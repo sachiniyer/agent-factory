@@ -7,6 +7,7 @@ import (
 	"claude-squad/schedule"
 	"claude-squad/session"
 	"claude-squad/session/git"
+	"claude-squad/task"
 	"claude-squad/ui"
 	"claude-squad/ui/overlay"
 	"context"
@@ -50,6 +51,8 @@ const (
 	stateSchedule
 	// stateSelectWorktree is the state when the user is selecting an existing worktree.
 	stateSelectWorktree
+	// stateTaskList is the state when the task list overlay is displayed.
+	stateTaskList
 )
 
 type home struct {
@@ -107,6 +110,8 @@ type home struct {
 	selectedWorktree *git.WorktreeInfo
 	// availableWorktrees stores the worktrees shown in the selection overlay
 	availableWorktrees []git.WorktreeInfo
+	// taskListOverlay handles task list management
+	taskListOverlay *overlay.TaskListOverlay
 }
 
 func newHome(ctx context.Context, program string, autoYes bool) *home {
@@ -204,6 +209,9 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	}
 	if m.selectionOverlay != nil {
 		m.selectionOverlay.SetWidth(int(float32(msg.Width) * 0.6))
+	}
+	if m.taskListOverlay != nil {
+		m.taskListOverlay.SetWidth(int(float32(msg.Width) * 0.6))
 	}
 
 	previewWidth, previewHeight := m.tabbedWindow.GetPreviewSize()
@@ -341,7 +349,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree || m.state == stateTaskList {
 		return nil, false
 	}
 	// If it's in the global keymap, we should try to highlight it.
@@ -592,6 +600,23 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
+	// Handle task list state
+	if m.state == stateTaskList {
+		shouldClose := m.taskListOverlay.HandleKeyPress(msg)
+		if shouldClose {
+			if m.taskListOverlay.IsDirty() {
+				if err := task.SaveTasks(m.taskListOverlay.GetTasks()); err != nil {
+					log.ErrorLog.Printf("failed to save tasks: %v", err)
+				}
+			}
+			m.taskListOverlay = nil
+			m.state = stateDefault
+			m.menu.SetState(ui.StateDefault)
+			return m, nil
+		}
+		return m, nil
+	}
+
 	// Handle confirmation state
 	if m.state == stateConfirm {
 		shouldClose := m.confirmationOverlay.HandleKeyPress(msg)
@@ -699,6 +724,15 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.state = stateSchedule
 		m.menu.SetState(ui.StateSchedule)
 		return m, tea.WindowSize()
+	case keys.KeyTasks:
+		tasks, err := task.LoadTasks()
+		if err != nil {
+			return m, m.handleError(fmt.Errorf("failed to load tasks: %v", err))
+		}
+		m.taskListOverlay = overlay.NewTaskListOverlay(tasks)
+		m.taskListOverlay.SetWidth(60)
+		m.state = stateTaskList
+		return m, nil
 	case keys.KeyNew:
 		if m.list.NumInstances() >= GlobalInstanceLimit {
 			return m, m.handleError(
@@ -1047,6 +1081,11 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true, true)
+	} else if m.state == stateTaskList {
+		if m.taskListOverlay == nil {
+			log.ErrorLog.Printf("task list overlay is nil")
+		}
+		return overlay.PlaceOverlay(0, 0, m.taskListOverlay.Render(), mainView, true, true)
 	}
 
 	return mainView
