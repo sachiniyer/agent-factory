@@ -13,13 +13,15 @@ const (
 	InstancesFileName = "instances.json"
 )
 
-// InstanceStorage handles instance-related operations
+// InstanceStorage handles instance-related operations with per-repo scoping.
 type InstanceStorage interface {
-	// SaveInstances saves the raw instance data
-	SaveInstances(instancesJSON json.RawMessage) error
-	// GetInstances returns the raw instance data
-	GetInstances() json.RawMessage
-	// DeleteAllInstances removes all stored instances
+	// SaveInstances saves the raw instance data for a specific repo.
+	SaveInstances(repoID string, instancesJSON json.RawMessage) error
+	// GetInstances returns the raw instance data for a specific repo.
+	GetInstances(repoID string) json.RawMessage
+	// GetAllInstances returns instance data for all repos, keyed by repo ID.
+	GetAllInstances() map[string]json.RawMessage
+	// DeleteAllInstances removes all stored instances across all repos.
 	DeleteAllInstances() error
 }
 
@@ -41,19 +43,20 @@ type StateManager interface {
 type State struct {
 	// HelpScreensSeen is a bitmask tracking which help screens have been shown
 	HelpScreensSeen uint32 `json:"help_screens_seen"`
-	// Instances stores the serialized instance data as raw JSON
-	InstancesData json.RawMessage `json:"instances"`
+	// InstancesData is kept only for migration from the old global format.
+	// New code stores instances in per-repo files under instances/<repoID>/.
+	InstancesData json.RawMessage `json:"instances,omitempty"`
 }
 
 // DefaultState returns the default state
 func DefaultState() *State {
 	return &State{
 		HelpScreensSeen: 0,
-		InstancesData:   json.RawMessage("[]"),
 	}
 }
 
 // LoadState loads the state from disk. If it cannot be done, we return the default state.
+// It also migrates old instance data from state.json to per-repo files.
 func LoadState() *State {
 	configDir, err := GetConfigDir()
 	if err != nil {
@@ -83,7 +86,61 @@ func LoadState() *State {
 		return DefaultState()
 	}
 
+	// Migrate old instance data from state.json to per-repo files
+	if len(state.InstancesData) > 0 && string(state.InstancesData) != "[]" && string(state.InstancesData) != "null" {
+		migrateInstances(state.InstancesData)
+		state.InstancesData = nil
+		if saveErr := SaveState(&state); saveErr != nil {
+			log.WarningLog.Printf("failed to save state after migration: %v", saveErr)
+		}
+	}
+
 	return &state
+}
+
+// migrateInstances moves instances from the old global state to per-repo files.
+func migrateInstances(data json.RawMessage) {
+	// Minimal struct to extract repo path for grouping
+	type instanceForMigration struct {
+		Worktree struct {
+			RepoPath string `json:"repo_path"`
+		} `json:"worktree"`
+	}
+
+	var instances []json.RawMessage
+	if err := json.Unmarshal(data, &instances); err != nil {
+		log.ErrorLog.Printf("failed to parse instances during migration: %v", err)
+		return
+	}
+
+	// Group raw instances by repo ID
+	grouped := make(map[string][]json.RawMessage)
+	for _, raw := range instances {
+		var inst instanceForMigration
+		if err := json.Unmarshal(raw, &inst); err != nil {
+			log.WarningLog.Printf("failed to parse instance during migration: %v", err)
+			continue
+		}
+		repoPath := inst.Worktree.RepoPath
+		if repoPath == "" {
+			repoPath = "unknown"
+		}
+		rid := RepoIDFromRoot(repoPath)
+		grouped[rid] = append(grouped[rid], raw)
+	}
+
+	// Save each group to its per-repo file
+	for rid, group := range grouped {
+		jsonData, err := json.MarshalIndent(group, "", "  ")
+		if err != nil {
+			log.ErrorLog.Printf("failed to marshal instances for repo %s during migration: %v", rid, err)
+			continue
+		}
+		if err := SaveRepoInstances(rid, jsonData); err != nil {
+			log.ErrorLog.Printf("failed to save instances for repo %s during migration: %v", rid, err)
+		}
+	}
+	log.InfoLog.Printf("migrated instances from state.json to %d per-repo files", len(grouped))
 }
 
 // SaveState saves the state to disk
@@ -106,23 +163,135 @@ func SaveState(state *State) error {
 	return os.WriteFile(statePath, data, 0644)
 }
 
+// Per-repo instance file functions
+
+func instancesDirPath() (string, error) {
+	configDir, err := GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "instances"), nil
+}
+
+func repoInstancesPath(repoID string) (string, error) {
+	dir, err := instancesDirPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, repoID, InstancesFileName), nil
+}
+
+// LoadRepoInstances loads instances for a specific repo.
+func LoadRepoInstances(repoID string) (json.RawMessage, error) {
+	path, err := repoInstancesPath(repoID)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return json.RawMessage("[]"), nil
+		}
+		return nil, fmt.Errorf("failed to read repo instances: %w", err)
+	}
+	return json.RawMessage(data), nil
+}
+
+// SaveRepoInstances saves instances for a specific repo.
+func SaveRepoInstances(repoID string, data json.RawMessage) error {
+	path, err := repoInstancesPath(repoID)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create instances directory: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// DeleteRepoInstances deletes instances for a specific repo.
+func DeleteRepoInstances(repoID string) error {
+	path, err := repoInstancesPath(repoID)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// LoadAllRepoInstances loads instances from all per-repo files.
+func LoadAllRepoInstances() (map[string]json.RawMessage, error) {
+	dir, err := instancesDirPath()
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]json.RawMessage)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return result, nil
+		}
+		return nil, fmt.Errorf("failed to read instances directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		repoID := entry.Name()
+		data, err := LoadRepoInstances(repoID)
+		if err != nil {
+			log.WarningLog.Printf("failed to load instances for repo %s: %v", repoID, err)
+			continue
+		}
+		result[repoID] = data
+	}
+	return result, nil
+}
+
+// DeleteAllRepoInstances deletes all per-repo instance files.
+func DeleteAllRepoInstances() error {
+	dir, err := instancesDirPath()
+	if err != nil {
+		return err
+	}
+	err = os.RemoveAll(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // InstanceStorage interface implementation
 
-// SaveInstances saves the raw instance data
-func (s *State) SaveInstances(instancesJSON json.RawMessage) error {
-	s.InstancesData = instancesJSON
-	return SaveState(s)
+func (s *State) SaveInstances(repoID string, instancesJSON json.RawMessage) error {
+	return SaveRepoInstances(repoID, instancesJSON)
 }
 
-// GetInstances returns the raw instance data
-func (s *State) GetInstances() json.RawMessage {
-	return s.InstancesData
+func (s *State) GetInstances(repoID string) json.RawMessage {
+	data, err := LoadRepoInstances(repoID)
+	if err != nil {
+		log.ErrorLog.Printf("failed to load repo instances: %v", err)
+		return json.RawMessage("[]")
+	}
+	return data
 }
 
-// DeleteAllInstances removes all stored instances
+func (s *State) GetAllInstances() map[string]json.RawMessage {
+	data, err := LoadAllRepoInstances()
+	if err != nil {
+		log.ErrorLog.Printf("failed to load all repo instances: %v", err)
+		return make(map[string]json.RawMessage)
+	}
+	return data
+}
+
 func (s *State) DeleteAllInstances() error {
-	s.InstancesData = json.RawMessage("[]")
-	return SaveState(s)
+	return DeleteAllRepoInstances()
 }
 
 // AppState interface implementation

@@ -11,6 +11,7 @@ import (
 	"claude-squad/ui"
 	"claude-squad/ui/overlay"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,9 +26,9 @@ import (
 const GlobalInstanceLimit = 10
 
 // Run is the main entrypoint into the application.
-func Run(ctx context.Context, program string, autoYes bool) error {
+func Run(ctx context.Context, program string, autoYes bool, repoID string) error {
 	p := tea.NewProgram(
-		newHome(ctx, program, autoYes),
+		newHome(ctx, program, autoYes, repoID),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(), // Mouse scroll
 	)
@@ -62,6 +63,7 @@ type home struct {
 
 	program string
 	autoYes bool
+	repoID  string
 
 	// storage is the interface for saving/loading data to/from the app's state
 	storage *session.Storage
@@ -114,15 +116,15 @@ type home struct {
 	taskListOverlay *overlay.TaskListOverlay
 }
 
-func newHome(ctx context.Context, program string, autoYes bool) *home {
+func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
 	// Load application config
 	appConfig := config.LoadConfig()
 
 	// Load application state
 	appState := config.LoadState()
 
-	// Initialize storage
-	storage, err := session.NewStorage(appState)
+	// Initialize storage (repo-scoped)
+	storage, err := session.NewStorage(appState, repoID)
 	if err != nil {
 		fmt.Printf("Failed to initialize storage: %v\n", err)
 		os.Exit(1)
@@ -138,30 +140,60 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 		appConfig:    appConfig,
 		program:      program,
 		autoYes:      autoYes,
+		repoID:       repoID,
 		state:        stateDefault,
 		appState:     appState,
 	}
 	h.list = ui.NewList(&h.spinner, autoYes)
 
-	// Load saved instances
+	// Load saved instances (scoped to current repo)
 	instances, err := storage.LoadInstances()
 	if err != nil {
 		fmt.Printf("Failed to load instances: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Merge any pending instances from scheduled runs
+	// Merge pending instances from scheduled runs.
+	// Only add instances that belong to the current repo; route others to
+	// their respective per-repo instance files.
 	pendingData, err := schedule.LoadAndClearPendingInstances()
 	if err != nil {
 		log.WarningLog.Printf("Failed to load pending instances: %v", err)
 	}
+	var otherRepoPending []session.InstanceData
+	var mergedCount int
 	for _, data := range pendingData {
-		pendingInstance, err := session.FromInstanceData(data)
-		if err != nil {
-			log.WarningLog.Printf("Failed to restore pending instance %s: %v", data.Title, err)
-			continue
+		rid := config.RepoIDFromRoot(data.Worktree.RepoPath)
+		if rid == repoID {
+			pendingInstance, err := session.FromInstanceData(data)
+			if err != nil {
+				log.WarningLog.Printf("Failed to restore pending instance %s: %v", data.Title, err)
+				continue
+			}
+			instances = append(instances, pendingInstance)
+			mergedCount++
+		} else {
+			otherRepoPending = append(otherRepoPending, data)
 		}
-		instances = append(instances, pendingInstance)
+	}
+
+	// Save other-repo pending instances directly to their per-repo files
+	if len(otherRepoPending) > 0 {
+		grouped := make(map[string][]session.InstanceData)
+		for _, d := range otherRepoPending {
+			rid := config.RepoIDFromRoot(d.Worktree.RepoPath)
+			grouped[rid] = append(grouped[rid], d)
+		}
+		for rid, group := range grouped {
+			existing, _ := config.LoadRepoInstances(rid)
+			var existingData []session.InstanceData
+			if existing != nil && string(existing) != "[]" && string(existing) != "null" {
+				json.Unmarshal(existing, &existingData)
+			}
+			existingData = append(existingData, group...)
+			jsonData, _ := json.Marshal(existingData)
+			config.SaveRepoInstances(rid, jsonData)
+		}
 	}
 
 	// Add loaded instances to the list
@@ -173,8 +205,8 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 		}
 	}
 
-	// Save instances so pending ones are now in state.json
-	if len(pendingData) > 0 {
+	// Save instances so pending ones are persisted to the per-repo file
+	if mergedCount > 0 {
 		if err := storage.SaveInstances(h.list.GetInstances()); err != nil {
 			log.WarningLog.Printf("Failed to save merged instances: %v", err)
 		}
@@ -684,12 +716,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 
 		return m, nil
 	case keys.KeyScheduleList:
-		schedules, err := schedule.LoadSchedules()
+		schedules, err := schedule.LoadSchedulesForCurrentRepo()
 		if err != nil {
 			return m, m.handleError(fmt.Errorf("failed to load schedules: %v", err))
 		}
 		if len(schedules) == 0 {
-			return m, m.handleError(fmt.Errorf("no schedules found — press S to create one"))
+			return m, m.handleError(fmt.Errorf("no schedules found for this repo — press S to create one"))
 		}
 		content := lipgloss.NewStyle().Bold(true).Underline(true).Foreground(lipgloss.Color("#7D56F4")).Render("Scheduled Tasks") + "\n\n"
 		for _, s := range schedules {

@@ -19,7 +19,7 @@ import (
 func RunDaemon(cfg *config.Config) error {
 	log.InfoLog.Printf("starting daemon")
 	state := config.LoadState()
-	storage, err := session.NewStorage(state)
+	storage, err := session.NewStorage(state, "")
 	if err != nil {
 		return fmt.Errorf("failed to initialize storage: %w", err)
 	}

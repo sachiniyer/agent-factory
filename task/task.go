@@ -3,14 +3,11 @@ package task
 import (
 	"claude-squad/config"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -23,28 +20,16 @@ type Task struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// getRepoID returns a short hash identifying the current git repo based on its root path.
-func getRepoID() (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get git repo root: %w", err)
-	}
-	root := strings.TrimSpace(string(out))
-	hash := sha256.Sum256([]byte(root))
-	return hex.EncodeToString(hash[:6]), nil
-}
-
 func getTasksPath() (string, error) {
-	configDir, err := config.GetConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get config directory: %w", err)
-	}
-	repoID, err := getRepoID()
+	repo, err := config.CurrentRepo()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(configDir, "tasks", repoID, tasksFileName), nil
+	dir, err := repo.DataDir("tasks")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, tasksFileName), nil
 }
 
 func LoadTasks() ([]Task, error) {

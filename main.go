@@ -48,6 +48,11 @@ var (
 				return fmt.Errorf("error: claude-squad must be run from within a git repository")
 			}
 
+			repo, err := config.CurrentRepo()
+			if err != nil {
+				return fmt.Errorf("failed to determine repo context: %w", err)
+			}
+
 			cfg := config.LoadConfig()
 
 			// Program flag overrides config
@@ -72,7 +77,7 @@ var (
 				log.ErrorLog.Printf("failed to stop daemon: %v", err)
 			}
 
-			return app.Run(ctx, program, autoYes)
+			return app.Run(ctx, program, autoYes, repo.ID)
 		},
 	}
 
@@ -84,7 +89,7 @@ var (
 			defer log.Close()
 
 			state := config.LoadState()
-			storage, err := session.NewStorage(state)
+			storage, err := session.NewStorage(state, "")
 			if err != nil {
 				return fmt.Errorf("failed to initialize storage: %w", err)
 			}

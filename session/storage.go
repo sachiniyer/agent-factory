@@ -41,19 +41,24 @@ type DiffStatsData struct {
 	Content string `json:"content"`
 }
 
-// Storage handles saving and loading instances using the state interface
+// Storage handles saving and loading instances using the state interface.
+// When repoID is set (TUI mode), operations are scoped to that repo.
+// When repoID is empty (daemon mode), operations span all repos.
 type Storage struct {
-	state config.InstanceStorage
+	state  config.InstanceStorage
+	repoID string
 }
 
-// NewStorage creates a new storage instance
-func NewStorage(state config.InstanceStorage) (*Storage, error) {
+// NewStorage creates a new storage instance.
+// Pass a non-empty repoID for TUI (repo-scoped) mode, or "" for daemon (all-repo) mode.
+func NewStorage(state config.InstanceStorage, repoID string) (*Storage, error) {
 	return &Storage{
-		state: state,
+		state:  state,
+		repoID: repoID,
 	}, nil
 }
 
-// SaveInstances saves the list of instances to disk
+// SaveInstances saves the list of instances to disk.
 func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Convert instances to InstanceData
 	data := make([]InstanceData, 0)
@@ -63,31 +68,61 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		}
 	}
 
-	// Marshal to JSON
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return fmt.Errorf("failed to marshal instances: %w", err)
+	if s.repoID != "" {
+		// TUI mode: save all to current repo's file
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			return fmt.Errorf("failed to marshal instances: %w", err)
+		}
+		return s.state.SaveInstances(s.repoID, jsonData)
 	}
 
-	return s.state.SaveInstances(jsonData)
+	// Daemon mode: group by repo and save each group separately
+	grouped := make(map[string][]InstanceData)
+	for _, d := range data {
+		rid := config.RepoIDFromRoot(d.Worktree.RepoPath)
+		grouped[rid] = append(grouped[rid], d)
+	}
+	for rid, group := range grouped {
+		jsonData, err := json.Marshal(group)
+		if err != nil {
+			return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
+		}
+		if err := s.state.SaveInstances(rid, jsonData); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// LoadInstances loads the list of instances from disk
+// LoadInstances loads the list of instances from disk.
 func (s *Storage) LoadInstances() ([]*Instance, error) {
-	jsonData := s.state.GetInstances()
-
-	var instancesData []InstanceData
-	if err := json.Unmarshal(jsonData, &instancesData); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
+	var allJSON map[string]json.RawMessage
+	if s.repoID != "" {
+		// TUI mode: load just this repo
+		raw := s.state.GetInstances(s.repoID)
+		allJSON = map[string]json.RawMessage{s.repoID: raw}
+	} else {
+		// Daemon mode: load all repos
+		allJSON = s.state.GetAllInstances()
 	}
 
-	instances := make([]*Instance, len(instancesData))
-	for i, data := range instancesData {
-		instance, err := FromInstanceData(data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create instance %s: %w", data.Title, err)
+	var instances []*Instance
+	for _, jsonData := range allJSON {
+		if jsonData == nil || string(jsonData) == "[]" || string(jsonData) == "null" {
+			continue
 		}
-		instances[i] = instance
+		var instancesData []InstanceData
+		if err := json.Unmarshal(jsonData, &instancesData); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
+		}
+		for _, data := range instancesData {
+			instance, err := FromInstanceData(data)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create instance %s: %w", data.Title, err)
+			}
+			instances = append(instances, instance)
+		}
 	}
 
 	return instances, nil

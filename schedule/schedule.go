@@ -128,6 +128,26 @@ func GenerateID() string {
 	return hex.EncodeToString(b)
 }
 
+// LoadSchedulesForCurrentRepo returns only schedules whose ProjectPath
+// matches the current git repository root.
+func LoadSchedulesForCurrentRepo() ([]Schedule, error) {
+	repo, err := config.CurrentRepo()
+	if err != nil {
+		return nil, err
+	}
+	all, err := LoadSchedules()
+	if err != nil {
+		return nil, err
+	}
+	var filtered []Schedule
+	for _, s := range all {
+		if s.ProjectPath == repo.Root {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered, nil
+}
+
 func UpdateSchedule(s Schedule) error {
 	schedules, err := LoadSchedules()
 	if err != nil {
