@@ -42,6 +42,10 @@ func InstallSystemdTimer(s Schedule) error {
 	pathEnv := os.Getenv("PATH")
 	homeEnv := os.Getenv("HOME")
 	shellEnv := os.Getenv("SHELL")
+	termEnv := os.Getenv("TERM")
+	if termEnv == "" {
+		termEnv = "xterm-256color"
+	}
 
 	serviceContent := fmt.Sprintf(`[Unit]
 Description=Claude Squad scheduled task %s
@@ -52,8 +56,9 @@ ExecStart=%s schedule run %s
 Environment="PATH=%s"
 Environment="HOME=%s"
 Environment="SHELL=%s"
+Environment="TERM=%s"
 WorkingDirectory=%s
-`, unitName, execPath, s.ID, pathEnv, homeEnv, shellEnv, s.ProjectPath)
+`, unitName, execPath, s.ID, pathEnv, homeEnv, shellEnv, termEnv, s.ProjectPath)
 
 	servicePath := filepath.Join(dir, unitName+".service")
 	if err := os.WriteFile(servicePath, []byte(serviceContent), 0644); err != nil {

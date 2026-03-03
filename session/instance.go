@@ -554,6 +554,18 @@ func (i *Instance) SendPrompt(prompt string) error {
 	return nil
 }
 
+// SendPromptCommand sends a prompt using tmux send-keys command instead of PTY writes.
+// This is more reliable for headless/scheduled runs where the PTY may not persist.
+func (i *Instance) SendPromptCommand(prompt string) error {
+	if !i.started {
+		return fmt.Errorf("instance not started")
+	}
+	if i.tmuxSession == nil {
+		return fmt.Errorf("tmux session not initialized")
+	}
+	return i.tmuxSession.SendKeysCommand(prompt)
+}
+
 // PreviewFullHistory captures the entire tmux pane output including full scrollback history
 func (i *Instance) PreviewFullHistory() (string, error) {
 	if !i.started || i.Status == Paused {

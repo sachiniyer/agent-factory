@@ -72,23 +72,24 @@ func LoadAndClearPendingInstances() ([]session.InstanceData, error) {
 }
 
 // waitForReady polls the instance's tmux pane until the program shows its
-// input prompt (e.g. Claude Code's "❯" prompt), or times out after 30 seconds.
+// input prompt (e.g. Claude Code's "❯" prompt) or trust prompt, or times out after 60 seconds.
 func waitForReady(instance *session.Instance) error {
-	timeout := time.After(30 * time.Second)
+	timeout := time.After(60 * time.Second)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-timeout:
-			return fmt.Errorf("timed out waiting for program to start (30s)")
+			content, _ := instance.Preview()
+			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
+			return fmt.Errorf("timed out waiting for program to start (60s)")
 		case <-ticker.C:
 			content, err := instance.Preview()
 			if err != nil {
 				continue
 			}
-			// Claude Code shows "❯" when ready for input
-			if strings.Contains(content, "❯") {
+			if strings.Contains(content, "❯") || strings.Contains(content, "Do you trust") {
 				return nil
 			}
 		}
@@ -156,7 +157,18 @@ func RunScheduledTask(scheduleID string) error {
 		return fmt.Errorf("program did not become ready: %w", err)
 	}
 
-	if err := instance.SendPrompt(s.Prompt); err != nil {
+	// Check for and dismiss the trust prompt if present.
+	if instance.CheckAndHandleTrustPrompt() {
+		log.InfoLog.Printf("trust prompt detected and dismissed, waiting for ready again")
+		time.Sleep(1 * time.Second)
+		if err := waitForReady(instance); err != nil {
+			return fmt.Errorf("program did not become ready after trust prompt: %w", err)
+		}
+	}
+
+	// Use SendPromptCommand (tmux send-keys) instead of SendPrompt (PTY write)
+	// for reliability in headless/scheduled runs.
+	if err := instance.SendPromptCommand(s.Prompt); err != nil {
 		return fmt.Errorf("failed to send prompt: %w", err)
 	}
 
