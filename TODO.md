@@ -1,0 +1,5 @@
+- [ ] create a session against an existing worktree instead of a new one
+- [ ] task management of some sort outside of the worktrees (almost like todo list for the agents to do)
+- [ ] conductor style claude code/nanoclaw interface to communicate with all the sessions 
+  - [ ] slack integration for this
+  - [ ] tui configs for this as well
