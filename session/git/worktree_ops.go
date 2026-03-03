@@ -75,8 +75,14 @@ func (g *GitWorktree) setupNewWorktree() error {
 	return nil
 }
 
-// Cleanup removes the worktree and associated branch
+// Cleanup removes the worktree and associated branch.
+// If the worktree was not created by claude-squad (externalWorktree), only prune is done.
 func (g *GitWorktree) Cleanup() error {
+	// For external worktrees, don't remove the worktree or delete the branch
+	if g.externalWorktree {
+		return nil
+	}
+
 	var errs []error
 
 	// Check if worktree path exists before attempting removal

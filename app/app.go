@@ -6,6 +6,7 @@ import (
 	"claude-squad/log"
 	"claude-squad/schedule"
 	"claude-squad/session"
+	"claude-squad/session/git"
 	"claude-squad/ui"
 	"claude-squad/ui/overlay"
 	"context"
@@ -47,6 +48,8 @@ const (
 	stateConfirm
 	// stateSchedule is the state when the user is creating a schedule.
 	stateSchedule
+	// stateSelectWorktree is the state when the user is selecting an existing worktree.
+	stateSelectWorktree
 )
 
 type home struct {
@@ -98,6 +101,12 @@ type home struct {
 	confirmationOverlay *overlay.ConfirmationOverlay
 	// scheduleOverlay handles schedule creation input
 	scheduleOverlay *overlay.ScheduleOverlay
+	// selectionOverlay handles worktree selection
+	selectionOverlay *overlay.SelectionOverlay
+	// selectedWorktree stores the worktree info selected by the user for attach
+	selectedWorktree *git.WorktreeInfo
+	// availableWorktrees stores the worktrees shown in the selection overlay
+	availableWorktrees []git.WorktreeInfo
 }
 
 func newHome(ctx context.Context, program string, autoYes bool) *home {
@@ -192,6 +201,9 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	}
 	if m.scheduleOverlay != nil {
 		m.scheduleOverlay.SetSize(int(float32(msg.Width)*0.6), int(float32(msg.Height)*0.5))
+	}
+	if m.selectionOverlay != nil {
+		m.selectionOverlay.SetWidth(int(float32(msg.Width) * 0.6))
 	}
 
 	previewWidth, previewHeight := m.tabbedWindow.GetPreviewSize()
@@ -329,7 +341,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree {
 		return nil, false
 	}
 	// If it's in the global keymap, we should try to highlight it.
@@ -371,6 +383,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			m.state = stateDefault
 			m.promptAfterName = false
+			m.selectedWorktree = nil
+			m.availableWorktrees = nil
 			m.list.Kill()
 			return m, tea.Sequence(
 				tea.WindowSize(),
@@ -398,8 +412,16 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			m.menu.SetState(ui.StateDefault)
 
 			// Return a tea.Cmd that runs instance.Start in the background
+			selectedWt := m.selectedWorktree
+			m.selectedWorktree = nil
+			m.availableWorktrees = nil
 			startCmd := func() tea.Msg {
-				err := instance.Start(true)
+				var err error
+				if selectedWt != nil {
+					err = instance.StartWithExistingWorktree(selectedWt.Path, selectedWt.Branch)
+				} else {
+					err = instance.Start(true)
+				}
 				return instanceStartedMsg{
 					instance:        instance,
 					err:             err,
@@ -430,6 +452,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		case tea.KeyEsc:
 			m.list.Kill()
 			m.state = stateDefault
+			m.selectedWorktree = nil
+			m.availableWorktrees = nil
 			m.instanceChanged()
 
 			return m, tea.Sequence(
@@ -524,6 +548,46 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 					return nil
 				},
 			)
+		}
+		return m, nil
+	}
+
+	// Handle worktree selection state
+	if m.state == stateSelectWorktree {
+		shouldClose := m.selectionOverlay.HandleKeyPress(msg)
+		if shouldClose {
+			if m.selectionOverlay.IsSubmitted() {
+				idx := m.selectionOverlay.GetSelectedIndex()
+				wt := m.availableWorktrees[idx]
+				m.selectedWorktree = &wt
+				m.selectionOverlay = nil
+
+				// Create a new instance and enter naming mode
+				instance, err := session.NewInstance(session.InstanceOptions{
+					Title:   "",
+					Path:    ".",
+					Program: m.program,
+				})
+				if err != nil {
+					m.selectedWorktree = nil
+					m.state = stateDefault
+					m.menu.SetState(ui.StateDefault)
+					return m, m.handleError(err)
+				}
+
+				m.newInstanceFinalizer = m.list.AddInstance(instance)
+				m.list.SetSelectedInstance(m.list.NumInstances() - 1)
+				m.state = stateNew
+				m.menu.SetState(ui.StateNewInstance)
+				return m, nil
+			}
+			// Canceled
+			m.selectionOverlay = nil
+			m.selectedWorktree = nil
+			m.availableWorktrees = nil
+			m.state = stateDefault
+			m.menu.SetState(ui.StateDefault)
+			return m, nil
 		}
 		return m, nil
 	}
@@ -654,6 +718,52 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.state = stateNew
 		m.menu.SetState(ui.StateNewInstance)
 
+		return m, nil
+	case keys.KeyAttach:
+		if m.list.NumInstances() >= GlobalInstanceLimit {
+			return m, m.handleError(
+				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
+		}
+
+		// List existing worktrees
+		worktrees, err := git.ListWorktrees(".")
+		if err != nil {
+			return m, m.handleError(fmt.Errorf("failed to list worktrees: %v", err))
+		}
+
+		// Filter out worktrees already tracked by existing instances
+		trackedPaths := make(map[string]bool)
+		for _, inst := range m.list.GetInstances() {
+			if p := inst.GetWorktreePath(); p != "" {
+				trackedPaths[p] = true
+			}
+		}
+
+		var available []git.WorktreeInfo
+		for _, wt := range worktrees {
+			if !trackedPaths[wt.Path] {
+				available = append(available, wt)
+			}
+		}
+
+		if len(available) == 0 {
+			return m, m.handleError(fmt.Errorf("no untracked worktrees found"))
+		}
+
+		// Build display items
+		items := make([]string, len(available))
+		for i, wt := range available {
+			if wt.Branch != "" {
+				items[i] = fmt.Sprintf("%s (%s)", wt.Branch, wt.Path)
+			} else {
+				items[i] = wt.Path
+			}
+		}
+
+		m.availableWorktrees = available
+		m.selectionOverlay = overlay.NewSelectionOverlay("Attach to existing worktree", items)
+		m.selectionOverlay.SetWidth(60)
+		m.state = stateSelectWorktree
 		return m, nil
 	case keys.KeyUp:
 		m.list.Up()
@@ -932,6 +1042,11 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("confirmation overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true, true)
+	} else if m.state == stateSelectWorktree {
+		if m.selectionOverlay == nil {
+			log.ErrorLog.Printf("selection overlay is nil")
+		}
+		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true, true)
 	}
 
 	return mainView

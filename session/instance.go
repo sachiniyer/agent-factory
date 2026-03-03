@@ -82,11 +82,12 @@ func (i *Instance) ToInstanceData() InstanceData {
 	// Only include worktree data if gitWorktree is initialized
 	if i.gitWorktree != nil {
 		data.Worktree = GitWorktreeData{
-			RepoPath:      i.gitWorktree.GetRepoPath(),
-			WorktreePath:  i.gitWorktree.GetWorktreePath(),
-			SessionName:   i.Title,
-			BranchName:    i.gitWorktree.GetBranchName(),
-			BaseCommitSHA: i.gitWorktree.GetBaseCommitSHA(),
+			RepoPath:         i.gitWorktree.GetRepoPath(),
+			WorktreePath:     i.gitWorktree.GetWorktreePath(),
+			SessionName:      i.Title,
+			BranchName:       i.gitWorktree.GetBranchName(),
+			BaseCommitSHA:    i.gitWorktree.GetBaseCommitSHA(),
+			ExternalWorktree: i.gitWorktree.IsExternalWorktree(),
 		}
 	}
 
@@ -120,6 +121,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			data.Worktree.SessionName,
 			data.Worktree.BranchName,
 			data.Worktree.BaseCommitSHA,
+			data.Worktree.ExternalWorktree,
 		),
 		diffStats: &git.DiffStats{
 			Added:   data.DiffStats.Added,
@@ -248,6 +250,32 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 
 	i.SetStatus(Running)
 
+	return nil
+}
+
+// StartWithExistingWorktree starts the instance using an existing worktree
+// instead of creating a new one. The worktree and branch are not deleted on kill.
+func (i *Instance) StartWithExistingWorktree(worktreePath, branchName string) error {
+	if i.Title == "" {
+		return fmt.Errorf("instance title cannot be empty")
+	}
+
+	gitWorktree, err := git.NewGitWorktreeFromExistingWorktree(i.Path, worktreePath, branchName)
+	if err != nil {
+		return fmt.Errorf("failed to create git worktree reference: %w", err)
+	}
+	i.gitWorktree = gitWorktree
+	i.Branch = branchName
+
+	tmuxSession := tmux.NewTmuxSession(i.Title, i.Program)
+	i.tmuxSession = tmuxSession
+
+	if err := tmuxSession.Start(worktreePath); err != nil {
+		return fmt.Errorf("failed to start tmux session: %w", err)
+	}
+
+	i.started = true
+	i.SetStatus(Running)
 	return nil
 }
 

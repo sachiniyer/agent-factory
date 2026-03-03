@@ -54,7 +54,7 @@ type Menu struct {
 	keyDown keys.KeyName
 }
 
-var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyPrompt, keys.KeyHelp, keys.KeyQuit}
+var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyPrompt, keys.KeyAttach, keys.KeyHelp, keys.KeyQuit}
 var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName}
 var promptMenuOptions = []keys.KeyName{keys.KeySubmitName}
 var scheduleMenuOptions = []keys.KeyName{keys.KeySubmitName}
@@ -132,7 +132,7 @@ func (m *Menu) addInstanceOptions() {
 	}
 
 	// Instance management group
-	options := []keys.KeyName{keys.KeyNew, keys.KeyKill}
+	options := []keys.KeyName{keys.KeyNew, keys.KeyAttach, keys.KeyKill}
 
 	// Action group
 	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeySubmit}
