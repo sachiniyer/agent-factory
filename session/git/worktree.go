@@ -62,8 +62,9 @@ type GitWorktree struct {
 
 // WorktreeInfo holds information about an existing git worktree
 type WorktreeInfo struct {
-	Path   string
-	Branch string
+	Path           string
+	Branch         string
+	IsMainWorktree bool
 }
 
 // IsExternalWorktree returns true if this worktree was not created by claude-squad
@@ -191,7 +192,8 @@ func NewGitWorktreeFromExistingWorktree(repoPath, worktreePath, branchName strin
 	}, nil
 }
 
-// ListWorktrees returns all non-main worktrees for the given repo.
+// ListWorktrees returns all worktrees for the given repo, including the main worktree.
+// The main worktree (root tree) is marked with IsMainWorktree=true.
 func ListWorktrees(repoPath string) ([]WorktreeInfo, error) {
 	absPath, err := filepath.Abs(repoPath)
 	if err != nil {
@@ -212,6 +214,7 @@ func ListWorktrees(repoPath string) ([]WorktreeInfo, error) {
 	var worktrees []WorktreeInfo
 	currentPath := ""
 	currentBranch := ""
+	isFirst := true
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "worktree ") {
@@ -221,7 +224,12 @@ func ListWorktrees(repoPath string) ([]WorktreeInfo, error) {
 			currentBranch = strings.TrimPrefix(branchPath, "refs/heads/")
 		} else if line == "" {
 			if currentPath != "" {
-				worktrees = append(worktrees, WorktreeInfo{Path: currentPath, Branch: currentBranch})
+				worktrees = append(worktrees, WorktreeInfo{
+					Path:           currentPath,
+					Branch:         currentBranch,
+					IsMainWorktree: isFirst,
+				})
+				isFirst = false
 			}
 			currentPath = ""
 			currentBranch = ""
@@ -229,12 +237,15 @@ func ListWorktrees(repoPath string) ([]WorktreeInfo, error) {
 	}
 	// Handle last entry if output doesn't end with a blank line
 	if currentPath != "" {
-		worktrees = append(worktrees, WorktreeInfo{Path: currentPath, Branch: currentBranch})
+		worktrees = append(worktrees, WorktreeInfo{
+			Path:           currentPath,
+			Branch:         currentBranch,
+			IsMainWorktree: isFirst,
+		})
 	}
 
-	// Skip the first entry (the main worktree / repo itself)
-	if len(worktrees) > 1 {
-		return worktrees[1:], nil
+	if len(worktrees) == 0 {
+		return nil, nil
 	}
-	return nil, nil
+	return worktrees, nil
 }

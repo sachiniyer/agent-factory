@@ -7,6 +7,7 @@ import (
 	"claude-squad/config"
 	"claude-squad/daemon"
 	"claude-squad/log"
+	"claude-squad/microclaw"
 	"claude-squad/schedule"
 	"claude-squad/session"
 	"claude-squad/session/git"
@@ -169,6 +170,7 @@ func init() {
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(schedule.ScheduleCmd)
 	rootCmd.AddCommand(api.ApiCmd)
+	rootCmd.AddCommand(microclaw.MicroClawCmd)
 }
 
 func main() {

@@ -1,204 +1,289 @@
 package ui
 
 import (
+	"claude-squad/log"
 	"claude-squad/microclaw"
+	"claude-squad/session/tmux"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
 )
 
-var (
-	mcSenderStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7D56F4")).
-			Bold(true)
-	mcTimestampStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#808080", Dark: "#808080"})
-	mcBotMessageStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#36CFC9"))
-	mcMessageStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
-	mcStatusStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFD700")).
-			Bold(true)
-)
+var mcPaneStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
 
-// MicroClawPane displays microclaw messages in a chat-like viewport.
+var mcFooterStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#808080", Dark: "#808080"})
+
+// MicroClawPane manages a tmux session running the interactive microclaw TUI.
+// It captures the tmux pane output for display in the tabbed window and
+// supports attaching for full interactive use.
 type MicroClawPane struct {
-	viewport viewport.Model
-	bridge   *microclaw.Bridge
-	messages []microclaw.Message
-	status   string
-	width    int
-	height   int
-	err      error
+	mu           sync.Mutex
+	bridge       *microclaw.Bridge
+	tmuxSession  *tmux.TmuxSession
+	width        int
+	height       int
+	content      string
+	fallback     bool
+	fallbackText string
+	isScrolling  bool
+	viewport     viewport.Model
 }
 
 // NewMicroClawPane creates a new pane backed by the given bridge.
 func NewMicroClawPane(bridge *microclaw.Bridge) *MicroClawPane {
 	return &MicroClawPane{
-		viewport: viewport.New(0, 0),
 		bridge:   bridge,
+		viewport: viewport.New(0, 0),
 	}
 }
 
 func (p *MicroClawPane) SetSize(width, height int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.width = width
 	p.height = height
 	p.viewport.Width = width
 	p.viewport.Height = height
+	if p.tmuxSession != nil {
+		if err := p.tmuxSession.SetDetachedSize(width, height); err != nil {
+			log.InfoLog.Printf("microclaw pane: failed to set detached size: %v", err)
+		}
+	}
 }
 
-// Refresh fetches the latest messages and status from microclaw.
+// setFallbackState sets the pane to display a fallback message.
+// Caller must hold p.mu.
+func (p *MicroClawPane) setFallbackState(message string) {
+	p.fallback = true
+	p.fallbackText = lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message)
+	p.content = ""
+}
+
+// Refresh captures the tmux pane output for display. Creates the session if needed.
 func (p *MicroClawPane) Refresh() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.bridge == nil || !p.bridge.Available() {
-		p.err = nil
-		p.status = ""
-		p.messages = nil
+		p.setFallbackState("MicroClaw not available.\nSet MICROCLAW_DIR or install microclaw.")
 		return
 	}
 
-	msgs, err := p.bridge.GetRecentMessages(100)
+	// Skip content updates while in scroll mode
+	if p.isScrolling {
+		return
+	}
+
+	// Ensure the tmux session is running
+	if err := p.ensureSessionLocked(); err != nil {
+		p.setFallbackState(fmt.Sprintf("Failed to start MicroClaw session: %v", err))
+		return
+	}
+
+	if p.tmuxSession == nil || !p.tmuxSession.DoesSessionExist() {
+		p.setFallbackState("MicroClaw session not available.")
+		return
+	}
+
+	content, err := p.tmuxSession.CapturePaneContent()
 	if err != nil {
-		p.err = err
+		p.setFallbackState(fmt.Sprintf("Failed to capture content: %v", err))
 		return
 	}
-	p.err = nil
-	p.messages = msgs
 
-	status, err := p.bridge.Status()
-	if err == nil {
-		p.status = status
-	}
-
-	// Re-render content into the viewport
-	p.renderContent()
+	p.fallback = false
+	p.content = content
 }
 
-func (p *MicroClawPane) renderContent() {
-	if p.width == 0 || p.height == 0 {
-		return
+// ensureSessionLocked creates the tmux session running `cs microclaw` if it doesn't exist.
+// Caller must hold p.mu.
+func (p *MicroClawPane) ensureSessionLocked() error {
+	if p.tmuxSession != nil && p.tmuxSession.DoesSessionExist() {
+		return nil
 	}
 
-	var sb strings.Builder
-
-	// Status bar at the top
-	if p.status != "" {
-		sb.WriteString(mcStatusStyle.Render("MicroClaw — "+p.status) + "\n")
-		sb.WriteString(strings.Repeat("─", p.width) + "\n")
+	// Find the binary path — use the running executable
+	binary, err := os.Executable()
+	if err != nil {
+		binary = os.Args[0]
 	}
 
-	if len(p.messages) == 0 {
-		sb.WriteString("\n  No messages yet.\n")
+	cmd := binary + " microclaw"
+	ts := tmux.NewTmuxSession("microclaw_tui", cmd)
+
+	// Check if session already exists (e.g. from a previous run)
+	if ts.DoesSessionExist() {
+		if err := ts.Restore(); err != nil {
+			_ = ts.Close()
+			ts = tmux.NewTmuxSession("microclaw_tui", cmd)
+			if err := ts.Start("."); err != nil {
+				return fmt.Errorf("failed to start microclaw session: %w", err)
+			}
+		}
 	} else {
-		for _, msg := range p.messages {
-			ts := formatTimestamp(msg.Timestamp)
-
-			sender := msg.SenderName
-			if sender == "" {
-				sender = "unknown"
-			}
-
-			senderStyle := mcSenderStyle
-			if msg.IsFromBot == 1 {
-				senderStyle = mcBotMessageStyle.Bold(true)
-			}
-
-			header := senderStyle.Render(sender) + " " + mcTimestampStyle.Render(ts)
-			sb.WriteString(header + "\n")
-
-			style := mcMessageStyle
-			if msg.IsFromBot == 1 {
-				style = mcBotMessageStyle
-			}
-
-			// Word-wrap content to viewport width
-			wrapped := wrapText(msg.Content, p.width-2)
-			sb.WriteString(style.Render("  "+strings.ReplaceAll(wrapped, "\n", "\n  ")) + "\n\n")
+		if err := ts.Start("."); err != nil {
+			return fmt.Errorf("failed to start microclaw session: %w", err)
 		}
 	}
 
-	content := sb.String()
-	p.viewport.SetContent(content)
-	p.viewport.GotoBottom()
+	p.tmuxSession = ts
+
+	if p.width > 0 && p.height > 0 {
+		if err := ts.SetDetachedSize(p.width, p.height); err != nil {
+			log.InfoLog.Printf("microclaw pane: failed to set size: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// Attach attaches to the microclaw tmux session for full interactive use.
+func (p *MicroClawPane) Attach() (chan struct{}, error) {
+	p.mu.Lock()
+	if p.tmuxSession == nil {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("no microclaw session to attach to")
+	}
+	if !p.tmuxSession.DoesSessionExist() {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("microclaw session does not exist")
+	}
+	ts := p.tmuxSession
+	p.mu.Unlock()
+	return ts.Attach()
+}
+
+// Close kills the microclaw tmux session.
+func (p *MicroClawPane) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.tmuxSession != nil {
+		if err := p.tmuxSession.Close(); err != nil {
+			log.InfoLog.Printf("microclaw pane: failed to close session: %v", err)
+		}
+		p.tmuxSession = nil
+	}
+	p.content = ""
+	p.fallback = false
+	p.fallbackText = ""
 }
 
 func (p *MicroClawPane) ScrollUp() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.isScrolling {
+		p.enterScrollMode()
+		return
+	}
 	p.viewport.LineUp(1)
 }
 
 func (p *MicroClawPane) ScrollDown() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.isScrolling {
+		p.enterScrollMode()
+		return
+	}
 	p.viewport.LineDown(1)
 }
 
+func (p *MicroClawPane) enterScrollMode() {
+	if p.tmuxSession == nil || !p.tmuxSession.DoesSessionExist() {
+		return
+	}
+
+	content, err := p.tmuxSession.CapturePaneContentWithOptions("-", "-")
+	if err != nil {
+		log.InfoLog.Printf("microclaw pane: failed to capture full history: %v", err)
+		return
+	}
+
+	footer := mcFooterStyle.Render("ESC to exit scroll mode")
+	contentWithFooter := lipgloss.JoinVertical(lipgloss.Left, content, footer)
+	p.viewport.SetContent(contentWithFooter)
+	p.viewport.GotoBottom()
+	p.isScrolling = true
+}
+
+// IsScrolling returns whether the microclaw pane is in scroll mode.
+func (p *MicroClawPane) IsScrolling() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.isScrolling
+}
+
+// ResetToNormalMode exits scroll mode.
+func (p *MicroClawPane) ResetToNormalMode() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.isScrolling {
+		return
+	}
+	p.isScrolling = false
+	p.viewport.SetContent("")
+	p.viewport.GotoTop()
+}
+
 func (p *MicroClawPane) String() string {
-	if p.width == 0 || p.height == 0 {
-		return ""
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	width := p.width
+	height := p.height
+
+	if width == 0 || height == 0 {
+		return strings.Repeat("\n", height)
 	}
 
-	if p.bridge == nil || !p.bridge.Available() {
-		return lipgloss.Place(
-			p.width, p.height,
-			lipgloss.Center, lipgloss.Center,
-			lipgloss.JoinVertical(lipgloss.Center,
-				FallBackText,
-				"",
-				"MicroClaw not available.",
-				"Set MICROCLAW_DIR or install microclaw.",
-			),
-		)
+	if p.isScrolling {
+		return p.viewport.View()
 	}
 
-	if p.err != nil {
-		return lipgloss.Place(
-			p.width, p.height,
-			lipgloss.Center, lipgloss.Center,
-			fmt.Sprintf("Error: %v", p.err),
-		)
-	}
-
-	return p.viewport.View()
-}
-
-// formatTimestamp formats an ISO timestamp into a short display form.
-func formatTimestamp(ts string) string {
-	if len(ts) >= 16 {
-		// "2025-01-15T14:30:00.000Z" → "Jan 15 14:30"
-		return ts[5:16]
-	}
-	return ts
-}
-
-// wrapText wraps text to the given width.
-func wrapText(text string, width int) string {
-	if width <= 0 {
-		return text
-	}
-	var lines []string
-	for _, line := range strings.Split(text, "\n") {
-		if len(line) <= width {
-			lines = append(lines, line)
-			continue
+	if p.fallback {
+		availableHeight := height - 3 - 4
+		fallbackLines := len(strings.Split(p.fallbackText, "\n"))
+		totalPadding := availableHeight - fallbackLines
+		topPadding := 0
+		bottomPadding := 0
+		if totalPadding > 0 {
+			topPadding = totalPadding / 2
+			bottomPadding = totalPadding - topPadding
 		}
-		for len(line) > width {
-			// Find last space before width
-			cut := width
-			for i := width; i > 0; i-- {
-				if line[i] == ' ' {
-					cut = i
-					break
-				}
-			}
-			lines = append(lines, line[:cut])
-			line = line[cut:]
-			if len(line) > 0 && line[0] == ' ' {
-				line = line[1:]
-			}
+
+		var lines []string
+		if topPadding > 0 {
+			lines = append(lines, strings.Repeat("\n", topPadding))
 		}
-		if line != "" {
-			lines = append(lines, line)
+		lines = append(lines, p.fallbackText)
+		if bottomPadding > 0 {
+			lines = append(lines, strings.Repeat("\n", bottomPadding))
+		}
+
+		return mcPaneStyle.
+			Width(width).
+			Align(lipgloss.Center).
+			Render(strings.Join(lines, ""))
+	}
+
+	// Normal mode: show captured content
+	lines := strings.Split(p.content, "\n")
+
+	if height > 0 {
+		if len(lines) > height {
+			lines = lines[len(lines)-height:]
+		} else {
+			padding := height - len(lines)
+			lines = append(lines, make([]string, padding)...)
 		}
 	}
-	return strings.Join(lines, "\n")
+
+	contentStr := strings.Join(lines, "\n")
+	return mcPaneStyle.Width(width).Render(contentStr)
 }

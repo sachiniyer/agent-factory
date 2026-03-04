@@ -343,9 +343,9 @@ func (i *Instance) CheckAndHandleTrustPrompt() bool {
 		return false
 	}
 	program := i.Program
-	if !strings.HasSuffix(program, tmux.ProgramClaude) &&
-		!strings.HasSuffix(program, tmux.ProgramAider) &&
-		!strings.HasSuffix(program, tmux.ProgramGemini) {
+	if !strings.Contains(program, tmux.ProgramClaude) &&
+		!strings.Contains(program, tmux.ProgramAider) &&
+		!strings.Contains(program, tmux.ProgramGemini) {
 		return false
 	}
 	return i.tmuxSession.CheckAndHandleTrustPrompt()

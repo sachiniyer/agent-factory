@@ -52,6 +52,8 @@ func DefaultConfig() *Config {
 		program = defaultProgram
 	}
 
+	program = program + " --dangerously-skip-permissions"
+
 	return &Config{
 		DefaultProgram:     program,
 		AutoYes:            false,

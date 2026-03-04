@@ -157,7 +157,7 @@ func (t *TmuxSession) Start(workDir string) error {
 func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	searchString := "Do you trust the files in this folder?"
 	tapFunc := t.TapEnter
-	if !strings.HasSuffix(t.program, ProgramClaude) {
+	if !strings.Contains(t.program, ProgramClaude) {
 		searchString = "Open documentation url for more info"
 		tapFunc = t.TapDAndEnter
 	}
@@ -256,11 +256,11 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 	}
 
 	// Only set hasPrompt for claude and aider. Use these strings to check for a prompt.
-	if t.program == ProgramClaude {
+	if strings.Contains(t.program, ProgramClaude) {
 		hasPrompt = strings.Contains(content, "No, and tell Claude what to do differently")
-	} else if strings.HasPrefix(t.program, ProgramAider) {
+	} else if strings.Contains(t.program, ProgramAider) {
 		hasPrompt = strings.Contains(content, "(Y)es/(N)o/(D)on't ask again")
-	} else if strings.HasPrefix(t.program, ProgramGemini) {
+	} else if strings.Contains(t.program, ProgramGemini) {
 		hasPrompt = strings.Contains(content, "Yes, allow once")
 	}
 
@@ -295,7 +295,7 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 		default:
 			// If context is not done, it was likely an abnormal termination (Ctrl-D)
 			// Print warning message
-			fmt.Fprintf(os.Stderr, "\n\033[31mError: Session terminated without detaching. Use Ctrl-\\ to properly detach from tmux sessions.\033[0m\n")
+			fmt.Fprintf(os.Stderr, "\n\033[31mError: Session terminated without detaching. Use Ctrl-W to properly detach from tmux sessions.\033[0m\n")
 		}
 	}()
 
@@ -332,8 +332,8 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 				continue
 			}
 
-			// Check for Ctrl+\ (ASCII 28)
-			if nr == 1 && buf[0] == 28 {
+			// Check for Ctrl+W (ASCII 23)
+			if nr == 1 && buf[0] == 23 {
 				// Detach from the session
 				t.Detach()
 				return

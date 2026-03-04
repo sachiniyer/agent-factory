@@ -400,6 +400,7 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
 		return m, m.handleError(err)
 	}
+	m.tabbedWindow.CleanupMicroClaw()
 	return m, tea.Quit
 }
 
@@ -410,7 +411,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree || m.state == stateTaskList || m.state == stateMicroClaw {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree || m.state == stateTaskList {
 		return nil, false
 	}
 	// If it's in the global keymap, we should try to highlight it.
@@ -678,41 +679,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
-	// Handle microclaw message state
-	if m.state == stateMicroClaw {
-		shouldClose := m.textInputOverlay.HandleKeyPress(msg)
-		if shouldClose {
-			if m.textInputOverlay.IsSubmitted() {
-				text := m.textInputOverlay.GetValue()
-				if text != "" && len(m.microclawChats) > 0 {
-					// Send to the most recently active chat
-					chat := m.microclawChats[0]
-					// Gather repo metadata
-					meta := &microclaw.MessageMeta{
-						Program: m.program,
-					}
-					if cwd, err := os.Getwd(); err == nil {
-						meta.RepoPath = cwd
-					}
-					if repo, err := config.CurrentRepo(); err == nil {
-						meta.RepoID = config.RepoIDFromRoot(repo.Root)
-					}
-					if err := m.microclawBridge.SendMessage(chat.ChatID, text, meta); err != nil {
-						m.textInputOverlay = nil
-						m.state = stateDefault
-						m.menu.SetState(ui.StateDefault)
-						return m, m.handleError(fmt.Errorf("failed to send microclaw message: %v", err))
-					}
-				}
-			}
-			m.textInputOverlay = nil
-			m.state = stateDefault
-			m.menu.SetState(ui.StateDefault)
-			return m, tea.WindowSize()
-		}
-		return m, nil
-	}
-
 	// Handle confirmation state
 	if m.state == stateConfirm {
 		shouldClose := m.confirmationOverlay.HandleKeyPress(msg)
@@ -741,6 +707,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		// If in terminal tab and in scroll mode, exit scroll mode
 		if m.tabbedWindow.IsInTerminalTab() && m.tabbedWindow.IsTerminalInScrollMode() {
 			m.tabbedWindow.ResetTerminalToNormalMode()
+			return m, m.instanceChanged()
+		}
+		// If in microclaw tab and in scroll mode, exit scroll mode
+		if m.tabbedWindow.IsInMicroClawTab() && m.tabbedWindow.IsMicroClawInScrollMode() {
+			m.tabbedWindow.ResetMicroClawToNormalMode()
 			return m, m.instanceChanged()
 		}
 	}
@@ -833,23 +804,21 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		if m.microclawBridge == nil || !m.microclawBridge.Available() {
 			return m, m.handleError(fmt.Errorf("MicroClaw not available — set MICROCLAW_DIR or install microclaw"))
 		}
-		chats, err := m.microclawBridge.ListChats()
-		if err != nil {
-			return m, m.handleError(fmt.Errorf("failed to list microclaw chats: %v", err))
+		// Switch to MicroClaw tab and attach to the interactive TUI
+		for m.tabbedWindow.GetActiveTab() != ui.MicroClawTab {
+			m.tabbedWindow.Toggle()
 		}
-		if len(chats) == 0 {
-			return m, m.handleError(fmt.Errorf("no microclaw chats found"))
-		}
-		m.microclawChats = chats
-		// Use the most recently active chat for the overlay title
-		chatTitle := chats[0].ChatTitle
-		if chatTitle == "" {
-			chatTitle = fmt.Sprintf("chat-%d", chats[0].ChatID)
-		}
-		m.textInputOverlay = overlay.NewTextInputOverlay(fmt.Sprintf("Message MicroClaw (%s)", chatTitle), "")
-		m.state = stateMicroClaw
-		m.menu.SetState(ui.StatePrompt)
-		return m, tea.WindowSize()
+		m.menu.SetActiveTab(m.tabbedWindow.GetActiveTab())
+		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+			ch, err := m.tabbedWindow.AttachMicroClaw()
+			if err != nil {
+				m.handleError(err)
+				return
+			}
+			<-ch
+			m.state = stateDefault
+		})
+		return m, nil
 	case keys.KeyNew:
 		if m.list.NumInstances() >= GlobalInstanceLimit {
 			return m, m.handleError(
@@ -900,6 +869,9 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			label := wt.Path
 			if wt.Branch != "" {
 				label = fmt.Sprintf("%s (%s)", wt.Branch, wt.Path)
+			}
+			if wt.IsMainWorktree {
+				label += " [root]"
 			}
 			if trackedPaths[wt.Path] {
 				label += " [has session]"
@@ -1026,6 +998,19 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		if m.tabbedWindow.IsInTerminalTab() {
 			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
 				ch, err := m.tabbedWindow.AttachTerminal()
+				if err != nil {
+					m.handleError(err)
+					return
+				}
+				<-ch
+				m.state = stateDefault
+			})
+			return m, nil
+		}
+		// MicroClaw tab: attach to microclaw session
+		if m.tabbedWindow.IsInMicroClawTab() {
+			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+				ch, err := m.tabbedWindow.AttachMicroClaw()
 				if err != nil {
 					m.handleError(err)
 					return
@@ -1199,11 +1184,6 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("task list overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.taskListOverlay.Render(), mainView, true, true)
-	} else if m.state == stateMicroClaw {
-		if m.textInputOverlay == nil {
-			log.ErrorLog.Printf("text input overlay is nil")
-		}
-		return overlay.PlaceOverlay(0, 0, m.textInputOverlay.Render(), mainView, true, true)
 	}
 
 	return mainView

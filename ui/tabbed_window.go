@@ -3,6 +3,8 @@ package ui
 import (
 	"claude-squad/log"
 	"claude-squad/session"
+	"fmt"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -204,6 +206,36 @@ func (w *TabbedWindow) UpdateMicroClaw() {
 		return
 	}
 	w.microclaw.Refresh()
+}
+
+// AttachMicroClaw attaches to the microclaw tmux session
+func (w *TabbedWindow) AttachMicroClaw() (chan struct{}, error) {
+	if w.microclaw == nil {
+		return nil, fmt.Errorf("microclaw pane not available")
+	}
+	return w.microclaw.Attach()
+}
+
+// CleanupMicroClaw closes the microclaw tmux session
+func (w *TabbedWindow) CleanupMicroClaw() {
+	if w.microclaw != nil {
+		w.microclaw.Close()
+	}
+}
+
+// IsMicroClawInScrollMode returns true if the microclaw pane is in scroll mode
+func (w *TabbedWindow) IsMicroClawInScrollMode() bool {
+	if w.microclaw == nil {
+		return false
+	}
+	return w.microclaw.IsScrolling()
+}
+
+// ResetMicroClawToNormalMode exits scroll mode on the microclaw pane
+func (w *TabbedWindow) ResetMicroClawToNormalMode() {
+	if w.microclaw != nil {
+		w.microclaw.ResetToNormalMode()
+	}
 }
 
 // GetActiveTab returns the currently active tab index
