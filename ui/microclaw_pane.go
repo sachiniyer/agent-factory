@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"claude-squad/nanoclaw"
+	"claude-squad/microclaw"
 	"fmt"
 	"strings"
 
@@ -10,49 +10,48 @@ import (
 )
 
 var (
-	ncSenderStyle = lipgloss.NewStyle().
+	mcSenderStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#7D56F4")).
 			Bold(true)
-	ncTimestampStyle = lipgloss.NewStyle().
+	mcTimestampStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.AdaptiveColor{Light: "#808080", Dark: "#808080"})
-	ncMyMessageStyle = lipgloss.NewStyle().
+	mcBotMessageStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#36CFC9"))
-	ncMessageStyle = lipgloss.NewStyle().
+	mcMessageStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
-	ncStatusStyle = lipgloss.NewStyle().
+	mcStatusStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFD700")).
 			Bold(true)
 )
 
-// NanoClawPane displays nanoclaw messages in a chat-like viewport.
-type NanoClawPane struct {
+// MicroClawPane displays microclaw messages in a chat-like viewport.
+type MicroClawPane struct {
 	viewport viewport.Model
-	bridge   *nanoclaw.Bridge
-	messages []nanoclaw.Message
+	bridge   *microclaw.Bridge
+	messages []microclaw.Message
 	status   string
 	width    int
 	height   int
 	err      error
 }
 
-// NewNanoClawPane creates a new pane backed by the given bridge.
-// If bridge is nil or unavailable, the pane shows a placeholder.
-func NewNanoClawPane(bridge *nanoclaw.Bridge) *NanoClawPane {
-	return &NanoClawPane{
+// NewMicroClawPane creates a new pane backed by the given bridge.
+func NewMicroClawPane(bridge *microclaw.Bridge) *MicroClawPane {
+	return &MicroClawPane{
 		viewport: viewport.New(0, 0),
 		bridge:   bridge,
 	}
 }
 
-func (p *NanoClawPane) SetSize(width, height int) {
+func (p *MicroClawPane) SetSize(width, height int) {
 	p.width = width
 	p.height = height
 	p.viewport.Width = width
 	p.viewport.Height = height
 }
 
-// Refresh fetches the latest messages and status from nanoclaw.
-func (p *NanoClawPane) Refresh() {
+// Refresh fetches the latest messages and status from microclaw.
+func (p *MicroClawPane) Refresh() {
 	if p.bridge == nil || !p.bridge.Available() {
 		p.err = nil
 		p.status = ""
@@ -77,7 +76,7 @@ func (p *NanoClawPane) Refresh() {
 	p.renderContent()
 }
 
-func (p *NanoClawPane) renderContent() {
+func (p *MicroClawPane) renderContent() {
 	if p.width == 0 || p.height == 0 {
 		return
 	}
@@ -86,7 +85,7 @@ func (p *NanoClawPane) renderContent() {
 
 	// Status bar at the top
 	if p.status != "" {
-		sb.WriteString(ncStatusStyle.Render("NanoClaw — "+p.status) + "\n")
+		sb.WriteString(mcStatusStyle.Render("MicroClaw — "+p.status) + "\n")
 		sb.WriteString(strings.Repeat("─", p.width) + "\n")
 	}
 
@@ -95,22 +94,23 @@ func (p *NanoClawPane) renderContent() {
 	} else {
 		for _, msg := range p.messages {
 			ts := formatTimestamp(msg.Timestamp)
+
 			sender := msg.SenderName
 			if sender == "" {
-				sender = msg.Sender
+				sender = "unknown"
 			}
 
-			senderStyle := ncSenderStyle
-			if msg.IsBotMessage == 1 || msg.IsFromMe == 1 {
-				senderStyle = ncMyMessageStyle.Bold(true)
+			senderStyle := mcSenderStyle
+			if msg.IsFromBot == 1 {
+				senderStyle = mcBotMessageStyle.Bold(true)
 			}
 
-			header := senderStyle.Render(sender) + " " + ncTimestampStyle.Render(ts)
+			header := senderStyle.Render(sender) + " " + mcTimestampStyle.Render(ts)
 			sb.WriteString(header + "\n")
 
-			style := ncMessageStyle
-			if msg.IsFromMe == 1 || msg.IsBotMessage == 1 {
-				style = ncMyMessageStyle
+			style := mcMessageStyle
+			if msg.IsFromBot == 1 {
+				style = mcBotMessageStyle
 			}
 
 			// Word-wrap content to viewport width
@@ -124,15 +124,15 @@ func (p *NanoClawPane) renderContent() {
 	p.viewport.GotoBottom()
 }
 
-func (p *NanoClawPane) ScrollUp() {
+func (p *MicroClawPane) ScrollUp() {
 	p.viewport.LineUp(1)
 }
 
-func (p *NanoClawPane) ScrollDown() {
+func (p *MicroClawPane) ScrollDown() {
 	p.viewport.LineDown(1)
 }
 
-func (p *NanoClawPane) String() string {
+func (p *MicroClawPane) String() string {
 	if p.width == 0 || p.height == 0 {
 		return ""
 	}
@@ -144,8 +144,8 @@ func (p *NanoClawPane) String() string {
 			lipgloss.JoinVertical(lipgloss.Center,
 				FallBackText,
 				"",
-				"NanoClaw not available.",
-				"Set NANOCLAW_DIR or install at ~/nanoclaw.",
+				"MicroClaw not available.",
+				"Set MICROCLAW_DIR or install microclaw.",
 			),
 		)
 	}

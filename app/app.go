@@ -4,7 +4,7 @@ import (
 	"claude-squad/config"
 	"claude-squad/keys"
 	"claude-squad/log"
-	"claude-squad/nanoclaw"
+	"claude-squad/microclaw"
 	"claude-squad/schedule"
 	"claude-squad/session"
 	"claude-squad/session/git"
@@ -55,8 +55,8 @@ const (
 	stateSelectWorktree
 	// stateTaskList is the state when the task list overlay is displayed.
 	stateTaskList
-	// stateNanoClaw is the state when the user is composing a nanoclaw message.
-	stateNanoClaw
+	// stateMicroClaw is the state when the user is composing a microclaw message.
+	stateMicroClaw
 )
 
 type home struct {
@@ -118,10 +118,10 @@ type home struct {
 	// taskListOverlay handles task list management
 	taskListOverlay *overlay.TaskListOverlay
 
-	// nanoclawBridge is the bridge to the nanoclaw instance
-	nanoclawBridge *nanoclaw.Bridge
-	// nanoclawGroups caches the nanoclaw groups for the message overlay
-	nanoclawGroups []nanoclaw.Group
+	// microclawBridge is the bridge to the microclaw instance
+	microclawBridge *microclaw.Bridge
+	// microclawChats caches the microclaw chats for the message overlay
+	microclawChats []microclaw.Chat
 }
 
 func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
@@ -138,19 +138,19 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		os.Exit(1)
 	}
 
-	// Initialize nanoclaw bridge
-	ncDir := os.Getenv("NANOCLAW_DIR")
-	ncBridge := nanoclaw.NewBridge(ncDir)
-	var ncPane *ui.NanoClawPane
-	if ncBridge.Available() {
-		ncPane = ui.NewNanoClawPane(ncBridge)
+	// Initialize microclaw bridge
+	mcDir := os.Getenv("MICROCLAW_DIR")
+	mcBridge := microclaw.NewBridge(mcDir)
+	var mcPane *ui.MicroClawPane
+	if mcBridge.Available() {
+		mcPane = ui.NewMicroClawPane(mcBridge)
 	}
 
 	h := &home{
 		ctx:            ctx,
 		spinner:        spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		menu:           ui.NewMenu(),
-		tabbedWindow:   ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane(), ncPane),
+		tabbedWindow:   ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane(), mcPane),
 		errBox:         ui.NewErrBox(),
 		storage:        storage,
 		appConfig:      appConfig,
@@ -159,7 +159,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		repoID:         repoID,
 		state:          stateDefault,
 		appState:       appState,
-		nanoclawBridge: ncBridge,
+		microclawBridge: mcBridge,
 	}
 	h.list = ui.NewList(&h.spinner, autoYes)
 
@@ -299,7 +299,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hideErrMsg:
 		m.errBox.Clear()
 	case previewTickMsg:
-		m.tabbedWindow.UpdateNanoClaw()
+		m.tabbedWindow.UpdateMicroClaw()
 		cmd := m.instanceChanged()
 		return m, tea.Batch(
 			cmd,
@@ -410,7 +410,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree || m.state == stateTaskList || m.state == stateNanoClaw {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree || m.state == stateTaskList || m.state == stateMicroClaw {
 		return nil, false
 	}
 	// If it's in the global keymap, we should try to highlight it.
@@ -678,23 +678,17 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
-	// Handle nanoclaw message state
-	if m.state == stateNanoClaw {
+	// Handle microclaw message state
+	if m.state == stateMicroClaw {
 		shouldClose := m.textInputOverlay.HandleKeyPress(msg)
 		if shouldClose {
 			if m.textInputOverlay.IsSubmitted() {
 				text := m.textInputOverlay.GetValue()
-				if text != "" && len(m.nanoclawGroups) > 0 {
-					// Send to the main group with repo metadata
-					group := m.nanoclawGroups[0]
-					for _, g := range m.nanoclawGroups {
-						if g.IsMain == 1 {
-							group = g
-							break
-						}
-					}
+				if text != "" && len(m.microclawChats) > 0 {
+					// Send to the most recently active chat
+					chat := m.microclawChats[0]
 					// Gather repo metadata
-					meta := &nanoclaw.MessageMeta{
+					meta := &microclaw.MessageMeta{
 						Program: m.program,
 					}
 					if cwd, err := os.Getwd(); err == nil {
@@ -703,11 +697,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 					if repo, err := config.CurrentRepo(); err == nil {
 						meta.RepoID = config.RepoIDFromRoot(repo.Root)
 					}
-					if err := m.nanoclawBridge.SendMessage(group.Folder, text, meta); err != nil {
+					if err := m.microclawBridge.SendMessage(chat.ChatID, text, meta); err != nil {
 						m.textInputOverlay = nil
 						m.state = stateDefault
 						m.menu.SetState(ui.StateDefault)
-						return m, m.handleError(fmt.Errorf("failed to send nanoclaw message: %v", err))
+						return m, m.handleError(fmt.Errorf("failed to send microclaw message: %v", err))
 					}
 				}
 			}
@@ -835,28 +829,25 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.taskListOverlay.SetWidth(60)
 		m.state = stateTaskList
 		return m, nil
-	case keys.KeyNanoClaw:
-		if m.nanoclawBridge == nil || !m.nanoclawBridge.Available() {
-			return m, m.handleError(fmt.Errorf("NanoClaw not available — set NANOCLAW_DIR or install at ~/nanoclaw"))
+	case keys.KeyMicroClaw:
+		if m.microclawBridge == nil || !m.microclawBridge.Available() {
+			return m, m.handleError(fmt.Errorf("MicroClaw not available — set MICROCLAW_DIR or install microclaw"))
 		}
-		groups, err := m.nanoclawBridge.ListGroups()
+		chats, err := m.microclawBridge.ListChats()
 		if err != nil {
-			return m, m.handleError(fmt.Errorf("failed to list nanoclaw groups: %v", err))
+			return m, m.handleError(fmt.Errorf("failed to list microclaw chats: %v", err))
 		}
-		if len(groups) == 0 {
-			return m, m.handleError(fmt.Errorf("no nanoclaw groups found"))
+		if len(chats) == 0 {
+			return m, m.handleError(fmt.Errorf("no microclaw chats found"))
 		}
-		m.nanoclawGroups = groups
-		// Find the main group name for the overlay title
-		groupName := groups[0].Name
-		for _, g := range groups {
-			if g.IsMain == 1 {
-				groupName = g.Name
-				break
-			}
+		m.microclawChats = chats
+		// Use the most recently active chat for the overlay title
+		chatTitle := chats[0].ChatTitle
+		if chatTitle == "" {
+			chatTitle = fmt.Sprintf("chat-%d", chats[0].ChatID)
 		}
-		m.textInputOverlay = overlay.NewTextInputOverlay(fmt.Sprintf("Message NanoClaw (%s)", groupName), "")
-		m.state = stateNanoClaw
+		m.textInputOverlay = overlay.NewTextInputOverlay(fmt.Sprintf("Message MicroClaw (%s)", chatTitle), "")
+		m.state = stateMicroClaw
 		m.menu.SetState(ui.StatePrompt)
 		return m, tea.WindowSize()
 	case keys.KeyNew:
@@ -1208,7 +1199,7 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("task list overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.taskListOverlay.Render(), mainView, true, true)
-	} else if m.state == stateNanoClaw {
+	} else if m.state == stateMicroClaw {
 		if m.textInputOverlay == nil {
 			log.ErrorLog.Printf("text input overlay is nil")
 		}

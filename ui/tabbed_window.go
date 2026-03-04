@@ -34,7 +34,7 @@ const (
 	PreviewTab int = iota
 	DiffTab
 	TerminalTab
-	NanoClawTab
+	MicroClawTab
 )
 
 type Tab struct {
@@ -51,24 +51,24 @@ type TabbedWindow struct {
 	height    int
 	width     int
 
-	preview  *PreviewPane
-	diff     *DiffPane
-	terminal *TerminalPane
-	nanoclaw *NanoClawPane
-	instance *session.Instance
+	preview   *PreviewPane
+	diff      *DiffPane
+	terminal  *TerminalPane
+	microclaw *MicroClawPane
+	instance  *session.Instance
 }
 
-func NewTabbedWindow(preview *PreviewPane, diff *DiffPane, terminal *TerminalPane, nanoclaw *NanoClawPane) *TabbedWindow {
+func NewTabbedWindow(preview *PreviewPane, diff *DiffPane, terminal *TerminalPane, microclaw *MicroClawPane) *TabbedWindow {
 	tabs := []string{"Preview", "Diff", "Terminal"}
-	if nanoclaw != nil {
-		tabs = append(tabs, "NanoClaw")
+	if microclaw != nil {
+		tabs = append(tabs, "MicroClaw")
 	}
 	return &TabbedWindow{
-		tabs:     tabs,
-		preview:  preview,
-		diff:     diff,
-		terminal: terminal,
-		nanoclaw: nanoclaw,
+		tabs:      tabs,
+		preview:   preview,
+		diff:      diff,
+		terminal:  terminal,
+		microclaw: microclaw,
 	}
 }
 
@@ -96,8 +96,8 @@ func (w *TabbedWindow) SetSize(width, height int) {
 	w.preview.SetSize(contentWidth, contentHeight)
 	w.diff.SetSize(contentWidth, contentHeight)
 	w.terminal.SetSize(contentWidth, contentHeight)
-	if w.nanoclaw != nil {
-		w.nanoclaw.SetSize(contentWidth, contentHeight)
+	if w.microclaw != nil {
+		w.microclaw.SetSize(contentWidth, contentHeight)
 	}
 }
 
@@ -151,9 +151,9 @@ func (w *TabbedWindow) ScrollUp() {
 		if err := w.terminal.ScrollUp(); err != nil {
 			log.InfoLog.Printf("tabbed window failed to scroll terminal up: %v", err)
 		}
-	case NanoClawTab:
-		if w.nanoclaw != nil {
-			w.nanoclaw.ScrollUp()
+	case MicroClawTab:
+		if w.microclaw != nil {
+			w.microclaw.ScrollUp()
 		}
 	}
 }
@@ -171,9 +171,9 @@ func (w *TabbedWindow) ScrollDown() {
 		if err := w.terminal.ScrollDown(); err != nil {
 			log.InfoLog.Printf("tabbed window failed to scroll terminal down: %v", err)
 		}
-	case NanoClawTab:
-		if w.nanoclaw != nil {
-			w.nanoclaw.ScrollDown()
+	case MicroClawTab:
+		if w.microclaw != nil {
+			w.microclaw.ScrollDown()
 		}
 	}
 }
@@ -193,17 +193,17 @@ func (w *TabbedWindow) IsInTerminalTab() bool {
 	return w.activeTab == TerminalTab
 }
 
-// IsInNanoClawTab returns true if the nanoclaw tab is currently active
-func (w *TabbedWindow) IsInNanoClawTab() bool {
-	return w.activeTab == NanoClawTab
+// IsInMicroClawTab returns true if the microclaw tab is currently active
+func (w *TabbedWindow) IsInMicroClawTab() bool {
+	return w.activeTab == MicroClawTab
 }
 
-// UpdateNanoClaw refreshes the nanoclaw pane content. Only updates when the tab is active.
-func (w *TabbedWindow) UpdateNanoClaw() {
-	if w.activeTab != NanoClawTab || w.nanoclaw == nil {
+// UpdateMicroClaw refreshes the microclaw pane content. Only updates when the tab is active.
+func (w *TabbedWindow) UpdateMicroClaw() {
+	if w.activeTab != MicroClawTab || w.microclaw == nil {
 		return
 	}
-	w.nanoclaw.Refresh()
+	w.microclaw.Refresh()
 }
 
 // GetActiveTab returns the currently active tab index
@@ -290,9 +290,9 @@ func (w *TabbedWindow) String() string {
 		content = w.diff.String()
 	case TerminalTab:
 		content = w.terminal.String()
-	case NanoClawTab:
-		if w.nanoclaw != nil {
-			content = w.nanoclaw.String()
+	case MicroClawTab:
+		if w.microclaw != nil {
+			content = w.microclaw.String()
 		}
 	}
 	window := windowStyle.Render(

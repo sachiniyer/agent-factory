@@ -1,6 +1,6 @@
 # siyer-claude-squad
 
-Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, task management, a programmatic API, and [NanoClaw](https://github.com/sachiniyer/nanoclaw) integration.
+Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, task management, a programmatic API, and [MicroClaw](https://microclaw.ai) integration.
 
 ## What's different from upstream
 
@@ -58,23 +58,20 @@ cs api tasks toggle <id> --repo <path>
 cs api tasks remove <id> --repo <path>
 ```
 
-Supports `--repo` and `--repo-id` flags for repo scoping from outside git directories (e.g. from NanoClaw containers or scripts).
+Supports `--repo` and `--repo-id` flags for repo scoping from outside git directories.
 
-### NanoClaw integration
+### MicroClaw integration
 
-Bidirectional bridge to a running [NanoClaw](https://github.com/sachiniyer/nanoclaw) instance.
+Bidirectional bridge to a running [MicroClaw](https://microclaw.ai) instance. MicroClaw runs directly on the host (no Docker containers), so agents have full bash and filesystem access.
 
-- **NanoClaw tab** — 4th tab in the TUI (press `tab` to cycle). Shows chat history from nanoclaw's message database with scrolling.
-- **Send messages** — Press `m` to compose a message to nanoclaw. Messages include repo metadata (path, repo ID, program).
-- **Configuration** — Set `NANOCLAW_DIR` env var (defaults to `~/nanoclaw`). The tab only appears when a valid nanoclaw installation is detected.
+- **MicroClaw tab** — 4th tab in the TUI (press `tab` to cycle). Shows chat history from microclaw's SQLite database with scrolling.
+- **Send messages** — Press `m` to compose a message to microclaw. Messages include repo metadata and instructions for the agent to use `cs api` CLI commands directly.
+- **Direct CLI access** — MicroClaw agents use `cs api` commands directly for session/task management (no MCP bridge needed).
+- **Configuration** — Set `MICROCLAW_DIR` env var (defaults to `~/.microclaw`). The tab only appears when a valid microclaw installation is detected.
 
 ```bash
-NANOCLAW_DIR=~/nanoclaw cs
+MICROCLAW_DIR=~/.microclaw cs
 ```
-
-The nanoclaw side also includes:
-- **Container-side MCP server** (`cs-bridge-mcp.ts`) — gives nanoclaw agents `claude_squad` tools for session/schedule/task management via IPC
-- **Host-side bridge** (`cs-bridge.ts`) — picks up MCP requests from containers and runs `cs api` commands on the host
 
 ### Internal changes
 
