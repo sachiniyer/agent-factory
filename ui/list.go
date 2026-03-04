@@ -302,6 +302,9 @@ func (l *List) Kill() {
 }
 
 func (l *List) Attach() (chan struct{}, error) {
+	if len(l.items) == 0 {
+		return nil, fmt.Errorf("no items")
+	}
 	targetInstance := l.items[l.selectedIdx]
 	return targetInstance.Attach()
 }

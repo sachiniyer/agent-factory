@@ -135,7 +135,7 @@ func (m *Menu) addInstanceOptions() {
 	options := []keys.KeyName{keys.KeyNew, keys.KeyAttach, keys.KeyKill}
 
 	// Action group
-	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeySubmit}
+	actionGroup := []keys.KeyName{keys.KeyEnter}
 	if m.instance.Status == session.Paused {
 		actionGroup = append(actionGroup, keys.KeyResume)
 	} else {
@@ -177,7 +177,7 @@ func (m *Menu) String() string {
 	}
 
 	for i, k := range m.options {
-		binding := keys.GlobalkeyBindings[k]
+		binding := keys.GlobalKeyBindings[k]
 
 		var (
 			localActionStyle = actionGroupStyle

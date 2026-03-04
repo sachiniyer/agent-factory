@@ -264,8 +264,9 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 		hasPrompt = strings.Contains(content, "Yes, allow once")
 	}
 
-	if !bytes.Equal(t.monitor.hash(content), t.monitor.prevOutputHash) {
-		t.monitor.prevOutputHash = t.monitor.hash(content)
+	newHash := t.monitor.hash(content)
+	if !bytes.Equal(newHash, t.monitor.prevOutputHash) {
+		t.monitor.prevOutputHash = newHash
 		return true, hasPrompt
 	}
 	return false, hasPrompt

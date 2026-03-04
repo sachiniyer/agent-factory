@@ -26,7 +26,7 @@ func RunDaemon(cfg *config.Config) error {
 
 	instances, err := storage.LoadInstances()
 	if err != nil {
-		return fmt.Errorf("failed to load instacnes: %w", err)
+		return fmt.Errorf("failed to load instances: %w", err)
 	}
 	for _, instance := range instances {
 		// Assume AutoYes is true if the daemon is running.
@@ -43,7 +43,8 @@ func RunDaemon(cfg *config.Config) error {
 	stopCh := make(chan struct{})
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTimer(pollInterval)
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
 		for {
 			for _, instance := range instances {
 				// We only store started instances, but check anyway.
@@ -63,11 +64,8 @@ func RunDaemon(cfg *config.Config) error {
 			select {
 			case <-stopCh:
 				return
-			default:
+			case <-ticker.C:
 			}
-
-			<-ticker.C
-			ticker.Reset(pollInterval)
 		}
 	}()
 

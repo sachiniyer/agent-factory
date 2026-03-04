@@ -29,14 +29,6 @@ func getTasksPathForRepo(repo *config.RepoContext) (string, error) {
 	return filepath.Join(dir, tasksFileName), nil
 }
 
-func getTasksPath() (string, error) {
-	repo, err := config.CurrentRepo()
-	if err != nil {
-		return "", err
-	}
-	return getTasksPathForRepo(repo)
-}
-
 // LoadTasksForRepo loads tasks for a specific repo context.
 func LoadTasksForRepo(repo *config.RepoContext) ([]Task, error) {
 	path, err := getTasksPathForRepo(repo)
@@ -113,37 +105,6 @@ func AddTaskForRepo(repo *config.RepoContext, title string) (Task, error) {
 	return t, SaveTasksForRepo(repo, tasks)
 }
 
-func AddTask(title string) error {
-	repo, err := config.CurrentRepo()
-	if err != nil {
-		return err
-	}
-	_, err = AddTaskForRepo(repo, title)
-	return err
-}
-
-func UpdateTask(id, title string) error {
-	tasks, err := LoadTasks()
-	if err != nil {
-		return err
-	}
-
-	found := false
-	for i, t := range tasks {
-		if t.ID == id {
-			tasks[i].Title = title
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return fmt.Errorf("task with id %q not found", id)
-	}
-
-	return SaveTasks(tasks)
-}
-
 // ToggleTaskForRepo toggles a task's done status for a specific repo context.
 func ToggleTaskForRepo(repo *config.RepoContext, id string) error {
 	tasks, err := LoadTasksForRepo(repo)
@@ -165,14 +126,6 @@ func ToggleTaskForRepo(repo *config.RepoContext, id string) error {
 	}
 
 	return SaveTasksForRepo(repo, tasks)
-}
-
-func ToggleTask(id string) error {
-	repo, err := config.CurrentRepo()
-	if err != nil {
-		return err
-	}
-	return ToggleTaskForRepo(repo, id)
 }
 
 // DeleteTaskForRepo deletes a task for a specific repo context.
@@ -197,14 +150,6 @@ func DeleteTaskForRepo(repo *config.RepoContext, id string) error {
 	}
 
 	return SaveTasksForRepo(repo, filtered)
-}
-
-func DeleteTask(id string) error {
-	repo, err := config.CurrentRepo()
-	if err != nil {
-		return err
-	}
-	return DeleteTaskForRepo(repo, id)
 }
 
 func GenerateID() string {

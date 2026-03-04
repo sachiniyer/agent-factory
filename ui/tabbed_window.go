@@ -39,11 +39,6 @@ const (
 	MicroClawTab
 )
 
-type Tab struct {
-	Name   string
-	Render func(width int, height int) string
-}
-
 // TabbedWindow has tabs at the top of a pane which can be selected. The tabs
 // take up one rune of height.
 type TabbedWindow struct {

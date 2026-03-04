@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/ansi"
 	"github.com/muesli/reflow/truncate"
@@ -13,6 +12,13 @@ import (
 )
 
 // Most of this code is modified from https://github.com/charmbracelet/lipgloss/pull/102
+
+// Pre-compiled regexes for ANSI color code replacement in overlay fade effect.
+var (
+	bgColorRegex     = regexp.MustCompile(`\x1b\[48;[25];[0-9;]+m`)
+	fgColorRegex     = regexp.MustCompile(`\x1b\[38;[25];[0-9;]+m`)
+	simpleColorRegex = regexp.MustCompile(`\x1b\[[0-9]+m`)
+)
 
 // WhitespaceOption sets a styling rule for rendering whitespace.
 type WhitespaceOption func(*whitespace)
@@ -42,12 +48,11 @@ func CalculateCenterCoordinates(foregroundLines []string, backgroundLines []stri
 	return x, y
 }
 
-// PlaceOverlay places fg on top of bg with an optional shadow effect.
+// PlaceOverlay places fg on top of bg.
 // If center is true, the foreground is centered on the background; otherwise, the provided x and y are used.
 func PlaceOverlay(
 	x, y int,
 	fg, bg string,
-	shadow bool,
 	center bool,
 	opts ...WhitespaceOption,
 ) string {
@@ -57,18 +62,7 @@ func PlaceOverlay(
 	fgHeight := len(fgLines)
 
 	// Apply a fade effect to the background by directly modifying each line
-	// Create a new array of background lines with the fade effect applied
 	fadedBgLines := make([]string, len(bgLines))
-
-	// Compile regular expressions for ANSI color codes
-	// Match background color codes like \x1b[48;2;R;G;Bm or \x1b[48;5;Nm
-	bgColorRegex := regexp.MustCompile(`\x1b\[48;[25];[0-9;]+m`)
-
-	// Match foreground color codes like \x1b[38;2;R;G;Bm or \x1b[38;5;Nm
-	fgColorRegex := regexp.MustCompile(`\x1b\[38;[25];[0-9;]+m`)
-
-	// Match simple color codes like \x1b[31m
-	simpleColorRegex := regexp.MustCompile(`\x1b\[[0-9]+m`)
 
 	for i, line := range bgLines {
 		// Replace background color codes with a faded version
@@ -97,24 +91,6 @@ func PlaceOverlay(
 	placeX, placeY := x, y
 	if center {
 		placeX, placeY = CalculateCenterCoordinates(fgLines, bgLines, fgWidth, bgWidth)
-	}
-
-	// Handle shadow if enabled
-	if shadow {
-		// Define shadow style and character
-		shadowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#333333"))
-		shadowChar := shadowStyle.Render("░")
-
-		// Create shadow string with same dimensions as foreground
-		shadowLines := make([]string, fgHeight)
-		for i := 0; i < fgHeight; i++ {
-			shadowLines[i] = strings.Repeat(shadowChar, fgWidth)
-		}
-		shadowStr := strings.Join(shadowLines, "\n")
-
-		// Place shadow on background at an offset (e.g., +1, +1)
-		const shadowOffsetX, shadowOffsetY = 1, 1
-		_ = PlaceOverlay(placeX+shadowOffsetX, placeY+shadowOffsetY, shadowStr, bg, false, false, opts...)
 	}
 
 	// Check if foreground exceeds background size

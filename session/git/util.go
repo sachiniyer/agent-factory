@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+var (
+	reUnsafe    = regexp.MustCompile(`[^a-z0-9\-_/.]+`)
+	reMultiDash = regexp.MustCompile(`-+`)
+)
+
 // sanitizeBranchName transforms an arbitrary string into a Git branch name friendly string.
 // Note: Git branch names have several rules, so this function uses a simple approach
 // by allowing only a safe subset of characters.
@@ -19,12 +24,10 @@ func sanitizeBranchName(s string) string {
 
 	// Remove any characters not allowed in our safe subset.
 	// Here we allow: letters, digits, dash, underscore, slash, and dot.
-	re := regexp.MustCompile(`[^a-z0-9\-_/.]+`)
-	s = re.ReplaceAllString(s, "")
+	s = reUnsafe.ReplaceAllString(s, "")
 
 	// Replace multiple dashes with a single dash (optional cleanup)
-	reDash := regexp.MustCompile(`-+`)
-	s = reDash.ReplaceAllString(s, "-")
+	s = reMultiDash.ReplaceAllString(s, "-")
 
 	// Trim leading and trailing dashes or slashes to avoid issues
 	s = strings.Trim(s, "-/")

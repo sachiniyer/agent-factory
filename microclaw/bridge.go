@@ -228,11 +228,17 @@ func (b *Bridge) Status() (string, error) {
 	defer db.Close()
 
 	var chats, messages int
-	_ = db.QueryRow("SELECT COUNT(*) FROM chats").Scan(&chats)
-	_ = db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&messages)
+	if err := db.QueryRow("SELECT COUNT(*) FROM chats").Scan(&chats); err != nil {
+		return "", fmt.Errorf("failed to count chats: %w", err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&messages); err != nil {
+		return "", fmt.Errorf("failed to count messages: %w", err)
+	}
 
 	var tasks int
-	_ = db.QueryRow("SELECT COUNT(*) FROM scheduled_tasks WHERE status = 'active'").Scan(&tasks)
+	if err := db.QueryRow("SELECT COUNT(*) FROM scheduled_tasks WHERE status = 'active'").Scan(&tasks); err != nil {
+		return "", fmt.Errorf("failed to count active tasks: %w", err)
+	}
 
 	return fmt.Sprintf("Chats: %d | Messages: %d | Active tasks: %d", chats, messages, tasks), nil
 }

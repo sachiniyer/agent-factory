@@ -70,7 +70,9 @@ func LoadAndClearPendingInstances() ([]session.InstanceData, error) {
 		return nil, err
 	}
 
-	os.Remove(path)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.WarningLog.Printf("failed to remove pending instances file: %v", err)
+	}
 	return pending, nil
 }
 
@@ -154,6 +156,16 @@ func RunScheduledTask(scheduleID string) error {
 		return fmt.Errorf("failed to start instance: %w", err)
 	}
 
+	// If anything fails after Start(), kill the instance to avoid orphaned resources.
+	started := true
+	defer func() {
+		if started {
+			if killErr := instance.Kill(); killErr != nil {
+				log.ErrorLog.Printf("failed to kill orphaned instance %s: %v", title, killErr)
+			}
+		}
+	}()
+
 	// Wait for the program to be ready before sending the prompt.
 	// Claude Code (and similar tools) take a few seconds to initialize.
 	if err := WaitForReady(instance); err != nil {
@@ -174,6 +186,9 @@ func RunScheduledTask(scheduleID string) error {
 	if err := instance.SendPromptCommand(s.Prompt); err != nil {
 		return fmt.Errorf("failed to send prompt: %w", err)
 	}
+
+	// Instance is successfully handed off, don't kill it on return.
+	started = false
 
 	// Write instance to a separate pending file to avoid racing with the
 	// daemon/TUI which also read-modify-write state.json concurrently.

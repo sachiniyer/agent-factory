@@ -400,6 +400,7 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
 		return m, m.handleError(err)
 	}
+	m.tabbedWindow.CleanupTerminal()
 	m.tabbedWindow.CleanupMicroClaw()
 	return m, tea.Quit
 }
@@ -524,15 +525,15 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			m.state = stateDefault
 			m.selectedWorktree = nil
 			m.availableWorktrees = nil
-			m.instanceChanged()
+			cmd := m.instanceChanged()
 
-			return m, tea.Sequence(
+			return m, tea.Batch(cmd, tea.Sequence(
 				tea.WindowSize(),
 				func() tea.Msg {
 					m.menu.SetState(ui.StateDefault)
 					return nil
 				},
-			)
+			))
 		default:
 		}
 		return m, nil
@@ -812,7 +813,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
 			ch, err := m.tabbedWindow.AttachMicroClaw()
 			if err != nil {
-				m.handleError(err)
+				log.ErrorLog.Printf("failed to attach microclaw: %v", err)
 				return
 			}
 			<-ch
@@ -926,42 +927,20 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			// Clean up terminal session for this instance
 			m.tabbedWindow.CleanupTerminalForInstance(selected.Title)
 
-			// Delete from storage first
+			// Kill the instance first (tmux session + git worktree)
+			m.list.Kill()
+
+			// Then delete from storage
 			if err := m.storage.DeleteInstance(selected.Title); err != nil {
 				return err
 			}
 
-			// Then kill the instance
-			m.list.Kill()
 			return instanceChangedMsg{}
 		}
 
 		// Show confirmation modal
 		message := fmt.Sprintf("[!] Kill session '%s'?", selected.Title)
 		return m, m.confirmAction(message, killAction)
-	case keys.KeySubmit:
-		selected := m.list.GetSelectedInstance()
-		if selected == nil || selected.Status == session.Loading {
-			return m, nil
-		}
-
-		// Create the push action as a tea.Cmd
-		pushAction := func() tea.Msg {
-			// Default commit message with timestamp
-			commitMsg := fmt.Sprintf("[claudesquad] update from '%s' on %s", selected.Title, time.Now().Format(time.RFC822))
-			worktree, err := selected.GetGitWorktree()
-			if err != nil {
-				return err
-			}
-			if err = worktree.PushChanges(commitMsg, true); err != nil {
-				return err
-			}
-			return nil
-		}
-
-		// Show confirmation modal
-		message := fmt.Sprintf("[!] Push changes from session '%s'?", selected.Title)
-		return m, m.confirmAction(message, pushAction)
 	case keys.KeyCheckout:
 		selected := m.list.GetSelectedInstance()
 		if selected == nil || selected.Status == session.Loading {
@@ -971,7 +950,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		// Show help screen before pausing
 		m.showHelpScreen(helpTypeInstanceCheckout{}, func() {
 			if err := selected.Pause(); err != nil {
-				m.handleError(err)
+				log.ErrorLog.Printf("failed to pause instance: %v", err)
 			}
 			m.tabbedWindow.CleanupTerminalForInstance(selected.Title)
 			m.instanceChanged()
@@ -999,7 +978,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
 				ch, err := m.tabbedWindow.AttachTerminal()
 				if err != nil {
-					m.handleError(err)
+					log.ErrorLog.Printf("failed to attach terminal: %v", err)
 					return
 				}
 				<-ch
@@ -1012,7 +991,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
 				ch, err := m.tabbedWindow.AttachMicroClaw()
 				if err != nil {
-					m.handleError(err)
+					log.ErrorLog.Printf("failed to attach microclaw: %v", err)
 					return
 				}
 				<-ch
@@ -1024,7 +1003,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
 			ch, err := m.list.Attach()
 			if err != nil {
-				m.handleError(err)
+				log.ErrorLog.Printf("failed to attach: %v", err)
 				return
 			}
 			<-ch
@@ -1124,7 +1103,12 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 		m.state = stateDefault
 		// Execute the action if it exists
 		if action != nil {
-			_ = action()
+			if msg := action(); msg != nil {
+				if err, ok := msg.(error); ok {
+					log.ErrorLog.Printf("confirmation action failed: %v", err)
+					m.errBox.SetError(err)
+				}
+			}
 		}
 	}
 
@@ -1136,10 +1120,11 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 }
 
 func truncateString(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
 }
 
 func (m *home) View() string {
@@ -1158,32 +1143,32 @@ func (m *home) View() string {
 		if m.textInputOverlay == nil {
 			log.ErrorLog.Printf("text input overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.textInputOverlay.Render(), mainView, true, true)
+		return overlay.PlaceOverlay(0, 0, m.textInputOverlay.Render(), mainView, true)
 	} else if m.state == stateHelp {
 		if m.textOverlay == nil {
 			log.ErrorLog.Printf("text overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.textOverlay.Render(), mainView, true, true)
+		return overlay.PlaceOverlay(0, 0, m.textOverlay.Render(), mainView, true)
 	} else if m.state == stateSchedule {
 		if m.scheduleOverlay == nil {
 			log.ErrorLog.Printf("schedule overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.scheduleOverlay.Render(), mainView, true, true)
+		return overlay.PlaceOverlay(0, 0, m.scheduleOverlay.Render(), mainView, true)
 	} else if m.state == stateConfirm {
 		if m.confirmationOverlay == nil {
 			log.ErrorLog.Printf("confirmation overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true, true)
+		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true)
 	} else if m.state == stateSelectWorktree {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true, true)
+		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
 	} else if m.state == stateTaskList {
 		if m.taskListOverlay == nil {
 			log.ErrorLog.Printf("task list overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.taskListOverlay.Render(), mainView, true, true)
+		return overlay.PlaceOverlay(0, 0, m.taskListOverlay.Render(), mainView, true)
 	}
 
 	return mainView
