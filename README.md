@@ -1,132 +1,87 @@
-# Claude Squad [![CI](https://github.com/smtg-ai/claude-squad/actions/workflows/build.yml/badge.svg)](https://github.com/smtg-ai/claude-squad/actions/workflows/build.yml) [![GitHub Release](https://img.shields.io/github/v/release/smtg-ai/claude-squad)](https://github.com/smtg-ai/claude-squad/releases/latest)
+# siyer-claude-squad
 
-[Claude Squad](https://smtg-ai.github.io/claude-squad/) is a terminal app that manages multiple [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli) (and other local agents including [Aider](https://github.com/Aider-AI/aider)) in separate workspaces, allowing you to work on multiple tasks simultaneously.
+Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, task management, a programmatic API, and [NanoClaw](https://github.com/sachiniyer/nanoclaw) integration.
 
+## What's different from upstream
 
-![Claude Squad Screenshot](assets/screenshot.png)
+### Per-repo scoping
 
-### Highlights
-- Complete tasks in the background (including yolo / auto-accept mode!)
-- Manage instances and tasks in one terminal window
-- Review changes before applying them, checkout changes before pushing them
-- Each task gets its own isolated git workspace, so no conflicts
+Instances, tasks, and schedules are scoped to the current git repository instead of being global.
 
-<br />
+- **Instances** stored per-repo at `~/.claude-squad/instances/<repoID>/instances.json` (auto-migrated from the old global `state.json`)
+- **Schedules** filtered to the current repo in the TUI and schedule list
+- **`repoID`** derived from SHA-256 of the git root path — shared across `config.RepoContext`
+- The daemon loads instances from all repos; the TUI scopes to whichever repo you're in
 
-https://github.com/user-attachments/assets/aef18253-e58f-4525-9032-f5a3d66c975a
+### Per-repo task list (press `t`)
 
-<br />
+A todo list overlay for managing tasks per repository.
 
-### Installation
+- Press `t` to open the task list
+- Add, toggle, and delete tasks
+- Tasks stored at `~/.claude-squad/tasks/<repoID>/tasks.json`
 
-Both Homebrew and manual installation will install Claude Squad as `cs` on your system.
+### Attach to existing worktrees (press `a`)
 
-#### Homebrew
+Create a session against an existing git worktree instead of always creating a new one.
 
-```bash
-brew install claude-squad
-ln -s "$(brew --prefix)/bin/claude-squad" "$(brew --prefix)/bin/cs"
-```
+- Press `a` to see all worktrees for the current repo
+- Worktrees that already have a session are annotated with `[has session]`
+- Select a worktree, name the session, and it attaches to the existing branch
 
-#### Manual
+### `cs api` — Programmatic JSON API
 
-Claude Squad can also be installed by running the following command:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.sh | bash
-```
-
-This puts the `cs` binary in `~/.local/bin`.
-
-To use a custom name for the binary:
+A CLI subcommand tree for driving claude-squad without the TUI. All commands output JSON to stdout, errors to stderr.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.sh | bash -s -- --name <your-binary-name>
+# Sessions
+cs api sessions list [--repo <path>]
+cs api sessions get <title>
+cs api sessions create --repo <path> --name <name> [--prompt <text>] [--program <prog>]
+cs api sessions send-prompt <title> <prompt>
+cs api sessions preview <title>
+cs api sessions diff <title>
+cs api sessions kill <title>
+cs api sessions push <title> [--message <msg>]
+cs api sessions pause <title>
+cs api sessions resume <title>
+
+# Schedules
+cs api schedules list [--repo <path>]
+cs api schedules add --repo <path> --prompt <text> --cron <expr> [--program <prog>]
+cs api schedules remove <id>
+
+# Tasks
+cs api tasks list --repo <path>
+cs api tasks add --repo <path> --title <text>
+cs api tasks toggle <id> --repo <path>
+cs api tasks remove <id> --repo <path>
 ```
 
-### Prerequisites
+Supports `--repo` and `--repo-id` flags for repo scoping from outside git directories (e.g. from NanoClaw containers or scripts).
 
-- [tmux](https://github.com/tmux/tmux/wiki/Installing)
-- [gh](https://cli.github.com/)
+### NanoClaw integration
 
-### Usage
+Bidirectional bridge to a running [NanoClaw](https://github.com/sachiniyer/nanoclaw) instance.
 
-```
-Usage:
-  cs [flags]
-  cs [command]
-
-Available Commands:
-  completion  Generate the autocompletion script for the specified shell
-  debug       Print debug information like config paths
-  help        Help about any command
-  reset       Reset all stored instances
-  version     Print the version number of claude-squad
-
-Flags:
-  -y, --autoyes          [experimental] If enabled, all instances will automatically accept prompts for claude code & aider
-  -h, --help             help for claude-squad
-  -p, --program string   Program to run in new instances (e.g. 'aider --model ollama_chat/gemma3:1b')
-```
-
-Run the application with:
+- **NanoClaw tab** — 4th tab in the TUI (press `tab` to cycle). Shows chat history from nanoclaw's message database with scrolling.
+- **Send messages** — Press `m` to compose a message to nanoclaw. Messages include repo metadata (path, repo ID, program).
+- **Configuration** — Set `NANOCLAW_DIR` env var (defaults to `~/nanoclaw`). The tab only appears when a valid nanoclaw installation is detected.
 
 ```bash
-cs
+NANOCLAW_DIR=~/nanoclaw cs
 ```
-NOTE: The default program is `claude` and we recommend using the latest version.
 
-<br />
+The nanoclaw side also includes:
+- **Container-side MCP server** (`cs-bridge-mcp.ts`) — gives nanoclaw agents `claude_squad` tools for session/schedule/task management via IPC
+- **Host-side bridge** (`cs-bridge.ts`) — picks up MCP requests from containers and runs `cs api` commands on the host
 
-<b>Using Claude Squad with other AI assistants:</b>
-- For [Codex](https://github.com/openai/codex): Set your API key with `export OPENAI_API_KEY=<your_key>`
-- Launch with specific assistants:
-   - Codex: `cs -p "codex"`
-   - Aider: `cs -p "aider ..."`
-   - Gemini: `cs -p "gemini"`
-- Make this the default, by modifying the config file (locate with `cs debug`)
+### Internal changes
 
-<br />
+- **`config.RepoContext`** — shared abstraction for repo identification and scoped path resolution
+- **Repo-explicit task functions** — `LoadTasksForRepo`, `AddTaskForRepo`, `ToggleTaskForRepo`, `DeleteTaskForRepo` accept a `*config.RepoContext`
+- **Exported `schedule.WaitForReady`** — reused by the API create command
 
-#### Menu
-The menu at the bottom of the screen shows available commands: 
+## Upstream
 
-##### Instance/Session Management
-- `n` - Create a new session
-- `N` - Create a new session with a prompt
-- `D` - Kill (delete) the selected session
-- `↑/j`, `↓/k` - Navigate between sessions
-
-##### Actions
-- `↵/o` - Attach to the selected session to reprompt
-- `ctrl-\` - Detach from session
-- `s` - Commit and push branch to github
-- `c` - Checkout. Commits changes and pauses the session
-- `r` - Resume a paused session
-- `?` - Show help menu
-
-##### Navigation
-- `tab` - Switch between preview tab and diff tab
-- `q` - Quit the application
-- `shift-↓/↑` - scroll in diff view
-
-### FAQs
-
-#### Failed to start new session
-
-If you get an error like `failed to start new session: timed out waiting for tmux session`, update the
-underlying program (ex. `claude`) to the latest version.
-
-### How It Works
-
-1. **tmux** to create isolated terminal sessions for each agent
-2. **git worktrees** to isolate codebases so each session works on its own branch
-3. A simple TUI interface for easy navigation and management
-
-### License
-
-[AGPL-3.0](LICENSE.md)
-
-### Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=smtg-ai/claude-squad&type=Date)](https://www.star-history.com/#smtg-ai/claude-squad&Date)
+For installation, usage, keybindings, and general documentation, see the upstream project: [smtg-ai/claude-squad](https://github.com/smtg-ai/claude-squad)
