@@ -4,6 +4,7 @@ import (
 	"claude-squad/log"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -110,6 +111,24 @@ func (g *GitWorktree) IsDirty() (bool, error) {
 		return false, fmt.Errorf("failed to check worktree status: %w", err)
 	}
 	return len(output) > 0, nil
+}
+
+// HasUnpushedCommits checks if there are local commits not pushed to remote.
+// Returns whether there are unpushed commits and the count (-1 if branch has no remote).
+func (g *GitWorktree) HasUnpushedCommits() (bool, int, error) {
+	// Check if remote branch exists
+	_, err := g.runGitCommand(g.worktreePath, "rev-parse", "--verify", "origin/"+g.branchName)
+	if err != nil {
+		// No remote branch - branch hasn't been pushed at all
+		return true, -1, nil
+	}
+
+	output, err := g.runGitCommand(g.worktreePath, "rev-list", "--count", "origin/"+g.branchName+"..HEAD")
+	if err != nil {
+		return false, 0, err
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(output))
+	return n > 0, n, nil
 }
 
 // IsBranchCheckedOut checks if the instance branch is currently checked out

@@ -55,6 +55,8 @@ const (
 	stateSelectWorktree
 	// stateTaskList is the state when the task list overlay is displayed.
 	stateTaskList
+	// stateScheduleList is the state when the schedule list overlay is displayed.
+	stateScheduleList
 	// stateMicroClaw is the state when the user is composing a microclaw message.
 	stateMicroClaw
 )
@@ -117,6 +119,8 @@ type home struct {
 	availableWorktrees []git.WorktreeInfo
 	// taskListOverlay handles task list management
 	taskListOverlay *overlay.TaskListOverlay
+	// scheduleListOverlay handles schedule list management
+	scheduleListOverlay *overlay.ScheduleListOverlay
 
 	// microclawBridge is the bridge to the microclaw instance
 	microclawBridge *microclaw.Bridge
@@ -273,6 +277,9 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	if m.taskListOverlay != nil {
 		m.taskListOverlay.SetWidth(int(float32(msg.Width) * 0.6))
 	}
+	if m.scheduleListOverlay != nil {
+		m.scheduleListOverlay.SetSize(int(float32(msg.Width)*0.6), int(float32(msg.Height)*0.5))
+	}
 
 	previewWidth, previewHeight := m.tabbedWindow.GetPreviewSize()
 	if err := m.list.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
@@ -412,7 +419,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree || m.state == stateTaskList {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree || m.state == stateTaskList || m.state == stateScheduleList {
 		return nil, false
 	}
 	// If it's in the global keymap, we should try to highlight it.
@@ -680,11 +687,52 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
+	// Handle schedule list state
+	if m.state == stateScheduleList {
+		shouldClose := m.scheduleListOverlay.HandleKeyPress(msg)
+		if shouldClose {
+			if m.scheduleListOverlay.IsDirty() {
+				// Update remaining schedules
+				for _, sched := range m.scheduleListOverlay.GetSchedules() {
+					if err := schedule.UpdateSchedule(sched); err != nil {
+						log.ErrorLog.Printf("failed to update schedule: %v", err)
+					}
+					if sched.Enabled {
+						if err := schedule.InstallSystemdTimer(sched); err != nil {
+							log.WarningLog.Printf("failed to install timer: %v", err)
+						}
+					} else {
+						if err := schedule.RemoveSystemdTimer(sched); err != nil {
+							log.WarningLog.Printf("failed to remove timer: %v", err)
+						}
+					}
+				}
+				// Remove deleted schedules
+				for _, sched := range m.scheduleListOverlay.GetDeleted() {
+					if err := schedule.RemoveSchedule(sched.ID); err != nil {
+						log.ErrorLog.Printf("failed to remove schedule: %v", err)
+					}
+					if err := schedule.RemoveSystemdTimer(sched); err != nil {
+						log.WarningLog.Printf("failed to remove timer: %v", err)
+					}
+				}
+			}
+			m.scheduleListOverlay = nil
+			m.state = stateDefault
+			m.menu.SetState(ui.StateDefault)
+			return m, nil
+		}
+		return m, nil
+	}
+
 	// Handle confirmation state
 	if m.state == stateConfirm {
 		shouldClose := m.confirmationOverlay.HandleKeyPress(msg)
 		if shouldClose {
-			m.state = stateDefault
+			// Only reset to default if callbacks didn't change state
+			if m.state == stateConfirm {
+				m.state = stateDefault
+			}
 			m.confirmationOverlay = nil
 			return m, nil
 		}
@@ -757,32 +805,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, m.handleError(fmt.Errorf("failed to load schedules: %v", err))
 		}
 		if len(schedules) == 0 {
-			return m, m.handleError(fmt.Errorf("no schedules found for this repo — press S to create one"))
+			return m, m.handleError(fmt.Errorf("no schedules found for this repo — press s to create one"))
 		}
-		content := lipgloss.NewStyle().Bold(true).Underline(true).Foreground(lipgloss.Color("#7D56F4")).Render("Scheduled Tasks") + "\n\n"
-		for _, s := range schedules {
-			status := "enabled"
-			if !s.Enabled {
-				status = "disabled"
-			}
-			lastRun := "never"
-			if s.LastRunAt != nil {
-				lastRun = s.LastRunAt.Format("Jan 02 15:04")
-			}
-			content += lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00")).Render(s.ID) +
-				"  " + s.CronExpr + "  " + status + "\n"
-			content += "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("#36CFC9")).Render(s.Program) +
-				"  " + s.ProjectPath + "\n"
-			content += "  Prompt: " + truncateString(s.Prompt, 60) + "\n"
-			content += "  Last run: " + lastRun
-			if s.LastRunStatus != "" {
-				content += " (" + s.LastRunStatus + ")"
-			}
-			content += "\n\n"
-		}
-		m.textOverlay = overlay.NewTextOverlay(content)
-		m.state = stateHelp
-		return m, nil
+		m.scheduleListOverlay = overlay.NewScheduleListOverlay(schedules)
+		m.scheduleListOverlay.SetSize(60, 20)
+		m.state = stateScheduleList
+		return m, tea.WindowSize()
 	case keys.KeySchedule:
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -942,14 +970,45 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, nil
 		}
 
-		// Show help screen before pausing
-		m.showHelpScreen(helpTypeInstanceCheckout{}, func() {
+		doPause := func() {
 			if err := selected.Pause(); err != nil {
 				log.ErrorLog.Printf("failed to pause instance: %v", err)
 			}
 			m.tabbedWindow.CleanupTerminalForInstance(selected.Title)
 			m.instanceChanged()
-		})
+		}
+
+		// Check for uncommitted/unpushed changes to warn user
+		worktree, err := selected.GetGitWorktree()
+		if err == nil && !selected.Paused() {
+			var warnings []string
+			if dirty, _ := worktree.IsDirty(); dirty {
+				warnings = append(warnings, "has uncommitted changes")
+			}
+			if hasUnpushed, count, _ := worktree.HasUnpushedCommits(); hasUnpushed {
+				if count > 0 {
+					warnings = append(warnings, fmt.Sprintf("has %d unpushed commit(s)", count))
+				} else {
+					warnings = append(warnings, "branch not pushed to remote")
+				}
+			}
+
+			if len(warnings) > 0 {
+				msg := fmt.Sprintf("[!] Checkout '%s'?\n", selected.Title)
+				for _, w := range warnings {
+					msg += "  - " + w + "\n"
+				}
+				msg += "Changes will be committed locally but NOT pushed."
+
+				return m, m.confirmAction(msg, func() tea.Msg {
+					doPause()
+					return instanceChangedMsg{}
+				})
+			}
+		}
+
+		// No warnings — show help screen as usual
+		m.showHelpScreen(helpTypeInstanceCheckout{}, doPause)
 		return m, nil
 	case keys.KeyResume:
 		selected := m.list.GetSelectedInstance()
@@ -1114,14 +1173,6 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 	return nil
 }
 
-func truncateString(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	return string(runes[:max-3]) + "..."
-}
-
 func (m *home) View() string {
 	listWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.list.String())
 	previewWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.tabbedWindow.String())
@@ -1164,6 +1215,11 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("task list overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.taskListOverlay.Render(), mainView, true)
+	} else if m.state == stateScheduleList {
+		if m.scheduleListOverlay == nil {
+			log.ErrorLog.Printf("schedule list overlay is nil")
+		}
+		return overlay.PlaceOverlay(0, 0, m.scheduleListOverlay.Render(), mainView, true)
 	}
 
 	return mainView

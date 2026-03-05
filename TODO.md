@@ -4,8 +4,8 @@
 - [x] conductor style claude code/microclaw interface to communicate with all the sessions
   - [x] slack integration for this
   - [x] tui configs for this as well
-- [ ] add ability to edit scheduled tasks from the list tasks pane
-- [ ] extra confirmation for uncommitted/local only commit
-- [ ] create a session without a worktree
+- [x] add ability to edit scheduled tasks from the list tasks pane
+- [x] extra confirmation for uncommitted/local only commit
+- [x] create a session without a worktree
 - [ ] hooks to install dependencies and make install/make build scripts
 - [ ] better graphite integration (link instances/sessions to open stacks instead of strictly worktrees maybe?)
