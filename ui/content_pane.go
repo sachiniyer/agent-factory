@@ -214,7 +214,7 @@ func (c *ContentPane) renderInlinePane(content string) string {
 			lipgloss.Left, lipgloss.Top,
 			content))
 
-	return lipgloss.JoinVertical(lipgloss.Left, "\n", "\n", wrapped)
+	return lipgloss.JoinVertical(lipgloss.Left, "\n", wrapped)
 }
 
 func (c *ContentPane) renderMicroClawPane() string {
@@ -234,7 +234,7 @@ func (c *ContentPane) renderMicroClawPane() string {
 			lipgloss.Left, lipgloss.Top,
 			c.microclaw.String()))
 
-	return lipgloss.JoinVertical(lipgloss.Left, "\n", "\n", wrapped)
+	return lipgloss.JoinVertical(lipgloss.Left, "\n", wrapped)
 }
 
 func (c *ContentPane) renderEmptyPane() string {
@@ -255,5 +255,5 @@ func (c *ContentPane) renderEmptyPane() string {
 			lipgloss.Left, lipgloss.Top,
 			content))
 
-	return lipgloss.JoinVertical(lipgloss.Left, "\n", "\n", wrapped)
+	return lipgloss.JoinVertical(lipgloss.Left, "\n", wrapped)
 }
