@@ -107,16 +107,18 @@ func TestConfirmationModalStateTransitions(t *testing.T) {
 
 // TestConfirmationModalKeyHandling tests the actual key handling in confirmation state
 func TestConfirmationModalKeyHandling(t *testing.T) {
-	// Import needed packages
-	spinner := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	list := ui.NewList(&spinner, false)
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	sidebar := ui.NewSidebar(&spin, false)
+	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane(), nil)
+	cp := ui.NewContentPane(tw, nil)
 
 	// Create enough of home struct to test handleKeyPress in confirmation state
 	h := &home{
 		ctx:                 context.Background(),
 		state:               stateConfirm,
 		appConfig:           config.DefaultConfig(),
-		list:                list,
+		sidebar:             sidebar,
+		contentPane:         cp,
 		menu:                ui.NewMenu(),
 		confirmationOverlay: overlay.NewConfirmationOverlay("Kill session?"),
 	}
@@ -228,9 +230,10 @@ func TestConfirmationMessageFormatting(t *testing.T) {
 
 // TestConfirmationFlowSimulation tests the confirmation flow by simulating the state changes
 func TestConfirmationFlowSimulation(t *testing.T) {
-	// Create a minimal setup
-	spinner := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	list := ui.NewList(&spinner, false)
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	sidebar := ui.NewSidebar(&spin, false)
+	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane(), nil)
+	cp := ui.NewContentPane(tw, nil)
 
 	// Add test instance
 	instance, err := session.NewInstance(session.InstanceOptions{
@@ -240,19 +243,20 @@ func TestConfirmationFlowSimulation(t *testing.T) {
 		AutoYes: false,
 	})
 	require.NoError(t, err)
-	_ = list.AddInstance(instance)
-	list.SetSelectedInstance(0)
+	_ = sidebar.AddInstance(instance)
+	sidebar.SetSelectedInstance(0)
 
 	h := &home{
-		ctx:       context.Background(),
-		state:     stateDefault,
-		appConfig: config.DefaultConfig(),
-		list:      list,
-		menu:      ui.NewMenu(),
+		ctx:         context.Background(),
+		state:       stateDefault,
+		appConfig:   config.DefaultConfig(),
+		sidebar:     sidebar,
+		contentPane: cp,
+		menu:        ui.NewMenu(),
 	}
 
 	// Simulate what happens when D is pressed
-	selected := h.list.GetSelectedInstance()
+	selected := h.sidebar.GetSelectedInstance()
 	require.NotNil(t, selected)
 
 	// This is what the KeyKill handler does

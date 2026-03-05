@@ -96,6 +96,22 @@ func (m *Menu) SetInstance(instance *session.Instance) {
 	m.updateOptions()
 }
 
+// SetSidebarContext updates menu options based on sidebar selection context.
+func (m *Menu) SetSidebarContext(sectionKind SidebarSectionKind, isHeader bool) {
+	if m.state == StateNewInstance || m.state == StatePrompt || m.state == StateSchedule {
+		return
+	}
+	// For instance items, use the normal instance-based menu
+	if sectionKind == SectionInstances && !isHeader && m.instance != nil {
+		m.state = StateDefault
+		m.updateOptions()
+		return
+	}
+	// For non-instance selections, show the empty/default menu
+	m.state = StateEmpty
+	m.updateOptions()
+}
+
 // SetActiveTab updates the currently active tab
 func (m *Menu) SetActiveTab(tab int) {
 	m.activeTab = tab

@@ -53,12 +53,6 @@ const (
 	stateSchedule
 	// stateSelectWorktree is the state when the user is selecting an existing worktree.
 	stateSelectWorktree
-	// stateTaskList is the state when the task list overlay is displayed.
-	stateTaskList
-	// stateScheduleList is the state when the schedule list overlay is displayed.
-	stateScheduleList
-	// stateMicroClaw is the state when the user is composing a microclaw message.
-	stateMicroClaw
 )
 
 type home struct {
@@ -93,12 +87,12 @@ type home struct {
 
 	// -- UI Components --
 
-	// list displays the list of instances
-	list *ui.List
+	// sidebar is the unified left navigation pane with collapsible sections
+	sidebar *ui.Sidebar
+	// contentPane wraps the tabbed window and other contextual panes
+	contentPane *ui.ContentPane
 	// menu displays the bottom menu
 	menu *ui.Menu
-	// tabbedWindow displays the tabbed window with preview and diff panes
-	tabbedWindow *ui.TabbedWindow
 	// errBox displays error messages
 	errBox *ui.ErrBox
 	// global spinner instance. we plumb this down to where it's needed
@@ -117,10 +111,6 @@ type home struct {
 	selectedWorktree *git.WorktreeInfo
 	// availableWorktrees stores the worktrees shown in the selection overlay
 	availableWorktrees []git.WorktreeInfo
-	// taskListOverlay handles task list management
-	taskListOverlay *overlay.TaskListOverlay
-	// scheduleListOverlay handles schedule list management
-	scheduleListOverlay *overlay.ScheduleListOverlay
 
 	// microclawBridge is the bridge to the microclaw instance
 	microclawBridge *microclaw.Bridge
@@ -150,22 +140,27 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		mcPane = ui.NewMicroClawPane(mcBridge)
 	}
 
+	tabbedWindow := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane(), mcPane)
+
 	h := &home{
-		ctx:            ctx,
-		spinner:        spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		menu:           ui.NewMenu(),
-		tabbedWindow:   ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane(), mcPane),
-		errBox:         ui.NewErrBox(),
-		storage:        storage,
-		appConfig:      appConfig,
-		program:        program,
-		autoYes:        autoYes,
-		repoID:         repoID,
-		state:          stateDefault,
-		appState:       appState,
+		ctx:             ctx,
+		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		menu:            ui.NewMenu(),
+		contentPane:     ui.NewContentPane(tabbedWindow, mcPane),
+		errBox:          ui.NewErrBox(),
+		storage:         storage,
+		appConfig:       appConfig,
+		program:         program,
+		autoYes:         autoYes,
+		repoID:          repoID,
+		state:           stateDefault,
+		appState:        appState,
 		microclawBridge: mcBridge,
 	}
-	h.list = ui.NewList(&h.spinner, autoYes)
+	h.sidebar = ui.NewSidebar(&h.spinner, autoYes)
+
+	// Set microclaw availability on sidebar
+	h.sidebar.SetMicroClawAvailable(mcBridge.Available())
 
 	// Load saved instances (scoped to current repo)
 	instances, err := storage.LoadInstances()
@@ -175,8 +170,6 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 	}
 
 	// Merge pending instances from scheduled runs.
-	// Only add instances that belong to the current repo; route others to
-	// their respective per-repo instance files.
 	pendingData, err := schedule.LoadAndClearPendingInstances()
 	if err != nil {
 		log.WarningLog.Printf("Failed to load pending instances: %v", err)
@@ -228,10 +221,9 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		}
 	}
 
-	// Add loaded instances to the list
+	// Add loaded instances to the sidebar
 	for _, instance := range instances {
-		// Call the finalizer immediately.
-		h.list.AddInstance(instance)()
+		h.sidebar.AddInstance(instance)()
 		if autoYes {
 			instance.AutoYes = true
 		}
@@ -239,28 +231,49 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 
 	// Save instances so pending ones are persisted to the per-repo file
 	if mergedCount > 0 {
-		if err := storage.SaveInstances(h.list.GetInstances()); err != nil {
+		if err := storage.SaveInstances(h.sidebar.GetInstances()); err != nil {
 			log.WarningLog.Printf("Failed to save merged instances: %v", err)
 		}
+	}
+
+	// Load schedules for sidebar display
+	schedules, err := schedule.LoadSchedulesForCurrentRepo()
+	if err != nil {
+		log.WarningLog.Printf("Failed to load schedules: %v", err)
+	} else {
+		h.sidebar.SetSchedules(schedules)
+	}
+
+	// Load task count for sidebar display
+	tasks, err := task.LoadTasks()
+	if err != nil {
+		log.WarningLog.Printf("Failed to load tasks: %v", err)
+	} else {
+		h.sidebar.SetTaskCount(len(tasks))
+		h.contentPane.TaskPane().SetTasks(tasks)
+	}
+
+	// Load schedules into schedule pane
+	if len(schedules) > 0 {
+		h.contentPane.SchedulePane().SetSchedules(schedules)
 	}
 
 	return h
 }
 
 // updateHandleWindowSizeEvent sets the sizes of the components.
-// The components will try to render inside their bounds.
 func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
-	// List takes 30% of width, preview takes 70%
-	listWidth := int(float32(msg.Width) * 0.3)
-	tabsWidth := msg.Width - listWidth
+	// Sidebar takes 30% of width, content takes 70%
+	sidebarWidth := int(float32(msg.Width) * 0.3)
+	contentWidth := msg.Width - sidebarWidth
 
-	// Menu takes 10% of height, list and window take 90%
+	// Menu takes 10% of height, sidebar and content take 90%
 	contentHeight := int(float32(msg.Height) * 0.9)
-	menuHeight := msg.Height - contentHeight - 1     // minus 1 for error box
-	m.errBox.SetSize(int(float32(msg.Width)*0.9), 1) // error box takes 1 row
+	menuHeight := msg.Height - contentHeight - 1
+	m.errBox.SetSize(int(float32(msg.Width)*0.9), 1)
 
-	m.tabbedWindow.SetSize(tabsWidth, contentHeight)
-	m.list.SetSize(listWidth, contentHeight)
+	m.contentPane.SetSize(contentWidth, contentHeight)
+	m.sidebar.SetSize(sidebarWidth, contentHeight)
 
 	if m.textInputOverlay != nil {
 		m.textInputOverlay.SetSize(int(float32(msg.Width)*0.6), int(float32(msg.Height)*0.4))
@@ -274,23 +287,16 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	if m.selectionOverlay != nil {
 		m.selectionOverlay.SetWidth(int(float32(msg.Width) * 0.6))
 	}
-	if m.taskListOverlay != nil {
-		m.taskListOverlay.SetWidth(int(float32(msg.Width) * 0.6))
-	}
-	if m.scheduleListOverlay != nil {
-		m.scheduleListOverlay.SetSize(int(float32(msg.Width)*0.6), int(float32(msg.Height)*0.5))
-	}
 
-	previewWidth, previewHeight := m.tabbedWindow.GetPreviewSize()
-	if err := m.list.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
+	tw := m.contentPane.TabbedWindow()
+	previewWidth, previewHeight := tw.GetPreviewSize()
+	if err := m.sidebar.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
 		log.ErrorLog.Print(err)
 	}
 	m.menu.SetSize(msg.Width, menuHeight)
 }
 
 func (m *home) Init() tea.Cmd {
-	// Upon starting, we want to start the spinner. Whenever we get a spinner.TickMsg, we
-	// update the spinner, which sends a new spinner.TickMsg. I think this lasts forever lol.
 	return tea.Batch(
 		m.spinner.Tick,
 		func() tea.Msg {
@@ -306,8 +312,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hideErrMsg:
 		m.errBox.Clear()
 	case previewTickMsg:
-		m.tabbedWindow.UpdateMicroClaw()
-		cmd := m.instanceChanged()
+		m.contentPane.UpdateMicroClaw()
+		cmd := m.selectionChanged()
 		return m, tea.Batch(
 			cmd,
 			func() tea.Msg {
@@ -319,7 +325,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.menu.ClearKeydown()
 		return m, nil
 	case tickUpdateMetadataMessage:
-		for _, instance := range m.list.GetInstances() {
+		for _, instance := range m.sidebar.GetInstances() {
 			if !instance.Started() || instance.Paused() {
 				continue
 			}
@@ -340,19 +346,17 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tickUpdateMetadataCmd
 	case tea.MouseMsg:
-		// Handle mouse wheel events for scrolling the diff/preview pane
 		if msg.Action == tea.MouseActionPress {
 			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
-				selected := m.list.GetSelectedInstance()
+				selected := m.sidebar.GetSelectedInstance()
 				if selected == nil || selected.Status == session.Paused {
 					return m, nil
 				}
-
 				switch msg.Button {
 				case tea.MouseButtonWheelUp:
-					m.tabbedWindow.ScrollUp()
+					m.contentPane.ScrollUp()
 				case tea.MouseButtonWheelDown:
-					m.tabbedWindow.ScrollDown()
+					m.contentPane.ScrollDown()
 				}
 			}
 		}
@@ -363,22 +367,18 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateHandleWindowSizeEvent(msg)
 		return m, nil
 	case error:
-		// Handle errors from confirmation actions
 		return m, m.handleError(msg)
 	case instanceChangedMsg:
-		// Handle instance changed after confirmation action
-		return m, m.instanceChanged()
+		return m, m.selectionChanged()
 	case instanceStartedMsg:
-		// Select the instance that just started (or failed)
-		m.list.SelectInstance(msg.instance)
+		m.sidebar.SelectInstance(msg.instance)
 
 		if msg.err != nil {
-			m.list.Kill()
-			return m, tea.Batch(m.handleError(msg.err), m.instanceChanged())
+			m.sidebar.Kill()
+			return m, tea.Batch(m.handleError(msg.err), m.selectionChanged())
 		}
 
-		// Save after successful start
-		if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
+		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 			return m, m.handleError(err)
 		}
 		if m.autoYes {
@@ -394,7 +394,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelpScreen(helpStart(msg.instance), nil)
 		}
 
-		return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
+		return m, tea.Batch(tea.WindowSize(), m.selectionChanged())
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -404,39 +404,88 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *home) handleQuit() (tea.Model, tea.Cmd) {
-	if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
+	// Save any dirty task/schedule state
+	m.saveContentPaneState()
+
+	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 		return m, m.handleError(err)
 	}
-	m.tabbedWindow.CleanupTerminal()
-	m.tabbedWindow.CleanupMicroClaw()
+	tw := m.contentPane.TabbedWindow()
+	tw.CleanupTerminal()
+	tw.CleanupMicroClaw()
 	return m, tea.Quit
 }
 
+// saveContentPaneState persists any changes from the task/schedule panes.
+func (m *home) saveContentPaneState() {
+	tp := m.contentPane.TaskPane()
+	if tp.IsDirty() {
+		if err := task.SaveTasks(tp.GetTasks()); err != nil {
+			log.ErrorLog.Printf("failed to save tasks: %v", err)
+		}
+		m.sidebar.SetTaskCount(len(tp.GetTasks()))
+	}
+
+	sp := m.contentPane.SchedulePane()
+	if sp.IsDirty() {
+		for _, sched := range sp.GetSchedules() {
+			if err := schedule.UpdateSchedule(sched); err != nil {
+				log.ErrorLog.Printf("failed to update schedule: %v", err)
+			}
+			if sched.Enabled {
+				if err := schedule.InstallSystemdTimer(sched); err != nil {
+					log.WarningLog.Printf("failed to install timer: %v", err)
+				}
+			} else {
+				if err := schedule.RemoveSystemdTimer(sched); err != nil {
+					log.WarningLog.Printf("failed to remove timer: %v", err)
+				}
+			}
+		}
+		for _, sched := range sp.GetDeleted() {
+			if err := schedule.RemoveSchedule(sched.ID); err != nil {
+				log.ErrorLog.Printf("failed to remove schedule: %v", err)
+			}
+			if err := schedule.RemoveSystemdTimer(sched); err != nil {
+				log.WarningLog.Printf("failed to remove timer: %v", err)
+			}
+		}
+		// Refresh sidebar
+		schedules, err := schedule.LoadSchedulesForCurrentRepo()
+		if err == nil {
+			m.sidebar.SetSchedules(schedules)
+		}
+	}
+}
+
 func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly bool) {
-	// Handle menu highlighting when you press a button. We intercept it here and immediately return to
-	// update the ui while re-sending the keypress. Then, on the next call to this, we actually handle the keypress.
 	if m.keySent {
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree || m.state == stateTaskList || m.state == stateScheduleList {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSchedule || m.state == stateSelectWorktree {
 		return nil, false
 	}
-	// If it's in the global keymap, we should try to highlight it.
+	// Don't highlight when content pane has focus
+	if m.contentPane.HasFocus() {
+		return nil, false
+	}
 	name, ok := keys.GlobalKeyStringsMap[msg.String()]
 	if !ok {
 		return nil, false
 	}
 
-	if m.list.GetSelectedInstance() != nil && m.list.GetSelectedInstance().Paused() && name == keys.KeyEnter {
+	if m.sidebar.GetSelectedInstance() != nil && m.sidebar.GetSelectedInstance().Paused() && name == keys.KeyEnter {
 		return nil, false
 	}
 	if name == keys.KeyShiftDown || name == keys.KeyShiftUp {
 		return nil, false
 	}
+	// Skip sidebar nav keys from menu highlighting
+	if name == keys.KeyLeft || name == keys.KeyRight || name == keys.KeyNextSection || name == keys.KeyPrevSection {
+		return nil, false
+	}
 
-	// Skip the menu highlighting if the key is not in the map or we are using the shift up and down keys.
-	// TODO: cleanup: when you press enter on stateNew, we use keys.KeySubmitName. We should unify the keymap.
 	if name == keys.KeyEnter && m.state == stateNew {
 		name = keys.KeySubmitName
 	}
@@ -457,13 +506,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	}
 
 	if m.state == stateNew {
-		// Handle quit commands first. Don't handle q because the user might want to type that.
 		if msg.String() == "ctrl+c" {
 			m.state = stateDefault
 			m.promptAfterName = false
 			m.selectedWorktree = nil
 			m.availableWorktrees = nil
-			m.list.Kill()
+			m.sidebar.Kill()
 			return m, tea.Sequence(
 				tea.WindowSize(),
 				func() tea.Msg {
@@ -473,15 +521,13 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			)
 		}
 
-		instance := m.list.GetInstances()[m.list.NumInstances()-1]
+		instance := m.sidebar.GetInstances()[m.sidebar.NumInstances()-1]
 		switch msg.Type {
-		// Start the instance (enable previews etc) and go back to the main menu state.
 		case tea.KeyEnter:
 			if len(instance.Title) == 0 {
 				return m, m.handleError(fmt.Errorf("title cannot be empty"))
 			}
 
-			// Set Loading status and finalize into the list immediately
 			instance.SetStatus(session.Loading)
 			m.newInstanceFinalizer()
 			promptAfterName := m.promptAfterName
@@ -489,7 +535,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			m.state = stateDefault
 			m.menu.SetState(ui.StateDefault)
 
-			// Return a tea.Cmd that runs instance.Start in the background
 			selectedWt := m.selectedWorktree
 			m.selectedWorktree = nil
 			m.availableWorktrees = nil
@@ -507,7 +552,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				}
 			}
 
-			return m, tea.Batch(tea.WindowSize(), m.instanceChanged(), startCmd)
+			return m, tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
 		case tea.KeyRunes:
 			if runewidth.StringWidth(instance.Title) >= 32 {
 				return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
@@ -528,11 +573,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				return m, m.handleError(err)
 			}
 		case tea.KeyEsc:
-			m.list.Kill()
+			m.sidebar.Kill()
 			m.state = stateDefault
 			m.selectedWorktree = nil
 			m.availableWorktrees = nil
-			cmd := m.instanceChanged()
+			cmd := m.selectionChanged()
 
 			return m, tea.Batch(cmd, tea.Sequence(
 				tea.WindowSize(),
@@ -545,24 +590,17 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 		return m, nil
 	} else if m.state == statePrompt {
-		// Use the new TextInputOverlay component to handle all key events
 		shouldClose := m.textInputOverlay.HandleKeyPress(msg)
-
-		// Check if the form was submitted or canceled
 		if shouldClose {
-			selected := m.list.GetSelectedInstance()
-			// TODO: this should never happen since we set the instance in the previous state.
+			selected := m.sidebar.GetSelectedInstance()
 			if selected == nil {
 				return m, nil
 			}
 			if m.textInputOverlay.IsSubmitted() {
 				if err := selected.SendPrompt(m.textInputOverlay.GetValue()); err != nil {
-					// TODO: we probably end up in a bad state here.
 					return m, m.handleError(err)
 				}
 			}
-
-			// Close the overlay and reset state
 			m.textInputOverlay = nil
 			m.state = stateDefault
 			return m, tea.Sequence(
@@ -574,11 +612,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				},
 			)
 		}
-
 		return m, nil
 	}
 
-	// Handle schedule state
+	// Handle schedule creation state
 	if m.state == stateSchedule {
 		shouldClose := m.scheduleOverlay.HandleKeyPress(msg)
 		if shouldClose {
@@ -616,6 +653,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				if err := schedule.InstallSystemdTimer(s); err != nil {
 					log.WarningLog.Printf("failed to install systemd timer: %v", err)
 				}
+				// Refresh sidebar schedules
+				schedules, err := schedule.LoadSchedulesForCurrentRepo()
+				if err == nil {
+					m.sidebar.SetSchedules(schedules)
+					m.contentPane.SchedulePane().SetSchedules(schedules)
+				}
 			}
 			m.scheduleOverlay = nil
 			m.state = stateDefault
@@ -640,7 +683,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				m.selectedWorktree = &wt
 				m.selectionOverlay = nil
 
-				// Create a new instance and enter naming mode
 				instance, err := session.NewInstance(session.InstanceOptions{
 					Title:   "",
 					Path:    ".",
@@ -653,71 +695,15 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 					return m, m.handleError(err)
 				}
 
-				m.newInstanceFinalizer = m.list.AddInstance(instance)
-				m.list.SetSelectedInstance(m.list.NumInstances() - 1)
+				m.newInstanceFinalizer = m.sidebar.AddInstance(instance)
+				m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
 				m.state = stateNew
 				m.menu.SetState(ui.StateNewInstance)
 				return m, nil
 			}
-			// Canceled
 			m.selectionOverlay = nil
 			m.selectedWorktree = nil
 			m.availableWorktrees = nil
-			m.state = stateDefault
-			m.menu.SetState(ui.StateDefault)
-			return m, nil
-		}
-		return m, nil
-	}
-
-	// Handle task list state
-	if m.state == stateTaskList {
-		shouldClose := m.taskListOverlay.HandleKeyPress(msg)
-		if shouldClose {
-			if m.taskListOverlay.IsDirty() {
-				if err := task.SaveTasks(m.taskListOverlay.GetTasks()); err != nil {
-					log.ErrorLog.Printf("failed to save tasks: %v", err)
-				}
-			}
-			m.taskListOverlay = nil
-			m.state = stateDefault
-			m.menu.SetState(ui.StateDefault)
-			return m, nil
-		}
-		return m, nil
-	}
-
-	// Handle schedule list state
-	if m.state == stateScheduleList {
-		shouldClose := m.scheduleListOverlay.HandleKeyPress(msg)
-		if shouldClose {
-			if m.scheduleListOverlay.IsDirty() {
-				// Update remaining schedules
-				for _, sched := range m.scheduleListOverlay.GetSchedules() {
-					if err := schedule.UpdateSchedule(sched); err != nil {
-						log.ErrorLog.Printf("failed to update schedule: %v", err)
-					}
-					if sched.Enabled {
-						if err := schedule.InstallSystemdTimer(sched); err != nil {
-							log.WarningLog.Printf("failed to install timer: %v", err)
-						}
-					} else {
-						if err := schedule.RemoveSystemdTimer(sched); err != nil {
-							log.WarningLog.Printf("failed to remove timer: %v", err)
-						}
-					}
-				}
-				// Remove deleted schedules
-				for _, sched := range m.scheduleListOverlay.GetDeleted() {
-					if err := schedule.RemoveSchedule(sched.ID); err != nil {
-						log.ErrorLog.Printf("failed to remove schedule: %v", err)
-					}
-					if err := schedule.RemoveSystemdTimer(sched); err != nil {
-						log.WarningLog.Printf("failed to remove timer: %v", err)
-					}
-				}
-			}
-			m.scheduleListOverlay = nil
 			m.state = stateDefault
 			m.menu.SetState(ui.StateDefault)
 			return m, nil
@@ -729,7 +715,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	if m.state == stateConfirm {
 		shouldClose := m.confirmationOverlay.HandleKeyPress(msg)
 		if shouldClose {
-			// Only reset to default if callbacks didn't change state
 			if m.state == stateConfirm {
 				m.state = stateDefault
 			}
@@ -739,33 +724,49 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
-	// Exit scrolling mode when ESC is pressed and preview pane is in scrolling mode
-	// Check if Escape key was pressed and we're not in the diff tab (meaning we're in preview tab)
-	// Always check for escape key first to ensure it doesn't get intercepted elsewhere
-	if msg.Type == tea.KeyEsc {
-		// If in preview tab and in scroll mode, exit scroll mode
-		if m.tabbedWindow.IsInPreviewTab() && m.tabbedWindow.IsPreviewInScrollMode() {
-			// Use the selected instance from the list
-			selected := m.list.GetSelectedInstance()
-			err := m.tabbedWindow.ResetPreviewToNormalMode(selected)
-			if err != nil {
-				return m, m.handleError(err)
+	// Route keys to content pane if it has focus (e.g., editing todos/schedules)
+	if m.contentPane.HasFocus() {
+		consumed := m.contentPane.HandleKeyPress(msg)
+		if consumed {
+			// If focus was released (Esc), save state
+			if !m.contentPane.HasFocus() {
+				m.saveContentPaneState()
 			}
-			return m, m.instanceChanged()
-		}
-		// If in terminal tab and in scroll mode, exit scroll mode
-		if m.tabbedWindow.IsInTerminalTab() && m.tabbedWindow.IsTerminalInScrollMode() {
-			m.tabbedWindow.ResetTerminalToNormalMode()
-			return m, m.instanceChanged()
-		}
-		// If in microclaw tab and in scroll mode, exit scroll mode
-		if m.tabbedWindow.IsInMicroClawTab() && m.tabbedWindow.IsMicroClawInScrollMode() {
-			m.tabbedWindow.ResetMicroClawToNormalMode()
-			return m, m.instanceChanged()
+			return m, nil
 		}
 	}
 
-	// Handle quit commands first
+	// Exit scrolling mode when ESC is pressed
+	tw := m.contentPane.TabbedWindow()
+	if msg.Type == tea.KeyEsc {
+		if m.contentPane.GetMode() == ui.ContentModeInstance {
+			if tw.IsInPreviewTab() && tw.IsPreviewInScrollMode() {
+				selected := m.sidebar.GetSelectedInstance()
+				err := tw.ResetPreviewToNormalMode(selected)
+				if err != nil {
+					return m, m.handleError(err)
+				}
+				return m, m.selectionChanged()
+			}
+			if tw.IsInTerminalTab() && tw.IsTerminalInScrollMode() {
+				tw.ResetTerminalToNormalMode()
+				return m, m.selectionChanged()
+			}
+			if tw.IsInMicroClawTab() && tw.IsMicroClawInScrollMode() {
+				tw.ResetMicroClawToNormalMode()
+				return m, m.selectionChanged()
+			}
+		}
+		if m.contentPane.GetMode() == ui.ContentModeMicroClaw {
+			mc := m.contentPane.MicroClawPane()
+			if mc != nil && mc.IsScrolling() {
+				mc.ResetToNormalMode()
+				return m, m.selectionChanged()
+			}
+		}
+	}
+
+	// Handle quit commands
 	if msg.String() == "ctrl+c" || msg.String() == "q" {
 		return m.handleQuit()
 	}
@@ -775,11 +776,44 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
+	// Handle content pane Enter for focusing (todos/schedules)
+	if name == keys.KeyEnter {
+		mode := m.contentPane.GetMode()
+		if mode == ui.ContentModeTodos || mode == ui.ContentModeSchedules {
+			consumed := m.contentPane.HandleKeyPress(msg)
+			if consumed {
+				return m, nil
+			}
+		}
+	}
+
 	switch name {
 	case keys.KeyHelp:
 		return m.showHelpScreen(helpTypeGeneral{}, nil)
+
+	// Sidebar navigation
+	case keys.KeyUp:
+		m.sidebar.Up()
+		return m, m.selectionChanged()
+	case keys.KeyDown:
+		m.sidebar.Down()
+		return m, m.selectionChanged()
+	case keys.KeyLeft:
+		m.sidebar.CollapseSection()
+		return m, m.selectionChanged()
+	case keys.KeyRight:
+		m.sidebar.ExpandSection()
+		return m, m.selectionChanged()
+	case keys.KeyNextSection:
+		m.sidebar.JumpNextSection()
+		return m, m.selectionChanged()
+	case keys.KeyPrevSection:
+		m.sidebar.JumpPrevSection()
+		return m, m.selectionChanged()
+
+	// Instance creation
 	case keys.KeyPrompt:
-		if m.list.NumInstances() >= GlobalInstanceLimit {
+		if m.sidebar.NumInstances() >= GlobalInstanceLimit {
 			return m, m.handleError(
 				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 		}
@@ -791,26 +825,32 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		if err != nil {
 			return m, m.handleError(err)
 		}
-
-		m.newInstanceFinalizer = m.list.AddInstance(instance)
-		m.list.SetSelectedInstance(m.list.NumInstances() - 1)
+		m.newInstanceFinalizer = m.sidebar.AddInstance(instance)
+		m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
 		m.state = stateNew
 		m.menu.SetState(ui.StateNewInstance)
 		m.promptAfterName = true
-
 		return m, nil
-	case keys.KeyScheduleList:
-		schedules, err := schedule.LoadSchedulesForCurrentRepo()
+
+	case keys.KeyNew:
+		if m.sidebar.NumInstances() >= GlobalInstanceLimit {
+			return m, m.handleError(
+				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
+		}
+		instance, err := session.NewInstance(session.InstanceOptions{
+			Title:   "",
+			Path:    ".",
+			Program: m.program,
+		})
 		if err != nil {
-			return m, m.handleError(fmt.Errorf("failed to load schedules: %v", err))
+			return m, m.handleError(err)
 		}
-		if len(schedules) == 0 {
-			return m, m.handleError(fmt.Errorf("no schedules found for this repo — press s to create one"))
-		}
-		m.scheduleListOverlay = overlay.NewScheduleListOverlay(schedules)
-		m.scheduleListOverlay.SetSize(60, 20)
-		m.state = stateScheduleList
-		return m, tea.WindowSize()
+		m.newInstanceFinalizer = m.sidebar.AddInstance(instance)
+		m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
+		m.state = stateNew
+		m.menu.SetState(ui.StateNewInstance)
+		return m, nil
+
 	case keys.KeySchedule:
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -820,79 +860,46 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.state = stateSchedule
 		m.menu.SetState(ui.StateSchedule)
 		return m, tea.WindowSize()
+
+	case keys.KeyScheduleList:
+		// Navigate to schedules section in sidebar
+		m.navigateToSection(ui.SectionSchedules)
+		return m, m.selectionChanged()
+
 	case keys.KeyTasks:
-		tasks, err := task.LoadTasks()
-		if err != nil {
-			return m, m.handleError(fmt.Errorf("failed to load tasks: %v", err))
-		}
-		m.taskListOverlay = overlay.NewTaskListOverlay(tasks)
-		m.taskListOverlay.SetWidth(60)
-		m.state = stateTaskList
-		return m, nil
+		// Navigate to todos section in sidebar
+		m.navigateToSection(ui.SectionTodos)
+		return m, m.selectionChanged()
+
 	case keys.KeyMicroClaw:
 		if m.microclawBridge == nil || !m.microclawBridge.Available() {
 			return m, m.handleError(fmt.Errorf("MicroClaw not available — set MICROCLAW_DIR or install microclaw"))
 		}
-		// Switch to MicroClaw tab and attach to the interactive TUI
-		for m.tabbedWindow.GetActiveTab() != ui.MicroClawTab {
-			m.tabbedWindow.Toggle()
-		}
-		m.menu.SetActiveTab(m.tabbedWindow.GetActiveTab())
-		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
-			ch, err := m.tabbedWindow.AttachMicroClaw()
-			if err != nil {
-				log.ErrorLog.Printf("failed to attach microclaw: %v", err)
-				return
-			}
-			<-ch
-			m.state = stateDefault
-		})
-		return m, nil
-	case keys.KeyNew:
-		if m.list.NumInstances() >= GlobalInstanceLimit {
-			return m, m.handleError(
-				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
-		}
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   "",
-			Path:    ".",
-			Program: m.program,
-		})
-		if err != nil {
-			return m, m.handleError(err)
-		}
+		// Navigate to MicroClaw section in sidebar
+		m.navigateToSection(ui.SectionMicroClaw)
+		return m, m.selectionChanged()
 
-		m.newInstanceFinalizer = m.list.AddInstance(instance)
-		m.list.SetSelectedInstance(m.list.NumInstances() - 1)
-		m.state = stateNew
-		m.menu.SetState(ui.StateNewInstance)
-
-		return m, nil
 	case keys.KeyAttach:
-		if m.list.NumInstances() >= GlobalInstanceLimit {
+		if m.sidebar.NumInstances() >= GlobalInstanceLimit {
 			return m, m.handleError(
 				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 		}
 
-		// List existing worktrees
 		worktrees, err := git.ListWorktrees(".")
 		if err != nil {
 			return m, m.handleError(fmt.Errorf("failed to list worktrees: %v", err))
 		}
-
 		if len(worktrees) == 0 {
 			return m, m.handleError(fmt.Errorf("no worktrees found"))
 		}
 
-		// Mark worktrees that already have a session
 		trackedPaths := make(map[string]bool)
-		for _, inst := range m.list.GetInstances() {
+		for _, inst := range m.sidebar.GetInstances() {
 			if p := inst.GetWorktreePath(); p != "" {
 				trackedPaths[p] = true
 			}
 		}
 
-		// Build display items
 		items := make([]string, len(worktrees))
 		for i, wt := range worktrees {
 			label := wt.Path
@@ -913,38 +920,39 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.selectionOverlay.SetWidth(60)
 		m.state = stateSelectWorktree
 		return m, nil
-	case keys.KeyUp:
-		m.list.Up()
-		return m, m.instanceChanged()
-	case keys.KeyDown:
-		m.list.Down()
-		return m, m.instanceChanged()
+
+	// Scrolling
 	case keys.KeyShiftUp:
-		m.tabbedWindow.ScrollUp()
-		return m, m.instanceChanged()
+		m.contentPane.ScrollUp()
+		return m, m.selectionChanged()
 	case keys.KeyShiftDown:
-		m.tabbedWindow.ScrollDown()
-		return m, m.instanceChanged()
+		m.contentPane.ScrollDown()
+		return m, m.selectionChanged()
+
+	// Tab cycling (instance mode only)
 	case keys.KeyTab:
-		m.tabbedWindow.Toggle()
-		m.menu.SetActiveTab(m.tabbedWindow.GetActiveTab())
-		return m, m.instanceChanged()
+		if m.contentPane.GetMode() == ui.ContentModeInstance {
+			tw.Toggle()
+			m.menu.SetActiveTab(tw.GetActiveTab())
+			return m, m.selectionChanged()
+		}
+		return m, nil
 	case keys.KeyShiftTab:
-		m.tabbedWindow.ToggleBack()
-		m.menu.SetActiveTab(m.tabbedWindow.GetActiveTab())
-		return m, m.instanceChanged()
+		if m.contentPane.GetMode() == ui.ContentModeInstance {
+			tw.ToggleBack()
+			m.menu.SetActiveTab(tw.GetActiveTab())
+			return m, m.selectionChanged()
+		}
+		return m, nil
+
+	// Instance actions
 	case keys.KeyKill:
-		selected := m.list.GetSelectedInstance()
+		selected := m.sidebar.GetSelectedInstance()
 		if selected == nil || selected.Status == session.Loading {
 			return m, nil
 		}
 
-		// Create the kill action as a tea.Cmd
 		killAction := func() tea.Msg {
-			// Check if branch is checked out — this is the only hard abort.
-			// Skip this check for external worktrees (root tree attach) since
-			// Cleanup() is a no-op for those and the branch is expected to be
-			// checked out.
 			worktree, err := selected.GetGitWorktree()
 			if err == nil && !worktree.IsExternalWorktree() {
 				checkedOut, checkErr := worktree.IsBranchCheckedOut()
@@ -952,27 +960,19 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 					return fmt.Errorf("instance %s is currently checked out", selected.Title)
 				}
 			}
-
-			// From here on, always attempt every cleanup step independently.
-			// Clean up terminal session for this instance.
-			m.tabbedWindow.CleanupTerminalForInstance(selected.Title)
-
-			// Kill the instance (tmux session + git worktree).
-			m.list.Kill()
-
-			// Delete from storage.
+			tw.CleanupTerminalForInstance(selected.Title)
+			m.sidebar.Kill()
 			if err := m.storage.DeleteInstance(selected.Title); err != nil {
 				log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
 			}
-
 			return instanceChangedMsg{}
 		}
 
-		// Show confirmation modal
 		message := fmt.Sprintf("[!] Kill session '%s'?", selected.Title)
 		return m, m.confirmAction(message, killAction)
+
 	case keys.KeyCheckout:
-		selected := m.list.GetSelectedInstance()
+		selected := m.sidebar.GetSelectedInstance()
 		if selected == nil || selected.Status == session.Loading {
 			return m, nil
 		}
@@ -981,11 +981,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			if err := selected.Pause(); err != nil {
 				log.ErrorLog.Printf("failed to pause instance: %v", err)
 			}
-			m.tabbedWindow.CleanupTerminalForInstance(selected.Title)
-			m.instanceChanged()
+			tw.CleanupTerminalForInstance(selected.Title)
+			m.selectionChanged()
 		}
 
-		// Check for uncommitted/unpushed changes to warn user
 		worktree, err := selected.GetGitWorktree()
 		if err == nil && !selected.Paused() {
 			var warnings []string
@@ -1001,24 +1000,24 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			}
 
 			if len(warnings) > 0 {
-				msg := fmt.Sprintf("[!] Checkout '%s'?\n", selected.Title)
+				msgText := fmt.Sprintf("[!] Checkout '%s'?\n", selected.Title)
 				for _, w := range warnings {
-					msg += "  - " + w + "\n"
+					msgText += "  - " + w + "\n"
 				}
-				msg += "Changes will be committed locally but NOT pushed."
+				msgText += "Changes will be committed locally but NOT pushed."
 
-				return m, m.confirmAction(msg, func() tea.Msg {
+				return m, m.confirmAction(msgText, func() tea.Msg {
 					doPause()
 					return instanceChangedMsg{}
 				})
 			}
 		}
 
-		// No warnings — show help screen as usual
 		m.showHelpScreen(helpTypeInstanceCheckout{}, doPause)
 		return m, nil
+
 	case keys.KeyResume:
-		selected := m.list.GetSelectedInstance()
+		selected := m.sidebar.GetSelectedInstance()
 		if selected == nil || selected.Status == session.Loading {
 			return m, nil
 		}
@@ -1026,20 +1025,48 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, m.handleError(err)
 		}
 		return m, tea.WindowSize()
+
 	case keys.KeyEnter:
-		if m.list.NumInstances() == 0 {
-			return m, nil
+		sel := m.sidebar.GetSelection()
+		// Toggle section headers
+		if sel.IsHeader {
+			m.sidebar.ToggleSection()
+			return m, m.selectionChanged()
 		}
-		selected := m.list.GetSelectedInstance()
-		if selected == nil || selected.Paused() || selected.Status == session.Loading || !selected.TmuxAlive() {
-			return m, nil
-		}
-		// Terminal tab: attach to terminal session
-		if m.tabbedWindow.IsInTerminalTab() {
+		// Instance selected
+		if sel.Kind == ui.SectionInstances {
+			selected := m.sidebar.GetSelectedInstance()
+			if selected == nil || selected.Paused() || selected.Status == session.Loading || !selected.TmuxAlive() {
+				return m, nil
+			}
+			if tw.IsInTerminalTab() {
+				m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+					ch, err := tw.AttachTerminal()
+					if err != nil {
+						log.ErrorLog.Printf("failed to attach terminal: %v", err)
+						return
+					}
+					<-ch
+					m.state = stateDefault
+				})
+				return m, nil
+			}
+			if tw.IsInMicroClawTab() {
+				m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+					ch, err := tw.AttachMicroClaw()
+					if err != nil {
+						log.ErrorLog.Printf("failed to attach microclaw: %v", err)
+						return
+					}
+					<-ch
+					m.state = stateDefault
+				})
+				return m, nil
+			}
 			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
-				ch, err := m.tabbedWindow.AttachTerminal()
+				ch, err := m.sidebar.Attach()
 				if err != nil {
-					log.ErrorLog.Printf("failed to attach terminal: %v", err)
+					log.ErrorLog.Printf("failed to attach: %v", err)
 					return
 				}
 				<-ch
@@ -1047,10 +1074,17 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			})
 			return m, nil
 		}
-		// MicroClaw tab: attach to microclaw session
-		if m.tabbedWindow.IsInMicroClawTab() {
+		// MicroClaw selected — attach
+		if sel.Kind == ui.SectionMicroClaw {
+			if m.microclawBridge == nil || !m.microclawBridge.Available() {
+				return m, m.handleError(fmt.Errorf("MicroClaw not available"))
+			}
+			mc := m.contentPane.MicroClawPane()
+			if mc == nil {
+				return m, nil
+			}
 			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
-				ch, err := m.tabbedWindow.AttachMicroClaw()
+				ch, err := mc.Attach()
 				if err != nil {
 					log.ErrorLog.Printf("failed to attach microclaw: %v", err)
 					return
@@ -1060,46 +1094,92 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			})
 			return m, nil
 		}
-		// Show help screen before attaching
-		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
-			ch, err := m.list.Attach()
-			if err != nil {
-				log.ErrorLog.Printf("failed to attach: %v", err)
-				return
-			}
-			<-ch
-			m.state = stateDefault
-		})
 		return m, nil
+
 	default:
 		return m, nil
 	}
 }
 
-// instanceChanged updates the preview pane, menu, and diff pane based on the selected instance. It returns an error
-// Cmd if there was any error.
-func (m *home) instanceChanged() tea.Cmd {
-	// selected may be nil
-	selected := m.list.GetSelectedInstance()
-
-	m.tabbedWindow.UpdateDiff(selected)
-	m.tabbedWindow.SetInstance(selected)
-	// Update menu with current instance
-	m.menu.SetInstance(selected)
-
-	// If there's no selected instance, we don't need to update the preview.
-	if err := m.tabbedWindow.UpdatePreview(selected); err != nil {
-		return m.handleError(err)
+// navigateToSection moves the sidebar selection to the header of the given section.
+func (m *home) navigateToSection(kind ui.SidebarSectionKind) {
+	sel := m.sidebar.GetSelection()
+	// Already on the right section? Do nothing extra.
+	if sel.Kind == kind && sel.IsHeader {
+		return
 	}
-	if err := m.tabbedWindow.UpdateTerminal(selected); err != nil {
-		return m.handleError(err)
+	// Jump through sections until we land on the right header
+	for i := 0; i < 10; i++ { // safety limit
+		m.sidebar.JumpNextSection()
+		sel = m.sidebar.GetSelection()
+		if sel.Kind == kind && sel.IsHeader {
+			return
+		}
 	}
+	// If we didn't find it going forward, try backward
+	for i := 0; i < 10; i++ {
+		m.sidebar.JumpPrevSection()
+		sel = m.sidebar.GetSelection()
+		if sel.Kind == kind && sel.IsHeader {
+			return
+		}
+	}
+}
+
+// selectionChanged updates the content pane and menu based on the sidebar selection.
+func (m *home) selectionChanged() tea.Cmd {
+	sel := m.sidebar.GetSelection()
+	tw := m.contentPane.TabbedWindow()
+
+	switch {
+	case sel.Kind == ui.SectionInstances && !sel.IsHeader:
+		m.contentPane.SetMode(ui.ContentModeInstance)
+		selected := m.sidebar.GetSelectedInstance()
+		tw.UpdateDiff(selected)
+		tw.SetInstance(selected)
+		m.menu.SetInstance(selected)
+		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
+		if err := tw.UpdatePreview(selected); err != nil {
+			return m.handleError(err)
+		}
+		if err := tw.UpdateTerminal(selected); err != nil {
+			return m.handleError(err)
+		}
+	case sel.Kind == ui.SectionTodos:
+		m.contentPane.SetMode(ui.ContentModeTodos)
+		m.menu.SetInstance(nil)
+		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
+	case sel.Kind == ui.SectionSchedules && !sel.IsHeader:
+		m.contentPane.SetMode(ui.ContentModeSchedules)
+		m.menu.SetInstance(nil)
+		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
+	case sel.Kind == ui.SectionMicroClaw:
+		m.contentPane.SetMode(ui.ContentModeMicroClaw)
+		m.menu.SetInstance(nil)
+		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
+	default:
+		// On section headers (Instances, Schedules), show the instance preview if available
+		if sel.Kind == ui.SectionInstances {
+			// On the Instances header, keep showing instance content if there's one selected
+			if m.sidebar.NumInstances() > 0 {
+				m.contentPane.SetMode(ui.ContentModeInstance)
+			} else {
+				m.contentPane.SetMode(ui.ContentModeEmpty)
+			}
+		} else if sel.Kind == ui.SectionSchedules {
+			m.contentPane.SetMode(ui.ContentModeSchedules)
+		} else {
+			m.contentPane.SetMode(ui.ContentModeEmpty)
+		}
+		m.menu.SetInstance(nil)
+		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
+	}
+
 	return nil
 }
 
 type keyupMsg struct{}
 
-// keydownCallback clears the menu option highlighting after 500ms.
 func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
 	m.menu.Keydown(name)
 	return func() tea.Msg {
@@ -1107,19 +1187,13 @@ func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
 		case <-m.ctx.Done():
 		case <-time.After(500 * time.Millisecond):
 		}
-
 		return keyupMsg{}
 	}
 }
 
-// hideErrMsg implements tea.Msg and clears the error text from the screen.
 type hideErrMsg struct{}
-
-// previewTickMsg implements tea.Msg and triggers a preview update
 type previewTickMsg struct{}
-
 type tickUpdateMetadataMessage struct{}
-
 type instanceChangedMsg struct{}
 
 type instanceStartedMsg struct {
@@ -1128,15 +1202,11 @@ type instanceStartedMsg struct {
 	promptAfterName bool
 }
 
-// tickUpdateMetadataCmd is the callback to update the metadata of the instances every 500ms. Note that we iterate
-// overall the instances and capture their output. It's a pretty expensive operation. Let's do it 2x a second only.
 var tickUpdateMetadataCmd = func() tea.Msg {
 	time.Sleep(500 * time.Millisecond)
 	return tickUpdateMetadataMessage{}
 }
 
-// handleError handles all errors which get bubbled up to the app. sets the error message. We return a callback tea.Cmd that returns a hideErrMsg message
-// which clears the error message after 3 seconds.
 func (m *home) handleError(err error) tea.Cmd {
 	log.ErrorLog.Printf("%v", err)
 	m.errBox.SetError(err)
@@ -1145,24 +1215,17 @@ func (m *home) handleError(err error) tea.Cmd {
 		case <-m.ctx.Done():
 		case <-time.After(3 * time.Second):
 		}
-
 		return hideErrMsg{}
 	}
 }
 
-// confirmAction shows a confirmation modal and stores the action to execute on confirm
 func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 	m.state = stateConfirm
-
-	// Create and show the confirmation overlay using ConfirmationOverlay
 	m.confirmationOverlay = overlay.NewConfirmationOverlay(message)
-	// Set a fixed width for consistent appearance
 	m.confirmationOverlay.SetWidth(50)
 
-	// Set callbacks for confirmation and cancellation
 	m.confirmationOverlay.OnConfirm = func() {
 		m.state = stateDefault
-		// Execute the action if it exists
 		if action != nil {
 			if msg := action(); msg != nil {
 				if err, ok := msg.(error); ok {
@@ -1181,13 +1244,13 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 }
 
 func (m *home) View() string {
-	listWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.list.String())
-	previewWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.tabbedWindow.String())
-	listAndPreview := lipgloss.JoinHorizontal(lipgloss.Top, listWithPadding, previewWithPadding)
+	sidebarWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.sidebar.String())
+	contentWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.contentPane.String())
+	sidebarAndContent := lipgloss.JoinHorizontal(lipgloss.Top, sidebarWithPadding, contentWithPadding)
 
 	mainView := lipgloss.JoinVertical(
 		lipgloss.Center,
-		listAndPreview,
+		sidebarAndContent,
 		m.menu.String(),
 		m.errBox.String(),
 	)
@@ -1217,16 +1280,6 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
-	} else if m.state == stateTaskList {
-		if m.taskListOverlay == nil {
-			log.ErrorLog.Printf("task list overlay is nil")
-		}
-		return overlay.PlaceOverlay(0, 0, m.taskListOverlay.Render(), mainView, true)
-	} else if m.state == stateScheduleList {
-		if m.scheduleListOverlay == nil {
-			log.ErrorLog.Printf("schedule list overlay is nil")
-		}
-		return overlay.PlaceOverlay(0, 0, m.scheduleListOverlay.Render(), mainView, true)
 	}
 
 	return mainView

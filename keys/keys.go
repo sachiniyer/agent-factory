@@ -32,6 +32,12 @@ const (
 	KeyAttach
 	KeyTasks
 	KeyMicroClaw // Key for sending a message to microclaw
+
+	// Sidebar navigation
+	KeyLeft        // Collapse section / move to parent
+	KeyRight       // Expand section
+	KeyNextSection // Jump to next section header
+	KeyPrevSection // Jump to previous section header
 )
 
 // GlobalKeyStringsMap is a global, immutable map string to keybinding.
@@ -58,6 +64,12 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"a":          KeyAttach,
 	"t":          KeyTasks,
 	"m":          KeyMicroClaw,
+	"h":          KeyLeft,
+	"left":       KeyLeft,
+	"l":          KeyRight,
+	"right":      KeyRight,
+	"]":          KeyNextSection,
+	"[":          KeyPrevSection,
 }
 
 // GlobalKeyBindings is a global, immutable map of KeyName to keybinding.
@@ -138,6 +150,22 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	KeyMicroClaw: key.NewBinding(
 		key.WithKeys("m"),
 		key.WithHelp("m", "microclaw"),
+	),
+	KeyLeft: key.NewBinding(
+		key.WithKeys("h", "left"),
+		key.WithHelp("h/←", "collapse"),
+	),
+	KeyRight: key.NewBinding(
+		key.WithKeys("l", "right"),
+		key.WithHelp("l/→", "expand"),
+	),
+	KeyNextSection: key.NewBinding(
+		key.WithKeys("]"),
+		key.WithHelp("]", "next section"),
+	),
+	KeyPrevSection: key.NewBinding(
+		key.WithKeys("["),
+		key.WithHelp("[", "prev section"),
 	),
 
 	// -- Special keybindings --

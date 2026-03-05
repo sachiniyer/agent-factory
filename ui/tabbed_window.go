@@ -36,7 +36,7 @@ const (
 	PreviewTab int = iota
 	DiffTab
 	TerminalTab
-	MicroClawTab
+	MicroClawTab // Deprecated: MicroClaw is now rendered by ContentPane directly
 )
 
 // TabbedWindow has tabs at the top of a pane which can be selected. The tabs
