@@ -7,5 +7,8 @@
 - [x] add ability to edit scheduled tasks from the list tasks pane
 - [x] extra confirmation for uncommitted/local only commit
 - [x] create a session without a worktree
+- [ ] adjust microclaw 
+- [ ] schedule messages against microclaw
+- [ ] add custom skills when in a claude squad session to explain how to create new sessions/worktrees through the api
 - [ ] hooks to install dependencies and make install/make build scripts
 - [ ] better graphite integration (link instances/sessions to open stacks instead of strictly worktrees maybe?)

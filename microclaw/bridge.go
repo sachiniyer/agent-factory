@@ -1,12 +1,18 @@
 package microclaw
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -40,9 +46,16 @@ type MessageMeta struct {
 	Program  string `json:"program,omitempty"`
 }
 
-// Bridge communicates with a running microclaw instance via its SQLite database.
+// Bridge communicates with a running microclaw instance via its Web API (for sending)
+// and SQLite database (for reading).
 type Bridge struct {
 	MicroClawDir string
+
+	apiBaseURL string
+	httpClient *http.Client
+	csrfToken  string
+	password   string
+	authMu     sync.Mutex
 }
 
 // NewBridge creates a new Bridge pointing at the given microclaw directory.
@@ -52,17 +65,96 @@ func NewBridge(dir string) *Bridge {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".microclaw")
 	}
-	return &Bridge{MicroClawDir: dir}
+
+	jar, _ := cookiejar.New(nil)
+
+	password := os.Getenv("MICROCLAW_PASSWORD")
+	if password == "" {
+		password = "helloworld"
+	}
+
+	return &Bridge{
+		MicroClawDir: dir,
+		apiBaseURL:   "http://localhost:10961",
+		httpClient: &http.Client{
+			Jar:     jar,
+			Timeout: 30 * time.Second,
+		},
+		password: password,
+	}
+}
+
+// SetAPIURL sets the base URL for the microclaw Web API.
+func (b *Bridge) SetAPIURL(url string) {
+	b.apiBaseURL = url
 }
 
 func (b *Bridge) dbPath() string {
 	return filepath.Join(b.MicroClawDir, "runtime", "microclaw.db")
 }
 
-// Available returns true if the microclaw DB exists.
+// Available returns true if the microclaw Web API is reachable, falling back to DB file check.
 func (b *Bridge) Available() bool {
-	_, err := os.Stat(b.dbPath())
+	resp, err := b.httpClient.Get(b.apiBaseURL + "/api/auth/status")
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == 200 || resp.StatusCode == 401 {
+			return true
+		}
+	}
+	// Fall back to DB file check
+	_, err = os.Stat(b.dbPath())
 	return err == nil
+}
+
+// login authenticates with the microclaw Web API and stores the CSRF token.
+func (b *Bridge) login() error {
+	body, _ := json.Marshal(map[string]string{"password": b.password})
+	resp, err := b.httpClient.Post(
+		b.apiBaseURL+"/api/auth/login",
+		"application/json",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return fmt.Errorf("login request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("login failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode login response: %w", err)
+	}
+	b.csrfToken = result.CSRFToken
+	return nil
+}
+
+// ensureAuth checks auth status and re-logins if needed.
+func (b *Bridge) ensureAuth() error {
+	b.authMu.Lock()
+	defer b.authMu.Unlock()
+
+	resp, err := b.httpClient.Get(b.apiBaseURL + "/api/auth/status")
+	if err != nil {
+		return b.login()
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		var status struct {
+			Authenticated bool `json:"authenticated"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&status); err == nil && status.Authenticated {
+			return nil
+		}
+	}
+	return b.login()
 }
 
 func (b *Bridge) openDB() (*sql.DB, error) {
@@ -174,15 +266,10 @@ func (b *Bridge) GetMessagesForChat(chatID int64, limit int) ([]Message, error) 
 	return msgs, nil
 }
 
-// SendMessage sends a message to a microclaw chat by inserting directly into the DB.
-// Metadata is prepended as context, including instructions to use `cs api` CLI directly.
+// SendMessage sends a message to microclaw via the Web API.
+// The message is posted to /api/send_stream which triggers immediate LLM processing.
+// Responses appear in the DB and are picked up by the TUI's poll loop.
 func (b *Bridge) SendMessage(chatID int64, text string, meta *MessageMeta) error {
-	db, err := b.openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
 	// Build content with metadata context
 	content := text
 	if meta != nil {
@@ -201,6 +288,77 @@ func (b *Bridge) SendMessage(chatID int64, text string, meta *MessageMeta) error
 				strings.Join(parts, " | "), text)
 		}
 	}
+
+	// Try Web API first
+	err := b.sendViaAPI(content)
+	if err == nil {
+		return nil
+	}
+
+	// Fall back to direct DB insert if API is unavailable
+	return b.sendVioDB(chatID, content)
+}
+
+// sendViaAPI posts the message to microclaw's Web API.
+func (b *Bridge) sendViaAPI(content string) error {
+	if err := b.ensureAuth(); err != nil {
+		return fmt.Errorf("auth failed: %w", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{"message": content})
+	req, err := http.NewRequest("POST", b.apiBaseURL+"/api/send_stream", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if b.csrfToken != "" {
+		req.Header.Set("X-CSRFToken", b.csrfToken)
+	}
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Retry once on 401 (session expired)
+	if resp.StatusCode == 401 {
+		if err := b.login(); err != nil {
+			return fmt.Errorf("re-auth failed: %w", err)
+		}
+		if b.csrfToken != "" {
+			req.Header.Set("X-CSRFToken", b.csrfToken)
+		}
+		body, _ := json.Marshal(map[string]string{"message": content})
+		req, _ = http.NewRequest("POST", b.apiBaseURL+"/api/send_stream", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if b.csrfToken != "" {
+			req.Header.Set("X-CSRFToken", b.csrfToken)
+		}
+		resp, err = b.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("retry send failed: %w", err)
+		}
+		defer resp.Body.Close()
+	}
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("send failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	// Fire-and-forget: we don't consume the SSE stream here.
+	// The TUI polls the DB for responses.
+	return nil
+}
+
+// sendVioDB falls back to inserting the message directly into the SQLite database.
+func (b *Bridge) sendVioDB(chatID int64, content string) error {
+	db, err := b.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
 
 	msgID := fmt.Sprintf("cs-bridge-%d-%s", time.Now().UnixMilli(), randomString(6))
 	now := time.Now().UTC().Format(time.RFC3339)

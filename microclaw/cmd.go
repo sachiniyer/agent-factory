@@ -7,7 +7,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var microclawDirFlag string
+var (
+	microclawDirFlag  string
+	microclawPortFlag int
+)
 
 // MicroClawCmd is the cobra command for the interactive microclaw TUI.
 var MicroClawCmd = &cobra.Command{
@@ -20,6 +23,11 @@ var MicroClawCmd = &cobra.Command{
 			dir = os.Getenv("MICROCLAW_DIR")
 		}
 		bridge := NewBridge(dir)
+
+		if microclawPortFlag != 10961 {
+			bridge.SetAPIURL(fmt.Sprintf("http://localhost:%d", microclawPortFlag))
+		}
+
 		if !bridge.Available() {
 			return fmt.Errorf("MicroClaw not available — set MICROCLAW_DIR or install microclaw")
 		}
@@ -52,4 +60,5 @@ var MicroClawCmd = &cobra.Command{
 
 func init() {
 	MicroClawCmd.Flags().StringVar(&microclawDirFlag, "dir", "", "MicroClaw directory (defaults to MICROCLAW_DIR or ~/.microclaw)")
+	MicroClawCmd.Flags().IntVar(&microclawPortFlag, "port", 10961, "MicroClaw Web API port")
 }
