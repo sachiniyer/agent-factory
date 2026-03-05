@@ -938,8 +938,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		// Create the kill action as a tea.Cmd
 		killAction := func() tea.Msg {
 			// Check if branch is checked out — this is the only hard abort.
+			// Skip this check for external worktrees (root tree attach) since
+			// Cleanup() is a no-op for those and the branch is expected to be
+			// checked out.
 			worktree, err := selected.GetGitWorktree()
-			if err == nil {
+			if err == nil && !worktree.IsExternalWorktree() {
 				checkedOut, checkErr := worktree.IsBranchCheckedOut()
 				if checkErr == nil && checkedOut {
 					return fmt.Errorf("instance %s is currently checked out", selected.Title)
