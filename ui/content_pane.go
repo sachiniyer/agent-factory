@@ -53,6 +53,9 @@ func (c *ContentPane) SetSize(width, height int) {
 	contentHeight := height - windowStyle.GetVerticalFrameSize() - 4
 	c.taskPane.SetSize(contentWidth, contentHeight)
 	c.schedulePane.SetSize(contentWidth, contentHeight)
+	if c.microclaw != nil {
+		c.microclaw.SetSize(contentWidth, contentHeight)
+	}
 }
 
 // SetMode switches the content pane mode.
