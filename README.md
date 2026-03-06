@@ -73,11 +73,30 @@ Bidirectional bridge to a running [MicroClaw](https://microclaw.ai) instance. Mi
 MICROCLAW_DIR=~/.microclaw cs
 ```
 
+### GitHub PR integration
+
+Automatically detects pull requests for instance branches via `gh pr view`.
+
+- PR info (number, title, state) displayed as a third line under each instance in the sidebar
+- Press `p` to open the PR in your browser
+- Press `P` to copy the PR URL to clipboard
+- PR info persists across restarts and refreshes every 60 seconds
+
+### Post-worktree hooks (press `H`)
+
+Per-repo shell commands that run asynchronously when a new worktree is created — useful for build/install steps.
+
+- Press `H` to navigate to the Hooks section in the sidebar
+- Press `Enter` to focus, then `n` to add, `Enter` to edit, `D` to delete
+- Commands run via `sh -c` in the new worktree directory, in the background
+- Config stored at `~/.claude-squad/repos/<repoID>/config.json`
+
 ### Internal changes
 
 - **`config.RepoContext`** — shared abstraction for repo identification and scoped path resolution
 - **Repo-explicit task functions** — `LoadTasksForRepo`, `AddTaskForRepo`, `ToggleTaskForRepo`, `DeleteTaskForRepo` accept a `*config.RepoContext`
 - **Exported `schedule.WaitForReady`** — reused by the API create command
+- **`config.RepoConfig`** — per-repo configuration for hooks and other repo-specific settings
 
 ## Upstream
 
