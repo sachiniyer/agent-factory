@@ -56,8 +56,6 @@ const (
 	stateSelectWorktree
 	// stateSearch is the state when the user is searching sessions.
 	stateSearch
-	// stateHooks is the state when the user is editing worktree hooks.
-	stateHooks
 )
 
 type home struct {
@@ -112,8 +110,6 @@ type home struct {
 	selectionOverlay *overlay.SelectionOverlay
 	// searchOverlay handles session search
 	searchOverlay *overlay.SearchOverlay
-	// hooksOverlay handles worktree hooks editing
-	hooksOverlay *overlay.HooksOverlay
 	// selectedWorktree stores the worktree info selected by the user for attach
 	selectedWorktree *git.WorktreeInfo
 	// availableWorktrees stores the worktrees shown in the selection overlay
@@ -263,6 +259,15 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 	// Load schedules into schedule pane
 	if len(schedules) > 0 {
 		h.contentPane.SchedulePane().SetSchedules(schedules)
+	}
+
+	// Load hooks for sidebar display and hooks pane
+	repoCfg, err := config.LoadRepoConfig(repoID)
+	if err != nil {
+		log.WarningLog.Printf("Failed to load repo config: %v", err)
+	} else {
+		h.sidebar.SetHookCount(len(repoCfg.PostWorktreeCommands))
+		h.contentPane.HooksPane().SetCommands(repoCfg.PostWorktreeCommands)
 	}
 
 	return h
@@ -448,6 +453,19 @@ func (m *home) saveContentPaneState() {
 		m.sidebar.SetTaskCount(len(tp.GetTasks()))
 	}
 
+	hp := m.contentPane.HooksPane()
+	if hp.IsDirty() {
+		repoCfg, err := config.LoadRepoConfig(m.repoID)
+		if err != nil {
+			repoCfg = &config.RepoConfig{}
+		}
+		repoCfg.PostWorktreeCommands = hp.GetCommands()
+		if err := config.SaveRepoConfig(m.repoID, repoCfg); err != nil {
+			log.ErrorLog.Printf("failed to save hooks: %v", err)
+		}
+		m.sidebar.SetHookCount(len(hp.GetCommands()))
+	}
+
 	sp := m.contentPane.SchedulePane()
 	if sp.IsDirty() {
 		for _, sched := range sp.GetSchedules() {
@@ -588,7 +606,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree || m.state == stateHooks {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree {
 		return nil, false
 	}
 	// Don't highlight when content pane has focus
@@ -804,27 +822,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
-	// Handle hooks editing state
-	if m.state == stateHooks {
-		shouldClose := m.hooksOverlay.HandleKeyPress(msg)
-		if shouldClose {
-			if m.hooksOverlay.IsDirty() {
-				repoCfg, err := config.LoadRepoConfig(m.repoID)
-				if err != nil {
-					repoCfg = &config.RepoConfig{}
-				}
-				repoCfg.PostWorktreeCommands = m.hooksOverlay.GetCommands()
-				if err := config.SaveRepoConfig(m.repoID, repoCfg); err != nil {
-					log.ErrorLog.Printf("failed to save hooks: %v", err)
-				}
-			}
-			m.hooksOverlay = nil
-			m.state = stateDefault
-			return m, nil
-		}
-		return m, nil
-	}
-
 	// Route keys to content pane if it has focus (e.g., editing todos/schedules)
 	if m.contentPane.HasFocus() {
 		consumed := m.contentPane.HandleKeyPress(msg)
@@ -884,7 +881,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// Handle content pane Enter for focusing (todos/schedules)
 	if name == keys.KeyEnter {
 		mode := m.contentPane.GetMode()
-		if mode == ui.ContentModeTodos || mode == ui.ContentModeSchedules {
+		if mode == ui.ContentModeTodos || mode == ui.ContentModeSchedules || mode == ui.ContentModeHooks {
 			consumed := m.contentPane.HandleKeyPress(msg)
 			if consumed {
 				return m, nil
@@ -1063,14 +1060,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 
 	// Hooks configuration
 	case keys.KeyHooks:
-		repoCfg, err := config.LoadRepoConfig(m.repoID)
-		if err != nil {
-			return m, m.handleError(fmt.Errorf("failed to load repo config: %w", err))
-		}
-		m.hooksOverlay = overlay.NewHooksOverlay(repoCfg.PostWorktreeCommands)
-		m.hooksOverlay.SetWidth(60)
-		m.state = stateHooks
-		return m, nil
+		m.navigateToSection(ui.SectionHooks)
+		return m, m.selectionChanged()
 
 	// PR actions
 	case keys.KeyOpenPR:
@@ -1271,6 +1262,10 @@ func (m *home) selectionChanged() tea.Cmd {
 		m.contentPane.SetMode(ui.ContentModeSchedules)
 		m.menu.SetInstance(nil)
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
+	case sel.Kind == ui.SectionHooks:
+		m.contentPane.SetMode(ui.ContentModeHooks)
+		m.menu.SetInstance(nil)
+		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
 	case sel.Kind == ui.SectionMicroClaw:
 		m.contentPane.SetMode(ui.ContentModeMicroClaw)
 		m.menu.SetInstance(nil)
@@ -1401,11 +1396,6 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("search overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.searchOverlay.Render(), mainView, true)
-	} else if m.state == stateHooks {
-		if m.hooksOverlay == nil {
-			log.ErrorLog.Printf("hooks overlay is nil")
-		}
-		return overlay.PlaceOverlay(0, 0, m.hooksOverlay.Render(), mainView, true)
 	}
 
 	return mainView

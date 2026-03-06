@@ -55,7 +55,7 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("[, ]")+descStyle.Render("      - Jump between section headers"),
 		"",
 		headerStyle.Render("Configuration:"),
-		keyStyle.Render("H")+descStyle.Render("         - Edit post-worktree hooks"),
+		keyStyle.Render("H")+descStyle.Render("         - Navigate to worktree hooks"),
 		"",
 		headerStyle.Render("GitHub PR:"),
 		keyStyle.Render("p")+descStyle.Render("         - Open PR in browser"),

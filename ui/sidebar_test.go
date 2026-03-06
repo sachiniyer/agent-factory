@@ -15,14 +15,15 @@ func TestSidebarInitialState(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false)
 
-	// Should have 4 sections (MicroClaw hidden by default since hasMC=false)
-	assert.Equal(t, 4, len(s.sections))
+	// Should have 5 sections (MicroClaw hidden by default since hasMC=false)
+	assert.Equal(t, 5, len(s.sections))
 
 	// Only Instances section is expanded by default
 	assert.True(t, s.sections[0].Expanded)
 	assert.False(t, s.sections[1].Expanded)
 	assert.False(t, s.sections[2].Expanded)
 	assert.False(t, s.sections[3].Expanded)
+	assert.False(t, s.sections[4].Expanded)
 
 	// Initial selection should be on Instances header
 	sel := s.GetSelection()
@@ -141,16 +142,20 @@ func TestSidebarJumpSections(t *testing.T) {
 
 	s.JumpNextSection()
 	sel = s.GetSelection()
+	assert.Equal(t, SectionHooks, sel.Kind)
+
+	s.JumpNextSection()
+	sel = s.GetSelection()
 	assert.Equal(t, SectionMicroClaw, sel.Kind)
 
 	// Jump back
 	s.JumpPrevSection()
 	sel = s.GetSelection()
-	assert.Equal(t, SectionTodos, sel.Kind)
+	assert.Equal(t, SectionHooks, sel.Kind)
 
 	s.JumpPrevSection()
 	sel = s.GetSelection()
-	assert.Equal(t, SectionSchedules, sel.Kind)
+	assert.Equal(t, SectionTodos, sel.Kind)
 }
 
 func TestSidebarCollapseFromChild(t *testing.T) {

@@ -15,6 +15,7 @@ const (
 	ContentModeInstance ContentMode = iota
 	ContentModeTodos
 	ContentModeSchedules
+	ContentModeHooks
 	ContentModeMicroClaw
 	ContentModeEmpty
 )
@@ -26,6 +27,7 @@ type ContentPane struct {
 	tabbedWindow *TabbedWindow
 	taskPane     *TaskPane
 	schedulePane *SchedulePane
+	hooksPane    *HooksPane
 	microclaw    *MicroClawPane
 
 	width, height int
@@ -38,6 +40,7 @@ func NewContentPane(tw *TabbedWindow, mc *MicroClawPane) *ContentPane {
 		tabbedWindow: tw,
 		taskPane:     NewTaskPane(),
 		schedulePane: NewSchedulePane(),
+		hooksPane:    NewHooksPane(),
 		microclaw:    mc,
 	}
 }
@@ -53,6 +56,7 @@ func (c *ContentPane) SetSize(width, height int) {
 	contentHeight := height - windowStyle.GetVerticalFrameSize() - 4
 	c.taskPane.SetSize(contentWidth, contentHeight)
 	c.schedulePane.SetSize(contentWidth, contentHeight)
+	c.hooksPane.SetSize(contentWidth, contentHeight)
 	if c.microclaw != nil {
 		c.microclaw.SetSize(contentWidth, contentHeight)
 	}
@@ -66,6 +70,7 @@ func (c *ContentPane) SetMode(mode ContentMode) {
 	// Unfocus panes when switching away
 	c.taskPane.SetFocus(false)
 	c.schedulePane.SetFocus(false)
+	c.hooksPane.SetFocus(false)
 	c.mode = mode
 }
 
@@ -81,6 +86,8 @@ func (c *ContentPane) HasFocus() bool {
 		return c.taskPane.HasFocus()
 	case ContentModeSchedules:
 		return c.schedulePane.HasFocus()
+	case ContentModeHooks:
+		return c.hooksPane.HasFocus()
 	}
 	return false
 }
@@ -106,6 +113,14 @@ func (c *ContentPane) HandleKeyPress(msg tea.KeyMsg) bool {
 			c.schedulePane.SetFocus(true)
 			return true
 		}
+	case ContentModeHooks:
+		if c.hooksPane.HasFocus() {
+			return c.hooksPane.HandleKeyPress(msg)
+		}
+		if msg.String() == "enter" || msg.String() == "o" {
+			c.hooksPane.SetFocus(true)
+			return true
+		}
 	}
 	return false
 }
@@ -123,6 +138,11 @@ func (c *ContentPane) TaskPane() *TaskPane {
 // SchedulePane returns the schedule pane.
 func (c *ContentPane) SchedulePane() *SchedulePane {
 	return c.schedulePane
+}
+
+// HooksPane returns the hooks pane.
+func (c *ContentPane) HooksPane() *HooksPane {
+	return c.hooksPane
 }
 
 // MicroClawPane returns the microclaw pane.
@@ -194,6 +214,8 @@ func (c *ContentPane) String() string {
 		return c.renderInlinePane(c.taskPane.String())
 	case ContentModeSchedules:
 		return c.renderInlinePane(c.schedulePane.String())
+	case ContentModeHooks:
+		return c.renderInlinePane(c.hooksPane.String())
 	case ContentModeMicroClaw:
 		return c.renderMicroClawPane()
 	default:

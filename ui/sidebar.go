@@ -19,6 +19,7 @@ const (
 	SectionInstances SidebarSectionKind = iota
 	SectionSchedules
 	SectionTodos
+	SectionHooks
 	SectionMicroClaw
 )
 
@@ -56,6 +57,7 @@ type Sidebar struct {
 	instances []*session.Instance
 	schedules []schedule.Schedule
 	taskCount int
+	hookCount int
 	hasMC     bool // microclaw available
 
 	// Rendering
@@ -73,6 +75,7 @@ func NewSidebar(spin *spinner.Model, autoYes bool) *Sidebar {
 			{Kind: SectionInstances, Title: "Instances", Expanded: true},
 			{Kind: SectionSchedules, Title: "Schedules", Expanded: false},
 			{Kind: SectionTodos, Title: "Todos", Expanded: false},
+			{Kind: SectionHooks, Title: "Hooks", Expanded: false},
 			{Kind: SectionMicroClaw, Title: "MicroClaw", Expanded: false},
 		},
 		renderer: &InstanceRenderer{spinner: spin},
@@ -113,6 +116,12 @@ func (s *Sidebar) SetSchedules(schedules []schedule.Schedule) {
 // SetTaskCount updates the displayed task count.
 func (s *Sidebar) SetTaskCount(count int) {
 	s.taskCount = count
+	s.rebuildVisibleItems()
+}
+
+// SetHookCount updates the displayed hook count.
+func (s *Sidebar) SetHookCount(count int) {
+	s.hookCount = count
 	s.rebuildVisibleItems()
 }
 
@@ -423,6 +432,13 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 			label = fmt.Sprintf("Todos (%d)", s.taskCount)
 		} else {
 			label = "Todos"
+		}
+		arrow = "  " // no expand arrow for leaf sections
+	case SectionHooks:
+		if s.hookCount > 0 {
+			label = fmt.Sprintf("Hooks (%d)", s.hookCount)
+		} else {
+			label = "Hooks"
 		}
 		arrow = "  " // no expand arrow for leaf sections
 	case SectionMicroClaw:
