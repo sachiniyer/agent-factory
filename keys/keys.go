@@ -36,6 +36,7 @@ const (
 
 	KeyOpenPR // Key for opening PR in browser
 	KeyCopyPR // Key for copying PR URL to clipboard
+	KeyHooks  // Key for editing post-worktree hooks
 
 	// Sidebar navigation
 	KeyLeft        // Collapse section / move to parent
@@ -70,6 +71,7 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"r":          KeyTriggerSchedule,
 	"p":          KeyOpenPR,
 	"P":          KeyCopyPR,
+	"H":          KeyHooks,
 	"h":          KeyLeft,
 	"left":       KeyLeft,
 	"l":          KeyRight,
@@ -163,6 +165,10 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	KeyCopyPR: key.NewBinding(
 		key.WithKeys("P"),
 		key.WithHelp("P", "copy PR URL"),
+	),
+	KeyHooks: key.NewBinding(
+		key.WithKeys("H"),
+		key.WithHelp("H", "worktree hooks"),
 	),
 	KeyLeft: key.NewBinding(
 		key.WithKeys("h", "left"),
