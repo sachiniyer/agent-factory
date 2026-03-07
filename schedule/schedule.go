@@ -15,6 +15,7 @@ const schedulesFileName = "schedules.json"
 
 type Schedule struct {
 	ID            string     `json:"id"`
+	Name          string     `json:"name,omitempty"`
 	Prompt        string     `json:"prompt"`
 	CronExpr      string     `json:"cron_expr"`
 	ProjectPath   string     `json:"project_path"`

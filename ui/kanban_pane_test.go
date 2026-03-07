@@ -145,6 +145,57 @@ func TestKanbanPaneNoConsumeWithoutFocus(t *testing.T) {
 	assert.False(t, kp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}))
 }
 
+func TestKanbanPaneJumpToInstance(t *testing.T) {
+	kp := NewKanbanPane()
+	board := &task.Board{Columns: task.DefaultColumns}
+	tk := board.AddTask("Linked task", "in_progress")
+	board.LinkTask(tk.ID, "my-session")
+	board.AddTask("Unlinked task", "backlog")
+	kp.SetBoard(board)
+	kp.SetFocus(true)
+
+	// Navigate to in_progress column header, then to the linked task
+	kp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	kp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+
+	// Press 'o' to jump
+	kp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	assert.Equal(t, "my-session", kp.PendingJumpInstance())
+
+	// Consume
+	title := kp.ConsumePendingJump()
+	assert.Equal(t, "my-session", title)
+	assert.Empty(t, kp.PendingJumpInstance())
+}
+
+func TestKanbanPaneJumpNoLink(t *testing.T) {
+	kp := NewKanbanPane()
+	board := &task.Board{Columns: task.DefaultColumns}
+	board.AddTask("Unlinked task", "backlog")
+	kp.SetBoard(board)
+	kp.SetFocus(true)
+
+	// Navigate to the task
+	kp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+
+	// Press 'o' — should not set pending jump
+	kp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	assert.Empty(t, kp.PendingJumpInstance())
+}
+
+func TestKanbanPaneRenderLinkedTask(t *testing.T) {
+	kp := NewKanbanPane()
+	kp.SetSize(80, 30)
+	board := &task.Board{Columns: task.DefaultColumns}
+	tk := board.AddTask("Auth refactor", "in_progress")
+	board.LinkTask(tk.ID, "refactor-auth")
+	kp.SetBoard(board)
+
+	rendered := kp.String()
+	assert.Contains(t, rendered, "Auth refactor")
+	assert.Contains(t, rendered, "refactor-auth")
+}
+
 func TestKanbanPaneRender(t *testing.T) {
 	kp := NewKanbanPane()
 	kp.SetSize(80, 30)

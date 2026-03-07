@@ -1,6 +1,7 @@
 package task
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -70,6 +71,86 @@ func TestBoardCountByStatus(t *testing.T) {
 	assert.Equal(t, 2, counts["backlog"])
 	assert.Equal(t, 1, counts["in_progress"])
 	assert.Equal(t, 1, counts["done"])
+}
+
+func TestBoardLinkTask(t *testing.T) {
+	b := &Board{Columns: DefaultColumns}
+	tk := b.AddTask("Test task", "backlog")
+
+	err := b.LinkTask(tk.ID, "my-session")
+	assert.NoError(t, err)
+	assert.Equal(t, "my-session", b.Tasks[0].InstanceTitle)
+}
+
+func TestBoardLinkTaskNotFound(t *testing.T) {
+	b := &Board{Columns: DefaultColumns}
+	assert.Error(t, b.LinkTask("nonexistent", "my-session"))
+}
+
+func TestBoardUnlinkTask(t *testing.T) {
+	b := &Board{Columns: DefaultColumns}
+	tk := b.AddTask("Test task", "backlog")
+	b.LinkTask(tk.ID, "my-session")
+
+	err := b.UnlinkTask(tk.ID)
+	assert.NoError(t, err)
+	assert.Empty(t, b.Tasks[0].InstanceTitle)
+}
+
+func TestBoardUnlinkTaskNotFound(t *testing.T) {
+	b := &Board{Columns: DefaultColumns}
+	assert.Error(t, b.UnlinkTask("nonexistent"))
+}
+
+func TestBoardFindTaskByInstance(t *testing.T) {
+	b := &Board{Columns: DefaultColumns}
+	tk := b.AddTask("Test task", "backlog")
+	b.LinkTask(tk.ID, "my-session")
+
+	found := b.FindTaskByInstance("my-session")
+	assert.NotNil(t, found)
+	assert.Equal(t, tk.ID, found.ID)
+
+	assert.Nil(t, b.FindTaskByInstance("nonexistent"))
+}
+
+func TestBoardLinkSurvivesMove(t *testing.T) {
+	b := &Board{Columns: DefaultColumns}
+	tk := b.AddTask("Linked task", "backlog")
+	b.LinkTask(tk.ID, "my-session")
+
+	// Move the task — link should persist
+	err := b.MoveTask(tk.ID, "in_progress")
+	assert.NoError(t, err)
+	assert.Equal(t, "in_progress", b.Tasks[0].Status)
+	assert.Equal(t, "my-session", b.Tasks[0].InstanceTitle)
+
+	// FindTaskByInstance should still work
+	found := b.FindTaskByInstance("my-session")
+	assert.NotNil(t, found)
+	assert.Equal(t, "in_progress", found.Status)
+}
+
+func TestBoardLinkJSON(t *testing.T) {
+	b := &Board{Columns: DefaultColumns}
+	tk := b.AddTask("Linked task", "backlog")
+	b.LinkTask(tk.ID, "my-session")
+
+	// Marshal and unmarshal
+	data, err := json.MarshalIndent(b, "", "  ")
+	assert.NoError(t, err)
+
+	var b2 Board
+	err = json.Unmarshal(data, &b2)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(b2.Tasks))
+	assert.Equal(t, "my-session", b2.Tasks[0].InstanceTitle)
+
+	// Unlinked task should not have instance_title in JSON
+	b.UnlinkTask(tk.ID)
+	data, err = json.MarshalIndent(b, "", "  ")
+	assert.NoError(t, err)
+	assert.NotContains(t, string(data), "instance_title")
 }
 
 func TestBoardToggleTask(t *testing.T) {

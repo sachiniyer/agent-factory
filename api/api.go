@@ -426,6 +426,7 @@ var schedulesListCmd = &cobra.Command{
 }
 
 var (
+	schedAddNameFlag    string
 	schedAddPromptFlag  string
 	schedAddCronFlag    string
 	schedAddProgramFlag string
@@ -455,6 +456,7 @@ var schedulesAddCmd = &cobra.Command{
 		id := schedule.GenerateID()
 		s := schedule.Schedule{
 			ID:          id,
+			Name:        schedAddNameFlag,
 			Prompt:      schedAddPromptFlag,
 			CronExpr:    schedAddCronFlag,
 			ProjectPath: repo.Root,
@@ -528,8 +530,10 @@ var tasksListCmd = &cobra.Command{
 }
 
 var (
-	taskAddTitleFlag  string
-	taskAddStatusFlag string
+	taskAddTitleFlag    string
+	taskAddStatusFlag   string
+	taskAddInstanceFlag string
+	taskLinkInstanceFlag string
 )
 
 var tasksAddCmd = &cobra.Command{
@@ -549,9 +553,18 @@ var tasksAddCmd = &cobra.Command{
 			status = "backlog"
 		}
 
-		t, err := task.AddTaskForRepoWithStatus(repo, taskAddTitleFlag, status)
+		board, err := task.LoadBoardForRepo(repo)
 		if err != nil {
-			return jsonError(fmt.Errorf("failed to add task: %w", err))
+			return jsonError(fmt.Errorf("failed to load board: %w", err))
+		}
+		t := board.AddTask(taskAddTitleFlag, status)
+		if taskAddInstanceFlag != "" {
+			board.LinkTask(t.ID, taskAddInstanceFlag)
+			// Re-fetch so we output the linked version
+			t.InstanceTitle = taskAddInstanceFlag
+		}
+		if err := task.SaveBoardForRepo(repo, board); err != nil {
+			return jsonError(fmt.Errorf("failed to save board: %w", err))
 		}
 		return jsonOut(t)
 	},
@@ -623,6 +636,50 @@ var tasksMoveCmd = &cobra.Command{
 	},
 }
 
+var tasksLinkCmd = &cobra.Command{
+	Use:   "link <id>",
+	Short: "Link a task to a session",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		repo, err := resolveRepo()
+		if err != nil {
+			return jsonError(fmt.Errorf("--repo is required: %w", err))
+		}
+
+		if taskLinkInstanceFlag == "" {
+			return jsonError(fmt.Errorf("--instance is required"))
+		}
+
+		if err := task.LinkTaskForRepo(repo, args[0], taskLinkInstanceFlag); err != nil {
+			return jsonError(fmt.Errorf("failed to link task: %w", err))
+		}
+		return jsonOut(map[string]bool{"ok": true})
+	},
+}
+
+var tasksUnlinkCmd = &cobra.Command{
+	Use:   "unlink <id>",
+	Short: "Remove linkage from a task",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		repo, err := resolveRepo()
+		if err != nil {
+			return jsonError(fmt.Errorf("--repo is required: %w", err))
+		}
+
+		if err := task.UnlinkTaskForRepo(repo, args[0]); err != nil {
+			return jsonError(fmt.Errorf("failed to unlink task: %w", err))
+		}
+		return jsonOut(map[string]bool{"ok": true})
+	},
+}
+
 var tasksBoardCmd = &cobra.Command{
 	Use:   "board",
 	Short: "Get kanban board (columns + tasks grouped by status)",
@@ -676,9 +733,11 @@ func init() {
 	sessionsCmd.AddCommand(sessionsKillCmd)
 
 	// Schedules
+	schedulesAddCmd.Flags().StringVar(&schedAddNameFlag, "name", "", "Schedule name (required)")
 	schedulesAddCmd.Flags().StringVar(&schedAddPromptFlag, "prompt", "", "Prompt to send (required)")
 	schedulesAddCmd.Flags().StringVar(&schedAddCronFlag, "cron", "", "Cron expression (required)")
 	schedulesAddCmd.Flags().StringVar(&schedAddProgramFlag, "program", "", "Program to run (defaults to config default)")
+	schedulesAddCmd.MarkFlagRequired("name")
 	schedulesAddCmd.MarkFlagRequired("prompt")
 	schedulesAddCmd.MarkFlagRequired("cron")
 
@@ -689,7 +748,11 @@ func init() {
 	// Tasks
 	tasksAddCmd.Flags().StringVar(&taskAddTitleFlag, "title", "", "Task title (required)")
 	tasksAddCmd.Flags().StringVar(&taskAddStatusFlag, "status", "backlog", "Task status column (backlog, in_progress, review, done)")
+	tasksAddCmd.Flags().StringVar(&taskAddInstanceFlag, "instance", "", "Link task to a session by title")
 	tasksAddCmd.MarkFlagRequired("title")
+
+	tasksLinkCmd.Flags().StringVar(&taskLinkInstanceFlag, "instance", "", "Session title to link (required)")
+	tasksLinkCmd.MarkFlagRequired("instance")
 
 	tasksMoveCmd.Flags().StringVar(&tasksMoveStatusFlag, "status", "", "Target column (backlog, in_progress, review, done)")
 	tasksMoveCmd.MarkFlagRequired("status")
@@ -699,6 +762,8 @@ func init() {
 	tasksCmd.AddCommand(tasksToggleCmd)
 	tasksCmd.AddCommand(tasksRemoveCmd)
 	tasksCmd.AddCommand(tasksMoveCmd)
+	tasksCmd.AddCommand(tasksLinkCmd)
+	tasksCmd.AddCommand(tasksUnlinkCmd)
 	tasksCmd.AddCommand(tasksBoardCmd)
 
 	// Register subcommand groups

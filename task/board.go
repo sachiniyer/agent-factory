@@ -16,11 +16,12 @@ var DefaultColumns = []string{"backlog", "in_progress", "review", "done"}
 const tasksFileName = "tasks.json"
 
 type Task struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	Title         string    `json:"title"`
+	Status        string    `json:"status"`
+	InstanceTitle string    `json:"instance_title,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Board struct {
@@ -96,6 +97,40 @@ func (b *Board) ToggleTask(id string) error {
 		}
 	}
 	return fmt.Errorf("task with id %q not found", id)
+}
+
+// LinkTask links a task to an instance by title.
+func (b *Board) LinkTask(taskID, instanceTitle string) error {
+	for i, t := range b.Tasks {
+		if t.ID == taskID {
+			b.Tasks[i].InstanceTitle = instanceTitle
+			b.Tasks[i].UpdatedAt = time.Now()
+			return nil
+		}
+	}
+	return fmt.Errorf("task with id %q not found", taskID)
+}
+
+// UnlinkTask removes the instance linkage from a task.
+func (b *Board) UnlinkTask(taskID string) error {
+	for i, t := range b.Tasks {
+		if t.ID == taskID {
+			b.Tasks[i].InstanceTitle = ""
+			b.Tasks[i].UpdatedAt = time.Now()
+			return nil
+		}
+	}
+	return fmt.Errorf("task with id %q not found", taskID)
+}
+
+// FindTaskByInstance returns the first task linked to the given instance title, or nil.
+func (b *Board) FindTaskByInstance(instanceTitle string) *Task {
+	for i, t := range b.Tasks {
+		if t.InstanceTitle == instanceTitle {
+			return &b.Tasks[i]
+		}
+	}
+	return nil
 }
 
 // --- Load / Save ---
@@ -205,6 +240,28 @@ func MoveTaskForRepo(repo *config.RepoContext, id, newStatus string) error {
 		return err
 	}
 	if err := board.MoveTask(id, newStatus); err != nil {
+		return err
+	}
+	return SaveBoardForRepo(repo, board)
+}
+
+func LinkTaskForRepo(repo *config.RepoContext, taskID, instanceTitle string) error {
+	board, err := LoadBoardForRepo(repo)
+	if err != nil {
+		return err
+	}
+	if err := board.LinkTask(taskID, instanceTitle); err != nil {
+		return err
+	}
+	return SaveBoardForRepo(repo, board)
+}
+
+func UnlinkTaskForRepo(repo *config.RepoContext, taskID string) error {
+	board, err := LoadBoardForRepo(repo)
+	if err != nil {
+		return err
+	}
+	if err := board.UnlinkTask(taskID); err != nil {
 		return err
 	}
 	return SaveBoardForRepo(repo, board)

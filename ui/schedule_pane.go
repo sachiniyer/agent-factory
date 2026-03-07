@@ -18,10 +18,11 @@ type SchedulePane struct {
 
 	// Edit mode
 	editing    bool
+	editName   textinput.Model
 	editPrompt textarea.Model
 	editCron   textinput.Model
 	editPath   textinput.Model
-	focusIndex int // 0=prompt, 1=cron, 2=path, 3=save button
+	focusIndex int // 0=name, 1=prompt, 2=cron, 3=path, 4=save button
 
 	// Create mode
 	creating       bool
@@ -100,10 +101,15 @@ func (s *SchedulePane) IsCreating() bool {
 func (s *SchedulePane) EnterCreateMode(defaultPath string) {
 	s.createPath = defaultPath
 
+	name := textinput.New()
+	name.Placeholder = "Schedule name"
+	name.CharLimit = 64
+	name.Focus()
+
 	prompt := textarea.New()
 	prompt.ShowLineNumbers = false
 	prompt.Prompt = ""
-	prompt.Focus()
+	prompt.Blur()
 	prompt.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	prompt.CharLimit = 0
 	prompt.MaxHeight = 0
@@ -119,6 +125,7 @@ func (s *SchedulePane) EnterCreateMode(defaultPath string) {
 	path.CharLimit = 256
 	path.Blur()
 
+	s.editName = name
 	s.editPrompt = prompt
 	s.editCron = cron
 	s.editPath = path
@@ -133,9 +140,9 @@ func (s *SchedulePane) HasPendingCreate() bool {
 }
 
 // ConsumePendingCreate returns the submitted create data and clears the pending flag.
-func (s *SchedulePane) ConsumePendingCreate() (prompt, cron, path string) {
+func (s *SchedulePane) ConsumePendingCreate() (name, prompt, cron, path string) {
 	s.pendingCreate = false
-	return s.editPrompt.Value(), s.editCron.Value(), s.editPath.Value()
+	return s.editName.Value(), s.editPrompt.Value(), s.editCron.Value(), s.editPath.Value()
 }
 
 // SetPendingTrigger marks the currently selected schedule to be triggered.
@@ -223,10 +230,15 @@ func (s *SchedulePane) handleNormalMode(msg tea.KeyMsg) bool {
 func (s *SchedulePane) enterEditMode() {
 	sched := s.schedules[s.selectedIdx]
 
+	name := textinput.New()
+	name.SetValue(sched.Name)
+	name.CharLimit = 64
+	name.Focus()
+
 	prompt := textarea.New()
 	prompt.ShowLineNumbers = false
 	prompt.Prompt = ""
-	prompt.Focus()
+	prompt.Blur()
 	prompt.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	prompt.CharLimit = 0
 	prompt.MaxHeight = 0
@@ -242,6 +254,7 @@ func (s *SchedulePane) enterEditMode() {
 	path.CharLimit = 256
 	path.Blur()
 
+	s.editName = name
 	s.editPrompt = prompt
 	s.editCron = cron
 	s.editPath = path
@@ -252,20 +265,24 @@ func (s *SchedulePane) enterEditMode() {
 func (s *SchedulePane) handleEditMode(msg tea.KeyMsg) bool {
 	switch msg.Type {
 	case tea.KeyTab:
-		s.focusIndex = (s.focusIndex + 1) % 4
+		s.focusIndex = (s.focusIndex + 1) % 5
 		s.updateEditFocus()
 	case tea.KeyShiftTab:
-		s.focusIndex = (s.focusIndex + 3) % 4
+		s.focusIndex = (s.focusIndex + 4) % 5
 		s.updateEditFocus()
 	case tea.KeyEsc:
 		s.editing = false
 		s.creating = false
 	case tea.KeyEnter:
-		if s.focusIndex == 3 {
+		if s.focusIndex == 4 {
 			if s.creating {
+				if s.editName.Value() == "" {
+					return true // name is required
+				}
 				s.pendingCreate = true
 				s.creating = false
 			} else {
+				s.schedules[s.selectedIdx].Name = s.editName.Value()
 				s.schedules[s.selectedIdx].Prompt = s.editPrompt.Value()
 				s.schedules[s.selectedIdx].CronExpr = s.editCron.Value()
 				s.schedules[s.selectedIdx].ProjectPath = s.editPath.Value()
@@ -274,16 +291,18 @@ func (s *SchedulePane) handleEditMode(msg tea.KeyMsg) bool {
 			}
 			return true
 		}
-		if s.focusIndex == 0 {
+		if s.focusIndex == 1 {
 			s.editPrompt, _ = s.editPrompt.Update(msg)
 		}
 	default:
 		switch s.focusIndex {
 		case 0:
-			s.editPrompt, _ = s.editPrompt.Update(msg)
+			s.editName, _ = s.editName.Update(msg)
 		case 1:
-			s.editCron, _ = s.editCron.Update(msg)
+			s.editPrompt, _ = s.editPrompt.Update(msg)
 		case 2:
+			s.editCron, _ = s.editCron.Update(msg)
+		case 3:
 			s.editPath, _ = s.editPath.Update(msg)
 		}
 	}
@@ -291,22 +310,20 @@ func (s *SchedulePane) handleEditMode(msg tea.KeyMsg) bool {
 }
 
 func (s *SchedulePane) updateEditFocus() {
-	if s.focusIndex == 0 {
+	s.editName.Blur()
+	s.editPrompt.Blur()
+	s.editCron.Blur()
+	s.editPath.Blur()
+
+	switch s.focusIndex {
+	case 0:
+		s.editName.Focus()
+	case 1:
 		s.editPrompt.Focus()
-		s.editCron.Blur()
-		s.editPath.Blur()
-	} else if s.focusIndex == 1 {
-		s.editPrompt.Blur()
+	case 2:
 		s.editCron.Focus()
-		s.editPath.Blur()
-	} else if s.focusIndex == 2 {
-		s.editPrompt.Blur()
-		s.editCron.Blur()
+	case 3:
 		s.editPath.Focus()
-	} else {
-		s.editPrompt.Blur()
-		s.editCron.Blur()
-		s.editPath.Blur()
 	}
 }
 
@@ -358,7 +375,12 @@ func (s *SchedulePane) renderListMode() string {
 		}
 
 		isSelected := i == s.selectedIdx
-		header := fmt.Sprintf("%s %s", status, sched.CronExpr)
+		var header string
+		if sched.Name != "" {
+			header = fmt.Sprintf("%s %s  %s", status, sched.Name, sched.CronExpr)
+		} else {
+			header = fmt.Sprintf("%s %s", status, sched.CronExpr)
+		}
 
 		if isSelected && s.hasFocus {
 			b.WriteString(selectedStyle.Render("▸ " + header))
@@ -414,6 +436,7 @@ func (s *SchedulePane) renderEditMode() string {
 	if inputWidth < 20 {
 		inputWidth = 20
 	}
+	s.editName.Width = inputWidth
 	s.editPrompt.SetWidth(inputWidth)
 	if s.height > 0 {
 		s.editPrompt.SetHeight(s.height / 4)
@@ -428,6 +451,10 @@ func (s *SchedulePane) renderEditMode() string {
 		sched := s.schedules[s.selectedIdx]
 		b.WriteString(editTitleStyle.Render(fmt.Sprintf("Edit Schedule %s", sched.ID)))
 	}
+	b.WriteString("\n")
+	b.WriteString(labelStyle.Render("Name:"))
+	b.WriteString("  ")
+	b.WriteString(s.editName.View())
 	b.WriteString("\n")
 	b.WriteString(labelStyle.Render("Prompt:"))
 	b.WriteString("\n")
@@ -446,7 +473,7 @@ func (s *SchedulePane) renderEditMode() string {
 	if s.creating {
 		submitLabel = " Schedule "
 	}
-	if s.focusIndex == 3 {
+	if s.focusIndex == 4 {
 		b.WriteString("       " + focusedButtonStyle.Render(submitLabel))
 	} else {
 		b.WriteString("       " + buttonStyle.Render(submitLabel))

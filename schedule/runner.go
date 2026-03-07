@@ -13,6 +13,7 @@ import (
 	"claude-squad/log"
 	"claude-squad/session"
 	"claude-squad/session/git"
+	"claude-squad/task"
 )
 
 const pendingInstancesFileName = "pending_instances.json"
@@ -194,6 +195,23 @@ func RunScheduledTask(scheduleID string) error {
 	// daemon/TUI which also read-modify-write state.json concurrently.
 	if err := appendPendingInstance(instance.ToInstanceData()); err != nil {
 		return fmt.Errorf("failed to save pending instance: %w", err)
+	}
+
+	// Create a board task linked to the new instance.
+	repo, repoErr := config.RepoFromPath(s.ProjectPath)
+	if repoErr == nil {
+		board, boardErr := task.LoadBoardForRepo(repo)
+		if boardErr == nil {
+			taskTitle := s.Name
+			if taskTitle == "" {
+				taskTitle = title
+			}
+			t := board.AddTask(taskTitle, "in_progress")
+			board.LinkTask(t.ID, title)
+			if err := task.SaveBoardForRepo(repo, board); err != nil {
+				log.ErrorLog.Printf("failed to save board task: %v", err)
+			}
+		}
 	}
 
 	// Launch daemon for autoyes if configured.

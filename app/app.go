@@ -501,8 +501,11 @@ func (m *home) saveContentPaneState() {
 // handleScheduleCreate processes a pending schedule creation from the inline form.
 func (m *home) handleScheduleCreate() tea.Cmd {
 	sp := m.contentPane.SchedulePane()
-	prompt, cronExpr, projectPath := sp.ConsumePendingCreate()
+	name, prompt, cronExpr, projectPath := sp.ConsumePendingCreate()
 
+	if name == "" {
+		return m.handleError(fmt.Errorf("schedule name is required"))
+	}
 	if err := schedule.ValidateCronExpr(cronExpr); err != nil {
 		return m.handleError(fmt.Errorf("invalid cron: %v", err))
 	}
@@ -512,6 +515,7 @@ func (m *home) handleScheduleCreate() tea.Cmd {
 	}
 	s := schedule.Schedule{
 		ID:          schedule.GenerateID(),
+		Name:        name,
 		Prompt:      prompt,
 		CronExpr:    cronExpr,
 		ProjectPath: absPath,
@@ -562,6 +566,21 @@ func (m *home) handleScheduleTrigger() tea.Cmd {
 	instance.SetStatus(session.Loading)
 	finalizer()
 	m.menu.SetState(ui.StateDefault)
+
+	// Create a board task linked to the new instance.
+	kp := m.contentPane.KanbanPane()
+	if board := kp.GetBoard(); board != nil {
+		taskTitle := sched.Name
+		if taskTitle == "" {
+			taskTitle = title
+		}
+		t := board.AddTask(taskTitle, "in_progress")
+		board.LinkTask(t.ID, title)
+		if err := task.SaveBoard(board); err != nil {
+			log.ErrorLog.Printf("failed to save board task: %v", err)
+		}
+		m.sidebar.SetTaskCount(board.TaskCount())
+	}
 
 	prompt := sched.Prompt
 	schedID := sched.ID
@@ -829,6 +848,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			// If focus was released (Esc), save state
 			if !m.contentPane.HasFocus() {
 				m.saveContentPaneState()
+			}
+			// Check for pending jump-to-instance from kanban
+			kp := m.contentPane.KanbanPane()
+			if title := kp.ConsumePendingJump(); title != "" {
+				return m, m.jumpToInstance(title)
 			}
 			// Check if a new schedule was submitted via the inline form
 			sp := m.contentPane.SchedulePane()
@@ -1208,6 +1232,20 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+// jumpToInstance navigates the sidebar to the instance with the given title.
+func (m *home) jumpToInstance(title string) tea.Cmd {
+	for _, inst := range m.sidebar.GetInstances() {
+		if inst.Title == title {
+			// Expand instances section
+			m.sidebar.ExpandInstancesSection()
+			m.sidebar.SelectInstance(inst)
+			m.contentPane.SetMode(ui.ContentModeInstance)
+			return m.selectionChanged()
+		}
+	}
+	return m.handleError(fmt.Errorf("instance %q not found", title))
 }
 
 // navigateToSection moves the sidebar selection to the header of the given section.

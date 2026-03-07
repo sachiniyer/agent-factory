@@ -21,14 +21,23 @@ Session commands:
   cs api sessions diff <title>                  Get diff stats for a session
 
 Task commands (kanban board):
-  cs api tasks board                               Get kanban board (columns + tasks)
-  cs api tasks list                                List all tasks (flat)
-  cs api tasks add --title "description"           Add task to backlog
-  cs api tasks add --title "desc" --status review  Add task to specific column
-  cs api tasks move <id> --status in_progress      Move task between columns
-  cs api tasks toggle <id>                         Mark a task as done/not done
-  cs api tasks remove <id>                         Remove a task
-Available columns: backlog, in_progress, review, done`
+  cs api tasks board                                    Get kanban board (columns + tasks)
+  cs api tasks list                                     List all tasks (flat)
+  cs api tasks add --title "description"                Add task to backlog
+  cs api tasks add --title "desc" --status in_progress  Add task to specific column
+  cs api tasks move <id> --status in_progress           Move task between columns
+  cs api tasks link <id> --instance "my-session"        Link yourself to a task
+  cs api tasks unlink <id>                              Remove linkage
+  cs api tasks toggle <id>                              Mark a task as done/not done
+  cs api tasks remove <id>                              Remove a task
+Available columns: backlog, in_progress, review, done
+
+Self-assignment workflow:
+  1. cs api tasks board                              # See available tasks
+  2. cs api tasks move <id> --status in_progress     # Claim a task
+  3. cs api tasks link <id> --instance "YOUR_SESSION" # Link yourself
+  4. ... do the work ...
+  5. cs api tasks move <id> --status done             # Mark complete`
 
 // buildSystemPrompt returns the system prompt text for a session.
 func buildSystemPrompt(sessionTitle string) string {

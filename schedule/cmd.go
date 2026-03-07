@@ -12,6 +12,7 @@ import (
 )
 
 var (
+	nameFlag    string
 	promptFlag  string
 	cronFlag    string
 	pathFlag    string
@@ -40,14 +41,14 @@ var listCmd = &cobra.Command{
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tENABLED\tCRON\tPROGRAM\tPATH\tLAST_RUN\tSTATUS")
+		fmt.Fprintln(w, "ID\tNAME\tENABLED\tCRON\tPROGRAM\tPATH\tLAST_RUN\tSTATUS")
 		for _, s := range schedules {
 			lastRun := "never"
 			if s.LastRunAt != nil {
 				lastRun = s.LastRunAt.Format(time.RFC822)
 			}
-			fmt.Fprintf(w, "%s\t%t\t%s\t%s\t%s\t%s\t%s\n",
-				s.ID, s.Enabled, s.CronExpr, s.Program, s.ProjectPath, lastRun, s.LastRunStatus)
+			fmt.Fprintf(w, "%s\t%s\t%t\t%s\t%s\t%s\t%s\t%s\n",
+				s.ID, s.Name, s.Enabled, s.CronExpr, s.Program, s.ProjectPath, lastRun, s.LastRunStatus)
 		}
 		w.Flush()
 		return nil
@@ -75,6 +76,7 @@ var addCmd = &cobra.Command{
 		id := GenerateID()
 		s := Schedule{
 			ID:          id,
+			Name:        nameFlag,
 			Prompt:      promptFlag,
 			CronExpr:    cronFlag,
 			ProjectPath: absPath,
@@ -129,6 +131,7 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
+	addCmd.Flags().StringVar(&nameFlag, "name", "", "Schedule name")
 	addCmd.Flags().StringVar(&promptFlag, "prompt", "", "Prompt to send to the AI agent (required)")
 	addCmd.Flags().StringVar(&cronFlag, "cron", "", "Cron expression for scheduling (required)")
 	addCmd.Flags().StringVar(&pathFlag, "path", ".", "Project path (defaults to current directory)")

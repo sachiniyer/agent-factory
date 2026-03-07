@@ -33,6 +33,8 @@ type KanbanPane struct {
 	scrollOff   int
 	dirty       bool
 	hasFocus    bool
+
+	pendingJumpInstance string
 }
 
 func NewKanbanPane() *KanbanPane { return &KanbanPane{} }
@@ -41,6 +43,18 @@ func (k *KanbanPane) SetSize(width, height int) { k.width = width; k.height = he
 func (k *KanbanPane) GetBoard() *task.Board      { return k.board }
 func (k *KanbanPane) IsDirty() bool              { return k.dirty }
 func (k *KanbanPane) HasFocus() bool             { return k.hasFocus }
+
+// PendingJumpInstance returns the instance title to jump to, if any.
+func (k *KanbanPane) PendingJumpInstance() string {
+	return k.pendingJumpInstance
+}
+
+// ConsumePendingJump returns and clears the pending jump instance.
+func (k *KanbanPane) ConsumePendingJump() string {
+	title := k.pendingJumpInstance
+	k.pendingJumpInstance = ""
+	return title
+}
 
 func (k *KanbanPane) SetBoard(board *task.Board) {
 	k.board = board
@@ -116,6 +130,11 @@ func (k *KanbanPane) HandleKeyPress(msg tea.KeyMsg) bool {
 			return true
 		case "c":
 			k.clearDone()
+			return true
+		case "o":
+			if t := k.getTaskAtFlat(k.selectedIdx); t != nil && t.InstanceTitle != "" {
+				k.pendingJumpInstance = t.InstanceTitle
+			}
 			return true
 		}
 	}
@@ -374,6 +393,7 @@ var (
 	kanbanSelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
 	kanbanNormalStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
 	kanbanDimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
+	kanbanLinkStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
 	kanbanHintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
 	kanbanEditStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF79C6"))
 )
@@ -443,16 +463,36 @@ func (k *KanbanPane) String() string {
 			continue
 		}
 
+		linkSuffix := ""
+		if t.InstanceTitle != "" {
+			suffix := " ⚡ " + t.InstanceTitle
+			maxTitle := contentWidth - 6 - len(suffix)
+			if maxTitle > 0 && len(t.Title) > maxTitle {
+				linkSuffix = suffix
+			} else if maxTitle > 0 {
+				linkSuffix = suffix
+			}
+		}
+
 		if k.editing && isSelected {
 			b.WriteString(kanbanEditStyle.Render(" > " + k.editBuffer + "_"))
 		} else if isSelected && k.carrying {
 			b.WriteString(kanbanSelectedStyle.Render(" > (drop here)"))
 		} else if isSelected {
 			b.WriteString(kanbanSelectedStyle.Render(" > " + t.Title))
+			if linkSuffix != "" {
+				b.WriteString(kanbanLinkStyle.Render(linkSuffix))
+			}
 		} else if fi.column == "done" {
 			b.WriteString(kanbanDimStyle.Render("   " + t.Title))
+			if linkSuffix != "" {
+				b.WriteString(kanbanLinkStyle.Render(linkSuffix))
+			}
 		} else {
 			b.WriteString(kanbanNormalStyle.Render("   " + t.Title))
+			if linkSuffix != "" {
+				b.WriteString(kanbanLinkStyle.Render(linkSuffix))
+			}
 		}
 		b.WriteString("\n")
 	}
@@ -482,6 +522,6 @@ func (k *KanbanPane) writeHints(b *strings.Builder) {
 	} else if k.carrying {
 		b.WriteString(kanbanHintStyle.Render("m drop here | j/k position | h/l column | esc cancel"))
 	} else {
-		b.WriteString(kanbanHintStyle.Render("j/k navigate | h/l column | n add | m move | d del | c clear done"))
+		b.WriteString(kanbanHintStyle.Render("j/k navigate | h/l column | n add | m move | d del | o open session | c clear done"))
 	}
 }

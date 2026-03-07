@@ -201,6 +201,17 @@ func (s *Sidebar) ToggleSection() {
 	s.rebuildVisibleItems()
 }
 
+// ExpandInstancesSection ensures the Instances section is expanded.
+func (s *Sidebar) ExpandInstancesSection() {
+	for i, sec := range s.sections {
+		if sec.Kind == SectionInstances {
+			s.sections[i].Expanded = true
+			break
+		}
+	}
+	s.rebuildVisibleItems()
+}
+
 // ExpandSection expands the section of the current selection.
 func (s *Sidebar) ExpandSection() {
 	sel := s.GetSelection()
