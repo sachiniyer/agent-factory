@@ -94,8 +94,8 @@ func TestContentPaneRender(t *testing.T) {
 	rendered = cp.String()
 	assert.NotEmpty(t, rendered)
 
-	// Todos mode
+	// Todos mode (kanban board)
 	cp.SetMode(ContentModeTodos)
 	rendered = cp.String()
-	assert.Contains(t, rendered, "Tasks")
+	assert.Contains(t, rendered, "Board")
 }

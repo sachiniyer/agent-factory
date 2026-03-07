@@ -74,7 +74,7 @@ func NewSidebar(spin *spinner.Model, autoYes bool) *Sidebar {
 		sections: []SidebarSection{
 			{Kind: SectionInstances, Title: "Instances", Expanded: true},
 			{Kind: SectionSchedules, Title: "Schedules", Expanded: false},
-			{Kind: SectionTodos, Title: "Todos", Expanded: false},
+			{Kind: SectionTodos, Title: "Board", Expanded: false},
 			{Kind: SectionHooks, Title: "Hooks", Expanded: false},
 			{Kind: SectionMicroClaw, Title: "MicroClaw", Expanded: false},
 		},
@@ -429,9 +429,9 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 		arrow = "  " // no expand arrow for leaf sections
 	case SectionTodos:
 		if s.taskCount > 0 {
-			label = fmt.Sprintf("Todos (%d)", s.taskCount)
+			label = fmt.Sprintf("Board (%d)", s.taskCount)
 		} else {
-			label = "Todos"
+			label = "Board"
 		}
 		arrow = "  " // no expand arrow for leaf sections
 	case SectionHooks:

@@ -527,7 +527,10 @@ var tasksListCmd = &cobra.Command{
 	},
 }
 
-var taskAddTitleFlag string
+var (
+	taskAddTitleFlag  string
+	taskAddStatusFlag string
+)
 
 var tasksAddCmd = &cobra.Command{
 	Use:   "add",
@@ -541,7 +544,12 @@ var tasksAddCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("--repo is required: %w", err))
 		}
 
-		t, err := task.AddTaskForRepo(repo, taskAddTitleFlag)
+		status := taskAddStatusFlag
+		if status == "" {
+			status = "backlog"
+		}
+
+		t, err := task.AddTaskForRepoWithStatus(repo, taskAddTitleFlag, status)
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to add task: %w", err))
 		}
@@ -589,6 +597,65 @@ var tasksRemoveCmd = &cobra.Command{
 	},
 }
 
+var tasksMoveStatusFlag string
+
+var tasksMoveCmd = &cobra.Command{
+	Use:   "move <id>",
+	Short: "Move a task to a different column",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		repo, err := resolveRepo()
+		if err != nil {
+			return jsonError(fmt.Errorf("--repo is required: %w", err))
+		}
+
+		if tasksMoveStatusFlag == "" {
+			return jsonError(fmt.Errorf("--status is required"))
+		}
+
+		if err := task.MoveTaskForRepo(repo, args[0], tasksMoveStatusFlag); err != nil {
+			return jsonError(fmt.Errorf("failed to move task: %w", err))
+		}
+		return jsonOut(map[string]bool{"ok": true})
+	},
+}
+
+var tasksBoardCmd = &cobra.Command{
+	Use:   "board",
+	Short: "Get kanban board (columns + tasks grouped by status)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		repo, err := resolveRepo()
+		if err != nil {
+			return jsonError(fmt.Errorf("--repo is required: %w", err))
+		}
+
+		board, err := task.LoadBoardForRepo(repo)
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to load board: %w", err))
+		}
+
+		// Group tasks by column for output
+		grouped := make(map[string][]task.Task)
+		for _, col := range board.Columns {
+			grouped[col] = board.GetTasksByStatus(col)
+			if grouped[col] == nil {
+				grouped[col] = []task.Task{}
+			}
+		}
+
+		return jsonOut(map[string]any{
+			"columns": board.Columns,
+			"tasks":   grouped,
+		})
+	},
+}
+
 func init() {
 	// Persistent flags on ApiCmd (available to all subcommands)
 	ApiCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to git repository")
@@ -621,12 +688,18 @@ func init() {
 
 	// Tasks
 	tasksAddCmd.Flags().StringVar(&taskAddTitleFlag, "title", "", "Task title (required)")
+	tasksAddCmd.Flags().StringVar(&taskAddStatusFlag, "status", "backlog", "Task status column (backlog, in_progress, review, done)")
 	tasksAddCmd.MarkFlagRequired("title")
+
+	tasksMoveCmd.Flags().StringVar(&tasksMoveStatusFlag, "status", "", "Target column (backlog, in_progress, review, done)")
+	tasksMoveCmd.MarkFlagRequired("status")
 
 	tasksCmd.AddCommand(tasksListCmd)
 	tasksCmd.AddCommand(tasksAddCmd)
 	tasksCmd.AddCommand(tasksToggleCmd)
 	tasksCmd.AddCommand(tasksRemoveCmd)
+	tasksCmd.AddCommand(tasksMoveCmd)
+	tasksCmd.AddCommand(tasksBoardCmd)
 
 	// Register subcommand groups
 	ApiCmd.AddCommand(sessionsCmd)

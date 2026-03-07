@@ -20,11 +20,15 @@ Session commands:
   cs api sessions preview <title>               View another session's terminal output
   cs api sessions diff <title>                  Get diff stats for a session
 
-Task commands:
-  cs api tasks list                             List tasks for this repo
-  cs api tasks add --title "description"        Add a new task
-  cs api tasks toggle <id>                      Mark a task as done/not done
-  cs api tasks remove <id>                      Remove a task`
+Task commands (kanban board):
+  cs api tasks board                               Get kanban board (columns + tasks)
+  cs api tasks list                                List all tasks (flat)
+  cs api tasks add --title "description"           Add task to backlog
+  cs api tasks add --title "desc" --status review  Add task to specific column
+  cs api tasks move <id> --status in_progress      Move task between columns
+  cs api tasks toggle <id>                         Mark a task as done/not done
+  cs api tasks remove <id>                         Remove a task
+Available columns: backlog, in_progress, review, done`
 
 // buildSystemPrompt returns the system prompt text for a session.
 func buildSystemPrompt(sessionTitle string) string {

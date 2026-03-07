@@ -247,13 +247,13 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		h.sidebar.SetSchedules(schedules)
 	}
 
-	// Load task count for sidebar display
-	tasks, err := task.LoadTasks()
+	// Load board for sidebar display and kanban pane
+	board, err := task.LoadBoard()
 	if err != nil {
-		log.WarningLog.Printf("Failed to load tasks: %v", err)
+		log.WarningLog.Printf("Failed to load board: %v", err)
 	} else {
-		h.sidebar.SetTaskCount(len(tasks))
-		h.contentPane.TaskPane().SetTasks(tasks)
+		h.sidebar.SetTaskCount(board.TaskCount())
+		h.contentPane.KanbanPane().SetBoard(board)
 	}
 
 	// Load schedules into schedule pane
@@ -445,12 +445,12 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 
 // saveContentPaneState persists any changes from the task/schedule panes.
 func (m *home) saveContentPaneState() {
-	tp := m.contentPane.TaskPane()
-	if tp.IsDirty() {
-		if err := task.SaveTasks(tp.GetTasks()); err != nil {
-			log.ErrorLog.Printf("failed to save tasks: %v", err)
+	kp := m.contentPane.KanbanPane()
+	if kp.IsDirty() {
+		if err := task.SaveBoard(kp.GetBoard()); err != nil {
+			log.ErrorLog.Printf("failed to save board: %v", err)
 		}
-		m.sidebar.SetTaskCount(len(tp.GetTasks()))
+		m.sidebar.SetTaskCount(kp.GetBoard().TaskCount())
 	}
 
 	hp := m.contentPane.HooksPane()
