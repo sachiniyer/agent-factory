@@ -56,6 +56,8 @@ const (
 	stateSelectWorktree
 	// stateSearch is the state when the user is searching sessions.
 	stateSearch
+	// stateLinkInstance is the state when the user is selecting an instance to link to a task.
+	stateLinkInstance
 )
 
 type home struct {
@@ -114,6 +116,8 @@ type home struct {
 	selectedWorktree *git.WorktreeInfo
 	// availableWorktrees stores the worktrees shown in the selection overlay
 	availableWorktrees []git.WorktreeInfo
+	// linkingTaskID is the task ID being linked to an instance
+	linkingTaskID string
 
 	// microclawBridge is the bridge to the microclaw instance
 	microclawBridge *microclaw.Bridge
@@ -625,7 +629,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree || m.state == stateLinkInstance {
 		return nil, false
 	}
 	// Don't highlight when content pane has focus
@@ -812,6 +816,33 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
+	// Handle link-instance selection state
+	if m.state == stateLinkInstance {
+		shouldClose := m.selectionOverlay.HandleKeyPress(msg)
+		if shouldClose {
+			if m.selectionOverlay.IsSubmitted() {
+				idx := m.selectionOverlay.GetSelectedIndex()
+				instances := m.sidebar.GetInstances()
+				if idx >= 0 && idx < len(instances) {
+					inst := instances[idx]
+					kp := m.contentPane.KanbanPane()
+					if board := kp.GetBoard(); board != nil {
+						board.LinkTask(m.linkingTaskID, inst.Title)
+						kp.SetBoard(board) // refresh flat list
+						if err := task.SaveBoard(board); err != nil {
+							log.ErrorLog.Printf("failed to save board: %v", err)
+						}
+					}
+				}
+			}
+			m.selectionOverlay = nil
+			m.linkingTaskID = ""
+			m.state = stateDefault
+			return m, nil
+		}
+		return m, nil
+	}
+
 	// Handle confirmation state
 	if m.state == stateConfirm {
 		shouldClose := m.confirmationOverlay.HandleKeyPress(msg)
@@ -849,7 +880,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			if !m.contentPane.HasFocus() {
 				m.saveContentPaneState()
 			}
-			// Check for pending jump/attach/status from kanban
+			// Check for pending jump/attach/link/status from kanban
 			kp := m.contentPane.KanbanPane()
 			if msg := kp.ConsumeStatusMsg(); msg != "" {
 				return m, m.handleError(fmt.Errorf("%s", msg))
@@ -859,6 +890,9 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			}
 			if title := kp.ConsumePendingAttach(); title != "" {
 				return m.attachToInstance(title)
+			}
+			if taskID := kp.ConsumePendingLink(); taskID != "" {
+				return m, m.showLinkInstanceOverlay(taskID)
 			}
 			// Check if a new schedule was submitted via the inline form
 			sp := m.contentPane.SchedulePane()
@@ -1287,6 +1321,25 @@ func (m *home) attachToInstance(title string) (tea.Model, tea.Cmd) {
 	return m, m.handleError(fmt.Errorf("instance %q not found", title))
 }
 
+// showLinkInstanceOverlay shows a selection overlay to pick an instance to link to a task.
+func (m *home) showLinkInstanceOverlay(taskID string) tea.Cmd {
+	instances := m.sidebar.GetInstances()
+	if len(instances) == 0 {
+		return m.handleError(fmt.Errorf("no sessions available to link"))
+	}
+
+	items := make([]string, len(instances))
+	for i, inst := range instances {
+		items[i] = inst.Title
+	}
+
+	m.linkingTaskID = taskID
+	m.selectionOverlay = overlay.NewSelectionOverlay("Link task to session", items)
+	m.selectionOverlay.SetWidth(60)
+	m.state = stateLinkInstance
+	return nil
+}
+
 // navigateToSection moves the sidebar selection to the header of the given section.
 func (m *home) navigateToSection(kind ui.SidebarSectionKind) {
 	sel := m.sidebar.GetSelection()
@@ -1473,6 +1526,11 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("search overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.searchOverlay.Render(), mainView, true)
+	} else if m.state == stateLinkInstance {
+		if m.selectionOverlay == nil {
+			log.ErrorLog.Printf("selection overlay is nil")
+		}
+		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
 	}
 
 	return mainView

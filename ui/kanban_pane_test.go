@@ -208,13 +208,15 @@ func TestKanbanPaneAttachToInstance(t *testing.T) {
 func TestKanbanPaneAttachNoLink(t *testing.T) {
 	kp := NewKanbanPane()
 	board := &task.Board{Columns: task.DefaultColumns}
-	board.AddTask("Unlinked task", "backlog")
+	tk := board.AddTask("Unlinked task", "backlog")
 	kp.SetBoard(board)
 	kp.SetFocus(true)
 
 	kp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	kp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	assert.Empty(t, kp.PendingAttachInstance())
+	// Should request link instead
+	assert.Equal(t, tk.ID, kp.ConsumePendingLink())
 }
 
 func TestKanbanPaneRenderLinkedTask(t *testing.T) {

@@ -36,6 +36,7 @@ type KanbanPane struct {
 
 	pendingJumpInstance   string
 	pendingAttachInstance string
+	pendingLinkTaskID     string
 	statusMsg             string
 }
 
@@ -68,6 +69,13 @@ func (k *KanbanPane) ConsumePendingAttach() string {
 	title := k.pendingAttachInstance
 	k.pendingAttachInstance = ""
 	return title
+}
+
+// ConsumePendingLink returns and clears the pending link task ID.
+func (k *KanbanPane) ConsumePendingLink() string {
+	id := k.pendingLinkTaskID
+	k.pendingLinkTaskID = ""
+	return id
 }
 
 // ConsumeStatusMsg returns and clears any status message (e.g. error feedback).
@@ -166,7 +174,7 @@ func (k *KanbanPane) HandleKeyPress(msg tea.KeyMsg) bool {
 				if t.InstanceTitle != "" {
 					k.pendingAttachInstance = t.InstanceTitle
 				} else {
-					k.statusMsg = "no linked session — use 'cs api tasks link' to link"
+					k.pendingLinkTaskID = t.ID
 				}
 			}
 			return true
@@ -556,6 +564,6 @@ func (k *KanbanPane) writeHints(b *strings.Builder) {
 	} else if k.carrying {
 		b.WriteString(kanbanHintStyle.Render("m drop here | j/k position | h/l column | esc cancel"))
 	} else {
-		b.WriteString(kanbanHintStyle.Render("j/k navigate | h/l column | n add | m move | d del | o open | a attach | c clear done"))
+		b.WriteString(kanbanHintStyle.Render("j/k navigate | h/l column | n add | m move | d del | o open | a link/attach | c clear done"))
 	}
 }

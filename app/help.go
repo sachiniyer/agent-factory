@@ -62,7 +62,7 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("m")+descStyle.Render("         - Grab/drop task to move between columns"),
 		keyStyle.Render("d")+descStyle.Render("         - Delete task (when focused)"),
 		keyStyle.Render("o")+descStyle.Render("         - Jump to linked instance"),
-		keyStyle.Render("a")+descStyle.Render("         - Attach to linked instance"),
+		keyStyle.Render("a")+descStyle.Render("         - Link session / attach to linked session"),
 		"",
 		headerStyle.Render("Configuration:"),
 		keyStyle.Render("H")+descStyle.Render("         - Navigate to worktree hooks"),
