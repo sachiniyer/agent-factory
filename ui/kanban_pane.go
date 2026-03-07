@@ -36,6 +36,7 @@ type KanbanPane struct {
 
 	pendingJumpInstance   string
 	pendingAttachInstance string
+	statusMsg             string
 }
 
 func NewKanbanPane() *KanbanPane { return &KanbanPane{} }
@@ -67,6 +68,13 @@ func (k *KanbanPane) ConsumePendingAttach() string {
 	title := k.pendingAttachInstance
 	k.pendingAttachInstance = ""
 	return title
+}
+
+// ConsumeStatusMsg returns and clears any status message (e.g. error feedback).
+func (k *KanbanPane) ConsumeStatusMsg() string {
+	msg := k.statusMsg
+	k.statusMsg = ""
+	return msg
 }
 
 func (k *KanbanPane) SetBoard(board *task.Board) {
@@ -145,13 +153,21 @@ func (k *KanbanPane) HandleKeyPress(msg tea.KeyMsg) bool {
 			k.clearDone()
 			return true
 		case "o":
-			if t := k.getTaskAtFlat(k.selectedIdx); t != nil && t.InstanceTitle != "" {
-				k.pendingJumpInstance = t.InstanceTitle
+			if t := k.getTaskAtFlat(k.selectedIdx); t != nil {
+				if t.InstanceTitle != "" {
+					k.pendingJumpInstance = t.InstanceTitle
+				} else {
+					k.statusMsg = "no linked session — use 'cs api tasks link' to link"
+				}
 			}
 			return true
 		case "a":
-			if t := k.getTaskAtFlat(k.selectedIdx); t != nil && t.InstanceTitle != "" {
-				k.pendingAttachInstance = t.InstanceTitle
+			if t := k.getTaskAtFlat(k.selectedIdx); t != nil {
+				if t.InstanceTitle != "" {
+					k.pendingAttachInstance = t.InstanceTitle
+				} else {
+					k.statusMsg = "no linked session — use 'cs api tasks link' to link"
+				}
 			}
 			return true
 		}

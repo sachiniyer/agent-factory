@@ -849,8 +849,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			if !m.contentPane.HasFocus() {
 				m.saveContentPaneState()
 			}
-			// Check for pending jump/attach-to-instance from kanban
+			// Check for pending jump/attach/status from kanban
 			kp := m.contentPane.KanbanPane()
+			if msg := kp.ConsumeStatusMsg(); msg != "" {
+				return m, m.handleError(fmt.Errorf("%s", msg))
+			}
 			if title := kp.ConsumePendingJump(); title != "" {
 				return m, m.jumpToInstance(title)
 			}
