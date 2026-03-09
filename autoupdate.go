@@ -47,9 +47,10 @@ func autoUpdate() error {
 		return fmt.Errorf("failed to fetch latest release: %w", err)
 	}
 
-	// Strip leading "v" from tag for comparison
+	// Strip leading "v" from tags for comparison
 	latestVersion := strings.TrimPrefix(latestTag, "v")
-	if !isNewer(latestVersion, version) {
+	currentVersion := strings.TrimPrefix(version, "v")
+	if !isNewer(latestVersion, currentVersion) {
 		recordCheck()
 		return nil
 	}

@@ -40,7 +40,9 @@ jobs:
         fi
         ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
         mkdir -p dist
-        go build -v -ldflags "-X main.version=${{ github.ref_name }}" -o dist/$BINARY_NAME
+        VERSION="${{ github.ref_name }}"
+        VERSION="${VERSION#v}"
+        go build -v -ldflags "-X main.version=${VERSION}" -o dist/$BINARY_NAME
         cd dist
         if [ "${{ matrix.goos }}" = "windows" ]; then
           zip ../${ARCHIVE_NAME}.zip $BINARY_NAME
