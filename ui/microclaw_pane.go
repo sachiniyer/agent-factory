@@ -101,7 +101,7 @@ func (p *MicroClawPane) Refresh() {
 	p.content = content
 }
 
-// ensureSessionLocked creates the tmux session running `cs microclaw` if it doesn't exist.
+// ensureSessionLocked creates the tmux session running `af microclaw` if it doesn't exist.
 // Caller must hold p.mu.
 func (p *MicroClawPane) ensureSessionLocked() error {
 	if p.tmuxSession != nil && p.tmuxSession.DoesSessionExist() {

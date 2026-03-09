@@ -293,7 +293,7 @@ func (b *Bridge) SendMessage(chatID int64, text string, meta *MessageMeta) error
 			parts = append(parts, fmt.Sprintf("program: %s", meta.Program))
 		}
 		if len(parts) > 0 {
-			content = fmt.Sprintf("[%s]\n[tools: use `cs api` commands directly for session/task management]\n%s",
+			content = fmt.Sprintf("[%s]\n[tools: use `af api` commands directly for session/task management]\n%s",
 				strings.Join(parts, " | "), text)
 		}
 	}
@@ -378,7 +378,7 @@ func (b *Bridge) sendVioDB(chatID int64, content string) error {
 	}
 	defer db.Close()
 
-	msgID := fmt.Sprintf("cs-bridge-%d-%s", time.Now().UnixMilli(), randomString(6))
+	msgID := fmt.Sprintf("af-bridge-%d-%s", time.Now().UnixMilli(), randomString(6))
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	_, err = db.Exec(

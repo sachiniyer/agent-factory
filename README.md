@@ -22,16 +22,16 @@ cd agent-factory
 ./dev-install.sh
 
 # Or build manually
-go build -o cs .
+go build -o af .
 ```
 
-The `dev-install.sh` script builds the `cs` binary, installs it to `~/.local/bin/`, and sets up [MicroClaw](https://microclaw.ai) for multi-agent orchestration.
+The `dev-install.sh` script builds the `af` binary, installs it to `~/.local/bin/`, and sets up [MicroClaw](https://microclaw.ai) for multi-agent orchestration.
 
 ### Usage
 
 ```bash
 cd your-project    # must be a git repo
-cs                 # launch the TUI
+af                 # launch the TUI
 ```
 
 Press `?` for the full keybindings help screen.
@@ -104,26 +104,26 @@ All data (sessions, tasks, schedules) is scoped to the current git repository. T
 
 ## Programmatic API
 
-The `cs api` subcommand provides a JSON CLI for driving Agent Factory without the TUI:
+The `af api` subcommand provides a JSON CLI for driving Agent Factory without the TUI:
 
 ```bash
 # Sessions
-cs api sessions list
-cs api sessions create --name my-task --prompt "fix the login bug"
-cs api sessions preview my-task
-cs api sessions diff my-task
-cs api sessions kill my-task
+af api sessions list
+af api sessions create --name my-task --prompt "fix the login bug"
+af api sessions preview my-task
+af api sessions diff my-task
+af api sessions kill my-task
 
 # Kanban board
-cs api tasks board
-cs api tasks add --title "fix auth" --status in_progress
-cs api tasks move <id> --status done
-cs api tasks link <id> --instance my-task
+af api tasks board
+af api tasks add --title "fix auth" --status in_progress
+af api tasks move <id> --status done
+af api tasks link <id> --instance my-task
 
 # Schedules
-cs api schedules list
-cs api schedules add --name "Daily triage" --prompt "triage new issues" --cron "0 9 * * *"
-cs api schedules remove <id>
+af api schedules list
+af api schedules add --name "Daily triage" --prompt "triage new issues" --cron "0 9 * * *"
+af api schedules remove <id>
 ```
 
 All commands output JSON to stdout and errors to stderr. Use `--repo <path>` or `--repo-id <id>` to target a specific repository.
@@ -134,7 +134,7 @@ All commands output JSON to stdout and errors to stderr. Use `--repo <path>` or 
 
 - **MicroClaw tab** in the TUI shows chat history (press `Tab` to cycle)
 - **Send messages** with `m` to have MicroClaw orchestrate your sessions
-- MicroClaw agents use `cs api` commands directly for session/task management
+- MicroClaw agents use `af api` commands directly for session/task management
 
 The `dev-install.sh` script sets up MicroClaw automatically. Configure your API key in `~/.microclaw/microclaw.config.yaml` before starting.
 
@@ -171,7 +171,7 @@ Configuration lives at `~/.agent-factory/config.json`:
 Override the program per-session with `-p`:
 
 ```bash
-cs -p "aider --model ollama_chat/gemma3:1b"
+af -p "aider --model ollama_chat/gemma3:1b"
 ```
 
 ## Upstream

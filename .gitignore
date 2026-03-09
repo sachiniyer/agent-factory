@@ -10,6 +10,7 @@
 
 # Build artifacts
 agent-factory
+af
 cs
 *.exe
 *.dll

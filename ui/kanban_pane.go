@@ -172,7 +172,7 @@ func (k *KanbanPane) HandleKeyPress(msg tea.KeyMsg) bool {
 				if t.InstanceTitle != "" {
 					k.pendingJumpInstance = t.InstanceTitle
 				} else {
-					k.statusMsg = "no linked session — use 'cs api tasks link' to link"
+					k.statusMsg = "no linked session — use 'af api tasks link' to link"
 				}
 			}
 			return true

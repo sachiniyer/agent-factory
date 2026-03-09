@@ -80,7 +80,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 
 	if s.repoID != "" {
 		// TUI mode: merge with on-disk state to preserve externally-created sessions
-		// (e.g. sessions created by `cs api sessions create` while the TUI was running)
+		// (e.g. sessions created by `af api sessions create` while the TUI was running)
 		merged, err := s.mergeWithDisk(data)
 		if err != nil {
 			return fmt.Errorf("failed to merge instances: %w", err)

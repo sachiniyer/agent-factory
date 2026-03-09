@@ -11,10 +11,10 @@ func TestBuildSystemPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "my-task") {
 		t.Error("expected prompt to contain session title")
 	}
-	if !strings.Contains(prompt, "cs api sessions list") {
+	if !strings.Contains(prompt, "af api sessions list") {
 		t.Error("expected prompt to contain session list command")
 	}
-	if !strings.Contains(prompt, "cs api tasks toggle") {
+	if !strings.Contains(prompt, "af api tasks toggle") {
 		t.Error("expected prompt to contain task toggle command")
 	}
 }

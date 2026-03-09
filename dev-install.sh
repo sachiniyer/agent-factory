@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Build and install cs from local source, and optionally set up microclaw.
+# Build and install af from local source, and optionally set up microclaw.
 # Usage: ./dev-install.sh
 
 set -e
 
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
-BINARY_NAME="cs"
+BINARY_NAME="af"
 
-echo "Building cs from source..."
+echo "Building af from source..."
 go build -o "$BINARY_NAME" .
 
 echo "Installing to ${BIN_DIR}/${BINARY_NAME}..."
@@ -112,5 +112,5 @@ if [ -f "$MICROCLAW_BIN" ]; then
     echo "MicroClaw quick start:"
     echo "  1. Edit ${MICROCLAW_CONFIG} and set your API key"
     echo "  2. Start microclaw: microclaw start"
-    echo "  3. Use the TUI: cs microclaw"
+    echo "  3. Use the TUI: af microclaw"
 fi

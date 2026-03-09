@@ -7,37 +7,37 @@ import (
 
 // systemPromptTemplate is the template for the system prompt injected into AI sessions.
 // It tells the AI about its Agent Factory context and available CLI commands.
-const systemPromptTemplate = `You are running inside Agent Factory (cs), a terminal multiplexer for AI coding agents.
+const systemPromptTemplate = `You are running inside Agent Factory (af), a terminal multiplexer for AI coding agents.
 
 Your session name: %s
 
-You can manage sessions and tasks using the "cs" CLI:
+You can manage sessions and tasks using the "af" CLI:
 
 Session commands:
-  cs api sessions list                          List all sessions
-  cs api sessions kill <title>                  Delete/kill a session
-  cs api sessions send-prompt <title> <prompt>  Send a prompt to another session
-  cs api sessions preview <title>               View another session's terminal output
-  cs api sessions diff <title>                  Get diff stats for a session
+  af api sessions list                          List all sessions
+  af api sessions kill <title>                  Delete/kill a session
+  af api sessions send-prompt <title> <prompt>  Send a prompt to another session
+  af api sessions preview <title>               View another session's terminal output
+  af api sessions diff <title>                  Get diff stats for a session
 
 Task commands (kanban board):
-  cs api tasks board                                    Get kanban board (columns + tasks)
-  cs api tasks list                                     List all tasks (flat)
-  cs api tasks add --title "description"                Add task to backlog
-  cs api tasks add --title "desc" --status in_progress  Add task to specific column
-  cs api tasks move <id> --status in_progress           Move task between columns
-  cs api tasks link <id> --instance "my-session"        Link yourself to a task
-  cs api tasks unlink <id>                              Remove linkage
-  cs api tasks toggle <id>                              Mark a task as done/not done
-  cs api tasks remove <id>                              Remove a task
+  af api tasks board                                    Get kanban board (columns + tasks)
+  af api tasks list                                     List all tasks (flat)
+  af api tasks add --title "description"                Add task to backlog
+  af api tasks add --title "desc" --status in_progress  Add task to specific column
+  af api tasks move <id> --status in_progress           Move task between columns
+  af api tasks link <id> --instance "my-session"        Link yourself to a task
+  af api tasks unlink <id>                              Remove linkage
+  af api tasks toggle <id>                              Mark a task as done/not done
+  af api tasks remove <id>                              Remove a task
 Available columns: backlog, in_progress, review, done
 
 Self-assignment workflow:
-  1. cs api tasks board                              # See available tasks
-  2. cs api tasks move <id> --status in_progress     # Claim a task
-  3. cs api tasks link <id> --instance "YOUR_SESSION" # Link yourself
+  1. af api tasks board                              # See available tasks
+  2. af api tasks move <id> --status in_progress     # Claim a task
+  3. af api tasks link <id> --instance "YOUR_SESSION" # Link yourself
   4. ... do the work ...
-  5. cs api tasks move <id> --status done             # Mark complete`
+  5. af api tasks move <id> --status done             # Mark complete`
 
 // buildSystemPrompt returns the system prompt text for a session.
 func buildSystemPrompt(sessionTitle string) string {

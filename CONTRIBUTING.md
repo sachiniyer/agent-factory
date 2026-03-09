@@ -7,7 +7,7 @@ Thank you for your interest in contributing!
 ```bash
 git clone https://github.com/sachiniyer/agent-factory.git
 cd agent-factory
-go build -o cs .
+go build -o af .
 ```
 
 ### Prerequisites
@@ -28,7 +28,7 @@ go test ./...
 ./dev-install.sh
 ```
 
-This builds the `cs` binary and installs it to `~/.local/bin/`. Override the install directory:
+This builds the `af` binary and installs it to `~/.local/bin/`. Override the install directory:
 
 ```bash
 BIN_DIR=/usr/local/bin ./dev-install.sh

@@ -26,7 +26,7 @@ var (
 	autoYesFlag bool
 	daemonFlag  bool
 	rootCmd     = &cobra.Command{
-		Use:   "cs",
+		Use:   "af",
 		Short: "Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, and Amp.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
