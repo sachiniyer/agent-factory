@@ -79,6 +79,9 @@ var (
 				log.ErrorLog.Printf("failed to stop daemon: %v", err)
 			}
 
+			// Check for updates in the background (non-blocking).
+			autoUpdateInBackground()
+
 			return app.Run(ctx, program, autoYes, repo.ID)
 		},
 	}
