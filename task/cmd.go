@@ -133,7 +133,7 @@ var runCmd = &cobra.Command{
 func init() {
 	addCmd.Flags().StringVar(&nameFlag, "name", "", "Task name")
 	addCmd.Flags().StringVar(&promptFlag, "prompt", "", "Prompt to send to the AI agent (required)")
-	addCmd.Flags().StringVar(&cronFlag, "cron", "", "Cron expression for scheduling (required)")
+	addCmd.Flags().StringVar(&cronFlag, "cron", "", "Cron expression (required)")
 	addCmd.Flags().StringVar(&pathFlag, "path", ".", "Project path (defaults to current directory)")
 	addCmd.Flags().StringVar(&programFlag, "program", "", "Program to run (defaults to config default)")
 	addCmd.MarkFlagRequired("prompt")

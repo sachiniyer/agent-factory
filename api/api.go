@@ -133,7 +133,7 @@ func init() {
 	sessionsCmd.AddCommand(sessionsKillCmd)
 
 	// Tasks
-	tasksAddCmd.Flags().StringVar(&taskAddNameFlag, "name", "", "Schedule name (required)")
+	tasksAddCmd.Flags().StringVar(&taskAddNameFlag, "name", "", "Task name (required)")
 	tasksAddCmd.Flags().StringVar(&taskAddPromptFlag, "prompt", "", "Prompt to send (required)")
 	tasksAddCmd.Flags().StringVar(&taskAddCronFlag, "cron", "", "Cron expression (required)")
 	tasksAddCmd.Flags().StringVar(&taskAddProgramFlag, "program", "", "Program to run (defaults to config default)")

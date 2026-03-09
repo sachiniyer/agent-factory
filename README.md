@@ -2,7 +2,7 @@
 
 A terminal UI that manages multiple AI coding agents (Claude Code, Aider, Codex, Amp) in separate git worktrees. Each agent runs in its own isolated workspace with full git integration, a kanban board for task tracking, and a programmatic API for orchestration.
 
-Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, kanban board, programmatic API, scheduled tasks, and [MicroClaw](https://microclaw.ai) integration.
+Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, kanban board, programmatic API, automated tasks, and [MicroClaw](https://microclaw.ai) integration.
 
 ## Quick Start
 
@@ -67,15 +67,15 @@ A per-repo kanban board with four columns: Backlog, In Progress, Review, Done. T
 | `a` | Link/attach session to task |
 | `c` | Clear all done tasks |
 
-### Scheduled Tasks
+### Tasks
 
-Create recurring scheduled tasks with cron expressions. Schedules are backed by systemd timers (Linux).
+Create recurring automated tasks with cron expressions. Tasks are backed by systemd timers (Linux).
 
 | Key | Action |
 |-----|--------|
-| `s` | Create a new schedule |
-| `S` | List scheduled tasks |
-| `r` | Run selected schedule now |
+| `s` | Create a new task |
+| `S` | List tasks |
+| `r` | Run selected task now |
 
 ### GitHub PR Integration
 
@@ -96,7 +96,7 @@ Per-repo shell commands that run when a new worktree is created (e.g. `npm insta
 
 ## Per-Repo Scoping
 
-All data (sessions, tasks, schedules) is scoped to the current git repository. The TUI shows only what's relevant to the repo you're in.
+All data (sessions, board, tasks) is scoped to the current git repository. The TUI shows only what's relevant to the repo you're in.
 
 - Sessions stored at `~/.agent-factory/instances/<repoID>/instances.json`
 - Tasks stored at `~/.agent-factory/tasks/<repoID>/board.json`
@@ -115,15 +115,15 @@ af api sessions diff my-task
 af api sessions kill my-task
 
 # Kanban board
-af api tasks board
-af api tasks add --title "fix auth" --status in_progress
-af api tasks move <id> --status done
-af api tasks link <id> --instance my-task
+af api board view
+af api board add --title "fix auth" --status in_progress
+af api board move <id> --status done
+af api board link <id> --instance my-task
 
-# Schedules
-af api schedules list
-af api schedules add --name "Daily triage" --prompt "triage new issues" --cron "0 9 * * *"
-af api schedules remove <id>
+# Tasks
+af api tasks list
+af api tasks add --name "Daily triage" --prompt "triage new issues" --cron "0 9 * * *"
+af api tasks remove <id>
 ```
 
 All commands output JSON to stdout and errors to stderr. Use `--repo <path>` or `--repo-id <id>` to target a specific repository.
