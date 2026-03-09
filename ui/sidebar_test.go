@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 	"testing"
 	"time"
 

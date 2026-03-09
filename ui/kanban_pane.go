@@ -43,7 +43,7 @@ type KanbanPane struct {
 func NewKanbanPane() *KanbanPane { return &KanbanPane{} }
 
 func (k *KanbanPane) SetSize(width, height int) { k.width = width; k.height = height }
-func (k *KanbanPane) GetBoard() *board.Board     { return k.board }
+func (k *KanbanPane) GetBoard() *board.Board    { return k.board }
 func (k *KanbanPane) IsDirty() bool             { return k.dirty }
 func (k *KanbanPane) HasFocus() bool            { return k.hasFocus }
 
