@@ -15,10 +15,7 @@ import (
 
 const (
 	releaseBaseURL = "https://github.com/sachiniyer/agent-factory/releases"
-	nightlyTag     = "nightly"
 )
-
-var upgradeNightlyFlag bool
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
@@ -31,23 +28,9 @@ var upgradeCmd = &cobra.Command{
 			return fmt.Errorf("af upgrade is not supported on Windows; download manually from %s", releaseBaseURL)
 		}
 
-		tag := "latest"
-		label := "latest release"
-		if upgradeNightlyFlag {
-			tag = nightlyTag
-			label = "nightly"
-		}
+		downloadURL := fmt.Sprintf("%s/latest/download/agent-factory-%s-%s.tar.gz", releaseBaseURL, goos, goarch)
 
-		// Build download URL
-		assetName := fmt.Sprintf("agent-factory-%s-%s-%s.tar.gz", tag, goos, goarch)
-		var downloadURL string
-		if tag == "latest" {
-			downloadURL = fmt.Sprintf("%s/latest/download/agent-factory-%s-%s.tar.gz", releaseBaseURL, goos, goarch)
-		} else {
-			downloadURL = fmt.Sprintf("%s/download/%s/%s", releaseBaseURL, tag, assetName)
-		}
-
-		fmt.Printf("Downloading %s build for %s/%s...\n", label, goos, goarch)
+		fmt.Printf("Downloading latest release for %s/%s...\n", goos, goarch)
 
 		resp, err := http.Get(downloadURL)
 		if err != nil {

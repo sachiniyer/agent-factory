@@ -170,8 +170,6 @@ func init() {
 		panic(err)
 	}
 
-	upgradeCmd.Flags().BoolVar(&upgradeNightlyFlag, "nightly", false, "Upgrade to the latest nightly build instead of stable release")
-
 	rootCmd.AddCommand(debugCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(resetCmd)

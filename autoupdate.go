@@ -32,11 +32,6 @@ func autoUpdateInBackground() {
 }
 
 func autoUpdate() error {
-	// Skip nightly builds — they have non-semver versions like "nightly-20260308-abc1234"
-	if strings.HasPrefix(version, "nightly") {
-		return nil
-	}
-
 	// Throttle: only check once per 24 hours
 	if !shouldCheck() {
 		return nil

@@ -1,0 +1,117 @@
+name: Auto Release
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-bump:
+    name: Check for changes and bump version
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      new_version: ${{ steps.bump.outputs.new_version }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check for new commits since last tag
+      id: check
+      run: |
+        LATEST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
+        if [ -z "$LATEST_TAG" ]; then
+          echo "No tags found, should release"
+          echo "should_release=true" >> $GITHUB_OUTPUT
+        else
+          COMMITS_SINCE=$(git rev-list ${LATEST_TAG}..HEAD --count)
+          if [ "$COMMITS_SINCE" -gt 0 ]; then
+            echo "Found $COMMITS_SINCE new commits since $LATEST_TAG"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "No new commits since $LATEST_TAG"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+        fi
+
+    - name: Bump version
+      id: bump
+      if: steps.check.outputs.should_release == 'true'
+      run: |
+        # Extract current version from main.go
+        CURRENT=$(grep -oP 'version\s+=\s+"\K[^"]+' main.go)
+        echo "Current version: $CURRENT"
+
+        # Split and bump patch
+        IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+        NEW_PATCH=$((PATCH + 1))
+        NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+        echo "New version: $NEW_VERSION"
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+        # Update main.go
+        sed -i "s/version     = \"${CURRENT}\"/version     = \"${NEW_VERSION}\"/" main.go
+
+        # Commit and tag
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add main.go
+        git commit -m "chore: bump version to ${NEW_VERSION}"
+        git tag "v${NEW_VERSION}"
+        git push origin HEAD:master
+        git push origin "v${NEW_VERSION}"
+
+  release:
+    name: Build and Release
+    needs: check-and-bump
+    if: needs.check-and-bump.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: v${{ needs.check-and-bump.outputs.new_version }}
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+        cache: true
+
+    - name: Build
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+      run: |
+        VERSION="${{ needs.check-and-bump.outputs.new_version }}"
+        BINARY_NAME=agent-factory
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          BINARY_NAME=$BINARY_NAME.exe
+        fi
+        ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
+        mkdir -p dist
+        go build -v -ldflags "-X main.version=${VERSION}" -o dist/$BINARY_NAME
+        cd dist
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          zip ../${ARCHIVE_NAME}.zip $BINARY_NAME
+        else
+          tar czf ../${ARCHIVE_NAME}.tar.gz $BINARY_NAME
+        fi
+
+    - name: Upload release assets
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ needs.check-and-bump.outputs.new_version }}
+        files: |
+          *.tar.gz
+          *.zip
