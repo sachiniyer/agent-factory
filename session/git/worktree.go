@@ -2,12 +2,13 @@ package git
 
 import (
 	"fmt"
-	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 func getWorktreeDirectory() (string, error) {
@@ -110,15 +111,22 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		return nil, "", err
 	}
 
-	// Use sanitized branch name for the worktree directory name
-	var worktreePath string
+	// Use sanitized branch name for the worktree directory name.
+	// Only append a numeric suffix if the path already exists (collision).
+	var basePath string
 	if cfg.WorktreeRoot == config.WorktreeRootSibling {
 		repoName := filepath.Base(repoPath)
-		worktreePath = filepath.Join(worktreeDir, repoName+"-"+sessionName)
+		basePath = filepath.Join(worktreeDir, repoName+"-"+sessionName)
 	} else {
-		worktreePath = filepath.Join(worktreeDir, branchName)
+		basePath = filepath.Join(worktreeDir, branchName)
 	}
-	worktreePath = worktreePath + "_" + fmt.Sprintf("%x", time.Now().UnixNano())
+	worktreePath := basePath
+	for i := 2; ; i++ {
+		if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+			break
+		}
+		worktreePath = fmt.Sprintf("%s-%d", basePath, i)
+	}
 
 	return &GitWorktree{
 		repoPath:     repoPath,

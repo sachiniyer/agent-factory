@@ -552,7 +552,10 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 		return m.handleError(fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 	}
 
-	title := fmt.Sprintf("task-%s-%s", tsk.ID, time.Now().Format("20060102-150405"))
+	title := tsk.Name
+	if title == "" {
+		title = fmt.Sprintf("task-%s", tsk.ID)
+	}
 
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:   title,
