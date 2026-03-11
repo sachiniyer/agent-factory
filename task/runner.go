@@ -146,7 +146,10 @@ func RunTask(taskID string) error {
 
 	cfg := config.LoadConfig()
 
-	title := fmt.Sprintf("task-%s-%s", t.ID, time.Now().Format("20060102-150405"))
+	title := t.Name
+	if title == "" {
+		title = fmt.Sprintf("task-%s", t.ID)
+	}
 
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:   title,
