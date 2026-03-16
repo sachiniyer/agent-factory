@@ -108,7 +108,6 @@ func TestDefaultConfig(t *testing.T) {
 		assert.Equal(t, 1000, config.DaemonPollInterval)
 		assert.NotEmpty(t, config.BranchPrefix)
 		assert.True(t, strings.HasSuffix(config.BranchPrefix, "/"))
-		assert.Equal(t, WorktreeRootSibling, config.WorktreeRoot)
 	})
 
 }
@@ -156,8 +155,7 @@ func TestLoadConfig(t *testing.T) {
 			"default_program": "test-claude",
 			"auto_yes": true,
 			"daemon_poll_interval": 2000,
-			"branch_prefix": "test/",
-			"worktree_root": "sibling"
+			"branch_prefix": "test/"
 		}`
 		err = os.WriteFile(configPath, []byte(configContent), 0644)
 		require.NoError(t, err)
@@ -174,31 +172,6 @@ func TestLoadConfig(t *testing.T) {
 		assert.True(t, config.AutoYes)
 		assert.Equal(t, 2000, config.DaemonPollInterval)
 		assert.Equal(t, "test/", config.BranchPrefix)
-		assert.Equal(t, WorktreeRootSibling, config.WorktreeRoot)
-	})
-
-	t.Run("defaults worktree_root when missing from existing config", func(t *testing.T) {
-		tempHome := t.TempDir()
-		configDir := filepath.Join(tempHome, ".agent-factory")
-		err := os.MkdirAll(configDir, 0755)
-		require.NoError(t, err)
-
-		configPath := filepath.Join(configDir, ConfigFileName)
-		configContent := `{
-			"default_program": "test-claude",
-			"auto_yes": true,
-			"daemon_poll_interval": 2000,
-			"branch_prefix": "test/"
-		}`
-		err = os.WriteFile(configPath, []byte(configContent), 0644)
-		require.NoError(t, err)
-
-		originalHome := os.Getenv("HOME")
-		os.Setenv("HOME", tempHome)
-		defer os.Setenv("HOME", originalHome)
-
-		loadedConfig := LoadConfig()
-		assert.Equal(t, WorktreeRootSibling, loadedConfig.WorktreeRoot)
 	})
 
 	t.Run("returns default config on invalid JSON", func(t *testing.T) {
@@ -226,7 +199,6 @@ func TestLoadConfig(t *testing.T) {
 		assert.NotEmpty(t, config.DefaultProgram)
 		assert.False(t, config.AutoYes)                  // Default value
 		assert.Equal(t, 1000, config.DaemonPollInterval) // Default value
-		assert.Equal(t, WorktreeRootSibling, config.WorktreeRoot)
 	})
 }
 
@@ -246,7 +218,6 @@ func TestSaveConfig(t *testing.T) {
 			AutoYes:            true,
 			DaemonPollInterval: 3000,
 			BranchPrefix:       "test-branch/",
-			WorktreeRoot:       WorktreeRootSibling,
 		}
 
 		err := SaveConfig(testConfig)
@@ -264,6 +235,5 @@ func TestSaveConfig(t *testing.T) {
 		assert.Equal(t, testConfig.AutoYes, loadedConfig.AutoYes)
 		assert.Equal(t, testConfig.DaemonPollInterval, loadedConfig.DaemonPollInterval)
 		assert.Equal(t, testConfig.BranchPrefix, loadedConfig.BranchPrefix)
-		assert.Equal(t, testConfig.WorktreeRoot, loadedConfig.WorktreeRoot)
 	})
 }

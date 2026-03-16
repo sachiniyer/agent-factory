@@ -11,16 +11,30 @@ import (
 )
 
 func TestResolveMainRepoRoot_MainRepo(t *testing.T) {
-	// When run from the main repo (this test itself), resolveMainRepoRoot
-	// should return the same path as git rev-parse --show-toplevel.
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	expected := string(out)
+	// Create a standalone git repo so the test doesn't depend on cwd
+	// (which may itself be a worktree).
+	mainDir := t.TempDir()
 
-	root, err := resolveMainRepoRoot()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v failed: %s", args, out)
+	}
+
+	run(mainDir, "init")
+	run(mainDir, "config", "user.email", "test@test.com")
+	run(mainDir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(mainDir, "file.txt"), []byte("hello"), 0644))
+	run(mainDir, "add", ".")
+	run(mainDir, "commit", "-m", "init")
+
+	root, err := resolveMainRepoRoot("-C", mainDir)
 	require.NoError(t, err)
-	assert.Equal(t, expected[:len(expected)-1], root) // trim newline
+	assert.Equal(t, mainDir, root)
 }
 
 func TestResolveMainRepoRoot_Worktree(t *testing.T) {
