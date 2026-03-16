@@ -475,11 +475,11 @@ func (m *home) saveContentPaneState() {
 				log.ErrorLog.Printf("failed to update task: %v", err)
 			}
 			if tsk.Enabled {
-				if err := task.InstallSystemdTimer(tsk); err != nil {
+				if err := task.InstallScheduler(tsk); err != nil {
 					log.WarningLog.Printf("failed to install timer: %v", err)
 				}
 			} else {
-				if err := task.RemoveSystemdTimer(tsk); err != nil {
+				if err := task.RemoveScheduler(tsk); err != nil {
 					log.WarningLog.Printf("failed to remove timer: %v", err)
 				}
 			}
@@ -488,7 +488,7 @@ func (m *home) saveContentPaneState() {
 			if err := task.RemoveTask(tsk.ID); err != nil {
 				log.ErrorLog.Printf("failed to remove task: %v", err)
 			}
-			if err := task.RemoveSystemdTimer(tsk); err != nil {
+			if err := task.RemoveScheduler(tsk); err != nil {
 				log.WarningLog.Printf("failed to remove timer: %v", err)
 			}
 		}
@@ -528,8 +528,8 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if err := task.AddTask(t); err != nil {
 		return m.handleError(fmt.Errorf("failed to save task: %v", err))
 	}
-	if err := task.InstallSystemdTimer(t); err != nil {
-		log.WarningLog.Printf("failed to install systemd timer: %v", err)
+	if err := task.InstallScheduler(t); err != nil {
+		log.WarningLog.Printf("failed to install task scheduler: %v", err)
 	}
 	// Refresh sidebar and task pane
 	tasks, err := task.LoadTasksForCurrentRepo()
