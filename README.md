@@ -156,7 +156,6 @@ Configuration lives at `~/.agent-factory/config.json`:
   "auto_yes": false,
   "daemon_poll_interval": 1000,
   "branch_prefix": "username/",
-  "worktree_root": "subdirectory"
 }
 ```
 
@@ -166,7 +165,6 @@ Configuration lives at `~/.agent-factory/config.json`:
 | `auto_yes` | Auto-accept agent prompts |
 | `daemon_poll_interval` | Daemon polling interval in ms |
 | `branch_prefix` | Prefix for worktree branches (defaults to `username/`) |
-| `worktree_root` | Where worktrees are created: `subdirectory` (under `~/.agent-factory`) or `sibling` (next to repo) |
 
 Override the program per-session with `-p`:
 

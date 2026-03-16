@@ -11,36 +11,19 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-func getWorktreeDirectory() (string, error) {
-	configDir, err := config.GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, "worktrees"), nil
-}
-
+// getWorktreeDirectoryForRepo returns the parent directory of the repo,
+// so worktrees are created as siblings next to the repository.
 func getWorktreeDirectoryForRepo(repoPath string) (string, error) {
-	cfg := config.LoadConfig()
-	if cfg.WorktreeRoot == config.WorktreeRootSibling {
-		if repoPath == "" {
-			return "", fmt.Errorf("repo path is required when worktree_root is %q", config.WorktreeRootSibling)
-		}
-
-		repoRoot, err := findGitRepoRoot(repoPath)
-		if err != nil {
-			return "", err
-		}
-
-		repoParent := filepath.Dir(repoRoot)
-		return repoParent, nil
+	if repoPath == "" {
+		return "", fmt.Errorf("repo path is required for worktree creation")
 	}
 
-	configDir, err := config.GetConfigDir()
+	repoRoot, err := findGitRepoRoot(repoPath)
 	if err != nil {
 		return "", err
 	}
 
-	return filepath.Join(configDir, "worktrees"), nil
+	return filepath.Dir(repoRoot), nil
 }
 
 // GitWorktree manages git worktree operations for a session
@@ -111,15 +94,10 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		return nil, "", err
 	}
 
-	// Use sanitized branch name for the worktree directory name.
+	// Worktree is placed as a sibling: {repoParent}/{repoName}-{sessionName}
 	// Only append a numeric suffix if the path already exists (collision).
-	var basePath string
-	if cfg.WorktreeRoot == config.WorktreeRootSibling {
-		repoName := filepath.Base(repoPath)
-		basePath = filepath.Join(worktreeDir, repoName+"-"+sessionName)
-	} else {
-		basePath = filepath.Join(worktreeDir, branchName)
-	}
+	repoName := filepath.Base(repoPath)
+	basePath := filepath.Join(worktreeDir, repoName+"-"+sessionName)
 	worktreePath := basePath
 	for i := 2; ; i++ {
 		if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
