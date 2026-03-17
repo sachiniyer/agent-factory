@@ -363,6 +363,34 @@ func (s *Sidebar) GetInstances() []*session.Instance {
 	return s.instances
 }
 
+// GetInstanceTitles returns a set of all instance titles for quick comparison.
+func (s *Sidebar) GetInstanceTitles() map[string]bool {
+	titles := make(map[string]bool, len(s.instances))
+	for _, inst := range s.instances {
+		titles[inst.Title] = true
+	}
+	return titles
+}
+
+// RemoveInstanceByTitle removes an instance from the sidebar by title without
+// killing it (the external process already cleaned up tmux/worktree).
+func (s *Sidebar) RemoveInstanceByTitle(title string) bool {
+	for i, inst := range s.instances {
+		if inst.Title == title {
+			repoName, err := inst.RepoName()
+			if err != nil {
+				log.ErrorLog.Printf("could not get repo name: %v", err)
+			} else {
+				s.rmRepo(repoName)
+			}
+			s.instances = append(s.instances[:i], s.instances[i+1:]...)
+			s.rebuildVisibleItems()
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Sidebar) addRepo(repo string) {
 	if _, ok := s.repos[repo]; !ok {
 		s.repos[repo] = 0

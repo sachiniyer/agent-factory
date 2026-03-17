@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/board"
 	"github.com/sachiniyer/agent-factory/config"
@@ -197,7 +196,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 	// Load tasks for sidebar display
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err != nil {
-		log.WarningLog.Printf("Failed to load tasks: %v", err)
+		log.WarningLog.Printf("failed to load tasks: %v", err)
 	} else {
 		h.sidebar.SetTasks(tasks)
 	}
@@ -205,7 +204,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 	// Load board for sidebar display and kanban pane
 	b, err := board.LoadBoard()
 	if err != nil {
-		log.WarningLog.Printf("Failed to load board: %v", err)
+		log.WarningLog.Printf("failed to load board: %v", err)
 	} else {
 		h.sidebar.SetTaskCount(b.TaskCount())
 		h.contentPane.KanbanPane().SetBoard(b)
@@ -219,7 +218,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 	// Load hooks for sidebar display and hooks pane
 	repoCfg, err := config.LoadRepoConfig(repoID)
 	if err != nil {
-		log.WarningLog.Printf("Failed to load repo config: %v", err)
+		log.WarningLog.Printf("failed to load repo config: %v", err)
 	} else {
 		h.sidebar.SetHookCount(len(repoCfg.PostWorktreeCommands))
 		h.contentPane.HooksPane().SetCommands(repoCfg.PostWorktreeCommands)
@@ -260,73 +259,6 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	m.menu.SetSize(msg.Width, menuHeight)
 }
 
-// mergePendingInstances loads pending instances written by scheduled task runs,
-// adds matching ones to the sidebar, and routes others to their per-repo storage.
-func (m *home) mergePendingInstances() int {
-	pendingData, err := task.LoadAndClearPendingInstances()
-	if err != nil {
-		log.WarningLog.Printf("Failed to load pending instances: %v", err)
-		return 0
-	}
-
-	var otherRepoPending []session.InstanceData
-	var mergedCount int
-	for _, data := range pendingData {
-		rid := config.RepoIDFromRoot(data.Worktree.RepoPath)
-		if rid == m.repoID {
-			pendingInstance, err := session.FromInstanceData(data)
-			if err != nil {
-				log.WarningLog.Printf("Failed to restore pending instance %s: %v", data.Title, err)
-				continue
-			}
-			m.sidebar.AddInstance(pendingInstance)()
-			if m.autoYes {
-				pendingInstance.AutoYes = true
-			}
-			mergedCount++
-		} else {
-			otherRepoPending = append(otherRepoPending, data)
-		}
-	}
-
-	if len(otherRepoPending) > 0 {
-		grouped := make(map[string][]session.InstanceData)
-		for _, d := range otherRepoPending {
-			rid := config.RepoIDFromRoot(d.Worktree.RepoPath)
-			grouped[rid] = append(grouped[rid], d)
-		}
-		for rid, group := range grouped {
-			existing, err := config.LoadRepoInstances(rid)
-			if err != nil {
-				log.WarningLog.Printf("Failed to load existing instances for repo %s: %v", rid, err)
-			}
-			var existingData []session.InstanceData
-			if existing != nil && string(existing) != "[]" && string(existing) != "null" {
-				if err := json.Unmarshal(existing, &existingData); err != nil {
-					log.WarningLog.Printf("Failed to parse existing instances for repo %s: %v", rid, err)
-				}
-			}
-			existingData = append(existingData, group...)
-			jsonData, err := json.Marshal(existingData)
-			if err != nil {
-				log.WarningLog.Printf("Failed to marshal instances for repo %s: %v", rid, err)
-				continue
-			}
-			if err := config.SaveRepoInstances(rid, jsonData); err != nil {
-				log.WarningLog.Printf("Failed to save instances for repo %s: %v", rid, err)
-			}
-		}
-	}
-
-	if mergedCount > 0 {
-		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-			log.WarningLog.Printf("Failed to save merged instances: %v", err)
-		}
-	}
-
-	return mergedCount
-}
-
 func (m *home) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
@@ -337,6 +269,7 @@ func (m *home) Init() tea.Cmd {
 		tickUpdateMetadataCmd,
 		tickUpdatePRInfoCmd,
 		tickPendingInstancesCmd,
+		tickRefreshExternalCmd,
 	)
 }
 
@@ -370,6 +303,18 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickPendingInstancesMessage:
 		m.mergePendingInstances()
 		return m, tickPendingInstancesCmd
+	case tickRefreshExternalMessage:
+		changed := m.refreshExternalInstances()
+		m.refreshExternalBoard()
+		var cmds []tea.Cmd
+		cmds = append(cmds, tickRefreshExternalCmd)
+		if changed {
+			if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
+				log.WarningLog.Printf("failed to save instances after refresh: %v", err)
+			}
+			cmds = append(cmds, m.selectionChanged())
+		}
+		return m, tea.Batch(cmds...)
 	case tickUpdateMetadataMessage:
 		for _, instance := range m.sidebar.GetInstances() {
 			if !instance.Started() {
@@ -890,30 +835,12 @@ func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
 
 type hideErrMsg struct{}
 type previewTickMsg struct{}
-type tickUpdateMetadataMessage struct{}
-type tickUpdatePRInfoMessage struct{}
-type tickPendingInstancesMessage struct{}
 type instanceChangedMsg struct{}
 
 type instanceStartedMsg struct {
 	instance        *session.Instance
 	err             error
 	promptAfterName bool
-}
-
-var tickUpdateMetadataCmd = func() tea.Msg {
-	time.Sleep(500 * time.Millisecond)
-	return tickUpdateMetadataMessage{}
-}
-
-var tickUpdatePRInfoCmd = func() tea.Msg {
-	time.Sleep(60 * time.Second)
-	return tickUpdatePRInfoMessage{}
-}
-
-var tickPendingInstancesCmd = func() tea.Msg {
-	time.Sleep(5 * time.Second)
-	return tickPendingInstancesMessage{}
 }
 
 func (m *home) handleError(err error) tea.Cmd {
