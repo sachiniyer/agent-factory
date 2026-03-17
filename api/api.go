@@ -157,6 +157,9 @@ func init() {
 	boardMoveCmd.Flags().StringVar(&boardMoveStatusFlag, "status", "", "Target column (backlog, in_progress, review, done)")
 	boardMoveCmd.MarkFlagRequired("status")
 
+	boardSpawnCmd.Flags().StringVar(&boardSpawnProgramFlag, "program", "", "Program to run (defaults to config default)")
+	boardSpawnCmd.Flags().StringVar(&boardSpawnNameFlag, "name", "", "Session name (defaults to task-<id>)")
+
 	boardCmd.AddCommand(boardListCmd)
 	boardCmd.AddCommand(boardAddCmd)
 	boardCmd.AddCommand(boardToggleCmd)
@@ -165,6 +168,7 @@ func init() {
 	boardCmd.AddCommand(boardLinkCmd)
 	boardCmd.AddCommand(boardUnlinkCmd)
 	boardCmd.AddCommand(boardViewCmd)
+	boardCmd.AddCommand(boardSpawnCmd)
 
 	// Register subcommand groups
 	ApiCmd.AddCommand(sessionsCmd)

@@ -30,6 +30,8 @@ Task commands (kanban board):
   af api board unlink <id>                              Remove linkage
   af api board toggle <id>                              Mark a task as done/not done
   af api board remove <id>                              Remove a task
+  af api board spawn <id>                               Spawn a new session from a task
+  af api board spawn <id> --name "name"                 Spawn with a custom session name
 Available columns: backlog, in_progress, review, done
 
 Self-assignment workflow:
