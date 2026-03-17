@@ -1,13 +1,13 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package task
 
 import "fmt"
 
-func InstallSystemdTimer(t Task) error {
-	return fmt.Errorf("systemd timers are only supported on Linux")
+func InstallScheduler(t Task) error {
+	return fmt.Errorf("scheduled tasks are not supported on this platform (only Linux and macOS are supported)")
 }
 
-func RemoveSystemdTimer(t Task) error {
-	return fmt.Errorf("systemd timers are only supported on Linux")
+func RemoveScheduler(t Task) error {
+	return fmt.Errorf("scheduled tasks are not supported on this platform (only Linux and macOS are supported)")
 }

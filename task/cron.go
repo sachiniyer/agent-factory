@@ -2,6 +2,7 @@ package task
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -234,4 +235,78 @@ func zeroPad(s string) string {
 		return s
 	}
 	return fmt.Sprintf("%02d", val)
+}
+
+// expandCronField expands a single cron field into all matching integer values.
+// Returns nil for wildcard (*) fields, meaning "all values".
+func expandCronField(field string, min, max int) ([]int, error) {
+	if field == "*" {
+		return nil, nil
+	}
+
+	var result []int
+	parts := strings.Split(field, ",")
+	for _, part := range parts {
+		vals, err := expandCronPart(part, min, max)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, vals...)
+	}
+
+	// Deduplicate and sort
+	seen := make(map[int]bool)
+	var unique []int
+	for _, v := range result {
+		if !seen[v] {
+			seen[v] = true
+			unique = append(unique, v)
+		}
+	}
+	sort.Ints(unique)
+	return unique, nil
+}
+
+// expandCronPart expands a single cron part (number, range, or step) into values.
+func expandCronPart(part string, min, max int) ([]int, error) {
+	step := 1
+	if idx := strings.Index(part, "/"); idx != -1 {
+		stepStr := part[idx+1:]
+		var err error
+		step, err = strconv.Atoi(stepStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid step value: %s", stepStr)
+		}
+		part = part[:idx]
+	}
+
+	if part == "*" {
+		var vals []int
+		for i := min; i <= max; i += step {
+			vals = append(vals, i)
+		}
+		return vals, nil
+	}
+
+	if idx := strings.Index(part, "-"); idx != -1 {
+		start, err := strconv.Atoi(part[:idx])
+		if err != nil {
+			return nil, err
+		}
+		end, err := strconv.Atoi(part[idx+1:])
+		if err != nil {
+			return nil, err
+		}
+		var vals []int
+		for i := start; i <= end; i += step {
+			vals = append(vals, i)
+		}
+		return vals, nil
+	}
+
+	val, err := strconv.Atoi(part)
+	if err != nil {
+		return nil, err
+	}
+	return []int{val}, nil
 }
