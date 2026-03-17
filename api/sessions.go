@@ -167,20 +167,100 @@ var sessionsCreateCmd = &cobra.Command{
 	},
 }
 
+var (
+	sendPromptCreateFlag  bool
+	sendPromptProgramFlag string
+)
+
 var sessionsSendPromptCmd = &cobra.Command{
 	Use:   "send-prompt <title> <prompt>",
 	Short: "Send a prompt to a session",
-	Args:  cobra.ExactArgs(2),
+	Long: `Send a prompt to an existing session. The session must already exist unless --create is used.
+
+If the session does not exist, use --create to automatically create it first,
+or use 'af api sessions create --name <title> --prompt <prompt>' instead.`,
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		instance, _, err := findLiveInstanceByTitle(args[0])
+		title := args[0]
+		prompt := args[1]
+
+		instance, _, err := findLiveInstanceByTitle(title)
 		if err != nil {
-			return jsonError(err)
+			if !sendPromptCreateFlag {
+				return jsonError(fmt.Errorf("instance %q not found. Use --create to auto-create the session, or run: af api sessions create --name %q --prompt <prompt>", title, title))
+			}
+
+			// Auto-create the session
+			repo, repoErr := resolveRepo()
+			if repoErr != nil {
+				return jsonError(fmt.Errorf("--repo is required when using --create: %w", repoErr))
+			}
+
+			if !git.IsGitRepo(repo.Root) {
+				return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
+			}
+
+			program := sendPromptProgramFlag
+			if program == "" {
+				program = config.LoadConfig().DefaultProgram
+			}
+
+			instance, err = session.NewInstance(session.InstanceOptions{
+				Title:   title,
+				Path:    repo.Root,
+				Program: program,
+			})
+			if err != nil {
+				return jsonError(fmt.Errorf("failed to create instance: %w", err))
+			}
+
+			if err := instance.Start(true); err != nil {
+				return jsonError(fmt.Errorf("failed to start instance: %w", err))
+			}
+
+			if err := task.WaitForReady(instance); err != nil {
+				return jsonError(fmt.Errorf("program did not become ready: %w", err))
+			}
+
+			if instance.CheckAndHandleTrustPrompt() {
+				time.Sleep(1 * time.Second)
+				if err := task.WaitForReady(instance); err != nil {
+					return jsonError(fmt.Errorf("program did not become ready after trust prompt: %w", err))
+				}
+			}
+
+			// Save to per-repo storage
+			data := instance.ToInstanceData()
+			raw, loadErr := config.LoadRepoInstances(repo.ID)
+			if loadErr != nil {
+				return jsonError(loadErr)
+			}
+			var existing []session.InstanceData
+			if err := json.Unmarshal(raw, &existing); err != nil {
+				existing = []session.InstanceData{}
+			}
+			existing = append(existing, data)
+			out, marshalErr := json.MarshalIndent(existing, "", "  ")
+			if marshalErr != nil {
+				return jsonError(marshalErr)
+			}
+			if err := config.SaveRepoInstances(repo.ID, out); err != nil {
+				return jsonError(err)
+			}
+
+			// Launch daemon for autoyes if configured
+			cfg := config.LoadConfig()
+			if cfg.AutoYes {
+				if err := daemon.LaunchDaemon(); err != nil {
+					log.ErrorLog.Printf("failed to launch daemon: %v", err)
+				}
+			}
 		}
 
-		if err := instance.SendPromptCommand(args[1]); err != nil {
+		if err := instance.SendPromptCommand(prompt); err != nil {
 			return jsonError(fmt.Errorf("failed to send prompt: %w", err))
 		}
 		return jsonOut(map[string]bool{"ok": true})
