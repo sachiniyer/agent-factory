@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/microclaw"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -124,6 +125,16 @@ type home struct {
 func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
 	// Load application config
 	appConfig := config.LoadConfig()
+
+	// Apply configured detach key
+	if appConfig.DetachKeys != "" {
+		b, err := config.ParseDetachKey(appConfig.DetachKeys)
+		if err != nil {
+			fmt.Printf("Invalid detach_keys %q in config: %v\n", appConfig.DetachKeys, err)
+			os.Exit(1)
+		}
+		tmux.SetDetachKey(b, appConfig.DetachKeys)
+	}
 
 	// Load application state
 	appState := config.LoadState()

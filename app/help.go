@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
@@ -46,7 +47,7 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("D")+descStyle.Render("         - Kill (delete) the selected session"),
 		keyStyle.Render("↑/j, ↓/k")+descStyle.Render("  - Navigate between sessions"),
 		keyStyle.Render("↵/o")+descStyle.Render("       - Attach to the selected session"),
-		keyStyle.Render("ctrl-w")+descStyle.Render("    - Detach from session"),
+		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("    - Detach from session"),
 		"",
 		headerStyle.Render("Sidebar:"),
 		keyStyle.Render("↑/j, ↓/k")+descStyle.Render("  - Navigate sidebar items"),
@@ -102,7 +103,7 @@ func (h helpTypeInstanceAttach) toContent() string {
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Attaching to Instance"),
 		"",
-		descStyle.Render("To detach from a session, press ")+keyStyle.Render("ctrl-w"),
+		descStyle.Render("To detach from a session, press ")+keyStyle.Render(tmux.DetachKeyDisplay),
 	)
 	return content
 }
