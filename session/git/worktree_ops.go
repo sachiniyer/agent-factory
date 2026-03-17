@@ -53,7 +53,24 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 	return nil
 }
 
-// setupNewWorktree creates a new worktree from HEAD
+// resolveOriginHead tries to resolve the latest commit from origin's default branch.
+// It fetches from origin first, then tries origin/HEAD, origin/main, and origin/master.
+// Returns the commit SHA if successful, or empty string if no remote ref is available.
+func (g *GitWorktree) resolveOriginHead() string {
+	// Fetch from origin to ensure we have the latest refs (best-effort)
+	_, _ = g.runGitCommand(g.repoPath, "fetch", "origin")
+
+	// Try origin/HEAD (symbolic ref pointing to the default branch)
+	for _, ref := range []string{"origin/HEAD", "origin/main", "origin/master"} {
+		output, err := g.runGitCommand(g.repoPath, "rev-parse", ref)
+		if err == nil {
+			return strings.TrimSpace(string(output))
+		}
+	}
+	return ""
+}
+
+// setupNewWorktree creates a new worktree from origin's default branch (or HEAD as fallback)
 func (g *GitWorktree) setupNewWorktree() error {
 	// Clean up any existing worktree first
 	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath) // Ignore error if worktree doesn't exist
@@ -61,23 +78,28 @@ func (g *GitWorktree) setupNewWorktree() error {
 	// Clean up any existing branch using git CLI (much faster than go-git PlainOpen)
 	_, _ = g.runGitCommand(g.repoPath, "branch", "-D", g.branchName) // Ignore error if branch doesn't exist
 
-	output, err := g.runGitCommand(g.repoPath, "rev-parse", "HEAD")
-	if err != nil {
-		if strings.Contains(err.Error(), "fatal: ambiguous argument 'HEAD'") ||
-			strings.Contains(err.Error(), "fatal: not a valid object name") ||
-			strings.Contains(err.Error(), "fatal: HEAD: not a valid object name") {
-			return fmt.Errorf("this appears to be a brand new repository: please create an initial commit before creating an instance")
+	// Try to base the new branch off origin's default branch for a fresh starting point.
+	// Fall back to HEAD if no remote is available.
+	baseCommit := g.resolveOriginHead()
+	if baseCommit == "" {
+		output, err := g.runGitCommand(g.repoPath, "rev-parse", "HEAD")
+		if err != nil {
+			if strings.Contains(err.Error(), "fatal: ambiguous argument 'HEAD'") ||
+				strings.Contains(err.Error(), "fatal: not a valid object name") ||
+				strings.Contains(err.Error(), "fatal: HEAD: not a valid object name") {
+				return fmt.Errorf("this appears to be a brand new repository: please create an initial commit before creating an instance")
+			}
+			return fmt.Errorf("failed to get HEAD commit hash: %w", err)
 		}
-		return fmt.Errorf("failed to get HEAD commit hash: %w", err)
+		baseCommit = strings.TrimSpace(string(output))
+		log.InfoLog.Printf("no origin remote found, falling back to HEAD for new worktree")
 	}
-	headCommit := strings.TrimSpace(string(output))
-	g.baseCommitSHA = headCommit
+	g.baseCommitSHA = baseCommit
 
-	// Create a new worktree from the HEAD commit
-	// Otherwise, we'll inherit uncommitted changes from the previous worktree.
-	// This way, we can start the worktree with a clean slate.
-	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, headCommit); err != nil {
-		return fmt.Errorf("failed to create worktree from commit %s: %w", headCommit, err)
+	// Create a new worktree from the base commit.
+	// This starts the worktree with a clean slate without inheriting uncommitted changes.
+	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
+		return fmt.Errorf("failed to create worktree from commit %s: %w", baseCommit, err)
 	}
 
 	return nil
