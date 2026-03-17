@@ -99,8 +99,8 @@ var tasksAddCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to add task: %w", err))
 		}
 
-		if err := task.InstallSystemdTimer(s); err != nil {
-			return jsonError(fmt.Errorf("failed to install systemd timer: %w", err))
+		if err := task.InstallScheduler(s); err != nil {
+			return jsonError(fmt.Errorf("failed to install task scheduler: %w", err))
 		}
 
 		return jsonOut(map[string]any{"id": id})
@@ -120,8 +120,8 @@ var tasksRemoveCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to get task: %w", err))
 		}
 
-		if err := task.RemoveSystemdTimer(*s); err != nil {
-			return jsonError(fmt.Errorf("failed to remove systemd timer: %w", err))
+		if err := task.RemoveScheduler(*s); err != nil {
+			return jsonError(fmt.Errorf("failed to remove task scheduler: %w", err))
 		}
 
 		if err := task.RemoveTask(args[0]); err != nil {

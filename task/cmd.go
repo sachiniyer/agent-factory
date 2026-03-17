@@ -89,8 +89,8 @@ var addCmd = &cobra.Command{
 			return fmt.Errorf("failed to add task: %w", err)
 		}
 
-		if err := InstallSystemdTimer(s); err != nil {
-			return fmt.Errorf("failed to install systemd timer: %w", err)
+		if err := InstallScheduler(s); err != nil {
+			return fmt.Errorf("failed to install task scheduler: %w", err)
 		}
 
 		fmt.Printf("Task added successfully (ID: %s)\n", id)
@@ -108,8 +108,8 @@ var removeCmd = &cobra.Command{
 			return fmt.Errorf("failed to get task: %w", err)
 		}
 
-		if err := RemoveSystemdTimer(*s); err != nil {
-			return fmt.Errorf("failed to remove systemd timer: %w", err)
+		if err := RemoveScheduler(*s); err != nil {
+			return fmt.Errorf("failed to remove task scheduler: %w", err)
 		}
 
 		if err := RemoveTask(args[0]); err != nil {
@@ -123,7 +123,7 @@ var removeCmd = &cobra.Command{
 
 var runCmd = &cobra.Command{
 	Use:   "run",
-	Short: "Run an automated task (called by systemd)",
+	Short: "Run an automated task (called by scheduler)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return RunTask(args[0])

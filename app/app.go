@@ -172,58 +172,6 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		os.Exit(1)
 	}
 
-	// Merge pending instances from task runs.
-	pendingData, err := task.LoadAndClearPendingInstances()
-	if err != nil {
-		log.WarningLog.Printf("Failed to load pending instances: %v", err)
-	}
-	var otherRepoPending []session.InstanceData
-	var mergedCount int
-	for _, data := range pendingData {
-		rid := config.RepoIDFromRoot(data.Worktree.RepoPath)
-		if rid == repoID {
-			pendingInstance, err := session.FromInstanceData(data)
-			if err != nil {
-				log.WarningLog.Printf("Failed to restore pending instance %s: %v", data.Title, err)
-				continue
-			}
-			instances = append(instances, pendingInstance)
-			mergedCount++
-		} else {
-			otherRepoPending = append(otherRepoPending, data)
-		}
-	}
-
-	// Save other-repo pending instances directly to their per-repo files
-	if len(otherRepoPending) > 0 {
-		grouped := make(map[string][]session.InstanceData)
-		for _, d := range otherRepoPending {
-			rid := config.RepoIDFromRoot(d.Worktree.RepoPath)
-			grouped[rid] = append(grouped[rid], d)
-		}
-		for rid, group := range grouped {
-			existing, err := config.LoadRepoInstances(rid)
-			if err != nil {
-				log.WarningLog.Printf("Failed to load existing instances for repo %s: %v", rid, err)
-			}
-			var existingData []session.InstanceData
-			if existing != nil && string(existing) != "[]" && string(existing) != "null" {
-				if err := json.Unmarshal(existing, &existingData); err != nil {
-					log.WarningLog.Printf("Failed to parse existing instances for repo %s: %v", rid, err)
-				}
-			}
-			existingData = append(existingData, group...)
-			jsonData, err := json.Marshal(existingData)
-			if err != nil {
-				log.WarningLog.Printf("Failed to marshal instances for repo %s: %v", rid, err)
-				continue
-			}
-			if err := config.SaveRepoInstances(rid, jsonData); err != nil {
-				log.WarningLog.Printf("Failed to save instances for repo %s: %v", rid, err)
-			}
-		}
-	}
-
 	// Add loaded instances to the sidebar
 	for _, instance := range instances {
 		h.sidebar.AddInstance(instance)()
@@ -232,12 +180,8 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		}
 	}
 
-	// Save instances so pending ones are persisted to the per-repo file
-	if mergedCount > 0 {
-		if err := storage.SaveInstances(h.sidebar.GetInstances()); err != nil {
-			log.WarningLog.Printf("Failed to save merged instances: %v", err)
-		}
-	}
+	// Merge pending instances from task runs.
+	h.mergePendingInstances()
 
 	// Load tasks for sidebar display
 	tasks, err := task.LoadTasksForCurrentRepo()
@@ -305,6 +249,73 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	m.menu.SetSize(msg.Width, menuHeight)
 }
 
+// mergePendingInstances loads pending instances written by scheduled task runs,
+// adds matching ones to the sidebar, and routes others to their per-repo storage.
+func (m *home) mergePendingInstances() int {
+	pendingData, err := task.LoadAndClearPendingInstances()
+	if err != nil {
+		log.WarningLog.Printf("Failed to load pending instances: %v", err)
+		return 0
+	}
+
+	var otherRepoPending []session.InstanceData
+	var mergedCount int
+	for _, data := range pendingData {
+		rid := config.RepoIDFromRoot(data.Worktree.RepoPath)
+		if rid == m.repoID {
+			pendingInstance, err := session.FromInstanceData(data)
+			if err != nil {
+				log.WarningLog.Printf("Failed to restore pending instance %s: %v", data.Title, err)
+				continue
+			}
+			m.sidebar.AddInstance(pendingInstance)()
+			if m.autoYes {
+				pendingInstance.AutoYes = true
+			}
+			mergedCount++
+		} else {
+			otherRepoPending = append(otherRepoPending, data)
+		}
+	}
+
+	if len(otherRepoPending) > 0 {
+		grouped := make(map[string][]session.InstanceData)
+		for _, d := range otherRepoPending {
+			rid := config.RepoIDFromRoot(d.Worktree.RepoPath)
+			grouped[rid] = append(grouped[rid], d)
+		}
+		for rid, group := range grouped {
+			existing, err := config.LoadRepoInstances(rid)
+			if err != nil {
+				log.WarningLog.Printf("Failed to load existing instances for repo %s: %v", rid, err)
+			}
+			var existingData []session.InstanceData
+			if existing != nil && string(existing) != "[]" && string(existing) != "null" {
+				if err := json.Unmarshal(existing, &existingData); err != nil {
+					log.WarningLog.Printf("Failed to parse existing instances for repo %s: %v", rid, err)
+				}
+			}
+			existingData = append(existingData, group...)
+			jsonData, err := json.Marshal(existingData)
+			if err != nil {
+				log.WarningLog.Printf("Failed to marshal instances for repo %s: %v", rid, err)
+				continue
+			}
+			if err := config.SaveRepoInstances(rid, jsonData); err != nil {
+				log.WarningLog.Printf("Failed to save instances for repo %s: %v", rid, err)
+			}
+		}
+	}
+
+	if mergedCount > 0 {
+		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
+			log.WarningLog.Printf("Failed to save merged instances: %v", err)
+		}
+	}
+
+	return mergedCount
+}
+
 func (m *home) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
@@ -314,6 +325,7 @@ func (m *home) Init() tea.Cmd {
 		},
 		tickUpdateMetadataCmd,
 		tickUpdatePRInfoCmd,
+		tickPendingInstancesCmd,
 	)
 }
 
@@ -344,6 +356,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tickUpdatePRInfoCmd
+	case tickPendingInstancesMessage:
+		m.mergePendingInstances()
+		return m, tickPendingInstancesCmd
 	case tickUpdateMetadataMessage:
 		for _, instance := range m.sidebar.GetInstances() {
 			if !instance.Started() {
@@ -475,11 +490,11 @@ func (m *home) saveContentPaneState() {
 				log.ErrorLog.Printf("failed to update task: %v", err)
 			}
 			if tsk.Enabled {
-				if err := task.InstallSystemdTimer(tsk); err != nil {
+				if err := task.InstallScheduler(tsk); err != nil {
 					log.WarningLog.Printf("failed to install timer: %v", err)
 				}
 			} else {
-				if err := task.RemoveSystemdTimer(tsk); err != nil {
+				if err := task.RemoveScheduler(tsk); err != nil {
 					log.WarningLog.Printf("failed to remove timer: %v", err)
 				}
 			}
@@ -488,7 +503,7 @@ func (m *home) saveContentPaneState() {
 			if err := task.RemoveTask(tsk.ID); err != nil {
 				log.ErrorLog.Printf("failed to remove task: %v", err)
 			}
-			if err := task.RemoveSystemdTimer(tsk); err != nil {
+			if err := task.RemoveScheduler(tsk); err != nil {
 				log.WarningLog.Printf("failed to remove timer: %v", err)
 			}
 		}
@@ -528,8 +543,8 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if err := task.AddTask(t); err != nil {
 		return m.handleError(fmt.Errorf("failed to save task: %v", err))
 	}
-	if err := task.InstallSystemdTimer(t); err != nil {
-		log.WarningLog.Printf("failed to install systemd timer: %v", err)
+	if err := task.InstallScheduler(t); err != nil {
+		log.WarningLog.Printf("failed to install task scheduler: %v", err)
 	}
 	// Refresh sidebar and task pane
 	tasks, err := task.LoadTasksForCurrentRepo()
@@ -866,6 +881,7 @@ type hideErrMsg struct{}
 type previewTickMsg struct{}
 type tickUpdateMetadataMessage struct{}
 type tickUpdatePRInfoMessage struct{}
+type tickPendingInstancesMessage struct{}
 type instanceChangedMsg struct{}
 
 type instanceStartedMsg struct {
@@ -882,6 +898,11 @@ var tickUpdateMetadataCmd = func() tea.Msg {
 var tickUpdatePRInfoCmd = func() tea.Msg {
 	time.Sleep(60 * time.Second)
 	return tickUpdatePRInfoMessage{}
+}
+
+var tickPendingInstancesCmd = func() tea.Msg {
+	time.Sleep(5 * time.Second)
+	return tickPendingInstancesMessage{}
 }
 
 func (m *home) handleError(err error) tea.Cmd {

@@ -42,13 +42,13 @@ var boardListCmd = &cobra.Command{
 }
 
 var (
-	boardAddTitleFlag      string
-	boardAddStatusFlag     string
-	boardAddInstanceFlag   string
-	boardLinkInstanceFlag  string
-	boardMoveStatusFlag    string
-	boardSpawnProgramFlag  string
-	boardSpawnNameFlag     string
+	boardAddTitleFlag     string
+	boardAddStatusFlag    string
+	boardAddInstanceFlag  string
+	boardLinkInstanceFlag string
+	boardMoveStatusFlag   string
+	boardSpawnProgramFlag string
+	boardSpawnNameFlag    string
 )
 
 var boardAddCmd = &cobra.Command{

@@ -26,7 +26,7 @@ func getSystemdUserDir() (string, error) {
 	return dir, nil
 }
 
-func InstallSystemdTimer(t Task) error {
+func InstallScheduler(t Task) error {
 	unitName := getUnitName(t)
 
 	dir, err := getSystemdUserDir()
@@ -99,7 +99,7 @@ WantedBy=timers.target
 	return nil
 }
 
-func RemoveSystemdTimer(t Task) error {
+func RemoveScheduler(t Task) error {
 	unitName := getUnitName(t)
 
 	dir, err := getSystemdUserDir()
