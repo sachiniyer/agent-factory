@@ -27,11 +27,11 @@ func TestParseDetachKey(t *testing.T) {
 		{"ctrl-\\", 28, false},
 		{"ctrl-^", 30, false},
 		{"ctrl-_", 31, false},
-		{"w", 0, true},           // missing ctrl- prefix
-		{"ctrl-", 0, true},       // missing character
-		{"ctrl-ab", 0, true},     // too many characters
-		{"ctrl-1", 0, true},      // digit not supported
-		{"alt-w", 0, true},       // wrong prefix
+		{"w", 0, true},       // missing ctrl- prefix
+		{"ctrl-", 0, true},   // missing character
+		{"ctrl-ab", 0, true}, // too many characters
+		{"ctrl-1", 0, true},  // digit not supported
+		{"alt-w", 0, true},   // wrong prefix
 	}
 
 	for _, tt := range tests {
