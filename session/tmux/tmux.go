@@ -59,6 +59,19 @@ type TmuxSession struct {
 
 const TmuxPrefix = "claudesquad_"
 
+// DetachKeyByte is the ASCII byte for the key used to detach from attached sessions.
+// Default is 23 (Ctrl-W). Set via SetDetachKey.
+var DetachKeyByte byte = 23
+
+// DetachKeyDisplay is the human-readable name for the detach key (e.g. "ctrl-w").
+var DetachKeyDisplay string = "ctrl-w"
+
+// SetDetachKey sets the global detach key byte and display name.
+func SetDetachKey(b byte, display string) {
+	DetachKeyByte = b
+	DetachKeyDisplay = display
+}
+
 var whiteSpaceRegex = regexp.MustCompile(`\s+`)
 
 func toClaudeSquadTmuxName(str string) string {
@@ -304,7 +317,7 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 		default:
 			// If context is not done, it was likely an abnormal termination (Ctrl-D)
 			// Print warning message
-			fmt.Fprintf(os.Stderr, "\n\033[31mError: Session terminated without detaching. Use Ctrl-W to properly detach from tmux sessions.\033[0m\n")
+			fmt.Fprintf(os.Stderr, "\n\033[31mError: Session terminated without detaching. Use %s to properly detach from tmux sessions.\033[0m\n", DetachKeyDisplay)
 		}
 	}()
 
@@ -341,8 +354,8 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 				continue
 			}
 
-			// Check for Ctrl+W (ASCII 23)
-			if nr == 1 && buf[0] == 23 {
+			// Check for detach key
+			if nr == 1 && buf[0] == DetachKeyByte {
 				// Detach from the session
 				t.Detach()
 				return
