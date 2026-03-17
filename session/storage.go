@@ -79,13 +79,9 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	}
 
 	if s.repoID != "" {
-		// TUI mode: merge with on-disk state to preserve externally-created sessions
-		// (e.g. sessions created by `af api sessions create` while the TUI was running)
-		merged, err := s.mergeWithDisk(data)
-		if err != nil {
-			return fmt.Errorf("failed to merge instances: %w", err)
-		}
-		jsonData, err := json.Marshal(merged)
+		// TUI mode: the sidebar is the source of truth; external instances
+		// are already pulled in by the periodic refreshExternalInstances tick.
+		jsonData, err := json.Marshal(data)
 		if err != nil {
 			return fmt.Errorf("failed to marshal instances: %w", err)
 		}
@@ -182,38 +178,19 @@ func (s *Storage) DeleteInstance(title string) error {
 	return s.state.SaveInstances(s.repoID, out)
 }
 
-// mergeWithDisk reads the current on-disk instances and merges them with the
-// in-memory set. Instances known to the TUI (by title) are replaced with the
-// in-memory version. Instances that only exist on disk (created externally)
-// are preserved.
-func (s *Storage) mergeWithDisk(memoryData []InstanceData) ([]InstanceData, error) {
+// LoadInstanceData reads and unmarshals instance data from disk without
+// constructing live Instance objects (no tmux session restoration).
+// Used for lightweight comparison against in-memory state.
+func (s *Storage) LoadInstanceData() ([]InstanceData, error) {
 	raw := s.state.GetInstances(s.repoID)
 	if raw == nil || string(raw) == "[]" || string(raw) == "null" {
-		return memoryData, nil
+		return nil, nil
 	}
-
-	var diskData []InstanceData
-	if err := json.Unmarshal(raw, &diskData); err != nil {
-		// Can't parse disk data, just use memory
-		return memoryData, nil
+	var data []InstanceData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
 	}
-
-	// Build a set of titles the TUI knows about
-	knownTitles := make(map[string]bool, len(memoryData))
-	for _, d := range memoryData {
-		knownTitles[d.Title] = true
-	}
-
-	// Keep disk-only instances (ones the TUI doesn't know about)
-	merged := make([]InstanceData, 0, len(memoryData)+len(diskData))
-	merged = append(merged, memoryData...)
-	for _, d := range diskData {
-		if !knownTitles[d.Title] {
-			merged = append(merged, d)
-		}
-	}
-
-	return merged, nil
+	return data, nil
 }
 
 // DeleteAllInstances removes all stored instances

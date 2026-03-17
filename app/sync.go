@@ -1,0 +1,178 @@
+package app
+
+import (
+	"encoding/json"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/board"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
+)
+
+// -- Ticker message types --
+
+type tickUpdateMetadataMessage struct{}
+type tickUpdatePRInfoMessage struct{}
+type tickPendingInstancesMessage struct{}
+type tickRefreshExternalMessage struct{}
+
+// -- Ticker commands --
+// Each ticker sleeps for a fixed interval, then returns its message type to
+// re-enter Update(). The ticker is re-scheduled at the end of its handler.
+
+var tickUpdateMetadataCmd = func() tea.Msg {
+	time.Sleep(500 * time.Millisecond)
+	return tickUpdateMetadataMessage{}
+}
+
+var tickUpdatePRInfoCmd = func() tea.Msg {
+	time.Sleep(60 * time.Second)
+	return tickUpdatePRInfoMessage{}
+}
+
+// tickPendingInstancesCmd processes one-shot pending instances written by
+// scheduled task runs (cleared after reading). Runs every 5s.
+var tickPendingInstancesCmd = func() tea.Msg {
+	time.Sleep(5 * time.Second)
+	return tickPendingInstancesMessage{}
+}
+
+// tickRefreshExternalCmd reconciles the sidebar and board with on-disk state
+// to pick up changes made via the CLI (e.g. `af api sessions create/kill`,
+// `af api board add/remove`). Runs every 3s.
+var tickRefreshExternalCmd = func() tea.Msg {
+	time.Sleep(3 * time.Second)
+	return tickRefreshExternalMessage{}
+}
+
+// -- Sync methods --
+
+// mergePendingInstances loads pending instances written by scheduled task runs,
+// adds matching ones to the sidebar, and routes others to their per-repo storage.
+func (m *home) mergePendingInstances() int {
+	pendingData, err := task.LoadAndClearPendingInstances()
+	if err != nil {
+		log.WarningLog.Printf("failed to load pending instances: %v", err)
+		return 0
+	}
+
+	var otherRepoPending []session.InstanceData
+	var mergedCount int
+	for _, data := range pendingData {
+		rid := config.RepoIDFromRoot(data.Worktree.RepoPath)
+		if rid == m.repoID {
+			pendingInstance, err := session.FromInstanceData(data)
+			if err != nil {
+				log.WarningLog.Printf("failed to restore pending instance %s: %v", data.Title, err)
+				continue
+			}
+			m.sidebar.AddInstance(pendingInstance)()
+			if m.autoYes {
+				pendingInstance.AutoYes = true
+			}
+			mergedCount++
+		} else {
+			otherRepoPending = append(otherRepoPending, data)
+		}
+	}
+
+	if len(otherRepoPending) > 0 {
+		grouped := make(map[string][]session.InstanceData)
+		for _, d := range otherRepoPending {
+			rid := config.RepoIDFromRoot(d.Worktree.RepoPath)
+			grouped[rid] = append(grouped[rid], d)
+		}
+		for rid, group := range grouped {
+			existing, err := config.LoadRepoInstances(rid)
+			if err != nil {
+				log.WarningLog.Printf("failed to load existing instances for repo %s: %v", rid, err)
+			}
+			var existingData []session.InstanceData
+			if existing != nil && string(existing) != "[]" && string(existing) != "null" {
+				if err := json.Unmarshal(existing, &existingData); err != nil {
+					log.WarningLog.Printf("failed to parse existing instances for repo %s: %v", rid, err)
+				}
+			}
+			existingData = append(existingData, group...)
+			jsonData, err := json.Marshal(existingData)
+			if err != nil {
+				log.WarningLog.Printf("failed to marshal instances for repo %s: %v", rid, err)
+				continue
+			}
+			if err := config.SaveRepoInstances(rid, jsonData); err != nil {
+				log.WarningLog.Printf("failed to save instances for repo %s: %v", rid, err)
+			}
+		}
+	}
+
+	if mergedCount > 0 {
+		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
+			log.WarningLog.Printf("failed to save merged instances: %v", err)
+		}
+	}
+
+	return mergedCount
+}
+
+// refreshExternalInstances reconciles the sidebar's in-memory instances with
+// the on-disk instances.json. Returns true if anything changed.
+func (m *home) refreshExternalInstances() bool {
+	diskData, err := m.storage.LoadInstanceData()
+	if err != nil {
+		log.WarningLog.Printf("failed to load instance data for refresh: %v", err)
+		return false
+	}
+
+	sidebarTitles := m.sidebar.GetInstanceTitles()
+	diskTitles := make(map[string]bool, len(diskData))
+	for _, d := range diskData {
+		diskTitles[d.Title] = true
+	}
+
+	changed := false
+
+	// Add instances that exist on disk but not in sidebar.
+	for _, d := range diskData {
+		if !sidebarTitles[d.Title] {
+			inst, err := session.FromInstanceData(d)
+			if err != nil {
+				log.WarningLog.Printf("failed to restore external instance %q: %v", d.Title, err)
+				continue
+			}
+			m.sidebar.AddInstance(inst)()
+			if m.autoYes {
+				inst.AutoYes = true
+			}
+			changed = true
+		}
+	}
+
+	// Remove instances that exist in sidebar but not on disk.
+	// Skip instances with Loading status (TUI is currently creating them).
+	for _, inst := range m.sidebar.GetInstances() {
+		if !diskTitles[inst.Title] && inst.Status != session.Loading {
+			m.sidebar.RemoveInstanceByTitle(inst.Title)
+			changed = true
+		}
+	}
+
+	return changed
+}
+
+// refreshExternalBoard reconciles the kanban board with the on-disk state.
+func (m *home) refreshExternalBoard() {
+	kp := m.contentPane.KanbanPane()
+	if kp.IsDirty() || kp.HasFocus() {
+		return
+	}
+	b, err := board.LoadBoard()
+	if err != nil {
+		log.WarningLog.Printf("failed to load board for refresh: %v", err)
+		return
+	}
+	kp.SetBoard(b)
+	m.sidebar.SetTaskCount(b.TaskCount())
+}
