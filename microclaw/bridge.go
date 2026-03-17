@@ -319,10 +319,10 @@ func (b *Bridge) sendViaAPI(content string) error {
 	if err != nil {
 		return fmt.Errorf("send request failed: %w", err)
 	}
-	defer resp.Body.Close()
 
 	// Retry once on 401 (session expired)
 	if resp.StatusCode == 401 {
+		resp.Body.Close()
 		if err := b.login(); err != nil {
 			return fmt.Errorf("re-auth failed: %w", err)
 		}
@@ -342,10 +342,10 @@ func (b *Bridge) sendViaAPI(content string) error {
 		if err != nil {
 			return fmt.Errorf("retry send failed: %w", err)
 		}
-		defer resp.Body.Close()
 	}
 
 	if resp.StatusCode != 200 {
+		defer resp.Body.Close()
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return fmt.Errorf("send failed (status %d), could not read body: %w", resp.StatusCode, err)
@@ -353,8 +353,12 @@ func (b *Bridge) sendViaAPI(content string) error {
 		return fmt.Errorf("send failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
-	// Fire-and-forget: we don't consume the SSE stream here.
-	// The TUI polls the DB for responses.
+	// Drain the SSE stream in the background so MicroClaw completes the LLM
+	// response. The TUI polls the DB for new messages.
+	go func() {
+		defer resp.Body.Close()
+		io.Copy(io.Discard, resp.Body)
+	}()
 	return nil
 }
 

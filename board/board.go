@@ -124,6 +124,16 @@ func (b *Board) UnlinkTask(taskID string) error {
 	return fmt.Errorf("task with id %q not found", taskID)
 }
 
+// GetTaskByID returns the task with the given ID, or nil if not found.
+func (b *Board) GetTaskByID(id string) *Task {
+	for i, t := range b.Tasks {
+		if t.ID == id {
+			return &b.Tasks[i]
+		}
+	}
+	return nil
+}
+
 // FindTaskByInstance returns the first task linked to the given instance title, or nil.
 func (b *Board) FindTaskByInstance(instanceTitle string) *Task {
 	for i, t := range b.Tasks {

@@ -1,10 +1,17 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/board"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/spf13/cobra"
 )
@@ -35,11 +42,13 @@ var boardListCmd = &cobra.Command{
 }
 
 var (
-	boardAddTitleFlag     string
-	boardAddStatusFlag    string
-	boardAddInstanceFlag  string
-	boardLinkInstanceFlag string
-	boardMoveStatusFlag   string
+	boardAddTitleFlag      string
+	boardAddStatusFlag     string
+	boardAddInstanceFlag   string
+	boardLinkInstanceFlag  string
+	boardMoveStatusFlag    string
+	boardSpawnProgramFlag  string
+	boardSpawnNameFlag     string
 )
 
 var boardAddCmd = &cobra.Command{
@@ -213,6 +222,121 @@ var boardViewCmd = &cobra.Command{
 		return jsonOut(map[string]any{
 			"columns": b.Columns,
 			"tasks":   grouped,
+		})
+	},
+}
+
+var boardSpawnCmd = &cobra.Command{
+	Use:   "spawn <id>",
+	Short: "Spawn a new session from a board task",
+	Long:  "Creates a new session using the task's title as the prompt, links the session to the task, and moves the task to in_progress.",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		repo, err := resolveRepo()
+		if err != nil {
+			return jsonError(fmt.Errorf("--repo is required: %w", err))
+		}
+
+		// Load board and find the task
+		b, err := board.LoadBoardForRepo(repo)
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to load board: %w", err))
+		}
+
+		t := b.GetTaskByID(args[0])
+		if t == nil {
+			return jsonError(fmt.Errorf("task %q not found", args[0]))
+		}
+
+		if t.InstanceTitle != "" {
+			return jsonError(fmt.Errorf("task %q is already linked to instance %q", args[0], t.InstanceTitle))
+		}
+
+		if !git.IsGitRepo(repo.Root) {
+			return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
+		}
+
+		// Determine session name and program
+		sessionName := boardSpawnNameFlag
+		if sessionName == "" {
+			sessionName = fmt.Sprintf("task-%s", t.ID)
+		}
+
+		program := boardSpawnProgramFlag
+		if program == "" {
+			program = config.LoadConfig().DefaultProgram
+		}
+
+		// Create and start the instance
+		instance, err := session.NewInstance(session.InstanceOptions{
+			Title:   sessionName,
+			Path:    repo.Root,
+			Program: program,
+		})
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to create instance: %w", err))
+		}
+
+		if err := instance.Start(true); err != nil {
+			return jsonError(fmt.Errorf("failed to start instance: %w", err))
+		}
+
+		// Wait for ready and send the task title as the prompt
+		if err := task.WaitForReady(instance); err != nil {
+			return jsonError(fmt.Errorf("program did not become ready: %w", err))
+		}
+
+		if instance.CheckAndHandleTrustPrompt() {
+			time.Sleep(1 * time.Second)
+			if err := task.WaitForReady(instance); err != nil {
+				return jsonError(fmt.Errorf("program did not become ready after trust prompt: %w", err))
+			}
+		}
+
+		if err := instance.SendPromptCommand(t.Title); err != nil {
+			return jsonError(fmt.Errorf("failed to send prompt: %w", err))
+		}
+
+		// Save instance to per-repo storage
+		data := instance.ToInstanceData()
+		raw, err := config.LoadRepoInstances(repo.ID)
+		if err != nil {
+			return jsonError(err)
+		}
+		var existing []session.InstanceData
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			existing = []session.InstanceData{}
+		}
+		existing = append(existing, data)
+		out, err := json.MarshalIndent(existing, "", "  ")
+		if err != nil {
+			return jsonError(err)
+		}
+		if err := config.SaveRepoInstances(repo.ID, out); err != nil {
+			return jsonError(err)
+		}
+
+		// Link task to instance and move to in_progress
+		b.LinkTask(t.ID, sessionName)
+		b.MoveTask(t.ID, "in_progress")
+		if err := board.SaveBoardForRepo(repo, b); err != nil {
+			return jsonError(fmt.Errorf("failed to save board: %w", err))
+		}
+
+		// Launch daemon for autoyes if configured
+		cfg := config.LoadConfig()
+		if cfg.AutoYes {
+			if err := daemon.LaunchDaemon(); err != nil {
+				log.ErrorLog.Printf("failed to launch daemon: %v", err)
+			}
+		}
+
+		return jsonOut(map[string]any{
+			"task":     t,
+			"instance": data,
 		})
 	},
 }
