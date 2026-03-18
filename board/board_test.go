@@ -163,3 +163,71 @@ func TestBoardToggleTask(t *testing.T) {
 	assert.NoError(t, b.ToggleTask(tk.ID))
 	assert.Equal(t, "backlog", b.Tasks[0].Status)
 }
+
+func TestMergeBoardsNewTaskFromDisk(t *testing.T) {
+	// Shared task present in both boards.
+	user := &Board{Columns: DefaultColumns}
+	shared := user.AddTask("Shared", "backlog")
+
+	// Disk board has the same shared task plus a new one added via CLI.
+	disk := &Board{Columns: DefaultColumns, Tasks: []Task{
+		{ID: shared.ID, Title: "Shared", Status: "backlog"},
+		{ID: "cli-new-1", Title: "CLI task", Status: "in_progress"},
+	}}
+
+	// originalIDs tracks what was loaded initially — just the shared task.
+	originalIDs := map[string]bool{shared.ID: true}
+
+	merged := MergeBoards(user, disk, originalIDs)
+
+	assert.Equal(t, 2, merged.TaskCount(), "new disk task should be merged in")
+	// The original user task should come first (user ordering preserved).
+	assert.Equal(t, shared.ID, merged.Tasks[0].ID)
+	// The new CLI task should be appended.
+	assert.Equal(t, "cli-new-1", merged.Tasks[1].ID)
+	assert.Equal(t, "CLI task", merged.Tasks[1].Title)
+}
+
+func TestMergeBoardsUserEditWins(t *testing.T) {
+	// User edited the task title in the TUI.
+	user := &Board{Columns: DefaultColumns, Tasks: []Task{
+		{ID: "t1", Title: "User edited title", Status: "in_progress"},
+	}}
+
+	// Disk still has the old version of the same task.
+	disk := &Board{Columns: DefaultColumns, Tasks: []Task{
+		{ID: "t1", Title: "Original title", Status: "backlog"},
+	}}
+
+	originalIDs := map[string]bool{"t1": true}
+
+	merged := MergeBoards(user, disk, originalIDs)
+
+	assert.Equal(t, 1, merged.TaskCount())
+	assert.Equal(t, "User edited title", merged.Tasks[0].Title)
+	assert.Equal(t, "in_progress", merged.Tasks[0].Status)
+}
+
+func TestMergeBoardsUserDeletedTaskStaysDeleted(t *testing.T) {
+	// User deleted a task in the TUI — it's not in userBoard.
+	user := &Board{Columns: DefaultColumns, Tasks: []Task{
+		{ID: "t1", Title: "Kept task", Status: "backlog"},
+	}}
+
+	// Disk still has the deleted task plus the kept one.
+	disk := &Board{Columns: DefaultColumns, Tasks: []Task{
+		{ID: "t1", Title: "Kept task", Status: "backlog"},
+		{ID: "t-deleted", Title: "Deleted by user", Status: "done"},
+	}}
+
+	// originalIDs includes the deleted task — the user knew about it and
+	// chose to delete it.
+	originalIDs := map[string]bool{"t1": true, "t-deleted": true}
+
+	merged := MergeBoards(user, disk, originalIDs)
+
+	// The deleted task was in originalIDs and absent from userBoard, so
+	// MergeBoards recognises that the user intentionally removed it.
+	assert.Equal(t, 1, merged.TaskCount())
+	assert.Equal(t, "t1", merged.Tasks[0].ID)
+}
