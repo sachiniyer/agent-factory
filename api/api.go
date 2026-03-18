@@ -132,7 +132,6 @@ func init() {
 	sessionsCmd.AddCommand(sessionsCreateCmd)
 	sessionsCmd.AddCommand(sessionsSendPromptCmd)
 	sessionsCmd.AddCommand(sessionsPreviewCmd)
-	sessionsCmd.AddCommand(sessionsDiffCmd)
 	sessionsCmd.AddCommand(sessionsKillCmd)
 
 	// Tasks

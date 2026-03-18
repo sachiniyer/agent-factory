@@ -149,8 +149,8 @@ func (m *Menu) addInstanceOptions() {
 	// Action group
 	actionGroup := []keys.KeyName{keys.KeyEnter}
 
-	// Navigation group (when in diff tab)
-	if m.activeTab == DiffTab || m.activeTab == TerminalTab {
+	// Navigation group (when in terminal tab)
+	if m.activeTab == TerminalTab {
 		actionGroup = append(actionGroup, keys.KeyShiftUp)
 	}
 

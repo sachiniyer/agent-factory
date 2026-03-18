@@ -47,9 +47,6 @@ type Instance struct {
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
 
-	// DiffStats stores the current git diff statistics
-	diffStats *git.DiffStats
-
 	// prInfo stores the associated GitHub PR info
 	prInfo *git.PRInfo
 
@@ -89,15 +86,6 @@ func (i *Instance) ToInstanceData() InstanceData {
 		}
 	}
 
-	// Only include diff stats if they exist
-	if i.diffStats != nil {
-		data.DiffStats = DiffStatsData{
-			Added:   i.diffStats.Added,
-			Removed: i.diffStats.Removed,
-			Content: i.diffStats.Content,
-		}
-	}
-
 	// Only include PR info if it exists
 	if i.prInfo != nil {
 		data.PRInfo = PRInfoData{
@@ -131,11 +119,6 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			data.Worktree.BaseCommitSHA,
 			data.Worktree.ExternalWorktree,
 		),
-		diffStats: &git.DiffStats{
-			Added:   data.DiffStats.Added,
-			Removed: data.DiffStats.Removed,
-			Content: data.DiffStats.Content,
-		},
 	}
 
 	if data.PRInfo.Number != 0 {
@@ -430,32 +413,6 @@ func (i *Instance) TmuxAlive() bool {
 		return false
 	}
 	return i.tmuxSession.DoesSessionExist()
-}
-
-// UpdateDiffStats updates the git diff statistics for this instance
-func (i *Instance) UpdateDiffStats() error {
-	if !i.started {
-		i.diffStats = nil
-		return nil
-	}
-
-	stats := i.gitWorktree.Diff()
-	if stats.Error != nil {
-		if strings.Contains(stats.Error.Error(), "base commit SHA not set") {
-			// Worktree is not fully set up yet, not an error
-			i.diffStats = nil
-			return nil
-		}
-		return fmt.Errorf("failed to get diff stats: %w", stats.Error)
-	}
-
-	i.diffStats = stats
-	return nil
-}
-
-// GetDiffStats returns the current git diff statistics
-func (i *Instance) GetDiffStats() *git.DiffStats {
-	return i.diffStats
 }
 
 // GetPRInfo returns the associated GitHub PR info, or nil if none.
