@@ -291,38 +291,6 @@ var sessionsPreviewCmd = &cobra.Command{
 	},
 }
 
-var sessionsDiffCmd = &cobra.Command{
-	Use:   "diff <title>",
-	Short: "Get diff stats for a session",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
-
-		instance, _, err := findLiveInstanceByTitle(args[0])
-		if err != nil {
-			return jsonError(err)
-		}
-
-		if err := instance.UpdateDiffStats(); err != nil {
-			return jsonError(fmt.Errorf("failed to update diff stats: %w", err))
-		}
-		stats := instance.GetDiffStats()
-		if stats == nil {
-			return jsonOut(map[string]any{
-				"added":   0,
-				"removed": 0,
-				"content": "",
-			})
-		}
-		return jsonOut(map[string]any{
-			"added":   stats.Added,
-			"removed": stats.Removed,
-			"content": stats.Content,
-		})
-	},
-}
-
 var sessionsKillCmd = &cobra.Command{
 	Use:   "kill <title>",
 	Short: "Kill a session",

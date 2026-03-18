@@ -22,7 +22,6 @@ type InstanceData struct {
 
 	Program   string          `json:"program"`
 	Worktree  GitWorktreeData `json:"worktree"`
-	DiffStats DiffStatsData   `json:"diff_stats"`
 	PRInfo    PRInfoData      `json:"pr_info,omitempty"`
 }
 
@@ -42,13 +41,6 @@ type GitWorktreeData struct {
 	BranchName       string `json:"branch_name"`
 	BaseCommitSHA    string `json:"base_commit_sha"`
 	ExternalWorktree bool   `json:"external_worktree,omitempty"`
-}
-
-// DiffStatsData represents the serializable data of a DiffStats
-type DiffStatsData struct {
-	Added   int    `json:"added"`
-	Removed int    `json:"removed"`
-	Content string `json:"content"`
 }
 
 // Storage handles saving and loading instances using the state interface.

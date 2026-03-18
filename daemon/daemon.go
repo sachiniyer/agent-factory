@@ -35,9 +35,6 @@ func RunDaemon(cfg *config.Config) error {
 
 	pollInterval := time.Duration(cfg.DaemonPollInterval) * time.Millisecond
 
-	// If we get an error for a session, it's likely that we'll keep getting the error. Log every 30 seconds.
-	everyN := log.NewEvery(60 * time.Second)
-
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	stopCh := make(chan struct{})
@@ -51,11 +48,6 @@ func RunDaemon(cfg *config.Config) error {
 				if instance.Started() {
 					if _, hasPrompt := instance.HasUpdated(); hasPrompt {
 						instance.TapEnter()
-						if err := instance.UpdateDiffStats(); err != nil {
-							if everyN.ShouldLog() {
-								log.WarningLog.Printf("could not update diff stats for %s: %v", instance.Title, err)
-							}
-						}
 					}
 				}
 			}

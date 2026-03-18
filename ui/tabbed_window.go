@@ -33,7 +33,6 @@ var (
 
 const (
 	PreviewTab int = iota
-	DiffTab
 	TerminalTab
 )
 
@@ -47,16 +46,14 @@ type TabbedWindow struct {
 	width     int
 
 	preview  *PreviewPane
-	diff     *DiffPane
 	terminal *TerminalPane
 	instance *session.Instance
 }
 
-func NewTabbedWindow(preview *PreviewPane, diff *DiffPane, terminal *TerminalPane) *TabbedWindow {
+func NewTabbedWindow(preview *PreviewPane, terminal *TerminalPane) *TabbedWindow {
 	return &TabbedWindow{
-		tabs:     []string{"Preview", "Diff", "Terminal"},
+		tabs:     []string{"Preview", "Terminal"},
 		preview:  preview,
-		diff:     diff,
 		terminal: terminal,
 	}
 }
@@ -83,7 +80,6 @@ func (w *TabbedWindow) SetSize(width, height int) {
 	contentWidth := w.width - windowStyle.GetHorizontalFrameSize()
 
 	w.preview.SetSize(contentWidth, contentHeight)
-	w.diff.SetSize(contentWidth, contentHeight)
 	w.terminal.SetSize(contentWidth, contentHeight)
 }
 
@@ -107,13 +103,6 @@ func (w *TabbedWindow) UpdatePreview(instance *session.Instance) error {
 	return w.preview.UpdateContent(instance)
 }
 
-func (w *TabbedWindow) UpdateDiff(instance *session.Instance) {
-	if w.activeTab != DiffTab {
-		return
-	}
-	w.diff.SetDiff(instance)
-}
-
 // UpdateTerminal updates the terminal pane content. Only updates when terminal tab is active.
 func (w *TabbedWindow) UpdateTerminal(instance *session.Instance) error {
 	if w.activeTab != TerminalTab {
@@ -135,8 +124,6 @@ func (w *TabbedWindow) ScrollUp() {
 		if err != nil {
 			log.InfoLog.Printf("tabbed window failed to scroll up: %v", err)
 		}
-	case DiffTab:
-		w.diff.ScrollUp()
 	case TerminalTab:
 		if err := w.terminal.ScrollUp(); err != nil {
 			log.InfoLog.Printf("tabbed window failed to scroll terminal up: %v", err)
@@ -151,8 +138,6 @@ func (w *TabbedWindow) ScrollDown() {
 		if err != nil {
 			log.InfoLog.Printf("tabbed window failed to scroll down: %v", err)
 		}
-	case DiffTab:
-		w.diff.ScrollDown()
 	case TerminalTab:
 		if err := w.terminal.ScrollDown(); err != nil {
 			log.InfoLog.Printf("tabbed window failed to scroll terminal down: %v", err)
@@ -163,11 +148,6 @@ func (w *TabbedWindow) ScrollDown() {
 // IsInPreviewTab returns true if the preview tab is currently active
 func (w *TabbedWindow) IsInPreviewTab() bool {
 	return w.activeTab == PreviewTab
-}
-
-// IsInDiffTab returns true if the diff tab is currently active
-func (w *TabbedWindow) IsInDiffTab() bool {
-	return w.activeTab == DiffTab
 }
 
 // IsInTerminalTab returns true if the terminal tab is currently active
@@ -255,8 +235,6 @@ func (w *TabbedWindow) String() string {
 	switch w.activeTab {
 	case PreviewTab:
 		content = w.preview.String()
-	case DiffTab:
-		content = w.diff.String()
 	case TerminalTab:
 		content = w.terminal.String()
 	}

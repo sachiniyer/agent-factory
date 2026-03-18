@@ -163,14 +163,6 @@ func (c *ContentPane) UpdatePreview(instance *session.Instance) error {
 	return c.tabbedWindow.UpdatePreview(instance)
 }
 
-// UpdateDiff delegates to TabbedWindow.
-func (c *ContentPane) UpdateDiff(instance *session.Instance) {
-	if c.mode != ContentModeInstance {
-		return
-	}
-	c.tabbedWindow.UpdateDiff(instance)
-}
-
 // UpdateTerminal delegates to TabbedWindow.
 func (c *ContentPane) UpdateTerminal(instance *session.Instance) error {
 	if c.mode != ContentModeInstance {

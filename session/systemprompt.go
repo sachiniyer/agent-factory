@@ -18,7 +18,6 @@ Session commands:
   af api sessions kill <title>                  Delete/kill a session
   af api sessions send-prompt <title> <prompt>  Send a prompt to another session
   af api sessions preview <title>               View another session's terminal output
-  af api sessions diff <title>                  Get diff stats for a session
 
 Task commands (kanban board):
   af api board view                                     Get kanban board (columns + tasks)

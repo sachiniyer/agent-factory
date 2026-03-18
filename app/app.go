@@ -140,7 +140,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		os.Exit(1)
 	}
 
-	tabbedWindow := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane())
+	tabbedWindow := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewTerminalPane())
 
 	h := &home{
 		ctx:             ctx,
@@ -313,10 +313,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					instance.SetStatus(session.Ready)
 				}
 			}
-			if err := instance.UpdateDiffStats(); err != nil {
-				log.WarningLog.Printf("could not update diff stats: %v", err)
 			}
-		}
 		return m, tickUpdateMetadataCmd
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress {
@@ -743,7 +740,6 @@ func (m *home) selectionChanged() tea.Cmd {
 	case sel.Kind == ui.SectionInstances && !sel.IsHeader:
 		m.contentPane.SetMode(ui.ContentModeInstance)
 		selected := m.sidebar.GetSelectedInstance()
-		tw.UpdateDiff(selected)
 		tw.SetInstance(selected)
 		m.menu.SetInstance(selected)
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)

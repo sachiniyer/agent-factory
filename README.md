@@ -51,7 +51,7 @@ Each session runs an AI agent in an isolated git worktree with its own branch. S
 | `D` | Kill (delete) selected session |
 | `j` / `k` | Navigate sessions |
 | `a` | Attach to an existing worktree |
-| `Tab` | Switch between preview, diff, and terminal |
+| `Tab` | Switch between preview and terminal |
 
 ### Kanban Board
 
@@ -111,7 +111,6 @@ The `af api` subcommand provides a JSON CLI for driving Agent Factory without th
 af api sessions list
 af api sessions create --name my-task --prompt "fix the login bug"
 af api sessions preview my-task
-af api sessions diff my-task
 af api sessions kill my-task
 
 # Kanban board
