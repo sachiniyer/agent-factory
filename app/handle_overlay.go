@@ -214,6 +214,9 @@ func (m *home) handleContentPaneFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 	if taskID := kp.ConsumePendingLink(); taskID != "" {
 		return m, m.showLinkInstanceOverlay(taskID), true
 	}
+	if spawnTask := kp.ConsumePendingSpawn(); spawnTask != nil {
+		return m, m.handleBoardSpawn(spawnTask), true
+	}
 
 	// Check if a new task was submitted via the inline form
 	sp := m.contentPane.TaskPane()

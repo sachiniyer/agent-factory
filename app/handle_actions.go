@@ -6,11 +6,13 @@ import (
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -264,6 +266,75 @@ func (m *home) handleOpenPR() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("failed to open PR: %w", err))
 	}
 	return m, nil
+}
+
+// handleBoardSpawn creates a new instance from a board task, using the task title as the prompt.
+func (m *home) handleBoardSpawn(bt *board.Task) tea.Cmd {
+	if m.sidebar.NumInstances() >= GlobalInstanceLimit {
+		return m.handleError(fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
+	}
+
+	// Auto-generate a unique instance title from the task title.
+	existing := make(map[string]bool, len(m.sidebar.GetInstances()))
+	for _, inst := range m.sidebar.GetInstances() {
+		existing[inst.Title] = true
+	}
+	title := board.GenerateInstanceTitle(bt.Title, existing)
+
+	instance, err := session.NewInstance(session.InstanceOptions{
+		Title:   title,
+		Path:    ".",
+		Program: m.program,
+	})
+	if err != nil {
+		return m.handleError(fmt.Errorf("failed to create instance: %w", err))
+	}
+
+	finalizer := m.sidebar.AddInstance(instance)
+	m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
+	instance.SetStatus(session.Loading)
+	finalizer()
+	m.menu.SetState(ui.StateDefault)
+
+	// Link the board task to the new instance and move to in_progress.
+	kp := m.contentPane.KanbanPane()
+	if b := kp.GetBoard(); b != nil {
+		b.LinkTask(bt.ID, title)
+		if err := b.MoveTask(bt.ID, "in_progress"); err != nil {
+			log.ErrorLog.Printf("failed to move task to in_progress: %v", err)
+		}
+		if err := board.SaveBoard(b); err != nil {
+			log.ErrorLog.Printf("failed to save board: %v", err)
+		}
+		kp.SetBoard(b)
+		m.sidebar.SetTaskCount(b.TaskCount())
+	}
+
+	prompt := bt.Title
+	startCmd := func() tea.Msg {
+		if err := instance.Start(true); err != nil {
+			return instanceStartedMsg{instance: instance, err: err}
+		}
+
+		if err := task.WaitForReady(instance); err != nil {
+			return instanceStartedMsg{instance: instance, err: err}
+		}
+
+		if instance.CheckAndHandleTrustPrompt() {
+			time.Sleep(1 * time.Second)
+			if err := task.WaitForReady(instance); err != nil {
+				return instanceStartedMsg{instance: instance, err: err}
+			}
+		}
+
+		if err := instance.SendPromptCommand(prompt); err != nil {
+			return instanceStartedMsg{instance: instance, err: err}
+		}
+
+		return instanceStartedMsg{instance: instance, err: nil}
+	}
+
+	return tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
 }
 
 // handleCopyPR copies the PR URL to the clipboard.
