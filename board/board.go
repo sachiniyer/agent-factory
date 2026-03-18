@@ -27,8 +27,9 @@ type Task struct {
 }
 
 type Board struct {
-	Columns []string `json:"columns"`
-	Tasks   []Task   `json:"tasks"`
+	Columns   []string  `json:"columns"`
+	Tasks     []Task    `json:"tasks"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (b *Board) AddTask(title, status string) Task {
@@ -187,11 +188,60 @@ func SaveBoardForRepo(repo *config.RepoContext, board *Board) error {
 	if err != nil {
 		return err
 	}
+	board.UpdatedAt = time.Now()
 	data, err := json.MarshalIndent(board, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal board: %w", err)
 	}
 	return config.AtomicWriteFile(path, data, 0644)
+}
+
+// MergeBoards merges external changes from disk into the user's edited board.
+// User edits take priority. New tasks from disk are added. Tasks deleted by the
+// user stay deleted. Tasks modified on disk but not by the user get the disk version.
+//
+// originalIDs is the set of task IDs that were present when the user's board was
+// loaded from disk. This lets us distinguish "user deleted a task" (ID was in
+// originalIDs but is no longer in userBoard) from "new external task" (ID was
+// NOT in originalIDs). If originalIDs is nil, all disk tasks not in userBoard
+// are treated as new.
+func MergeBoards(userBoard, diskBoard *Board, originalIDs map[string]bool) *Board {
+	if userBoard == nil {
+		return diskBoard
+	}
+	if diskBoard == nil {
+		return userBoard
+	}
+
+	// Build a set of task IDs in userBoard for fast lookup.
+	userIDs := make(map[string]bool, len(userBoard.Tasks))
+	for _, t := range userBoard.Tasks {
+		userIDs[t.ID] = true
+	}
+
+	// Start with the user's tasks (preserving their order and edits).
+	merged := &Board{
+		Columns:   userBoard.Columns,
+		Tasks:     make([]Task, len(userBoard.Tasks)),
+		UpdatedAt: userBoard.UpdatedAt,
+	}
+	copy(merged.Tasks, userBoard.Tasks)
+
+	// Add tasks from disk that don't exist in user board, but only if they
+	// are truly new (not present in the original loaded set, meaning the
+	// user didn't delete them).
+	for _, dt := range diskBoard.Tasks {
+		if userIDs[dt.ID] {
+			continue // already in user board — user version wins
+		}
+		if originalIDs != nil && originalIDs[dt.ID] {
+			continue // was in original load — user deleted it, honour that
+		}
+		// Truly new external task — add it.
+		merged.Tasks = append(merged.Tasks, dt)
+	}
+
+	return merged
 }
 
 func SaveBoard(board *Board) error {
