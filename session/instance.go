@@ -27,7 +27,7 @@ const (
 type Instance struct {
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):
-	// started, Status, tmuxSession, gitWorktree, prInfo, diffStats.
+	// started, Status, tmuxSession, gitWorktree, prInfo.
 	mu sync.RWMutex
 
 	// Title is the title of the instance.
@@ -429,14 +429,6 @@ func (i *Instance) SetPreviewSize(width, height int) error {
 		return fmt.Errorf("cannot set preview size for instance that has not been started")
 	}
 	return i.tmuxSession.SetDetachedSize(width, height)
-}
-
-// GetGitWorktree returns the git worktree for the instance
-func (i *Instance) GetGitWorktree() (*git.GitWorktree, error) {
-	if !i.started {
-		return nil, fmt.Errorf("cannot get git worktree for instance that has not been started")
-	}
-	return i.gitWorktree, nil
 }
 
 // GetWorktreePath returns the worktree path for the instance, or empty string if unavailable
