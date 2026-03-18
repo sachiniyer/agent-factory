@@ -187,14 +187,11 @@ func SaveBoardForRepo(repo *config.RepoContext, board *Board) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
 	data, err := json.MarshalIndent(board, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal board: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return config.AtomicWriteFile(path, data, 0644)
 }
 
 func SaveBoard(board *Board) error {
@@ -207,16 +204,22 @@ func SaveBoard(board *Board) error {
 
 // --- Repo-scoped convenience (used by API) ---
 
-// updateBoardForRepo loads the board, applies fn, and saves it back.
+// updateBoardForRepo loads the board under a file lock, applies fn, and saves it back atomically.
 func updateBoardForRepo(repo *config.RepoContext, fn func(*Board) error) error {
-	board, err := LoadBoardForRepo(repo)
+	path, err := tasksPath(repo)
 	if err != nil {
 		return err
 	}
-	if err := fn(board); err != nil {
-		return err
-	}
-	return SaveBoardForRepo(repo, board)
+	return config.WithFileLock(path, func() error {
+		board, err := LoadBoardForRepo(repo)
+		if err != nil {
+			return err
+		}
+		if err := fn(board); err != nil {
+			return err
+		}
+		return SaveBoardForRepo(repo, board)
+	})
 }
 
 func LoadTasksForRepo(repo *config.RepoContext) ([]Task, error) {
@@ -228,12 +231,20 @@ func LoadTasksForRepo(repo *config.RepoContext) ([]Task, error) {
 }
 
 func AddTaskForRepoWithStatus(repo *config.RepoContext, title, status string) (Task, error) {
-	board, err := LoadBoardForRepo(repo)
+	path, err := tasksPath(repo)
 	if err != nil {
 		return Task{}, err
 	}
-	t := board.AddTask(title, status)
-	return t, SaveBoardForRepo(repo, board)
+	var t Task
+	err = config.WithFileLock(path, func() error {
+		board, loadErr := LoadBoardForRepo(repo)
+		if loadErr != nil {
+			return loadErr
+		}
+		t = board.AddTask(title, status)
+		return SaveBoardForRepo(repo, board)
+	})
+	return t, err
 }
 
 func ToggleTaskForRepo(repo *config.RepoContext, id string) error {
@@ -254,6 +265,27 @@ func LinkTaskForRepo(repo *config.RepoContext, taskID, instanceTitle string) err
 
 func UnlinkTaskForRepo(repo *config.RepoContext, taskID string) error {
 	return updateBoardForRepo(repo, func(b *Board) error { return b.UnlinkTask(taskID) })
+}
+
+// AddAndLinkTaskForRepo adds a new task and links it to an instance in a single locked operation.
+func AddAndLinkTaskForRepo(repo *config.RepoContext, title, status, instanceTitle string) error {
+	return updateBoardForRepo(repo, func(b *Board) error {
+		t := b.AddTask(title, status)
+		return b.LinkTask(t.ID, instanceTitle)
+	})
+}
+
+// MoveLinkedTaskForRepo finds a task linked to the given instance, unlinks it,
+// and moves it to the given status. Does nothing if no task is linked.
+func MoveLinkedTaskForRepo(repo *config.RepoContext, instanceTitle, newStatus string) error {
+	return updateBoardForRepo(repo, func(b *Board) error {
+		t := b.FindTaskByInstance(instanceTitle)
+		if t == nil {
+			return nil // nothing to move
+		}
+		b.UnlinkTask(t.ID)
+		return b.MoveTask(t.ID, newStatus)
+	})
 }
 
 func generateID() string {

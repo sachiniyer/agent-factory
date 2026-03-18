@@ -102,7 +102,7 @@ func SaveState(state *State) error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	return os.WriteFile(statePath, data, 0644)
+	return AtomicWriteFile(statePath, data, 0644)
 }
 
 // Per-repo instance file functions
@@ -139,17 +139,38 @@ func LoadRepoInstances(repoID string) (json.RawMessage, error) {
 	return json.RawMessage(data), nil
 }
 
-// SaveRepoInstances saves instances for a specific repo.
+// SaveRepoInstances saves instances for a specific repo using atomic writes.
 func SaveRepoInstances(repoID string, data json.RawMessage) error {
 	path, err := repoInstancesPath(repoID)
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create instances directory: %w", err)
+	return AtomicWriteFile(path, data, 0644)
+}
+
+// RepoInstancesPath returns the file path for a repo's instances file.
+// Exported so callers can use it for file locking.
+func RepoInstancesPath(repoID string) (string, error) {
+	return repoInstancesPath(repoID)
+}
+
+// UpdateRepoInstances loads instances under a file lock, applies fn, and saves atomically.
+func UpdateRepoInstances(repoID string, fn func(raw json.RawMessage) (json.RawMessage, error)) error {
+	path, err := repoInstancesPath(repoID)
+	if err != nil {
+		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return WithFileLock(path, func() error {
+		raw, err := LoadRepoInstances(repoID)
+		if err != nil {
+			return err
+		}
+		result, err := fn(raw)
+		if err != nil {
+			return err
+		}
+		return SaveRepoInstances(repoID, result)
+	})
 }
 
 // DeleteRepoInstances deletes instances for a specific repo.

@@ -136,22 +136,16 @@ var sessionsCreateCmd = &cobra.Command{
 			}
 		}
 
-		// Save to per-repo storage
+		// Save to per-repo storage under file lock
 		data := instance.ToInstanceData()
-		raw, err := config.LoadRepoInstances(repo.ID)
-		if err != nil {
-			return jsonError(err)
-		}
-		var existing []session.InstanceData
-		if err := json.Unmarshal(raw, &existing); err != nil {
-			existing = []session.InstanceData{}
-		}
-		existing = append(existing, data)
-		out, err := json.MarshalIndent(existing, "", "  ")
-		if err != nil {
-			return jsonError(err)
-		}
-		if err := config.SaveRepoInstances(repo.ID, out); err != nil {
+		if err := config.UpdateRepoInstances(repo.ID, func(raw json.RawMessage) (json.RawMessage, error) {
+			var existing []session.InstanceData
+			if err := json.Unmarshal(raw, &existing); err != nil {
+				existing = []session.InstanceData{}
+			}
+			existing = append(existing, data)
+			return json.MarshalIndent(existing, "", "  ")
+		}); err != nil {
 			return jsonError(err)
 		}
 
@@ -232,22 +226,16 @@ or use 'af api sessions create --name <title> --prompt <prompt>' instead.`,
 				}
 			}
 
-			// Save to per-repo storage
+			// Save to per-repo storage under file lock
 			data := instance.ToInstanceData()
-			raw, loadErr := config.LoadRepoInstances(repo.ID)
-			if loadErr != nil {
-				return jsonError(loadErr)
-			}
-			var existing []session.InstanceData
-			if err := json.Unmarshal(raw, &existing); err != nil {
-				existing = []session.InstanceData{}
-			}
-			existing = append(existing, data)
-			out, marshalErr := json.MarshalIndent(existing, "", "  ")
-			if marshalErr != nil {
-				return jsonError(marshalErr)
-			}
-			if err := config.SaveRepoInstances(repo.ID, out); err != nil {
+			if err := config.UpdateRepoInstances(repo.ID, func(raw json.RawMessage) (json.RawMessage, error) {
+				var existing []session.InstanceData
+				if err := json.Unmarshal(raw, &existing); err != nil {
+					existing = []session.InstanceData{}
+				}
+				existing = append(existing, data)
+				return json.MarshalIndent(existing, "", "  ")
+			}); err != nil {
 				return jsonError(err)
 			}
 
@@ -319,16 +307,10 @@ var sessionsKillCmd = &cobra.Command{
 			log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
 		}
 
-		// Auto-move linked board task to "done" and unlink it.
-		b, boardErr := board.LoadBoard()
-		if boardErr == nil {
-			if linkedTask := b.FindTaskByInstance(args[0]); linkedTask != nil {
-				b.UnlinkTask(linkedTask.ID)
-				if err := b.MoveTask(linkedTask.ID, "done"); err == nil {
-					if err := board.SaveBoard(b); err != nil {
-						log.ErrorLog.Printf("failed to save board after moving task to done: %v", err)
-					}
-				}
+		// Auto-unlink and move linked board task to "done".
+		if repo, repoErr := config.RepoFromPath(instance.Path); repoErr == nil {
+			if err := board.MoveLinkedTaskForRepo(repo, args[0], "done"); err != nil {
+				log.ErrorLog.Printf("failed to move linked board task to done: %v", err)
 			}
 		}
 

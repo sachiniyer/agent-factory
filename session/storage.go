@@ -60,7 +60,7 @@ func NewStorage(state config.InstanceStorage, repoID string) (*Storage, error) {
 	}, nil
 }
 
-// SaveInstances saves the list of instances to disk.
+// SaveInstances saves the list of instances to disk under file locks.
 func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Convert instances to InstanceData
 	data := make([]InstanceData, 0)
@@ -73,11 +73,17 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	if s.repoID != "" {
 		// TUI mode: the sidebar is the source of truth; external instances
 		// are already pulled in by the periodic refreshExternalInstances tick.
-		jsonData, err := json.Marshal(data)
-		if err != nil {
-			return fmt.Errorf("failed to marshal instances: %w", err)
+		path, pathErr := config.RepoInstancesPath(s.repoID)
+		if pathErr != nil {
+			return pathErr
 		}
-		return s.state.SaveInstances(s.repoID, jsonData)
+		return config.WithFileLock(path, func() error {
+			jsonData, err := json.Marshal(data)
+			if err != nil {
+				return fmt.Errorf("failed to marshal instances: %w", err)
+			}
+			return s.state.SaveInstances(s.repoID, jsonData)
+		})
 	}
 
 	// Daemon mode: group by repo and save each group separately
@@ -87,11 +93,17 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		grouped[rid] = append(grouped[rid], d)
 	}
 	for rid, group := range grouped {
-		jsonData, err := json.Marshal(group)
-		if err != nil {
-			return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
+		path, pathErr := config.RepoInstancesPath(rid)
+		if pathErr != nil {
+			return pathErr
 		}
-		if err := s.state.SaveInstances(rid, jsonData); err != nil {
+		if err := config.WithFileLock(path, func() error {
+			jsonData, err := json.Marshal(group)
+			if err != nil {
+				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
+			}
+			return s.state.SaveInstances(rid, jsonData)
+		}); err != nil {
 			return err
 		}
 	}
@@ -139,35 +151,41 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 // directly, avoiding the need to reconstruct live Instance objects (which
 // may fail if tmux/worktree has already been destroyed).
 func (s *Storage) DeleteInstance(title string) error {
-	raw := s.state.GetInstances(s.repoID)
-	if raw == nil || string(raw) == "[]" || string(raw) == "null" {
-		return fmt.Errorf("instance not found: %s", title)
+	path, pathErr := config.RepoInstancesPath(s.repoID)
+	if pathErr != nil {
+		return pathErr
 	}
-
-	var data []InstanceData
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return fmt.Errorf("failed to parse instances: %w", err)
-	}
-
-	filtered := make([]InstanceData, 0, len(data))
-	found := false
-	for _, d := range data {
-		if d.Title == title {
-			found = true
-			continue
+	return config.WithFileLock(path, func() error {
+		raw := s.state.GetInstances(s.repoID)
+		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
+			return fmt.Errorf("instance not found: %s", title)
 		}
-		filtered = append(filtered, d)
-	}
 
-	if !found {
-		return fmt.Errorf("instance not found: %s", title)
-	}
+		var data []InstanceData
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return fmt.Errorf("failed to parse instances: %w", err)
+		}
 
-	out, err := json.Marshal(filtered)
-	if err != nil {
-		return fmt.Errorf("failed to marshal instances: %w", err)
-	}
-	return s.state.SaveInstances(s.repoID, out)
+		filtered := make([]InstanceData, 0, len(data))
+		found := false
+		for _, d := range data {
+			if d.Title == title {
+				found = true
+				continue
+			}
+			filtered = append(filtered, d)
+		}
+
+		if !found {
+			return fmt.Errorf("instance not found: %s", title)
+		}
+
+		out, err := json.Marshal(filtered)
+		if err != nil {
+			return fmt.Errorf("failed to marshal instances: %w", err)
+		}
+		return s.state.SaveInstances(s.repoID, out)
+	})
 }
 
 // LoadInstanceData reads and unmarshals instance data from disk without
