@@ -9,6 +9,7 @@ import (
 
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -259,4 +260,32 @@ func generateID() string {
 	b := make([]byte, 4)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// GenerateInstanceTitle creates a short, unique session title from a task description.
+// existingTitles is the set of titles already in use.
+func GenerateInstanceTitle(taskTitle string, existingTitles map[string]bool) string {
+	base := strings.TrimSpace(taskTitle)
+	if len(base) > 24 {
+		base = base[:24]
+		if idx := strings.LastIndex(base, " "); idx > 8 {
+			base = base[:idx]
+		}
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "board-task"
+	}
+
+	candidate := base
+	if !existingTitles[candidate] {
+		return candidate
+	}
+	for i := 2; i < 100; i++ {
+		candidate = fmt.Sprintf("%s-%d", base, i)
+		if !existingTitles[candidate] {
+			return candidate
+		}
+	}
+	return candidate
 }

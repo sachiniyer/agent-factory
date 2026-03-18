@@ -262,7 +262,19 @@ var boardSpawnCmd = &cobra.Command{
 		// Determine session name and program
 		sessionName := boardSpawnNameFlag
 		if sessionName == "" {
-			sessionName = fmt.Sprintf("task-%s", t.ID)
+			// Auto-generate from task title, avoiding clashes with existing instances.
+			existingTitles := make(map[string]bool)
+			if allInstances, err := config.LoadAllRepoInstances(); err == nil {
+				for _, raw := range allInstances {
+					var instances []session.InstanceData
+					if err := json.Unmarshal(raw, &instances); err == nil {
+						for _, inst := range instances {
+							existingTitles[inst.Title] = true
+						}
+					}
+				}
+			}
+			sessionName = board.GenerateInstanceTitle(t.Title, existingTitles)
 		}
 
 		program := boardSpawnProgramFlag

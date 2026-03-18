@@ -37,6 +37,7 @@ type KanbanPane struct {
 	pendingJumpInstance   string
 	pendingAttachInstance string
 	pendingLinkTaskID     string
+	pendingSpawnTask      *board.Task
 	statusMsg             string
 }
 
@@ -76,6 +77,13 @@ func (k *KanbanPane) ConsumePendingLink() string {
 	id := k.pendingLinkTaskID
 	k.pendingLinkTaskID = ""
 	return id
+}
+
+// ConsumePendingSpawn returns and clears the pending spawn task.
+func (k *KanbanPane) ConsumePendingSpawn() *board.Task {
+	t := k.pendingSpawnTask
+	k.pendingSpawnTask = nil
+	return t
 }
 
 // ConsumeStatusMsg returns and clears any status message (e.g. error feedback).
@@ -182,6 +190,16 @@ func (k *KanbanPane) HandleKeyPress(msg tea.KeyMsg) bool {
 					k.pendingAttachInstance = t.InstanceTitle
 				} else {
 					k.pendingLinkTaskID = t.ID
+				}
+			}
+			return true
+		case "N":
+			if t := k.getTaskAtFlat(k.selectedIdx); t != nil {
+				if t.InstanceTitle != "" {
+					k.statusMsg = "task already linked to a session"
+				} else {
+					spawned := *t
+					k.pendingSpawnTask = &spawned
 				}
 			}
 			return true
@@ -571,6 +589,6 @@ func (k *KanbanPane) writeHints(b *strings.Builder) {
 	} else if k.carrying {
 		b.WriteString(kanbanHintStyle.Render("m drop here | j/k position | h/l column | esc cancel"))
 	} else {
-		b.WriteString(kanbanHintStyle.Render("j/k navigate | h/l column | n add | m move | d del | o open | a link/attach | c clear done"))
+		b.WriteString(kanbanHintStyle.Render("j/k navigate | h/l column | n add | N spawn | m move | d del | o open | a link/attach | c clear done"))
 	}
 }
