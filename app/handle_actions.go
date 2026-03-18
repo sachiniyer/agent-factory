@@ -160,9 +160,10 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 			log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
 		}
 
-		// Auto-move linked board task to "done"
+		// Auto-move linked board task to "done" and unlink it.
 		if b := m.contentPane.KanbanPane().GetBoard(); b != nil {
 			if linkedTask := b.FindTaskByInstance(selected.Title); linkedTask != nil {
+				b.UnlinkTask(linkedTask.ID)
 				if err := b.MoveTask(linkedTask.ID, "done"); err == nil {
 					if err := board.SaveBoard(b); err != nil {
 						log.ErrorLog.Printf("failed to save board after moving task to done: %v", err)
@@ -282,6 +283,8 @@ func (m *home) handleBoardSpawn(bt *board.Task) tea.Cmd {
 		kp.SetBoard(b)
 		m.sidebar.SetTaskCount(b.TaskCount())
 	}
+
+	m.preSaveInstances()
 
 	prompt := bt.Title
 	startCmd := func() tea.Msg {

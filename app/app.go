@@ -344,7 +344,30 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sidebar.SelectInstance(msg.instance)
 
 		if msg.err != nil {
+			// Unlink any board task that was linked to this failed instance.
+			kp := m.contentPane.KanbanPane()
+			if b := kp.GetBoard(); b != nil {
+				if linkedTask := b.FindTaskByInstance(msg.instance.Title); linkedTask != nil {
+					if err := b.UnlinkTask(linkedTask.ID); err != nil {
+						log.ErrorLog.Printf("failed to unlink task: %v", err)
+					}
+					if err := b.MoveTask(linkedTask.ID, "backlog"); err != nil {
+						log.ErrorLog.Printf("failed to move task to backlog: %v", err)
+					}
+					if err := board.SaveBoard(b); err != nil {
+						log.ErrorLog.Printf("failed to save board after unlinking failed instance: %v", err)
+					}
+					kp.SetBoard(b)
+				}
+			}
+
 			m.sidebar.Kill()
+
+			// Save to disk to remove the pre-saved instance entry.
+			if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
+				log.ErrorLog.Printf("failed to save instances after kill: %v", err)
+			}
+
 			return m, tea.Batch(m.handleError(msg.err), m.selectionChanged())
 		}
 
@@ -528,6 +551,8 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 		}
 		m.sidebar.SetTaskCount(b.TaskCount())
 	}
+
+	m.preSaveInstances()
 
 	prompt := tsk.Prompt
 	taskID := tsk.ID
@@ -800,6 +825,15 @@ type instanceStartedMsg struct {
 	instance        *session.Instance
 	err             error
 	promptAfterName bool
+}
+
+// preSaveInstances persists the current sidebar instances to disk so that
+// refreshExternalInstances won't remove a newly-created instance whose
+// status transitions from Loading to Running during async Start().
+func (m *home) preSaveInstances() {
+	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
+		log.ErrorLog.Printf("failed to pre-save instance: %v", err)
+	}
 }
 
 func (m *home) handleError(err error) tea.Cmd {
