@@ -29,7 +29,6 @@ const (
 	KeyTaskList
 	KeyAttach
 	KeyBoard
-	KeyMicroClaw // Key for sending a message to microclaw
 
 	KeySearch      // Key for searching sessions
 	KeyTriggerTask // Key for triggering a task immediately
@@ -66,7 +65,6 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"S":          KeyTaskList,
 	"a":          KeyAttach,
 	"t":          KeyBoard,
-	"m":          KeyMicroClaw,
 	"/":          KeySearch,
 	"r":          KeyTriggerTask,
 	"p":          KeyOpenPR,
@@ -145,10 +143,6 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	KeyBoard: key.NewBinding(
 		key.WithKeys("t"),
 		key.WithHelp("t", "board"),
-	),
-	KeyMicroClaw: key.NewBinding(
-		key.WithKeys("m"),
-		key.WithHelp("m", "microclaw"),
 	),
 	KeySearch: key.NewBinding(
 		key.WithKeys("/"),

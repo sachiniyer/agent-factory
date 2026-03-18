@@ -93,13 +93,6 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		m.navigateToSection(ui.SectionBoard)
 		return m, m.selectionChanged()
 
-	case keys.KeyMicroClaw:
-		if m.microclawBridge == nil || !m.microclawBridge.Available() {
-			return m, m.handleError(fmt.Errorf("MicroClaw not available — set MICROCLAW_DIR or install microclaw"))
-		}
-		m.navigateToSection(ui.SectionMicroClaw)
-		return m, m.selectionChanged()
-
 	case keys.KeySearch:
 		return m.showSearchOverlay()
 
@@ -219,26 +212,6 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 			ch, err := m.sidebar.Attach()
 			if err != nil {
 				log.ErrorLog.Printf("failed to attach: %v", err)
-				return
-			}
-			<-ch
-			m.state = stateDefault
-		})
-		return m, nil
-	}
-	// MicroClaw selected — attach
-	if sel.Kind == ui.SectionMicroClaw {
-		if m.microclawBridge == nil || !m.microclawBridge.Available() {
-			return m, m.handleError(fmt.Errorf("MicroClaw not available"))
-		}
-		mc := m.contentPane.MicroClawPane()
-		if mc == nil {
-			return m, nil
-		}
-		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
-			ch, err := mc.Attach()
-			if err != nil {
-				log.ErrorLog.Printf("failed to attach microclaw: %v", err)
 				return
 			}
 			<-ch

@@ -2,7 +2,7 @@
 
 A terminal UI that manages multiple AI coding agents (Claude Code, Aider, Codex, Amp) in separate git worktrees. Each agent runs in its own isolated workspace with full git integration, a kanban board for task tracking, and a programmatic API for orchestration.
 
-Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, kanban board, programmatic API, automated tasks, and [MicroClaw](https://microclaw.ai) integration.
+Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, kanban board, programmatic API, and automated tasks.
 
 ## Quick Start
 
@@ -25,7 +25,7 @@ cd agent-factory
 go build -o af .
 ```
 
-The `dev-install.sh` script builds the `af` binary, installs it to `~/.local/bin/`, and sets up [MicroClaw](https://microclaw.ai) for multi-agent orchestration.
+The `dev-install.sh` script builds the `af` binary and installs it to `~/.local/bin/`.
 
 ### Usage
 
@@ -127,24 +127,6 @@ af api tasks remove <id>
 ```
 
 All commands output JSON to stdout and errors to stderr. Use `--repo <path>` or `--repo-id <id>` to target a specific repository.
-
-## MicroClaw Integration
-
-[MicroClaw](https://microclaw.ai) is an agentic AI assistant that runs on your machine. Agent Factory integrates with it bidirectionally:
-
-- **MicroClaw tab** in the TUI shows chat history (press `Tab` to cycle)
-- **Send messages** with `m` to have MicroClaw orchestrate your sessions
-- MicroClaw agents use `af api` commands directly for session/task management
-
-The `dev-install.sh` script sets up MicroClaw automatically. Configure your API key in `~/.microclaw/microclaw.config.yaml` before starting.
-
-```bash
-# Start MicroClaw
-microclaw start
-
-# Or via systemd (Linux)
-systemctl --user enable --now microclaw
-```
 
 ## Configuration
 

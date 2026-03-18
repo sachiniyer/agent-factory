@@ -9,7 +9,7 @@ import (
 
 func TestContentPaneModeSwitch(t *testing.T) {
 	tw := NewTabbedWindow(NewPreviewPane(), NewDiffPane(), NewTerminalPane())
-	cp := NewContentPane(tw, nil)
+	cp := NewContentPane(tw)
 
 	assert.Equal(t, ContentModeEmpty, cp.GetMode())
 
@@ -22,13 +22,11 @@ func TestContentPaneModeSwitch(t *testing.T) {
 	cp.SetMode(ContentModeTasks)
 	assert.Equal(t, ContentModeTasks, cp.GetMode())
 
-	cp.SetMode(ContentModeMicroClaw)
-	assert.Equal(t, ContentModeMicroClaw, cp.GetMode())
 }
 
 func TestContentPaneFocus(t *testing.T) {
 	tw := NewTabbedWindow(NewPreviewPane(), NewDiffPane(), NewTerminalPane())
-	cp := NewContentPane(tw, nil)
+	cp := NewContentPane(tw)
 
 	// No focus initially
 	assert.False(t, cp.HasFocus())
@@ -52,7 +50,7 @@ func TestContentPaneFocus(t *testing.T) {
 
 func TestContentPaneTaskFocus(t *testing.T) {
 	tw := NewTabbedWindow(NewPreviewPane(), NewDiffPane(), NewTerminalPane())
-	cp := NewContentPane(tw, nil)
+	cp := NewContentPane(tw)
 
 	cp.SetMode(ContentModeTasks)
 	assert.False(t, cp.HasFocus())
@@ -66,7 +64,7 @@ func TestContentPaneTaskFocus(t *testing.T) {
 
 func TestContentPaneModeSwitchUnfocuses(t *testing.T) {
 	tw := NewTabbedWindow(NewPreviewPane(), NewDiffPane(), NewTerminalPane())
-	cp := NewContentPane(tw, nil)
+	cp := NewContentPane(tw)
 
 	// Focus task pane
 	cp.SetMode(ContentModeBoard)
@@ -81,7 +79,7 @@ func TestContentPaneModeSwitchUnfocuses(t *testing.T) {
 func TestContentPaneRender(t *testing.T) {
 	tw := NewTabbedWindow(NewPreviewPane(), NewDiffPane(), NewTerminalPane())
 	tw.SetSize(80, 30)
-	cp := NewContentPane(tw, nil)
+	cp := NewContentPane(tw)
 	cp.SetSize(80, 30)
 
 	// Empty mode

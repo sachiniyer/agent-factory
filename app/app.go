@@ -7,7 +7,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/microclaw"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -115,10 +114,6 @@ type home struct {
 	// linkingTaskID is the task ID being linked to an instance
 	linkingTaskID string
 
-	// microclawBridge is the bridge to the microclaw instance
-	microclawBridge *microclaw.Bridge
-	// microclawChats caches the microclaw chats for the message overlay
-	microclawChats []microclaw.Chat
 }
 
 func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
@@ -145,21 +140,13 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		os.Exit(1)
 	}
 
-	// Initialize microclaw bridge
-	mcDir := os.Getenv("MICROCLAW_DIR")
-	mcBridge := microclaw.NewBridge(mcDir)
-	var mcPane *ui.MicroClawPane
-	if mcBridge.Available() {
-		mcPane = ui.NewMicroClawPane(mcBridge)
-	}
-
 	tabbedWindow := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane())
 
 	h := &home{
 		ctx:             ctx,
 		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		menu:            ui.NewMenu(),
-		contentPane:     ui.NewContentPane(tabbedWindow, mcPane),
+		contentPane:     ui.NewContentPane(tabbedWindow),
 		errBox:          ui.NewErrBox(),
 		storage:         storage,
 		appConfig:       appConfig,
@@ -168,12 +155,8 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		repoID:          repoID,
 		state:           stateDefault,
 		appState:        appState,
-		microclawBridge: mcBridge,
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes)
-
-	// Set microclaw availability on sidebar
-	h.sidebar.SetMicroClawAvailable(mcBridge.Available())
 
 	// Load saved instances (scoped to current repo)
 	instances, err := storage.LoadInstances()
@@ -278,7 +261,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hideErrMsg:
 		m.errBox.Clear()
 	case previewTickMsg:
-		m.contentPane.UpdateMicroClaw()
 		cmd := m.selectionChanged()
 		return m, tea.Batch(
 			cmd,
@@ -394,13 +376,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *home) cleanupMicroClaw() {
-	mc := m.contentPane.MicroClawPane()
-	if mc != nil {
-		mc.Close()
-	}
-}
-
 func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	// Save any dirty board/task state
 	m.saveContentPaneState()
@@ -410,7 +385,6 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	}
 	tw := m.contentPane.TabbedWindow()
 	tw.CleanupTerminal()
-	m.cleanupMicroClaw()
 	return m, tea.Quit
 }
 
@@ -676,13 +650,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				return m, m.selectionChanged()
 			}
 		}
-		if m.contentPane.GetMode() == ui.ContentModeMicroClaw {
-			mc := m.contentPane.MicroClawPane()
-			if mc != nil && mc.IsScrolling() {
-				mc.ResetToNormalMode()
-				return m, m.selectionChanged()
-			}
-		}
 	}
 
 	// Handle quit commands
@@ -796,10 +763,6 @@ func (m *home) selectionChanged() tea.Cmd {
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
 	case sel.Kind == ui.SectionHooks:
 		m.contentPane.SetMode(ui.ContentModeHooks)
-		m.menu.SetInstance(nil)
-		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
-	case sel.Kind == ui.SectionMicroClaw:
-		m.contentPane.SetMode(ui.ContentModeMicroClaw)
 		m.menu.SetInstance(nil)
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
 	default:

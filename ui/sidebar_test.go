@@ -15,15 +15,14 @@ func TestSidebarInitialState(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false)
 
-	// Should have 5 sections (MicroClaw hidden by default since hasMC=false)
-	assert.Equal(t, 5, len(s.sections))
+	// Should have 4 sections
+	assert.Equal(t, 4, len(s.sections))
 
 	// Only Instances section is expanded by default
 	assert.True(t, s.sections[0].Expanded)
 	assert.False(t, s.sections[1].Expanded)
 	assert.False(t, s.sections[2].Expanded)
 	assert.False(t, s.sections[3].Expanded)
-	assert.False(t, s.sections[4].Expanded)
 
 	// Initial selection should be on Instances header
 	sel := s.GetSelection()
@@ -120,7 +119,6 @@ func TestSidebarToggleSection(t *testing.T) {
 func TestSidebarJumpSections(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false)
-	s.SetMicroClawAvailable(true)
 
 	inst, _ := session.NewInstance(session.InstanceOptions{
 		Title: "inst", Path: t.TempDir(), Program: "test",
@@ -144,18 +142,14 @@ func TestSidebarJumpSections(t *testing.T) {
 	sel = s.GetSelection()
 	assert.Equal(t, SectionHooks, sel.Kind)
 
-	s.JumpNextSection()
-	sel = s.GetSelection()
-	assert.Equal(t, SectionMicroClaw, sel.Kind)
-
 	// Jump back
 	s.JumpPrevSection()
 	sel = s.GetSelection()
-	assert.Equal(t, SectionHooks, sel.Kind)
+	assert.Equal(t, SectionBoard, sel.Kind)
 
 	s.JumpPrevSection()
 	sel = s.GetSelection()
-	assert.Equal(t, SectionBoard, sel.Kind)
+	assert.Equal(t, SectionTasks, sel.Kind)
 }
 
 func TestSidebarCollapseFromChild(t *testing.T) {
@@ -242,19 +236,6 @@ func TestSidebarTaskCount(t *testing.T) {
 	s.SetTaskCount(5)
 	// Task count is just stored, no need to verify visible items here
 	assert.Equal(t, 5, s.taskCount)
-}
-
-func TestSidebarMicroClawVisibility(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
-
-	// MicroClaw hidden by default
-	countWithout := len(s.visibleItems)
-
-	s.SetMicroClawAvailable(true)
-	countWith := len(s.visibleItems)
-
-	assert.Greater(t, countWith, countWithout, "MicroClaw section should add a visible item")
 }
 
 func TestSidebarRender(t *testing.T) {
