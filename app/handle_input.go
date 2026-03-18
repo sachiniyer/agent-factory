@@ -138,6 +138,7 @@ func (m *home) startNewInstance(promptAfterName bool) (tea.Model, tea.Cmd) {
 	if err != nil {
 		return m, m.handleError(err)
 	}
+	instance.SetStatus(session.Loading)
 	m.newInstanceFinalizer = m.sidebar.AddInstance(instance)
 	m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
 	m.state = stateNew
