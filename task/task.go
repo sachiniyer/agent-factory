@@ -66,50 +66,56 @@ func SaveTasks(tasks []Task) error {
 		return err
 	}
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
 	data, err := json.MarshalIndent(tasks, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal tasks: %w", err)
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return config.AtomicWriteFile(path, data, 0644)
 }
 
 func AddTask(t Task) error {
-	tasks, err := LoadTasks()
+	path, err := getTasksPathFn()
 	if err != nil {
 		return err
 	}
-
-	tasks = append(tasks, t)
-	return SaveTasks(tasks)
+	return config.WithFileLock(path, func() error {
+		tasks, err := LoadTasks()
+		if err != nil {
+			return err
+		}
+		tasks = append(tasks, t)
+		return SaveTasks(tasks)
+	})
 }
 
 func RemoveTask(id string) error {
-	tasks, err := LoadTasks()
+	path, err := getTasksPathFn()
 	if err != nil {
 		return err
 	}
-
-	filtered := make([]Task, 0, len(tasks))
-	found := false
-	for _, t := range tasks {
-		if t.ID == id {
-			found = true
-			continue
+	return config.WithFileLock(path, func() error {
+		tasks, err := LoadTasks()
+		if err != nil {
+			return err
 		}
-		filtered = append(filtered, t)
-	}
 
-	if !found {
-		return fmt.Errorf("task with id %q not found", id)
-	}
+		filtered := make([]Task, 0, len(tasks))
+		found := false
+		for _, t := range tasks {
+			if t.ID == id {
+				found = true
+				continue
+			}
+			filtered = append(filtered, t)
+		}
 
-	return SaveTasks(filtered)
+		if !found {
+			return fmt.Errorf("task with id %q not found", id)
+		}
+
+		return SaveTasks(filtered)
+	})
 }
 
 func GetTask(id string) (*Task, error) {
@@ -154,23 +160,29 @@ func LoadTasksForCurrentRepo() ([]Task, error) {
 }
 
 func UpdateTask(t Task) error {
-	tasks, err := LoadTasks()
+	path, err := getTasksPathFn()
 	if err != nil {
 		return err
 	}
-
-	found := false
-	for i, existing := range tasks {
-		if existing.ID == t.ID {
-			tasks[i] = t
-			found = true
-			break
+	return config.WithFileLock(path, func() error {
+		tasks, err := LoadTasks()
+		if err != nil {
+			return err
 		}
-	}
 
-	if !found {
-		return fmt.Errorf("task with id %q not found", t.ID)
-	}
+		found := false
+		for i, existing := range tasks {
+			if existing.ID == t.ID {
+				tasks[i] = t
+				found = true
+				break
+			}
+		}
 
-	return SaveTasks(tasks)
+		if !found {
+			return fmt.Errorf("task with id %q not found", t.ID)
+		}
+
+		return SaveTasks(tasks)
+	})
 }

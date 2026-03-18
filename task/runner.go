@@ -34,20 +34,22 @@ func appendPendingInstance(data session.InstanceData) error {
 		return err
 	}
 
-	var pending []session.InstanceData
-	if raw, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(raw, &pending); err != nil {
-			log.WarningLog.Printf("failed to parse pending instances file, starting fresh: %v", err)
-			pending = nil
+	return config.WithFileLock(path, func() error {
+		var pending []session.InstanceData
+		if raw, err := os.ReadFile(path); err == nil {
+			if err := json.Unmarshal(raw, &pending); err != nil {
+				log.WarningLog.Printf("failed to parse pending instances file, starting fresh: %v", err)
+				pending = nil
+			}
 		}
-	}
-	pending = append(pending, data)
+		pending = append(pending, data)
 
-	out, err := json.MarshalIndent(pending, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, out, 0644)
+		out, err := json.MarshalIndent(pending, "", "  ")
+		if err != nil {
+			return err
+		}
+		return config.AtomicWriteFile(path, out, 0644)
+	})
 }
 
 // LoadAndClearPendingInstances reads pending instances written by task runs
@@ -58,23 +60,26 @@ func LoadAndClearPendingInstances() ([]session.InstanceData, error) {
 		return nil, err
 	}
 
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
 	var pending []session.InstanceData
-	if err := json.Unmarshal(raw, &pending); err != nil {
-		return nil, err
-	}
+	err = config.WithFileLock(path, func() error {
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				return nil
+			}
+			return readErr
+		}
 
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		log.WarningLog.Printf("failed to remove pending instances file: %v", err)
-	}
-	return pending, nil
+		if err := json.Unmarshal(raw, &pending); err != nil {
+			return err
+		}
+
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.WarningLog.Printf("failed to remove pending instances file: %v", err)
+		}
+		return nil
+	})
+	return pending, err
 }
 
 // WaitForReady polls the instance's tmux pane until the program shows its
@@ -207,17 +212,12 @@ func RunTask(taskID string) error {
 	// Create a board task linked to the new instance.
 	repo, repoErr := config.RepoFromPath(t.ProjectPath)
 	if repoErr == nil {
-		b, boardErr := board.LoadBoardForRepo(repo)
-		if boardErr == nil {
-			taskTitle := t.Name
-			if taskTitle == "" {
-				taskTitle = title
-			}
-			bt := b.AddTask(taskTitle, "in_progress")
-			b.LinkTask(bt.ID, title)
-			if err := board.SaveBoardForRepo(repo, b); err != nil {
-				log.ErrorLog.Printf("failed to save board task: %v", err)
-			}
+		taskTitle := t.Name
+		if taskTitle == "" {
+			taskTitle = title
+		}
+		if err := board.AddAndLinkTaskForRepo(repo, taskTitle, "in_progress", title); err != nil {
+			log.ErrorLog.Printf("failed to save board task: %v", err)
 		}
 	}
 

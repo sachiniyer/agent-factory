@@ -68,18 +68,21 @@ var boardAddCmd = &cobra.Command{
 			status = "backlog"
 		}
 
-		b, err := board.LoadBoardForRepo(repo)
-		if err != nil {
-			return jsonError(fmt.Errorf("failed to load board: %w", err))
-		}
-		t := b.AddTask(boardAddTitleFlag, status)
 		if boardAddInstanceFlag != "" {
-			b.LinkTask(t.ID, boardAddInstanceFlag)
-			// Re-fetch so we output the linked version
+			// Add and link in one locked operation
+			t, err := board.AddTaskForRepoWithStatus(repo, boardAddTitleFlag, status)
+			if err != nil {
+				return jsonError(fmt.Errorf("failed to add task: %w", err))
+			}
+			if err := board.LinkTaskForRepo(repo, t.ID, boardAddInstanceFlag); err != nil {
+				return jsonError(fmt.Errorf("failed to link task: %w", err))
+			}
 			t.InstanceTitle = boardAddInstanceFlag
+			return jsonOut(t)
 		}
-		if err := board.SaveBoardForRepo(repo, b); err != nil {
-			return jsonError(fmt.Errorf("failed to save board: %w", err))
+		t, err := board.AddTaskForRepoWithStatus(repo, boardAddTitleFlag, status)
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to add task: %w", err))
 		}
 		return jsonOut(t)
 	},
@@ -312,30 +315,29 @@ var boardSpawnCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to send prompt: %w", err))
 		}
 
-		// Save instance to per-repo storage
+		// Save instance to per-repo storage under file lock
 		data := instance.ToInstanceData()
-		raw, err := config.LoadRepoInstances(repo.ID)
-		if err != nil {
-			return jsonError(err)
-		}
-		var existing []session.InstanceData
-		if err := json.Unmarshal(raw, &existing); err != nil {
-			existing = []session.InstanceData{}
-		}
-		existing = append(existing, data)
-		out, err := json.MarshalIndent(existing, "", "  ")
-		if err != nil {
-			return jsonError(err)
-		}
-		if err := config.SaveRepoInstances(repo.ID, out); err != nil {
+		if err := config.UpdateRepoInstances(repo.ID, func(raw json.RawMessage) (json.RawMessage, error) {
+			var existing []session.InstanceData
+			if err := json.Unmarshal(raw, &existing); err != nil {
+				existing = []session.InstanceData{}
+			}
+			existing = append(existing, data)
+			out, err := json.MarshalIndent(existing, "", "  ")
+			if err != nil {
+				return nil, err
+			}
+			return out, nil
+		}); err != nil {
 			return jsonError(err)
 		}
 
-		// Link task to instance and move to in_progress
-		b.LinkTask(t.ID, sessionName)
-		b.MoveTask(t.ID, "in_progress")
-		if err := board.SaveBoardForRepo(repo, b); err != nil {
-			return jsonError(fmt.Errorf("failed to save board: %w", err))
+		// Link task to instance and move to in_progress (locked via updateBoardForRepo)
+		if err := board.LinkTaskForRepo(repo, t.ID, sessionName); err != nil {
+			return jsonError(fmt.Errorf("failed to link task: %w", err))
+		}
+		if err := board.MoveTaskForRepo(repo, t.ID, "in_progress"); err != nil {
+			return jsonError(fmt.Errorf("failed to move task: %w", err))
 		}
 
 		// Launch daemon for autoyes if configured
