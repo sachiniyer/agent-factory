@@ -319,10 +319,11 @@ var sessionsKillCmd = &cobra.Command{
 			log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
 		}
 
-		// Auto-move linked board task to "done"
+		// Auto-move linked board task to "done" and unlink it.
 		b, boardErr := board.LoadBoard()
 		if boardErr == nil {
 			if linkedTask := b.FindTaskByInstance(args[0]); linkedTask != nil {
+				b.UnlinkTask(linkedTask.ID)
 				if err := b.MoveTask(linkedTask.ID, "done"); err == nil {
 					if err := board.SaveBoard(b); err != nil {
 						log.ErrorLog.Printf("failed to save board after moving task to done: %v", err)
