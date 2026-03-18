@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
-	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-runewidth"
@@ -145,11 +144,4 @@ func (m *home) startNewInstance(promptAfterName bool) (tea.Model, tea.Cmd) {
 	m.menu.SetState(ui.StateNewInstance)
 	m.promptAfterName = promptAfterName
 	return m, nil
-}
-
-// showPromptOverlay displays the prompt text input overlay for the selected instance.
-func (m *home) showPromptOverlay() {
-	m.state = statePrompt
-	m.menu.SetState(ui.StatePrompt)
-	m.textInputOverlay = overlay.NewTextInputOverlay("Enter prompt", "")
 }
