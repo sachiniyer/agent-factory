@@ -48,7 +48,6 @@ BIN_DIR=/usr/local/bin ./dev-install.sh
 | `config/` | Configuration and state persistence |
 | `api/` | Programmatic JSON CLI API |
 | `daemon/` | Background daemon for auto-yes |
-| `microclaw/` | MicroClaw integration bridge |
 | `keys/` | Key bindings |
 
 ## Guidelines

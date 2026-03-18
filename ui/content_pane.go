@@ -16,7 +16,6 @@ const (
 	ContentModeBoard
 	ContentModeTasks
 	ContentModeHooks
-	ContentModeMicroClaw
 	ContentModeEmpty
 )
 
@@ -28,20 +27,18 @@ type ContentPane struct {
 	kanbanPane   *KanbanPane
 	taskPane     *TaskPane
 	hooksPane    *HooksPane
-	microclaw    *MicroClawPane
 
 	width, height int
 }
 
 // NewContentPane creates a new content pane wrapping the given sub-panes.
-func NewContentPane(tw *TabbedWindow, mc *MicroClawPane) *ContentPane {
+func NewContentPane(tw *TabbedWindow) *ContentPane {
 	return &ContentPane{
 		mode:         ContentModeEmpty,
 		tabbedWindow: tw,
 		kanbanPane:   NewKanbanPane(),
 		taskPane:     NewTaskPane(),
 		hooksPane:    NewHooksPane(),
-		microclaw:    mc,
 	}
 }
 
@@ -57,9 +54,6 @@ func (c *ContentPane) SetSize(width, height int) {
 	c.kanbanPane.SetSize(contentWidth, contentHeight)
 	c.taskPane.SetSize(contentWidth, contentHeight)
 	c.hooksPane.SetSize(contentWidth, contentHeight)
-	if c.microclaw != nil {
-		c.microclaw.SetSize(contentWidth, contentHeight)
-	}
 }
 
 // SetMode switches the content pane mode.
@@ -145,20 +139,11 @@ func (c *ContentPane) HooksPane() *HooksPane {
 	return c.hooksPane
 }
 
-// MicroClawPane returns the microclaw pane.
-func (c *ContentPane) MicroClawPane() *MicroClawPane {
-	return c.microclaw
-}
-
 // ScrollUp scrolls the active pane up.
 func (c *ContentPane) ScrollUp() {
 	switch c.mode {
 	case ContentModeInstance:
 		c.tabbedWindow.ScrollUp()
-	case ContentModeMicroClaw:
-		if c.microclaw != nil {
-			c.microclaw.ScrollUp()
-		}
 	}
 }
 
@@ -167,10 +152,6 @@ func (c *ContentPane) ScrollDown() {
 	switch c.mode {
 	case ContentModeInstance:
 		c.tabbedWindow.ScrollDown()
-	case ContentModeMicroClaw:
-		if c.microclaw != nil {
-			c.microclaw.ScrollDown()
-		}
 	}
 }
 
@@ -198,13 +179,6 @@ func (c *ContentPane) UpdateTerminal(instance *session.Instance) error {
 	return c.tabbedWindow.UpdateTerminal(instance)
 }
 
-// UpdateMicroClaw refreshes the microclaw pane.
-func (c *ContentPane) UpdateMicroClaw() {
-	if c.mode == ContentModeMicroClaw && c.microclaw != nil {
-		c.microclaw.Refresh()
-	}
-}
-
 // String renders the content pane.
 func (c *ContentPane) String() string {
 	switch c.mode {
@@ -216,8 +190,6 @@ func (c *ContentPane) String() string {
 		return c.renderInlinePane(c.taskPane.String())
 	case ContentModeHooks:
 		return c.renderInlinePane(c.hooksPane.String())
-	case ContentModeMicroClaw:
-		return c.renderMicroClawPane()
 	default:
 		return c.renderEmptyPane()
 	}
@@ -236,26 +208,6 @@ func (c *ContentPane) renderInlinePane(content string) string {
 			c.height-windowStyle.GetVerticalFrameSize()-2,
 			lipgloss.Left, lipgloss.Top,
 			content))
-
-	return lipgloss.JoinVertical(lipgloss.Left, "\n", wrapped)
-}
-
-func (c *ContentPane) renderMicroClawPane() string {
-	if c.microclaw == nil {
-		return c.renderEmptyPane()
-	}
-	w := AdjustPreviewWidth(c.width)
-	if w <= 0 || c.height <= 0 {
-		return ""
-	}
-
-	style := windowStyle.Width(w).Height(c.height - windowStyle.GetVerticalFrameSize() - 2)
-	wrapped := style.Render(
-		lipgloss.Place(
-			w-windowStyle.GetHorizontalFrameSize(),
-			c.height-windowStyle.GetVerticalFrameSize()-2,
-			lipgloss.Left, lipgloss.Top,
-			c.microclaw.String()))
 
 	return lipgloss.JoinVertical(lipgloss.Left, "\n", wrapped)
 }

@@ -20,7 +20,6 @@ const (
 	SectionTasks
 	SectionBoard
 	SectionHooks
-	SectionMicroClaw
 )
 
 // SidebarItem represents one visible row in the sidebar.
@@ -57,7 +56,6 @@ type Sidebar struct {
 	tasks     []task.Task
 	taskCount int
 	hookCount int
-	hasMC     bool // microclaw available
 
 	// Rendering
 	renderer *InstanceRenderer
@@ -75,7 +73,6 @@ func NewSidebar(spin *spinner.Model, autoYes bool) *Sidebar {
 			{Kind: SectionTasks, Title: "Tasks", Expanded: false},
 			{Kind: SectionBoard, Title: "Board", Expanded: false},
 			{Kind: SectionHooks, Title: "Hooks", Expanded: false},
-			{Kind: SectionMicroClaw, Title: "MicroClaw", Expanded: false},
 		},
 		renderer: &InstanceRenderer{spinner: spin},
 		repos:    make(map[string]int),
@@ -124,12 +121,6 @@ func (s *Sidebar) SetHookCount(count int) {
 	s.rebuildVisibleItems()
 }
 
-// SetMicroClawAvailable sets whether MicroClaw is available.
-func (s *Sidebar) SetMicroClawAvailable(available bool) {
-	s.hasMC = available
-	s.rebuildVisibleItems()
-}
-
 // GetTasks returns the current tasks.
 func (s *Sidebar) GetTasks() []task.Task {
 	return s.tasks
@@ -139,10 +130,6 @@ func (s *Sidebar) GetTasks() []task.Task {
 func (s *Sidebar) rebuildVisibleItems() {
 	var items []SidebarItem
 	for _, sec := range s.sections {
-		// Skip MicroClaw section if not available
-		if sec.Kind == SectionMicroClaw && !s.hasMC {
-			continue
-		}
 		items = append(items, SidebarItem{Kind: sec.Kind, IsHeader: true})
 		if sec.Expanded {
 			switch sec.Kind {
@@ -478,9 +465,6 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 		} else {
 			label = "Hooks"
 		}
-		arrow = "  " // no expand arrow for leaf sections
-	case SectionMicroClaw:
-		label = "MicroClaw"
 		arrow = "  " // no expand arrow for leaf sections
 	}
 

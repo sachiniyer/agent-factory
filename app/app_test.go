@@ -110,7 +110,7 @@ func TestConfirmationModalKeyHandling(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sidebar := ui.NewSidebar(&spin, false)
 	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane())
-	cp := ui.NewContentPane(tw, nil)
+	cp := ui.NewContentPane(tw)
 
 	// Create enough of home struct to test handleKeyPress in confirmation state
 	h := &home{
@@ -233,7 +233,7 @@ func TestConfirmationFlowSimulation(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sidebar := ui.NewSidebar(&spin, false)
 	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane())
-	cp := ui.NewContentPane(tw, nil)
+	cp := ui.NewContentPane(tw)
 
 	// Add test instance
 	instance, err := session.NewInstance(session.InstanceOptions{
