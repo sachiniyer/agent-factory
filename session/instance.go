@@ -5,6 +5,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"path/filepath"
+	"sync"
 
 	"fmt"
 	"strings"
@@ -24,6 +25,11 @@ const (
 
 // Instance is a running instance of claude code.
 type Instance struct {
+	// mu protects fields that are accessed concurrently by async Start()
+	// goroutines (writers) and the main bubbletea loop (readers):
+	// started, Status, tmuxSession, gitWorktree, prInfo, diffStats.
+	mu sync.RWMutex
+
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.
@@ -61,6 +67,9 @@ type Instance struct {
 
 // ToInstanceData converts an Instance to its serializable form
 func (i *Instance) ToInstanceData() InstanceData {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
 	data := InstanceData{
 		Title:     i.Title,
 		Path:      i.Path,
@@ -179,6 +188,8 @@ func (i *Instance) RepoName() (string, error) {
 }
 
 func (i *Instance) SetStatus(status Status) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	i.Status = status
 }
 
@@ -189,25 +200,35 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 	}
 
 	var tmuxSession *tmux.TmuxSession
-	if i.tmuxSession != nil {
+	i.mu.RLock()
+	existingSession := i.tmuxSession
+	i.mu.RUnlock()
+
+	if existingSession != nil {
 		// Use existing tmux session (useful for testing)
-		tmuxSession = i.tmuxSession
+		tmuxSession = existingSession
 	} else {
 		// Create new tmux session
 		tmuxSession = tmux.NewTmuxSession(i.Title, i.Program)
 	}
+
+	i.mu.Lock()
 	i.tmuxSession = tmuxSession
+	i.mu.Unlock()
 
 	if firstTimeSetup {
 		gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title)
 		if err != nil {
 			return fmt.Errorf("failed to create git worktree: %w", err)
 		}
+		i.mu.Lock()
 		i.gitWorktree = gitWorktree
 		i.Branch = branchName
+		i.mu.Unlock()
 	}
 
-	// Setup error handler to cleanup resources on any error
+	// Setup error handler to cleanup resources on any error.
+	// Kill() acquires its own lock, so we must not hold i.mu here.
 	var setupErr error
 	defer func() {
 		if setupErr != nil {
@@ -215,7 +236,9 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 				setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
 			}
 		} else {
+			i.mu.Lock()
 			i.started = true
+			i.mu.Unlock()
 		}
 	}()
 
@@ -226,8 +249,12 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 			return setupErr
 		}
 	} else {
+		i.mu.RLock()
+		gw := i.gitWorktree
+		i.mu.RUnlock()
+
 		// Setup git worktree first
-		if err := i.gitWorktree.Setup(); err != nil {
+		if err := gw.Setup(); err != nil {
 			setupErr = fmt.Errorf("failed to setup git worktree: %w", err)
 			return setupErr
 		}
@@ -236,13 +263,13 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		// (Claude Code) this modifies the program command. For file-based tools
 		// (Codex, Amp, OpenCode) this writes an instruction file into the worktree.
 		i.tmuxSession.SetProgram(
-			injectSystemPrompt(i.Program, i.Title, i.gitWorktree.GetWorktreePath()),
+			injectSystemPrompt(i.Program, i.Title, gw.GetWorktreePath()),
 		)
 
 		// Create new session
-		if err := i.tmuxSession.Start(i.gitWorktree.GetWorktreePath()); err != nil {
+		if err := i.tmuxSession.Start(gw.GetWorktreePath()); err != nil {
 			// Cleanup git worktree if tmux session creation fails
-			if cleanupErr := i.gitWorktree.Cleanup(); cleanupErr != nil {
+			if cleanupErr := gw.Cleanup(); cleanupErr != nil {
 				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 			}
 			setupErr = fmt.Errorf("failed to start new session: %w", err)
@@ -250,6 +277,7 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		}
 	}
 
+	// SetStatus acquires its own lock.
 	i.SetStatus(Running)
 
 	return nil
@@ -266,25 +294,41 @@ func (i *Instance) StartWithExistingWorktree(worktreePath, branchName string) er
 	if err != nil {
 		return fmt.Errorf("failed to create git worktree reference: %w", err)
 	}
+
+	i.mu.Lock()
 	i.gitWorktree = gitWorktree
 	i.Branch = branchName
+	i.mu.Unlock()
 
 	program := injectSystemPrompt(i.Program, i.Title, worktreePath)
 	tmuxSession := tmux.NewTmuxSession(i.Title, program)
-	i.tmuxSession = tmuxSession
 
+	i.mu.Lock()
+	i.tmuxSession = tmuxSession
+	i.mu.Unlock()
+
+	// Start is I/O; do not hold the lock.
 	if err := tmuxSession.Start(worktreePath); err != nil {
 		return fmt.Errorf("failed to start tmux session: %w", err)
 	}
 
+	i.mu.Lock()
 	i.started = true
-	i.SetStatus(Running)
+	i.Status = Running
+	i.mu.Unlock()
+
 	return nil
 }
 
 // Kill terminates the instance and cleans up all resources
 func (i *Instance) Kill() error {
-	if !i.started {
+	i.mu.RLock()
+	wasStarted := i.started
+	ts := i.tmuxSession
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+
+	if !wasStarted {
 		// If instance was never started, just return success
 		return nil
 	}
@@ -293,15 +337,15 @@ func (i *Instance) Kill() error {
 
 	// Always try to cleanup both resources, even if one fails
 	// Clean up tmux session first since it's using the git worktree
-	if i.tmuxSession != nil {
-		if err := i.tmuxSession.Close(); err != nil {
+	if ts != nil {
+		if err := ts.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close tmux session: %w", err))
 		}
 	}
 
 	// Then clean up git worktree
-	if i.gitWorktree != nil {
-		if err := i.gitWorktree.Cleanup(); err != nil {
+	if gw != nil {
+		if err := gw.Cleanup(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to cleanup git worktree: %w", err))
 		}
 	}
@@ -333,16 +377,26 @@ func (i *Instance) Preview() (string, error) {
 }
 
 func (i *Instance) HasUpdated() (updated bool, hasPrompt bool) {
-	if !i.started {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s {
 		return false, false
 	}
-	return i.tmuxSession.HasUpdated()
+	return ts.HasUpdated()
 }
 
 // TapEnter sends an enter key press to the tmux session if AutoYes is enabled.
 // CheckAndHandleTrustPrompt checks for and dismisses the trust prompt for supported programs.
 func (i *Instance) CheckAndHandleTrustPrompt() bool {
-	if !i.started || i.tmuxSession == nil {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s || ts == nil {
 		return false
 	}
 	program := i.Program
@@ -351,7 +405,7 @@ func (i *Instance) CheckAndHandleTrustPrompt() bool {
 		!strings.Contains(program, tmux.ProgramGemini) {
 		return false
 	}
-	return i.tmuxSession.CheckAndHandleTrustPrompt()
+	return ts.CheckAndHandleTrustPrompt()
 }
 
 func (i *Instance) TapEnter() {
@@ -387,19 +441,27 @@ func (i *Instance) GetGitWorktree() (*git.GitWorktree, error) {
 
 // GetWorktreePath returns the worktree path for the instance, or empty string if unavailable
 func (i *Instance) GetWorktreePath() string {
-	if i.gitWorktree == nil {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+
+	if gw == nil {
 		return ""
 	}
-	return i.gitWorktree.GetWorktreePath()
+	return gw.GetWorktreePath()
 }
 
 func (i *Instance) Started() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
 	return i.started
 }
 
 // SetTitle sets the title of the instance. Returns an error if the instance has started.
 // We cant change the title once it's been used for a tmux session etc.
 func (i *Instance) SetTitle(title string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	if i.started {
 		return fmt.Errorf("cannot change title of a started instance")
 	}
@@ -409,32 +471,49 @@ func (i *Instance) SetTitle(title string) error {
 
 // TmuxAlive returns true if the tmux session is alive. This is a sanity check before attaching.
 func (i *Instance) TmuxAlive() bool {
-	if i.tmuxSession == nil {
+	i.mu.RLock()
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if ts == nil {
 		return false
 	}
-	return i.tmuxSession.DoesSessionExist()
+	return ts.DoesSessionExist()
 }
+
 
 // GetPRInfo returns the associated GitHub PR info, or nil if none.
 func (i *Instance) GetPRInfo() *git.PRInfo {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
 	return i.prInfo
 }
 
 // SetPRInfo sets the associated GitHub PR info.
 func (i *Instance) SetPRInfo(info *git.PRInfo) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	i.prInfo = info
 }
 
 // UpdatePRInfo fetches the latest PR info from GitHub for this instance's branch.
 func (i *Instance) UpdatePRInfo() error {
-	if !i.started || i.gitWorktree == nil {
+	i.mu.RLock()
+	s := i.started
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+
+	if !s || gw == nil {
 		return nil
 	}
-	info, err := git.FetchPRInfo(i.gitWorktree.GetRepoPath(), i.Branch)
+	info, err := git.FetchPRInfo(gw.GetRepoPath(), i.Branch)
 	if err != nil {
 		return err
 	}
+
+	i.mu.Lock()
 	i.prInfo = info
+	i.mu.Unlock()
 	return nil
 }
 
