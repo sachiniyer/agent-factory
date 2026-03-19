@@ -20,9 +20,9 @@ type InstanceData struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	AutoYes   bool      `json:"auto_yes"`
 
-	Program   string          `json:"program"`
-	Worktree  GitWorktreeData `json:"worktree"`
-	PRInfo    PRInfoData      `json:"pr_info,omitempty"`
+	Program  string          `json:"program"`
+	Worktree GitWorktreeData `json:"worktree"`
+	PRInfo   PRInfoData      `json:"pr_info,omitempty"`
 }
 
 // PRInfoData represents the serializable data of a PRInfo

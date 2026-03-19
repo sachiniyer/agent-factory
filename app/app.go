@@ -111,7 +111,6 @@ type home struct {
 	availableWorktrees []git.WorktreeInfo
 	// linkingTaskID is the task ID being linked to an instance
 	linkingTaskID string
-
 }
 
 func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
@@ -141,18 +140,18 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 	tabbedWindow := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewTerminalPane())
 
 	h := &home{
-		ctx:             ctx,
-		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		menu:            ui.NewMenu(),
-		contentPane:     ui.NewContentPane(tabbedWindow),
-		errBox:          ui.NewErrBox(),
-		storage:         storage,
-		appConfig:       appConfig,
-		program:         program,
-		autoYes:         autoYes,
-		repoID:          repoID,
-		state:           stateDefault,
-		appState:        appState,
+		ctx:         ctx,
+		spinner:     spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		menu:        ui.NewMenu(),
+		contentPane: ui.NewContentPane(tabbedWindow),
+		errBox:      ui.NewErrBox(),
+		storage:     storage,
+		appConfig:   appConfig,
+		program:     program,
+		autoYes:     autoYes,
+		repoID:      repoID,
+		state:       stateDefault,
+		appState:    appState,
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes)
 
@@ -311,7 +310,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					instance.SetStatus(session.Ready)
 				}
 			}
-			}
+		}
 		return m, tickUpdateMetadataCmd
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress {
