@@ -57,7 +57,7 @@ type TmuxSession struct {
 	wg     *sync.WaitGroup
 }
 
-const TmuxPrefix = "claudesquad_"
+const TmuxPrefix = "af_"
 
 // DetachKeyByte is the ASCII byte for the key used to detach from attached sessions.
 // Default is 23 (Ctrl-W). Set via SetDetachKey.
@@ -74,7 +74,7 @@ func SetDetachKey(b byte, display string) {
 
 var whiteSpaceRegex = regexp.MustCompile(`\s+`)
 
-func toClaudeSquadTmuxName(str string) string {
+func toTmuxName(str string) string {
 	str = whiteSpaceRegex.ReplaceAllString(str, "")
 	str = strings.ReplaceAll(str, ".", "_") // tmux replaces all . with _
 	return fmt.Sprintf("%s%s", TmuxPrefix, str)
@@ -92,7 +92,7 @@ func NewTmuxSessionWithDeps(name string, program string, ptyFactory PtyFactory, 
 
 func newTmuxSession(name string, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
 	return &TmuxSession{
-		sanitizedName: toClaudeSquadTmuxName(name),
+		sanitizedName: toTmuxName(name),
 		program:       program,
 		ptyFactory:    ptyFactory,
 		cmdExec:       cmdExec,
