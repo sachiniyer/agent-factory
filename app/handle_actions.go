@@ -244,10 +244,6 @@ func (m *home) handleOpenPR() (tea.Model, tea.Cmd) {
 
 // handleBoardSpawn creates a new instance from a board task, using the task title as the prompt.
 func (m *home) handleBoardSpawn(bt *board.Task) tea.Cmd {
-	if m.sidebar.NumInstances() >= GlobalInstanceLimit {
-		return m.handleError(fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
-	}
-
 	// Auto-generate a unique instance title from the task title.
 	existing := make(map[string]bool, len(m.sidebar.GetInstances()))
 	for _, inst := range m.sidebar.GetInstances() {

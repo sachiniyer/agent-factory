@@ -110,11 +110,6 @@ func (m *home) handleStateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // showAttachWorktreeOverlay displays the worktree selection overlay.
 func (m *home) showAttachWorktreeOverlay() (tea.Model, tea.Cmd) {
-	if m.sidebar.NumInstances() >= GlobalInstanceLimit {
-		return m, m.handleError(
-			fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
-	}
-
 	worktrees, err := git.ListWorktrees(".")
 	if err != nil {
 		return m, m.handleError(fmt.Errorf("failed to list worktrees: %v", err))

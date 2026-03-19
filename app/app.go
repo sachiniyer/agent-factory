@@ -22,8 +22,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const GlobalInstanceLimit = 10
-
 // Run is the main entrypoint into the application.
 func Run(ctx context.Context, program string, autoYes bool, repoID string) error {
 	p := tea.NewProgram(
@@ -524,10 +522,6 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 	tsk := sp.ConsumePendingTrigger()
 	if tsk == nil {
 		return m.handleError(fmt.Errorf("no task selected"))
-	}
-
-	if m.sidebar.NumInstances() >= GlobalInstanceLimit {
-		return m.handleError(fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 	}
 
 	title := tsk.Name

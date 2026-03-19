@@ -126,10 +126,6 @@ func (m *home) handleStatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // startNewInstance creates a new instance and enters stateNew for naming.
 func (m *home) startNewInstance(promptAfterName bool) (tea.Model, tea.Cmd) {
-	if m.sidebar.NumInstances() >= GlobalInstanceLimit {
-		return m, m.handleError(
-			fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
-	}
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:   "",
 		Path:    ".",
