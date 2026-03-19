@@ -118,6 +118,7 @@ var sessionsCreateCmd = &cobra.Command{
 		if err := instance.Start(true); err != nil {
 			return jsonError(fmt.Errorf("failed to start instance: %w", err))
 		}
+		instance.SetStatus(session.Running)
 
 		if createPromptFlag != "" {
 			if err := task.WaitForReady(instance); err != nil {
@@ -214,6 +215,7 @@ or use 'af api sessions create --name <title> --prompt <prompt>' instead.`,
 			if err := instance.Start(true); err != nil {
 				return jsonError(fmt.Errorf("failed to start instance: %w", err))
 			}
+			instance.SetStatus(session.Running)
 
 			if err := task.WaitForReady(instance); err != nil {
 				return jsonError(fmt.Errorf("program did not become ready: %w", err))
