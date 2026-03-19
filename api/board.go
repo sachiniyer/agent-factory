@@ -298,6 +298,7 @@ var boardSpawnCmd = &cobra.Command{
 		if err := instance.Start(true); err != nil {
 			return jsonError(fmt.Errorf("failed to start instance: %w", err))
 		}
+		instance.SetStatus(session.Running)
 
 		// Wait for ready and send the task title as the prompt
 		if err := task.WaitForReady(instance); err != nil {

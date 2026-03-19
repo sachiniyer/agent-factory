@@ -296,7 +296,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	case tickUpdateMetadataMessage:
 		for _, instance := range m.sidebar.GetInstances() {
-			if !instance.Started() {
+			if !instance.Started() || instance.Status == session.Loading {
 				continue
 			}
 			instance.CheckAndHandleTrustPrompt()
@@ -368,6 +368,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.handleError(msg.err), m.selectionChanged())
 		}
 
+		msg.instance.SetStatus(session.Running)
 		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 			return m, m.handleError(err)
 		}

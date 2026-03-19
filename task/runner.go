@@ -168,6 +168,7 @@ func RunTask(taskID string) error {
 	if err := instance.Start(true); err != nil {
 		return fmt.Errorf("failed to start instance: %w", err)
 	}
+	instance.SetStatus(session.Running)
 
 	// If anything fails after Start(), kill the instance to avoid orphaned resources.
 	started := true

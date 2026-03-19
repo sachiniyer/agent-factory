@@ -277,9 +277,6 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		}
 	}
 
-	// SetStatus acquires its own lock.
-	i.SetStatus(Running)
-
 	return nil
 }
 
@@ -314,7 +311,6 @@ func (i *Instance) StartWithExistingWorktree(worktreePath, branchName string) er
 
 	i.mu.Lock()
 	i.started = true
-	i.Status = Running
 	i.mu.Unlock()
 
 	return nil
