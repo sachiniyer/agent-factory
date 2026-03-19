@@ -61,11 +61,15 @@ func NewStorage(state config.InstanceStorage, repoID string) (*Storage, error) {
 }
 
 // SaveInstances saves the list of instances to disk under file locks.
+// Includes both started instances and Loading instances (which are in the
+// process of being started asynchronously). This ensures preSaveInstances
+// persists Loading instances to disk so refreshExternalInstances won't
+// remove them during the Loading→Running transition.
 func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Convert instances to InstanceData
 	data := make([]InstanceData, 0)
 	for _, instance := range instances {
-		if instance.Started() {
+		if instance.Started() || instance.Status == Loading {
 			data = append(data, instance.ToInstanceData())
 		}
 	}
