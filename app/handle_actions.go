@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -284,25 +283,9 @@ func (m *home) handleBoardSpawn(bt *board.Task) tea.Cmd {
 
 	prompt := bt.Title
 	startCmd := func() tea.Msg {
-		if err := instance.Start(true); err != nil {
+		if err := task.StartAndSendPrompt(instance, prompt); err != nil {
 			return instanceStartedMsg{instance: instance, err: err}
 		}
-
-		if err := task.WaitForReady(instance); err != nil {
-			return instanceStartedMsg{instance: instance, err: err}
-		}
-
-		if instance.CheckAndHandleTrustPrompt() {
-			time.Sleep(1 * time.Second)
-			if err := task.WaitForReady(instance); err != nil {
-				return instanceStartedMsg{instance: instance, err: err}
-			}
-		}
-
-		if err := instance.SendPromptCommand(prompt); err != nil {
-			return instanceStartedMsg{instance: instance, err: err}
-		}
-
 		return instanceStartedMsg{instance: instance, err: nil}
 	}
 

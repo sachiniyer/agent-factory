@@ -564,22 +564,7 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 	prompt := tsk.Prompt
 	taskID := tsk.ID
 	startCmd := func() tea.Msg {
-		if err := instance.Start(true); err != nil {
-			return instanceStartedMsg{instance: instance, err: err}
-		}
-
-		if err := task.WaitForReady(instance); err != nil {
-			return instanceStartedMsg{instance: instance, err: err}
-		}
-
-		if instance.CheckAndHandleTrustPrompt() {
-			time.Sleep(1 * time.Second)
-			if err := task.WaitForReady(instance); err != nil {
-				return instanceStartedMsg{instance: instance, err: err}
-			}
-		}
-
-		if err := instance.SendPromptCommand(prompt); err != nil {
+		if err := task.StartAndSendPrompt(instance, prompt); err != nil {
 			return instanceStartedMsg{instance: instance, err: err}
 		}
 

@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/board"
 	"github.com/sachiniyer/agent-factory/config"
@@ -115,27 +114,10 @@ var sessionsCreateCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to create instance: %w", err))
 		}
 
-		if err := instance.Start(true); err != nil {
+		if err := task.StartAndSendPrompt(instance, createPromptFlag); err != nil {
 			return jsonError(fmt.Errorf("failed to start instance: %w", err))
 		}
 		instance.SetStatus(session.Running)
-
-		if createPromptFlag != "" {
-			if err := task.WaitForReady(instance); err != nil {
-				return jsonError(fmt.Errorf("program did not become ready: %w", err))
-			}
-
-			if instance.CheckAndHandleTrustPrompt() {
-				time.Sleep(1 * time.Second)
-				if err := task.WaitForReady(instance); err != nil {
-					return jsonError(fmt.Errorf("program did not become ready after trust prompt: %w", err))
-				}
-			}
-
-			if err := instance.SendPromptCommand(createPromptFlag); err != nil {
-				return jsonError(fmt.Errorf("failed to send prompt: %w", err))
-			}
-		}
 
 		// Save to per-repo storage under file lock
 		data := instance.ToInstanceData()
@@ -212,21 +194,10 @@ or use 'af api sessions create --name <title> --prompt <prompt>' instead.`,
 				return jsonError(fmt.Errorf("failed to create instance: %w", err))
 			}
 
-			if err := instance.Start(true); err != nil {
+			if err := task.StartAndSendPrompt(instance, ""); err != nil {
 				return jsonError(fmt.Errorf("failed to start instance: %w", err))
 			}
 			instance.SetStatus(session.Running)
-
-			if err := task.WaitForReady(instance); err != nil {
-				return jsonError(fmt.Errorf("program did not become ready: %w", err))
-			}
-
-			if instance.CheckAndHandleTrustPrompt() {
-				time.Sleep(1 * time.Second)
-				if err := task.WaitForReady(instance); err != nil {
-					return jsonError(fmt.Errorf("program did not become ready after trust prompt: %w", err))
-				}
-			}
 
 			// Save to per-repo storage under file lock
 			data := instance.ToInstanceData()

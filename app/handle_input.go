@@ -41,6 +41,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
 
+		m.preSaveInstances()
+
 		selectedWt := m.selectedWorktree
 		m.selectedWorktree = nil
 		m.availableWorktrees = nil

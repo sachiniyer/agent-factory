@@ -165,11 +165,6 @@ func RunTask(taskID string) error {
 		return fmt.Errorf("failed to create instance: %w", err)
 	}
 
-	if err := instance.Start(true); err != nil {
-		return fmt.Errorf("failed to start instance: %w", err)
-	}
-	instance.SetStatus(session.Running)
-
 	// If anything fails after Start(), kill the instance to avoid orphaned resources.
 	started := true
 	defer func() {
@@ -180,26 +175,10 @@ func RunTask(taskID string) error {
 		}
 	}()
 
-	// Wait for the program to be ready before sending the prompt.
-	// Claude Code (and similar tools) take a few seconds to initialize.
-	if err := WaitForReady(instance); err != nil {
-		return fmt.Errorf("program did not become ready: %w", err)
+	if err := StartAndSendPrompt(instance, t.Prompt); err != nil {
+		return fmt.Errorf("failed to start instance: %w", err)
 	}
-
-	// Check for and dismiss the trust prompt if present.
-	if instance.CheckAndHandleTrustPrompt() {
-		log.InfoLog.Printf("trust prompt detected and dismissed, waiting for ready again")
-		time.Sleep(1 * time.Second)
-		if err := WaitForReady(instance); err != nil {
-			return fmt.Errorf("program did not become ready after trust prompt: %w", err)
-		}
-	}
-
-	// Use SendPromptCommand (tmux send-keys) instead of SendPrompt (PTY write)
-	// for reliability in headless/task runs.
-	if err := instance.SendPromptCommand(t.Prompt); err != nil {
-		return fmt.Errorf("failed to send prompt: %w", err)
-	}
+	instance.SetStatus(session.Running)
 
 	// Instance is successfully handed off, don't kill it on return.
 	started = false

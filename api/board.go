@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/board"
 	"github.com/sachiniyer/agent-factory/config"
@@ -295,26 +294,10 @@ var boardSpawnCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to create instance: %w", err))
 		}
 
-		if err := instance.Start(true); err != nil {
+		if err := task.StartAndSendPrompt(instance, t.Title); err != nil {
 			return jsonError(fmt.Errorf("failed to start instance: %w", err))
 		}
 		instance.SetStatus(session.Running)
-
-		// Wait for ready and send the task title as the prompt
-		if err := task.WaitForReady(instance); err != nil {
-			return jsonError(fmt.Errorf("program did not become ready: %w", err))
-		}
-
-		if instance.CheckAndHandleTrustPrompt() {
-			time.Sleep(1 * time.Second)
-			if err := task.WaitForReady(instance); err != nil {
-				return jsonError(fmt.Errorf("program did not become ready after trust prompt: %w", err))
-			}
-		}
-
-		if err := instance.SendPromptCommand(t.Title); err != nil {
-			return jsonError(fmt.Errorf("failed to send prompt: %w", err))
-		}
 
 		// Save instance to per-repo storage under file lock
 		data := instance.ToInstanceData()
