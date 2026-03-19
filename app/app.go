@@ -410,11 +410,24 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 func (m *home) saveContentPaneState() {
 	kp := m.contentPane.KanbanPane()
 	if kp.IsDirty() {
-		if b := kp.GetBoard(); b != nil {
-			if err := board.SaveBoard(b); err != nil {
-				log.ErrorLog.Printf("failed to save board: %v", err)
+		if userBoard := kp.GetBoard(); userBoard != nil {
+			// Check whether the disk version was updated after we loaded.
+			// If so, merge external changes before saving so CLI operations
+			// (add, move, link, spawn) are not silently overwritten.
+			diskBoard, err := board.LoadBoard()
+			if err == nil && diskBoard.UpdatedAt.After(kp.LoadedAt()) {
+				merged := board.MergeBoards(userBoard, diskBoard, kp.LoadedIDs())
+				if err := board.SaveBoard(merged); err != nil {
+					log.ErrorLog.Printf("failed to save board: %v", err)
+				}
+				kp.SetBoard(merged)
+				m.sidebar.SetTaskCount(merged.TaskCount())
+			} else {
+				if err := board.SaveBoard(userBoard); err != nil {
+					log.ErrorLog.Printf("failed to save board: %v", err)
+				}
+				m.sidebar.SetTaskCount(userBoard.TaskCount())
 			}
-			m.sidebar.SetTaskCount(b.TaskCount())
 		}
 	}
 

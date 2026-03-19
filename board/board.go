@@ -27,8 +27,9 @@ type Task struct {
 }
 
 type Board struct {
-	Columns []string `json:"columns"`
-	Tasks   []Task   `json:"tasks"`
+	Columns   []string  `json:"columns"`
+	Tasks     []Task    `json:"tasks"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (b *Board) AddTask(title, status string) Task {
@@ -187,14 +188,60 @@ func SaveBoardForRepo(repo *config.RepoContext, board *Board) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
+	board.UpdatedAt = time.Now()
 	data, err := json.MarshalIndent(board, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal board: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return config.AtomicWriteFile(path, data, 0644)
+}
+
+// MergeBoards merges external changes from disk into the user's edited board.
+// User edits take priority. New tasks from disk are added. Tasks deleted by the
+// user stay deleted. Tasks modified on disk but not by the user get the disk version.
+//
+// originalIDs is the set of task IDs that were present when the user's board was
+// loaded from disk. This lets us distinguish "user deleted a task" (ID was in
+// originalIDs but is no longer in userBoard) from "new external task" (ID was
+// NOT in originalIDs). If originalIDs is nil, all disk tasks not in userBoard
+// are treated as new.
+func MergeBoards(userBoard, diskBoard *Board, originalIDs map[string]bool) *Board {
+	if userBoard == nil {
+		return diskBoard
+	}
+	if diskBoard == nil {
+		return userBoard
+	}
+
+	// Build a set of task IDs in userBoard for fast lookup.
+	userIDs := make(map[string]bool, len(userBoard.Tasks))
+	for _, t := range userBoard.Tasks {
+		userIDs[t.ID] = true
+	}
+
+	// Start with the user's tasks (preserving their order and edits).
+	merged := &Board{
+		Columns:   userBoard.Columns,
+		Tasks:     make([]Task, len(userBoard.Tasks)),
+		UpdatedAt: userBoard.UpdatedAt,
+	}
+	copy(merged.Tasks, userBoard.Tasks)
+
+	// Add tasks from disk that don't exist in user board, but only if they
+	// are truly new (not present in the original loaded set, meaning the
+	// user didn't delete them).
+	for _, dt := range diskBoard.Tasks {
+		if userIDs[dt.ID] {
+			continue // already in user board — user version wins
+		}
+		if originalIDs != nil && originalIDs[dt.ID] {
+			continue // was in original load — user deleted it, honour that
+		}
+		// Truly new external task — add it.
+		merged.Tasks = append(merged.Tasks, dt)
+	}
+
+	return merged
 }
 
 func SaveBoard(board *Board) error {
@@ -207,16 +254,22 @@ func SaveBoard(board *Board) error {
 
 // --- Repo-scoped convenience (used by API) ---
 
-// updateBoardForRepo loads the board, applies fn, and saves it back.
+// updateBoardForRepo loads the board under a file lock, applies fn, and saves it back atomically.
 func updateBoardForRepo(repo *config.RepoContext, fn func(*Board) error) error {
-	board, err := LoadBoardForRepo(repo)
+	path, err := tasksPath(repo)
 	if err != nil {
 		return err
 	}
-	if err := fn(board); err != nil {
-		return err
-	}
-	return SaveBoardForRepo(repo, board)
+	return config.WithFileLock(path, func() error {
+		board, err := LoadBoardForRepo(repo)
+		if err != nil {
+			return err
+		}
+		if err := fn(board); err != nil {
+			return err
+		}
+		return SaveBoardForRepo(repo, board)
+	})
 }
 
 func LoadTasksForRepo(repo *config.RepoContext) ([]Task, error) {
@@ -228,12 +281,20 @@ func LoadTasksForRepo(repo *config.RepoContext) ([]Task, error) {
 }
 
 func AddTaskForRepoWithStatus(repo *config.RepoContext, title, status string) (Task, error) {
-	board, err := LoadBoardForRepo(repo)
+	path, err := tasksPath(repo)
 	if err != nil {
 		return Task{}, err
 	}
-	t := board.AddTask(title, status)
-	return t, SaveBoardForRepo(repo, board)
+	var t Task
+	err = config.WithFileLock(path, func() error {
+		board, loadErr := LoadBoardForRepo(repo)
+		if loadErr != nil {
+			return loadErr
+		}
+		t = board.AddTask(title, status)
+		return SaveBoardForRepo(repo, board)
+	})
+	return t, err
 }
 
 func ToggleTaskForRepo(repo *config.RepoContext, id string) error {
@@ -254,6 +315,27 @@ func LinkTaskForRepo(repo *config.RepoContext, taskID, instanceTitle string) err
 
 func UnlinkTaskForRepo(repo *config.RepoContext, taskID string) error {
 	return updateBoardForRepo(repo, func(b *Board) error { return b.UnlinkTask(taskID) })
+}
+
+// AddAndLinkTaskForRepo adds a new task and links it to an instance in a single locked operation.
+func AddAndLinkTaskForRepo(repo *config.RepoContext, title, status, instanceTitle string) error {
+	return updateBoardForRepo(repo, func(b *Board) error {
+		t := b.AddTask(title, status)
+		return b.LinkTask(t.ID, instanceTitle)
+	})
+}
+
+// MoveLinkedTaskForRepo finds a task linked to the given instance, unlinks it,
+// and moves it to the given status. Does nothing if no task is linked.
+func MoveLinkedTaskForRepo(repo *config.RepoContext, instanceTitle, newStatus string) error {
+	return updateBoardForRepo(repo, func(b *Board) error {
+		t := b.FindTaskByInstance(instanceTitle)
+		if t == nil {
+			return nil // nothing to move
+		}
+		b.UnlinkTask(t.ID)
+		return b.MoveTask(t.ID, newStatus)
+	})
 }
 
 func generateID() string {

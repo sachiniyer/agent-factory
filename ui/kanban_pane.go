@@ -33,6 +33,8 @@ type KanbanPane struct {
 	scrollOff   int
 	dirty       bool
 	hasFocus    bool
+	loadedAt    time.Time
+	loadedIDs   map[string]bool
 
 	pendingJumpInstance   string
 	pendingAttachInstance string
@@ -47,6 +49,8 @@ func (k *KanbanPane) SetSize(width, height int) { k.width = width; k.height = he
 func (k *KanbanPane) GetBoard() *board.Board    { return k.board }
 func (k *KanbanPane) IsDirty() bool             { return k.dirty }
 func (k *KanbanPane) HasFocus() bool            { return k.hasFocus }
+func (k *KanbanPane) LoadedAt() time.Time            { return k.loadedAt }
+func (k *KanbanPane) LoadedIDs() map[string]bool     { return k.loadedIDs }
 
 // PendingJumpInstance returns the instance title to jump to, if any.
 func (k *KanbanPane) PendingJumpInstance() string {
@@ -93,9 +97,16 @@ func (k *KanbanPane) ConsumeStatusMsg() string {
 	return msg
 }
 
-func (k *KanbanPane) SetBoard(board *board.Board) {
-	k.board = board
+func (k *KanbanPane) SetBoard(b *board.Board) {
+	k.board = b
 	k.dirty = false
+	k.loadedAt = time.Now()
+	k.loadedIDs = make(map[string]bool)
+	if b != nil {
+		for _, t := range b.Tasks {
+			k.loadedIDs[t.ID] = true
+		}
+	}
 	k.rebuildFlat()
 }
 

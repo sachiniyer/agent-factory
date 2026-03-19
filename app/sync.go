@@ -165,14 +165,29 @@ func (m *home) refreshExternalInstances() bool {
 // refreshExternalBoard reconciles the kanban board with the on-disk state.
 func (m *home) refreshExternalBoard() {
 	kp := m.contentPane.KanbanPane()
-	if kp.IsDirty() || kp.HasFocus() {
-		return
-	}
-	b, err := board.LoadBoard()
+
+	diskBoard, err := board.LoadBoard()
 	if err != nil {
 		log.WarningLog.Printf("failed to load board for refresh: %v", err)
 		return
 	}
-	kp.SetBoard(b)
-	m.sidebar.SetTaskCount(b.TaskCount())
+
+	if kp.IsDirty() {
+		// Board has unsaved user edits — merge in only new external tasks
+		// so that CLI-added tasks appear without disrupting user work.
+		userBoard := kp.GetBoard()
+		if userBoard != nil {
+			merged := board.MergeBoards(userBoard, diskBoard, kp.LoadedIDs())
+			if len(merged.Tasks) != len(userBoard.Tasks) {
+				// New tasks were added externally; update in-place.
+				kp.GetBoard().Tasks = merged.Tasks
+				m.sidebar.SetTaskCount(merged.TaskCount())
+			}
+		}
+		return
+	}
+
+	// Clean board — full refresh from disk.
+	kp.SetBoard(diskBoard)
+	m.sidebar.SetTaskCount(diskBoard.TaskCount())
 }
