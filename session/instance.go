@@ -481,7 +481,6 @@ func (i *Instance) TmuxAlive() bool {
 	return ts.DoesSessionExist()
 }
 
-
 // GetPRInfo returns the associated GitHub PR info, or nil if none.
 func (i *Instance) GetPRInfo() *git.PRInfo {
 	i.mu.RLock()
