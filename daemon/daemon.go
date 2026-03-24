@@ -79,6 +79,12 @@ func RunDaemon(cfg *config.Config) error {
 
 // LaunchDaemon launches the daemon process.
 func LaunchDaemon() error {
+	// Stop any existing daemon first to prevent duplicates.
+	if err := StopDaemon(); err != nil {
+		log.ErrorLog.Printf("failed to stop existing daemon: %v", err)
+		// Continue anyway — best effort
+	}
+
 	// Find the agent-factory binary.
 	execPath, err := os.Executable()
 	if err != nil {
