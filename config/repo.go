@@ -53,7 +53,19 @@ func resolveMainRepoRoot(pathArgs ...string) (string, error) {
 	}
 	commonDir = filepath.Clean(commonDir)
 
-	// commonDir is the main repo's .git directory; its parent is the main repo root
+	// commonDir is the main repo's .git directory.
+	// For submodules, git stores the worktree path in core.worktree inside the git dir.
+	// For regular repos, core.worktree is unset and the parent of .git is the repo root.
+	wtCmd := exec.Command("git", "config", "--file", filepath.Join(commonDir, "config"), "core.worktree")
+	wtOut, err := wtCmd.Output()
+	if err == nil {
+		worktree := strings.TrimSpace(string(wtOut))
+		if !filepath.IsAbs(worktree) {
+			worktree = filepath.Join(commonDir, worktree)
+		}
+		return filepath.Clean(worktree), nil
+	}
+	// Fallback: parent of .git directory (correct for non-submodule repos)
 	return filepath.Dir(commonDir), nil
 }
 
