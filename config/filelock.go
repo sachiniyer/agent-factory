@@ -32,6 +32,24 @@ func WithFileLock(path string, fn func() error) error {
 	return fn()
 }
 
+// LockedUpdate loads a file under an exclusive lock, applies fn to transform
+// its contents, and atomically writes the result back. If the file doesn't
+// exist, fn receives nil. This is the preferred way to do read-modify-write
+// on any shared JSON file.
+func LockedUpdate(path string, perm os.FileMode, fn func(data []byte) ([]byte, error)) error {
+	return WithFileLock(path, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to read %s: %w", path, err)
+		}
+		newData, err := fn(data)
+		if err != nil {
+			return err
+		}
+		return AtomicWriteFile(path, newData, perm)
+	})
+}
+
 // AtomicWriteFile writes data to a temporary file in the same directory as path
 // and atomically renames it to path. This prevents partial writes from being
 // visible to readers.

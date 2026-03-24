@@ -71,6 +71,21 @@ func SaveTasks(tasks []Task) error {
 		return fmt.Errorf("failed to marshal tasks: %w", err)
 	}
 
+	return config.WithFileLock(path, func() error {
+		return config.AtomicWriteFile(path, data, 0644)
+	})
+}
+
+// saveTasks writes tasks without locking. Must be called from within WithFileLock.
+func saveTasks(tasks []Task) error {
+	path, err := getTasksPathFn()
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal tasks: %w", err)
+	}
 	return config.AtomicWriteFile(path, data, 0644)
 }
 
@@ -85,7 +100,7 @@ func AddTask(t Task) error {
 			return err
 		}
 		tasks = append(tasks, t)
-		return SaveTasks(tasks)
+		return saveTasks(tasks)
 	})
 }
 
@@ -114,7 +129,7 @@ func RemoveTask(id string) error {
 			return fmt.Errorf("task with id %q not found", id)
 		}
 
-		return SaveTasks(filtered)
+		return saveTasks(filtered)
 	})
 }
 
@@ -183,6 +198,6 @@ func UpdateTask(t Task) error {
 			return fmt.Errorf("task with id %q not found", t.ID)
 		}
 
-		return SaveTasks(tasks)
+		return saveTasks(tasks)
 	})
 }
