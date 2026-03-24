@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/log"
@@ -135,6 +136,10 @@ func LoadRepoInstances(repoID string) (json.RawMessage, error) {
 			return json.RawMessage("[]"), nil
 		}
 		return nil, fmt.Errorf("failed to read repo instances: %w", err)
+	}
+	// Handle empty file (e.g. from interrupted write)
+	if len(bytes.TrimSpace(data)) == 0 {
+		return json.RawMessage("[]"), nil
 	}
 	return json.RawMessage(data), nil
 }
