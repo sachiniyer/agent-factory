@@ -180,14 +180,14 @@ func RunTask(taskID string) error {
 	}
 	instance.SetStatus(session.Running)
 
-	// Instance is successfully handed off, don't kill it on return.
-	started = false
-
 	// Write instance to a separate pending file to avoid racing with the
 	// daemon/TUI which also read-modify-write state.json concurrently.
 	if err := appendPendingInstance(instance.ToInstanceData()); err != nil {
 		return fmt.Errorf("failed to save pending instance: %w", err)
 	}
+
+	// Instance is successfully handed off, don't kill it on return.
+	started = false
 
 	// Create a board task linked to the new instance.
 	repo, repoErr := config.RepoFromPath(t.ProjectPath)
