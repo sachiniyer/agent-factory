@@ -318,16 +318,13 @@ func (i *Instance) StartWithExistingWorktree(worktreePath, branchName string) er
 
 // Kill terminates the instance and cleans up all resources
 func (i *Instance) Kill() error {
-	i.mu.RLock()
-	wasStarted := i.started
+	i.mu.Lock()
 	ts := i.tmuxSession
 	gw := i.gitWorktree
-	i.mu.RUnlock()
-
-	if !wasStarted {
-		// If instance was never started, just return success
-		return nil
-	}
+	i.started = false
+	i.tmuxSession = nil
+	i.gitWorktree = nil
+	i.mu.Unlock()
 
 	var errs []error
 
