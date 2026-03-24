@@ -81,14 +81,8 @@ func autoUpdate() error {
 		return fmt.Errorf("failed to find executable: %w", err)
 	}
 
-	tmpPath := execPath + ".autoupdate-tmp"
-	if err := os.WriteFile(tmpPath, binary, 0755); err != nil {
+	if err := config.AtomicWriteFile(execPath, binary, 0755); err != nil {
 		return fmt.Errorf("failed to write new binary: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, execPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to replace binary: %w", err)
 	}
 
 	recordCheck()
