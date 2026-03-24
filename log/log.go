@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -14,18 +15,36 @@ var (
 	ErrorLog   *log.Logger
 )
 
-var logFileName = filepath.Join(os.TempDir(), "agent-factory.log")
+func getLogPath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "agent-factory.log")
+	}
+	dir := filepath.Join(configDir, "agent-factory")
+	os.MkdirAll(dir, 0700)
+	return filepath.Join(dir, "agent-factory.log")
+}
+
+var logFileName = getLogPath()
 
 var globalLogFile *os.File
 
 // Initialize should be called once at the beginning of the program to set up logging.
 // defer Close() after calling this function. It sets the go log output to the file in
-// the os temp directory.
+// the user config directory.
 
 func Initialize(daemon bool) {
-	f, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	f, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
-		panic(fmt.Sprintf("could not open log file: %s", err))
+		fmt.Fprintf(os.Stderr, "warning: could not open log file %s: %v, logging to stderr\n", logFileName, err)
+		fmtS := "%s"
+		if daemon {
+			fmtS = "[DAEMON] %s"
+		}
+		InfoLog = log.New(os.Stderr, fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
+		WarningLog = log.New(os.Stderr, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
+		ErrorLog = log.New(os.Stderr, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
+		return
 	}
 
 	// Set log format to include timestamp and file/line number
@@ -51,25 +70,28 @@ func Close() {
 
 // Every is used to log at most once every timeout duration.
 type Every struct {
-	timeout time.Duration
-	timer   *time.Timer
+	mu       sync.Mutex
+	duration time.Duration
+	timer    *time.Timer
 }
 
 func NewEvery(timeout time.Duration) *Every {
-	return &Every{timeout: timeout}
+	return &Every{duration: timeout}
 }
 
 // ShouldLog returns true if the timeout has passed since the last log.
 func (e *Every) ShouldLog() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if e.timer == nil {
-		e.timer = time.NewTimer(e.timeout)
-		e.timer.Reset(e.timeout)
+		e.timer = time.NewTimer(e.duration)
 		return true
 	}
 
 	select {
 	case <-e.timer.C:
-		e.timer.Reset(e.timeout)
+		e.timer.Reset(e.duration)
 		return true
 	default:
 		return false
