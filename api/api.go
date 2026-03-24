@@ -14,8 +14,7 @@ import (
 
 // Shared flags
 var (
-	repoFlag   string
-	repoIDFlag string
+	repoFlag string
 )
 
 // resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
@@ -30,9 +29,6 @@ func resolveRepoID() (string, error) {
 			return "", fmt.Errorf("failed to get repo from path: %w", err)
 		}
 		return repo.ID, nil
-	}
-	if repoIDFlag != "" {
-		return repoIDFlag, nil
 	}
 	// Try cwd
 	repo, err := config.CurrentRepo()
@@ -116,7 +112,6 @@ var ApiCmd = &cobra.Command{
 func init() {
 	// Persistent flags on ApiCmd (available to all subcommands)
 	ApiCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to git repository")
-	ApiCmd.PersistentFlags().StringVar(&repoIDFlag, "repo-id", "", "Repository ID (alternative to --repo)")
 
 	// Sessions
 	sessionsCreateCmd.Flags().StringVar(&createNameFlag, "name", "", "Session name (required)")
