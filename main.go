@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -65,6 +66,9 @@ var (
 			autoYes := cfg.AutoYes
 			if autoYesFlag {
 				autoYes = true
+			}
+			if autoYes && strings.Contains(strings.ToLower(program), "claude") {
+				program = program + " --permission-mode bypassPermissions"
 			}
 			if autoYes {
 				defer func() {

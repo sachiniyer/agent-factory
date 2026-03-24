@@ -176,7 +176,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		Width:     0,
 		CreatedAt: t,
 		UpdatedAt: t,
-		AutoYes:   false,
+		AutoYes:   opts.AutoYes,
 	}, nil
 }
 
