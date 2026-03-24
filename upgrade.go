@@ -90,7 +90,7 @@ func extractBinaryFromTarGz(r io.Reader, binaryName string) ([]byte, error) {
 		}
 
 		name := hdr.Name
-		if name == binaryName || strings.HasSuffix(name, "/"+binaryName) {
+		if hdr.Typeflag == tar.TypeReg && (name == binaryName || strings.HasSuffix(name, "/"+binaryName)) {
 			data, err := io.ReadAll(tr)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read binary from archive: %w", err)
