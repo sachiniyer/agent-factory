@@ -193,7 +193,9 @@ func SaveBoardForRepo(repo *config.RepoContext, board *Board) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal board: %w", err)
 	}
-	return config.AtomicWriteFile(path, data, 0644)
+	return config.WithFileLock(path, func() error {
+		return config.AtomicWriteFile(path, data, 0644)
+	})
 }
 
 // MergeBoards merges external changes from disk into the user's edited board.
@@ -268,7 +270,13 @@ func updateBoardForRepo(repo *config.RepoContext, fn func(*Board) error) error {
 		if err := fn(board); err != nil {
 			return err
 		}
-		return SaveBoardForRepo(repo, board)
+		// Save directly (already under lock).
+		board.UpdatedAt = time.Now()
+		data, err := json.MarshalIndent(board, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal board: %w", err)
+		}
+		return config.AtomicWriteFile(path, data, 0644)
 	})
 }
 
@@ -292,7 +300,13 @@ func AddTaskForRepoWithStatus(repo *config.RepoContext, title, status string) (T
 			return loadErr
 		}
 		t = board.AddTask(title, status)
-		return SaveBoardForRepo(repo, board)
+		// Save directly (already under lock).
+		board.UpdatedAt = time.Now()
+		data, marshalErr := json.MarshalIndent(board, "", "  ")
+		if marshalErr != nil {
+			return fmt.Errorf("failed to marshal board: %w", marshalErr)
+		}
+		return config.AtomicWriteFile(path, data, 0644)
 	})
 	return t, err
 }
