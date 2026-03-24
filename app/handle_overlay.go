@@ -38,6 +38,7 @@ func (m *home) handleStateSelectWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			instance.SetStatus(session.Loading)
 			m.newInstanceFinalizer = m.sidebar.AddInstance(instance)
 			m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
+			m.namingInstance = instance
 			m.state = stateNew
 			m.menu.SetState(ui.StateNewInstance)
 			return m, nil

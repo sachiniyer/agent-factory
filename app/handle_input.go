@@ -15,6 +15,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		m.state = stateDefault
 		m.promptAfterName = false
+		m.namingInstance = nil
 		m.selectedWorktree = nil
 		m.availableWorktrees = nil
 		m.sidebar.Kill()
@@ -27,7 +28,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		)
 	}
 
-	instance := m.sidebar.GetInstances()[m.sidebar.NumInstances()-1]
+	instance := m.namingInstance
+	if instance == nil {
+		return m, nil
+	}
 	switch msg.Type {
 	case tea.KeyEnter:
 		if len(instance.Title) == 0 {
@@ -36,6 +40,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		instance.SetStatus(session.Loading)
 		m.newInstanceFinalizer()
+		m.namingInstance = nil
 		promptAfterName := m.promptAfterName
 		m.promptAfterName = false
 		m.state = stateDefault
@@ -82,6 +87,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyEsc:
 		m.sidebar.Kill()
+		m.namingInstance = nil
 		m.state = stateDefault
 		m.selectedWorktree = nil
 		m.availableWorktrees = nil
@@ -139,6 +145,7 @@ func (m *home) startNewInstance(promptAfterName bool) (tea.Model, tea.Cmd) {
 	instance.SetStatus(session.Loading)
 	m.newInstanceFinalizer = m.sidebar.AddInstance(instance)
 	m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
+	m.namingInstance = instance
 	m.state = stateNew
 	m.menu.SetState(ui.StateNewInstance)
 	m.promptAfterName = promptAfterName

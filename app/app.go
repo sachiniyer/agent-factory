@@ -77,6 +77,11 @@ type home struct {
 	// It registers the new instance in the list after the instance has been started.
 	newInstanceFinalizer func()
 
+	// namingInstance is the instance currently being named in stateNew.
+	// Stored as a direct pointer so background sync cannot change which
+	// instance the naming keystrokes target.
+	namingInstance *session.Instance
+
 	// promptAfterName tracks if we should enter prompt mode after naming
 	promptAfterName bool
 
