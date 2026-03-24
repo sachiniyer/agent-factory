@@ -17,8 +17,21 @@ const (
 	defaultProgram = "claude"
 )
 
-// GetConfigDir returns the path to the application's configuration directory
+// GetConfigDir returns the path to the application's configuration directory.
+// If AGENT_FACTORY_HOME is set, it is used as the config directory.
+// Otherwise, defaults to ~/.agent-factory.
 func GetConfigDir() (string, error) {
+	if envDir := os.Getenv("AGENT_FACTORY_HOME"); envDir != "" {
+		if strings.HasPrefix(envDir, "~") {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return "", fmt.Errorf("failed to expand home directory: %w", err)
+			}
+			envDir = filepath.Join(homeDir, envDir[2:])
+		}
+		return envDir, nil
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get config home directory: %w", err)

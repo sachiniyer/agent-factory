@@ -123,6 +123,43 @@ func TestGetConfigDir(t *testing.T) {
 		// Verify it's an absolute path
 		assert.True(t, filepath.IsAbs(configDir))
 	})
+
+	t.Run("uses AGENT_FACTORY_HOME when set", func(t *testing.T) {
+		originalVal := os.Getenv("AGENT_FACTORY_HOME")
+		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
+
+		customDir := t.TempDir()
+		os.Setenv("AGENT_FACTORY_HOME", customDir)
+
+		configDir, err := GetConfigDir()
+		assert.NoError(t, err)
+		assert.Equal(t, customDir, configDir)
+	})
+
+	t.Run("expands tilde in AGENT_FACTORY_HOME", func(t *testing.T) {
+		originalVal := os.Getenv("AGENT_FACTORY_HOME")
+		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
+
+		os.Setenv("AGENT_FACTORY_HOME", "~/.my-custom-config")
+
+		homeDir, err := os.UserHomeDir()
+		require.NoError(t, err)
+
+		configDir, err := GetConfigDir()
+		assert.NoError(t, err)
+		assert.Equal(t, filepath.Join(homeDir, ".my-custom-config"), configDir)
+	})
+
+	t.Run("falls back to default when AGENT_FACTORY_HOME is empty", func(t *testing.T) {
+		originalVal := os.Getenv("AGENT_FACTORY_HOME")
+		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
+
+		os.Setenv("AGENT_FACTORY_HOME", "")
+
+		configDir, err := GetConfigDir()
+		assert.NoError(t, err)
+		assert.True(t, strings.HasSuffix(configDir, ".agent-factory"))
+	})
 }
 
 func TestLoadConfig(t *testing.T) {
