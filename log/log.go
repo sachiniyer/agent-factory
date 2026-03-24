@@ -46,7 +46,7 @@ func Close() {
 	if globalLogFile != nil {
 		_ = globalLogFile.Close()
 	}
-	fmt.Println("wrote logs to " + logFileName)
+	fmt.Fprintln(os.Stderr, "wrote logs to "+logFileName)
 }
 
 // Every is used to log at most once every timeout duration.
