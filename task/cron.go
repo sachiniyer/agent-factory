@@ -137,16 +137,10 @@ func CronToOnCalendar(cronExpr string) (string, error) {
 	}
 
 	// Convert month
-	monthPart := "*"
-	if monthField != "*" {
-		monthPart = zeroPad(monthField)
-	}
+	monthPart := convertTimeField(monthField)
 
 	// Convert day-of-month
-	domPart := "*"
-	if domField != "*" {
-		domPart = zeroPad(domField)
-	}
+	domPart := convertTimeField(domField)
 
 	// Convert hour
 	hourPart := convertTimeField(hourField)
@@ -173,6 +167,16 @@ func convertTimeField(field string) string {
 		return "*"
 	}
 
+	// Handle lists (e.g. "1,3,5" → "01,03,05")
+	if strings.Contains(field, ",") {
+		parts := strings.Split(field, ",")
+		converted := make([]string, len(parts))
+		for i, p := range parts {
+			converted[i] = convertTimeField(p)
+		}
+		return strings.Join(converted, ",")
+	}
+
 	// Handle step values
 	if strings.Contains(field, "/") {
 		idx := strings.Index(field, "/")
@@ -181,12 +185,20 @@ func convertTimeField(field string) string {
 		if base == "*" {
 			return fmt.Sprintf("00/%s", step)
 		}
-		// Range with step: "X-Y/N" → "X/N"
+		// Range with step: "X-Y/N" → "XX..YY/N"
 		if dashIdx := strings.Index(base, "-"); dashIdx != -1 {
 			start := base[:dashIdx]
-			return fmt.Sprintf("%s/%s", zeroPad(start), step)
+			end := base[dashIdx+1:]
+			return fmt.Sprintf("%s..%s/%s", zeroPad(start), zeroPad(end), step)
 		}
 		return fmt.Sprintf("%s/%s", zeroPad(base), step)
+	}
+
+	// Handle ranges (e.g. "1-5" → "01..05")
+	if dashIdx := strings.Index(field, "-"); dashIdx != -1 {
+		start := field[:dashIdx]
+		end := field[dashIdx+1:]
+		return fmt.Sprintf("%s..%s", zeroPad(start), zeroPad(end))
 	}
 
 	// Plain number — zero-pad
