@@ -150,13 +150,13 @@ func LoadConfig() *Config {
 		return DefaultConfig()
 	}
 
-	var config Config
-	if err := json.Unmarshal(data, &config); err != nil {
+	config := DefaultConfig()
+	if err := json.Unmarshal(data, config); err != nil {
 		log.ErrorLog.Printf("failed to parse config file: %v", err)
 		return DefaultConfig()
 	}
 
-	return &config
+	return config
 }
 
 // saveConfig saves the configuration to disk
