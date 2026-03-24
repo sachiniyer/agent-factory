@@ -53,10 +53,11 @@ func (t *TmuxSession) monitorWindowSize() {
 				if resizeTimer != nil {
 					resizeTimer.Stop()
 				}
+				ctx := t.ctx
 				resizeTimer = time.AfterFunc(50*time.Millisecond, func() {
 					select {
 					case debouncedWinch <- syscall.SIGWINCH:
-					case <-t.ctx.Done():
+					case <-ctx.Done():
 					}
 				})
 			}
