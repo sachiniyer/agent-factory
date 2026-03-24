@@ -91,9 +91,16 @@ func extractBinaryFromTarGz(r io.Reader, binaryName string) ([]byte, error) {
 
 		name := hdr.Name
 		if hdr.Typeflag == tar.TypeReg && (name == binaryName || strings.HasSuffix(name, "/"+binaryName)) {
-			data, err := io.ReadAll(tr)
+			const maxBinarySize = 500 << 20 // 500 MB
+			if hdr.Size > maxBinarySize {
+				return nil, fmt.Errorf("binary too large: %d bytes (max %d)", hdr.Size, maxBinarySize)
+			}
+			data, err := io.ReadAll(io.LimitReader(tr, maxBinarySize+1))
 			if err != nil {
 				return nil, fmt.Errorf("failed to read binary from archive: %w", err)
+			}
+			if int64(len(data)) > maxBinarySize {
+				return nil, fmt.Errorf("binary exceeds maximum size of %d bytes", maxBinarySize)
 			}
 			return data, nil
 		}
