@@ -129,6 +129,7 @@ var sessionsCreateCmd = &cobra.Command{
 			existing = append(existing, data)
 			return json.MarshalIndent(existing, "", "  ")
 		}); err != nil {
+			instance.Kill()
 			return jsonError(err)
 		}
 
@@ -209,6 +210,7 @@ or use 'af api sessions create --name <title> --prompt <prompt>' instead.`,
 				existing = append(existing, data)
 				return json.MarshalIndent(existing, "", "  ")
 			}); err != nil {
+				instance.Kill()
 				return jsonError(err)
 			}
 

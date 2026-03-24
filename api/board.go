@@ -313,6 +313,7 @@ var boardSpawnCmd = &cobra.Command{
 			}
 			return out, nil
 		}); err != nil {
+			instance.Kill()
 			return jsonError(err)
 		}
 
