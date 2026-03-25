@@ -458,7 +458,11 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		return m.handleError(fmt.Errorf("failed to save task: %v", err))
 	}
 	if err := task.InstallScheduler(t); err != nil {
-		log.WarningLog.Printf("failed to install task scheduler: %v", err)
+		// Rollback: remove the task we just added
+		if removeErr := task.RemoveTask(t.ID); removeErr != nil {
+			log.ErrorLog.Printf("failed to rollback task after scheduler install failure: %v", removeErr)
+		}
+		return m.handleError(fmt.Errorf("failed to install task scheduler: %v", err))
 	}
 	// Refresh sidebar and task pane
 	tasks, err := task.LoadTasksForCurrentRepo()

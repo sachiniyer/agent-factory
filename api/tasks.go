@@ -100,6 +100,10 @@ var tasksAddCmd = &cobra.Command{
 		}
 
 		if err := task.InstallScheduler(s); err != nil {
+			// Rollback: remove the task we just added
+			if removeErr := task.RemoveTask(s.ID); removeErr != nil {
+				log.ErrorLog.Printf("failed to rollback task after scheduler install failure: %v", removeErr)
+			}
 			return jsonError(fmt.Errorf("failed to install task scheduler: %w", err))
 		}
 
