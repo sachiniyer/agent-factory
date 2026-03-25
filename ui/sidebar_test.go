@@ -15,14 +15,13 @@ func TestSidebarInitialState(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false)
 
-	// Should have 4 sections
-	assert.Equal(t, 4, len(s.sections))
+	// Should have 3 sections
+	assert.Equal(t, 3, len(s.sections))
 
 	// Only Instances section is expanded by default
 	assert.True(t, s.sections[0].Expanded)
 	assert.False(t, s.sections[1].Expanded)
 	assert.False(t, s.sections[2].Expanded)
-	assert.False(t, s.sections[3].Expanded)
 
 	// Initial selection should be on Instances header
 	sel := s.GetSelection()
@@ -66,11 +65,11 @@ func TestSidebarNavigation(t *testing.T) {
 	assert.True(t, sel.IsHeader)
 	assert.Equal(t, SectionTasks, sel.Kind)
 
-	// Move down to Board header
+	// Move down to Hooks header
 	s.Down()
 	sel = s.GetSelection()
 	assert.True(t, sel.IsHeader)
-	assert.Equal(t, SectionBoard, sel.Kind)
+	assert.Equal(t, SectionHooks, sel.Kind)
 
 	// Move back up
 	s.Up()
@@ -136,17 +135,9 @@ func TestSidebarJumpSections(t *testing.T) {
 
 	s.JumpNextSection()
 	sel = s.GetSelection()
-	assert.Equal(t, SectionBoard, sel.Kind)
-
-	s.JumpNextSection()
-	sel = s.GetSelection()
 	assert.Equal(t, SectionHooks, sel.Kind)
 
 	// Jump back
-	s.JumpPrevSection()
-	sel = s.GetSelection()
-	assert.Equal(t, SectionBoard, sel.Kind)
-
 	s.JumpPrevSection()
 	sel = s.GetSelection()
 	assert.Equal(t, SectionTasks, sel.Kind)
@@ -227,15 +218,6 @@ func TestSidebarTaskData(t *testing.T) {
 
 	result := s.GetTasks()
 	assert.Len(t, result, 2)
-}
-
-func TestSidebarTaskCount(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
-
-	s.SetTaskCount(5)
-	// Task count is just stored, no need to verify visible items here
-	assert.Equal(t, 5, s.taskCount)
 }
 
 func TestSidebarRender(t *testing.T) {

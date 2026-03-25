@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"github.com/sachiniyer/agent-factory/board"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
@@ -49,8 +48,6 @@ const (
 	stateSelectWorktree
 	// stateSearch is the state when the user is searching sessions.
 	stateSearch
-	// stateLinkInstance is the state when the user is selecting an instance to link to a task.
-	stateLinkInstance
 )
 
 type home struct {
@@ -114,8 +111,6 @@ type home struct {
 	selectedWorktree *git.WorktreeInfo
 	// availableWorktrees stores the worktrees shown in the selection overlay
 	availableWorktrees []git.WorktreeInfo
-	// linkingTaskID is the task ID being linked to an instance
-	linkingTaskID string
 }
 
 func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
@@ -184,15 +179,6 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		log.WarningLog.Printf("failed to load tasks: %v", err)
 	} else {
 		h.sidebar.SetTasks(tasks)
-	}
-
-	// Load board for sidebar display and kanban pane
-	b, err := board.LoadBoard()
-	if err != nil {
-		log.WarningLog.Printf("failed to load board: %v", err)
-	} else {
-		h.sidebar.SetTaskCount(b.TaskCount())
-		h.contentPane.KanbanPane().SetBoard(b)
 	}
 
 	// Load tasks into task pane
@@ -289,7 +275,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickPendingInstancesCmd
 	case tickRefreshExternalMessage:
 		changed := m.refreshExternalInstances()
-		m.refreshExternalBoard()
 		var cmds []tea.Cmd
 		cmds = append(cmds, tickRefreshExternalCmd)
 		if changed {
@@ -346,23 +331,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sidebar.SelectInstance(msg.instance)
 
 		if msg.err != nil {
-			// Unlink any board task that was linked to this failed instance.
-			kp := m.contentPane.KanbanPane()
-			if b := kp.GetBoard(); b != nil {
-				if linkedTask := b.FindTaskByInstance(msg.instance.Title); linkedTask != nil {
-					if err := b.UnlinkTask(linkedTask.ID); err != nil {
-						log.ErrorLog.Printf("failed to unlink task: %v", err)
-					}
-					if err := b.MoveTask(linkedTask.ID, "backlog"); err != nil {
-						log.ErrorLog.Printf("failed to move task to backlog: %v", err)
-					}
-					if err := board.SaveBoard(b); err != nil {
-						log.ErrorLog.Printf("failed to save board after unlinking failed instance: %v", err)
-					}
-					kp.SetBoard(b)
-				}
-			}
-
 			m.sidebar.Kill()
 
 			// Save to disk to remove the pre-saved instance entry.
@@ -400,7 +368,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *home) handleQuit() (tea.Model, tea.Cmd) {
-	// Save any dirty board/task state
+	// Save any dirty task/hooks state
 	m.saveContentPaneState()
 
 	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
@@ -411,31 +379,8 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	return m, tea.Quit
 }
 
-// saveContentPaneState persists any changes from the board/task panes.
+// saveContentPaneState persists any changes from the task/hooks panes.
 func (m *home) saveContentPaneState() {
-	kp := m.contentPane.KanbanPane()
-	if kp.IsDirty() {
-		if userBoard := kp.GetBoard(); userBoard != nil {
-			// Check whether the disk version was updated after we loaded.
-			// If so, merge external changes before saving so CLI operations
-			// (add, move, link, spawn) are not silently overwritten.
-			diskBoard, err := board.LoadBoard()
-			if err == nil && diskBoard.UpdatedAt.After(kp.LoadedAt()) {
-				merged := board.MergeBoards(userBoard, diskBoard, kp.LoadedIDs())
-				if err := board.SaveBoard(merged); err != nil {
-					log.ErrorLog.Printf("failed to save board: %v", err)
-				}
-				kp.SetBoard(merged)
-				m.sidebar.SetTaskCount(merged.TaskCount())
-			} else {
-				if err := board.SaveBoard(userBoard); err != nil {
-					log.ErrorLog.Printf("failed to save board: %v", err)
-				}
-				m.sidebar.SetTaskCount(userBoard.TaskCount())
-			}
-		}
-	}
-
 	hp := m.contentPane.HooksPane()
 	if hp.IsDirty() {
 		repoCfg, err := config.LoadRepoConfig(m.repoID)
@@ -549,21 +494,6 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 	finalizer()
 	m.menu.SetState(ui.StateDefault)
 
-	// Create a board task linked to the new instance.
-	kp := m.contentPane.KanbanPane()
-	if b := kp.GetBoard(); b != nil {
-		taskTitle := tsk.Name
-		if taskTitle == "" {
-			taskTitle = title
-		}
-		bt := b.AddTask(taskTitle, "in_progress")
-		b.LinkTask(bt.ID, title)
-		if err := board.SaveBoard(b); err != nil {
-			log.ErrorLog.Printf("failed to save board task: %v", err)
-		}
-		m.sidebar.SetTaskCount(b.TaskCount())
-	}
-
 	m.preSaveInstances()
 
 	prompt := tsk.Prompt
@@ -594,7 +524,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree || m.state == stateLinkInstance {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree {
 		return nil, false
 	}
 	// Don't highlight when content pane has focus
@@ -639,15 +569,13 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStatePrompt(msg)
 	case stateSelectWorktree:
 		return m.handleStateSelectWorktree(msg)
-	case stateLinkInstance:
-		return m.handleStateLinkInstance(msg)
 	case stateConfirm:
 		return m.handleStateConfirm(msg)
 	case stateSearch:
 		return m.handleStateSearch(msg)
 	}
 
-	// Route keys to content pane if it has focus (e.g., editing board/tasks)
+	// Route keys to content pane if it has focus (e.g., editing tasks/hooks)
 	if mod, cmd, consumed := m.handleContentPaneFocus(msg); consumed {
 		return mod, cmd
 	}
@@ -681,7 +609,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
-	// Handle content pane Enter/attach for focusing (board/tasks/hooks)
+	// Handle content pane Enter for focusing (tasks/hooks)
 	if mod, cmd, consumed := m.handleContentPaneEnter(msg, name); consumed {
 		return mod, cmd
 	}
@@ -771,10 +699,6 @@ func (m *home) selectionChanged() tea.Cmd {
 		if err := tw.UpdateTerminal(selected); err != nil {
 			return m.handleError(err)
 		}
-	case sel.Kind == ui.SectionBoard:
-		m.contentPane.SetMode(ui.ContentModeBoard)
-		m.menu.SetInstance(nil)
-		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
 	case sel.Kind == ui.SectionTasks:
 		m.contentPane.SetMode(ui.ContentModeTasks)
 		m.menu.SetInstance(nil)
@@ -906,11 +830,6 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("search overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.searchOverlay.Render(), mainView, true)
-	} else if m.state == stateLinkInstance {
-		if m.selectionOverlay == nil {
-			log.ErrorLog.Printf("selection overlay is nil")
-		}
-		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
 	}
 
 	return mainView

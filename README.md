@@ -1,8 +1,8 @@
 # Agent Factory
 
-A terminal UI that manages multiple AI coding agents (Claude Code, Aider, Codex, Amp) in separate git worktrees. Each agent runs in its own isolated workspace with full git integration, a kanban board for task tracking, and a programmatic API for orchestration.
+A terminal UI that manages multiple AI coding agents (Claude Code, Aider, Codex, Amp) in separate git worktrees. Each agent runs in its own isolated workspace with full git integration, automated tasks, and a programmatic API for orchestration.
 
-Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, kanban board, programmatic API, and automated tasks.
+Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, programmatic API, and automated tasks.
 
 ## Quick Start
 
@@ -53,20 +53,6 @@ Each session runs an AI agent in an isolated git worktree with its own branch. S
 | `a` | Attach to an existing worktree |
 | `Tab` | Switch between preview and terminal |
 
-### Kanban Board
-
-A per-repo kanban board with four columns: Backlog, In Progress, Review, Done. Tasks can be linked to sessions.
-
-| Key | Action |
-|-----|--------|
-| `t` | Navigate to kanban board |
-| `n` | Add new task (when focused) |
-| `m` | Grab/drop task to move between columns |
-| `d` | Delete task |
-| `o` | Jump to linked session |
-| `a` | Link/attach session to task |
-| `c` | Clear all done tasks |
-
 ### Tasks
 
 Create recurring automated tasks with cron expressions. Tasks are backed by systemd timers (Linux).
@@ -96,10 +82,9 @@ Per-repo shell commands that run when a new worktree is created (e.g. `npm insta
 
 ## Per-Repo Scoping
 
-All data (sessions, board, tasks) is scoped to the current git repository. The TUI shows only what's relevant to the repo you're in.
+All data (sessions, tasks) is scoped to the current git repository. The TUI shows only what's relevant to the repo you're in.
 
 - Sessions stored at `~/.agent-factory/instances/<repoID>/instances.json`
-- Tasks stored at `~/.agent-factory/tasks/<repoID>/board.json`
 - Configuration at `~/.agent-factory/config.json`
 
 ## Programmatic API
@@ -112,12 +97,6 @@ af api sessions list
 af api sessions create --name my-task --prompt "fix the login bug"
 af api sessions preview my-task
 af api sessions kill my-task
-
-# Kanban board
-af api board view
-af api board add --title "fix auth" --status in_progress
-af api board move <id> --status done
-af api board link <id> --instance my-task
 
 # Tasks
 af api tasks list

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sachiniyer/agent-factory/board"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -40,9 +39,9 @@ var tickPendingInstancesCmd = func() tea.Msg {
 	return tickPendingInstancesMessage{}
 }
 
-// tickRefreshExternalCmd reconciles the sidebar and board with on-disk state
-// to pick up changes made via the CLI (e.g. `af api sessions create/kill`,
-// `af api board add/remove`). Runs every 3s.
+// tickRefreshExternalCmd reconciles the sidebar with on-disk state
+// to pick up changes made via the CLI (e.g. `af api sessions create/kill`).
+// Runs every 3s.
 var tickRefreshExternalCmd = func() tea.Msg {
 	time.Sleep(3 * time.Second)
 	return tickRefreshExternalMessage{}
@@ -162,32 +161,3 @@ func (m *home) refreshExternalInstances() bool {
 	return changed
 }
 
-// refreshExternalBoard reconciles the kanban board with the on-disk state.
-func (m *home) refreshExternalBoard() {
-	kp := m.contentPane.KanbanPane()
-
-	diskBoard, err := board.LoadBoard()
-	if err != nil {
-		log.WarningLog.Printf("failed to load board for refresh: %v", err)
-		return
-	}
-
-	if kp.IsDirty() {
-		// Board has unsaved user edits — merge in only new external tasks
-		// so that CLI-added tasks appear without disrupting user work.
-		userBoard := kp.GetBoard()
-		if userBoard != nil {
-			merged := board.MergeBoards(userBoard, diskBoard, kp.LoadedIDs())
-			if len(merged.Tasks) != len(userBoard.Tasks) {
-				// New tasks were added externally; update in-place.
-				kp.GetBoard().Tasks = merged.Tasks
-				m.sidebar.SetTaskCount(merged.TaskCount())
-			}
-		}
-		return
-	}
-
-	// Clean board — full refresh from disk.
-	kp.SetBoard(diskBoard)
-	m.sidebar.SetTaskCount(diskBoard.TaskCount())
-}

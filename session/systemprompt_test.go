@@ -14,8 +14,8 @@ func TestBuildSystemPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "af api sessions list") {
 		t.Error("expected prompt to contain session list command")
 	}
-	if !strings.Contains(prompt, "af api board toggle") {
-		t.Error("expected prompt to contain board toggle command")
+	if !strings.Contains(prompt, "af api sessions preview") {
+		t.Error("expected prompt to contain session preview command")
 	}
 }
 

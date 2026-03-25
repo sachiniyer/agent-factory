@@ -2,11 +2,9 @@ package app
 
 import (
 	"fmt"
-	"github.com/sachiniyer/agent-factory/board"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"os"
 	"os/exec"
@@ -88,10 +86,6 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		sp.SetPendingTrigger()
 		return m, m.handleTaskTrigger()
 
-	case keys.KeyBoard:
-		m.navigateToSection(ui.SectionBoard)
-		return m, m.selectionChanged()
-
 	case keys.KeySearch:
 		return m.showSearchOverlay()
 
@@ -157,20 +151,6 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		m.sidebar.Kill()
 		if err := m.storage.DeleteInstance(selected.Title); err != nil {
 			log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
-		}
-
-		// Auto-move linked board task to "done" and unlink it.
-		if b := m.contentPane.KanbanPane().GetBoard(); b != nil {
-			if linkedTask := b.FindTaskByInstance(selected.Title); linkedTask != nil {
-				b.UnlinkTask(linkedTask.ID)
-				if err := b.MoveTask(linkedTask.ID, "done"); err == nil {
-					if err := board.SaveBoard(b); err != nil {
-						log.ErrorLog.Printf("failed to save board after moving task to done: %v", err)
-					}
-					m.contentPane.KanbanPane().SetBoard(b)
-					m.sidebar.SetTaskCount(b.TaskCount())
-				}
-			}
 		}
 
 		return instanceChangedMsg{}
@@ -239,57 +219,6 @@ func (m *home) handleOpenPR() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("failed to open PR: %w", err))
 	}
 	return m, nil
-}
-
-// handleBoardSpawn creates a new instance from a board task, using the task title as the prompt.
-func (m *home) handleBoardSpawn(bt *board.Task) tea.Cmd {
-	// Auto-generate a unique instance title from the task title.
-	existing := make(map[string]bool, len(m.sidebar.GetInstances()))
-	for _, inst := range m.sidebar.GetInstances() {
-		existing[inst.Title] = true
-	}
-	title := board.GenerateInstanceTitle(bt.Title, existing)
-
-	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:   title,
-		Path:    ".",
-		Program: m.program,
-	})
-	if err != nil {
-		return m.handleError(fmt.Errorf("failed to create instance: %w", err))
-	}
-
-	finalizer := m.sidebar.AddInstance(instance)
-	m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
-	instance.SetStatus(session.Loading)
-	finalizer()
-	m.menu.SetState(ui.StateDefault)
-
-	// Link the board task to the new instance and move to in_progress.
-	kp := m.contentPane.KanbanPane()
-	if b := kp.GetBoard(); b != nil {
-		b.LinkTask(bt.ID, title)
-		if err := b.MoveTask(bt.ID, "in_progress"); err != nil {
-			log.ErrorLog.Printf("failed to move task to in_progress: %v", err)
-		}
-		if err := board.SaveBoard(b); err != nil {
-			log.ErrorLog.Printf("failed to save board: %v", err)
-		}
-		kp.SetBoard(b)
-		m.sidebar.SetTaskCount(b.TaskCount())
-	}
-
-	m.preSaveInstances()
-
-	prompt := bt.Title
-	startCmd := func() tea.Msg {
-		if err := task.StartAndSendPrompt(instance, prompt); err != nil {
-			return instanceStartedMsg{instance: instance, err: err}
-		}
-		return instanceStartedMsg{instance: instance, err: nil}
-	}
-
-	return tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
 }
 
 // handleCopyPR copies the PR URL to the clipboard.

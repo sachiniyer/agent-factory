@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/sachiniyer/agent-factory/board"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
@@ -280,13 +279,6 @@ var sessionsKillCmd = &cobra.Command{
 		if err := storage.DeleteInstance(args[0]); err != nil {
 			// Not fatal - instance is already killed
 			log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
-		}
-
-		// Auto-unlink and move linked board task to "done".
-		if repo, repoErr := config.RepoFromPath(instance.Path); repoErr == nil {
-			if err := board.MoveLinkedTaskForRepo(repo, args[0], "done"); err != nil {
-				log.ErrorLog.Printf("failed to move linked board task to done: %v", err)
-			}
 		}
 
 		return jsonOut(map[string]bool{"ok": true})
