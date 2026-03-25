@@ -159,6 +159,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	for !t.DoesSessionExist() {
 		select {
 		case <-timeout:
+			ptmx.Close()
 			if cleanupErr := t.Close(); cleanupErr != nil {
 				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 			}
