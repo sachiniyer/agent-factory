@@ -85,6 +85,7 @@ var (
 			// Check for updates in the background (non-blocking).
 			autoUpdateInBackground()
 
+			app.Version = version
 			return app.Run(ctx, program, autoYes, repo.ID)
 		},
 	}

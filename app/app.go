@@ -21,6 +21,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Version is set by main before calling Run.
+var Version string
+
 // Run is the main entrypoint into the application.
 func Run(ctx context.Context, program string, autoYes bool, repoID string) error {
 	p := tea.NewProgram(
