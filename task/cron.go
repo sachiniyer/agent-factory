@@ -207,6 +207,19 @@ func convertTimeField(field string) string {
 
 // convertDOW converts a cron day-of-week field to systemd day names.
 func convertDOW(field string) string {
+	// Handle step values (e.g. "*/2" or "1-5/2") by expanding to explicit day names
+	if strings.Contains(field, "/") {
+		expanded, err := expandCronField(field, 0, 6)
+		if err != nil {
+			return ""
+		}
+		names := make([]string, len(expanded))
+		for i, v := range expanded {
+			names[i] = dowNames[strconv.Itoa(v)]
+		}
+		return strings.Join(names, ",")
+	}
+
 	// Handle lists (e.g. "1,3,5" → "Mon,Wed,Fri")
 	if strings.Contains(field, ",") {
 		parts := strings.Split(field, ",")

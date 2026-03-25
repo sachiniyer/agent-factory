@@ -96,3 +96,15 @@ func TestCronToOnCalendarDOW(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Mon..Fri *-*-* 09:00:00", result)
 }
+
+func TestCronToOnCalendarDOWStepAll(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * */2")
+	require.NoError(t, err)
+	assert.Equal(t, "Sun,Tue,Thu,Sat *-*-* 09:00:00", result)
+}
+
+func TestCronToOnCalendarDOWStepRange(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 1-5/2")
+	require.NoError(t, err)
+	assert.Equal(t, "Mon,Wed,Fri *-*-* 09:00:00", result)
+}
