@@ -51,6 +51,16 @@ View the terminal output of another running Agent Factory session. The user must
 ## Usage
 /af-preview <session-title>
 `,
+
+	"af-whoami.md": `---
+allowed-tools: Bash(af api sessions whoami:*)
+description: Identify the current Agent Factory session
+---
+
+Identify which Agent Factory session you are running in. Returns your session title and metadata.
+
+` + "!" + `af api sessions whoami
+`,
 }
 
 // ensurePluginDir creates the plugin directory with slash command files and returns its path.

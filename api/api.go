@@ -128,6 +128,7 @@ func init() {
 	sessionsCmd.AddCommand(sessionsSendPromptCmd)
 	sessionsCmd.AddCommand(sessionsPreviewCmd)
 	sessionsCmd.AddCommand(sessionsKillCmd)
+	sessionsCmd.AddCommand(sessionsWhoamiCmd)
 
 	// Tasks
 	tasksAddCmd.Flags().StringVar(&taskAddNameFlag, "name", "", "Task name (required)")

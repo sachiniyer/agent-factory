@@ -7,19 +7,6 @@ import (
 	"testing"
 )
 
-func TestBuildCodexSystemPrompt(t *testing.T) {
-	prompt := buildCodexSystemPrompt("my-task")
-	if !strings.Contains(prompt, "my-task") {
-		t.Error("expected prompt to contain session title")
-	}
-	if !strings.Contains(prompt, "af api sessions list") {
-		t.Error("expected prompt to contain session list command")
-	}
-	if !strings.Contains(prompt, "af api sessions preview") {
-		t.Error("expected prompt to contain session preview command")
-	}
-}
-
 func TestShellQuote(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -40,24 +27,25 @@ func TestShellQuote(t *testing.T) {
 
 func TestInjectSystemPrompt_Claude(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
 	result := injectSystemPrompt("claude", "test-session", dir)
 
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir flag, got %q", result)
 	}
-	if !strings.Contains(result, "--append-system-prompt") {
-		t.Errorf("expected --append-system-prompt flag, got %q", result)
-	}
 	if !strings.HasPrefix(result, "claude") {
 		t.Errorf("expected result to start with 'claude', got %q", result)
 	}
-	if !strings.Contains(result, "test-session") {
-		t.Errorf("expected result to contain session title, got %q", result)
+	if strings.Contains(result, "--append-system-prompt") {
+		t.Errorf("expected no --append-system-prompt flag, got %q", result)
 	}
 }
 
 func TestInjectSystemPrompt_ClaudeWithArgs(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
 	result := injectSystemPrompt("claude --model opus", "my-session", dir)
 
 	if !strings.HasPrefix(result, "claude --model opus") {
@@ -65,9 +53,6 @@ func TestInjectSystemPrompt_ClaudeWithArgs(t *testing.T) {
 	}
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir flag, got %q", result)
-	}
-	if !strings.Contains(result, "--append-system-prompt") {
-		t.Errorf("expected --append-system-prompt flag, got %q", result)
 	}
 }
 
@@ -81,8 +66,8 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 	if !strings.Contains(result, "developer_instructions=") {
 		t.Errorf("expected developer_instructions= in flag, got %q", result)
 	}
-	if !strings.Contains(result, "test-session") {
-		t.Errorf("expected session title in flag, got %q", result)
+	if !strings.Contains(result, "af api sessions whoami") {
+		t.Errorf("expected whoami command in codex prompt, got %q", result)
 	}
 	if !strings.HasPrefix(result, "codex") {
 		t.Errorf("expected result to start with 'codex', got %q", result)
@@ -123,7 +108,6 @@ func TestInjectSystemPrompt_UnknownProgram(t *testing.T) {
 }
 
 func TestEnsurePluginDir(t *testing.T) {
-	// Use a temp dir as config home
 	tmpDir := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
@@ -138,7 +122,7 @@ func TestEnsurePluginDir(t *testing.T) {
 	}
 
 	commandsDir := filepath.Join(pluginDir, "commands")
-	expectedFiles := []string{"af-sessions.md", "af-kill.md", "af-send.md", "af-preview.md"}
+	expectedFiles := []string{"af-sessions.md", "af-kill.md", "af-send.md", "af-preview.md", "af-whoami.md"}
 	for _, name := range expectedFiles {
 		path := filepath.Join(commandsDir, name)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
