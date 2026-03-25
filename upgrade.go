@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/spf13/cobra"
 )
 
@@ -54,15 +55,8 @@ var upgradeCmd = &cobra.Command{
 			return fmt.Errorf("failed to find current executable: %w", err)
 		}
 
-		// Write to temp file next to the executable, then rename (atomic on same filesystem)
-		tmpPath := execPath + ".upgrade-tmp"
-		if err := os.WriteFile(tmpPath, binary, 0755); err != nil {
+		if err := config.AtomicWriteFile(execPath, binary, 0755); err != nil {
 			return fmt.Errorf("failed to write new binary: %w", err)
-		}
-
-		if err := os.Rename(tmpPath, execPath); err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to replace binary: %w", err)
 		}
 
 		fmt.Printf("Upgraded successfully!\n")
