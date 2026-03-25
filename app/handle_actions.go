@@ -156,7 +156,19 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		return instanceChangedMsg{}
 	}
 
+	// Check for uncommitted changes in the worktree
+	hasChanges := false
+	if wt := selected.GetWorktreePath(); wt != "" {
+		out, err := exec.Command("git", "-C", wt, "status", "--porcelain").Output()
+		if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			hasChanges = true
+		}
+	}
+
 	message := fmt.Sprintf("[!] Kill session '%s'?", selected.Title)
+	if hasChanges {
+		message = fmt.Sprintf("[!] Kill session '%s'?\n\nWARNING: This worktree has uncommitted changes that will be lost!", selected.Title)
+	}
 	return m, m.confirmAction(message, killAction)
 }
 
