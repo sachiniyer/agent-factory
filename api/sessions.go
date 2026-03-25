@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"os/exec"
+	"strings"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
@@ -282,5 +285,45 @@ var sessionsKillCmd = &cobra.Command{
 		}
 
 		return jsonOut(map[string]bool{"ok": true})
+	},
+}
+
+var sessionsWhoamiCmd = &cobra.Command{
+	Use:   "whoami",
+	Short: "Identify the current Agent Factory session",
+	Long:  "Returns the session info for the current tmux session by matching the tmux session name against stored instances.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		// Get the current tmux session name
+		out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
+		if err != nil {
+			return jsonError(fmt.Errorf("not running inside a tmux session: %w", err))
+		}
+		tmuxName := strings.TrimSpace(string(out))
+		if tmuxName == "" {
+			return jsonError(fmt.Errorf("could not determine tmux session name"))
+		}
+
+		// Scan all instances for a matching tmux_name
+		allInstances, err := config.LoadAllRepoInstances()
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to load instances: %w", err))
+		}
+
+		for _, raw := range allInstances {
+			var instances []session.InstanceData
+			if err := json.Unmarshal(raw, &instances); err != nil {
+				continue
+			}
+			for i := range instances {
+				if instances[i].TmuxName == tmuxName {
+					return jsonOut(instances[i])
+				}
+			}
+		}
+
+		return jsonError(fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName))
 	},
 }
