@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/board"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
@@ -188,18 +187,6 @@ func RunTask(taskID string) error {
 
 	// Instance is successfully handed off, don't kill it on return.
 	started = false
-
-	// Create a board task linked to the new instance.
-	repo, repoErr := config.RepoFromPath(t.ProjectPath)
-	if repoErr == nil {
-		taskTitle := t.Name
-		if taskTitle == "" {
-			taskTitle = title
-		}
-		if err := board.AddAndLinkTaskForRepo(repo, taskTitle, "in_progress", title); err != nil {
-			log.ErrorLog.Printf("failed to save board task: %v", err)
-		}
-	}
 
 	// Launch daemon for autoyes if configured.
 	if cfg.AutoYes {

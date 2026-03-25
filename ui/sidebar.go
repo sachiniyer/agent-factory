@@ -18,7 +18,6 @@ type SidebarSectionKind int
 const (
 	SectionInstances SidebarSectionKind = iota
 	SectionTasks
-	SectionBoard
 	SectionHooks
 )
 
@@ -54,7 +53,6 @@ type Sidebar struct {
 	// Data
 	instances []*session.Instance
 	tasks     []task.Task
-	taskCount int
 	hookCount int
 
 	// Rendering
@@ -71,7 +69,6 @@ func NewSidebar(spin *spinner.Model, autoYes bool) *Sidebar {
 		sections: []SidebarSection{
 			{Kind: SectionInstances, Title: "Instances", Expanded: true},
 			{Kind: SectionTasks, Title: "Tasks", Expanded: false},
-			{Kind: SectionBoard, Title: "Board", Expanded: false},
 			{Kind: SectionHooks, Title: "Hooks", Expanded: false},
 		},
 		renderer: &InstanceRenderer{spinner: spin},
@@ -106,12 +103,6 @@ func (s *Sidebar) SetSessionPreviewSize(width, height int) error {
 // SetTasks updates the task data.
 func (s *Sidebar) SetTasks(tasks []task.Task) {
 	s.tasks = tasks
-	s.rebuildVisibleItems()
-}
-
-// SetTaskCount updates the displayed task count.
-func (s *Sidebar) SetTaskCount(count int) {
-	s.taskCount = count
 	s.rebuildVisibleItems()
 }
 
@@ -451,13 +442,6 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 		label = fmt.Sprintf("Instances (%d)", len(s.instances))
 	case SectionTasks:
 		label = fmt.Sprintf("Tasks (%d)", len(s.tasks))
-		arrow = "  " // no expand arrow for leaf sections
-	case SectionBoard:
-		if s.taskCount > 0 {
-			label = fmt.Sprintf("Board (%d)", s.taskCount)
-		} else {
-			label = "Board"
-		}
 		arrow = "  " // no expand arrow for leaf sections
 	case SectionHooks:
 		if s.hookCount > 0 {

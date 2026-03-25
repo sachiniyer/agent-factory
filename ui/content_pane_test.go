@@ -16,9 +16,6 @@ func TestContentPaneModeSwitch(t *testing.T) {
 	cp.SetMode(ContentModeInstance)
 	assert.Equal(t, ContentModeInstance, cp.GetMode())
 
-	cp.SetMode(ContentModeBoard)
-	assert.Equal(t, ContentModeBoard, cp.GetMode())
-
 	cp.SetMode(ContentModeTasks)
 	assert.Equal(t, ContentModeTasks, cp.GetMode())
 
@@ -31,8 +28,8 @@ func TestContentPaneFocus(t *testing.T) {
 	// No focus initially
 	assert.False(t, cp.HasFocus())
 
-	// Switch to board mode
-	cp.SetMode(ContentModeBoard)
+	// Switch to tasks mode
+	cp.SetMode(ContentModeTasks)
 	assert.False(t, cp.HasFocus())
 
 	// Enter focuses the task pane
@@ -67,7 +64,7 @@ func TestContentPaneModeSwitchUnfocuses(t *testing.T) {
 	cp := NewContentPane(tw)
 
 	// Focus task pane
-	cp.SetMode(ContentModeBoard)
+	cp.SetMode(ContentModeTasks)
 	cp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.True(t, cp.HasFocus())
 
@@ -91,9 +88,4 @@ func TestContentPaneRender(t *testing.T) {
 	cp.SetMode(ContentModeInstance)
 	rendered = cp.String()
 	assert.NotEmpty(t, rendered)
-
-	// Board mode (kanban board)
-	cp.SetMode(ContentModeBoard)
-	rendered = cp.String()
-	assert.Contains(t, rendered, "Board")
 }

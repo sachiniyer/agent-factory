@@ -39,12 +39,11 @@ BIN_DIR=/usr/local/bin ./dev-install.sh
 | Directory | Description |
 |-----------|-------------|
 | `app/` | TUI application (bubbletea), main event loop |
-| `ui/` | UI components: sidebar, kanban, terminal, overlays |
+| `ui/` | UI components: sidebar, terminal, overlays |
 | `session/` | Instance lifecycle (start, pause, resume, kill) |
 | `session/git/` | Git worktree operations |
 | `session/tmux/` | Tmux session management |
 | `task/` | Automated tasks (cron, systemd timers) |
-| `board/` | Per-repo kanban board |
 | `config/` | Configuration and state persistence |
 | `api/` | Programmatic JSON CLI API |
 | `daemon/` | Background daemon for auto-yes |

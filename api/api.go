@@ -106,7 +106,7 @@ func jsonError(err error) error {
 var ApiCmd = &cobra.Command{
 	Use:   "api",
 	Short: "Programmatic JSON API for external orchestrators",
-	Long:  "Machine-readable CLI interface for driving agent-factory sessions, tasks, and board.",
+	Long:  "Machine-readable CLI interface for driving agent-factory sessions and tasks.",
 }
 
 func init() {
@@ -142,33 +142,7 @@ func init() {
 	tasksCmd.AddCommand(tasksAddCmd)
 	tasksCmd.AddCommand(tasksRemoveCmd)
 
-	// Board
-	boardAddCmd.Flags().StringVar(&boardAddTitleFlag, "title", "", "Task title (required)")
-	boardAddCmd.Flags().StringVar(&boardAddStatusFlag, "status", "backlog", "Task status column (backlog, in_progress, review, done)")
-	boardAddCmd.Flags().StringVar(&boardAddInstanceFlag, "instance", "", "Link task to a session by title")
-	boardAddCmd.MarkFlagRequired("title")
-
-	boardLinkCmd.Flags().StringVar(&boardLinkInstanceFlag, "instance", "", "Session title to link (required)")
-	boardLinkCmd.MarkFlagRequired("instance")
-
-	boardMoveCmd.Flags().StringVar(&boardMoveStatusFlag, "status", "", "Target column (backlog, in_progress, review, done)")
-	boardMoveCmd.MarkFlagRequired("status")
-
-	boardSpawnCmd.Flags().StringVar(&boardSpawnProgramFlag, "program", "", "Program to run (defaults to config default)")
-	boardSpawnCmd.Flags().StringVar(&boardSpawnNameFlag, "name", "", "Session name (defaults to task-<id>)")
-
-	boardCmd.AddCommand(boardListCmd)
-	boardCmd.AddCommand(boardAddCmd)
-	boardCmd.AddCommand(boardToggleCmd)
-	boardCmd.AddCommand(boardRemoveCmd)
-	boardCmd.AddCommand(boardMoveCmd)
-	boardCmd.AddCommand(boardLinkCmd)
-	boardCmd.AddCommand(boardUnlinkCmd)
-	boardCmd.AddCommand(boardViewCmd)
-	boardCmd.AddCommand(boardSpawnCmd)
-
 	// Register subcommand groups
 	ApiCmd.AddCommand(sessionsCmd)
 	ApiCmd.AddCommand(tasksCmd)
-	ApiCmd.AddCommand(boardCmd)
 }

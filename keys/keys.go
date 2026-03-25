@@ -28,7 +28,6 @@ const (
 	KeyTask
 	KeyTaskList
 	KeyAttach
-	KeyBoard
 
 	KeySearch      // Key for searching sessions
 	KeyTriggerTask // Key for triggering a task immediately
@@ -64,7 +63,6 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"s":          KeyTask,
 	"S":          KeyTaskList,
 	"a":          KeyAttach,
-	"t":          KeyBoard,
 	"/":          KeySearch,
 	"r":          KeyTriggerTask,
 	"p":          KeyOpenPR,
@@ -139,10 +137,6 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	KeyAttach: key.NewBinding(
 		key.WithKeys("a"),
 		key.WithHelp("a", "attach worktree"),
-	),
-	KeyBoard: key.NewBinding(
-		key.WithKeys("t"),
-		key.WithHelp("t", "board"),
 	),
 	KeySearch: key.NewBinding(
 		key.WithKeys("/"),
