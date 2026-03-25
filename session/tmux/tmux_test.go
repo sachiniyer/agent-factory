@@ -42,11 +42,25 @@ func NewMockPtyFactory(t *testing.T) *MockPtyFactory {
 }
 
 func TestSanitizeName(t *testing.T) {
+	// Without repo path (legacy naming)
 	session := NewTmuxSession("asdf", "program")
 	require.Equal(t, TmuxPrefix+"asdf", session.sanitizedName)
 
 	session = NewTmuxSession("a sd f . . asdf", "program")
 	require.Equal(t, TmuxPrefix+"asdf__asdf", session.sanitizedName)
+
+	// With repo path (repo-scoped naming)
+	session = NewTmuxSessionForRepo("asdf", "/home/user/repo", "program")
+	hash := repoHash("/home/user/repo")
+	require.Equal(t, TmuxPrefix+hash+"_asdf", session.sanitizedName)
+
+	// Same title, different repo → different tmux name
+	session2 := NewTmuxSessionForRepo("asdf", "/home/user/other-repo", "program")
+	require.NotEqual(t, session.sanitizedName, session2.sanitizedName)
+
+	// FromSanitizedName preserves exact name
+	session3 := NewTmuxSessionFromSanitizedName("af_custom_name", "program")
+	require.Equal(t, "af_custom_name", session3.sanitizedName)
 }
 
 func TestStartTmuxSession(t *testing.T) {
@@ -67,7 +81,7 @@ func TestStartTmuxSession(t *testing.T) {
 	}
 
 	workdir := t.TempDir()
-	session := newTmuxSession("test-session", "claude", ptyFactory, cmdExec)
+	session := newTmuxSession(toTmuxName("test-session", ""), "claude", ptyFactory, cmdExec)
 
 	err := session.Start(workdir)
 	require.NoError(t, err)

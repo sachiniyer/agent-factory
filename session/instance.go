@@ -84,6 +84,11 @@ func (i *Instance) ToInstanceData() InstanceData {
 		AutoYes:   i.AutoYes,
 	}
 
+	// Persist the tmux session name so we can restore it exactly
+	if i.tmuxSession != nil {
+		data.TmuxName = i.tmuxSession.SanitizedName()
+	}
+
 	// Only include worktree data if gitWorktree is initialized
 	if i.gitWorktree != nil {
 		data.Worktree = GitWorktreeData{
@@ -129,6 +134,15 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			data.Worktree.BaseCommitSHA,
 			data.Worktree.ExternalWorktree,
 		),
+	}
+
+	// Pre-set the tmux session with the correct name for backward compat.
+	// If TmuxName was persisted, use it exactly; otherwise fall back to
+	// the legacy naming scheme (no repo hash) so old sessions still restore.
+	if data.TmuxName != "" {
+		instance.tmuxSession = tmux.NewTmuxSessionFromSanitizedName(data.TmuxName, data.Program)
+	} else {
+		instance.tmuxSession = tmux.NewTmuxSession(data.Title, data.Program)
 	}
 
 	if data.PRInfo.Number != 0 {
@@ -209,8 +223,8 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		// Use existing tmux session (useful for testing)
 		tmuxSession = existingSession
 	} else {
-		// Create new tmux session
-		tmuxSession = tmux.NewTmuxSession(i.Title, i.Program)
+		// Create new tmux session with repo-scoped name
+		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, i.Path, i.Program)
 	}
 
 	i.mu.Lock()
@@ -299,7 +313,7 @@ func (i *Instance) StartWithExistingWorktree(worktreePath, branchName string) er
 	i.mu.Unlock()
 
 	program := injectSystemPrompt(i.Program, i.Title, worktreePath)
-	tmuxSession := tmux.NewTmuxSession(i.Title, program)
+	tmuxSession := tmux.NewTmuxSessionForRepo(i.Title, i.Path, program)
 
 	i.mu.Lock()
 	i.tmuxSession = tmuxSession
