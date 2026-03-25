@@ -1,11 +1,10 @@
 package overlay
 
 import (
-	"bytes"
 	"regexp"
 	"strings"
 
-	"github.com/mattn/go-runewidth"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/muesli/ansi"
 	"github.com/muesli/reflow/truncate"
 	"github.com/muesli/termenv"
@@ -134,7 +133,7 @@ func PlaceOverlay(
 		b.WriteString(fgLine)
 		pos += ansi.PrintableRuneWidth(fgLine)
 
-		right := cutLeft(bgLine, pos)
+		right := xansi.TruncateLeft(bgLine, pos, "")
 		bgLineWidth := ansi.PrintableRuneWidth(bgLine)
 		rightWidth := ansi.PrintableRuneWidth(right)
 		if rightWidth <= bgLineWidth-pos {
@@ -143,45 +142,6 @@ func PlaceOverlay(
 		b.WriteString(right)
 	}
 
-	return b.String()
-}
-
-func cutLeft(s string, cutWidth int) string {
-	var (
-		pos    int
-		isAnsi bool
-		ab     bytes.Buffer
-		b      bytes.Buffer
-	)
-	for _, c := range s {
-		var w int
-		if c == ansi.Marker || isAnsi {
-			isAnsi = true
-			ab.WriteRune(c)
-			if ansi.IsTerminator(c) {
-				isAnsi = false
-				if bytes.HasSuffix(ab.Bytes(), []byte("[0m")) {
-					ab.Reset()
-				}
-			}
-		} else {
-			w = runewidth.RuneWidth(c)
-		}
-
-		if pos >= cutWidth {
-			if b.Len() == 0 {
-				if ab.Len() > 0 {
-					b.Write(ab.Bytes())
-				}
-				if pos-cutWidth > 1 {
-					b.WriteByte(' ')
-					continue
-				}
-			}
-			b.WriteRune(c)
-		}
-		pos += w
-	}
 	return b.String()
 }
 
