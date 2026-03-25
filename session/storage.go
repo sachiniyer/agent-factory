@@ -21,6 +21,7 @@ type InstanceData struct {
 	AutoYes   bool      `json:"auto_yes"`
 
 	Program  string          `json:"program"`
+	TmuxName string          `json:"tmux_name,omitempty"`
 	Worktree GitWorktreeData `json:"worktree"`
 	PRInfo   PRInfoData      `json:"pr_info,omitempty"`
 }

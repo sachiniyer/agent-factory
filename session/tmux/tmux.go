@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -74,25 +75,50 @@ func SetDetachKey(b byte, display string) {
 
 var whiteSpaceRegex = regexp.MustCompile(`\s+`)
 
-func toTmuxName(str string) string {
-	str = whiteSpaceRegex.ReplaceAllString(str, "")
-	str = strings.ReplaceAll(str, ".", "_") // tmux replaces all . with _
-	return fmt.Sprintf("%s%s", TmuxPrefix, str)
+// repoHash returns a short hex hash of the repo path for use in tmux session names.
+func repoHash(repoPath string) string {
+	h := sha256.Sum256([]byte(repoPath))
+	return hex.EncodeToString(h[:4]) // 8 hex chars
 }
 
-// NewTmuxSession creates a new TmuxSession with the given name and program.
+func toTmuxName(title string, repoPath string) string {
+	title = whiteSpaceRegex.ReplaceAllString(title, "")
+	title = strings.ReplaceAll(title, ".", "_") // tmux replaces all . with _
+	if repoPath != "" {
+		return fmt.Sprintf("%s%s_%s", TmuxPrefix, repoHash(repoPath), title)
+	}
+	return fmt.Sprintf("%s%s", TmuxPrefix, title)
+}
+
+// NewTmuxSession creates a new TmuxSession with the given name and program (no repo scoping).
 func NewTmuxSession(name string, program string) *TmuxSession {
-	return newTmuxSession(name, program, MakePtyFactory(), cmd.MakeExecutor())
+	return newTmuxSession(toTmuxName(name, ""), program, MakePtyFactory(), cmd.MakeExecutor())
+}
+
+// NewTmuxSessionForRepo creates a new TmuxSession with a repo-scoped name to avoid collisions.
+func NewTmuxSessionForRepo(name string, repoPath string, program string) *TmuxSession {
+	return newTmuxSession(toTmuxName(name, repoPath), program, MakePtyFactory(), cmd.MakeExecutor())
+}
+
+// NewTmuxSessionFromSanitizedName creates a new TmuxSession with an exact pre-computed name.
+// Used when restoring sessions from storage where the tmux name was already persisted.
+func NewTmuxSessionFromSanitizedName(sanitizedName string, program string) *TmuxSession {
+	return newTmuxSession(sanitizedName, program, MakePtyFactory(), cmd.MakeExecutor())
 }
 
 // NewTmuxSessionWithDeps creates a new TmuxSession with provided dependencies for testing.
 func NewTmuxSessionWithDeps(name string, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
-	return newTmuxSession(name, program, ptyFactory, cmdExec)
+	return newTmuxSession(toTmuxName(name, ""), program, ptyFactory, cmdExec)
 }
 
-func newTmuxSession(name string, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
+// SanitizedName returns the sanitized tmux session name.
+func (t *TmuxSession) SanitizedName() string {
+	return t.sanitizedName
+}
+
+func newTmuxSession(sanitizedName string, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
 	return &TmuxSession{
-		sanitizedName: toTmuxName(name),
+		sanitizedName: sanitizedName,
 		program:       program,
 		ptyFactory:    ptyFactory,
 		cmdExec:       cmdExec,
