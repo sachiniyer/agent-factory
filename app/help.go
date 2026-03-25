@@ -34,7 +34,7 @@ func helpStart(instance *session.Instance) helpText {
 
 func (h helpTypeGeneral) toContent() string {
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render("Agent Factory"),
+		titleStyle.Render(fmt.Sprintf("Agent Factory v%s", Version)),
 		"",
 		"A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.",
 		"",
