@@ -216,17 +216,22 @@ func CleanupWorktrees() error {
 	// Skip the first entry (the main worktree / repo itself)
 	if len(worktrees) > 1 {
 		for _, wt := range worktrees[1:] {
-			// Delete the branch if one exists (worktree may have detached HEAD)
+			// Remove the worktree FIRST (git refuses to delete a branch checked out in a worktree)
+			removeCmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", wt.path)
+			if err := removeCmd.Run(); err != nil {
+				log.ErrorLog.Printf("failed to remove worktree %s: %v", wt.path, err)
+				// Fallback: remove directory manually
+				if err := os.RemoveAll(wt.path); err != nil {
+					log.ErrorLog.Printf("failed to remove worktree directory %s: %v", wt.path, err)
+				}
+			}
+
+			// THEN delete the branch
 			if wt.branch != "" {
 				deleteCmd := exec.Command("git", "-C", repoRoot, "branch", "-D", wt.branch)
 				if err := deleteCmd.Run(); err != nil {
 					log.ErrorLog.Printf("failed to delete branch %s: %v", wt.branch, err)
 				}
-			}
-
-			// Remove the worktree directory
-			if err := os.RemoveAll(wt.path); err != nil {
-				log.ErrorLog.Printf("failed to remove worktree directory %s: %v", wt.path, err)
 			}
 		}
 	}
