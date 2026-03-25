@@ -401,10 +401,16 @@ func (i *Instance) CheckAndHandleTrustPrompt() bool {
 }
 
 func (i *Instance) TapEnter() {
-	if !i.started || !i.AutoYes {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	autoYes := i.AutoYes
+	i.mu.RUnlock()
+
+	if !s || !autoYes {
 		return
 	}
-	if err := i.tmuxSession.TapEnter(); err != nil {
+	if err := ts.TapEnter(); err != nil {
 		log.ErrorLog.Printf("error tapping enter: %v", err)
 	}
 }
@@ -510,19 +516,24 @@ func (i *Instance) UpdatePRInfo() error {
 
 // SendPrompt sends a prompt to the tmux session
 func (i *Instance) SendPrompt(prompt string) error {
-	if !i.started {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s {
 		return fmt.Errorf("instance not started")
 	}
-	if i.tmuxSession == nil {
+	if ts == nil {
 		return fmt.Errorf("tmux session not initialized")
 	}
-	if err := i.tmuxSession.SendKeys(prompt); err != nil {
+	if err := ts.SendKeys(prompt); err != nil {
 		return fmt.Errorf("error sending keys to tmux session: %w", err)
 	}
 
 	// Brief pause to prevent carriage return from being interpreted as newline
 	time.Sleep(100 * time.Millisecond)
-	if err := i.tmuxSession.TapEnter(); err != nil {
+	if err := ts.TapEnter(); err != nil {
 		return fmt.Errorf("error tapping enter: %w", err)
 	}
 
@@ -532,13 +543,18 @@ func (i *Instance) SendPrompt(prompt string) error {
 // SendPromptCommand sends a prompt using tmux send-keys command instead of PTY writes.
 // This is more reliable for headless/scheduled runs where the PTY may not persist.
 func (i *Instance) SendPromptCommand(prompt string) error {
-	if !i.started {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s {
 		return fmt.Errorf("instance not started")
 	}
-	if i.tmuxSession == nil {
+	if ts == nil {
 		return fmt.Errorf("tmux session not initialized")
 	}
-	return i.tmuxSession.SendKeysCommand(prompt)
+	return ts.SendKeysCommand(prompt)
 }
 
 // PreviewFullHistory captures the entire tmux pane output including full scrollback history
@@ -556,8 +572,13 @@ func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
 
 // SendKeys sends keys to the tmux session
 func (i *Instance) SendKeys(keys string) error {
-	if !i.started {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s {
 		return fmt.Errorf("cannot send keys to instance that has not been started")
 	}
-	return i.tmuxSession.SendKeys(keys)
+	return ts.SendKeys(keys)
 }
