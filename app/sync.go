@@ -160,4 +160,3 @@ func (m *home) refreshExternalInstances() bool {
 
 	return changed
 }
-
