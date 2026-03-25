@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -343,23 +344,7 @@ func (i *Instance) Kill() error {
 		}
 	}
 
-	return i.combineErrors(errs)
-}
-
-// combineErrors combines multiple errors into a single error
-func (i *Instance) combineErrors(errs []error) error {
-	if len(errs) == 0 {
-		return nil
-	}
-	if len(errs) == 1 {
-		return errs[0]
-	}
-
-	errMsg := "multiple cleanup errors occurred:"
-	for _, err := range errs {
-		errMsg += "\n  - " + err.Error()
-	}
-	return fmt.Errorf("%s", errMsg)
+	return errors.Join(errs...)
 }
 
 func (i *Instance) Preview() (string, error) {
