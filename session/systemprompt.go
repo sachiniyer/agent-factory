@@ -5,9 +5,8 @@ import (
 	"strings"
 )
 
-// systemPromptTemplate is the template for the system prompt injected into AI sessions.
-// It tells the AI about its Agent Factory context and available CLI commands.
-const systemPromptTemplate = `You are running inside Agent Factory (af), a terminal multiplexer for AI coding agents.
+// codexSystemPromptTemplate is the system prompt for Codex sessions, which don't support plugins.
+const codexSystemPromptTemplate = `You are running inside Agent Factory (af), a terminal multiplexer for AI coding agents.
 
 Your session name: %s
 
@@ -19,13 +18,13 @@ Session commands:
   af api sessions send-prompt <title> <prompt>  Send a prompt to another session
   af api sessions preview <title>               View another session's terminal output`
 
-// buildSystemPrompt returns the system prompt text for a session.
-func buildSystemPrompt(sessionTitle string) string {
-	return fmt.Sprintf(systemPromptTemplate, sessionTitle)
+// buildCodexSystemPrompt returns the full system prompt text for a Codex session.
+func buildCodexSystemPrompt(sessionTitle string) string {
+	return fmt.Sprintf(codexSystemPromptTemplate, sessionTitle)
 }
 
 // shellQuote wraps a string in single quotes, escaping any embedded single quotes
-// using the standard shell idiom: replace ' with '\”
+// using the standard shell idiom: replace ' with '\"
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
@@ -33,21 +32,28 @@ func shellQuote(s string) string {
 // injectSystemPrompt injects Agent Factory instructions into the session.
 //
 // Strategy per tool:
-//   - Claude Code: --append-system-prompt flag (appended to program command)
-//   - Codex: -c developer_instructions="..." flag (appended to program command)
+//   - Claude Code: --plugin-dir flag for slash commands + minimal --append-system-prompt
+//   - Codex: -c developer_instructions="..." flag (text-based, no plugin support)
 //
 // Returns the (possibly modified) program string.
 func injectSystemPrompt(program, sessionTitle, worktreePath string) string {
-	prompt := buildSystemPrompt(sessionTitle)
 	lower := strings.ToLower(program)
 
-	// Claude Code: --append-system-prompt flag
+	// Claude Code: --plugin-dir for commands + --append-system-prompt for session context
 	if strings.Contains(lower, "claude") {
-		return program + " --append-system-prompt " + shellQuote(prompt)
+		pluginDir, err := ensurePluginDir()
+		if err != nil {
+			// Fall back to append-system-prompt only if plugin dir fails
+			prompt := fmt.Sprintf("You are running inside Agent Factory (af). Your session name: %s", sessionTitle)
+			return program + " --append-system-prompt " + shellQuote(prompt)
+		}
+		prompt := fmt.Sprintf("You are running inside Agent Factory (af), a terminal multiplexer for AI coding agents.\n\nYour session name: %s", sessionTitle)
+		return program + " --plugin-dir " + shellQuote(pluginDir) + " --append-system-prompt " + shellQuote(prompt)
 	}
 
 	// Codex: -c developer_instructions="..." config override
 	if strings.Contains(lower, "codex") {
+		prompt := buildCodexSystemPrompt(sessionTitle)
 		return program + " -c " + shellQuote("developer_instructions="+prompt)
 	}
 
