@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -42,6 +43,11 @@ type GitWorktree struct {
 	baseCommitSHA string
 	// externalWorktree is true if the worktree was not created by agent-factory
 	externalWorktree bool
+	// hooksCtx and hooksCancel control the lifetime of post-worktree hooks.
+	// Cancelling hooksCtx stops any in-flight hook commands so they don't
+	// outlive the worktree itself.
+	hooksCtx    context.Context
+	hooksCancel context.CancelFunc
 }
 
 // WorktreeInfo holds information about an existing git worktree
@@ -57,6 +63,7 @@ func (g *GitWorktree) IsExternalWorktree() bool {
 }
 
 func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName string, branchName string, baseCommitSHA string, externalWorktree bool) *GitWorktree {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &GitWorktree{
 		repoPath:         repoPath,
 		worktreePath:     worktreePath,
@@ -65,6 +72,8 @@ func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName
 		branchName:       branchName,
 		baseCommitSHA:    baseCommitSHA,
 		externalWorktree: externalWorktree,
+		hooksCtx:         ctx,
+		hooksCancel:      cancel,
 	}
 }
 
@@ -106,12 +115,15 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		worktreePath = fmt.Sprintf("%s-%d", basePath, i)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	return &GitWorktree{
 		repoPath:     repoPath,
 		sessionName:  sessionName,
 		branchName:   branchName,
 		worktreePath: worktreePath,
 		worktreeDir:  worktreeDir,
+		hooksCtx:     ctx,
+		hooksCancel:  cancel,
 	}, branchName, nil
 }
 
@@ -168,6 +180,7 @@ func NewGitWorktreeFromExistingWorktree(repoPath, worktreePath, branchName strin
 		}
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	return &GitWorktree{
 		repoPath:         repoRoot,
 		worktreePath:     worktreePath,
@@ -175,6 +188,8 @@ func NewGitWorktreeFromExistingWorktree(repoPath, worktreePath, branchName strin
 		branchName:       branchName,
 		baseCommitSHA:    baseCommitSHA,
 		externalWorktree: true,
+		hooksCtx:         ctx,
+		hooksCancel:      cancel,
 	}, nil
 }
 

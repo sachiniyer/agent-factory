@@ -34,8 +34,8 @@ func (g *GitWorktree) Setup() error {
 		return setupErr
 	}
 
-	// Fire-and-forget post-worktree hooks
-	RunPostWorktreeHooksAsync(g.repoPath, g.worktreePath)
+	// Fire-and-forget post-worktree hooks (cancellable via hooksCtx)
+	RunPostWorktreeHooksAsync(g.hooksCtx, g.repoPath, g.worktreePath)
 	return nil
 }
 
@@ -109,6 +109,11 @@ func (g *GitWorktree) setupNewWorktree() error {
 // Cleanup removes the worktree and associated branch.
 // If the worktree was not created by agent-factory (externalWorktree), only prune is done.
 func (g *GitWorktree) Cleanup() error {
+	// Cancel any in-flight post-worktree hooks before removing the worktree.
+	if g.hooksCancel != nil {
+		g.hooksCancel()
+	}
+
 	// For external worktrees, don't remove the worktree or delete the branch
 	if g.externalWorktree {
 		return nil
