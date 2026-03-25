@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -126,12 +127,17 @@ func RunTask(taskID string) error {
 		return fmt.Errorf("failed to create lock directory: %w", err)
 	}
 	lockPath := filepath.Join(lockDir, "task-"+taskID+".lock")
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
-		return fmt.Errorf("another run is already active for task %s: %w", taskID, err)
+		return fmt.Errorf("failed to open lock file: %w", err)
 	}
-	defer os.Remove(lockPath)
 	defer lockFile.Close()
+	defer os.Remove(lockPath)
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("another run is already active for task %s", taskID)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
 	// Load the task.
 	t, err := GetTask(taskID)
