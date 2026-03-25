@@ -209,6 +209,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			strings.Contains(content, "new MCP server") {
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
+				return false
 			}
 			return true
 		}
@@ -216,6 +217,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if strings.Contains(content, "Open documentation url for more info") {
 			if err := t.TapDAndEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
+				return false
 			}
 			return true
 		}
