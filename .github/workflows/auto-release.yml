@@ -72,11 +72,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        goos: [linux, darwin, windows]
+        goos: [linux, darwin]
         goarch: [amd64, arm64]
-        exclude:
-          - goos: windows
-            goarch: arm64
     steps:
     - uses: actions/checkout@v4
       with:
@@ -94,19 +91,11 @@ jobs:
         GOARCH: ${{ matrix.goarch }}
       run: |
         VERSION="${{ needs.check-and-bump.outputs.new_version }}"
-        BINARY_NAME=agent-factory
-        if [ "${{ matrix.goos }}" = "windows" ]; then
-          BINARY_NAME=$BINARY_NAME.exe
-        fi
         ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
         mkdir -p dist
-        go build -v -ldflags "-X main.version=${VERSION}" -o dist/$BINARY_NAME
+        go build -v -ldflags "-X main.version=${VERSION}" -o dist/agent-factory
         cd dist
-        if [ "${{ matrix.goos }}" = "windows" ]; then
-          zip ../${ARCHIVE_NAME}.zip $BINARY_NAME
-        else
-          tar czf ../${ARCHIVE_NAME}.tar.gz $BINARY_NAME
-        fi
+        tar czf ../${ARCHIVE_NAME}.tar.gz agent-factory
 
     - name: Upload release assets
       uses: softprops/action-gh-release@v2
@@ -114,4 +103,3 @@ jobs:
         tag_name: v${{ needs.check-and-bump.outputs.new_version }}
         files: |
           *.tar.gz
-          *.zip
