@@ -158,3 +158,100 @@ func TestEnsurePluginDir_Idempotent(t *testing.T) {
 		t.Errorf("expected same dir on repeated calls, got %q and %q", dir1, dir2)
 	}
 }
+
+// TestInjectSystemPrompt_Claude_E2E verifies the full chain: injectSystemPrompt
+// creates the plugin dir, the --plugin-dir path points to real files with valid
+// Claude Code slash command format, and all expected commands are present.
+func TestInjectSystemPrompt_Claude_E2E(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
+
+	result := injectSystemPrompt("claude", "test-session", tmpDir)
+
+	// Extract the plugin dir path from the command string
+	const flag = "--plugin-dir "
+	idx := strings.Index(result, flag)
+	if idx == -1 {
+		t.Fatalf("--plugin-dir not found in result: %q", result)
+	}
+	// Path is single-quoted after the flag
+	rest := result[idx+len(flag):]
+	if rest[0] != '\'' {
+		t.Fatalf("expected single-quoted path, got: %q", rest)
+	}
+	end := strings.Index(rest[1:], "'")
+	if end == -1 {
+		t.Fatalf("unterminated quote in: %q", rest)
+	}
+	pluginDir := rest[1 : end+1]
+
+	// Verify the plugin dir exists and has a commands/ subdirectory
+	commandsDir := filepath.Join(pluginDir, "commands")
+	info, err := os.Stat(commandsDir)
+	if err != nil {
+		t.Fatalf("commands dir does not exist at %q: %v", commandsDir, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected %q to be a directory", commandsDir)
+	}
+
+	// Verify all expected command files exist with valid frontmatter
+	expectedCommands := map[string]struct {
+		tool string // expected allowed-tools pattern
+		desc string // expected description substring
+	}{
+		"af-sessions.md": {tool: "af api sessions list", desc: "List all Agent Factory sessions"},
+		"af-kill.md":     {tool: "af api sessions kill", desc: "Kill an Agent Factory session"},
+		"af-send.md":     {tool: "af api sessions send-prompt", desc: "Send a prompt to another"},
+		"af-preview.md":  {tool: "af api sessions preview", desc: "Preview another Agent Factory"},
+		"af-whoami.md":   {tool: "af api sessions whoami", desc: "Identify the current Agent Factory"},
+	}
+
+	entries, err := os.ReadDir(commandsDir)
+	if err != nil {
+		t.Fatalf("failed to read commands dir: %v", err)
+	}
+
+	foundFiles := make(map[string]bool)
+	for _, e := range entries {
+		foundFiles[e.Name()] = true
+	}
+
+	for name, expected := range expectedCommands {
+		if !foundFiles[name] {
+			t.Errorf("missing command file: %s", name)
+			continue
+		}
+
+		content, err := os.ReadFile(filepath.Join(commandsDir, name))
+		if err != nil {
+			t.Errorf("failed to read %s: %v", name, err)
+			continue
+		}
+		text := string(content)
+
+		// Verify frontmatter structure (starts with ---, has allowed-tools, description, ends with ---)
+		if !strings.HasPrefix(text, "---\n") {
+			t.Errorf("%s: missing frontmatter opening '---'", name)
+		}
+		if !strings.Contains(text, "allowed-tools:") {
+			t.Errorf("%s: missing 'allowed-tools:' in frontmatter", name)
+		}
+		if !strings.Contains(text, "description:") {
+			t.Errorf("%s: missing 'description:' in frontmatter", name)
+		}
+		if !strings.Contains(text, expected.tool) {
+			t.Errorf("%s: expected allowed-tools to contain %q, got:\n%s", name, expected.tool, text)
+		}
+		if !strings.Contains(text, expected.desc) {
+			t.Errorf("%s: expected description to contain %q, got:\n%s", name, expected.desc, text)
+		}
+	}
+
+	// Verify no unexpected files
+	for name := range foundFiles {
+		if _, ok := expectedCommands[name]; !ok {
+			t.Errorf("unexpected file in commands dir: %s", name)
+		}
+	}
+}
