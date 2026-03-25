@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/log"
 	"os"
@@ -140,7 +141,7 @@ func (g *GitWorktree) Cleanup() error {
 	}
 
 	if len(errs) > 0 {
-		return g.combineErrors(errs)
+		return errors.Join(errs...)
 	}
 
 	return nil
