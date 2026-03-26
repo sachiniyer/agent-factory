@@ -8,8 +8,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
-
-	"github.com/spf13/cobra"
 )
 
 // Shared flags
@@ -102,16 +100,10 @@ func jsonError(err error) error {
 	return err
 }
 
-// ApiCmd is the parent command for the programmatic API
-var ApiCmd = &cobra.Command{
-	Use:   "api",
-	Short: "Programmatic JSON API for external orchestrators",
-	Long:  "Machine-readable CLI interface for driving agent-factory sessions and tasks.",
-}
-
 func init() {
-	// Persistent flags on ApiCmd (available to all subcommands)
-	ApiCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to git repository")
+	// --repo flag on each top-level subcommand
+	SessionsCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to git repository")
+	TasksCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to git repository")
 
 	// Sessions
 	sessionsCreateCmd.Flags().StringVar(&createNameFlag, "name", "", "Session name (required)")
@@ -122,13 +114,13 @@ func init() {
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptCreateFlag, "create", false, "Auto-create the session if it doesn't exist")
 	sessionsSendPromptCmd.Flags().StringVar(&sendPromptProgramFlag, "program", "", "Program to run when creating a new session (defaults to config default)")
 
-	sessionsCmd.AddCommand(sessionsListCmd)
-	sessionsCmd.AddCommand(sessionsGetCmd)
-	sessionsCmd.AddCommand(sessionsCreateCmd)
-	sessionsCmd.AddCommand(sessionsSendPromptCmd)
-	sessionsCmd.AddCommand(sessionsPreviewCmd)
-	sessionsCmd.AddCommand(sessionsKillCmd)
-	sessionsCmd.AddCommand(sessionsWhoamiCmd)
+	SessionsCmd.AddCommand(sessionsListCmd)
+	SessionsCmd.AddCommand(sessionsGetCmd)
+	SessionsCmd.AddCommand(sessionsCreateCmd)
+	SessionsCmd.AddCommand(sessionsSendPromptCmd)
+	SessionsCmd.AddCommand(sessionsPreviewCmd)
+	SessionsCmd.AddCommand(sessionsKillCmd)
+	SessionsCmd.AddCommand(sessionsWhoamiCmd)
 
 	// Tasks
 	tasksAddCmd.Flags().StringVar(&taskAddNameFlag, "name", "", "Task name (required)")
@@ -139,11 +131,7 @@ func init() {
 	tasksAddCmd.MarkFlagRequired("prompt")
 	tasksAddCmd.MarkFlagRequired("cron")
 
-	tasksCmd.AddCommand(tasksListCmd)
-	tasksCmd.AddCommand(tasksAddCmd)
-	tasksCmd.AddCommand(tasksRemoveCmd)
-
-	// Register subcommand groups
-	ApiCmd.AddCommand(sessionsCmd)
-	ApiCmd.AddCommand(tasksCmd)
+	TasksCmd.AddCommand(tasksListCmd)
+	TasksCmd.AddCommand(tasksAddCmd)
+	TasksCmd.AddCommand(tasksRemoveCmd)
 }

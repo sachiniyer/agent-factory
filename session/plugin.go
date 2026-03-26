@@ -20,7 +20,7 @@ const pluginManifest = `{
 // pluginCommands defines the slash command files to write into the plugin directory.
 var pluginCommands = map[string]string{
 	"af-sessions.md": "---\n" +
-		"allowed-tools: Bash(af api sessions list:*)\n" +
+		"allowed-tools: Bash(af sessions list:*)\n" +
 		"description: List all Agent Factory sessions\n" +
 		"---\n" +
 		"\n" +
@@ -28,10 +28,10 @@ var pluginCommands = map[string]string{
 		"\n" +
 		"## Context\n" +
 		"\n" +
-		"- Current sessions: !`af api sessions list`\n",
+		"- Current sessions: !`af sessions list`\n",
 
 	"af-kill.md": "---\n" +
-		"allowed-tools: Bash(af api sessions kill:*)\n" +
+		"allowed-tools: Bash(af sessions kill:*)\n" +
 		"description: Kill an Agent Factory session by title\n" +
 		"argument-hint: <session-title>\n" +
 		"---\n" +
@@ -40,10 +40,10 @@ var pluginCommands = map[string]string{
 		"\n" +
 		"The user wants to kill the session: $ARGUMENTS\n" +
 		"\n" +
-		"Run `af api sessions kill $ARGUMENTS` to kill it.\n",
+		"Run `af sessions kill $ARGUMENTS` to kill it.\n",
 
 	"af-send.md": "---\n" +
-		"allowed-tools: Bash(af api sessions send-prompt:*)\n" +
+		"allowed-tools: Bash(af sessions send-prompt:*)\n" +
 		"description: Send a prompt to another Agent Factory session\n" +
 		"argument-hint: <session-title> <prompt>\n" +
 		"---\n" +
@@ -53,10 +53,10 @@ var pluginCommands = map[string]string{
 		"The user provided: $ARGUMENTS\n" +
 		"\n" +
 		"Parse the session title (first argument) and prompt (remaining arguments), " +
-		"then run `af api sessions send-prompt <title> <prompt>`.\n",
+		"then run `af sessions send-prompt <title> <prompt>`.\n",
 
 	"af-preview.md": "---\n" +
-		"allowed-tools: Bash(af api sessions preview:*)\n" +
+		"allowed-tools: Bash(af sessions preview:*)\n" +
 		"description: Preview another Agent Factory session's terminal output\n" +
 		"argument-hint: <session-title>\n" +
 		"---\n" +
@@ -65,10 +65,10 @@ var pluginCommands = map[string]string{
 		"\n" +
 		"The user wants to preview the session: $ARGUMENTS\n" +
 		"\n" +
-		"Run `af api sessions preview $ARGUMENTS` to view it.\n",
+		"Run `af sessions preview $ARGUMENTS` to view it.\n",
 
 	"af-whoami.md": "---\n" +
-		"allowed-tools: Bash(af api sessions whoami:*)\n" +
+		"allowed-tools: Bash(af sessions whoami:*)\n" +
 		"description: Identify the current Agent Factory session\n" +
 		"---\n" +
 		"\n" +
@@ -76,7 +76,7 @@ var pluginCommands = map[string]string{
 		"\n" +
 		"## Context\n" +
 		"\n" +
-		"- Current session: !`af api sessions whoami`\n",
+		"- Current session: !`af sessions whoami`\n",
 }
 
 // ensurePluginDir creates the plugin directory with manifest and slash command
