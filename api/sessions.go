@@ -17,7 +17,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var sessionsCmd = &cobra.Command{
+// SessionsCmd is the top-level command for session management.
+var SessionsCmd = &cobra.Command{
 	Use:   "sessions",
 	Short: "Manage sessions",
 }
@@ -158,7 +159,7 @@ var sessionsSendPromptCmd = &cobra.Command{
 	Long: `Send a prompt to an existing session. The session must already exist unless --create is used.
 
 If the session does not exist, use --create to automatically create it first,
-or use 'af api sessions create --name <title> --prompt <prompt>' instead.`,
+or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -170,7 +171,7 @@ or use 'af api sessions create --name <title> --prompt <prompt>' instead.`,
 		instance, _, err := findLiveInstanceByTitle(title)
 		if err != nil {
 			if !sendPromptCreateFlag {
-				return jsonError(fmt.Errorf("instance %q not found. Use --create to auto-create the session, or run: af api sessions create --name %q --prompt <prompt>", title, title))
+				return jsonError(fmt.Errorf("instance %q not found. Use --create to auto-create the session, or run: af sessions create --name %q --prompt <prompt>", title, title))
 			}
 
 			// Auto-create the session

@@ -66,7 +66,7 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 	if !strings.Contains(result, "developer_instructions=") {
 		t.Errorf("expected developer_instructions= in flag, got %q", result)
 	}
-	if !strings.Contains(result, "af api sessions whoami") {
+	if !strings.Contains(result, "af sessions whoami") {
 		t.Errorf("expected whoami command in codex prompt, got %q", result)
 	}
 	if !strings.HasPrefix(result, "codex") {

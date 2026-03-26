@@ -12,7 +12,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var tasksCmd = &cobra.Command{
+// TasksCmd is the top-level command for task management.
+var TasksCmd = &cobra.Command{
 	Use:   "tasks",
 	Short: "Manage tasks",
 }

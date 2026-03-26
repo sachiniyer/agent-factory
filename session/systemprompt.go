@@ -10,11 +10,11 @@ const codexSystemPrompt = `You are running inside Agent Factory (af), a terminal
 You can manage sessions using the "af" CLI:
 
 Session commands:
-  af api sessions whoami                        Identify your current session
-  af api sessions list                          List all sessions
-  af api sessions kill <title>                  Delete/kill a session
-  af api sessions send-prompt <title> <prompt>  Send a prompt to another session
-  af api sessions preview <title>               View another session's terminal output`
+  af sessions whoami                        Identify your current session
+  af sessions list                          List all sessions
+  af sessions kill <title>                  Delete/kill a session
+  af sessions send-prompt <title> <prompt>  Send a prompt to another session
+  af sessions preview <title>               View another session's terminal output`
 
 // shellQuote wraps a string in single quotes, escaping any embedded single quotes
 // using the standard shell idiom: replace ' with '\"

@@ -89,19 +89,19 @@ All data (sessions, tasks) is scoped to the current git repository. The TUI show
 
 ## Programmatic API
 
-The `af api` subcommand provides a JSON CLI for driving Agent Factory without the TUI:
+The `af sessions` and `af tasks` subcommands provide a JSON CLI for driving Agent Factory without the TUI:
 
 ```bash
 # Sessions
-af api sessions list
-af api sessions create --name my-task --prompt "fix the login bug"
-af api sessions preview my-task
-af api sessions kill my-task
+af sessions list
+af sessions create --name my-task --prompt "fix the login bug"
+af sessions preview my-task
+af sessions kill my-task
 
 # Tasks
-af api tasks list
-af api tasks add --name "Daily triage" --prompt "triage new issues" --cron "0 9 * * *"
-af api tasks remove <id>
+af tasks list
+af tasks add --name "Daily triage" --prompt "triage new issues" --cron "0 9 * * *"
+af tasks remove <id>
 ```
 
 All commands output JSON to stdout and errors to stderr. Use `--repo <path>` or `--repo-id <id>` to target a specific repository.

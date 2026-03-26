@@ -179,7 +179,8 @@ func init() {
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(task.TaskCmd)
-	rootCmd.AddCommand(api.ApiCmd)
+	rootCmd.AddCommand(api.SessionsCmd)
+	rootCmd.AddCommand(api.TasksCmd)
 }
 
 func main() {

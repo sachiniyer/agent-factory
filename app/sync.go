@@ -40,7 +40,7 @@ var tickPendingInstancesCmd = func() tea.Msg {
 }
 
 // tickRefreshExternalCmd reconciles the sidebar with on-disk state
-// to pick up changes made via the CLI (e.g. `af api sessions create/kill`).
+// to pick up changes made via the CLI (e.g. `af sessions create/kill`).
 // Runs every 3s.
 var tickRefreshExternalCmd = func() tea.Msg {
 	time.Sleep(3 * time.Second)
