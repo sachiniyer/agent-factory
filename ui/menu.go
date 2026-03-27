@@ -39,7 +39,6 @@ const (
 	StateDefault MenuState = iota
 	StateEmpty
 	StateNewInstance
-	StatePrompt
 )
 
 type Menu struct {
@@ -53,9 +52,8 @@ type Menu struct {
 	keyDown keys.KeyName
 }
 
-var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyPrompt, keys.KeyAttach, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
+var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeyAttach, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
 var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName}
-var promptMenuOptions = []keys.KeyName{keys.KeySubmitName}
 
 func NewMenu() *Menu {
 	return &Menu{
@@ -84,7 +82,7 @@ func (m *Menu) SetState(state MenuState) {
 func (m *Menu) SetInstance(instance *session.Instance) {
 	m.instance = instance
 	// Only change the state if we're not in a special state (NewInstance or Prompt)
-	if m.state != StateNewInstance && m.state != StatePrompt {
+	if m.state != StateNewInstance {
 		if m.instance != nil {
 			m.state = StateDefault
 		} else {
@@ -96,7 +94,7 @@ func (m *Menu) SetInstance(instance *session.Instance) {
 
 // SetSidebarContext updates menu options based on sidebar selection context.
 func (m *Menu) SetSidebarContext(sectionKind SidebarSectionKind, isHeader bool) {
-	if m.state == StateNewInstance || m.state == StatePrompt {
+	if m.state == StateNewInstance {
 		return
 	}
 	// For instance items, use the normal instance-based menu
@@ -131,8 +129,6 @@ func (m *Menu) updateOptions() {
 		}
 	case StateNewInstance:
 		m.options = newInstanceMenuOptions
-	case StatePrompt:
-		m.options = promptMenuOptions
 	}
 }
 

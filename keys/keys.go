@@ -18,7 +18,7 @@ const (
 	KeyShiftTab   // ShiftTab cycles panes in reverse.
 	KeySubmitName // SubmitName is a special keybinding for submitting the name of a new instance.
 
-	KeyPrompt // New key for entering a prompt
+	KeyNewRemote // Key for creating a new remote instance
 	KeyHelp   // Key for showing help screen
 
 	// Diff keybindings
@@ -51,7 +51,7 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"j":          KeyDown,
 	"shift+up":   KeyShiftUp,
 	"shift+down": KeyShiftDown,
-	"N":          KeyPrompt,
+	"N":          KeyNewRemote,
 	"enter":      KeyEnter,
 	"o":          KeyEnter,
 	"n":          KeyNew,
@@ -114,9 +114,9 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 		key.WithKeys("q"),
 		key.WithHelp("q", "quit"),
 	),
-	KeyPrompt: key.NewBinding(
+	KeyNewRemote: key.NewBinding(
 		key.WithKeys("N"),
-		key.WithHelp("N", "new with prompt"),
+		key.WithHelp("N", "new remote"),
 	),
 	KeyTab: key.NewBinding(
 		key.WithKeys("tab"),
