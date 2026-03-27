@@ -2,27 +2,25 @@
 # Skeleton launch script for Agent Factory remote hooks.
 # Starts a remote agent session.
 #
-# Required args: --name <name> --prompt <prompt> --json
+# Required args: --name <name> --json
 # stdout: JSON {"name": "...", "status": "running"}
 # stderr: progress logs
 
 set -euo pipefail
 
 NAME=""
-PROMPT=""
 JSON_OUTPUT=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --name) NAME="$2"; shift 2 ;;
-    --prompt) PROMPT="$2"; shift 2 ;;
     --json) JSON_OUTPUT=true; shift ;;
     *) shift ;;
   esac
 done
 
-if [[ -z "$NAME" ]] || [[ -z "$PROMPT" ]]; then
-  echo "Error: --name and --prompt are required" >&2
+if [[ -z "$NAME" ]]; then
+  echo "Error: --name is required" >&2
   exit 1
 fi
 

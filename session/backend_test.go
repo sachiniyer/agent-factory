@@ -371,54 +371,7 @@ func TestInstanceDataJSONRoundTrip(t *testing.T) {
 	})
 }
 
-// --- HookBackend launch with prompt ---
-
-func TestHookBackendStartWithPrompt(t *testing.T) {
-	dir := t.TempDir()
-
-	// Script that parses --name and --prompt flags.
-	// Args: --name <name> --json --prompt <prompt>
-	// $2=name, $5=prompt (after --json is $3, --prompt is $4, value is $5)
-	launchCmd := writeScript(t, dir, "launch.sh",
-		`NAME=""; PROMPT=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --name) NAME="$2"; shift 2;;
-    --prompt) PROMPT="$2"; shift 2;;
-    *) shift;;
-  esac
-done
-echo "{\"name\": \"$NAME\", \"status\": \"running\", \"prompt\": \"$PROMPT\"}"
-`)
-	attachCmd := writeScript(t, dir, "attach.sh", `echo "attached"; sleep 0.1`)
-	deleteCmd := writeScript(t, dir, "delete.sh", `echo '{"deleted": true}'`)
-	listCmd := writeScript(t, dir, "list.sh", `echo '[]'`)
-
-	b := &HookBackend{
-		Hooks: config.RemoteHooks{
-			LaunchCmd: launchCmd,
-			ListCmd:   listCmd,
-			AttachCmd: attachCmd,
-			DeleteCmd: deleteCmd,
-		},
-	}
-
-	i := &Instance{
-		Title:   "prompt-test",
-		Path:    t.TempDir(),
-		Prompt:  "fix the auth bug",
-		backend: b,
-	}
-
-	err := b.Start(i, true)
-	require.NoError(t, err)
-	assert.True(t, i.Started())
-	assert.Equal(t, "prompt-test", i.Branch)
-	// The prompt should be captured in remoteMeta
-	assert.Equal(t, "fix the auth bug", i.remoteMeta["prompt"])
-
-	b.closePTY(i.Title)
-}
+// --- HookBackend launch (no prompt) ---
 
 // --- HookBackend launch failure ---
 

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
-	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-runewidth"
@@ -37,18 +36,31 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(fmt.Errorf("title cannot be empty"))
 		}
 
-		// For remote instances, collect a prompt before launching.
-		if instance.IsRemote() {
-			m.remotePromptInstance = instance
-			m.namingInstance = nil
-			m.state = stateRemotePrompt
-			m.remotePromptOverlay = overlay.NewTextInputOverlay("Enter prompt for remote session", "")
-			// Size will be set on the next WindowSizeMsg; use a default for now.
-			m.remotePromptOverlay.SetSize(60, 10)
-			return m, tea.WindowSize()
+		instance.SetStatus(session.Loading)
+		m.newInstanceFinalizer()
+		m.namingInstance = nil
+		m.state = stateDefault
+		m.menu.SetState(ui.StateDefault)
+
+		m.preSaveInstances()
+
+		selectedWt := m.selectedWorktree
+		m.selectedWorktree = nil
+		m.availableWorktrees = nil
+		startCmd := func() tea.Msg {
+			var err error
+			if selectedWt != nil {
+				err = instance.StartWithExistingWorktree(selectedWt.Path, selectedWt.Branch)
+			} else {
+				err = instance.Start(true)
+			}
+			return instanceStartedMsg{
+				instance: instance,
+				err:      err,
+			}
 		}
 
-		return m.finishNewInstance(instance)
+		return m, tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
 	case tea.KeyRunes:
 		if runewidth.StringWidth(instance.Title) >= 32 {
 			return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
@@ -86,72 +98,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 	}
 	return m, nil
-}
-
-// handleStateRemotePrompt handles key events when entering a prompt for a remote instance.
-func (m *home) handleStateRemotePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.remotePromptOverlay == nil {
-		m.state = stateDefault
-		return m, nil
-	}
-
-	closed := m.remotePromptOverlay.HandleKeyPress(msg)
-	if !closed {
-		return m, nil
-	}
-
-	instance := m.remotePromptInstance
-	m.remotePromptInstance = nil
-
-	if m.remotePromptOverlay.IsCanceled() {
-		// User cancelled — remove the instance.
-		m.remotePromptOverlay = nil
-		m.sidebar.Kill()
-		m.state = stateDefault
-		m.menu.SetState(ui.StateDefault)
-		cmd := m.selectionChanged()
-		return m, tea.Batch(cmd, tea.WindowSize())
-	}
-
-	// Submit — set the prompt and launch.
-	prompt := m.remotePromptOverlay.GetValue()
-	m.remotePromptOverlay = nil
-
-	if prompt == "" {
-		return m, m.handleError(fmt.Errorf("prompt cannot be empty for remote sessions"))
-	}
-
-	instance.Prompt = prompt
-	return m.finishNewInstance(instance)
-}
-
-// finishNewInstance finalizes instance creation: sets loading, triggers Start in background.
-func (m *home) finishNewInstance(instance *session.Instance) (tea.Model, tea.Cmd) {
-	instance.SetStatus(session.Loading)
-	m.newInstanceFinalizer()
-	m.namingInstance = nil
-	m.state = stateDefault
-	m.menu.SetState(ui.StateDefault)
-
-	m.preSaveInstances()
-
-	selectedWt := m.selectedWorktree
-	m.selectedWorktree = nil
-	m.availableWorktrees = nil
-	startCmd := func() tea.Msg {
-		var err error
-		if selectedWt != nil {
-			err = instance.StartWithExistingWorktree(selectedWt.Path, selectedWt.Branch)
-		} else {
-			err = instance.Start(true)
-		}
-		return instanceStartedMsg{
-			instance: instance,
-			err:      err,
-		}
-	}
-
-	return m, tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
 }
 
 // startNewInstance creates a new instance and enters stateNew for naming.
