@@ -69,9 +69,6 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	// Launch a new remote session.
 	slug := slugify(i.Title)
 	args := []string{"--name", slug, "--json"}
-	if i.Prompt != "" {
-		args = append(args, "--prompt", i.Prompt)
-	}
 	cmd := exec.Command(b.Hooks.LaunchCmd, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

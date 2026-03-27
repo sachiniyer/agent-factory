@@ -161,7 +161,6 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	assert.False(t, instance.Started())
 
 	// --- Step 2: Start (first-time) should call launch_cmd ---
-	instance.Prompt = "fix the auth bug in login.go"
 	err = instance.Start(true)
 	require.NoError(t, err)
 	assert.True(t, instance.Started())

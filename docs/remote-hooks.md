@@ -31,7 +31,7 @@ All scripts must:
 
 Starts a new remote agent session.
 
-**Arguments:** `--name <name> --prompt <prompt> --json`
+**Arguments:** `--name <name> --json`
 
 **stdout (JSON):**
 ```json

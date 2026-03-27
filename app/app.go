@@ -41,8 +41,6 @@ const (
 	stateDefault state = iota
 	// stateNew is the state when the user is creating a new instance.
 	stateNew
-	// stateRemotePrompt is the state when the user is entering a prompt for a remote instance.
-	stateRemotePrompt
 	// stateHelp is the state when a help screen is displayed.
 	stateHelp
 	// stateConfirm is the state when a confirmation modal is displayed.
@@ -81,11 +79,6 @@ type home struct {
 	// Stored as a direct pointer so background sync cannot change which
 	// instance the naming keystrokes target.
 	namingInstance *session.Instance
-
-	// remotePromptInstance is the instance waiting for a prompt in stateRemotePrompt.
-	remotePromptInstance *session.Instance
-	// remotePromptOverlay is the text input overlay for the remote prompt.
-	remotePromptOverlay *overlay.TextInputOverlay
 
 	// keySent is used to manage underlining menu items
 	keySent bool
@@ -220,9 +213,6 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	}
 	if m.selectionOverlay != nil {
 		m.selectionOverlay.SetWidth(int(float32(msg.Width) * 0.6))
-	}
-	if m.remotePromptOverlay != nil {
-		m.remotePromptOverlay.SetSize(int(float32(msg.Width)*0.6), int(float32(msg.Height)*0.4))
 	}
 
 	tw := m.contentPane.TabbedWindow()
@@ -525,7 +515,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree || m.state == stateRemotePrompt {
+	if m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree {
 		return nil, false
 	}
 	// Don't highlight when content pane has focus
@@ -566,8 +556,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleHelpState(msg)
 	case stateNew:
 		return m.handleStateNew(msg)
-	case stateRemotePrompt:
-		return m.handleStateRemotePrompt(msg)
 	case stateSelectWorktree:
 		return m.handleStateSelectWorktree(msg)
 	case stateConfirm:
@@ -805,9 +793,7 @@ func (m *home) View() string {
 		m.errBox.String(),
 	)
 
-	if m.state == stateRemotePrompt && m.remotePromptOverlay != nil {
-		return overlay.PlaceOverlay(0, 0, m.remotePromptOverlay.Render(), mainView, true)
-	} else if m.state == stateHelp {
+	if m.state == stateHelp {
 		if m.textOverlay == nil {
 			log.ErrorLog.Printf("text overlay is nil")
 		}
