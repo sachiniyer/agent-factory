@@ -458,7 +458,7 @@ func TestHookBackendStartLaunchCmdBadJSON(t *testing.T) {
 
 	err := b.Start(i, true)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid JSON")
+	assert.Contains(t, err.Error(), "no JSON")
 }
 
 // --- HookBackend kill failure ---
