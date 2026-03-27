@@ -21,6 +21,11 @@ func StartAndSendPrompt(instance *session.Instance, prompt string) error {
 		return err
 	}
 
+	// Remote sessions handle readiness and prompts on the remote host.
+	if instance.IsRemote() {
+		return nil
+	}
+
 	if err := WaitForReady(instance); err != nil {
 		return err
 	}

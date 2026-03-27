@@ -9,11 +9,24 @@ import (
 
 const RepoConfigFileName = "config.json"
 
+// RemoteHooks configures user-provided shell scripts for managing remote
+// sessions. When present in a repo config, sessions for that repo use the
+// remote hook backend instead of local tmux+git worktrees.
+type RemoteHooks struct {
+	LaunchCmd string `json:"launch_cmd"`
+	ListCmd   string `json:"list_cmd"`
+	AttachCmd string `json:"attach_cmd"`
+	DeleteCmd string `json:"delete_cmd"`
+}
+
 // RepoConfig holds per-repository configuration.
 type RepoConfig struct {
 	// PostWorktreeCommands are shell commands run asynchronously in the worktree
 	// directory after a new worktree is created.
 	PostWorktreeCommands []string `json:"post_worktree_commands,omitempty"`
+	// RemoteHooks, when set, causes all sessions for this repo to use the
+	// remote hook backend.
+	RemoteHooks *RemoteHooks `json:"remote_hooks,omitempty"`
 }
 
 // LoadRepoConfig loads the per-repo config for the given repo ID.
