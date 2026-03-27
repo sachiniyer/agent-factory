@@ -148,14 +148,15 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 
 	repoDir := setupE2ERepo(t)
 
-	// --- Step 1: NewInstance should pick the remote backend ---
+	// --- Step 1: NewInstance with ForceRemote should pick the remote backend ---
 	instance, err := NewInstance(InstanceOptions{
-		Title:   "e2e-fix-auth",
-		Path:    repoDir,
-		Program: "claude",
+		Title:       "e2e-fix-auth",
+		Path:        repoDir,
+		Program:     "claude",
+		ForceRemote: true,
 	})
 	require.NoError(t, err)
-	assert.True(t, instance.IsRemote(), "NewInstance should pick HookBackend when remote_hooks is configured")
+	assert.True(t, instance.IsRemote(), "NewInstance with ForceRemote should pick HookBackend")
 	assert.Equal(t, "remote", instance.GetBackend().Type())
 	assert.False(t, instance.Started())
 
@@ -238,11 +239,11 @@ func TestE2ERemoteHooksMultipleSessions(t *testing.T) {
 	repoDir := setupE2ERepo(t)
 
 	// Create and start two sessions.
-	inst1, err := NewInstance(InstanceOptions{Title: "session-alpha", Path: repoDir, Program: "claude"})
+	inst1, err := NewInstance(InstanceOptions{Title: "session-alpha", Path: repoDir, Program: "claude", ForceRemote: true})
 	require.NoError(t, err)
 	require.True(t, inst1.IsRemote())
 
-	inst2, err := NewInstance(InstanceOptions{Title: "session-beta", Path: repoDir, Program: "claude"})
+	inst2, err := NewInstance(InstanceOptions{Title: "session-beta", Path: repoDir, Program: "claude", ForceRemote: true})
 	require.NoError(t, err)
 	require.True(t, inst2.IsRemote())
 

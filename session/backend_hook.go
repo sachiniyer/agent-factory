@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -24,13 +24,30 @@ type HookBackend struct {
 	ptys map[string]*hookPTY
 }
 
-// hookPTY holds a persistent attach_cmd PTY for preview capture.
+// hookPTY holds a persistent attach_cmd process for preview capture.
+// Instead of allocating a real PTY (which SSH rejects without a terminal),
+// we use a pipe-based approach that captures whatever the attach_cmd writes.
 type hookPTY struct {
 	cmd    *exec.Cmd
-	pty    *os.File
+	stdout *os.File // read end of stdout pipe
 	buf    []byte
 	mu     sync.Mutex
 	closed bool
+}
+
+var slugRegexp = regexp.MustCompile(`[^a-z0-9-]`)
+
+// slugify converts a title to a slug-safe string for hook scripts.
+func slugify(title string) string {
+	s := strings.ToLower(title)
+	s = strings.ReplaceAll(s, " ", "-")
+	s = slugRegexp.ReplaceAllString(s, "")
+	// Trim leading/trailing hyphens
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = "session"
+	}
+	return s
 }
 
 func (b *HookBackend) Type() string { return "remote" }
@@ -50,18 +67,28 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	}
 
 	// Launch a new remote session.
-	args := []string{"--name", i.Title, "--json"}
+	slug := slugify(i.Title)
+	args := []string{"--name", slug, "--json"}
 	if i.Prompt != "" {
 		args = append(args, "--prompt", i.Prompt)
 	}
-	out, err := exec.Command(b.Hooks.LaunchCmd, args...).Output()
+	cmd := exec.Command(b.Hooks.LaunchCmd, args...)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("launch_cmd failed: %w", err)
+		return fmt.Errorf("launch_cmd failed: %s: %w", string(out), err)
+	}
+
+	// The script writes progress to stderr and JSON to stdout.
+	// With CombinedOutput we get both mixed together. Try to find
+	// the JSON object in the output (last line starting with '{').
+	jsonStr := extractJSON(string(out))
+	if jsonStr == "" {
+		return fmt.Errorf("launch_cmd returned no JSON in output: %s", string(out))
 	}
 
 	var meta map[string]interface{}
-	if err := json.Unmarshal(out, &meta); err != nil {
-		return fmt.Errorf("launch_cmd returned invalid JSON: %w", err)
+	if err := json.Unmarshal([]byte(jsonStr), &meta); err != nil {
+		return fmt.Errorf("launch_cmd returned invalid JSON: %s: %w", jsonStr, err)
 	}
 
 	i.mu.Lock()
@@ -76,10 +103,24 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
+// extractJSON finds the last JSON object in mixed output (stderr + stdout).
+func extractJSON(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	// Search from the end for a line that looks like JSON
+	for idx := len(lines) - 1; idx >= 0; idx-- {
+		line := strings.TrimSpace(lines[idx])
+		if strings.HasPrefix(line, "{") {
+			return line
+		}
+	}
+	return ""
+}
+
 func (b *HookBackend) Kill(i *Instance) error {
 	b.closePTY(i.Title)
 
-	args := []string{"--name", i.Title, "--json"}
+	slug := slugify(i.Title)
+	args := []string{"--name", slug, "--json"}
 	out, err := exec.Command(b.Hooks.DeleteCmd, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("delete_cmd failed: %s: %w", string(out), err)
@@ -104,7 +145,7 @@ func (b *HookBackend) Preview(i *Instance) (string, error) {
 }
 
 func (b *HookBackend) PreviewFullHistory(i *Instance) (string, error) {
-	// Same as Preview for remote — we capture everything from the PTY.
+	// Same as Preview for remote — we capture everything from the process.
 	return b.Preview(i)
 }
 
@@ -113,15 +154,16 @@ func (b *HookBackend) Attach(i *Instance) (chan struct{}, error) {
 		return nil, fmt.Errorf("cannot attach instance that has not been started")
 	}
 
-	// Stop the background preview PTY so it doesn't compete for the terminal.
+	// Stop the background preview process so it doesn't compete.
 	b.closePTY(i.Title)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		defer b.ensurePTY(i) // restart preview PTY after detach
+		defer b.ensurePTY(i) // restart preview process after detach
 
-		cmd := exec.Command(b.Hooks.AttachCmd, i.Title)
+		slug := slugify(i.Title)
+		cmd := exec.Command(b.Hooks.AttachCmd, slug)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -145,7 +187,7 @@ func (b *HookBackend) SendPromptCommand(_ *Instance, _ string) error {
 }
 
 func (b *HookBackend) SetPreviewSize(_ *Instance, _, _ int) error {
-	// No-op: remote PTY size is controlled by the remote host.
+	// No-op: remote session size is controlled by the remote host.
 	return nil
 }
 
@@ -158,10 +200,11 @@ func (b *HookBackend) IsAlive(i *Instance) bool {
 	if err := json.Unmarshal(out, &sessions); err != nil {
 		return false
 	}
+	slug := slugify(i.Title)
 	for _, s := range sessions {
 		name, _ := s["name"].(string)
 		status, _ := s["status"].(string)
-		if name == i.Title && status == "running" {
+		if name == slug && status == "running" {
 			return true
 		}
 	}
@@ -174,7 +217,7 @@ func (b *HookBackend) CheckAndHandleTrustPrompt(_ *Instance) bool {
 
 func (b *HookBackend) TapEnter(_ *Instance) {}
 
-// --- PTY management for preview capture ---
+// --- Process management for preview capture ---
 
 func (b *HookBackend) ensurePTY(i *Instance) {
 	b.mu.Lock()
@@ -187,22 +230,40 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 		return
 	}
 
-	cmd := exec.Command(b.Hooks.AttachCmd, i.Title)
-	ptmx, err := pty.Start(cmd)
+	slug := slugify(i.Title)
+	cmd := exec.Command(b.Hooks.AttachCmd, slug)
+
+	// Use pipes instead of a PTY. The attach_cmd for preview doesn't need
+	// a real terminal — we just want to capture whatever it outputs.
+	// (SSH-based attach scripts will fail gracefully here since they
+	// require a TTY, and that's fine — preview just shows empty until
+	// the user attaches interactively.)
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
-		log.ErrorLog.Printf("failed to start attach_cmd PTY for %s: %v", i.Title, err)
+		log.ErrorLog.Printf("failed to create pipe for preview of %s: %v", i.Title, err)
 		return
 	}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stdoutW
 
-	hp := &hookPTY{cmd: cmd, pty: ptmx}
+	if err := cmd.Start(); err != nil {
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		log.ErrorLog.Printf("failed to start attach_cmd for preview of %s: %v", i.Title, err)
+		return
+	}
+	// Close the write end in the parent so reads get EOF when the child exits.
+	_ = stdoutW.Close()
+
+	hp := &hookPTY{cmd: cmd, stdout: stdoutR}
 	b.ptys[i.Title] = hp
 
-	// Background goroutine reads PTY output into a ring buffer.
+	// Background goroutine reads output into a ring buffer.
 	go func() {
 		buf := make([]byte, 4096)
 		const maxBuf = 64 * 1024
 		for {
-			n, err := ptmx.Read(buf)
+			n, err := stdoutR.Read(buf)
 			if n > 0 {
 				hp.mu.Lock()
 				hp.buf = append(hp.buf, buf[:n]...)
@@ -230,7 +291,7 @@ func (b *HookBackend) closePTY(title string) {
 	hp.closed = true
 	hp.mu.Unlock()
 
-	_ = hp.pty.Close()
+	_ = hp.stdout.Close()
 	// Give the process a moment to exit, then kill if needed.
 	done := make(chan error, 1)
 	go func() { done <- hp.cmd.Wait() }()
@@ -251,12 +312,9 @@ func (b *HookBackend) getPTY(title string) *hookPTY {
 	return b.ptys[title]
 }
 
-// previewFromPTY extracts visible lines from the raw PTY buffer.
-// For now it does a simple conversion — a more robust approach would
-// use a terminal emulator to interpret escape sequences.
+// previewFromPTY extracts visible lines from the raw buffer.
 func previewFromPTY(raw []byte) string {
 	s := string(raw)
-	// Split on newlines and take the last screenful.
 	lines := strings.Split(s, "\n")
 	return strings.Join(lines, "\n")
 }
