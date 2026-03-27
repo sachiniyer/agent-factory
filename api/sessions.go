@@ -289,6 +289,29 @@ var sessionsKillCmd = &cobra.Command{
 	},
 }
 
+var sessionsAttachCmd = &cobra.Command{
+	Use:   "attach <title>",
+	Short: "Attach to a session's terminal",
+	Long:  "Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-b d).",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		instance, _, err := findLiveInstanceByTitle(args[0])
+		if err != nil {
+			return jsonError(err)
+		}
+
+		detached, err := instance.Attach()
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to attach: %w", err))
+		}
+		<-detached
+		return nil
+	},
+}
+
 var sessionsWhoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Identify the current Agent Factory session",

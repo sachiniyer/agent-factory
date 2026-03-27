@@ -136,3 +136,100 @@ var tasksRemoveCmd = &cobra.Command{
 		return jsonOut(map[string]bool{"ok": true})
 	},
 }
+
+var tasksGetCmd = &cobra.Command{
+	Use:   "get <id>",
+	Short: "Get a task by ID",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		s, err := task.GetTask(args[0])
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to get task: %w", err))
+		}
+
+		return jsonOut(s)
+	},
+}
+
+var tasksRunCmd = &cobra.Command{
+	Use:   "trigger <id>",
+	Short: "Trigger a task to run immediately",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		if err := task.RunTask(args[0]); err != nil {
+			return jsonError(fmt.Errorf("failed to trigger task: %w", err))
+		}
+
+		return jsonOut(map[string]bool{"ok": true})
+	},
+}
+
+var (
+	taskUpdateNameFlag    string
+	taskUpdatePromptFlag  string
+	taskUpdateCronFlag    string
+	taskUpdateEnabledFlag string
+)
+
+var tasksUpdateCmd = &cobra.Command{
+	Use:   "update <id>",
+	Short: "Update a task's properties",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		s, err := task.GetTask(args[0])
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to get task: %w", err))
+		}
+
+		if taskUpdateNameFlag != "" {
+			s.Name = taskUpdateNameFlag
+		}
+		if taskUpdatePromptFlag != "" {
+			s.Prompt = taskUpdatePromptFlag
+		}
+
+		cronChanged := false
+		if taskUpdateCronFlag != "" {
+			if err := task.ValidateCronExpr(taskUpdateCronFlag); err != nil {
+				return jsonError(fmt.Errorf("invalid cron expression: %w", err))
+			}
+			s.CronExpr = taskUpdateCronFlag
+			cronChanged = true
+		}
+
+		switch taskUpdateEnabledFlag {
+		case "true":
+			s.Enabled = true
+		case "false":
+			s.Enabled = false
+		case "":
+			// not changed
+		default:
+			return jsonError(fmt.Errorf("--enabled must be 'true' or 'false'"))
+		}
+
+		if err := task.UpdateTask(*s); err != nil {
+			return jsonError(fmt.Errorf("failed to update task: %w", err))
+		}
+
+		if cronChanged {
+			if err := task.RemoveScheduler(*s); err != nil {
+				log.ErrorLog.Printf("failed to remove old scheduler: %v", err)
+			}
+			if err := task.InstallScheduler(*s); err != nil {
+				return jsonError(fmt.Errorf("failed to reinstall scheduler: %w", err))
+			}
+		}
+
+		return jsonOut(s)
+	},
+}

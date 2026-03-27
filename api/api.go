@@ -120,6 +120,7 @@ func init() {
 	SessionsCmd.AddCommand(sessionsSendPromptCmd)
 	SessionsCmd.AddCommand(sessionsPreviewCmd)
 	SessionsCmd.AddCommand(sessionsKillCmd)
+	SessionsCmd.AddCommand(sessionsAttachCmd)
 	SessionsCmd.AddCommand(sessionsWhoamiCmd)
 
 	// Tasks
@@ -131,7 +132,15 @@ func init() {
 	tasksAddCmd.MarkFlagRequired("prompt")
 	tasksAddCmd.MarkFlagRequired("cron")
 
+	tasksUpdateCmd.Flags().StringVar(&taskUpdateNameFlag, "name", "", "New task name")
+	tasksUpdateCmd.Flags().StringVar(&taskUpdatePromptFlag, "prompt", "", "New prompt")
+	tasksUpdateCmd.Flags().StringVar(&taskUpdateCronFlag, "cron", "", "New cron expression")
+	tasksUpdateCmd.Flags().StringVar(&taskUpdateEnabledFlag, "enabled", "", "Enable or disable the task (true/false)")
+
 	TasksCmd.AddCommand(tasksListCmd)
+	TasksCmd.AddCommand(tasksGetCmd)
 	TasksCmd.AddCommand(tasksAddCmd)
+	TasksCmd.AddCommand(tasksUpdateCmd)
 	TasksCmd.AddCommand(tasksRemoveCmd)
+	TasksCmd.AddCommand(tasksRunCmd)
 }
