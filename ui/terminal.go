@@ -83,6 +83,13 @@ func (t *TerminalPane) UpdateContent(instance *session.Instance) error {
 		return nil
 	}
 
+	// Remote instances have no local worktree, so there's no terminal
+	// session to open. Show the preview pane output instead.
+	if instance.IsRemote() {
+		t.setFallbackState("Terminal tab not available for remote sessions.\nUse the Preview tab to see session output.")
+		return nil
+	}
+
 	// Skip content updates while in scroll mode
 	if t.isScrolling {
 		return nil

@@ -156,12 +156,15 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		return instanceChangedMsg{}
 	}
 
-	// Check for uncommitted changes in the worktree
+	// Check for uncommitted changes in the worktree (skip for remote sessions
+	// which have no local worktree).
 	hasChanges := false
-	if wt := selected.GetWorktreePath(); wt != "" {
-		out, err := exec.Command("git", "-C", wt, "status", "--porcelain").Output()
-		if err == nil && len(strings.TrimSpace(string(out))) > 0 {
-			hasChanges = true
+	if !selected.IsRemote() {
+		if wt := selected.GetWorktreePath(); wt != "" {
+			out, err := exec.Command("git", "-C", wt, "status", "--porcelain").Output()
+			if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+				hasChanges = true
+			}
 		}
 	}
 

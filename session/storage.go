@@ -20,10 +20,12 @@ type InstanceData struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	AutoYes   bool      `json:"auto_yes"`
 
-	Program  string          `json:"program"`
-	TmuxName string          `json:"tmux_name,omitempty"`
-	Worktree GitWorktreeData `json:"worktree"`
-	PRInfo   PRInfoData      `json:"pr_info,omitempty"`
+	Program     string                 `json:"program"`
+	TmuxName    string                 `json:"tmux_name,omitempty"`
+	Worktree    GitWorktreeData        `json:"worktree"`
+	PRInfo      PRInfoData             `json:"pr_info,omitempty"`
+	BackendType string                 `json:"backend_type,omitempty"`
+	RemoteMeta  map[string]interface{} `json:"remote_meta,omitempty"`
 }
 
 // PRInfoData represents the serializable data of a PRInfo

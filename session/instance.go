@@ -1,15 +1,12 @@
 package session
 
 import (
-	"errors"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"path/filepath"
 	"sync"
 
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -57,6 +54,11 @@ type Instance struct {
 	// prInfo stores the associated GitHub PR info
 	prInfo *git.PRInfo
 
+	// backend abstracts session lifecycle (local tmux+git vs remote hooks).
+	backend Backend
+	// remoteMeta stores additional metadata returned by remote hook scripts.
+	remoteMeta map[string]interface{}
+
 	// The below fields are initialized upon calling Start().
 
 	started bool
@@ -82,6 +84,13 @@ func (i *Instance) ToInstanceData() InstanceData {
 		UpdatedAt: time.Now(),
 		Program:   i.Program,
 		AutoYes:   i.AutoYes,
+	}
+
+	if i.backend != nil {
+		data.BackendType = i.backend.Type()
+	}
+	if i.remoteMeta != nil {
+		data.RemoteMeta = i.remoteMeta
 	}
 
 	// Persist the tmux session name so we can restore it exactly
@@ -117,32 +126,45 @@ func (i *Instance) ToInstanceData() InstanceData {
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
 	instance := &Instance{
-		Title:     data.Title,
-		Path:      data.Path,
-		Branch:    data.Branch,
-		Status:    data.Status,
-		Height:    data.Height,
-		Width:     data.Width,
-		CreatedAt: data.CreatedAt,
-		UpdatedAt: data.UpdatedAt,
-		Program:   data.Program,
-		gitWorktree: git.NewGitWorktreeFromStorage(
+		Title:      data.Title,
+		Path:       data.Path,
+		Branch:     data.Branch,
+		Status:     data.Status,
+		Height:     data.Height,
+		Width:      data.Width,
+		CreatedAt:  data.CreatedAt,
+		UpdatedAt:  data.UpdatedAt,
+		Program:    data.Program,
+		remoteMeta: data.RemoteMeta,
+	}
+
+	// Pick backend based on persisted BackendType.
+	if data.BackendType == "remote" {
+		hook, err := loadHookBackendForPath(data.Path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load remote hooks config: %w", err)
+		}
+		instance.backend = hook
+	} else {
+		instance.backend = &LocalBackend{}
+
+		instance.gitWorktree = git.NewGitWorktreeFromStorage(
 			data.Worktree.RepoPath,
 			data.Worktree.WorktreePath,
 			data.Worktree.SessionName,
 			data.Worktree.BranchName,
 			data.Worktree.BaseCommitSHA,
 			data.Worktree.ExternalWorktree,
-		),
-	}
+		)
 
-	// Pre-set the tmux session with the correct name for backward compat.
-	// If TmuxName was persisted, use it exactly; otherwise fall back to
-	// the legacy naming scheme (no repo hash) so old sessions still restore.
-	if data.TmuxName != "" {
-		instance.tmuxSession = tmux.NewTmuxSessionFromSanitizedName(data.TmuxName, data.Program)
-	} else {
-		instance.tmuxSession = tmux.NewTmuxSession(data.Title, data.Program)
+		// Pre-set the tmux session with the correct name for backward compat.
+		// If TmuxName was persisted, use it exactly; otherwise fall back to
+		// the legacy naming scheme (no repo hash) so old sessions still restore.
+		if data.TmuxName != "" {
+			instance.tmuxSession = tmux.NewTmuxSessionFromSanitizedName(data.TmuxName, data.Program)
+		} else {
+			instance.tmuxSession = tmux.NewTmuxSession(data.Title, data.Program)
+		}
 	}
 
 	if data.PRInfo.Number != 0 {
@@ -182,6 +204,11 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
+	backend, err := backendForPath(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine backend: %w", err)
+	}
+
 	return &Instance{
 		Title:     opts.Title,
 		Status:    Ready,
@@ -192,10 +219,14 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		CreatedAt: t,
 		UpdatedAt: t,
 		AutoYes:   opts.AutoYes,
+		backend:   backend,
 	}, nil
 }
 
 func (i *Instance) RepoName() (string, error) {
+	if i.IsRemote() {
+		return "", fmt.Errorf("remote instances do not have a local repo")
+	}
 	if !i.started {
 		return "", fmt.Errorf("cannot get repo name for instance that has not been started")
 	}
@@ -210,89 +241,7 @@ func (i *Instance) SetStatus(status Status) {
 
 // firstTimeSetup is true if this is a new instance. Otherwise, it's one loaded from storage.
 func (i *Instance) Start(firstTimeSetup bool) error {
-	if i.Title == "" {
-		return fmt.Errorf("instance title cannot be empty")
-	}
-
-	var tmuxSession *tmux.TmuxSession
-	i.mu.RLock()
-	existingSession := i.tmuxSession
-	i.mu.RUnlock()
-
-	if existingSession != nil {
-		// Use existing tmux session (useful for testing)
-		tmuxSession = existingSession
-	} else {
-		// Create new tmux session with repo-scoped name
-		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, i.Path, i.Program)
-	}
-
-	i.mu.Lock()
-	i.tmuxSession = tmuxSession
-	i.mu.Unlock()
-
-	if firstTimeSetup {
-		gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title)
-		if err != nil {
-			return fmt.Errorf("failed to create git worktree: %w", err)
-		}
-		i.mu.Lock()
-		i.gitWorktree = gitWorktree
-		i.Branch = branchName
-		i.mu.Unlock()
-	}
-
-	// Setup error handler to cleanup resources on any error.
-	// Kill() acquires its own lock, so we must not hold i.mu here.
-	var setupErr error
-	defer func() {
-		if setupErr != nil {
-			if cleanupErr := i.Kill(); cleanupErr != nil {
-				setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
-			}
-		} else {
-			i.mu.Lock()
-			i.started = true
-			i.mu.Unlock()
-		}
-	}()
-
-	if !firstTimeSetup {
-		// Reuse existing session
-		if err := tmuxSession.Restore(); err != nil {
-			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
-			return setupErr
-		}
-	} else {
-		i.mu.RLock()
-		gw := i.gitWorktree
-		i.mu.RUnlock()
-
-		// Setup git worktree first
-		if err := gw.Setup(); err != nil {
-			setupErr = fmt.Errorf("failed to setup git worktree: %w", err)
-			return setupErr
-		}
-
-		// Inject Agent Factory instructions into the session. For CLI-based tools
-		// (Claude Code) this modifies the program command. For file-based tools
-		// (Codex, Amp, OpenCode) this writes an instruction file into the worktree.
-		i.tmuxSession.SetProgram(
-			injectSystemPrompt(i.Program, i.Title, gw.GetWorktreePath()),
-		)
-
-		// Create new session
-		if err := i.tmuxSession.Start(gw.GetWorktreePath()); err != nil {
-			// Cleanup git worktree if tmux session creation fails
-			if cleanupErr := gw.Cleanup(); cleanupErr != nil {
-				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
-			}
-			setupErr = fmt.Errorf("failed to start new session: %w", err)
-			return setupErr
-		}
-	}
-
-	return nil
+	return i.backend.Start(i, firstTimeSetup)
 }
 
 // StartWithExistingWorktree starts the instance using an existing worktree
@@ -333,100 +282,33 @@ func (i *Instance) StartWithExistingWorktree(worktreePath, branchName string) er
 
 // Kill terminates the instance and cleans up all resources
 func (i *Instance) Kill() error {
-	i.mu.Lock()
-	ts := i.tmuxSession
-	gw := i.gitWorktree
-	i.started = false
-	i.tmuxSession = nil
-	i.gitWorktree = nil
-	i.mu.Unlock()
-
-	var errs []error
-
-	// Always try to cleanup both resources, even if one fails
-	// Clean up tmux session first since it's using the git worktree
-	if ts != nil {
-		if err := ts.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close tmux session: %w", err))
-		}
-	}
-
-	// Then clean up git worktree
-	if gw != nil {
-		if err := gw.Cleanup(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to cleanup git worktree: %w", err))
-		}
-	}
-
-	return errors.Join(errs...)
+	return i.backend.Kill(i)
 }
 
 func (i *Instance) Preview() (string, error) {
-	if !i.started {
-		return "", nil
-	}
-	return i.tmuxSession.CapturePaneContent()
+	return i.backend.Preview(i)
 }
 
 func (i *Instance) HasUpdated() (updated bool, hasPrompt bool) {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxSession
-	i.mu.RUnlock()
+	return i.backend.HasUpdated(i)
+}
 
-	if !s {
-		return false, false
-	}
-	return ts.HasUpdated()
+// CheckAndHandleTrustPrompt checks for and dismisses the trust prompt for supported programs.
+func (i *Instance) CheckAndHandleTrustPrompt() bool {
+	return i.backend.CheckAndHandleTrustPrompt(i)
 }
 
 // TapEnter sends an enter key press to the tmux session if AutoYes is enabled.
-// CheckAndHandleTrustPrompt checks for and dismisses the trust prompt for supported programs.
-func (i *Instance) CheckAndHandleTrustPrompt() bool {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxSession
-	i.mu.RUnlock()
-
-	if !s || ts == nil {
-		return false
-	}
-	program := i.Program
-	if !strings.Contains(program, tmux.ProgramClaude) &&
-		!strings.Contains(program, tmux.ProgramAider) &&
-		!strings.Contains(program, tmux.ProgramGemini) {
-		return false
-	}
-	return ts.CheckAndHandleTrustPrompt()
-}
-
 func (i *Instance) TapEnter() {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxSession
-	autoYes := i.AutoYes
-	i.mu.RUnlock()
-
-	if !s || !autoYes {
-		return
-	}
-	if err := ts.TapEnter(); err != nil {
-		log.ErrorLog.Printf("error tapping enter: %v", err)
-	}
+	i.backend.TapEnter(i)
 }
 
 func (i *Instance) Attach() (chan struct{}, error) {
-	if !i.started {
-		return nil, fmt.Errorf("cannot attach instance that has not been started")
-	}
-	return i.tmuxSession.Attach()
+	return i.backend.Attach(i)
 }
 
 func (i *Instance) SetPreviewSize(width, height int) error {
-	if !i.started {
-		return fmt.Errorf("cannot set preview size for instance that has not been started")
-	}
-	return i.tmuxSession.SetDetachedSize(width, height)
+	return i.backend.SetPreviewSize(i, width, height)
 }
 
 // GetGitWorktree returns the git worktree for the instance
@@ -467,16 +349,10 @@ func (i *Instance) SetTitle(title string) error {
 	return nil
 }
 
-// TmuxAlive returns true if the tmux session is alive. This is a sanity check before attaching.
+// TmuxAlive returns true if the underlying session is alive.
+// For remote backends this delegates to IsAlive.
 func (i *Instance) TmuxAlive() bool {
-	i.mu.RLock()
-	ts := i.tmuxSession
-	i.mu.RUnlock()
-
-	if ts == nil {
-		return false
-	}
-	return ts.DoesSessionExist()
+	return i.backend.IsAlive(i)
 }
 
 // GetPRInfo returns the associated GitHub PR info, or nil if none.
@@ -514,55 +390,20 @@ func (i *Instance) UpdatePRInfo() error {
 	return nil
 }
 
-// SendPrompt sends a prompt to the tmux session
+// SendPrompt sends a prompt to the session
 func (i *Instance) SendPrompt(prompt string) error {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxSession
-	i.mu.RUnlock()
-
-	if !s {
-		return fmt.Errorf("instance not started")
-	}
-	if ts == nil {
-		return fmt.Errorf("tmux session not initialized")
-	}
-	if err := ts.SendKeys(prompt); err != nil {
-		return fmt.Errorf("error sending keys to tmux session: %w", err)
-	}
-
-	// Brief pause to prevent carriage return from being interpreted as newline
-	time.Sleep(100 * time.Millisecond)
-	if err := ts.TapEnter(); err != nil {
-		return fmt.Errorf("error tapping enter: %w", err)
-	}
-
-	return nil
+	return i.backend.SendPrompt(i, prompt)
 }
 
-// SendPromptCommand sends a prompt using tmux send-keys command instead of PTY writes.
+// SendPromptCommand sends a prompt using a more reliable command-based approach.
 // This is more reliable for headless/scheduled runs where the PTY may not persist.
 func (i *Instance) SendPromptCommand(prompt string) error {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxSession
-	i.mu.RUnlock()
-
-	if !s {
-		return fmt.Errorf("instance not started")
-	}
-	if ts == nil {
-		return fmt.Errorf("tmux session not initialized")
-	}
-	return ts.SendKeysCommand(prompt)
+	return i.backend.SendPromptCommand(i, prompt)
 }
 
-// PreviewFullHistory captures the entire tmux pane output including full scrollback history
+// PreviewFullHistory captures the entire session output including full scrollback history
 func (i *Instance) PreviewFullHistory() (string, error) {
-	if !i.started {
-		return "", nil
-	}
-	return i.tmuxSession.CapturePaneContentWithOptions("-", "-")
+	return i.backend.PreviewFullHistory(i)
 }
 
 // SetTmuxSession sets the tmux session for testing purposes
@@ -581,4 +422,22 @@ func (i *Instance) SendKeys(keys string) error {
 		return fmt.Errorf("cannot send keys to instance that has not been started")
 	}
 	return ts.SendKeys(keys)
+}
+
+// IsRemote returns true if this instance uses the remote hook backend.
+func (i *Instance) IsRemote() bool {
+	if i.backend == nil {
+		return false
+	}
+	return i.backend.Type() == "remote"
+}
+
+// GetBackend returns the backend for the instance (mainly for testing).
+func (i *Instance) GetBackend() Backend {
+	return i.backend
+}
+
+// SetBackend sets the backend for the instance (mainly for testing).
+func (i *Instance) SetBackend(b Backend) {
+	i.backend = b
 }
