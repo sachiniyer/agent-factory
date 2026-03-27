@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
-	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-runewidth"
@@ -14,7 +13,6 @@ import (
 func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		m.state = stateDefault
-		m.promptAfterName = false
 		m.namingInstance = nil
 		m.selectedWorktree = nil
 		m.availableWorktrees = nil
@@ -41,8 +39,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		instance.SetStatus(session.Loading)
 		m.newInstanceFinalizer()
 		m.namingInstance = nil
-		promptAfterName := m.promptAfterName
-		m.promptAfterName = false
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
 
@@ -59,9 +55,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				err = instance.Start(true)
 			}
 			return instanceStartedMsg{
-				instance:        instance,
-				err:             err,
-				promptAfterName: promptAfterName,
+				instance: instance,
+				err:      err,
 			}
 		}
 
@@ -105,39 +100,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleStatePrompt handles key events when in statePrompt (entering a prompt).
-func (m *home) handleStatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	shouldClose := m.textInputOverlay.HandleKeyPress(msg)
-	if shouldClose {
-		selected := m.sidebar.GetSelectedInstance()
-		if selected == nil {
-			return m, nil
-		}
-		if m.textInputOverlay.IsSubmitted() {
-			if err := selected.SendPrompt(m.textInputOverlay.GetValue()); err != nil {
-				return m, m.handleError(err)
-			}
-		}
-		m.textInputOverlay = nil
-		m.state = stateDefault
-		return m, tea.Sequence(
-			tea.WindowSize(),
-			func() tea.Msg {
-				m.menu.SetState(ui.StateDefault)
-				m.showHelpScreen(helpStart(selected), nil)
-				return nil
-			},
-		)
-	}
-	return m, nil
-}
-
 // startNewInstance creates a new instance and enters stateNew for naming.
-func (m *home) startNewInstance(promptAfterName bool) (tea.Model, tea.Cmd) {
+// If remote is true, the instance is forced to use the remote hook backend.
+func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:   "",
-		Path:    ".",
-		Program: m.program,
+		Title:       "",
+		Path:        ".",
+		Program:     m.program,
+		ForceRemote: remote,
 	})
 	if err != nil {
 		return m, m.handleError(err)
@@ -148,13 +118,5 @@ func (m *home) startNewInstance(promptAfterName bool) (tea.Model, tea.Cmd) {
 	m.namingInstance = instance
 	m.state = stateNew
 	m.menu.SetState(ui.StateNewInstance)
-	m.promptAfterName = promptAfterName
 	return m, nil
-}
-
-// showPromptOverlay displays the prompt text input overlay for the selected instance.
-func (m *home) showPromptOverlay() {
-	m.state = statePrompt
-	m.menu.SetState(ui.StatePrompt)
-	m.textInputOverlay = overlay.NewTextInputOverlay("Enter prompt", "")
 }

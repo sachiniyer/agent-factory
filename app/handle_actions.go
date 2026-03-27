@@ -43,7 +43,7 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m, m.selectionChanged()
 
 	// Instance creation
-	case keys.KeyPrompt:
+	case keys.KeyNewRemote:
 		return m.startNewInstance(true)
 
 	case keys.KeyNew:

@@ -193,6 +193,9 @@ type InstanceOptions struct {
 	Program string
 	// If AutoYes is true, then
 	AutoYes bool
+	// ForceRemote forces the instance to use the remote hook backend,
+	// even if the repo config would default to local.
+	ForceRemote bool
 }
 
 func NewInstance(opts InstanceOptions) (*Instance, error) {
@@ -204,9 +207,15 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	backend, err := backendForPath(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine backend: %w", err)
+	var backend Backend
+	if opts.ForceRemote {
+		hook, err := loadHookBackendForPath(absPath)
+		if err != nil {
+			return nil, fmt.Errorf("remote hooks not configured for this repo: %w", err)
+		}
+		backend = hook
+	} else {
+		backend = &LocalBackend{}
 	}
 
 	return &Instance{
