@@ -2,7 +2,9 @@ package git
 
 import (
 	"encoding/json"
+	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // PRInfo holds information about a GitHub pull request associated with a branch.
@@ -24,8 +26,14 @@ func FetchPRInfo(repoPath, branchName string) (*PRInfo, error) {
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
-		// Non-zero exit means no PR found (or other error) — treat as no PR.
-		return nil, nil
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "no pull requests found") ||
+				strings.Contains(stderr, "Could not resolve to a PullRequest") {
+				return nil, nil // genuinely no PR
+			}
+		}
+		return nil, fmt.Errorf("failed to fetch PR info: %w", err)
 	}
 
 	var info PRInfo

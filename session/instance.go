@@ -1,13 +1,14 @@
 package session
 
 import (
-	"github.com/sachiniyer/agent-factory/session/git"
-	"github.com/sachiniyer/agent-factory/session/tmux"
+	"fmt"
 	"path/filepath"
 	"sync"
-
-	"fmt"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 type Status int
@@ -390,7 +391,8 @@ func (i *Instance) UpdatePRInfo() error {
 	}
 	info, err := git.FetchPRInfo(gw.GetRepoPath(), i.Branch)
 	if err != nil {
-		return err
+		log.ErrorLog.Printf("transient PR fetch error (keeping cached info): %v", err)
+		return nil // don't propagate, just keep existing cached info
 	}
 
 	i.mu.Lock()
