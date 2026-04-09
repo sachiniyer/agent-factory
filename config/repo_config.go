@@ -34,7 +34,7 @@ type RepoConfig struct {
 func LoadRepoConfig(repoID string) (*RepoConfig, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
-		return &RepoConfig{}, nil
+		return nil, fmt.Errorf("failed to get config dir: %w", err)
 	}
 	path := filepath.Join(configDir, "repos", repoID, RepoConfigFileName)
 	data, err := os.ReadFile(path)

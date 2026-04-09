@@ -65,6 +65,17 @@ func TestRepoConfigRemoteHooks(t *testing.T) {
 		assert.Nil(t, loaded.PostWorktreeCommands)
 	})
 
+	t.Run("load returns error when config dir cannot be resolved", func(t *testing.T) {
+		// Use a ~ prefix with no HOME set so GetConfigDir fails.
+		t.Setenv("AGENT_FACTORY_HOME", "~/broken")
+		t.Setenv("HOME", "")
+
+		loaded, err := LoadRepoConfig("any-repo")
+		assert.Error(t, err)
+		assert.Nil(t, loaded)
+		assert.Contains(t, err.Error(), "failed to get config dir")
+	})
+
 	t.Run("both remote hooks and post worktree commands", func(t *testing.T) {
 		tempHome := t.TempDir()
 		t.Setenv("AGENT_FACTORY_HOME", tempHome)
