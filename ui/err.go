@@ -35,13 +35,16 @@ func (e *ErrBox) SetSize(width, height int) {
 }
 
 func (e *ErrBox) String() string {
+	if e.width <= 0 || e.height <= 0 {
+		return ""
+	}
 	var err string
 	if e.err != nil {
 		err = e.err.Error()
 		lines := strings.Split(err, "\n")
 		err = strings.Join(lines, "//")
-		if runewidth.StringWidth(err) > e.width-3 && e.width-3 >= 0 {
-			err = runewidth.Truncate(err, e.width-3, "...")
+		if runewidth.StringWidth(err) > e.width {
+			err = runewidth.Truncate(err, e.width, "...")
 		}
 	}
 	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, errStyle.Render(err))
