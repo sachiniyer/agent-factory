@@ -183,6 +183,61 @@ func TestCleanup_EmptyWorktreePath(t *testing.T) {
 	assert.Contains(t, err.Error(), "worktree path is empty")
 }
 
+func TestFindGitRepoRoot_ResolvesLinkedWorktree(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	// Create a main repo with an initial commit (required for worktree add)
+	repoRoot := createGitRepo(t)
+	commitCmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "init")
+	commitCmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := commitCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Create a linked worktree
+	linkedPath := filepath.Join(filepath.Dir(repoRoot), "linked-wt")
+	addCmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", "linked-branch", linkedPath)
+	out, err = addCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// findGitRepoRoot from the linked worktree should resolve to the main repo
+	resolved, err := findGitRepoRoot(linkedPath)
+	require.NoError(t, err)
+	assert.Equal(t, repoRoot, resolved,
+		"findGitRepoRoot should resolve a linked worktree back to the main repo root")
+}
+
+func TestGetWorktreeDirectoryForRepo_FromLinkedWorktree(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	// Create a main repo with an initial commit
+	repoRoot := createGitRepo(t)
+	commitCmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "init")
+	commitCmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := commitCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Create a linked worktree
+	linkedPath := filepath.Join(filepath.Dir(repoRoot), "linked-wt")
+	addCmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", "linked-branch", linkedPath)
+	out, err = addCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// getWorktreeDirectoryForRepo from the linked worktree should return
+	// the parent of the main repo, not the parent of the linked worktree.
+	worktreeDir, err := getWorktreeDirectoryForRepo(linkedPath)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Dir(repoRoot), worktreeDir,
+		"new worktrees should be placed next to the main repo, not next to a linked worktree")
+}
+
 func createGitRepo(t *testing.T) string {
 	t.Helper()
 	repoRoot := filepath.Join(t.TempDir(), "repo")
