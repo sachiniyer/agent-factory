@@ -63,12 +63,19 @@ func writeScript(t *testing.T, dir, name, content string) string {
 // a HookBackend configured to use them.
 func makeHooks(t *testing.T) *HookBackend {
 	t.Helper()
+	return makeHooksWithListName(t, slugify("test-session"))
+}
+
+// makeHooksWithListName is like makeHooks but lets the caller control
+// which session name the list_cmd will report.
+func makeHooksWithListName(t *testing.T, listName string) *HookBackend {
+	t.Helper()
 	dir := t.TempDir()
 
 	launchCmd := writeScript(t, dir, "launch.sh",
 		`echo '{"name": "'"$2"'", "status": "running"}'`)
 	listCmd := writeScript(t, dir, "list.sh",
-		`echo '[{"name": "test-session", "status": "running"}]'`)
+		`echo '[{"name": "`+listName+`", "status": "running"}]'`)
 	attachCmd := writeScript(t, dir, "attach.sh",
 		`echo "attached to $1"; sleep 0.1`)
 	deleteCmd := writeScript(t, dir, "delete.sh",
@@ -95,7 +102,7 @@ func TestHookBackendStartFirstTime(t *testing.T) {
 	err := b.Start(i, true)
 	require.NoError(t, err)
 	assert.True(t, i.Started())
-	assert.Equal(t, "test-session", i.Branch)
+	assert.Equal(t, slugify("test-session"), i.Branch)
 	assert.NotNil(t, i.remoteMeta)
 	assert.Equal(t, "running", i.remoteMeta["status"])
 
@@ -568,8 +575,9 @@ func TestHookBackendIsAliveWithBadJSON(t *testing.T) {
 
 func TestHookBackendIsAliveWithStoppedSession(t *testing.T) {
 	dir := t.TempDir()
+	slug := slugify("test-session")
 	listCmd := writeScript(t, dir, "list.sh",
-		`echo '[{"name": "test-session", "status": "stopped"}]'`)
+		`echo '[{"name": "`+slug+`", "status": "stopped"}]'`)
 	b := &HookBackend{
 		Hooks: config.RemoteHooks{ListCmd: listCmd},
 	}
@@ -580,8 +588,10 @@ func TestHookBackendIsAliveWithStoppedSession(t *testing.T) {
 
 func TestHookBackendIsAliveWithMultipleSessions(t *testing.T) {
 	dir := t.TempDir()
+	slugA := slugify("session-a")
+	slugB := slugify("session-b")
 	listCmd := writeScript(t, dir, "list.sh",
-		`echo '[{"name": "session-a", "status": "stopped"}, {"name": "session-b", "status": "running"}]'`)
+		`echo '[{"name": "`+slugA+`", "status": "stopped"}, {"name": "`+slugB+`", "status": "running"}]'`)
 	b := &HookBackend{
 		Hooks: config.RemoteHooks{ListCmd: listCmd},
 	}
@@ -591,4 +601,34 @@ func TestHookBackendIsAliveWithMultipleSessions(t *testing.T) {
 
 	assert.False(t, b.IsAlive(iA))
 	assert.True(t, b.IsAlive(iB))
+}
+
+// --- slugify uniqueness ---
+
+func TestSlugifyUniqueness(t *testing.T) {
+	// Titles that reduce to the same base slug must produce distinct slugified names.
+	pairs := [][2]string{
+		{"my_app", "myapp"},
+		{"My App!", "my-app"},
+		{"hello world", "hello-world"},
+		{"HELLO", "hello"},
+	}
+	for _, p := range pairs {
+		a := slugify(p[0])
+		b := slugify(p[1])
+		assert.NotEqual(t, a, b, "slugify(%q) == slugify(%q) == %q", p[0], p[1], a)
+	}
+}
+
+func TestSlugifyDeterministic(t *testing.T) {
+	title := "some-session-title"
+	assert.Equal(t, slugify(title), slugify(title))
+}
+
+func TestSlugifyNonEmpty(t *testing.T) {
+	// Even pathological inputs should produce a non-empty slug.
+	for _, title := range []string{"!!!", "   ", ""} {
+		s := slugify(title)
+		assert.NotEmpty(t, s, "slugify(%q) should not be empty", title)
+	}
 }

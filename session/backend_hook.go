@@ -1,6 +1,8 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,6 +40,8 @@ type hookPTY struct {
 var slugRegexp = regexp.MustCompile(`[^a-z0-9-]`)
 
 // slugify converts a title to a slug-safe string for hook scripts.
+// A short hash of the original title is appended to prevent collisions
+// when different titles (e.g. "my_app" vs "myapp") reduce to the same slug.
 func slugify(title string) string {
 	s := strings.ToLower(title)
 	s = strings.ReplaceAll(s, " ", "-")
@@ -47,7 +51,10 @@ func slugify(title string) string {
 	if s == "" {
 		s = "session"
 	}
-	return s
+
+	// Append a short hash of the original title to guarantee uniqueness.
+	h := sha256.Sum256([]byte(title))
+	return s + "-" + hex.EncodeToString(h[:])[:8]
 }
 
 func (b *HookBackend) Type() string { return "remote" }
