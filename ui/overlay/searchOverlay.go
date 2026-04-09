@@ -163,13 +163,24 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 	}
 
 	maxVisible := 10
-	for i, r := range s.results {
-		if i >= maxVisible {
-			remaining := len(s.results) - maxVisible
-			content += normalStyle.Render(
-				fmt.Sprintf("    ... and %d more", remaining)) + "\n"
-			break
-		}
+
+	// Compute the visible window so it always includes the selected item.
+	startIdx := 0
+	if s.selectedIdx >= maxVisible {
+		startIdx = s.selectedIdx - maxVisible + 1
+	}
+	endIdx := startIdx + maxVisible
+	if endIdx > len(s.results) {
+		endIdx = len(s.results)
+	}
+
+	if startIdx > 0 {
+		content += normalStyle.Render(
+			fmt.Sprintf("    ... %d more above", startIdx)) + "\n"
+	}
+
+	for i := startIdx; i < endIdx; i++ {
+		r := s.results[i]
 
 		// Status indicator
 		var statusStr string
@@ -198,6 +209,12 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 		} else {
 			content += "  " + statusStr + " " + normalStyle.Render("  "+label) + "\n"
 		}
+	}
+
+	if endIdx < len(s.results) {
+		remaining := len(s.results) - endIdx
+		content += normalStyle.Render(
+			fmt.Sprintf("    ... and %d more below", remaining)) + "\n"
 	}
 
 	content += "\n"
