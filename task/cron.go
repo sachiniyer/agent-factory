@@ -213,6 +213,10 @@ func convertDOW(field string) string {
 		if err != nil {
 			return ""
 		}
+		// If all 7 days are covered, omit DOW entirely.
+		if len(expanded) >= 7 {
+			return ""
+		}
 		names := make([]string, len(expanded))
 		for i, v := range expanded {
 			names[i] = dowNames[strconv.Itoa(v)]
@@ -231,11 +235,11 @@ func convertDOW(field string) string {
 	}
 
 	// Handle ranges (e.g. "1-5" → "Mon..Fri")
+	// For ranges starting with 0 (Sunday), expand to comma-separated day names
+	// because systemd requires Day1 < Day2 in weekly order (Mon..Sun), and
+	// Sun..X is invalid.
 	if strings.Contains(field, "-") {
-		idx := strings.Index(field, "-")
-		start := field[:idx]
-		end := field[idx+1:]
-		return fmt.Sprintf("%s..%s", dowNames[start], dowNames[end])
+		return convertSingleDOW(field)
 	}
 
 	// Single value
@@ -243,11 +247,30 @@ func convertDOW(field string) string {
 }
 
 // convertSingleDOW converts a single DOW element (number or range) to a name.
+// For ranges starting with 0 (Sunday), it expands to a comma-separated list
+// because systemd's range syntax requires Day1 < Day2 in weekly order
+// (Mon->Tue->...->Sun), making Sun..X invalid.
 func convertSingleDOW(part string) string {
 	if strings.Contains(part, "-") {
 		idx := strings.Index(part, "-")
 		start := part[:idx]
 		end := part[idx+1:]
+
+		// For ranges starting with Sunday (0), expand to comma-separated names.
+		if start == "0" {
+			endVal, _ := strconv.Atoi(end)
+			// 0-6 or 0-7 covers all 7 days (7 is also Sunday in cron).
+			// Return empty to signal the caller to omit DOW entirely.
+			if endVal >= 6 {
+				return ""
+			}
+			var names []string
+			for i := 0; i <= endVal; i++ {
+				names = append(names, dowNames[strconv.Itoa(i)])
+			}
+			return strings.Join(names, ",")
+		}
+
 		return fmt.Sprintf("%s..%s", dowNames[start], dowNames[end])
 	}
 	return dowNames[part]
