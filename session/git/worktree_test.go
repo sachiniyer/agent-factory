@@ -97,6 +97,51 @@ func TestNewGitWorktree_CollisionSuffix(t *testing.T) {
 		"third worktree should have -3 suffix, got: %s", gw3.GetWorktreePath())
 }
 
+func TestSetupFromExistingBranch_SetsBaseCommitSHA(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	repoRoot := createGitRepo(t)
+
+	// Create an initial commit so HEAD is valid
+	cmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Record the HEAD commit SHA before creating the branch
+	headCmd := exec.Command("git", "-C", repoRoot, "rev-parse", "HEAD")
+	headOut, err := headCmd.Output()
+	require.NoError(t, err)
+	headSHA := strings.TrimSpace(string(headOut))
+
+	// Create a branch manually (simulating a pre-existing branch)
+	cmd = exec.Command("git", "-C", repoRoot, "branch", "test/existing-branch")
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, _, err := NewGitWorktree(repoRoot, "existing-branch")
+	require.NoError(t, err)
+
+	// Setup should detect the existing branch and call setupFromExistingBranch
+	err = gw.Setup()
+	require.NoError(t, err)
+
+	// The base commit SHA should be set (not empty)
+	assert.NotEmpty(t, gw.GetBaseCommitSHA(), "baseCommitSHA should not be empty when reusing an existing branch")
+	assert.Equal(t, headSHA, gw.GetBaseCommitSHA(), "baseCommitSHA should equal the HEAD commit")
+
+	// Clean up
+	require.NoError(t, gw.Cleanup())
+}
+
 func createGitRepo(t *testing.T) string {
 	t.Helper()
 	repoRoot := filepath.Join(t.TempDir(), "repo")
