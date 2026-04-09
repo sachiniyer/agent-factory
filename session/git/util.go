@@ -1,6 +1,7 @@
 package git
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -32,7 +33,20 @@ func sanitizeBranchName(s string) string {
 	// Trim leading and trailing dashes or slashes to avoid issues
 	s = strings.Trim(s, "-/")
 
+	// If the result is empty (e.g., input was only special characters),
+	// generate a fallback branch name to prevent worktree creation failures.
+	if s == "" {
+		s = "session-" + randomHex(4)
+	}
+
 	return s
+}
+
+// randomHex returns a hex string of n random bytes (2n hex characters).
+func randomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
 }
 
 // IsGitRepo checks if the given path is within a git repository

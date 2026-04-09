@@ -1,6 +1,7 @@
 package git
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -51,11 +52,6 @@ func TestSanitizeBranchName(t *testing.T) {
 			expected: "feature/branch",
 		},
 		{
-			name:     "empty string",
-			input:    "",
-			expected: "",
-		},
-		{
 			name:     "complex mixed case with special chars",
 			input:    "USER/Feature Branch!@#$%^&*()/v1.0",
 			expected: "user/feature-branch/v1.0",
@@ -69,5 +65,36 @@ func TestSanitizeBranchName(t *testing.T) {
 				t.Errorf("sanitizeBranchName(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestSanitizeBranchName_FallbackOnEmpty(t *testing.T) {
+	// Inputs that would sanitize to an empty string should get a fallback name.
+	inputs := []string{
+		"",
+		"!@#$%^&*()",
+		"---",
+		"///",
+		"-/-/-/",
+	}
+	for _, input := range inputs {
+		t.Run("input="+input, func(t *testing.T) {
+			got := sanitizeBranchName(input)
+			if got == "" {
+				t.Errorf("sanitizeBranchName(%q) returned empty string, expected fallback name", input)
+			}
+			if !strings.HasPrefix(got, "session-") {
+				t.Errorf("sanitizeBranchName(%q) = %q, expected prefix \"session-\"", input, got)
+			}
+		})
+	}
+}
+
+func TestSanitizeBranchName_FallbackIsUnique(t *testing.T) {
+	// Each call with an empty-producing input should return a unique fallback.
+	a := sanitizeBranchName("")
+	b := sanitizeBranchName("")
+	if a == b {
+		t.Errorf("expected unique fallback names, got %q twice", a)
 	}
 }
