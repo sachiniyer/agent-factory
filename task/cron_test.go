@@ -108,3 +108,36 @@ func TestCronToOnCalendarDOWStepRange(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Mon,Wed,Fri *-*-* 09:00:00", result)
 }
+
+func TestCronToOnCalendarDOWSundayRange01(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 0-1")
+	require.NoError(t, err)
+	assert.Equal(t, "Sun,Mon *-*-* 09:00:00", result)
+}
+
+func TestCronToOnCalendarDOWSundayRange03(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 0-3")
+	require.NoError(t, err)
+	assert.Equal(t, "Sun,Mon,Tue,Wed *-*-* 09:00:00", result)
+}
+
+func TestCronToOnCalendarDOWSundayRange06(t *testing.T) {
+	// 0-6 covers all 7 days, so DOW should be omitted.
+	result, err := CronToOnCalendar("0 9 * * 0-6")
+	require.NoError(t, err)
+	assert.Equal(t, "*-*-* 09:00:00", result)
+}
+
+func TestCronToOnCalendarDOWSundayRange07(t *testing.T) {
+	// 0-7 also covers all days (7 is Sunday in cron), so DOW should be omitted.
+	result, err := CronToOnCalendar("0 9 * * 0-7")
+	require.NoError(t, err)
+	assert.Equal(t, "*-*-* 09:00:00", result)
+}
+
+func TestCronToOnCalendarDOWNonSundayRange(t *testing.T) {
+	// Non-zero-starting ranges should still use .. syntax.
+	result, err := CronToOnCalendar("0 9 * * 2-4")
+	require.NoError(t, err)
+	assert.Equal(t, "Tue..Thu *-*-* 09:00:00", result)
+}
