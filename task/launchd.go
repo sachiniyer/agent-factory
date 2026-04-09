@@ -186,29 +186,68 @@ func cronToCalendarIntervalXML(cronExpr string) (string, error) {
 		expanded = append(expanded, expandedField{key: def.key, vals: vals})
 	}
 
-	// Build cartesian product of all non-wildcard field values.
-	type combo map[string]int
-	combos := []combo{{}}
+	// When both day-of-month (DOM) and day-of-week (DOW) are non-wildcard,
+	// standard cron uses OR semantics: run on matching DOM OR matching DOW.
+	// We handle this by building two separate sets of combos and merging them.
+	domIdx, dowIdx := 2, 4
+	bothDOMandDOW := expanded[domIdx].vals != nil && expanded[dowIdx].vals != nil
 
-	for _, ef := range expanded {
-		if ef.vals == nil {
-			continue // wildcard, omit from dict
-		}
-		var newCombos []combo
-		for _, existing := range combos {
-			for _, val := range ef.vals {
-				c := make(combo)
-				for k, v := range existing {
-					c[k] = v
-				}
-				c[ef.key] = val
-				newCombos = append(newCombos, c)
+	// buildCombos builds the cartesian product of the given expanded fields.
+	type combo map[string]int
+	buildCombos := func(fields []expandedField) ([]combo, error) {
+		result := []combo{{}}
+		for _, ef := range fields {
+			if ef.vals == nil {
+				continue // wildcard, omit from dict
 			}
+			var newResult []combo
+			for _, existing := range result {
+				for _, val := range ef.vals {
+					c := make(combo)
+					for k, v := range existing {
+						c[k] = v
+					}
+					c[ef.key] = val
+					newResult = append(newResult, c)
+				}
+			}
+			if len(newResult) > maxCalendarIntervals {
+				return nil, fmt.Errorf("cron expression %q expands to too many intervals (%d > %d)", cronExpr, len(newResult), maxCalendarIntervals)
+			}
+			result = newResult
 		}
-		if len(newCombos) > maxCalendarIntervals {
-			return "", fmt.Errorf("cron expression %q expands to too many intervals (%d > %d)", cronExpr, len(newCombos), maxCalendarIntervals)
+		return result, nil
+	}
+
+	var combos []combo
+	if bothDOMandDOW {
+		// OR semantics: generate DOM combos (without DOW) and DOW combos (without DOM).
+		domFields := make([]expandedField, len(expanded))
+		copy(domFields, expanded)
+		domFields[dowIdx] = expandedField{key: "Weekday", vals: nil} // exclude DOW
+
+		dowFields := make([]expandedField, len(expanded))
+		copy(dowFields, expanded)
+		dowFields[domIdx] = expandedField{key: "Day", vals: nil} // exclude DOM
+
+		domCombos, err := buildCombos(domFields)
+		if err != nil {
+			return "", err
 		}
-		combos = newCombos
+		dowCombos, err := buildCombos(dowFields)
+		if err != nil {
+			return "", err
+		}
+		combos = append(domCombos, dowCombos...)
+		if len(combos) > maxCalendarIntervals {
+			return "", fmt.Errorf("cron expression %q expands to too many intervals (%d > %d)", cronExpr, len(combos), maxCalendarIntervals)
+		}
+	} else {
+		var err error
+		combos, err = buildCombos(expanded)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	if len(combos) == 0 || (len(combos) == 1 && len(combos[0]) == 0) {
