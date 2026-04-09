@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 var (
@@ -56,10 +58,14 @@ func IsGitRepo(path string) bool {
 }
 
 func findGitRepoRoot(path string) (string, error) {
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
-	out, err := cmd.Output()
+	// Use ResolveMainRepoRoot to resolve through linked worktrees so that
+	// all worktrees of a repository share the same root path. Without this,
+	// running from a linked worktree would return the linked worktree's
+	// path, causing new worktrees to be placed in the wrong directory and
+	// post-worktree hooks to look up the wrong repo config.
+	root, err := config.ResolveMainRepoRoot(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to find Git repository root from path: %s", path)
 	}
-	return strings.TrimSpace(string(out)), nil
+	return root, nil
 }

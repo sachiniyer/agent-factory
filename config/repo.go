@@ -95,6 +95,14 @@ func RepoFromPath(path string) (*RepoContext, error) {
 	return repoContextFromRoot(root), nil
 }
 
+// ResolveMainRepoRoot returns the root of the main working tree for the
+// repository at the given path. If path is inside a linked worktree, this
+// resolves back to the main repository root so that all worktrees of the
+// same repository share a single identity.
+func ResolveMainRepoRoot(path string) (string, error) {
+	return resolveMainRepoRoot("-C", path)
+}
+
 // RepoIDFromRoot computes a repo ID from an absolute repo root path.
 func RepoIDFromRoot(root string) string {
 	hash := sha256.Sum256([]byte(root))

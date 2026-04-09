@@ -80,6 +80,41 @@ func TestResolveMainRepoRoot_Worktree(t *testing.T) {
 	assert.Equal(t, repoFromMain.Root, repoFromWT.Root)
 }
 
+func TestResolveMainRepoRoot_Public(t *testing.T) {
+	// Verify the exported wrapper works the same as the internal function.
+	mainDir := t.TempDir()
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v failed: %s", args, out)
+	}
+
+	run(mainDir, "init")
+	run(mainDir, "config", "user.email", "test@test.com")
+	run(mainDir, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(mainDir, "file.txt"), []byte("hello"), 0644))
+	run(mainDir, "add", ".")
+	run(mainDir, "commit", "-m", "init")
+
+	// Create a linked worktree
+	wtDir := filepath.Join(t.TempDir(), "wt-public")
+	run(mainDir, "worktree", "add", wtDir, "-b", "public-test-branch")
+
+	// ResolveMainRepoRoot from the worktree should return mainDir
+	root, err := ResolveMainRepoRoot(wtDir)
+	require.NoError(t, err)
+	assert.Equal(t, mainDir, root)
+
+	// ResolveMainRepoRoot from the main repo should also return mainDir
+	root, err = ResolveMainRepoRoot(mainDir)
+	require.NoError(t, err)
+	assert.Equal(t, mainDir, root)
+}
+
 func TestRepoIDFromRoot(t *testing.T) {
 	id := RepoIDFromRoot("/some/path")
 	assert.Len(t, id, 12) // 6 bytes = 12 hex chars
