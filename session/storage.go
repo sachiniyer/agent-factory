@@ -93,19 +93,78 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		})
 	}
 
-	// Daemon mode: group by repo and save each group separately
+	// Daemon mode: group in-memory instances by repo.
+	// Use d.Path (always set) rather than d.Worktree.RepoPath (empty for
+	// remote backends) so the grouping key is consistent with knownRepoIDs.
 	grouped := make(map[string][]InstanceData)
 	for _, d := range data {
-		rid := config.RepoIDFromRoot(d.Worktree.RepoPath)
+		rid := config.RepoIDFromRoot(d.Path)
 		grouped[rid] = append(grouped[rid], d)
 	}
-	for rid, group := range grouped {
+
+	// Build a set of ALL in-memory instance titles (including non-started/
+	// non-loading ones) so we can distinguish "killed in daemon" from
+	// "added externally on disk".
+	allInMemoryTitles := make(map[string]bool, len(instances))
+	for _, inst := range instances {
+		allInMemoryTitles[inst.Title] = true
+	}
+
+	// Also collect repo IDs that the daemon knows about so we visit repos
+	// that had all their in-memory instances killed (group would be empty).
+	knownRepoIDs := make(map[string]bool)
+	for _, inst := range instances {
+		rid := config.RepoIDFromRoot(inst.Path)
+		knownRepoIDs[rid] = true
+	}
+
+	// Merge each repo's in-memory state with disk state.
+	for rid := range knownRepoIDs {
+		group := grouped[rid] // may be nil if all instances for this repo were killed
 		path, pathErr := config.RepoInstancesPath(rid)
 		if pathErr != nil {
 			return pathErr
 		}
 		if err := config.WithFileLock(path, func() error {
-			jsonData, err := json.Marshal(group)
+			// Read existing disk state inside the lock.
+			diskJSON := s.state.GetInstances(rid)
+			var diskData []InstanceData
+			if diskJSON != nil && string(diskJSON) != "[]" && string(diskJSON) != "null" {
+				if err := json.Unmarshal(diskJSON, &diskData); err != nil {
+					log.WarningLog.Printf("failed to parse disk instances for repo %s, overwriting: %v", rid, err)
+					diskData = nil
+				}
+			}
+
+			// Build set of in-memory titles for this repo's group for
+			// quick lookup when replacing disk entries.
+			memTitles := make(map[string]bool, len(group))
+			for _, d := range group {
+				memTitles[d.Title] = true
+			}
+
+			// Start with the in-memory instances (they take precedence).
+			merged := make([]InstanceData, 0, len(group)+len(diskData))
+			merged = append(merged, group...)
+
+			// Preserve disk-only instances that were NOT known to the
+			// daemon (i.e. added externally while the daemon was running).
+			for _, dd := range diskData {
+				if memTitles[dd.Title] {
+					// Already covered by the in-memory version.
+					continue
+				}
+				if allInMemoryTitles[dd.Title] {
+					// The daemon knew about this instance but it is no
+					// longer started/loading (e.g. killed). Don't
+					// preserve it.
+					continue
+				}
+				// Externally added instance — keep it.
+				merged = append(merged, dd)
+			}
+
+			jsonData, err := json.Marshal(merged)
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
 			}
@@ -114,6 +173,12 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 			return err
 		}
 	}
+
+	// Handle repos that exist ONLY on disk (no in-memory instances at all).
+	// These repos were never loaded by the daemon, so we must not touch them.
+	// Since we only iterate knownRepoIDs above, disk-only repos are
+	// naturally preserved (we never write to them).
+
 	return nil
 }
 
