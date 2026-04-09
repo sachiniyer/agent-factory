@@ -1,6 +1,7 @@
 package session
 
 import (
+	"path/filepath"
 	"strings"
 )
 
@@ -22,6 +23,17 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// getBaseCommand extracts the lowercase basename of the executable from a
+// program string that may include a full path and arguments.
+// For example, "/home/user/bin/claude --model opus" returns "claude".
+func getBaseCommand(program string) string {
+	parts := strings.Fields(program)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.ToLower(filepath.Base(parts[0]))
+}
+
 // injectSystemPrompt injects Agent Factory instructions into the session.
 //
 // Strategy per tool:
@@ -30,10 +42,10 @@ func shellQuote(s string) string {
 //
 // Returns the (possibly modified) program string.
 func injectSystemPrompt(program, sessionTitle, worktreePath string) string {
-	lower := strings.ToLower(program)
+	base := getBaseCommand(program)
 
 	// Claude Code: --plugin-dir provides slash commands including /af-whoami
-	if strings.Contains(lower, "claude") {
+	if base == "claude" || base == "claude-code" {
 		pluginDir, err := ensurePluginDir()
 		if err != nil {
 			return program
@@ -42,7 +54,7 @@ func injectSystemPrompt(program, sessionTitle, worktreePath string) string {
 	}
 
 	// Codex: -c developer_instructions="..." config override
-	if strings.Contains(lower, "codex") {
+	if base == "codex" {
 		return program + " -c " + shellQuote("developer_instructions="+codexSystemPrompt)
 	}
 
