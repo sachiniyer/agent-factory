@@ -164,24 +164,25 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	err = instance.Start(true)
 	require.NoError(t, err)
 	assert.True(t, instance.Started())
-	assert.Equal(t, "e2e-fix-auth", instance.Branch, "Branch should be set from launch response")
+	expectedSlug := slugify("e2e-fix-auth")
+	assert.Equal(t, expectedSlug, instance.Branch, "Branch should be set from launch response")
 
 	// Verify the remote state file was updated
 	stateData := readStateFile(t, repoDir)
 	require.Len(t, stateData, 1, "state file should have 1 session after launch")
-	assert.Equal(t, "e2e-fix-auth", stateData[0]["name"])
+	assert.Equal(t, expectedSlug, stateData[0]["name"])
 	assert.Equal(t, "running", stateData[0]["status"])
 
 	// --- Step 3: Preview should capture output from attach_cmd PTY ---
 	time.Sleep(500 * time.Millisecond) // Let PTY reader capture output
 	preview, err := instance.Preview()
 	require.NoError(t, err)
-	assert.Contains(t, preview, "Remote Session: e2e-fix-auth", "Preview should contain output from attach.sh")
+	assert.Contains(t, preview, "Remote Session: "+expectedSlug, "Preview should contain output from attach.sh")
 
 	// --- Step 4: PreviewFullHistory should also work ---
 	fullHistory, err := instance.PreviewFullHistory()
 	require.NoError(t, err)
-	assert.Contains(t, fullHistory, "Remote Session: e2e-fix-auth")
+	assert.Contains(t, fullHistory, "Remote Session: "+expectedSlug)
 
 	// --- Step 5: IsAlive should return true (session is in state file with status=running) ---
 	assert.True(t, instance.TmuxAlive(), "TmuxAlive (delegates to IsAlive) should return true")
@@ -207,7 +208,7 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	data := instance.ToInstanceData()
 	assert.Equal(t, "remote", data.BackendType)
 	assert.Equal(t, "e2e-fix-auth", data.Title)
-	assert.Equal(t, "e2e-fix-auth", data.Branch)
+	assert.Equal(t, expectedSlug, data.Branch)
 	assert.NotNil(t, data.RemoteMeta)
 	assert.Equal(t, "running", data.RemoteMeta["status"])
 
@@ -217,7 +218,7 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	var restored InstanceData
 	require.NoError(t, json.Unmarshal(jsonBytes, &restored))
 	assert.Equal(t, "remote", restored.BackendType)
-	assert.Equal(t, "e2e-fix-auth", restored.RemoteMeta["name"])
+	assert.Equal(t, expectedSlug, restored.RemoteMeta["name"])
 
 	// --- Step 11: Kill should call delete_cmd and clean up ---
 	err = instance.Kill()
@@ -263,7 +264,7 @@ func TestE2ERemoteHooksMultipleSessions(t *testing.T) {
 	// State file should have only session-beta.
 	stateData = readStateFile(t, repoDir)
 	require.Len(t, stateData, 1)
-	assert.Equal(t, "session-beta", stateData[0]["name"])
+	assert.Equal(t, slugify("session-beta"), stateData[0]["name"])
 
 	// session-alpha should no longer be alive, session-beta should be.
 	assert.False(t, inst1.TmuxAlive())
