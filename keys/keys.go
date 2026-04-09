@@ -19,7 +19,7 @@ const (
 	KeySubmitName // SubmitName is a special keybinding for submitting the name of a new instance.
 
 	KeyNewRemote // Key for creating a new remote instance
-	KeyHelp   // Key for showing help screen
+	KeyHelp      // Key for showing help screen
 
 	// Diff keybindings
 	KeyShiftUp
