@@ -34,6 +34,7 @@ gofmt -l .   # should produce no output
 - `main.go` — entry point, CLI commands via Cobra
 - `app/` — main TUI application (bubbletea)
 - `ui/` — terminal UI components (sidebar, overlays, panes)
+- `keys/` — key binding definitions
 - `session/` — session management, backend, plugins
 - `session/git/` — git worktree operations, GitHub integration
 - `session/tmux/` — tmux PTY integration
@@ -43,6 +44,8 @@ gofmt -l .   # should produce no output
 - `daemon/` — background daemon for autoyes mode
 - `cmd/` — CLI command utilities
 - `log/` — logging
+- `docs/` — documentation (remote hooks, etc.)
+- `examples/` — example configurations
 
 ## Conventions
 
