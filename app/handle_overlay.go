@@ -2,9 +2,12 @@ package app
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
@@ -20,11 +23,12 @@ func (m *home) handleStateSelectWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			wt := m.availableWorktrees[idx]
 			m.selectedWorktree = &wt
 			m.selectionOverlay = nil
+			m.pendingProgram = m.program
 
 			instance, err := session.NewInstance(session.InstanceOptions{
 				Title:   "",
 				Path:    ".",
-				Program: m.program,
+				Program: m.pendingProgram,
 			})
 			if err != nil {
 				m.selectedWorktree = nil
@@ -46,6 +50,30 @@ func (m *home) handleStateSelectWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.availableWorktrees = nil
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
+		return m, nil
+	}
+	return m, nil
+}
+
+// handleStateSelectProgram handles key events during program selection.
+func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	shouldClose := m.selectionOverlay.HandleKeyPress(msg)
+	if shouldClose {
+		if m.selectionOverlay.IsSubmitted() {
+			idx := m.selectionOverlay.GetSelectedIndex()
+			selected := tmux.SupportedPrograms[idx]
+			// If the user re-selected the program matching the default (which may
+			// contain flags like --dangerously-skip-permissions), keep the full
+			// default string. Otherwise use the bare program name.
+			if strings.Contains(strings.ToLower(m.program), selected) {
+				m.pendingProgram = m.program
+			} else {
+				m.pendingProgram = selected
+			}
+		}
+		m.selectionOverlay = nil
+		m.state = stateNew
+		m.menu.SetState(ui.StateNewInstance)
 		return m, nil
 	}
 	return m, nil

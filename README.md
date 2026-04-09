@@ -1,6 +1,6 @@
 # Agent Factory
 
-A terminal UI that manages multiple AI coding agents (Claude Code, Aider, Codex, Amp) in separate git worktrees. Each agent runs in its own isolated workspace with full git integration, automated tasks, and a programmatic API for orchestration.
+A terminal UI that manages multiple AI coding agents (Claude Code, Aider, Codex, Gemini) in separate git worktrees. Each agent runs in its own isolated workspace with full git integration, automated tasks, and a programmatic API for orchestration.
 
 Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, programmatic API, and automated tasks.
 

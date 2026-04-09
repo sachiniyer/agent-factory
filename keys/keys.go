@@ -36,6 +36,8 @@ const (
 	KeyCopyPR // Key for copying PR URL to clipboard
 	KeyHooks  // Key for editing post-worktree hooks
 
+	KeyChangeProgram // Key for changing the program during new instance naming
+
 	// Sidebar navigation
 	KeyLeft        // Collapse section / move to parent
 	KeyRight       // Expand section
@@ -180,5 +182,9 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	KeySubmitName: key.NewBinding(
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "submit name"),
+	),
+	KeyChangeProgram: key.NewBinding(
+		key.WithKeys("tab"),
+		key.WithHelp("tab", "change program"),
 	),
 }

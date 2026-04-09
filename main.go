@@ -29,7 +29,7 @@ var (
 	daemonFlag  bool
 	rootCmd     = &cobra.Command{
 		Use:   "af",
-		Short: "Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, and Amp.",
+		Short: "Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, and Gemini.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			log.Initialize(daemonFlag)
