@@ -107,6 +107,73 @@ func TestInjectSystemPrompt_UnknownProgram(t *testing.T) {
 	}
 }
 
+func TestInjectSystemPrompt_PathContainingClaude(t *testing.T) {
+	dir := t.TempDir()
+	// A tool whose path contains "claude" but is not actually claude
+	result := injectSystemPrompt("/home/claude-user/bin/mytool", "test-session", dir)
+
+	if result != "/home/claude-user/bin/mytool" {
+		t.Errorf("expected program unchanged when path contains 'claude' but exe is not claude, got %q", result)
+	}
+}
+
+func TestInjectSystemPrompt_PathContainingCodex(t *testing.T) {
+	dir := t.TempDir()
+	// A tool whose path contains "codex" but is not actually codex
+	result := injectSystemPrompt("/home/user/codex-projects/aider", "test-session", dir)
+
+	if result != "/home/user/codex-projects/aider" {
+		t.Errorf("expected program unchanged when path contains 'codex' but exe is not codex, got %q", result)
+	}
+}
+
+func TestInjectSystemPrompt_ClaudeFullPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	result := injectSystemPrompt("/usr/local/bin/claude --model opus", "test-session", dir)
+
+	if !strings.Contains(result, "--plugin-dir") {
+		t.Errorf("expected --plugin-dir flag for full-path claude, got %q", result)
+	}
+	if !strings.HasPrefix(result, "/usr/local/bin/claude --model opus") {
+		t.Errorf("expected original args preserved, got %q", result)
+	}
+}
+
+func TestInjectSystemPrompt_ClaudeCode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	result := injectSystemPrompt("claude-code", "test-session", dir)
+
+	if !strings.Contains(result, "--plugin-dir") {
+		t.Errorf("expected --plugin-dir flag for claude-code, got %q", result)
+	}
+}
+
+func TestGetBaseCommand(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"claude", "claude"},
+		{"claude --model opus", "claude"},
+		{"/usr/local/bin/claude", "claude"},
+		{"/home/user/claude-projects/aider", "aider"},
+		{"codex --full-auto", "codex"},
+		{"/usr/bin/codex", "codex"},
+		{"", ""},
+		{"Claude", "claude"},
+	}
+	for _, tt := range tests {
+		got := getBaseCommand(tt.input)
+		if got != tt.expected {
+			t.Errorf("getBaseCommand(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
 func TestEnsurePluginDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
