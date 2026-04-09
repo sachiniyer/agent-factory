@@ -27,6 +27,9 @@ func GetConfigDir() (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("failed to expand home directory: %w", err)
 			}
+			if envDir == "~" {
+				return homeDir, nil
+			}
 			envDir = filepath.Join(homeDir, envDir[2:])
 		}
 		return envDir, nil
