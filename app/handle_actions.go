@@ -159,6 +159,7 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 			if inst.Title == selectedTitle {
 				if err := inst.Kill(); err != nil {
 					log.ErrorLog.Printf("could not kill instance: %v", err)
+					return fmt.Errorf("failed to kill session '%s': %w", selectedTitle, err)
 				}
 				break
 			}

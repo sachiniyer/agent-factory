@@ -246,16 +246,18 @@ func (l *List) Down() {
 	}
 }
 
-// Kill selects the next item in the list.
-func (l *List) Kill() {
+// Kill kills the selected instance and removes it from the list. It returns
+// an error if the underlying kill fails, in which case the instance is NOT
+// removed so the user can retry.
+func (l *List) Kill() error {
 	if len(l.items) == 0 {
-		return
+		return nil
 	}
 	targetInstance := l.items[l.selectedIdx]
 
 	// Kill the tmux session
 	if err := targetInstance.Kill(); err != nil {
-		log.ErrorLog.Printf("could not kill instance: %v", err)
+		return fmt.Errorf("could not kill instance: %w", err)
 	}
 
 	// If you delete the last one in the list, select the previous one.
@@ -273,6 +275,7 @@ func (l *List) Kill() {
 
 	// Since there's items after this, the selectedIdx can stay the same.
 	l.items = append(l.items[:l.selectedIdx], l.items[l.selectedIdx+1:]...)
+	return nil
 }
 
 func (l *List) Attach() (chan struct{}, error) {

@@ -267,19 +267,21 @@ func (s *Sidebar) AddInstance(instance *session.Instance) (finalize func()) {
 	}
 }
 
-// Kill kills the selected instance.
-func (s *Sidebar) Kill() {
+// Kill kills the selected instance. It returns an error if the underlying
+// kill fails, in which case the instance is NOT removed from the sidebar
+// so the user can retry.
+func (s *Sidebar) Kill() error {
 	sel := s.GetSelection()
 	if sel.Kind != SectionInstances || sel.IsHeader {
-		return
+		return nil
 	}
 	idx := sel.ItemIndex
 	if idx < 0 || idx >= len(s.instances) {
-		return
+		return nil
 	}
 	target := s.instances[idx]
 	if err := target.Kill(); err != nil {
-		log.ErrorLog.Printf("could not kill instance: %v", err)
+		return fmt.Errorf("could not kill instance: %w", err)
 	}
 	repoName, err := target.RepoName()
 	if err != nil {
@@ -289,6 +291,7 @@ func (s *Sidebar) Kill() {
 	}
 	s.instances = append(s.instances[:idx], s.instances[idx+1:]...)
 	s.rebuildVisibleItems()
+	return nil
 }
 
 // Attach attaches to the selected instance.

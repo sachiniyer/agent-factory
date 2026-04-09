@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 
@@ -16,7 +17,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.namingInstance = nil
 		m.selectedWorktree = nil
 		m.availableWorktrees = nil
-		m.sidebar.Kill()
+		if err := m.sidebar.Kill(); err != nil {
+			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
+		}
 		return m, tea.Sequence(
 			tea.WindowSize(),
 			func() tea.Msg {
@@ -81,7 +84,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(err)
 		}
 	case tea.KeyEsc:
-		m.sidebar.Kill()
+		if err := m.sidebar.Kill(); err != nil {
+			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
+		}
 		m.namingInstance = nil
 		m.state = stateDefault
 		m.selectedWorktree = nil

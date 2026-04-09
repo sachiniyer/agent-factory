@@ -324,7 +324,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sidebar.SelectInstance(msg.instance)
 
 		if msg.err != nil {
-			m.sidebar.Kill()
+			if killErr := m.sidebar.Kill(); killErr != nil {
+				log.ErrorLog.Printf("failed to clean up instance after start failure: %v", killErr)
+			}
 
 			// Save to disk to remove the pre-saved instance entry.
 			if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
