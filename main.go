@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
 	"github.com/sachiniyer/agent-factory/api"
 	"github.com/sachiniyer/agent-factory/app"
 	cmdutil "github.com/sachiniyer/agent-factory/cmd"
@@ -14,8 +18,6 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -185,6 +187,6 @@ func init() {
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		os.Exit(1)
 	}
 }
