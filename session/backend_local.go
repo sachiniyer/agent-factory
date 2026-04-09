@@ -127,24 +127,39 @@ func (b *LocalBackend) Kill(i *Instance) error {
 }
 
 func (b *LocalBackend) Preview(i *Instance) (string, error) {
-	if !i.started {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s || ts == nil {
 		return "", nil
 	}
-	return i.tmuxSession.CapturePaneContent()
+	return ts.CapturePaneContent()
 }
 
 func (b *LocalBackend) PreviewFullHistory(i *Instance) (string, error) {
-	if !i.started {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s || ts == nil {
 		return "", nil
 	}
-	return i.tmuxSession.CapturePaneContentWithOptions("-", "-")
+	return ts.CapturePaneContentWithOptions("-", "-")
 }
 
 func (b *LocalBackend) Attach(i *Instance) (chan struct{}, error) {
-	if !i.started {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s || ts == nil {
 		return nil, fmt.Errorf("cannot attach instance that has not been started")
 	}
-	return i.tmuxSession.Attach()
+	return ts.Attach()
 }
 
 func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool) {
@@ -199,10 +214,15 @@ func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
 }
 
 func (b *LocalBackend) SetPreviewSize(i *Instance, width, height int) error {
-	if !i.started {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s || ts == nil {
 		return fmt.Errorf("cannot set preview size for instance that has not been started")
 	}
-	return i.tmuxSession.SetDetachedSize(width, height)
+	return ts.SetDetachedSize(width, height)
 }
 
 func (b *LocalBackend) IsAlive(i *Instance) bool {

@@ -147,7 +147,11 @@ func (b *HookBackend) PreviewFullHistory(i *Instance) (string, error) {
 }
 
 func (b *HookBackend) Attach(i *Instance) (chan struct{}, error) {
-	if !i.started {
+	i.mu.RLock()
+	s := i.started
+	i.mu.RUnlock()
+
+	if !s {
 		return nil, fmt.Errorf("cannot attach instance that has not been started")
 	}
 
