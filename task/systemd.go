@@ -26,6 +26,22 @@ func getSystemdUserDir() (string, error) {
 	return dir, nil
 }
 
+// generateServiceContent builds the systemd service unit file content.
+func generateServiceContent(unitName, execPath, taskID, projectPath, pathEnv, homeEnv, shellEnv, termEnv string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Agent Factory task %s
+
+[Service]
+Type=oneshot
+ExecStart="%s" task run %s
+Environment="PATH=%s"
+Environment="HOME=%s"
+Environment="SHELL=%s"
+Environment="TERM=%s"
+WorkingDirectory="%s"
+`, unitName, execPath, taskID, pathEnv, homeEnv, shellEnv, termEnv, projectPath)
+}
+
 func InstallScheduler(t Task) error {
 	unitName := getUnitName(t)
 
@@ -47,18 +63,7 @@ func InstallScheduler(t Task) error {
 		termEnv = "xterm-256color"
 	}
 
-	serviceContent := fmt.Sprintf(`[Unit]
-Description=Agent Factory task %s
-
-[Service]
-Type=oneshot
-ExecStart=%s task run %s
-Environment="PATH=%s"
-Environment="HOME=%s"
-Environment="SHELL=%s"
-Environment="TERM=%s"
-WorkingDirectory=%s
-`, unitName, execPath, t.ID, pathEnv, homeEnv, shellEnv, termEnv, t.ProjectPath)
+	serviceContent := generateServiceContent(unitName, execPath, t.ID, t.ProjectPath, pathEnv, homeEnv, shellEnv, termEnv)
 
 	servicePath := filepath.Join(dir, unitName+".service")
 	if err := os.WriteFile(servicePath, []byte(serviceContent), 0644); err != nil {
