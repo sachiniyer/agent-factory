@@ -151,11 +151,16 @@ func (m *home) refreshExternalInstances() bool {
 
 	// Remove instances that exist in sidebar but not on disk.
 	// Skip instances with Loading status (TUI is currently creating them).
+	// Collect removals first to avoid modifying the slice during iteration.
+	var toRemove []*session.Instance
 	for _, inst := range m.sidebar.GetInstances() {
 		if !diskTitles[inst.Title] && inst.Status != session.Loading {
-			m.sidebar.RemoveInstanceByTitle(inst.Title)
-			changed = true
+			toRemove = append(toRemove, inst)
 		}
+	}
+	for _, inst := range toRemove {
+		m.sidebar.RemoveInstanceByTitle(inst.Title)
+		changed = true
 	}
 
 	return changed
