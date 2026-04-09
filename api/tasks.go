@@ -217,17 +217,33 @@ var tasksUpdateCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("--enabled must be 'true' or 'false'"))
 		}
 
-		if err := task.UpdateTask(*s); err != nil {
-			return jsonError(fmt.Errorf("failed to update task: %w", err))
-		}
-
+		// When the cron expression changes, install the new scheduler
+		// *before* persisting the update so that a failed install doesn't
+		// leave the task unscheduled (fixes #160).
 		if cronChanged {
-			if err := task.RemoveScheduler(*s); err != nil {
-				log.ErrorLog.Printf("failed to remove old scheduler: %v", err)
+			oldCron := ""
+			if old, err := task.GetTask(s.ID); err == nil {
+				oldCron = old.CronExpr
 			}
+
+			// Install the new scheduler (overwrites existing unit/plist
+			// because the scheduler key is the task ID).
 			if err := task.InstallScheduler(*s); err != nil {
+				// Installation failed — attempt to re-install the old
+				// scheduler so the task doesn't end up unscheduled.
+				if oldCron != "" {
+					rollback := *s
+					rollback.CronExpr = oldCron
+					if rbErr := task.InstallScheduler(rollback); rbErr != nil {
+						log.ErrorLog.Printf("failed to rollback scheduler to old cron %q: %v", oldCron, rbErr)
+					}
+				}
 				return jsonError(fmt.Errorf("failed to reinstall scheduler: %w", err))
 			}
+		}
+
+		if err := task.UpdateTask(*s); err != nil {
+			return jsonError(fmt.Errorf("failed to update task: %w", err))
 		}
 
 		return jsonOut(s)
