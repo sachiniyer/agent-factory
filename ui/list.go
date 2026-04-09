@@ -253,6 +253,10 @@ func (l *List) Kill() {
 	}
 	targetInstance := l.items[l.selectedIdx]
 
+	// Capture repo name before Kill(), because Kill() sets started=false
+	// which causes RepoName() to fail.
+	repoName, repoErr := targetInstance.RepoName()
+
 	// Kill the tmux session
 	if err := targetInstance.Kill(); err != nil {
 		log.ErrorLog.Printf("could not kill instance: %v", err)
@@ -264,9 +268,8 @@ func (l *List) Kill() {
 	}
 
 	// Unregister the reponame.
-	repoName, err := targetInstance.RepoName()
-	if err != nil {
-		log.ErrorLog.Printf("could not get repo name: %v", err)
+	if repoErr != nil {
+		log.ErrorLog.Printf("could not get repo name: %v", repoErr)
 	} else {
 		l.rmRepo(repoName)
 	}

@@ -278,12 +278,14 @@ func (s *Sidebar) Kill() {
 		return
 	}
 	target := s.instances[idx]
+	// Capture repo name before Kill(), because Kill() sets started=false
+	// which causes RepoName() to fail.
+	repoName, repoErr := target.RepoName()
 	if err := target.Kill(); err != nil {
 		log.ErrorLog.Printf("could not kill instance: %v", err)
 	}
-	repoName, err := target.RepoName()
-	if err != nil {
-		log.ErrorLog.Printf("could not get repo name: %v", err)
+	if repoErr != nil {
+		log.ErrorLog.Printf("could not get repo name: %v", repoErr)
 	} else {
 		s.rmRepo(repoName)
 	}
@@ -352,11 +354,17 @@ func (s *Sidebar) GetInstanceTitles() map[string]bool {
 
 // RemoveInstanceByTitle removes an instance from the sidebar by title without
 // killing it (the external process already cleaned up tmux/worktree).
+// Note: the instance may already have been killed (started=false), so we fall
+// back to looking up the repo name from the gitWorktree directly.
 func (s *Sidebar) RemoveInstanceByTitle(title string) bool {
 	for i, inst := range s.instances {
 		if inst.Title == title {
 			repoName, err := inst.RepoName()
 			if err != nil {
+				// If RepoName() fails (e.g. instance already killed/not started),
+				// try to find and remove the repo by scanning remaining instances.
+				// We cannot decrement the repo count without the name, so log and
+				// continue — the repo map will be corrected on next full rebuild.
 				log.ErrorLog.Printf("could not get repo name: %v", err)
 			} else {
 				s.rmRepo(repoName)
