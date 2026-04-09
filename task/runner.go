@@ -132,7 +132,6 @@ func RunTask(taskID string) error {
 		return fmt.Errorf("failed to open lock file: %w", err)
 	}
 	defer lockFile.Close()
-	defer os.Remove(lockPath)
 
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return fmt.Errorf("another run is already active for task %s", taskID)
