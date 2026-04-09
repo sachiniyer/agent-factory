@@ -34,6 +34,13 @@ var globalLogFile *os.File
 // the user config directory.
 
 func Initialize(daemon bool) {
+	// Close any previously opened log file to avoid leaking file descriptors
+	// when Initialize is called multiple times (e.g. af tasks trigger -> RunTask).
+	if globalLogFile != nil {
+		_ = globalLogFile.Close()
+		globalLogFile = nil
+	}
+
 	f, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not open log file %s: %v, logging to stderr\n", logFileName, err)
