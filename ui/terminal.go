@@ -152,7 +152,7 @@ func (t *TerminalPane) ensureSessionLocked(instance *session.Instance) error {
 	}
 
 	termName := "term_" + instance.Title
-	ts := tmux.NewTmuxSession(termName, shell)
+	ts := tmux.NewTmuxSessionForRepo(termName, worktreePath, shell)
 
 	// Check if session already exists (e.g. from a previous run)
 	if ts.DoesSessionExist() {
@@ -161,7 +161,7 @@ func (t *TerminalPane) ensureSessionLocked(instance *session.Instance) error {
 			if closeErr := ts.Close(); closeErr != nil {
 				log.ErrorLog.Printf("terminal pane: failed to close stale session %s: %v", termName, closeErr)
 			}
-			ts = tmux.NewTmuxSession(termName, shell)
+			ts = tmux.NewTmuxSessionForRepo(termName, worktreePath, shell)
 			if err := ts.Start(worktreePath); err != nil {
 				return fmt.Errorf("terminal pane: failed to start session: %w", err)
 			}
