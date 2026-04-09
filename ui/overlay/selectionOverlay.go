@@ -62,6 +62,13 @@ func (s *SelectionOverlay) IsCanceled() bool {
 	return s.canceled
 }
 
+// SetSelectedIndex sets the initially selected item index
+func (s *SelectionOverlay) SetSelectedIndex(idx int) {
+	if idx >= 0 && idx < len(s.items) {
+		s.selectedIdx = idx
+	}
+}
+
 // SetWidth sets the width of the selection overlay
 func (s *SelectionOverlay) SetWidth(width int) {
 	s.width = width

@@ -49,6 +49,8 @@ const (
 	stateSelectWorktree
 	// stateSearch is the state when the user is searching sessions.
 	stateSearch
+	// stateSelectProgram is the state when the user is selecting a program during naming.
+	stateSelectProgram
 )
 
 type home struct {
@@ -107,6 +109,8 @@ type home struct {
 	selectedWorktree *git.WorktreeInfo
 	// availableWorktrees stores the worktrees shown in the selection overlay
 	availableWorktrees []git.WorktreeInfo
+	// pendingProgram tracks the program selected during new instance naming
+	pendingProgram string
 }
 
 func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
@@ -564,6 +568,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateConfirm(msg)
 	case stateSearch:
 		return m.handleStateSearch(msg)
+	case stateSelectProgram:
+		return m.handleStateSelectProgram(msg)
 	}
 
 	// Route keys to content pane if it has focus (e.g., editing tasks/hooks)
@@ -815,6 +821,11 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("search overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.searchOverlay.Render(), mainView, true)
+	} else if m.state == stateSelectProgram {
+		if m.selectionOverlay == nil {
+			log.ErrorLog.Printf("selection overlay is nil")
+		}
+		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
 	}
 
 	return mainView

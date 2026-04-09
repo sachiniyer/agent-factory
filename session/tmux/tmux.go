@@ -21,9 +21,12 @@ import (
 )
 
 const ProgramClaude = "claude"
-
+const ProgramCodex = "codex"
 const ProgramAider = "aider"
 const ProgramGemini = "gemini"
+
+// SupportedPrograms is the canonical list of known agent programs.
+var SupportedPrograms = []string{ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini}
 
 // TmuxSession represents a managed tmux session
 type TmuxSession struct {

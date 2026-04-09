@@ -61,7 +61,7 @@ type Menu struct {
 }
 
 var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeyAttach, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
-var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName}
+var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName, keys.KeyChangeProgram}
 
 func NewMenu() *Menu {
 	m := &Menu{

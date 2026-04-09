@@ -2,9 +2,13 @@ package app
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-runewidth"
@@ -39,6 +43,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(fmt.Errorf("title cannot be empty"))
 		}
 
+		// Apply the program selected during naming
+		instance.Program = m.pendingProgram
 		instance.SetStatus(session.Loading)
 		m.newInstanceFinalizer()
 		m.namingInstance = nil
@@ -64,6 +70,21 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
+	case tea.KeyTab:
+		// Open program selection overlay
+		items := make([]string, len(tmux.SupportedPrograms))
+		selectedIdx := 0
+		for i, p := range tmux.SupportedPrograms {
+			items[i] = p
+			if strings.Contains(strings.ToLower(m.pendingProgram), p) {
+				selectedIdx = i
+			}
+		}
+		m.selectionOverlay = overlay.NewSelectionOverlay("Select Program", items)
+		m.selectionOverlay.SetWidth(40)
+		m.selectionOverlay.SetSelectedIndex(selectedIdx)
+		m.state = stateSelectProgram
+		return m, nil
 	case tea.KeyRunes:
 		if runewidth.StringWidth(instance.Title) >= 32 {
 			return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
@@ -108,10 +129,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // startNewInstance creates a new instance and enters stateNew for naming.
 // If remote is true, the instance is forced to use the remote hook backend.
 func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
+	m.pendingProgram = m.program
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:       "",
 		Path:        ".",
-		Program:     m.program,
+		Program:     m.pendingProgram,
 		ForceRemote: remote,
 	})
 	if err != nil {
