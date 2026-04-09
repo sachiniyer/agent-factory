@@ -149,7 +149,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	} else {
 		instance.backend = &LocalBackend{}
 
-		instance.gitWorktree = git.NewGitWorktreeFromStorage(
+		gw, err := git.NewGitWorktreeFromStorage(
 			data.Worktree.RepoPath,
 			data.Worktree.WorktreePath,
 			data.Worktree.SessionName,
@@ -157,6 +157,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			data.Worktree.BaseCommitSHA,
 			data.Worktree.ExternalWorktree,
 		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to restore git worktree: %w", err)
+		}
+		instance.gitWorktree = gw
 
 		// Pre-set the tmux session with the correct name for backward compat.
 		// If TmuxName was persisted, use it exactly; otherwise fall back to

@@ -142,6 +142,47 @@ func TestSetupFromExistingBranch_SetsBaseCommitSHA(t *testing.T) {
 	require.NoError(t, gw.Cleanup())
 }
 
+func TestNewGitWorktreeFromStorage_EmptyWorktreePath(t *testing.T) {
+	_, err := NewGitWorktreeFromStorage("/some/repo", "", "session", "branch", "abc123", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "worktree path is empty")
+}
+
+func TestNewGitWorktreeFromStorage_EmptyRepoPath(t *testing.T) {
+	_, err := NewGitWorktreeFromStorage("", "/some/worktree", "session", "branch", "abc123", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repo path is empty")
+}
+
+func TestNewGitWorktreeFromStorage_ValidPaths(t *testing.T) {
+	gw, err := NewGitWorktreeFromStorage("/some/repo", "/some/worktree", "session", "branch", "abc123", false)
+	require.NoError(t, err)
+	assert.Equal(t, "/some/repo", gw.GetRepoPath())
+	assert.Equal(t, "/some/worktree", gw.GetWorktreePath())
+	assert.Equal(t, "branch", gw.GetBranchName())
+	assert.Equal(t, "abc123", gw.GetBaseCommitSHA())
+}
+
+func TestCleanup_EmptyRepoPath(t *testing.T) {
+	gw, err := NewGitWorktreeFromStorage("/some/repo", "/some/worktree", "session", "branch", "abc123", false)
+	require.NoError(t, err)
+	// Simulate a corrupted state by zeroing out repoPath
+	gw.repoPath = ""
+	err = gw.Cleanup()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repo path is empty")
+}
+
+func TestCleanup_EmptyWorktreePath(t *testing.T) {
+	gw, err := NewGitWorktreeFromStorage("/some/repo", "/some/worktree", "session", "branch", "abc123", false)
+	require.NoError(t, err)
+	// Simulate a corrupted state by zeroing out worktreePath
+	gw.worktreePath = ""
+	err = gw.Cleanup()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "worktree path is empty")
+}
+
 func createGitRepo(t *testing.T) string {
 	t.Helper()
 	repoRoot := filepath.Join(t.TempDir(), "repo")
