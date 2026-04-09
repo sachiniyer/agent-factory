@@ -136,6 +136,15 @@ func (g *GitWorktree) Cleanup() error {
 		return nil
 	}
 
+	// Guard against empty paths that would cause git commands to fail or
+	// operate on unintended directories.
+	if g.repoPath == "" {
+		return fmt.Errorf("cannot clean up worktree: repo path is empty")
+	}
+	if g.worktreePath == "" {
+		return fmt.Errorf("cannot clean up worktree: worktree path is empty")
+	}
+
 	var errs []error
 
 	// Check if worktree path exists before attempting removal

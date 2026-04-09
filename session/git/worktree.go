@@ -62,7 +62,13 @@ func (g *GitWorktree) IsExternalWorktree() bool {
 	return g.externalWorktree
 }
 
-func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName string, branchName string, baseCommitSHA string, externalWorktree bool) *GitWorktree {
+func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName string, branchName string, baseCommitSHA string, externalWorktree bool) (*GitWorktree, error) {
+	if worktreePath == "" {
+		return nil, fmt.Errorf("worktree path is empty")
+	}
+	if repoPath == "" {
+		return nil, fmt.Errorf("repo path is empty")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &GitWorktree{
 		repoPath:         repoPath,
@@ -74,7 +80,7 @@ func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName
 		externalWorktree: externalWorktree,
 		hooksCtx:         ctx,
 		hooksCancel:      cancel,
-	}
+	}, nil
 }
 
 // NewGitWorktree creates a new GitWorktree instance
