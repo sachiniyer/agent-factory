@@ -408,6 +408,13 @@ func (t *TmuxSession) DetachSafely() error {
 
 	var errs []error
 
+	// Cancel context FIRST so the io.Copy goroutine in Attach() sees a normal
+	// detach rather than an abnormal termination (same race fix as Detach).
+	if t.cancel != nil {
+		t.cancel()
+		t.cancel = nil
+	}
+
 	// Close the attached pty session.
 	if t.ptmx != nil {
 		if err := t.ptmx.Close(); err != nil {
@@ -420,11 +427,6 @@ func (t *TmuxSession) DetachSafely() error {
 	if t.attachCh != nil {
 		close(t.attachCh)
 		t.attachCh = nil
-	}
-
-	if t.cancel != nil {
-		t.cancel()
-		t.cancel = nil
 	}
 
 	if t.wg != nil {
@@ -451,23 +453,25 @@ func (t *TmuxSession) Detach() {
 		t.wg = nil
 	}()
 
+	// Cancel context FIRST so the io.Copy goroutine in Attach() sees a normal
+	// detach rather than an abnormal termination. Without this, closing the PTY
+	// can wake the goroutine before cancel() runs, causing a spurious
+	// "Session terminated without detaching" warning.
+	t.cancel()
+
 	// Close the attached pty session.
 	if err := t.ptmx.Close(); err != nil {
 		log.ErrorLog.Printf("error closing attach pty session: %v", err)
-		// Still attempt cleanup — cancel goroutines and return.
-		t.cancel()
 		t.wg.Wait()
 		return
 	}
 
-	// Attach goroutines should die on EOF due to the ptmx closing. Call
+	// Attach goroutines should die due to the ptmx closing. Call
 	// t.Restore to set a new t.ptmx.
 	if err := t.Restore(); err != nil {
 		log.ErrorLog.Printf("error restoring pty after detach: %v", err)
 	}
 
-	// Cancel goroutines created by Attach.
-	t.cancel()
 	t.wg.Wait()
 }
 
