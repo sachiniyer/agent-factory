@@ -8,13 +8,6 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/build.yml'
-  pull_request:
-    branches: [ master ]
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/build.yml'
 
 jobs:
   build:

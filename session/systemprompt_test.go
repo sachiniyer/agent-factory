@@ -164,4 +164,3 @@ func TestEnsurePluginDir_Idempotent(t *testing.T) {
 		t.Errorf("expected same dir on repeated calls, got %q and %q", dir1, dir2)
 	}
 }
-
