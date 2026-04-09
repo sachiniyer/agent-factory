@@ -118,6 +118,7 @@ var sessionsCreateCmd = &cobra.Command{
 		}
 
 		if err := task.StartAndSendPrompt(instance, createPromptFlag); err != nil {
+			instance.Kill() // Clean up tmux session and git worktree
 			return jsonError(fmt.Errorf("failed to start instance: %w", err))
 		}
 		instance.SetStatus(session.Running)
@@ -199,6 +200,7 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 			}
 
 			if err := task.StartAndSendPrompt(instance, ""); err != nil {
+				instance.Kill() // Clean up tmux session and git worktree
 				return jsonError(fmt.Errorf("failed to start instance: %w", err))
 			}
 			instance.SetStatus(session.Running)
