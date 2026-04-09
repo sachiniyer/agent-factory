@@ -145,11 +145,27 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Capture the title at confirmation time so that background tick events
+	// cannot change which instance we operate on.
+	selectedTitle := selected.Title
+
 	tw := m.contentPane.TabbedWindow()
 	killAction := func() tea.Msg {
-		tw.CleanupTerminalForInstance(selected.Title)
-		m.sidebar.Kill()
-		if err := m.storage.DeleteInstance(selected.Title); err != nil {
+		tw.CleanupTerminalForInstance(selectedTitle)
+
+		// Find and kill by title, not by current selection index, to avoid
+		// destroying the wrong worktree if the sidebar order changed.
+		for _, inst := range m.sidebar.GetInstances() {
+			if inst.Title == selectedTitle {
+				if err := inst.Kill(); err != nil {
+					log.ErrorLog.Printf("could not kill instance: %v", err)
+				}
+				break
+			}
+		}
+		m.sidebar.RemoveInstanceByTitle(selectedTitle)
+
+		if err := m.storage.DeleteInstance(selectedTitle); err != nil {
 			log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
 		}
 
@@ -168,9 +184,9 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	message := fmt.Sprintf("[!] Kill session '%s'?", selected.Title)
+	message := fmt.Sprintf("[!] Kill session '%s'?", selectedTitle)
 	if hasChanges {
-		message = fmt.Sprintf("[!] Kill session '%s'?\n\nWARNING: This worktree has uncommitted changes that will be lost!", selected.Title)
+		message = fmt.Sprintf("[!] Kill session '%s'?\n\nWARNING: This worktree has uncommitted changes that will be lost!", selectedTitle)
 	}
 	return m, m.confirmAction(message, killAction)
 }
