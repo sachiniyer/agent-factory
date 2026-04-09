@@ -160,7 +160,7 @@ func TestDaemonSaveMergesCorrectly(t *testing.T) {
 
 	// Daemon memory: A (started, updated), C (killed).
 	instanceA := makeInstance("instance-A", repoPath, true)
-	instanceA.Branch = "new-branch-a" // updated in memory
+	instanceA.Branch = "new-branch-a"                        // updated in memory
 	instanceC := makeInstance("instance-C", repoPath, false) // killed
 
 	storage, err := NewStorage(ms, "")
