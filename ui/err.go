@@ -44,7 +44,15 @@ func (e *ErrBox) String() string {
 		lines := strings.Split(err, "\n")
 		err = strings.Join(lines, "//")
 		if runewidth.StringWidth(err) > e.width {
-			err = runewidth.Truncate(err, e.width, "...")
+			// Only add ellipsis when the string is long enough that the
+			// truncated content plus "..." is shorter than the original.
+			// Otherwise just hard-truncate to avoid losing more content
+			// to the 3-char ellipsis than we save by truncating.
+			tail := "..."
+			if runewidth.StringWidth(err) <= e.width+runewidth.StringWidth(tail) {
+				tail = ""
+			}
+			err = runewidth.Truncate(err, e.width, tail)
 		}
 	}
 	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, errStyle.Render(err))
