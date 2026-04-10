@@ -92,6 +92,21 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("failed to rename temp file to %s: %w", path, err)
 	}
+
+	// Fsync the parent directory to ensure the rename (new directory entry) is
+	// persisted. Without this, a crash right after rename could lose the file.
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("failed to open directory %s for sync: %w", dir, err)
+	}
+	if err := dirFd.Sync(); err != nil {
+		dirFd.Close()
+		return fmt.Errorf("failed to sync directory %s: %w", dir, err)
+	}
+	if err := dirFd.Close(); err != nil {
+		return fmt.Errorf("failed to close directory %s: %w", dir, err)
+	}
+
 	success = true
 	return nil
 }
