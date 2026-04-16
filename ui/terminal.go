@@ -249,8 +249,8 @@ func (t *TerminalPane) String() string {
 	width := t.width
 	height := t.height
 
-	if width == 0 || height == 0 {
-		return strings.Repeat("\n", height)
+	if width <= 0 || height <= 0 {
+		return ""
 	}
 
 	if t.isScrolling {
