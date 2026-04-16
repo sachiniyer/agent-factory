@@ -544,6 +544,9 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 	if name == keys.KeyEnter && m.state == stateNew {
 		name = keys.KeySubmitName
 	}
+	if name == keys.KeyTab && m.state == stateNew {
+		name = keys.KeyChangeProgram
+	}
 	m.keySent = true
 	return tea.Batch(
 		func() tea.Msg { return msg },
