@@ -136,17 +136,17 @@ func CronToOnCalendar(cronExpr string) (string, error) {
 		dowPart = convertDOW(dowField)
 	}
 
-	// Convert month
-	monthPart := convertTimeField(monthField)
+	// Convert month (1-indexed)
+	monthPart := convertTimeField(monthField, true)
 
-	// Convert day-of-month
-	domPart := convertTimeField(domField)
+	// Convert day-of-month (1-indexed)
+	domPart := convertTimeField(domField, true)
 
-	// Convert hour
-	hourPart := convertTimeField(hourField)
+	// Convert hour (0-indexed)
+	hourPart := convertTimeField(hourField, false)
 
-	// Convert minute
-	minutePart := convertTimeField(minuteField)
+	// Convert minute (0-indexed)
+	minutePart := convertTimeField(minuteField, false)
 
 	// Build the date part: YEAR-MONTH-DAY
 	datePart := fmt.Sprintf("*-%s-%s", monthPart, domPart)
@@ -161,8 +161,10 @@ func CronToOnCalendar(cronExpr string) (string, error) {
 	return fmt.Sprintf("%s %s", datePart, timePart), nil
 }
 
-// convertTimeField converts a cron time field (minute or hour) to OnCalendar format.
-func convertTimeField(field string) string {
+// convertTimeField converts a cron time field to OnCalendar format.
+// oneIndexed should be true for month and day-of-month fields (which start at 1),
+// and false for hour and minute fields (which start at 0).
+func convertTimeField(field string, oneIndexed bool) string {
 	if field == "*" {
 		return "*"
 	}
@@ -172,7 +174,7 @@ func convertTimeField(field string) string {
 		parts := strings.Split(field, ",")
 		converted := make([]string, len(parts))
 		for i, p := range parts {
-			converted[i] = convertTimeField(p)
+			converted[i] = convertTimeField(p, oneIndexed)
 		}
 		return strings.Join(converted, ",")
 	}
@@ -183,6 +185,9 @@ func convertTimeField(field string) string {
 		base := field[:idx]
 		step := field[idx+1:]
 		if base == "*" {
+			if oneIndexed {
+				return fmt.Sprintf("01/%s", step)
+			}
 			return fmt.Sprintf("00/%s", step)
 		}
 		// Range with step: "X-Y/N" → "XX..YY/N"
