@@ -38,7 +38,9 @@ var (
 			if daemonFlag {
 				cfg := config.LoadConfig()
 				err := daemon.RunDaemon(cfg)
-				log.ErrorLog.Printf("failed to start daemon %v", err)
+				if err != nil {
+					log.ErrorLog.Printf("failed to start daemon %v", err)
+				}
 				return err
 			}
 
