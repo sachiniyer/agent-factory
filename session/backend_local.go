@@ -54,8 +54,24 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	var setupErr error
 	defer func() {
 		if setupErr != nil {
-			if cleanupErr := i.Kill(); cleanupErr != nil {
-				setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
+			if firstTimeSetup {
+				// New session: full cleanup (tmux + worktree) is safe.
+				if cleanupErr := i.Kill(); cleanupErr != nil {
+					setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
+				}
+			} else {
+				// Restore: only clean up tmux session, preserve the worktree
+				// to avoid data loss.
+				i.mu.Lock()
+				ts := i.tmuxSession
+				i.tmuxSession = nil
+				i.started = false
+				i.mu.Unlock()
+				if ts != nil {
+					if cleanupErr := ts.Close(); cleanupErr != nil {
+						setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
+					}
+				}
 			}
 		} else {
 			i.mu.Lock()
