@@ -141,3 +141,31 @@ func TestCronToOnCalendarDOWNonSundayRange(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Tue..Thu *-*-* 09:00:00", result)
 }
+
+func TestCronToOnCalendarMonthStep(t *testing.T) {
+	// Month is 1-indexed, so */3 should become 01/3, not 00/3.
+	result, err := CronToOnCalendar("0 0 1 */3 *")
+	require.NoError(t, err)
+	assert.Equal(t, "*-01/3-01 00:00:00", result)
+}
+
+func TestCronToOnCalendarDOMStep(t *testing.T) {
+	// Day-of-month is 1-indexed, so */5 should become 01/5, not 00/5.
+	result, err := CronToOnCalendar("0 0 */5 * *")
+	require.NoError(t, err)
+	assert.Equal(t, "*-*-01/5 00:00:00", result)
+}
+
+func TestCronToOnCalendarHourStep(t *testing.T) {
+	// Hour is 0-indexed, so */4 should become 00/4.
+	result, err := CronToOnCalendar("0 */4 * * *")
+	require.NoError(t, err)
+	assert.Equal(t, "*-*-* 00/4:00:00", result)
+}
+
+func TestCronToOnCalendarMinuteStep(t *testing.T) {
+	// Minute is 0-indexed, so */15 should become 00/15.
+	result, err := CronToOnCalendar("*/15 * * * *")
+	require.NoError(t, err)
+	assert.Equal(t, "*-*-* *:00/15:00", result)
+}
