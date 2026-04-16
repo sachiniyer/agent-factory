@@ -350,7 +350,7 @@ func (s *TaskPane) renderListMode() string {
 	b.WriteString("\n\n")
 
 	if len(s.tasks) == 0 {
-		b.WriteString(disabledStyle.Render("  No tasks. Press s to create one."))
+		b.WriteString(disabledStyle.Render("  No tasks. Press n to create one."))
 		b.WriteString("\n")
 	}
 
