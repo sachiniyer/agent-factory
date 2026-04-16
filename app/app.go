@@ -206,7 +206,7 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 
 	// Menu takes 10% of height, sidebar and content take 90%
 	contentHeight := int(float32(msg.Height) * 0.9)
-	menuHeight := msg.Height - contentHeight - 1
+	menuHeight := msg.Height - contentHeight - 2
 	m.errBox.SetSize(int(float32(msg.Width)*0.9), 1)
 
 	m.contentPane.SetSize(contentWidth, contentHeight)
