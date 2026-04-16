@@ -96,6 +96,10 @@ func extractBinaryFromTarGz(r io.Reader, binaryName string) ([]byte, error) {
 			if int64(len(data)) > maxBinarySize {
 				return nil, fmt.Errorf("binary exceeds maximum size of %d bytes", maxBinarySize)
 			}
+			// Drain remaining gzip data to trigger CRC32 validation
+			if _, err := io.Copy(io.Discard, gz); err != nil {
+				return nil, fmt.Errorf("gzip integrity check failed: %w", err)
+			}
 			return data, nil
 		}
 	}
