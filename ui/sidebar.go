@@ -215,7 +215,6 @@ func (s *Sidebar) CollapseSection() {
 				break
 			}
 		}
-		return
 	}
 	for i, sec := range s.sections {
 		if sec.Kind == sel.Kind {
