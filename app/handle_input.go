@@ -86,10 +86,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateSelectProgram
 		return m, nil
 	case tea.KeyRunes:
-		if runewidth.StringWidth(instance.Title) >= 32 {
+		newTitle := instance.Title + string(msg.Runes)
+		if runewidth.StringWidth(newTitle) > 32 {
 			return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
 		}
-		if err := instance.SetTitle(instance.Title + string(msg.Runes)); err != nil {
+		if err := instance.SetTitle(newTitle); err != nil {
 			return m, m.handleError(err)
 		}
 	case tea.KeyBackspace:
