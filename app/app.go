@@ -255,7 +255,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			},
 		)
 	case keyupMsg:
-		m.menu.ClearKeydown()
+		m.menu.ClearKeydownIfMatch(msg.name)
 		return m, nil
 	case tickUpdatePRInfoMessage:
 		for _, instance := range m.sidebar.GetInstances() {
@@ -722,7 +722,9 @@ func (m *home) selectionChanged() tea.Cmd {
 	return nil
 }
 
-type keyupMsg struct{}
+type keyupMsg struct {
+	name keys.KeyName
+}
 
 func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
 	m.menu.Keydown(name)
@@ -731,7 +733,7 @@ func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
 		case <-m.ctx.Done():
 		case <-time.After(500 * time.Millisecond):
 		}
-		return keyupMsg{}
+		return keyupMsg{name: name}
 	}
 }
 

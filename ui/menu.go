@@ -82,6 +82,12 @@ func (m *Menu) ClearKeydown() {
 	m.keyDown = -1
 }
 
+func (m *Menu) ClearKeydownIfMatch(name keys.KeyName) {
+	if m.keyDown == name {
+		m.keyDown = -1
+	}
+}
+
 // SetState updates the menu state and options accordingly
 func (m *Menu) SetState(state MenuState) {
 	m.state = state
