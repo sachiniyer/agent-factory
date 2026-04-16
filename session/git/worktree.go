@@ -112,7 +112,24 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 	// Worktree is placed as a sibling: {repoParent}/{repoName}-{sessionName}
 	// Only append a numeric suffix if the path already exists (collision).
 	repoName := filepath.Base(repoPath)
-	basePath := filepath.Join(worktreeDir, repoName+"-"+sessionName)
+
+	// Sanitize sessionName for filesystem path to prevent directory traversal
+	safeSessionName := strings.ReplaceAll(sessionName, "..", "")
+	safeSessionName = strings.ReplaceAll(safeSessionName, "/", "-")
+	safeSessionName = strings.TrimLeft(safeSessionName, "-.")
+	if safeSessionName == "" {
+		safeSessionName = "session"
+	}
+
+	basePath := filepath.Join(worktreeDir, repoName+"-"+safeSessionName)
+
+	// Ensure the worktree path is under worktreeDir
+	absBase, _ := filepath.Abs(basePath)
+	absDir, _ := filepath.Abs(worktreeDir)
+	if !strings.HasPrefix(absBase, absDir+string(filepath.Separator)) {
+		return nil, "", fmt.Errorf("invalid session name: would create worktree outside expected directory")
+	}
+
 	worktreePath := basePath
 	for i := 2; ; i++ {
 		if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
