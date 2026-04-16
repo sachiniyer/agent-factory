@@ -105,6 +105,11 @@ func (p *PreviewPane) String() string {
 		return ""
 	}
 
+	// If in scroll/copy mode, always use the viewport
+	if p.isScrolling {
+		return p.viewport.View()
+	}
+
 	if p.previewState.fallback {
 		// Calculate available height for fallback text
 		availableHeight := p.height - 3 - 4 // 2 for borders, 1 for margin, 1 for padding
@@ -136,11 +141,6 @@ func (p *PreviewPane) String() string {
 			Width(p.width).
 			Align(lipgloss.Center).
 			Render(strings.Join(lines, ""))
-	}
-
-	// If in copy mode, use the viewport to display scrollable content
-	if p.isScrolling {
-		return p.viewport.View()
 	}
 
 	// Normal mode display
