@@ -35,6 +35,27 @@ func sanitizeBranchName(s string) string {
 	// Trim leading and trailing dashes or slashes to avoid issues
 	s = strings.Trim(s, "-/")
 
+	// Handle git dot restrictions:
+	// 1. Remove leading dots from each path component (no hidden-file-style names like .env)
+	//    This also handles ".." since stripping leading dots from ".." leaves it empty.
+	parts := strings.Split(s, "/")
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimLeft(part, ".")
+		if part != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	s = strings.Join(filtered, "/")
+	// 2. Replace any remaining double dots with a dash (e.g., "a..b")
+	s = strings.ReplaceAll(s, "..", "-")
+	// 3. No .lock suffix (reserved by git)
+	s = strings.TrimSuffix(s, ".lock")
+	// 4. No trailing dots
+	s = strings.TrimRight(s, ".")
+	// 5. Clean up any trailing dashes or slashes left after dot removal
+	s = strings.Trim(s, "-/")
+
 	// If the result is empty (e.g., input was only special characters),
 	// generate a fallback branch name to prevent worktree creation failures.
 	if s == "" {

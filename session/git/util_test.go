@@ -56,6 +56,41 @@ func TestSanitizeBranchName(t *testing.T) {
 			input:    "USER/Feature Branch!@#$%^&*()/v1.0",
 			expected: "user/feature-branch/v1.0",
 		},
+		{
+			name:     "leading dot in path component",
+			input:    "john/.env",
+			expected: "john/env",
+		},
+		{
+			name:     "name ending with .lock",
+			input:    "john/config.lock",
+			expected: "john/config",
+		},
+		{
+			name:     "double dots in name",
+			input:    "feature..branch",
+			expected: "feature-branch",
+		},
+		{
+			name:     "trailing dots",
+			input:    "feature.branch...",
+			expected: "feature.branch",
+		},
+		{
+			name:     "path component is only dots",
+			input:    "john/.../file",
+			expected: "john/file",
+		},
+		{
+			name:     "multiple leading dots",
+			input:    "john/...hidden",
+			expected: "john/hidden",
+		},
+		{
+			name:     "standalone dotfile name",
+			input:    ".env",
+			expected: "env",
+		},
 	}
 
 	for _, tt := range tests {
@@ -76,6 +111,8 @@ func TestSanitizeBranchName_FallbackOnEmpty(t *testing.T) {
 		"---",
 		"///",
 		"-/-/-/",
+		"...",
+		"/.../",
 	}
 	for _, input := range inputs {
 		t.Run("input="+input, func(t *testing.T) {
