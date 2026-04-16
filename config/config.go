@@ -64,6 +64,11 @@ func DefaultConfig() *Config {
 		program = defaultProgram
 	}
 
+	// Quote path if it contains spaces (for tmux shell execution)
+	if strings.Contains(program, " ") {
+		program = "'" + strings.ReplaceAll(program, "'", "'\\''") + "'"
+	}
+
 	program = program + " --dangerously-skip-permissions"
 
 	return &Config{

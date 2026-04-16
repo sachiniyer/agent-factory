@@ -26,12 +26,38 @@ func shellQuote(s string) string {
 // getBaseCommand extracts the lowercase basename of the executable from a
 // program string that may include a full path and arguments.
 // For example, "/home/user/bin/claude --model opus" returns "claude".
+// It handles single-quoted and double-quoted paths for binaries whose
+// paths contain spaces (e.g. on WSL).
 func getBaseCommand(program string) string {
-	parts := strings.Fields(program)
-	if len(parts) == 0 {
+	program = strings.TrimSpace(program)
+	if len(program) == 0 {
 		return ""
 	}
-	return strings.ToLower(filepath.Base(parts[0]))
+
+	var cmd string
+	// Handle single-quoted paths
+	if program[0] == '\'' {
+		end := strings.Index(program[1:], "'")
+		if end >= 0 {
+			cmd = program[1 : end+1]
+		} else {
+			cmd = program[1:]
+		}
+	} else if program[0] == '"' {
+		end := strings.Index(program[1:], "\"")
+		if end >= 0 {
+			cmd = program[1 : end+1]
+		} else {
+			cmd = program[1:]
+		}
+	} else {
+		parts := strings.Fields(program)
+		if len(parts) == 0 {
+			return ""
+		}
+		cmd = parts[0]
+	}
+	return strings.ToLower(filepath.Base(cmd))
 }
 
 // injectSystemPrompt injects Agent Factory instructions into the session.
