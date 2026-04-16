@@ -1,6 +1,8 @@
 package overlay
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -40,14 +42,15 @@ func NewConfirmationOverlay(message string) *ConfirmationOverlay {
 // HandleKeyPress processes a key press and updates the state
 // Returns true if the overlay should be closed
 func (c *ConfirmationOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
-	switch msg.String() {
-	case c.ConfirmKey:
+	key := strings.ToLower(msg.String())
+	switch key {
+	case strings.ToLower(c.ConfirmKey):
 		c.Dismissed = true
 		if c.OnConfirm != nil {
 			c.OnConfirm()
 		}
 		return true
-	case c.CancelKey, "esc":
+	case strings.ToLower(c.CancelKey), "esc":
 		c.Dismissed = true
 		if c.OnCancel != nil {
 			c.OnCancel()
