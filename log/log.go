@@ -15,6 +15,13 @@ var (
 	ErrorLog   *log.Logger
 )
 
+// mu guards writes to globalLogFile and the exported *log.Logger pointers
+// performed by Initialize and Close. Readers (e.g. InfoLog.Printf) rely on
+// init-once-before-use semantics: Initialize is expected to complete before
+// any goroutine reads the logger pointers. *log.Logger itself is internally
+// thread-safe, so we do not take this lock on the logging hot path.
+var mu sync.Mutex
+
 func getLogPath() string {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
@@ -34,6 +41,9 @@ var globalLogFile *os.File
 // the user config directory.
 
 func Initialize(daemon bool) {
+	mu.Lock()
+	defer mu.Unlock()
+
 	// Close any previously opened log file to avoid leaking file descriptors
 	// when Initialize is called multiple times (e.g. af tasks trigger -> RunTask).
 	if globalLogFile != nil {
@@ -69,6 +79,9 @@ func Initialize(daemon bool) {
 }
 
 func Close() {
+	mu.Lock()
+	defer mu.Unlock()
+
 	if globalLogFile != nil {
 		_ = globalLogFile.Close()
 	}
