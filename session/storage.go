@@ -102,15 +102,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		grouped[rid] = append(grouped[rid], d)
 	}
 
-	// Build a set of ALL in-memory instance titles (including non-started/
-	// non-loading ones) so we can distinguish "killed in daemon" from
-	// "added externally on disk".
-	allInMemoryTitles := make(map[string]bool, len(instances))
-	for _, inst := range instances {
-		allInMemoryTitles[inst.Title] = true
-	}
-
-	// Also collect repo IDs that the daemon knows about so we visit repos
+	// Collect repo IDs that the daemon knows about so we visit repos
 	// that had all their in-memory instances killed (group would be empty).
 	knownRepoIDs := make(map[string]bool)
 	for _, inst := range instances {
@@ -121,6 +113,20 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Merge each repo's in-memory state with disk state.
 	for rid := range knownRepoIDs {
 		group := grouped[rid] // may be nil if all instances for this repo were killed
+
+		// Build a per-repo set of ALL in-memory instance titles (including
+		// non-started/non-loading ones) belonging to THIS repo. This is used
+		// to distinguish "killed in daemon" from "added externally on disk".
+		// IMPORTANT: this must be scoped per-repo. Using a global set across
+		// all repos causes cross-repo title collisions to drop legitimate
+		// externally-added instances from other repos (issue #198).
+		repoMemTitlesAll := make(map[string]bool)
+		for _, inst := range instances {
+			if config.RepoIDFromRoot(inst.Path) == rid {
+				repoMemTitlesAll[inst.Title] = true
+			}
+		}
+
 		path, pathErr := config.RepoInstancesPath(rid)
 		if pathErr != nil {
 			return pathErr
@@ -154,9 +160,9 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 					// Already covered by the in-memory version.
 					continue
 				}
-				if allInMemoryTitles[dd.Title] {
-					// The daemon knew about this instance but it is no
-					// longer started/loading (e.g. killed). Don't
+				if repoMemTitlesAll[dd.Title] {
+					// The daemon knew about this instance in THIS repo but
+					// it is no longer started/loading (e.g. killed). Don't
 					// preserve it.
 					continue
 				}

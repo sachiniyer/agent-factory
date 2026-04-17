@@ -235,6 +235,58 @@ func TestDaemonSaveEmptyDisk(t *testing.T) {
 	assert.Equal(t, "instance-A", result[0].Title)
 }
 
+// TestDaemonSaveCrossRepoTitleCollision verifies that when two repos have
+// instances with the same title, saving does not drop an externally-added
+// instance from one repo just because the daemon knows about a same-titled
+// instance in another repo. Regression test for #198.
+func TestDaemonSaveCrossRepoTitleCollision(t *testing.T) {
+	const repoPathA = "/tmp/repo-a"
+	const repoPathB = "/tmp/repo-b"
+	ms := newMockStorage()
+
+	// Repo A has instance "shared" known to the daemon.
+	// Repo B has instance "shared" added externally (NOT known to the daemon).
+	seedDisk(t, ms, repoPathA, []InstanceData{
+		{Title: "shared", Path: repoPathA, Branch: "branch-a"},
+	})
+	seedDisk(t, ms, repoPathB, []InstanceData{
+		{Title: "shared", Path: repoPathB, Branch: "branch-b"},
+	})
+
+	// Daemon knows about repo A's "shared" and also has some other instance
+	// in repo B so that repo B is a known repo (forcing SaveInstances to
+	// visit repo B).
+	instanceAShared := makeInstance("shared", repoPathA, true)
+	instanceAShared.Branch = "branch-a"
+	instanceBOther := makeInstance("other-b", repoPathB, true)
+
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{instanceAShared, instanceBOther})
+	require.NoError(t, err)
+
+	// Repo A: "shared" should be present (in-memory copy).
+	resultA := readDisk(t, ms, repoPathA)
+	titlesA := make(map[string]bool)
+	for _, d := range resultA {
+		titlesA[d.Title] = true
+	}
+	assert.True(t, titlesA["shared"], "repo A's shared instance should be preserved")
+
+	// Repo B: BOTH "shared" (externally added) AND "other-b" (in-memory)
+	// should be present. Before the fix, "shared" would be dropped from
+	// repo B because the global allInMemoryTitles set contained "shared"
+	// (from repo A).
+	resultB := readDisk(t, ms, repoPathB)
+	titlesB := make(map[string]bool)
+	for _, d := range resultB {
+		titlesB[d.Title] = true
+	}
+	assert.True(t, titlesB["other-b"], "repo B's in-memory instance should be saved")
+	assert.True(t, titlesB["shared"], "repo B's externally-added instance with title colliding with a different repo's daemon instance must be preserved")
+}
+
 func TestDaemonSaveNoInstances(t *testing.T) {
 	ms := newMockStorage()
 
