@@ -43,6 +43,9 @@ func (g *GitWorktree) Setup() error {
 func (g *GitWorktree) setupFromExistingBranch() error {
 	// Directory already created in Setup(), skip duplicate creation
 
+	// We are reusing a pre-existing branch — Cleanup() must not delete it.
+	g.branchCreatedByUs = false
+
 	// Clean up any existing worktree first
 	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath) // Ignore error if worktree doesn't exist
 
@@ -90,6 +93,9 @@ func (g *GitWorktree) resolveOriginHead() string {
 
 // setupNewWorktree creates a new worktree from origin's default branch (or HEAD as fallback)
 func (g *GitWorktree) setupNewWorktree() error {
+	// We are creating the branch ourselves — Cleanup() may delete it.
+	g.branchCreatedByUs = true
+
 	// Clean up any existing worktree first
 	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath) // Ignore error if worktree doesn't exist
 
@@ -158,11 +164,15 @@ func (g *GitWorktree) Cleanup() error {
 		errs = append(errs, fmt.Errorf("failed to check worktree path: %w", err))
 	}
 
-	// Delete the branch using git CLI
-	if _, err := g.runGitCommand(g.repoPath, "branch", "-D", g.branchName); err != nil {
-		// Only log if it's not a "branch not found" error
-		if !strings.Contains(err.Error(), "not found") {
-			errs = append(errs, fmt.Errorf("failed to remove branch %s: %w", g.branchName, err))
+	// Only delete the branch if this session actually created it. When we
+	// reused a pre-existing branch via setupFromExistingBranch(), the branch
+	// may contain unrelated user work and must be preserved.
+	if g.branchCreatedByUs {
+		if _, err := g.runGitCommand(g.repoPath, "branch", "-D", g.branchName); err != nil {
+			// Only log if it's not a "branch not found" error
+			if !strings.Contains(err.Error(), "not found") {
+				errs = append(errs, fmt.Errorf("failed to remove branch %s: %w", g.branchName, err))
+			}
 		}
 	}
 

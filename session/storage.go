@@ -36,14 +36,22 @@ type PRInfoData struct {
 	State  string `json:"state,omitempty"`
 }
 
-// GitWorktreeData represents the serializable data of a GitWorktree
+// GitWorktreeData represents the serializable data of a GitWorktree.
+//
+// BranchCreatedByUs indicates whether the session created the underlying
+// branch itself (vs. reused a pre-existing one). It is serialized via a
+// pointer so that "missing" (nil, for data written before this field was
+// added) can be distinguished from an explicit false. Missing values are
+// treated as true to preserve the prior behavior for sessions that existed
+// before this flag was introduced.
 type GitWorktreeData struct {
-	RepoPath         string `json:"repo_path"`
-	WorktreePath     string `json:"worktree_path"`
-	SessionName      string `json:"session_name"`
-	BranchName       string `json:"branch_name"`
-	BaseCommitSHA    string `json:"base_commit_sha"`
-	ExternalWorktree bool   `json:"external_worktree,omitempty"`
+	RepoPath          string `json:"repo_path"`
+	WorktreePath      string `json:"worktree_path"`
+	SessionName       string `json:"session_name"`
+	BranchName        string `json:"branch_name"`
+	BaseCommitSHA     string `json:"base_commit_sha"`
+	ExternalWorktree  bool   `json:"external_worktree,omitempty"`
+	BranchCreatedByUs *bool  `json:"branch_created_by_us,omitempty"`
 }
 
 // Storage handles saving and loading instances using the state interface.

@@ -142,29 +142,115 @@ func TestSetupFromExistingBranch_SetsBaseCommitSHA(t *testing.T) {
 	require.NoError(t, gw.Cleanup())
 }
 
+// TestCleanup_PreservesPreExistingBranch verifies that when Setup() reuses a
+// pre-existing local branch, Cleanup() does NOT delete it. Previously,
+// Cleanup() always ran `git branch -D <branch>`, destroying user work on any
+// branch whose name happened to match the session's derived branch name.
+func TestCleanup_PreservesPreExistingBranch(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	repoRoot := createGitRepo(t)
+
+	// Initial commit so HEAD is valid.
+	cmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Create a pre-existing branch the user might care about.
+	cmd = exec.Command("git", "-C", repoRoot, "branch", "test/preexisting")
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, _, err := NewGitWorktree(repoRoot, "preexisting")
+	require.NoError(t, err)
+
+	// Setup() should detect the existing branch and reuse it.
+	require.NoError(t, gw.Setup())
+	assert.False(t, gw.BranchCreatedByUs(),
+		"BranchCreatedByUs should be false when Setup reused an existing branch")
+
+	// Cleanup should remove the worktree but NOT delete the branch.
+	require.NoError(t, gw.Cleanup())
+
+	// Verify the branch still exists in the repo.
+	verifyCmd := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "refs/heads/test/preexisting")
+	out, err = verifyCmd.CombinedOutput()
+	require.NoError(t, err,
+		"pre-existing branch was deleted by Cleanup; output: %s", string(out))
+}
+
+// TestCleanup_DeletesBranchWeCreated verifies that when Setup() creates a new
+// branch itself, Cleanup() still deletes it (preserving existing behavior for
+// branches that the session owns).
+func TestCleanup_DeletesBranchWeCreated(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	repoRoot := createGitRepo(t)
+
+	// Initial commit so HEAD is valid.
+	cmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, _, err := NewGitWorktree(repoRoot, "brand-new")
+	require.NoError(t, err)
+
+	// No pre-existing branch — Setup() should create a fresh one.
+	require.NoError(t, gw.Setup())
+	assert.True(t, gw.BranchCreatedByUs(),
+		"BranchCreatedByUs should be true when Setup created a new branch")
+
+	require.NoError(t, gw.Cleanup())
+
+	// Branch should be gone.
+	verifyCmd := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "refs/heads/test/brand-new")
+	err = verifyCmd.Run()
+	require.Error(t, err,
+		"branch created by the session should be deleted by Cleanup")
+}
+
 func TestNewGitWorktreeFromStorage_EmptyWorktreePath(t *testing.T) {
-	_, err := NewGitWorktreeFromStorage("/some/repo", "", "session", "branch", "abc123", false)
+	_, err := NewGitWorktreeFromStorage("/some/repo", "", "session", "branch", "abc123", false, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worktree path is empty")
 }
 
 func TestNewGitWorktreeFromStorage_EmptyRepoPath(t *testing.T) {
-	_, err := NewGitWorktreeFromStorage("", "/some/worktree", "session", "branch", "abc123", false)
+	_, err := NewGitWorktreeFromStorage("", "/some/worktree", "session", "branch", "abc123", false, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "repo path is empty")
 }
 
 func TestNewGitWorktreeFromStorage_ValidPaths(t *testing.T) {
-	gw, err := NewGitWorktreeFromStorage("/some/repo", "/some/worktree", "session", "branch", "abc123", false)
+	gw, err := NewGitWorktreeFromStorage("/some/repo", "/some/worktree", "session", "branch", "abc123", false, true)
 	require.NoError(t, err)
 	assert.Equal(t, "/some/repo", gw.GetRepoPath())
 	assert.Equal(t, "/some/worktree", gw.GetWorktreePath())
 	assert.Equal(t, "branch", gw.GetBranchName())
 	assert.Equal(t, "abc123", gw.GetBaseCommitSHA())
+	assert.True(t, gw.BranchCreatedByUs())
 }
 
 func TestCleanup_EmptyRepoPath(t *testing.T) {
-	gw, err := NewGitWorktreeFromStorage("/some/repo", "/some/worktree", "session", "branch", "abc123", false)
+	gw, err := NewGitWorktreeFromStorage("/some/repo", "/some/worktree", "session", "branch", "abc123", false, true)
 	require.NoError(t, err)
 	// Simulate a corrupted state by zeroing out repoPath
 	gw.repoPath = ""
@@ -174,7 +260,7 @@ func TestCleanup_EmptyRepoPath(t *testing.T) {
 }
 
 func TestCleanup_EmptyWorktreePath(t *testing.T) {
-	gw, err := NewGitWorktreeFromStorage("/some/repo", "/some/worktree", "session", "branch", "abc123", false)
+	gw, err := NewGitWorktreeFromStorage("/some/repo", "/some/worktree", "session", "branch", "abc123", false, true)
 	require.NoError(t, err)
 	// Simulate a corrupted state by zeroing out worktreePath
 	gw.worktreePath = ""
