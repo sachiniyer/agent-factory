@@ -26,6 +26,27 @@ func getSystemdUserDir() (string, error) {
 	return dir, nil
 }
 
+// quoteExecStartPath quotes a path for use in an ExecStart= line.
+// systemd parses ExecStart= with shell-like quoting, so surrounding the path
+// in double quotes allows spaces. Internal backslashes and double quotes are
+// escaped so the value remains syntactically valid.
+func quoteExecStartPath(p string) string {
+	escaped := strings.ReplaceAll(p, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
+}
+
+// sanitizeEnvValue makes a value safe for an Environment= assignment.
+// systemd does not apply shell-style quote parsing to Environment= values,
+// so surrounding quotes would be preserved literally. Newlines are also
+// disallowed by systemd in Environment= values; replace them with spaces
+// rather than emitting a syntactically invalid unit file.
+func sanitizeEnvValue(v string) string {
+	v = strings.ReplaceAll(v, "\n", " ")
+	v = strings.ReplaceAll(v, "\r", " ")
+	return v
+}
+
 // generateServiceContent builds the systemd service unit file content.
 func generateServiceContent(unitName, execPath, taskID, projectPath, pathEnv, homeEnv, shellEnv, termEnv string) string {
 	return fmt.Sprintf(`[Unit]
@@ -33,13 +54,19 @@ Description=Agent Factory task %s
 
 [Service]
 Type=oneshot
-ExecStart="%s" task run %s
-Environment="PATH=%s"
-Environment="HOME=%s"
-Environment="SHELL=%s"
-Environment="TERM=%s"
-WorkingDirectory="%s"
-`, unitName, execPath, taskID, pathEnv, homeEnv, shellEnv, termEnv, projectPath)
+ExecStart=%s task run %s
+Environment=PATH=%s
+Environment=HOME=%s
+Environment=SHELL=%s
+Environment=TERM=%s
+WorkingDirectory=%s
+`, unitName,
+		quoteExecStartPath(execPath), taskID,
+		sanitizeEnvValue(pathEnv),
+		sanitizeEnvValue(homeEnv),
+		sanitizeEnvValue(shellEnv),
+		sanitizeEnvValue(termEnv),
+		projectPath)
 }
 
 func InstallScheduler(t Task) error {
