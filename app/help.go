@@ -40,7 +40,7 @@ func (h helpTypeGeneral) toContent() string {
 		"",
 		headerStyle.Render("Managing:"),
 		keyStyle.Render("n")+descStyle.Render("         - Create a new session"),
-		keyStyle.Render("N")+descStyle.Render("         - Create a new session with a prompt"),
+		keyStyle.Render("N")+descStyle.Render("         - Create a new remote session (requires remote_hooks config)"),
 		keyStyle.Render("s")+descStyle.Render("         - Create a new task"),
 		keyStyle.Render("S")+descStyle.Render("         - List tasks"),
 		keyStyle.Render("r")+descStyle.Render("         - Run selected task now"),
