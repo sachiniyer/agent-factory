@@ -190,6 +190,19 @@ func cronToCalendarIntervalXML(cronExpr string) (string, error) {
 	// standard cron uses OR semantics: run on matching DOM OR matching DOW.
 	// We handle this by building two separate sets of combos and merging them.
 	domIdx, dowIdx := 2, 4
+
+	// Detect when DOM or DOW is syntactically restricted but semantically
+	// covers all possible values (e.g., DOW=0-6 or DOM=1-31). Under cron OR
+	// semantics, "X OR every-day" collapses to "every day", so both the DOM
+	// and DOW restrictions become irrelevant and we emit a single
+	// wildcard-day dict.
+	dowCoversAll := expanded[dowIdx].vals != nil && len(expanded[dowIdx].vals) >= 7
+	domCoversAll := expanded[domIdx].vals != nil && len(expanded[domIdx].vals) >= 31
+	if dowCoversAll || domCoversAll {
+		expanded[dowIdx].vals = nil
+		expanded[domIdx].vals = nil
+	}
+
 	bothDOMandDOW := expanded[domIdx].vals != nil && expanded[dowIdx].vals != nil
 
 	// buildCombos builds the cartesian product of the given expanded fields.
