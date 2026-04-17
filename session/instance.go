@@ -101,13 +101,15 @@ func (i *Instance) ToInstanceData() InstanceData {
 
 	// Only include worktree data if gitWorktree is initialized
 	if i.gitWorktree != nil {
+		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
 		data.Worktree = GitWorktreeData{
-			RepoPath:         i.gitWorktree.GetRepoPath(),
-			WorktreePath:     i.gitWorktree.GetWorktreePath(),
-			SessionName:      i.Title,
-			BranchName:       i.gitWorktree.GetBranchName(),
-			BaseCommitSHA:    i.gitWorktree.GetBaseCommitSHA(),
-			ExternalWorktree: i.gitWorktree.IsExternalWorktree(),
+			RepoPath:          i.gitWorktree.GetRepoPath(),
+			WorktreePath:      i.gitWorktree.GetWorktreePath(),
+			SessionName:       i.Title,
+			BranchName:        i.gitWorktree.GetBranchName(),
+			BaseCommitSHA:     i.gitWorktree.GetBaseCommitSHA(),
+			ExternalWorktree:  i.gitWorktree.IsExternalWorktree(),
+			BranchCreatedByUs: &branchCreatedByUs,
 		}
 	}
 
@@ -149,6 +151,16 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	} else {
 		instance.backend = &LocalBackend{}
 
+		// Preserve backward compatibility: when the branch_created_by_us
+		// field is missing from persisted data (written before this field
+		// was added), default to true. Old saved sessions were created
+		// under the assumption that the session owned the branch, so
+		// keeping that behavior avoids surprising changes on restore.
+		branchCreatedByUs := true
+		if data.Worktree.BranchCreatedByUs != nil {
+			branchCreatedByUs = *data.Worktree.BranchCreatedByUs
+		}
+
 		gw, err := git.NewGitWorktreeFromStorage(
 			data.Worktree.RepoPath,
 			data.Worktree.WorktreePath,
@@ -156,6 +168,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			data.Worktree.BranchName,
 			data.Worktree.BaseCommitSHA,
 			data.Worktree.ExternalWorktree,
+			branchCreatedByUs,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to restore git worktree: %w", err)

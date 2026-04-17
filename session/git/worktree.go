@@ -43,6 +43,10 @@ type GitWorktree struct {
 	baseCommitSHA string
 	// externalWorktree is true if the worktree was not created by agent-factory
 	externalWorktree bool
+	// branchCreatedByUs is true if this session created the underlying branch
+	// itself (via setupNewWorktree). When false, Cleanup() must NOT delete the
+	// branch because it pre-existed and likely contains user work.
+	branchCreatedByUs bool
 	// hooksCtx and hooksCancel control the lifetime of post-worktree hooks.
 	// Cancelling hooksCtx stops any in-flight hook commands so they don't
 	// outlive the worktree itself.
@@ -62,7 +66,18 @@ func (g *GitWorktree) IsExternalWorktree() bool {
 	return g.externalWorktree
 }
 
-func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName string, branchName string, baseCommitSHA string, externalWorktree bool) (*GitWorktree, error) {
+// BranchCreatedByUs returns true if this session created the underlying
+// branch (rather than reusing a pre-existing one). Cleanup() uses this to
+// decide whether it is safe to delete the branch.
+func (g *GitWorktree) BranchCreatedByUs() bool {
+	return g.branchCreatedByUs
+}
+
+// NewGitWorktreeFromStorage restores a GitWorktree from persisted state.
+// branchCreatedByUs indicates whether the session originally created the
+// branch itself. Existing saved sessions (written before this field was
+// persisted) should pass true to preserve prior cleanup behavior.
+func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName string, branchName string, baseCommitSHA string, externalWorktree bool, branchCreatedByUs bool) (*GitWorktree, error) {
 	if worktreePath == "" {
 		return nil, fmt.Errorf("worktree path is empty")
 	}
@@ -71,15 +86,16 @@ func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &GitWorktree{
-		repoPath:         repoPath,
-		worktreePath:     worktreePath,
-		worktreeDir:      filepath.Dir(worktreePath),
-		sessionName:      sessionName,
-		branchName:       branchName,
-		baseCommitSHA:    baseCommitSHA,
-		externalWorktree: externalWorktree,
-		hooksCtx:         ctx,
-		hooksCancel:      cancel,
+		repoPath:          repoPath,
+		worktreePath:      worktreePath,
+		worktreeDir:       filepath.Dir(worktreePath),
+		sessionName:       sessionName,
+		branchName:        branchName,
+		baseCommitSHA:     baseCommitSHA,
+		externalWorktree:  externalWorktree,
+		branchCreatedByUs: branchCreatedByUs,
+		hooksCtx:          ctx,
+		hooksCancel:       cancel,
 	}, nil
 }
 
@@ -205,14 +221,15 @@ func NewGitWorktreeFromExistingWorktree(repoPath, worktreePath, branchName strin
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &GitWorktree{
-		repoPath:         repoRoot,
-		worktreePath:     worktreePath,
-		worktreeDir:      filepath.Dir(worktreePath),
-		branchName:       branchName,
-		baseCommitSHA:    baseCommitSHA,
-		externalWorktree: true,
-		hooksCtx:         ctx,
-		hooksCancel:      cancel,
+		repoPath:          repoRoot,
+		worktreePath:      worktreePath,
+		worktreeDir:       filepath.Dir(worktreePath),
+		branchName:        branchName,
+		baseCommitSHA:     baseCommitSHA,
+		externalWorktree:  true,
+		branchCreatedByUs: false,
+		hooksCtx:          ctx,
+		hooksCancel:       cancel,
 	}, nil
 }
 
