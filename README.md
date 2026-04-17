@@ -45,7 +45,7 @@ Each session runs an AI agent in an isolated git worktree with its own branch. S
 | Key | Action |
 |-----|--------|
 | `n` | Create a new session |
-| `N` | Create a session with an initial prompt |
+| `N` | Create a new remote session (requires `remote_hooks` config) |
 | `Enter` / `o` | Attach to selected session |
 | `Ctrl-w` | Detach from session |
 | `D` | Kill (delete) selected session |

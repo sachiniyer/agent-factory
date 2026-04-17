@@ -17,7 +17,7 @@ Add remote hooks to your per-repo config at `~/.agent-factory/repos/<repoID>/con
 }
 ```
 
-When `remote_hooks` is absent, Agent Factory uses local tmux+git worktrees (default). When present, all sessions for that repo use the remote backend.
+Configuring `remote_hooks` enables the remote backend for that repo, but using it is explicit opt-in: press `N` in the TUI to create a remote session. Pressing `n` still creates a local tmux+git worktree session. When `remote_hooks` is absent, `N` is unavailable and all sessions are local.
 
 ## Script Protocol
 
