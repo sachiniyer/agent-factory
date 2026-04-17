@@ -131,10 +131,12 @@ func TestTerminalUpdateContent(t *testing.T) {
 	tp := NewTerminalPane()
 	tp.SetSize(80, 30)
 
-	// Inject a mock session that returns expectedContent on capture-pane
+	// Inject a mock session that returns expectedContent on capture-pane.
+	// Use the instance's actual worktree path so the cache lookup treats
+	// the pre-populated session as a valid match (see #222).
 	ts := newMockTmuxSession(t, "mock-update", cmdExec)
 	// Start the session so DoesSessionExist returns true
-	injectSession(tp, instance.Title, ts, t.TempDir())
+	injectSession(tp, instance.Title, ts, instance.GetWorktreePath())
 
 	// UpdateContent should set fallback=false and capture content
 	err := tp.UpdateContent(instance)
@@ -224,13 +226,14 @@ func TestTerminalSessionCaching(t *testing.T) {
 	instance2 := makeStartedInstance(t, "cache2")
 	defer func() { _ = instance2.Kill() }()
 
-	// Inject two separate sessions
-	injectSession(tp, instance1.Title, ts1, t.TempDir())
+	// Inject two separate sessions. Use each instance's actual worktree path
+	// so the cache lookup accepts the pre-populated mocks (see #222).
+	injectSession(tp, instance1.Title, ts1, instance1.GetWorktreePath())
 
 	tp.mu.Lock()
 	tp.sessions[instance2.Title] = &terminalSession{
 		tmuxSession:  ts2,
-		worktreePath: t.TempDir(),
+		worktreePath: instance2.GetWorktreePath(),
 	}
 	tp.mu.Unlock()
 
@@ -317,6 +320,57 @@ func TestTerminalScrolling(t *testing.T) {
 	tp.mu.Lock()
 	require.False(t, tp.isScrolling, "isScrolling should be false")
 	tp.mu.Unlock()
+}
+
+// TestTerminalTitleCollisionBug verifies that the terminal session cache does
+// not reuse a cached entry when a different instance (different worktreePath)
+// happens to share the same Title. Titles can collide across CLI, task
+// runner, and TUI instances. Without verifying worktreePath, the second
+// instance's terminal tab would silently point at the first instance's
+// worktree — dangerous (e.g. `rm -rf *` in the wrong directory). See #222.
+func TestTerminalTitleCollisionBug(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	tp := NewTerminalPane()
+	tp.SetSize(80, 30)
+
+	// Create a started instance with a real git worktree. This instance's
+	// GetWorktreePath() returns a valid directory we can start tmux in.
+	instance := makeStartedInstance(t, "collision")
+	defer func() { _ = instance.Kill() }()
+
+	realWorktreePath := instance.GetWorktreePath()
+	require.NotEmpty(t, realWorktreePath, "test precondition: instance must have a worktree path")
+
+	// Pre-populate the cache with a DIFFERENT (stale) worktreePath under the
+	// same Title. This simulates a prior instance with the same title that
+	// has since been replaced by one with a new worktree.
+	stalePath := t.TempDir()
+	require.NotEqual(t, realWorktreePath, stalePath, "test precondition: paths must differ")
+
+	staleCmdExec := mockCmdExec("stale-session-content", true)
+	staleTs := newMockTmuxSession(t, "stale-collision", staleCmdExec)
+	injectSession(tp, instance.Title, staleTs, stalePath)
+
+	// Trigger the cache lookup path. With the bug, the stale entry is reused
+	// because only the Title is checked. With the fix, the entry is evicted
+	// and a new session is created for the correct worktreePath.
+	err := tp.ensureSession(instance)
+	require.NoError(t, err)
+
+	tp.mu.Lock()
+	cached, ok := tp.sessions[instance.Title]
+	tp.mu.Unlock()
+	require.True(t, ok, "cache should still contain an entry for the instance's title")
+	require.Equal(t, realWorktreePath, cached.worktreePath,
+		"cached terminal session must point at the instance's actual worktree, not a collided stale entry")
+
+	// Clean up any real tmux session created by the fix path so it doesn't
+	// leak across tests.
+	if cached.tmuxSession != nil {
+		_ = cached.tmuxSession.Close()
+	}
 }
 
 func TestTerminalCloseForInstance(t *testing.T) {
