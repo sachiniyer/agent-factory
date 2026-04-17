@@ -137,12 +137,24 @@ func (t *TerminalPane) ensureSessionLocked(instance *session.Instance) error {
 
 	t.currentTitle = instance.Title
 
-	// Check if we already have a cached session for this instance
+	// Check if we already have a cached session for this instance.
+	// The cache is keyed by instance.Title, which is not guaranteed to be unique
+	// across instances (titles can collide between CLI, task runner, and TUI).
+	// Verify worktreePath matches before reusing a cached session; otherwise
+	// kill the stale tmux session and recreate to avoid running commands in
+	// the wrong worktree (issue #222).
 	if s, ok := t.sessions[instance.Title]; ok {
-		if s.tmuxSession != nil && s.tmuxSession.DoesSessionExist() {
+		if s.worktreePath == worktreePath && s.tmuxSession != nil && s.tmuxSession.DoesSessionExist() {
 			return nil
 		}
-		// Session died, remove stale entry and recreate below
+		// Either the session died, or a different instance with the same title
+		// claimed the slot. Close the stale tmux session before replacing the
+		// cache entry.
+		if s.tmuxSession != nil {
+			if err := s.tmuxSession.Close(); err != nil {
+				log.InfoLog.Printf("terminal pane: failed to close stale session for %s: %v", instance.Title, err)
+			}
+		}
 		delete(t.sessions, instance.Title)
 	}
 
