@@ -58,24 +58,52 @@ func (m *home) mergePendingInstances() int {
 		return 0
 	}
 
+	sidebarTitles := m.sidebar.GetInstanceTitles()
+
 	var otherRepoPending []session.InstanceData
 	var mergedCount int
 	for _, data := range pendingData {
 		rid := config.RepoIDFromRoot(data.Worktree.RepoPath)
-		if rid == m.repoID {
-			pendingInstance, err := session.FromInstanceData(data)
-			if err != nil {
-				log.WarningLog.Printf("failed to restore pending instance %s: %v", data.Title, err)
+		if rid != m.repoID {
+			otherRepoPending = append(otherRepoPending, data)
+			continue
+		}
+
+		// If an entry with the same title already exists in the sidebar, replace
+		// it only if the existing instance is dead (tmux gone). If it's still
+		// alive, skip the new pending instance to avoid creating a duplicate.
+		if sidebarTitles[data.Title] {
+			skip := false
+			for _, existing := range m.sidebar.GetInstances() {
+				if existing.Title != data.Title {
+					continue
+				}
+				if existing.TmuxAlive() {
+					log.WarningLog.Printf("skipping pending instance %q: already exists and is alive", data.Title)
+					skip = true
+				} else {
+					log.InfoLog.Printf("replacing dead instance %q with new pending instance", data.Title)
+					m.sidebar.RemoveInstanceByTitle(data.Title)
+					delete(sidebarTitles, data.Title)
+				}
+				break
+			}
+			if skip {
 				continue
 			}
-			m.sidebar.AddInstance(pendingInstance)()
-			if m.autoYes {
-				pendingInstance.AutoYes = true
-			}
-			mergedCount++
-		} else {
-			otherRepoPending = append(otherRepoPending, data)
 		}
+
+		pendingInstance, err := session.FromInstanceData(data)
+		if err != nil {
+			log.WarningLog.Printf("failed to restore pending instance %s: %v", data.Title, err)
+			continue
+		}
+		m.sidebar.AddInstance(pendingInstance)()
+		if m.autoYes {
+			pendingInstance.AutoYes = true
+		}
+		sidebarTitles[data.Title] = true
+		mergedCount++
 	}
 
 	if len(otherRepoPending) > 0 {
