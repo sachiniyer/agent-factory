@@ -82,6 +82,24 @@ func LoadAndClearPendingInstances() ([]session.InstanceData, error) {
 	return pending, err
 }
 
+// isReadyContent reports whether the captured pane content indicates the
+// program is ready for input or is showing a trust prompt that downstream
+// handlers know how to dismiss. It recognizes Claude Code's input prompt
+// and trust prompt as well as the Aider/Gemini trust prompt
+// ("Open documentation url" + "(D)on't ask again").
+func isReadyContent(content string) bool {
+	if strings.Contains(content, "❯") || strings.Contains(content, "Do you trust") {
+		return true
+	}
+	// Aider/Gemini trust prompt. Require both substrings to avoid false
+	// positives from documentation links unrelated to the trust prompt.
+	if strings.Contains(content, "Open documentation url") &&
+		strings.Contains(content, "(D)on't ask again") {
+		return true
+	}
+	return false
+}
+
 // WaitForReady polls the instance's tmux pane until the program shows its
 // input prompt (e.g. Claude Code's ">" prompt) or trust prompt, or times out after 60 seconds.
 func WaitForReady(instance *session.Instance) error {
@@ -104,7 +122,7 @@ func WaitForReady(instance *session.Instance) error {
 			if err != nil {
 				continue
 			}
-			if strings.Contains(content, "❯") || strings.Contains(content, "Do you trust") {
+			if isReadyContent(content) {
 				return nil
 			}
 		}
