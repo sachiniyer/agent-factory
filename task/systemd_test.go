@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestGenerateServiceContentQuotesPaths(t *testing.T) {
+func TestGenerateServiceContentPathsWithSpaces(t *testing.T) {
 	content := generateServiceContent(
 		"agent-factory-task-abc1",
 		"/opt/my apps/agent-factory",
@@ -21,11 +21,24 @@ func TestGenerateServiceContentQuotesPaths(t *testing.T) {
 		"xterm-256color",
 	)
 
-	// ExecStart must quote the executable path so spaces are handled correctly.
+	// ExecStart uses shell-style quoting in systemd, so quoting the
+	// executable path is correct and required to survive spaces.
 	assert.Contains(t, content, `ExecStart="/opt/my apps/agent-factory" task run abc1`)
 
-	// WorkingDirectory must quote the project path.
-	assert.Contains(t, content, `WorkingDirectory="/home/user/my projects/repo"`)
+	// WorkingDirectory does NOT use shell-style quote parsing — quotes
+	// would be kept literally. The raw path (spaces and all) is valid.
+	assert.Contains(t, content, "\nWorkingDirectory=/home/user/my projects/repo\n")
+	assert.NotContains(t, content, `WorkingDirectory="/home/user/my projects/repo"`)
+
+	// Environment= values are likewise assignment-style; no surrounding quotes.
+	assert.Contains(t, content, "\nEnvironment=PATH=/usr/bin:/usr/local/bin\n")
+	assert.Contains(t, content, "\nEnvironment=HOME=/home/user\n")
+	assert.Contains(t, content, "\nEnvironment=SHELL=/bin/bash\n")
+	assert.Contains(t, content, "\nEnvironment=TERM=xterm-256color\n")
+	assert.NotContains(t, content, `Environment="PATH=`)
+	assert.NotContains(t, content, `Environment="HOME=`)
+	assert.NotContains(t, content, `Environment="SHELL=`)
+	assert.NotContains(t, content, `Environment="TERM=`)
 }
 
 func TestGenerateServiceContentNoSpaces(t *testing.T) {
@@ -40,12 +53,59 @@ func TestGenerateServiceContentNoSpaces(t *testing.T) {
 		"xterm-256color",
 	)
 
-	// Even without spaces, paths should be quoted (quoting is always safe).
+	// ExecStart keeps its shell-style quoting (safe for any path).
 	assert.Contains(t, content, `ExecStart="/usr/local/bin/agent-factory" task run def2`)
-	assert.Contains(t, content, `WorkingDirectory="/home/user/repo"`)
+
+	// WorkingDirectory and Environment lines must not be wrapped in
+	// literal double-quotes, since systemd would treat them as value
+	// characters and reject the resulting unit file.
+	assert.Contains(t, content, "\nWorkingDirectory=/home/user/repo\n")
+	assert.NotContains(t, content, `WorkingDirectory="`)
+	assert.NotContains(t, content, `Environment="`)
 
 	// Verify it's a valid unit structure.
 	assert.True(t, strings.Contains(content, "[Unit]"))
 	assert.True(t, strings.Contains(content, "[Service]"))
 	assert.True(t, strings.Contains(content, "Type=oneshot"))
+}
+
+func TestGenerateServiceContentEnvNewlineSanitized(t *testing.T) {
+	// Newlines in Environment= values would produce an invalid unit file;
+	// sanitizeEnvValue replaces them so the unit remains parseable.
+	content := generateServiceContent(
+		"agent-factory-task-xyz9",
+		"/usr/local/bin/agent-factory",
+		"xyz9",
+		"/home/user/repo",
+		"/usr/bin\n/evil",
+		"/home/user",
+		"/bin/bash",
+		"xterm-256color",
+	)
+
+	// The PATH line must not contain an embedded newline that would
+	// prematurely terminate the Environment= assignment.
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "Environment=PATH=") {
+			assert.NotContains(t, line, "\n")
+		}
+	}
+	assert.Contains(t, content, "Environment=PATH=/usr/bin /evil")
+}
+
+func TestGenerateServiceContentExecStartEscapesQuotes(t *testing.T) {
+	// An executable path containing a literal double-quote must not
+	// break out of the ExecStart= quoted string.
+	content := generateServiceContent(
+		"agent-factory-task-q1",
+		`/opt/weird"path/agent-factory`,
+		"q1",
+		"/home/user/repo",
+		"/usr/bin",
+		"/home/user",
+		"/bin/bash",
+		"xterm-256color",
+	)
+
+	assert.Contains(t, content, `ExecStart="/opt/weird\"path/agent-factory" task run q1`)
 }
