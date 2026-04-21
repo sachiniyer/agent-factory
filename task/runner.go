@@ -71,7 +71,8 @@ func LoadAndClearPendingInstances() ([]session.InstanceData, error) {
 		}
 
 		if err := json.Unmarshal(raw, &pending); err != nil {
-			return err
+			log.WarningLog.Printf("failed to parse pending instances file, discarding: %v", err)
+			pending = nil
 		}
 
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
