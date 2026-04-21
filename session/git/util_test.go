@@ -67,6 +67,11 @@ func TestSanitizeBranchName(t *testing.T) {
 			expected: "john/config",
 		},
 		{
+			name:     "multiple .lock suffixes",
+			input:    "john/config.lock.lock",
+			expected: "john/config",
+		},
+		{
 			name:     "double dots in name",
 			input:    "feature..branch",
 			expected: "feature-branch",
