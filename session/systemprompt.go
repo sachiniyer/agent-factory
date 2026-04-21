@@ -35,14 +35,32 @@ func getBaseCommand(program string) string {
 	}
 
 	var cmd string
-	// Handle single-quoted paths
+	// Handle single-quoted paths. Embedded single quotes are escaped using the
+	// POSIX idiom '\'' (close quote, escaped literal quote, reopen quote), so
+	// scan for a closing quote that is NOT part of a '\'' escape sequence.
 	if program[0] == '\'' {
-		end := strings.Index(program[1:], "'")
+		end := -1
+		for i := 1; i < len(program); i++ {
+			if program[i] != '\'' {
+				continue
+			}
+			// Check for the '\'' escape idiom: current ' followed by \'' —
+			// i.e. program[i..i+3] == "'\\''". Advance past the whole 4-byte
+			// sequence so the reopening quote is not mistaken for the closer.
+			if i+3 < len(program) && program[i+1] == '\\' && program[i+2] == '\'' && program[i+3] == '\'' {
+				i += 3
+				continue
+			}
+			end = i
+			break
+		}
 		if end >= 0 {
-			cmd = program[1 : end+1]
+			cmd = program[1:end]
 		} else {
 			cmd = program[1:]
 		}
+		// Unescape '\'' sequences back to a literal ' so filepath.Base works.
+		cmd = strings.ReplaceAll(cmd, "'\\''", "'")
 	} else if program[0] == '"' {
 		end := strings.Index(program[1:], "\"")
 		if end >= 0 {
