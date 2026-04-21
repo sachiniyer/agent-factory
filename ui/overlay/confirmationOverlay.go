@@ -50,7 +50,7 @@ func (c *ConfirmationOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 			c.OnConfirm()
 		}
 		return true
-	case strings.ToLower(c.CancelKey), "esc":
+	case strings.ToLower(c.CancelKey), "esc", "ctrl+c":
 		c.Dismissed = true
 		if c.OnCancel != nil {
 			c.OnCancel()
