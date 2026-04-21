@@ -180,12 +180,13 @@ func (w whitespace) render(width int) string {
 
 	// Cycle through runes and print them into the whitespace.
 	for i := 0; i < width; {
-		b.WriteRune(r[j])
+		writtenRune := r[j]
+		b.WriteRune(writtenRune)
 		j++
 		if j >= len(r) {
 			j = 0
 		}
-		i += ansi.PrintableRuneWidth(string(r[j]))
+		i += ansi.PrintableRuneWidth(string(writtenRune))
 	}
 
 	// Fill any extra gaps white spaces. This might be necessary if any runes
