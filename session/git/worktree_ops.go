@@ -206,7 +206,8 @@ func (g *GitWorktree) Prune() error {
 	return nil
 }
 
-// CleanupWorktrees removes all worktrees and their associated branches
+// CleanupWorktrees removes all worktrees and their associated branches for
+// the git repo containing the current working directory.
 func CleanupWorktrees() error {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -216,6 +217,18 @@ func CleanupWorktrees() error {
 	repoRoot, err := findGitRepoRoot(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to find git repo root: %w", err)
+	}
+
+	return CleanupWorktreesForRepo(repoRoot)
+}
+
+// CleanupWorktreesForRepo removes all worktrees and their associated branches
+// for the given repo root. The main worktree (the repo itself) is preserved.
+// The repoRoot must be the main repo path; callers should resolve linked
+// worktree paths to the main repo root before invoking this function.
+func CleanupWorktreesForRepo(repoRoot string) error {
+	if repoRoot == "" {
+		return fmt.Errorf("repo root is empty")
 	}
 
 	// List all worktrees from the repo
