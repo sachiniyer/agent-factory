@@ -117,10 +117,13 @@ func GetClaudeCommand() (string, error) {
 		if path != "" {
 			// Check if the output is an alias definition and extract the actual path
 			// Handle formats like "claude: aliased to /path/to/claude" or other shell-specific formats
-			aliasRegex := regexp.MustCompile(`(?:aliased to|->|=)\s*([^\s]+)`)
+			// Capture everything after the alias marker so paths containing spaces
+			// (e.g. "/Applications/Claude Code.app/.../claude") are preserved; trim
+			// surrounding whitespace afterwards.
+			aliasRegex := regexp.MustCompile(`(?:aliased to|->|=)\s*(.+)`)
 			matches := aliasRegex.FindStringSubmatch(path)
 			if len(matches) > 1 {
-				path = matches[1]
+				path = strings.TrimSpace(matches[1])
 			}
 			return path, nil
 		}
