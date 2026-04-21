@@ -101,6 +101,10 @@ type home struct {
 	textOverlay *overlay.TextOverlay
 	// confirmationOverlay displays confirmation modals
 	confirmationOverlay *overlay.ConfirmationOverlay
+	// pendingConfirmMsg holds a non-error tea.Msg returned by a confirmation
+	// action so that handleStateConfirm can forward it to the Bubble Tea
+	// event loop after OnConfirm runs.
+	pendingConfirmMsg tea.Msg
 	// selectionOverlay handles worktree selection
 	selectionOverlay *overlay.SelectionOverlay
 	// searchOverlay handles session search
@@ -782,6 +786,10 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 				if err, ok := msg.(error); ok {
 					log.ErrorLog.Printf("confirmation action failed: %v", err)
 					m.errBox.SetError(err)
+				} else {
+					// Stash non-error messages so handleStateConfirm can
+					// forward them into the Bubble Tea event loop.
+					m.pendingConfirmMsg = msg
 				}
 			}
 		}
