@@ -82,19 +82,41 @@ func TestGetClaudeCommand(t *testing.T) {
 	})
 
 	t.Run("handles alias parsing", func(t *testing.T) {
-		// Test core alias formats
-		aliasRegex := regexp.MustCompile(`(?:aliased to|->|=)\s*([^\s]+)`)
+		// Test core alias formats. Keep this regex in sync with the one used in
+		// GetClaudeCommand so the test exercises the real extraction logic.
+		aliasRegex := regexp.MustCompile(`(?:aliased to|->|=)\s*(.+)`)
+
+		extract := func(output string) (string, bool) {
+			matches := aliasRegex.FindStringSubmatch(output)
+			if len(matches) < 2 {
+				return "", false
+			}
+			return strings.TrimSpace(matches[1]), true
+		}
 
 		// Standard alias format
-		output := "claude: aliased to /usr/local/bin/claude"
-		matches := aliasRegex.FindStringSubmatch(output)
-		assert.Len(t, matches, 2)
-		assert.Equal(t, "/usr/local/bin/claude", matches[1])
+		got, ok := extract("claude: aliased to /usr/local/bin/claude")
+		assert.True(t, ok)
+		assert.Equal(t, "/usr/local/bin/claude", got)
+
+		// Alias path containing spaces (e.g. macOS app bundle) must be preserved.
+		got, ok = extract("claude: aliased to /Applications/Claude Code.app/Contents/MacOS/claude")
+		assert.True(t, ok)
+		assert.Equal(t, "/Applications/Claude Code.app/Contents/MacOS/claude", got)
+
+		// Arrow format with spaces in the path.
+		got, ok = extract("claude -> /path/with spaces/claude")
+		assert.True(t, ok)
+		assert.Equal(t, "/path/with spaces/claude", got)
+
+		// Equals format with trailing whitespace should be trimmed.
+		got, ok = extract("claude=/path/with spaces/claude   ")
+		assert.True(t, ok)
+		assert.Equal(t, "/path/with spaces/claude", got)
 
 		// Direct path (no alias)
-		output = "/usr/local/bin/claude"
-		matches = aliasRegex.FindStringSubmatch(output)
-		assert.Len(t, matches, 0)
+		_, ok = extract("/usr/local/bin/claude")
+		assert.False(t, ok)
 	})
 }
 
