@@ -153,12 +153,14 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 		Title:       "e2e-fix-auth",
 		Path:        repoDir,
 		Program:     "claude",
+		AutoYes:     true,
 		ForceRemote: true,
 	})
 	require.NoError(t, err)
 	assert.True(t, instance.IsRemote(), "NewInstance with ForceRemote should pick HookBackend")
 	assert.Equal(t, "remote", instance.GetBackend().Type())
 	assert.False(t, instance.Started())
+	assert.True(t, instance.AutoYes, "NewInstance should preserve AutoYes from options")
 
 	// --- Step 2: Start (first-time) should call launch_cmd ---
 	err = instance.Start(true)
@@ -211,6 +213,7 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	assert.Equal(t, expectedSlug, data.Branch)
 	assert.NotNil(t, data.RemoteMeta)
 	assert.Equal(t, "running", data.RemoteMeta["status"])
+	assert.True(t, data.AutoYes, "ToInstanceData should persist AutoYes")
 
 	// Verify JSON round-trip
 	jsonBytes, err := json.Marshal(data)
@@ -219,6 +222,21 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	require.NoError(t, json.Unmarshal(jsonBytes, &restored))
 	assert.Equal(t, "remote", restored.BackendType)
 	assert.Equal(t, expectedSlug, restored.RemoteMeta["name"])
+	assert.True(t, restored.AutoYes, "InstanceData JSON round-trip should preserve AutoYes")
+
+	// Regression for #261: FromInstanceData must copy AutoYes back onto the
+	// restored Instance. Before the fix, this field was silently dropped,
+	// so sessions persisted with AutoYes=true would come back with
+	// AutoYes=false after restart.
+	rebuilt, err := FromInstanceData(restored)
+	require.NoError(t, err)
+	assert.True(t, rebuilt.AutoYes, "FromInstanceData must restore AutoYes from persisted data")
+	// Close the rebuilt instance's preview PTY so it does not leak past the
+	// test. The shared state file is cleaned up by Step 11's Kill() on the
+	// original instance.
+	if hb, ok := rebuilt.GetBackend().(*HookBackend); ok {
+		hb.closePTY(rebuilt.Title)
+	}
 
 	// --- Step 11: Kill should call delete_cmd and clean up ---
 	err = instance.Kill()
