@@ -102,7 +102,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(err)
 		}
 	case tea.KeySpace:
-		if err := instance.SetTitle(instance.Title + " "); err != nil {
+		newTitle := instance.Title + " "
+		if runewidth.StringWidth(newTitle) > 32 {
+			return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
+		}
+		if err := instance.SetTitle(newTitle); err != nil {
 			return m, m.handleError(err)
 		}
 	case tea.KeyEsc:
