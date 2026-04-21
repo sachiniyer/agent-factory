@@ -448,10 +448,22 @@ func TestHookBackendKillDeleteCmdFails(t *testing.T) {
 
 	err := b.Start(i, true)
 	require.NoError(t, err)
+	assert.True(t, i.Started())
 
 	err = b.Kill(i)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "delete_cmd failed")
+
+	// Even when delete_cmd fails, the instance must be marked stopped and
+	// its remote metadata cleared so that the UI doesn't show it as running
+	// while its PTY is already closed (see issue #266).
+	assert.False(t, i.Started(), "instance should be stopped after failed Kill")
+	i.mu.RLock()
+	meta := i.remoteMeta
+	i.mu.RUnlock()
+	assert.Nil(t, meta, "remoteMeta should be cleared after failed Kill")
+	// The PTY should have been cleaned up too.
+	assert.Nil(t, b.getPTY(i.Title), "PTY should be closed after failed Kill")
 }
 
 // --- PTY management ---

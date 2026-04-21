@@ -121,6 +121,16 @@ func extractJSON(output string) string {
 }
 
 func (b *HookBackend) Kill(i *Instance) error {
+	// Mark the instance as stopped BEFORE any resource cleanup so that the
+	// instance is in a consistent state even if delete_cmd fails. Otherwise
+	// the PTY could be closed while started=true, leaving the session
+	// appearing running but unusable (empty preview, broken attach).
+	// This mirrors LocalBackend.Kill's behavior.
+	i.mu.Lock()
+	i.started = false
+	i.remoteMeta = nil
+	i.mu.Unlock()
+
 	b.closePTY(i.Title)
 
 	slug := slugify(i.Title)
@@ -129,11 +139,6 @@ func (b *HookBackend) Kill(i *Instance) error {
 	if err != nil {
 		return fmt.Errorf("delete_cmd failed: %s: %w", string(out), err)
 	}
-
-	i.mu.Lock()
-	i.started = false
-	i.remoteMeta = nil
-	i.mu.Unlock()
 
 	return nil
 }
