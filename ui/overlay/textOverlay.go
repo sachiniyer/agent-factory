@@ -22,6 +22,9 @@ func NewTextOverlay(content string) *TextOverlay {
 	return &TextOverlay{
 		Dismissed: false,
 		content:   content,
+		// Default width so PlaceOverlay can center/fade on narrow terminals.
+		// Callers should invoke SetWidth once the actual terminal size is known.
+		width: 60,
 	}
 }
 
