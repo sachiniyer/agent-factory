@@ -36,9 +36,17 @@ func FetchPRInfo(repoPath, branchName string) (*PRInfo, error) {
 		return nil, fmt.Errorf("failed to fetch PR info: %w", err)
 	}
 
+	return parsePRInfo(out)
+}
+
+// parsePRInfo parses the JSON output from `gh pr view`.
+// Returns (nil, nil) only when the output clearly indicates no PR exists
+// (i.e. PR number of 0). On malformed JSON it returns an error so that
+// callers preserve previously cached PR info rather than clearing it.
+func parsePRInfo(out []byte) (*PRInfo, error) {
 	var info PRInfo
 	if err := json.Unmarshal(out, &info); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("failed to parse PR info JSON: %w", err)
 	}
 	if info.Number == 0 {
 		return nil, nil
