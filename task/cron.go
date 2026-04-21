@@ -361,5 +361,14 @@ func expandCronPart(part string, min, max int) ([]int, error) {
 	if err != nil {
 		return nil, err
 	}
+	// When a step is provided with a single number (e.g. "5/10"), expand from
+	// that number to max by step. Without a step, return just the single value.
+	if step > 1 {
+		var vals []int
+		for i := val; i <= max; i += step {
+			vals = append(vals, i)
+		}
+		return vals, nil
+	}
 	return []int{val}, nil
 }
