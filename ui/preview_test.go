@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/require"
 )
 
@@ -386,4 +387,63 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestPreviewFallbackHeightNoDoubleCounting ensures that the fallback welcome
+// screen does not over-subtract lines for borders/margins that
+// TabbedWindow.SetSize has already stripped. Previously it subtracted 7, which
+// produced a 6-line deficit versus normal mode and truncated the ASCII art on
+// short terminals. See issue #274.
+func TestPreviewFallbackHeightNoDoubleCounting(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	// Count the number of lines in the fallback text itself so we can make
+	// assertions that depend on the ASCII art surviving the layout math.
+	fallbackTextLines := len(strings.Split(
+		lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", "msg"),
+		"\n",
+	))
+
+	t.Run("renders full content at comfortable height", func(t *testing.T) {
+		p := NewPreviewPane()
+		p.SetSize(80, 30)
+		p.setFallbackState("hello world")
+
+		rendered := p.String()
+		require.NotEmpty(t, rendered, "fallback render should not be empty")
+		require.Contains(t, rendered, "hello world",
+			"fallback render should contain the provided message")
+		// A sentinel glyph from the ASCII art - its presence means the art
+		// wasn't truncated away.
+		require.Contains(t, rendered, "█████",
+			"fallback render should contain the ASCII art")
+	})
+
+	t.Run("matches normal-mode height budget", func(t *testing.T) {
+		// At any height, the fallback should compute the same availableHeight
+		// as normal mode (p.height - 1), so the rendered output fills the
+		// same number of lines.
+		for _, h := range []int{20, 25, 30, 50} {
+			p := NewPreviewPane()
+			p.SetSize(80, h)
+			p.setFallbackState("msg")
+
+			rendered := p.String()
+			lines := strings.Split(rendered, "\n")
+
+			// We expect at least max(fallbackTextLines, h-1) lines; the pane
+			// pads to fill the available area when content is shorter than
+			// the budget.
+			expected := h - 1
+			if fallbackTextLines > expected {
+				expected = fallbackTextLines
+			}
+			require.GreaterOrEqual(t, len(lines), expected,
+				"height=%d: fallback must fill p.height-1 (no double-counting of chrome)",
+				h)
+			require.Contains(t, rendered, "msg",
+				"height=%d: fallback message must remain visible", h)
+		}
+	})
 }
