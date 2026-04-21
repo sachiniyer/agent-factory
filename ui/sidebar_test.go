@@ -206,6 +206,45 @@ func TestSidebarSelectInstance(t *testing.T) {
 	assert.Equal(t, "first", selected.Title)
 }
 
+// TestSetSelectedInstanceExpandsCollapsedSection verifies that calling
+// SetSelectedInstance while the Instances section is collapsed transparently
+// expands the section and selects the target instance (regression for #275).
+func TestSetSelectedInstanceExpandsCollapsedSection(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false)
+
+	inst1, _ := session.NewInstance(session.InstanceOptions{
+		Title: "first", Path: t.TempDir(), Program: "test",
+	})
+	inst2, _ := session.NewInstance(session.InstanceOptions{
+		Title: "second", Path: t.TempDir(), Program: "test",
+	})
+	s.AddInstance(inst1)
+	s.AddInstance(inst2)
+
+	// Sanity check: SetSelectedInstance works when expanded.
+	s.SetSelectedInstance(1)
+	selected := s.GetSelectedInstance()
+	require.NotNil(t, selected)
+	assert.Equal(t, "second", selected.Title)
+
+	// Collapse the Instances section; selection lands on the Instances header.
+	s.CollapseSection()
+	sel := s.GetSelection()
+	require.True(t, sel.IsHeader)
+	require.Equal(t, SectionInstances, sel.Kind)
+
+	// Selecting while collapsed should transparently expand the section and
+	// land on the requested instance instead of silently no-oping.
+	s.SetSelectedInstance(0)
+	selected = s.GetSelectedInstance()
+	require.NotNil(t, selected, "SetSelectedInstance should expand the collapsed Instances section")
+	assert.Equal(t, "first", selected.Title)
+
+	// The Instances section should now be expanded.
+	assert.True(t, s.sections[0].Expanded)
+}
+
 func TestSidebarTaskData(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false)

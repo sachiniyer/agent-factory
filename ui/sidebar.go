@@ -317,10 +317,15 @@ func (s *Sidebar) GetSelectedInstance() *session.Instance {
 }
 
 // SetSelectedInstance sets the selected index to point at the given instance index.
+// If the Instances section is collapsed, it is expanded first so the target row
+// is always reachable.
 func (s *Sidebar) SetSelectedInstance(idx int) {
 	if idx >= len(s.instances) {
 		return
 	}
+	// Ensure the Instances section is expanded so the target row is part of
+	// visibleItems; otherwise the search below would silently no-op.
+	s.ExpandInstancesSection()
 	// Find the visible item that corresponds to this instance
 	for i, item := range s.visibleItems {
 		if item.Kind == SectionInstances && !item.IsHeader && item.ItemIndex == idx {
