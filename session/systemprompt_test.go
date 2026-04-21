@@ -165,11 +165,44 @@ func TestGetBaseCommand(t *testing.T) {
 		{"/usr/bin/codex", "codex"},
 		{"", ""},
 		{"Claude", "claude"},
+		// Single-quoted path (config.go quotes paths containing spaces).
+		{"'/home/user/my apps/claude'", "claude"},
+		{"'/home/user/my apps/claude' --model opus", "claude"},
+		// POSIX escape idiom '\'' for an embedded apostrophe inside a
+		// single-quoted path. Regression test for issue #254.
+		{"'/home/user/o'\\''brien/my apps/claude'", "claude"},
+		{"'/home/user/o'\\''brien/my apps/claude' --model opus", "claude"},
+		{"'/home/user/o'\\''brien/codex'", "codex"},
+		// Double-quoted path.
+		{"\"/home/user/my apps/claude\"", "claude"},
 	}
 	for _, tt := range tests {
 		got := getBaseCommand(tt.input)
 		if got != tt.expected {
 			t.Errorf("getBaseCommand(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+// TestGetBaseCommand_RoundTripWithShellQuote verifies that getBaseCommand
+// correctly parses output from shellQuote (same quoting format used by
+// config.go for paths with spaces), including paths with embedded apostrophes.
+func TestGetBaseCommand_RoundTripWithShellQuote(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected string
+	}{
+		{"/home/user/my apps/claude", "claude"},
+		{"/home/user/o'brien/my apps/claude", "claude"},
+		{"/home/user/o'brien/codex", "codex"},
+		{"/plain/claude", "claude"},
+	}
+	for _, tt := range tests {
+		quoted := shellQuote(tt.path)
+		got := getBaseCommand(quoted)
+		if got != tt.expected {
+			t.Errorf("getBaseCommand(shellQuote(%q)) = getBaseCommand(%q) = %q, want %q",
+				tt.path, quoted, got, tt.expected)
 		}
 	}
 }
