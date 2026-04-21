@@ -32,6 +32,9 @@ type Backend interface {
 	// approach (e.g. tmux send-keys).
 	SendPromptCommand(instance *Instance, prompt string) error
 
+	// SendKeys sends raw keys to the session (without pressing Enter).
+	SendKeys(instance *Instance, keys string) error
+
 	// SetPreviewSize sets the terminal dimensions for the session preview.
 	SetPreviewSize(instance *Instance, width, height int) error
 

@@ -184,7 +184,7 @@ func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool) {
 	ts := i.tmuxSession
 	i.mu.RUnlock()
 
-	if !s {
+	if !s || ts == nil {
 		return false, false
 	}
 	return ts.HasUpdated()
@@ -227,6 +227,21 @@ func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
 		return fmt.Errorf("tmux session not initialized")
 	}
 	return ts.SendKeysCommand(prompt)
+}
+
+func (b *LocalBackend) SendKeys(i *Instance, keys string) error {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxSession
+	i.mu.RUnlock()
+
+	if !s {
+		return fmt.Errorf("cannot send keys to instance that has not been started")
+	}
+	if ts == nil {
+		return fmt.Errorf("tmux session not initialized")
+	}
+	return ts.SendKeys(keys)
 }
 
 func (b *LocalBackend) SetPreviewSize(i *Instance, width, height int) error {

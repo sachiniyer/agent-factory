@@ -194,6 +194,10 @@ func (b *HookBackend) SendPromptCommand(_ *Instance, _ string) error {
 	return fmt.Errorf("SendPromptCommand not supported for remote sessions")
 }
 
+func (b *HookBackend) SendKeys(_ *Instance, _ string) error {
+	return fmt.Errorf("SendKeys not supported for remote sessions")
+}
+
 func (b *HookBackend) SetPreviewSize(_ *Instance, _, _ int) error {
 	// No-op: remote session size is controlled by the remote host.
 	return nil

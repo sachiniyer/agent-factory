@@ -439,17 +439,10 @@ func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
 	i.tmuxSession = session
 }
 
-// SendKeys sends keys to the tmux session
+// SendKeys sends keys to the underlying session. For remote backends this
+// returns an explicit error since raw key injection is not supported.
 func (i *Instance) SendKeys(keys string) error {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxSession
-	i.mu.RUnlock()
-
-	if !s {
-		return fmt.Errorf("cannot send keys to instance that has not been started")
-	}
-	return ts.SendKeys(keys)
+	return i.backend.SendKeys(i, keys)
 }
 
 // IsRemote returns true if this instance uses the remote hook backend.
