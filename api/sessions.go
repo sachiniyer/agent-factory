@@ -125,14 +125,7 @@ var sessionsCreateCmd = &cobra.Command{
 
 		// Save to per-repo storage under file lock
 		data := instance.ToInstanceData()
-		if err := config.UpdateRepoInstances(repo.ID, func(raw json.RawMessage) (json.RawMessage, error) {
-			var existing []session.InstanceData
-			if err := json.Unmarshal(raw, &existing); err != nil {
-				existing = []session.InstanceData{}
-			}
-			existing = append(existing, data)
-			return json.MarshalIndent(existing, "", "  ")
-		}); err != nil {
+		if err := config.UpdateRepoInstances(repo.ID, appendInstanceFn(data)); err != nil {
 			instance.Kill()
 			return jsonError(err)
 		}
@@ -147,6 +140,21 @@ var sessionsCreateCmd = &cobra.Command{
 
 		return jsonOut(data)
 	},
+}
+
+// appendInstanceFn returns a callback for config.UpdateRepoInstances that
+// appends data to the existing instances array. If the existing file is
+// corrupted, it returns an error so the update is aborted without
+// overwriting the on-disk file (preserving it for manual recovery).
+func appendInstanceFn(data session.InstanceData) func(json.RawMessage) (json.RawMessage, error) {
+	return func(raw json.RawMessage) (json.RawMessage, error) {
+		var existing []session.InstanceData
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
+		}
+		existing = append(existing, data)
+		return json.MarshalIndent(existing, "", "  ")
+	}
 }
 
 var (
@@ -207,14 +215,7 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 
 			// Save to per-repo storage under file lock
 			data := instance.ToInstanceData()
-			if err := config.UpdateRepoInstances(repo.ID, func(raw json.RawMessage) (json.RawMessage, error) {
-				var existing []session.InstanceData
-				if err := json.Unmarshal(raw, &existing); err != nil {
-					existing = []session.InstanceData{}
-				}
-				existing = append(existing, data)
-				return json.MarshalIndent(existing, "", "  ")
-			}); err != nil {
+			if err := config.UpdateRepoInstances(repo.ID, appendInstanceFn(data)); err != nil {
 				instance.Kill()
 				return jsonError(err)
 			}
