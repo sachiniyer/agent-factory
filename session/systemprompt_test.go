@@ -195,7 +195,7 @@ func TestEnsurePluginDir(t *testing.T) {
 	}
 
 	commandsDir := filepath.Join(pluginDir, "commands")
-	expectedFiles := []string{"af-sessions.md", "af-kill.md", "af-send.md", "af-preview.md", "af-whoami.md"}
+	expectedFiles := []string{"af-sessions.md", "af-kill.md", "af-send.md", "af-preview.md", "af-whoami.md", "af-create.md"}
 	for _, name := range expectedFiles {
 		path := filepath.Join(commandsDir, name)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -229,5 +229,44 @@ func TestEnsurePluginDir_Idempotent(t *testing.T) {
 
 	if dir1 != dir2 {
 		t.Errorf("expected same dir on repeated calls, got %q and %q", dir1, dir2)
+	}
+}
+
+func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
+
+	pluginDir, err := ensurePluginDir()
+	if err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+
+	commandsDir := filepath.Join(pluginDir, "commands")
+	stale := filepath.Join(commandsDir, "af-removed.md")
+	if err := os.WriteFile(stale, []byte("stale"), 0644); err != nil {
+		t.Fatalf("failed to seed stale file: %v", err)
+	}
+
+	// Non-.md files and unrelated content must be left alone.
+	keep := filepath.Join(commandsDir, "README.txt")
+	if err := os.WriteFile(keep, []byte("keep me"), 0644); err != nil {
+		t.Fatalf("failed to seed keep file: %v", err)
+	}
+
+	if _, err := ensurePluginDir(); err != nil {
+		t.Fatalf("second call failed: %v", err)
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("expected stale file %s to be pruned, got err=%v", stale, err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("expected non-.md file %s to survive prune: %v", keep, err)
+	}
+
+	for name := range pluginCommands {
+		if _, err := os.Stat(filepath.Join(commandsDir, name)); err != nil {
+			t.Errorf("expected %s to still exist after prune: %v", name, err)
+		}
 	}
 }
