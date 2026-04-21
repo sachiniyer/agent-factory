@@ -113,17 +113,37 @@ var (
 			}
 			fmt.Println("Tmux sessions have been cleaned up")
 
-			if err := git.CleanupWorktrees(); err != nil {
-				return fmt.Errorf("failed to cleanup worktrees: %w", err)
-			}
-			fmt.Println("Worktrees have been cleaned up")
-
-			// Delete storage last, after resources are cleaned up
+			// Clean worktrees across ALL repos with stored instances, not
+			// just the current repo. Storage is global (DeleteAllInstances
+			// removes records for every repo), so worktree cleanup must match
+			// that scope — otherwise repos we don't run reset from are left
+			// with orphaned worktrees/branches (issue #265).
 			state := config.LoadState()
 			storage, err := session.NewStorage(state, "")
 			if err != nil {
 				return fmt.Errorf("failed to initialize storage: %w", err)
 			}
+
+			repoRoots, err := storage.CollectRepoRoots()
+			if err != nil {
+				return fmt.Errorf("failed to collect repo roots: %w", err)
+			}
+			// Ensure the current repo (if any) is cleaned even when it has
+			// no stored instances, matching prior behavior.
+			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+				if root, rerr := config.ResolveMainRepoRoot(cwd); rerr == nil {
+					repoRoots[root] = struct{}{}
+				}
+			}
+
+			for root := range repoRoots {
+				if err := git.CleanupWorktreesForRepo(root); err != nil {
+					return fmt.Errorf("failed to cleanup worktrees for %s: %w", root, err)
+				}
+			}
+			fmt.Println("Worktrees have been cleaned up")
+
+			// Delete storage last, after resources are cleaned up
 			if err := storage.DeleteAllInstances(); err != nil {
 				return fmt.Errorf("failed to reset storage: %w", err)
 			}

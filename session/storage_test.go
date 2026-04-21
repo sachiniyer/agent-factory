@@ -297,3 +297,78 @@ func TestDaemonSaveNoInstances(t *testing.T) {
 	err = storage.SaveInstances([]*Instance{})
 	require.NoError(t, err)
 }
+
+// TestCollectRepoRoots verifies that Storage.CollectRepoRoots returns the
+// unique set of repo roots from stored instances across ALL repos. This
+// underpins the fix for #265 (af reset must clean worktrees in every repo
+// whose instance storage will be deleted, not just the current repo).
+func TestCollectRepoRoots(t *testing.T) {
+	const repoA = "/tmp/repo-a"
+	const repoB = "/tmp/repo-b"
+	const repoC = "/tmp/repo-c"
+	ms := newMockStorage()
+
+	// Repo A: two instances, both with Worktree.RepoPath set.
+	seedDisk(t, ms, repoA, []InstanceData{
+		{Title: "a1", Path: repoA, Worktree: GitWorktreeData{RepoPath: repoA}},
+		{Title: "a2", Path: repoA, Worktree: GitWorktreeData{RepoPath: repoA}},
+	})
+	// Repo B: one instance with Worktree.RepoPath set.
+	seedDisk(t, ms, repoB, []InstanceData{
+		{Title: "b1", Path: repoB, Worktree: GitWorktreeData{RepoPath: repoB}},
+	})
+	// Repo C: instance with empty Worktree.RepoPath (e.g. remote backend);
+	// should fall back to Path.
+	seedDisk(t, ms, repoC, []InstanceData{
+		{Title: "c1", Path: repoC},
+	})
+
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+
+	roots, err := storage.CollectRepoRoots()
+	require.NoError(t, err)
+
+	assert.Len(t, roots, 3, "should collect one entry per unique repo root")
+	assert.Contains(t, roots, repoA)
+	assert.Contains(t, roots, repoB)
+	assert.Contains(t, roots, repoC)
+}
+
+// TestCollectRepoRootsEmpty verifies the helper returns an empty set when
+// there are no stored instances.
+func TestCollectRepoRootsEmpty(t *testing.T) {
+	ms := newMockStorage()
+
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+
+	roots, err := storage.CollectRepoRoots()
+	require.NoError(t, err)
+	assert.Empty(t, roots)
+}
+
+// TestCollectRepoRootsSkipsEmpty verifies that instances with neither a
+// Worktree.RepoPath nor a Path are skipped rather than producing an empty
+// string entry.
+func TestCollectRepoRootsSkipsEmpty(t *testing.T) {
+	const repoA = "/tmp/repo-a"
+	ms := newMockStorage()
+
+	// One usable instance and one with no usable repo info.
+	seedDisk(t, ms, repoA, []InstanceData{
+		{Title: "a1", Path: repoA, Worktree: GitWorktreeData{RepoPath: repoA}},
+		{Title: "ghost"},
+	})
+
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+
+	roots, err := storage.CollectRepoRoots()
+	require.NoError(t, err)
+
+	assert.Len(t, roots, 1)
+	assert.Contains(t, roots, repoA)
+	_, hasEmpty := roots[""]
+	assert.False(t, hasEmpty, "empty repo root should be skipped")
+}

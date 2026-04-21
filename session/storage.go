@@ -293,3 +293,38 @@ func (s *Storage) LoadInstanceData() ([]InstanceData, error) {
 func (s *Storage) DeleteAllInstances() error {
 	return s.state.DeleteAllInstances()
 }
+
+// CollectRepoRoots returns the set of unique repo root paths referenced by
+// stored instances across all repos. This is used by operations whose scope
+// must span every repo with persisted state (e.g. `af reset` cleaning
+// worktrees in all repos before deleting global instance storage).
+//
+// Instances without a usable repo path (e.g. certain remote backends where
+// Worktree.RepoPath is empty and Path is not a local filesystem path) are
+// skipped. Callers should treat the result as best-effort.
+func (s *Storage) CollectRepoRoots() (map[string]struct{}, error) {
+	roots := make(map[string]struct{})
+	allJSON := s.state.GetAllInstances()
+	for _, jsonData := range allJSON {
+		if jsonData == nil || string(jsonData) == "[]" || string(jsonData) == "null" {
+			continue
+		}
+		var instancesData []InstanceData
+		if err := json.Unmarshal(jsonData, &instancesData); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
+		}
+		for _, data := range instancesData {
+			// Prefer the worktree's repo path; fall back to the
+			// instance path (the repo the instance was created in).
+			root := data.Worktree.RepoPath
+			if root == "" {
+				root = data.Path
+			}
+			if root == "" {
+				continue
+			}
+			roots[root] = struct{}{}
+		}
+	}
+	return roots, nil
+}

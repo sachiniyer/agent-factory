@@ -336,3 +336,64 @@ func createGitRepo(t *testing.T) string {
 
 	return repoRoot
 }
+
+// TestCleanupWorktreesForRepo_RejectsEmpty verifies the exported helper does
+// not silently operate on the cwd when given an empty repo root.
+func TestCleanupWorktreesForRepo_RejectsEmpty(t *testing.T) {
+	err := CleanupWorktreesForRepo("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repo root is empty")
+}
+
+// TestCleanupWorktreesForRepo_CleansGivenRepo verifies that
+// CleanupWorktreesForRepo targets the repo it is given — regardless of the
+// process's current working directory. This is the core of the #265 fix:
+// `af reset` must be able to clean worktrees in repos OTHER than the cwd.
+func TestCleanupWorktreesForRepo_CleansGivenRepo(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	// Build a repo, make an initial commit, and add a linked worktree.
+	repoRoot := createGitRepo(t)
+	env := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	commitCmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "init")
+	commitCmd.Env = env
+	out, err := commitCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	linkedPath := filepath.Join(filepath.Dir(repoRoot), "linked-wt")
+	addCmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", "linked-branch", linkedPath)
+	addCmd.Env = env
+	out, err = addCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Sanity: the linked worktree is on disk and known to git.
+	_, err = os.Stat(linkedPath)
+	require.NoError(t, err)
+
+	// Run cleanup targeting this repo EXPLICITLY. We do not chdir, so if
+	// the helper were derived from cwd (the old behavior) it would not
+	// touch this repo at all.
+	require.NoError(t, CleanupWorktreesForRepo(repoRoot))
+
+	// The linked worktree directory should have been removed.
+	if _, statErr := os.Stat(linkedPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected linked worktree to be removed; got stat err: %v", statErr)
+	}
+
+	// The linked branch should have been deleted.
+	branchCmd := exec.Command("git", "-C", repoRoot, "branch", "--list", "linked-branch")
+	out, err = branchCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Empty(t, strings.TrimSpace(string(out)), "linked branch should be deleted")
+
+	// Only the main worktree should remain.
+	listCmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	out, err = listCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Equal(t, 1, strings.Count(string(out), "worktree "),
+		"only the main worktree should remain, got:\n%s", string(out))
+}
