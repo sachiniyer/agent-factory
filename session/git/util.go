@@ -49,8 +49,10 @@ func sanitizeBranchName(s string) string {
 	s = strings.Join(filtered, "/")
 	// 2. Replace any remaining double dots with a dash (e.g., "a..b")
 	s = strings.ReplaceAll(s, "..", "-")
-	// 3. No .lock suffix (reserved by git)
-	s = strings.TrimSuffix(s, ".lock")
+	// 3. No .lock suffix (reserved by git) - remove ALL trailing .lock suffixes
+	for strings.HasSuffix(s, ".lock") {
+		s = strings.TrimSuffix(s, ".lock")
+	}
 	// 4. No trailing dots
 	s = strings.TrimRight(s, ".")
 	// 5. Clean up any trailing dashes or slashes left after dot removal
