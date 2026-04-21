@@ -21,6 +21,15 @@ const (
 	githubAPILatestRelease  = "https://api.github.com/repos/sachiniyer/agent-factory/releases/latest"
 )
 
+// runtimeGOOS is a variable so tests can override the value reported by
+// runtime.GOOS to exercise platform-specific branches (e.g. the Windows
+// early-return path below).
+var runtimeGOOS = runtime.GOOS
+
+// fetchLatestReleaseTagFn is indirected through a variable so tests can inject
+// a fake without hitting the network.
+var fetchLatestReleaseTagFn = fetchLatestReleaseTag
+
 // autoUpdateInBackground checks for a newer release and applies it silently.
 // It runs in a goroutine and never blocks the main program.
 func autoUpdateInBackground() {
@@ -37,7 +46,7 @@ func autoUpdate() error {
 		return nil
 	}
 
-	latestTag, err := fetchLatestReleaseTag()
+	latestTag, err := fetchLatestReleaseTagFn()
 	if err != nil {
 		return fmt.Errorf("failed to fetch latest release: %w", err)
 	}
@@ -52,9 +61,12 @@ func autoUpdate() error {
 
 	log.ErrorLog.Printf("auto-update: updating from %s to %s", version, latestVersion)
 
-	goos := runtime.GOOS
+	goos := runtimeGOOS
 	goarch := runtime.GOARCH
 	if goos == "windows" {
+		// Auto-update is not supported on Windows, but record the check so the
+		// 24-hour throttle fires and we don't hit the GitHub API on every launch.
+		recordCheck()
 		return nil
 	}
 
