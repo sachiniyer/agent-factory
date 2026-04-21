@@ -111,8 +111,11 @@ func (p *PreviewPane) String() string {
 	}
 
 	if p.previewState.fallback {
-		// Calculate available height for fallback text
-		availableHeight := p.height - 3 - 4 // 2 for borders, 1 for margin, 1 for padding
+		// TabbedWindow.SetSize already subtracts borders/margins/padding from
+		// p.height, so we mirror the normal-mode subtraction here to avoid
+		// double-counting chrome and truncating the welcome ASCII art on
+		// smaller terminals.
+		availableHeight := p.height - 1
 
 		// Count the number of lines in the fallback text
 		fallbackLines := len(strings.Split(p.previewState.text, "\n"))
