@@ -69,20 +69,23 @@ func (m *home) mergePendingInstances() int {
 			continue
 		}
 
-		// If an entry with the same title already exists in the sidebar, replace
-		// it only if the existing instance is dead (tmux gone). If it's still
-		// alive, skip the new pending instance to avoid creating a duplicate.
+		// If an entry with the same title already exists in the sidebar, decide
+		// whether to replace it or skip the pending instance. A scheduled task
+		// rerun may recreate the same tmux session name under a different
+		// worktree path (worktrees gain a numeric suffix on collision), so we
+		// cannot rely on TmuxAlive() alone to tell whether the sidebar
+		// instance still reflects the pending one.
 		if sidebarTitles[data.Title] {
 			skip := false
 			for _, existing := range m.sidebar.GetInstances() {
 				if existing.Title != data.Title {
 					continue
 				}
-				if existing.TmuxAlive() {
+				if pendingInstanceCollisionShouldSkip(existing.GetWorktreePath(), data.Worktree.WorktreePath, existing.TmuxAlive()) {
 					log.WarningLog.Printf("skipping pending instance %q: already exists and is alive", data.Title)
 					skip = true
 				} else {
-					log.InfoLog.Printf("replacing dead instance %q with new pending instance", data.Title)
+					log.InfoLog.Printf("replacing stale instance %q with new pending instance", data.Title)
 					m.sidebar.RemoveInstanceByTitle(data.Title)
 					delete(sidebarTitles, data.Title)
 				}
@@ -192,4 +195,22 @@ func (m *home) refreshExternalInstances() bool {
 	}
 
 	return changed
+}
+
+// pendingInstanceCollisionShouldSkip decides whether to skip a pending
+// instance when an instance with the same title already exists in the
+// sidebar. It returns true when the pending instance should be skipped
+// (sidebar instance is still valid), false when the sidebar instance is
+// stale and should be replaced.
+//
+// If both worktree paths are known and differ, the sidebar instance is
+// stale regardless of TmuxAlive() — a scheduled task rerun creates a new
+// worktree with a numeric suffix and a tmux session with the same name,
+// so TmuxAlive() would incorrectly report the sidebar instance as live.
+// Otherwise, fall back to the tmuxAlive signal.
+func pendingInstanceCollisionShouldSkip(existingWorktreePath, pendingWorktreePath string, tmuxAlive bool) bool {
+	if existingWorktreePath != "" && pendingWorktreePath != "" && existingWorktreePath != pendingWorktreePath {
+		return false
+	}
+	return tmuxAlive
 }
