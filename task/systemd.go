@@ -41,6 +41,10 @@ func quoteExecStartPath(p string) string {
 // so surrounding quotes would be preserved literally. Newlines are also
 // disallowed by systemd in Environment= values; replace them with spaces
 // rather than emitting a syntactically invalid unit file.
+//
+// The same rules apply to WorkingDirectory=: a raw newline would terminate
+// the value and cause systemd to run the task in a truncated path, so this
+// helper is reused there as well.
 func sanitizeEnvValue(v string) string {
 	v = strings.ReplaceAll(v, "\n", " ")
 	v = strings.ReplaceAll(v, "\r", " ")
@@ -66,7 +70,7 @@ WorkingDirectory=%s
 		sanitizeEnvValue(homeEnv),
 		sanitizeEnvValue(shellEnv),
 		sanitizeEnvValue(termEnv),
-		projectPath)
+		sanitizeEnvValue(projectPath))
 }
 
 func InstallScheduler(t Task) error {
