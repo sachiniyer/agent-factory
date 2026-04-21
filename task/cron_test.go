@@ -43,6 +43,27 @@ func TestCronFieldExpandRangeWithStep(t *testing.T) {
 	assert.Equal(t, []int{0, 3, 6, 9}, vals)
 }
 
+func TestCronFieldExpandSingleWithStep(t *testing.T) {
+	// "5/10" means "every 10 starting at 5" — the step must be honored.
+	vals, err := expandCronField("5/10", 0, 59)
+	require.NoError(t, err)
+	assert.Equal(t, []int{5, 15, 25, 35, 45, 55}, vals)
+}
+
+func TestCronFieldExpandSingleWithStepAtBoundary(t *testing.T) {
+	// Starting value equal to max should yield just that value.
+	vals, err := expandCronField("59/10", 0, 59)
+	require.NoError(t, err)
+	assert.Equal(t, []int{59}, vals)
+}
+
+func TestCronFieldExpandListWithSingleStep(t *testing.T) {
+	// A list element with a single-number step should also expand.
+	vals, err := expandCronField("0,5/20", 0, 59)
+	require.NoError(t, err)
+	assert.Equal(t, []int{0, 5, 25, 45}, vals)
+}
+
 func TestCronFieldExpandDedup(t *testing.T) {
 	vals, err := expandCronField("1,1,3", 0, 7)
 	require.NoError(t, err)
