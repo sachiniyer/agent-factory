@@ -79,6 +79,16 @@ func (w *TabbedWindow) SetSize(width, height int) {
 	contentHeight := height - tabHeight - windowStyle.GetVerticalFrameSize() - 2
 	contentWidth := w.width - windowStyle.GetHorizontalFrameSize()
 
+	// Clamp to zero so tiny terminals don't produce negative dimensions,
+	// which would otherwise overflow when later cast to uint16 (e.g. by
+	// pty.Setsize for the tmux preview/terminal panes).
+	if contentHeight < 0 {
+		contentHeight = 0
+	}
+	if contentWidth < 0 {
+		contentWidth = 0
+	}
+
 	w.preview.SetSize(contentWidth, contentHeight)
 	w.terminal.SetSize(contentWidth, contentHeight)
 }
