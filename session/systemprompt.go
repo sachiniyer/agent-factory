@@ -11,6 +11,7 @@ const codexSystemPrompt = `You are running inside Agent Factory (af), a terminal
 You can manage sessions using the "af" CLI:
 
 Session commands:
+  af sessions create --name <title> [--prompt <prompt>]  Create a new session
   af sessions whoami                        Identify your current session
   af sessions list                          List all sessions
   af sessions kill <title>                  Delete/kill a session
