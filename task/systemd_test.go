@@ -93,6 +93,38 @@ func TestGenerateServiceContentEnvNewlineSanitized(t *testing.T) {
 	assert.Contains(t, content, "Environment=PATH=/usr/bin /evil")
 }
 
+func TestGenerateServiceContentWorkingDirectoryNewlineSanitized(t *testing.T) {
+	// A newline inside WorkingDirectory= would terminate the value and cause
+	// systemd to run the task in a truncated directory. The unit must have
+	// the newline replaced so the full path is preserved on a single line.
+	projectPath := "/tmp/test\ninjected"
+	content := generateServiceContent(
+		"agent-factory-task-nl1",
+		"/usr/local/bin/agent-factory",
+		"nl1",
+		projectPath,
+		"/usr/bin",
+		"/home/user",
+		"/bin/bash",
+		"xterm-256color",
+	)
+
+	// The raw newline must not appear mid-value.
+	assert.NotContains(t, content, "WorkingDirectory=/tmp/test\n")
+
+	// The sanitized single-line WorkingDirectory= should contain the full
+	// path with the newline replaced (spaces, matching Environment= handling).
+	assert.Contains(t, content, "\nWorkingDirectory=/tmp/test injected\n")
+
+	// Defensive: whichever line holds WorkingDirectory= must be free of any
+	// embedded newline in its value.
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "WorkingDirectory=") {
+			assert.NotContains(t, line, "\n")
+		}
+	}
+}
+
 func TestGenerateServiceContentExecStartEscapesQuotes(t *testing.T) {
 	// An executable path containing a literal double-quote must not
 	// break out of the ExecStart= quoted string.
