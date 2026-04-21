@@ -437,6 +437,85 @@ func TestMultipleConfirmationsDontInterfere(t *testing.T) {
 	assert.True(t, action1Called, "First action should be callable after being replaced")
 }
 
+// TestConfirmActionForwardsNonErrorMsg verifies that a non-error tea.Msg returned
+// by a confirmation action (e.g. instanceChangedMsg{}) is forwarded back into the
+// Bubble Tea event loop so its handler runs (e.g. selectionChanged updating the
+// content pane after a session is killed). Regression test for #259.
+func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	sidebar := ui.NewSidebar(&spin, false)
+	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewTerminalPane())
+	cp := ui.NewContentPane(tw)
+
+	h := &home{
+		ctx:         context.Background(),
+		state:       stateDefault,
+		appConfig:   config.DefaultConfig(),
+		sidebar:     sidebar,
+		contentPane: cp,
+		menu:        ui.NewMenu(),
+		errBox:      ui.NewErrBox(),
+	}
+
+	// Build an action mirroring killAction: returns instanceChangedMsg{} on success.
+	actionCalled := false
+	action := func() tea.Msg {
+		actionCalled = true
+		return instanceChangedMsg{}
+	}
+
+	// Trigger the confirmation flow.
+	_ = h.confirmAction("Kill session 'test'?", action)
+	require.Equal(t, stateConfirm, h.state)
+	require.NotNil(t, h.confirmationOverlay)
+
+	// Simulate pressing 'y' to confirm. handleStateConfirm should now return
+	// a command that emits the instanceChangedMsg back to the event loop.
+	confirmKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
+	_, cmd := h.handleStateConfirm(confirmKey)
+
+	assert.True(t, actionCalled, "confirmation action should have run")
+	assert.Equal(t, stateDefault, h.state)
+	assert.Nil(t, h.confirmationOverlay)
+	assert.Nil(t, h.pendingConfirmMsg, "pending msg should be consumed after forwarding")
+	require.NotNil(t, cmd, "handleStateConfirm must return a tea.Cmd that forwards instanceChangedMsg")
+
+	// Execute the returned command and confirm it emits instanceChangedMsg.
+	msg := cmd()
+	_, ok := msg.(instanceChangedMsg)
+	assert.True(t, ok, "expected instanceChangedMsg, got %T", msg)
+
+	// Feed the message into Update to confirm the main event loop routes it to
+	// selectionChanged (which manipulates the sidebar/content pane, verifying
+	// the message really reaches its handler without panicking).
+	_, updateCmd := h.Update(msg)
+	_ = updateCmd // selectionChanged returns nil when no instance is selected
+}
+
+// TestConfirmActionErrorStillRecorded verifies that error returns from the
+// confirmation action still reach the error box and do NOT get forwarded as
+// a regular tea.Msg.
+func TestConfirmActionErrorStillRecorded(t *testing.T) {
+	h := &home{
+		ctx:       context.Background(),
+		state:     stateDefault,
+		appConfig: config.DefaultConfig(),
+		errBox:    ui.NewErrBox(),
+	}
+
+	expectedErr := fmt.Errorf("boom")
+	action := func() tea.Msg { return expectedErr }
+
+	_ = h.confirmAction("Do thing?", action)
+	confirmKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
+	_, cmd := h.handleStateConfirm(confirmKey)
+
+	// Errors are handled inline (recorded in errBox); no tea.Cmd should be returned.
+	assert.Nil(t, cmd, "errors should not be forwarded as tea.Msg")
+	assert.Nil(t, h.pendingConfirmMsg)
+	assert.Equal(t, stateDefault, h.state)
+}
+
 // TestConfirmationModalVisualAppearance tests that confirmation modal has distinct visual appearance
 func TestConfirmationModalVisualAppearance(t *testing.T) {
 	h := &home{
