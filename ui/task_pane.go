@@ -53,7 +53,9 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 	s.dirty = false
 	s.deleted = nil
 	s.editing = false
-	if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
+	if len(s.tasks) == 0 {
+		s.selectedIdx = 0
+	} else if s.selectedIdx >= len(s.tasks) {
 		s.selectedIdx = len(s.tasks) - 1
 	}
 }
@@ -160,7 +162,7 @@ func (s *TaskPane) HasPendingTrigger() bool {
 // ConsumePendingTrigger returns the triggered task and clears the flag.
 func (s *TaskPane) ConsumePendingTrigger() *task.Task {
 	s.pendingTrigger = false
-	if s.selectedIdx < len(s.tasks) {
+	if s.selectedIdx >= 0 && s.selectedIdx < len(s.tasks) {
 		tsk := s.tasks[s.selectedIdx]
 		return &tsk
 	}
