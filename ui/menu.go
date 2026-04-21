@@ -181,6 +181,7 @@ func (m *Menu) addInstanceOptions() {
 	// Navigation group (when in terminal tab)
 	if m.activeTab == TerminalTab {
 		actionGroup = append(actionGroup, keys.KeyShiftUp)
+		actionGroup = append(actionGroup, keys.KeyShiftDown)
 	}
 
 	// System group
