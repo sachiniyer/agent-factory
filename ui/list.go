@@ -147,7 +147,10 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	remainingWidth -= runewidth.StringWidth(branchIcon)
 	remainingWidth -= 2 // for the literal " " and "-" in the branchLine format string
 
-	branch := i.Branch
+	// Use the mutex-guarded accessor so this read (on the renderer
+	// goroutine) doesn't race with LocalBackend.Start's write on the
+	// instance-creation tea.Cmd goroutine.
+	branch := i.GetBranch()
 	if i.Started() && hasMultipleRepos {
 		repoName, err := i.RepoName()
 		if err != nil {

@@ -291,6 +291,32 @@ func (i *Instance) SetStatus(status Status) {
 	i.Status = status
 }
 
+// GetBranch returns the current worktree branch name under the Instance's
+// mutex. Readers that run from goroutines other than the one mutating the
+// instance (notably the bubbletea renderer) must use this accessor rather
+// than reading i.Branch directly, or the race detector flags a write in
+// LocalBackend.Start vs a read in InstanceRenderer.Render.
+func (i *Instance) GetBranch() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Branch
+}
+
+// GetStatus returns the current status under the Instance's mutex, so
+// cross-goroutine readers don't race with SetStatus.
+func (i *Instance) GetStatus() Status {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Status
+}
+
+// GetTitle returns the instance title under the Instance's mutex.
+func (i *Instance) GetTitle() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Title
+}
+
 // firstTimeSetup is true if this is a new instance. Otherwise, it's one loaded from storage.
 func (i *Instance) Start(firstTimeSetup bool) error {
 	return i.backend.Start(i, firstTimeSetup)
