@@ -117,8 +117,17 @@ jobs:
         path: dist
         merge-multiple: true
 
-    - name: Create release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: v${{ needs.check-and-bump.outputs.new_version }}
-        files: dist/*.tar.gz
+    # Immutable releases require all assets to be attached before the release
+    # is published: create as draft, upload assets into the draft, then publish.
+    - name: Publish release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ needs.check-and-bump.outputs.new_version }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        gh release create "v${VERSION}" \
+          --title "v${VERSION}" \
+          --generate-notes \
+          --draft \
+          dist/*.tar.gz
+        gh release edit "v${VERSION}" --draft=false --latest
