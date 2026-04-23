@@ -262,15 +262,25 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.menu.ClearKeydownIfMatch(msg.name)
 		return m, nil
 	case tickUpdatePRInfoMessage:
-		for _, instance := range m.sidebar.GetInstances() {
-			if !instance.Started() {
-				continue
-			}
-			if err := instance.UpdatePRInfo(); err != nil {
-				log.WarningLog.Printf("could not update PR info: %v", err)
-			}
+		// Lazy: only refresh PR info for the currently selected instance. Other
+		// instances keep whatever was last fetched (or restored from disk) —
+		// they'll refresh when the user actually looks at them. The fetch
+		// itself runs in a background goroutine so the UI stays responsive.
+		selected := m.sidebar.GetSelectedInstance()
+		return m, tea.Batch(tickUpdatePRInfoCmd, fetchPRInfoCmd(selected, true))
+	case prInfoUpdatedMsg:
+		if msg.err != nil {
+			log.WarningLog.Printf("PR info fetch failed for %q: %v", msg.instance.Title, msg.err)
+			// Mark as fetched anyway so we don't thrash retries on every
+			// selection change when the network is unreachable.
+			msg.instance.MarkPRInfoFetched()
+			return m, nil
 		}
-		return m, tickUpdatePRInfoCmd
+		msg.instance.SetPRInfo(msg.info)
+		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
+			log.WarningLog.Printf("failed to save instances after PR update: %v", err)
+		}
+		return m, nil
 	case tickPendingInstancesMessage:
 		m.mergePendingInstances()
 		return m, tickPendingInstancesCmd
@@ -326,19 +336,38 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case error:
 		return m, m.handleError(msg)
+	case runOnEventLoopMsg:
+		// Invoked only by test harnesses — lets them read model state from
+		// the tea goroutine so it doesn't race with Update mutations.
+		msg.fn(m)
+		close(msg.done)
+		return m, nil
 	case instanceChangedMsg:
 		return m, m.selectionChanged()
 	case instanceStartedMsg:
-		m.sidebar.SelectInstance(msg.instance)
+		// The user may have navigated elsewhere while the instance was
+		// starting. Don't yank their selection or pop a modal onto them.
+		userStillWatching := m.state == stateDefault && m.sidebar.GetSelectedInstance() == msg.instance
 
 		if msg.err != nil {
-			if killErr := m.sidebar.Kill(); killErr != nil {
-				log.ErrorLog.Printf("failed to clean up instance after start failure: %v", killErr)
+			// Remove the *specific* instance that failed, by title. The old
+			// code did m.sidebar.Kill() after SelectInstance(msg.instance),
+			// which would have killed whatever the user was currently
+			// looking at if we skipped the re-select. Backend.Start already
+			// cleans up tmux/worktree on failure (see backend_local.go
+			// defer), so there is nothing more to tear down here.
+			//
+			// Capture the user's current selection before the remove so we
+			// can restore it afterwards. RemoveInstanceByTitle shifts the
+			// instances slice, which can bump selectedIdx onto a different
+			// row when the removed instance preceded the selected one.
+			priorSelection := m.sidebar.GetSelectedInstance()
+			m.sidebar.RemoveInstanceByTitle(msg.instance.Title)
+			if priorSelection != nil && priorSelection != msg.instance {
+				m.sidebar.SelectInstance(priorSelection)
 			}
-
-			// Save to disk to remove the pre-saved instance entry.
 			if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-				log.ErrorLog.Printf("failed to save instances after kill: %v", err)
+				log.ErrorLog.Printf("failed to save instances after failed start: %v", err)
 			}
 
 			return m, tea.Batch(m.handleError(msg.err), m.selectionChanged())
@@ -350,6 +379,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.autoYes {
 			msg.instance.AutoYes = true
+		}
+
+		if !userStillWatching {
+			// User moved on — update status silently and keep their current
+			// focus. The instance flips from Loading to Running in the
+			// sidebar on its own.
+			return m, tea.Batch(tea.WindowSize(), m.selectionChanged())
 		}
 
 		m.menu.SetState(ui.StateDefault)
@@ -690,6 +726,7 @@ func (m *home) selectionChanged() tea.Cmd {
 	sel := m.sidebar.GetSelection()
 	tw := m.contentPane.TabbedWindow()
 
+	var prFetch tea.Cmd
 	switch {
 	case sel.Kind == ui.SectionInstances && !sel.IsHeader:
 		m.contentPane.SetMode(ui.ContentModeInstance)
@@ -702,6 +739,12 @@ func (m *home) selectionChanged() tea.Cmd {
 		}
 		if err := tw.UpdateTerminal(selected); err != nil {
 			return m.handleError(err)
+		}
+		// Lazily refresh PR info when the user lands on an instance that
+		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
+		// data is still fresh, so rapid Up/Down navigation doesn't hammer gh.
+		if selected != nil && selected.Started() {
+			prFetch = fetchPRInfoCmd(selected, false)
 		}
 	case sel.Kind == ui.SectionTasks:
 		m.contentPane.SetMode(ui.ContentModeTasks)
@@ -726,7 +769,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
 	}
 
-	return nil
+	return prFetch
 }
 
 type keyupMsg struct {
@@ -747,6 +790,15 @@ func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
 type hideErrMsg struct{}
 type previewTickMsg struct{}
 type instanceChangedMsg struct{}
+
+// runOnEventLoopMsg is a test-only primitive: when received by Update, it
+// runs fn with the home pointer on the tea goroutine, then closes done.
+// Production code never emits these — it exists purely so e2e tests can
+// read home state without racing concurrent Update handlers.
+type runOnEventLoopMsg struct {
+	fn   func(*home)
+	done chan struct{}
+}
 
 type instanceStartedMsg struct {
 	instance *session.Instance

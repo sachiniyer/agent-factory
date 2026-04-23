@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -54,6 +53,11 @@ type Instance struct {
 
 	// prInfo stores the associated GitHub PR info
 	prInfo *git.PRInfo
+	// prInfoLastFetched is the wall-clock time of the most recent PR info
+	// fetch. Not persisted — restored instances start with a zero value so
+	// the first lazy fetch on selection always runs. Used to debounce
+	// repeated fetches when the user cycles the sidebar.
+	prInfoLastFetched time.Time
 
 	// backend abstracts session lifecycle (local tmux+git vs remote hooks).
 	backend Backend
@@ -217,6 +221,32 @@ type InstanceOptions struct {
 	ForceRemote bool
 }
 
+// backendFactory constructs the Backend used by a new Instance. It is a
+// package-level variable (not a hard-coded branch) so tests can inject a
+// FakeBackend through SetBackendFactoryForTest without touching production
+// code paths. Defaults to the real local/remote branching.
+var backendFactory = defaultBackendFactory
+
+func defaultBackendFactory(opts InstanceOptions, absPath string) (Backend, error) {
+	if opts.ForceRemote {
+		hook, err := loadHookBackendForPath(absPath)
+		if err != nil {
+			return nil, fmt.Errorf("remote hooks not configured for this repo: %w", err)
+		}
+		return hook, nil
+	}
+	return &LocalBackend{}, nil
+}
+
+// SetBackendFactoryForTest replaces the backend factory with f and returns a
+// restore function. Intended for use in tests that need to swap in a
+// FakeBackend so NewInstance-driven creation flows stay on the hot path.
+func SetBackendFactoryForTest(f func(opts InstanceOptions, absPath string) (Backend, error)) func() {
+	prev := backendFactory
+	backendFactory = f
+	return func() { backendFactory = prev }
+}
+
 func NewInstance(opts InstanceOptions) (*Instance, error) {
 	t := time.Now()
 
@@ -226,15 +256,9 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	var backend Backend
-	if opts.ForceRemote {
-		hook, err := loadHookBackendForPath(absPath)
-		if err != nil {
-			return nil, fmt.Errorf("remote hooks not configured for this repo: %w", err)
-		}
-		backend = hook
-	} else {
-		backend = &LocalBackend{}
+	backend, err := backendFactory(opts, absPath)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Instance{
@@ -395,28 +419,39 @@ func (i *Instance) SetPRInfo(info *git.PRInfo) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.prInfo = info
+	i.prInfoLastFetched = time.Now()
 }
 
-// UpdatePRInfo fetches the latest PR info from GitHub for this instance's branch.
-func (i *Instance) UpdatePRInfo() error {
+// PRInfoAge returns how long ago PR info was last fetched. Returns a very
+// large duration if PR info has never been fetched in this process.
+func (i *Instance) PRInfoAge() time.Duration {
 	i.mu.RLock()
-	s := i.started
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-
-	if !s || gw == nil {
-		return nil
+	defer i.mu.RUnlock()
+	if i.prInfoLastFetched.IsZero() {
+		return time.Duration(1<<62 - 1)
 	}
-	info, err := git.FetchPRInfo(gw.GetRepoPath(), i.Branch)
-	if err != nil {
-		log.ErrorLog.Printf("transient PR fetch error (keeping cached info): %v", err)
-		return nil // don't propagate, just keep existing cached info
-	}
+	return time.Since(i.prInfoLastFetched)
+}
 
+// MarkPRInfoFetched bumps the fetch timestamp without touching the cached
+// value. Used after a transient fetch error so we don't re-try on every
+// subsequent selection change.
+func (i *Instance) MarkPRInfoFetched() {
 	i.mu.Lock()
-	i.prInfo = info
-	i.mu.Unlock()
-	return nil
+	defer i.mu.Unlock()
+	i.prInfoLastFetched = time.Now()
+}
+
+// FetchPRInfoSnapshot returns the data needed to fetch PR info for this
+// instance off the main event loop. The returned repoPath is empty when the
+// instance is not ready for fetching (not started, no worktree, or remote).
+func (i *Instance) FetchPRInfoSnapshot() (repoPath, branch string) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if !i.started || i.gitWorktree == nil {
+		return "", ""
+	}
+	return i.gitWorktree.GetRepoPath(), i.Branch
 }
 
 // SendPrompt sends a prompt to the session
@@ -438,6 +473,24 @@ func (i *Instance) PreviewFullHistory() (string, error) {
 // SetTmuxSession sets the tmux session for testing purposes
 func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
 	i.tmuxSession = session
+}
+
+// SetStartedForTest toggles the started flag for testing purposes. Prefer
+// Start() in non-test code; this exists so unit tests can exercise flows
+// gated on Started() without spinning up a real tmux session.
+func (i *Instance) SetStartedForTest(started bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.started = started
+}
+
+// SetGitWorktreeForTest assigns a git worktree to this instance. Test-only:
+// the real flow sets this inside LocalBackend.Start, which isn't available
+// in unit tests that use FakeBackend.
+func (i *Instance) SetGitWorktreeForTest(gw *git.GitWorktree) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.gitWorktree = gw
 }
 
 // SendKeys sends keys to the underlying session. For remote backends this
