@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -69,4 +70,67 @@ func TestHandleStateNewKeySpaceUnderLimit(t *testing.T) {
 	require.True(t, ok)
 
 	assert.Equal(t, "hello ", homeModel.namingInstance.Title)
+}
+
+// TestHandleStateNewRejectsRemoteSlugCollision regression-tests issue #312:
+// when a user names a new remote session whose Title reduces to the same
+// hook-script slug as an existing remote session, Enter must refuse the
+// name rather than silently producing a colliding slug. Local sessions
+// are unaffected because slugify only drives the remote hook protocol.
+func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	errBox := ui.NewErrBox()
+	// ErrBox only renders text when it has non-zero size; set something
+	// reasonable so String() returns the error for the assertion below.
+	errBox.SetSize(120, 1)
+	h := &home{
+		ctx:       context.Background(),
+		state:     stateNew,
+		appConfig: config.DefaultConfig(),
+		errBox:    errBox,
+		sidebar:   ui.NewSidebar(&spin, false),
+		menu:      ui.NewMenu(),
+	}
+
+	// Stub the backend factory so NewInstance can mint remote instances
+	// without a real repo / remote_hooks config on disk.
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		if opts.ForceRemote {
+			return &session.HookBackend{Hooks: config.RemoteHooks{}}, nil
+		}
+		return &session.LocalBackend{}, nil
+	})
+	defer restore()
+
+	// Pre-existing remote session whose Title slugifies to "myapp".
+	existing, err := session.NewInstance(session.InstanceOptions{
+		Title:       "myapp",
+		Path:        t.TempDir(),
+		Program:     "claude",
+		ForceRemote: true,
+	})
+	require.NoError(t, err)
+	h.sidebar.AddInstance(existing)()
+
+	// The instance currently being named: underscore is stripped, so this
+	// also slugifies to "myapp" and must be rejected.
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:       "my_app",
+		Path:        t.TempDir(),
+		Program:     "claude",
+		ForceRemote: true,
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+	h.newInstanceFinalizer = func() {}
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// The naming flow must stay in stateNew with the title preserved, and
+	// the errBox should carry a collision message naming the existing title.
+	assert.Equal(t, stateNew, h.state, "collision should not advance past stateNew")
+	require.NotNil(t, h.namingInstance)
+	assert.Equal(t, "my_app", h.namingInstance.Title)
+	assert.Contains(t, h.errBox.String(), "myapp",
+		"error message should name the colliding existing slug")
 }

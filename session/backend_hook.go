@@ -1,8 +1,6 @@
 package session
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -39,22 +37,54 @@ type hookPTY struct {
 
 var slugRegexp = regexp.MustCompile(`[^a-z0-9-]`)
 
-// slugify converts a title to a slug-safe string for hook scripts.
-// A short hash of the original title is appended to prevent collisions
-// when different titles (e.g. "my_app" vs "myapp") reduce to the same slug.
-func slugify(title string) string {
+// Slugify converts a title to a slug-safe string for hook scripts.
+// The slug is what gets passed to launch_cmd / list_cmd / attach_cmd /
+// delete_cmd via the --name flag (or positional argument for attach),
+// so it is part of the public hook protocol documented in
+// docs/remote-hooks.md — any change here is a breaking change for users'
+// hook scripts.
+//
+// Collisions between distinct titles that reduce to the same slug
+// (e.g. "my_app" and "myapp") are prevented at create time by the TUI
+// naming flow, not by mangling the slug itself. That way external
+// resources named by list_cmd round-trip cleanly and hand-authored
+// instances.json entries can address real remote sessions.
+func Slugify(title string) string {
 	s := strings.ToLower(title)
 	s = strings.ReplaceAll(s, " ", "-")
 	s = slugRegexp.ReplaceAllString(s, "")
-	// Trim leading/trailing hyphens
 	s = strings.Trim(s, "-")
 	if s == "" {
 		s = "session"
 	}
+	return s
+}
 
-	// Append a short hash of the original title to guarantee uniqueness.
-	h := sha256.Sum256([]byte(title))
-	return s + "-" + hex.EncodeToString(h[:])[:8]
+// slugify is the unexported alias kept for call sites inside this package.
+func slugify(title string) string { return Slugify(title) }
+
+// FindSlugCollision returns the title of the first instance in existing
+// whose Title produces the same slug as candidate, or "" if none do.
+// Returns "" when candidate itself is empty. This is used by the create
+// flow to reject titles that would map to an already-taken hook slug.
+func FindSlugCollision(candidate string, existing []*Instance) string {
+	if candidate == "" {
+		return ""
+	}
+	want := Slugify(candidate)
+	for _, inst := range existing {
+		if inst == nil {
+			continue
+		}
+		if inst.Title == candidate {
+			// Identical titles are a different error — not a slug collision.
+			continue
+		}
+		if Slugify(inst.Title) == want {
+			return inst.Title
+		}
+	}
+	return ""
 }
 
 func (b *HookBackend) Type() string { return "remote" }
