@@ -24,13 +24,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := m.sidebar.Kill(); err != nil {
 			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
 		}
-		return m, tea.Sequence(
-			tea.WindowSize(),
-			func() tea.Msg {
-				m.menu.SetState(ui.StateDefault)
-				return nil
-			},
-		)
+		// Menu.SetState rebuilds the options slice; call it synchronously
+		// on the event-loop goroutine rather than from a tea.Cmd closure
+		// that runs off-loop and races with home.View -> Menu.String.
+		m.menu.SetState(ui.StateDefault)
+		return m, tea.WindowSize()
 	}
 
 	instance := m.namingInstance
@@ -119,13 +117,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.availableWorktrees = nil
 		cmd := m.selectionChanged()
 
-		return m, tea.Batch(cmd, tea.Sequence(
-			tea.WindowSize(),
-			func() tea.Msg {
-				m.menu.SetState(ui.StateDefault)
-				return nil
-			},
-		))
+		// Menu.SetState rebuilds the options slice; call it synchronously
+		// on the event-loop goroutine rather than from a tea.Cmd closure
+		// that runs off-loop and races with home.View -> Menu.String.
+		m.menu.SetState(ui.StateDefault)
+		return m, tea.Batch(cmd, tea.WindowSize())
 	default:
 	}
 	return m, nil
