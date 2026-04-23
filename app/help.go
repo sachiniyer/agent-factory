@@ -157,13 +157,11 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	shouldClose := m.textOverlay.HandleKeyPress(msg)
 	if shouldClose {
 		m.state = stateDefault
-		return m, tea.Sequence(
-			tea.WindowSize(),
-			func() tea.Msg {
-				m.menu.SetState(ui.StateDefault)
-				return nil
-			},
-		)
+		// Menu.SetState rebuilds the options slice; call it synchronously
+		// on the event-loop goroutine rather than from a tea.Cmd closure
+		// that runs off-loop and races with home.View -> Menu.String.
+		m.menu.SetState(ui.StateDefault)
+		return m, tea.WindowSize()
 	}
 
 	return m, nil
