@@ -8,8 +8,13 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 )
+
+// prInfoStaleAfter is how long a fetched PR info entry is considered fresh.
+// Selection changes within this window do not re-trigger a fetch.
+const prInfoStaleAfter = 60 * time.Second
 
 // -- Ticker message types --
 
@@ -17,6 +22,15 @@ type tickUpdateMetadataMessage struct{}
 type tickUpdatePRInfoMessage struct{}
 type tickPendingInstancesMessage struct{}
 type tickRefreshExternalMessage struct{}
+
+// prInfoUpdatedMsg is returned by an async PR info fetch.
+// info is nil when the fetch resolved to "no PR for this branch".
+// err is set for transient errors — the handler keeps the cached value.
+type prInfoUpdatedMsg struct {
+	instance *session.Instance
+	info     *git.PRInfo
+	err      error
+}
 
 // -- Ticker commands --
 // Each ticker sleeps for a fixed interval, then returns its message type to
@@ -45,6 +59,42 @@ var tickPendingInstancesCmd = func() tea.Msg {
 var tickRefreshExternalCmd = func() tea.Msg {
 	time.Sleep(3 * time.Second)
 	return tickRefreshExternalMessage{}
+}
+
+// prInfoFetcher is the function used by fetchPRInfoCmd to retrieve PR info.
+// It's a package-level variable (not a direct git.FetchPRInfo call) so
+// e2e tests can swap in a fake that returns canned data and counts calls —
+// the real fetcher shells out to `gh`, which we don't want in unit tests.
+var prInfoFetcher = git.FetchPRInfo
+
+// SetPRInfoFetcherForTest replaces prInfoFetcher with f and returns a
+// restore function. Test-only.
+func SetPRInfoFetcherForTest(f func(repoPath, branch string) (*git.PRInfo, error)) func() {
+	prev := prInfoFetcher
+	prInfoFetcher = f
+	return func() { prInfoFetcher = prev }
+}
+
+// fetchPRInfoCmd returns a tea.Cmd that fetches PR info for inst in a
+// background goroutine and emits a prInfoUpdatedMsg. Returns nil when the
+// instance is not eligible for a fetch (nil / not started / remote / already
+// fresh). Using force=true ignores the freshness check — for tick-driven
+// refreshes of the selected instance.
+func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
+	if inst == nil || inst.IsRemote() {
+		return nil
+	}
+	if !force && inst.PRInfoAge() < prInfoStaleAfter {
+		return nil
+	}
+	repoPath, branch := inst.FetchPRInfoSnapshot()
+	if repoPath == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		info, err := prInfoFetcher(repoPath, branch)
+		return prInfoUpdatedMsg{instance: inst, info: info, err: err}
+	}
 }
 
 // -- Sync methods --
