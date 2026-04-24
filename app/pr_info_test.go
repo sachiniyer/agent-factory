@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +13,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// newStartedInstanceWithWorktree returns an instance that passes all the
+// guards in fetchPRInfoCmd (not nil, started, not remote, has a gitWorktree
+// that yields a non-empty repoPath from FetchPRInfoSnapshot). Use for tests
+// that need fetchPRInfoCmd to actually return a non-nil command.
+func newStartedInstanceWithWorktree(t *testing.T, title string) *session.Instance {
+	t.Helper()
+	inst := newStartedInstance(t, title)
+	inst.Branch = "feature/" + title
+	gw, err := git.NewGitWorktreeFromStorage(
+		t.TempDir(),
+		filepath.Join(t.TempDir(), "worktree"),
+		title,
+		inst.Branch,
+		"deadbeef",
+		false,
+		true,
+	)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	return inst
+}
 
 // newStartedInstance builds an instance that Started() reports as true.
 // Uses the test-only SetStartedForTest seam so we don't need a real git repo
@@ -190,6 +214,79 @@ func TestSelectionChanged_DoesNotRefetchFreshInstance(t *testing.T) {
 
 	cmd := h.selectionChanged()
 	assert.Nil(t, cmd, "no PR fetch should be scheduled for a fresh instance")
+}
+
+// TestFetchPRInfoCmd_MarksFetchAtKickoff_DebouncesConcurrentCalls verifies the
+// fix for the in-flight-fetch thrash described in issue #311: selectionChanged
+// runs on every 100ms preview tick, and fetchPRInfoCmd was previously only
+// bumping prInfoLastFetched once the fetch completed. A restored instance
+// (prInfoLastFetched == 0) would therefore trigger a new `gh pr view`
+// subprocess on every tick until one finally returned.
+//
+// The fix marks the instance as fetched at kickoff. This test asserts:
+//  1. the first non-forced call returns a non-nil cmd and immediately
+//     bumps PRInfoAge out of the "never fetched" sentinel range,
+//  2. a second non-forced call within prInfoStaleAfter returns nil even
+//     though the fetcher has not been invoked yet (the in-flight fetch is
+//     the debounce anchor), and
+//  3. when the returned cmd is eventually executed the fetcher runs
+//     exactly once per kickoff.
+func TestFetchPRInfoCmd_MarksFetchAtKickoff_DebouncesConcurrentCalls(t *testing.T) {
+	inst := newStartedInstanceWithWorktree(t, "needs-fetch")
+
+	var calls int32
+	block := make(chan struct{})
+	restore := SetPRInfoFetcherForTest(func(repoPath, branch string) (*git.PRInfo, error) {
+		atomic.AddInt32(&calls, 1)
+		<-block
+		return &git.PRInfo{Number: 99, Title: "done"}, nil
+	})
+	t.Cleanup(restore)
+
+	require.Greater(t, inst.PRInfoAge(), 365*24*time.Hour,
+		"precondition: a freshly-restored instance reports a very large age")
+
+	cmd1 := fetchPRInfoCmd(inst, false)
+	require.NotNil(t, cmd1, "first call should dispatch a fetch")
+	assert.Less(t, inst.PRInfoAge(), time.Second,
+		"kickoff must bump prInfoLastFetched so the next tick is debounced")
+
+	cmd2 := fetchPRInfoCmd(inst, false)
+	assert.Nil(t, cmd2,
+		"second non-forced call within the stale window must be a no-op, "+
+			"even while the first fetch is still in flight")
+
+	assert.Equal(t, int32(0), atomic.LoadInt32(&calls),
+		"kickoff must not run the fetcher — tea runs returned Cmds off-loop")
+
+	// Drain the in-flight fetch before letting t.Cleanup swap the fetcher
+	// back — otherwise the goroutine's read of prInfoFetcher races with the
+	// restore write.
+	done := make(chan struct{})
+	go func() {
+		_ = cmd1()
+		close(done)
+	}()
+	close(block)
+	<-done
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls),
+		"each returned cmd should invoke the fetcher exactly once")
+}
+
+// TestFetchPRInfoCmd_Force_StillRunsWhileFetchInFlight — force=true bypasses
+// the kickoff debounce. The 60s ticker relies on this to always refresh the
+// selected instance, even if selectionChanged just kicked off a fetch.
+func TestFetchPRInfoCmd_Force_StillRunsWhileFetchInFlight(t *testing.T) {
+	inst := newStartedInstanceWithWorktree(t, "force-through")
+
+	restore := SetPRInfoFetcherForTest(func(repoPath, branch string) (*git.PRInfo, error) {
+		return &git.PRInfo{Number: 1}, nil
+	})
+	t.Cleanup(restore)
+
+	require.NotNil(t, fetchPRInfoCmd(inst, false), "first lazy call dispatches")
+	assert.NotNil(t, fetchPRInfoCmd(inst, true),
+		"force=true must bypass the kickoff-debounce the previous call set")
 }
 
 // sanity: exercise config.DefaultConfig / AppState wiring so a compile

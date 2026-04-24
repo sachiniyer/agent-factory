@@ -78,8 +78,8 @@ func SetPRInfoFetcherForTest(f func(repoPath, branch string) (*git.PRInfo, error
 // fetchPRInfoCmd returns a tea.Cmd that fetches PR info for inst in a
 // background goroutine and emits a prInfoUpdatedMsg. Returns nil when the
 // instance is not eligible for a fetch (nil / not started / remote / already
-// fresh). Using force=true ignores the freshness check — for tick-driven
-// refreshes of the selected instance.
+// fresh / fetch already in flight). Using force=true ignores the freshness
+// check — for tick-driven refreshes of the selected instance.
 func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 	if inst == nil || inst.IsRemote() {
 		return nil
@@ -91,6 +91,14 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 	if repoPath == "" {
 		return nil
 	}
+	// Mark as fetched at kickoff so concurrent callers observe the debounce
+	// window while this fetch is in flight. selectionChanged is re-entered
+	// every 100ms by the preview tick; without this, restored instances
+	// (whose prInfoLastFetched is zero until the first fetch completes)
+	// would spawn a new `gh pr view` subprocess on every tick until one
+	// returned. The completion handler bumps the timestamp again with the
+	// real result, so the fresh window starts from fetch completion.
+	inst.MarkPRInfoFetched()
 	return func() tea.Msg {
 		info, err := prInfoFetcher(repoPath, branch)
 		return prInfoUpdatedMsg{instance: inst, info: info, err: err}
