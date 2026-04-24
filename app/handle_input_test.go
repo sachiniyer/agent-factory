@@ -134,3 +134,46 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	assert.Contains(t, h.errBox.String(), "myapp",
 		"error message should name the colliding existing slug")
 }
+
+// TestHandleStateNewRejectsDuplicateLocalTitle covers the duplicate-Title
+// path for local sessions: tmux would later reject the Start with "tmux
+// session already exists", but the naming flow catches it earlier with a
+// clean error. Same path applies to remote exact-duplicate titles.
+func TestHandleStateNewRejectsDuplicateLocalTitle(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	errBox := ui.NewErrBox()
+	errBox.SetSize(120, 1)
+	h := &home{
+		ctx:       context.Background(),
+		state:     stateNew,
+		appConfig: config.DefaultConfig(),
+		errBox:    errBox,
+		sidebar:   ui.NewSidebar(&spin, false),
+		menu:      ui.NewMenu(),
+	}
+
+	existing, err := session.NewInstance(session.InstanceOptions{
+		Title:   "fix-bug",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	h.sidebar.AddInstance(existing)()
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "fix-bug",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+	h.newInstanceFinalizer = func() {}
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateNew, h.state, "duplicate Title should not advance past stateNew")
+	require.NotNil(t, h.namingInstance)
+	assert.Equal(t, "fix-bug", h.namingInstance.Title)
+	assert.Contains(t, h.errBox.String(), "fix-bug",
+		"error message should name the duplicate Title")
+}

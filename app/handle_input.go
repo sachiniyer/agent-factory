@@ -41,11 +41,30 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(fmt.Errorf("title cannot be empty"))
 		}
 
-		// For remote instances, reject titles that collide with an existing
-		// remote session's hook-script slug. slugify is lossy (e.g. "my_app"
-		// and "myapp" both become "myapp"); enforcing uniqueness here keeps
-		// the slug stable at the hook layer so launch_cmd / delete_cmd /
-		// attach_cmd can address the right remote resource (see issue #312).
+		// Reject duplicate Titles at the naming stage (applies to local
+		// and remote). For local sessions an identical Title would later
+		// fail at tmux Start with "tmux session already exists"; for
+		// remote it would silently re-invoke launch_cmd with an already-
+		// taken --name. Catching it here gives a cleaner error in the
+		// naming flow rather than after Start.
+		for _, other := range m.sidebar.GetInstances() {
+			if other == instance {
+				continue
+			}
+			if other.Title == instance.Title {
+				return m, m.handleError(fmt.Errorf(
+					"a session titled %q already exists", instance.Title,
+				))
+			}
+		}
+
+		// For remote instances, also reject titles that reduce to an
+		// existing remote slug ("my_app" and "myapp" both slugify to
+		// "myapp"). slugify is lossy, and catching the collision here
+		// keeps the slug stable at the hook layer so launch_cmd /
+		// delete_cmd / attach_cmd can address the right remote resource
+		// (see issue #312). Local sessions are unaffected because they
+		// use the raw Title, not a slug.
 		if instance.IsRemote() {
 			existing := make([]*session.Instance, 0, m.sidebar.NumInstances())
 			for _, other := range m.sidebar.GetInstances() {
