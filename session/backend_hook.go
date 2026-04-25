@@ -243,8 +243,17 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 	if b.ptys == nil {
 		b.ptys = make(map[string]*hookPTY)
 	}
-	if _, ok := b.ptys[i.Title]; ok {
-		return
+	if existing, ok := b.ptys[i.Title]; ok {
+		// If the existing entry is still alive, reuse it. Otherwise drop
+		// the stale entry and fall through to create a fresh process so
+		// preview can recover after attach_cmd has exited.
+		existing.mu.Lock()
+		alive := !existing.closed
+		existing.mu.Unlock()
+		if alive {
+			return
+		}
+		delete(b.ptys, i.Title)
 	}
 
 	slug := slugify(i.Title)
@@ -293,6 +302,24 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 				break
 			}
 		}
+		// The reader has hit EOF or an error, which means the attach_cmd
+		// child has closed its stdout (typically because it exited).
+		// If closePTY already marked us closed, it owns the Wait() call
+		// (and may need to Kill the process); otherwise the child exited
+		// on its own, so we Wait() here to reap it and mark the entry
+		// closed so a subsequent ensurePTY call can recreate it.
+		hp.mu.Lock()
+		alreadyClosed := hp.closed
+		hp.mu.Unlock()
+		if alreadyClosed {
+			return
+		}
+		if err := hp.cmd.Wait(); err != nil {
+			log.ErrorLog.Printf("attach_cmd preview process exited: %v", err)
+		}
+		hp.mu.Lock()
+		hp.closed = true
+		hp.mu.Unlock()
 	}()
 }
 
