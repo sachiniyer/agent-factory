@@ -577,6 +577,87 @@ func TestHookBackendClosePTYNonexistent(t *testing.T) {
 	b.closePTY("nonexistent")
 }
 
+// TestHookBackendEnsurePTYRecreatesAfterAttachCmdExits verifies that when
+// attach_cmd exits on its own (e.g. SSH disconnect, remote-side restart),
+// a subsequent ensurePTY call replaces the dead entry instead of leaving
+// it cached forever. Regression test for issue #328.
+func TestHookBackendEnsurePTYRecreatesAfterAttachCmdExits(t *testing.T) {
+	dir := t.TempDir()
+	// attach_cmd exits immediately so the read goroutine sees EOF and
+	// must mark the hookPTY closed.
+	attachCmd := writeScript(t, dir, "attach.sh",
+		`echo "first run for $1"; exit 0`)
+	b := &HookBackend{
+		Hooks: config.RemoteHooks{AttachCmd: attachCmd},
+	}
+	i := &Instance{
+		Title:   "recreate-test",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	b.ensurePTY(i)
+
+	// Wait for the reader goroutine to observe EOF and mark the entry closed.
+	deadline := time.Now().Add(2 * time.Second)
+	var hp *hookPTY
+	for time.Now().Before(deadline) {
+		hp = b.getPTY(i.Title)
+		if hp == nil {
+			t.Fatalf("ensurePTY did not register a hookPTY entry")
+		}
+		hp.mu.Lock()
+		closed := hp.closed
+		hp.mu.Unlock()
+		if closed {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	hp.mu.Lock()
+	closed := hp.closed
+	hp.mu.Unlock()
+	require.True(t, closed,
+		"reader goroutine should have marked the dead entry as closed")
+	firstCmd := hp.cmd
+
+	// A second ensurePTY call must drop the stale entry and start a new
+	// process rather than returning early.
+	b.ensurePTY(i)
+	hp2 := b.getPTY(i.Title)
+	require.NotNil(t, hp2)
+	assert.NotSame(t, firstCmd, hp2.cmd,
+		"ensurePTY should have created a fresh process, not reused the dead one")
+
+	// Cleanup: the second process also exits quickly, but closePTY is idempotent.
+	b.closePTY(i.Title)
+}
+
+// TestHookBackendEnsurePTYReturnsEarlyWhenAlive ensures we don't replace a
+// healthy preview process — only stale ones get recreated.
+func TestHookBackendEnsurePTYReturnsEarlyWhenAlive(t *testing.T) {
+	b := makeHooks(t) // attach script sleeps 0.1s, alive when we re-check
+	i := &Instance{
+		Title:   "alive-test",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	b.ensurePTY(i)
+	hp := b.getPTY(i.Title)
+	require.NotNil(t, hp)
+	firstCmd := hp.cmd
+
+	// Immediately call ensurePTY again — the existing entry is still alive.
+	b.ensurePTY(i)
+	hp2 := b.getPTY(i.Title)
+	require.NotNil(t, hp2)
+	assert.Same(t, firstCmd, hp2.cmd,
+		"ensurePTY must reuse a live entry rather than spawning a duplicate")
+
+	b.closePTY(i.Title)
+}
+
 // --- Instance delegation ---
 
 func TestInstanceDelegatesStartToBackend(t *testing.T) {
