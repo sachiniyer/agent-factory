@@ -214,17 +214,23 @@ func convertTimeField(field string, oneIndexed bool) string {
 func convertDOW(field string) string {
 	// Handle step values (e.g. "*/2" or "1-5/2") by expanding to explicit day names
 	if strings.Contains(field, "/") {
-		expanded, err := expandCronField(field, 0, 6)
+		expanded, err := expandCronField(field, 0, 7)
 		if err != nil {
 			return ""
 		}
-		// If all 7 days are covered, omit DOW entirely.
-		if len(expanded) >= 7 {
-			return ""
+		// Map to day names, deduplicating (since both 0 and 7 mean Sunday).
+		seen := make(map[string]bool)
+		var names []string
+		for _, v := range expanded {
+			name := dowNames[strconv.Itoa(v)]
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
 		}
-		names := make([]string, len(expanded))
-		for i, v := range expanded {
-			names[i] = dowNames[strconv.Itoa(v)]
+		// If all 7 days are covered, omit DOW entirely.
+		if len(names) >= 7 {
+			return ""
 		}
 		return strings.Join(names, ",")
 	}

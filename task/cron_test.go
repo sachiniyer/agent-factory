@@ -130,6 +130,19 @@ func TestCronToOnCalendarDOWStepRange(t *testing.T) {
 	assert.Equal(t, "Mon,Wed,Fri *-*-* 09:00:00", result)
 }
 
+// TestCronToOnCalendarDOWStepFrom7 is a regression test for a bug where DOW
+// step expressions starting at 7 (e.g. "7/2") expanded to an empty set because
+// convertDOW called expandCronField with max=6, while validation treats DOW as
+// 0-7 (with 7 also meaning Sunday). The empty set caused the DOW constraint to
+// be silently dropped, changing the schedule to run every day.
+func TestCronToOnCalendarDOWStepFrom7(t *testing.T) {
+	// "7/2" should expand to just [7] (i.e. Sunday); step 2 from 7 with max=7
+	// yields a single value. The result must include Sunday and not omit DOW.
+	result, err := CronToOnCalendar("0 9 * * 7/2")
+	require.NoError(t, err)
+	assert.Equal(t, "Sun *-*-* 09:00:00", result)
+}
+
 func TestCronToOnCalendarDOWSundayRange01(t *testing.T) {
 	result, err := CronToOnCalendar("0 9 * * 0-1")
 	require.NoError(t, err)
