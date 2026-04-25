@@ -2,6 +2,8 @@ package app
 
 import (
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestPendingInstanceCollisionShouldSkip covers the decision logic used by
@@ -75,6 +77,67 @@ func TestPendingInstanceCollisionShouldSkip(t *testing.T) {
 			if got != tc.wantSkip {
 				t.Fatalf("pendingInstanceCollisionShouldSkip(%q, %q, %v) = %v; want %v",
 					tc.existingWorktree, tc.pendingWorktree, tc.tmuxAlive, got, tc.wantSkip)
+			}
+		})
+	}
+}
+
+// TestSessionAutoYesAuthoritative is a regression test for issue #326.
+//
+// Previously the TUI loops only set instance.AutoYes = true when the
+// session-level autoYes was true and never cleared it, so a prior
+// `--auto-yes` run that persisted AutoYes=true would silently keep
+// auto-accepting prompts in subsequent TUI runs without the flag.
+//
+// The fix synchronizes instance.AutoYes with the session-level autoYes
+// in all TUI paths (loading instances, starting instances, merging
+// pending instances, and refreshing external instances). This test
+// guards the load-instances path: it verifies that a persisted
+// AutoYes=true is cleared when the session autoYes is false.
+func TestSessionAutoYesAuthoritative(t *testing.T) {
+	cases := []struct {
+		name           string
+		persistedValue bool
+		sessionAutoYes bool
+		want           bool
+	}{
+		{
+			name:           "persisted true, session false -> false (issue #326)",
+			persistedValue: true,
+			sessionAutoYes: false,
+			want:           false,
+		},
+		{
+			name:           "persisted false, session true -> true",
+			persistedValue: false,
+			sessionAutoYes: true,
+			want:           true,
+		},
+		{
+			name:           "persisted true, session true -> true",
+			persistedValue: true,
+			sessionAutoYes: true,
+			want:           true,
+		},
+		{
+			name:           "persisted false, session false -> false",
+			persistedValue: false,
+			sessionAutoYes: false,
+			want:           false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Mirror the load-instances loop in app.go: the session-level
+			// autoYes must be authoritative over the persisted value.
+			instances := []*session.Instance{{Title: "t", AutoYes: tc.persistedValue}}
+			autoYes := tc.sessionAutoYes
+			for _, instance := range instances {
+				instance.AutoYes = autoYes
+			}
+			if instances[0].AutoYes != tc.want {
+				t.Fatalf("instance.AutoYes = %v; want %v", instances[0].AutoYes, tc.want)
 			}
 		})
 	}

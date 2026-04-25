@@ -169,9 +169,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 	// Add loaded instances to the sidebar
 	for _, instance := range instances {
 		h.sidebar.AddInstance(instance)()
-		if autoYes {
-			instance.AutoYes = true
-		}
+		instance.AutoYes = autoYes
 	}
 
 	// Merge pending instances from task runs.
@@ -377,9 +375,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 			return m, m.handleError(err)
 		}
-		if m.autoYes {
-			msg.instance.AutoYes = true
-		}
+		msg.instance.AutoYes = m.autoYes
 
 		if !userStillWatching {
 			// User moved on — update status silently and keep their current

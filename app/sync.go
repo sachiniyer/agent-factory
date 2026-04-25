@@ -160,9 +160,7 @@ func (m *home) mergePendingInstances() int {
 			continue
 		}
 		m.sidebar.AddInstance(pendingInstance)()
-		if m.autoYes {
-			pendingInstance.AutoYes = true
-		}
+		pendingInstance.AutoYes = m.autoYes
 		sidebarTitles[data.Title] = true
 		mergedCount++
 	}
@@ -231,9 +229,7 @@ func (m *home) refreshExternalInstances() bool {
 				continue
 			}
 			m.sidebar.AddInstance(inst)()
-			if m.autoYes {
-				inst.AutoYes = true
-			}
+			inst.AutoYes = m.autoYes
 			changed = true
 		}
 	}
