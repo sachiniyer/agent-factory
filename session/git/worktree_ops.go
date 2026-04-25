@@ -280,6 +280,15 @@ func CleanupWorktreesForRepo(repoRoot string) error {
 				}
 			}
 
+			// Prune stale worktree metadata (best-effort) BEFORE deleting the
+			// branch. When the `git worktree remove -f` above fails and we fall
+			// back to os.RemoveAll, git still tracks the worktree internally,
+			// causing `git branch -D` to fail with "branch is checked out".
+			pruneCmd := exec.Command("git", "-C", repoRoot, "worktree", "prune")
+			if err := pruneCmd.Run(); err != nil {
+				log.ErrorLog.Printf("failed to prune worktree metadata before deleting branch %s: %v", wt.branch, err)
+			}
+
 			// THEN delete the branch
 			if wt.branch != "" {
 				deleteCmd := exec.Command("git", "-C", repoRoot, "branch", "-D", wt.branch)
