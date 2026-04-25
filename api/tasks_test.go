@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/task"
@@ -13,18 +14,20 @@ import (
 // tests can assert that `af tasks update` reconciles systemd state
 // correctly (see #258).
 type schedulerCalls struct {
-	installed []task.Task
-	removed   []task.Task
+	installed     []task.Task
+	removed       []task.Task
+	updateTaskErr error
 }
 
-// stubSchedulers swaps installScheduler/removeScheduler for in-memory
-// stubs and restores them on test cleanup.
+// stubSchedulers swaps installScheduler/removeScheduler/updateTask for
+// in-memory stubs and restores them on test cleanup.
 func stubSchedulers(t *testing.T) *schedulerCalls {
 	t.Helper()
 	calls := &schedulerCalls{}
 
 	origInstall := installScheduler
 	origRemove := removeScheduler
+	origUpdate := updateTask
 	installScheduler = func(tsk task.Task) error {
 		calls.installed = append(calls.installed, tsk)
 		return nil
@@ -33,9 +36,16 @@ func stubSchedulers(t *testing.T) *schedulerCalls {
 		calls.removed = append(calls.removed, tsk)
 		return nil
 	}
+	updateTask = func(tsk task.Task) error {
+		if calls.updateTaskErr != nil {
+			return calls.updateTaskErr
+		}
+		return origUpdate(tsk)
+	}
 	t.Cleanup(func() {
 		installScheduler = origInstall
 		removeScheduler = origRemove
+		updateTask = origUpdate
 	})
 	return calls
 }
@@ -199,4 +209,79 @@ func TestTasksUpdate_EnabledToggleNoOpWhenAlreadyEnabled(t *testing.T) {
 
 	assert.Empty(t, calls.installed, "setting enabled=true on already-enabled task should be a no-op")
 	assert.Empty(t, calls.removed)
+}
+
+// TestTasksUpdate_RollsBackSchedulerWhenUpdateTaskFails is the
+// regression test for #324: when installScheduler succeeds but the
+// subsequent updateTask write fails, tasksUpdateCmd must best-effort
+// roll back the scheduler so that JSON state and scheduler state stay
+// consistent.
+func TestTasksUpdate_RollsBackSchedulerWhenUpdateTaskFails(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	calls := stubSchedulers(t)
+
+	seedTask(t, task.Task{ID: "t8", CronExpr: "0 9 * * *", Enabled: true})
+
+	calls.updateTaskErr = errors.New("simulated JSON write failure")
+	taskUpdateCronFlag = "0 10 * * *"
+
+	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"t8"})
+	assert.Error(t, err, "update should fail when JSON write fails")
+
+	// Scheduler was installed with the new cron, then rolled back to
+	// the old cron when the JSON write failed.
+	require.Len(t, calls.installed, 2, "scheduler should be installed then rolled back")
+	assert.Equal(t, "0 10 * * *", calls.installed[0].CronExpr, "first install uses new cron")
+	assert.Equal(t, "0 9 * * *", calls.installed[1].CronExpr, "rollback restores old cron")
+
+	// JSON file still has the old cron because updateTask failed.
+	got, err := task.GetTask("t8")
+	require.NoError(t, err)
+	assert.Equal(t, "0 9 * * *", got.CronExpr, "JSON should retain old cron after failed write")
+}
+
+// TestTasksUpdate_RollsBackSchedulerInstallOnEnableWhenUpdateTaskFails
+// covers the disabled→enabled transition: installScheduler succeeded
+// but updateTask failed, so the scheduler install should be undone via
+// removeScheduler.
+func TestTasksUpdate_RollsBackSchedulerInstallOnEnableWhenUpdateTaskFails(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	calls := stubSchedulers(t)
+
+	seedTask(t, task.Task{ID: "t9", CronExpr: "0 9 * * *", Enabled: false})
+
+	calls.updateTaskErr = errors.New("simulated JSON write failure")
+	taskUpdateEnabledFlag = "true"
+
+	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"t9"})
+	assert.Error(t, err, "update should fail when JSON write fails")
+
+	require.Len(t, calls.installed, 1, "scheduler should be installed once")
+	require.Len(t, calls.removed, 1, "scheduler install should be rolled back via remove")
+	assert.Equal(t, "t9", calls.removed[0].ID)
+}
+
+// TestTasksUpdate_RollsBackSchedulerRemoveOnDisableWhenUpdateTaskFails
+// covers the enabled→disabled transition: removeScheduler succeeded
+// but updateTask failed, so the scheduler should be re-installed with
+// the old cron.
+func TestTasksUpdate_RollsBackSchedulerRemoveOnDisableWhenUpdateTaskFails(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	calls := stubSchedulers(t)
+
+	seedTask(t, task.Task{ID: "t10", CronExpr: "0 9 * * *", Enabled: true})
+
+	calls.updateTaskErr = errors.New("simulated JSON write failure")
+	taskUpdateEnabledFlag = "false"
+
+	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"t10"})
+	assert.Error(t, err, "update should fail when JSON write fails")
+
+	require.Len(t, calls.removed, 1, "scheduler should be removed once")
+	require.Len(t, calls.installed, 1, "scheduler remove should be rolled back via install")
+	assert.Equal(t, "0 9 * * *", calls.installed[0].CronExpr, "rollback restores old cron")
+	assert.True(t, calls.installed[0].Enabled, "rollback restores enabled=true")
 }
