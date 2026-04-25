@@ -237,16 +237,22 @@ func (p *PreviewPane) ScrollDown(instance *session.Instance) error {
 
 // ResetToNormalMode exits scroll mode and returns to normal mode
 func (p *PreviewPane) ResetToNormalMode(instance *session.Instance) error {
-	if instance == nil {
-		return nil
-	}
-
-	if p.isScrolling {
+	// Always clear scroll state first so that pressing ESC while no instance
+	// is selected (e.g., the sidebar header) does not leave the preview pane
+	// stuck on stale viewport content. Mirrors TerminalPane.ResetToNormalMode.
+	wasScrolling := p.isScrolling
+	if wasScrolling {
 		p.isScrolling = false
 		// Reset viewport
 		p.viewport.SetContent("")
 		p.viewport.GotoTop()
+	}
 
+	if instance == nil {
+		return nil
+	}
+
+	if wasScrolling {
 		// Immediately update content instead of waiting for next UpdateContent call
 		content, err := instance.Preview()
 		if err != nil {
