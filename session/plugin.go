@@ -140,7 +140,7 @@ func ensurePluginDir() (string, error) {
 		if _, ok := pluginCommands[entry.Name()]; ok {
 			continue
 		}
-		if err := os.Remove(filepath.Join(commandsDir, entry.Name())); err != nil {
+		if err := os.Remove(filepath.Join(commandsDir, entry.Name())); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
 	}
