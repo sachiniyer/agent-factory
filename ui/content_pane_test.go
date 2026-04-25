@@ -73,6 +73,23 @@ func TestContentPaneModeSwitchUnfocuses(t *testing.T) {
 	assert.False(t, cp.HasFocus())
 }
 
+func TestContentPaneSetSizeMatchesRenderHeight(t *testing.T) {
+	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	cp := NewContentPane(tw)
+
+	const w, h = 80, 30
+	cp.SetSize(w, h)
+
+	// renderInlinePane uses Place height = c.height - windowStyle.GetVerticalFrameSize() - 2.
+	// The child panes must be sized to match, otherwise content is cut off
+	// or padded incorrectly (issue #336).
+	expected := h - windowStyle.GetVerticalFrameSize() - 2
+	assert.Equal(t, expected, cp.taskPane.height,
+		"taskPane height must match renderInlinePane Place height")
+	assert.Equal(t, expected, cp.hooksPane.height,
+		"hooksPane height must match renderInlinePane Place height")
+}
+
 func TestContentPaneRender(t *testing.T) {
 	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
 	tw.SetSize(80, 30)

@@ -47,7 +47,7 @@ func (c *ContentPane) SetSize(width, height int) {
 
 	// Calculate content area for inline panes (matching window style)
 	contentWidth := AdjustPreviewWidth(width) - windowStyle.GetHorizontalFrameSize()
-	contentHeight := height - windowStyle.GetVerticalFrameSize() - 4
+	contentHeight := height - windowStyle.GetVerticalFrameSize() - 2
 	c.taskPane.SetSize(contentWidth, contentHeight)
 	c.hooksPane.SetSize(contentWidth, contentHeight)
 }
