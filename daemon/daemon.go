@@ -190,9 +190,13 @@ func StopDaemon() error {
 }
 
 // isAgentFactoryDaemon checks whether the process at pid looks like an agent-factory daemon
-// (i.e. its command line contains the --daemon flag). It tries /proc/<pid>/cmdline first (Linux)
-// and falls back to `ps -p <pid> -o args=` (macOS and other unixes). If neither source yields a
-// readable command line, returns false so callers treat the PID as unverified.
+// (i.e. its command line contains the --daemon flag as a discrete argument). It tries
+// /proc/<pid>/cmdline first (Linux) and falls back to `ps -p <pid> -o args=` (macOS and other
+// unixes). If neither source yields a readable command line, returns false so callers treat the
+// PID as unverified.
+//
+// We split the command line on whitespace and require an exact "--daemon" token (or a
+// "--daemon=..." form), so flags like --daemonize don't get matched as substrings.
 func isAgentFactoryDaemon(pid int) bool {
 	cmdline := readProcCmdline(pid)
 	if cmdline == "" {
@@ -201,7 +205,19 @@ func isAgentFactoryDaemon(pid int) bool {
 	if cmdline == "" {
 		return false
 	}
-	return strings.Contains(cmdline, "--daemon")
+	return cmdlineHasDaemonFlag(cmdline)
+}
+
+// cmdlineHasDaemonFlag reports whether cmdline contains "--daemon" as a discrete argument
+// (either bare or in the "--daemon=value" form). It deliberately rejects substring matches like
+// "--daemonize" or "--daemon-mode".
+func cmdlineHasDaemonFlag(cmdline string) bool {
+	for _, field := range strings.Fields(cmdline) {
+		if field == "--daemon" || strings.HasPrefix(field, "--daemon=") {
+			return true
+		}
+	}
+	return false
 }
 
 // readProcCmdline returns the full command line for pid via /proc/<pid>/cmdline (Linux).

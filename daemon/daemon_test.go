@@ -104,6 +104,31 @@ func TestStopDaemon_NonExistentPID(t *testing.T) {
 	}
 }
 
+// TestCmdlineHasDaemonFlag verifies that --daemon is matched only as a discrete argument,
+// not as a substring of unrelated flags like --daemonize. Regression test for issue #342.
+func TestCmdlineHasDaemonFlag(t *testing.T) {
+	tests := []struct {
+		name    string
+		cmdline string
+		want    bool
+	}{
+		{name: "empty", cmdline: "", want: false},
+		{name: "bare --daemon flag", cmdline: "/usr/local/bin/agent-factory --daemon", want: true},
+		{name: "--daemon with leading args", cmdline: "agent-factory --verbose --daemon", want: true},
+		{name: "--daemon= form", cmdline: "agent-factory --daemon=foo", want: true},
+		{name: "--daemonize substring should not match", cmdline: "/usr/bin/some-tool --daemonize", want: false},
+		{name: "--daemon-mode substring should not match", cmdline: "agent-factory --daemon-mode", want: false},
+		{name: "no daemon flag at all", cmdline: "/usr/bin/sleep 60", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cmdlineHasDaemonFlag(tt.cmdline); got != tt.want {
+				t.Errorf("cmdlineHasDaemonFlag(%q) = %v, want %v", tt.cmdline, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestStopDaemon_RefusesSelfPID verifies that StopDaemon refuses to kill the current test process
 // even if the PID file points at it.
 func TestStopDaemon_RefusesSelfPID(t *testing.T) {
