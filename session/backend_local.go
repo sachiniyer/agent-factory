@@ -292,7 +292,7 @@ func (b *LocalBackend) TapEnter(i *Instance) {
 	autoYes := i.AutoYes
 	i.mu.RUnlock()
 
-	if !s || !autoYes {
+	if !s || !autoYes || ts == nil {
 		return
 	}
 	if err := ts.TapEnter(); err != nil {
