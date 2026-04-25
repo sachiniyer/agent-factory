@@ -84,6 +84,19 @@ func Close() {
 
 	if globalLogFile != nil {
 		_ = globalLogFile.Close()
+		globalLogFile = nil
+	}
+	// Redirect any further log writes to stderr so that messages from
+	// goroutines that outlive Close() are not silently dropped to a closed
+	// fd. log.Logger.SetOutput is documented as safe for concurrent use.
+	if InfoLog != nil {
+		InfoLog.SetOutput(os.Stderr)
+	}
+	if WarningLog != nil {
+		WarningLog.SetOutput(os.Stderr)
+	}
+	if ErrorLog != nil {
+		ErrorLog.SetOutput(os.Stderr)
 	}
 	fmt.Fprintln(os.Stderr, "wrote logs to "+logFileName)
 }
