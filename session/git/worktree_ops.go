@@ -231,6 +231,17 @@ func CleanupWorktreesForRepo(repoRoot string) error {
 		return fmt.Errorf("repo root is empty")
 	}
 
+	// Skip cleanup if the repo path no longer exists on disk. `af reset`
+	// iterates over collected repo roots, which may include deleted, moved,
+	// or unmounted paths; without this check, `git -C` would fail and abort
+	// the entire reset before subsequent repos (and DeleteAllInstances) ran.
+	if _, err := os.Stat(repoRoot); os.IsNotExist(err) {
+		log.WarningLog.Printf("skipping cleanup for deleted repo: %s", repoRoot)
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to access repo path: %w", err)
+	}
+
 	// List all worktrees from the repo
 	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
 	output, err := cmd.Output()
