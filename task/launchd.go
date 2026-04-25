@@ -232,35 +232,13 @@ func cronToCalendarIntervalXML(cronExpr string) (string, error) {
 		return result, nil
 	}
 
-	var combos []combo
 	if bothDOMandDOW {
-		// OR semantics: generate DOM combos (without DOW) and DOW combos (without DOM).
-		domFields := make([]expandedField, len(expanded))
-		copy(domFields, expanded)
-		domFields[dowIdx] = expandedField{key: "Weekday", vals: nil} // exclude DOW
+		return "", fmt.Errorf("cron expression %q combines day-of-month and day-of-week; macOS launchd cannot correctly express this. Use either DOM or DOW, not both", cronExpr)
+	}
 
-		dowFields := make([]expandedField, len(expanded))
-		copy(dowFields, expanded)
-		dowFields[domIdx] = expandedField{key: "Day", vals: nil} // exclude DOM
-
-		domCombos, err := buildCombos(domFields)
-		if err != nil {
-			return "", err
-		}
-		dowCombos, err := buildCombos(dowFields)
-		if err != nil {
-			return "", err
-		}
-		combos = append(domCombos, dowCombos...)
-		if len(combos) > maxCalendarIntervals {
-			return "", fmt.Errorf("cron expression %q expands to too many intervals (%d > %d)", cronExpr, len(combos), maxCalendarIntervals)
-		}
-	} else {
-		var err error
-		combos, err = buildCombos(expanded)
-		if err != nil {
-			return "", err
-		}
+	combos, err := buildCombos(expanded)
+	if err != nil {
+		return "", err
 	}
 
 	if len(combos) == 0 || (len(combos) == 1 && len(combos[0]) == 0) {

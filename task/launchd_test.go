@@ -64,18 +64,27 @@ func TestCronToCalendarIntervalXML_DOWStepCoversAll(t *testing.T) {
 	assert.NotContains(t, xml, "<key>Weekday</key>")
 }
 
-// TestCronToCalendarIntervalXML_BothRestricted verifies that when DOM and
-// DOW are both restricted and neither covers all values, we still emit
-// the OR-semantics union (one DOM dict + one DOW dict).
-func TestCronToCalendarIntervalXML_BothRestricted(t *testing.T) {
-	xml, err := cronToCalendarIntervalXML("0 9 1 * 1")
-	require.NoError(t, err)
-
-	// Expect two dicts: one for Day=1 (with Hour/Minute) and one for
-	// Weekday=1 (with Hour/Minute).
-	assert.Equal(t, 2, countDicts(xml), "expected exactly two dicts, got:\n%s", xml)
-	assert.Contains(t, xml, "<key>Day</key>")
-	assert.Contains(t, xml, "<key>Weekday</key>")
+// TestCronToCalendarIntervalXML_BothRestrictedRejected verifies that when
+// DOM and DOW are both restricted and neither covers all values, the
+// expression is rejected. launchd cannot express the cron OR-semantics
+// without double-firing on dates that match both fields, so we surface a
+// clear error rather than silently scheduling duplicate runs.
+func TestCronToCalendarIntervalXML_BothRestrictedRejected(t *testing.T) {
+	cases := []string{
+		"0 9 1 * 1",     // single DOM, single DOW
+		"0 9 1,15 * 2",  // multi DOM, single DOW
+		"0 9 1-5 * 1-3", // range DOM, range DOW
+		"0 9 */10 * 1",  // step DOM, single DOW
+	}
+	for _, expr := range cases {
+		expr := expr
+		t.Run(expr, func(t *testing.T) {
+			xml, err := cronToCalendarIntervalXML(expr)
+			require.Error(t, err, "expected rejection for %q", expr)
+			assert.Empty(t, xml)
+			assert.Contains(t, err.Error(), "day-of-month and day-of-week")
+		})
+	}
 }
 
 // TestCronToCalendarIntervalXML_WildcardDOW verifies the baseline case
