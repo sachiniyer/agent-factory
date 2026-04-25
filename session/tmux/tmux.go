@@ -482,11 +482,33 @@ func (t *TmuxSession) Detach() {
 func (t *TmuxSession) Close() error {
 	var errs []error
 
+	// Coordinate with any in-flight Attach goroutines (mirrors Detach):
+	// cancel context first so monitorWindowSize goroutines exit before we
+	// nil out t.ptmx, otherwise they can race against updateWindowSize and
+	// panic dereferencing a nil PTY. Safe to call when Attach was never
+	// invoked because cancel/wg are only set by Attach.
+	if t.cancel != nil {
+		t.cancel()
+		t.cancel = nil
+	}
+
 	if t.ptmx != nil {
 		if err := t.ptmx.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("error closing PTY: %w", err))
 		}
-		t.ptmx = nil
+	}
+
+	if t.wg != nil {
+		t.wg.Wait()
+		t.wg = nil
+	}
+
+	t.ptmx = nil
+	t.ctx = nil
+
+	if t.attachCh != nil {
+		close(t.attachCh)
+		t.attachCh = nil
 	}
 
 	cmd := exec.Command("tmux", "kill-session", "-t", t.sanitizedName)
