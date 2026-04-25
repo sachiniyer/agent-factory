@@ -182,6 +182,58 @@ func TestGetConfigDir(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, strings.HasSuffix(configDir, ".agent-factory"))
 	})
+
+	t.Run("returns home dir when AGENT_FACTORY_HOME is exactly ~", func(t *testing.T) {
+		originalVal := os.Getenv("AGENT_FACTORY_HOME")
+		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
+
+		os.Setenv("AGENT_FACTORY_HOME", "~")
+
+		homeDir, err := os.UserHomeDir()
+		require.NoError(t, err)
+
+		configDir, err := GetConfigDir()
+		assert.NoError(t, err)
+		assert.Equal(t, homeDir, configDir)
+	})
+
+	t.Run("expands ~/foo correctly", func(t *testing.T) {
+		originalVal := os.Getenv("AGENT_FACTORY_HOME")
+		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
+
+		os.Setenv("AGENT_FACTORY_HOME", "~/foo")
+
+		homeDir, err := os.UserHomeDir()
+		require.NoError(t, err)
+
+		configDir, err := GetConfigDir()
+		assert.NoError(t, err)
+		assert.Equal(t, filepath.Join(homeDir, "foo"), configDir)
+	})
+
+	t.Run("returns error for malformed ~.config", func(t *testing.T) {
+		originalVal := os.Getenv("AGENT_FACTORY_HOME")
+		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
+
+		os.Setenv("AGENT_FACTORY_HOME", "~.config")
+
+		configDir, err := GetConfigDir()
+		assert.Error(t, err)
+		assert.Empty(t, configDir)
+		assert.Contains(t, err.Error(), "invalid tilde format")
+	})
+
+	t.Run("returns error for malformed ~config", func(t *testing.T) {
+		originalVal := os.Getenv("AGENT_FACTORY_HOME")
+		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
+
+		os.Setenv("AGENT_FACTORY_HOME", "~config")
+
+		configDir, err := GetConfigDir()
+		assert.Error(t, err)
+		assert.Empty(t, configDir)
+		assert.Contains(t, err.Error(), "invalid tilde format")
+	})
 }
 
 func TestLoadConfig(t *testing.T) {
