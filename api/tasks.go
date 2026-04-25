@@ -22,6 +22,7 @@ var TasksCmd = &cobra.Command{
 var (
 	installScheduler = task.InstallScheduler
 	removeScheduler  = task.RemoveScheduler
+	updateTask       = task.UpdateTask
 )
 
 var tasksListCmd = &cobra.Command{
@@ -236,13 +237,15 @@ var tasksUpdateCmd = &cobra.Command{
 		// the scheduler (even if cron changed), so a disabled task never
 		// has an active timer. When enabled we (re)install the scheduler
 		// with the new cron. See #258.
+		oldCron := ""
+		schedulerInstalled := false
+		schedulerRemoved := false
 		if cronChanged || enabledChanged {
-			if s.Enabled {
-				oldCron := ""
-				if old, err := task.GetTask(s.ID); err == nil {
-					oldCron = old.CronExpr
-				}
+			if old, err := task.GetTask(s.ID); err == nil {
+				oldCron = old.CronExpr
+			}
 
+			if s.Enabled {
 				// Install the new scheduler (overwrites existing unit/plist
 				// because the scheduler key is the task ID).
 				if err := installScheduler(*s); err != nil {
@@ -259,14 +262,45 @@ var tasksUpdateCmd = &cobra.Command{
 					}
 					return jsonError(fmt.Errorf("failed to reinstall scheduler: %w", err))
 				}
+				schedulerInstalled = true
 			} else {
 				if err := removeScheduler(*s); err != nil {
 					return jsonError(fmt.Errorf("failed to remove task scheduler: %w", err))
 				}
+				schedulerRemoved = true
 			}
 		}
 
-		if err := task.UpdateTask(*s); err != nil {
+		if err := updateTask(*s); err != nil {
+			// Roll back the scheduler change so the system doesn't stay
+			// in an inconsistent state where the scheduler reflects new
+			// settings but the JSON still has the old ones (fixes #324).
+			// Mirrors the install-failure rollback above; best-effort.
+			if schedulerInstalled {
+				if wasEnabled && oldCron != "" {
+					// Previously enabled — restore old cron.
+					rollback := *s
+					rollback.CronExpr = oldCron
+					if rbErr := installScheduler(rollback); rbErr != nil {
+						log.ErrorLog.Printf("failed to rollback scheduler after updateTask failure: %v", rbErr)
+					}
+				} else {
+					// Was disabled — undo the install by removing.
+					rollback := *s
+					rollback.Enabled = false
+					if rbErr := removeScheduler(rollback); rbErr != nil {
+						log.ErrorLog.Printf("failed to rollback scheduler after updateTask failure: %v", rbErr)
+					}
+				}
+			} else if schedulerRemoved && wasEnabled && oldCron != "" {
+				// Was enabled — re-install with old cron to undo the removal.
+				rollback := *s
+				rollback.Enabled = true
+				rollback.CronExpr = oldCron
+				if rbErr := installScheduler(rollback); rbErr != nil {
+					log.ErrorLog.Printf("failed to rollback scheduler after updateTask failure: %v", rbErr)
+				}
+			}
 			return jsonError(fmt.Errorf("failed to update task: %w", err))
 		}
 
