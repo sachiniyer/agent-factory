@@ -30,6 +30,9 @@ func GetConfigDir() (string, error) {
 			if envDir == "~" {
 				return homeDir, nil
 			}
+			if !strings.HasPrefix(envDir, "~/") {
+				return "", fmt.Errorf("AGENT_FACTORY_HOME: invalid tilde format %q (expected ~ or ~/path)", envDir)
+			}
 			envDir = filepath.Join(homeDir, envDir[2:])
 		}
 		return envDir, nil
