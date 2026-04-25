@@ -205,9 +205,38 @@ func RunTask(taskID string) error {
 	}
 	instance.SetStatus(session.Running)
 
-	// Write instance to a separate pending file to avoid racing with the
-	// daemon/TUI which also read-modify-write state.json concurrently.
-	if err := appendPendingInstance(instance.ToInstanceData()); err != nil {
+	// Apply AutoYes to the in-memory instance before persisting so the
+	// flag is part of the saved data the daemon will read back.
+	if cfg.AutoYes {
+		instance.AutoYes = true
+	}
+
+	// Persist the new instance into per-repo instances.json under the
+	// file lock. This is the source of truth the daemon reads via
+	// storage.LoadInstances; without this write, the daemon never sees
+	// scheduled tasks and AutoYes runs hang. Mirrors api/sessions.go.
+	repo, err := config.RepoFromPath(t.ProjectPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve repo for project path %s: %w", t.ProjectPath, err)
+	}
+	data := instance.ToInstanceData()
+	if err := config.UpdateRepoInstances(repo.ID, func(raw json.RawMessage) (json.RawMessage, error) {
+		var existing []session.InstanceData
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
+		}
+		existing = append(existing, data)
+		return json.MarshalIndent(existing, "", "  ")
+	}); err != nil {
+		return fmt.Errorf("failed to save instance to per-repo storage: %w", err)
+	}
+
+	// Also write to the pending file so the running TUI (which doesn't
+	// re-read instances.json on every tick) can merge the new instance
+	// into its in-memory list at startup. This is defensive: the daemon
+	// reads from per-repo instances.json above, which is the load-bearing
+	// path for AutoYes.
+	if err := appendPendingInstance(data); err != nil {
 		return fmt.Errorf("failed to save pending instance: %w", err)
 	}
 
@@ -216,7 +245,6 @@ func RunTask(taskID string) error {
 
 	// Launch daemon for autoyes if configured.
 	if cfg.AutoYes {
-		instance.AutoYes = true
 		if err := daemon.LaunchDaemon(); err != nil {
 			log.ErrorLog.Printf("failed to launch daemon: %v", err)
 		}
