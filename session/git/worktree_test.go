@@ -1,6 +1,8 @@
 package git
 
 import (
+	"bytes"
+	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -396,4 +398,28 @@ func TestCleanupWorktreesForRepo_CleansGivenRepo(t *testing.T) {
 	require.NoError(t, err, string(out))
 	assert.Equal(t, 1, strings.Count(string(out), "worktree "),
 		"only the main worktree should remain, got:\n%s", string(out))
+}
+
+// TestCleanupWorktreesForRepo_SkipsMissingPath verifies that when a stored
+// repo root no longer exists on disk (e.g. because the user moved or deleted
+// the repo), CleanupWorktreesForRepo logs a warning and returns nil instead
+// of aborting `af reset`. See issue #341.
+func TestCleanupWorktreesForRepo_SkipsMissingPath(t *testing.T) {
+	// Redirect WarningLog to a buffer so we can assert on the message.
+	var buf bytes.Buffer
+	origWarning := log.WarningLog
+	log.WarningLog = stdlog.New(&buf, "WARNING: ", 0)
+	t.Cleanup(func() { log.WarningLog = origWarning })
+
+	missing := filepath.Join(t.TempDir(), "definitely-does-not-exist")
+	// Sanity: the path really is absent.
+	_, statErr := os.Stat(missing)
+	require.True(t, os.IsNotExist(statErr), "test setup: path should not exist")
+
+	err := CleanupWorktreesForRepo(missing)
+	require.NoError(t, err,
+		"CleanupWorktreesForRepo should return nil when the repo path is missing")
+
+	assert.Contains(t, buf.String(), "skipping cleanup for deleted repo",
+		"expected warning log about skipped cleanup, got: %q", buf.String())
 }
