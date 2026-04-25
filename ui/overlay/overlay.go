@@ -93,7 +93,7 @@ func PlaceOverlay(
 	}
 
 	// Check if foreground exceeds background size
-	if fgWidth >= bgWidth || fgHeight >= bgHeight {
+	if fgWidth > bgWidth || fgHeight > bgHeight {
 		return fg // Return foreground if it's larger than background
 	}
 
