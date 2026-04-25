@@ -89,7 +89,9 @@ func LoadAndClearPendingInstances() ([]session.InstanceData, error) {
 // and trust prompt as well as the Aider/Gemini trust prompt
 // ("Open documentation url" + "(D)on't ask again").
 func isReadyContent(content string) bool {
-	if strings.Contains(content, "❯") || strings.Contains(content, "Do you trust") {
+	if strings.Contains(content, "❯") ||
+		strings.Contains(content, "Do you trust") ||
+		strings.Contains(content, "new MCP server") {
 		return true
 	}
 	// Aider/Gemini trust prompt. Require both substrings to avoid false

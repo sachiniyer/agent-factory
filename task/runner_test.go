@@ -40,6 +40,11 @@ func TestIsReadyContent(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "claude mcp trust prompt",
+			content: "Claude Code detected a new MCP server from `.mcp.json`.\n1. Use this and all future MCP servers in this project\n2. Use this MCP server\n3. Continue without using this MCP server",
+			want:    true,
+		},
+		{
 			name: "aider trust prompt",
 			content: "Aider v0.1\nOpen documentation url for more info: https://aider.chat/docs/\n" +
 				"(Y)es/(N)o/(D)on't ask again [Yes]:",
