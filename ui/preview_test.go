@@ -389,6 +389,41 @@ func max(a, b int) int {
 	return b
 }
 
+// TestPreviewResetToNormalModeNilInstance is a regression test for issue #338.
+// When ResetToNormalMode is called with a nil instance (e.g., the user pressed
+// ESC while the sidebar header was selected), the pane previously returned
+// early without clearing isScrolling, leaving it stuck on stale viewport
+// content. After the fix, the scroll state must be cleared regardless of
+// whether an instance is provided.
+func TestPreviewResetToNormalModeNilInstance(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	p := NewPreviewPane()
+	p.SetSize(80, 30)
+
+	// Simulate being in scroll mode with stale viewport content.
+	const staleContent = "stale-scroll-content-line\nanother-line"
+	p.isScrolling = true
+	p.viewport.SetContent(staleContent)
+
+	require.True(t, p.isScrolling, "precondition: should be in scrolling mode")
+	require.Contains(t, p.viewport.View(), "stale-scroll-content-line",
+		"precondition: viewport should hold stale content")
+
+	// Calling ResetToNormalMode with nil must still clear scroll state.
+	err := p.ResetToNormalMode(nil)
+	require.NoError(t, err)
+
+	require.False(t, p.isScrolling,
+		"isScrolling must be false after ResetToNormalMode(nil)")
+
+	// The rendered output must no longer be the stale scroll-mode viewport.
+	rendered := p.String()
+	require.NotContains(t, rendered, "stale-scroll-content-line",
+		"rendered content must not be the stale scroll-mode viewport after reset")
+}
+
 // TestPreviewFallbackHeightNoDoubleCounting ensures that the fallback welcome
 // screen does not over-subtract lines for borders/margins that
 // TabbedWindow.SetSize has already stripped. Previously it subtracted 7, which
