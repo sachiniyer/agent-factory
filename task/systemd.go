@@ -33,6 +33,8 @@ func getSystemdUserDir() (string, error) {
 func quoteExecStartPath(p string) string {
 	escaped := strings.ReplaceAll(p, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	escaped = strings.ReplaceAll(escaped, `$`, `$$`)
+	escaped = strings.ReplaceAll(escaped, `%`, `%%`)
 	return `"` + escaped + `"`
 }
 

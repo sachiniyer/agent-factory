@@ -141,3 +141,12 @@ func TestGenerateServiceContentExecStartEscapesQuotes(t *testing.T) {
 
 	assert.Contains(t, content, `ExecStart="/opt/weird\"path/agent-factory" task run q1`)
 }
+
+func TestQuoteExecStartPathEscapesDollarAndPercent(t *testing.T) {
+	// systemd performs $VAR variable expansion and %X specifier substitution
+	// inside ExecStart= values even within double quotes. Literal `$` and `%`
+	// in the path must be doubled (`$$`, `%%`) so systemd preserves them.
+	assert.Equal(t, `"/tmp/weird$$path/bin/af"`, quoteExecStartPath(`/tmp/weird$path/bin/af`))
+	assert.Equal(t, `"/tmp/weird%%h/bin/af"`, quoteExecStartPath(`/tmp/weird%h/bin/af`))
+	assert.Equal(t, `"/tmp/$$HOME-%%t/af"`, quoteExecStartPath(`/tmp/$HOME-%t/af`))
+}
