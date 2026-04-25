@@ -297,6 +297,21 @@ func TestLocalBackendHasUpdatedNilTmuxSession(t *testing.T) {
 	assert.False(t, hasPrompt)
 }
 
+// Regression test for #329: LocalBackend.TapEnter must not panic when
+// started=true and AutoYes=true but tmuxSession=nil (it should return
+// early instead).
+func TestLocalBackendTapEnterNilTmuxSession(t *testing.T) {
+	b := &LocalBackend{}
+	i := &Instance{
+		Title:   "local-inst",
+		backend: b,
+		started: true,
+		AutoYes: true, // tmuxSession intentionally left nil
+	}
+	// Should not panic.
+	b.TapEnter(i)
+}
+
 // LocalBackend.SendKeys should return an error (not panic) when the tmux
 // session has not been initialized yet.
 func TestLocalBackendSendKeysNilTmuxSession(t *testing.T) {
