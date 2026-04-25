@@ -111,3 +111,112 @@ func TestAppendInstanceFn_ErrorUnwraps(t *testing.T) {
 		t.Fatalf("expected wrapped error, got non-wrapped: %v", err)
 	}
 }
+
+// TestSessionsKill_GhostSessionDeleted is the regression test for issue #323.
+// When a session's metadata exists on disk but the live instance can no
+// longer be restored (e.g. tmux session destroyed externally,
+// FromInstanceData fails), `af sessions kill <title>` must still remove the
+// stale metadata so users can clean up the entry without resorting to the
+// destructive `af reset`.
+func TestSessionsKill_GhostSessionDeleted(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoID := "ghost-repo"
+	instancesPath, err := config.RepoInstancesPath(repoID)
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Write a "ghost" instance whose worktree fields are empty so that
+	// session.FromInstanceData -> git.NewGitWorktreeFromStorage fails,
+	// reproducing the failure mode of a real ghost session whose tmux
+	// session has been destroyed. A second non-ghost entry is included
+	// so we can confirm only the targeted entry is removed.
+	ghost := session.InstanceData{
+		Title:   "ghost-session",
+		Path:    tmp,
+		Program: "claude",
+		// Worktree fields intentionally empty.
+	}
+	keep := session.InstanceData{
+		Title:   "keep-session",
+		Path:    tmp,
+		Program: "claude",
+	}
+	raw, err := json.Marshal([]session.InstanceData{ghost, keep})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(instancesPath, raw, 0644); err != nil {
+		t.Fatalf("write instances: %v", err)
+	}
+
+	// Sanity: findLiveInstanceByTitle must fail for the ghost session,
+	// otherwise the regression branch is not exercised.
+	if _, _, err := findLiveInstanceByTitle("ghost-session"); err == nil {
+		t.Fatalf("expected findLiveInstanceByTitle to fail for ghost session")
+	}
+
+	// Run the kill command. Suppress stdout/stderr noise from jsonOut/jsonError.
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStdout, origStderr := os.Stdout, os.Stderr
+	os.Stdout = devnull
+	os.Stderr = devnull
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	}()
+
+	if err := sessionsKillCmd.RunE(sessionsKillCmd, []string{"ghost-session"}); err != nil {
+		t.Fatalf("sessionsKillCmd returned error for ghost session: %v", err)
+	}
+
+	// Verify the ghost entry is gone but the other entry remains.
+	out, err := os.ReadFile(instancesPath)
+	if err != nil {
+		t.Fatalf("read back instances: %v", err)
+	}
+	var got []session.InstanceData
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 remaining entry, got %d: %+v", len(got), got)
+	}
+	if got[0].Title != "keep-session" {
+		t.Fatalf("wrong entry remained: %q", got[0].Title)
+	}
+}
+
+// TestSessionsKill_UnknownTitle verifies that killing a non-existent session
+// (no metadata on disk at all) still surfaces an error rather than silently
+// succeeding.
+func TestSessionsKill_UnknownTitle(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStdout, origStderr := os.Stdout, os.Stderr
+	os.Stdout = devnull
+	os.Stderr = devnull
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	}()
+
+	if err := sessionsKillCmd.RunE(sessionsKillCmd, []string{"does-not-exist"}); err == nil {
+		t.Fatalf("expected error for unknown session, got nil")
+	}
+}

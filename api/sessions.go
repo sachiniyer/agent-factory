@@ -270,7 +270,49 @@ var sessionsKillCmd = &cobra.Command{
 
 		instance, repoID, err := findLiveInstanceByTitle(args[0])
 		if err != nil {
-			return jsonError(err)
+			// The live instance could not be restored (e.g. the tmux
+			// session was destroyed externally). Fall back to a raw
+			// InstanceData lookup so we can still clean up the stored
+			// metadata for these "ghost" sessions. Without this, users
+			// can see the entry via `af sessions list` but have no way
+			// to delete it short of the destructive `af reset`.
+			data, ghostRepoID, lookupErr := findInstanceByTitle(args[0])
+			if lookupErr != nil {
+				// No metadata either — surface the original restore error.
+				return jsonError(err)
+			}
+
+			// Best-effort worktree cleanup since instance.Kill() can't run.
+			if data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree {
+				branchCreatedByUs := true
+				if data.Worktree.BranchCreatedByUs != nil {
+					branchCreatedByUs = *data.Worktree.BranchCreatedByUs
+				}
+				gw, gwErr := git.NewGitWorktreeFromStorage(
+					data.Worktree.RepoPath,
+					data.Worktree.WorktreePath,
+					data.Worktree.SessionName,
+					data.Worktree.BranchName,
+					data.Worktree.BaseCommitSHA,
+					data.Worktree.ExternalWorktree,
+					branchCreatedByUs,
+				)
+				if gwErr != nil {
+					log.WarningLog.Printf("ghost session %q: failed to load worktree for cleanup: %v", args[0], gwErr)
+				} else if cleanupErr := gw.Cleanup(); cleanupErr != nil {
+					log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", args[0], cleanupErr)
+				}
+			}
+
+			state := config.LoadState()
+			storage, storageErr := session.NewStorage(state, ghostRepoID)
+			if storageErr != nil {
+				return jsonError(storageErr)
+			}
+			if delErr := storage.DeleteInstance(args[0]); delErr != nil {
+				return jsonError(fmt.Errorf("failed to delete instance from storage: %w", delErr))
+			}
+			return jsonOut(map[string]bool{"ok": true})
 		}
 
 		if err := instance.Kill(); err != nil {
