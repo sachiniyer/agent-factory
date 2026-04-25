@@ -475,7 +475,14 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 	w := AdjustPreviewWidth(s.width)
 	text := arrow + label
 	if w > 0 && runewidth.StringWidth(text) > w {
-		text = runewidth.Truncate(text, w, "...")
+		// Drop the "..." tail when the container is too narrow to fit it,
+		// otherwise runewidth.Truncate returns content wider than w and
+		// lipgloss.Place won't clip the overflow.
+		tail := "..."
+		if w < runewidth.StringWidth(tail) {
+			tail = ""
+		}
+		text = runewidth.Truncate(text, w, tail)
 	}
 	return style.Padding(0, 1).Render(
 		lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))

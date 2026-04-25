@@ -49,7 +49,12 @@ func (e *ErrBox) String() string {
 			// Otherwise just hard-truncate to avoid losing more content
 			// to the 3-char ellipsis than we save by truncating.
 			tail := "..."
-			if runewidth.StringWidth(err) <= e.width+runewidth.StringWidth(tail) {
+			tailWidth := runewidth.StringWidth(tail)
+			if e.width < tailWidth {
+				// Container is too narrow to fit "..."; drop the tail to
+				// avoid overflowing past e.width (lipgloss.Place won't clip).
+				tail = ""
+			} else if runewidth.StringWidth(err) <= e.width+tailWidth {
 				tail = ""
 			}
 			err = runewidth.Truncate(err, e.width, tail)
