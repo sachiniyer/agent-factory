@@ -774,20 +774,24 @@ func TestHookBackendIsAliveWithMultipleSessions(t *testing.T) {
 	assert.True(t, b.IsAlive(iB))
 }
 
-// --- slugify uniqueness ---
+// --- slugify shape ---
 
-func TestSlugifyUniqueness(t *testing.T) {
-	// Titles that reduce to the same base slug must produce distinct slugified names.
-	pairs := [][2]string{
-		{"my_app", "myapp"},
-		{"My App!", "my-app"},
-		{"hello world", "hello-world"},
-		{"HELLO", "hello"},
+// Slugify is part of the documented hook-script contract (see
+// docs/remote-hooks.md) — hook scripts receive exactly what Slugify
+// produces, with no implicit hash suffix. Regression test for #312.
+func TestSlugifyNoHashSuffix(t *testing.T) {
+	cases := map[string]string{
+		"hello":             "hello",
+		"Hello World":       "hello-world",
+		"My App!":           "my-app",
+		"  spaced  ":        "spaced",
+		"CAPS":              "caps",
+		"already-a-slug":    "already-a-slug",
+		"af-test":           "af-test",
+		"some/name:thing@1": "somenamething1",
 	}
-	for _, p := range pairs {
-		a := slugify(p[0])
-		b := slugify(p[1])
-		assert.NotEqual(t, a, b, "slugify(%q) == slugify(%q) == %q", p[0], p[1], a)
+	for title, want := range cases {
+		assert.Equal(t, want, slugify(title), "slugify(%q)", title)
 	}
 }
 
@@ -802,4 +806,36 @@ func TestSlugifyNonEmpty(t *testing.T) {
 		s := slugify(title)
 		assert.NotEmpty(t, s, "slugify(%q) should not be empty", title)
 	}
+}
+
+// TestSlugifyCollisionsReduce documents that distinct titles can reduce
+// to the same slug — uniqueness is enforced by the create flow, not by
+// mangling the slug itself. See FindSlugCollision for the check.
+func TestSlugifyCollisionsReduce(t *testing.T) {
+	collisions := [][2]string{
+		{"my_app", "myapp"},
+		{"My App!", "my-app"},
+		{"HELLO", "hello"},
+	}
+	for _, p := range collisions {
+		assert.Equal(t, slugify(p[0]), slugify(p[1]),
+			"expected slugify(%q) == slugify(%q) so the collision check has something to catch",
+			p[0], p[1])
+	}
+}
+
+func TestFindSlugCollision(t *testing.T) {
+	mk := func(title string) *Instance { return &Instance{Title: title} }
+	existing := []*Instance{mk("myapp"), mk("other"), nil}
+
+	assert.Equal(t, "myapp", FindSlugCollision("my_app", existing),
+		"underscore stripped so my_app reduces to the same slug as myapp")
+	assert.Equal(t, "myapp", FindSlugCollision("MyApp", existing),
+		"case is lowered so MyApp reduces to myapp")
+	assert.Equal(t, "", FindSlugCollision("fresh-title", existing),
+		"non-colliding titles should return no collision")
+	assert.Equal(t, "", FindSlugCollision("myapp", existing),
+		"identical titles are not a slug collision (duplicate-title is a different error)")
+	assert.Equal(t, "", FindSlugCollision("", existing),
+		"empty candidate should not report a collision")
 }
