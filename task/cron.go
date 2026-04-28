@@ -61,13 +61,12 @@ func validateField(field string, min, max int) error {
 
 func validatePart(part string, min, max int) error {
 	// Handle step values (e.g. "*/5" or "1-5/2")
-	step := ""
 	if idx := strings.Index(part, "/"); idx != -1 {
-		step = part[idx+1:]
+		step := part[idx+1:]
 		part = part[:idx]
-	}
-
-	if step != "" {
+		if step == "" {
+			return fmt.Errorf("empty step value")
+		}
 		stepVal, err := strconv.Atoi(step)
 		if err != nil {
 			return fmt.Errorf("invalid step value %q", step)
