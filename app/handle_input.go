@@ -28,7 +28,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
 		m.menu.SetState(ui.StateDefault)
-		return m, tea.WindowSize()
+		return m, tea.Batch(m.selectionChanged(), tea.WindowSize())
 	}
 
 	instance := m.namingInstance
