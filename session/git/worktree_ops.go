@@ -242,11 +242,15 @@ func CleanupWorktreesForRepo(repoRoot string) error {
 		return fmt.Errorf("failed to access repo path: %w", err)
 	}
 
-	// List all worktrees from the repo
+	// List all worktrees from the repo. If the path exists but is no longer a
+	// git repo (e.g. `.git` was removed), `git -C` exits non-zero. Treat that
+	// like the missing-directory case above: log and skip, so `af reset` can
+	// still clean up other repos and reset storage (issue #370).
 	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("failed to list worktrees: %w", err)
+		log.WarningLog.Printf("skipping cleanup for non-git path: %s", repoRoot)
+		return nil
 	}
 
 	// Parse output to get (worktreePath, branchName) pairs.
