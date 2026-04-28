@@ -76,6 +76,15 @@ WorkingDirectory=%s
 }
 
 func InstallScheduler(t Task) error {
+	// Validate the cron expression FIRST, before any file writes.
+	// Otherwise a bad cron leaves a stale .service on disk while the previous
+	// timer keeps running, so the user sees their edit "saved" but the
+	// schedule never updates.
+	onCalendar, err := CronToOnCalendar(t.CronExpr)
+	if err != nil {
+		return fmt.Errorf("failed to convert cron expression: %w", err)
+	}
+
 	unitName := getUnitName(t)
 
 	dir, err := getSystemdUserDir()
@@ -101,11 +110,6 @@ func InstallScheduler(t Task) error {
 	servicePath := filepath.Join(dir, unitName+".service")
 	if err := os.WriteFile(servicePath, []byte(serviceContent), 0644); err != nil {
 		return fmt.Errorf("failed to write service file: %w", err)
-	}
-
-	onCalendar, err := CronToOnCalendar(t.CronExpr)
-	if err != nil {
-		return fmt.Errorf("failed to convert cron expression: %w", err)
 	}
 
 	timerContent := fmt.Sprintf(`[Unit]
