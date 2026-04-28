@@ -90,6 +90,15 @@ func (t *TerminalPane) UpdateContent(instance *session.Instance) error {
 		return nil
 	}
 
+	// If the selected instance changed while in scroll mode, exit scroll mode
+	// so ensureSessionLocked() runs and updates t.currentTitle. Otherwise
+	// Attach() would resolve t.sessions[t.currentTitle] to the previous
+	// instance's session (issue #384).
+	if t.isScrolling && t.currentTitle != "" && t.currentTitle != instance.Title {
+		t.isScrolling = false
+		t.viewport.SetContent("")
+	}
+
 	// Skip content updates while in scroll mode
 	if t.isScrolling {
 		return nil
