@@ -14,8 +14,8 @@ import (
 
 // Pre-compiled regexes for ANSI color code replacement in overlay fade effect.
 var (
-	bgColorRegex     = regexp.MustCompile(`\x1b\[48;[25];[0-9;]+m`)
-	fgColorRegex     = regexp.MustCompile(`\x1b\[38;[25];[0-9;]+m`)
+	bgColorRegex     = regexp.MustCompile(`\x1b\[(?:[0-9;]*;)?48;[25];[0-9;]+m`)
+	fgColorRegex     = regexp.MustCompile(`\x1b\[(?:[0-9;]*;)?38;[25];[0-9;]+m`)
 	simpleColorRegex = regexp.MustCompile(`\x1b\[[0-9]+m`)
 )
 
