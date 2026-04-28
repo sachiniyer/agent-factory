@@ -474,3 +474,30 @@ func TestCleanupWorktreesForRepo_SkipsMissingPath(t *testing.T) {
 	assert.Contains(t, buf.String(), "skipping cleanup for deleted repo",
 		"expected warning log about skipped cleanup, got: %q", buf.String())
 }
+
+// TestCleanupWorktreesForRepo_SkipsNonGitPath verifies that when a stored repo
+// path exists but is no longer a git repo (e.g. `.git` has been removed),
+// CleanupWorktreesForRepo logs a warning and returns nil instead of aborting
+// `af reset`. See issue #370.
+func TestCleanupWorktreesForRepo_SkipsNonGitPath(t *testing.T) {
+	// Redirect WarningLog to a buffer so we can assert on the message.
+	var buf bytes.Buffer
+	origWarning := log.WarningLog
+	log.WarningLog = stdlog.New(&buf, "WARNING: ", 0)
+	t.Cleanup(func() { log.WarningLog = origWarning })
+
+	// Create a directory that exists but is not a git repo.
+	nonGit := t.TempDir()
+	// Sanity: the directory exists but has no .git entry.
+	_, statErr := os.Stat(nonGit)
+	require.NoError(t, statErr, "test setup: path should exist")
+	_, gitStatErr := os.Stat(filepath.Join(nonGit, ".git"))
+	require.True(t, os.IsNotExist(gitStatErr), "test setup: .git should not exist")
+
+	err := CleanupWorktreesForRepo(nonGit)
+	require.NoError(t, err,
+		"CleanupWorktreesForRepo should return nil when the path is not a git repo")
+
+	assert.Contains(t, buf.String(), "skipping cleanup for non-git path",
+		"expected warning log about non-git path, got: %q", buf.String())
+}
