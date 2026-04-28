@@ -3,6 +3,8 @@ package session
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // codexSystemPrompt is the system prompt for Codex sessions, which don't support plugins.
@@ -93,6 +95,7 @@ func injectSystemPrompt(program, sessionTitle, worktreePath string) string {
 	if base == "claude" || base == "claude-code" {
 		pluginDir, err := ensurePluginDir()
 		if err != nil {
+			log.WarningLog.Printf("failed to set up plugin directory, slash commands unavailable: %v", err)
 			return program
 		}
 		return program + " --plugin-dir " + shellQuote(pluginDir)
