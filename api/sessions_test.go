@@ -41,6 +41,32 @@ func TestAppendInstanceFn_ValidJSON(t *testing.T) {
 	}
 }
 
+// TestAppendInstanceFn_DuplicateTitle is the regression test for issue #371.
+// Previously, appendInstanceFn blindly appended without checking whether an
+// entry with the same Title already existed, producing duplicate stored
+// entries that confused title-based lookup (findInstanceByTitle returns only
+// the first match). It must now reject duplicates so the caller can clean up
+// the just-created instance (tmux session + worktree) rather than orphaning
+// the prior session's state.
+func TestAppendInstanceFn_DuplicateTitle(t *testing.T) {
+	existing := []session.InstanceData{{Title: "dupe"}}
+	raw, err := json.Marshal(existing)
+	if err != nil {
+		t.Fatalf("marshal existing: %v", err)
+	}
+
+	out, err := appendInstanceFn(session.InstanceData{Title: "dupe"})(raw)
+	if err == nil {
+		t.Fatalf("expected error on duplicate title, got nil (output=%s)", string(out))
+	}
+	if out != nil {
+		t.Fatalf("expected nil output on error, got: %s", string(out))
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("expected duplicate-title error, got: %v", err)
+	}
+}
+
 // TestAppendInstanceFn_CorruptedJSON is the regression test for issue #257.
 // Previously, the callback silently reset the existing data to an empty
 // array on unmarshal failure, wiping all saved sessions. It must now return

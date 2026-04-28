@@ -103,6 +103,14 @@ var sessionsCreateCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
 		}
 
+		// Best-effort pre-check to fail fast on duplicate titles before we
+		// spend time creating a tmux session and git worktree we'd just
+		// have to tear down. The authoritative race-safe check still
+		// happens inside appendInstanceFn under the per-repo file lock.
+		if existing, _, lookupErr := findInstanceByTitle(createNameFlag); lookupErr == nil && existing != nil {
+			return jsonError(fmt.Errorf("session with title %q already exists", createNameFlag))
+		}
+
 		program := createProgramFlag
 		if program == "" {
 			program = config.LoadConfig().DefaultProgram
@@ -146,11 +154,24 @@ var sessionsCreateCmd = &cobra.Command{
 // appends data to the existing instances array. If the existing file is
 // corrupted, it returns an error so the update is aborted without
 // overwriting the on-disk file (preserving it for manual recovery).
+//
+// If an entry with the same Title already exists, it returns an error
+// rather than appending a duplicate or silently replacing the existing
+// entry. Title-based lookup (findInstanceByTitle) assumes uniqueness, and
+// silently replacing would orphan the prior tmux session/worktree without
+// cleanup. Erroring out makes the conflict explicit to the caller, who is
+// then responsible for cleaning up the just-created instance (typically
+// via instance.Kill()).
 func appendInstanceFn(data session.InstanceData) func(json.RawMessage) (json.RawMessage, error) {
 	return func(raw json.RawMessage) (json.RawMessage, error) {
 		var existing []session.InstanceData
 		if err := json.Unmarshal(raw, &existing); err != nil {
 			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
+		}
+		for i := range existing {
+			if existing[i].Title == data.Title {
+				return nil, fmt.Errorf("session with title %q already exists", data.Title)
+			}
 		}
 		existing = append(existing, data)
 		return json.MarshalIndent(existing, "", "  ")
