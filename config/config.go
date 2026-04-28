@@ -67,8 +67,8 @@ func DefaultConfig() *Config {
 		program = defaultProgram
 	}
 
-	// Quote path if it contains spaces (for tmux shell execution)
-	if strings.Contains(program, " ") {
+	// Quote path if it contains spaces or apostrophes (for tmux shell execution)
+	if strings.Contains(program, " ") || strings.Contains(program, "'") {
 		program = "'" + strings.ReplaceAll(program, "'", "'\\''") + "'"
 	}
 
