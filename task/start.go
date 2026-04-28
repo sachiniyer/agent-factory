@@ -30,7 +30,7 @@ func StartAndSendPrompt(instance *session.Instance, prompt string) error {
 		return err
 	}
 
-	if instance.CheckAndHandleTrustPrompt() {
+	for instance.CheckAndHandleTrustPrompt() {
 		time.Sleep(1 * time.Second)
 		if err := WaitForReady(instance); err != nil {
 			return err
