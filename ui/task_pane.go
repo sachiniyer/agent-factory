@@ -22,7 +22,8 @@ type TaskPane struct {
 	editPrompt textarea.Model
 	editCron   textinput.Model
 	editPath   textinput.Model
-	focusIndex int // 0=name, 1=prompt, 2=cron, 3=path, 4=save button
+	editError  string // last validation error shown to the user
+	focusIndex int    // 0=name, 1=prompt, 2=cron, 3=path, 4=save button
 
 	// Create mode
 	creating       bool
@@ -134,6 +135,7 @@ func (s *TaskPane) EnterCreateMode(defaultPath string) {
 	s.focusIndex = 0
 	s.creating = true
 	s.hasFocus = true
+	s.editError = ""
 }
 
 // HasPendingCreate returns true if a new task was submitted and needs saving.
@@ -262,6 +264,7 @@ func (s *TaskPane) enterEditMode() {
 	s.editPath = path
 	s.focusIndex = 0
 	s.editing = true
+	s.editError = ""
 }
 
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
@@ -275,15 +278,31 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 	case tea.KeyEsc:
 		s.editing = false
 		s.creating = false
+		s.editError = ""
 	case tea.KeyEnter:
 		if s.focusIndex == 4 {
 			if s.creating {
 				if s.editName.Value() == "" {
-					return true // name is required
+					s.editError = "name is required"
+					return true
 				}
+				if err := task.ValidateCronExpr(s.editCron.Value()); err != nil {
+					s.editError = fmt.Sprintf("invalid cron: %v", err)
+					return true
+				}
+				s.editError = ""
 				s.pendingCreate = true
 				s.creating = false
 			} else {
+				if s.editName.Value() == "" {
+					s.editError = "name is required"
+					return true
+				}
+				if err := task.ValidateCronExpr(s.editCron.Value()); err != nil {
+					s.editError = fmt.Sprintf("invalid cron: %v", err)
+					return true
+				}
+				s.editError = ""
 				s.tasks[s.selectedIdx].Name = s.editName.Value()
 				s.tasks[s.selectedIdx].Prompt = s.editPrompt.Value()
 				s.tasks[s.selectedIdx].CronExpr = s.editCron.Value()
@@ -479,6 +498,12 @@ func (s *TaskPane) renderEditMode() string {
 		b.WriteString("       " + focusedButtonStyle.Render(submitLabel))
 	} else {
 		b.WriteString("       " + buttonStyle.Render(submitLabel))
+	}
+
+	if s.editError != "" {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+		b.WriteString("\n\n")
+		b.WriteString(errorStyle.Render("! " + s.editError))
 	}
 
 	return b.String()
