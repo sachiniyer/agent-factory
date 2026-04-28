@@ -237,7 +237,7 @@ func RunTask(taskID string) error {
 	// reads from per-repo instances.json above, which is the load-bearing
 	// path for AutoYes.
 	if err := appendPendingInstance(data); err != nil {
-		return fmt.Errorf("failed to save pending instance: %w", err)
+		log.WarningLog.Printf("failed to save pending instance: %v", err)
 	}
 
 	// Instance is successfully handed off, don't kill it on return.
