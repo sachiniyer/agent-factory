@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -54,8 +55,14 @@ var upgradeCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to find current executable: %w", err)
 		}
+		// Resolve symlinks so we replace the real binary, not the symlink
+		// pointing to it (e.g. on macOS Homebrew installs).
+		resolvedPath, err := filepath.EvalSymlinks(execPath)
+		if err != nil {
+			return fmt.Errorf("failed to resolve executable path: %w", err)
+		}
 
-		if err := config.AtomicWriteFile(execPath, binary, 0755); err != nil {
+		if err := config.AtomicWriteFile(resolvedPath, binary, 0755); err != nil {
 			return fmt.Errorf("failed to write new binary: %w", err)
 		}
 
