@@ -212,6 +212,10 @@ func (m *Menu) SetSize(width, height int) {
 }
 
 func (m *Menu) String() string {
+	if m.width <= 0 || m.height <= 0 {
+		return ""
+	}
+
 	var s strings.Builder
 
 	for i, k := range m.options {
