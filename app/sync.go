@@ -133,6 +133,14 @@ func (m *home) mergePendingInstances() int {
 		// worktree path (worktrees gain a numeric suffix on collision), so we
 		// cannot rely on TmuxAlive() alone to tell whether the sidebar
 		// instance still reflects the pending one.
+		//
+		// We capture the collision decision BEFORE attempting FromInstanceData
+		// so that we only remove the existing sidebar instance after we know
+		// the replacement could be constructed. Otherwise a transient
+		// FromInstanceData failure plus a subsequent successful merge in the
+		// same batch would cause SaveInstances to overwrite disk without the
+		// removed entry, permanently losing it (issue #367).
+		shouldReplace := false
 		if sidebarTitles[data.Title] {
 			skip := false
 			for _, existing := range m.sidebar.GetInstances() {
@@ -143,9 +151,7 @@ func (m *home) mergePendingInstances() int {
 					log.WarningLog.Printf("skipping pending instance %q: already exists and is alive", data.Title)
 					skip = true
 				} else {
-					log.InfoLog.Printf("replacing stale instance %q with new pending instance", data.Title)
-					m.sidebar.RemoveInstanceByTitle(data.Title)
-					delete(sidebarTitles, data.Title)
+					shouldReplace = true
 				}
 				break
 			}
@@ -157,8 +163,17 @@ func (m *home) mergePendingInstances() int {
 		pendingInstance, err := session.FromInstanceData(data)
 		if err != nil {
 			log.WarningLog.Printf("failed to restore pending instance %s: %v", data.Title, err)
+			// Do NOT mutate the sidebar — the existing instance (if any)
+			// must remain so SaveInstances does not drop it from disk.
 			continue
 		}
+
+		if shouldReplace {
+			log.InfoLog.Printf("replacing stale instance %q with new pending instance", data.Title)
+			m.sidebar.RemoveInstanceByTitle(data.Title)
+			delete(sidebarTitles, data.Title)
+		}
+
 		m.sidebar.AddInstance(pendingInstance)()
 		pendingInstance.AutoYes = m.autoYes
 		sidebarTitles[data.Title] = true
