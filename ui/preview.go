@@ -147,19 +147,16 @@ func (p *PreviewPane) String() string {
 	}
 
 	// Normal mode display
-	// Calculate available height accounting for border and margin
-	availableHeight := p.height - 1 //  1 for ellipsis
-
 	lines := strings.Split(p.previewState.text, "\n")
 
 	// Truncate if we have more lines than available height
-	if availableHeight > 0 {
-		if len(lines) > availableHeight {
-			lines = lines[:availableHeight]
+	if p.height > 0 {
+		if len(lines) > p.height-1 {
+			lines = lines[:p.height-1]
 			lines = append(lines, "...")
 		} else {
 			// Pad with empty lines to fill available height
-			padding := availableHeight - len(lines)
+			padding := p.height - len(lines)
 			lines = append(lines, make([]string, padding)...)
 		}
 	}
