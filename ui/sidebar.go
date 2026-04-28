@@ -384,6 +384,23 @@ func (s *Sidebar) RemoveInstanceByTitle(title string) bool {
 	return false
 }
 
+// RemoveInstanceByTitleWithRepo removes an instance from the sidebar by title
+// using the supplied repoName instead of calling RepoName() on the instance.
+// This is useful when the caller has already killed the instance (which causes
+// RepoName() to fail) but captured the repo name beforehand, ensuring the repo
+// count is still decremented correctly.
+func (s *Sidebar) RemoveInstanceByTitleWithRepo(title, repoName string) bool {
+	for i, inst := range s.instances {
+		if inst.Title == title {
+			s.rmRepo(repoName)
+			s.instances = append(s.instances[:i], s.instances[i+1:]...)
+			s.rebuildVisibleItems()
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Sidebar) addRepo(repo string) {
 	if _, ok := s.repos[repo]; !ok {
 		s.repos[repo] = 0
