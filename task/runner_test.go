@@ -157,3 +157,69 @@ func TestLoadAndClearPendingInstances_Corrupted(t *testing.T) {
 		t.Fatalf("expected corrupted pending file to be removed, stat err = %v", err)
 	}
 }
+
+// TestPickFreeTaskTitle exercises the title-allocation behavior used by
+// RunTask to keep concurrent task runs from stomping on each other's
+// tmux session. The taken-predicate is supplied as a set of known-busy
+// titles so the test can drive the algorithm without spawning real
+// tmux sessions.
+func TestPickFreeTaskTitle(t *testing.T) {
+	makeTaken := func(busy ...string) func(string) bool {
+		set := make(map[string]struct{}, len(busy))
+		for _, s := range busy {
+			set[s] = struct{}{}
+		}
+		return func(s string) bool {
+			_, ok := set[s]
+			return ok
+		}
+	}
+
+	cases := []struct {
+		name string
+		base string
+		busy []string
+		want string
+	}{
+		{
+			name: "base is free",
+			base: "scheduled-task",
+			busy: nil,
+			want: "scheduled-task",
+		},
+		{
+			name: "base taken, falls through to -1",
+			base: "scheduled-task",
+			busy: []string{"scheduled-task"},
+			want: "scheduled-task-1",
+		},
+		{
+			name: "base + -1 taken, lands on -2",
+			base: "scheduled-task",
+			busy: []string{"scheduled-task", "scheduled-task-1"},
+			want: "scheduled-task-2",
+		},
+		{
+			name: "fills gap left by killed run",
+			base: "scheduled-task",
+			busy: []string{"scheduled-task", "scheduled-task-2"},
+			want: "scheduled-task-1",
+		},
+		{
+			name: "long contiguous sequence",
+			base: "task",
+			busy: []string{"task", "task-1", "task-2", "task-3", "task-4"},
+			want: "task-5",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pickFreeTaskTitle(tc.base, makeTaken(tc.busy...))
+			if got != tc.want {
+				t.Fatalf("pickFreeTaskTitle(%q, busy=%v) = %q, want %q",
+					tc.base, tc.busy, got, tc.want)
+			}
+		})
+	}
+}

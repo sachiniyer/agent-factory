@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 const pendingInstancesFileName = "pending_instances.json"
@@ -24,6 +25,25 @@ func getPendingInstancesPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(configDir, pendingInstancesFileName), nil
+}
+
+// pickFreeTaskTitle returns the lowest-numbered Title in the sequence
+// base, base-1, base-2, ... for which taken(title) returns false. If
+// base itself is free it is returned unchanged. The taken predicate is
+// what defines "in use" — callers typically pass a tmux-session-exists
+// check so a still-running previous task run keeps its slot and a
+// concurrent fresh run picks the next number. Gaps left by killed
+// runs are filled before the sequence extends.
+func pickFreeTaskTitle(base string, taken func(title string) bool) string {
+	if !taken(base) {
+		return base
+	}
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", base, i)
+		if !taken(candidate) {
+			return candidate
+		}
+	}
 }
 
 // appendPendingInstance appends an instance to the pending_instances.json file.
@@ -178,6 +198,18 @@ func RunTask(taskID string) error {
 	if title == "" {
 		title = fmt.Sprintf("task-%s", t.ID)
 	}
+
+	// If the task fires while a previous run's tmux session is still
+	// alive, the deterministic Title→tmux-name derivation would point
+	// both Instances at the same tmux session, and the second run's
+	// Setup-time cleanup would tear down the first run's tmux. Pick
+	// the lowest-numbered "<title>-N" suffix that is currently free
+	// instead, so a still-running prior run becomes "<title>", the
+	// next concurrent run becomes "<title>-1", and freed slots (after
+	// a kill) are refilled before extending the sequence.
+	title = pickFreeTaskTitle(title, func(candidate string) bool {
+		return tmux.NewTmuxSessionForRepo(candidate, t.ProjectPath, "").DoesSessionExist()
+	})
 
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:   title,
