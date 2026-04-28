@@ -16,7 +16,15 @@ type PtyFactory interface {
 type Pty struct{}
 
 func (pt Pty) Start(cmd *exec.Cmd) (*os.File, error) {
-	return pty.Start(cmd)
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		return nil, err
+	}
+	// Reap the child process when it exits to avoid zombie processes.
+	go func() {
+		_ = cmd.Wait()
+	}()
+	return ptmx, nil
 }
 
 func (pt Pty) Close() {}
