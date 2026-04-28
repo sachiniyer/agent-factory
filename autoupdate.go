@@ -186,6 +186,9 @@ func shouldCheck() bool {
 	if err != nil {
 		return true
 	}
+	if t.After(time.Now()) {
+		return true
+	}
 	return time.Since(t) >= autoUpdateCheckInterval
 }
 
