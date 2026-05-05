@@ -557,7 +557,8 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree {
+	if m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree ||
+		m.state == stateNew || m.state == stateSearch {
 		return nil, false
 	}
 	// Don't highlight when content pane has focus
