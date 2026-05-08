@@ -141,7 +141,7 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 // handleKill handles the kill/delete session action.
 func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.Status == session.Loading {
+	if selected == nil || selected.GetStatus() == session.Loading {
 		return m, nil
 	}
 
@@ -206,7 +206,7 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	// Instance selected
 	if sel.Kind == ui.SectionInstances {
 		selected := m.sidebar.GetSelectedInstance()
-		if selected == nil || selected.Status == session.Loading || !selected.TmuxAlive() {
+		if selected == nil || selected.GetStatus() == session.Loading || !selected.TmuxAlive() {
 			return m, nil
 		}
 		if tw.IsInTerminalTab() {

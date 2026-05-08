@@ -54,7 +54,7 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 	case instance == nil:
 		p.setFallbackState("No agents running yet. Spin up a new instance with 'n' to get started!")
 		return nil
-	case instance.Status == session.Loading:
+	case instance.GetStatus() == session.Loading:
 		p.setFallbackState("Setting up workspace...")
 		return nil
 	}

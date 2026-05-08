@@ -248,7 +248,7 @@ func (m *home) refreshExternalInstances() bool {
 	// Collect removals first to avoid modifying the slice during iteration.
 	var toRemove []*session.Instance
 	for _, inst := range m.sidebar.GetInstances() {
-		if !diskTitles[inst.Title] && inst.Status != session.Loading {
+		if !diskTitles[inst.Title] && inst.GetStatus() != session.Loading {
 			toRemove = append(toRemove, inst)
 		}
 	}

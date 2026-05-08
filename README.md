@@ -136,6 +136,10 @@ af -p "aider --model ollama_chat/gemma3:1b"
 
 For general documentation about the original claude-squad project, see [smtg-ai/claude-squad](https://github.com/smtg-ai/claude-squad).
 
+## Release Testing
+
+See [docs/release-testing-plan.md](docs/release-testing-plan.md) for the release gate, manual smoke checks, and artifact verification checklist.
+
 ## License
 
 [GNU AGPL v3](LICENSE.md)

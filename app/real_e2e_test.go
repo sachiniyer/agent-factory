@@ -156,6 +156,5 @@ func newRealE2EHarness(t *testing.T) *e2eHarness {
 }
 
 // The TUI-level test TestRealTUI_CreateThroughKeypresses lives in
-// real_tui_e2e_test.go (gated with //go:build !race) because it surfaces a
-// pre-existing production race on Instance.Branch — out of scope for the
-// async-issues PR but worth fixing separately.
+// real_tui_e2e_test.go. It drives the same real LocalBackend through
+// Bubble Tea so renderer-facing reads stay covered by the race detector.
