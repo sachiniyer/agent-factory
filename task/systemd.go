@@ -50,6 +50,8 @@ func quoteExecStartPath(p string) string {
 func sanitizeEnvValue(v string) string {
 	v = strings.ReplaceAll(v, "\n", " ")
 	v = strings.ReplaceAll(v, "\r", " ")
+	v = strings.ReplaceAll(v, `$`, `$$`)
+	v = strings.ReplaceAll(v, `%`, `%%`)
 	return v
 }
 

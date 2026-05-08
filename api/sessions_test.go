@@ -67,6 +67,44 @@ func TestAppendInstanceFn_DuplicateTitle(t *testing.T) {
 	}
 }
 
+func TestRepoHasInstanceTitleScopedToRepo(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoA := "repo-a"
+	repoB := "repo-b"
+	rawA, err := json.Marshal([]session.InstanceData{{Title: "shared"}})
+	if err != nil {
+		t.Fatalf("marshal repo A: %v", err)
+	}
+	rawB, err := json.Marshal([]session.InstanceData{{Title: "other"}})
+	if err != nil {
+		t.Fatalf("marshal repo B: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoA, rawA); err != nil {
+		t.Fatalf("save repo A: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoB, rawB); err != nil {
+		t.Fatalf("save repo B: %v", err)
+	}
+
+	exists, err := repoHasInstanceTitle(repoB, "shared")
+	if err != nil {
+		t.Fatalf("repoHasInstanceTitle repo B: %v", err)
+	}
+	if exists {
+		t.Fatalf("title from repo A must not block creation in repo B")
+	}
+
+	exists, err = repoHasInstanceTitle(repoA, "shared")
+	if err != nil {
+		t.Fatalf("repoHasInstanceTitle repo A: %v", err)
+	}
+	if !exists {
+		t.Fatalf("same-repo duplicate title should be detected")
+	}
+}
+
 // TestAppendInstanceFn_CorruptedJSON is the regression test for issue #257.
 // Previously, the callback silently reset the existing data to an empty
 // array on unmarshal failure, wiping all saved sessions. It must now return

@@ -18,6 +18,11 @@ import (
 
 const pendingInstancesFileName = "pending_instances.json"
 
+var (
+	waitForReadyTimeout      = 60 * time.Second
+	waitForReadyPollInterval = 500 * time.Millisecond
+)
+
 func getPendingInstancesPath() (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
@@ -106,8 +111,8 @@ func isReadyContent(content string) bool {
 // WaitForReady polls the instance's tmux pane until the program shows its
 // input prompt (e.g. Claude Code's ">" prompt) or trust prompt, or times out after 60 seconds.
 func WaitForReady(instance *session.Instance) error {
-	timeout := time.After(60 * time.Second)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	timeout := time.After(waitForReadyTimeout)
+	ticker := time.NewTicker(waitForReadyPollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -119,7 +124,7 @@ func WaitForReady(instance *session.Instance) error {
 			} else {
 				log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
 			}
-			return fmt.Errorf("timed out waiting for program to start (60s)")
+			return fmt.Errorf("timed out waiting for program to start (%s)", waitForReadyTimeout)
 		case <-ticker.C:
 			content, err := instance.Preview()
 			if err != nil {
@@ -220,14 +225,7 @@ func RunTask(taskID string) error {
 		return fmt.Errorf("failed to resolve repo for project path %s: %w", t.ProjectPath, err)
 	}
 	data := instance.ToInstanceData()
-	if err := config.UpdateRepoInstances(repo.ID, func(raw json.RawMessage) (json.RawMessage, error) {
-		var existing []session.InstanceData
-		if err := json.Unmarshal(raw, &existing); err != nil {
-			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
-		}
-		existing = append(existing, data)
-		return json.MarshalIndent(existing, "", "  ")
-	}); err != nil {
+	if err := config.UpdateRepoInstances(repo.ID, appendTaskRunnerInstanceFn(data)); err != nil {
 		return fmt.Errorf("failed to save instance to per-repo storage: %w", err)
 	}
 
@@ -260,4 +258,20 @@ func RunTask(taskID string) error {
 
 	log.InfoLog.Printf("task %s started successfully as instance %s", taskID, title)
 	return nil
+}
+
+func appendTaskRunnerInstanceFn(data session.InstanceData) func(json.RawMessage) (json.RawMessage, error) {
+	return func(raw json.RawMessage) (json.RawMessage, error) {
+		var existing []session.InstanceData
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
+		}
+		for i := range existing {
+			if existing[i].Title == data.Title {
+				return nil, fmt.Errorf("session with title %q already exists", data.Title)
+			}
+		}
+		existing = append(existing, data)
+		return json.MarshalIndent(existing, "", "  ")
+	}
 }

@@ -103,11 +103,15 @@ var sessionsCreateCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
 		}
 
-		// Best-effort pre-check to fail fast on duplicate titles before we
-		// spend time creating a tmux session and git worktree we'd just
-		// have to tear down. The authoritative race-safe check still
+		// Best-effort per-repo pre-check to fail fast on duplicate titles
+		// before we spend time creating a tmux session and git worktree we'd
+		// just have to tear down. The authoritative race-safe check still
 		// happens inside appendInstanceFn under the per-repo file lock.
-		if existing, _, lookupErr := findInstanceByTitle(createNameFlag); lookupErr == nil && existing != nil {
+		exists, err := repoHasInstanceTitle(repo.ID, createNameFlag)
+		if err != nil {
+			return jsonError(err)
+		}
+		if exists {
 			return jsonError(fmt.Errorf("session with title %q already exists", createNameFlag))
 		}
 
@@ -212,6 +216,14 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 
 			if !git.IsGitRepo(repo.Root) {
 				return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
+			}
+
+			exists, err := repoHasInstanceTitle(repo.ID, title)
+			if err != nil {
+				return jsonError(err)
+			}
+			if exists {
+				return jsonError(fmt.Errorf("session with title %q already exists", title))
 			}
 
 			program := sendPromptProgramFlag

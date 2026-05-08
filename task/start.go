@@ -1,10 +1,15 @@
 package task
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
+
+const maxTrustPromptAttempts = 20
+
+var trustPromptRetryDelay = time.Second
 
 // StartAndSendPrompt is the canonical way to start an instance, wait for
 // readiness, handle trust prompts, and optionally send a prompt.
@@ -30,8 +35,11 @@ func StartAndSendPrompt(instance *session.Instance, prompt string) error {
 		return err
 	}
 
-	for instance.CheckAndHandleTrustPrompt() {
-		time.Sleep(1 * time.Second)
+	for attempts := 0; instance.CheckAndHandleTrustPrompt(); attempts++ {
+		if attempts+1 >= maxTrustPromptAttempts {
+			return fmt.Errorf("trust prompt did not dismiss after %d attempts", maxTrustPromptAttempts)
+		}
+		time.Sleep(trustPromptRetryDelay)
 		if err := WaitForReady(instance); err != nil {
 			return err
 		}

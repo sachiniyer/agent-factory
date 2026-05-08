@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
@@ -38,7 +37,7 @@ func (m *home) handleStateSelectWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 
 			instance.SetStatus(session.Loading)
-			m.newInstanceFinalizer = m.sidebar.AddInstance(instance)
+			m.sidebar.AddInstance(instance)
 			m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
 			m.namingInstance = instance
 			m.state = stateNew
@@ -65,7 +64,7 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// If the user re-selected the program matching the default (which may
 			// contain flags like --dangerously-skip-permissions), keep the full
 			// default string. Otherwise use the bare program name.
-			if strings.Contains(strings.ToLower(m.program), selected) {
+			if session.BaseCommand(m.program) == selected {
 				m.pendingProgram = m.program
 			} else {
 				m.pendingProgram = selected

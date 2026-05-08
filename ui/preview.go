@@ -151,7 +151,7 @@ func (p *PreviewPane) String() string {
 
 	// Truncate if we have more lines than available height
 	if p.height > 0 {
-		if len(lines) > p.height-1 {
+		if len(lines) > p.height {
 			lines = lines[:p.height-1]
 			lines = append(lines, "...")
 		} else {

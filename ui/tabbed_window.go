@@ -207,7 +207,7 @@ func (w *TabbedWindow) String() string {
 
 	var renderedTabs []string
 
-	totalTabWidth := w.width + windowStyle.GetHorizontalFrameSize()
+	totalTabWidth := w.width
 	tabWidth := totalTabWidth / len(w.tabs)
 	lastTabWidth := totalTabWidth - tabWidth*(len(w.tabs)-1)
 	tabHeight := activeTabStyle.GetVerticalFrameSize() + 1 // get padding border margin size + 1 for character height
@@ -248,9 +248,13 @@ func (w *TabbedWindow) String() string {
 	case TerminalTab:
 		content = w.terminal.String()
 	}
+	contentWidth := w.width - windowStyle.GetHorizontalFrameSize()
+	if contentWidth < 0 {
+		contentWidth = 0
+	}
 	window := windowStyle.Render(
 		lipgloss.Place(
-			w.width, w.height-2-windowStyle.GetVerticalFrameSize()-tabHeight,
+			contentWidth, w.height-2-windowStyle.GetVerticalFrameSize()-tabHeight,
 			lipgloss.Left, lipgloss.Top, content))
 
 	return lipgloss.JoinVertical(lipgloss.Left, "\n", row, window)

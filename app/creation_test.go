@@ -3,12 +3,15 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -182,6 +185,56 @@ func TestInstanceStarted_Success_AutoYesApplied(t *testing.T) {
 	_, _ = h.Update(instanceStartedMsg{instance: inst, err: nil})
 
 	assert.True(t, inst.AutoYes, "autoYes must propagate to the new instance when enabled")
+}
+
+func TestSaveContentPaneStateDoesNotOverwriteUnreadableRepoConfig(t *testing.T) {
+	h := newTestHome(t)
+
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	repoConfigPath := filepath.Join(configDir, "repos", h.repoID, config.RepoConfigFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(repoConfigPath), 0755))
+	corruptConfig := []byte(`{"remote_hooks":{"launch_cmd":"/bin/launch"`)
+	require.NoError(t, os.WriteFile(repoConfigPath, corruptConfig, 0644))
+
+	hooks := h.contentPane.HooksPane()
+	hooks.SetFocus(true)
+	require.True(t, hooks.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")}))
+	require.True(t, hooks.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")}))
+	require.True(t, hooks.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}))
+	require.True(t, hooks.IsDirty())
+
+	h.saveContentPaneState()
+
+	raw, err := os.ReadFile(repoConfigPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(corruptConfig), string(raw))
+}
+
+func TestInstanceStartedRegistersRepoAfterStart(t *testing.T) {
+	h := newTestHome(t)
+	repoRoot := filepath.Join(t.TempDir(), "repo-a")
+	worktreePath := filepath.Join(t.TempDir(), "repo-a-session")
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repoRoot, worktreePath, "new-session", "branch", "sha", false, true)
+	require.NoError(t, err)
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "new-session",
+		Path:    repoRoot,
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	inst.SetStatus(session.Loading)
+	inst.SetStartedForTest(true)
+	inst.SetGitWorktreeForTest(gw)
+
+	h.sidebar.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	require.Equal(t, 0, h.sidebar.NumRepos())
+
+	_, _ = h.Update(instanceStartedMsg{instance: inst, err: nil})
+
+	assert.Equal(t, 1, h.sidebar.NumRepos())
 }
 
 func collectTitles(instances []*session.Instance) []string {

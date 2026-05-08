@@ -123,7 +123,7 @@ func (s *SearchOverlay) matches(inst *session.Instance, query string) bool {
 		return true
 	}
 	title := strings.ToLower(inst.Title)
-	branch := strings.ToLower(inst.Branch)
+	branch := strings.ToLower(inst.GetBranch())
 
 	// Simple fuzzy: check if all query chars appear in order in the title or branch
 	return fuzzyMatch(query, title) || fuzzyMatch(query, branch)
@@ -184,7 +184,7 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 
 		// Status indicator
 		var statusStr string
-		switch r.Instance.Status {
+		switch r.Instance.GetStatus() {
 		case session.Running:
 			statusStr = statusRunning.Render("●")
 		case session.Ready:
@@ -196,14 +196,15 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 		}
 
 		label := r.Instance.Title
-		if r.Instance.Branch != "" {
-			label += normalStyle.Render(" (" + r.Instance.Branch + ")")
+		branch := r.Instance.GetBranch()
+		if branch != "" {
+			label += normalStyle.Render(" (" + branch + ")")
 		}
 
 		if i == s.selectedIdx {
 			content += "  " + statusStr + " " + selectedStyle.Render("▸ "+r.Instance.Title)
-			if r.Instance.Branch != "" {
-				content += normalStyle.Render(" (" + r.Instance.Branch + ")")
+			if branch != "" {
+				content += normalStyle.Render(" (" + branch + ")")
 			}
 			content += "\n"
 		} else {

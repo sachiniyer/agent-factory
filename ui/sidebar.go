@@ -252,18 +252,27 @@ func (s *Sidebar) NumInstances() int {
 	return len(s.instances)
 }
 
+// NumRepos returns the number of repositories represented in the sidebar.
+func (s *Sidebar) NumRepos() int {
+	return len(s.repos)
+}
+
 // AddInstance adds a new instance. Returns a finalizer to register the repo.
 func (s *Sidebar) AddInstance(instance *session.Instance) (finalize func()) {
 	s.instances = append(s.instances, instance)
 	s.rebuildVisibleItems()
-	return func() {
-		repoName, err := instance.RepoName()
-		if err != nil {
-			log.ErrorLog.Printf("could not get repo name: %v", err)
-			return
-		}
-		s.addRepo(repoName)
+	return func() { s.RegisterRepoForInstance(instance) }
+}
+
+// RegisterRepoForInstance records the instance's repo after the instance has
+// started and its worktree is available.
+func (s *Sidebar) RegisterRepoForInstance(instance *session.Instance) {
+	repoName, err := instance.RepoName()
+	if err != nil {
+		log.ErrorLog.Printf("could not get repo name: %v", err)
+		return
 	}
+	s.addRepo(repoName)
 }
 
 // Kill kills the selected instance. It returns an error if the underlying

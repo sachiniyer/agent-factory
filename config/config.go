@@ -17,6 +17,8 @@ const (
 	defaultProgram = "claude"
 )
 
+var aliasOutputRegex = regexp.MustCompile(`(?:aliased to|->|^[^/=\s]+\s*=)\s*(.+)`)
+
 // GetConfigDir returns the path to the application's configuration directory.
 // If AGENT_FACTORY_HOME is set, it is used as the config directory.
 // Otherwise, defaults to ~/.agent-factory.
@@ -123,8 +125,7 @@ func GetClaudeCommand() (string, error) {
 			// Capture everything after the alias marker so paths containing spaces
 			// (e.g. "/Applications/Claude Code.app/.../claude") are preserved; trim
 			// surrounding whitespace afterwards.
-			aliasRegex := regexp.MustCompile(`(?:aliased to|->|=)\s*(.+)`)
-			matches := aliasRegex.FindStringSubmatch(path)
+			matches := aliasOutputRegex.FindStringSubmatch(path)
 			if len(matches) > 1 {
 				path = strings.TrimSpace(matches[1])
 			}

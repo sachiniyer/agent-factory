@@ -2,13 +2,17 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,6 +33,30 @@ func TestLocalBackendType(t *testing.T) {
 func TestHookBackendType(t *testing.T) {
 	b := &HookBackend{Hooks: config.RemoteHooks{}}
 	assert.Equal(t, "remote", b.Type())
+}
+
+func TestLocalBackendKillRetainsFailedTmuxForRetry(t *testing.T) {
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error {
+			return errors.New("kill failed")
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	ts := tmux.NewTmuxSessionWithDeps("retry-kill", "bash", nil, cmdExec)
+	inst := &Instance{
+		Title:       "retry-kill",
+		backend:     &LocalBackend{},
+		started:     true,
+		tmuxSession: ts,
+	}
+
+	err := inst.Kill()
+	require.Error(t, err)
+
+	err = inst.Kill()
+	require.Error(t, err, "failed tmux cleanup must remain retryable instead of becoming a false success")
 }
 
 // --- IsRemote helper ---

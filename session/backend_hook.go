@@ -30,11 +30,14 @@ type HookBackend struct {
 // Instead of allocating a real PTY (which SSH rejects without a terminal),
 // we use a pipe-based approach that captures whatever the attach_cmd writes.
 type hookPTY struct {
-	cmd    *exec.Cmd
-	stdout *os.File // read end of stdout pipe
-	buf    []byte
-	mu     sync.Mutex
-	closed bool
+	cmd      *exec.Cmd
+	stdout   *os.File // read end of stdout pipe
+	buf      []byte
+	mu       sync.Mutex
+	closed   bool
+	waitOnce sync.Once
+	waitDone chan struct{}
+	waitErr  error
 }
 
 var slugRegexp = regexp.MustCompile(`[^a-z0-9-]`)
@@ -281,7 +284,7 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 	// Close the write end in the parent so reads get EOF when the child exits.
 	_ = stdoutW.Close()
 
-	hp := &hookPTY{cmd: cmd, stdout: stdoutR}
+	hp := &hookPTY{cmd: cmd, stdout: stdoutR, waitDone: make(chan struct{})}
 	b.ptys[i.Title] = hp
 
 	// Background goroutine reads output into a ring buffer.
@@ -314,7 +317,7 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 		if alreadyClosed {
 			return
 		}
-		if err := hp.cmd.Wait(); err != nil {
+		if err := hp.wait(); err != nil {
 			log.ErrorLog.Printf("attach_cmd preview process exited: %v", err)
 		}
 		hp.mu.Lock()
@@ -337,14 +340,28 @@ func (b *HookBackend) closePTY(title string) {
 
 	_ = hp.stdout.Close()
 	// Give the process a moment to exit, then kill if needed.
-	done := make(chan error, 1)
-	go func() { done <- hp.cmd.Wait() }()
+	done := hp.waitAsync()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		_ = hp.cmd.Process.Kill()
 	}
 	delete(b.ptys, title)
+}
+
+func (hp *hookPTY) waitAsync() <-chan struct{} {
+	hp.waitOnce.Do(func() {
+		go func() {
+			hp.waitErr = hp.cmd.Wait()
+			close(hp.waitDone)
+		}()
+	})
+	return hp.waitDone
+}
+
+func (hp *hookPTY) wait() error {
+	<-hp.waitAsync()
+	return hp.waitErr
 }
 
 func (b *HookBackend) getPTY(title string) *hookPTY {

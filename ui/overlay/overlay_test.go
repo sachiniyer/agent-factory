@@ -112,3 +112,22 @@ func TestPlaceOverlayEqualHeight(t *testing.T) {
 		}
 	}
 }
+
+func TestPlaceOverlayBasicBackgroundFade(t *testing.T) {
+	result := PlaceOverlay(0, 0, "XX", "\x1b[41mred-bg\x1b[0m", false)
+
+	if strings.Contains(result, "\x1b[38;5;240m") {
+		t.Fatalf("basic background code was faded as foreground: %q", result)
+	}
+	if !strings.Contains(result, "\x1b[48;5;236m") {
+		t.Fatalf("expected faded background code, got: %q", result)
+	}
+}
+
+func TestPlaceOverlayReverseVideoFadesAsBackground(t *testing.T) {
+	result := PlaceOverlay(0, 0, "XX", "\x1b[7mreverse\x1b[0m", false)
+
+	if !strings.Contains(result, "\x1b[48;5;236m") {
+		t.Fatalf("expected reverse-video styling to preserve background semantics, got: %q", result)
+	}
+}

@@ -2,9 +2,9 @@ package task
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -169,14 +169,7 @@ func TestLoadAndClearPendingInstances_Corrupted(t *testing.T) {
 // RunTask. Keeping it identical here lets us exercise the per-repo write
 // path without spinning up a full session/tmux/git-worktree fixture.
 func runnerAppendInstance(repoID string, data session.InstanceData) error {
-	return config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
-		var existing []session.InstanceData
-		if err := json.Unmarshal(raw, &existing); err != nil {
-			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
-		}
-		existing = append(existing, data)
-		return json.MarshalIndent(existing, "", "  ")
-	})
+	return config.UpdateRepoInstances(repoID, appendTaskRunnerInstanceFn(data))
 }
 
 // TestRunTask_WritesToPerRepoStorage is the regression test for issue #334.
@@ -267,5 +260,58 @@ func TestRunTask_AppendsToExistingPerRepoStorage(t *testing.T) {
 	}
 	if got[0].Title != "existing-from-api" || got[1].Title != "task-instance" {
 		t.Fatalf("unexpected merged instances: %+v", got)
+	}
+}
+
+func TestRunTask_RejectsDuplicateTitleInPerRepoStorage(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoID := "test-repo-dup"
+	instancesPath, err := config.RepoInstancesPath(repoID)
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	preexisting := []session.InstanceData{{
+		Title: "task-instance",
+		Worktree: session.GitWorktreeData{
+			WorktreePath: "/repo/worktrees/task-instance",
+		},
+	}}
+	preRaw, err := json.MarshalIndent(preexisting, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal preexisting: %v", err)
+	}
+	if err := os.WriteFile(instancesPath, preRaw, 0644); err != nil {
+		t.Fatalf("write preexisting: %v", err)
+	}
+
+	err = runnerAppendInstance(repoID, session.InstanceData{
+		Title: "task-instance",
+		Worktree: session.GitWorktreeData{
+			WorktreePath: "/repo/worktrees/task-instance-2",
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected duplicate title error")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+	var got []session.InstanceData
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 1 || got[0].Worktree.WorktreePath != "/repo/worktrees/task-instance" {
+		t.Fatalf("duplicate append should preserve original storage, got %+v", got)
 	}
 }

@@ -3,6 +3,7 @@ package ui
 import (
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/assert"
 )
@@ -72,4 +73,12 @@ func TestTaskPaneConsumePendingTriggerReturnsSelected(t *testing.T) {
 		assert.Equal(t, "b", got.ID)
 	}
 	assert.False(t, tp.pendingTrigger)
+}
+
+func TestTaskPaneNormalModeAllowsQuitKeysToPropagate(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetFocus(true)
+
+	assert.False(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}))
+	assert.False(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlC}))
 }

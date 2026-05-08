@@ -279,10 +279,17 @@ func (i *Instance) RepoName() (string, error) {
 	if i.IsRemote() {
 		return "", fmt.Errorf("remote instances do not have a local repo")
 	}
-	if !i.started {
+	i.mu.RLock()
+	started := i.started
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if !started {
 		return "", fmt.Errorf("cannot get repo name for instance that has not been started")
 	}
-	return i.gitWorktree.GetRepoName(), nil
+	if gw == nil {
+		return "", fmt.Errorf("cannot get repo name for instance without a git worktree")
+	}
+	return gw.GetRepoName(), nil
 }
 
 func (i *Instance) SetStatus(status Status) {

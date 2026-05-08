@@ -150,3 +150,23 @@ func TestQuoteExecStartPathEscapesDollarAndPercent(t *testing.T) {
 	assert.Equal(t, `"/tmp/weird%%h/bin/af"`, quoteExecStartPath(`/tmp/weird%h/bin/af`))
 	assert.Equal(t, `"/tmp/$$HOME-%%t/af"`, quoteExecStartPath(`/tmp/$HOME-%t/af`))
 }
+
+func TestSanitizeEnvValueEscapesDollarAndPercent(t *testing.T) {
+	assert.Equal(t, `/tmp/$$HOME-%%h`, sanitizeEnvValue(`/tmp/$HOME-%h`))
+}
+
+func TestGenerateServiceContentEscapesWorkingDirectorySpecifier(t *testing.T) {
+	content := generateServiceContent(
+		"agent-factory-task-spec",
+		"/usr/local/bin/agent-factory",
+		"spec",
+		"/tmp/test%hdir",
+		"/usr/bin",
+		"/home/user",
+		"/bin/bash",
+		"xterm-256color",
+	)
+
+	assert.Contains(t, content, "\nWorkingDirectory=/tmp/test%%hdir\n")
+	assert.NotContains(t, content, "\nWorkingDirectory=/tmp/test%hdir\n")
+}

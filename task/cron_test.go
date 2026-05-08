@@ -57,6 +57,12 @@ func TestCronFieldExpandSingleWithStepAtBoundary(t *testing.T) {
 	assert.Equal(t, []int{59}, vals)
 }
 
+func TestCronFieldExpandSingleWithStepOne(t *testing.T) {
+	vals, err := expandCronField("5/1", 0, 10)
+	require.NoError(t, err)
+	assert.Equal(t, []int{5, 6, 7, 8, 9, 10}, vals)
+}
+
 func TestCronFieldExpandListWithSingleStep(t *testing.T) {
 	// A list element with a single-number step should also expand.
 	vals, err := expandCronField("0,5/20", 0, 59)
