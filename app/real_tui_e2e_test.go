@@ -1,20 +1,3 @@
-//go:build !race
-
-// This TUI-level real-backend test is excluded from `go test -race` runs
-// because it surfaces a pre-existing production race in ui.InstanceRenderer
-// (reads instance.Branch from the renderer goroutine without the mutex
-// LocalBackend.Start takes when it writes the same field). That bug is
-// real but out of scope for the async-issues PR; fixing it requires
-// plumbing read locks through the renderer. Leaving the test behind the
-// !race tag so:
-//   - normal `go test ./...` still exercises the real LocalBackend → UI
-//     path (high-value contract check)
-//   - `go test -race ./...` stays clean as a regression signal for
-//     other race-prone changes
-//
-// The session-level TestRealLocalBackend_FullLifecycle in real_e2e_test.go
-// is race-safe and keeps coverage of the LocalBackend itself under -race.
-
 package app
 
 import (

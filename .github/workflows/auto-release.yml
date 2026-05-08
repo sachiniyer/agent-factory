@@ -21,23 +21,43 @@ jobs:
         fetch-depth: 0
         ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+        cache: true
+
     - name: Check for new commits since last tag
       id: check
       run: |
         LATEST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
         if [ -z "$LATEST_TAG" ]; then
           echo "No tags found, should release"
-          echo "should_release=true" >> $GITHUB_OUTPUT
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
         else
-          COMMITS_SINCE=$(git rev-list ${LATEST_TAG}..HEAD --count)
+          COMMITS_SINCE=$(git rev-list "${LATEST_TAG}..HEAD" --count)
           if [ "$COMMITS_SINCE" -gt 0 ]; then
             echo "Found $COMMITS_SINCE new commits since $LATEST_TAG"
-            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
           else
             echo "No new commits since $LATEST_TAG"
-            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
           fi
         fi
+
+    - name: Release preflight
+      if: steps.check.outputs.should_release == 'true'
+      run: |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "::error::Unformatted files found:"
+          echo "$unformatted"
+          gofmt -d .
+          exit 1
+        fi
+        go vet ./...
+        go test -v -race -count=1 ./...
+        go build ./...
 
     - name: Bump version
       id: bump
@@ -52,7 +72,7 @@ jobs:
         NEW_PATCH=$((PATCH + 1))
         NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
         echo "New version: $NEW_VERSION"
-        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
         # Update main.go
         sed -i "s/version     = \"${CURRENT}\"/version     = \"${NEW_VERSION}\"/" main.go

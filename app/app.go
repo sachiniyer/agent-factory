@@ -293,7 +293,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	case tickUpdateMetadataMessage:
 		for _, instance := range m.sidebar.GetInstances() {
-			if !instance.Started() || instance.Status == session.Loading {
+			if !instance.Started() || instance.GetStatus() == session.Loading {
 				continue
 			}
 			instance.CheckAndHandleTrustPrompt()
@@ -691,7 +691,7 @@ func (m *home) jumpToInstance(title string) tea.Cmd {
 func (m *home) attachToInstance(title string) (tea.Model, tea.Cmd) {
 	for _, inst := range m.sidebar.GetInstances() {
 		if inst.Title == title {
-			if inst.Status == session.Loading || !inst.TmuxAlive() {
+			if inst.GetStatus() == session.Loading || !inst.TmuxAlive() {
 				return m, m.handleError(fmt.Errorf("instance %q is not ready", title))
 			}
 			m.sidebar.ExpandInstancesSection()

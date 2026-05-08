@@ -380,7 +380,7 @@ func TestE2E_310_Success_NavigateAwayDuringCreation(t *testing.T) {
 	eh.waitForStart(fb, e2eAsyncTimeout)
 
 	// Creation is now in flight. Grab the creating instance for later
-	// assertions (pointer is stable, so no race on reading .Status).
+	// assertions; status reads go through instanceStatus below.
 	fig := eh.findInstance("fig")
 	require.NotNil(t, fig, "'fig' should be in sidebar while creating")
 	require.Equal(t, session.Loading, eh.instanceStatus(fig),
