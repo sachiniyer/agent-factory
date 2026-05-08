@@ -77,28 +77,16 @@ func NewStorage(state config.InstanceStorage, repoID string) (*Storage, error) {
 // persists Loading instances to disk so refreshExternalInstances won't
 // remove them during the Loading→Running transition.
 func (s *Storage) SaveInstances(instances []*Instance) error {
+	if s.repoID != "" {
+		return s.saveRepoInstances(instances)
+	}
+
 	// Convert instances to InstanceData
 	data := make([]InstanceData, 0)
 	for _, instance := range instances {
-		if instance.Started() || instance.Status == Loading {
+		if instance.Started() || instance.GetStatus() == Loading {
 			data = append(data, instance.ToInstanceData())
 		}
-	}
-
-	if s.repoID != "" {
-		// TUI mode: the sidebar is the source of truth; external instances
-		// are already pulled in by the periodic refreshExternalInstances tick.
-		path, pathErr := config.RepoInstancesPath(s.repoID)
-		if pathErr != nil {
-			return pathErr
-		}
-		return config.WithFileLock(path, func() error {
-			jsonData, err := json.Marshal(data)
-			if err != nil {
-				return fmt.Errorf("failed to marshal instances: %w", err)
-			}
-			return s.state.SaveInstances(s.repoID, jsonData)
-		})
 	}
 
 	// Daemon mode: group in-memory instances by repo.
@@ -194,6 +182,67 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	// naturally preserved (we never write to them).
 
 	return nil
+}
+
+func (s *Storage) saveRepoInstances(instances []*Instance) error {
+	path, pathErr := config.RepoInstancesPath(s.repoID)
+	if pathErr != nil {
+		return pathErr
+	}
+	return config.WithFileLock(path, func() error {
+		raw := s.state.GetInstances(s.repoID)
+		var diskData []InstanceData
+		if raw != nil && string(raw) != "[]" && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &diskData); err != nil {
+				return fmt.Errorf("failed to parse existing instances for repo %s: %w", s.repoID, err)
+			}
+		}
+
+		diskTitles := make(map[string]bool, len(diskData))
+		for _, disk := range diskData {
+			diskTitles[disk.Title] = true
+		}
+
+		data := make([]InstanceData, 0)
+		memTitles := make(map[string]bool)
+		for _, instance := range instances {
+			status := instance.GetStatus()
+			if status != Loading {
+				if !instance.Started() {
+					continue
+				}
+				// If another process deleted the disk record and the backing
+				// session is gone, don't resurrect it from stale TUI memory.
+				if !diskTitles[instance.Title] && !instance.TmuxAlive() {
+					continue
+				}
+			}
+			d := instance.ToInstanceData()
+			data = append(data, d)
+			memTitles[d.Title] = true
+		}
+
+		merged := make([]InstanceData, 0, len(data)+len(diskData))
+		merged = append(merged, data...)
+		for _, disk := range diskData {
+			if memTitles[disk.Title] {
+				continue
+			}
+			// Disk-only Loading entries are stale pre-save records from a TUI
+			// start that never completed. External CLI/task creates are only
+			// persisted after startup succeeds, so they arrive as non-Loading.
+			if disk.Status == Loading {
+				continue
+			}
+			merged = append(merged, disk)
+		}
+
+		jsonData, err := json.Marshal(merged)
+		if err != nil {
+			return fmt.Errorf("failed to marshal instances: %w", err)
+		}
+		return s.state.SaveInstances(s.repoID, jsonData)
+	})
 }
 
 // LoadInstances loads the list of instances from disk.

@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 const pendingInstancesFileName = "pending_instances.json"
@@ -181,9 +182,15 @@ func RunTask(taskID string) error {
 
 	cfg := config.LoadConfig()
 
-	title := t.Name
-	if title == "" {
-		title = fmt.Sprintf("task-%s", t.ID)
+	baseTitle := TaskRunBaseTitle(*t)
+
+	repo, err := config.RepoFromPath(t.ProjectPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve repo for project path %s: %w", t.ProjectPath, err)
+	}
+	title, err := NextTaskRunTitle(repo.ID, t.ProjectPath, baseTitle, t.Program)
+	if err != nil {
+		return fmt.Errorf("failed to allocate task run title: %w", err)
 	}
 
 	instance, err := session.NewInstance(session.InstanceOptions{
@@ -220,10 +227,6 @@ func RunTask(taskID string) error {
 	// file lock. This is the source of truth the daemon reads via
 	// storage.LoadInstances; without this write, the daemon never sees
 	// scheduled tasks and AutoYes runs hang. Mirrors api/sessions.go.
-	repo, err := config.RepoFromPath(t.ProjectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve repo for project path %s: %w", t.ProjectPath, err)
-	}
 	data := instance.ToInstanceData()
 	if err := config.UpdateRepoInstances(repo.ID, appendTaskRunnerInstanceFn(data)); err != nil {
 		return fmt.Errorf("failed to save instance to per-repo storage: %w", err)
@@ -274,4 +277,61 @@ func appendTaskRunnerInstanceFn(data session.InstanceData) func(json.RawMessage)
 		existing = append(existing, data)
 		return json.MarshalIndent(existing, "", "  ")
 	}
+}
+
+// TaskRunBaseTitle returns the preferred title for a task-created session.
+func TaskRunBaseTitle(t Task) string {
+	if t.Name != "" {
+		return t.Name
+	}
+	return fmt.Sprintf("task-%s", t.ID)
+}
+
+// NextTaskRunTitle chooses a repo-scoped title for a task run that will not
+// collide with persisted sessions or an already-live tmux session. Recurring
+// tasks can fire while a previous run is still around, so task sessions cannot
+// use the static task name blindly.
+func NextTaskRunTitle(repoID, repoPath, baseTitle, program string) (string, error) {
+	path, err := config.RepoInstancesPath(repoID)
+	if err != nil {
+		return "", err
+	}
+
+	var title string
+	if err := config.WithFileLock(path, func() error {
+		raw, err := config.LoadRepoInstances(repoID)
+		if err != nil {
+			return err
+		}
+
+		var existing []session.InstanceData
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return fmt.Errorf("failed to parse existing instances: %w", err)
+		}
+
+		used := make(map[string]bool, len(existing))
+		for _, data := range existing {
+			used[data.Title] = true
+		}
+
+		for i := 1; i <= 10000; i++ {
+			candidate := baseTitle
+			if i > 1 {
+				candidate = fmt.Sprintf("%s-%d", baseTitle, i)
+			}
+			if used[candidate] {
+				continue
+			}
+			if tmux.NewTmuxSessionForRepo(candidate, repoPath, program).DoesSessionExist() {
+				continue
+			}
+			title = candidate
+			return nil
+		}
+		return fmt.Errorf("could not find an available title for %q", baseTitle)
+	}); err != nil {
+		return "", err
+	}
+
+	return title, nil
 }

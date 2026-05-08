@@ -142,3 +142,33 @@ func TestSessionAutoYesAuthoritative(t *testing.T) {
 		})
 	}
 }
+
+func TestUpsertInstanceDataByTitleReplacesDuplicates(t *testing.T) {
+	existing := []session.InstanceData{
+		{Title: "already", Worktree: session.GitWorktreeData{WorktreePath: "/old"}},
+		{Title: "keep", Worktree: session.GitWorktreeData{WorktreePath: "/keep"}},
+	}
+	incoming := []session.InstanceData{
+		{Title: "already", Worktree: session.GitWorktreeData{WorktreePath: "/new"}},
+		{Title: "add", Worktree: session.GitWorktreeData{WorktreePath: "/add"}},
+	}
+
+	got := upsertInstanceDataByTitle(existing, incoming)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 entries, got %d: %+v", len(got), got)
+	}
+
+	byTitle := make(map[string]session.InstanceData)
+	for _, data := range got {
+		byTitle[data.Title] = data
+	}
+	if byTitle["already"].Worktree.WorktreePath != "/new" {
+		t.Fatalf("expected duplicate title to be replaced, got %+v", byTitle["already"])
+	}
+	if byTitle["keep"].Worktree.WorktreePath != "/keep" {
+		t.Fatalf("expected unrelated existing entry to remain, got %+v", byTitle["keep"])
+	}
+	if byTitle["add"].Worktree.WorktreePath != "/add" {
+		t.Fatalf("expected new entry to be appended, got %+v", byTitle["add"])
+	}
+}

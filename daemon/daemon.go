@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,14 +27,11 @@ func RunDaemon(cfg *config.Config) error {
 		return fmt.Errorf("failed to initialize storage: %w", err)
 	}
 
-	instances, err := storage.LoadInstances()
+	instanceMap, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return fmt.Errorf("failed to load instances: %w", err)
 	}
-	for _, instance := range instances {
-		// Assume AutoYes is true if the daemon is running.
-		instance.AutoYes = true
-	}
+	instances := daemonInstances(instanceMap)
 
 	pollInterval := time.Duration(cfg.DaemonPollInterval) * time.Millisecond
 
@@ -44,6 +43,13 @@ func RunDaemon(cfg *config.Config) error {
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
+			if refreshed, err := refreshDaemonInstances(instanceMap); err != nil {
+				log.WarningLog.Printf("failed to refresh daemon instances: %v", err)
+			} else {
+				instanceMap = refreshed
+				instances = daemonInstances(instanceMap)
+			}
+
 			for _, instance := range instances {
 				// We only store started instances, but check anyway.
 				if instance.Started() {
@@ -76,6 +82,64 @@ func RunDaemon(cfg *config.Config) error {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
 	return nil
+}
+
+func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return existing, err
+	}
+
+	next := make(map[string]*session.Instance)
+	for repoID, raw := range allInstances {
+		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
+			continue
+		}
+
+		var data []session.InstanceData
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return existing, fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+		}
+
+		for _, item := range data {
+			key := daemonInstanceKey(repoID, item.Title)
+			if existing != nil {
+				if instance := existing[key]; instance != nil {
+					next[key] = instance
+					continue
+				}
+			}
+
+			instance, err := session.FromInstanceData(item)
+			if err != nil {
+				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
+				continue
+			}
+			// Assume AutoYes is true if the daemon is running.
+			instance.AutoYes = true
+			next[key] = instance
+		}
+	}
+
+	return next, nil
+}
+
+func daemonInstanceKey(repoID, title string) string {
+	return repoID + "\x00" + title
+}
+
+func daemonInstances(instanceMap map[string]*session.Instance) []*session.Instance {
+	keys := make([]string, 0, len(instanceMap))
+	for key := range instanceMap {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	instances := make([]*session.Instance, 0, len(keys))
+	for _, key := range keys {
+		instances = append(instances, instanceMap[key])
+	}
+	return instances
 }
 
 // LaunchDaemon launches the daemon process.

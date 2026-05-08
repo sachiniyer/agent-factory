@@ -315,3 +315,44 @@ func TestRunTask_RejectsDuplicateTitleInPerRepoStorage(t *testing.T) {
 		t.Fatalf("duplicate append should preserve original storage, got %+v", got)
 	}
 }
+
+func TestNextTaskRunTitleSkipsPersistedTitles(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoID := "test-repo-title"
+	instancesPath, err := config.RepoInstancesPath(repoID)
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	preexisting := []session.InstanceData{
+		{Title: "nightly"},
+		{Title: "nightly-2"},
+	}
+	preRaw, err := json.MarshalIndent(preexisting, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal preexisting: %v", err)
+	}
+	if err := os.WriteFile(instancesPath, preRaw, 0644); err != nil {
+		t.Fatalf("write preexisting: %v", err)
+	}
+
+	title, err := NextTaskRunTitle(repoID, "/tmp/repo", "nightly", "claude")
+	if err != nil {
+		t.Fatalf("NextTaskRunTitle: %v", err)
+	}
+	if title != "nightly-3" {
+		t.Fatalf("expected nightly-3, got %q", title)
+	}
+}
+
+func TestTaskRunBaseTitleFallsBackToTaskID(t *testing.T) {
+	got := TaskRunBaseTitle(Task{ID: "abc123"})
+	if got != "task-abc123" {
+		t.Fatalf("unexpected fallback title: %q", got)
+	}
+}
