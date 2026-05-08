@@ -5,9 +5,6 @@ on:
     - cron: '0 */3 * * *'
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 permissions:
   contents: write
 
@@ -19,13 +16,13 @@ jobs:
       should_release: ${{ steps.check.outputs.should_release }}
       new_version: ${{ steps.bump.outputs.new_version }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.24'
         cache: true
@@ -99,12 +96,12 @@ jobs:
         goos: [linux, darwin]
         goarch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         ref: v${{ needs.check-and-bump.outputs.new_version }}
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.24'
         cache: true
@@ -122,7 +119,7 @@ jobs:
         tar czf ../${ARCHIVE_NAME}.tar.gz agent-factory
 
     - name: Upload build artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
         path: agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
@@ -135,7 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Download build artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         path: dist
         merge-multiple: true
