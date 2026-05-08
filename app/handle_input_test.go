@@ -80,3 +80,70 @@ func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 	assert.False(t, returnEarly)
 	assert.Nil(t, cmd)
 }
+
+func TestHandleStateNewRejectsDuplicateTitle(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	h.errBox.SetSize(120, 1)
+
+	existing, err := session.NewInstance(session.InstanceOptions{
+		Title:   "fix-bug",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	h.sidebar.AddInstance(existing)
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "fix-bug",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateNew, h.state)
+	require.NotNil(t, h.namingInstance)
+	assert.Contains(t, h.errBox.String(), "fix-bug")
+}
+
+func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	h.errBox.SetSize(120, 1)
+
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		if opts.ForceRemote {
+			return &session.HookBackend{Hooks: config.RemoteHooks{}}, nil
+		}
+		return &session.LocalBackend{}, nil
+	})
+	defer restore()
+
+	existing, err := session.NewInstance(session.InstanceOptions{
+		Title:       "myapp",
+		Path:        t.TempDir(),
+		Program:     "claude",
+		ForceRemote: true,
+	})
+	require.NoError(t, err)
+	h.sidebar.AddInstance(existing)
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:       "my_app",
+		Path:        t.TempDir(),
+		Program:     "claude",
+		ForceRemote: true,
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateNew, h.state)
+	require.NotNil(t, h.namingInstance)
+	assert.Equal(t, "my_app", h.namingInstance.Title)
+	assert.Contains(t, h.errBox.String(), "myapp")
+}

@@ -39,6 +39,29 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(instance.Title) == 0 {
 			return m, m.handleError(fmt.Errorf("title cannot be empty"))
 		}
+		for _, other := range m.sidebar.GetInstances() {
+			if other == instance {
+				continue
+			}
+			if other.Title == instance.Title {
+				return m, m.handleError(fmt.Errorf("a session titled %q already exists", instance.Title))
+			}
+		}
+		if instance.IsRemote() {
+			existing := make([]*session.Instance, 0, m.sidebar.NumInstances())
+			for _, other := range m.sidebar.GetInstances() {
+				if other == instance || !other.IsRemote() {
+					continue
+				}
+				existing = append(existing, other)
+			}
+			if dup := session.FindSlugCollision(instance.Title, existing); dup != "" {
+				return m, m.handleError(fmt.Errorf(
+					"a remote session titled %q already maps to hook name %q",
+					dup, session.Slugify(instance.Title),
+				))
+			}
+		}
 
 		// Apply the program selected during naming
 		instance.Program = m.pendingProgram

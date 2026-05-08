@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -802,20 +803,21 @@ func TestHookBackendIsAliveWithMultipleSessions(t *testing.T) {
 	assert.True(t, b.IsAlive(iB))
 }
 
-// --- slugify uniqueness ---
+// --- slugify shape ---
 
-func TestSlugifyUniqueness(t *testing.T) {
-	// Titles that reduce to the same base slug must produce distinct slugified names.
-	pairs := [][2]string{
-		{"my_app", "myapp"},
-		{"My App!", "my-app"},
-		{"hello world", "hello-world"},
-		{"HELLO", "hello"},
+func TestSlugifyNoHashSuffix(t *testing.T) {
+	cases := map[string]string{
+		"hello":             "hello",
+		"Hello World":       "hello-world",
+		"My App!":           "my-app",
+		"  spaced  ":        "spaced",
+		"CAPS":              "caps",
+		"already-a-slug":    "already-a-slug",
+		"af-test":           "af-test",
+		"some/name:thing@1": "somenamething1",
 	}
-	for _, p := range pairs {
-		a := slugify(p[0])
-		b := slugify(p[1])
-		assert.NotEqual(t, a, b, "slugify(%q) == slugify(%q) == %q", p[0], p[1], a)
+	for title, want := range cases {
+		assert.Equal(t, want, slugify(title), "slugify(%q)", title)
 	}
 }
 
@@ -829,5 +831,75 @@ func TestSlugifyNonEmpty(t *testing.T) {
 	for _, title := range []string{"!!!", "   ", ""} {
 		s := slugify(title)
 		assert.NotEmpty(t, s, "slugify(%q) should not be empty", title)
+	}
+}
+
+func TestSlugifyCollisionsReduce(t *testing.T) {
+	collisions := [][2]string{
+		{"my_app", "myapp"},
+		{"My App!", "my-app"},
+		{"HELLO", "hello"},
+	}
+	for _, p := range collisions {
+		assert.Equal(t, slugify(p[0]), slugify(p[1]))
+	}
+}
+
+func TestFindSlugCollision(t *testing.T) {
+	mk := func(title string) *Instance { return &Instance{Title: title} }
+	existing := []*Instance{mk("myapp"), mk("other"), nil}
+
+	assert.Equal(t, "myapp", FindSlugCollision("my_app", existing))
+	assert.Equal(t, "myapp", FindSlugCollision("MyApp", existing))
+	assert.Equal(t, "", FindSlugCollision("fresh-title", existing))
+	assert.Equal(t, "", FindSlugCollision("myapp", existing))
+	assert.Equal(t, "", FindSlugCollision("", existing))
+}
+
+func TestRemoteHookNamePrefersRemoteMetaName(t *testing.T) {
+	assert.Equal(t, "box-af-test", RemoteHookName("af-test", map[string]interface{}{"name": "box-af-test"}))
+	assert.Equal(t, "af-test", RemoteHookName("af-test", nil))
+}
+
+func TestListRemoteHookInstanceDataImportsRunningSessions(t *testing.T) {
+	dir := t.TempDir()
+	listCmd := writeScript(t, dir, "list.sh",
+		`echo '[{"name": "remote-one", "status": "running", "host": "h1"}, {"name": "remote-two", "status": "stopped"}]'`)
+
+	now := time.Now()
+	data, err := ListRemoteHookInstanceData("/repo/root", config.RemoteHooks{ListCmd: listCmd}, now)
+	require.NoError(t, err)
+	require.Len(t, data, 1)
+	assert.Equal(t, "remote-one", data[0].Title)
+	assert.Equal(t, "/repo/root", data[0].Path)
+	assert.Equal(t, "remote-one", data[0].Branch)
+	assert.Equal(t, Running, data[0].Status)
+	assert.Equal(t, "remote", data[0].BackendType)
+	assert.Equal(t, "remote-one", data[0].RemoteMeta["name"])
+	assert.Equal(t, "h1", data[0].RemoteMeta["host"])
+}
+
+func TestRunHookAttachWithDetachKey(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		cmd := exec.Command("sh", "-c", "sleep 10")
+		done <- runHookAttachWithDetach(cmd, stdinR, io.Discard, io.Discard)
+	}()
+
+	_, err := stdinW.Write([]byte{tmux.DetachKeyByte})
+	require.NoError(t, err)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("remote attach did not exit after detach key")
 	}
 }

@@ -293,3 +293,62 @@ func upsertInstanceDataByTitle(existing, incoming []session.InstanceData) []sess
 	}
 	return existing
 }
+
+func (m *home) importRemoteHookSessions() int {
+	repoCfg, err := config.LoadRepoConfig(m.repoID)
+	if err != nil {
+		log.WarningLog.Printf("failed to load repo config for remote import: %v", err)
+		return 0
+	}
+	if repoCfg.RemoteHooks == nil || repoCfg.RemoteHooks.ListCmd == "" {
+		return 0
+	}
+
+	repo, err := config.CurrentRepo()
+	if err != nil {
+		log.WarningLog.Printf("failed to resolve repo for remote import: %v", err)
+		return 0
+	}
+
+	listed, err := session.ListRemoteHookInstanceData(repo.Root, *repoCfg.RemoteHooks, time.Now())
+	if err != nil {
+		log.WarningLog.Printf("failed to list remote hook sessions: %v", err)
+		return 0
+	}
+
+	existingTitles := m.sidebar.GetInstanceTitles()
+	existingHookNames := make(map[string]bool)
+	for _, inst := range m.sidebar.GetInstances() {
+		if !inst.IsRemote() {
+			continue
+		}
+		data := inst.ToInstanceData()
+		existingHookNames[session.RemoteHookName(data.Title, data.RemoteMeta)] = true
+	}
+
+	imported := 0
+	for _, data := range listed {
+		name := session.RemoteHookName(data.Title, data.RemoteMeta)
+		if existingTitles[data.Title] || existingHookNames[name] {
+			continue
+		}
+
+		inst, err := session.FromInstanceData(data)
+		if err != nil {
+			log.WarningLog.Printf("failed to import remote hook session %q: %v", data.Title, err)
+			continue
+		}
+		m.sidebar.AddInstance(inst)()
+		inst.AutoYes = m.autoYes
+		existingTitles[data.Title] = true
+		existingHookNames[name] = true
+		imported++
+	}
+
+	if imported > 0 {
+		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
+			log.WarningLog.Printf("failed to save imported remote sessions: %v", err)
+		}
+	}
+	return imported
+}
