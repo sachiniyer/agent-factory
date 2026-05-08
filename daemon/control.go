@@ -281,6 +281,7 @@ type Manager struct {
 	instances           map[string]*session.Instance
 	reservedTitles      map[string]struct{}
 	reservedRemoteNames map[string]struct{}
+	repoStartLocks      map[string]*sync.Mutex
 }
 
 func NewManager(cfg *config.Config) (*Manager, error) {
@@ -299,6 +300,7 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 		instances:           instances,
 		reservedTitles:      make(map[string]struct{}),
 		reservedRemoteNames: make(map[string]struct{}),
+		repoStartLocks:      make(map[string]*sync.Mutex),
 	}, nil
 }
 
@@ -337,6 +339,10 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 	}
 	defer release()
 
+	repoStartLock := m.startLockForRepo(repo.ID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:       title,
 		Path:        repo.Root,
@@ -374,6 +380,18 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 	m.mu.Unlock()
 
 	return data, nil
+}
+
+func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	lock := m.repoStartLocks[repoID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.repoStartLocks[repoID] = lock
+	}
+	return lock
 }
 
 func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), error) {
