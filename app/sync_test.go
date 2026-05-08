@@ -1,9 +1,14 @@
 package app
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/stretchr/testify/require"
 )
 
 // TestPendingInstanceCollisionShouldSkip covers the decision logic used by
@@ -171,4 +176,53 @@ func TestUpsertInstanceDataByTitleReplacesDuplicates(t *testing.T) {
 	if byTitle["add"].Worktree.WorktreePath != "/add" {
 		t.Fatalf("expected new entry to be appended, got %+v", byTitle["add"])
 	}
+}
+
+func TestImportRemoteHookSessionsAddsListCmdSessions(t *testing.T) {
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+
+	h := newTestHome(t)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+	h.storage, err = session.NewStorage(config.DefaultState(), repo.ID)
+	require.NoError(t, err)
+
+	scriptDir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		path := filepath.Join(scriptDir, name)
+		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0755))
+		return path
+	}
+
+	listCmd := write("list.sh", `echo '[{"name": "remote-one", "status": "running", "host": "h1"}, {"name": "remote-two", "status": "stopped"}]'`)
+	attachCmd := write("attach.sh", `echo "attached $1"`)
+	noopCmd := write("noop.sh", `echo '{"ok": true}'`)
+	require.NoError(t, config.SaveRepoConfig(repo.ID, &config.RepoConfig{
+		RemoteHooks: &config.RemoteHooks{
+			LaunchCmd: noopCmd,
+			ListCmd:   listCmd,
+			AttachCmd: attachCmd,
+			DeleteCmd: noopCmd,
+		},
+	}))
+
+	imported := h.importRemoteHookSessions()
+	require.Equal(t, 1, imported)
+	require.Equal(t, 1, h.sidebar.NumInstances())
+
+	inst := h.sidebar.GetInstances()[0]
+	require.True(t, inst.IsRemote())
+	require.Equal(t, "remote-one", inst.Title)
+
+	stored, err := config.LoadRepoInstances(repo.ID)
+	require.NoError(t, err)
+	var data []session.InstanceData
+	require.NoError(t, json.Unmarshal(stored, &data))
+	require.Len(t, data, 1)
+	require.Equal(t, "remote-one", data[0].Title)
+	require.Equal(t, "remote-one", data[0].RemoteMeta["name"])
+	require.Equal(t, "h1", data[0].RemoteMeta["host"])
 }

@@ -168,6 +168,8 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		instance.AutoYes = autoYes
 	}
 
+	h.importRemoteHookSessions()
+
 	// Merge pending instances from task runs.
 	h.mergePendingInstances()
 

@@ -1,10 +1,9 @@
 package session
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -14,6 +13,9 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+
+	"github.com/creack/pty"
 )
 
 // HookBackend implements Backend by delegating to user-provided shell scripts.
@@ -42,22 +44,62 @@ type hookPTY struct {
 
 var slugRegexp = regexp.MustCompile(`[^a-z0-9-]`)
 
-// slugify converts a title to a slug-safe string for hook scripts.
-// A short hash of the original title is appended to prevent collisions
-// when different titles (e.g. "my_app" vs "myapp") reduce to the same slug.
-func slugify(title string) string {
+// Slugify converts a title to a slug-safe string for hook scripts.
+// The slug is part of the public remote hook protocol documented in
+// docs/remote-hooks.md: launch_cmd, list_cmd, attach_cmd, and delete_cmd all
+// receive this value unless the instance was imported with an explicit
+// remote_meta.name.
+func Slugify(title string) string {
 	s := strings.ToLower(title)
 	s = strings.ReplaceAll(s, " ", "-")
 	s = slugRegexp.ReplaceAllString(s, "")
-	// Trim leading/trailing hyphens
 	s = strings.Trim(s, "-")
 	if s == "" {
 		s = "session"
 	}
+	return s
+}
 
-	// Append a short hash of the original title to guarantee uniqueness.
-	h := sha256.Sum256([]byte(title))
-	return s + "-" + hex.EncodeToString(h[:])[:8]
+// slugify is kept as an unexported alias for existing package-local call sites
+// and tests.
+func slugify(title string) string { return Slugify(title) }
+
+// RemoteHookName returns the hook-protocol name for a title and persisted
+// remote metadata. Imported remote sessions can carry their authoritative
+// list_cmd name in remote_meta.name; TUI-created sessions derive it from the
+// title.
+func RemoteHookName(title string, meta map[string]interface{}) string {
+	if name, ok := meta["name"].(string); ok && name != "" {
+		return name
+	}
+	return Slugify(title)
+}
+
+// FindSlugCollision returns the title of the first existing remote instance
+// whose hook name collides with candidate, or "" if none do.
+func FindSlugCollision(candidate string, existing []*Instance) string {
+	if candidate == "" {
+		return ""
+	}
+	want := Slugify(candidate)
+	for _, inst := range existing {
+		if inst == nil || inst.Title == candidate {
+			continue
+		}
+		inst.mu.RLock()
+		name := RemoteHookName(inst.Title, inst.remoteMeta)
+		inst.mu.RUnlock()
+		if name == want {
+			return inst.Title
+		}
+	}
+	return ""
+}
+
+func hookNameForInstance(i *Instance) string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return RemoteHookName(i.Title, i.remoteMeta)
 }
 
 func (b *HookBackend) Type() string { return "remote" }
@@ -77,7 +119,7 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	}
 
 	// Launch a new remote session.
-	slug := slugify(i.Title)
+	slug := Slugify(i.Title)
 	args := []string{"--name", slug, "--json"}
 	cmd := exec.Command(b.Hooks.LaunchCmd, args...)
 	out, err := cmd.CombinedOutput()
@@ -136,7 +178,7 @@ func (b *HookBackend) Kill(i *Instance) error {
 
 	b.closePTY(i.Title)
 
-	slug := slugify(i.Title)
+	slug := hookNameForInstance(i)
 	args := []string{"--name", slug, "--json"}
 	out, err := exec.Command(b.Hooks.DeleteCmd, args...).CombinedOutput()
 	if err != nil {
@@ -178,12 +220,9 @@ func (b *HookBackend) Attach(i *Instance) (chan struct{}, error) {
 		defer close(done)
 		defer b.ensurePTY(i) // restart preview process after detach
 
-		slug := slugify(i.Title)
+		slug := hookNameForInstance(i)
 		cmd := exec.Command(b.Hooks.AttachCmd, slug)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+		if err := runHookAttachWithDetach(cmd, os.Stdin, os.Stdout, os.Stderr); err != nil {
 			log.ErrorLog.Printf("attach_cmd error: %v", err)
 		}
 	}()
@@ -220,7 +259,7 @@ func (b *HookBackend) IsAlive(i *Instance) bool {
 	if err := json.Unmarshal(out, &sessions); err != nil {
 		return false
 	}
-	slug := slugify(i.Title)
+	slug := hookNameForInstance(i)
 	for _, s := range sessions {
 		name, _ := s["name"].(string)
 		status, _ := s["status"].(string)
@@ -236,6 +275,118 @@ func (b *HookBackend) CheckAndHandleTrustPrompt(_ *Instance) bool {
 }
 
 func (b *HookBackend) TapEnter(_ *Instance) {}
+
+// ListRemoteHookInstanceData converts running sessions reported by list_cmd
+// into persistable remote InstanceData records for the current repo.
+func ListRemoteHookInstanceData(repoPath string, hooks config.RemoteHooks, now time.Time) ([]InstanceData, error) {
+	if hooks.ListCmd == "" {
+		return nil, nil
+	}
+
+	out, err := exec.Command(hooks.ListCmd, "--json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("list_cmd failed: %w", err)
+	}
+
+	var listed []map[string]interface{}
+	if err := json.Unmarshal(out, &listed); err != nil {
+		return nil, fmt.Errorf("list_cmd returned invalid JSON: %w", err)
+	}
+
+	imported := make([]InstanceData, 0, len(listed))
+	for _, meta := range listed {
+		name, _ := meta["name"].(string)
+		if name == "" {
+			continue
+		}
+		status, _ := meta["status"].(string)
+		if status != "running" {
+			continue
+		}
+
+		title := name
+		if displayTitle, _ := meta["title"].(string); displayTitle != "" {
+			title = displayTitle
+		}
+
+		imported = append(imported, InstanceData{
+			Title:       title,
+			Path:        repoPath,
+			Branch:      name,
+			Status:      Running,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			BackendType: "remote",
+			RemoteMeta:  meta,
+		})
+	}
+	return imported, nil
+}
+
+func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer) error {
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		return err
+	}
+	defer ptmx.Close()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+
+	copyDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(stdout, ptmx)
+		close(copyDone)
+	}()
+
+	detached := make(chan struct{})
+	var detachOnce sync.Once
+	detach := func() {
+		detachOnce.Do(func() {
+			close(detached)
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = ptmx.Close()
+		})
+	}
+
+	go func() {
+		buf := make([]byte, 32)
+		for {
+			n, err := stdin.Read(buf)
+			if n > 0 {
+				if n == 1 && buf[0] == tmux.DetachKeyByte {
+					detach()
+					return
+				}
+				if _, writeErr := ptmx.Write(buf[:n]); writeErr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	err = <-waitDone
+	_ = ptmx.Close()
+	<-copyDone
+
+	select {
+	case <-detached:
+		return nil
+	default:
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "remote attach exited: %v\n", err)
+		return err
+	}
+	return nil
+}
 
 // --- Process management for preview capture ---
 
@@ -259,7 +410,7 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 		delete(b.ptys, i.Title)
 	}
 
-	slug := slugify(i.Title)
+	slug := hookNameForInstance(i)
 	cmd := exec.Command(b.Hooks.AttachCmd, slug)
 
 	// Use pipes instead of a PTY. The attach_cmd for preview doesn't need

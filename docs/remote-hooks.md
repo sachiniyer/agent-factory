@@ -27,6 +27,22 @@ All scripts must:
 - Write progress/log messages to **stderr**
 - Accept the flags documented below
 
+### Session Names
+
+The `<name>` value passed to hooks is a slug derived from the session title:
+
+1. lowercase the title
+2. replace spaces with `-`
+3. drop every character that is not `[a-z0-9-]`
+4. trim leading/trailing `-`
+5. if empty, use `session`
+
+Examples: `"Fix Auth Bug"` becomes `fix-auth-bug`, `"my_app"` becomes `myapp`, and `"af-test"` stays `af-test`.
+
+This slug is the stable remote identity. Agent Factory passes it to `launch_cmd --name`, expects `list_cmd` to report it as `name`, passes it to `delete_cmd --name`, and passes it as the positional argument to `attach_cmd`. There is no hidden hash suffix.
+
+When Agent Factory imports an existing remote session from `list_cmd`, the reported `name` is stored in `remote_meta.name` and remains authoritative even if the display title differs.
+
 ### `launch_cmd`
 
 Starts a new remote agent session.
@@ -76,7 +92,9 @@ Gives interactive terminal access to a running session (e.g., SSH + tmux attach)
 
 **No JSON output** — this command takes over the terminal. It should behave like `ssh -t host "tmux attach"`.
 
-Agent Factory also uses this script for the preview pane by running it in a background PTY and capturing its output.
+Agent Factory runs this command behind a local PTY and intercepts the configured detach key before forwarding input to the hook process. On detach, Agent Factory terminates the local `attach_cmd` process; remote tmux sessions should survive the client disconnect and be attachable again later.
+
+Agent Factory also uses this script for the preview pane by running it in a background process and capturing its output.
 
 ## Example
 
