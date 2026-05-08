@@ -153,30 +153,22 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	killAction := func() tea.Msg {
 		tw.CleanupTerminalForInstance(selectedTitle)
 
-		// Find and kill by title, not by current selection index, to avoid
-		// destroying the wrong worktree if the sidebar order changed.
-		// Capture the repo name before Kill(), because Kill() sets started=false
-		// which causes RepoName() to fail — leaving the sidebar repo count stale.
 		var repoName string
 		var repoErr error = fmt.Errorf("instance not found")
 		for _, inst := range m.sidebar.GetInstances() {
 			if inst.Title == selectedTitle {
 				repoName, repoErr = inst.RepoName()
-				if err := inst.Kill(); err != nil {
-					log.ErrorLog.Printf("could not kill instance: %v", err)
-					return fmt.Errorf("failed to kill session '%s': %w", selectedTitle, err)
-				}
 				break
 			}
+		}
+		if err := killSessionThroughDaemon(selectedTitle, m.repoID); err != nil {
+			log.ErrorLog.Printf("could not kill instance: %v", err)
+			return fmt.Errorf("failed to kill session '%s': %w", selectedTitle, err)
 		}
 		if repoErr == nil {
 			m.sidebar.RemoveInstanceByTitleWithRepo(selectedTitle, repoName)
 		} else {
 			m.sidebar.RemoveInstanceByTitle(selectedTitle)
-		}
-
-		if err := m.storage.DeleteInstance(selectedTitle); err != nil {
-			log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
 		}
 
 		return instanceChangedMsg{}

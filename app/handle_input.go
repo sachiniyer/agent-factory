@@ -70,20 +70,25 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
 
-		m.preSaveInstances()
-
 		selectedWt := m.selectedWorktree
 		m.selectedWorktree = nil
 		m.availableWorktrees = nil
 		startCmd := func() tea.Msg {
-			var err error
-			if selectedWt != nil {
-				err = instance.StartWithExistingWorktree(selectedWt.Path, selectedWt.Branch)
-			} else {
-				err = instance.Start(true)
+			req := sessionStartRequest{
+				Title:       instance.Title,
+				RepoPath:    instance.Path,
+				Program:     instance.Program,
+				AutoYes:     m.autoYes,
+				ForceRemote: instance.IsRemote(),
 			}
+			if selectedWt != nil {
+				req.ExistingWorktreePath = selectedWt.Path
+				req.ExistingWorktreeBranch = selectedWt.Branch
+			}
+			started, err := startSessionThroughDaemon(instance, req)
 			return instanceStartedMsg{
 				instance: instance,
+				started:  started,
 				err:      err,
 			}
 		}

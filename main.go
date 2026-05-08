@@ -81,11 +81,6 @@ var (
 					}
 				}()
 			}
-			// Kill any daemon that's running.
-			if err := daemon.StopDaemon(); err != nil {
-				log.ErrorLog.Printf("failed to stop daemon: %v", err)
-			}
-
 			// Check for updates in the background (non-blocking).
 			autoUpdateInBackground()
 

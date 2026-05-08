@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -226,6 +227,8 @@ func TestSessionsKill_GhostSessionDeleted(t *testing.T) {
 	}
 
 	// Run the kill command. Suppress stdout/stderr noise from jsonOut/jsonError.
+	restoreKill := stubKillSessionDirect()
+	defer restoreKill()
 	devnull, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
@@ -266,6 +269,8 @@ func TestSessionsKill_GhostSessionDeleted(t *testing.T) {
 func TestSessionsKill_UnknownTitle(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	restoreKill := stubKillSessionDirect()
+	defer restoreKill()
 
 	devnull, err := os.Open(os.DevNull)
 	if err != nil {
@@ -283,4 +288,12 @@ func TestSessionsKill_UnknownTitle(t *testing.T) {
 	if err := sessionsKillCmd.RunE(sessionsKillCmd, []string{"does-not-exist"}); err == nil {
 		t.Fatalf("expected error for unknown session, got nil")
 	}
+}
+
+func stubKillSessionDirect() func() {
+	prev := killSessionViaDaemon
+	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {
+		return killSessionDirect(req.Title)
+	}
+	return func() { killSessionViaDaemon = prev }
 }

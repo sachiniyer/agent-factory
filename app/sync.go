@@ -310,7 +310,7 @@ func (m *home) importRemoteHookSessions() int {
 		return 0
 	}
 
-	listed, err := session.ListRemoteHookInstanceData(repo.Root, *repoCfg.RemoteHooks, time.Now())
+	listed, err := importRemoteSessionsThroughDaemon(repo.Root)
 	if err != nil {
 		log.WarningLog.Printf("failed to list remote hook sessions: %v", err)
 		return 0
@@ -345,10 +345,5 @@ func (m *home) importRemoteHookSessions() int {
 		imported++
 	}
 
-	if imported > 0 {
-		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-			log.WarningLog.Printf("failed to save imported remote sessions: %v", err)
-		}
-	}
 	return imported
 }

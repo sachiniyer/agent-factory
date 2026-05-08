@@ -369,12 +369,23 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.handleError(msg.err), m.selectionChanged())
 		}
 
-		msg.instance.SetStatus(session.Running)
-		m.sidebar.RegisterRepoForInstance(msg.instance)
-		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-			return m, m.handleError(err)
+		started := msg.instance
+		if msg.started != nil {
+			started = msg.started
 		}
-		msg.instance.AutoYes = m.autoYes
+		if started != msg.instance {
+			if !m.sidebar.ReplaceInstance(msg.instance, started) && !m.sidebar.ContainsInstance(started) {
+				m.sidebar.AddInstance(started)
+			}
+		} else if !m.sidebar.ContainsInstance(started) {
+			m.sidebar.AddInstance(started)
+		}
+
+		started.SetStatus(session.Running)
+		if !started.IsRemote() {
+			m.sidebar.RegisterRepoForInstance(started)
+		}
+		started.AutoYes = m.autoYes
 
 		if !userStillWatching {
 			// User moved on — update status silently and keep their current
@@ -384,7 +395,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.menu.SetState(ui.StateDefault)
-		m.showHelpScreen(helpStart(msg.instance), nil)
+		m.showHelpScreen(helpStart(started), nil)
 
 		return m, tea.Batch(tea.WindowSize(), m.selectionChanged())
 	case spinner.TickMsg:
@@ -530,12 +541,17 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 	instance.SetStatus(session.Loading)
 	m.menu.SetState(ui.StateDefault)
 
-	m.preSaveInstances()
-
 	prompt := tsk.Prompt
 	taskID := tsk.ID
 	startCmd := func() tea.Msg {
-		if err := task.StartAndSendPrompt(instance, prompt); err != nil {
+		started, err := startSessionThroughDaemon(instance, sessionStartRequest{
+			Title:    instance.Title,
+			RepoPath: instance.Path,
+			Program:  instance.Program,
+			Prompt:   prompt,
+			AutoYes:  m.autoYes,
+		})
+		if err != nil {
 			return instanceStartedMsg{instance: instance, err: err}
 		}
 
@@ -549,7 +565,7 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 			}
 		}
 
-		return instanceStartedMsg{instance: instance, err: nil}
+		return instanceStartedMsg{instance: instance, started: started, err: nil}
 	}
 
 	return tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
@@ -802,16 +818,8 @@ type runOnEventLoopMsg struct {
 
 type instanceStartedMsg struct {
 	instance *session.Instance
+	started  *session.Instance
 	err      error
-}
-
-// preSaveInstances persists the current sidebar instances to disk so that
-// refreshExternalInstances won't remove a newly-created instance whose
-// status transitions from Loading to Running during async Start().
-func (m *home) preSaveInstances() {
-	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-		log.ErrorLog.Printf("failed to pre-save instance: %v", err)
-	}
 }
 
 func (m *home) handleError(err error) tea.Cmd {

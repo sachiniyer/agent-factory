@@ -180,75 +180,17 @@ func RunTask(taskID string) error {
 		return fmt.Errorf("project path %s is not a valid git repository", t.ProjectPath)
 	}
 
-	cfg := config.LoadConfig()
-
 	baseTitle := TaskRunBaseTitle(*t)
-
-	repo, err := config.RepoFromPath(t.ProjectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve repo for project path %s: %w", t.ProjectPath, err)
-	}
-	title, err := NextTaskRunTitle(repo.ID, t.ProjectPath, baseTitle, t.Program)
-	if err != nil {
-		return fmt.Errorf("failed to allocate task run title: %w", err)
-	}
-
-	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:   title,
-		Path:    t.ProjectPath,
-		Program: t.Program,
+	cfg := config.LoadConfig()
+	data, err := daemon.CreateSession(daemon.CreateSessionRequest{
+		TitleBase: baseTitle,
+		RepoPath:  t.ProjectPath,
+		Program:   t.Program,
+		Prompt:    t.Prompt,
+		AutoYes:   cfg.AutoYes,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create instance: %w", err)
-	}
-
-	// If anything fails after Start(), kill the instance to avoid orphaned resources.
-	started := true
-	defer func() {
-		if started {
-			if killErr := instance.Kill(); killErr != nil {
-				log.ErrorLog.Printf("failed to kill orphaned instance %s: %v", title, killErr)
-			}
-		}
-	}()
-
-	if err := StartAndSendPrompt(instance, t.Prompt); err != nil {
-		return fmt.Errorf("failed to start instance: %w", err)
-	}
-	instance.SetStatus(session.Running)
-
-	// Apply AutoYes to the in-memory instance before persisting so the
-	// flag is part of the saved data the daemon will read back.
-	if cfg.AutoYes {
-		instance.AutoYes = true
-	}
-
-	// Persist the new instance into per-repo instances.json under the
-	// file lock. This is the source of truth the daemon reads via
-	// storage.LoadInstances; without this write, the daemon never sees
-	// scheduled tasks and AutoYes runs hang. Mirrors api/sessions.go.
-	data := instance.ToInstanceData()
-	if err := config.UpdateRepoInstances(repo.ID, appendTaskRunnerInstanceFn(data)); err != nil {
-		return fmt.Errorf("failed to save instance to per-repo storage: %w", err)
-	}
-
-	// Also write to the pending file so the running TUI (which doesn't
-	// re-read instances.json on every tick) can merge the new instance
-	// into its in-memory list at startup. This is defensive: the daemon
-	// reads from per-repo instances.json above, which is the load-bearing
-	// path for AutoYes.
-	if err := appendPendingInstance(data); err != nil {
-		log.WarningLog.Printf("failed to save pending instance: %v", err)
-	}
-
-	// Instance is successfully handed off, don't kill it on return.
-	started = false
-
-	// Launch daemon for autoyes if configured.
-	if cfg.AutoYes {
-		if err := daemon.LaunchDaemon(); err != nil {
-			log.ErrorLog.Printf("failed to launch daemon: %v", err)
-		}
+		return fmt.Errorf("failed to start task session: %w", err)
 	}
 
 	// Update task status.
@@ -259,7 +201,7 @@ func RunTask(taskID string) error {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 
-	log.InfoLog.Printf("task %s started successfully as instance %s", taskID, title)
+	log.InfoLog.Printf("task %s started successfully as instance %s", taskID, data.Title)
 	return nil
 }
 

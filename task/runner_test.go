@@ -165,20 +165,15 @@ func TestLoadAndClearPendingInstances_Corrupted(t *testing.T) {
 	}
 }
 
-// runnerAppendInstance mirrors the inline UpdateRepoInstances callback in
-// RunTask. Keeping it identical here lets us exercise the per-repo write
-// path without spinning up a full session/tmux/git-worktree fixture.
+// runnerAppendInstance exercises the legacy append helper kept for storage
+// merge regression coverage without spinning up a full session fixture.
 func runnerAppendInstance(repoID string, data session.InstanceData) error {
 	return config.UpdateRepoInstances(repoID, appendTaskRunnerInstanceFn(data))
 }
 
-// TestRunTask_WritesToPerRepoStorage is the regression test for issue #334.
-// The bug: RunTask wrote scheduled instances only to pending_instances.json
-// and launched the daemon, which loads from per-repo instances.json. The
-// daemon therefore never saw the scheduled instance and AutoYes runs hung.
-// This test asserts that the per-repo storage write that RunTask now performs
-// produces a file the daemon path (config.LoadRepoInstances) can read back
-// with the new instance present.
+// TestRunTask_WritesToPerRepoStorage is legacy regression coverage for issue
+// #334: scheduled instances must end up in per-repo instances.json so the
+// daemon can see them.
 func TestRunTask_WritesToPerRepoStorage(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmp)

@@ -17,21 +17,23 @@ import (
 	"time"
 )
 
-// RunDaemon runs the daemon process which iterates over all sessions and runs AutoYes mode on them.
-// It's expected that the main process kills the daemon when the main process starts.
+// RunDaemon runs the daemon process, serves the local control plane, and
+// iterates over all sessions to run AutoYes mode on them.
 func RunDaemon(cfg *config.Config) error {
 	log.InfoLog.Printf("starting daemon")
-	state := config.LoadState()
-	storage, err := session.NewStorage(state, "")
+	manager, err := NewManager(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to initialize storage: %w", err)
+		return err
 	}
-
-	instanceMap, err := refreshDaemonInstances(nil)
+	closeControl, err := startControlServer(manager)
 	if err != nil {
-		return fmt.Errorf("failed to load instances: %w", err)
+		return fmt.Errorf("failed to start daemon control server: %w", err)
 	}
-	instances := daemonInstances(instanceMap)
+	defer func() {
+		if err := closeControl(); err != nil {
+			log.WarningLog.Printf("failed to close daemon control socket: %v", err)
+		}
+	}()
 
 	pollInterval := time.Duration(cfg.DaemonPollInterval) * time.Millisecond
 
@@ -43,14 +45,11 @@ func RunDaemon(cfg *config.Config) error {
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
-			if refreshed, err := refreshDaemonInstances(instanceMap); err != nil {
+			if err := manager.RefreshInstances(); err != nil {
 				log.WarningLog.Printf("failed to refresh daemon instances: %v", err)
-			} else {
-				instanceMap = refreshed
-				instances = daemonInstances(instanceMap)
 			}
 
-			for _, instance := range instances {
+			for _, instance := range manager.InstancesSnapshot() {
 				// We only store started instances, but check anyway.
 				if instance.Started() {
 					if _, hasPrompt := instance.HasUpdated(); hasPrompt {
@@ -78,7 +77,7 @@ func RunDaemon(cfg *config.Config) error {
 	close(stopCh)
 	wg.Wait()
 
-	if err := storage.SaveInstances(instances); err != nil {
+	if err := manager.SaveInstances(); err != nil {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
 	return nil
@@ -142,14 +141,13 @@ func daemonInstances(instanceMap map[string]*session.Instance) []*session.Instan
 	return instances
 }
 
-// LaunchDaemon launches the daemon process.
+// LaunchDaemon launches the daemon process if it is not already serving the
+// local control plane.
 func LaunchDaemon() error {
-	// Stop any existing daemon first to prevent duplicates.
-	if err := StopDaemon(); err != nil {
-		log.ErrorLog.Printf("failed to stop existing daemon: %v", err)
-		// Continue anyway — best effort
-	}
+	return EnsureDaemon()
+}
 
+func launchDaemonProcess() error {
 	// Find the agent-factory binary.
 	execPath, err := os.Executable()
 	if err != nil {
@@ -247,6 +245,9 @@ func StopDaemon() error {
 	// Clean up PID file
 	if err := os.Remove(pidFile); err != nil {
 		return fmt.Errorf("failed to remove PID file: %w", err)
+	}
+	if socketPath, socketErr := DaemonSocketPath(); socketErr == nil {
+		_ = os.Remove(socketPath)
 	}
 
 	log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
