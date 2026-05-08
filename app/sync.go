@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -187,24 +188,17 @@ func (m *home) mergePendingInstances() int {
 			grouped[rid] = append(grouped[rid], d)
 		}
 		for rid, group := range grouped {
-			existing, err := config.LoadRepoInstances(rid)
-			if err != nil {
-				log.WarningLog.Printf("failed to load existing instances for repo %s: %v", rid, err)
-			}
-			var existingData []session.InstanceData
-			if existing != nil && string(existing) != "[]" && string(existing) != "null" {
-				if err := json.Unmarshal(existing, &existingData); err != nil {
-					log.WarningLog.Printf("failed to parse existing instances for repo %s: %v", rid, err)
+			if err := config.UpdateRepoInstances(rid, func(existing json.RawMessage) (json.RawMessage, error) {
+				var existingData []session.InstanceData
+				if existing != nil && string(existing) != "[]" && string(existing) != "null" {
+					if err := json.Unmarshal(existing, &existingData); err != nil {
+						return nil, fmt.Errorf("failed to parse existing instances for repo %s: %w", rid, err)
+					}
 				}
-			}
-			existingData = append(existingData, group...)
-			jsonData, err := json.Marshal(existingData)
-			if err != nil {
-				log.WarningLog.Printf("failed to marshal instances for repo %s: %v", rid, err)
-				continue
-			}
-			if err := config.SaveRepoInstances(rid, jsonData); err != nil {
-				log.WarningLog.Printf("failed to save instances for repo %s: %v", rid, err)
+				existingData = upsertInstanceDataByTitle(existingData, group)
+				return json.Marshal(existingData)
+			}); err != nil {
+				log.WarningLog.Printf("failed to merge pending instances for repo %s: %v", rid, err)
 			}
 		}
 	}
@@ -282,4 +276,20 @@ func pendingInstanceCollisionShouldSkip(existingWorktreePath, pendingWorktreePat
 		return false
 	}
 	return tmuxAlive
+}
+
+func upsertInstanceDataByTitle(existing, incoming []session.InstanceData) []session.InstanceData {
+	index := make(map[string]int, len(existing))
+	for i := range existing {
+		index[existing[i].Title] = i
+	}
+	for _, data := range incoming {
+		if i, ok := index[data.Title]; ok {
+			existing[i] = data
+			continue
+		}
+		index[data.Title] = len(existing)
+		existing = append(existing, data)
+	}
+	return existing
 }

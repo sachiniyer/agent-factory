@@ -505,9 +505,13 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 		return m.handleError(fmt.Errorf("no task selected"))
 	}
 
-	title := tsk.Name
-	if title == "" {
-		title = fmt.Sprintf("task-%s", tsk.ID)
+	repo, err := config.RepoFromPath(tsk.ProjectPath)
+	if err != nil {
+		return m.handleError(fmt.Errorf("failed to resolve repo for task path: %w", err))
+	}
+	title, err := task.NextTaskRunTitle(repo.ID, tsk.ProjectPath, task.TaskRunBaseTitle(*tsk), tsk.Program)
+	if err != nil {
+		return m.handleError(fmt.Errorf("failed to allocate task run title: %w", err))
 	}
 
 	instance, err := session.NewInstance(session.InstanceOptions{

@@ -298,6 +298,51 @@ func TestDaemonSaveNoInstances(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestRepoSavePreservesDiskOnlyInstances(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	seedDisk(t, ms, repoPath, []InstanceData{
+		{Title: "loaded-in-tui", Path: repoPath, Status: Running, Branch: "old"},
+		{Title: "created-by-cli", Path: repoPath, Status: Running},
+	})
+
+	tuiInstance := makeInstance("loaded-in-tui", repoPath, true)
+	tuiInstance.Branch = "new"
+	storage, err := NewStorage(ms, repoID)
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{tuiInstance})
+	require.NoError(t, err)
+
+	result := readDisk(t, ms, repoPath)
+	byTitle := make(map[string]InstanceData)
+	for _, d := range result {
+		byTitle[d.Title] = d
+	}
+	assert.Equal(t, "new", byTitle["loaded-in-tui"].Branch, "in-memory TUI instance should update its disk record")
+	assert.Contains(t, byTitle, "created-by-cli", "disk-only CLI/task instance must not be overwritten by TUI saves")
+}
+
+func TestRepoSaveDoesNotResurrectDeadDiskMissingInstance(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	// This looks started in memory but has no tmux session, which is the
+	// shape left behind if another process already killed and deleted it.
+	stale := makeInstance("stale", repoPath, true)
+	storage, err := NewStorage(ms, repoID)
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{stale})
+	require.NoError(t, err)
+
+	result := readDisk(t, ms, repoPath)
+	assert.Empty(t, result, "stale TUI memory must not recreate a deleted instance record")
+}
+
 // TestCollectRepoRoots verifies that Storage.CollectRepoRoots returns the
 // unique set of repo roots from stored instances across ALL repos. This
 // underpins the fix for #265 (af reset must clean worktrees in every repo
