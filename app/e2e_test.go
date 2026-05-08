@@ -64,6 +64,7 @@ func newE2EHarness(t *testing.T) *e2eHarness {
 		return fb, nil
 	})
 	t.Cleanup(restoreBackend)
+	installDirectSessionStarter(t)
 
 	restoreFetcher := SetPRInfoFetcherForTest(func(repoPath, branch string) (*git.PRInfo, error) {
 		eh.fmu.Lock()
@@ -75,6 +76,42 @@ func newE2EHarness(t *testing.T) *e2eHarness {
 	t.Cleanup(restoreFetcher)
 
 	return eh
+}
+
+func installDirectSessionStarter(t *testing.T) {
+	t.Helper()
+	restore := SetSessionStarterForTest(func(inst *session.Instance, req sessionStartRequest) (*session.Instance, error) {
+		if inst == nil {
+			var err error
+			inst, err = session.NewInstance(session.InstanceOptions{
+				Title:       req.Title,
+				Path:        req.RepoPath,
+				Program:     req.Program,
+				AutoYes:     req.AutoYes,
+				ForceRemote: req.ForceRemote,
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+		inst.Program = req.Program
+		var err error
+		if req.ExistingWorktreePath != "" {
+			err = inst.StartWithExistingWorktree(req.ExistingWorktreePath, req.ExistingWorktreeBranch)
+		} else {
+			err = inst.Start(true)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if req.Prompt != "" {
+			if err := inst.SendPromptCommand(req.Prompt); err != nil {
+				return nil, err
+			}
+		}
+		return inst, nil
+	})
+	t.Cleanup(restore)
 }
 
 // start launches the teatest program. Must be called exactly once, after any

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -208,6 +209,22 @@ func TestImportRemoteHookSessionsAddsListCmdSessions(t *testing.T) {
 			DeleteCmd: noopCmd,
 		},
 	}))
+
+	restoreImporter := SetRemoteImporterForTest(func(repoPath string) ([]session.InstanceData, error) {
+		listed, err := session.ListRemoteHookInstanceData(repoPath, config.RemoteHooks{ListCmd: listCmd}, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(listed)
+		if err != nil {
+			return nil, err
+		}
+		if err := config.SaveRepoInstances(repo.ID, raw); err != nil {
+			return nil, err
+		}
+		return listed, nil
+	})
+	t.Cleanup(restoreImporter)
 
 	imported := h.importRemoteHookSessions()
 	require.Equal(t, 1, imported)

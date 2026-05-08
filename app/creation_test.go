@@ -50,10 +50,8 @@ func newTestHome(t *testing.T) *home {
 	}
 }
 
-// newLoadingInstance returns an instance in Loading status — mirroring the
-// state that preSaveInstances produces before Start() runs. started=false so
-// ToInstanceData / SaveInstances include it via the "|| Status == Loading"
-// branch.
+// newLoadingInstance returns an instance in Loading status, matching the UI
+// placeholder shown while the daemon starts a session.
 func newLoadingInstance(t *testing.T, title string) *session.Instance {
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{

@@ -139,6 +139,7 @@ func newRealE2EHarness(t *testing.T) *e2eHarness {
 	t.Helper()
 	h := newTestHome(t)
 	eh := &e2eHarness{t: t, home: h}
+	installDirectSessionStarter(t)
 
 	// Stub PR fetcher: return no PR, zero log noise. Don't count calls —
 	// we don't care here, the PR behaviour is covered by the faked tests.

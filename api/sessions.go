@@ -12,7 +12,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
-	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/spf13/cobra"
 )
@@ -22,6 +21,12 @@ var SessionsCmd = &cobra.Command{
 	Use:   "sessions",
 	Short: "Manage sessions",
 }
+
+var (
+	createSessionViaDaemon = daemon.CreateSession
+	killSessionViaDaemon   = daemon.KillSession
+	sendPromptViaDaemon    = daemon.SendPrompt
+)
 
 var sessionsListCmd = &cobra.Command{
 	Use:   "list",
@@ -120,34 +125,16 @@ var sessionsCreateCmd = &cobra.Command{
 			program = config.LoadConfig().DefaultProgram
 		}
 
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   createNameFlag,
-			Path:    repo.Root,
-			Program: program,
+		cfg := config.LoadConfig()
+		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
+			Title:    createNameFlag,
+			RepoPath: repo.Root,
+			Program:  program,
+			Prompt:   createPromptFlag,
+			AutoYes:  cfg.AutoYes,
 		})
 		if err != nil {
-			return jsonError(fmt.Errorf("failed to create instance: %w", err))
-		}
-
-		if err := task.StartAndSendPrompt(instance, createPromptFlag); err != nil {
-			instance.Kill() // Clean up tmux session and git worktree
-			return jsonError(fmt.Errorf("failed to start instance: %w", err))
-		}
-		instance.SetStatus(session.Running)
-
-		// Save to per-repo storage under file lock
-		data := instance.ToInstanceData()
-		if err := config.UpdateRepoInstances(repo.ID, appendInstanceFn(data)); err != nil {
-			instance.Kill()
 			return jsonError(err)
-		}
-
-		// Launch daemon for autoyes if configured
-		cfg := config.LoadConfig()
-		if cfg.AutoYes {
-			if err := daemon.LaunchDaemon(); err != nil {
-				log.ErrorLog.Printf("failed to launch daemon: %v", err)
-			}
 		}
 
 		return jsonOut(data)
@@ -182,6 +169,61 @@ func appendInstanceFn(data session.InstanceData) func(json.RawMessage) (json.Raw
 	}
 }
 
+func killSessionDirect(title string) error {
+	instance, repoID, err := findLiveInstanceByTitle(title)
+	if err != nil {
+		data, ghostRepoID, lookupErr := findInstanceByTitle(title)
+		if lookupErr != nil {
+			return err
+		}
+
+		if data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree {
+			branchCreatedByUs := true
+			if data.Worktree.BranchCreatedByUs != nil {
+				branchCreatedByUs = *data.Worktree.BranchCreatedByUs
+			}
+			gw, gwErr := git.NewGitWorktreeFromStorage(
+				data.Worktree.RepoPath,
+				data.Worktree.WorktreePath,
+				data.Worktree.SessionName,
+				data.Worktree.BranchName,
+				data.Worktree.BaseCommitSHA,
+				data.Worktree.ExternalWorktree,
+				branchCreatedByUs,
+			)
+			if gwErr != nil {
+				log.WarningLog.Printf("ghost session %q: failed to load worktree for cleanup: %v", title, gwErr)
+			} else if cleanupErr := gw.Cleanup(); cleanupErr != nil {
+				log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", title, cleanupErr)
+			}
+		}
+
+		state := config.LoadState()
+		storage, storageErr := session.NewStorage(state, ghostRepoID)
+		if storageErr != nil {
+			return storageErr
+		}
+		if delErr := storage.DeleteInstance(title); delErr != nil {
+			return fmt.Errorf("failed to delete instance from storage: %w", delErr)
+		}
+		return nil
+	}
+
+	if err := instance.Kill(); err != nil {
+		return fmt.Errorf("failed to kill instance: %w", err)
+	}
+
+	state := config.LoadState()
+	storage, err := session.NewStorage(state, repoID)
+	if err != nil {
+		return err
+	}
+	if err := storage.DeleteInstance(title); err != nil {
+		log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
+	}
+	return nil
+}
+
 var (
 	sendPromptCreateFlag  bool
 	sendPromptProgramFlag string
@@ -202,7 +244,7 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 		title := args[0]
 		prompt := args[1]
 
-		instance, _, err := findLiveInstanceByTitle(title)
+		_, _, err := findLiveInstanceByTitle(title)
 		if err != nil {
 			if !sendPromptCreateFlag {
 				return jsonError(fmt.Errorf("instance %q not found. Use --create to auto-create the session, or run: af sessions create --name %q --prompt <prompt>", title, title))
@@ -231,39 +273,22 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 				program = config.LoadConfig().DefaultProgram
 			}
 
-			instance, err = session.NewInstance(session.InstanceOptions{
-				Title:   title,
-				Path:    repo.Root,
-				Program: program,
+			cfg := config.LoadConfig()
+			_, err = createSessionViaDaemon(daemon.CreateSessionRequest{
+				Title:    title,
+				RepoPath: repo.Root,
+				Program:  program,
+				Prompt:   prompt,
+				AutoYes:  cfg.AutoYes,
 			})
 			if err != nil {
-				return jsonError(fmt.Errorf("failed to create instance: %w", err))
-			}
-
-			if err := task.StartAndSendPrompt(instance, ""); err != nil {
-				instance.Kill() // Clean up tmux session and git worktree
-				return jsonError(fmt.Errorf("failed to start instance: %w", err))
-			}
-			instance.SetStatus(session.Running)
-
-			// Save to per-repo storage under file lock
-			data := instance.ToInstanceData()
-			if err := config.UpdateRepoInstances(repo.ID, appendInstanceFn(data)); err != nil {
-				instance.Kill()
 				return jsonError(err)
 			}
-
-			// Launch daemon for autoyes if configured
-			cfg := config.LoadConfig()
-			if cfg.AutoYes {
-				if err := daemon.LaunchDaemon(); err != nil {
-					log.ErrorLog.Printf("failed to launch daemon: %v", err)
-				}
-			}
+			return jsonOut(map[string]bool{"ok": true})
 		}
 
-		if err := instance.SendPromptCommand(prompt); err != nil {
-			return jsonError(fmt.Errorf("failed to send prompt: %w", err))
+		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: title, Prompt: prompt}); err != nil {
+			return jsonError(err)
 		}
 		return jsonOut(map[string]bool{"ok": true})
 	},
@@ -301,66 +326,8 @@ var sessionsKillCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
-		instance, repoID, err := findLiveInstanceByTitle(args[0])
-		if err != nil {
-			// The live instance could not be restored (e.g. the tmux
-			// session was destroyed externally). Fall back to a raw
-			// InstanceData lookup so we can still clean up the stored
-			// metadata for these "ghost" sessions. Without this, users
-			// can see the entry via `af sessions list` but have no way
-			// to delete it short of the destructive `af reset`.
-			data, ghostRepoID, lookupErr := findInstanceByTitle(args[0])
-			if lookupErr != nil {
-				// No metadata either — surface the original restore error.
-				return jsonError(err)
-			}
-
-			// Best-effort worktree cleanup since instance.Kill() can't run.
-			if data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree {
-				branchCreatedByUs := true
-				if data.Worktree.BranchCreatedByUs != nil {
-					branchCreatedByUs = *data.Worktree.BranchCreatedByUs
-				}
-				gw, gwErr := git.NewGitWorktreeFromStorage(
-					data.Worktree.RepoPath,
-					data.Worktree.WorktreePath,
-					data.Worktree.SessionName,
-					data.Worktree.BranchName,
-					data.Worktree.BaseCommitSHA,
-					data.Worktree.ExternalWorktree,
-					branchCreatedByUs,
-				)
-				if gwErr != nil {
-					log.WarningLog.Printf("ghost session %q: failed to load worktree for cleanup: %v", args[0], gwErr)
-				} else if cleanupErr := gw.Cleanup(); cleanupErr != nil {
-					log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", args[0], cleanupErr)
-				}
-			}
-
-			state := config.LoadState()
-			storage, storageErr := session.NewStorage(state, ghostRepoID)
-			if storageErr != nil {
-				return jsonError(storageErr)
-			}
-			if delErr := storage.DeleteInstance(args[0]); delErr != nil {
-				return jsonError(fmt.Errorf("failed to delete instance from storage: %w", delErr))
-			}
-			return jsonOut(map[string]bool{"ok": true})
-		}
-
-		if err := instance.Kill(); err != nil {
-			return jsonError(fmt.Errorf("failed to kill instance: %w", err))
-		}
-
-		// Remove from storage
-		state := config.LoadState()
-		storage, err := session.NewStorage(state, repoID)
-		if err != nil {
+		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0]}); err != nil {
 			return jsonError(err)
-		}
-		if err := storage.DeleteInstance(args[0]); err != nil {
-			// Not fatal - instance is already killed
-			log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
 		}
 
 		return jsonOut(map[string]bool{"ok": true})

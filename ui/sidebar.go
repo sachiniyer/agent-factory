@@ -354,6 +354,34 @@ func (s *Sidebar) SelectInstance(target *session.Instance) {
 	}
 }
 
+// ContainsInstance reports whether target is currently in the sidebar.
+func (s *Sidebar) ContainsInstance(target *session.Instance) bool {
+	for _, inst := range s.instances {
+		if inst == target {
+			return true
+		}
+	}
+	return false
+}
+
+// ReplaceInstance swaps an existing sidebar instance for replacement while
+// preserving the selected row when the replaced instance was selected.
+func (s *Sidebar) ReplaceInstance(target, replacement *session.Instance) bool {
+	for i, inst := range s.instances {
+		if inst != target {
+			continue
+		}
+		wasSelected := s.GetSelectedInstance() == inst
+		s.instances[i] = replacement
+		s.rebuildVisibleItems()
+		if wasSelected {
+			s.SetSelectedInstance(i)
+		}
+		return true
+	}
+	return false
+}
+
 // GetInstances returns all instances.
 func (s *Sidebar) GetInstances() []*session.Instance {
 	return s.instances
