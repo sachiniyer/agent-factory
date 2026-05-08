@@ -166,6 +166,8 @@ func extractJSON(output string) string {
 }
 
 func (b *HookBackend) Kill(i *Instance) error {
+	slug := hookNameForInstance(i)
+
 	// Mark the instance as stopped BEFORE any resource cleanup so that the
 	// instance is in a consistent state even if delete_cmd fails. Otherwise
 	// the PTY could be closed while started=true, leaving the session
@@ -178,7 +180,6 @@ func (b *HookBackend) Kill(i *Instance) error {
 
 	b.closePTY(i.Title)
 
-	slug := hookNameForInstance(i)
 	args := []string{"--name", slug, "--json"}
 	out, err := exec.Command(b.Hooks.DeleteCmd, args...).CombinedOutput()
 	if err != nil {

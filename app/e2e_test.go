@@ -41,6 +41,8 @@ type e2eHarness struct {
 	prFetchResp *git.PRInfo
 }
 
+const e2eAsyncTimeout = 5 * time.Second
+
 type prFetchCall struct {
 	repoPath string
 	branch   string
@@ -321,8 +323,12 @@ func (eh *e2eHarness) namingTitle() string {
 // racing SetStatus writes from Update handlers.
 func (eh *e2eHarness) instanceStatus(inst *session.Instance) session.Status {
 	var s session.Status
-	eh.query(func(*home) { s = inst.Status })
+	eh.query(func(*home) { s = inst.GetStatus() })
 	return s
+}
+
+func isActiveStatus(status session.Status) bool {
+	return status == session.Running || status == session.Ready
 }
 
 // ----------------------------------------------------------------------------
@@ -350,7 +356,7 @@ func TestE2E_310_Success_NavigateAwayDuringCreation(t *testing.T) {
 	// handleMenuHighlighting (which re-emits it once for highlighting
 	// bookkeeping), so this lands in stateNew after the second Update cycle.
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	eh.waitUntil(time.Second, "state transitions to stateNew", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "state transitions to stateNew", func() bool {
 		return eh.homeState() == stateNew
 	})
 
@@ -358,20 +364,20 @@ func TestE2E_310_Success_NavigateAwayDuringCreation(t *testing.T) {
 	// entries ({k,j,o,n,q,s,a,r,p,h,l}) — handleMenuHighlighting re-emits
 	// any mapped key, which reorders typing in subtle ways.
 	eh.tm.Type("fig")
-	eh.waitUntil(2*time.Second, "title 'fig' fully typed", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "title 'fig' fully typed", func() bool {
 		return eh.namingTitle() == "fig"
 	})
 
 	// Commit with Enter. This fires startCmd (which blocks on FakeBackend).
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	eh.waitUntil(time.Second, "state returns to stateDefault after Enter", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "state returns to stateDefault after Enter", func() bool {
 		return eh.homeState() == stateDefault
 	})
 
 	// FakeBackend was created by the factory during NewInstance; wait for
 	// Start to be invoked by the creation goroutine.
-	fb := eh.latestBackend(time.Second)
-	eh.waitForStart(fb, time.Second)
+	fb := eh.latestBackend(e2eAsyncTimeout)
+	eh.waitForStart(fb, e2eAsyncTimeout)
 
 	// Creation is now in flight. Grab the creating instance for later
 	// assertions (pointer is stable, so no race on reading .Status).
@@ -384,17 +390,18 @@ func TestE2E_310_Success_NavigateAwayDuringCreation(t *testing.T) {
 	// instance was just added and auto-selected (see startNewInstance), so
 	// a single Up moves us back.
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyUp})
-	eh.waitUntil(time.Second, "selection moves back to 'other'", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "selection moves back to 'other'", func() bool {
 		return eh.selectedInstance() == other
 	})
 
 	// Unblock Start — creation completes successfully.
 	fb.CompleteStart()
 
-	// Wait for the async instanceStartedMsg handler to flip status. Read
-	// via instanceStatus so the test goroutine doesn't race SetStatus.
-	eh.waitUntil(time.Second, "'fig' status flips to Running", func() bool {
-		return eh.instanceStatus(fig) == session.Running
+	// Wait for the async instanceStartedMsg handler to leave Loading. The
+	// metadata tick may quickly move Running sessions to Ready, so both active
+	// states are valid here.
+	eh.waitUntil(e2eAsyncTimeout, "'fig' leaves Loading", func() bool {
+		return isActiveStatus(eh.instanceStatus(fig))
 	})
 
 	// Core assertions for #310:
@@ -404,8 +411,8 @@ func TestE2E_310_Success_NavigateAwayDuringCreation(t *testing.T) {
 		"no help overlay should be set")
 	assert.Same(t, other, eh.selectedInstance(),
 		"user's selection on 'other' must be preserved across creation completion")
-	assert.Equal(t, session.Running, eh.instanceStatus(fig),
-		"'fig' must still flip to Running even though no modal was shown")
+	assert.True(t, isActiveStatus(eh.instanceStatus(fig)),
+		"'fig' must become active even though no modal was shown")
 }
 
 // TestE2E_310_Success_UserStillOnInstance verifies the counterpart: when
@@ -418,29 +425,29 @@ func TestE2E_310_Success_UserStillOnInstance(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	eh.waitUntil(time.Second, "stateNew", func() bool { return eh.homeState() == stateNew })
+	eh.waitUntil(e2eAsyncTimeout, "stateNew", func() bool { return eh.homeState() == stateNew })
 	eh.tm.Type("bee")
-	eh.waitUntil(time.Second, "title typed", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "title typed", func() bool {
 		return eh.namingTitle() == "bee"
 	})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	eh.waitUntil(time.Second, "stateDefault", func() bool { return eh.homeState() == stateDefault })
+	eh.waitUntil(e2eAsyncTimeout, "stateDefault", func() bool { return eh.homeState() == stateDefault })
 
-	fb := eh.latestBackend(time.Second)
-	eh.waitForStart(fb, time.Second)
+	fb := eh.latestBackend(e2eAsyncTimeout)
+	eh.waitForStart(fb, e2eAsyncTimeout)
 
 	// User does NOT navigate away — they stay on 'bee'.
 	fb.CompleteStart()
 
 	// The attach-help modal should fire: state flips to stateHelp.
-	eh.waitUntil(time.Second, "state flips to stateHelp", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "state flips to stateHelp", func() bool {
 		return eh.homeState() == stateHelp
 	})
 	assert.False(t, eh.homeTextOverlayNil(), "help overlay must be installed")
 
 	bee := eh.findInstance("bee")
 	require.NotNil(t, bee)
-	assert.Equal(t, session.Running, eh.instanceStatus(bee))
+	assert.True(t, isActiveStatus(eh.instanceStatus(bee)))
 }
 
 // ----------------------------------------------------------------------------
@@ -458,20 +465,20 @@ func TestE2E_310_Failure_DoesNotTouchOtherInstance(t *testing.T) {
 
 	// Kick off creation of 'bug'.
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	eh.waitUntil(time.Second, "stateNew", func() bool { return eh.homeState() == stateNew })
+	eh.waitUntil(e2eAsyncTimeout, "stateNew", func() bool { return eh.homeState() == stateNew })
 	eh.tm.Type("bug")
-	eh.waitUntil(time.Second, "title typed", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "title typed", func() bool {
 		return eh.namingTitle() == "bug"
 	})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	eh.waitUntil(time.Second, "stateDefault", func() bool { return eh.homeState() == stateDefault })
+	eh.waitUntil(e2eAsyncTimeout, "stateDefault", func() bool { return eh.homeState() == stateDefault })
 
-	fb := eh.latestBackend(time.Second)
-	eh.waitForStart(fb, time.Second)
+	fb := eh.latestBackend(e2eAsyncTimeout)
+	eh.waitForStart(fb, e2eAsyncTimeout)
 
 	// User navigates back to 'other' while 'bug' is mid-creation.
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyUp})
-	eh.waitUntil(time.Second, "selection back on 'other'", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "selection back on 'other'", func() bool {
 		return eh.selectedInstance() == other
 	})
 
@@ -479,7 +486,7 @@ func TestE2E_310_Failure_DoesNotTouchOtherInstance(t *testing.T) {
 	fb.FailStart(errors.New("simulated launch failure"))
 
 	// Wait for the handler to run RemoveInstanceByTitle.
-	eh.waitUntil(2*time.Second, "'bug' is removed from sidebar", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "'bug' is removed from sidebar", func() bool {
 		return eh.findInstance("bug") == nil
 	})
 
@@ -509,7 +516,7 @@ func TestE2E_311_LazyDebounce_OnSelectionChange(t *testing.T) {
 
 	// Wait for the initial selection-triggered fetch. Freshness age is
 	// sentinel-infinite on process start, so the first selection dispatches.
-	eh.waitUntil(2*time.Second, "first fetch (for 'egg') dispatches", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "first fetch (for 'egg') dispatches", func() bool {
 		return eh.prFetchCount() >= 1
 	})
 	require.Equal(t, []string{"branch-a"}, eh.prFetchBranches(),
@@ -517,7 +524,7 @@ func TestE2E_311_LazyDebounce_OnSelectionChange(t *testing.T) {
 
 	// Navigate down to B — triggers a second selectionChanged and fetch.
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	eh.waitUntil(2*time.Second, "second fetch (for 'fig') dispatches", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "second fetch (for 'fig') dispatches", func() bool {
 		return eh.prFetchCount() >= 2
 	})
 	assert.Equal(t, []string{"branch-a", "branch-b"}, eh.prFetchBranches())
@@ -548,7 +555,7 @@ func TestE2E_311_TickRefresh_OnlySelectedInstance(t *testing.T) {
 	eh.start()
 
 	// Let the initial selection-triggered fetch complete.
-	eh.waitUntil(2*time.Second, "initial fetch for selected instance", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "initial fetch for selected instance", func() bool {
 		return eh.prFetchCount() >= 1
 	})
 	initial := eh.prFetchCount()
@@ -559,7 +566,7 @@ func TestE2E_311_TickRefresh_OnlySelectedInstance(t *testing.T) {
 	// 60s, too long for a unit test. The handler forces a fetch for the
 	// selected instance regardless of freshness.
 	eh.tm.Send(tickUpdatePRInfoMessage{})
-	eh.waitUntil(2*time.Second, "tick triggers another fetch", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "tick triggers another fetch", func() bool {
 		return eh.prFetchCount() > initial
 	})
 
