@@ -73,10 +73,6 @@ type home struct {
 
 	// state is the current discrete state of the application
 	state state
-	// newInstanceFinalizer is called when the state is stateNew and then you press enter.
-	// It registers the new instance in the list after the instance has been started.
-	newInstanceFinalizer func()
-
 	// namingInstance is the instance currently being named in stateNew.
 	// Stored as a direct pointer so background sync cannot change which
 	// instance the naming keystrokes target.
@@ -372,6 +368,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		msg.instance.SetStatus(session.Running)
+		m.sidebar.RegisterRepoForInstance(msg.instance)
 		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 			return m, m.handleError(err)
 		}
@@ -414,13 +411,14 @@ func (m *home) saveContentPaneState() {
 	if hp.IsDirty() {
 		repoCfg, err := config.LoadRepoConfig(m.repoID)
 		if err != nil {
-			repoCfg = &config.RepoConfig{}
+			log.ErrorLog.Printf("failed to save hooks: could not load repo config: %v", err)
+		} else {
+			repoCfg.PostWorktreeCommands = hp.GetCommands()
+			if err := config.SaveRepoConfig(m.repoID, repoCfg); err != nil {
+				log.ErrorLog.Printf("failed to save hooks: %v", err)
+			}
+			m.sidebar.SetHookCount(len(hp.GetCommands()))
 		}
-		repoCfg.PostWorktreeCommands = hp.GetCommands()
-		if err := config.SaveRepoConfig(m.repoID, repoCfg); err != nil {
-			log.ErrorLog.Printf("failed to save hooks: %v", err)
-		}
-		m.sidebar.SetHookCount(len(hp.GetCommands()))
 	}
 
 	sp := m.contentPane.TaskPane()
@@ -521,10 +519,9 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 		return m.handleError(fmt.Errorf("failed to create instance: %w", err))
 	}
 
-	finalizer := m.sidebar.AddInstance(instance)
+	m.sidebar.AddInstance(instance)
 	m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
 	instance.SetStatus(session.Loading)
-	finalizer()
 	m.menu.SetState(ui.StateDefault)
 
 	m.preSaveInstances()
@@ -557,7 +554,8 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree {
+	if m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree ||
+		m.state == stateNew || m.state == stateSearch || m.state == stateSelectProgram {
 		return nil, false
 	}
 	// Don't highlight when content pane has focus

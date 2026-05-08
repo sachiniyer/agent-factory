@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	xansi "github.com/charmbracelet/x/ansi"
@@ -75,6 +76,11 @@ func PlaceOverlay(
 			// Skip reset codes
 			if match == "\x1b[0m" {
 				return match
+			}
+			codeText := strings.TrimSuffix(strings.TrimPrefix(match, "\x1b["), "m")
+			code, err := strconv.Atoi(codeText)
+			if err == nil && (code == 7 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+				return "\x1b[48;5;236m" // Dark gray background
 			}
 			// Replace with dimmed color
 			return "\x1b[38;5;240m" // Medium gray

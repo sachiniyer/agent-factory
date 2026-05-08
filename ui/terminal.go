@@ -19,6 +19,8 @@ var terminalPaneStyle = lipgloss.NewStyle().
 var terminalFooterStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#808080", Dark: "#808080"})
 
+var newTerminalTmuxSessionForRepo = tmux.NewTmuxSessionForRepo
+
 // terminalSession holds a cached tmux session for a specific instance.
 type terminalSession struct {
 	tmuxSession  *tmux.TmuxSession
@@ -173,16 +175,19 @@ func (t *TerminalPane) ensureSessionLocked(instance *session.Instance) error {
 	}
 
 	termName := "term_" + instance.Title
-	ts := tmux.NewTmuxSessionForRepo(termName, worktreePath, shell)
+	ts := newTerminalTmuxSessionForRepo(termName, worktreePath, shell)
 
 	// Check if session already exists (e.g. from a previous run)
 	if ts.DoesSessionExist() {
 		if err := ts.Restore(); err != nil {
 			// Session exists but can't restore, kill it and start fresh
 			if closeErr := ts.Close(); closeErr != nil {
-				log.ErrorLog.Printf("terminal pane: failed to close stale session %s: %v", termName, closeErr)
+				if ts.DoesSessionExist() {
+					return fmt.Errorf("terminal pane: failed to close stale session %s: %w", termName, closeErr)
+				}
+				log.ErrorLog.Printf("terminal pane: partial cleanup of stale session %s: %v", termName, closeErr)
 			}
-			ts = tmux.NewTmuxSessionForRepo(termName, worktreePath, shell)
+			ts = newTerminalTmuxSessionForRepo(termName, worktreePath, shell)
 			if err := ts.Start(worktreePath); err != nil {
 				return fmt.Errorf("terminal pane: failed to start session: %w", err)
 			}

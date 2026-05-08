@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -97,6 +98,30 @@ func TestNewGitWorktree_CollisionSuffix(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, strings.HasSuffix(gw3.GetWorktreePath(), repoName+"-my-feature-3"),
 		"third worktree should have -3 suffix, got: %s", gw3.GetWorktreePath())
+}
+
+func TestNewGitWorktree_StatErrorReturns(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	repoRoot := createGitRepo(t)
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := NewGitWorktree(repoRoot, strings.Repeat("a", 300))
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot check worktree path")
+	case <-time.After(2 * time.Second):
+		t.Fatal("NewGitWorktree hung on a non-ENOENT stat error")
+	}
 }
 
 func TestSetupFromExistingBranch_SetsBaseCommitSHA(t *testing.T) {

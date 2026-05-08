@@ -4,7 +4,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -84,10 +83,8 @@ func TestGetClaudeCommand(t *testing.T) {
 	t.Run("handles alias parsing", func(t *testing.T) {
 		// Test core alias formats. Keep this regex in sync with the one used in
 		// GetClaudeCommand so the test exercises the real extraction logic.
-		aliasRegex := regexp.MustCompile(`(?:aliased to|->|=)\s*(.+)`)
-
 		extract := func(output string) (string, bool) {
-			matches := aliasRegex.FindStringSubmatch(output)
+			matches := aliasOutputRegex.FindStringSubmatch(output)
 			if len(matches) < 2 {
 				return "", false
 			}
@@ -116,6 +113,10 @@ func TestGetClaudeCommand(t *testing.T) {
 
 		// Direct path (no alias)
 		_, ok = extract("/usr/local/bin/claude")
+		assert.False(t, ok)
+
+		// Direct path containing "=" is still a path, not an alias assignment.
+		_, ok = extract("/tmp/test=dir/bin/claude")
 		assert.False(t, ok)
 	})
 }

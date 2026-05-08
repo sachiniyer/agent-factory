@@ -1,5 +1,3 @@
-//go:build darwin
-
 package task
 
 import (
@@ -110,4 +108,22 @@ func TestCronToCalendarIntervalXML_DOW7NormalizesAndCoversAll(t *testing.T) {
 	assert.Equal(t, 1, countDicts(xml), "expected a single dict, got:\n%s", xml)
 	assert.NotContains(t, xml, "<key>Day</key>")
 	assert.NotContains(t, xml, "<key>Weekday</key>")
+}
+
+func TestCronToCalendarIntervalXML_AllWildcards(t *testing.T) {
+	xml, err := cronToCalendarIntervalXML("* * * * *")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, countDicts(xml), "expected one wildcard dict, got:\n%s", xml)
+	assert.NotContains(t, xml, "<key>Minute</key>")
+	assert.NotContains(t, xml, "<key>Hour</key>")
+}
+
+func TestCronToLaunchdScheduleXML_AllWildcardsUsesStartInterval(t *testing.T) {
+	xml, err := cronToLaunchdScheduleXML("* * * * *")
+	require.NoError(t, err)
+
+	assert.Contains(t, xml, "<key>StartInterval</key>")
+	assert.Contains(t, xml, "<integer>60</integer>")
+	assert.NotContains(t, xml, "<key>StartCalendarInterval</key>")
 }

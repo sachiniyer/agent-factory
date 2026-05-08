@@ -381,6 +381,19 @@ func TestPreviewContentWithoutScrolling(t *testing.T) {
 	require.Contains(t, renderedString, "test", "Rendered preview should contain the test content")
 }
 
+func TestPreviewExactFitDoesNotTruncate(t *testing.T) {
+	p := NewPreviewPane()
+	p.SetSize(80, 3)
+	p.previewState = previewState{
+		fallback: false,
+		text:     "one\ntwo\nthree",
+	}
+
+	rendered := p.String()
+	require.Contains(t, rendered, "three")
+	require.NotContains(t, rendered, "...")
+}
+
 // Helper function for max
 func max(a, b int) int {
 	if a > b {

@@ -328,7 +328,9 @@ func expandCronField(field string, min, max int) ([]int, error) {
 // expandCronPart expands a single cron part (number, range, or step) into values.
 func expandCronPart(part string, min, max int) ([]int, error) {
 	step := 1
+	hasStep := false
 	if idx := strings.Index(part, "/"); idx != -1 {
+		hasStep = true
 		stepStr := part[idx+1:]
 		var err error
 		step, err = strconv.Atoi(stepStr)
@@ -368,7 +370,7 @@ func expandCronPart(part string, min, max int) ([]int, error) {
 	}
 	// When a step is provided with a single number (e.g. "5/10"), expand from
 	// that number to max by step. Without a step, return just the single value.
-	if step > 1 {
+	if hasStep {
 		var vals []int
 		for i := val; i <= max; i += step {
 			vals = append(vals, i)

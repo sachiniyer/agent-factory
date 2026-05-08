@@ -121,23 +121,36 @@ func (b *LocalBackend) Kill(i *Instance) error {
 	ts := i.tmuxSession
 	gw := i.gitWorktree
 	i.started = false
-	i.tmuxSession = nil
-	i.gitWorktree = nil
 	i.mu.Unlock()
 
 	var errs []error
+	tmuxCleaned := ts == nil
+	worktreeCleaned := gw == nil
 
 	if ts != nil {
 		if err := ts.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close tmux session: %w", err))
+		} else {
+			tmuxCleaned = true
 		}
 	}
 
 	if gw != nil {
 		if err := gw.Cleanup(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to cleanup git worktree: %w", err))
+		} else {
+			worktreeCleaned = true
 		}
 	}
+
+	i.mu.Lock()
+	if tmuxCleaned && i.tmuxSession == ts {
+		i.tmuxSession = nil
+	}
+	if worktreeCleaned && i.gitWorktree == gw {
+		i.gitWorktree = nil
+	}
+	i.mu.Unlock()
 
 	return errors.Join(errs...)
 }

@@ -81,6 +81,11 @@ func getBaseCommand(program string) string {
 	return strings.ToLower(filepath.Base(cmd))
 }
 
+// BaseCommand extracts the lowercase executable basename from a program string.
+func BaseCommand(program string) string {
+	return getBaseCommand(program)
+}
+
 // injectSystemPrompt injects Agent Factory instructions into the session.
 //
 // Strategy per tool:

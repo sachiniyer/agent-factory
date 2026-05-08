@@ -70,3 +70,13 @@ func TestHandleStateNewKeySpaceUnderLimit(t *testing.T) {
 
 	assert.Equal(t, "hello ", homeModel.namingInstance.Title)
 }
+
+func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+
+	cmd, returnEarly := h.handleMenuHighlighting(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+
+	assert.False(t, returnEarly)
+	assert.Nil(t, cmd)
+}

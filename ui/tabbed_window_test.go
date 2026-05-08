@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/muesli/ansi"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -46,4 +48,20 @@ func TestTabbedWindowSetSizeNormal(t *testing.T) {
 	previewW, previewH := w.GetPreviewSize()
 	assert.Greater(t, previewW, 0)
 	assert.Greater(t, previewH, 0)
+}
+
+func TestTabbedWindowStringDoesNotExceedConfiguredWidth(t *testing.T) {
+	w := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	w.SetSize(100, 30)
+	w.preview.previewState = previewState{text: "content"}
+
+	rendered := w.String()
+	maxWidth := 0
+	for _, line := range strings.Split(rendered, "\n") {
+		if width := ansi.PrintableRuneWidth(line); width > maxWidth {
+			maxWidth = width
+		}
+	}
+
+	assert.LessOrEqual(t, maxWidth, w.width)
 }

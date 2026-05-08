@@ -70,6 +70,23 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	return nil, "", fmt.Errorf("instance %q not found", title)
 }
 
+func repoHasInstanceTitle(repoID, title string) (bool, error) {
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		return false, fmt.Errorf("failed to load instances for repo %s: %w", repoID, err)
+	}
+	var instances []session.InstanceData
+	if err := json.Unmarshal(raw, &instances); err != nil {
+		return false, fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+	}
+	for i := range instances {
+		if instances[i].Title == title {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // findLiveInstanceByTitle finds an instance by title and restores it as a live *Instance.
 func findLiveInstanceByTitle(title string) (*session.Instance, string, error) {
 	data, repoID, err := findInstanceByTitle(title)

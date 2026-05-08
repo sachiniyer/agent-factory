@@ -126,7 +126,7 @@ func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 		h.adding = false
 		h.editing = false
 		h.editBuffer = ""
-	case tea.KeyEsc:
+	case tea.KeyEsc, tea.KeyCtrlC:
 		h.adding = false
 		h.editing = false
 		h.editBuffer = ""

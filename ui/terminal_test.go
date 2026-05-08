@@ -6,6 +6,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -423,4 +424,48 @@ func TestTerminalCloseForInstance(t *testing.T) {
 	tp.mu.Lock()
 	require.Len(t, tp.sessions, 1, "non-existent close should not affect existing sessions")
 	tp.mu.Unlock()
+}
+
+type failingPtyFactory struct{}
+
+func (f failingPtyFactory) Start(*exec.Cmd) (*os.File, error) {
+	return nil, fmt.Errorf("restore failed")
+}
+
+func (f failingPtyFactory) Close() {}
+
+func TestTerminalEnsureSessionReturnsStaleCleanupError(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	instance := makeStartedInstance(t, "stale-cleanup")
+	defer func() { _ = instance.Kill() }()
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			cmdStr := cmd.String()
+			if strings.Contains(cmdStr, "has-session") {
+				return nil
+			}
+			if strings.Contains(cmdStr, "kill-session") {
+				return fmt.Errorf("kill failed")
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			return nil, nil
+		},
+	}
+
+	oldFactory := newTerminalTmuxSessionForRepo
+	newTerminalTmuxSessionForRepo = func(name, program, shell string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionWithDeps(name, shell, failingPtyFactory{}, cmdExec)
+	}
+	t.Cleanup(func() { newTerminalTmuxSessionForRepo = oldFactory })
+
+	tp := NewTerminalPane()
+	err := tp.ensureSession(instance)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to close stale session")
+	require.Contains(t, err.Error(), "kill failed")
 }

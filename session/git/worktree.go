@@ -148,8 +148,12 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 
 	worktreePath := basePath
 	for i := 2; ; i++ {
-		if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		_, err := os.Stat(worktreePath)
+		if os.IsNotExist(err) {
 			break
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("cannot check worktree path %q: %w", worktreePath, err)
 		}
 		worktreePath = fmt.Sprintf("%s-%d", basePath, i)
 	}

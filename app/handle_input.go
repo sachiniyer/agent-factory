@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -44,7 +43,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Apply the program selected during naming
 		instance.Program = m.pendingProgram
 		instance.SetStatus(session.Loading)
-		m.newInstanceFinalizer()
 		m.namingInstance = nil
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
@@ -72,9 +70,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open program selection overlay
 		items := make([]string, len(tmux.SupportedPrograms))
 		selectedIdx := 0
+		baseProgram := session.BaseCommand(m.pendingProgram)
 		for i, p := range tmux.SupportedPrograms {
 			items[i] = p
-			if strings.Contains(strings.ToLower(m.pendingProgram), p) {
+			if baseProgram == p {
 				selectedIdx = i
 			}
 		}
@@ -141,7 +140,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 		return m, m.handleError(err)
 	}
 	instance.SetStatus(session.Loading)
-	m.newInstanceFinalizer = m.sidebar.AddInstance(instance)
+	m.sidebar.AddInstance(instance)
 	m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
 	m.namingInstance = instance
 	m.state = stateNew
