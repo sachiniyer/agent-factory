@@ -99,8 +99,8 @@ af sessions get <title>                                        # fetch one sessi
 af sessions create --name <title> --prompt "fix the bug"       # create + start a session
 af sessions preview <title>                                    # snapshot the session's pane
 af sessions attach <title>                                     # attach interactively (foreground)
-af sessions send-prompt <title> --prompt "..."                 # append a prompt to a session
-af sessions send-prompt <title> --prompt "..." --create        # send-or-create
+af sessions send-prompt <title> "..."                          # append a prompt to a session
+af sessions send-prompt <title> "..." --create                 # send-or-create
 af sessions whoami                                             # report the session this shell is inside
 af sessions kill <title>                                       # kill + clean up the session
 ```
