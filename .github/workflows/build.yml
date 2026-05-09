@@ -9,6 +9,10 @@ on:
       - 'go.sum'
       - '.github/workflows/build.yml'
 
+# Read-only: workflow only checks out source, runs tests, and uploads artifacts (artifact upload uses the Actions API, not repo contents).
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build Binary and Test

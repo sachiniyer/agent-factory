@@ -9,6 +9,10 @@ on:
       - 'go.sum'
       - '.github/workflows/lint.yml'
 
+# Read-only: workflow only checks out source and runs golangci-lint + gofmt.
+permissions:
+  contents: read
+
 jobs:
   golangci:
     name: lint
