@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	version     = "1.0.58"
+	version     = "1.0.59"
 	programFlag string
 	autoYesFlag bool
 	daemonFlag  bool
