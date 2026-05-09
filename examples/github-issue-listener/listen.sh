@@ -33,6 +33,11 @@ if [[ ! -f "$STATE_FILE" ]]; then
   log "initialized state file at $STATE_FILE; only issues opened after $(cat "$STATE_FILE") will be picked up"
 fi
 
+if ! gh api "repos/$REPO" --silent >/dev/null 2>&1; then
+  log "cannot read repos/$REPO via gh — check that the repo exists, is spelled owner/name, and that gh auth has access"
+  exit 1
+fi
+
 log "watching $REPO every ${POLL_INTERVAL}s${LABEL:+ (label: $LABEL)}"
 
 while true; do
