@@ -33,7 +33,7 @@ func TestCloseDuringAttachRace(t *testing.T) {
 		}
 
 		session := newTmuxSession(toTmuxName("race-session", ""), "claude", ptyFactory, cmdExec)
-		if err := session.Restore(); err != nil {
+		if err := session.Restore(""); err != nil {
 			t.Fatalf("Restore: %v", err)
 		}
 
@@ -88,7 +88,7 @@ func TestCloseWithoutAttach(t *testing.T) {
 	}
 
 	session := newTmuxSession(toTmuxName("no-attach-session", ""), "claude", ptyFactory, cmdExec)
-	if err := session.Restore(); err != nil {
+	if err := session.Restore(""); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
