@@ -189,7 +189,9 @@ func (t *TmuxSession) Start(workDir string) error {
 		log.InfoLog.Printf("Warning: failed to enable mouse scrolling for session %s: %v", t.sanitizedName, err)
 	}
 
-	err = t.Restore()
+	// Attach to the session we just created. Pass empty workDir so a missing
+	// session here surfaces as an error rather than recursively re-spawning.
+	err = t.Restore("")
 	if err != nil {
 		if cleanupErr := t.Close(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
@@ -229,8 +231,22 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	return false
 }
 
-// Restore attaches to an existing session and restores the window size
-func (t *TmuxSession) Restore() error {
+// Restore attaches to an existing tmux session. If the session is missing
+// (e.g. the tmux server died after a machine reboot, see #386) and workDir is
+// non-empty, a fresh session is spawned in workDir using the same program so
+// persisted instances can resume across reboots. If the session is missing
+// and workDir is empty, the missing-session condition is surfaced as an error;
+// real failures (PTY open errors, Start failures such as missing binaries or
+// vanished worktrees) are always surfaced.
+func (t *TmuxSession) Restore(workDir string) error {
+	if !t.DoesSessionExist() {
+		if workDir == "" {
+			return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
+		}
+		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
+		return t.Start(workDir)
+	}
+
 	ptmx, err := t.ptyFactory.Start(exec.Command("tmux", "attach-session", "-t", t.sanitizedName))
 	if err != nil {
 		return fmt.Errorf("error opening PTY: %w", err)
@@ -470,8 +486,10 @@ func (t *TmuxSession) Detach() {
 	}
 
 	// Attach goroutines should die due to the ptmx closing. Call
-	// t.Restore to set a new t.ptmx.
-	if err := t.Restore(); err != nil {
+	// t.Restore to set a new t.ptmx. The session is alive (we just detached
+	// from it), so pass empty workDir — a missing session here is a real
+	// problem and should surface, not silently re-spawn and lose history.
+	if err := t.Restore(""); err != nil {
 		log.ErrorLog.Printf("error restoring pty after detach: %v", err)
 	}
 

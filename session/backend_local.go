@@ -81,8 +81,18 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	}()
 
 	if !firstTimeSetup {
-		// Reuse existing session
-		if err := tmuxSession.Restore(); err != nil {
+		// Reuse existing session. Pass the worktree path so Restore can
+		// re-spawn the tmux session if the server died across a reboot
+		// (see #386). When the worktree is unavailable (e.g. tests inject
+		// a tmux session without a gitWorktree), pass empty string.
+		i.mu.RLock()
+		gw := i.gitWorktree
+		i.mu.RUnlock()
+		var workDir string
+		if gw != nil {
+			workDir = gw.GetWorktreePath()
+		}
+		if err := tmuxSession.Restore(workDir); err != nil {
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
 		}

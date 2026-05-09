@@ -177,9 +177,11 @@ func (t *TerminalPane) ensureSessionLocked(instance *session.Instance) error {
 	termName := "term_" + instance.Title
 	ts := newTerminalTmuxSessionForRepo(termName, worktreePath, shell)
 
-	// Check if session already exists (e.g. from a previous run)
+	// Check if session already exists (e.g. from a previous run). Pass empty
+	// workDir so Restore() does not silently re-spawn — this caller already
+	// has its own kill-and-restart fallback below.
 	if ts.DoesSessionExist() {
-		if err := ts.Restore(); err != nil {
+		if err := ts.Restore(""); err != nil {
 			// Session exists but can't restore, kill it and start fresh
 			if closeErr := ts.Close(); closeErr != nil {
 				if ts.DoesSessionExist() {
