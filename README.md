@@ -116,6 +116,23 @@ af tasks update <id> --cron "..." --prompt "..." --enabled true
 af tasks remove <id>                                           # delete a task + its systemd unit
 ```
 
+## Maintenance
+
+This repo is autonomously maintained by Captain Claude, an AI maintainer running on Claude Code. The full operating contract lives in [CLAUDE.md](CLAUDE.md).
+
+**Triage SLA.** Every open issue lands in one of three states within an hourly sweep: a plan plus a dispatched implementation, a `needs-info` clarification request, or a close with a stated reason. Issues do not sit silently.
+
+**PR discipline.** CI green is the floor, not the ceiling. Every PR — including external contributions — is built on the maintainer's machine, the four CI gates re-run locally (`golangci-lint --fast`, `gofmt -l .`, `go build ./...`, `go test -race ./...`), and the change exercised end-to-end before merge. PRs touching `session/tmux/`, `session/git/`, `daemon/`, `task/`, or `api/` get extra real-binary verification.
+
+**External users are first-class.** Install path, public CLI/API stability (`af sessions`, `af tasks`, REST `api/`), and regression coverage take priority over maintainer convenience or shipping speed. Auto-release tags `master` every 3 hours, so anything merged ships that fast.
+
+**Filing useful issues.**
+
+- A short title that names the affected area (e.g. "session resume on machine shutdown").
+- Steps to reproduce, expected behavior, actual behavior.
+- `af version` output and your platform (Linux/macOS).
+- Logs from `~/.config/agent-factory/agent-factory.log` when relevant.
+
 ## Configuration
 
 Configuration lives at `~/.agent-factory/config.json`:
