@@ -8,6 +8,10 @@ concurrency:
   group: pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Read-only: workflow only checks out source and runs lint/test/build; it never comments on or modifies the PR.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint
