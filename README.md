@@ -89,22 +89,32 @@ All data (sessions, tasks) is scoped to the current git repository. The TUI show
 
 ## Programmatic API
 
-The `af sessions` and `af tasks` subcommands provide a JSON CLI for driving Agent Factory without the TUI:
+The `af sessions` and `af tasks` subcommands provide a JSON CLI for driving Agent Factory without the TUI. All commands output JSON to stdout and errors to stderr; use `--repo <path>` or `--repo-id <id>` to target a specific repository.
+
+### Sessions
 
 ```bash
-# Sessions
-af sessions list
-af sessions create --name my-task --prompt "fix the login bug"
-af sessions preview my-task
-af sessions kill my-task
-
-# Tasks
-af tasks list
-af tasks add --name "Daily triage" --prompt "triage new issues" --cron "0 9 * * *"
-af tasks remove <id>
+af sessions list                                              # list sessions in current repo
+af sessions get <title>                                        # fetch one session
+af sessions create --name <title> --prompt "fix the bug"       # create + start a session
+af sessions preview <title>                                    # snapshot the session's pane
+af sessions attach <title>                                     # attach interactively (foreground)
+af sessions send-prompt <title> --prompt "..."                 # append a prompt to a session
+af sessions send-prompt <title> --prompt "..." --create        # send-or-create
+af sessions whoami                                             # report the session this shell is inside
+af sessions kill <title>                                       # kill + clean up the session
 ```
 
-All commands output JSON to stdout and errors to stderr. Use `--repo <path>` or `--repo-id <id>` to target a specific repository.
+### Tasks
+
+```bash
+af tasks list                                                  # list scheduled tasks
+af tasks add --name "Daily triage" --prompt "..." --cron "0 9 * * *"
+af tasks get <id>                                              # fetch one task
+af tasks trigger <id>                                          # run task immediately
+af tasks update <id> --cron "..." --prompt "..." --enabled true
+af tasks remove <id>                                           # delete a task + its systemd unit
+```
 
 ## Configuration
 
