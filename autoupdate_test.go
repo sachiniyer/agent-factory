@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,6 +94,72 @@ func TestAutoUpdateWindowsRecordsCheckWhenNoUpdate(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dir, lastCheckFile)); err != nil {
 		t.Fatalf("expected %s to be written, got: %v", lastCheckFile, err)
+	}
+}
+
+// TestAutoUpdateRecordsCheckOnFetchFailure guards against the regression
+// tracked in issue #459: when fetchLatestReleaseTag fails (blocked API, DNS,
+// proxy, rate limit), the 24-hour throttle must still fire so the next launch
+// does not retry the network immediately.
+func TestAutoUpdateRecordsCheckOnFetchFailure(t *testing.T) {
+	dir := withTestHome(t)
+
+	prevFetch := fetchLatestReleaseTagFn
+	t.Cleanup(func() {
+		fetchLatestReleaseTagFn = prevFetch
+	})
+
+	fetchLatestReleaseTagFn = func() (string, error) {
+		return "", errors.New("simulated network failure")
+	}
+
+	if err := autoUpdate(); err == nil {
+		t.Fatalf("autoUpdate returned nil error; expected fetch failure")
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, lastCheckFile)); err != nil {
+		t.Fatalf("expected %s to be written after fetch failure, got: %v",
+			lastCheckFile, err)
+	}
+	if shouldCheck() {
+		t.Fatalf("shouldCheck() returned true after fetch failure; throttle is broken")
+	}
+}
+
+// TestAutoUpdateRecordsCheckOnDownloadFailure guards against the regression
+// tracked in issue #459: when downloadBinary fails (network error mid-update),
+// the 24-hour throttle must still fire.
+func TestAutoUpdateRecordsCheckOnDownloadFailure(t *testing.T) {
+	dir := withTestHome(t)
+
+	prevGOOS := runtimeGOOS
+	prevFetch := fetchLatestReleaseTagFn
+	prevDownload := downloadBinaryFn
+	prevVersion := version
+	t.Cleanup(func() {
+		runtimeGOOS = prevGOOS
+		fetchLatestReleaseTagFn = prevFetch
+		downloadBinaryFn = prevDownload
+		version = prevVersion
+	})
+
+	runtimeGOOS = "linux"
+	version = "1.0.0"
+	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	downloadBinaryFn = func(string) ([]byte, error) {
+		return nil, errors.New("simulated download failure")
+	}
+
+	if err := autoUpdate(); err == nil {
+		t.Fatalf("autoUpdate returned nil error; expected download failure")
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, lastCheckFile)); err != nil {
+		t.Fatalf("expected %s to be written after download failure, got: %v",
+			lastCheckFile, err)
+	}
+	if shouldCheck() {
+		t.Fatalf("shouldCheck() returned true after download failure; throttle is broken")
 	}
 }
 
