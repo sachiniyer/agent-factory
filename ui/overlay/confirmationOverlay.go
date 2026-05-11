@@ -43,17 +43,21 @@ func NewConfirmationOverlay(message string) *ConfirmationOverlay {
 // Returns true if the overlay should be closed
 func (c *ConfirmationOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 	key := strings.ToLower(msg.String())
+	// ESC and Ctrl+C must always cancel. The UI promises "esc to cancel", so
+	// check the cancel branch first — if ConfirmKey is misconfigured to "esc"
+	// or "ctrl+c", the dialog becomes cancel-only rather than silently
+	// confirming a destructive action.
 	switch key {
-	case strings.ToLower(c.ConfirmKey):
-		c.Dismissed = true
-		if c.OnConfirm != nil {
-			c.OnConfirm()
-		}
-		return true
 	case strings.ToLower(c.CancelKey), "esc", "ctrl+c":
 		c.Dismissed = true
 		if c.OnCancel != nil {
 			c.OnCancel()
+		}
+		return true
+	case strings.ToLower(c.ConfirmKey):
+		c.Dismissed = true
+		if c.OnConfirm != nil {
+			c.OnConfirm()
 		}
 		return true
 	default:
