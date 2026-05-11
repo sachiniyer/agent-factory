@@ -398,6 +398,8 @@ func (i *Instance) SetPreviewSize(width, height int) error {
 
 // GetGitWorktree returns the git worktree for the instance
 func (i *Instance) GetGitWorktree() (*git.GitWorktree, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
 	if !i.started {
 		return nil, fmt.Errorf("cannot get git worktree for instance that has not been started")
 	}
