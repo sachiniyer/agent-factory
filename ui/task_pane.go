@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"strings"
 
@@ -446,7 +447,7 @@ func (s *TaskPane) renderListMode() string {
 		if tsk.LastRunAt != nil {
 			lastRun = tsk.LastRunAt.Format("Jan 02 15:04")
 		}
-		detail := fmt.Sprintf("    %s • last: %s", tsk.Program, lastRun)
+		detail := fmt.Sprintf("    %s • last: %s", tmux.AgentNameFromProgram(tsk.Program), lastRun)
 		if tsk.LastRunStatus != "" {
 			detail += " (" + tsk.LastRunStatus + ")"
 		}
