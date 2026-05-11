@@ -364,6 +364,14 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 }
 
 func (t *TmuxSession) Attach() (chan struct{}, error) {
+	// Detach clears t.ptmx after closing it so a Restore failure in the
+	// detach path can't leave a stale closed handle behind (issue #464).
+	// Refuse to attach without a live PTY rather than binding goroutines
+	// to a nil or closed file and hanging.
+	if t.ptmx == nil {
+		return nil, fmt.Errorf("cannot attach: no PTY available, call Restore first")
+	}
+
 	t.attachCh = make(chan struct{})
 
 	t.wg = &sync.WaitGroup{}
@@ -500,9 +508,14 @@ func (t *TmuxSession) Detach() {
 	// "Session terminated without detaching" warning.
 	t.cancel()
 
-	// Close the attached pty session.
-	if err := t.ptmx.Close(); err != nil {
-		log.ErrorLog.Printf("error closing attach pty session: %v", err)
+	// Close the attached pty session. Clear t.ptmx unconditionally before
+	// Restore so a Restore failure (or a Close failure) can't leave the
+	// closed handle dangling on the struct — a subsequent Attach would
+	// otherwise silently bind goroutines to a closed file and hang (#464).
+	closeErr := t.ptmx.Close()
+	t.ptmx = nil
+	if closeErr != nil {
+		log.ErrorLog.Printf("error closing attach pty session: %v", closeErr)
 		t.wg.Wait()
 		return
 	}
