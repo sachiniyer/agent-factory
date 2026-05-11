@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/keys"
@@ -507,11 +508,24 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		return m.handleError(fmt.Errorf("failed to save task: %v", err))
 	}
 	if err := task.InstallScheduler(t); err != nil {
-		// Rollback: remove the task we just added
+		// InstallScheduler writes the systemd unit/timer (or launchd
+		// plist) to disk BEFORE running systemctl/launchctl, so a
+		// failure on the external command leaves the scheduler files
+		// behind. RemoveTask alone only clears the JSON record, so we
+		// must also call RemoveScheduler to clean up those files
+		// (fixes #458). Both rollbacks are best-effort and run
+		// independently; failures are folded into the returned error so
+		// the user knows what to clean up manually.
+		msg := fmt.Sprintf("failed to install task scheduler: %v", err)
+		if rmSchedErr := task.RemoveScheduler(t); rmSchedErr != nil {
+			log.ErrorLog.Printf("failed to remove scheduler files during rollback: %v", rmSchedErr)
+			msg += fmt.Sprintf("; scheduler file cleanup also failed: %v", rmSchedErr)
+		}
 		if removeErr := task.RemoveTask(t.ID); removeErr != nil {
 			log.ErrorLog.Printf("failed to rollback task after scheduler install failure: %v", removeErr)
+			msg += fmt.Sprintf("; task record rollback also failed: %v", removeErr)
 		}
-		return m.handleError(fmt.Errorf("failed to install task scheduler: %v", err))
+		return m.handleError(errors.New(msg))
 	}
 	// Refresh sidebar and task pane
 	tasks, err := task.LoadTasksForCurrentRepo()

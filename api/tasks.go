@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -109,11 +110,25 @@ var tasksAddCmd = &cobra.Command{
 		}
 
 		if err := installScheduler(s); err != nil {
-			// Rollback: remove the task we just added
-			if removeErr := task.RemoveTask(s.ID); removeErr != nil {
-				log.ErrorLog.Printf("failed to rollback task after scheduler install failure: %v", removeErr)
+			// InstallScheduler writes the systemd unit/timer (or launchd
+			// plist) to disk BEFORE running systemctl/launchctl, so a
+			// failure on the external command leaves the scheduler files
+			// behind. RemoveTask alone only clears the JSON record, so
+			// we must also call RemoveScheduler to clean up those files
+			// (fixes #458). Both rollbacks are best-effort and run
+			// independently — if one fails the other is still attempted,
+			// and any failures are folded into the returned error so the
+			// user knows what to clean up manually.
+			msg := fmt.Sprintf("failed to install task scheduler: %v", err)
+			if rmSchedErr := removeScheduler(s); rmSchedErr != nil {
+				log.ErrorLog.Printf("failed to remove scheduler files during rollback: %v", rmSchedErr)
+				msg += fmt.Sprintf("; scheduler file cleanup also failed: %v", rmSchedErr)
 			}
-			return jsonError(fmt.Errorf("failed to install task scheduler: %w", err))
+			if removeErr := removeTask(s.ID); removeErr != nil {
+				log.ErrorLog.Printf("failed to rollback task after scheduler install failure: %v", removeErr)
+				msg += fmt.Sprintf("; task record rollback also failed: %v", removeErr)
+			}
+			return jsonError(errors.New(msg))
 		}
 
 		return jsonOut(map[string]any{"id": id})

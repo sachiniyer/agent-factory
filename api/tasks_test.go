@@ -2,6 +2,8 @@ package api
 
 import (
 	"errors"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/task"
@@ -414,4 +416,122 @@ func TestTasksRemove_RollbackInstallAlsoFails(t *testing.T) {
 	got, err := task.GetTask("r4")
 	require.NoError(t, err, "task record must remain when RemoveTask fails")
 	assert.Equal(t, "r4", got.ID)
+}
+
+// resetAddFlags clears the package-level add flag variables so add-path
+// tests don't leak state into each other.
+func resetAddFlags(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		taskAddNameFlag = ""
+		taskAddPromptFlag = ""
+		taskAddCronFlag = ""
+		taskAddProgramFlag = ""
+		repoFlag = ""
+	})
+	taskAddNameFlag = ""
+	taskAddPromptFlag = ""
+	taskAddCronFlag = ""
+	taskAddProgramFlag = ""
+}
+
+// setupAddRepo creates a throwaway git repo so resolveRepo() inside
+// tasksAddCmd succeeds. Returns the repo path.
+func setupAddRepo(t *testing.T) string {
+	t.Helper()
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repo).Run(), "git init")
+	require.NoError(t, exec.Command("git", "-C", repo, "config", "user.email", "test@example.com").Run())
+	require.NoError(t, exec.Command("git", "-C", repo, "config", "user.name", "Test User").Run())
+	require.NoError(t, exec.Command("git", "-C", repo, "commit", "--allow-empty", "-m", "init").Run())
+	repoFlag = repo
+	return repo
+}
+
+// TestTasksAdd_HappyPathDoesNotRollBack is the regression guard for the
+// existing behavior: when installScheduler succeeds, neither
+// removeScheduler nor removeTask runs.
+func TestTasksAdd_HappyPathDoesNotRollBack(t *testing.T) {
+	useTempConfig(t)
+	resetAddFlags(t)
+	calls := stubSchedulers(t)
+	setupAddRepo(t)
+
+	taskAddNameFlag = "happy"
+	taskAddPromptFlag = "hello"
+	taskAddCronFlag = "0 9 * * *"
+	taskAddProgramFlag = "claude"
+
+	err := tasksAddCmd.RunE(tasksAddCmd, nil)
+	require.NoError(t, err)
+
+	require.Len(t, calls.installed, 1, "installScheduler runs once")
+	assert.Empty(t, calls.removed, "no rollback when install succeeds")
+
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1, "task record must persist on success")
+}
+
+// TestTasksAdd_InstallSchedulerFailsRollsBackBoth is the regression
+// test for #458: when installScheduler fails after writing scheduler
+// files, the rollback must call BOTH removeScheduler (to clean up
+// systemd unit/timer or launchd plist) and removeTask (to clean up the
+// JSON record).
+func TestTasksAdd_InstallSchedulerFailsRollsBackBoth(t *testing.T) {
+	useTempConfig(t)
+	resetAddFlags(t)
+	calls := stubSchedulers(t)
+	setupAddRepo(t)
+
+	calls.installErrs = []error{errors.New("simulated systemctl enable failure")}
+
+	taskAddNameFlag = "rollback-both"
+	taskAddPromptFlag = "p"
+	taskAddCronFlag = "0 9 * * *"
+	taskAddProgramFlag = "claude"
+
+	err := tasksAddCmd.RunE(tasksAddCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to install task scheduler")
+
+	require.Len(t, calls.installed, 1, "installScheduler runs once")
+	require.Len(t, calls.removed, 1, "rollback must call removeScheduler to clean up files written before install failure")
+
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	assert.Empty(t, tasks, "task record must be removed when scheduler install fails")
+}
+
+// TestTasksAdd_RollbackRemoveSchedulerAlsoFails verifies that when the
+// scheduler-file rollback ALSO fails, removeTask is still attempted and
+// the returned error names both failures so the user can clean up
+// orphaned scheduler files manually.
+func TestTasksAdd_RollbackRemoveSchedulerAlsoFails(t *testing.T) {
+	useTempConfig(t)
+	resetAddFlags(t)
+	calls := stubSchedulers(t)
+	setupAddRepo(t)
+
+	calls.installErrs = []error{errors.New("simulated systemctl enable failure")}
+	calls.removeErrs = []error{errors.New("simulated scheduler cleanup failure")}
+
+	taskAddNameFlag = "rollback-fail"
+	taskAddPromptFlag = "p"
+	taskAddCronFlag = "0 9 * * *"
+	taskAddProgramFlag = "claude"
+
+	err := tasksAddCmd.RunE(tasksAddCmd, nil)
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "simulated systemctl enable failure", "primary install failure must surface")
+	assert.Contains(t, msg, "simulated scheduler cleanup failure", "scheduler-rollback failure must surface")
+	assert.Contains(t, msg, "scheduler file cleanup also failed")
+
+	require.Len(t, calls.installed, 1, "installScheduler runs once")
+	require.Len(t, calls.removed, 1, "removeScheduler is still attempted")
+
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	assert.Empty(t, tasks, "removeTask must still run even when scheduler rollback fails")
 }
