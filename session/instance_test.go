@@ -1,6 +1,7 @@
 package session
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -81,4 +82,37 @@ func TestFetchPRInfoSnapshot_StartedWithoutWorktree(t *testing.T) {
 	assert.Empty(t, repoPath,
 		"snapshot must be empty when gitWorktree is nil (remote / mid-setup)")
 	assert.Empty(t, branch)
+}
+
+// TestGetGitWorktree_RaceWithStart guards the fix for #462. GetGitWorktree
+// must read i.started and i.gitWorktree under i.mu — Start() writes both
+// under the lock, so an unlocked reader trips the race detector. Run with
+// `go test -race ./session/...` to validate.
+func TestGetGitWorktree_RaceWithStart(t *testing.T) {
+	i, err := NewInstance(InstanceOptions{Title: "t", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Writer goroutine: mirrors the lock-protected writes in
+	// StartWithExistingWorktree (i.gitWorktree, then i.started).
+	go func() {
+		defer wg.Done()
+		for n := 0; n < iterations; n++ {
+			i.SetGitWorktreeForTest(&git.GitWorktree{})
+			i.SetStartedForTest(true)
+		}
+	}()
+
+	// Reader goroutine: exercises the path the bug lived on.
+	go func() {
+		defer wg.Done()
+		for n := 0; n < iterations; n++ {
+			_, _ = i.GetGitWorktree()
+		}
+	}()
+
+	wg.Wait()
 }
