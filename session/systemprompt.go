@@ -26,57 +26,102 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// splitShell tokenizes a shell-style command string, respecting single
+// quotes (no escapes), double quotes (with \" and \\ escapes), and
+// backslash escapes outside quotes. Adjacent runs concatenate into a
+// single token (e.g. 'foo'bar -> "foobar"), which makes the POSIX
+// '\” idiom for embedded apostrophes work naturally. Unclosed quotes
+// consume to end of input.
+func splitShell(s string) []string {
+	var tokens []string
+	var cur strings.Builder
+	inToken := false
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		switch c {
+		case ' ', '\t':
+			if inToken {
+				tokens = append(tokens, cur.String())
+				cur.Reset()
+				inToken = false
+			}
+			i++
+		case '\\':
+			inToken = true
+			if i+1 < len(s) {
+				cur.WriteByte(s[i+1])
+				i += 2
+			} else {
+				i++
+			}
+		case '\'':
+			inToken = true
+			i++
+			for i < len(s) && s[i] != '\'' {
+				cur.WriteByte(s[i])
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+		case '"':
+			inToken = true
+			i++
+			for i < len(s) && s[i] != '"' {
+				if s[i] == '\\' && i+1 < len(s) {
+					n := s[i+1]
+					if n == '"' || n == '\\' {
+						cur.WriteByte(n)
+						i += 2
+						continue
+					}
+				}
+				cur.WriteByte(s[i])
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+		default:
+			inToken = true
+			cur.WriteByte(c)
+			i++
+		}
+	}
+	if inToken {
+		tokens = append(tokens, cur.String())
+	}
+	return tokens
+}
+
 // getBaseCommand extracts the lowercase basename of the executable from a
 // program string that may include a full path and arguments.
 // For example, "/home/user/bin/claude --model opus" returns "claude".
-// It handles single-quoted and double-quoted paths for binaries whose
-// paths contain spaces (e.g. on WSL).
+// It respects shell quoting (single/double quotes and backslash escapes)
+// and additionally tolerates unquoted absolute or relative paths whose
+// directory components contain spaces — common when users pass --program
+// with a path like "/home/my user/claude" via the CLI (issue #463).
 func getBaseCommand(program string) string {
 	program = strings.TrimSpace(program)
 	if len(program) == 0 {
 		return ""
 	}
-
-	var cmd string
-	// Handle single-quoted paths. Embedded single quotes are escaped using the
-	// POSIX idiom '\'' (close quote, escaped literal quote, reopen quote), so
-	// scan for a closing quote that is NOT part of a '\'' escape sequence.
-	if program[0] == '\'' {
-		end := -1
-		for i := 1; i < len(program); i++ {
-			if program[i] != '\'' {
-				continue
-			}
-			// Check for the '\'' escape idiom: current ' followed by \'' —
-			// i.e. program[i..i+3] == "'\\''". Advance past the whole 4-byte
-			// sequence so the reopening quote is not mistaken for the closer.
-			if i+3 < len(program) && program[i+1] == '\\' && program[i+2] == '\'' && program[i+3] == '\'' {
-				i += 3
-				continue
-			}
-			end = i
-			break
+	parts := splitShell(program)
+	if len(parts) == 0 {
+		return ""
+	}
+	cmd := parts[0]
+	// If the first token looks like an unquoted path (absolute or relative),
+	// assume following non-flag tokens are literal spaces in that path. This
+	// recovers the basename for inputs like `/home/my user/claude --foo`
+	// where the path contains spaces and was not quoted on the command line.
+	if strings.HasPrefix(cmd, "/") || strings.HasPrefix(cmd, "./") || strings.HasPrefix(cmd, "../") {
+		end := 1
+		for end < len(parts) && !strings.HasPrefix(parts[end], "-") {
+			end++
 		}
-		if end >= 0 {
-			cmd = program[1:end]
-		} else {
-			cmd = program[1:]
-		}
-		// Unescape '\'' sequences back to a literal ' so filepath.Base works.
-		cmd = strings.ReplaceAll(cmd, "'\\''", "'")
-	} else if program[0] == '"' {
-		end := strings.Index(program[1:], "\"")
-		if end >= 0 {
-			cmd = program[1 : end+1]
-		} else {
-			cmd = program[1:]
-		}
-	} else {
-		parts := strings.Fields(program)
-		if len(parts) == 0 {
-			return ""
-		}
-		cmd = parts[0]
+		cmd = strings.Join(parts[:end], " ")
 	}
 	return strings.ToLower(filepath.Base(cmd))
 }

@@ -175,6 +175,15 @@ func TestGetBaseCommand(t *testing.T) {
 		{"'/home/user/o'\\''brien/codex'", "codex"},
 		// Double-quoted path.
 		{"\"/home/user/my apps/claude\"", "claude"},
+		// Issue #463: unquoted CLI --program path with spaces.
+		{"/home/my user/claude", "claude"},
+		{"/home/my user/claude --foo", "claude"},
+		{"/Applications/My Apps/claude", "claude"},
+		// Quoted path containing spaces with trailing flags.
+		{"\"/home/my user/claude\" --foo", "claude"},
+		{"'/home/my user/claude' --foo", "claude"},
+		// Backslash-escaped space in an unquoted path.
+		{"/home/me\\ name/claude --foo", "claude"},
 	}
 	for _, tt := range tests {
 		got := getBaseCommand(tt.input)
