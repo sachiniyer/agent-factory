@@ -14,13 +14,21 @@ import (
 // tests can assert that `af tasks update` reconciles systemd state
 // correctly (see #258).
 type schedulerCalls struct {
-	installed     []task.Task
-	removed       []task.Task
-	updateTaskErr error
+	installed []task.Task
+	removed   []task.Task
+
+	// Error-injection knobs. installErrs / removeErrs are consumed in
+	// order so multi-call flows (e.g. the install→rollback path) can
+	// fail a specific call without failing every call.
+	installErrs    []error
+	removeErrs     []error
+	updateTaskErr  error
+	removeTaskErr  error
+	removeTaskHook func(string)
 }
 
-// stubSchedulers swaps installScheduler/removeScheduler/updateTask for
-// in-memory stubs and restores them on test cleanup.
+// stubSchedulers swaps installScheduler/removeScheduler/updateTask/removeTask
+// for in-memory stubs and restores them on test cleanup.
 func stubSchedulers(t *testing.T) *schedulerCalls {
 	t.Helper()
 	calls := &schedulerCalls{}
@@ -28,12 +36,27 @@ func stubSchedulers(t *testing.T) *schedulerCalls {
 	origInstall := installScheduler
 	origRemove := removeScheduler
 	origUpdate := updateTask
+	origRemoveTask := removeTask
 	installScheduler = func(tsk task.Task) error {
 		calls.installed = append(calls.installed, tsk)
+		if len(calls.installErrs) > 0 {
+			err := calls.installErrs[0]
+			calls.installErrs = calls.installErrs[1:]
+			if err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	removeScheduler = func(tsk task.Task) error {
 		calls.removed = append(calls.removed, tsk)
+		if len(calls.removeErrs) > 0 {
+			err := calls.removeErrs[0]
+			calls.removeErrs = calls.removeErrs[1:]
+			if err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	updateTask = func(tsk task.Task) error {
@@ -42,10 +65,20 @@ func stubSchedulers(t *testing.T) *schedulerCalls {
 		}
 		return origUpdate(tsk)
 	}
+	removeTask = func(id string) error {
+		if calls.removeTaskHook != nil {
+			calls.removeTaskHook(id)
+		}
+		if calls.removeTaskErr != nil {
+			return calls.removeTaskErr
+		}
+		return origRemoveTask(id)
+	}
 	t.Cleanup(func() {
 		installScheduler = origInstall
 		removeScheduler = origRemove
 		updateTask = origUpdate
+		removeTask = origRemoveTask
 	})
 	return calls
 }
@@ -284,4 +317,101 @@ func TestTasksUpdate_RollsBackSchedulerRemoveOnDisableWhenUpdateTaskFails(t *tes
 	require.Len(t, calls.installed, 1, "scheduler remove should be rolled back via install")
 	assert.Equal(t, "0 9 * * *", calls.installed[0].CronExpr, "rollback restores old cron")
 	assert.True(t, calls.installed[0].Enabled, "rollback restores enabled=true")
+}
+
+// TestTasksRemove_HappyPath verifies that when both removeScheduler and
+// RemoveTask succeed, the final state has no scheduler and no task
+// record.
+func TestTasksRemove_HappyPath(t *testing.T) {
+	useTempConfig(t)
+	calls := stubSchedulers(t)
+
+	seedTask(t, task.Task{ID: "r1", CronExpr: "0 9 * * *", Enabled: true})
+
+	err := tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"r1"})
+	require.NoError(t, err)
+
+	require.Len(t, calls.removed, 1, "scheduler should be removed once")
+	assert.Empty(t, calls.installed, "happy-path remove must not install scheduler")
+
+	_, err = task.GetTask("r1")
+	assert.Error(t, err, "task record should be gone")
+}
+
+// TestTasksRemove_RemoveSchedulerFailsLeavesTask verifies that when
+// removeScheduler fails the task record is NOT deleted (i.e. the
+// half-removal #457 describes can't happen by skipping RemoveTask).
+func TestTasksRemove_RemoveSchedulerFailsLeavesTask(t *testing.T) {
+	useTempConfig(t)
+	calls := stubSchedulers(t)
+
+	seedTask(t, task.Task{ID: "r2", CronExpr: "0 9 * * *", Enabled: true})
+	calls.removeErrs = []error{errors.New("simulated scheduler removal failure")}
+
+	err := tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"r2"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to remove task scheduler")
+
+	require.Len(t, calls.removed, 1, "removeScheduler should be attempted exactly once")
+	assert.Empty(t, calls.installed, "no rollback install should run when removeScheduler fails")
+
+	got, err := task.GetTask("r2")
+	require.NoError(t, err, "task record must still exist when scheduler removal fails")
+	assert.Equal(t, "r2", got.ID)
+}
+
+// TestTasksRemove_RemoveTaskFailsRollsBackScheduler is the regression
+// test for #457: removeScheduler succeeded but RemoveTask failed; the
+// scheduler must be re-installed so the still-listed task stays
+// schedulable.
+func TestTasksRemove_RemoveTaskFailsRollsBackScheduler(t *testing.T) {
+	useTempConfig(t)
+	calls := stubSchedulers(t)
+
+	seedTask(t, task.Task{ID: "r3", CronExpr: "0 9 * * *", Enabled: true})
+	calls.removeTaskErr = errors.New("simulated tasks.json write failure")
+
+	err := tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"r3"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to remove task")
+	assert.Contains(t, err.Error(), "re-installed", "error should mention the rollback")
+	assert.Contains(t, err.Error(), "af tasks remove r3", "error should tell the user how to retry")
+
+	require.Len(t, calls.removed, 1, "scheduler should be removed once")
+	require.Len(t, calls.installed, 1, "scheduler should be re-installed exactly once as rollback")
+	assert.Equal(t, "r3", calls.installed[0].ID)
+	assert.Equal(t, "0 9 * * *", calls.installed[0].CronExpr)
+	assert.True(t, calls.installed[0].Enabled)
+
+	got, err := task.GetTask("r3")
+	require.NoError(t, err, "task record must remain when RemoveTask fails")
+	assert.Equal(t, "r3", got.ID)
+}
+
+// TestTasksRemove_RollbackInstallAlsoFails verifies that when both the
+// RemoveTask write fails AND the scheduler-rollback InstallScheduler
+// fails, the returned error names both failures and tells the user how
+// to recover.
+func TestTasksRemove_RollbackInstallAlsoFails(t *testing.T) {
+	useTempConfig(t)
+	calls := stubSchedulers(t)
+
+	seedTask(t, task.Task{ID: "r4", CronExpr: "0 9 * * *", Enabled: true})
+	calls.removeTaskErr = errors.New("simulated tasks.json write failure")
+	calls.installErrs = []error{errors.New("simulated rollback install failure")}
+
+	err := tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"r4"})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "simulated tasks.json write failure", "compound error must name the RemoveTask failure")
+	assert.Contains(t, msg, "simulated rollback install failure", "compound error must name the rollback failure")
+	assert.Contains(t, msg, "rollback also failed")
+	assert.Contains(t, msg, "tasks.json", "user must be told where the orphaned record lives")
+
+	require.Len(t, calls.removed, 1, "scheduler should be removed once")
+	require.Len(t, calls.installed, 1, "rollback install should be attempted once")
+
+	got, err := task.GetTask("r4")
+	require.NoError(t, err, "task record must remain when RemoveTask fails")
+	assert.Equal(t, "r4", got.ID)
 }

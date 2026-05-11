@@ -23,6 +23,7 @@ var (
 	installScheduler = task.InstallScheduler
 	removeScheduler  = task.RemoveScheduler
 	updateTask       = task.UpdateTask
+	removeTask       = task.RemoveTask
 )
 
 var tasksListCmd = &cobra.Command{
@@ -136,8 +137,23 @@ var tasksRemoveCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to remove task scheduler: %w", err))
 		}
 
-		if err := task.RemoveTask(args[0]); err != nil {
-			return jsonError(fmt.Errorf("failed to remove task: %w", err))
+		if err := removeTask(args[0]); err != nil {
+			// Scheduler was already torn down, so a half-removed task
+			// would be listed in `af tasks list` with no firing timer
+			// (fixes #457). Best-effort re-install of the scheduler
+			// puts the system back into a consistent state. If that
+			// also fails, surface both errors and tell the user how to
+			// recover manually.
+			if rbErr := installScheduler(*s); rbErr != nil {
+				return jsonError(fmt.Errorf(
+					"failed to remove task: %w; scheduler rollback also failed: %v; task record remains with no active scheduler — delete it manually from ~/.agent-factory/tasks.json or rerun 'af tasks remove %s' once the underlying issue is resolved",
+					err, rbErr, args[0],
+				))
+			}
+			return jsonError(fmt.Errorf(
+				"failed to remove task: %w; scheduler was re-installed so the task continues to fire on schedule — rerun 'af tasks remove %s' once the underlying issue is resolved",
+				err, args[0],
+			))
 		}
 
 		return jsonOut(map[string]bool{"ok": true})

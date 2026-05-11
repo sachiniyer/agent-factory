@@ -451,11 +451,20 @@ func (m *home) saveContentPaneState() {
 			}
 		}
 		for _, tsk := range sp.GetDeleted() {
-			if err := task.RemoveTask(tsk.ID); err != nil {
-				log.ErrorLog.Printf("failed to remove task: %v", err)
-			}
+			// Tear down the scheduler before deleting the task record so
+			// a phantom timer can't keep firing for a deleted task. If
+			// RemoveTask then fails, re-install the scheduler so the
+			// listed task is at least still firing on its schedule
+			// (fixes #457).
 			if err := task.RemoveScheduler(tsk); err != nil {
 				log.WarningLog.Printf("failed to remove timer: %v", err)
+				continue
+			}
+			if err := task.RemoveTask(tsk.ID); err != nil {
+				log.ErrorLog.Printf("failed to remove task: %v", err)
+				if rbErr := task.InstallScheduler(tsk); rbErr != nil {
+					log.ErrorLog.Printf("failed to roll back scheduler after RemoveTask failure: %v", rbErr)
+				}
 			}
 		}
 		// Refresh sidebar
