@@ -109,7 +109,7 @@ af sessions kill <title>                                       # kill + clean up
 
 ```bash
 af tasks list                                                  # list scheduled tasks
-af tasks add --name "Daily triage" --prompt "..." --cron "0 9 * * *"
+af tasks add --name "Daily triage" --prompt "..." --cron "0 9 * * *" --program claude
 af tasks get <id>                                              # fetch one task
 af tasks trigger <id>                                          # run task immediately
 af tasks update <id> --cron "..." --prompt "..." --enabled true

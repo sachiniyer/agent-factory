@@ -17,13 +17,14 @@ type TaskPane struct {
 	selectedIdx int
 
 	// Edit mode
-	editing    bool
-	editName   textinput.Model
-	editPrompt textarea.Model
-	editCron   textinput.Model
-	editPath   textinput.Model
-	editError  string // last validation error shown to the user
-	focusIndex int    // 0=name, 1=prompt, 2=cron, 3=path, 4=save button
+	editing     bool
+	editName    textinput.Model
+	editPrompt  textarea.Model
+	editCron    textinput.Model
+	editPath    textinput.Model
+	editProgram textinput.Model
+	editError   string // last validation error shown to the user
+	focusIndex  int    // 0=name, 1=prompt, 2=cron, 3=path, 4=program, 5=save button
 
 	// Create mode
 	creating       bool
@@ -128,10 +129,16 @@ func (s *TaskPane) EnterCreateMode(defaultPath string) {
 	path.CharLimit = 256
 	path.Blur()
 
+	program := textinput.New()
+	program.Placeholder = "leave empty for config default"
+	program.CharLimit = 256
+	program.Blur()
+
 	s.editName = name
 	s.editPrompt = prompt
 	s.editCron = cron
 	s.editPath = path
+	s.editProgram = program
 	s.focusIndex = 0
 	s.creating = true
 	s.hasFocus = true
@@ -144,9 +151,10 @@ func (s *TaskPane) HasPendingCreate() bool {
 }
 
 // ConsumePendingCreate returns the submitted create data and clears the pending flag.
-func (s *TaskPane) ConsumePendingCreate() (name, prompt, cron, path string) {
+// program is the user-supplied program override; empty means "use the caller's default".
+func (s *TaskPane) ConsumePendingCreate() (name, prompt, cron, path, program string) {
 	s.pendingCreate = false
-	return s.editName.Value(), s.editPrompt.Value(), s.editCron.Value(), s.editPath.Value()
+	return s.editName.Value(), s.editPrompt.Value(), s.editCron.Value(), s.editPath.Value(), s.editProgram.Value()
 }
 
 // SetPendingTrigger marks the currently selected task to be triggered.
@@ -261,10 +269,17 @@ func (s *TaskPane) enterEditMode() {
 	path.CharLimit = 256
 	path.Blur()
 
+	program := textinput.New()
+	program.SetValue(tsk.Program)
+	program.Placeholder = "leave empty for config default"
+	program.CharLimit = 256
+	program.Blur()
+
 	s.editName = name
 	s.editPrompt = prompt
 	s.editCron = cron
 	s.editPath = path
+	s.editProgram = program
 	s.focusIndex = 0
 	s.editing = true
 	s.editError = ""
@@ -273,17 +288,17 @@ func (s *TaskPane) enterEditMode() {
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 	switch msg.Type {
 	case tea.KeyTab:
-		s.focusIndex = (s.focusIndex + 1) % 5
+		s.focusIndex = (s.focusIndex + 1) % 6
 		s.updateEditFocus()
 	case tea.KeyShiftTab:
-		s.focusIndex = (s.focusIndex + 4) % 5
+		s.focusIndex = (s.focusIndex + 5) % 6
 		s.updateEditFocus()
 	case tea.KeyEsc:
 		s.editing = false
 		s.creating = false
 		s.editError = ""
 	case tea.KeyEnter:
-		if s.focusIndex == 4 {
+		if s.focusIndex == 5 {
 			if s.creating {
 				if s.editName.Value() == "" {
 					s.editError = "name is required"
@@ -310,6 +325,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 				s.tasks[s.selectedIdx].Prompt = s.editPrompt.Value()
 				s.tasks[s.selectedIdx].CronExpr = s.editCron.Value()
 				s.tasks[s.selectedIdx].ProjectPath = s.editPath.Value()
+				s.tasks[s.selectedIdx].Program = s.editProgram.Value()
 				s.dirty = true
 				s.editing = false
 			}
@@ -328,6 +344,8 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.editCron, _ = s.editCron.Update(msg)
 		case 3:
 			s.editPath, _ = s.editPath.Update(msg)
+		case 4:
+			s.editProgram, _ = s.editProgram.Update(msg)
 		}
 	}
 	return true
@@ -338,6 +356,7 @@ func (s *TaskPane) updateEditFocus() {
 	s.editPrompt.Blur()
 	s.editCron.Blur()
 	s.editPath.Blur()
+	s.editProgram.Blur()
 
 	switch s.focusIndex {
 	case 0:
@@ -348,6 +367,8 @@ func (s *TaskPane) updateEditFocus() {
 		s.editCron.Focus()
 	case 3:
 		s.editPath.Focus()
+	case 4:
+		s.editProgram.Focus()
 	}
 }
 
@@ -467,6 +488,7 @@ func (s *TaskPane) renderEditMode() string {
 	}
 	s.editCron.Width = inputWidth
 	s.editPath.Width = inputWidth
+	s.editProgram.Width = inputWidth
 
 	var b strings.Builder
 	if s.creating {
@@ -491,13 +513,17 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString(labelStyle.Render("Path:"))
 	b.WriteString("  ")
 	b.WriteString(s.editPath.View())
+	b.WriteString("\n")
+	b.WriteString(labelStyle.Render("Program:"))
+	b.WriteString("  ")
+	b.WriteString(s.editProgram.View())
 	b.WriteString("\n\n")
 
 	submitLabel := " Save "
 	if s.creating {
 		submitLabel = " Create "
 	}
-	if s.focusIndex == 4 {
+	if s.focusIndex == 5 {
 		b.WriteString("       " + focusedButtonStyle.Render(submitLabel))
 	} else {
 		b.WriteString("       " + buttonStyle.Render(submitLabel))
