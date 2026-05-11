@@ -469,7 +469,7 @@ func (m *home) saveContentPaneState() {
 // handleTaskCreate processes a pending task creation from the inline form.
 func (m *home) handleTaskCreate() tea.Cmd {
 	sp := m.contentPane.TaskPane()
-	name, prompt, cronExpr, projectPath := sp.ConsumePendingCreate()
+	name, prompt, cronExpr, projectPath, program := sp.ConsumePendingCreate()
 
 	if name == "" {
 		return m.handleError(fmt.Errorf("task name is required"))
@@ -481,13 +481,16 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if err != nil {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
+	if program == "" {
+		program = m.program
+	}
 	t := task.Task{
 		ID:          task.GenerateID(),
 		Name:        name,
 		Prompt:      prompt,
 		CronExpr:    cronExpr,
 		ProjectPath: absPath,
-		Program:     m.program,
+		Program:     program,
 		Enabled:     true,
 		CreatedAt:   time.Now(),
 	}

@@ -173,6 +173,47 @@ func TestGenerateID(t *testing.T) {
 	assert.NotEqual(t, id1, id2)
 }
 
+// TestLoadTaskWithoutProgramFieldFallsBackToEmpty verifies that a task record
+// persisted before the per-task program feature (i.e. without a "program"
+// key) loads cleanly with Program == "". The runner / daemon path treats an
+// empty Program as "use the config default", so this is the backwards-compat
+// path users on stale tasks.json files depend on. Regression test for #453.
+func TestLoadTaskWithoutProgramFieldFallsBackToEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, tasksFileName)
+
+	legacyJSON := `[{"id":"legacy","name":"Old Task","prompt":"do it","cron_expr":"0 9 * * *","project_path":"/tmp","enabled":true,"created_at":"2025-01-01T00:00:00Z"}]`
+	require.NoError(t, os.WriteFile(path, []byte(legacyJSON), 0644))
+
+	origGetPath := getTasksPathFn
+	getTasksPathFn = func() (string, error) { return path, nil }
+	t.Cleanup(func() { getTasksPathFn = origGetPath })
+
+	tasks, err := LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "legacy", tasks[0].ID)
+	assert.Equal(t, "", tasks[0].Program, "legacy task without program key must load with Program=\"\" so the runner falls back to the config default")
+}
+
+// TestUpdateTaskPersistsProgram verifies that the Program field is persisted
+// through UpdateTask. Regression test for #453: editing a task's program
+// through the TUI must survive a SaveTasks -> LoadTasks round-trip.
+func TestUpdateTaskPersistsProgram(t *testing.T) {
+	tasks := []Task{
+		{ID: "p1", Name: "Original", Program: "claude", Enabled: true},
+	}
+	setupTestTasks(t, tasks)
+
+	updated := tasks[0]
+	updated.Program = "aider"
+	require.NoError(t, UpdateTask(updated))
+
+	got, err := GetTask("p1")
+	require.NoError(t, err)
+	assert.Equal(t, "aider", got.Program)
+}
+
 func TestTaskNameInJSON(t *testing.T) {
 	s := Task{ID: "n1", Name: "My Task", Prompt: "do things"}
 	data, err := json.Marshal(s)
