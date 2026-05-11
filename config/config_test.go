@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"github.com/sachiniyer/agent-factory/log"
 	"os"
 	"path/filepath"
@@ -284,6 +285,38 @@ func TestLoadConfig(t *testing.T) {
 		assert.True(t, config.AutoYes)
 		assert.Equal(t, 2000, config.DaemonPollInterval)
 		assert.Equal(t, "test/", config.BranchPrefix)
+	})
+
+	t.Run("clamps non-positive daemon_poll_interval to default", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			raw      int
+			expected int
+		}{
+			{"zero -> default", 0, defaultDaemonPollInterval},
+			{"negative -> default", -500, defaultDaemonPollInterval},
+			{"positive -> as-is", 2500, 2500},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				tempHome := t.TempDir()
+				configDir := filepath.Join(tempHome, ".agent-factory")
+				require.NoError(t, os.MkdirAll(configDir, 0755))
+
+				configPath := filepath.Join(configDir, ConfigFileName)
+				content := fmt.Sprintf(`{"daemon_poll_interval": %d}`, tc.raw)
+				require.NoError(t, os.WriteFile(configPath, []byte(content), 0644))
+
+				originalHome := os.Getenv("HOME")
+				os.Setenv("HOME", tempHome)
+				defer os.Setenv("HOME", originalHome)
+
+				config := LoadConfig()
+				assert.NotNil(t, config)
+				assert.Equal(t, tc.expected, config.DaemonPollInterval)
+			})
+		}
 	})
 
 	t.Run("returns default config on invalid JSON", func(t *testing.T) {
