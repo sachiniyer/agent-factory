@@ -45,6 +45,11 @@ func autoUpdate() error {
 	if !shouldCheck() {
 		return nil
 	}
+	// Record the check up front so failure-prone steps below (network fetch,
+	// download, install) still honor the 24-hour throttle. Without this,
+	// persistent failures (blocked api.github.com, corp proxy, DNS) would
+	// retry on every launch and flood GitHub's rate limit. See issue #459.
+	recordCheck()
 
 	latestTag, err := fetchLatestReleaseTagFn()
 	if err != nil {
@@ -55,7 +60,6 @@ func autoUpdate() error {
 	latestVersion := strings.TrimPrefix(latestTag, "v")
 	currentVersion := strings.TrimPrefix(version, "v")
 	if !isNewer(latestVersion, currentVersion) {
-		recordCheck()
 		return nil
 	}
 
@@ -64,9 +68,7 @@ func autoUpdate() error {
 	goos := runtimeGOOS
 	goarch := runtime.GOARCH
 	if goos == "windows" {
-		// Auto-update is not supported on Windows, but record the check so the
-		// 24-hour throttle fires and we don't hit the GitHub API on every launch.
-		recordCheck()
+		// Auto-update is not supported on Windows.
 		return nil
 	}
 
@@ -93,7 +95,6 @@ func autoUpdate() error {
 		return fmt.Errorf("failed to write new binary: %w", err)
 	}
 
-	recordCheck()
 	log.ErrorLog.Printf("auto-update: successfully updated to %s (effective on next launch)", latestVersion)
 	return nil
 }
