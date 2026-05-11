@@ -178,8 +178,8 @@ func (m *Menu) addInstanceOptions() {
 	// Action group
 	actionGroup := []keys.KeyName{keys.KeyEnter}
 
-	// Navigation group (when in terminal tab)
-	if m.activeTab == TerminalTab {
+	// Navigation group (tabs that support scrolling)
+	if m.activeTab == TerminalTab || m.activeTab == PreviewTab {
 		actionGroup = append(actionGroup, keys.KeyShiftUp)
 		actionGroup = append(actionGroup, keys.KeyShiftDown)
 	}
