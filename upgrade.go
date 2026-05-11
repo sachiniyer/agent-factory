@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/spf13/cobra"
@@ -18,6 +19,55 @@ import (
 const (
 	releaseBaseURL = "https://github.com/sachiniyer/agent-factory/releases"
 )
+
+// Download timeouts are variables (not consts) so tests can shrink them to
+// keep the stalled-server case under a few seconds.
+var (
+	// downloadTimeout caps the total time spent fetching the release tarball.
+	// Binaries are <10MB but we stay generous to tolerate slow links.
+	downloadTimeout = 5 * time.Minute
+	// downloadResponseHeaderTimeout caps the time spent waiting for response
+	// headers, so a server that accepts the TCP connection but never replies
+	// fails fast instead of consuming the full downloadTimeout budget.
+	downloadResponseHeaderTimeout = 30 * time.Second
+)
+
+// newDownloadClient builds an *http.Client suitable for fetching a release
+// tarball, with both an overall request timeout and a header timeout so a
+// stalled server can't hang the upgrade indefinitely (#471).
+func newDownloadClient() *http.Client {
+	return &http.Client{
+		Timeout: downloadTimeout,
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: downloadResponseHeaderTimeout,
+		},
+	}
+}
+
+// downloadBinaryFn is indirected so tests can stub the download without
+// standing up an httptest server.
+var downloadBinaryFn = downloadBinary
+
+// downloadBinary fetches the release tarball at url and returns the embedded
+// `agent-factory` binary bytes. It uses newDownloadClient() to bound the
+// fetch with a timeout.
+func downloadBinary(url string) ([]byte, error) {
+	resp, err := newDownloadClient().Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("download failed: HTTP %d from %s", resp.StatusCode, url)
+	}
+
+	binary, err := extractBinaryFromTarGz(resp.Body, "agent-factory")
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract binary: %w", err)
+	}
+	return binary, nil
+}
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
@@ -34,20 +84,9 @@ var upgradeCmd = &cobra.Command{
 
 		fmt.Printf("Downloading latest release for %s/%s...\n", goos, goarch)
 
-		resp, err := http.Get(downloadURL)
+		binary, err := downloadBinaryFn(downloadURL)
 		if err != nil {
-			return fmt.Errorf("download failed: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			return fmt.Errorf("download failed: HTTP %d from %s", resp.StatusCode, downloadURL)
-		}
-
-		// Extract binary from tar.gz
-		binary, err := extractBinaryFromTarGz(resp.Body, "agent-factory")
-		if err != nil {
-			return fmt.Errorf("failed to extract binary: %w", err)
+			return err
 		}
 
 		// Find current executable path

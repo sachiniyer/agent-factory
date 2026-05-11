@@ -73,19 +73,9 @@ func autoUpdate() error {
 	downloadURL := fmt.Sprintf("%s/latest/download/agent-factory-%s-%s.tar.gz",
 		releaseBaseURL, goos, goarch)
 
-	resp, err := http.Get(downloadURL)
+	binary, err := downloadBinaryFn(downloadURL)
 	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
-	}
-
-	binary, err := extractBinaryFromTarGz(resp.Body, "agent-factory")
-	if err != nil {
-		return fmt.Errorf("extract failed: %w", err)
+		return err
 	}
 
 	execPath, err := os.Executable()
