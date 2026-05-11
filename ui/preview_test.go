@@ -495,3 +495,129 @@ func TestPreviewFallbackHeightNoDoubleCounting(t *testing.T) {
 		}
 	})
 }
+
+// setupTwoInstances creates two independent instances in the same test so we
+// can exercise the instance-switch path in PreviewPane.UpdateContent. The mock
+// tracks tmux sessions in a map keyed by name so each instance has its own
+// has-session/new-session bookkeeping.
+func setupTwoInstances(t *testing.T, previewA, previewB string) (*session.Instance, *session.Instance, func()) {
+	t.Helper()
+	log.Initialize(false)
+
+	workdir := t.TempDir()
+	setupGitRepo(t, workdir)
+
+	existing := map[string]bool{}
+	sessionFor := func(cmd *exec.Cmd) string {
+		// tmux targets can be passed as either "-t <name>" / "-s <name>"
+		// (two args) or "-t=<name>" / "-s=<name>" (one arg). Handle both.
+		for i, a := range cmd.Args {
+			switch {
+			case (a == "-t" || a == "-s") && i+1 < len(cmd.Args):
+				return cmd.Args[i+1]
+			case strings.HasPrefix(a, "-t="):
+				return strings.TrimPrefix(a, "-t=")
+			case strings.HasPrefix(a, "-s="):
+				return strings.TrimPrefix(a, "-s=")
+			}
+		}
+		return ""
+	}
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			cmdStr := cmd.String()
+			name := sessionFor(cmd)
+			switch {
+			case strings.Contains(cmdStr, "has-session"):
+				if existing[name] {
+					return nil
+				}
+				return fmt.Errorf("session does not exist")
+			case strings.Contains(cmdStr, "new-session"):
+				existing[name] = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			cmdStr := cmd.String()
+			if !strings.Contains(cmdStr, "capture-pane") {
+				return []byte(""), nil
+			}
+			name := sessionFor(cmd)
+			// Distinguish per-instance output so tests can assert which
+			// instance's content was rendered.
+			if strings.HasSuffix(name, "-inst_b") {
+				return []byte(previewB), nil
+			}
+			return []byte(previewA), nil
+		},
+	}
+
+	mkInstance := func(suffix string) *session.Instance {
+		title := fmt.Sprintf("test-switch-%s-%d-%s", t.Name(), time.Now().UnixNano(), suffix)
+		// Clean any pre-existing tmux session by the same name.
+		_ = exec.Command("tmux", "kill-session", "-t", "af_"+title).Run()
+
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title:   title,
+			Path:    workdir,
+			Program: "bash",
+			AutoYes: false,
+		})
+		require.NoError(t, err)
+
+		pty := &MockPtyFactory{t: t, cmdExec: cmdExec}
+		inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(title, "bash", pty, cmdExec))
+		require.NoError(t, inst.Start(true))
+		return inst
+	}
+
+	a := mkInstance("inst_a")
+	b := mkInstance("inst_b")
+	cleanup := func() {
+		_ = a.Kill()
+		_ = b.Kill()
+		log.Close()
+	}
+	return a, b, cleanup
+}
+
+// TestPreviewSwitchInstanceResetsScroll is a regression test for issue #470:
+// when the user is in scroll mode on instance A and switches to instance B,
+// the preview pane must drop the scroll-mode viewport (which still holds A's
+// captured history) and render B's current content. Re-rendering the SAME
+// instance while scrolling must preserve scroll state.
+func TestPreviewSwitchInstanceResetsScroll(t *testing.T) {
+	const previewA = "instance-A-content"
+	const previewB = "instance-B-content"
+
+	instA, instB, cleanup := setupTwoInstances(t, previewA, previewB)
+	defer cleanup()
+
+	p := NewPreviewPane()
+	p.SetSize(80, 30)
+
+	// Render A normally, then enter scroll mode on A.
+	require.NoError(t, p.UpdateContent(instA))
+	require.NoError(t, p.ScrollUp(instA))
+	require.True(t, p.isScrolling, "should be scrolling after ScrollUp on A")
+
+	// Re-render the SAME instance while scrolling: scroll state must
+	// survive (this is the original behavior the #470 fix must not break).
+	require.NoError(t, p.UpdateContent(instA))
+	require.True(t, p.isScrolling,
+		"re-rendering the same instance must preserve scroll mode")
+
+	// Now switch to B. Scroll state must be cleared and B's content rendered.
+	require.NoError(t, p.UpdateContent(instB))
+	require.False(t, p.isScrolling,
+		"switching to a different instance must exit scroll mode")
+	require.False(t, p.previewState.fallback,
+		"B is a real running instance; preview must not be in fallback")
+	require.Equal(t, previewB, p.previewState.text,
+		"preview must reflect the newly selected instance's content")
+	require.NotContains(t, p.viewport.View(), previewA,
+		"stale viewport content from A must be cleared")
+}

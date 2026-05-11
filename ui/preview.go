@@ -18,6 +18,10 @@ type PreviewPane struct {
 	previewState previewState
 	isScrolling  bool
 	viewport     viewport.Model
+	// currentInstance is the instance whose content is currently rendered.
+	// Tracked so UpdateContent can detect instance switches and drop stale
+	// scroll-mode viewport content belonging to the previous instance.
+	currentInstance *session.Instance
 }
 
 type previewState struct {
@@ -50,6 +54,19 @@ func (p *PreviewPane) setFallbackState(message string) {
 
 // Updates the preview pane content with the tmux pane content
 func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
+	// If the selected instance changed since the last render, drop any
+	// scroll-mode viewport content captured from the previous instance.
+	// Otherwise switching instances while scrolling leaves the viewport
+	// pinned on the previous instance's output (issue #470).
+	if instance != p.currentInstance {
+		if p.isScrolling {
+			p.isScrolling = false
+			p.viewport.SetContent("")
+			p.viewport.GotoTop()
+		}
+		p.currentInstance = instance
+	}
+
 	switch {
 	case instance == nil:
 		p.setFallbackState("No agents running yet. Spin up a new instance with 'n' to get started!")
