@@ -1,18 +1,22 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,7 +40,12 @@ func TestHookBackendType(t *testing.T) {
 	assert.Equal(t, "remote", b.Type())
 }
 
-func TestLocalBackendKillRetainsFailedTmuxForRetry(t *testing.T) {
+// TestLocalBackendKillBestEffort_TmuxFails is a regression test for issue
+// #478. When the tmux teardown fails, Kill must still clear in-memory state
+// and return nil so the caller can finish removing the session from the
+// persisted instances.json. The failure is surfaced as a WarningLog entry
+// (including the instance title) for diagnosis.
+func TestLocalBackendKillBestEffort_TmuxFails(t *testing.T) {
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(*exec.Cmd) error {
 			return errors.New("kill failed")
@@ -45,19 +54,126 @@ func TestLocalBackendKillRetainsFailedTmuxForRetry(t *testing.T) {
 			return nil, nil
 		},
 	}
-	ts := tmux.NewTmuxSessionWithDeps("retry-kill", "bash", nil, cmdExec)
+	ts := tmux.NewTmuxSessionWithDeps("best-effort-tmux", "bash", nil, cmdExec)
 	inst := &Instance{
-		Title:       "retry-kill",
+		Title:       "best-effort-tmux",
 		backend:     &LocalBackend{},
 		started:     true,
 		tmuxSession: ts,
 	}
 
-	err := inst.Kill()
-	require.Error(t, err)
+	buf := captureWarningLog(t)
 
-	err = inst.Kill()
-	require.Error(t, err, "failed tmux cleanup must remain retryable instead of becoming a false success")
+	require.NoError(t, inst.Kill(), "tmux cleanup failure must not block deletion")
+	assert.False(t, inst.Started(), "started flag should be cleared")
+	assert.Nil(t, inst.tmuxSession, "tmux pointer should be cleared so a retry is a clean no-op")
+
+	logged := buf.String()
+	assert.Contains(t, logged, "best-effort-tmux", "warning must include instance title for correlation in agent-factory.log")
+	assert.Contains(t, logged, "tmux cleanup failed")
+
+	require.NoError(t, inst.Kill(), "second kill on a cleared instance must be a no-op")
+}
+
+// TestLocalBackendKillBestEffort_WorktreeFails reproduces the exact scenario
+// from issue #478: the git worktree cleanup fails because the path is no
+// longer a working tree, and the user is stuck unable to delete the session.
+// After the fix, Kill logs a warning and returns nil so the caller can
+// remove the row from the sidebar and the persisted record.
+func TestLocalBackendKillBestEffort_WorktreeFails(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+
+	// Create a real directory that exists but is NOT a git worktree.
+	// `git worktree remove -f` on this path returns the "is not a working
+	// tree" error pattern users see in the issue.
+	stalePath := filepath.Join(t.TempDir(), "stale-worktree")
+	require.NoError(t, os.MkdirAll(stalePath, 0755))
+
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, stalePath, "issue-478", "issue-478-branch", "", false, false)
+	require.NoError(t, err)
+
+	inst := &Instance{
+		Title:       "issue-478",
+		backend:     &LocalBackend{},
+		started:     true,
+		gitWorktree: gw,
+	}
+
+	buf := captureWarningLog(t)
+
+	require.NoError(t, inst.Kill(), "worktree cleanup failure must not block deletion")
+	assert.False(t, inst.Started())
+	assert.Nil(t, inst.gitWorktree, "git worktree pointer should be cleared")
+
+	logged := buf.String()
+	assert.Contains(t, logged, "issue-478", "warning must include instance title")
+	assert.Contains(t, logged, "git worktree cleanup failed")
+	assert.Contains(t, logged, "is not a working tree", "warning should preserve the underlying git error so users can diagnose")
+}
+
+// TestLocalBackendKillBestEffort_BothFail covers the multi-component failure
+// case: both tmux and worktree cleanup blow up, and Kill should still return
+// nil with a warning per component.
+func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error {
+			return errors.New("kill failed")
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	ts := tmux.NewTmuxSessionWithDeps("both-fail", "bash", nil, cmdExec)
+
+	repoRoot := initTempGitRepo(t)
+	stalePath := filepath.Join(t.TempDir(), "stale")
+	require.NoError(t, os.MkdirAll(stalePath, 0755))
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, stalePath, "both-fail", "both-fail-branch", "", false, false)
+	require.NoError(t, err)
+
+	inst := &Instance{
+		Title:       "both-fail",
+		backend:     &LocalBackend{},
+		started:     true,
+		tmuxSession: ts,
+		gitWorktree: gw,
+	}
+
+	buf := captureWarningLog(t)
+
+	require.NoError(t, inst.Kill())
+	assert.Nil(t, inst.tmuxSession)
+	assert.Nil(t, inst.gitWorktree)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "tmux cleanup failed")
+	assert.Contains(t, logged, "git worktree cleanup failed")
+	assert.Equal(t, 2, strings.Count(logged, "both-fail"), "title should appear in both component warnings")
+}
+
+// captureWarningLog redirects log.WarningLog to a buffer for the duration of
+// the test and returns the buffer. Restoration happens via t.Cleanup.
+func captureWarningLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := log.WarningLog
+	log.WarningLog = stdlog.New(&buf, "WARNING: ", 0)
+	t.Cleanup(func() { log.WarningLog = orig })
+	return &buf
+}
+
+// initTempGitRepo initializes an empty git repo in a temp directory and
+// returns its absolute path. Used by best-effort Kill tests that need a
+// real repo path for git worktree commands to dispatch against.
+func initTempGitRepo(t *testing.T) string {
+	t.Helper()
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(repoRoot, 0755))
+	cmd := exec.Command("git", "init")
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return repoRoot
 }
 
 // --- IsRemote helper ---

@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -126,43 +125,40 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
+// Kill is best-effort: each cleanup step runs independently and a failure in
+// one (e.g. a broken git worktree) only logs a warning rather than aborting
+// the rest. The in-memory pointers are cleared regardless so the daemon
+// caller can always proceed to remove the persisted record. See issue #478.
 func (b *LocalBackend) Kill(i *Instance) error {
 	i.mu.Lock()
 	ts := i.tmuxSession
 	gw := i.gitWorktree
+	title := i.Title
 	i.started = false
 	i.mu.Unlock()
 
-	var errs []error
-	tmuxCleaned := ts == nil
-	worktreeCleaned := gw == nil
-
 	if ts != nil {
 		if err := ts.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close tmux session: %w", err))
-		} else {
-			tmuxCleaned = true
+			log.WarningLog.Printf("kill %q: tmux cleanup failed: %v", title, err)
 		}
 	}
 
 	if gw != nil {
 		if err := gw.Cleanup(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to cleanup git worktree: %w", err))
-		} else {
-			worktreeCleaned = true
+			log.WarningLog.Printf("kill %q: git worktree cleanup failed: %v", title, err)
 		}
 	}
 
 	i.mu.Lock()
-	if tmuxCleaned && i.tmuxSession == ts {
+	if i.tmuxSession == ts {
 		i.tmuxSession = nil
 	}
-	if worktreeCleaned && i.gitWorktree == gw {
+	if i.gitWorktree == gw {
 		i.gitWorktree = nil
 	}
 	i.mu.Unlock()
 
-	return errors.Join(errs...)
+	return nil
 }
 
 func (b *LocalBackend) Preview(i *Instance) (string, error) {
