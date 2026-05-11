@@ -133,7 +133,14 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	}
 	widthAvail := r.width - 3 - runewidth.StringWidth(prefix) - 1
 	if widthAvail > 0 && runewidth.StringWidth(titleText) > widthAvail {
-		titleText = runewidth.Truncate(titleText, widthAvail-3, "...")
+		// Drop the "..." tail when the container is too narrow to fit it,
+		// otherwise runewidth.Truncate returns content wider than widthAvail
+		// and lipgloss.Place won't clip the overflow.
+		tail := "..."
+		if widthAvail < runewidth.StringWidth(tail) {
+			tail = ""
+		}
+		titleText = runewidth.Truncate(titleText, widthAvail, tail)
 	}
 	title := titleS.Render(lipgloss.JoinHorizontal(
 		lipgloss.Left,
@@ -187,7 +194,11 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		prText := fmt.Sprintf("PR #%d: %s", prInfo.Number, prInfo.Title)
 		prMaxWidth := r.width - len(prefix) - 2
 		if prMaxWidth > 0 && runewidth.StringWidth(prText) > prMaxWidth {
-			prText = runewidth.Truncate(prText, prMaxWidth-3, "...")
+			tail := "..."
+			if prMaxWidth < runewidth.StringWidth(tail) {
+				tail = ""
+			}
+			prText = runewidth.Truncate(prText, prMaxWidth, tail)
 		}
 		prLine = fmt.Sprintf("%s %s", strings.Repeat(" ", len(prefix)), prText)
 	}
