@@ -222,3 +222,28 @@ func TestStartTmuxSession(t *testing.T) {
 	_, err = ptyFactory.files[1].Stat()
 	require.NoError(t, err)
 }
+
+func TestAgentNameFromProgram(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"whitespace only", "   ", ""},
+		{"bare canonical name", "claude", "claude"},
+		{"canonical with flags", "claude --dangerously-skip-permissions", "claude"},
+		{"absolute path", "/home/user/.local/bin/claude --foo", "claude"},
+		{"aider with model flag", "/usr/local/bin/aider --model gpt-4", "aider"},
+		{"codex bare", "codex", "codex"},
+		{"gemini in path", "/opt/gemini/bin/gemini --quiet", "gemini"},
+		{"unknown binary with flags", "foo --bar", "foo"},
+		{"unknown absolute path", "/opt/tools/foo --bar baz", "foo"},
+		{"uppercase canonical", "CLAUDE --foo", "claude"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, AgentNameFromProgram(tc.in))
+		})
+	}
+}

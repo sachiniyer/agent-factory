@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -160,4 +161,27 @@ func TestTaskPaneEditModePersistsProgramChange(t *testing.T) {
 	if assert.Len(t, tasks, 1) {
 		assert.Equal(t, "aider", tasks[0].Program, "Program field must reflect the edited value")
 	}
+}
+
+// TestTaskPaneListShowsAgentNameNotFullProgram confirms the list view collapses
+// a noisy program string (path + flags) down to the agent name for #455.
+func TestTaskPaneListShowsAgentNameNotFullProgram(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetSize(80, 24)
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "0 0 * * *",
+		ProjectPath: "/tmp/repo",
+		Program:     "/usr/local/bin/aider --model gpt-4",
+		Enabled:     true,
+	}})
+
+	out := tp.String()
+	assert.Contains(t, out, "aider", "list view should render the agent name")
+	assert.False(t, strings.Contains(out, "/usr/local/bin/aider"),
+		"list view must not include the full program path")
+	assert.False(t, strings.Contains(out, "--model gpt-4"),
+		"list view must not include program flags")
 }
