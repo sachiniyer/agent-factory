@@ -175,6 +175,30 @@ func TestCronToOnCalendarDOWSundayRange07(t *testing.T) {
 	assert.Equal(t, "*-*-* 09:00:00", result)
 }
 
+// TestCronToOnCalendarDOWListDedupes is a regression test for #465: "0,7"
+// both map to Sunday, which previously produced an invalid "Sun,Sun"
+// OnCalendar string that systemd rejects.
+func TestCronToOnCalendarDOWListDedupes(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 0,7")
+	require.NoError(t, err)
+	assert.Equal(t, "Sun *-*-* 09:00:00", result)
+}
+
+func TestCronToOnCalendarDOWListMonWedFri(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 1,3,5")
+	require.NoError(t, err)
+	assert.Equal(t, "Mon,Wed,Fri *-*-* 09:00:00", result)
+}
+
+// TestCronToOnCalendarDOWListAllDays covers a list whose elements union to
+// all 7 days. "0-6" alone is all days, so "0-6,7" must omit DOW entirely
+// (previously emitted invalid ",Sun").
+func TestCronToOnCalendarDOWListAllDays(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 0-6,7")
+	require.NoError(t, err)
+	assert.Equal(t, "*-*-* 09:00:00", result)
+}
+
 func TestCronToOnCalendarDOWNonSundayRange(t *testing.T) {
 	// Non-zero-starting ranges should still use .. syntax.
 	result, err := CronToOnCalendar("0 9 * * 2-4")
