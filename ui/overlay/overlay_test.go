@@ -131,3 +131,52 @@ func TestPlaceOverlayReverseVideoFadesAsBackground(t *testing.T) {
 		t.Fatalf("expected reverse-video styling to preserve background semantics, got: %q", result)
 	}
 }
+
+// TestPlaceOverlaySingleParamForegroundFade verifies the pre-existing
+// single-parameter case (e.g. \x1b[37m) is still faded to the medium-gray
+// foreground. Regression guard for the regex broadening in #469.
+func TestPlaceOverlaySingleParamForegroundFade(t *testing.T) {
+	result := PlaceOverlay(0, 0, "XX", "\x1b[37mhello\x1b[0m", false)
+
+	if !strings.Contains(result, "\x1b[38;5;240m") {
+		t.Fatalf("expected single-param fg code to be faded, got: %q", result)
+	}
+	if strings.Contains(result, "\x1b[37m") {
+		t.Fatalf("original \\x1b[37m should have been rewritten, got: %q", result)
+	}
+	if !strings.Contains(result, "\x1b[0m") {
+		t.Fatalf("trailing reset should be preserved, got: %q", result)
+	}
+}
+
+// TestPlaceOverlayMultiParamForegroundFade covers the #469 bug: lipgloss in
+// 16-color mode emits multi-parameter SGR sequences like \x1b[1;37m (bold +
+// white). The original regex only matched single-parameter sequences, so these
+// passed through the fade logic unchanged and stayed visible under overlays.
+func TestPlaceOverlayMultiParamForegroundFade(t *testing.T) {
+	result := PlaceOverlay(0, 0, "XX", "\x1b[1;37mhello\x1b[0m", false)
+
+	if strings.Contains(result, "\x1b[1;37m") {
+		t.Fatalf("multi-param SGR \\x1b[1;37m leaked through fade: %q", result)
+	}
+	if !strings.Contains(result, "\x1b[38;5;240m") {
+		t.Fatalf("expected multi-param fg code to be faded, got: %q", result)
+	}
+	if !strings.Contains(result, "\x1b[0m") {
+		t.Fatalf("trailing reset should be preserved, got: %q", result)
+	}
+}
+
+// TestPlaceOverlayMultiParamBackgroundFade verifies that a multi-parameter SGR
+// whose parameters include a background-color code is faded to the dark-gray
+// background rather than the foreground gray.
+func TestPlaceOverlayMultiParamBackgroundFade(t *testing.T) {
+	result := PlaceOverlay(0, 0, "XX", "\x1b[1;41mbold-red-bg\x1b[0m", false)
+
+	if strings.Contains(result, "\x1b[1;41m") {
+		t.Fatalf("multi-param SGR \\x1b[1;41m leaked through fade: %q", result)
+	}
+	if !strings.Contains(result, "\x1b[48;5;236m") {
+		t.Fatalf("expected multi-param bg code to be faded to bg gray, got: %q", result)
+	}
+}

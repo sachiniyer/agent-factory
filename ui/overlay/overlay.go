@@ -17,7 +17,7 @@ import (
 var (
 	bgColorRegex     = regexp.MustCompile(`\x1b\[(?:[0-9;]*;)?48;[25];[0-9;]+m`)
 	fgColorRegex     = regexp.MustCompile(`\x1b\[(?:[0-9;]*;)?38;[25];[0-9;]+m`)
-	simpleColorRegex = regexp.MustCompile(`\x1b\[[0-9]+m`)
+	simpleColorRegex = regexp.MustCompile(`\x1b\[[0-9;]+m`)
 )
 
 // WhitespaceOption sets a styling rule for rendering whitespace.
@@ -71,19 +71,34 @@ func PlaceOverlay(
 		// Replace foreground color codes with a faded version
 		content = fgColorRegex.ReplaceAllString(content, "\x1b[38;5;240m") // Medium gray foreground
 
-		// Replace simple color codes with a faded version
+		// Replace simple color codes with a faded version. Handles both
+		// single-parameter (e.g. \x1b[37m) and multi-parameter (e.g.
+		// \x1b[1;37m) SGR sequences emitted by lipgloss in 16-color mode.
 		content = simpleColorRegex.ReplaceAllStringFunc(content, func(match string) string {
-			// Skip reset codes
+			// Preserve pure reset (\x1b[0m) so styled regions still close.
 			if match == "\x1b[0m" {
 				return match
 			}
 			codeText := strings.TrimSuffix(strings.TrimPrefix(match, "\x1b["), "m")
-			code, err := strconv.Atoi(codeText)
-			if err == nil && (code == 7 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+			isBg := false
+			hasFadeableParam := false
+			for _, p := range strings.Split(codeText, ";") {
+				code, err := strconv.Atoi(p)
+				if err != nil || code == 0 {
+					continue
+				}
+				hasFadeableParam = true
+				if code == 7 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107) {
+					isBg = true
+				}
+			}
+			if !hasFadeableParam {
+				return match
+			}
+			if isBg {
 				return "\x1b[48;5;236m" // Dark gray background
 			}
-			// Replace with dimmed color
-			return "\x1b[38;5;240m" // Medium gray
+			return "\x1b[38;5;240m" // Medium gray foreground
 		})
 
 		fadedBgLines[i] = content
