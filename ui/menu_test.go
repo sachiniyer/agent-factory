@@ -34,16 +34,29 @@ func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 	}
 }
 
-// TestMenuPreviewTabHidesScrollKeys ensures scroll shortcuts remain hidden
-// when the preview tab (not the terminal tab) is active.
-func TestMenuPreviewTabHidesScrollKeys(t *testing.T) {
+// TestMenuPreviewTabShowsBothScrollKeys verifies that the preview tab also
+// surfaces shift+up and shift+down — preview supports scrolling identically to
+// terminal, and the help screen documents the shortcuts for both. Regression
+// test for issue #467.
+func TestMenuPreviewTabShowsBothScrollKeys(t *testing.T) {
 	m := NewMenu()
 	m.SetInstance(&session.Instance{Status: session.Ready})
 	m.SetActiveTab(PreviewTab)
 
+	var gotShiftUp, gotShiftDown int
 	for _, k := range m.options {
-		if k == keys.KeyShiftUp || k == keys.KeyShiftDown {
-			t.Errorf("preview tab menu should not contain scroll keys, found %v", k)
+		switch k {
+		case keys.KeyShiftUp:
+			gotShiftUp++
+		case keys.KeyShiftDown:
+			gotShiftDown++
 		}
+	}
+
+	if gotShiftUp != 1 {
+		t.Errorf("expected exactly 1 KeyShiftUp in preview tab menu, got %d", gotShiftUp)
+	}
+	if gotShiftDown != 1 {
+		t.Errorf("expected exactly 1 KeyShiftDown in preview tab menu, got %d", gotShiftDown)
 	}
 }
