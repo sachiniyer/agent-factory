@@ -351,6 +351,31 @@ func TestGetWorktreeDirectoryForRepo_FromLinkedWorktree(t *testing.T) {
 		"new worktrees should be placed next to the main repo, not next to a linked worktree")
 }
 
+// TestIsPathStrictlyInside covers the containment check used to validate that
+// a derived worktree path lives under the configured worktree directory. The
+// `/`-root cases exercise the fix for #461.
+func TestIsPathStrictlyInside(t *testing.T) {
+	cases := []struct {
+		name    string
+		absBase string
+		absDir  string
+		want    bool
+	}{
+		{"nested under home", "/home/user/repo-session", "/home/user", true},
+		{"nested under root", "/repo-session", "/", true},
+		{"sibling directory", "/home/user2/foo", "/home/user", false},
+		{"equal to dir", "/home/user", "/home/user", false},
+		{"equal to root", "/", "/", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isPathStrictlyInside(tc.absBase, tc.absDir)
+			assert.Equal(t, tc.want, got,
+				"isPathStrictlyInside(%q, %q)", tc.absBase, tc.absDir)
+		})
+	}
+}
+
 func createGitRepo(t *testing.T) string {
 	t.Helper()
 	repoRoot := filepath.Join(t.TempDir(), "repo")
