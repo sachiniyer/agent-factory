@@ -2,7 +2,9 @@ package tmux
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +77,103 @@ func TestCloseDuringAttachRace(t *testing.T) {
 		if session.ptmx != nil {
 			t.Fatalf("expected ptmx to be nil after Close")
 		}
+	}
+}
+
+// TestDetachClearsPtmxOnRestoreFailure is a regression test for issue #464.
+//
+// Detach used to close t.ptmx and then call Restore without clearing the
+// field. If Restore failed (e.g. tmux session vanished between detach and
+// re-attach), t.ptmx was left pointing at the closed file. A subsequent
+// Attach would silently bind goroutines to the closed handle and hang.
+//
+// Detach must clear t.ptmx after closing so the state is unambiguously
+// "no PTY", and Attach must surface a clear error rather than proceeding
+// against a nil/closed handle.
+func TestDetachClearsPtmxOnRestoreFailure(t *testing.T) {
+	ptyFactory := NewMockPtyFactory(t)
+
+	// First has-session (from the test's initial Restore) reports the
+	// session exists so we can stand up a live ptmx. Subsequent calls
+	// (from Detach's internal Restore("")) report missing so Restore
+	// fails and exercises the bug.
+	hasSessionCalls := 0
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "has-session") {
+				hasSessionCalls++
+				if hasSessionCalls > 1 {
+					return fmt.Errorf("session vanished")
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return nil, nil },
+	}
+
+	session := newTmuxSession(toTmuxName("detach-restore-fail", ""), "claude", ptyFactory, cmdExec)
+
+	// Stand up the initial PTY the way Start would.
+	if err := session.Restore(""); err != nil {
+		t.Fatalf("initial Restore: %v", err)
+	}
+
+	// Mimic the bookkeeping that Attach() sets up so Detach has matching
+	// state to tear down. The real Attach goroutines touch stdin/SIGWINCH
+	// and so are unsuitable for tests; an empty wg is sufficient for
+	// Detach to complete.
+	session.attachCh = make(chan struct{})
+	session.wg = &sync.WaitGroup{}
+	session.ctx, session.cancel = context.WithCancel(context.Background())
+
+	session.Detach()
+
+	if session.ptmx != nil {
+		t.Fatalf("expected ptmx to be nil after Detach with failed Restore, got %v", session.ptmx)
+	}
+
+	// A subsequent Attach must surface a clear error rather than hang on
+	// a closed PTY.
+	ch, err := session.Attach()
+	if err == nil {
+		t.Fatalf("expected Attach to error when ptmx is nil")
+	}
+	if ch != nil {
+		t.Fatalf("expected nil channel when Attach errors, got %v", ch)
+	}
+	if !strings.Contains(err.Error(), "no PTY") {
+		t.Fatalf("expected error to mention missing PTY, got %v", err)
+	}
+}
+
+// TestDetachHappyPathReplacesPtmx confirms the normal Detach flow still
+// installs a fresh PTY via Restore, so the issue #464 fix doesn't regress
+// the path where the tmux session is alive after detach.
+func TestDetachHappyPathReplacesPtmx(t *testing.T) {
+	ptyFactory := NewMockPtyFactory(t)
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc:    func(cmd *exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return nil, nil },
+	}
+
+	session := newTmuxSession(toTmuxName("detach-happy", ""), "claude", ptyFactory, cmdExec)
+	if err := session.Restore(""); err != nil {
+		t.Fatalf("initial Restore: %v", err)
+	}
+	original := session.ptmx
+
+	session.attachCh = make(chan struct{})
+	session.wg = &sync.WaitGroup{}
+	session.ctx, session.cancel = context.WithCancel(context.Background())
+
+	session.Detach()
+
+	if session.ptmx == nil {
+		t.Fatalf("expected ptmx to be set after successful Detach -> Restore")
+	}
+	if session.ptmx == original {
+		t.Fatalf("expected Detach to swap in a fresh ptmx, got the original handle")
 	}
 }
 
