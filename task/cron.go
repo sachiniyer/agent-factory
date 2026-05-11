@@ -234,12 +234,31 @@ func convertDOW(field string) string {
 		return strings.Join(names, ",")
 	}
 
-	// Handle lists (e.g. "1,3,5" → "Mon,Wed,Fri")
+	// Handle lists (e.g. "1,3,5" → "Mon,Wed,Fri"). Dedupe day names so
+	// "0,7" → "Sun" (not "Sun,Sun"), and short-circuit to "" if any element
+	// already covers all 7 days (e.g. "0-6,7"), matching the wildcard
+	// convention of omitting DOW entirely.
 	if strings.Contains(field, ",") {
 		parts := strings.Split(field, ",")
-		names := make([]string, len(parts))
-		for i, p := range parts {
-			names[i] = convertSingleDOW(p)
+		seen := make(map[string]bool)
+		var names []string
+		for _, p := range parts {
+			converted := convertSingleDOW(p)
+			if converted == "" {
+				// A single element covers all 7 days; so does the list.
+				return ""
+			}
+			// A single element may itself expand to a comma-separated
+			// list (e.g. "0-1" → "Sun,Mon"); split before dedupe.
+			for _, n := range strings.Split(converted, ",") {
+				if !seen[n] {
+					seen[n] = true
+					names = append(names, n)
+				}
+			}
+		}
+		if len(names) >= 7 {
+			return ""
 		}
 		return strings.Join(names, ",")
 	}
