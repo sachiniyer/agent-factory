@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	ConfigFileName = "config.json"
-	defaultProgram = "claude"
+	ConfigFileName            = "config.json"
+	defaultProgram            = "claude"
+	defaultDaemonPollInterval = 1000
 )
 
 var aliasOutputRegex = regexp.MustCompile(`(?:aliased to|->|^[^/=\s]+\s*=)\s*(.+)`)
@@ -79,7 +80,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		DefaultProgram:     program,
 		AutoYes:            false,
-		DaemonPollInterval: 1000,
+		DaemonPollInterval: defaultDaemonPollInterval,
 		BranchPrefix: func() string {
 			user, err := user.Current()
 			if err != nil || user == nil || user.Username == "" {
@@ -169,6 +170,11 @@ func LoadConfig() *Config {
 	if err := json.Unmarshal(data, config); err != nil {
 		log.ErrorLog.Printf("failed to parse config file: %v", err)
 		return DefaultConfig()
+	}
+
+	if config.DaemonPollInterval <= 0 {
+		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)
+		config.DaemonPollInterval = defaultDaemonPollInterval
 	}
 
 	return config
