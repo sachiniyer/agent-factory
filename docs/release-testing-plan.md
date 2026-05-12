@@ -56,7 +56,7 @@ Expected result:
 | Scheduled tasks | Unit tests cover cron parsing, systemd/launchd rendering, task CRUD, and task runner storage. Integration tests run the same task twice and verify `name` then `name-2`. | On a Linux machine with systemd user timers, add/list/remove one task and confirm the timer exists then disappears. On macOS, verify launchd plist load/unload on a real host before macOS-targeted releases. |
 | Remote hooks | Session and integration tests cover launch/list/import/attach/delete protocols, bad JSON, command failures, duplicate imports, and imported display-title deletion. | Configure `examples/remote-hooks` or a repo-local fake hook set, import, preview, and delete a remote session. |
 | Reset/cleanup | Unit tests cover ghost sessions and worktree cleanup helpers. | With temp `AGENT_FACTORY_HOME`, create two sessions, run `af reset`, then confirm tmux sessions, worktrees, and stored instances are gone. |
-| Upgrade/release artifacts | Unit tests cover archive extraction and release URL behavior indirectly; CI builds Linux/macOS artifacts. | Download the release tarball for the host platform, unpack it, run `af version`, and test `af upgrade` from the previous release binary. |
+| Upgrade/release artifacts | Unit tests cover binary download (success, non-200, stalled body, stalled headers) and archive extraction; CI builds Linux/macOS artifacts. | Download the release tarball for the host platform, unpack it, run `af version`, and test `af upgrade` from the previous release binary. |
 | UI rendering | UI tests cover sidebar/menu/task pane/preview/terminal layout and overlay behavior. | Open the TUI in a narrow terminal and a normal terminal, verify text does not overlap, and check help/confirmation overlays. |
 
 ## Manual Smoke
