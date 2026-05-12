@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"fmt"
 	cmd2 "github.com/sachiniyer/agent-factory/cmd"
 	"math/rand"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -221,6 +223,140 @@ func TestStartTmuxSession(t *testing.T) {
 	// File should be open
 	_, err = ptyFactory.files[1].Stat()
 	require.NoError(t, err)
+}
+
+// captureErrorLog redirects log.ErrorLog at the test's ErrorLog into the
+// returned buffer for the duration of the test, restoring the previous
+// destination on cleanup.
+func captureErrorLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := aflog.ErrorLog.Writer()
+	aflog.ErrorLog.SetOutput(&buf)
+	t.Cleanup(func() { aflog.ErrorLog.SetOutput(prev) })
+	return &buf
+}
+
+// makeAttachedSession builds a TmuxSession that has already been "Restored":
+// a statusMonitor is in place, but no real PTY exists. captureOK controls
+// whether capture-pane succeeds; sessionAlive controls what has-session
+// reports. The returned counters are incremented on each respective call so
+// tests can assert call counts.
+func makeAttachedSession(t *testing.T, captureOK, sessionAlive *atomic.Bool) (*TmuxSession, *atomic.Int32, *atomic.Int32) {
+	t.Helper()
+	var captureCalls atomic.Int32
+	var hasSessionCalls atomic.Int32
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "has-session") {
+				hasSessionCalls.Add(1)
+				if sessionAlive.Load() {
+					return nil
+				}
+				return fmt.Errorf("can't find session")
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "capture-pane") {
+				captureCalls.Add(1)
+				if !captureOK.Load() {
+					return nil, fmt.Errorf("exit status 1")
+				}
+				return []byte("pane content"), nil
+			}
+			return []byte("output"), nil
+		},
+	}
+
+	session := newTmuxSession(toTmuxName("monitor", ""), "claude", NewMockPtyFactory(t), cmdExec)
+	session.monitor = newStatusMonitor()
+	return session, &captureCalls, &hasSessionCalls
+}
+
+// TestHasUpdatedSilentWhenSessionGone covers issue #489: when capture-pane
+// fails because the tmux session is gone, HasUpdated must log exactly once,
+// mark the monitor dead, and short-circuit subsequent polls so the
+// per-second daemon loop cannot flood agent-factory.log.
+func TestHasUpdatedSilentWhenSessionGone(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	// capture-pane fails AND has-session reports dead.
+	session, captureCalls, hasSessionCalls := makeAttachedSession(t, &captureOK, &sessionAlive)
+
+	logs := captureErrorLog(t)
+
+	updated, hasPrompt := session.HasUpdated()
+	require.False(t, updated)
+	require.False(t, hasPrompt)
+	require.True(t, session.monitor.dead, "monitor must latch dead after confirming session is gone")
+	require.Equal(t, int32(1), captureCalls.Load())
+	require.Equal(t, int32(1), hasSessionCalls.Load())
+	firstLog := logs.String()
+	require.Contains(t, firstLog, "going silent")
+	require.Equal(t, 1, strings.Count(firstLog, "\n"), "exactly one log line on the first failure")
+
+	// 50 more ticks while the session is still gone must produce zero new
+	// log lines and zero additional capture-pane / has-session calls.
+	for i := 0; i < 50; i++ {
+		updated, hasPrompt = session.HasUpdated()
+		require.False(t, updated)
+		require.False(t, hasPrompt)
+	}
+	require.Equal(t, firstLog, logs.String(), "no further logs while dead")
+	require.Equal(t, int32(1), captureCalls.Load(), "no further capture-pane calls while dead")
+	require.Equal(t, int32(1), hasSessionCalls.Load(), "no further has-session calls while dead")
+}
+
+// TestHasUpdatedRespawnResetsDead documents that a re-spawn via Restore
+// produces a fresh statusMonitor with dead cleared, so polling resumes
+// normally after the session comes back. This is the recovery path for
+// issue #489 — operators don't have to restart the daemon after a stale
+// instance is healed.
+func TestHasUpdatedRespawnResetsDead(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+	_ = captureErrorLog(t)
+
+	// First poll: session gone, monitor goes dead.
+	session.HasUpdated()
+	require.True(t, session.monitor.dead)
+
+	// Session comes back; Restore attaches and installs a fresh monitor.
+	sessionAlive.Store(true)
+	captureOK.Store(true)
+	require.NoError(t, session.Restore("/some/work/dir"))
+	require.NotNil(t, session.monitor)
+	require.False(t, session.monitor.dead, "fresh monitor after Restore must not be dead")
+
+	// Polling resumes and produces a normal updated=true on first content.
+	updated, _ := session.HasUpdated()
+	require.True(t, updated, "first capture after Restore should report updated")
+}
+
+// TestHasUpdatedTransientErrorKeepsLogging covers the other branch of #489:
+// if capture-pane fails but DoesSessionExist still reports the session is
+// alive (a rare transient error), the monitor must NOT latch dead and the
+// error must still be visible in the log every tick — the spam fix should
+// not silently swallow real problems.
+func TestHasUpdatedTransientErrorKeepsLogging(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	// capture-pane fails BUT has-session reports the session is alive.
+	sessionAlive.Store(true)
+	session, captureCalls, hasSessionCalls := makeAttachedSession(t, &captureOK, &sessionAlive)
+
+	logs := captureErrorLog(t)
+
+	for i := 0; i < 3; i++ {
+		updated, hasPrompt := session.HasUpdated()
+		require.False(t, updated)
+		require.False(t, hasPrompt)
+	}
+	require.False(t, session.monitor.dead, "transient capture-pane error must not latch dead")
+	require.Equal(t, int32(3), captureCalls.Load())
+	require.Equal(t, int32(3), hasSessionCalls.Load())
+	require.Equal(t, 3, strings.Count(logs.String(), "error capturing pane content in status monitor"))
+	require.NotContains(t, logs.String(), "going silent")
 }
 
 func TestAgentNameFromProgram(t *testing.T) {
