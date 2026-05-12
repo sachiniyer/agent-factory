@@ -281,6 +281,13 @@ func (t *TmuxSession) Restore(workDir string) error {
 type statusMonitor struct {
 	// Store hashes to save memory.
 	prevOutputHash []byte
+	// dead is set once a capture-pane failure has been confirmed by
+	// DoesSessionExist() reporting the tmux session is gone. While true,
+	// HasUpdated short-circuits and emits no further logs so a stale
+	// instance can't flood agent-factory.log (#489). A successful Start or
+	// Restore replaces the monitor with a fresh one, which naturally clears
+	// this state on respawn.
+	dead bool
 }
 
 func newStatusMonitor() *statusMonitor {
@@ -340,8 +347,23 @@ func (t *TmuxSession) SendKeysCommand(text string) error {
 // HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if
 // the tmux pane has a prompt for aider or claude code.
 func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
+	// Once the underlying tmux session has been confirmed gone, stay silent
+	// instead of relogging capture-pane failures every daemon tick (#489).
+	if t.monitor.dead {
+		return false, false
+	}
+
 	content, err := t.CapturePaneContent()
 	if err != nil {
+		// If the tmux session no longer exists, log once and latch the
+		// monitor as dead so the daemon's per-second poll doesn't spam
+		// the log (#489). Transient capture-pane failures while the
+		// session is still alive are rare and still surface every tick.
+		if !t.DoesSessionExist() {
+			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
+			t.monitor.dead = true
+			return false, false
+		}
 		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
 		return false, false
 	}
