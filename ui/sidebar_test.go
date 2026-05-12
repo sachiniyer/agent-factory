@@ -2,11 +2,14 @@ package ui
 
 import (
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -272,4 +275,119 @@ func TestSidebarRender(t *testing.T) {
 	rendered := s.String()
 	assert.Contains(t, rendered, "Instances (1)")
 	assert.NotEmpty(t, rendered)
+}
+
+// renderForTerminal renders an instance at the sidebar width app.go derives
+// from the given terminal width, and returns the rendered title and PR lines.
+// The renderer wraps each section in lipgloss padding, so the visible title
+// content sits on line 1 (after the top-padding line) and the PR content
+// sits on line 4 (title content + branch + branch-pad + pr content).
+func renderForTerminal(t *testing.T, terminalW int, inst *session.Instance, spin *spinner.Model) (titleLine string, prLine string, sidebarW int) {
+	t.Helper()
+	sidebarW = int(float32(terminalW) * 0.3)
+	r := &InstanceRenderer{spinner: spin}
+	r.setWidth(sidebarW)
+	out := r.Render(inst, 1, false, false)
+	lines := strings.Split(out, "\n")
+	require.GreaterOrEqual(t, len(lines), 2, "renderer should emit at least a title row")
+	titleLine = lines[1]
+	if len(lines) >= 5 {
+		prLine = lines[4]
+	}
+	return titleLine, prLine, sidebarW
+}
+
+// TestInstanceRendererNarrowTerminalNoOverflow guards against the regression
+// reported in #466: at 40-43 column terminal widths the sidebar's instance
+// row ended with a "..." artifact that pushed the rendered line one cell past
+// the sidebar container width.
+func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "long-feature",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+
+	cases := []struct {
+		name              string
+		terminalW         int
+		expectFullTitle   bool
+		expectEllipsis    bool
+		expectNoOverflow  bool
+		expectNoTitleTail bool
+	}{
+		// Plenty of room — full title, no truncation.
+		{name: "width80", terminalW: 80, expectFullTitle: true, expectNoOverflow: true},
+		// Some truncation, room for the ellipsis.
+		{name: "width50", terminalW: 50, expectEllipsis: true, expectNoOverflow: true},
+		// Bug range: widthAvail is positive but less than the 3-cell ellipsis.
+		// The fix must drop the tail rather than render a "..." artifact.
+		{name: "width43", terminalW: 43, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width42", terminalW: 42, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width41", terminalW: 41, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width40", terminalW: 40, expectNoOverflow: true, expectNoTitleTail: true},
+		// Even narrower — widthAvail <= 0 so the truncation block is skipped,
+		// but the row must still not contain a stray "..." artifact.
+		{name: "width30", terminalW: 30, expectNoTitleTail: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			titleLine, _, sidebarW := renderForTerminal(t, tc.terminalW, inst, &spin)
+			w := lipgloss.Width(titleLine)
+
+			if tc.expectFullTitle {
+				assert.Contains(t, titleLine, inst.Title, "wide terminal should render the full title")
+				assert.NotContains(t, titleLine, "...", "wide terminal should not truncate")
+			}
+			if tc.expectEllipsis {
+				assert.Contains(t, titleLine, "...", "title should be truncated with ellipsis when there is room for it")
+			}
+			if tc.expectNoOverflow {
+				assert.LessOrEqualf(t, w, sidebarW,
+					"title line width (%d) must fit within sidebar container width (%d) at terminal=%d",
+					w, sidebarW, tc.terminalW)
+			}
+			if tc.expectNoTitleTail {
+				// Strip trailing padding, then the visible title text must
+				// not end with a stray ellipsis from a negative-width
+				// runewidth.Truncate call.
+				trimmed := strings.TrimRight(titleLine, " ")
+				assert.Falsef(t, strings.HasSuffix(trimmed, "..."),
+					"narrow terminal must not produce a '...' artifact; got %q", titleLine)
+			}
+		})
+	}
+}
+
+// TestInstanceRendererNarrowTerminalPRNoTail exercises the parallel
+// truncation site for PR text: when prMaxWidth drops below the 3-cell
+// ellipsis the row must drop the tail rather than render a "..." that
+// overflows the sidebar.
+func TestInstanceRendererNarrowTerminalPRNoTail(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "feat",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+	inst.SetPRInfo(&git.PRInfo{
+		Number: 1234,
+		Title:  "long pull request title needing truncation",
+		State:  "OPEN",
+	})
+
+	// terminalW=28..32 produces prMaxWidth in {1, 2}, which is the bug
+	// range where the pre-fix code passed a negative width to
+	// runewidth.Truncate and got back "..." (wider than prMaxWidth).
+	for _, terminalW := range []int{28, 30, 32} {
+		_, prLine, _ := renderForTerminal(t, terminalW, inst, &spin)
+		trimmed := strings.TrimRight(prLine, " ")
+		assert.Falsef(t, strings.HasSuffix(trimmed, "..."),
+			"PR line must not produce a '...' artifact at terminal=%d; got %q",
+			terminalW, prLine)
+	}
 }
