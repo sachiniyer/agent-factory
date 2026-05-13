@@ -376,6 +376,10 @@ func TestAgentNameFromProgram(t *testing.T) {
 		{"unknown binary with flags", "foo --bar", "foo"},
 		{"unknown absolute path", "/opt/tools/foo --bar baz", "foo"},
 		{"uppercase canonical", "CLAUDE --foo", "claude"},
+		// amp is intentionally not in SupportedPrograms (see #494); the helper
+		// must still degrade gracefully and yield the basename so reintroducing
+		// it requires an explicit decision.
+		{"amp falls through basename", "amp", "amp"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
