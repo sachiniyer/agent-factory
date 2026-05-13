@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -98,12 +99,16 @@ func autoUpdate() error {
 	// Same rationale as `af upgrade` (#498): take down the running daemon so
 	// the next RPC respawns it from the freshly written binary. Quiet on the
 	// no-daemon path since autoUpdate runs in the background on every launch.
-	restarted, shutdownErr := requestDaemonShutdownFn()
+	// Pre-#501 daemons don't speak the Shutdown RPC; RequestShutdown falls
+	// back to PID-file-based SIGTERM (#504).
+	result, shutdownErr := requestDaemonShutdownFn()
 	switch {
 	case shutdownErr != nil:
 		log.WarningLog.Printf("auto-update: updated to %s but failed to restart daemon: %v", latestVersion, shutdownErr)
-	case restarted:
+	case result == daemon.ShutdownViaRPC:
 		log.InfoLog.Printf("auto-update: updated to %s and stopped running daemon", latestVersion)
+	case result == daemon.ShutdownViaSIGTERM:
+		log.InfoLog.Printf("auto-update: updated to %s and stopped pre-#501 running daemon via SIGTERM fallback", latestVersion)
 	default:
 		log.InfoLog.Printf("auto-update: updated to %s (effective on next launch)", latestVersion)
 	}

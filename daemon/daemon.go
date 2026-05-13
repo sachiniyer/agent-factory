@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,6 +36,17 @@ func RunDaemon(cfg *config.Config) error {
 			log.WarningLog.Printf("failed to close daemon control socket: %v", err)
 		}
 	}()
+
+	// Write our PID so `af upgrade`'s SIGTERM fallback (#504) can find the
+	// running daemon. Both the SIGTERM and Shutdown-RPC exit paths fall
+	// through to the deferred cleanup, so the file is removed on any graceful
+	// shutdown. A stale file is harmless — readers verify the live process's
+	// cmdline before signaling it.
+	if err := writeDaemonPIDFile(); err != nil {
+		log.WarningLog.Printf("failed to write daemon PID file: %v", err)
+	} else {
+		defer removeDaemonPIDFile()
+	}
 
 	pollInterval := time.Duration(cfg.DaemonPollInterval) * time.Millisecond
 
@@ -177,19 +189,44 @@ func launchDaemonProcess() error {
 
 	log.InfoLog.Printf("started daemon child process with PID: %d", cmd.Process.Pid)
 
-	// Save PID to a file for later management
-	pidDir, err := config.GetConfigDir()
-	if err != nil {
-		return fmt.Errorf("failed to get config directory: %w", err)
-	}
-
-	pidFile := filepath.Join(pidDir, "daemon.pid")
-	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0644); err != nil {
-		return fmt.Errorf("failed to write PID file: %w", err)
-	}
-
-	// Don't wait for the child to exit, it's detached
+	// The child writes its own PID file from RunDaemon (#504). Don't wait for
+	// the child to exit, it's detached.
 	return nil
+}
+
+// daemonPIDFilePath returns the path to the daemon PID file, or "" if the
+// config dir cannot be resolved.
+func daemonPIDFilePath() (string, error) {
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "daemon.pid"), nil
+}
+
+// writeDaemonPIDFile atomically writes the current process's PID to the daemon
+// PID file with mode 0600. Used by RunDaemon so callers (StopDaemon, the
+// SIGTERM fallback in RequestShutdown) can locate and signal this daemon.
+func writeDaemonPIDFile() error {
+	path, err := daemonPIDFilePath()
+	if err != nil {
+		return err
+	}
+	return config.AtomicWriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+}
+
+// removeDaemonPIDFile deletes the daemon PID file. Best-effort: an ENOENT is
+// already harmless (a stale file is fine — readers verify cmdline) and
+// permission errors only occur in pathological setups. Logs at warning level
+// rather than failing the daemon teardown.
+func removeDaemonPIDFile() {
+	path, err := daemonPIDFilePath()
+	if err != nil {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
+	}
 }
 
 // StopDaemon attempts to stop a running daemon process if it exists. Returns no error if the daemon is not found
