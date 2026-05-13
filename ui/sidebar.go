@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"strings"
 
@@ -86,7 +88,10 @@ func (s *Sidebar) SetSize(width, height int) {
 	s.renderer.setWidth(width)
 }
 
-// SetSessionPreviewSize sets the tmux session preview sizes.
+// SetSessionPreviewSize sets the tmux session preview sizes. Instances whose
+// underlying tmux session has vanished (ErrSessionGone) are skipped silently
+// — the daemon-side latch already covers ongoing polling and the resize itself
+// has no useful work to do on a dead session (#496).
 func (s *Sidebar) SetSessionPreviewSize(width, height int) error {
 	var err error
 	for i, item := range s.instances {
@@ -94,6 +99,9 @@ func (s *Sidebar) SetSessionPreviewSize(width, height int) error {
 			continue
 		}
 		if innerErr := item.SetPreviewSize(width, height); innerErr != nil {
+			if errors.Is(innerErr, tmux.ErrSessionGone) {
+				continue
+			}
 			err = fmt.Errorf("could not set preview size for instance %d: %v", i, innerErr)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -72,7 +73,9 @@ func (l *List) SetSize(width, height int) {
 }
 
 // SetSessionPreviewSize sets the height and width for the tmux sessions. This makes the stdout line have the correct
-// width and height.
+// width and height. Instances whose tmux session has vanished are skipped
+// silently (ErrSessionGone) so an external `tmux kill-session` doesn't spam
+// ERROR logs on every window-resize (#496).
 func (l *List) SetSessionPreviewSize(width, height int) (err error) {
 	for i, item := range l.items {
 		if !item.Started() {
@@ -80,6 +83,9 @@ func (l *List) SetSessionPreviewSize(width, height int) (err error) {
 		}
 
 		if innerErr := item.SetPreviewSize(width, height); innerErr != nil {
+			if errors.Is(innerErr, tmux.ErrSessionGone) {
+				continue
+			}
 			err = errors.Join(
 				err, fmt.Errorf("could not set preview size for instance %d: %v", i, innerErr))
 		}

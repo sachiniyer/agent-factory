@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -119,6 +120,14 @@ func (t *TerminalPane) UpdateContent(instance *session.Instance) error {
 
 	content, err := s.tmuxSession.CapturePaneContent()
 	if err != nil {
+		// The DoesSessionExist pre-check above can race against an external
+		// kill of the tmux session. When CapturePaneContent reports the
+		// session is gone, fall through to the fallback state instead of
+		// propagating an error that handleError logs at ERROR (#496).
+		if errors.Is(err, tmux.ErrSessionGone) {
+			t.setFallbackState("Terminal session no longer running.")
+			return nil
+		}
 		return fmt.Errorf("terminal pane: failed to capture content: %w", err)
 	}
 
@@ -342,6 +351,10 @@ func (t *TerminalPane) enterScrollMode() error {
 
 	content, err := s.tmuxSession.CapturePaneContentWithOptions("-", "-")
 	if err != nil {
+		if errors.Is(err, tmux.ErrSessionGone) {
+			t.setFallbackState("Terminal session no longer running.")
+			return nil
+		}
 		return fmt.Errorf("terminal pane: failed to capture full history: %w", err)
 	}
 

@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"errors"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -84,6 +86,11 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 		// Capture full pane content including scrollback history using capture-pane -p -S -
 		content, err = instance.PreviewFullHistory()
 		if err != nil {
+			if errors.Is(err, tmux.ErrSessionGone) {
+				p.isScrolling = false
+				p.setFallbackState("Session no longer running.")
+				return nil
+			}
 			return err
 		}
 
@@ -97,6 +104,14 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 		// In normal mode, use the usual preview
 		content, err = instance.Preview()
 		if err != nil {
+			// Tmux session vanished out from under us (#496). Render an
+			// inactive-session fallback instead of propagating the error
+			// up to handleError, which would log "error capturing pane
+			// content" at ERROR every preview tick (every 100ms).
+			if errors.Is(err, tmux.ErrSessionGone) {
+				p.setFallbackState("Session no longer running.")
+				return nil
+			}
 			return err
 		}
 
@@ -193,6 +208,10 @@ func (p *PreviewPane) ScrollUp(instance *session.Instance) error {
 		// Entering scroll mode - capture entire pane content including scrollback history
 		content, err := instance.PreviewFullHistory()
 		if err != nil {
+			if errors.Is(err, tmux.ErrSessionGone) {
+				p.setFallbackState("Session no longer running.")
+				return nil
+			}
 			return err
 		}
 
@@ -226,6 +245,10 @@ func (p *PreviewPane) ScrollDown(instance *session.Instance) error {
 		// Entering scroll mode - capture entire pane content including scrollback history
 		content, err := instance.PreviewFullHistory()
 		if err != nil {
+			if errors.Is(err, tmux.ErrSessionGone) {
+				p.setFallbackState("Session no longer running.")
+				return nil
+			}
 			return err
 		}
 
@@ -270,6 +293,10 @@ func (p *PreviewPane) ResetToNormalMode(instance *session.Instance) error {
 		// Immediately update content instead of waiting for next UpdateContent call
 		content, err := instance.Preview()
 		if err != nil {
+			if errors.Is(err, tmux.ErrSessionGone) {
+				p.setFallbackState("Session no longer running.")
+				return nil
+			}
 			return err
 		}
 		p.previewState.text = content

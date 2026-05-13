@@ -3,6 +3,7 @@ package ui
 import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"strings"
 	"testing"
@@ -183,6 +184,39 @@ func TestSidebarInstanceManagement(t *testing.T) {
 	instances := s.GetInstances()
 	assert.Len(t, instances, 1)
 	assert.Equal(t, "test", instances[0].Title)
+}
+
+// goneSetPreviewSizeBackend wraps FakeBackend so SetPreviewSize emulates the
+// state after `tmux kill-session`: the underlying tmux/PTY layer returns
+// ErrSessionGone. Used to verify the sidebar's SetSessionPreviewSize swallows
+// the sentinel rather than spamming ERROR (#496).
+type goneSetPreviewSizeBackend struct {
+	*session.FakeBackend
+}
+
+func (b *goneSetPreviewSizeBackend) SetPreviewSize(*session.Instance, int, int) error {
+	return tmux.ErrSessionGone
+}
+
+// TestSidebarSetSessionPreviewSizeSkipsErrSessionGone is the #496 regression:
+// when an instance's tmux session has vanished, item.SetPreviewSize returns
+// ErrSessionGone, and the sidebar wrapper must skip that instance silently —
+// not surface it as a returned error that the caller (app.go:226) would log
+// at ERROR on every window-resize.
+func TestSidebarSetSessionPreviewSizeSkipsErrSessionGone(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false)
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "dead", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(&goneSetPreviewSizeBackend{FakeBackend: session.NewFakeBackend()})
+	inst.SetStartedForTest(true)
+	s.AddInstance(inst)
+
+	require.NoError(t, s.SetSessionPreviewSize(80, 24),
+		"ErrSessionGone from a single instance must not propagate as a returned error")
 }
 
 func TestSidebarSelectInstance(t *testing.T) {

@@ -86,6 +86,14 @@ type TmuxSession struct {
 
 const TmuxPrefix = "af_"
 
+// ErrSessionGone is returned by PTY/tmux operations when the underlying tmux
+// session no longer exists. Non-daemon callers (preview pane, sidebar resize,
+// terminal pane) use errors.Is to detect this case and degrade gracefully
+// (render an inactive-session state, skip silently) instead of logging at
+// ERROR level (#496). The daemon's statusMonitor has its own latch (#489) and
+// does not use this sentinel.
+var ErrSessionGone = errors.New("tmux session no longer exists")
+
 // DetachKeyByte is the ASCII byte for the key used to detach from attached sessions.
 // Default is 23 (Ctrl-W). Set via SetDetachKey.
 var DetachKeyByte byte = 23
@@ -360,7 +368,9 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 		// monitor as dead so the daemon's per-second poll doesn't spam
 		// the log (#489). Transient capture-pane failures while the
 		// session is still alive are rare and still surface every tick.
-		if !t.DoesSessionExist() {
+		// CapturePaneContent has already probed DoesSessionExist on the
+		// error path, so use the wrapped sentinel rather than re-probing.
+		if errors.Is(err, ErrSessionGone) {
 			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
 			t.monitor.dead = true
 			return false, false
@@ -609,7 +619,20 @@ func (t *TmuxSession) Close() error {
 // SetDetachedSize set the width and height of the session while detached. This makes the
 // tmux output conform to the specified shape.
 func (t *TmuxSession) SetDetachedSize(width, height int) error {
-	return t.updateWindowSize(width, height)
+	// Detach failure (or Close) clears t.ptmx (#474), and the tmux session
+	// may have been killed externally. Guard the ioctl so a missing PTY
+	// surfaces as ErrSessionGone instead of panicking on nil.Fd() or
+	// logging "bad file descriptor" at ERROR (#496).
+	if t.ptmx == nil {
+		return ErrSessionGone
+	}
+	if err := t.updateWindowSize(width, height); err != nil {
+		if !t.DoesSessionExist() {
+			return fmt.Errorf("%w: %v", ErrSessionGone, err)
+		}
+		return err
+	}
+	return nil
 }
 
 // updateWindowSize updates the window size of the PTY.
@@ -628,24 +651,34 @@ func (t *TmuxSession) DoesSessionExist() bool {
 	return t.cmdExec.Run(existsCmd) == nil
 }
 
-// CapturePaneContent captures the content of the tmux pane
+// CapturePaneContent captures the content of the tmux pane. When the
+// capture fails and DoesSessionExist confirms the session is gone, the
+// returned error wraps ErrSessionGone so non-daemon callers can degrade
+// gracefully instead of logging at ERROR (#496).
 func (t *TmuxSession) CapturePaneContent() (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes)
 	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", t.sanitizedName)
 	output, err := t.cmdExec.Output(cmd)
 	if err != nil {
+		if !t.DoesSessionExist() {
+			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
+		}
 		return "", fmt.Errorf("error capturing pane content: %v", err)
 	}
 	return string(output), nil
 }
 
 // CapturePaneContentWithOptions captures the pane content with additional options
-// start and end specify the starting and ending line numbers (use "-" for the start/end of history)
+// start and end specify the starting and ending line numbers (use "-" for the start/end of history).
+// Wraps ErrSessionGone when the session has vanished, mirroring CapturePaneContent.
 func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes)
 	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", t.sanitizedName)
 	output, err := t.cmdExec.Output(cmd)
 	if err != nil {
+		if !t.DoesSessionExist() {
+			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
+		}
 		return "", fmt.Errorf("failed to capture tmux pane content with options: %v", err)
 	}
 	return string(output), nil
