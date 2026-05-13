@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -258,6 +259,67 @@ func TestRequestShutdownSuccess(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("shutdownCh was not closed after RequestShutdown")
 	}
+}
+
+// TestFormatWaitForReadyTimeoutError covers the UX half of
+// sachiniyer/agent-factory#502: when waitForReady gives up, the returned
+// error must carry a trimmed snippet of the captured pane content so the
+// user-facing TUI shows what the agent was doing — not just "timed out".
+// Empty captured content collapses back to the bare timeout message so
+// users don't see a dangling "last pane content:" header.
+func TestFormatWaitForReadyTimeoutError(t *testing.T) {
+	timeout := 60 * time.Second
+
+	t.Run("happy case appends trimmed snippet", func(t *testing.T) {
+		// >5 lines and well under 400 bytes — should keep only the last 5.
+		content := "boot 1\nboot 2\nboot 3\nLoading config...\nConnecting to MCP server...\nStill waiting on handshake\nAlmost there..."
+		got := formatWaitForReadyTimeoutError(timeout, content).Error()
+
+		wantHeader := "timed out waiting for program to start (1m0s)\nlast pane content:"
+		if !strings.HasPrefix(got, wantHeader) {
+			t.Fatalf("missing header.\n got=%q\nwant prefix=%q", got, wantHeader)
+		}
+		if !strings.Contains(got, "  Almost there...") {
+			t.Errorf("expected indented snippet line in error, got %q", got)
+		}
+		if !strings.Contains(got, "  Loading config...") {
+			t.Errorf("expected last-5-lines window to include 'Loading config...', got %q", got)
+		}
+		if strings.Contains(got, "boot 1") || strings.Contains(got, "boot 2") {
+			t.Errorf("expected oldest lines to be trimmed off, got %q", got)
+		}
+	})
+
+	t.Run("empty content omits header entirely", func(t *testing.T) {
+		got := formatWaitForReadyTimeoutError(timeout, "").Error()
+		want := "timed out waiting for program to start (1m0s)"
+		if got != want {
+			t.Fatalf("empty content error mismatch.\n got=%q\nwant=%q", got, want)
+		}
+	})
+
+	t.Run("whitespace-only content treated as empty", func(t *testing.T) {
+		got := formatWaitForReadyTimeoutError(timeout, "\n\n   \n\n").Error()
+		want := "timed out waiting for program to start (1m0s)"
+		if got != want {
+			t.Fatalf("whitespace-only content error mismatch.\n got=%q\nwant=%q", got, want)
+		}
+	})
+
+	t.Run("long content is byte-capped", func(t *testing.T) {
+		// One huge line well over the 400-byte cap.
+		long := strings.Repeat("x", 1200)
+		got := formatWaitForReadyTimeoutError(timeout, long).Error()
+		// Header + "\n  " + at most 400 bytes of snippet.
+		header := "timed out waiting for program to start (1m0s)\nlast pane content:\n  "
+		if !strings.HasPrefix(got, header) {
+			t.Fatalf("missing header prefix, got %q", got)
+		}
+		snippet := strings.TrimPrefix(got, header)
+		if len(snippet) > 400 {
+			t.Errorf("snippet not capped: len=%d, want <=400", len(snippet))
+		}
+	})
 }
 
 // TestIsDaemonAbsentErr covers the small classifier RequestShutdown uses to

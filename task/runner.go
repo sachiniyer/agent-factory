@@ -2,6 +2,7 @@ package task
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,10 +123,10 @@ func WaitForReady(instance *session.Instance) error {
 			content, err := instance.Preview()
 			if err != nil {
 				log.ErrorLog.Printf("waitForReady timed out (preview also failed: %v)", err)
-			} else {
-				log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
+				return formatWaitForReadyTimeoutError(waitForReadyTimeout, "")
 			}
-			return fmt.Errorf("timed out waiting for program to start (%s)", waitForReadyTimeout)
+			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
+			return formatWaitForReadyTimeoutError(waitForReadyTimeout, content)
 		case <-ticker.C:
 			content, err := instance.Preview()
 			if err != nil {
@@ -136,6 +137,47 @@ func WaitForReady(instance *session.Instance) error {
 			}
 		}
 	}
+}
+
+// formatWaitForReadyTimeoutError builds the user-facing timeout error. When
+// the captured pane content is non-empty, the error body carries a trimmed
+// snippet of the last few lines so users see what the agent was doing instead
+// of an opaque "timed out" message. See sachiniyer/agent-factory#502.
+func formatWaitForReadyTimeoutError(timeout time.Duration, content string) error {
+	base := fmt.Sprintf("timed out waiting for program to start (%s)", timeout)
+	snippet := trimPaneSnippet(content)
+	if snippet == "" {
+		return errors.New(base)
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString("\nlast pane content:")
+	for _, line := range strings.Split(snippet, "\n") {
+		b.WriteString("\n  ")
+		b.WriteString(line)
+	}
+	return errors.New(b.String())
+}
+
+// trimPaneSnippet returns at most the last 5 non-empty trailing lines of the
+// captured pane content, capped at 400 bytes. ANSI escape sequences are left
+// intact — keeping the snippet short matters more than stripping them.
+func trimPaneSnippet(content string) string {
+	lines := strings.Split(content, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if len(lines) > 5 {
+		lines = lines[len(lines)-5:]
+	}
+	out := strings.Join(lines, "\n")
+	if len(out) > 400 {
+		out = out[len(out)-400:]
+	}
+	return out
 }
 
 // RunTask executes a task by creating a new instance,
