@@ -242,3 +242,42 @@ func collectTitles(instances []*session.Instance) []string {
 	}
 	return out
 }
+
+// TestInstanceStarted_TimeoutError_SurfacesPaneSnippet covers the UX half of
+// sachiniyer/agent-factory#502: a daemon-side timeout error that carries a
+// "last pane content:" snippet should reach the user-facing ErrBox unchanged
+// so the user can see what the agent was doing when it stalled.
+func TestInstanceStarted_TimeoutError_SurfacesPaneSnippet(t *testing.T) {
+	h := newTestHome(t)
+	failing := newLoadingInstance(t, "stalled")
+	h.sidebar.AddInstance(failing)
+	h.sidebar.SetSelectedInstance(0)
+	h.errBox.SetSize(500, 1)
+
+	daemonErr := errors.New("failed to start instance: timed out waiting for program to start (1m0s)\nlast pane content:\n  Loading config...\n  Connecting to MCP server...")
+	_, _ = h.Update(instanceStartedMsg{instance: failing, err: daemonErr})
+
+	rendered := h.errBox.String()
+	assert.Contains(t, rendered, "timed out waiting for program to start")
+	assert.Contains(t, rendered, "last pane content:")
+	assert.Contains(t, rendered, "Connecting to MCP server...")
+}
+
+// TestInstanceStarted_TimeoutError_EmptyContentOmitsHeader covers the
+// no-snippet branch: when the daemon couldn't capture any pane content the
+// error string should remain the original bare timeout message — no empty
+// "last pane content:" header.
+func TestInstanceStarted_TimeoutError_EmptyContentOmitsHeader(t *testing.T) {
+	h := newTestHome(t)
+	failing := newLoadingInstance(t, "stalled-empty")
+	h.sidebar.AddInstance(failing)
+	h.sidebar.SetSelectedInstance(0)
+	h.errBox.SetSize(500, 1)
+
+	daemonErr := errors.New("failed to start instance: timed out waiting for program to start (1m0s)")
+	_, _ = h.Update(instanceStartedMsg{instance: failing, err: daemonErr})
+
+	rendered := h.errBox.String()
+	assert.Contains(t, rendered, "timed out waiting for program to start")
+	assert.NotContains(t, rendered, "last pane content:")
+}
