@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/log"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -582,6 +584,74 @@ func setupTwoInstances(t *testing.T, previewA, previewB string) (*session.Instan
 		log.Close()
 	}
 	return a, b, cleanup
+}
+
+// TestPreviewUpdateContentSessionGoneRendersFallback is the #496 regression:
+// when the underlying tmux session vanishes between ticks, UpdateContent
+// must enter the inactive-session fallback rather than propagate an error
+// that the app-level handleError would log at ERROR every 100ms.
+func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
+	var sessionCreated, sessionGone atomic.Bool
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			cmdStr := cmd.String()
+			if strings.Contains(cmdStr, "has-session") {
+				if sessionGone.Load() {
+					return fmt.Errorf("session gone")
+				}
+				if sessionCreated.Load() {
+					return nil
+				}
+				return fmt.Errorf("session does not exist")
+			}
+			if strings.Contains(cmdStr, "new-session") {
+				sessionCreated.Store(true)
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			cmdStr := cmd.String()
+			if strings.Contains(cmdStr, "capture-pane") {
+				if sessionGone.Load() {
+					return nil, fmt.Errorf("exit status 1")
+				}
+				return []byte("hello world"), nil
+			}
+			return []byte(""), nil
+		},
+	}
+
+	setup := setupTestEnvironment(t, cmdExec)
+	defer setup.cleanupFn()
+
+	p := NewPreviewPane()
+	p.SetSize(80, 30)
+
+	// Happy path first: session alive, normal content renders.
+	require.NoError(t, p.UpdateContent(setup.instance))
+	require.False(t, p.previewState.fallback,
+		"happy path must not render fallback")
+	require.Contains(t, p.previewState.text, "hello world")
+
+	// Session vanishes externally; redirect ErrorLog so we can prove
+	// UpdateContent does not log anything at ERROR.
+	var errBuf bytes.Buffer
+	prev := log.ErrorLog.Writer()
+	log.ErrorLog.SetOutput(&errBuf)
+	defer log.ErrorLog.SetOutput(prev)
+
+	sessionGone.Store(true)
+
+	err := p.UpdateContent(setup.instance)
+	require.NoError(t, err,
+		"dead session must NOT bubble an error up to handleError")
+	require.True(t, p.previewState.fallback,
+		"preview must enter fallback state when session is gone")
+	require.Contains(t, p.previewState.text, "Session no longer running")
+	require.Empty(t, errBuf.String(),
+		"no ERROR log line on session-gone fallback path")
 }
 
 // TestPreviewSwitchInstanceResetsScroll is a regression test for issue #470:

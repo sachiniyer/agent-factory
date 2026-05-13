@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	cmd2 "github.com/sachiniyer/agent-factory/cmd"
 	"math/rand"
@@ -357,6 +358,62 @@ func TestHasUpdatedTransientErrorKeepsLogging(t *testing.T) {
 	require.Equal(t, int32(3), hasSessionCalls.Load())
 	require.Equal(t, 3, strings.Count(logs.String(), "error capturing pane content in status monitor"))
 	require.NotContains(t, logs.String(), "going silent")
+}
+
+// TestCapturePaneContentWrapsErrSessionGoneWhenGone covers #496: a vanished
+// tmux session must surface to non-daemon callers as ErrSessionGone so the
+// preview pane can render an inactive-session state instead of
+// handleError-ing at ERROR.
+func TestCapturePaneContentWrapsErrSessionGoneWhenGone(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	// capture-pane fails AND has-session reports dead.
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+
+	_, err := session.CapturePaneContent()
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSessionGone,
+		"capture-pane failure on a gone session must wrap ErrSessionGone")
+}
+
+// TestCapturePaneContentTransientErrorDoesNotWrap guards the other branch:
+// if has-session still reports alive, the wrap must NOT happen — callers
+// should still see/log the original error and operators get visibility into
+// rare transient capture-pane failures.
+func TestCapturePaneContentTransientErrorDoesNotWrap(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	sessionAlive.Store(true) // alive but capture fails
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+
+	_, err := session.CapturePaneContent()
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrSessionGone),
+		"transient capture-pane error must not be misclassified as ErrSessionGone")
+	require.Contains(t, err.Error(), "error capturing pane content")
+}
+
+// TestCapturePaneContentWithOptionsWrapsErrSessionGone mirrors the
+// CapturePaneContent test for the scroll-mode/full-history path that
+// PreviewFullHistory and the terminal pane's scroll mode use.
+func TestCapturePaneContentWithOptionsWrapsErrSessionGone(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+
+	_, err := session.CapturePaneContentWithOptions("-", "-")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSessionGone)
+}
+
+// TestSetDetachedSizeReturnsErrSessionGoneWhenPtmxNil covers #496: when the
+// PTY has been cleared (Detach failure in #474, Close, or never restored),
+// SetDetachedSize must surface ErrSessionGone instead of panicking on
+// nil.Fd() or emitting "bad file descriptor" at ERROR.
+func TestSetDetachedSizeReturnsErrSessionGoneWhenPtmxNil(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+	require.Nil(t, session.ptmx, "precondition: helper builds a session without a PTY")
+
+	err := session.SetDetachedSize(80, 24)
+	require.ErrorIs(t, err, ErrSessionGone)
 }
 
 func TestAgentNameFromProgram(t *testing.T) {
