@@ -25,10 +25,9 @@ const ProgramClaude = "claude"
 const ProgramCodex = "codex"
 const ProgramAider = "aider"
 const ProgramGemini = "gemini"
-const ProgramAmp = "amp"
 
 // SupportedPrograms is the canonical list of known agent programs.
-var SupportedPrograms = []string{ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini, ProgramAmp}
+var SupportedPrograms = []string{ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini}
 
 // AgentNameFromProgram extracts a short, user-facing agent name from a program
 // command string. It first looks for a known SupportedPrograms token (after
