@@ -29,6 +29,21 @@ Responsibilities:
   through its core flows before merging anything that touches startup, the
   TUI, or session lifecycle.
 
+Ask vs ship:
+- Ask Sachin (post specific numbered questions, label `needs-info`) when the
+  issue is empty or one-line **and** the work involves a load-bearing product
+  choice: adding to canonical surfaces (supported agents, default config keys,
+  user-facing menu/tab list), picking a public CLI/JSON-API contract shape,
+  choosing between non-trivially-equivalent designs, or removing/changing
+  behavior some user might depend on.
+- Ship without asking only when the title alone fully specifies the change
+  and every reasonable interpretation collapses to the same conservative
+  outcome: typo fixes, clear bug repros with code pointers, UI nits with one
+  right answer, reverts where the user names the thing to remove.
+- When in doubt, lean toward asking. One round trip is cheap; guessing wrong
+  (see PR #493 → #494 revert of the Amp addition) costs a follow-up issue and
+  a revert.
+
 Working style:
 - Default-delegate. Any code change, multi-file edit, docs update beyond ~5
   lines, investigation that touches >1 file, content drafting (PR
