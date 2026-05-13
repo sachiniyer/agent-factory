@@ -4,8 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +189,129 @@ func TestDownloadBinaryStalledHeaders(t *testing.T) {
 		}
 	case <-deadline:
 		t.Fatalf("downloadBinary did not return within 3s; header timeout not enforced")
+	}
+}
+
+// TestUpgradeCallsShutdownAfterBinarySwap verifies the upgrade flow
+// requests a daemon shutdown after a successful binary write (#498), so
+// users actually pick up the version they just downloaded instead of the
+// daemon continuing to run the old image.
+func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
+	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+
+	archive := makeTarGz(t, map[string][]byte{"agent-factory": []byte("new-binary")})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(archive)
+	}))
+	defer srv.Close()
+
+	prevExe := osExecutableFn
+	prevShutdown := requestDaemonShutdownFn
+	t.Cleanup(func() {
+		osExecutableFn = prevExe
+		requestDaemonShutdownFn = prevShutdown
+	})
+	osExecutableFn = func() (string, error) { return tempBin, nil }
+	shutdownCalls := 0
+	requestDaemonShutdownFn = func() (bool, error) {
+		shutdownCalls++
+		return true, nil
+	}
+
+	if err := runUpgrade(srv.URL); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if shutdownCalls != 1 {
+		t.Fatalf("expected one Shutdown call, got %d", shutdownCalls)
+	}
+	got, err := os.ReadFile(tempBin)
+	if err != nil {
+		t.Fatalf("read upgraded binary: %v", err)
+	}
+	if string(got) != "new-binary" {
+		t.Fatalf("binary contents = %q, want new-binary", got)
+	}
+}
+
+// TestUpgradeSucceedsWhenNoDaemon verifies that a connection-refused /
+// no-socket result from RequestShutdown does NOT fail the upgrade — this is
+// the common case in CI, fresh installs, and interactive `af upgrade` runs
+// where no daemon is currently active.
+func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
+	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+
+	archive := makeTarGz(t, map[string][]byte{"agent-factory": []byte("new-binary")})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(archive)
+	}))
+	defer srv.Close()
+
+	prevExe := osExecutableFn
+	prevShutdown := requestDaemonShutdownFn
+	t.Cleanup(func() {
+		osExecutableFn = prevExe
+		requestDaemonShutdownFn = prevShutdown
+	})
+	osExecutableFn = func() (string, error) { return tempBin, nil }
+	requestDaemonShutdownFn = func() (bool, error) {
+		// Mirror what daemon.RequestShutdown returns when no daemon is
+		// running: (false, nil) — silently no-op.
+		return false, nil
+	}
+
+	if err := runUpgrade(srv.URL); err != nil {
+		t.Fatalf("runUpgrade with absent daemon failed: %v", err)
+	}
+	got, err := os.ReadFile(tempBin)
+	if err != nil {
+		t.Fatalf("read upgraded binary: %v", err)
+	}
+	if string(got) != "new-binary" {
+		t.Fatalf("binary contents = %q, want new-binary", got)
+	}
+}
+
+// TestUpgradeSucceedsWhenShutdownErrors verifies that an unexpected error
+// from RequestShutdown is reported to the user but does not roll back the
+// binary swap — the new binary is on disk and will be used next launch.
+func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
+	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+
+	archive := makeTarGz(t, map[string][]byte{"agent-factory": []byte("new-binary")})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(archive)
+	}))
+	defer srv.Close()
+
+	prevExe := osExecutableFn
+	prevShutdown := requestDaemonShutdownFn
+	t.Cleanup(func() {
+		osExecutableFn = prevExe
+		requestDaemonShutdownFn = prevShutdown
+	})
+	osExecutableFn = func() (string, error) { return tempBin, nil }
+	requestDaemonShutdownFn = func() (bool, error) {
+		return false, errors.New("simulated rpc failure")
+	}
+
+	if err := runUpgrade(srv.URL); err != nil {
+		t.Fatalf("runUpgrade should not fail when Shutdown errors, got: %v", err)
+	}
+	got, err := os.ReadFile(tempBin)
+	if err != nil {
+		t.Fatalf("read upgraded binary: %v", err)
+	}
+	if string(got) != "new-binary" {
+		t.Fatalf("binary contents = %q, want new-binary", got)
 	}
 }
 

@@ -2,9 +2,15 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -98,7 +104,7 @@ func TestControlServerCreateAndKillSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	closeServer, err := startControlServer(manager)
+	closeServer, err := startControlServer(manager, nil)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
@@ -134,5 +140,145 @@ func TestControlServerCreateAndKillSession(t *testing.T) {
 	}
 	if len(stored) != 0 {
 		t.Fatalf("expected storage to be empty after kill, got %+v", stored)
+	}
+}
+
+// TestControlServerShutdownClosesChannel verifies that the Shutdown RPC
+// acknowledges with OK and closes the supplied shutdownCh exactly once,
+// which is what RunDaemon's main select uses to exit the daemon loop (#498).
+func TestControlServerShutdownClosesChannel(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	shutdownCh := make(chan struct{})
+	closeServer, err := startControlServer(manager, shutdownCh)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	t.Cleanup(func() { _ = closeServer() })
+
+	var resp ShutdownResponse
+	if err := callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp); err != nil {
+		t.Fatalf("rpc Shutdown: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("Shutdown returned OK=false")
+	}
+
+	select {
+	case <-shutdownCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("shutdownCh was not closed within 2s after Shutdown RPC")
+	}
+
+	// A second Shutdown call must not double-close the channel (panic).
+	var resp2 ShutdownResponse
+	if err := callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp2); err != nil {
+		// The listener may already be closed depending on timing; accept
+		// either a successful ack or a transport-level error, but never a
+		// double-close panic on the server side.
+		t.Logf("second Shutdown returned (expected, may race with teardown): %v", err)
+	}
+}
+
+// TestRequestShutdownNoDaemon verifies that RequestShutdown silently
+// no-ops when no daemon socket exists — the case during `af upgrade` on a
+// fresh install or in CI.
+func TestRequestShutdownNoDaemon(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	restarted, err := RequestShutdown()
+	if err != nil {
+		t.Fatalf("RequestShutdown returned error when no daemon present: %v", err)
+	}
+	if restarted {
+		t.Fatalf("RequestShutdown reported restart when no daemon was running")
+	}
+}
+
+// TestRequestShutdownStaleSocket verifies that RequestShutdown treats a
+// socket file with no listener as "no daemon" (connection refused) rather
+// than propagating the transport error to callers.
+func TestRequestShutdownStaleSocket(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	socketPath, err := DaemonSocketPath()
+	if err != nil {
+		t.Fatalf("DaemonSocketPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A regular file at the socket path causes Dial to return ECONNREFUSED
+	// (or an equivalent transport error). RequestShutdown must swallow it.
+	if err := os.WriteFile(socketPath, nil, 0600); err != nil {
+		t.Fatalf("write stale socket placeholder: %v", err)
+	}
+
+	restarted, err := RequestShutdown()
+	if err != nil {
+		t.Fatalf("RequestShutdown returned error on stale socket: %v", err)
+	}
+	if restarted {
+		t.Fatalf("RequestShutdown reported restart against stale socket")
+	}
+}
+
+// TestRequestShutdownSuccess starts a real control server and verifies the
+// end-to-end Shutdown flow: client sees OK, server's shutdownCh closes.
+func TestRequestShutdownSuccess(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	shutdownCh := make(chan struct{})
+	closeServer, err := startControlServer(manager, shutdownCh)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	t.Cleanup(func() { _ = closeServer() })
+
+	restarted, err := RequestShutdown()
+	if err != nil {
+		t.Fatalf("RequestShutdown: %v", err)
+	}
+	if !restarted {
+		t.Fatalf("expected restarted=true against live control server")
+	}
+	select {
+	case <-shutdownCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("shutdownCh was not closed after RequestShutdown")
+	}
+}
+
+// TestIsDaemonAbsentErr covers the small classifier RequestShutdown uses to
+// decide whether a dial/RPC failure means "no daemon" (silent no-op) or
+// "unexpected transport problem" (surface to the caller).
+func TestIsDaemonAbsentErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"connection refused", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, true},
+		{"no such file", &net.OpError{Op: "dial", Err: fs.ErrNotExist}, true},
+		{"wrapped enoent", errors.New("some other error"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isDaemonAbsentErr(c.err); got != c.want {
+				t.Errorf("isDaemonAbsentErr(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
 	}
 }
