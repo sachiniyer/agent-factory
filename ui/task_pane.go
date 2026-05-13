@@ -12,20 +12,34 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// programDefaultLabel is the selector option that resolves to an empty Program
+// string (the daemon then falls back to the user's configured default_program).
+const programDefaultLabel = "(use config default)"
+
 // TaskPane renders an inline task editor in the right pane.
 type TaskPane struct {
 	tasks       []task.Task
 	selectedIdx int
 
 	// Edit mode
-	editing     bool
-	editName    textinput.Model
-	editPrompt  textarea.Model
-	editCron    textinput.Model
-	editPath    textinput.Model
-	editProgram textinput.Model
-	editError   string // last validation error shown to the user
-	focusIndex  int    // 0=name, 1=prompt, 2=cron, 3=path, 4=program, 5=save button
+	editing    bool
+	editName   textinput.Model
+	editPrompt textarea.Model
+	editCron   textinput.Model
+	editPath   textinput.Model
+	// Program selector state. editProgramOptions is the list of choices shown
+	// inline (index 0 is always the "use config default" entry, followed by
+	// tmux.SupportedPrograms, optionally followed by a "(custom: ...)" entry
+	// preserving an unrecognized legacy program string from before #492).
+	editProgramOptions []string
+	editProgramIdx     int
+	// editProgramCustom holds the raw legacy program string when the existing
+	// task.Program doesn't match any canonical option. The selector renders
+	// "(custom: <raw>)" for it and writes the raw value back on save unless
+	// the user chooses a different option.
+	editProgramCustom string
+	editError         string // last validation error shown to the user
+	focusIndex        int    // 0=name, 1=prompt, 2=cron, 3=path, 4=program, 5=save button
 
 	// Create mode
 	creating       bool
@@ -130,20 +144,58 @@ func (s *TaskPane) EnterCreateMode(defaultPath string) {
 	path.CharLimit = 256
 	path.Blur()
 
-	program := textinput.New()
-	program.Placeholder = "leave empty for config default"
-	program.CharLimit = 256
-	program.Blur()
-
 	s.editName = name
 	s.editPrompt = prompt
 	s.editCron = cron
 	s.editPath = path
-	s.editProgram = program
+	s.setProgramFromValue("")
 	s.focusIndex = 0
 	s.creating = true
 	s.hasFocus = true
 	s.editError = ""
+}
+
+// setProgramFromValue initializes the selector state from a stored Program
+// string. An empty value selects "(use config default)"; a value matching a
+// SupportedPrograms entry pre-selects that canonical option; anything else is
+// preserved verbatim as a "(custom: <raw>)" option so editing other fields
+// can't accidentally rewrite a legacy command line.
+func (s *TaskPane) setProgramFromValue(value string) {
+	opts := make([]string, 0, len(tmux.SupportedPrograms)+2)
+	opts = append(opts, programDefaultLabel)
+	opts = append(opts, tmux.SupportedPrograms...)
+
+	trimmed := strings.TrimSpace(value)
+	s.editProgramCustom = ""
+	if trimmed == "" {
+		s.editProgramOptions = opts
+		s.editProgramIdx = 0
+		return
+	}
+	for i, p := range tmux.SupportedPrograms {
+		if trimmed == p {
+			s.editProgramOptions = opts
+			s.editProgramIdx = i + 1
+			return
+		}
+	}
+	s.editProgramCustom = value
+	opts = append(opts, fmt.Sprintf("(custom: %s)", value))
+	s.editProgramOptions = opts
+	s.editProgramIdx = len(opts) - 1
+}
+
+// programValue returns the Program string corresponding to the current
+// selector state: "" for the default option, the raw custom string for the
+// custom entry, or the canonical agent name otherwise.
+func (s *TaskPane) programValue() string {
+	if s.editProgramIdx <= 0 || s.editProgramIdx >= len(s.editProgramOptions) {
+		return ""
+	}
+	if s.editProgramCustom != "" && s.editProgramIdx == len(s.editProgramOptions)-1 {
+		return s.editProgramCustom
+	}
+	return s.editProgramOptions[s.editProgramIdx]
 }
 
 // HasPendingCreate returns true if a new task was submitted and needs saving.
@@ -155,7 +207,7 @@ func (s *TaskPane) HasPendingCreate() bool {
 // program is the user-supplied program override; empty means "use the caller's default".
 func (s *TaskPane) ConsumePendingCreate() (name, prompt, cron, path, program string) {
 	s.pendingCreate = false
-	return s.editName.Value(), s.editPrompt.Value(), s.editCron.Value(), s.editPath.Value(), s.editProgram.Value()
+	return s.editName.Value(), s.editPrompt.Value(), s.editCron.Value(), s.editPath.Value(), s.programValue()
 }
 
 // SetPendingTrigger marks the currently selected task to be triggered.
@@ -270,17 +322,11 @@ func (s *TaskPane) enterEditMode() {
 	path.CharLimit = 256
 	path.Blur()
 
-	program := textinput.New()
-	program.SetValue(tsk.Program)
-	program.Placeholder = "leave empty for config default"
-	program.CharLimit = 256
-	program.Blur()
-
 	s.editName = name
 	s.editPrompt = prompt
 	s.editCron = cron
 	s.editPath = path
-	s.editProgram = program
+	s.setProgramFromValue(tsk.Program)
 	s.focusIndex = 0
 	s.editing = true
 	s.editError = ""
@@ -326,7 +372,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 				s.tasks[s.selectedIdx].Prompt = s.editPrompt.Value()
 				s.tasks[s.selectedIdx].CronExpr = s.editCron.Value()
 				s.tasks[s.selectedIdx].ProjectPath = s.editPath.Value()
-				s.tasks[s.selectedIdx].Program = s.editProgram.Value()
+				s.tasks[s.selectedIdx].Program = s.programValue()
 				s.dirty = true
 				s.editing = false
 			}
@@ -346,10 +392,29 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 		case 3:
 			s.editPath, _ = s.editPath.Update(msg)
 		case 4:
-			s.editProgram, _ = s.editProgram.Update(msg)
+			s.handleProgramKey(msg)
 		}
 	}
 	return true
+}
+
+// handleProgramKey moves the selector cursor when the Program field has focus.
+// Up/k and down/j navigate; other keys are ignored so the selector behaves
+// like a list, not a free-text input (#492).
+func (s *TaskPane) handleProgramKey(msg tea.KeyMsg) {
+	if len(s.editProgramOptions) == 0 {
+		return
+	}
+	switch msg.String() {
+	case "up", "k", "left", "h":
+		if s.editProgramIdx > 0 {
+			s.editProgramIdx--
+		}
+	case "down", "j", "right", "l":
+		if s.editProgramIdx < len(s.editProgramOptions)-1 {
+			s.editProgramIdx++
+		}
+	}
 }
 
 func (s *TaskPane) updateEditFocus() {
@@ -357,7 +422,6 @@ func (s *TaskPane) updateEditFocus() {
 	s.editPrompt.Blur()
 	s.editCron.Blur()
 	s.editPath.Blur()
-	s.editProgram.Blur()
 
 	switch s.focusIndex {
 	case 0:
@@ -368,8 +432,6 @@ func (s *TaskPane) updateEditFocus() {
 		s.editCron.Focus()
 	case 3:
 		s.editPath.Focus()
-	case 4:
-		s.editProgram.Focus()
 	}
 }
 
@@ -489,7 +551,6 @@ func (s *TaskPane) renderEditMode() string {
 	}
 	s.editCron.Width = inputWidth
 	s.editPath.Width = inputWidth
-	s.editProgram.Width = inputWidth
 
 	var b strings.Builder
 	if s.creating {
@@ -516,9 +577,9 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString(s.editPath.View())
 	b.WriteString("\n")
 	b.WriteString(labelStyle.Render("Program:"))
-	b.WriteString("  ")
-	b.WriteString(s.editProgram.View())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	b.WriteString(s.renderProgramSelector())
+	b.WriteString("\n")
 
 	submitLabel := " Save "
 	if s.creating {
@@ -536,6 +597,36 @@ func (s *TaskPane) renderEditMode() string {
 		b.WriteString(errorStyle.Render("! " + s.editError))
 	}
 
+	return b.String()
+}
+
+// renderProgramSelector renders the inline agent selector. Focused selection
+// is highlighted in yellow with a ▸ marker; the unfocused row gets the
+// dim/focus-hint treatment used by the rest of the edit form.
+func (s *TaskPane) renderProgramSelector() string {
+	focused := s.focusIndex == 4
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+
+	var b strings.Builder
+	for i, opt := range s.editProgramOptions {
+		isSel := i == s.editProgramIdx
+		switch {
+		case isSel && focused:
+			b.WriteString("    " + selectedStyle.Render("▸ "+opt))
+		case isSel:
+			b.WriteString("    " + dimSelectedStyle.Render("▸ "+opt))
+		default:
+			b.WriteString("    " + normalStyle.Render("  "+opt))
+		}
+		b.WriteString("\n")
+	}
+	if focused {
+		hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+		b.WriteString("    " + hintStyle.Render("↑/↓ change agent"))
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 
