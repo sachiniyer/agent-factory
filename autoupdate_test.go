@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
@@ -197,9 +198,9 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
-	requestDaemonShutdownFn = func() (bool, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		shutdownCalls++
-		return true, nil
+		return daemon.ShutdownViaRPC, nil
 	}
 
 	if err := autoUpdate(); err != nil {
@@ -248,8 +249,8 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
 	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (bool, error) {
-		return false, errors.New("simulated rpc failure")
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+		return daemon.ShutdownNoDaemon, errors.New("simulated rpc failure")
 	}
 
 	if err := autoUpdate(); err != nil {

@@ -199,41 +199,82 @@ func ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest) ([]session.In
 	return resp.Instances, nil
 }
 
-// RequestShutdown asks any running daemon to exit cleanly via the control
-// socket. Returns (true, nil) when a daemon acknowledged the request and
-// will exit, (false, nil) when no daemon is running (no socket or connection
-// refused — common in CI, fresh installs, or interactive `af upgrade`), and
-// (false, err) for unexpected errors.
+// ShutdownResult reports how RequestShutdown stopped (or failed to stop) the
+// running daemon. Used by upgrade.go and autoupdate.go to pick the right
+// user-facing message after a binary swap.
+type ShutdownResult int
+
+const (
+	// ShutdownNoDaemon means no daemon was running (no socket, ECONNREFUSED,
+	// or PID-file scan found nothing). The upgrade prints bare success.
+	ShutdownNoDaemon ShutdownResult = iota
+	// ShutdownViaRPC means the daemon acknowledged the Shutdown RPC and is
+	// exiting cleanly. The post-#501 happy path.
+	ShutdownViaRPC
+	// ShutdownViaSIGTERM means the daemon was a pre-#501 binary that did not
+	// register the Shutdown RPC, so we located its PID and signaled it
+	// directly. The upgrade prints a slightly different success message so
+	// users know we used the fallback. See #504.
+	ShutdownViaSIGTERM
+)
+
+// sigtermFallbackGrace is the max time we wait for a SIGTERM'd daemon to exit
+// before escalating to SIGKILL.
+const sigtermFallbackGrace = 5 * time.Second
+
+// sigtermFallbackPoll is how often we check whether the SIGTERM'd daemon has
+// exited.
+const sigtermFallbackPoll = 100 * time.Millisecond
+
+// RequestShutdown asks any running daemon to exit cleanly. The normal path
+// uses the Shutdown RPC (#498/#501). When the running daemon is a pre-#501
+// binary that does not register Shutdown, we fall back to locating the
+// daemon's PID and sending SIGTERM directly (#504) so an `af upgrade` does
+// not leave a stale daemon running the old binary.
 //
-// This is invoked after `af upgrade` / autoUpdate() write a new binary so the
-// running daemon process, which still references the old binary's inode, is
-// taken down. A subsequent RPC call (CreateSession, KillSession, etc.) will
-// EnsureDaemon-respawn from the freshly written binary.
-func RequestShutdown() (bool, error) {
+// Returns (ShutdownNoDaemon, nil) when no daemon is running (no socket,
+// ECONNREFUSED, or no signalable PID), (ShutdownViaRPC, nil) when the Shutdown
+// RPC acknowledged, (ShutdownViaSIGTERM, nil) when the fallback signaled a
+// real `af --daemon` process, and (ShutdownNoDaemon, err) for unexpected
+// errors that the caller should surface (e.g. multiple ambiguous candidates,
+// permission denied on signal).
+func RequestShutdown() (ShutdownResult, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
-		return false, err
+		return ShutdownNoDaemon, err
 	}
 	if _, statErr := os.Stat(socketPath); statErr != nil {
 		if errors.Is(statErr, fs.ErrNotExist) {
-			return false, nil
+			return ShutdownNoDaemon, nil
 		}
-		return false, statErr
+		return ShutdownNoDaemon, statErr
 	}
 	var resp ShutdownResponse
-	if err := callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp); err != nil {
-		if isDaemonAbsentErr(err) {
-			return false, nil
+	if rpcErr := callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp); rpcErr != nil {
+		if isDaemonAbsentErr(rpcErr) {
+			return ShutdownNoDaemon, nil
 		}
-		return false, err
+		if isRPCMethodNotFoundErr(rpcErr) {
+			// Daemon is alive on the socket but does not speak Shutdown
+			// (pre-#501 binary). Fall through to the PID-based fallback.
+			return sigtermFallback()
+		}
+		return ShutdownNoDaemon, rpcErr
 	}
-	return resp.OK, nil
+	if !resp.OK {
+		return ShutdownNoDaemon, fmt.Errorf("daemon Shutdown RPC returned OK=false")
+	}
+	return ShutdownViaRPC, nil
 }
 
 // isDaemonAbsentErr reports whether err from a dial/RPC call indicates that
 // no daemon is currently listening on the control socket (vs. some other
 // transport failure). Both ECONNREFUSED (stale socket, no listener) and
-// ENOENT (socket removed between Stat and Dial) qualify.
+// ENOENT (socket removed between Stat and Dial) qualify. Application-level
+// RPC errors (method-not-found, server panic) do NOT — those are handled
+// separately by isRPCMethodNotFoundErr so we can route them to the SIGTERM
+// fallback rather than treating them as "no daemon" and silently leaving the
+// stale process running (#504).
 func isDaemonAbsentErr(err error) bool {
 	if err == nil {
 		return false
@@ -242,6 +283,24 @@ func isDaemonAbsentErr(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isRPCMethodNotFoundErr reports whether err is the net/rpc server's reply
+// for an unknown method or service. The connection succeeded (daemon is
+// running, control socket is alive) but the registered service did not have
+// the requested method — i.e. a pre-#501 daemon that never registered
+// "Control.Shutdown". The stdlib returns this as rpc.ServerError with the
+// literal prefix "rpc: can't find method " or "rpc: can't find service ".
+func isRPCMethodNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var serverErr rpc.ServerError
+	if !errors.As(err, &serverErr) {
+		return false
+	}
+	s := string(serverErr)
+	return strings.Contains(s, "can't find method") || strings.Contains(s, "can't find service")
 }
 
 type controlServer struct {

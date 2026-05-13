@@ -192,12 +192,12 @@ func TestControlServerShutdownClosesChannel(t *testing.T) {
 func TestRequestShutdownNoDaemon(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	restarted, err := RequestShutdown()
+	result, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown returned error when no daemon present: %v", err)
 	}
-	if restarted {
-		t.Fatalf("RequestShutdown reported restart when no daemon was running")
+	if result != ShutdownNoDaemon {
+		t.Fatalf("RequestShutdown returned %v when no daemon was running, want ShutdownNoDaemon", result)
 	}
 }
 
@@ -221,12 +221,12 @@ func TestRequestShutdownStaleSocket(t *testing.T) {
 		t.Fatalf("write stale socket placeholder: %v", err)
 	}
 
-	restarted, err := RequestShutdown()
+	result, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown returned error on stale socket: %v", err)
 	}
-	if restarted {
-		t.Fatalf("RequestShutdown reported restart against stale socket")
+	if result != ShutdownNoDaemon {
+		t.Fatalf("RequestShutdown returned %v against stale socket, want ShutdownNoDaemon", result)
 	}
 }
 
@@ -247,12 +247,12 @@ func TestRequestShutdownSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = closeServer() })
 
-	restarted, err := RequestShutdown()
+	result, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown: %v", err)
 	}
-	if !restarted {
-		t.Fatalf("expected restarted=true against live control server")
+	if result != ShutdownViaRPC {
+		t.Fatalf("RequestShutdown returned %v against live control server, want ShutdownViaRPC", result)
 	}
 	select {
 	case <-shutdownCh:

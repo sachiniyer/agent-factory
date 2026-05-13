@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/daemon"
 )
 
 func TestExtractBinaryFromTarGz(t *testing.T) {
@@ -216,9 +219,9 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 	})
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
-	requestDaemonShutdownFn = func() (bool, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		shutdownCalls++
-		return true, nil
+		return daemon.ShutdownViaRPC, nil
 	}
 
 	if err := runUpgrade(srv.URL); err != nil {
@@ -259,10 +262,10 @@ func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
 		requestDaemonShutdownFn = prevShutdown
 	})
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (bool, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		// Mirror what daemon.RequestShutdown returns when no daemon is
-		// running: (false, nil) — silently no-op.
-		return false, nil
+		// running: (ShutdownNoDaemon, nil) — silently no-op.
+		return daemon.ShutdownNoDaemon, nil
 	}
 
 	if err := runUpgrade(srv.URL); err != nil {
@@ -299,8 +302,8 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 		requestDaemonShutdownFn = prevShutdown
 	})
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (bool, error) {
-		return false, errors.New("simulated rpc failure")
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+		return daemon.ShutdownNoDaemon, errors.New("simulated rpc failure")
 	}
 
 	if err := runUpgrade(srv.URL); err != nil {
@@ -312,6 +315,58 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 	}
 	if string(got) != "new-binary" {
 		t.Fatalf("binary contents = %q, want new-binary", got)
+	}
+}
+
+// TestUpgradeReportsSIGTERMFallback verifies the user-facing message when
+// RequestShutdown stopped a pre-#501 daemon via the SIGTERM fallback (#504).
+// Users need to see that we used the fallback so support can tell whether
+// the daemon will respawn cleanly.
+func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
+	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+
+	archive := makeTarGz(t, map[string][]byte{"agent-factory": []byte("new-binary")})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(archive)
+	}))
+	defer srv.Close()
+
+	prevExe := osExecutableFn
+	prevShutdown := requestDaemonShutdownFn
+	t.Cleanup(func() {
+		osExecutableFn = prevExe
+		requestDaemonShutdownFn = prevShutdown
+	})
+	osExecutableFn = func() (string, error) { return tempBin, nil }
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+		return daemon.ShutdownViaSIGTERM, nil
+	}
+
+	// Capture stdout so we can assert on the user-visible message.
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = origStdout }()
+
+	if err := runUpgrade(srv.URL); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	w.Close()
+	captured, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+
+	got := string(captured)
+	want := "Upgraded successfully! Stopped the running daemon (pre-fix; used SIGTERM)"
+	if !strings.Contains(got, want) {
+		t.Fatalf("runUpgrade stdout missing SIGTERM-fallback message.\n got=%q\nwant substring=%q", got, want)
 	}
 }
 

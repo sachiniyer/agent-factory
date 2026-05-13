@@ -128,13 +128,17 @@ func runUpgrade(downloadURL string) error {
 	// on Linux, so users would keep running the stale image until they
 	// killed it manually. Ask any running daemon to exit; the next `af`
 	// invocation will EnsureDaemon-respawn from the new binary (#498).
-	restarted, shutdownErr := requestDaemonShutdownFn()
+	// Pre-#501 daemons don't speak the Shutdown RPC, so RequestShutdown
+	// falls back to PID-file-based SIGTERM (#504).
+	result, shutdownErr := requestDaemonShutdownFn()
 	switch {
 	case shutdownErr != nil:
 		fmt.Printf("Upgraded successfully! Failed to restart the running daemon: %v\n", shutdownErr)
 		fmt.Println("Stop the daemon manually (e.g. `af reset`) or kill the `--daemon` process to pick up the new binary.")
-	case restarted:
+	case result == daemon.ShutdownViaRPC:
 		fmt.Println("Upgraded successfully! Stopped the running daemon; it will respawn from the new binary on next use.")
+	case result == daemon.ShutdownViaSIGTERM:
+		fmt.Println("Upgraded successfully! Stopped the running daemon (pre-fix; used SIGTERM); it will respawn from the new binary on next use.")
 	default:
 		fmt.Println("Upgraded successfully!")
 	}
