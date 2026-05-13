@@ -25,7 +25,8 @@ func RunDaemon(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	closeControl, err := startControlServer(manager)
+	shutdownCh := make(chan struct{})
+	closeControl, err := startControlServer(manager, shutdownCh)
 	if err != nil {
 		return fmt.Errorf("failed to start daemon control server: %w", err)
 	}
@@ -67,11 +68,17 @@ func RunDaemon(cfg *config.Config) error {
 		}
 	}()
 
-	// Notify on SIGINT (Ctrl+C) and SIGTERM. Save instances before
+	// Notify on SIGINT (Ctrl+C) and SIGTERM, and watch for a Shutdown RPC.
+	// The RPC path is used by `af upgrade` / autoUpdate after writing a new
+	// binary so the next RPC respawns the daemon from the fresh image (#498).
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigChan
-	log.InfoLog.Printf("received signal %s", sig.String())
+	select {
+	case sig := <-sigChan:
+		log.InfoLog.Printf("received signal %s", sig.String())
+	case <-shutdownCh:
+		log.InfoLog.Printf("received shutdown request via control socket")
+	}
 
 	// Stop the goroutine so we don't race.
 	close(stopCh)

@@ -13,8 +13,20 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/spf13/cobra"
 )
+
+// requestDaemonShutdownFn is indirected so tests can stub the daemon
+// shutdown call without standing up a real control socket. The production
+// implementation contacts the local control plane (#436) and asks any
+// running daemon to exit so the next RPC respawns from the freshly written
+// binary (#498).
+var requestDaemonShutdownFn = daemon.RequestShutdown
+
+// osExecutableFn is indirected so tests can point the upgrade flow at a
+// temp file rather than overwriting the test binary itself.
+var osExecutableFn = os.Executable
 
 const (
 	releaseBaseURL = "https://github.com/sachiniyer/agent-factory/releases"
@@ -83,31 +95,50 @@ var upgradeCmd = &cobra.Command{
 		downloadURL := fmt.Sprintf("%s/latest/download/agent-factory-%s-%s.tar.gz", releaseBaseURL, goos, goarch)
 
 		fmt.Printf("Downloading latest release for %s/%s...\n", goos, goarch)
-
-		binary, err := downloadBinaryFn(downloadURL)
-		if err != nil {
-			return err
-		}
-
-		// Find current executable path
-		execPath, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("failed to find current executable: %w", err)
-		}
-		// Resolve symlinks so we replace the real binary, not the symlink
-		// pointing to it (e.g. on macOS Homebrew installs).
-		resolvedPath, err := filepath.EvalSymlinks(execPath)
-		if err != nil {
-			return fmt.Errorf("failed to resolve executable path: %w", err)
-		}
-
-		if err := config.AtomicWriteFile(resolvedPath, binary, 0755); err != nil {
-			return fmt.Errorf("failed to write new binary: %w", err)
-		}
-
-		fmt.Printf("Upgraded successfully!\n")
-		return nil
+		return runUpgrade(downloadURL)
 	},
+}
+
+// runUpgrade downloads the release tarball at downloadURL, atomically swaps
+// the current executable with the embedded binary, and asks any running
+// daemon to exit so users actually pick up the new image. Extracted from
+// upgradeCmd.RunE so tests can drive it without going through Cobra.
+func runUpgrade(downloadURL string) error {
+	binary, err := downloadBinaryFn(downloadURL)
+	if err != nil {
+		return err
+	}
+
+	execPath, err := osExecutableFn()
+	if err != nil {
+		return fmt.Errorf("failed to find current executable: %w", err)
+	}
+	// Resolve symlinks so we replace the real binary, not the symlink
+	// pointing to it (e.g. on macOS Homebrew installs).
+	resolvedPath, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve executable path: %w", err)
+	}
+
+	if err := config.AtomicWriteFile(resolvedPath, binary, 0755); err != nil {
+		return fmt.Errorf("failed to write new binary: %w", err)
+	}
+
+	// The running daemon process still references the old binary's inode
+	// on Linux, so users would keep running the stale image until they
+	// killed it manually. Ask any running daemon to exit; the next `af`
+	// invocation will EnsureDaemon-respawn from the new binary (#498).
+	restarted, shutdownErr := requestDaemonShutdownFn()
+	switch {
+	case shutdownErr != nil:
+		fmt.Printf("Upgraded successfully! Failed to restart the running daemon: %v\n", shutdownErr)
+		fmt.Println("Stop the daemon manually (e.g. `af reset`) or kill the `--daemon` process to pick up the new binary.")
+	case restarted:
+		fmt.Println("Upgraded successfully! Stopped the running daemon; it will respawn from the new binary on next use.")
+	default:
+		fmt.Println("Upgraded successfully!")
+	}
+	return nil
 }
 
 // extractBinaryFromTarGz reads a tar.gz stream and returns the contents of the

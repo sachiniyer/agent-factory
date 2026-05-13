@@ -80,7 +80,7 @@ func autoUpdate() error {
 		return err
 	}
 
-	execPath, err := os.Executable()
+	execPath, err := osExecutableFn()
 	if err != nil {
 		return fmt.Errorf("failed to find executable: %w", err)
 	}
@@ -95,7 +95,18 @@ func autoUpdate() error {
 		return fmt.Errorf("failed to write new binary: %w", err)
 	}
 
-	log.ErrorLog.Printf("auto-update: successfully updated to %s (effective on next launch)", latestVersion)
+	// Same rationale as `af upgrade` (#498): take down the running daemon so
+	// the next RPC respawns it from the freshly written binary. Quiet on the
+	// no-daemon path since autoUpdate runs in the background on every launch.
+	restarted, shutdownErr := requestDaemonShutdownFn()
+	switch {
+	case shutdownErr != nil:
+		log.WarningLog.Printf("auto-update: updated to %s but failed to restart daemon: %v", latestVersion, shutdownErr)
+	case restarted:
+		log.InfoLog.Printf("auto-update: updated to %s and stopped running daemon", latestVersion)
+	default:
+		log.InfoLog.Printf("auto-update: updated to %s (effective on next launch)", latestVersion)
+	}
 	return nil
 }
 

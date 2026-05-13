@@ -2,13 +2,16 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/rpc"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -27,6 +30,10 @@ const (
 	trustPromptRetryDelay    = time.Second
 	waitForReadyTimeout      = 60 * time.Second
 	waitForReadyPollInterval = 500 * time.Millisecond
+	// shutdownAckGrace delays the daemon main-loop teardown after a Shutdown
+	// RPC handler returns so the response can flush back to the caller before
+	// the listener closes.
+	shutdownAckGrace = 50 * time.Millisecond
 )
 
 var ensureDaemonMu sync.Mutex
@@ -78,6 +85,11 @@ type ImportRemoteHookSessionsResponse struct {
 
 type PingRequest struct{}
 type PingResponse struct {
+	OK bool
+}
+
+type ShutdownRequest struct{}
+type ShutdownResponse struct {
 	OK bool
 }
 
@@ -187,12 +199,76 @@ func ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest) ([]session.In
 	return resp.Instances, nil
 }
 
+// RequestShutdown asks any running daemon to exit cleanly via the control
+// socket. Returns (true, nil) when a daemon acknowledged the request and
+// will exit, (false, nil) when no daemon is running (no socket or connection
+// refused — common in CI, fresh installs, or interactive `af upgrade`), and
+// (false, err) for unexpected errors.
+//
+// This is invoked after `af upgrade` / autoUpdate() write a new binary so the
+// running daemon process, which still references the old binary's inode, is
+// taken down. A subsequent RPC call (CreateSession, KillSession, etc.) will
+// EnsureDaemon-respawn from the freshly written binary.
+func RequestShutdown() (bool, error) {
+	socketPath, err := DaemonSocketPath()
+	if err != nil {
+		return false, err
+	}
+	if _, statErr := os.Stat(socketPath); statErr != nil {
+		if errors.Is(statErr, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, statErr
+	}
+	var resp ShutdownResponse
+	if err := callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp); err != nil {
+		if isDaemonAbsentErr(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return resp.OK, nil
+}
+
+// isDaemonAbsentErr reports whether err from a dial/RPC call indicates that
+// no daemon is currently listening on the control socket (vs. some other
+// transport failure). Both ECONNREFUSED (stale socket, no listener) and
+// ENOENT (socket removed between Stat and Dial) qualify.
+func isDaemonAbsentErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	return false
+}
+
 type controlServer struct {
-	manager *Manager
+	manager      *Manager
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
 }
 
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
+	return nil
+}
+
+// Shutdown acknowledges a request to terminate the daemon, then asynchronously
+// signals the main loop to tear down after a short grace period. The grace
+// lets the RPC response flush back to the caller before the listener closes.
+func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
+	resp.OK = true
+	if s.shutdownCh == nil {
+		return nil
+	}
+	s.shutdownOnce.Do(func() {
+		go func() {
+			time.Sleep(shutdownAckGrace)
+			close(s.shutdownCh)
+		}()
+	})
 	return nil
 }
 
@@ -230,7 +306,11 @@ func (s *controlServer) ImportRemoteHookSessions(req ImportRemoteHookSessionsReq
 	return nil
 }
 
-func startControlServer(manager *Manager) (func() error, error) {
+// startControlServer registers the control RPC service on the Unix socket and
+// returns a cleanup function that closes the listener and removes the socket
+// file. When shutdownCh is non-nil, the Shutdown RPC will close it on the
+// first invocation, allowing the daemon main loop to exit on RPC request.
+func startControlServer(manager *Manager, shutdownCh chan struct{}) (func() error, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
 		return nil, err
@@ -250,7 +330,10 @@ func startControlServer(manager *Manager) (func() error, error) {
 	}
 
 	server := rpc.NewServer()
-	if err := server.RegisterName(controlServiceName, &controlServer{manager: manager}); err != nil {
+	if err := server.RegisterName(controlServiceName, &controlServer{
+		manager:    manager,
+		shutdownCh: shutdownCh,
+	}); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}

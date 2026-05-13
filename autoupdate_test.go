@@ -163,6 +163,100 @@ func TestAutoUpdateRecordsCheckOnDownloadFailure(t *testing.T) {
 	}
 }
 
+// TestAutoUpdateCallsShutdownAfterBinarySwap guards the #498 fix on the
+// background path: when autoUpdate() successfully writes a new binary, it
+// must also ask any running daemon to exit so users don't keep running
+// the stale image silently for days.
+func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
+	withTestHome(t)
+
+	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+
+	prevGOOS := runtimeGOOS
+	prevFetch := fetchLatestReleaseTagFn
+	prevDownload := downloadBinaryFn
+	prevVersion := version
+	prevExe := osExecutableFn
+	prevShutdown := requestDaemonShutdownFn
+	t.Cleanup(func() {
+		runtimeGOOS = prevGOOS
+		fetchLatestReleaseTagFn = prevFetch
+		downloadBinaryFn = prevDownload
+		version = prevVersion
+		osExecutableFn = prevExe
+		requestDaemonShutdownFn = prevShutdown
+	})
+
+	runtimeGOOS = "linux"
+	version = "1.0.0"
+	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	// Bypass the tarball extract by returning the raw binary directly.
+	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
+	osExecutableFn = func() (string, error) { return tempBin, nil }
+	shutdownCalls := 0
+	requestDaemonShutdownFn = func() (bool, error) {
+		shutdownCalls++
+		return true, nil
+	}
+
+	if err := autoUpdate(); err != nil {
+		t.Fatalf("autoUpdate: %v", err)
+	}
+	if shutdownCalls != 1 {
+		t.Fatalf("expected one Shutdown call, got %d", shutdownCalls)
+	}
+	got, err := os.ReadFile(tempBin)
+	if err != nil {
+		t.Fatalf("read upgraded binary: %v", err)
+	}
+	if string(got) != "new-binary" {
+		t.Fatalf("binary contents = %q, want new-binary", got)
+	}
+}
+
+// TestAutoUpdateSucceedsWhenShutdownErrors verifies that an error from
+// RequestShutdown is logged but does not cause autoUpdate to surface a
+// failure to the background goroutine — the binary is on disk.
+func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
+	withTestHome(t)
+
+	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+
+	prevGOOS := runtimeGOOS
+	prevFetch := fetchLatestReleaseTagFn
+	prevDownload := downloadBinaryFn
+	prevVersion := version
+	prevExe := osExecutableFn
+	prevShutdown := requestDaemonShutdownFn
+	t.Cleanup(func() {
+		runtimeGOOS = prevGOOS
+		fetchLatestReleaseTagFn = prevFetch
+		downloadBinaryFn = prevDownload
+		version = prevVersion
+		osExecutableFn = prevExe
+		requestDaemonShutdownFn = prevShutdown
+	})
+
+	runtimeGOOS = "linux"
+	version = "1.0.0"
+	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
+	osExecutableFn = func() (string, error) { return tempBin, nil }
+	requestDaemonShutdownFn = func() (bool, error) {
+		return false, errors.New("simulated rpc failure")
+	}
+
+	if err := autoUpdate(); err != nil {
+		t.Fatalf("autoUpdate should not fail when Shutdown errors, got: %v", err)
+	}
+}
+
 func TestIsNewer(t *testing.T) {
 	cases := []struct {
 		latest, current string
