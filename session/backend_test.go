@@ -303,6 +303,42 @@ func TestHookBackendKill(t *testing.T) {
 	assert.Nil(t, i.remoteMeta)
 }
 
+// TestHookBackendKillUnallocatedSkipsDeleteCmd verifies that Kill on an
+// instance that was never successfully Start'd (no remoteMeta) does not
+// invoke delete_cmd. Otherwise we'd ask the user-provided cleanup script
+// to delete a slug it never saw — surfacing as a spurious failure on a
+// kill that had nothing to do. See issue #518.
+func TestHookBackendKillUnallocatedSkipsDeleteCmd(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "delete-ran")
+	// delete_cmd touches a sentinel file iff it runs; the test fails the
+	// kill guard by detecting the sentinel afterward.
+	deleteCmd := writeScript(t, dir, "delete.sh", `touch `+sentinel+`; echo '{"deleted": true}'`)
+
+	b := &HookBackend{
+		Hooks: config.RemoteHooks{
+			DeleteCmd: deleteCmd,
+		},
+	}
+	i := &Instance{
+		Title:   "never-started",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	// Sanity: no Start call, so remoteMeta is nil.
+	require.Nil(t, i.remoteMeta)
+
+	err := b.Kill(i)
+	require.NoError(t, err)
+
+	_, statErr := os.Stat(sentinel)
+	assert.True(t, os.IsNotExist(statErr),
+		"delete_cmd should not run when no remote session was allocated (sentinel exists: %v)", statErr)
+	assert.False(t, i.Started())
+	assert.Nil(t, i.remoteMeta)
+}
+
 func TestHookBackendPreview(t *testing.T) {
 	b := makeHooks(t)
 	i := &Instance{

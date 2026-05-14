@@ -168,17 +168,28 @@ func extractJSON(output string) string {
 func (b *HookBackend) Kill(i *Instance) error {
 	slug := hookNameForInstance(i)
 
+	// Snapshot whether a remote session was ever allocated before clearing
+	// state. If Start never ran successfully there is nothing for delete_cmd
+	// to clean up — invoking it would surface as a confusing failure against
+	// a slug the user-provided script has never heard of. Mirrors
+	// LocalBackend.Kill's tmuxSession/gitWorktree guards.
+	//
 	// Mark the instance as stopped BEFORE any resource cleanup so that the
 	// instance is in a consistent state even if delete_cmd fails. Otherwise
 	// the PTY could be closed while started=true, leaving the session
 	// appearing running but unusable (empty preview, broken attach).
-	// This mirrors LocalBackend.Kill's behavior.
 	i.mu.Lock()
+	hadRemote := i.remoteMeta != nil
 	i.started = false
 	i.remoteMeta = nil
 	i.mu.Unlock()
 
 	b.closePTY(i.Title)
+
+	if !hadRemote {
+		log.WarningLog.Printf("kill %q: skipping delete_cmd, no remote session allocated", i.Title)
+		return nil
+	}
 
 	args := []string{"--name", slug, "--json"}
 	out, err := exec.Command(b.Hooks.DeleteCmd, args...).CombinedOutput()
