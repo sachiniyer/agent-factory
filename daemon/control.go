@@ -512,14 +512,29 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 
 	instance.SetStatus(session.Running)
 	data := instance.ToInstanceData()
-	if err := appendInstanceData(repo.ID, data); err != nil {
-		_ = instance.Kill()
-		return session.InstanceData{}, err
-	}
 
-	m.mu.Lock()
-	m.instances[daemonInstanceKey(repo.ID, title)] = instance
-	m.mu.Unlock()
+	// Register the in-memory instance and persist it to disk inside the
+	// same critical section. The daemon refresh loop rebuilds
+	// session.Instance objects from disk for any key it does not already
+	// see in m.instances, so a window where the entry exists on disk but
+	// not in memory would let refresh construct a duplicate Instance
+	// (opening a fresh PTY in the tmux backend) that gets orphaned when
+	// the original is later stored under the same key.
+	key := daemonInstanceKey(repo.ID, title)
+	persistErr := func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.instances[key] = instance
+		if err := appendInstanceData(repo.ID, data); err != nil {
+			delete(m.instances, key)
+			return err
+		}
+		return nil
+	}()
+	if persistErr != nil {
+		_ = instance.Kill()
+		return session.InstanceData{}, persistErr
+	}
 
 	return data, nil
 }

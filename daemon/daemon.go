@@ -102,6 +102,14 @@ func RunDaemon(cfg *config.Config) error {
 	return nil
 }
 
+// fromInstanceDataForRefresh is the entry point refreshDaemonInstances uses
+// to materialize a session.Instance from a persisted on-disk entry. It is a
+// package-level variable so tests can observe (or substitute) the call —
+// see TestManagerCreateSessionAtomicWithRefresh, which uses it to detect
+// whether refresh ever raced CreateSession and tried to construct a
+// duplicate Instance from disk.
+var fromInstanceDataForRefresh = session.FromInstanceData
+
 func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, error) {
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
@@ -128,7 +136,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				}
 			}
 
-			instance, err := session.FromInstanceData(item)
+			instance, err := fromInstanceDataForRefresh(item)
 			if err != nil {
 				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
 				continue

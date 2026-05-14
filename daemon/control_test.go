@@ -3,12 +3,15 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -89,6 +92,109 @@ func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
 		Program:  "claude",
 	}); err == nil {
 		t.Fatalf("expected duplicate title to be rejected")
+	}
+}
+
+// TestManagerCreateSessionAtomicWithRefresh is a regression test for
+// sachiniyer/agent-factory#509. The pre-fix code persisted a new session to
+// disk before inserting it into m.instances under m.mu. The daemon's refresh
+// loop rebuilds session.Instance objects from disk for any key it does not
+// already see in m.instances — so a refresh that fired between disk-write
+// and memory-insert constructed a duplicate Instance via FromInstanceData
+// (opening a fresh PTY in the tmux backend) that became unreachable when
+// CreateSession finally stored its own instance under the same key. The
+// duplicate's PTY fd was then leaked for the lifetime of the daemon.
+//
+// The fix folds the in-memory insert and the disk write into a single
+// critical section under m.mu, so refresh either runs before the disk
+// write happens or blocks until the in-memory entry is present and is
+// reused via existing-key dedup.
+//
+// We assert that property by counting how many times the refresh path
+// invokes FromInstanceData. With the fix, refresh races with CreateSession
+// can never observe a disk-only state, so FromInstanceData is never called
+// for newly-created sessions and the counter stays at zero. With the buggy
+// ordering, refresh occasionally observes the gap and increments the
+// counter — even in the test environment where the real FromInstanceData
+// would have failed for lack of tmux, the call itself is recorded.
+func TestManagerCreateSessionAtomicWithRefresh(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	var fromInstanceDataCalls atomic.Int32
+	prev := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		fromInstanceDataCalls.Add(1)
+		return prev(d)
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = manager.RefreshInstances()
+				}
+			}
+		}()
+	}
+	t.Cleanup(func() {
+		close(stop)
+		wg.Wait()
+	})
+
+	const numSessions = 8
+	for i := 0; i < numSessions; i++ {
+		title := fmt.Sprintf("race-%d", i)
+		if _, err := manager.CreateSession(CreateSessionRequest{
+			Title:    title,
+			RepoPath: repoPath,
+			Program:  "claude",
+		}); err != nil {
+			t.Fatalf("CreateSession(%q): %v", title, err)
+		}
+	}
+
+	for i := 0; i < 50; i++ {
+		_ = manager.RefreshInstances()
+	}
+
+	if got := fromInstanceDataCalls.Load(); got != 0 {
+		t.Fatalf("refresh invoked FromInstanceData %d times — would have constructed duplicate Instance(s) and orphaned their PTY fds (#509)", got)
+	}
+
+	snap := manager.InstancesSnapshot()
+	if len(snap) != numSessions {
+		t.Fatalf("expected %d instances in memory, got %d", numSessions, len(snap))
+	}
+
+	raw, err := config.LoadRepoInstances(repo.ID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+	var stored []session.InstanceData
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("unmarshal stored: %v", err)
+	}
+	if len(stored) != numSessions {
+		t.Fatalf("expected %d sessions on disk, got %d", numSessions, len(stored))
 	}
 }
 
