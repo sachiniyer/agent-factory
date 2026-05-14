@@ -1,14 +1,34 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
 	aflog "github.com/sachiniyer/agent-factory/log"
 )
+
+// captureLogs redirects InfoLog and ErrorLog to in-memory buffers for the
+// duration of the test. Returns the buffers; output collected reflects every
+// Printf call routed through those loggers after the swap.
+func captureLogs(t *testing.T) (info, errLog *bytes.Buffer) {
+	t.Helper()
+	info = &bytes.Buffer{}
+	errLog = &bytes.Buffer{}
+	prevInfoOut := aflog.InfoLog.Writer()
+	prevErrOut := aflog.ErrorLog.Writer()
+	aflog.InfoLog.SetOutput(info)
+	aflog.ErrorLog.SetOutput(errLog)
+	t.Cleanup(func() {
+		aflog.InfoLog.SetOutput(prevInfoOut)
+		aflog.ErrorLog.SetOutput(prevErrOut)
+	})
+	return info, errLog
+}
 
 func TestMain(m *testing.M) {
 	// autoUpdate() calls log.ErrorLog.Printf, which panics if logging has not
@@ -42,6 +62,7 @@ func withTestHome(t *testing.T) string {
 // fires and the GitHub API is not hit on every launch.
 func TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable(t *testing.T) {
 	dir := withTestHome(t)
+	infoBuf, errBuf := captureLogs(t)
 
 	prevGOOS := runtimeGOOS
 	prevFetch := fetchLatestReleaseTagFn
@@ -67,6 +88,14 @@ func TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable(t *testing.T) {
 	}
 	if shouldCheck() {
 		t.Fatalf("shouldCheck() returned true after recordCheck(); throttle is broken")
+	}
+	// Windows skips the actual update, so the misleading "updating from X to Y"
+	// line must not appear in any log stream (issue #519).
+	if strings.Contains(infoBuf.String(), "updating from") {
+		t.Fatalf("InfoLog contained 'updating from' on Windows skip path:\n%s", infoBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "updating from") {
+		t.Fatalf("ErrorLog contained 'updating from' on Windows skip path:\n%s", errBuf.String())
 	}
 }
 
@@ -170,6 +199,7 @@ func TestAutoUpdateRecordsCheckOnDownloadFailure(t *testing.T) {
 // the stale image silently for days.
 func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	withTestHome(t)
+	infoBuf, errBuf := captureLogs(t)
 
 	tempBin := filepath.Join(t.TempDir(), "agent-factory")
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
@@ -215,6 +245,16 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	}
 	if string(got) != "new-binary" {
 		t.Fatalf("binary contents = %q, want new-binary", got)
+	}
+	// On non-Windows hosts where an update actually runs, the "updating from"
+	// line must be emitted at INFO level (issue #519).
+	if !strings.Contains(infoBuf.String(), "updating from 1.0.0 to 1.0.1") {
+		t.Fatalf("expected InfoLog to contain 'updating from 1.0.0 to 1.0.1', got:\n%s",
+			infoBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "updating from") {
+		t.Fatalf("'updating from' must not be logged at ERROR level, got:\n%s",
+			errBuf.String())
 	}
 }
 

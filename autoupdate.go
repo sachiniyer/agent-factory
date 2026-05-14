@@ -64,14 +64,14 @@ func autoUpdate() error {
 		return nil
 	}
 
-	log.ErrorLog.Printf("auto-update: updating from %s to %s", version, latestVersion)
-
 	goos := runtimeGOOS
 	goarch := runtime.GOARCH
 	if goos == "windows" {
 		// Auto-update is not supported on Windows.
 		return nil
 	}
+
+	log.InfoLog.Printf("auto-update: updating from %s to %s", version, latestVersion)
 
 	downloadURL := fmt.Sprintf("%s/latest/download/agent-factory-%s-%s.tar.gz",
 		releaseBaseURL, goos, goarch)
