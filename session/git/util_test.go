@@ -72,6 +72,21 @@ func TestSanitizeBranchName(t *testing.T) {
 			expected: "john/config",
 		},
 		{
+			name:     ".lock in intermediate path segment",
+			input:    "foo.lock/bar",
+			expected: "foo/bar",
+		},
+		{
+			name:     ".locked is not stripped (internal .lock preserved)",
+			input:    "foo.locked/bar",
+			expected: "foo.locked/bar",
+		},
+		{
+			name:     ".lock in multiple segments",
+			input:    "foo.lock/bar.lock/baz",
+			expected: "foo/bar/baz",
+		},
+		{
 			name:     "double dots in name",
 			input:    "feature..branch",
 			expected: "feature-branch",
