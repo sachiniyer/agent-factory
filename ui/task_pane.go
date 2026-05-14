@@ -340,7 +340,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 	case tea.KeyShiftTab:
 		s.focusIndex = (s.focusIndex + 5) % 6
 		s.updateEditFocus()
-	case tea.KeyEsc:
+	case tea.KeyEsc, tea.KeyCtrlC:
 		s.editing = false
 		s.creating = false
 		s.editError = ""
