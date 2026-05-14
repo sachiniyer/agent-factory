@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/api"
 	"github.com/sachiniyer/agent-factory/app"
@@ -71,7 +70,11 @@ var (
 			if autoYesFlag {
 				autoYes = true
 			}
-			if autoYes && strings.Contains(strings.ToLower(program), "claude") {
+			// Match Claude by exact basename (issue #520). A substring check
+			// false-matched paths like /home/claude-user/bin/aider or wrapper
+			// scripts named claude-something, appending Claude's permission
+			// flag to non-Claude commands.
+			if autoYes && session.BaseCommand(program) == tmux.ProgramClaude {
 				program = program + " --permission-mode bypassPermissions"
 			}
 			if autoYes {
