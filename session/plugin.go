@@ -46,7 +46,18 @@ var pluginCommands = map[string]string{
 		"Parse the session name (first argument) and optional initial prompt (remaining arguments), " +
 		"then run `af sessions create --name <name> --prompt <prompt>`. " +
 		"If no prompt is given, omit the --prompt flag. " +
-		"The name should be a short kebab-case identifier the user will recognize in the session list.\n",
+		"The name should be a short kebab-case identifier the user will recognize in the session list.\n" +
+		"\n" +
+		"## Output contract\n" +
+		"\n" +
+		"The initial prompt is the entire contract — the spawned session inherits no context from this conversation. " +
+		"State everything it needs, including the expected output mode. Common shapes:\n" +
+		"\n" +
+		"- \"Open a PR titled X, link it back here, do not merge — the parent will verify and merge.\"\n" +
+		"- \"Produce a report in tmp_docs/<name>.md and exit. Do NOT write code or open a PR.\"\n" +
+		"- \"Diagnose only — stop after the audit summary, no implementation.\"\n" +
+		"\n" +
+		"If the user's instruction is short or ambiguous (e.g. \"spawn an agent to audit X\"), confirm the desired output shape with them before spawning — a wrong guess surfaces later as a \"did you do it or did the af session?\" round-trip.\n",
 
 	"af-kill.md": "---\n" +
 		"allowed-tools: Bash(af sessions kill:*)\n" +
