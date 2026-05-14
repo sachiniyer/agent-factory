@@ -242,6 +242,52 @@ func TestTaskPaneEditModePreservesCustomProgram(t *testing.T) {
 	}
 }
 
+// TestTaskPaneEditModeCtrlCCancels is the regression guard for #526: Ctrl+C
+// inside the edit form must cancel the edit (matching Esc) instead of being
+// silently swallowed. Dirty buffer changes must not be written back.
+func TestTaskPaneEditModeCtrlCCancels(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "0 0 * * *",
+		ProjectPath: "/tmp/repo",
+		Program:     "claude",
+		Enabled:     true,
+	}})
+	tp.SetFocus(true)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // enter edit mode
+	assert.True(t, tp.IsEditing())
+
+	// Dirty the Name buffer so we can prove the cancel doesn't persist edits.
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("XXX")})
+
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlC})
+
+	assert.False(t, tp.IsEditing(), "Ctrl+C should exit edit mode")
+	assert.Equal(t, "", tp.editError, "Ctrl+C should clear any inline error")
+	tasks := tp.GetTasks()
+	if assert.Len(t, tasks, 1) {
+		assert.Equal(t, "nightly", tasks[0].Name,
+			"Ctrl+C must not write the dirty Name buffer back to the task")
+	}
+}
+
+// TestTaskPaneCreateModeCtrlCCancels mirrors the edit-mode regression guard
+// for the create form: Ctrl+C must exit create mode without producing a
+// pending create. Regression test for #526.
+func TestTaskPaneCreateModeCtrlCCancels(t *testing.T) {
+	tp := NewTaskPane()
+	tp.EnterCreateMode("/tmp/repo")
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("draft")})
+
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlC})
+
+	assert.False(t, tp.IsCreating(), "Ctrl+C should exit create mode")
+	assert.False(t, tp.HasPendingCreate(), "Ctrl+C must not produce a pending create")
+}
+
 // TestTaskPaneListShowsAgentNameNotFullProgram confirms the list view collapses
 // a noisy program string (path + flags) down to the agent name for #455.
 func TestTaskPaneListShowsAgentNameNotFullProgram(t *testing.T) {
