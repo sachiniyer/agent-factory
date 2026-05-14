@@ -36,12 +36,16 @@ func sanitizeBranchName(s string) string {
 	s = strings.Trim(s, "-/")
 
 	// Handle git dot restrictions:
-	// 1. Remove leading dots from each path component (no hidden-file-style names like .env)
-	//    This also handles ".." since stripping leading dots from ".." leaves it empty.
+	// 1. For each path component: strip leading dots (no hidden-file-style names
+	//    like .env; also collapses ".." to empty) and strip any trailing ".lock"
+	//    suffixes (reserved by git for every path segment, not just the final one).
 	parts := strings.Split(s, "/")
 	filtered := make([]string, 0, len(parts))
 	for _, part := range parts {
 		part = strings.TrimLeft(part, ".")
+		for strings.HasSuffix(part, ".lock") {
+			part = strings.TrimSuffix(part, ".lock")
+		}
 		if part != "" {
 			filtered = append(filtered, part)
 		}
@@ -49,13 +53,9 @@ func sanitizeBranchName(s string) string {
 	s = strings.Join(filtered, "/")
 	// 2. Replace any remaining double dots with a dash (e.g., "a..b")
 	s = strings.ReplaceAll(s, "..", "-")
-	// 3. No .lock suffix (reserved by git) - remove ALL trailing .lock suffixes
-	for strings.HasSuffix(s, ".lock") {
-		s = strings.TrimSuffix(s, ".lock")
-	}
-	// 4. No trailing dots
+	// 3. No trailing dots
 	s = strings.TrimRight(s, ".")
-	// 5. Clean up any trailing dashes or slashes left after dot removal
+	// 4. Clean up any trailing dashes or slashes left after dot removal
 	s = strings.Trim(s, "-/")
 
 	// If the result is empty (e.g., input was only special characters),
