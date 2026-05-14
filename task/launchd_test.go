@@ -119,6 +119,53 @@ func TestCronToCalendarIntervalXML_AllWildcards(t *testing.T) {
 	assert.NotContains(t, xml, "<key>Hour</key>")
 }
 
+// TestCronToLaunchdScheduleXML_StepOneCoversAll verifies that "*/N" forms
+// that cover every legal value for their field are normalized back to a
+// wildcard, so semantically-equivalent expressions of "every minute" do
+// not trip the maxCalendarIntervals guard.
+func TestCronToLaunchdScheduleXML_StepOneCoversAll(t *testing.T) {
+	cases := []string{
+		"*/1 */1 * * *", // every minute via */1 on minute and hour
+		"*/1 * * * *",   // every minute via */1 on minute only
+		"* */1 * * *",   // wildcard hour via */1
+	}
+	for _, expr := range cases {
+		expr := expr
+		t.Run(expr, func(t *testing.T) {
+			xml, err := cronToLaunchdScheduleXML(expr)
+			require.NoError(t, err)
+			assert.Contains(t, xml, "<key>StartInterval</key>")
+			assert.Contains(t, xml, "<integer>60</integer>")
+			assert.NotContains(t, xml, "<key>StartCalendarInterval</key>")
+		})
+	}
+}
+
+// TestCronToCalendarIntervalXML_StepStillRestrictive verifies that step
+// expressions that do NOT cover every value (e.g. */2 on minute) remain
+// restrictive and emit the expected number of dicts.
+func TestCronToCalendarIntervalXML_StepStillRestrictive(t *testing.T) {
+	xml, err := cronToCalendarIntervalXML("*/2 * * * *")
+	require.NoError(t, err)
+
+	assert.Equal(t, 30, countDicts(xml), "expected 30 dicts for every-2-minutes, got:\n%s", xml)
+	assert.Contains(t, xml, "<key>Minute</key>")
+	assert.NotContains(t, xml, "<key>Hour</key>")
+}
+
+// TestCronToCalendarIntervalXML_MonthStepCoversAll verifies the symmetric
+// collapse for the month field — "*/1" on month covers all 12 values and
+// must drop the Month key from the emitted dict.
+func TestCronToCalendarIntervalXML_MonthStepCoversAll(t *testing.T) {
+	xml, err := cronToCalendarIntervalXML("0 9 15 */1 *")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, countDicts(xml), "expected a single dict, got:\n%s", xml)
+	assert.NotContains(t, xml, "<key>Month</key>")
+	assert.Contains(t, xml, "<key>Day</key>")
+	assert.Contains(t, xml, "<integer>15</integer>")
+}
+
 func TestCronToLaunchdScheduleXML_AllWildcardsUsesStartInterval(t *testing.T) {
 	xml, err := cronToLaunchdScheduleXML("* * * * *")
 	require.NoError(t, err)

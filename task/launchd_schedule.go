@@ -25,13 +25,38 @@ func cronToLaunchdScheduleXML(cronExpr string) (string, error) {
 	return "    <key>StartCalendarInterval</key>\n" + calendarXML, nil
 }
 
+// isEveryMinuteCron reports whether cronExpr is semantically "every minute" —
+// either a literal "* * * * *" or a form whose fields all cover every legal
+// value (e.g. "*/1 */1 * * *"). Matching the equivalent forms here lets us
+// emit StartInterval=60 instead of a single empty StartCalendarInterval dict.
 func isEveryMinuteCron(cronExpr string) bool {
 	fields := strings.Fields(cronExpr)
 	if len(fields) != 5 {
 		return false
 	}
-	for _, field := range fields {
-		if field != "*" {
+	ranges := []struct{ min, max int }{
+		{0, 59}, // minute
+		{0, 23}, // hour
+		{1, 31}, // day-of-month
+		{1, 12}, // month
+		{0, 7},  // day-of-week (0 and 7 both mean Sunday)
+	}
+	for i, field := range fields {
+		if field == "*" {
+			continue
+		}
+		vals, err := expandCronField(field, ranges[i].min, ranges[i].max)
+		if err != nil {
+			return false
+		}
+		if i == 4 {
+			vals = normalizeDOWValues(vals)
+			if len(vals) < 7 {
+				return false
+			}
+			continue
+		}
+		if len(vals) < (ranges[i].max - ranges[i].min + 1) {
 			return false
 		}
 	}
@@ -74,6 +99,15 @@ func cronToCalendarIntervalXML(cronExpr string) (string, error) {
 		// Normalize weekday 7 -> 0 (both mean Sunday in cron; launchd uses 0).
 		if def.key == "Weekday" && vals != nil {
 			vals = normalizeDOWValues(vals)
+		}
+		// Collapse fields that syntactically cover every legal value
+		// (e.g. "*/1" for minute expands to all 60 values) back to a
+		// wildcard. Without this, the cartesian product blows past
+		// maxCalendarIntervals and we reject schedules that are
+		// semantically identical to "* * * * *". DOM/DOW have their
+		// own collapse below for OR-semantics reasons.
+		if def.key != "Day" && def.key != "Weekday" && vals != nil && len(vals) >= (def.max-def.min+1) {
+			vals = nil
 		}
 		expanded = append(expanded, expandedField{key: def.key, vals: vals})
 	}
