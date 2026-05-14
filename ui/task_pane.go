@@ -351,6 +351,10 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 					s.editError = "name is required"
 					return true
 				}
+				if strings.TrimSpace(s.editPrompt.Value()) == "" {
+					s.editError = "prompt must be non-empty"
+					return true
+				}
 				if err := task.ValidateCronExpr(s.editCron.Value()); err != nil {
 					s.editError = fmt.Sprintf("invalid cron: %v", err)
 					return true
@@ -361,6 +365,10 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			} else {
 				if s.editName.Value() == "" {
 					s.editError = "name is required"
+					return true
+				}
+				if strings.TrimSpace(s.editPrompt.Value()) == "" {
+					s.editError = "prompt must be non-empty"
 					return true
 				}
 				if err := task.ValidateCronExpr(s.editCron.Value()); err != nil {
