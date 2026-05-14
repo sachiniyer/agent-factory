@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -118,4 +119,63 @@ func TestResolveMainRepoRoot_Public(t *testing.T) {
 func TestRepoIDFromRoot(t *testing.T) {
 	id := RepoIDFromRoot("/some/path")
 	assert.Len(t, id, 12) // 6 bytes = 12 hex chars
+}
+
+// TestValidateRepoID_PathTraversalRejected covers the daemon RPC path
+// traversal exploit class from #515. Every input that could break out of
+// the per-repo file scope must be rejected.
+func TestValidateRepoID_PathTraversalRejected(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"empty", ""},
+		{"dot", "."},
+		{"dotdot", ".."},
+		{"dotdot-slash", "../"},
+		{"deep-traversal", "../../../etc/passwd"},
+		{"embedded-traversal", "foo/../bar"},
+		{"trailing-traversal", "abc/.."},
+		{"absolute-path", "/etc/passwd"},
+		{"windows-absolute", "C:\\windows\\system32"},
+		{"forward-slash", "foo/bar"},
+		{"backslash", "foo\\bar"},
+		{"null-byte", "foo\x00bar"},
+		{"newline", "foo\nbar"},
+		{"tilde", "~/secrets"},
+		{"hidden", ".hidden"},
+		{"glob", "foo*"},
+		{"space", "foo bar"},
+		{"unicode-traversal", "foo/../bar"},
+		{"too-long", strings.Repeat("a", maxRepoIDLength+1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateRepoID(tc.input)
+			assert.Error(t, err, "expected %q to be rejected", tc.input)
+		})
+	}
+}
+
+// TestValidateRepoID_LegitimateAccepted ensures real-world repo IDs from
+// RepoIDFromRoot, plus the test fixture IDs already used elsewhere in the
+// codebase, continue to validate.
+func TestValidateRepoID_LegitimateAccepted(t *testing.T) {
+	cases := []string{
+		RepoIDFromRoot("/some/path"), // 12 hex chars from production helper
+		"abc123def456",
+		"AAAA1111BBBB",
+		"test-repo-id",
+		"test-repo-no-hooks",
+		"ghost-repo",
+		"json-roundtrip",
+		"underscore_id",
+		"a",
+		strings.Repeat("a", maxRepoIDLength),
+	}
+	for _, id := range cases {
+		t.Run(id, func(t *testing.T) {
+			assert.NoError(t, ValidateRepoID(id))
+		})
+	}
 }

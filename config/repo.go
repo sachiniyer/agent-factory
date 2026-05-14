@@ -7,8 +7,39 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// repoIDPattern restricts a repoID to characters that are safe to use as a
+// single path segment. Legitimate IDs from RepoIDFromRoot are 12 lowercase
+// hex characters; tests and any future ID schemes are constrained to the
+// same character class so the value can never escape its parent directory.
+var repoIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// maxRepoIDLength caps the size of an accepted repoID. Legitimate IDs are
+// 12 chars; the cap is loose enough to accommodate future schemes while
+// preventing unbounded allocation in path joins or error messages.
+const maxRepoIDLength = 128
+
+// ValidateRepoID enforces the shape of a repository identifier before it is
+// used to construct a filesystem path. Returns an error when the id is
+// empty, exceeds maxRepoIDLength, or contains any character outside
+// [a-zA-Z0-9_-] — in particular, "." (used in traversal), "/", or "\".
+// Callers that legitimately accept an empty id as "all repos" must check
+// that case before calling this function.
+func ValidateRepoID(repoID string) error {
+	if repoID == "" {
+		return fmt.Errorf("invalid repo id: empty")
+	}
+	if len(repoID) > maxRepoIDLength {
+		return fmt.Errorf("invalid repo id: length %d exceeds maximum %d", len(repoID), maxRepoIDLength)
+	}
+	if !repoIDPattern.MatchString(repoID) {
+		return fmt.Errorf("invalid repo id: must match %s", repoIDPattern.String())
+	}
+	return nil
+}
 
 // resolveMainRepoRoot returns the root of the main working tree, resolving
 // through linked worktrees so that worktree sessions get the same repo ID
