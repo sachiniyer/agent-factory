@@ -311,6 +311,12 @@ func (m *statusMonitor) hash(s string) []byte {
 
 // TapEnter sends an enter keystroke to the tmux pane.
 func (t *TmuxSession) TapEnter() error {
+	// Detach failure (or Close) clears t.ptmx (#474), so callers that fire
+	// keystrokes against a detached session must surface ErrSessionGone
+	// instead of panicking on a nil Write (#510).
+	if t.ptmx == nil {
+		return ErrSessionGone
+	}
 	_, err := t.ptmx.Write([]byte{0x0D})
 	if err != nil {
 		return fmt.Errorf("error sending enter keystroke to PTY: %w", err)
@@ -320,6 +326,9 @@ func (t *TmuxSession) TapEnter() error {
 
 // TapDAndEnter sends 'D' followed by an enter keystroke to the tmux pane.
 func (t *TmuxSession) TapDAndEnter() error {
+	if t.ptmx == nil {
+		return ErrSessionGone
+	}
 	_, err := t.ptmx.Write([]byte{0x44, 0x0D})
 	if err != nil {
 		return fmt.Errorf("error sending enter keystroke to PTY: %w", err)
@@ -328,6 +337,9 @@ func (t *TmuxSession) TapDAndEnter() error {
 }
 
 func (t *TmuxSession) SendKeys(keys string) error {
+	if t.ptmx == nil {
+		return ErrSessionGone
+	}
 	_, err := t.ptmx.Write([]byte(keys))
 	return err
 }
