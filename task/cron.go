@@ -116,10 +116,16 @@ func validatePart(part string, min, max int) error {
 	return nil
 }
 
-// CronToOnCalendar converts a 5-field cron expression to systemd OnCalendar format.
-func CronToOnCalendar(cronExpr string) (string, error) {
+// CronToOnCalendar converts a 5-field cron expression to one or more systemd
+// OnCalendar entries. When both day-of-month and day-of-week are restricted,
+// Vixie cron uses OR semantics (match DOM OR match DOW), while a single
+// systemd OnCalendar entry combines all fields with AND. In that case this
+// returns two entries — one constraining DOM (DOW=*), one constraining DOW
+// (DOM=*) — and the caller emits one OnCalendar= line per entry so systemd
+// unions them, reproducing cron's OR semantics.
+func CronToOnCalendar(cronExpr string) ([]string, error) {
 	if err := ValidateCronExpr(cronExpr); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	fields := strings.Fields(cronExpr)
@@ -129,35 +135,39 @@ func CronToOnCalendar(cronExpr string) (string, error) {
 	monthField := fields[3]
 	dowField := fields[4]
 
-	// Convert day-of-week
+	monthPart := convertTimeField(monthField, true)
+	domPart := convertTimeField(domField, true)
+	hourPart := convertTimeField(hourField, false)
+	minutePart := convertTimeField(minuteField, false)
+	timePart := fmt.Sprintf("%s:%s:00", hourPart, minutePart)
+
 	dowPart := ""
 	if dowField != "*" {
 		dowPart = convertDOW(dowField)
 	}
 
-	// Convert month (1-indexed)
-	monthPart := convertTimeField(monthField, true)
+	// A field that syntactically restricts but covers every legal value
+	// (DOM=1-31, DOW=0-6, DOW=*/1, etc.) is an effective wildcard. Under
+	// cron OR semantics, "X OR every-day" collapses to "every day", so an
+	// effective-wildcard side must not trigger the OR fan-out. convertDOW
+	// already returns "" for the DOW side; for DOM we expand and check.
+	domVals, _ := expandCronField(domField, 1, 31)
+	domCoversAll := domVals != nil && len(domVals) >= 31
 
-	// Convert day-of-month (1-indexed)
-	domPart := convertTimeField(domField, true)
+	domRestricted := domField != "*" && !domCoversAll
+	dowRestricted := dowPart != ""
 
-	// Convert hour (0-indexed)
-	hourPart := convertTimeField(hourField, false)
-
-	// Convert minute (0-indexed)
-	minutePart := convertTimeField(minuteField, false)
-
-	// Build the date part: YEAR-MONTH-DAY
-	datePart := fmt.Sprintf("*-%s-%s", monthPart, domPart)
-
-	// Build the time part: HOUR:MIN:SEC
-	timePart := fmt.Sprintf("%s:%s:00", hourPart, minutePart)
-
-	// Combine
-	if dowPart != "" {
-		return fmt.Sprintf("%s %s %s", dowPart, datePart, timePart), nil
+	if domRestricted && dowRestricted {
+		domOnly := fmt.Sprintf("*-%s-%s %s", monthPart, domPart, timePart)
+		dowOnly := fmt.Sprintf("%s *-%s-* %s", dowPart, monthPart, timePart)
+		return []string{domOnly, dowOnly}, nil
 	}
-	return fmt.Sprintf("%s %s", datePart, timePart), nil
+
+	datePart := fmt.Sprintf("*-%s-%s", monthPart, domPart)
+	if dowRestricted {
+		return []string{fmt.Sprintf("%s %s %s", dowPart, datePart, timePart)}, nil
+	}
+	return []string{fmt.Sprintf("%s %s", datePart, timePart)}, nil
 }
 
 // convertTimeField converts a cron time field to OnCalendar format.
