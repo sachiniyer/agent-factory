@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -82,6 +83,13 @@ var tasksAddCmd = &cobra.Command{
 		repo, err := resolveRepo()
 		if err != nil {
 			return jsonError(fmt.Errorf("--repo is required: %w", err))
+		}
+
+		// MarkFlagRequired only enforces presence, so --prompt "" or
+		// whitespace-only values slip past Cobra and create tasks that
+		// no-op when triggered (#517).
+		if strings.TrimSpace(taskAddPromptFlag) == "" {
+			return jsonError(errors.New("prompt must be non-empty"))
 		}
 
 		if err := task.ValidateCronExpr(taskAddCronFlag); err != nil {

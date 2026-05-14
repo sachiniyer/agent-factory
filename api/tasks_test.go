@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -534,4 +535,34 @@ func TestTasksAdd_RollbackRemoveSchedulerAlsoFails(t *testing.T) {
 	tasks, err := task.LoadTasks()
 	require.NoError(t, err)
 	assert.Empty(t, tasks, "removeTask must still run even when scheduler rollback fails")
+}
+
+// TestTasksAdd_RejectsEmptyPrompt is the regression guard for #517: Cobra's
+// MarkFlagRequired only checks flag presence, so --prompt "" (or
+// whitespace-only) used to slip through and create a task that no-ops when
+// triggered. tasksAddCmd must reject the value before any scheduler work runs.
+func TestTasksAdd_RejectsEmptyPrompt(t *testing.T) {
+	for _, prompt := range []string{"", "   ", "\t\n"} {
+		t.Run(fmt.Sprintf("prompt=%q", prompt), func(t *testing.T) {
+			useTempConfig(t)
+			resetAddFlags(t)
+			calls := stubSchedulers(t)
+			setupAddRepo(t)
+
+			taskAddNameFlag = "blank"
+			taskAddPromptFlag = prompt
+			taskAddCronFlag = "0 9 * * *"
+			taskAddProgramFlag = "claude"
+
+			err := tasksAddCmd.RunE(tasksAddCmd, nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "prompt must be non-empty")
+
+			assert.Empty(t, calls.installed, "scheduler install must not run when prompt fails validation")
+
+			tasks, err := task.LoadTasks()
+			require.NoError(t, err)
+			assert.Empty(t, tasks, "no task record must be persisted when prompt fails validation")
+		})
+	}
 }

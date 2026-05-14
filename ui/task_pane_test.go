@@ -84,18 +84,53 @@ func TestTaskPaneNormalModeAllowsQuitKeysToPropagate(t *testing.T) {
 	assert.False(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlC}))
 }
 
-// fillCreateForm types a name and cron into the create form so submitting via
-// the Save button doesn't trip name/cron validation. Leaves focus on index 0
-// (Name) so callers can walk to whichever field they want to drive next.
+// fillCreateForm types a name, prompt, and cron into the create form so
+// submitting via the Save button doesn't trip validation. Leaves focus on
+// index 0 (Name) so callers can walk to whichever field they want to drive
+// next.
 func fillCreateForm(t *testing.T, tp *TaskPane, name string) {
 	t.Helper()
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(name)})
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do something")})
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> cron
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
 	// Walk back to name (index 0) so callers can navigate forward consistently.
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyShiftTab})
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyShiftTab})
+}
+
+// TestTaskPaneCreateModeRejectsEmptyPrompt is the regression guard for #517:
+// submitting the create form with no prompt (or whitespace-only) must surface
+// an inline validation error instead of marking a pending create with a blank
+// prompt that no-ops when the scheduler fires.
+func TestTaskPaneCreateModeRejectsEmptyPrompt(t *testing.T) {
+	for _, prompt := range []string{"", "   "} {
+		t.Run("prompt="+prompt, func(t *testing.T) {
+			tp := NewTaskPane()
+			tp.EnterCreateMode("/tmp/repo")
+
+			// Fill name, leave prompt empty/whitespace, fill cron.
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("daily")})
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
+			if prompt != "" {
+				tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(prompt)})
+			}
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> cron
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
+
+			// Walk to Save and submit.
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> path
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> program
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> save
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+			assert.False(t, tp.HasPendingCreate(), "empty prompt must not produce a pending create")
+			assert.True(t, tp.IsCreating(), "form must stay open so user can fix the error")
+			assert.Equal(t, "prompt must be non-empty", tp.editError,
+				"inline validation error must surface to the user")
+		})
+	}
 }
 
 // TestTaskPaneCreateModeSelectorDefaultsToConfigDefault verifies that creating
