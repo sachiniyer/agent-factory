@@ -82,7 +82,7 @@ func InstallScheduler(t Task) error {
 	// Otherwise a bad cron leaves a stale .service on disk while the previous
 	// timer keeps running, so the user sees their edit "saved" but the
 	// schedule never updates.
-	onCalendar, err := CronToOnCalendar(t.CronExpr)
+	onCalendars, err := CronToOnCalendar(t.CronExpr)
 	if err != nil {
 		return fmt.Errorf("failed to convert cron expression: %w", err)
 	}
@@ -114,16 +114,22 @@ func InstallScheduler(t Task) error {
 		return fmt.Errorf("failed to write service file: %w", err)
 	}
 
+	var onCalendarLines strings.Builder
+	for _, oc := range onCalendars {
+		onCalendarLines.WriteString("OnCalendar=")
+		onCalendarLines.WriteString(oc)
+		onCalendarLines.WriteString("\n")
+	}
+
 	timerContent := fmt.Sprintf(`[Unit]
 Description=Timer for Agent Factory task %s
 
 [Timer]
-OnCalendar=%s
-Persistent=true
+%sPersistent=true
 
 [Install]
 WantedBy=timers.target
-`, unitName, onCalendar)
+`, unitName, onCalendarLines.String())
 
 	timerPath := filepath.Join(dir, unitName+".timer")
 	if err := os.WriteFile(timerPath, []byte(timerContent), 0644); err != nil {
