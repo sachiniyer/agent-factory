@@ -313,8 +313,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress {
 			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
-				selected := m.sidebar.GetSelectedInstance()
-				if selected == nil {
+				// Instance mode needs a selected instance to scroll preview/terminal;
+				// Tasks/Hooks modes scroll their own list independent of sidebar selection (#524).
+				if m.contentPane.GetMode() == ui.ContentModeInstance && m.sidebar.GetSelectedInstance() == nil {
 					return m, nil
 				}
 				switch msg.Button {
