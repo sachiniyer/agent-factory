@@ -1,11 +1,18 @@
 package ui
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
+
+// ansiEscapeRegex matches CSI escape sequences (e.g. SGR colors) so they can
+// be stripped before width-based truncation. Truncating a string that still
+// contains escape sequences risks cutting one mid-byte, leaking visible
+// garbage like "[31m" into the rendered output (issue #525).
+var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 type ErrBox struct {
 	height, width int
@@ -41,6 +48,10 @@ func (e *ErrBox) String() string {
 	var err string
 	if e.err != nil {
 		err = e.err.Error()
+		// Agent pane output can reach us via wrapped errors (see #502) and
+		// carry ANSI escape sequences. Strip them so width math and the
+		// final Truncate operate on plain text only.
+		err = ansiEscapeRegex.ReplaceAllString(err, "")
 		lines := strings.Split(err, "\n")
 		err = strings.Join(lines, "//")
 		if runewidth.StringWidth(err) > e.width {
