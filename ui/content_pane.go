@@ -118,11 +118,17 @@ func (c *ContentPane) HooksPane() *HooksPane {
 	return c.hooksPane
 }
 
-// ScrollUp scrolls the active pane up.
+// ScrollUp scrolls the active pane up. Mirrors the Terminal/Preview routing
+// pattern: Tasks and Hooks modes each delegate to their own pane's cursor
+// movement so shift+up and mouse wheel work in those modes too (#524).
 func (c *ContentPane) ScrollUp() {
 	switch c.mode {
 	case ContentModeInstance:
 		c.tabbedWindow.ScrollUp()
+	case ContentModeTasks:
+		c.taskPane.ScrollUp()
+	case ContentModeHooks:
+		c.hooksPane.ScrollUp()
 	}
 }
 
@@ -131,6 +137,10 @@ func (c *ContentPane) ScrollDown() {
 	switch c.mode {
 	case ContentModeInstance:
 		c.tabbedWindow.ScrollDown()
+	case ContentModeTasks:
+		c.taskPane.ScrollDown()
+	case ContentModeHooks:
+		c.hooksPane.ScrollDown()
 	}
 }
 
