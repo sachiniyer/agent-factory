@@ -55,6 +55,47 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
+// TestErrBoxStripsANSIBeforeTruncating is a regression test for issue #525.
+// When an error string carries embedded ANSI escape sequences (e.g. from an
+// agent's pane output reaching ErrBox via #502), runewidth.Truncate would
+// cut sequences mid-byte and leak visible garbage like "[31m". Stripping
+// ANSI before truncation keeps the rendered text clean.
+func TestErrBoxStripsANSIBeforeTruncating(t *testing.T) {
+	e := NewErrBox()
+	e.SetSize(20, 1)
+	// Red SGR, payload, reset, then filler beyond the 20-cell width.
+	e.SetError(errors.New("\x1b[31merror in red\x1b[0m " + strings.Repeat("x", 200)))
+
+	out := e.String()
+	// The raw ESC byte must not appear anywhere in the input portion — only
+	// in lipgloss's own styling wrapping the result. Easier check: the
+	// literal "[31m" and "[0m" payloads must not survive into the output.
+	if strings.Contains(out, "[31m") {
+		t.Errorf("output leaked partial ANSI input sequence [31m: %q", out)
+	}
+	if strings.Contains(out, "[0m ") {
+		t.Errorf("output leaked partial ANSI input sequence [0m: %q", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if got := runewidth.StringWidth(stripANSI(line)); got > 20 {
+			t.Errorf("rendered line width %d exceeds container width 20 (line=%q)", got, line)
+		}
+	}
+}
+
+// TestErrBoxWithoutANSIUnchanged ensures the strip pass is a no-op for
+// plain-text errors (no spurious changes to existing rendering).
+func TestErrBoxWithoutANSIUnchanged(t *testing.T) {
+	e := NewErrBox()
+	e.SetSize(500, 1)
+	e.SetError(errors.New("plain error message"))
+
+	out := e.String()
+	if !strings.Contains(stripANSI(out), "plain error message") {
+		t.Errorf("expected plain message to render unchanged, got %q", out)
+	}
+}
+
 // stripANSI removes ANSI escape sequences (CSI) so width measurements
 // reflect only visible runes.
 func stripANSI(s string) string {
