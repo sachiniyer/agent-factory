@@ -184,6 +184,14 @@ func TestGetBaseCommand(t *testing.T) {
 		{"'/home/my user/claude' --foo", "claude"},
 		// Backslash-escaped space in an unquoted path.
 		{"/home/me\\ name/claude --foo", "claude"},
+		// Issue #513: unquoted path whose directory contains literal " - ".
+		// splitShell produces ["/home/user/my", "-", "project/claude"] and
+		// the simple reconcat heuristic stops at "-"; the SupportedPrograms
+		// basename match recovers the right answer.
+		{"/home/user/my - project/claude", "claude"},
+		{"/home/user/my - project/claude --foo", "claude"},
+		{"/home/user/my - project/codex", "codex"},
+		{"/home/user/a - b - c/aider --model x", "aider"},
 	}
 	for _, tt := range tests {
 		got := getBaseCommand(tt.input)

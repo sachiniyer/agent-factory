@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // codexSystemPrompt is the system prompt for Codex sessions, which don't support plugins.
@@ -110,6 +111,20 @@ func getBaseCommand(program string) string {
 	parts := splitShell(program)
 	if len(parts) == 0 {
 		return ""
+	}
+	// If any token's basename matches a known agent (tmux.SupportedPrograms),
+	// prefer it. Handles unquoted paths whose directories contain literal
+	// " - " (issue #513): splitShell yields ["/home/u/my", "-", "proj/claude"]
+	// and the simple "join non-flag tokens" heuristic below stops at "-",
+	// landing on "my". Left-to-right wins so the leading executable still
+	// dominates when a flag value happens to point at another known agent.
+	for _, p := range parts {
+		base := strings.ToLower(filepath.Base(p))
+		for _, supported := range tmux.SupportedPrograms {
+			if base == supported {
+				return supported
+			}
+		}
 	}
 	cmd := parts[0]
 	// If the first token looks like an unquoted path (absolute or relative),
