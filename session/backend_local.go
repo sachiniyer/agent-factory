@@ -91,6 +91,16 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		if gw != nil {
 			workDir = gw.GetWorktreePath()
 		}
+		// Re-inject the system prompt so a lazy re-spawn (tmux server died
+		// across a reboot, see #386/#444) starts the agent with the same
+		// program string as the original first-time launch — most
+		// importantly, claude-code's --plugin-dir flag, without which
+		// /af-* slash commands silently vanish post-reboot (#511).
+		// Setting the program on the existing attach path is harmless:
+		// attach-session does not re-exec the program.
+		if workDir != "" {
+			tmuxSession.SetProgram(injectSystemPrompt(i.Program, i.Title, workDir))
+		}
 		if err := tmuxSession.Restore(workDir); err != nil {
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr

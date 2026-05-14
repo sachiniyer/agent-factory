@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	stdlog "log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -1018,4 +1021,92 @@ func TestRunHookAttachWithDetachKey(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("remote attach did not exit after detach key")
 	}
+}
+
+// recordingPtyFactory is a tmux.PtyFactory that records each exec.Cmd passed
+// to Start, lets the caller inspect the new-session vs attach-session sequence
+// emitted by Restore's lazy-respawn path. It returns a real (writable) temp
+// file as the PTY so callers that close it don't crash.
+type recordingPtyFactory struct {
+	t    *testing.T
+	cmds []*exec.Cmd
+}
+
+func (p *recordingPtyFactory) Start(c *exec.Cmd) (*os.File, error) {
+	path := filepath.Join(p.t.TempDir(), fmt.Sprintf("pty-%s-%d", p.t.Name(), rand.Int31()))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+	p.cmds = append(p.cmds, c)
+	return f, nil
+}
+
+func (p *recordingPtyFactory) Close() {}
+
+// TestLocalBackendStartRestoreReinjectsSystemPrompt is a regression test for
+// issue #511. After a reboot the tmux server is gone, so Restore takes the
+// lazy-respawn path added in #386/#444 and spawns a fresh tmux session using
+// the program string stored on the TmuxSession. Before the fix that program
+// was the raw `i.Program` (e.g. "claude") with no `--plugin-dir` flag, so
+// Agent Factory's /af-* slash commands silently disappeared until the user
+// killed and recreated the session. The fix re-injects the system prompt in
+// LocalBackend.Start before calling Restore, so the respawned tmux session
+// receives the same program string as the original first-time launch.
+func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
+	// Isolate the plugin dir to a temp config home so ensurePluginDir has
+	// somewhere safe to write and tests don't fight over a shared dir.
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	ptyFactory := &recordingPtyFactory{t: t}
+
+	// First two has-session calls report missing (the outer Restore check, then
+	// the existence check at the top of Start). After tmux new-session runs,
+	// subsequent has-session calls report exists so Start's poll loop and the
+	// inner Restore("") attach call succeed.
+	hasSessionCalls := 0
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "has-session") {
+				hasSessionCalls++
+				if hasSessionCalls <= 2 {
+					return fmt.Errorf("can't find session")
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			return []byte("output"), nil
+		},
+	}
+
+	repoRoot := initTempGitRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "worktree-511")
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "respawn-511", "respawn-511-branch", "", false, false)
+	require.NoError(t, err)
+
+	// The tmuxSession is pre-attached on the instance (the production path
+	// builds it from persisted state). It starts with the raw program string,
+	// just like a freshly-deserialized instance.
+	ts := tmux.NewTmuxSessionWithDeps("respawn-511", "claude", ptyFactory, cmdExec)
+
+	inst := &Instance{
+		Title:       "respawn-511",
+		Path:        repoRoot,
+		Program:     "claude",
+		backend:     &LocalBackend{},
+		tmuxSession: ts,
+		gitWorktree: gw,
+	}
+
+	require.NoError(t, inst.Start(false))
+	assert.True(t, inst.Started())
+
+	require.GreaterOrEqual(t, len(ptyFactory.cmds), 1,
+		"expected at least one PTY command from the respawn path")
+	newSessionCmd := cmd.ToString(ptyFactory.cmds[0])
+	require.Contains(t, newSessionCmd, "new-session",
+		"first PTY command must be the lazy-respawn new-session (not an attach)")
+	require.Contains(t, newSessionCmd, "--plugin-dir",
+		"respawned session must include claude --plugin-dir injection so /af-* slash commands keep working (#511)")
 }
