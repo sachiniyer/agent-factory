@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/spf13/cobra"
 )
@@ -27,6 +28,58 @@ var (
 	killSessionViaDaemon   = daemon.KillSession
 	sendPromptViaDaemon    = daemon.SendPrompt
 )
+
+// ghostKillTmuxByName issues a tmux kill-session for a persisted sanitized
+// name. Package-level so tests can stub it without invoking real tmux. The
+// af_ prefix check refuses to act on names the daemon would never write, so a
+// corrupted store can't make us kill an unrelated tmux session.
+var ghostKillTmuxByName = func(sanitizedName string) error {
+	if !strings.HasPrefix(sanitizedName, tmux.TmuxPrefix) {
+		return fmt.Errorf("refusing to kill tmux session without %q prefix: %q", tmux.TmuxPrefix, sanitizedName)
+	}
+	return tmux.NewTmuxSessionFromSanitizedName(sanitizedName, "").Close()
+}
+
+// ghostCleanupWorktree performs best-effort worktree teardown for a ghost
+// session whose live restore failed. Package-level so tests can stub it.
+var ghostCleanupWorktree = func(data *session.InstanceData, title string) {
+	if data.Worktree.RepoPath == "" || data.Worktree.WorktreePath == "" || data.Worktree.ExternalWorktree {
+		return
+	}
+	branchCreatedByUs := true
+	if data.Worktree.BranchCreatedByUs != nil {
+		branchCreatedByUs = *data.Worktree.BranchCreatedByUs
+	}
+	gw, gwErr := git.NewGitWorktreeFromStorage(
+		data.Worktree.RepoPath,
+		data.Worktree.WorktreePath,
+		data.Worktree.SessionName,
+		data.Worktree.BranchName,
+		data.Worktree.BaseCommitSHA,
+		data.Worktree.ExternalWorktree,
+		branchCreatedByUs,
+	)
+	if gwErr != nil {
+		log.WarningLog.Printf("ghost session %q: failed to load worktree for cleanup: %v", title, gwErr)
+		return
+	}
+	if cleanupErr := gw.Cleanup(); cleanupErr != nil {
+		log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", title, cleanupErr)
+	}
+}
+
+// ghostCleanup runs best-effort teardown of a ghost session's external
+// resources. Tmux teardown is independent of worktree state (#516): a ghost
+// record can have an empty worktree path while a tmux session with the
+// persisted name is still running, so the two branches share no condition.
+func ghostCleanup(data *session.InstanceData, title string) {
+	ghostCleanupWorktree(data, title)
+	if data.TmuxName != "" {
+		if killErr := ghostKillTmuxByName(data.TmuxName); killErr != nil {
+			log.WarningLog.Printf("ghost session %q: tmux cleanup failed: %v", title, killErr)
+		}
+	}
+}
 
 var sessionsListCmd = &cobra.Command{
 	Use:   "list",
@@ -177,26 +230,7 @@ func killSessionDirect(title string) error {
 			return err
 		}
 
-		if data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree {
-			branchCreatedByUs := true
-			if data.Worktree.BranchCreatedByUs != nil {
-				branchCreatedByUs = *data.Worktree.BranchCreatedByUs
-			}
-			gw, gwErr := git.NewGitWorktreeFromStorage(
-				data.Worktree.RepoPath,
-				data.Worktree.WorktreePath,
-				data.Worktree.SessionName,
-				data.Worktree.BranchName,
-				data.Worktree.BaseCommitSHA,
-				data.Worktree.ExternalWorktree,
-				branchCreatedByUs,
-			)
-			if gwErr != nil {
-				log.WarningLog.Printf("ghost session %q: failed to load worktree for cleanup: %v", title, gwErr)
-			} else if cleanupErr := gw.Cleanup(); cleanupErr != nil {
-				log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", title, cleanupErr)
-			}
-		}
+		ghostCleanup(data, title)
 
 		state := config.LoadState()
 		storage, storageErr := session.NewStorage(state, ghostRepoID)
