@@ -546,33 +546,39 @@ func (t *TmuxSession) Detach() {
 		t.wg = nil
 	}()
 
-	// Cancel context FIRST so the io.Copy goroutine in Attach() sees a normal
-	// detach rather than an abnormal termination. Without this, closing the PTY
-	// can wake the goroutine before cancel() runs, causing a spurious
+	// Cancel context FIRST so monitorWindowSize goroutines exit promptly and
+	// the io.Copy goroutine in Attach() sees a normal detach rather than an
+	// abnormal termination. Without this, closing the PTY can wake the
+	// io.Copy goroutine before cancel() runs, causing a spurious
 	// "Session terminated without detaching" warning.
 	t.cancel()
 
-	// Close the attached pty session. Clear t.ptmx unconditionally before
-	// Restore so a Restore failure (or a Close failure) can't leave the
-	// closed handle dangling on the struct — a subsequent Attach would
-	// otherwise silently bind goroutines to a closed file and hang (#464).
+	// Close the attached pty session so the io.Copy goroutine returns.
 	closeErr := t.ptmx.Close()
+
+	// Wait for the attach goroutines (io.Copy + monitorWindowSize x2) to
+	// finish before mutating t.ptmx. monitorWindowSize reads t.ptmx via
+	// updateWindowSize, so clearing the field before wg.Wait races against
+	// those reads (#512). Coordinated like Close already is.
+	t.wg.Wait()
+
+	// Now safe to clear t.ptmx. Clearing unconditionally before Restore
+	// means a Restore failure (or a Close failure) can't leave the closed
+	// handle dangling on the struct — a subsequent Attach would otherwise
+	// silently bind goroutines to a closed file and hang (#464).
 	t.ptmx = nil
+
 	if closeErr != nil {
 		log.ErrorLog.Printf("error closing attach pty session: %v", closeErr)
-		t.wg.Wait()
 		return
 	}
 
-	// Attach goroutines should die due to the ptmx closing. Call
-	// t.Restore to set a new t.ptmx. The session is alive (we just detached
-	// from it), so pass empty workDir — a missing session here is a real
-	// problem and should surface, not silently re-spawn and lose history.
+	// Call t.Restore to set a new t.ptmx. The session is alive (we just
+	// detached from it), so pass empty workDir — a missing session here is a
+	// real problem and should surface, not silently re-spawn and lose history.
 	if err := t.Restore(""); err != nil {
 		log.ErrorLog.Printf("error restoring pty after detach: %v", err)
 	}
-
-	t.wg.Wait()
 }
 
 // Close terminates the tmux session and cleans up resources

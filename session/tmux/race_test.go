@@ -255,6 +255,66 @@ func TestKeystrokeMethodsReturnErrSessionGoneAfterDetachRestoreFailure(t *testin
 	}
 }
 
+// TestDetachDuringResizeRace is a regression test for issue #512.
+//
+// TmuxSession.Detach used to clear t.ptmx (and call Restore which writes
+// t.ptmx) before t.wg.Wait, racing those writes against monitorWindowSize
+// goroutines tracked by t.wg — they read t.ptmx via updateWindowSize until
+// t.ctx was observed cancelled. Under `go test -race`, the read/write of
+// t.ptmx flagged a data race.
+//
+// Detach must now wg.Wait before mutating t.ptmx so the resize goroutines
+// have drained, mirroring the coordination Close uses (#331).
+func TestDetachDuringResizeRace(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		ptyFactory := NewMockPtyFactory(t)
+		cmdExec := cmd_test.MockCmdExec{
+			RunFunc:    func(cmd *exec.Cmd) error { return nil },
+			OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return nil, nil },
+		}
+
+		session := newTmuxSession(toTmuxName("detach-race-session", ""), "claude", ptyFactory, cmdExec)
+		if err := session.Restore(""); err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+
+		// Mimic the bookkeeping that Attach() sets up so Detach has matching
+		// state to tear down. The real monitorWindowSize touches stdin and
+		// SIGWINCH so we stand in for it with a goroutine that reads the
+		// field — the bug is the unsynchronized read of t.ptmx, regardless
+		// of whether the read goes on to Fd() or not.
+		session.attachCh = make(chan struct{})
+		session.wg = &sync.WaitGroup{}
+		session.ctx, session.cancel = context.WithCancel(context.Background())
+
+		session.wg.Add(1)
+		go func() {
+			defer session.wg.Done()
+			for {
+				select {
+				case <-session.ctx.Done():
+					return
+				default:
+					if p := session.ptmx; p == nil {
+						t.Errorf("monitor goroutine observed nil ptmx before ctx cancel")
+						return
+					}
+				}
+			}
+		}()
+
+		// Let the goroutine spin so Detach races with active reads.
+		time.Sleep(time.Microsecond)
+
+		session.Detach()
+
+		// After Detach completes, the goroutine must have exited (wg.Wait
+		// in Detach drained it). t.ptmx may be non-nil here because Detach's
+		// internal Restore("") succeeded against the mock — that's expected
+		// and tested by TestDetachHappyPathReplacesPtmx.
+	}
+}
+
 // TestCloseWithoutAttach ensures Close is safe when Attach was never called
 // (cancel/wg are nil).
 func TestCloseWithoutAttach(t *testing.T) {
