@@ -2,6 +2,7 @@ package log
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -14,6 +15,16 @@ var (
 	InfoLog    *log.Logger
 	ErrorLog   *log.Logger
 )
+
+// Default the package-level loggers to discard sinks so callers that reach a
+// log call before Initialize do not nil-panic. Initialize replaces these with
+// real file/stderr loggers. Without this, code paths like `af upgrade` that
+// forget to call Initialize crash inside the SIGTERM fallback (#514).
+func init() {
+	InfoLog = log.New(io.Discard, "", 0)
+	WarningLog = log.New(io.Discard, "", 0)
+	ErrorLog = log.New(io.Discard, "", 0)
+}
 
 // mu guards writes to globalLogFile and the exported *log.Logger pointers
 // performed by Initialize and Close. Readers (e.g. InfoLog.Printf) rely on

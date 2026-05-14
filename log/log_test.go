@@ -8,6 +8,28 @@ import (
 	"testing"
 )
 
+// TestLoggersInitializedByDefault asserts that the package-level loggers are
+// non-nil before any Initialize call. Regression for sachiniyer/agent-factory#514:
+// `af upgrade` reaches the SIGTERM fallback in daemon/sigterm_fallback.go
+// before runUpgrade has a chance to call Initialize, and the fallback writes
+// through InfoLog/WarningLog. Without non-nil defaults those Printf calls
+// nil-dereference and panic the upgrade.
+func TestLoggersInitializedByDefault(t *testing.T) {
+	if InfoLog == nil {
+		t.Error("InfoLog is nil at package-init time; upgrade SIGTERM fallback would panic")
+	}
+	if WarningLog == nil {
+		t.Error("WarningLog is nil at package-init time; upgrade SIGTERM fallback would panic")
+	}
+	if ErrorLog == nil {
+		t.Error("ErrorLog is nil at package-init time")
+	}
+	// Exercise each logger to confirm no panic on a Printf path.
+	InfoLog.Printf("default-logger-smoke-test")
+	WarningLog.Printf("default-logger-smoke-test")
+	ErrorLog.Printf("default-logger-smoke-test")
+}
+
 // TestInitializeRace spins multiple goroutines concurrently calling
 // Initialize to make sure the package-level mutex prevents data races on
 // globalLogFile and the exported logger pointers. Run with `go test -race`.
