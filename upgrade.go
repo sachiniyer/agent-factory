@@ -14,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/spf13/cobra"
 )
 
@@ -85,6 +86,13 @@ var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
 	Short: "Upgrade agent-factory to the latest version",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// RequestShutdown's SIGTERM fallback (#504) writes through
+		// log.InfoLog / log.WarningLog. Initialize logging up-front so those
+		// pointers are non-nil when we hit a pre-#501 daemon — otherwise the
+		// upgrade panics with a nil-deref instead of finishing cleanly (#514).
+		log.Initialize(false)
+		defer log.Close()
+
 		goos := runtime.GOOS
 		goarch := runtime.GOARCH
 

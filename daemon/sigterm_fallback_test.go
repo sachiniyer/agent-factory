@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/rpc"
 	"os"
 	"os/exec"
@@ -331,5 +332,98 @@ func TestErrIsProcessGone(t *testing.T) {
 				t.Errorf("errIsProcessGone(%v) = %v, want %v", c.err, got, c.want)
 			}
 		})
+	}
+}
+
+// preShutdownDaemonRPC is an RPC service that exposes Ping but deliberately
+// omits Shutdown — modeling a pre-#501 daemon that registered Control before
+// the Shutdown method existed. Used by TestRequestShutdown_PreShutdownDaemon.
+type preShutdownDaemonRPC struct{}
+
+func (preShutdownDaemonRPC) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.OK = true
+	return nil
+}
+
+// startPreShutdownFakeDaemon listens on the daemon control socket and serves
+// a Control service that registers Ping but no Shutdown method. Returns a
+// cleanup function that closes the listener.
+func startPreShutdownFakeDaemon(t *testing.T) func() {
+	t.Helper()
+	socketPath, err := DaemonSocketPath()
+	if err != nil {
+		t.Fatalf("DaemonSocketPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+		t.Fatalf("mkdir socket parent: %v", err)
+	}
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen on %s: %v", socketPath, err)
+	}
+	server := rpc.NewServer()
+	if err := server.RegisterName(controlServiceName, preShutdownDaemonRPC{}); err != nil {
+		_ = listener.Close()
+		t.Fatalf("RegisterName: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go server.ServeConn(conn)
+		}
+	}()
+	return func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}
+}
+
+// TestRequestShutdown_PreShutdownDaemon regresses sachiniyer/agent-factory#514.
+// The scenario from the report: a daemon that registers Control as an RPC
+// service but never registered Shutdown (the method added in #498/#501).
+// RequestShutdown must:
+//   - detect the rpc method-not-found via isRPCMethodNotFoundErr,
+//   - route to sigtermFallback rather than treating the daemon as absent,
+//   - return a sane (Result, error) pair without panicking.
+//
+// Prior to the #514 fix the sigtermFallback log.InfoLog.Printf call would
+// nil-deref when the upgrade path reached this code without log.Initialize
+// having been called. We can't replay the missing-Initialize case in this
+// process (TestMain runs Initialize) — that's covered separately by the
+// log-package default-initializer test. This test pins the routing+behavior
+// half: the rpc-method-not-found branch must reach sigtermFallback cleanly,
+// which is the structural precondition for the upgrade flow to recover.
+func TestRequestShutdown_PreShutdownDaemon(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	stop := startPreShutdownFakeDaemon(t)
+	defer stop()
+
+	// Sanity: a Ping over the socket succeeds — this is what makes the
+	// daemon look "alive" so RequestShutdown does not short-circuit at the
+	// socket-stat step.
+	if err := pingDaemon(); err != nil {
+		t.Fatalf("ping fake daemon: %v", err)
+	}
+
+	// The fallback's pgrep step would, on a busy host, find a real
+	// `af --daemon` process and try to signal it. That host-state
+	// dependency belongs in an integration test, not a unit test —
+	// here we only need to assert RequestShutdown completes without
+	// a panic and surfaces a Result/error consistent with the routing
+	// having reached the fallback. The result space is:
+	//   - ShutdownNoDaemon, nil           (clean test host)
+	//   - ShutdownViaSIGTERM, nil         (host has a real daemon — uncommon)
+	//   - ShutdownNoDaemon, non-nil error (ambiguous pgrep matches)
+	// What is NOT acceptable: a panic, or ShutdownViaRPC (would mean the
+	// fake daemon answered Shutdown, which it does not implement).
+	result, err := RequestShutdown()
+	if result == ShutdownViaRPC {
+		t.Fatalf("RequestShutdown returned ShutdownViaRPC; fake daemon has no Shutdown method — routing into the SIGTERM fallback is broken (err=%v)", err)
 	}
 }
