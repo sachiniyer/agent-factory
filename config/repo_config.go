@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const RepoConfigFileName = "config.json"
@@ -29,14 +30,34 @@ type RepoConfig struct {
 	RemoteHooks *RemoteHooks `json:"remote_hooks,omitempty"`
 }
 
+// repoConfigPath validates repoID and returns the per-repo config file path.
+// Mirrors the validation + containment guard from repoInstancesPath so the
+// "repos/" tree is held to the same boundary as "instances/".
+func repoConfigPath(repoID string) (string, string, error) {
+	if err := ValidateRepoID(repoID); err != nil {
+		return "", "", err
+	}
+	configDir, err := GetConfigDir()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get config dir: %w", err)
+	}
+	parent := filepath.Join(configDir, "repos")
+	dir := filepath.Join(parent, repoID)
+	path := filepath.Join(dir, RepoConfigFileName)
+	cleanParent := filepath.Clean(parent) + string(filepath.Separator)
+	if !strings.HasPrefix(filepath.Clean(path), cleanParent) {
+		return "", "", fmt.Errorf("invalid repo id: resolved path escapes repos directory")
+	}
+	return dir, path, nil
+}
+
 // LoadRepoConfig loads the per-repo config for the given repo ID.
 // Returns an empty config (not an error) if none exists.
 func LoadRepoConfig(repoID string) (*RepoConfig, error) {
-	configDir, err := GetConfigDir()
+	_, path, err := repoConfigPath(repoID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get config dir: %w", err)
+		return nil, err
 	}
-	path := filepath.Join(configDir, "repos", repoID, RepoConfigFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -53,11 +74,10 @@ func LoadRepoConfig(repoID string) (*RepoConfig, error) {
 
 // SaveRepoConfig saves the per-repo config for the given repo ID.
 func SaveRepoConfig(repoID string, cfg *RepoConfig) error {
-	configDir, err := GetConfigDir()
+	dir, path, err := repoConfigPath(repoID)
 	if err != nil {
-		return fmt.Errorf("failed to get config dir: %w", err)
+		return err
 	}
-	dir := filepath.Join(configDir, "repos", repoID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create repo config dir: %w", err)
 	}
@@ -65,5 +85,5 @@ func SaveRepoConfig(repoID string, cfg *RepoConfig) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal repo config: %w", err)
 	}
-	return os.WriteFile(filepath.Join(dir, RepoConfigFileName), data, 0644)
+	return os.WriteFile(path, data, 0644)
 }

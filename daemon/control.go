@@ -341,6 +341,9 @@ func (s *controlServer) CreateSession(req CreateSessionRequest, resp *CreateSess
 }
 
 func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
 	if err := s.manager.KillSession(req); err != nil {
 		return err
 	}
@@ -349,10 +352,27 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 }
 
 func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptResponse) error {
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
 	if err := s.manager.SendPrompt(req); err != nil {
 		return err
 	}
 	resp.OK = true
+	return nil
+}
+
+// validateRPCRepoID enforces the RepoID shape for RPC requests that allow an
+// empty value to mean "search all repos". A non-empty RepoID must satisfy
+// config.ValidateRepoID so it cannot escape the per-repo file scope through
+// path traversal characters (#515).
+func validateRPCRepoID(repoID string) error {
+	if repoID == "" {
+		return nil
+	}
+	if err := config.ValidateRepoID(repoID); err != nil {
+		return fmt.Errorf("rejected RPC request: %w", err)
+	}
 	return nil
 }
 

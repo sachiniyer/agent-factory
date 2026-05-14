@@ -7,6 +7,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -117,11 +118,23 @@ func instancesDirPath() (string, error) {
 }
 
 func repoInstancesPath(repoID string) (string, error) {
+	if err := ValidateRepoID(repoID); err != nil {
+		return "", err
+	}
 	dir, err := instancesDirPath()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, repoID, InstancesFileName), nil
+	path := filepath.Join(dir, repoID, InstancesFileName)
+	// Defense in depth: confirm the joined path remains inside the
+	// instances directory. ValidateRepoID already rejects "..", "/",
+	// and "\", so this is a belt-and-suspenders check in case the
+	// regex is ever loosened.
+	cleanDir := filepath.Clean(dir) + string(filepath.Separator)
+	if !strings.HasPrefix(filepath.Clean(path), cleanDir) {
+		return "", fmt.Errorf("invalid repo id: resolved path escapes instances directory")
+	}
+	return path, nil
 }
 
 // LoadRepoInstances loads instances for a specific repo.
