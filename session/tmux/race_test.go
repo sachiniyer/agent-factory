@@ -177,6 +177,69 @@ func TestDetachHappyPathReplacesPtmx(t *testing.T) {
 	}
 }
 
+// TestDetachDuringResizeRace is a regression test for issue #512.
+//
+// PR #474 changed Detach to clear t.ptmx right after closing the PTY so a
+// Restore failure couldn't leave a stale closed handle dangling on the
+// struct. That nil-clear happened BEFORE t.wg.Wait(), so it raced with
+// monitorWindowSize's resize goroutine — which reads t.ptmx via
+// updateWindowSize and is tracked by t.wg. Under -race the read/write of
+// t.ptmx is flagged; in production it could observe a nil ptmx and panic.
+//
+// Detach must drain t.wg.Wait() BEFORE touching t.ptmx (clear or replace
+// via Restore). Mirrors TestCloseDuringAttachRace: a stand-in goroutine
+// reads the t.ptmx field until ctx is cancelled. Many iterations to give
+// the race detector room to fire.
+func TestDetachDuringResizeRace(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		ptyFactory := NewMockPtyFactory(t)
+		cmdExec := cmd_test.MockCmdExec{
+			RunFunc:    func(cmd *exec.Cmd) error { return nil },
+			OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return nil, nil },
+		}
+
+		session := newTmuxSession(toTmuxName("detach-race", ""), "claude", ptyFactory, cmdExec)
+		if err := session.Restore(""); err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+
+		session.attachCh = make(chan struct{})
+		session.wg = &sync.WaitGroup{}
+		session.ctx, session.cancel = context.WithCancel(context.Background())
+
+		// Stand-in for monitorWindowSize's resize goroutine: reads t.ptmx
+		// (the field) until ctx is cancelled. The real goroutine calls
+		// pty.Setsize(t.ptmx, ...) which reads the same field; we read the
+		// field directly to focus on the data race without touching real
+		// terminal state.
+		session.wg.Add(1)
+		go func() {
+			defer session.wg.Done()
+			for {
+				select {
+				case <-session.ctx.Done():
+					return
+				default:
+					_ = session.ptmx
+				}
+			}
+		}()
+
+		// Let the goroutine spin so Detach races with active reads.
+		time.Sleep(time.Microsecond)
+
+		session.Detach()
+
+		// Happy path: Detach calls Restore("") which succeeds and installs a
+		// fresh ptmx. The point of this test is the race detector, but
+		// asserting the happy-path invariant keeps the test honest about what
+		// state Detach leaves behind.
+		if session.ptmx == nil {
+			t.Fatalf("expected ptmx to be set after successful Detach -> Restore")
+		}
+	}
+}
+
 // TestCloseWithoutAttach ensures Close is safe when Attach was never called
 // (cancel/wg are nil).
 func TestCloseWithoutAttach(t *testing.T) {

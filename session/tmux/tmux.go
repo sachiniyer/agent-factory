@@ -540,27 +540,34 @@ func (t *TmuxSession) Detach() {
 	// "Session terminated without detaching" warning.
 	t.cancel()
 
-	// Close the attached pty session. Clear t.ptmx unconditionally before
-	// Restore so a Restore failure (or a Close failure) can't leave the
-	// closed handle dangling on the struct — a subsequent Attach would
-	// otherwise silently bind goroutines to a closed file and hang (#464).
+	// Close the attached pty session, then wait for the goroutines tracked
+	// by t.wg to drain BEFORE touching t.ptmx. monitorWindowSize's resize
+	// goroutine reads t.ptmx via updateWindowSize, so clearing it (or
+	// having Restore replace it) while that goroutine is live is a data
+	// race (#512). The goroutines exit promptly once t.ctx is cancelled
+	// and the PTY is closed.
 	closeErr := t.ptmx.Close()
+	t.wg.Wait()
+
+	// Goroutines have exited; safe to touch t.ptmx without coordination.
+	// Clear unconditionally so that a subsequent Restore failure (or the
+	// Close failure above) can't leave a stale closed handle on the
+	// struct — a later Attach would otherwise silently bind goroutines
+	// to a closed file and hang (#464).
 	t.ptmx = nil
 	if closeErr != nil {
 		log.ErrorLog.Printf("error closing attach pty session: %v", closeErr)
-		t.wg.Wait()
 		return
 	}
 
-	// Attach goroutines should die due to the ptmx closing. Call
-	// t.Restore to set a new t.ptmx. The session is alive (we just detached
-	// from it), so pass empty workDir — a missing session here is a real
-	// problem and should surface, not silently re-spawn and lose history.
+	// Call t.Restore to install a fresh t.ptmx. The session is alive (we
+	// just detached from it), so pass empty workDir — a missing session
+	// here is a real problem and should surface, not silently re-spawn
+	// and lose history. On Restore failure, t.ptmx remains nil per the
+	// clear above (#474).
 	if err := t.Restore(""); err != nil {
 		log.ErrorLog.Printf("error restoring pty after detach: %v", err)
 	}
-
-	t.wg.Wait()
 }
 
 // Close terminates the tmux session and cleans up resources
