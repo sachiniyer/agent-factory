@@ -11,8 +11,11 @@ import (
 // ansiEscapeRegex matches CSI escape sequences (e.g. SGR colors) so they can
 // be stripped before width-based truncation. Truncating a string that still
 // contains escape sequences risks cutting one mid-byte, leaking visible
-// garbage like "[31m" into the rendered output (issue #525).
-var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+// garbage like "[31m" into the rendered output (issue #525). The "?" prefix
+// covers private-mode sequences like \x1b[?25l (cursor hide) which would
+// otherwise be width-counted as visible runes and trigger premature truncation
+// (issue #552).
+var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[?0-9;]*[a-zA-Z]`)
 
 type ErrBox struct {
 	height, width int
