@@ -42,6 +42,43 @@ var tickUpdateMetadataCmd = func() tea.Msg {
 	return tickUpdateMetadataMessage{}
 }
 
+// runMetadataTick refreshes each started instance's status/prompt state by
+// shelling out to tmux capture-pane via CheckAndHandleTrustPrompt and
+// HasUpdated. Intended to run off the bubbletea Update goroutine (see
+// runMetadataTickCmd) so the per-instance tmux work does not block rendering.
+// Status mutations go through Instance.SetStatus, which holds the instance
+// mutex, so concurrent reads from the renderer remain safe.
+func runMetadataTick(instances []*session.Instance) {
+	for _, instance := range instances {
+		if !instance.Started() || instance.GetStatus() == session.Loading {
+			continue
+		}
+		instance.CheckAndHandleTrustPrompt()
+		updated, prompt := instance.HasUpdated()
+		if updated {
+			instance.SetStatus(session.Running)
+		} else {
+			if prompt {
+				instance.TapEnter()
+			} else {
+				instance.SetStatus(session.Ready)
+			}
+		}
+	}
+}
+
+// runMetadataTickCmd returns a tea.Cmd that performs the metadata tick work
+// for the supplied snapshot of instances off the event loop, then sleeps for
+// 500ms before re-emitting tickUpdateMetadataMessage. The sleep happens after
+// the work so two ticks can never overlap on the same tmux sessions.
+func runMetadataTickCmd(instances []*session.Instance) tea.Cmd {
+	return func() tea.Msg {
+		runMetadataTick(instances)
+		time.Sleep(500 * time.Millisecond)
+		return tickUpdateMetadataMessage{}
+	}
+}
+
 var tickUpdatePRInfoCmd = func() tea.Msg {
 	time.Sleep(60 * time.Second)
 	return tickUpdatePRInfoMessage{}

@@ -293,23 +293,15 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	case tickUpdateMetadataMessage:
-		for _, instance := range m.sidebar.GetInstances() {
-			if !instance.Started() || instance.GetStatus() == session.Loading {
-				continue
-			}
-			instance.CheckAndHandleTrustPrompt()
-			updated, prompt := instance.HasUpdated()
-			if updated {
-				instance.SetStatus(session.Running)
-			} else {
-				if prompt {
-					instance.TapEnter()
-				} else {
-					instance.SetStatus(session.Ready)
-				}
-			}
-		}
-		return m, tickUpdateMetadataCmd
+		// Per-instance work (CheckAndHandleTrustPrompt + HasUpdated) is a
+		// tmux capture-pane shell-out per call. Iterating all instances on
+		// the bubbletea Update goroutine blocks the next render for ~10ms ×
+		// 2N (issue #559) — most visible when the queued tick fires right
+		// after tmux detach, because rendering can't catch up until the
+		// loop drains. Snapshot the instance list on the event loop and
+		// hand the work off to a goroutine so View() isn't blocked.
+		instances := m.sidebar.GetInstances()
+		return m, runMetadataTickCmd(instances)
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress {
 			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
