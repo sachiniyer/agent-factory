@@ -72,10 +72,12 @@ func NewStorage(state config.InstanceStorage, repoID string) (*Storage, error) {
 }
 
 // SaveInstances saves the list of instances to disk under file locks.
-// Includes both started instances and Loading instances (which are in the
-// process of being started asynchronously). This ensures preSaveInstances
-// persists Loading instances to disk so refreshExternalInstances won't
-// remove them during the Loading→Running transition.
+// Loading instances are excluded — they represent in-flight TUI session
+// creations whose worktree is not yet populated, so they cannot be
+// restored via FromInstanceData. refreshExternalInstances already
+// protects in-memory Loading entries from being reaped, so they don't
+// need a disk presence. Persisting them risked orphaned records that
+// the daemon's title-collision check would treat as live (#551).
 func (s *Storage) SaveInstances(instances []*Instance) error {
 	if s.repoID != "" {
 		return s.saveRepoInstances(instances)
@@ -84,7 +86,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Convert instances to InstanceData
 	data := make([]InstanceData, 0)
 	for _, instance := range instances {
-		if instance.Started() || instance.GetStatus() == Loading {
+		if instance.Started() {
 			data = append(data, instance.ToInstanceData())
 		}
 	}
@@ -162,6 +164,13 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 					// preserve it.
 					continue
 				}
+				// Legacy Loading ghosts (#551) left by older binaries
+				// would block title reuse via the daemon's collision
+				// check. Drop them on the next save instead of
+				// preserving them as "external".
+				if dd.Status == Loading {
+					continue
+				}
 				// Externally added instance — keep it.
 				merged = append(merged, dd)
 			}
@@ -206,16 +215,20 @@ func (s *Storage) saveRepoInstances(instances []*Instance) error {
 		data := make([]InstanceData, 0)
 		memTitles := make(map[string]bool)
 		for _, instance := range instances {
-			status := instance.GetStatus()
-			if status != Loading {
-				if !instance.Started() {
-					continue
-				}
-				// If another process deleted the disk record and the backing
-				// session is gone, don't resurrect it from stale TUI memory.
-				if !diskTitles[instance.Title] && !instance.TmuxAlive() {
-					continue
-				}
+			// Loading is transient TUI state — its worktree is not yet
+			// populated, so FromInstanceData cannot restore it. Persisting
+			// it would leave an orphan that the daemon's title-collision
+			// check would treat as live (#551).
+			if instance.GetStatus() == Loading {
+				continue
+			}
+			if !instance.Started() {
+				continue
+			}
+			// If another process deleted the disk record and the backing
+			// session is gone, don't resurrect it from stale TUI memory.
+			if !diskTitles[instance.Title] && !instance.TmuxAlive() {
+				continue
 			}
 			d := instance.ToInstanceData()
 			data = append(data, d)
