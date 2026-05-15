@@ -198,6 +198,45 @@ func TestManagerCreateSessionAtomicWithRefresh(t *testing.T) {
 	}
 }
 
+// TestManagerCreateSessionIgnoresLoadingGhost is a regression test for
+// sachiniyer/agent-factory#551. An older TUI binary could persist a
+// Loading-status entry on quit; the daemon's title-collision check
+// then treated it as a live reservation and rejected any future
+// session creation with the same title. The fix skips Loading entries
+// in disk-side validation so they no longer block — the next save will
+// reap them.
+func TestManagerCreateSessionIgnoresLoadingGhost(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	ghostJSON, err := json.Marshal([]session.InstanceData{
+		{Title: "stuck", Path: repoPath, Status: session.Loading},
+	})
+	if err != nil {
+		t.Fatalf("marshal ghost: %v", err)
+	}
+	if err := config.LoadState().SaveInstances(repo.ID, ghostJSON); err != nil {
+		t.Fatalf("seed ghost: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := manager.CreateSession(CreateSessionRequest{
+		Title:    "stuck",
+		RepoPath: repoPath,
+		Program:  "claude",
+	}); err != nil {
+		t.Fatalf("CreateSession should ignore Loading ghost, got: %v", err)
+	}
+}
+
 func TestControlServerCreateAndKillSession(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	installInstantBackend(t)

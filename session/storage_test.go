@@ -343,6 +343,89 @@ func TestRepoSaveDoesNotResurrectDeadDiskMissingInstance(t *testing.T) {
 	assert.Empty(t, result, "stale TUI memory must not recreate a deleted instance record")
 }
 
+// TestRepoSaveDropsLoadingFromMemory is a regression test for
+// sachiniyer/agent-factory#551. When the TUI quits while a session is
+// still in Loading status (worktree not yet populated), the in-memory
+// instance must not be persisted to disk. FromInstanceData cannot
+// restore Loading entries, and the daemon's title-collision check would
+// otherwise see the orphan and reject any future session with the same
+// title.
+func TestRepoSaveDropsLoadingFromMemory(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	loading := makeInstance("in-flight", repoPath, false)
+	loading.Status = Loading
+	storage, err := NewStorage(ms, repoID)
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{loading})
+	require.NoError(t, err)
+
+	result := readDisk(t, ms, repoPath)
+	assert.Empty(t, result, "Loading instance must not be persisted to disk (#551)")
+}
+
+// TestRepoSaveReapsLegacyLoadingGhost verifies that an older binary's
+// orphaned Loading record on disk is reaped on the next TUI save, even
+// when the in-memory state does not include a same-titled instance. The
+// merge path used to preserve such entries as "external", which kept
+// the ghost alive across saves.
+func TestRepoSaveReapsLegacyLoadingGhost(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	seedDisk(t, ms, repoPath, []InstanceData{
+		{Title: "ghost", Path: repoPath, Status: Loading},
+		{Title: "alive", Path: repoPath, Status: Running},
+	})
+
+	alive := makeInstance("alive", repoPath, true)
+	storage, err := NewStorage(ms, repoID)
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{alive})
+	require.NoError(t, err)
+
+	result := readDisk(t, ms, repoPath)
+	titles := make(map[string]bool, len(result))
+	for _, d := range result {
+		titles[d.Title] = true
+	}
+	assert.True(t, titles["alive"], "running instance should remain on disk")
+	assert.False(t, titles["ghost"], "legacy Loading ghost must be reaped on save (#551)")
+}
+
+// TestDaemonSaveReapsLegacyLoadingGhost mirrors the TUI check for the
+// daemon merge path: a Loading record on disk that the daemon did not
+// create should be dropped rather than preserved as an external entry.
+func TestDaemonSaveReapsLegacyLoadingGhost(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	ms := newMockStorage()
+
+	seedDisk(t, ms, repoPath, []InstanceData{
+		{Title: "ghost", Path: repoPath, Status: Loading},
+		{Title: "alive", Path: repoPath, Status: Running},
+	})
+
+	alive := makeInstance("alive", repoPath, true)
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{alive})
+	require.NoError(t, err)
+
+	result := readDisk(t, ms, repoPath)
+	titles := make(map[string]bool, len(result))
+	for _, d := range result {
+		titles[d.Title] = true
+	}
+	assert.True(t, titles["alive"], "daemon-known instance should remain on disk")
+	assert.False(t, titles["ghost"], "legacy Loading ghost must be reaped by daemon save (#551)")
+}
+
 // TestCollectRepoRoots verifies that Storage.CollectRepoRoots returns the
 // unique set of repo roots from stored instances across ALL repos. This
 // underpins the fix for #265 (af reset must clean worktrees in every repo

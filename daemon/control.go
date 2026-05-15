@@ -655,9 +655,18 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		return fmt.Errorf("session with title %q already exists", title)
 	}
 	for _, data := range diskData {
-		if data.Title == title {
-			return fmt.Errorf("session with title %q already exists", title)
+		if data.Title != title {
+			continue
 		}
+		// Loading entries are transient TUI state with an empty worktree
+		// path and cannot be restored. Older TUI binaries (#551) could
+		// persist them to disk on quit, where they would block title
+		// reuse forever. Treat them as ghosts that the next save will
+		// reap rather than as live reservations.
+		if data.Status == session.Loading {
+			continue
+		}
+		return fmt.Errorf("session with title %q already exists", title)
 	}
 	if remote {
 		candidate := session.Slugify(title)
@@ -827,9 +836,19 @@ func appendInstanceData(repoID string, data session.InstanceData) error {
 			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
 		}
 		for i := range existing {
-			if existing[i].Title == data.Title {
-				return nil, fmt.Errorf("session with title %q already exists", data.Title)
+			if existing[i].Title != data.Title {
+				continue
 			}
+			// A Loading ghost left by an older TUI binary (#551) should
+			// be overwritten rather than blocking the new session.
+			// validateTitleAvailableLocked already cleared this title,
+			// so reaching here under a same-titled non-Loading entry
+			// is a real conflict.
+			if existing[i].Status == session.Loading {
+				existing[i] = data
+				return json.MarshalIndent(existing, "", "  ")
+			}
+			return nil, fmt.Errorf("session with title %q already exists", data.Title)
 		}
 		existing = append(existing, data)
 		return json.MarshalIndent(existing, "", "  ")
