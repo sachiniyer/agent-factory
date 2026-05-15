@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -177,6 +178,95 @@ func TestUpsertInstanceDataByTitleReplacesDuplicates(t *testing.T) {
 	if byTitle["add"].Worktree.WorktreePath != "/add" {
 		t.Fatalf("expected new entry to be appended, got %+v", byTitle["add"])
 	}
+}
+
+// instanceWithFakeBackend builds an instance backed by FakeBackend, marked
+// Started and Running. Used by metadata-tick tests to exercise the loop body
+// without spinning up real tmux sessions.
+func instanceWithFakeBackend(t *testing.T, title string) *session.Instance {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   title,
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatus(session.Running)
+	return inst
+}
+
+// TestTickUpdateMetadata_HandlerDispatchesOffEventLoop is the regression test
+// for issue #559: the tickUpdateMetadataMessage handler must not iterate
+// instances on the bubbletea Update goroutine. The loop body shells out to
+// tmux capture-pane per instance, so executing it synchronously blocks
+// rendering and is most visible right after detach when the queued tick
+// fires. The fix moves the iteration into a tea.Cmd that runs in a goroutine.
+//
+// We assert the handler returns quickly and the instance statuses are NOT
+// yet modified by the time Update returns — they only flip after the cmd
+// runs.
+func TestTickUpdateMetadata_HandlerDispatchesOffEventLoop(t *testing.T) {
+	h := newTestHome(t)
+	a := instanceWithFakeBackend(t, "a")
+	b := instanceWithFakeBackend(t, "b")
+	c := instanceWithFakeBackend(t, "c")
+	h.sidebar.AddInstance(a)
+	h.sidebar.AddInstance(b)
+	h.sidebar.AddInstance(c)
+
+	start := time.Now()
+	_, cmd := h.Update(tickUpdateMetadataMessage{})
+	elapsed := time.Since(start)
+
+	require.NotNil(t, cmd, "handler must return a re-schedule cmd")
+	// The handler should now return essentially instantly — the work is
+	// deferred to the returned cmd, which runs off the event loop.
+	assert.Less(t, elapsed, 5*time.Millisecond,
+		"Update must not block on per-instance work; saw %s", elapsed)
+	// Statuses remain unchanged at this point — the cmd hasn't run yet.
+	assert.Equal(t, session.Running, a.GetStatus())
+	assert.Equal(t, session.Running, b.GetStatus())
+	assert.Equal(t, session.Running, c.GetStatus())
+}
+
+// TestRunMetadataTick_TransitionsRunningToReady checks the loop body still
+// performs its job when invoked off the event loop: a FakeBackend reports
+// no updates and no prompt, so each Running instance must flip to Ready.
+func TestRunMetadataTick_TransitionsRunningToReady(t *testing.T) {
+	a := instanceWithFakeBackend(t, "a")
+	b := instanceWithFakeBackend(t, "b")
+
+	runMetadataTick([]*session.Instance{a, b})
+
+	assert.Equal(t, session.Ready, a.GetStatus())
+	assert.Equal(t, session.Ready, b.GetStatus())
+}
+
+// TestRunMetadataTick_SkipsLoadingAndUnstartedInstances mirrors the previous
+// synchronous handler's guard: instances that are still Loading or not
+// Started must not be probed (tmux session may not exist yet).
+func TestRunMetadataTick_SkipsLoadingAndUnstartedInstances(t *testing.T) {
+	loading := instanceWithFakeBackend(t, "loading")
+	loading.SetStatus(session.Loading)
+
+	unstarted, err := session.NewInstance(session.InstanceOptions{
+		Title:   "unstarted",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	unstarted.SetBackend(session.NewFakeBackend())
+	// Deliberately leave started=false.
+	unstarted.SetStatus(session.Running)
+
+	runMetadataTick([]*session.Instance{loading, unstarted})
+
+	assert.Equal(t, session.Loading, loading.GetStatus(),
+		"Loading instance must not have its status overwritten")
+	assert.Equal(t, session.Running, unstarted.GetStatus(),
+		"unstarted instance must not have its status overwritten")
 }
 
 func TestImportRemoteHookSessionsAddsListCmdSessions(t *testing.T) {
