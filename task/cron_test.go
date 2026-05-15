@@ -285,11 +285,41 @@ func TestCronToOnCalendarDOMandDOWStep(t *testing.T) {
 
 // TestCronToOnCalendarDOMCoversAllNoSplit verifies that when DOM is
 // syntactically restricted but covers every day (1-31), the OR collapses to
-// "every day" and the result is a single DOW-restricted entry.
+// "every day" and the result is a single DOW-restricted entry with DOM=*.
 func TestCronToOnCalendarDOMCoversAllNoSplit(t *testing.T) {
 	result, err := CronToOnCalendar("0 9 1-31 * 1")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"Mon *-*-01..31 09:00:00"}, result)
+	assert.Equal(t, []string{"Mon *-*-* 09:00:00"}, result)
+}
+
+// TestCronToOnCalendarDOMTrulyRestrictedFanOut verifies the OR-semantics
+// fan-out still triggers when DOM is a real subset of days (1-7, not 1-31).
+func TestCronToOnCalendarDOMTrulyRestrictedFanOut(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 1-7 * 1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"*-*-01..07 09:00:00",
+		"Mon *-*-* 09:00:00",
+	}, result)
+}
+
+// TestCronToOnCalendarDOMCoversAllNoDOW verifies that a full-range DOM with
+// wildcard DOW collapses to plain every-day (no DOM restriction in output).
+func TestCronToOnCalendarDOMCoversAllNoDOW(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 1-31 * *")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*-*-* 09:00:00"}, result)
+}
+
+// TestCronToOnCalendarDOMSingleDayFanOut verifies that a single restrictive
+// DOM still produces the OR-semantics fan-out.
+func TestCronToOnCalendarDOMSingleDayFanOut(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 1 * 1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"*-*-01 09:00:00",
+		"Mon *-*-* 09:00:00",
+	}, result)
 }
 
 // TestCronToOnCalendarDOWCoversAllNoSplit verifies the symmetric case where
