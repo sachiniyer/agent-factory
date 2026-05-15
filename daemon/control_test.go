@@ -428,6 +428,109 @@ func TestFormatWaitForReadyTimeoutError(t *testing.T) {
 	})
 }
 
+// stubGhostCleanup replaces both ghostCleanupWorktree and ghostKillTmuxByName
+// with recorders so tests can assert which teardown branches fired without
+// invoking real git / real tmux.
+func stubGhostCleanup(t *testing.T) (wtCalls *[]string, tmuxCalls *[]string) {
+	t.Helper()
+	var wt, tm []string
+	prevWT := ghostCleanupWorktree
+	prevTmux := ghostKillTmuxByName
+	ghostCleanupWorktree = func(data *session.InstanceData, title string) {
+		if data.Worktree.RepoPath == "" || data.Worktree.WorktreePath == "" || data.Worktree.ExternalWorktree {
+			return
+		}
+		wt = append(wt, title)
+	}
+	ghostKillTmuxByName = func(name string) error {
+		tm = append(tm, name)
+		return nil
+	}
+	t.Cleanup(func() {
+		ghostCleanupWorktree = prevWT
+		ghostKillTmuxByName = prevTmux
+	})
+	return &wt, &tm
+}
+
+// TestGhostCleanup_TmuxOrphan is the daemon-side regression test for #549:
+// PR #536 fixed the same orphan in api/sessions.go, but the daemon kill path
+// kept the old worktree-only teardown, so the bug returned through the
+// daemon-routed kill. With an empty worktree path and a populated TmuxName,
+// ghostCleanup must still attempt to kill the tmux session.
+func TestGhostCleanup_TmuxOrphan(t *testing.T) {
+	wtCalls, tmCalls := stubGhostCleanup(t)
+
+	data := &session.InstanceData{
+		Title:    "ghost",
+		Program:  "claude",
+		TmuxName: "af_ghost",
+	}
+	ghostCleanup(data, "ghost")
+
+	if len(*wtCalls) != 0 {
+		t.Fatalf("expected worktree cleanup skipped, got: %v", *wtCalls)
+	}
+	if len(*tmCalls) != 1 || (*tmCalls)[0] != "af_ghost" {
+		t.Fatalf("expected tmux kill for af_ghost, got: %v", *tmCalls)
+	}
+}
+
+// TestGhostCleanup_BothPopulated verifies the fix did not regress the
+// worktree-cleanup branch: with both fields populated, both teardowns fire.
+func TestGhostCleanup_BothPopulated(t *testing.T) {
+	wtCalls, tmCalls := stubGhostCleanup(t)
+
+	data := &session.InstanceData{
+		Title:    "ghost",
+		Program:  "claude",
+		TmuxName: "af_ghost",
+		Worktree: session.GitWorktreeData{
+			RepoPath:     "/tmp/repo",
+			WorktreePath: "/tmp/wt",
+			SessionName:  "ghost",
+			BranchName:   "af/ghost",
+		},
+	}
+	ghostCleanup(data, "ghost")
+
+	if len(*wtCalls) != 1 || (*wtCalls)[0] != "ghost" {
+		t.Fatalf("expected worktree cleanup, got: %v", *wtCalls)
+	}
+	if len(*tmCalls) != 1 || (*tmCalls)[0] != "af_ghost" {
+		t.Fatalf("expected tmux kill for af_ghost, got: %v", *tmCalls)
+	}
+}
+
+// TestGhostCleanup_AllEmpty verifies that with no TmuxName and no worktree
+// paths, both teardown branches are skipped.
+func TestGhostCleanup_AllEmpty(t *testing.T) {
+	wtCalls, tmCalls := stubGhostCleanup(t)
+
+	data := &session.InstanceData{
+		Title:   "ghost",
+		Program: "claude",
+	}
+	ghostCleanup(data, "ghost")
+
+	if len(*wtCalls) != 0 {
+		t.Fatalf("expected no worktree cleanup, got: %v", *wtCalls)
+	}
+	if len(*tmCalls) != 0 {
+		t.Fatalf("expected no tmux kill, got: %v", *tmCalls)
+	}
+}
+
+// TestGhostKillTmuxByName_RefusesNonAfPrefix guards the validation in the
+// real ghostKillTmuxByName: a sanitized name without the af_ prefix would
+// only appear via storage corruption, and silently killing whatever tmux
+// session it names could destroy unrelated work.
+func TestGhostKillTmuxByName_RefusesNonAfPrefix(t *testing.T) {
+	if err := ghostKillTmuxByName("not-ours"); err == nil {
+		t.Fatalf("expected refusal for non-af prefix, got nil")
+	}
+}
+
 // TestIsDaemonAbsentErr covers the small classifier RequestShutdown uses to
 // decide whether a dial/RPC failure means "no daemon" (silent no-op) or
 // "unexpected transport problem" (surface to the caller).
