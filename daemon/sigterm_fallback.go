@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,24 +26,34 @@ import (
 //     "af --daemon"`, filter out /tmp/Test* paths (Go test binaries) and the
 //     current process, and require exactly one candidate.
 //
-// Returns ShutdownViaSIGTERM when a signal was delivered, ShutdownNoDaemon
-// when nothing eligible was found, or an error for ambiguous cases (multiple
-// pgrep matches) so the caller can surface a clear actionable message.
+// Returns ShutdownViaSIGTERM when a signal was delivered, or ShutdownFailed
+// with an actionable error when the daemon (which is provably running — the
+// caller only invokes us after the Shutdown RPC returned method-not-found,
+// not ECONNREFUSED) could not be located or signaled. Returning
+// ShutdownNoDaemon here would contradict the established state and silently
+// leave the stale daemon running (#553).
 func sigtermFallback() (ShutdownResult, error) {
 	pid, source, err := locateDaemonPID()
 	if err != nil {
-		return ShutdownNoDaemon, err
+		return ShutdownFailed, fmt.Errorf(
+			"sigterm fallback failed: %w; run 'pkill -f \"af --daemon\"' to stop the old daemon manually before retrying `af upgrade`",
+			err,
+		)
 	}
 	if pid == 0 {
-		// Nothing to signal. Treat as ShutdownNoDaemon: the upgrade prints
-		// bare success and the next RPC EnsureDaemon-respawns from the new
-		// binary anyway.
-		return ShutdownNoDaemon, nil
+		return ShutdownFailed, fmt.Errorf(
+			"sigterm fallback: daemon is running on the control socket but no PID candidate was found (%s); "+
+				"run 'pkill -f \"af --daemon\"' to stop the old daemon manually before retrying `af upgrade`",
+			source,
+		)
 	}
 
 	log.InfoLog.Printf("sigterm fallback: signaling pre-#501 daemon (pid=%d source=%s)", pid, source)
 	if err := signalAndWait(pid); err != nil {
-		return ShutdownNoDaemon, fmt.Errorf("sigterm fallback for daemon pid %d: %w", pid, err)
+		return ShutdownFailed, fmt.Errorf(
+			"sigterm fallback for daemon pid %d: %w; run 'pkill -f \"af --daemon\"' to stop the old daemon manually before retrying `af upgrade`",
+			pid, err,
+		)
 	}
 
 	// Best-effort PID file cleanup so the next `af` invocation does not see
@@ -52,25 +63,32 @@ func sigtermFallback() (ShutdownResult, error) {
 	return ShutdownViaSIGTERM, nil
 }
 
-// locateDaemonPID returns the PID of the running daemon to signal, the source
-// it was found in ("pid-file" or "pgrep") for diagnostics, or (0, "", nil)
-// when no eligible target exists. An error is returned only for ambiguous
-// pgrep results where signaling would be unsafe.
+// locateDaemonPID returns the PID of the running daemon to signal and the
+// source it was found in ("pid-file" or "pgrep") on success. On failure to
+// locate a PID, returns (0, source, nil) where source describes the suspected
+// PID source for diagnostics (e.g. "pid-file pid=N stale, pgrep: no matches"
+// or "no pid-file, pgrep unavailable"). An error is returned only for hard
+// failures (ambiguous pgrep results, pgrep itself failing to execute).
 func locateDaemonPID() (int, string, error) {
+	pidFileSource := "no pid-file"
 	if pid, ok := readPIDFromFile(); ok {
 		if pidLooksAlive(pid) && isAgentFactoryDaemon(pid) {
 			return pid, "pid-file", nil
 		}
 		log.InfoLog.Printf("sigterm fallback: PID file pid=%d is dead or non-daemon; falling back to pgrep", pid)
+		pidFileSource = fmt.Sprintf("pid-file pid=%d stale", pid)
 	}
 
 	pids, err := pgrepDaemonCandidates()
 	if err != nil {
-		return 0, "", err
+		if errors.Is(err, errPgrepUnavailable) {
+			return 0, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), nil
+		}
+		return 0, "", fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
 	}
 	switch len(pids) {
 	case 0:
-		return 0, "", nil
+		return 0, fmt.Sprintf("%s, pgrep: no matches", pidFileSource), nil
 	case 1:
 		return pids[0], "pgrep", nil
 	default:
@@ -133,6 +151,12 @@ func pidLooksAlive(pid int) bool {
 	return true
 }
 
+// errPgrepUnavailable signals that `pgrep` is not on PATH, distinct from
+// "pgrep ran and returned no matches". Surfaced by locateDaemonPID so the
+// caller can build an actionable error rather than misclassifying the running
+// daemon as absent (#553).
+var errPgrepUnavailable = errors.New("pgrep not found in PATH")
+
 // pgrepDaemonCandidates scans for processes whose full command line contains
 // "af --daemon", excluding Go test binaries living under /tmp/Test* and the
 // current process. We rely on pgrep -f rather than parsing /proc directly so
@@ -140,12 +164,8 @@ func pidLooksAlive(pid int) bool {
 func pgrepDaemonCandidates() ([]int, error) {
 	pgrep, err := exec.LookPath("pgrep")
 	if err != nil {
-		// No pgrep is unusual but recoverable: just report no candidates so
-		// the upgrade falls back to "bare success". The daemon will keep
-		// running but the next RPC respawns the right one anyway, and we
-		// surface this in the log for debugging.
 		log.WarningLog.Printf("sigterm fallback: pgrep not found in PATH; cannot scan for daemons: %v", err)
-		return nil, nil
+		return nil, fmt.Errorf("%w: %v", errPgrepUnavailable, err)
 	}
 	out, err := exec.Command(pgrep, "-f", "af --daemon").Output()
 	if err != nil {

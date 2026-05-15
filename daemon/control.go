@@ -216,6 +216,13 @@ const (
 	// directly. The upgrade prints a slightly different success message so
 	// users know we used the fallback. See #504.
 	ShutdownViaSIGTERM
+	// ShutdownFailed means a daemon was proven to be listening on the
+	// control socket (the Shutdown RPC came back as method-not-found, not
+	// ECONNREFUSED) but the SIGTERM fallback could not locate a PID to
+	// signal — e.g. no PID file AND pgrep is unavailable on this host. The
+	// daemon is still running the old binary; the caller must surface the
+	// recovery hint in the accompanying error. See #553.
+	ShutdownFailed
 )
 
 // sigtermFallbackGrace is the max time we wait for a SIGTERM'd daemon to exit
@@ -232,12 +239,13 @@ const sigtermFallbackPoll = 100 * time.Millisecond
 // daemon's PID and sending SIGTERM directly (#504) so an `af upgrade` does
 // not leave a stale daemon running the old binary.
 //
-// Returns (ShutdownNoDaemon, nil) when no daemon is running (no socket,
-// ECONNREFUSED, or no signalable PID), (ShutdownViaRPC, nil) when the Shutdown
-// RPC acknowledged, (ShutdownViaSIGTERM, nil) when the fallback signaled a
-// real `af --daemon` process, and (ShutdownNoDaemon, err) for unexpected
-// errors that the caller should surface (e.g. multiple ambiguous candidates,
-// permission denied on signal).
+// Returns (ShutdownNoDaemon, nil) when no daemon is running (no socket or
+// ECONNREFUSED), (ShutdownViaRPC, nil) when the Shutdown RPC acknowledged,
+// (ShutdownViaSIGTERM, nil) when the fallback signaled a real `af --daemon`
+// process, and (ShutdownFailed, err) when the daemon is provably running but
+// the fallback could not locate or signal it (ambiguous pgrep matches, no
+// PID file with pgrep unavailable, permission denied on signal) — the
+// returned error carries the recovery hint the caller must surface.
 func RequestShutdown() (ShutdownResult, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
