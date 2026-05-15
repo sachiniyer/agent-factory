@@ -96,6 +96,37 @@ func TestErrBoxWithoutANSIUnchanged(t *testing.T) {
 	}
 }
 
+// TestErrBoxStripsPrivateModeCSI is a regression test for issue #552. The
+// original strip regex only allowed [0-9;] in the parameter byte slot, so
+// private-mode sequences like \x1b[?25l (cursor hide/show), \x1b[?1049h
+// (alt-screen), and \x1b[?7l (autowrap off) leaked through. runewidth then
+// counted "?25l" etc. as visible runes and the box truncated prematurely.
+func TestErrBoxStripsPrivateModeCSI(t *testing.T) {
+	payload := "agent crashed"
+	// Mix display SGR with several private-mode sequences.
+	raw := "\x1b[?25l\x1b[?1049h\x1b[?7l\x1b[31m" + payload + "\x1b[0m\x1b[?25h\x1b[?1049l"
+	stripped := ansiEscapeRegex.ReplaceAllString(raw, "")
+	if stripped != payload {
+		t.Fatalf("private-mode CSI not stripped: got %q want %q", stripped, payload)
+	}
+	if got := runewidth.StringWidth(stripped); got != runewidth.StringWidth(payload) {
+		t.Errorf("width after strip = %d, want %d", got, runewidth.StringWidth(payload))
+	}
+
+	// End-to-end: a wide-enough box must render the full payload without
+	// truncation now that private-mode bytes no longer inflate the width.
+	e := NewErrBox()
+	e.SetSize(80, 1)
+	e.SetError(errors.New(raw))
+	out := e.String()
+	if !strings.Contains(stripANSI(out), payload) {
+		t.Errorf("payload missing from rendered output: %q", out)
+	}
+	if strings.Contains(out, "?25l") || strings.Contains(out, "?1049h") || strings.Contains(out, "?7l") {
+		t.Errorf("private-mode sequence leaked into output: %q", out)
+	}
+}
+
 // stripANSI removes ANSI escape sequences (CSI) so width measurements
 // reflect only visible runes.
 func stripANSI(s string) string {
