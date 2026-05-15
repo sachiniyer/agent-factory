@@ -153,6 +153,9 @@ func CronToOnCalendar(cronExpr string) ([]string, error) {
 	// already returns "" for the DOW side; for DOM we expand and check.
 	domVals, _ := expandCronField(domField, 1, 31)
 	domCoversAll := domVals != nil && len(domVals) >= 31
+	if domCoversAll {
+		domPart = "*"
+	}
 
 	domRestricted := domField != "*" && !domCoversAll
 	dowRestricted := dowPart != ""
