@@ -285,10 +285,12 @@ func TestSigtermFallback_IgnoresNonMatchingCmdline(t *testing.T) {
 	}
 }
 
-// TestSigtermFallback_DeadPID covers the second specified test: when the PID
-// file points at a process that no longer exists (or was never one), the
-// fallback should clean up gracefully and report ShutdownNoDaemon rather
-// than erroring or hanging.
+// TestSigtermFallback_DeadPID covers the dead-PID case: the PID file points
+// at a process that no longer exists, pgrep falls through to "no matches".
+// Per #553 the fallback's contract is invoked only after the Shutdown RPC
+// has proven the daemon is running, so "could not locate a PID" must be
+// reported as ShutdownFailed (not ShutdownNoDaemon) along with an actionable
+// recovery hint — anything else would silently leave the stale daemon up.
 func TestSigtermFallback_DeadPID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -302,13 +304,51 @@ func TestSigtermFallback_DeadPID(t *testing.T) {
 	}
 
 	result, err := sigtermFallback()
-	if err != nil {
-		t.Fatalf("sigtermFallback returned error for dead PID: %v", err)
+	if result != ShutdownFailed {
+		t.Fatalf("sigtermFallback returned %v for dead PID, want ShutdownFailed", result)
 	}
-	// The dead-PID branch falls through to pgrep; on a clean test runner
-	// there are no `af --daemon` matches, so we expect ShutdownNoDaemon.
-	if result != ShutdownNoDaemon {
-		t.Fatalf("sigtermFallback returned %v for dead PID, want ShutdownNoDaemon", result)
+	if err == nil {
+		t.Fatalf("sigtermFallback returned nil error for dead PID; expected one carrying the recovery hint")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `pkill -f "af --daemon"`) {
+		t.Errorf("sigtermFallback error %q missing recovery hint with `pkill -f \"af --daemon\"`", msg)
+	}
+	if !strings.Contains(msg, strconv.Itoa(deadPID)) {
+		t.Errorf("sigtermFallback error %q missing stale PID-file pid=%d in source", msg, deadPID)
+	}
+}
+
+// TestSigtermFallback_NoPIDFileAndNoPgrep covers #553: the Shutdown RPC
+// proved the daemon is listening on the socket, but the fallback path has
+// no PID file to consult AND pgrep is unavailable. Returning ShutdownNoDaemon
+// would contradict the established state and leave the stale daemon running;
+// the fix is to return ShutdownFailed with an actionable error pointing at
+// `pkill -f "af --daemon"`.
+func TestSigtermFallback_NoPIDFileAndNoPgrep(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// Force pgrep off PATH for this test only. Using a fresh, empty temp
+	// dir guarantees exec.LookPath("pgrep") fails.
+	t.Setenv("PATH", t.TempDir())
+
+	result, err := sigtermFallback()
+	if result != ShutdownFailed {
+		t.Fatalf("sigtermFallback returned %v, want ShutdownFailed", result)
+	}
+	if err == nil {
+		t.Fatalf("sigtermFallback returned nil error; expected one carrying the recovery hint")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `pkill -f "af --daemon"`) {
+		t.Errorf("sigtermFallback error %q missing recovery hint with `pkill -f \"af --daemon\"`", msg)
+	}
+	if !strings.Contains(msg, "pgrep unavailable") {
+		t.Errorf("sigtermFallback error %q missing `pgrep unavailable` source", msg)
+	}
+	if !strings.Contains(msg, "no pid-file") {
+		t.Errorf("sigtermFallback error %q missing `no pid-file` source", msg)
 	}
 }
 
@@ -416,14 +456,19 @@ func TestRequestShutdown_PreShutdownDaemon(t *testing.T) {
 	// dependency belongs in an integration test, not a unit test —
 	// here we only need to assert RequestShutdown completes without
 	// a panic and surfaces a Result/error consistent with the routing
-	// having reached the fallback. The result space is:
-	//   - ShutdownNoDaemon, nil           (clean test host)
-	//   - ShutdownViaSIGTERM, nil         (host has a real daemon — uncommon)
-	//   - ShutdownNoDaemon, non-nil error (ambiguous pgrep matches)
-	// What is NOT acceptable: a panic, or ShutdownViaRPC (would mean the
-	// fake daemon answered Shutdown, which it does not implement).
+	// having reached the fallback. The result space (post-#553) is:
+	//   - ShutdownFailed, non-nil error (clean test host: pgrep found
+	//       no matches; or ambiguous pgrep matches; both fold into the
+	//       "daemon is provably running but unsignaled" bucket)
+	//   - ShutdownViaSIGTERM, nil       (host has a real daemon — uncommon)
+	// What is NOT acceptable: a panic, ShutdownViaRPC (would mean the
+	// fake daemon answered Shutdown, which it does not implement), or
+	// ShutdownNoDaemon (would contradict the proven-alive socket).
 	result, err := RequestShutdown()
 	if result == ShutdownViaRPC {
 		t.Fatalf("RequestShutdown returned ShutdownViaRPC; fake daemon has no Shutdown method — routing into the SIGTERM fallback is broken (err=%v)", err)
+	}
+	if result == ShutdownNoDaemon {
+		t.Fatalf("RequestShutdown returned ShutdownNoDaemon after a successful Ping; the socket proved the daemon is alive, so #553's invariant is violated (err=%v)", err)
 	}
 }
