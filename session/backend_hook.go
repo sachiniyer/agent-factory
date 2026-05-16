@@ -152,13 +152,16 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
-// extractJSON finds the last JSON object in mixed output (stderr + stdout).
+// extractJSON finds the last JSON value in mixed output (stderr + stdout).
+// It matches either a JSON object (`{...}`) or a JSON array (`[...]`) so
+// list_cmd (array) and launch_cmd (object) can both recover their payload
+// from output that interleaves diagnostics on stderr with JSON on stdout.
 func extractJSON(output string) string {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	// Search from the end for a line that looks like JSON
 	for idx := len(lines) - 1; idx >= 0; idx-- {
 		line := strings.TrimSpace(lines[idx])
-		if strings.HasPrefix(line, "{") {
+		if strings.HasPrefix(line, "{") || strings.HasPrefix(line, "[") {
 			return line
 		}
 	}
@@ -263,12 +266,18 @@ func (b *HookBackend) SetPreviewSize(_ *Instance, _, _ int) error {
 }
 
 func (b *HookBackend) IsAlive(i *Instance) bool {
-	out, err := exec.Command(b.Hooks.ListCmd, "--json").Output()
+	out, err := exec.Command(b.Hooks.ListCmd, "--json").CombinedOutput()
 	if err != nil {
 		return false
 	}
+	// Mirror launch_cmd: list_cmd may write progress to stderr and JSON to
+	// stdout, so recover the JSON object from the combined output.
+	jsonStr := extractJSON(string(out))
+	if jsonStr == "" {
+		return false
+	}
 	var sessions []map[string]interface{}
-	if err := json.Unmarshal(out, &sessions); err != nil {
+	if err := json.Unmarshal([]byte(jsonStr), &sessions); err != nil {
 		return false
 	}
 	slug := hookNameForInstance(i)
@@ -295,14 +304,21 @@ func ListRemoteHookInstanceData(repoPath string, hooks config.RemoteHooks, now t
 		return nil, nil
 	}
 
-	out, err := exec.Command(hooks.ListCmd, "--json").Output()
+	out, err := exec.Command(hooks.ListCmd, "--json").CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("list_cmd failed: %w", err)
+		return nil, fmt.Errorf("list_cmd failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	// Mirror launch_cmd: list_cmd may write progress to stderr and JSON to
+	// stdout, so recover the JSON array from the combined output.
+	jsonStr := extractJSON(string(out))
+	if jsonStr == "" {
+		return nil, fmt.Errorf("list_cmd returned no JSON in output: %s", strings.TrimSpace(string(out)))
 	}
 
 	var listed []map[string]interface{}
-	if err := json.Unmarshal(out, &listed); err != nil {
-		return nil, fmt.Errorf("list_cmd returned invalid JSON: %w", err)
+	if err := json.Unmarshal([]byte(jsonStr), &listed); err != nil {
+		return nil, fmt.Errorf("list_cmd returned invalid JSON: %s: %w", jsonStr, err)
 	}
 
 	imported := make([]InstanceData, 0, len(listed))

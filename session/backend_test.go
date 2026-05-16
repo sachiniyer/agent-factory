@@ -1034,6 +1034,45 @@ func TestListRemoteHookInstanceDataImportsRunningSessions(t *testing.T) {
 	assert.Equal(t, "h1", data[0].RemoteMeta["host"])
 }
 
+// TestListRemoteHookInstanceDataIgnoresStderrDiagnostics covers the common
+// pattern of a list_cmd script that writes progress to stderr while emitting
+// JSON on stdout (e.g. an ssh-backed lister that logs "connecting…"). The
+// captured stderr must not corrupt the JSON we parse. See #561.
+func TestListRemoteHookInstanceDataIgnoresStderrDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	listCmd := writeScript(t, dir, "list.sh", `
+echo "connecting to remote host..." >&2
+echo "fetched 1 session" >&2
+echo '[{"name": "remote-one", "status": "running", "host": "h1"}]'
+`)
+
+	now := time.Now()
+	data, err := ListRemoteHookInstanceData("/repo/root", config.RemoteHooks{ListCmd: listCmd}, now)
+	require.NoError(t, err)
+	require.Len(t, data, 1)
+	assert.Equal(t, "remote-one", data[0].Title)
+	assert.Equal(t, "remote-one", data[0].RemoteMeta["name"])
+	assert.Equal(t, "h1", data[0].RemoteMeta["host"])
+}
+
+// TestListRemoteHookInstanceDataSurfacesStderrOnFailure verifies that when
+// list_cmd exits non-zero, the returned error includes the captured stderr
+// so the warning surfaced at app/sync.go and daemon/control.go is actually
+// diagnostic. Before #561 the error was just "list_cmd failed: exit status 1".
+func TestListRemoteHookInstanceDataSurfacesStderrOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	listCmd := writeScript(t, dir, "list.sh", `
+echo "ssh: could not resolve hostname remote.example.com" >&2
+exit 1
+`)
+
+	_, err := ListRemoteHookInstanceData("/repo/root", config.RemoteHooks{ListCmd: listCmd}, time.Now())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "list_cmd failed")
+	assert.Contains(t, err.Error(), "ssh: could not resolve hostname remote.example.com",
+		"error must surface captured stderr so users can debug list_cmd failures (#561)")
+}
+
 func TestRunHookAttachWithDetachKey(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
