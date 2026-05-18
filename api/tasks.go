@@ -256,6 +256,14 @@ var tasksUpdateCmd = &cobra.Command{
 			s.Name = taskUpdateNameFlag
 		}
 		if taskUpdatePromptFlag != "" {
+			// Partial-update semantics keep `--prompt ""` as "leave
+			// unchanged", but whitespace-only values used to slip past
+			// the != "" check and be sent literally to tmux via
+			// send-keys (#568). Mirrors the trim-validation tasksAddCmd
+			// applies for #517.
+			if strings.TrimSpace(taskUpdatePromptFlag) == "" {
+				return jsonError(errors.New("prompt must be non-empty"))
+			}
 			s.Prompt = taskUpdatePromptFlag
 		}
 
