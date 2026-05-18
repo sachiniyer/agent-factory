@@ -8,10 +8,40 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
 const tasksFileName = "tasks.json"
+
+// taskIDPattern restricts a task ID to characters that are safe to use as a
+// single path segment. Legitimate IDs from GenerateID are 8 lowercase hex
+// characters; the wider class accommodates any future ID scheme while
+// preventing path-traversal segments like "..", "/", or "\".
+var taskIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// maxTaskIDLength caps the size of an accepted task ID. Legitimate IDs are
+// 8 chars; the cap is loose enough for future schemes while bounding the
+// size of values that flow into filesystem paths and error messages.
+const maxTaskIDLength = 128
+
+// ValidateTaskID enforces the shape of a task identifier before it is used
+// to construct filesystem paths (lock files, log files, scheduler units).
+// Returns an error when the id is empty, exceeds maxTaskIDLength, or
+// contains any character outside [a-zA-Z0-9_-] — in particular "." (used
+// in traversal), "/", or "\". Mirrors config.ValidateRepoID.
+func ValidateTaskID(taskID string) error {
+	if taskID == "" {
+		return fmt.Errorf("invalid task id: empty")
+	}
+	if len(taskID) > maxTaskIDLength {
+		return fmt.Errorf("invalid task id: length %d exceeds maximum %d", len(taskID), maxTaskIDLength)
+	}
+	if !taskIDPattern.MatchString(taskID) {
+		return fmt.Errorf("invalid task id: must match %s", taskIDPattern.String())
+	}
+	return nil
+}
 
 type Task struct {
 	ID            string     `json:"id"`
@@ -90,6 +120,9 @@ func saveTasks(tasks []Task) error {
 }
 
 func AddTask(t Task) error {
+	if err := ValidateTaskID(t.ID); err != nil {
+		return err
+	}
 	path, err := getTasksPathFn()
 	if err != nil {
 		return err
@@ -105,6 +138,9 @@ func AddTask(t Task) error {
 }
 
 func RemoveTask(id string) error {
+	if err := ValidateTaskID(id); err != nil {
+		return err
+	}
 	path, err := getTasksPathFn()
 	if err != nil {
 		return err
@@ -134,6 +170,9 @@ func RemoveTask(id string) error {
 }
 
 func GetTask(id string) (*Task, error) {
+	if err := ValidateTaskID(id); err != nil {
+		return nil, err
+	}
 	tasks, err := LoadTasks()
 	if err != nil {
 		return nil, err
@@ -175,6 +214,9 @@ func LoadTasksForCurrentRepo() ([]Task, error) {
 }
 
 func UpdateTask(t Task) error {
+	if err := ValidateTaskID(t.ID); err != nil {
+		return err
+	}
 	path, err := getTasksPathFn()
 	if err != nil {
 		return err

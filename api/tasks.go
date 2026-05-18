@@ -151,6 +151,10 @@ var tasksRemoveCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
+		if err := task.ValidateTaskID(args[0]); err != nil {
+			return jsonError(err)
+		}
+
 		s, err := task.GetTask(args[0])
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to get task: %w", err))
@@ -191,6 +195,10 @@ var tasksGetCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
+		if err := task.ValidateTaskID(args[0]); err != nil {
+			return jsonError(err)
+		}
+
 		s, err := task.GetTask(args[0])
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to get task: %w", err))
@@ -207,6 +215,10 @@ var tasksRunCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		if err := task.ValidateTaskID(args[0]); err != nil {
+			return jsonError(err)
+		}
 
 		if err := task.RunTask(args[0]); err != nil {
 			return jsonError(fmt.Errorf("failed to trigger task: %w", err))
@@ -230,6 +242,10 @@ var tasksUpdateCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		if err := task.ValidateTaskID(args[0]); err != nil {
+			return jsonError(err)
+		}
 
 		s, err := task.GetTask(args[0])
 		if err != nil {
