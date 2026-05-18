@@ -129,7 +129,7 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 
 	// The script writes progress to stderr and JSON to stdout.
 	// With CombinedOutput we get both mixed together. Try to find
-	// the JSON object in the output (last line starting with '{').
+	// the first complete top-level JSON value in the output.
 	jsonStr := extractJSON(string(out))
 	if jsonStr == "" {
 		return fmt.Errorf("launch_cmd returned no JSON in output: %s", string(out))
@@ -152,17 +152,52 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
-// extractJSON finds the last JSON value in mixed output (stderr + stdout).
-// It matches either a JSON object (`{...}`) or a JSON array (`[...]`) so
-// list_cmd (array) and launch_cmd (object) can both recover their payload
-// from output that interleaves diagnostics on stderr with JSON on stdout.
+// extractJSON finds the first complete top-level JSON value (object or array)
+// in output, ignoring text outside JSON delimiters. It handles pretty-printed
+// / multi-line JSON and stderr interleaving around (but not inside) the JSON
+// payload. Returns empty string if no valid JSON value is found.
 func extractJSON(output string) string {
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	// Search from the end for a line that looks like JSON
-	for idx := len(lines) - 1; idx >= 0; idx-- {
-		line := strings.TrimSpace(lines[idx])
-		if strings.HasPrefix(line, "{") || strings.HasPrefix(line, "[") {
-			return line
+	for i := 0; i < len(output); i++ {
+		if output[i] != '{' && output[i] != '[' {
+			continue
+		}
+
+		var depth int
+		inString := false
+		escape := false
+
+		for j := i; j < len(output); j++ {
+			c := output[j]
+
+			if escape {
+				escape = false
+				continue
+			}
+			if c == '\\' && inString {
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inString = !inString
+				continue
+			}
+
+			if !inString {
+				if c == '{' || c == '[' {
+					depth++
+				}
+				if c == '}' || c == ']' {
+					depth--
+					if depth == 0 {
+						candidate := output[i : j+1]
+						var test interface{}
+						if json.Unmarshal([]byte(candidate), &test) == nil {
+							return candidate
+						}
+						break
+					}
+				}
+			}
 		}
 	}
 	return ""
