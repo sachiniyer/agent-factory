@@ -134,7 +134,7 @@ func ensurePluginDir() (string, error) {
 
 	// Write plugin manifest
 	manifestPath := filepath.Join(manifestDir, "plugin.json")
-	if err := os.WriteFile(manifestPath, []byte(pluginManifest), 0644); err != nil {
+	if err := config.AtomicWriteFile(manifestPath, []byte(pluginManifest), 0644); err != nil {
 		return "", err
 	}
 
@@ -159,7 +159,7 @@ func ensurePluginDir() (string, error) {
 	// Write command files
 	for name, content := range pluginCommands {
 		path := filepath.Join(commandsDir, name)
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		if err := config.AtomicWriteFile(path, []byte(content), 0644); err != nil {
 			return "", err
 		}
 	}

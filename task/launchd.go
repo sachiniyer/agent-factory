@@ -106,7 +106,7 @@ func InstallScheduler(t Task) error {
 	unloadCmd := exec.Command("launchctl", "unload", plistPath)
 	_ = unloadCmd.Run()
 
-	if err := os.WriteFile(plistPath, []byte(plistContent), 0644); err != nil {
+	if err := config.AtomicWriteFile(plistPath, []byte(plistContent), 0644); err != nil {
 		return fmt.Errorf("failed to write plist file: %w", err)
 	}
 

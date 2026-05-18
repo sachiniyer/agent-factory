@@ -197,7 +197,7 @@ func saveConfig(config *Config) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	return os.WriteFile(configPath, data, 0644)
+	return AtomicWriteFile(configPath, data, 0644)
 }
 
 // SaveConfig exports the saveConfig function for use by other packages

@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 func getUnitName(t Task) string {
@@ -110,7 +112,7 @@ func InstallScheduler(t Task) error {
 	serviceContent := generateServiceContent(unitName, execPath, t.ID, t.ProjectPath, pathEnv, homeEnv, shellEnv, termEnv)
 
 	servicePath := filepath.Join(dir, unitName+".service")
-	if err := os.WriteFile(servicePath, []byte(serviceContent), 0644); err != nil {
+	if err := config.AtomicWriteFile(servicePath, []byte(serviceContent), 0644); err != nil {
 		return fmt.Errorf("failed to write service file: %w", err)
 	}
 
@@ -132,7 +134,7 @@ WantedBy=timers.target
 `, unitName, onCalendarLines.String())
 
 	timerPath := filepath.Join(dir, unitName+".timer")
-	if err := os.WriteFile(timerPath, []byte(timerContent), 0644); err != nil {
+	if err := config.AtomicWriteFile(timerPath, []byte(timerContent), 0644); err != nil {
 		return fmt.Errorf("failed to write timer file: %w", err)
 	}
 

@@ -85,5 +85,5 @@ func SaveRepoConfig(repoID string, cfg *RepoConfig) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal repo config: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return AtomicWriteFile(path, data, 0644)
 }
