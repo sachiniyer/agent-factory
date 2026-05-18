@@ -1,21 +1,12 @@
 package ui
 
 import (
-	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
-
-// ansiEscapeRegex matches CSI escape sequences (e.g. SGR colors) so they can
-// be stripped before width-based truncation. Truncating a string that still
-// contains escape sequences risks cutting one mid-byte, leaking visible
-// garbage like "[31m" into the rendered output (issue #525). The "?" prefix
-// covers private-mode sequences like \x1b[?25l (cursor hide) which would
-// otherwise be width-counted as visible runes and trigger premature truncation
-// (issue #552).
-var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[?0-9;]*[a-zA-Z]`)
 
 type ErrBox struct {
 	height, width int
@@ -52,9 +43,12 @@ func (e *ErrBox) String() string {
 	if e.err != nil {
 		err = e.err.Error()
 		// Agent pane output can reach us via wrapped errors (see #502) and
-		// carry ANSI escape sequences. Strip them so width math and the
-		// final Truncate operate on plain text only.
-		err = ansiEscapeRegex.ReplaceAllString(err, "")
+		// carry ANSI escape sequences — CSI (SGR colors, private-mode like
+		// \x1b[?25l) and OSC (e.g. the OSC 8 hyperlink protocol from #565).
+		// Use xansi.Strip so width math and the final Truncate operate on
+		// plain text only — a bespoke regex repeatedly missed variants
+		// (#525 → #552 → #565).
+		err = xansi.Strip(err)
 		lines := strings.Split(err, "\n")
 		err = strings.Join(lines, "//")
 		if runewidth.StringWidth(err) > e.width {
