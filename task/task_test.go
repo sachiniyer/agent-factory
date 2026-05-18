@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,6 +213,96 @@ func TestUpdateTaskPersistsProgram(t *testing.T) {
 	got, err := GetTask("p1")
 	require.NoError(t, err)
 	assert.Equal(t, "aider", got.Program)
+}
+
+// TestValidateTaskID_PathTraversalRejected covers the CLI path-traversal
+// exploit class from #575. Every input that could break out of the locks
+// directory (or any other path segment built from the task ID) must be
+// rejected. Mirrors config.TestValidateRepoID_PathTraversalRejected.
+func TestValidateTaskID_PathTraversalRejected(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"empty", ""},
+		{"dot", "."},
+		{"dotdot", ".."},
+		{"dotdot-slash", "../"},
+		{"deep-traversal", "../../../etc/passwd"},
+		{"embedded-traversal", "foo/../bar"},
+		{"trailing-traversal", "abc/.."},
+		{"absolute-path", "/etc/passwd"},
+		{"windows-absolute", "C:\\windows\\system32"},
+		{"forward-slash", "foo/bar"},
+		{"backslash", "foo\\bar"},
+		{"null-byte", "foo\x00bar"},
+		{"newline", "foo\nbar"},
+		{"tilde", "~/secrets"},
+		{"hidden", ".hidden"},
+		{"glob", "foo*"},
+		{"space", "foo bar"},
+		{"issue-575-payload", "foo/../../rogue/pwned"},
+		{"too-long", strings.Repeat("a", maxTaskIDLength+1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateTaskID(tc.input)
+			assert.Error(t, err, "expected %q to be rejected", tc.input)
+		})
+	}
+}
+
+// TestValidateTaskID_LegitimateAccepted ensures real-world task IDs from
+// GenerateID and the fixture IDs already used elsewhere in the test suite
+// continue to validate.
+func TestValidateTaskID_LegitimateAccepted(t *testing.T) {
+	cases := []string{
+		GenerateID(), // 8 hex chars from production helper
+		"a1b2",
+		"abc1",
+		"x1",
+		"u1",
+		"underscore_id",
+		"dashed-id",
+		"A",
+		strings.Repeat("a", maxTaskIDLength),
+	}
+	for _, id := range cases {
+		t.Run(id, func(t *testing.T) {
+			assert.NoError(t, ValidateTaskID(id))
+		})
+	}
+}
+
+// TestGetTask_RejectsInvalidID verifies that GetTask rejects path-traversal
+// IDs without touching the on-disk tasks file. This is the defense-in-depth
+// layer that protects callers that bypass the CLI validation.
+func TestGetTask_RejectsInvalidID(t *testing.T) {
+	setupTestTasks(t, []Task{{ID: "real"}})
+
+	_, err := GetTask("../etc/passwd")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid task id")
+}
+
+// TestRemoveTask_RejectsInvalidID mirrors TestGetTask_RejectsInvalidID for
+// RemoveTask, which is reachable from the API and TUI.
+func TestRemoveTask_RejectsInvalidID(t *testing.T) {
+	setupTestTasks(t, []Task{{ID: "real"}})
+
+	err := RemoveTask("../etc/passwd")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid task id")
+}
+
+// TestUpdateTask_RejectsInvalidID mirrors TestGetTask_RejectsInvalidID for
+// UpdateTask.
+func TestUpdateTask_RejectsInvalidID(t *testing.T) {
+	setupTestTasks(t, []Task{{ID: "real"}})
+
+	err := UpdateTask(Task{ID: "../etc/passwd"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid task id")
 }
 
 func TestTaskNameInJSON(t *testing.T) {
