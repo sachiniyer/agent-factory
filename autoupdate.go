@@ -210,7 +210,5 @@ func recordCheck() {
 	if path == "" {
 		return
 	}
-	dir := filepath.Dir(path)
-	os.MkdirAll(dir, 0755)
-	os.WriteFile(path, []byte(time.Now().UTC().Format(time.RFC3339)), 0644)
+	_ = config.AtomicWriteFile(path, []byte(time.Now().UTC().Format(time.RFC3339)), 0644)
 }
