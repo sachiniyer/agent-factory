@@ -166,7 +166,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 	// Add loaded instances to the sidebar
 	for _, instance := range instances {
 		h.sidebar.AddInstance(instance)()
-		instance.AutoYes = autoYes
+		instance.SetAutoYes(autoYes)
 	}
 
 	h.importRemoteHookSessions()
@@ -379,7 +379,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !started.IsRemote() {
 			m.sidebar.RegisterRepoForInstance(started)
 		}
-		started.AutoYes = m.autoYes
+		started.SetAutoYes(m.autoYes)
 
 		if !userStillWatching {
 			// User moved on — update status silently and keep their current

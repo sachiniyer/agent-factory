@@ -141,7 +141,7 @@ func TestSessionAutoYesAuthoritative(t *testing.T) {
 			instances := []*session.Instance{{Title: "t", AutoYes: tc.persistedValue}}
 			autoYes := tc.sessionAutoYes
 			for _, instance := range instances {
-				instance.AutoYes = autoYes
+				instance.SetAutoYes(autoYes)
 			}
 			if instances[0].AutoYes != tc.want {
 				t.Fatalf("instance.AutoYes = %v; want %v", instances[0].AutoYes, tc.want)
