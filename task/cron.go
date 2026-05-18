@@ -289,23 +289,27 @@ func convertDOW(field string) string {
 }
 
 // convertSingleDOW converts a single DOW element (number or range) to a name.
-// For ranges starting with 0 (Sunday), it expands to a comma-separated list
-// because systemd's range syntax requires Day1 < Day2 in weekly order
-// (Mon->Tue->...->Sun), making Sun..X invalid.
+// Ranges covering all 7 unique days (0-6, 0-7, 1-7) return "" so the caller
+// omits DOW entirely; otherwise CronToOnCalendar treats DOW as restricted and
+// emits a "Mon..Sun" line that systemd normalizes to daily, fanning out under
+// DOM/DOW OR-semantics to fire monthly schedules every day (#576).
+// For ranges starting with 0 (Sunday) but not all-days, the range expands to
+// a comma-separated list because systemd's range syntax requires Day1 < Day2
+// in weekly order (Mon->Tue->...->Sun), making Sun..X invalid.
 func convertSingleDOW(part string) string {
 	if strings.Contains(part, "-") {
+		if expanded, err := expandCronField(part, 0, 7); err == nil {
+			if len(normalizeDOWValues(expanded)) >= 7 {
+				return ""
+			}
+		}
+
 		idx := strings.Index(part, "-")
 		start := part[:idx]
 		end := part[idx+1:]
 
-		// For ranges starting with Sunday (0), expand to comma-separated names.
 		if start == "0" {
 			endVal, _ := strconv.Atoi(end)
-			// 0-6 or 0-7 covers all 7 days (7 is also Sunday in cron).
-			// Return empty to signal the caller to omit DOW entirely.
-			if endVal >= 6 {
-				return ""
-			}
 			var names []string
 			for i := 0; i <= endVal; i++ {
 				names = append(names, dowNames[strconv.Itoa(i)])
