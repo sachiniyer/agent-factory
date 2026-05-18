@@ -180,3 +180,28 @@ func TestPlaceOverlayMultiParamBackgroundFade(t *testing.T) {
 		t.Fatalf("expected multi-param bg code to be faded to bg gray, got: %q", result)
 	}
 }
+
+// TestPlaceOverlayExtendedBackgroundFade is a regression guard for #564:
+// step 1 of PlaceOverlay rewrites \x1b[48;5;Nm to \x1b[48;5;236m, but
+// simpleColorRegex then re-matched that rewrite and (because SGR 48 was
+// missing from the background detector) re-faded it as foreground gray.
+func TestPlaceOverlayExtendedBackgroundFade(t *testing.T) {
+	input := "\x1b[48;5;196mred-bg\x1b[0m"
+	result := PlaceOverlay(0, 0, "XX", input, false)
+
+	if strings.Contains(result, "\x1b[38;5;240m") && strings.Contains(input, "\x1b[48;5;") {
+		t.Fatalf("BUG CONFIRMED: extended background was faded as foreground.\nInput had 48;5 (bg), output has 38;5 (fg)")
+	}
+}
+
+// TestPlaceOverlayTrueColorBackgroundFade is the true-color (24-bit, 48;2;R;G;B)
+// counterpart to TestPlaceOverlayExtendedBackgroundFade — same #564 bug,
+// different input shape.
+func TestPlaceOverlayTrueColorBackgroundFade(t *testing.T) {
+	input := "\x1b[48;2;255;0;0mtrue-color-red-bg\x1b[0m"
+	result := PlaceOverlay(0, 0, "XX", input, false)
+
+	if strings.Contains(result, "\x1b[38;5;240m") && strings.Contains(input, "\x1b[48;2;") {
+		t.Fatalf("BUG CONFIRMED: true-color background was faded as foreground")
+	}
+}
