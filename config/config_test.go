@@ -319,6 +319,29 @@ func TestLoadConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("reapplies shell-quoting to user default_program with spaces", func(t *testing.T) {
+		// Regression for #569: a user-provided default_program with spaces
+		// (typical macOS App Bundle install) used to overwrite the quoted
+		// auto-detected value and reach tmux unquoted, breaking sh -c.
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+
+		configPath := filepath.Join(configDir, ConfigFileName)
+		const userProgram = "/Applications/Claude Code.app/Contents/MacOS/claude --dangerously-skip-permissions"
+		content := fmt.Sprintf(`{"default_program": %q}`, userProgram)
+		require.NoError(t, os.WriteFile(configPath, []byte(content), 0644))
+
+		config := LoadConfig()
+		assert.NotNil(t, config)
+		assert.Equal(t,
+			"'/Applications/Claude Code.app/Contents/MacOS/claude' --dangerously-skip-permissions",
+			config.DefaultProgram,
+		)
+	})
+
 	t.Run("returns default config on invalid JSON", func(t *testing.T) {
 		// Create a temporary config directory
 		tempHome := t.TempDir()
@@ -345,6 +368,66 @@ func TestLoadConfig(t *testing.T) {
 		assert.False(t, config.AutoYes)                  // Default value
 		assert.Equal(t, 1000, config.DaemonPollInterval) // Default value
 	})
+}
+
+func TestShellQuoteProgram(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "macOS App Bundle path",
+			in:   "/Applications/Claude Code.app/Contents/MacOS/claude",
+			want: "'/Applications/Claude Code.app/Contents/MacOS/claude'",
+		},
+		{
+			name: "path with apostrophe",
+			in:   "/Users/o'malley/bin/claude",
+			want: `'/Users/o'\''malley/bin/claude'`,
+		},
+		{
+			name: "path with trailing flags",
+			in:   "/Applications/Claude Code.app/Contents/MacOS/claude --dangerously-skip-permissions",
+			want: "'/Applications/Claude Code.app/Contents/MacOS/claude' --dangerously-skip-permissions",
+		},
+		{
+			name: "already single-quoted with flags",
+			in:   "'/Applications/Claude Code.app/Contents/MacOS/claude' --dangerously-skip-permissions",
+			want: "'/Applications/Claude Code.app/Contents/MacOS/claude' --dangerously-skip-permissions",
+		},
+		{
+			name: "already double-quoted",
+			in:   `"/Applications/Claude Code.app/Contents/MacOS/claude"`,
+			want: `"/Applications/Claude Code.app/Contents/MacOS/claude"`,
+		},
+		{
+			name: "plain identifier",
+			in:   "claude",
+			want: "claude",
+		},
+		{
+			name: "plain identifier with flags",
+			in:   "claude --dangerously-skip-permissions",
+			want: "claude --dangerously-skip-permissions",
+		},
+		{
+			name: "spaces and multiple flags",
+			in:   "/opt/My Tools/claude -v --dangerously-skip-permissions",
+			want: "'/opt/My Tools/claude' -v --dangerously-skip-permissions",
+		},
+		{
+			name: "empty string",
+			in:   "",
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, shellQuoteProgram(tc.in))
+		})
+	}
 }
 
 func TestSaveConfig(t *testing.T) {

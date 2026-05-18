@@ -62,6 +62,38 @@ type Config struct {
 	DetachKeys string `json:"detach_keys"`
 }
 
+// shellQuoteProgram returns a tmux-safe form of program. tmux passes a
+// session's program string to `sh -c`, so paths containing spaces or
+// apostrophes must be shell-quoted or the shell will split them. The input
+// may be a bare program path or a path followed by flags; the first " -"
+// is treated as the flag boundary so only the path portion is quoted and
+// trailing flags are preserved verbatim. Values whose path portion is
+// already wrapped in matching single or double quotes are returned
+// unchanged to avoid double-quoting user-provided config.
+func shellQuoteProgram(program string) string {
+	if program == "" {
+		return program
+	}
+
+	path, suffix := program, ""
+	if i := strings.Index(program, " -"); i >= 0 {
+		path, suffix = program[:i], program[i:]
+	}
+
+	if len(path) >= 2 {
+		first, last := path[0], path[len(path)-1]
+		if (first == '\'' && last == '\'') || (first == '"' && last == '"') {
+			return program
+		}
+	}
+
+	if !strings.ContainsAny(path, " '") {
+		return program
+	}
+
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'" + suffix
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	program, err := GetClaudeCommand()
@@ -70,11 +102,7 @@ func DefaultConfig() *Config {
 		program = defaultProgram
 	}
 
-	// Quote path if it contains spaces or apostrophes (for tmux shell execution)
-	if strings.Contains(program, " ") || strings.Contains(program, "'") {
-		program = "'" + strings.ReplaceAll(program, "'", "'\\''") + "'"
-	}
-
+	program = shellQuoteProgram(program)
 	program = program + " --dangerously-skip-permissions"
 
 	return &Config{
@@ -171,6 +199,11 @@ func LoadConfig() *Config {
 		log.ErrorLog.Printf("failed to parse config file: %v", err)
 		return DefaultConfig()
 	}
+
+	// User-provided default_program overwrites the auto-detected (and
+	// already-quoted) value from DefaultConfig, so re-apply the same
+	// shell-quoting before handing it to tmux. See issue #569.
+	config.DefaultProgram = shellQuoteProgram(config.DefaultProgram)
 
 	if config.DaemonPollInterval <= 0 {
 		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)
