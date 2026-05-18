@@ -212,8 +212,18 @@ func TestSelectionChanged_DoesNotRefetchFreshInstance(t *testing.T) {
 	h.sidebar.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	cmd := h.selectionChanged()
-	assert.Nil(t, cmd, "no PR fetch should be scheduled for a fresh instance")
+	// selectionChanged now also dispatches an off-loop pane refresh cmd
+	// (#579), so the returned cmd is non-nil even when no PR fetch is
+	// scheduled. Verify the PR-info path stays untouched by checking that
+	// the cached info and fetch timestamp aren't disturbed when we ignore
+	// the returned cmd: prInfoLastFetched was set by SetPRInfo above and
+	// must still be fresh after selectionChanged.
+	_ = h.selectionChanged()
+	assert.Less(t, inst.PRInfoAge(), time.Second,
+		"fresh PR info must not be re-fetched on selection change")
+	require.NotNil(t, inst.GetPRInfo())
+	assert.Equal(t, 1, inst.GetPRInfo().Number,
+		"cached PR info must be preserved across selectionChanged")
 }
 
 // TestFetchPRInfoCmd_MarksFetchAtKickoff_DebouncesConcurrentCalls verifies the

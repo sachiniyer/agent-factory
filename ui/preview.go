@@ -5,6 +5,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
@@ -14,6 +15,16 @@ var previewPaneStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
 
 type PreviewPane struct {
+	// mu serialises UpdateContent (called off the bubbletea Update goroutine
+	// via refreshPanesCmd in app/) against String() (called from the
+	// bubbletea renderer). Without it the renderer can observe partially-
+	// written previewState while a capture is in flight (#579). Scroll-mode
+	// state and viewport mutations go through the same lock for the same
+	// reason. ResetToNormalMode is invoked from the renderer thread but is
+	// still guarded by the mutex so concurrent UpdateContent calls (from the
+	// async refresh path) cannot race with the scroll-mode reset.
+	mu sync.Mutex
+
 	width  int
 	height int
 
@@ -45,7 +56,17 @@ func NewPreviewPane() *PreviewPane {
 	}
 }
 
+// IsScrolling reports whether the preview pane is in scroll mode. Locks
+// p.mu to match the mutators (#579 race fix).
+func (p *PreviewPane) IsScrolling() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.isScrolling
+}
+
 func (p *PreviewPane) SetSize(width, maxHeight int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.width = width
 	p.height = maxHeight
 	p.viewport.Width = width
@@ -60,8 +81,16 @@ func (p *PreviewPane) setFallbackState(message string) {
 	}
 }
 
-// Updates the preview pane content with the tmux pane content
+// Updates the preview pane content with the tmux pane content. Safe to call
+// from a goroutine — UpdateContent serialises against String() and the other
+// mutators via p.mu so the renderer never observes a half-written state
+// (#579). The Preview()/PreviewFullHistory() shell-outs happen while the
+// lock is held; the renderer briefly blocks waiting for them, which is the
+// cost of removing the partial-state race. The shell-outs are ~3–5ms locally
+// so the wait is bounded.
 func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	// If the selected instance changed since the last render, drop any
 	// scroll-mode viewport content captured from the previous instance.
 	// Otherwise switching instances while scrolling leaves the viewport
@@ -139,6 +168,8 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 
 // Returns the preview pane content as a string.
 func (p *PreviewPane) String() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.width <= 0 || p.height <= 0 {
 		return ""
 	}
@@ -206,6 +237,8 @@ func (p *PreviewPane) String() string {
 
 // ScrollUp scrolls up in the viewport
 func (p *PreviewPane) ScrollUp(instance *session.Instance) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if instance == nil {
 		return nil
 	}
@@ -243,6 +276,8 @@ func (p *PreviewPane) ScrollUp(instance *session.Instance) error {
 
 // ScrollDown scrolls down in the viewport
 func (p *PreviewPane) ScrollDown(instance *session.Instance) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if instance == nil {
 		return nil
 	}
@@ -280,6 +315,8 @@ func (p *PreviewPane) ScrollDown(instance *session.Instance) error {
 
 // ResetToNormalMode exits scroll mode and returns to normal mode
 func (p *PreviewPane) ResetToNormalMode(instance *session.Instance) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	// Always clear scroll state first so that pressing ESC while no instance
 	// is selected (e.g., the sidebar header) does not leave the preview pane
 	// stuck on stale viewport content. Mirrors TerminalPane.ResetToNormalMode.

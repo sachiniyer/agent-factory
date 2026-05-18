@@ -187,7 +187,7 @@ func (w *TabbedWindow) CleanupTerminalForInstance(title string) {
 
 // IsPreviewInScrollMode returns true if the preview pane is in scroll mode
 func (w *TabbedWindow) IsPreviewInScrollMode() bool {
-	return w.preview.isScrolling
+	return w.preview.IsScrolling()
 }
 
 // IsTerminalInScrollMode returns true if the terminal pane is in scroll mode
