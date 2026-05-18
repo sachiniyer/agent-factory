@@ -129,6 +129,193 @@ func TestCmdlineHasDaemonFlag(t *testing.T) {
 	}
 }
 
+// TestStopDaemon_SIGTERMFirst verifies that StopDaemon sends SIGTERM (giving
+// the daemon's signal handler a chance to run SaveInstances) and only
+// escalates to SIGKILL after the grace period. Regression test for #571 —
+// before the fix this called proc.Kill() unconditionally, bypassing the
+// daemon's state-save path.
+func TestStopDaemon_SIGTERMFirst(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+	tmpHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
+
+	// Spawn a process that responds to SIGTERM by exiting (sleep's default
+	// behavior) and exposes "--daemon" as a discrete token in /proc cmdline
+	// (via bash's `exec -a` argv[0] rewrite). This is the same recipe used
+	// in TestSigtermFallback_KillsPIDFileDaemon.
+	cmd := exec.Command("bash", "-c", "exec -a 'sleep --daemon af-test' sleep 60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon: %v", err)
+	}
+	pid := cmd.Process.Pid
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	// Wait for the post-exec cmdline to be readable.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if isAgentFactoryDaemon(pid) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !isAgentFactoryDaemon(pid) {
+		t.Fatalf("fake daemon pid=%d not recognized as agent-factory daemon", pid)
+	}
+
+	// Reap in a goroutine so /proc/<pid>/cmdline clears once the process
+	// exits — otherwise pidLooksAlive keeps seeing the zombie as alive and
+	// StopDaemon would wait the full grace period before declaring success.
+	exited := make(chan *os.ProcessState, 1)
+	go func() {
+		state, _ := cmd.Process.Wait()
+		exited <- state
+	}()
+
+	pidFile := filepath.Join(tmpHome, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", pid)), 0600); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+
+	start := time.Now()
+	if err := StopDaemon(); err != nil {
+		t.Fatalf("StopDaemon: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// If StopDaemon respected SIGTERM-first, the process exits within the
+	// poll cadence — well under the grace period. A near-full-grace duration
+	// would mean we're back to the immediate-SIGKILL bug or that the poll
+	// never observed the exit.
+	if elapsed >= stopDaemonGrace {
+		t.Errorf("StopDaemon took %s (>= grace %s); SIGTERM may not have been sent first", elapsed, stopDaemonGrace)
+	}
+
+	select {
+	case state := <-exited:
+		if state == nil {
+			t.Fatalf("process state nil")
+		}
+		ws, ok := state.Sys().(syscall.WaitStatus)
+		if !ok {
+			t.Fatalf("WaitStatus assertion failed: %T", state.Sys())
+		}
+		if !ws.Signaled() {
+			t.Fatalf("process exited without a signal (status=%v); expected SIGTERM", state)
+		}
+		if ws.Signal() != syscall.SIGTERM {
+			t.Errorf("process exited via signal %v, want SIGTERM (the SIGKILL escalation path fired)", ws.Signal())
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatalf("fake daemon did not exit within 8s of StopDaemon")
+	}
+}
+
+// TestStopDaemon_EscalatesToSIGKILL verifies the SIGKILL escalation path:
+// when the daemon ignores SIGTERM, StopDaemon must wait stopDaemonGrace and
+// then SIGKILL the process. Companion to TestStopDaemon_SIGTERMFirst.
+func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+	tmpHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
+
+	// Shorten the grace so the test runs in ~300ms instead of ~5s.
+	origGrace := stopDaemonGrace
+	origPoll := stopDaemonPoll
+	stopDaemonGrace = 250 * time.Millisecond
+	stopDaemonPoll = 25 * time.Millisecond
+	defer func() {
+		stopDaemonGrace = origGrace
+		stopDaemonPoll = origPoll
+	}()
+
+	// Inner bash sets SIGTERM to SIG_IGN via `trap '' TERM` (the empty-string
+	// form, which truly ignores the signal — `trap : TERM` would run a no-op
+	// but bash still terminates non-interactively after the handler). Outer
+	// bash uses `exec -a` to rewrite argv[0] so the cmdline contains
+	// "--daemon" as a discrete token (passes isAgentFactoryDaemon). A
+	// ready-file sentinel proves the trap was installed before SIGTERM lands,
+	// closing a race where the cmdline becomes visible while bash is still
+	// parsing the script.
+	readyFile := filepath.Join(tmpHome, "trap-ready")
+	script := fmt.Sprintf(
+		`exec -a 'bash --daemon af-test' bash -c 'trap "" TERM; : > %q; while :; do sleep 1; done'`,
+		readyFile,
+	)
+	cmd := exec.Command("bash", "-c", script)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon: %v", err)
+	}
+	pid := cmd.Process.Pid
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(readyFile); err == nil && isAgentFactoryDaemon(pid) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(readyFile); err != nil {
+		t.Fatalf("ready sentinel never appeared (trap not installed): %v", err)
+	}
+	if !isAgentFactoryDaemon(pid) {
+		t.Fatalf("fake daemon pid=%d cmdline does not match --daemon", pid)
+	}
+
+	exited := make(chan *os.ProcessState, 1)
+	go func() {
+		state, _ := cmd.Process.Wait()
+		exited <- state
+	}()
+
+	pidFile := filepath.Join(tmpHome, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", pid)), 0600); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+
+	start := time.Now()
+	if err := StopDaemon(); err != nil {
+		t.Fatalf("StopDaemon: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Must have waited at least the grace period before escalating. A
+	// shorter elapsed time would mean we skipped the SIGTERM grace and
+	// went straight to SIGKILL — the pre-#571 behavior.
+	if elapsed < stopDaemonGrace {
+		t.Errorf("StopDaemon returned in %s, want at least grace %s before SIGKILL", elapsed, stopDaemonGrace)
+	}
+
+	select {
+	case state := <-exited:
+		if state == nil {
+			t.Fatalf("process state nil")
+		}
+		ws, ok := state.Sys().(syscall.WaitStatus)
+		if !ok {
+			t.Fatalf("WaitStatus assertion failed: %T", state.Sys())
+		}
+		if !ws.Signaled() {
+			t.Fatalf("process exited without a signal (status=%v); expected SIGKILL", state)
+		}
+		if ws.Signal() != syscall.SIGKILL {
+			t.Errorf("process exited via signal %v, want SIGKILL (escalation never fired)", ws.Signal())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("fake daemon did not exit within 5s after StopDaemon")
+	}
+}
+
 // TestStopDaemon_RefusesSelfPID verifies that StopDaemon refuses to kill the current test process
 // even if the PID file points at it.
 func TestStopDaemon_RefusesSelfPID(t *testing.T) {

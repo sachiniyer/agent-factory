@@ -237,9 +237,24 @@ func removeDaemonPIDFile() {
 	}
 }
 
+// stopDaemonGrace bounds how long StopDaemon waits for a SIGTERM'd daemon to
+// exit before escalating to SIGKILL. stopDaemonPoll is the polling cadence.
+// Package vars rather than constants so tests can shorten them. Production
+// defaults mirror sigtermFallbackGrace / sigtermFallbackPoll — the same
+// timings already used by signalAndWait on the upgrade fallback path.
+var (
+	stopDaemonGrace = sigtermFallbackGrace
+	stopDaemonPoll  = sigtermFallbackPoll
+)
+
 // StopDaemon attempts to stop a running daemon process if it exists. Returns no error if the daemon is not found
 // (assumes the daemon does not exist). It verifies the PID actually belongs to an agent-factory daemon before
-// sending a kill signal, so a stale or reused PID in the PID file can't take down an unrelated process.
+// signaling it, so a stale or reused PID in the PID file can't take down an unrelated process.
+//
+// Shutdown is graceful by default: SIGTERM gives the daemon's signal handler a
+// chance to run SaveInstances() and clean up the PID file (see RunDaemon). We
+// only escalate to SIGKILL if the daemon does not exit within stopDaemonGrace,
+// matching the SIGTERM-first pattern in signalAndWait (#571).
 func StopDaemon() error {
 	pidDir, err := config.GetConfigDir()
 	if err != nil {
@@ -282,28 +297,64 @@ func StopDaemon() error {
 		return nil
 	}
 
-	// Verify the process is actually an agent-factory daemon before killing it. If we can't verify,
-	// err on the side of caution and treat the PID file as stale rather than killing a random process.
+	// Verify the process is actually an agent-factory daemon before signaling it. If we can't verify,
+	// err on the side of caution and treat the PID file as stale rather than signaling a random process.
 	if !isAgentFactoryDaemon(pid) {
 		log.InfoLog.Printf("PID %d does not look like an agent-factory daemon; removing stale PID file", pid)
 		_ = os.Remove(pidFile)
 		return nil
 	}
 
-	if err := proc.Kill(); err != nil {
-		return fmt.Errorf("failed to stop daemon process: %w", err)
+	// Send SIGTERM so the daemon's signal handler can SaveInstances() before
+	// exit (#571). A race where the daemon exits between the signal-0 probe
+	// above and this call is benign: errIsProcessGone covers both ESRCH and
+	// the os.ErrProcessDone surface.
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		if errIsProcessGone(err) {
+			log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
+			cleanupDaemonRuntimeFiles(pidFile)
+			return nil
+		}
+		return fmt.Errorf("failed to signal daemon process: %w", err)
 	}
 
-	// Clean up PID file
-	if err := os.Remove(pidFile); err != nil {
-		return fmt.Errorf("failed to remove PID file: %w", err)
+	// Poll for graceful exit.
+	gracefulDeadline := time.Now().Add(stopDaemonGrace)
+	exited := false
+	for time.Now().Before(gracefulDeadline) {
+		if !pidLooksAlive(pid) {
+			exited = true
+			break
+		}
+		time.Sleep(stopDaemonPoll)
+	}
+
+	if exited {
+		log.InfoLog.Printf("daemon process (PID: %d) exited gracefully after SIGTERM", pid)
+	} else {
+		log.WarningLog.Printf("daemon process (PID: %d) did not exit within %s of SIGTERM; escalating to SIGKILL", pid, stopDaemonGrace)
+		if err := proc.Signal(syscall.SIGKILL); err != nil && !errIsProcessGone(err) {
+			return fmt.Errorf("failed to stop daemon process: %w", err)
+		}
+	}
+
+	cleanupDaemonRuntimeFiles(pidFile)
+	log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
+	return nil
+}
+
+// cleanupDaemonRuntimeFiles removes the PID file and (best-effort) the control
+// socket left behind by a stopped daemon. The PID file is tolerated as
+// already-gone because the daemon's own SIGTERM handler removes it via
+// removeDaemonPIDFile() before exiting — so on the SIGTERM-success path we
+// race with the daemon's own cleanup.
+func cleanupDaemonRuntimeFiles(pidFile string) {
+	if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
+		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
 	}
 	if socketPath, socketErr := DaemonSocketPath(); socketErr == nil {
 		_ = os.Remove(socketPath)
 	}
-
-	log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
-	return nil
 }
 
 // isAgentFactoryDaemon checks whether the process at pid looks like an agent-factory daemon
