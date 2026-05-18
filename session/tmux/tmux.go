@@ -114,9 +114,29 @@ func repoHash(repoPath string) string {
 	return hex.EncodeToString(h[:4]) // 8 hex chars
 }
 
+// toTmuxName builds the tmux session name from a user-supplied title.
+//
+// Characters that tmux does not preserve verbatim in session names must be
+// replaced here so DoesSessionExist() and kill paths match the name tmux
+// actually created (#574). Verified against tmux 3.4:
+//   - '.' and ':' are silently rewritten to '_'; using them as-is causes
+//     Start() to poll for a name tmux never created and time out, orphaning
+//     the session.
+//   - '$' is rewritten to a literal backslash+'$' (tmux uses '$' as the
+//     session-id prefix), which has the same round-trip failure.
+//   - '#' is preserved verbatim but is tmux's format-escape character, so
+//     it can corrupt status-line and display-message output that includes
+//     the session name. Sanitized defensively.
+//
+// Other punctuation (',', ';', '@', '%', '(', etc.) is preserved verbatim
+// by tmux and round-trips correctly, so we leave it alone to keep names
+// recognizable.
 func toTmuxName(title string, repoPath string) string {
 	title = whiteSpaceRegex.ReplaceAllString(title, "")
-	title = strings.ReplaceAll(title, ".", "_") // tmux replaces all . with _
+	title = strings.ReplaceAll(title, ".", "_") // tmux silently rewrites '.' to '_'
+	title = strings.ReplaceAll(title, ":", "_") // tmux silently rewrites ':' to '_'
+	title = strings.ReplaceAll(title, "#", "_") // tmux treats '#' as format-escape
+	title = strings.ReplaceAll(title, "$", "_") // tmux escapes '$' to '\$' in session names
 	if repoPath != "" {
 		return fmt.Sprintf("%s%s_%s", TmuxPrefix, repoHash(repoPath), title)
 	}
