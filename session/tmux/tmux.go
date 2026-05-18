@@ -288,12 +288,19 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 // and workDir is empty, the missing-session condition is surfaced as an error;
 // real failures (PTY open errors, Start failures such as missing binaries or
 // vanished worktrees) are always surfaced.
+//
+// When re-spawning, the program string is rewritten via resumeProgram so
+// agents that expose a "resume the most recent session in cwd" flag pick
+// the prior conversation back up instead of starting fresh (#595). Agents
+// without such a flag, or programs that already include one, are left
+// untouched.
 func (t *TmuxSession) Restore(workDir string) error {
 	if !t.DoesSessionExist() {
 		if workDir == "" {
 			return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
 		}
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
+		t.program = resumeProgram(t.program)
 		return t.Start(workDir)
 	}
 
