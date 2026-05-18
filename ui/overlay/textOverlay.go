@@ -9,8 +9,12 @@ import (
 type TextOverlay struct {
 	// Whether the overlay has been dismissed
 	Dismissed bool
-	// Callback function to be called when the overlay is dismissed
-	OnDismiss func()
+	// OnDismiss is invoked once when the user dismisses the overlay. It may
+	// return a tea.Cmd that callers should feed back into the bubbletea event
+	// loop — used by the attach-overlay path (#579) so the post-detach
+	// goroutine can dispatch an immediate repaintAfterDetachMsg{} instead of
+	// waiting up to one previewTickMsg cycle (~100ms) for the next paint.
+	OnDismiss func() tea.Cmd
 	// Content to display in the overlay
 	content string
 
@@ -28,16 +32,17 @@ func NewTextOverlay(content string) *TextOverlay {
 	}
 }
 
-// HandleKeyPress processes a key press and updates the state
-// Returns true if the overlay should be closed
-func (t *TextOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
+// HandleKeyPress processes a key press and updates the state. Returns the
+// caller-supplied OnDismiss cmd (if any) so the bubbletea Update path can
+// feed it into tea.Batch, plus true to indicate the overlay should close.
+func (t *TextOverlay) HandleKeyPress(msg tea.KeyMsg) (tea.Cmd, bool) {
 	// Close on any key
 	t.Dismissed = true
-	// Call the OnDismiss callback if it exists
+	var cmd tea.Cmd
 	if t.OnDismiss != nil {
-		t.OnDismiss()
+		cmd = t.OnDismiss()
 	}
-	return true
+	return cmd, true
 }
 
 // Render renders the text overlay

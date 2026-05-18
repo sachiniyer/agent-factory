@@ -334,6 +334,19 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case instanceChangedMsg:
 		return m, m.selectionChanged()
+	case repaintAfterDetachMsg:
+		// Trigger an immediate repaint with whatever content is already
+		// cached on the panes (rendered when bubbletea's main loop calls
+		// View() after this Update returns), and kick off the async
+		// preview/terminal refresh so fresh content lands within a few
+		// milliseconds. selectionChanged() also dispatches the captures
+		// off the event loop, so this handler returns instantly.
+		return m, m.selectionChanged()
+	case panesRefreshedMsg:
+		// The refresh cmd already wrote captured content into the mutex-
+		// guarded pane state. Returning here causes bubbletea to invoke
+		// View() again, which renders the now-fresh content.
+		return m, nil
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
@@ -716,16 +729,16 @@ func (m *home) attachToInstance(title string) (tea.Model, tea.Cmd) {
 			m.sidebar.ExpandInstancesSection()
 			m.sidebar.SelectInstance(inst)
 			m.contentPane.SetMode(ui.ContentModeInstance)
-			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 				ch, err := inst.Attach()
 				if err != nil {
 					log.ErrorLog.Printf("failed to attach to %s: %v", title, err)
-					return
+					return nil
 				}
 				<-ch
 				m.state = stateDefault
+				return func() tea.Msg { return repaintAfterDetachMsg{} }
 			})
-			return m, nil
 		}
 	}
 	return m, m.handleError(fmt.Errorf("instance %q not found", title))
@@ -756,12 +769,22 @@ func (m *home) navigateToSection(kind ui.SidebarSectionKind) {
 	}
 }
 
-// selectionChanged updates the content pane and menu based on the sidebar selection.
+// selectionChanged updates the content pane and menu based on the sidebar
+// selection. The preview/terminal tmux captures are dispatched via a tea.Cmd
+// (goroutine) rather than run synchronously: each call shells out to
+// `tmux capture-pane` (~3–5ms locally), and on the bubbletea Update goroutine
+// that cost compounded — every previewTickMsg (100ms) blocked the event loop,
+// and the first paint after detach paid the full cost on top of waiting up
+// to a full tick cycle for the next msg (#579, #559 sibling). The
+// PreviewPane/TerminalPane each guard their captured state with a mutex so
+// the goroutine can mutate it while View() reads it. Synchronous fields
+// touched here (mode, menu state, scroll-reset) stay on the event loop.
 func (m *home) selectionChanged() tea.Cmd {
 	sel := m.sidebar.GetSelection()
 	tw := m.contentPane.TabbedWindow()
 
 	var prFetch tea.Cmd
+	var refreshCmd tea.Cmd
 	switch {
 	case sel.Kind == ui.SectionInstances && !sel.IsHeader:
 		m.contentPane.SetMode(ui.ContentModeInstance)
@@ -769,12 +792,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		tw.SetInstance(selected)
 		m.menu.SetInstance(selected)
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
-		if err := tw.UpdatePreview(selected); err != nil {
-			return m.handleError(err)
-		}
-		if err := tw.UpdateTerminal(selected); err != nil {
-			return m.handleError(err)
-		}
+		refreshCmd = refreshPanesCmd(tw, selected)
 		// Lazily refresh PR info when the user lands on an instance that
 		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
 		// data is still fresh, so rapid Up/Down navigation doesn't hammer gh.
@@ -804,8 +822,43 @@ func (m *home) selectionChanged() tea.Cmd {
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
 	}
 
-	return prFetch
+	return tea.Batch(prFetch, refreshCmd)
 }
+
+// panesRefreshedMsg signals that the off-loop preview/terminal capture
+// finished. The msg itself carries no payload — bubbletea calls View() after
+// every Update return regardless of the msg type, and PreviewPane /
+// TerminalPane already published the captured content into their own
+// mutex-guarded state inside the goroutine. Sending the msg back is what
+// actually wakes the event loop so View() runs against the fresh content.
+type panesRefreshedMsg struct{}
+
+// refreshPanesCmd runs UpdatePreview + UpdateTerminal off the bubbletea
+// Update goroutine. Each shells out to `tmux capture-pane` (~3–5ms locally),
+// and previously those two calls compounded to a ~7–10ms event-loop block on
+// every previewTickMsg (every 100ms) and on every post-detach repaint.
+// PreviewPane and TerminalPane both serialise their capture writes against
+// String() reads with internal mutexes, so the goroutine can mutate the
+// captured content concurrently with the renderer (#579).
+func refreshPanesCmd(tw *ui.TabbedWindow, selected *session.Instance) tea.Cmd {
+	return func() tea.Msg {
+		if err := tw.UpdatePreview(selected); err != nil {
+			log.WarningLog.Printf("UpdatePreview failed: %v", err)
+		}
+		if err := tw.UpdateTerminal(selected); err != nil {
+			log.WarningLog.Printf("UpdateTerminal failed: %v", err)
+		}
+		return panesRefreshedMsg{}
+	}
+}
+
+// repaintAfterDetachMsg is dispatched by the attach goroutine immediately
+// after `<-ch` unblocks. Without it the first post-detach paint waits up
+// to ~100ms for the next previewTickMsg (the goroutine sets stateDefault
+// but bubbletea has no event queued, so View() does not re-run). The
+// handler hands the actual refresh off to a tea.Cmd so the tmux
+// capture-pane calls don't block the event loop (#579).
+type repaintAfterDetachMsg struct{}
 
 type keyupMsg struct {
 	name keys.KeyName

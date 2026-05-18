@@ -116,8 +116,11 @@ var (
 	descStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
 )
 
-// showHelpScreen displays the help screen overlay if it hasn't been shown before
-func (m *home) showHelpScreen(helpType helpText, onDismiss func()) (tea.Model, tea.Cmd) {
+// showHelpScreen displays the help screen overlay if it hasn't been shown
+// before. onDismiss may return a tea.Cmd; this function forwards that cmd
+// back to the bubbletea event loop, which is how the attach path dispatches
+// repaintAfterDetachMsg{} right after `<-ch` unblocks (#579).
+func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.Model, tea.Cmd) {
 	// Get the flag for this help type
 	var alwaysShow bool
 	switch helpType.(type) {
@@ -146,7 +149,7 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func()) (tea.Model, t
 
 	// Skip displaying the help screen
 	if onDismiss != nil {
-		onDismiss()
+		return m, onDismiss()
 	}
 	return m, nil
 }
@@ -154,14 +157,17 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func()) (tea.Model, t
 // handleHelpState handles key events when in help state
 func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Any key press will close the help overlay
-	shouldClose := m.textOverlay.HandleKeyPress(msg)
+	dismissCmd, shouldClose := m.textOverlay.HandleKeyPress(msg)
 	if shouldClose {
 		m.state = stateDefault
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
 		m.menu.SetState(ui.StateDefault)
-		return m, tea.WindowSize()
+		// dismissCmd forwards repaintAfterDetachMsg{} from the attach
+		// callback (#579) so the post-detach repaint doesn't have to wait
+		// for the next previewTickMsg cycle.
+		return m, tea.Batch(tea.WindowSize(), dismissCmd)
 	}
 
 	return m, nil

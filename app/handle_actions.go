@@ -210,27 +210,32 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if tw.IsInTerminalTab() {
-			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 				ch, err := tw.AttachTerminal()
 				if err != nil {
 					log.ErrorLog.Printf("failed to attach terminal: %v", err)
-					return
+					return nil
 				}
 				<-ch
 				m.state = stateDefault
+				// Without this msg the post-detach repaint waits up to one
+				// previewTickMsg cycle (~100ms) for the first paint. With it
+				// the bubbletea loop wakes immediately, repaints the cached
+				// content, and the async refresh in the handler swaps in
+				// fresh content within a few ms (#579).
+				return func() tea.Msg { return repaintAfterDetachMsg{} }
 			})
-			return m, nil
 		}
-		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 			ch, err := m.sidebar.Attach()
 			if err != nil {
 				log.ErrorLog.Printf("failed to attach: %v", err)
-				return
+				return nil
 			}
 			<-ch
 			m.state = stateDefault
+			return func() tea.Msg { return repaintAfterDetachMsg{} }
 		})
-		return m, nil
 	}
 	return m, nil
 }
