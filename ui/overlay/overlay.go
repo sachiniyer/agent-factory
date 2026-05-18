@@ -88,7 +88,10 @@ func PlaceOverlay(
 					continue
 				}
 				hasFadeableParam = true
-				if code == 7 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107) {
+				// SGR 48 catches the extended-bg replacement (\x1b[48;5;236m)
+				// that step 1 emits — without it, the loop misclassifies our
+				// own rewrite as foreground and re-fades it to fg gray (#564).
+				if code == 7 || code == 48 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107) {
 					isBg = true
 				}
 			}
