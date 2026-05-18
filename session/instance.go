@@ -298,6 +298,17 @@ func (i *Instance) SetStatus(status Status) {
 	i.Status = status
 }
 
+// SetAutoYes sets the AutoYes flag under the instance mutex. Writers must use
+// this rather than assigning i.AutoYes directly: TapEnter runs from the
+// metadata-tick background goroutine and reads AutoYes under i.mu.RLock, so
+// any unsynchronized write produces a data race (issue #563, regression from
+// PR #560 which moved the tick off the bubbletea event loop).
+func (i *Instance) SetAutoYes(autoYes bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.AutoYes = autoYes
+}
+
 // GetBranch returns the current worktree branch name under the Instance's
 // mutex. Readers that run from goroutines other than the one mutating the
 // instance (notably the bubbletea renderer) must use this accessor rather

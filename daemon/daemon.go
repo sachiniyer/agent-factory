@@ -142,7 +142,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				continue
 			}
 			// Assume AutoYes is true if the daemon is running.
-			instance.AutoYes = true
+			instance.SetAutoYes(true)
 			next[key] = instance
 		}
 	}

@@ -213,7 +213,7 @@ func (m *home) mergePendingInstances() int {
 		}
 
 		m.sidebar.AddInstance(pendingInstance)()
-		pendingInstance.AutoYes = m.autoYes
+		pendingInstance.SetAutoYes(m.autoYes)
 		sidebarTitles[data.Title] = true
 		mergedCount++
 	}
@@ -275,7 +275,7 @@ func (m *home) refreshExternalInstances() bool {
 				continue
 			}
 			m.sidebar.AddInstance(inst)()
-			inst.AutoYes = m.autoYes
+			inst.SetAutoYes(m.autoYes)
 			changed = true
 		}
 	}
@@ -376,7 +376,7 @@ func (m *home) importRemoteHookSessions() int {
 			continue
 		}
 		m.sidebar.AddInstance(inst)()
-		inst.AutoYes = m.autoYes
+		inst.SetAutoYes(m.autoYes)
 		existingTitles[data.Title] = true
 		existingHookNames[name] = true
 		imported++
