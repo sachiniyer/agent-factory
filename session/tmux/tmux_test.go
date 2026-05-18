@@ -75,6 +75,43 @@ func TestSanitizeName(t *testing.T) {
 	require.Equal(t, "af_custom_name", session3.sanitizedName)
 }
 
+// TestSanitizeNameTmuxRestrictedChars guards toTmuxName against the #574
+// failure mode: tmux silently rewrites or escapes certain characters in
+// session names, so a title containing them must be transformed before we
+// hand it to tmux. Otherwise DoesSessionExist() polls for a name tmux never
+// created and Start() times out, orphaning the session.
+func TestSanitizeNameTmuxRestrictedChars(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+		want  string
+	}{
+		// Existing dot behavior — regression guard.
+		{"dot", "a.b", TmuxPrefix + "a_b"},
+		// Issue #574: colon causes tmux to silently rewrite to '_'.
+		{"colon", "test:session", TmuxPrefix + "test_session"},
+		// '#' is tmux's format-escape — sanitize defensively.
+		{"hash", "fix#574", TmuxPrefix + "fix_574"},
+		// '$' is tmux's session-id prefix — tmux escapes it to '\$' in the
+		// stored name, so has-session round-trips fail without sanitization.
+		{"dollar", "a$b", TmuxPrefix + "a_b"},
+		// All four together, plus whitespace stripping.
+		{"all-four-and-spaces", "a.b :c #d $e", TmuxPrefix + "a_b_c_d_e"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			session := NewTmuxSession(tc.title, "program")
+			require.Equal(t, tc.want, session.sanitizedName)
+		})
+	}
+
+	// Same checks for repo-scoped names.
+	repoPath := "/home/user/repo"
+	hash := repoHash(repoPath)
+	scoped := NewTmuxSessionForRepo("test:session#1.x$2", repoPath, "program")
+	require.Equal(t, TmuxPrefix+hash+"_test_session_1_x_2", scoped.sanitizedName)
+}
+
 // errPtyFactory is a PtyFactory that fails Start(). Used to verify Restore
 // surfaces non-missing-session errors from the PTY layer.
 type errPtyFactory struct {
