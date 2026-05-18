@@ -173,8 +173,10 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 
 	require.Equal(t, 2, len(ptyFactory.cmds),
 		"expected new-session followed by attach-session via PTY")
+	// Re-spawn must include the resume-most-recent flag so the prior
+	// conversation isn't lost on lazy respawn after a reboot (#595).
 	require.Equal(t,
-		fmt.Sprintf("tmux new-session -d -s af_missing -c %s claude", workdir),
+		fmt.Sprintf("tmux new-session -d -s af_missing -c %s claude --continue", workdir),
 		cmd2.ToString(ptyFactory.cmds[0]))
 	require.Equal(t, "tmux attach-session -t af_missing", cmd2.ToString(ptyFactory.cmds[1]))
 }
