@@ -26,6 +26,12 @@ type PreviewPane struct {
 	currentInstance *session.Instance
 }
 
+// previewState holds the rendered content of the preview pane.
+//
+// Invariant: fallback==true iff text is a centered fallback message
+// (loading / error / inactive). Writers MUST replace the whole struct
+// rather than mutate fields individually, so the two fields can never
+// disagree about which rendering branch String() should take (#577).
 type previewState struct {
 	// fallback is true if the preview pane is displaying fallback text
 	fallback bool
@@ -299,7 +305,10 @@ func (p *PreviewPane) ResetToNormalMode(instance *session.Instance) error {
 			}
 			return err
 		}
-		p.previewState.text = content
+		p.previewState = previewState{
+			fallback: false,
+			text:     content,
+		}
 	}
 
 	return nil

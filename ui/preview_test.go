@@ -654,6 +654,82 @@ func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
 		"no ERROR log line on session-gone fallback path")
 }
 
+// TestResetToNormalModeDoesNotClearFallbackFlag is the #577 regression: when
+// ResetToNormalMode exits scroll mode it fetches fresh preview content and
+// writes it into previewState.text, but previously it left previewState.fallback
+// untouched. If the prior state was a fallback (e.g. Loading or Session no
+// longer running), the pane would then hold real terminal output while still
+// flagged as fallback, and a subsequent UpdateContent that errored before
+// reaching its own `fallback: false` assignment would render the captured
+// terminal output with centered fallback styling.
+func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
+	const expectedContent = "$ terminal output"
+
+	sessionCreated := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			cmdStr := cmd.String()
+			if strings.Contains(cmdStr, "has-session") {
+				if sessionCreated {
+					return nil
+				}
+				return fmt.Errorf("session does not exist")
+			}
+			if strings.Contains(cmdStr, "new-session") {
+				sessionCreated = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			cmdStr := cmd.String()
+			if strings.Contains(cmdStr, "capture-pane") {
+				return []byte(expectedContent), nil
+			}
+			return []byte(""), nil
+		},
+	}
+
+	setup := setupTestEnvironment(t, cmdExec)
+	defer setup.cleanupFn()
+
+	p := NewPreviewPane()
+	p.SetSize(80, 30)
+
+	// Simulate the precondition: pane is in a fallback state (e.g. Loading)
+	// and the user has entered scroll mode while it was still showing the
+	// fallback. setFallbackState is the production path that gets us into
+	// fallback==true; isScrolling/viewport mimic ScrollUp's side effects
+	// without depending on tmux capture-pane behavior here.
+	p.setFallbackState("Setting up workspace...")
+	require.True(t, p.previewState.fallback,
+		"precondition: fallback should be true after setFallbackState")
+	p.isScrolling = true
+	p.viewport.SetContent("ESC to exit scroll mode")
+
+	// Exit scroll mode. ResetToNormalMode pulls fresh content via Preview()
+	// (our mock returns expectedContent) and must clear the stale fallback
+	// flag at the same time, otherwise String() would render the captured
+	// terminal output with centered fallback styling.
+	require.NoError(t, p.ResetToNormalMode(setup.instance))
+
+	require.False(t, p.isScrolling, "should exit scroll mode")
+	require.Equal(t, expectedContent, p.previewState.text,
+		"text should be set to the captured preview content")
+	require.False(t, p.previewState.fallback,
+		"fallback must be cleared when ResetToNormalMode sets real content (#577)")
+
+	// And the rendered output must use the normal (left-aligned) branch,
+	// not the centered fallback layout — i.e. it must not be padded with
+	// the giant top-of-pane vertical whitespace that fallback rendering
+	// injects to vertically center its message.
+	rendered := p.String()
+	require.Contains(t, rendered, expectedContent,
+		"normal-mode render must contain the captured content")
+	require.False(t, strings.HasPrefix(rendered, "\n\n\n\n"),
+		"normal-mode render must not be vertically centered like fallback")
+}
+
 // TestPreviewSwitchInstanceResetsScroll is a regression test for issue #470:
 // when the user is in scroll mode on instance A and switches to instance B,
 // the preview pane must drop the scroll-mode viewport (which still holds A's
