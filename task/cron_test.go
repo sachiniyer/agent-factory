@@ -206,6 +206,67 @@ func TestCronToOnCalendarDOWNonSundayRange(t *testing.T) {
 	assert.Equal(t, []string{"Tue..Thu *-*-* 09:00:00"}, result)
 }
 
+// TestCronToOnCalendarDOWRange17Monthly is the regression for #576.
+// 1-7 covers all 7 unique days (1=Mon, 7=Sun, 0=Sun). Previously
+// convertSingleDOW only collapsed ranges starting with 0, so this emitted a
+// "Mon..Sun" DOW line; combined with the DOM=15 restriction, the DOM/DOW
+// fan-out unioned a daily entry with the monthly entry and systemd fired
+// daily instead of monthly.
+func TestCronToOnCalendarDOWRange17Monthly(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 15 * 1-7")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*-*-15 09:00:00"}, result)
+}
+
+func TestCronToOnCalendarDOWRange17(t *testing.T) {
+	// 1-7 alone collapses to every-day.
+	result, err := CronToOnCalendar("0 9 * * 1-7")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*-*-* 09:00:00"}, result)
+}
+
+func TestCronToOnCalendarDOWRange27(t *testing.T) {
+	// 2-7 covers Tue,Wed,Thu,Fri,Sat,Sun — 6 unique days (missing Monday),
+	// so it must NOT collapse to every-day.
+	result, err := CronToOnCalendar("0 9 * * 2-7")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Tue..Sun *-*-* 09:00:00"}, result)
+}
+
+func TestCronToOnCalendarDOWStepOneCollapses(t *testing.T) {
+	// */1 expands to [0..7] which normalizes to all 7 days.
+	result, err := CronToOnCalendar("0 9 * * */1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*-*-* 09:00:00"}, result)
+}
+
+func TestCronToOnCalendarDOWListAllDaysZeroSix(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 0,1,2,3,4,5,6")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*-*-* 09:00:00"}, result)
+}
+
+func TestCronToOnCalendarDOWListAllDaysOneSeven(t *testing.T) {
+	// 1..7 explicit list: 7 = Sunday completes the week.
+	result, err := CronToOnCalendar("0 9 * * 1,2,3,4,5,6,7")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*-*-* 09:00:00"}, result)
+}
+
+func TestCronToOnCalendarDOWRange26(t *testing.T) {
+	// 2-6 covers 5 weekdays; must NOT collapse.
+	result, err := CronToOnCalendar("0 9 * * 2-6")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Tue..Sat *-*-* 09:00:00"}, result)
+}
+
+// TestConvertSingleDOWDayNames protects against future callers that bypass
+// ValidateCronExpr: day-name ranges like MON-FRI are not numerically
+// expandable, so the all-days collapse must not falsely fire.
+func TestConvertSingleDOWDayNames(t *testing.T) {
+	assert.NotEqual(t, "", convertSingleDOW("MON-FRI"))
+}
+
 func TestCronToOnCalendarMonthStep(t *testing.T) {
 	// Month is 1-indexed, so */3 should become 01/3, not 00/3.
 	result, err := CronToOnCalendar("0 0 1 */3 *")
