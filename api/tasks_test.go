@@ -322,6 +322,39 @@ func TestTasksUpdate_RollsBackSchedulerRemoveOnDisableWhenUpdateTaskFails(t *tes
 	assert.True(t, calls.installed[0].Enabled, "rollback restores enabled=true")
 }
 
+// TestTasksUpdate_RejectsEmptyPrompt is the regression guard for #568:
+// tasksUpdateCmd used to accept whitespace-only --prompt values, which
+// were saved and later sent literally to the agent via tmux send-keys.
+// The trim-validation must match tasksAddCmd and the TUI forms (fixed
+// for #517).
+func TestTasksUpdate_RejectsEmptyPrompt(t *testing.T) {
+	for _, prompt := range []string{"   ", "\t\n"} {
+		t.Run(fmt.Sprintf("prompt=%q", prompt), func(t *testing.T) {
+			useTempConfig(t)
+			resetUpdateFlags(t)
+			stubSchedulers(t)
+
+			seedTask(t, task.Task{
+				ID:       "t-whitespace",
+				Name:     "test",
+				Prompt:   "valid prompt",
+				CronExpr: "0 9 * * *",
+				Enabled:  true,
+			})
+
+			taskUpdatePromptFlag = prompt
+			err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"t-whitespace"})
+
+			require.Error(t, err, "whitespace-only prompt should be rejected")
+			assert.Contains(t, err.Error(), "prompt must be non-empty")
+
+			got, err := task.GetTask("t-whitespace")
+			require.NoError(t, err)
+			assert.Equal(t, "valid prompt", got.Prompt, "prompt should remain unchanged")
+		})
+	}
+}
+
 // TestTasksRemove_HappyPath verifies that when both removeScheduler and
 // RemoveTask succeed, the final state has no scheduler and no task
 // record.
