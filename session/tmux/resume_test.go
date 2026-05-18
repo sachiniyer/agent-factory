@@ -57,13 +57,77 @@ func TestResumeProgram(t *testing.T) {
 		{"codex already resume", "codex resume --last", "codex resume --last"},
 		{"codex exec already resume", "codex exec resume --last", "codex exec resume --last"},
 
-		// Agents without a documented resume-most-recent flag are passed
-		// through unchanged. Deferred to follow-up issues if/when those
-		// CLIs expose comparable flags.
-		{"aider with model flag", "aider --model x", "aider --model x"},
-		{"aider absolute path", "/usr/local/bin/aider", "/usr/local/bin/aider"},
-		{"gemini bare", "gemini", "gemini"},
-		{"gemini with flag", "gemini --quiet", "gemini --quiet"},
+		// Aider: append --restore-chat-history at the end. Position-
+		// independent flag, so the original program string is preserved
+		// verbatim except for the appended token. Aider silently falls
+		// back to a fresh chat when .aider.chat.history.md is absent.
+		{"aider bare", "aider", "aider --restore-chat-history"},
+		{
+			"aider with model flag",
+			"aider --model x",
+			"aider --model x --restore-chat-history",
+		},
+		{
+			"aider absolute path",
+			"/usr/local/bin/aider --foo",
+			"/usr/local/bin/aider --foo --restore-chat-history",
+		},
+		{
+			// Quoted path with spaces (regression for #569): existing
+			// quoting on the executable token must survive untouched.
+			"aider quoted path with spaces",
+			"'/path with space/aider' --foo",
+			"'/path with space/aider' --foo --restore-chat-history",
+		},
+		// Aider: already-has-resume cases — no-op.
+		{
+			"aider already --restore-chat-history",
+			"aider --restore-chat-history",
+			"aider --restore-chat-history",
+		},
+		// Aider: explicit opt-out — respect the user's choice and leave
+		// the program string alone.
+		{
+			"aider explicit --no-restore-chat-history",
+			"aider --no-restore-chat-history",
+			"aider --no-restore-chat-history",
+		},
+
+		// Gemini: append --resume latest at the end. "latest" resumes
+		// the most recent session in cwd and silently falls back to a
+		// fresh session if none exists.
+		{"gemini bare", "gemini", "gemini --resume latest"},
+		{
+			"gemini with flag",
+			"gemini --model x",
+			"gemini --model x --resume latest",
+		},
+		{
+			"gemini absolute path",
+			"/usr/local/bin/gemini --foo",
+			"/usr/local/bin/gemini --foo --resume latest",
+		},
+		{
+			// Quoted path with spaces (regression for #569).
+			"gemini quoted path with spaces",
+			"'/path with space/gemini' --foo",
+			"'/path with space/gemini' --foo --resume latest",
+		},
+		// Gemini: already-has-resume cases — no-op so repeated Restore
+		// calls don't accumulate flags.
+		{
+			"gemini already --resume latest",
+			"gemini --resume latest",
+			"gemini --resume latest",
+		},
+		{
+			// User picked a specific session by index — respect it,
+			// don't clobber with "latest".
+			"gemini already --resume numeric",
+			"gemini --resume 5",
+			"gemini --resume 5",
+		},
+		{"gemini already -r", "gemini -r latest", "gemini -r latest"},
 
 		// Unknown programs are passed through unchanged so unrelated CLIs
 		// aren't accidentally rewritten.
@@ -99,7 +163,11 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"codex exec",
 		"codex --model gpt-5",
 		"aider",
+		"aider --model x",
+		"aider --no-restore-chat-history",
 		"gemini",
+		"gemini --model x",
+		"gemini --resume 5",
 	} {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)

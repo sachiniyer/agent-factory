@@ -19,8 +19,15 @@ import (
 //   - codex: insert "resume --last" immediately after the codex token,
 //     or after "exec" if it follows codex. Subcommand position matters
 //     for codex, so this can't be a tail append.
+//   - aider: append --restore-chat-history at the end. Reads
+//     .aider.chat.history.md from cwd if present; silently falls back to
+//     a fresh chat if absent. Skipped if the user passed an explicit
+//     --no-restore-chat-history opt-out.
+//   - gemini: append --resume latest at the end. The "latest" keyword
+//     resumes the most recent session in cwd and silently falls back
+//     to a fresh session if none exists.
 //
-// Both CLIs silently fall back to a fresh session when no prior session
+// All four CLIs silently fall back to a fresh session when no prior session
 // exists in cwd, so the rewrite is safe to apply unconditionally.
 func resumeProgram(program string) string {
 	tokens := splitShellTokens(program)
@@ -70,6 +77,20 @@ func resumeProgram(program string) string {
 		newTokens = append(newTokens, "resume", "--last")
 		newTokens = append(newTokens, tokens[insertAt:]...)
 		return shellJoinTokens(newTokens)
+	case ProgramAider:
+		for _, tok := range tokens {
+			if tok == "--restore-chat-history" || tok == "--no-restore-chat-history" {
+				return program
+			}
+		}
+		return program + " --restore-chat-history"
+	case ProgramGemini:
+		for _, tok := range tokens {
+			if tok == "--resume" || tok == "-r" {
+				return program
+			}
+		}
+		return program + " --resume latest"
 	}
 	return program
 }
