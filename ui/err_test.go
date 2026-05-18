@@ -96,34 +96,78 @@ func TestErrBoxWithoutANSIUnchanged(t *testing.T) {
 	}
 }
 
-// TestErrBoxStripsPrivateModeCSI is a regression test for issue #552. The
-// original strip regex only allowed [0-9;] in the parameter byte slot, so
-// private-mode sequences like \x1b[?25l (cursor hide/show), \x1b[?1049h
-// (alt-screen), and \x1b[?7l (autowrap off) leaked through. runewidth then
-// counted "?25l" etc. as visible runes and the box truncated prematurely.
-func TestErrBoxStripsPrivateModeCSI(t *testing.T) {
-	payload := "agent crashed"
-	// Mix display SGR with several private-mode sequences.
-	raw := "\x1b[?25l\x1b[?1049h\x1b[?7l\x1b[31m" + payload + "\x1b[0m\x1b[?25h\x1b[?1049l"
-	stripped := ansiEscapeRegex.ReplaceAllString(raw, "")
-	if stripped != payload {
-		t.Fatalf("private-mode CSI not stripped: got %q want %q", stripped, payload)
-	}
-	if got := runewidth.StringWidth(stripped); got != runewidth.StringWidth(payload) {
-		t.Errorf("width after strip = %d, want %d", got, runewidth.StringWidth(payload))
+// TestErrBoxStripsANSIVariants is a regression matrix covering every ANSI
+// variant the strip pass has had to learn the hard way:
+//   - Plain CSI / SGR (#525, original bug — partial CSI bytes leaked).
+//   - Private-mode CSI like \x1b[?25l (#552 — the bespoke regex's [0-9;]
+//     parameter class didn't allow the "?" prefix, so these inflated width).
+//   - OSC 8 hyperlinks terminated by ST (\x1b\\) (#565 — the bespoke regex
+//     never matched \x1b] at all, so OSC payload counted as visible runes).
+//   - OSC terminated by BEL (\x07), the legacy xterm terminator that some
+//     emitters (e.g. iTerm OSC 1337) still use instead of ST.
+//
+// Switching to xansi.Strip handles all of these uniformly; this test pins
+// that behavior so the next exotic variant doesn't require another fix-up.
+func TestErrBoxStripsANSIVariants(t *testing.T) {
+	const payload = "agent crashed"
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "plain_csi_sgr",
+			raw:  "\x1b[31m" + payload + "\x1b[0m",
+		},
+		{
+			name: "private_mode_csi",
+			raw:  "\x1b[?25l\x1b[?1049h\x1b[?7l\x1b[31m" + payload + "\x1b[0m\x1b[?25h\x1b[?1049l",
+		},
+		{
+			name: "osc8_hyperlink_st_terminated",
+			// OSC 8 ; params ; URI ST <link text> OSC 8 ;; ST
+			raw: "\x1b]8;;https://example.com/very/long/url/that/blows/up/width/math\x1b\\" + payload + "\x1b]8;;\x1b\\",
+		},
+		{
+			name: "osc_bel_terminated",
+			// OSC 0 (set window title) terminated by BEL. The title payload
+			// must not be width-counted.
+			raw: "\x1b]0;a title that is much longer than the payload\x07" + payload,
+		},
 	}
 
-	// End-to-end: a wide-enough box must render the full payload without
-	// truncation now that private-mode bytes no longer inflate the width.
-	e := NewErrBox()
-	e.SetSize(80, 1)
-	e.SetError(errors.New(raw))
-	out := e.String()
-	if !strings.Contains(stripANSI(out), payload) {
-		t.Errorf("payload missing from rendered output: %q", out)
-	}
-	if strings.Contains(out, "?25l") || strings.Contains(out, "?1049h") || strings.Contains(out, "?7l") {
-		t.Errorf("private-mode sequence leaked into output: %q", out)
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			// Box wide enough to fit the visible payload but NOT wide enough
+			// to fit any inflated count from leaked escape bytes. This is
+			// the condition that historically tripped truncation.
+			width := runewidth.StringWidth(payload) + 4
+			e := NewErrBox()
+			e.SetSize(width, 1)
+			e.SetError(errors.New(tc.raw))
+
+			out := e.String()
+
+			// 1. Visible payload survives intact (no premature truncation).
+			if !strings.Contains(stripANSI(out), payload) {
+				t.Errorf("payload missing from rendered output: %q", out)
+			}
+			// 2. No escape-sequence carcass leaks as visible characters.
+			//    Spot-check signature fragments from each variant.
+			for _, leak := range []string{"[31m", "[?25l", "[?1049h", "8;;https://", "0;a title"} {
+				if strings.Contains(out, leak) {
+					t.Errorf("escape fragment %q leaked into output: %q", leak, out)
+				}
+			}
+			// 3. The rendered line width must equal the visible payload
+			//    width (within the box). If OSC/private-mode bytes had been
+			//    width-counted, this would fail with an inflated width.
+			for _, line := range strings.Split(out, "\n") {
+				if got := runewidth.StringWidth(stripANSI(line)); got > width {
+					t.Errorf("rendered line width %d exceeds container width %d (line=%q)", got, width, line)
+				}
+			}
+		})
 	}
 }
 
