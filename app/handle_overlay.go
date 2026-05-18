@@ -184,6 +184,13 @@ func (m *home) handleContentPaneFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 	// Check if a new task was submitted via the inline form
 	sp := m.contentPane.TaskPane()
 	if sp.HasPendingCreate() {
+		// Submitting the create form sets pendingCreate without releasing
+		// focus, so the "save on focus release" branch above doesn't run.
+		// handleTaskCreate writes the new task to disk and then reloads
+		// every task via SetTasks, which clears the dirty flag and any
+		// unsaved toggle/edit/delete. Flush those changes first so the
+		// reload picks them up (#578).
+		m.saveContentPaneState()
 		return m, m.handleTaskCreate(), true
 	}
 	if sp.HasPendingTrigger() {
