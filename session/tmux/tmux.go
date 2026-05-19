@@ -85,6 +85,14 @@ type TmuxSession struct {
 
 const TmuxPrefix = "af_"
 
+// slowDetachWgWaitThreshold is the wg.Wait elapsed above which Detach()
+// emits an ErrorLog entry. Picked above the worst recorded non-pathological
+// wait (~120ms during normal io.Copy drain) and well below the smallest
+// observed pathological wait (~42s in #598), so the threshold cleanly
+// separates "noise" from "regression of the contention fix". Exported as
+// a var so future regressions can be detected without recompiling.
+var slowDetachWgWaitThreshold = 5 * time.Second
+
 // ErrSessionGone is returned by PTY/tmux operations when the underlying tmux
 // session no longer exists. Non-daemon callers (preview pane, sidebar resize,
 // terminal pane) use errors.Is to detect this case and degrade gracefully
@@ -602,10 +610,24 @@ func (t *TmuxSession) Detach() {
 	// finish before mutating t.ptmx. monitorWindowSize reads t.ptmx via
 	// updateWindowSize, so clearing the field before wg.Wait races against
 	// those reads (#512). Coordinated like Close already is.
-	stepStart = time.Now()
+	waitStart := time.Now()
 	t.wg.Wait()
+	waitElapsed := time.Since(waitStart)
 	log.WarningLog.Printf("[detach-trace] tmux.Detach-wg.Wait-done name=%s elapsed=%v",
-		t.sanitizedName, time.Since(stepStart))
+		t.sanitizedName, waitElapsed)
+	// Defense-in-depth against #598: closing the PTY master does not wake
+	// the io.Copy(os.Stdout, t.ptmx) goroutine on a character device —
+	// that read only returns when the tmux client child exits, which
+	// requires a round-trip through the tmux server. If the server is
+	// being starved by background capture-pane work (the original
+	// failure mode) wg.Wait can block for tens of seconds. The
+	// pause-while-attached gate in app/app.go should prevent this, so if
+	// it still happens we want to know loudly.
+	if waitElapsed > slowDetachWgWaitThreshold {
+		log.ErrorLog.Printf("tmux.Detach: wg.Wait took %v — likely tmux server "+
+			"contention from background capture-pane operations. Sessions paused "+
+			"while attached should have prevented this; bug?", waitElapsed)
+	}
 
 	// Now safe to clear t.ptmx. Clearing unconditionally before Restore
 	// means a Restore failure (or a Close failure) can't leave the closed

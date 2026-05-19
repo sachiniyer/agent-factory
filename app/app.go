@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -112,6 +113,19 @@ type home struct {
 	availableWorktrees []git.WorktreeInfo
 	// pendingProgram tracks the program selected during new instance naming
 	pendingProgram string
+
+	// attached is set while the user is inside an attached tmux session.
+	// While true, periodic background work that hits the shared tmux server
+	// (capture-pane via runMetadataTick, refreshPanesCmd, fetchPRInfoCmd) is
+	// paused so the user's detach key-press is never queued behind it. See
+	// issue #598 — the 44s detach hang was traced to wg.Wait waiting on
+	// the tmux client to exit, which itself was blocked behind ~40 RPS of
+	// capture-pane requests we were generating from the metadata tick.
+	//
+	// Stored as atomic because the attach overlay's onDismiss callback runs
+	// off the bubbletea Update goroutine (as a tea.Cmd) and toggles this
+	// while Update reads it on every tick.
+	attached atomic.Bool
 }
 
 func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
@@ -247,7 +261,17 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hideErrMsg:
 		m.errBox.Clear()
 	case previewTickMsg:
-		cmd := m.selectionChanged()
+		// While the user is attached to an instance, the preview/terminal
+		// panes are hidden behind the tmux client they detached into. Running
+		// selectionChanged here would dispatch refreshPanesCmd (two tmux
+		// capture-pane shell-outs against the shared tmux server) every
+		// 100ms — exactly the contention that produced the 44s detach hang
+		// in #598. Keep the tick alive so the first post-detach iteration
+		// fires within ~100ms of clearing the flag, but skip the work.
+		var cmd tea.Cmd
+		if !m.attached.Load() {
+			cmd = m.selectionChanged()
+		}
 		return m, tea.Batch(
 			cmd,
 			func() tea.Msg {
@@ -263,6 +287,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// instances keep whatever was last fetched (or restored from disk) —
 		// they'll refresh when the user actually looks at them. The fetch
 		// itself runs in a background goroutine so the UI stays responsive.
+		// Skip the fetch while attached: gh pr view is a network call and
+		// the sidebar PR badge is hidden behind the tmux client (#598).
+		if m.attached.Load() {
+			return m, tickUpdatePRInfoCmd
+		}
 		selected := m.sidebar.GetSelectedInstance()
 		return m, tea.Batch(tickUpdatePRInfoCmd, fetchPRInfoCmd(selected, true))
 	case prInfoUpdatedMsg:
@@ -311,7 +340,17 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// after tmux detach, because rendering can't catch up until the
 		// loop drains. Snapshot the instance list on the event loop and
 		// hand the work off to a goroutine so View() isn't blocked.
+		//
+		// While the user is attached, skip the per-instance work entirely:
+		// the sidebar is hidden, status flips have no visible effect, and
+		// the capture-pane calls were contending with the user's detach
+		// keystroke against the shared tmux server (#598). Keep the
+		// re-schedule cmd so the next tick fires within ~500ms of detach,
+		// catching the sidebar up promptly.
 		detachTraceMark("tickUpdateMetadataMessage-handler-entry")
+		if m.attached.Load() {
+			return m, tickUpdateMetadataCmd
+		}
 		instances := m.sidebar.GetInstances()
 		return m, runMetadataTickCmd(instances)
 	case tea.MouseMsg:
@@ -750,34 +789,57 @@ func (m *home) attachToInstance(title string) (tea.Model, tea.Cmd) {
 			m.sidebar.SelectInstance(inst)
 			m.contentPane.SetMode(ui.ContentModeInstance)
 			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-				detachTraceMark(fmt.Sprintf("attachToInstance-onDismiss-entry title=%s", title))
-				ch, err := inst.Attach()
-				if err != nil {
-					log.ErrorLog.Printf("failed to attach to %s: %v", title, err)
-					return nil
-				}
-				// <-ch blocks for as long as the user is attached. Mark the
-				// boundary so post-detach elapsed times in the trace are
-				// measured from when the user actually returned to the UI,
-				// not from when the attach started.
-				detachTraceMark(fmt.Sprintf("attachToInstance-blocking-on-<-ch title=%s", title))
-				<-ch
-				detachStart := time.Now()
-				detachTraceMark(fmt.Sprintf("attachToInstance-<-ch-unblocked title=%s", title))
-				m.state = stateDefault
-				// Arm the slow-detach watchdog: if the post-detach paint
-				// (panesRefreshedMsg) does not arrive within
-				// slowDetachThreshold, a goroutine dump is appended to
-				// detach-slow.log so we can see which goroutine is blocked.
-				beginDetachWatchdog(fmt.Sprintf("attachToInstance title=%s", title))
-				return func() tea.Msg {
-					detachTrace(detachStart, "attachToInstance-repaintAfterDetachMsg-emitted")
-					return repaintAfterDetachMsg{}
-				}
+				return m.attachOverlayCallback("attachToInstance",
+					fmt.Sprintf(" title=%s", title), inst.Attach)
 			})
 		}
 	}
 	return m, m.handleError(fmt.Errorf("instance %q not found", title))
+}
+
+// attachOverlayCallback runs the attach-overlay onDismiss lifecycle: emits
+// the detach-trace markers, invokes attach, arms the attached flag for the
+// duration of `<-ch`, then returns the tea.Cmd to emit the
+// repaintAfterDetachMsg{}. Returns nil when attach itself fails so the
+// callback can be passed directly to showHelpScreen's onDismiss.
+//
+// The defer on m.attached.Store(false) is load-bearing: it guarantees the
+// flag clears even if `<-ch` is woken by an abnormal close or a panic
+// further down the stack. Leaving the flag stuck at true would silently
+// stall the metadata tick, preview refresh, and PR info fetcher until the
+// next process restart — exactly the kind of regression #598 wants to
+// avoid creating while fixing the original hang.
+//
+// Extracted so the three attach call-sites (handleEnter sidebar, handleEnter
+// terminal-tab, attachToInstance) all funnel through one place — and so the
+// pause-while-attached gating + the flag-clears-on-error path are testable
+// without spinning up real tmux.
+func (m *home) attachOverlayCallback(label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
+	detachTraceMark(label + "-onDismiss-entry" + traceSuffix)
+	ch, err := attach()
+	if err != nil {
+		log.ErrorLog.Printf("failed to attach (%s): %v", label+traceSuffix, err)
+		return nil
+	}
+	m.attached.Store(true)
+	defer m.attached.Store(false)
+	// <-ch blocks for as long as the user is attached. Mark the boundary so
+	// post-detach elapsed times in the trace are measured from when the user
+	// actually returned to the UI, not from when the attach started.
+	detachTraceMark(label + "-blocking-on-<-ch" + traceSuffix)
+	<-ch
+	detachStart := time.Now()
+	detachTraceMark(label + "-<-ch-unblocked" + traceSuffix)
+	m.state = stateDefault
+	// Arm the slow-detach watchdog: if the post-detach paint
+	// (panesRefreshedMsg) does not arrive within slowDetachThreshold, a
+	// goroutine dump is appended to detach-slow.log so we can see which
+	// goroutine is blocked.
+	beginDetachWatchdog(label + traceSuffix)
+	return func() tea.Msg {
+		detachTrace(detachStart, label+"-repaintAfterDetachMsg-emitted")
+		return repaintAfterDetachMsg{}
+	}
 }
 
 // navigateToSection moves the sidebar selection to the header of the given section.
@@ -821,6 +883,14 @@ func (m *home) selectionChanged() tea.Cmd {
 	sel := m.sidebar.GetSelection()
 	tw := m.contentPane.TabbedWindow()
 
+	// While attached, the sidebar is hidden behind the tmux client and the
+	// preview/terminal panes will be repainted by repaintAfterDetachMsg as
+	// soon as the user detaches. Skip the refresh + PR fetch dispatches so
+	// they don't queue capture-pane / gh pr view work behind the user's
+	// detach key (#598). The synchronous mutations (mode, menu state) still
+	// run so sidebar nav that happens between attach failures is consistent.
+	attachedNow := m.attached.Load()
+
 	var prFetch tea.Cmd
 	var refreshCmd tea.Cmd
 	switch {
@@ -830,12 +900,14 @@ func (m *home) selectionChanged() tea.Cmd {
 		tw.SetInstance(selected)
 		m.menu.SetInstance(selected)
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
-		refreshCmd = refreshPanesCmd(tw, selected)
+		if !attachedNow {
+			refreshCmd = refreshPanesCmd(tw, selected)
+		}
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
 		// Lazily refresh PR info when the user lands on an instance that
 		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
 		// data is still fresh, so rapid Up/Down navigation doesn't hammer gh.
-		if selected != nil && selected.Started() {
+		if !attachedNow && selected != nil && selected.Started() {
 			prFetch = fetchPRInfoCmd(selected, false)
 		}
 	case sel.Kind == ui.SectionTasks:
