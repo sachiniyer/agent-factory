@@ -266,6 +266,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		selected := m.sidebar.GetSelectedInstance()
 		return m, tea.Batch(tickUpdatePRInfoCmd, fetchPRInfoCmd(selected, true))
 	case prInfoUpdatedMsg:
+		detachTraceMark("prInfoUpdatedMsg-handler-entry")
 		if msg.err != nil {
 			log.WarningLog.Printf("PR info fetch failed for %q: %v", msg.instance.Title, msg.err)
 			// Mark as fetched anyway so we don't thrash retries on every
@@ -274,21 +275,31 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		msg.instance.SetPRInfo(msg.info)
+		saveStart := time.Now()
 		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 			log.WarningLog.Printf("failed to save instances after PR update: %v", err)
 		}
+		detachTrace(saveStart, "prInfoUpdatedMsg-SaveInstances-returned")
 		return m, nil
 	case tickPendingInstancesMessage:
+		detachTraceMark("tickPendingInstancesMessage-handler-entry")
 		m.mergePendingInstances()
 		return m, tickPendingInstancesCmd
 	case tickRefreshExternalMessage:
+		// Logged even when the tick is a no-op so we can spot it racing
+		// with detach in the trace tail.
+		detachTraceMark("tickRefreshExternalMessage-handler-entry")
+		tickStart := time.Now()
 		changed := m.refreshExternalInstances()
+		detachTrace(tickStart, "tickRefreshExternalMessage-refreshExternalInstances-returned")
 		var cmds []tea.Cmd
 		cmds = append(cmds, tickRefreshExternalCmd)
 		if changed {
+			saveStart := time.Now()
 			if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 				log.WarningLog.Printf("failed to save instances after refresh: %v", err)
 			}
+			detachTrace(saveStart, "tickRefreshExternalMessage-SaveInstances-returned")
 			cmds = append(cmds, m.selectionChanged())
 		}
 		return m, tea.Batch(cmds...)
@@ -300,6 +311,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// after tmux detach, because rendering can't catch up until the
 		// loop drains. Snapshot the instance list on the event loop and
 		// hand the work off to a goroutine so View() isn't blocked.
+		detachTraceMark("tickUpdateMetadataMessage-handler-entry")
 		instances := m.sidebar.GetInstances()
 		return m, runMetadataTickCmd(instances)
 	case tea.MouseMsg:
@@ -341,11 +353,19 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// preview/terminal refresh so fresh content lands within a few
 		// milliseconds. selectionChanged() also dispatches the captures
 		// off the event loop, so this handler returns instantly.
-		return m, m.selectionChanged()
+		detachTraceMark("repaintAfterDetachMsg-handler-entry")
+		cmd := m.selectionChanged()
+		detachTraceMark("repaintAfterDetachMsg-handler-exit")
+		return m, cmd
 	case panesRefreshedMsg:
 		// The refresh cmd already wrote captured content into the mutex-
 		// guarded pane state. Returning here causes bubbletea to invoke
 		// View() again, which renders the now-fresh content.
+		detachTraceMark("panesRefreshedMsg-handler-entry")
+		// End the slow-detach watchdog: the post-detach paint completed,
+		// so any in-flight watchdog should stop. No-op when no detach is
+		// currently in flight.
+		endDetachWatchdog()
 		return m, nil
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
@@ -730,14 +750,30 @@ func (m *home) attachToInstance(title string) (tea.Model, tea.Cmd) {
 			m.sidebar.SelectInstance(inst)
 			m.contentPane.SetMode(ui.ContentModeInstance)
 			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
+				detachTraceMark(fmt.Sprintf("attachToInstance-onDismiss-entry title=%s", title))
 				ch, err := inst.Attach()
 				if err != nil {
 					log.ErrorLog.Printf("failed to attach to %s: %v", title, err)
 					return nil
 				}
+				// <-ch blocks for as long as the user is attached. Mark the
+				// boundary so post-detach elapsed times in the trace are
+				// measured from when the user actually returned to the UI,
+				// not from when the attach started.
+				detachTraceMark(fmt.Sprintf("attachToInstance-blocking-on-<-ch title=%s", title))
 				<-ch
+				detachStart := time.Now()
+				detachTraceMark(fmt.Sprintf("attachToInstance-<-ch-unblocked title=%s", title))
 				m.state = stateDefault
-				return func() tea.Msg { return repaintAfterDetachMsg{} }
+				// Arm the slow-detach watchdog: if the post-detach paint
+				// (panesRefreshedMsg) does not arrive within
+				// slowDetachThreshold, a goroutine dump is appended to
+				// detach-slow.log so we can see which goroutine is blocked.
+				beginDetachWatchdog(fmt.Sprintf("attachToInstance title=%s", title))
+				return func() tea.Msg {
+					detachTrace(detachStart, "attachToInstance-repaintAfterDetachMsg-emitted")
+					return repaintAfterDetachMsg{}
+				}
 			})
 		}
 	}
@@ -780,6 +816,8 @@ func (m *home) navigateToSection(kind ui.SidebarSectionKind) {
 // the goroutine can mutate it while View() reads it. Synchronous fields
 // touched here (mode, menu state, scroll-reset) stay on the event loop.
 func (m *home) selectionChanged() tea.Cmd {
+	selectionStart := time.Now()
+	detachTraceMark("selectionChanged-entry")
 	sel := m.sidebar.GetSelection()
 	tw := m.contentPane.TabbedWindow()
 
@@ -793,6 +831,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		m.menu.SetInstance(selected)
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
 		refreshCmd = refreshPanesCmd(tw, selected)
+		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
 		// Lazily refresh PR info when the user lands on an instance that
 		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
 		// data is still fresh, so rapid Up/Down navigation doesn't hammer gh.
@@ -842,12 +881,19 @@ type panesRefreshedMsg struct{}
 // captured content concurrently with the renderer (#579).
 func refreshPanesCmd(tw *ui.TabbedWindow, selected *session.Instance) tea.Cmd {
 	return func() tea.Msg {
+		cmdStart := time.Now()
+		detachTraceMark("refreshPanesCmd-goroutine-entry")
+		previewStart := time.Now()
 		if err := tw.UpdatePreview(selected); err != nil {
 			log.WarningLog.Printf("UpdatePreview failed: %v", err)
 		}
+		detachTrace(previewStart, "refreshPanesCmd-UpdatePreview-returned")
+		terminalStart := time.Now()
 		if err := tw.UpdateTerminal(selected); err != nil {
 			log.WarningLog.Printf("UpdateTerminal failed: %v", err)
 		}
+		detachTrace(terminalStart, "refreshPanesCmd-UpdateTerminal-returned")
+		detachTrace(cmdStart, "refreshPanesCmd-goroutine-exit")
 		return panesRefreshedMsg{}
 	}
 }

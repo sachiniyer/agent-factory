@@ -49,10 +49,13 @@ var tickUpdateMetadataCmd = func() tea.Msg {
 // Status mutations go through Instance.SetStatus, which holds the instance
 // mutex, so concurrent reads from the renderer remain safe.
 func runMetadataTick(instances []*session.Instance) {
+	tickStart := time.Now()
+	detachTraceMark("runMetadataTick-entry")
 	for _, instance := range instances {
 		if !instance.Started() || instance.GetStatus() == session.Loading {
 			continue
 		}
+		instStart := time.Now()
 		instance.CheckAndHandleTrustPrompt()
 		updated, prompt := instance.HasUpdated()
 		if updated {
@@ -64,7 +67,13 @@ func runMetadataTick(instances []*session.Instance) {
 				instance.SetStatus(session.Ready)
 			}
 		}
+		// Per-instance elapsed makes contention visible: if 1 of N tmux
+		// capture-pane shell-outs hangs, the marker for that instance
+		// will dominate the total while the others stay sub-10ms.
+		detachTraceFields(instStart, "runMetadataTick-instance-done",
+			fmt.Sprintf("title=%s", instance.Title))
 	}
+	detachTrace(tickStart, "runMetadataTick-exit")
 }
 
 // runMetadataTickCmd returns a tea.Cmd that performs the metadata tick work
@@ -138,7 +147,10 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 	// real result, so the fresh window starts from fetch completion.
 	inst.MarkPRInfoFetched()
 	return func() tea.Msg {
+		fetchStart := time.Now()
+		detachTraceMark("fetchPRInfoCmd-goroutine-entry")
 		info, err := prInfoFetcher(repoPath, branch)
+		detachTrace(fetchStart, "fetchPRInfoCmd-prInfoFetcher-returned")
 		return prInfoUpdatedMsg{instance: inst, info: info, err: err}
 	}
 }

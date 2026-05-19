@@ -505,6 +505,11 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 
 			// Check for detach key
 			if nr == 1 && buf[0] == DetachKeyByte {
+				// Closest point to "user pressed detach" we can observe —
+				// the elapsed in this trace is whatever Detach() itself
+				// took, which matches what blocks the app-side <-ch.
+				log.WarningLog.Printf("[detach-trace] tmux-stdin-reader-saw-detach-key name=%s",
+					t.sanitizedName)
 				// Detach from the session
 				t.Detach()
 				return
@@ -565,7 +570,11 @@ func (t *TmuxSession) DetachSafely() error {
 // Detach disconnects from the current tmux session. Logs errors instead of panicking
 // so the application can attempt graceful recovery.
 func (t *TmuxSession) Detach() {
+	detachStart := time.Now()
+	log.WarningLog.Printf("[detach-trace] tmux.Detach-entry name=%s", t.sanitizedName)
 	defer func() {
+		log.WarningLog.Printf("[detach-trace] tmux.Detach-exit name=%s total=%v",
+			t.sanitizedName, time.Since(detachStart))
 		close(t.attachCh)
 		t.attachCh = nil
 		t.cancel = nil
@@ -578,16 +587,25 @@ func (t *TmuxSession) Detach() {
 	// abnormal termination. Without this, closing the PTY can wake the
 	// io.Copy goroutine before cancel() runs, causing a spurious
 	// "Session terminated without detaching" warning.
+	stepStart := time.Now()
 	t.cancel()
+	log.WarningLog.Printf("[detach-trace] tmux.Detach-cancel-done name=%s elapsed=%v",
+		t.sanitizedName, time.Since(stepStart))
 
 	// Close the attached pty session so the io.Copy goroutine returns.
+	stepStart = time.Now()
 	closeErr := t.ptmx.Close()
+	log.WarningLog.Printf("[detach-trace] tmux.Detach-ptmx.Close-done name=%s elapsed=%v",
+		t.sanitizedName, time.Since(stepStart))
 
 	// Wait for the attach goroutines (io.Copy + monitorWindowSize x2) to
 	// finish before mutating t.ptmx. monitorWindowSize reads t.ptmx via
 	// updateWindowSize, so clearing the field before wg.Wait races against
 	// those reads (#512). Coordinated like Close already is.
+	stepStart = time.Now()
 	t.wg.Wait()
+	log.WarningLog.Printf("[detach-trace] tmux.Detach-wg.Wait-done name=%s elapsed=%v",
+		t.sanitizedName, time.Since(stepStart))
 
 	// Now safe to clear t.ptmx. Clearing unconditionally before Restore
 	// means a Restore failure (or a Close failure) can't leave the closed
@@ -603,9 +621,12 @@ func (t *TmuxSession) Detach() {
 	// Call t.Restore to set a new t.ptmx. The session is alive (we just
 	// detached from it), so pass empty workDir — a missing session here is a
 	// real problem and should surface, not silently re-spawn and lose history.
+	stepStart = time.Now()
 	if err := t.Restore(""); err != nil {
 		log.ErrorLog.Printf("error restoring pty after detach: %v", err)
 	}
+	log.WarningLog.Printf("[detach-trace] tmux.Detach-Restore-done name=%s elapsed=%v",
+		t.sanitizedName, time.Since(stepStart))
 }
 
 // Close terminates the tmux session and cleans up resources
