@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -212,46 +211,11 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		}
 		if tw.IsInTerminalTab() {
 			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-				detachTraceMark("handleEnter-terminal-onDismiss-entry")
-				ch, err := tw.AttachTerminal()
-				if err != nil {
-					log.ErrorLog.Printf("failed to attach terminal: %v", err)
-					return nil
-				}
-				detachTraceMark("handleEnter-terminal-blocking-on-<-ch")
-				<-ch
-				detachStart := time.Now()
-				detachTraceMark("handleEnter-terminal-<-ch-unblocked")
-				m.state = stateDefault
-				// Without this msg the post-detach repaint waits up to one
-				// previewTickMsg cycle (~100ms) for the first paint. With it
-				// the bubbletea loop wakes immediately, repaints the cached
-				// content, and the async refresh in the handler swaps in
-				// fresh content within a few ms (#579).
-				beginDetachWatchdog("handleEnter-terminal")
-				return func() tea.Msg {
-					detachTrace(detachStart, "handleEnter-terminal-repaintAfterDetachMsg-emitted")
-					return repaintAfterDetachMsg{}
-				}
+				return m.attachOverlayCallback("handleEnter-terminal", "", tw.AttachTerminal)
 			})
 		}
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			detachTraceMark("handleEnter-sidebar-onDismiss-entry")
-			ch, err := m.sidebar.Attach()
-			if err != nil {
-				log.ErrorLog.Printf("failed to attach: %v", err)
-				return nil
-			}
-			detachTraceMark("handleEnter-sidebar-blocking-on-<-ch")
-			<-ch
-			detachStart := time.Now()
-			detachTraceMark("handleEnter-sidebar-<-ch-unblocked")
-			m.state = stateDefault
-			beginDetachWatchdog("handleEnter-sidebar")
-			return func() tea.Msg {
-				detachTrace(detachStart, "handleEnter-sidebar-repaintAfterDetachMsg-emitted")
-				return repaintAfterDetachMsg{}
-			}
+			return m.attachOverlayCallback("handleEnter-sidebar", "", m.sidebar.Attach)
 		})
 	}
 	return m, nil
