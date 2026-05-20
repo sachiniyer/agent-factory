@@ -14,8 +14,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -111,6 +113,17 @@ var slowDetachWgWaitThreshold = 5 * time.Second
 // every second and can contend with the attach client's exit round-trip
 // (see the #598 follow-up). var, not const, so tests can lower it.
 var wgWaitSigkillDeadline = 1 * time.Second
+
+// wgWaitAbandonDeadline bounds the secondary wait after the SIGKILL/pgrep
+// fallback has already fired. If wg.Wait still hasn't returned by this
+// deadline, the io.Copy goroutine is wedged in a way our escape hatches
+// can't unstick (kernel-level PTY drain bug, syscall stuck in D-state).
+// Leaking that one goroutine until the OS eventually drains the PTY is
+// strictly better than holding the user's TUI hostage for tens of seconds
+// — the original incident in #598 was a 51s hang at 00:05:14 because the
+// fallback was missing. Set to 2× wgWaitSigkillDeadline so the total
+// worst-case detach is ~3s. var, not const, so tests can lower it.
+var wgWaitAbandonDeadline = 2 * time.Second
 
 // ErrSessionGone is returned by PTY/tmux operations when the underlying tmux
 // session no longer exists. Non-daemon callers (preview pane, sidebar resize,
@@ -361,21 +374,47 @@ func (t *TmuxSession) Restore(workDir string) error {
 // blocking Read on a character device — that read only returns when the
 // slave end closes, which happens when the tmux client child exits, which
 // requires a round-trip through a potentially contended tmux server (#598).
+//
+// Three-stage bound to guarantee the user-visible detach is finite even
+// when our escape hatches fail (#598 follow-up regression at 00:05:14
+// 2026-05-20 — a 51s hang because killAttach was nil and the post-SIGKILL
+// wait was unbounded):
+//
+//  1. wg.Wait returns within wgWaitSigkillDeadline (the happy path).
+//  2. Otherwise: try the recorded killAttach closure if present, then a
+//     pgrep-based "find the tmux attach-session for this name and kill it"
+//     as last-resort. Then wait at most wgWaitAbandonDeadline for the
+//     stuck goroutine to drain.
+//  3. Otherwise: log ERROR, return, and let the goroutine leak. The
+//     kernel will eventually drain the PTY and the goroutine will exit on
+//     its own — a leaked goroutine is strictly better than freezing the
+//     TUI.
+//
 // Returns the elapsed wait so callers that surface diagnostics about a slow
-// wg.Wait (Detach) can do so without re-measuring.
+// wg.Wait (Detach) can do so without re-measuring. On the abandon path
+// returns wgWaitAbandonDeadline (not the literal elapsed) so the caller's
+// slowDetachWgWaitThreshold check still fires cleanly.
 func (t *TmuxSession) waitForAttachDrain() time.Duration {
-	if t.wg == nil {
+	// Capture the WaitGroup pointer locally so the helper goroutine below
+	// doesn't race against the Detach/Close defer that nils t.wg after
+	// we return. The abandon path leaks the goroutine on purpose; capture
+	// here means the leaked goroutine reads its own local, not a field
+	// concurrent goroutines may have mutated.
+	wg := t.wg
+	if wg == nil {
 		return 0
 	}
 	waitStart := time.Now()
 	waitDone := make(chan struct{})
 	go func() {
-		t.wg.Wait()
+		wg.Wait()
 		close(waitDone)
 	}()
 	select {
 	case <-waitDone:
+		return time.Since(waitStart)
 	case <-time.After(wgWaitSigkillDeadline):
+		// Primary fallback: SIGKILL the recorded attach process.
 		if t.killAttach != nil {
 			pid, killErr := t.killAttach()
 			log.WarningLog.Printf("tmux: wg.Wait exceeded %v; SIGKILLing tmux attach-session pid=%d to unblock io.Copy",
@@ -384,12 +423,130 @@ func (t *TmuxSession) waitForAttachDrain() time.Duration {
 				log.WarningLog.Printf("tmux: SIGKILL attempt failed: %v", killErr)
 			}
 		} else {
-			log.WarningLog.Printf("tmux: wg.Wait exceeded %v but no attach process recorded; cannot SIGKILL",
+			// Last-resort fallback: locate the attach client via pgrep -f
+			// and SIGKILL by pid. We get here when the pairing invariant
+			// between t.ptmx and t.killAttach was violated (a bug
+			// elsewhere) — the Problem A fix should prevent this, but
+			// the safety net protects against any future regression.
+			log.WarningLog.Printf("tmux: wg.Wait exceeded %v but no attach process recorded; attempting pgrep-based fallback",
 				wgWaitSigkillDeadline)
+			if killed, err := killTmuxAttachByName(t.sanitizedName); err != nil {
+				log.WarningLog.Printf("tmux: pgrep fallback failed: %v", err)
+			} else if killed > 0 {
+				log.WarningLog.Printf("tmux: pgrep fallback killed %d attach-session process(es) for %s",
+					killed, t.sanitizedName)
+			} else {
+				log.WarningLog.Printf("tmux: pgrep fallback found no matching attach-session process for %s",
+					t.sanitizedName)
+			}
 		}
-		<-waitDone
+		// Secondary bound: even if the SIGKILL/pgrep attempts above
+		// failed (or there was nothing to kill), do not block the TUI
+		// indefinitely waiting for the io.Copy goroutine to drain. If
+		// it's still stuck after wgWaitAbandonDeadline more, abandon
+		// the wait, leak the goroutine, and return. See the package
+		// doc on wgWaitAbandonDeadline.
+		select {
+		case <-waitDone:
+			return time.Since(waitStart)
+		case <-time.After(wgWaitAbandonDeadline):
+			log.ErrorLog.Printf("tmux: wg.Wait exceeded %v even after SIGKILL/pgrep fallback; "+
+				"abandoning wg.Wait. The io.Copy goroutine may leak until the kernel drains the PTY. "+
+				"This is preferable to freezing the TUI but indicates a deeper PTY/tmux-server issue.",
+				wgWaitAbandonDeadline)
+			return wgWaitSigkillDeadline + wgWaitAbandonDeadline
+		}
 	}
-	return time.Since(waitStart)
+}
+
+// pgrepRunner abstracts the "pgrep -f <pattern>" call so tests can stub
+// process discovery without actually shelling out. Returns the matched
+// pids (one per line of pgrep stdout) or an error if pgrep fails for a
+// reason other than "no matches" (which pgrep signals with exit code 1
+// and the runner reports as len(pids) == 0, nil).
+type pgrepRunner func(pattern string) (pids []int, err error)
+
+// killByPid abstracts SIGKILL-by-pid so tests can record calls without
+// actually killing real processes.
+type killByPidFn func(pid int) error
+
+// pgrepRunnerVar / killByPidVar are package-level hooks tests can swap.
+// Production uses defaultPgrepRunner + defaultKillByPid via exec/syscall.
+var (
+	pgrepRunnerVar pgrepRunner = defaultPgrepRunner
+	killByPidVar   killByPidFn = defaultKillByPid
+)
+
+// killTmuxAttachByName locates tmux attach-session client(s) bound to the
+// given sanitized session name via `pgrep -f` and SIGKILLs each match.
+// Returns the number of processes signalled and any error encountered.
+//
+// The pgrep pattern is anchored to the literal `tmux attach-session ... -t
+// <name>` invocation we run in Restore(), so the worst that can happen is
+// missing a kill (graceful) — not killing the wrong process. A bare name
+// match could collide with other tmux invocations (e.g. `tmux kill-session
+// -t <name>`), which we explicitly do NOT want to interrupt mid-flight.
+//
+// Exit code 1 from pgrep means "no matches" and is treated as success
+// with 0 kills; any other exit code is surfaced as an error.
+func killTmuxAttachByName(sanitizedName string) (int, error) {
+	pattern := fmt.Sprintf(`tmux attach-session -t %s$`, regexp.QuoteMeta(sanitizedName))
+	pids, err := pgrepRunnerVar(pattern)
+	if err != nil {
+		return 0, fmt.Errorf("pgrep -f %q: %w", pattern, err)
+	}
+	killed := 0
+	for _, pid := range pids {
+		if killErr := killByPidVar(pid); killErr != nil {
+			log.WarningLog.Printf("tmux: SIGKILL pid=%d (pgrep fallback) failed: %v", pid, killErr)
+			continue
+		}
+		killed++
+	}
+	return killed, nil
+}
+
+// defaultPgrepRunner shells out to `pgrep -f <pattern>` and parses the
+// pid list. Exit status 1 = "no matches" returns (nil, nil); any other
+// non-zero exit is an error.
+func defaultPgrepRunner(pattern string) ([]int, error) {
+	out, err := exec.Command("pgrep", "-f", pattern).Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var pids []int
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pid, parseErr := strconv.Atoi(line)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing pgrep pid %q: %w", line, parseErr)
+		}
+		pids = append(pids, pid)
+	}
+	return pids, nil
+}
+
+// defaultKillByPid sends SIGKILL to the given pid. ESRCH (process already
+// exited) is silently ignored — the goal is "no longer a blocker", which
+// an already-dead process satisfies.
+func defaultKillByPid(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 type statusMonitor struct {
@@ -660,7 +817,14 @@ func (t *TmuxSession) Detach() {
 		t.cancel = nil
 		t.ctx = nil
 		t.wg = nil
-		t.killAttach = nil
+		// NOTE: t.killAttach is deliberately NOT cleared here. The Restore()
+		// call below sets a fresh killAttach paired with the new t.ptmx; if
+		// we cleared it here we'd leave the next Attach lifecycle in a
+		// ptmx-valid / killAttach-nil state, which is exactly the
+		// invariant break that caused the 51s detach hang in the #598
+		// follow-up regression. killAttach is now paired with t.ptmx
+		// inline below — set/cleared together. See the in-line clear next
+		// to "t.ptmx = nil".
 	}()
 
 	// Cancel context FIRST so monitorWindowSize goroutines exit promptly and
@@ -702,7 +866,13 @@ func (t *TmuxSession) Detach() {
 	// means a Restore failure (or a Close failure) can't leave the closed
 	// handle dangling on the struct — a subsequent Attach would otherwise
 	// silently bind goroutines to a closed file and hang (#464).
+	// Pair the clear with t.killAttach: the closure references the dying
+	// attachCmd whose process is being torn down, so it must not survive
+	// past this point. Restore() below will assign both fields together
+	// for the next attach lifecycle; this is the invariant the #598
+	// follow-up regression broke.
 	t.ptmx = nil
+	t.killAttach = nil
 
 	if closeErr != nil {
 		log.ErrorLog.Printf("error closing attach pty session: %v", closeErr)
