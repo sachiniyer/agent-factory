@@ -81,6 +81,15 @@ type TmuxSession struct {
 	ctx    context.Context
 	cancel func()
 	wg     *sync.WaitGroup
+
+	// killAttach SIGKILLs the tmux attach-session client child whose slave end
+	// of the PTY is keeping io.Copy(os.Stdout, t.ptmx) blocked in Attach().
+	// Set by Restore() once the PTY-backed child is running; cleared by the
+	// detach/teardown paths after wg drains. Returns (pid, err) so the
+	// fallback log can name the pid that was signalled. See Detach() for the
+	// "why" — this is the defensive escape hatch for #598 when the tmux
+	// server is too contended to let the client exit on its own.
+	killAttach func() (int, error)
 }
 
 const TmuxPrefix = "af_"
@@ -92,6 +101,16 @@ const TmuxPrefix = "af_"
 // separates "noise" from "regression of the contention fix". Exported as
 // a var so future regressions can be detected without recompiling.
 var slowDetachWgWaitThreshold = 5 * time.Second
+
+// wgWaitSigkillDeadline is the wg.Wait elapsed above which the
+// detach/teardown paths SIGKILL the tmux attach-session child to force
+// io.Copy to return. The 1s value is generous enough to absorb routine
+// kernel scheduling but short enough that the user-visible hang is bounded
+// regardless of tmux-server load — even with the pause-while-attached gate
+// in app/app.go, the daemon (separate process) still polls capture-pane
+// every second and can contend with the attach client's exit round-trip
+// (see the #598 follow-up). var, not const, so tests can lower it.
+var wgWaitSigkillDeadline = 1 * time.Second
 
 // ErrSessionGone is returned by PTY/tmux operations when the underlying tmux
 // session no longer exists. Non-daemon callers (preview pane, sidebar resize,
@@ -312,13 +331,65 @@ func (t *TmuxSession) Restore(workDir string) error {
 		return t.Start(workDir)
 	}
 
-	ptmx, err := t.ptyFactory.Start(exec.Command("tmux", "attach-session", "-t", t.sanitizedName))
+	attachCmd := exec.Command("tmux", "attach-session", "-t", t.sanitizedName)
+	ptmx, err := t.ptyFactory.Start(attachCmd)
 	if err != nil {
 		return fmt.Errorf("error opening PTY: %w", err)
 	}
 	t.ptmx = ptmx
 	t.monitor = newStatusMonitor()
+	// Save a closure that SIGKILLs the attach-session child so Detach() can
+	// force io.Copy(os.Stdout, t.ptmx) to unblock when the tmux server is
+	// too contended to let the client exit on its own. Closing ptmx (the
+	// master end) doesn't wake a blocking Read on a non-pollable character
+	// device — only the slave end closing (i.e. the client child exiting)
+	// does. See Detach() and the wgWaitSigkillDeadline comment for the
+	// full reasoning (#598 follow-up).
+	t.killAttach = func() (int, error) {
+		if attachCmd.Process == nil {
+			return 0, errors.New("attach process not started")
+		}
+		return attachCmd.Process.Pid, attachCmd.Process.Kill()
+	}
 	return nil
+}
+
+// waitForAttachDrain waits for the attach goroutines (io.Copy +
+// monitorWindowSize x2) to finish, falling back to SIGKILLing the
+// attach-session child if the wait exceeds wgWaitSigkillDeadline. The
+// fallback exists because closing the PTY master (t.ptmx) does not wake a
+// blocking Read on a character device — that read only returns when the
+// slave end closes, which happens when the tmux client child exits, which
+// requires a round-trip through a potentially contended tmux server (#598).
+// Returns the elapsed wait so callers that surface diagnostics about a slow
+// wg.Wait (Detach) can do so without re-measuring.
+func (t *TmuxSession) waitForAttachDrain() time.Duration {
+	if t.wg == nil {
+		return 0
+	}
+	waitStart := time.Now()
+	waitDone := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(wgWaitSigkillDeadline):
+		if t.killAttach != nil {
+			pid, killErr := t.killAttach()
+			log.WarningLog.Printf("tmux: wg.Wait exceeded %v; SIGKILLing tmux attach-session pid=%d to unblock io.Copy",
+				wgWaitSigkillDeadline, pid)
+			if killErr != nil {
+				log.WarningLog.Printf("tmux: SIGKILL attempt failed: %v", killErr)
+			}
+		} else {
+			log.WarningLog.Printf("tmux: wg.Wait exceeded %v but no attach process recorded; cannot SIGKILL",
+				wgWaitSigkillDeadline)
+		}
+		<-waitDone
+	}
+	return time.Since(waitStart)
 }
 
 type statusMonitor struct {
@@ -562,12 +633,13 @@ func (t *TmuxSession) DetachSafely() error {
 		t.attachCh = nil
 	}
 
-	if t.wg != nil {
-		t.wg.Wait()
-		t.wg = nil
-	}
+	// Same bounded wait as Detach (#598 follow-up) — share the SIGKILL
+	// fallback so the safety variant can't hang either.
+	_ = t.waitForAttachDrain()
+	t.wg = nil
 
 	t.ctx = nil
+	t.killAttach = nil
 
 	if len(errs) > 0 {
 		return fmt.Errorf("errors during detach: %v", errs)
@@ -588,6 +660,7 @@ func (t *TmuxSession) Detach() {
 		t.cancel = nil
 		t.ctx = nil
 		t.wg = nil
+		t.killAttach = nil
 	}()
 
 	// Cancel context FIRST so monitorWindowSize goroutines exit promptly and
@@ -609,20 +682,16 @@ func (t *TmuxSession) Detach() {
 	// Wait for the attach goroutines (io.Copy + monitorWindowSize x2) to
 	// finish before mutating t.ptmx. monitorWindowSize reads t.ptmx via
 	// updateWindowSize, so clearing the field before wg.Wait races against
-	// those reads (#512). Coordinated like Close already is.
-	waitStart := time.Now()
-	t.wg.Wait()
-	waitElapsed := time.Since(waitStart)
+	// those reads (#512). waitForAttachDrain bounds the wait by SIGKILLing
+	// the attach-session child if wg.Wait exceeds wgWaitSigkillDeadline —
+	// see #598 follow-up for the diagnosis.
+	waitElapsed := t.waitForAttachDrain()
 	log.WarningLog.Printf("[detach-trace] tmux.Detach-wg.Wait-done name=%s elapsed=%v",
 		t.sanitizedName, waitElapsed)
-	// Defense-in-depth against #598: closing the PTY master does not wake
-	// the io.Copy(os.Stdout, t.ptmx) goroutine on a character device —
-	// that read only returns when the tmux client child exits, which
-	// requires a round-trip through the tmux server. If the server is
-	// being starved by background capture-pane work (the original
-	// failure mode) wg.Wait can block for tens of seconds. The
-	// pause-while-attached gate in app/app.go should prevent this, so if
-	// it still happens we want to know loudly.
+	// Defense-in-depth: if wg.Wait still exceeded the slow threshold after
+	// the SIGKILL fallback ran, that means killAttach didn't unstick the
+	// goroutine — a deeper bug than what this fix targets. Keep the loud
+	// log so we hear about it.
 	if waitElapsed > slowDetachWgWaitThreshold {
 		log.ErrorLog.Printf("tmux.Detach: wg.Wait took %v — likely tmux server "+
 			"contention from background capture-pane operations. Sessions paused "+
@@ -671,13 +740,18 @@ func (t *TmuxSession) Close() error {
 		}
 	}
 
-	if t.wg != nil {
-		t.wg.Wait()
-		t.wg = nil
-	}
+	// Same bounded wait as Detach (#598 follow-up). The tmux kill-session
+	// below will eventually force the attach client to exit on its own, but
+	// that depends on the same tmux-server round-trip that #598 showed can
+	// stall for tens of seconds. Sharing the SIGKILL fallback keeps Close
+	// snappy when used from user-driven teardown paths (terminal pane
+	// close).
+	_ = t.waitForAttachDrain()
+	t.wg = nil
 
 	t.ptmx = nil
 	t.ctx = nil
+	t.killAttach = nil
 
 	if t.attachCh != nil {
 		close(t.attachCh)
