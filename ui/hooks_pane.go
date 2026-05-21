@@ -33,7 +33,9 @@ func (h *HooksPane) SetSize(width, height int) {
 func (h *HooksPane) SetCommands(commands []string) {
 	h.commands = commands
 	h.dirty = false
-	if h.selectedIdx >= len(h.commands) && h.selectedIdx > 0 {
+	if len(h.commands) == 0 {
+		h.selectedIdx = 0
+	} else if h.selectedIdx >= len(h.commands) {
 		h.selectedIdx = len(h.commands) - 1
 	}
 }
