@@ -124,7 +124,24 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 		var data []session.InstanceData
 		if err := json.Unmarshal(raw, &data); err != nil {
-			return existing, fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+			// Skip corrupted per-repo JSON instead of failing the whole
+			// refresh (#603). At startup (existing==nil) a single corrupt
+			// file used to abort NewManager and orphan every AutoYes
+			// session across every repo. On the polling path we also
+			// re-hydrate this repo's prior in-memory instances so a
+			// transient/persistent corruption doesn't silently drop
+			// already-running sessions — matching the pre-fix semantics
+			// of returning `existing` on parse failure.
+			log.WarningLog.Printf("daemon skipping repo %s: corrupted instances.json: %v", repoID, err)
+			if existing != nil {
+				keyPrefix := repoID + "\x00"
+				for key, inst := range existing {
+					if strings.HasPrefix(key, keyPrefix) {
+						next[key] = inst
+					}
+				}
+			}
+			continue
 		}
 
 		for _, item := range data {
