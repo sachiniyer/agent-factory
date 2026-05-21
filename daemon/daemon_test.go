@@ -1,15 +1,21 @@
 package daemon
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 func TestMain(m *testing.M) {
@@ -313,6 +319,108 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("fake daemon did not exit within 5s after StopDaemon")
+	}
+}
+
+// TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup is the regression
+// test for #603. Pre-fix, a single corrupted per-repo instances.json caused
+// refreshDaemonInstances(nil) to return (nil, err); NewManager propagated
+// that error so the daemon never started, orphaning every AutoYes session
+// across every repo. The fix logs a WARNING and continues, so valid repos
+// still load on startup.
+func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	// Capture warning output so we can assert the corrupted repo was named
+	// in the log line — silent skipping would re-introduce a different bug
+	// (invisible data drop).
+	var warnBuf bytes.Buffer
+	prevOut := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(io.MultiWriter(prevOut, &warnBuf))
+	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+
+	// Stub the session restore so we don't need a live tmux/PTY backend.
+	prevFromInstance := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
+
+	validRepoID := "valid-repo-a"
+	validData := []session.InstanceData{{Title: "valid-session"}}
+	validJSON, err := json.Marshal(validData)
+	if err != nil {
+		t.Fatalf("marshal valid: %v", err)
+	}
+	if err := config.SaveRepoInstances(validRepoID, validJSON); err != nil {
+		t.Fatalf("save valid repo: %v", err)
+	}
+
+	corruptedRepoID := "corrupted-repo-b"
+	if err := config.SaveRepoInstances(corruptedRepoID, json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupted repo: %v", err)
+	}
+
+	got, err := refreshDaemonInstances(nil)
+	if err != nil {
+		t.Fatalf("refreshDaemonInstances(nil) returned error on corrupted-repo input — daemon startup would fail and orphan every AutoYes session: %v", err)
+	}
+
+	validKey := daemonInstanceKey(validRepoID, "valid-session")
+	if _, ok := got[validKey]; !ok {
+		keys := make([]string, 0, len(got))
+		for k := range got {
+			keys = append(keys, k)
+		}
+		t.Fatalf("expected valid repo's session %q to load; got keys: %v", validKey, keys)
+	}
+
+	corruptedPrefix := corruptedRepoID + "\x00"
+	for k := range got {
+		if strings.HasPrefix(k, corruptedPrefix) {
+			t.Fatalf("corrupted repo %q must not contribute entries on startup; key=%q", corruptedRepoID, k)
+		}
+	}
+
+	if !strings.Contains(warnBuf.String(), corruptedRepoID) {
+		t.Fatalf("expected warning log to name corrupted repo %q so users can find the bad file; got: %q", corruptedRepoID, warnBuf.String())
+	}
+}
+
+// TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll covers
+// the polling path (existing != nil). The pre-fix code returned the entire
+// `existing` map on any unmarshal error, preserving prior in-memory state.
+// The fix replaces that with a per-repo skip — to keep the same "don't drop
+// running sessions on a transient corrupt write" guarantee, the skip path
+// re-hydrates this repo's prior keys from `existing` into the returned map.
+func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	prevOut := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(io.Discard)
+	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+
+	prevFromInstance := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
+
+	repoID := "corrupted-repo-c"
+	if err := config.SaveRepoInstances(repoID, json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupted repo: %v", err)
+	}
+
+	priorKey := daemonInstanceKey(repoID, "still-running")
+	prior := &session.Instance{}
+	existing := map[string]*session.Instance{priorKey: prior}
+
+	got, err := refreshDaemonInstances(existing)
+	if err != nil {
+		t.Fatalf("refreshDaemonInstances on poll path errored on corrupted-repo input: %v", err)
+	}
+	if got[priorKey] != prior {
+		t.Fatalf("polling refresh dropped prior in-memory instance for corrupted repo %q; running AutoYes session would be silently abandoned", repoID)
 	}
 }
 
