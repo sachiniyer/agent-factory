@@ -257,6 +257,14 @@ func (t *TerminalPane) Close() {
 	t.content = ""
 	t.fallback = false
 	t.fallbackText = ""
+	// Match CloseForInstance: a wholesale teardown of "current" state should
+	// also drop scroll-mode state so the pane is not left in a stuck
+	// isScrolling=true state if it is ever reused (#619).
+	if t.isScrolling {
+		t.isScrolling = false
+		t.viewport.SetContent("")
+		t.viewport.GotoTop()
+	}
 }
 
 // CloseForInstance kills the cached terminal session for a specific instance.
@@ -276,6 +284,15 @@ func (t *TerminalPane) CloseForInstance(title string) {
 		t.content = ""
 		t.fallback = false
 		t.fallbackText = ""
+		// Drop scroll-mode state too; otherwise UpdateContent's isScrolling
+		// guard suppresses the next selection's content updates until the
+		// user presses ESC (issue #619, regression of #407). Mirrors
+		// PreviewPane's instance-change reset.
+		if t.isScrolling {
+			t.isScrolling = false
+			t.viewport.SetContent("")
+			t.viewport.GotoTop()
+		}
 	}
 }
 
