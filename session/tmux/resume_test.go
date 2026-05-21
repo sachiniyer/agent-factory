@@ -40,6 +40,11 @@ func TestResumeProgram(t *testing.T) {
 		{"claude already -c", "claude -c", "claude -c"},
 		{"claude already --resume", "claude --resume foo", "claude --resume foo"},
 		{"claude already -r", "claude -r abc123", "claude -r abc123"},
+		// Long-option = syntax: claude accepts `--resume=<value>` so the
+		// rewrite must detect it and skip appending `--continue` (regression
+		// of #604 for claude — same flag-detection class as gemini).
+		{"claude already --resume=value", "claude --resume=abc123", "claude --resume=abc123"},
+		{"claude already --resume=latest", "claude --resume=latest", "claude --resume=latest"},
 
 		// Codex: insert "resume --last" after the codex token (subcommand
 		// position matters for codex; a tail append wouldn't parse).
@@ -128,6 +133,24 @@ func TestResumeProgram(t *testing.T) {
 			"gemini --resume 5",
 		},
 		{"gemini already -r", "gemini -r latest", "gemini -r latest"},
+		// Long-option = syntax: gemini accepts `--resume=<value>` and would
+		// concatenate duplicate values with commas ("5,latest") and exit 42
+		// if we appended a second flag (#604).
+		{
+			"gemini already --resume=numeric",
+			"gemini --resume=5",
+			"gemini --resume=5",
+		},
+		{
+			"gemini already --resume=latest",
+			"gemini --resume=latest",
+			"gemini --resume=latest",
+		},
+		{
+			"gemini already --resume=arbitrary",
+			"gemini --resume=anything",
+			"gemini --resume=anything",
+		},
 
 		// Unknown programs are passed through unchanged so unrelated CLIs
 		// aren't accidentally rewritten.
@@ -168,6 +191,8 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"gemini",
 		"gemini --model x",
 		"gemini --resume 5",
+		"gemini --resume=5",
+		"claude --resume=abc123",
 	} {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)
