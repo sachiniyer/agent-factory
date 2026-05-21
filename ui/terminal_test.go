@@ -426,6 +426,58 @@ func TestTerminalCloseForInstance(t *testing.T) {
 	tp.mu.Unlock()
 }
 
+// TestTerminalCloseForInstanceResetsScrollMode is a regression test for #619.
+// CloseForInstance must clear isScrolling when it clears the current-title
+// state; otherwise UpdateContent's isScrolling guard suppresses content
+// updates on the next selection, leaving the pane stuck on stale (empty)
+// content until the user presses ESC. Regression of #407.
+func TestTerminalCloseForInstanceResetsScrollMode(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	tp := NewTerminalPane()
+	tp.SetSize(80, 30)
+
+	// Instance whose terminal is being viewed in scroll mode.
+	closedInstance := makeStartedInstance(t, "closed")
+	defer func() { _ = closedInstance.Kill() }()
+
+	closedTs := newMockTmuxSession(t, "closed-scroll", mockCmdExec("history-content", true))
+	injectSession(tp, closedInstance.Title, closedTs, closedInstance.GetWorktreePath())
+
+	// Enter scroll mode on closedInstance — populates viewport, sets isScrolling=true.
+	require.NoError(t, tp.ScrollUp())
+	require.True(t, tp.IsScrolling(), "precondition: should be in scroll mode after ScrollUp")
+
+	// Close the instance whose terminal we are scrolling. With the bug,
+	// currentTitle/content are cleared but isScrolling stays true.
+	tp.CloseForInstance(closedInstance.Title)
+
+	tp.mu.Lock()
+	require.False(t, tp.isScrolling,
+		"CloseForInstance must reset isScrolling when clearing currentTitle (#619)")
+	require.Empty(t, tp.currentTitle, "currentTitle should be cleared")
+	tp.mu.Unlock()
+	require.False(t, tp.IsScrolling(), "IsScrolling() must report false after CloseForInstance")
+
+	// Selecting a new instance must now render its content, not be silently
+	// suppressed by the stale scroll-mode guard.
+	nextContent := "fresh-content"
+	nextInstance := makeStartedInstance(t, "next")
+	defer func() { _ = nextInstance.Kill() }()
+
+	nextTs := newMockTmuxSession(t, "next-scroll", mockCmdExec(nextContent, true))
+	injectSession(tp, nextInstance.Title, nextTs, nextInstance.GetWorktreePath())
+
+	require.NoError(t, tp.UpdateContent(nextInstance))
+
+	tp.mu.Lock()
+	require.False(t, tp.fallback, "should not be in fallback after UpdateContent on next instance")
+	require.Equal(t, nextContent, tp.content,
+		"UpdateContent must capture fresh content after CloseForInstance (would be empty if isScrolling guard still suppressed it)")
+	tp.mu.Unlock()
+}
+
 type failingPtyFactory struct{}
 
 func (f failingPtyFactory) Start(*exec.Cmd) (*os.File, error) {
