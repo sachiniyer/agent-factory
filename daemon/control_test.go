@@ -237,6 +237,90 @@ func TestManagerCreateSessionIgnoresLoadingGhost(t *testing.T) {
 	}
 }
 
+// TestManagerCreateSessionRejectsCaseVariantTitle is a regression test for
+// sachiniyer/agent-factory#605. sanitizeBranchName lowercases titles when
+// deriving git branch names, so two case-variant titles ("MyApp" and "myapp")
+// would map to the same branch. The daemon used to validate titles
+// case-sensitively, accept both, and let the second worktree create fail with
+// a cryptic git error. The daemon now rejects the case-variant up front with
+// a clear conflict error before any worktree or tmux setup runs.
+func TestManagerCreateSessionRejectsCaseVariantTitle(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := manager.CreateSession(CreateSessionRequest{
+		Title:    "MyApp",
+		RepoPath: repoPath,
+		Program:  "claude",
+		AutoYes:  true,
+	}); err != nil {
+		t.Fatalf("first CreateSession: %v", err)
+	}
+
+	_, err = manager.CreateSession(CreateSessionRequest{
+		Title:    "myapp",
+		RepoPath: repoPath,
+		Program:  "claude",
+		AutoYes:  true,
+	})
+	if err == nil {
+		t.Fatalf("expected case-variant title to be rejected")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "myapp") || !strings.Contains(msg, "MyApp") {
+		t.Fatalf("expected error to name both titles, got: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(msg), "case-insensitive") {
+		t.Fatalf("expected error to mention case-insensitive conflict, got: %v", err)
+	}
+}
+
+// TestManagerCreateSessionRejectsCaseVariantTitleFromDisk covers the disk-side
+// branch of the #605 fix: a case-variant title persisted to disk from a prior
+// daemon run must still be rejected when the manager loads fresh and a new
+// CreateSession arrives.
+func TestManagerCreateSessionRejectsCaseVariantTitleFromDisk(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	seeded, err := json.Marshal([]session.InstanceData{
+		{Title: "MyApp", Path: repoPath, Status: session.Running},
+	})
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := config.LoadState().SaveInstances(repo.ID, seeded); err != nil {
+		t.Fatalf("seed disk: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	_, err = manager.CreateSession(CreateSessionRequest{
+		Title:    "myapp",
+		RepoPath: repoPath,
+		Program:  "claude",
+		AutoYes:  true,
+	})
+	if err == nil {
+		t.Fatalf("expected case-variant title to be rejected by disk check")
+	}
+	if !strings.Contains(err.Error(), "MyApp") {
+		t.Fatalf("expected error to name the on-disk title, got: %v", err)
+	}
+}
+
 func TestControlServerCreateAndKillSession(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	installInstantBackend(t)

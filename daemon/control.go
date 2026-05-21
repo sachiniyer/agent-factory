@@ -655,26 +655,21 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 	if title == "" {
 		return fmt.Errorf("session title is required")
 	}
-	key := daemonInstanceKey(repoID, title)
-	if _, ok := m.reservedTitles[key]; ok {
-		return fmt.Errorf("session with title %q is already reserved", title)
-	}
-	if _, ok := m.instances[key]; ok {
-		return fmt.Errorf("session with title %q already exists", title)
-	}
-	for _, data := range diskData {
-		if data.Title != title {
-			continue
+	// Title comparisons are case-insensitive: sanitizeBranchName lowercases
+	// titles when deriving git branch names, so two case-variant titles
+	// (e.g. "MyApp" and "myapp") would map to the same branch and the
+	// second worktree create would fail with a cryptic git error. Reject
+	// the conflict here, before any worktree or tmux setup runs. (#605)
+	if existing, kind := m.findTitleConflictLocked(repoID, title, diskData); existing != "" {
+		switch {
+		case existing == title:
+			if kind == titleConflictReserved {
+				return fmt.Errorf("session with title %q is already reserved", title)
+			}
+			return fmt.Errorf("session with title %q already exists", title)
+		default:
+			return fmt.Errorf("session titled %q conflicts with existing session %q (case-insensitive comparison; sanitize collides at git layer)", title, existing)
 		}
-		// Loading entries are transient TUI state with an empty worktree
-		// path and cannot be restored. Older TUI binaries (#551) could
-		// persist them to disk on quit, where they would block title
-		// reuse forever. Treat them as ghosts that the next save will
-		// reap rather than as live reservations.
-		if data.Status == session.Loading {
-			continue
-		}
-		return fmt.Errorf("session with title %q already exists", title)
 	}
 	if remote {
 		candidate := session.Slugify(title)
@@ -695,6 +690,53 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		return fmt.Errorf("tmux session for title %q already exists", title)
 	}
 	return nil
+}
+
+type titleConflictKind int
+
+const (
+	titleConflictNone titleConflictKind = iota
+	titleConflictReserved
+	titleConflictLive
+	titleConflictDisk
+)
+
+// findTitleConflictLocked returns the existing title that conflicts with the
+// given candidate under case-insensitive comparison, along with the source of
+// the conflict. An empty result means the title is available. Comparisons are
+// case-insensitive so that titles which would collide at the git branch layer
+// (sanitizeBranchName lowercases) are rejected before worktree setup. (#605)
+func (m *Manager) findTitleConflictLocked(repoID, title string, diskData []session.InstanceData) (string, titleConflictKind) {
+	for key := range m.reservedTitles {
+		rid, existing := splitDaemonInstanceKey(key)
+		if rid == repoID && strings.EqualFold(existing, title) {
+			return existing, titleConflictReserved
+		}
+	}
+	for key, inst := range m.instances {
+		rid, _ := splitDaemonInstanceKey(key)
+		if rid != repoID || inst == nil {
+			continue
+		}
+		if strings.EqualFold(inst.Title, title) {
+			return inst.Title, titleConflictLive
+		}
+	}
+	for _, data := range diskData {
+		if !strings.EqualFold(data.Title, title) {
+			continue
+		}
+		// Loading entries are transient TUI state with an empty worktree
+		// path and cannot be restored. Older TUI binaries (#551) could
+		// persist them to disk on quit, where they would block title
+		// reuse forever. Treat them as ghosts that the next save will
+		// reap rather than as live reservations.
+		if data.Status == session.Loading {
+			continue
+		}
+		return data.Title, titleConflictDisk
+	}
+	return "", titleConflictNone
 }
 
 func (m *Manager) KillSession(req KillSessionRequest) error {
