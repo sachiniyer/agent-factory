@@ -57,7 +57,8 @@ func resumeProgram(program string) string {
 	switch agent {
 	case ProgramClaude:
 		for _, tok := range tokens {
-			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" {
+			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
+				strings.HasPrefix(tok, "--resume=") {
 				return program
 			}
 		}
@@ -86,7 +87,7 @@ func resumeProgram(program string) string {
 		return program + " --restore-chat-history"
 	case ProgramGemini:
 		for _, tok := range tokens {
-			if tok == "--resume" || tok == "-r" {
+			if tok == "--resume" || tok == "-r" || strings.HasPrefix(tok, "--resume=") {
 				return program
 			}
 		}
