@@ -99,6 +99,13 @@ func (g *GitWorktree) setupNewWorktree() error {
 	// Clean up any existing worktree first
 	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath) // Ignore error if worktree doesn't exist
 
+	// Prune stale worktree metadata BEFORE deleting the branch. If `worktree
+	// remove -f` above failed (corrupted .git pointer, etc.), git still tracks
+	// the worktree internally and `branch -D` will fail with "branch is
+	// checked out", leaving the orphaned branch behind and blocking
+	// `worktree add -b` below.
+	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
+
 	// Clean up any existing branch using git CLI (much faster than go-git PlainOpen)
 	_, _ = g.runGitCommand(g.repoPath, "branch", "-D", g.branchName) // Ignore error if branch doesn't exist
 
@@ -164,6 +171,17 @@ func (g *GitWorktree) Cleanup() error {
 		errs = append(errs, fmt.Errorf("failed to check worktree path: %w", err))
 	}
 
+	// Prune stale worktree metadata BEFORE deleting the branch. When the
+	// `git worktree remove -f` above fails (e.g. the worktree's `.git`
+	// pointer file was removed externally), git still tracks the worktree
+	// internally and `git branch -D` will fail with "branch is checked
+	// out", leaving an orphaned branch behind. Mirrors the ordering in
+	// CleanupWorktreesForRepo (#330). Best-effort: a prune failure here
+	// should not block the branch-delete attempt.
+	if err := g.Prune(); err != nil {
+		errs = append(errs, err)
+	}
+
 	// Only delete the branch if this session actually created it. When we
 	// reused a pre-existing branch via setupFromExistingBranch(), the branch
 	// may contain unrelated user work and must be preserved.
@@ -176,7 +194,8 @@ func (g *GitWorktree) Cleanup() error {
 		}
 	}
 
-	// Prune the worktree to clean up any remaining references
+	// Final prune to clean up any remaining references. Usually a no-op
+	// after the prune above, but mirrors CleanupWorktreesForRepo.
 	if err := g.Prune(); err != nil {
 		errs = append(errs, err)
 	}
