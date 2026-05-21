@@ -20,6 +20,12 @@ const (
 
 var aliasOutputRegex = regexp.MustCompile(`(?:aliased to|->|^[^/=\s]+\s*=)\s*(.+)`)
 
+// flagBoundaryRegex matches the first " -X" / " --X" sequence in a program
+// string, where X is an ASCII letter. The trailing letter requirement is
+// what distinguishes a real flag boundary from a literal " - " (space dash
+// space) that appears inside a directory name (issue #606).
+var flagBoundaryRegex = regexp.MustCompile(` -{1,2}[a-zA-Z]`)
+
 // GetConfigDir returns the path to the application's configuration directory.
 // If AGENT_FACTORY_HOME is set, it is used as the config directory.
 // Otherwise, defaults to ~/.agent-factory.
@@ -65,19 +71,21 @@ type Config struct {
 // shellQuoteProgram returns a tmux-safe form of program. tmux passes a
 // session's program string to `sh -c`, so paths containing spaces or
 // apostrophes must be shell-quoted or the shell will split them. The input
-// may be a bare program path or a path followed by flags; the first " -"
-// is treated as the flag boundary so only the path portion is quoted and
-// trailing flags are preserved verbatim. Values whose path portion is
-// already wrapped in matching single or double quotes are returned
-// unchanged to avoid double-quoting user-provided config.
+// may be a bare program path or a path followed by flags; the first
+// space-dash-letter sequence is treated as the flag boundary so only the
+// path portion is quoted and trailing flags are preserved verbatim. The
+// trailing-letter requirement avoids false matches on literal " - " (space
+// dash space) inside a directory name (issue #606). Values whose path
+// portion is already wrapped in matching single or double quotes are
+// returned unchanged to avoid double-quoting user-provided config.
 func shellQuoteProgram(program string) string {
 	if program == "" {
 		return program
 	}
 
 	path, suffix := program, ""
-	if i := strings.Index(program, " -"); i >= 0 {
-		path, suffix = program[:i], program[i:]
+	if loc := flagBoundaryRegex.FindStringIndex(program); loc != nil {
+		path, suffix = program[:loc[0]], program[loc[0]:]
 	}
 
 	if len(path) >= 2 {
