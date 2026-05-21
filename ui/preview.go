@@ -181,10 +181,10 @@ func (p *PreviewPane) String() string {
 
 	if p.previewState.fallback {
 		// TabbedWindow.SetSize already subtracts borders/margins/padding from
-		// p.height, so we mirror the normal-mode subtraction here to avoid
-		// double-counting chrome and truncating the welcome ASCII art on
-		// smaller terminals.
-		availableHeight := p.height - 1
+		// p.height, so we use p.height directly to match normal mode (which
+		// pads to the full p.height). Subtracting again here would
+		// double-count chrome and leave a trailing blank line (#616).
+		availableHeight := p.height
 
 		// Count the number of lines in the fallback text
 		fallbackLines := len(strings.Split(p.previewState.text, "\n"))

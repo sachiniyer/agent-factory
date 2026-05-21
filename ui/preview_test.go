@@ -472,8 +472,8 @@ func TestPreviewFallbackHeightNoDoubleCounting(t *testing.T) {
 
 	t.Run("matches normal-mode height budget", func(t *testing.T) {
 		// At any height, the fallback should compute the same availableHeight
-		// as normal mode (p.height - 1), so the rendered output fills the
-		// same number of lines.
+		// as normal mode (p.height), so the rendered output fills the same
+		// number of lines.
 		for _, h := range []int{20, 25, 30, 50} {
 			p := NewPreviewPane()
 			p.SetSize(80, h)
@@ -482,20 +482,54 @@ func TestPreviewFallbackHeightNoDoubleCounting(t *testing.T) {
 			rendered := p.String()
 			lines := strings.Split(rendered, "\n")
 
-			// We expect at least max(fallbackTextLines, h-1) lines; the pane
+			// We expect at least max(fallbackTextLines, h) lines; the pane
 			// pads to fill the available area when content is shorter than
 			// the budget.
-			expected := h - 1
+			expected := h
 			if fallbackTextLines > expected {
 				expected = fallbackTextLines
 			}
 			require.GreaterOrEqual(t, len(lines), expected,
-				"height=%d: fallback must fill p.height-1 (no double-counting of chrome)",
+				"height=%d: fallback must fill p.height (no double-counting of chrome)",
 				h)
 			require.Contains(t, rendered, "msg",
 				"height=%d: fallback message must remain visible", h)
 		}
 	})
+}
+
+// TestPreviewFallbackMatchesNormalModeHeight is the regression test for #616.
+// Before the fix, fallback rendering computed availableHeight as p.height - 1
+// while normal mode (post-#405) padded to the full p.height, so fallback views
+// rendered one line shorter than normal views and left a trailing blank line.
+// Both modes must now render the same number of lines for the same p.height.
+func TestPreviewFallbackMatchesNormalModeHeight(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	// Heights large enough that the height budget — not the fallback ASCII
+	// art — bounds the rendered output. At smaller heights the ASCII art
+	// overflows the budget and the two modes are not comparable.
+	for _, h := range []int{20, 25, 30, 50} {
+		// Normal mode: short content padded to full height.
+		normal := NewPreviewPane()
+		normal.SetSize(80, h)
+		normal.previewState = previewState{
+			fallback: false,
+			text:     "line1\nline2",
+		}
+		normalLines := len(strings.Split(normal.String(), "\n"))
+
+		// Fallback mode at the same height with a short message.
+		fb := NewPreviewPane()
+		fb.SetSize(80, h)
+		fb.setFallbackState("msg")
+		fbLines := len(strings.Split(fb.String(), "\n"))
+
+		require.Equal(t, normalLines, fbLines,
+			"height=%d: fallback and normal mode must render the same number of lines",
+			h)
+	}
 }
 
 // setupTwoInstances creates two independent instances in the same test so we
