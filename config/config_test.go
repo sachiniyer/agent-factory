@@ -417,6 +417,23 @@ func TestShellQuoteProgram(t *testing.T) {
 			want: "'/opt/My Tools/claude' -v --dangerously-skip-permissions",
 		},
 		{
+			// Regression for #606: " - " in a directory name must not be
+			// treated as a flag boundary.
+			name: "dir name contains space-dash-space",
+			in:   "/home/user/my - project/claude",
+			want: "'/home/user/my - project/claude'",
+		},
+		{
+			name: "dir name contains space-dash-space, with long flag",
+			in:   "/home/user/my - project/claude --foo",
+			want: "'/home/user/my - project/claude' --foo",
+		},
+		{
+			name: "dir name contains multiple space-dash-space, with flag and value",
+			in:   "/home/user/a - b - c/aider --model x",
+			want: "'/home/user/a - b - c/aider' --model x",
+		},
+		{
 			name: "empty string",
 			in:   "",
 			want: "",
