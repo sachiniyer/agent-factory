@@ -254,6 +254,65 @@ func TestCleanup_DeletesBranchWeCreated(t *testing.T) {
 		"branch created by the session should be deleted by Cleanup")
 }
 
+// TestCleanup_PrunesBeforeBranchDelete is a regression test for #611. When
+// `git worktree remove -f` fails (e.g. the worktree's `.git` pointer file
+// has been removed externally), git retains internal worktree metadata.
+// Without an intervening `git worktree prune`, `git branch -D` reports the
+// branch is "in use" and the orphaned branch is left behind.
+// CleanupWorktreesForRepo already prunes before branch deletion (#330);
+// this verifies GitWorktree.Cleanup() follows the same order.
+func TestCleanup_PrunesBeforeBranchDelete(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	repoRoot := createGitRepo(t)
+
+	// Initial commit so HEAD is valid (required for `worktree add`).
+	cmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, branchName, err := NewGitWorktree(repoRoot, "corrupted")
+	require.NoError(t, err)
+
+	// Setup() creates a fresh branch and worktree owned by this session.
+	require.NoError(t, gw.Setup())
+	require.True(t, gw.BranchCreatedByUs(),
+		"BranchCreatedByUs should be true when Setup created a new branch")
+
+	// Corrupt the worktree by removing its `.git` pointer file. This makes
+	// `git worktree remove -f` fail validation; without the prune-before-delete
+	// fix, git still tracks the worktree internally and blocks `branch -D`.
+	require.NoError(t, os.Remove(filepath.Join(gw.GetWorktreePath(), ".git")))
+
+	// Cleanup may return errors from the failed `worktree remove`, but it
+	// must still delete the branch — that's the user-visible regression.
+	_ = gw.Cleanup()
+
+	// The branch should be gone — this is what regresses without the prune
+	// before `git branch -D`.
+	branchCmd := exec.Command("git", "-C", repoRoot, "branch", "--list", branchName)
+	out, err = branchCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Empty(t, strings.TrimSpace(string(out)),
+		"session-owned branch should be deleted even when `git worktree remove` fails on a corrupted worktree")
+
+	// Only the main worktree should remain — no stale linked-worktree metadata.
+	listCmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	out, err = listCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Equal(t, 1, strings.Count(string(out), "worktree "),
+		"only the main worktree should remain, got:\n%s", string(out))
+}
+
 func TestNewGitWorktreeFromStorage_EmptyWorktreePath(t *testing.T) {
 	_, err := NewGitWorktreeFromStorage("/some/repo", "", "session", "branch", "abc123", false, true)
 	require.Error(t, err)
