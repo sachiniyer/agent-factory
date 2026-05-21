@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // WithFileLock acquires an exclusive flock on a .lock file adjacent to the target path,
@@ -93,20 +95,26 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("failed to rename temp file to %s: %w", path, err)
 	}
 
+	// Rename succeeded: data is visible on disk. The contract
+	// "err == nil ⟺ data is persisted" must hold from this point on, so the
+	// parent-directory fsync below (which only affects crash durability, not
+	// visibility) becomes best-effort. Mark success so the deferred temp-file
+	// cleanup is a no-op and downstream callers don't roll back persisted data.
+	success = true
+
 	// Fsync the parent directory to ensure the rename (new directory entry) is
-	// persisted. Without this, a crash right after rename could lose the file.
+	// persisted across a crash. Failures here are logged but not returned --
+	// the data is already visible to readers.
 	dirFd, err := os.Open(dir)
 	if err != nil {
-		return fmt.Errorf("failed to open directory %s for sync: %w", dir, err)
+		log.WarningLog.Printf("AtomicWriteFile: failed to open directory %s for post-rename sync: %v", dir, err)
+		return nil
 	}
 	if err := dirFd.Sync(); err != nil {
-		dirFd.Close()
-		return fmt.Errorf("failed to sync directory %s: %w", dir, err)
+		log.WarningLog.Printf("AtomicWriteFile: failed to fsync directory %s after rename of %s: %v", dir, path, err)
 	}
 	if err := dirFd.Close(); err != nil {
-		return fmt.Errorf("failed to close directory %s: %w", dir, err)
+		log.WarningLog.Printf("AtomicWriteFile: failed to close directory %s after post-rename sync of %s: %v", dir, path, err)
 	}
-
-	success = true
 	return nil
 }
