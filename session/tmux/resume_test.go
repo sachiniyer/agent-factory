@@ -45,6 +45,10 @@ func TestResumeProgram(t *testing.T) {
 		// of #604 for claude — same flag-detection class as gemini).
 		{"claude already --resume=value", "claude --resume=abc123", "claude --resume=abc123"},
 		{"claude already --resume=latest", "claude --resume=latest", "claude --resume=latest"},
+		// Short-option = syntax: detect defensively so we don't accumulate
+		// flags if the CLI accepts `-r=VALUE` (same class as gemini's #633).
+		{"claude already -r=value", "claude -r=abc123", "claude -r=abc123"},
+		{"claude already -r=latest", "claude -r=latest", "claude -r=latest"},
 
 		// Codex: insert "resume --last" after the codex token (subcommand
 		// position matters for codex; a tail append wouldn't parse).
@@ -61,6 +65,30 @@ func TestResumeProgram(t *testing.T) {
 		// Codex: already-has-resume cases — no-op.
 		{"codex already resume", "codex resume --last", "codex resume --last"},
 		{"codex exec already resume", "codex exec resume --last", "codex exec resume --last"},
+		// Codex: "resume" appearing in flag-value position must NOT trip
+		// the already-has-resume check (#632). The subcommand can only
+		// appear immediately after `codex` or after `codex exec`, so the
+		// detection is position-aware.
+		{
+			"codex profile named resume",
+			"codex --profile resume",
+			"codex resume --last --profile resume",
+		},
+		{
+			"codex profile=resume equals form",
+			"codex --profile=resume",
+			"codex resume --last --profile=resume",
+		},
+		{
+			"codex exec with profile named resume",
+			"codex exec --profile resume",
+			"codex exec resume --last --profile resume",
+		},
+		{
+			"codex model value named resume",
+			"codex --model resume",
+			"codex resume --last --model resume",
+		},
 
 		// Aider: append --restore-chat-history at the end. Position-
 		// independent flag, so the original program string is preserved
@@ -151,6 +179,12 @@ func TestResumeProgram(t *testing.T) {
 			"gemini --resume=anything",
 			"gemini --resume=anything",
 		},
+		// Short-option = syntax: gemini accepts `-r=<value>` and would
+		// concatenate duplicate values with commas ("5,latest") and exit 1
+		// if we appended a second flag (#633).
+		{"gemini already -r=numeric", "gemini -r=5", "gemini -r=5"},
+		{"gemini already -r=latest", "gemini -r=latest", "gemini -r=latest"},
+		{"gemini already -r=arbitrary", "gemini -r=anything", "gemini -r=anything"},
 
 		// Unknown programs are passed through unchanged so unrelated CLIs
 		// aren't accidentally rewritten.
@@ -175,6 +209,17 @@ func TestResumeProgram_QuotedCodexPath(t *testing.T) {
 	require.Equal(t, "'/path with space/codex' resume --last --model gpt-5", got)
 }
 
+// TestResumeProgram_CodexProfileResumeFalsePositive guards #632: the codex
+// "already has resume" check must be position-aware. A profile named "resume"
+// (or any other flag value of "resume") must not be mistaken for the resume
+// subcommand, otherwise the user loses their conversation on respawn.
+func TestResumeProgram_CodexProfileResumeFalsePositive(t *testing.T) {
+	in := "codex --profile resume"
+	want := "codex resume --last --profile resume"
+	got := resumeProgram(in)
+	require.Equal(t, want, got, "BUG: 'resume' in flag value position should not be detected as subcommand")
+}
+
 // TestResumeProgram_Idempotent verifies that running the rewrite twice
 // produces the same string as running it once — defense against repeated
 // Restore() calls (e.g. user kills tmux multiple times in a row).
@@ -192,7 +237,13 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"gemini --model x",
 		"gemini --resume 5",
 		"gemini --resume=5",
+		"gemini -r=5",
+		"gemini -r=latest",
 		"claude --resume=abc123",
+		"claude -r=abc123",
+		"codex --profile resume",
+		"codex --profile=resume",
+		"codex exec --profile resume",
 	} {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)
