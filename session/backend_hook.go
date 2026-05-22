@@ -586,10 +586,3 @@ func (b *HookBackend) getPTY(title string) *hookPTY {
 	}
 	return b.ptys[title]
 }
-
-// previewFromPTY extracts visible lines from the raw buffer.
-func previewFromPTY(raw []byte) string {
-	s := string(raw)
-	lines := strings.Split(s, "\n")
-	return strings.Join(lines, "\n")
-}

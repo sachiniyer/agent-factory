@@ -1,16 +1,15 @@
 package ui
 
 import (
-	"errors"
 	"fmt"
-	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
+
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 const readyIcon = "● "
@@ -43,59 +42,6 @@ var mainTitle = lipgloss.NewStyle().
 var autoYesStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.Color("#1a1a1a"))
-
-type List struct {
-	items         []*session.Instance
-	selectedIdx   int
-	height, width int
-	renderer      *InstanceRenderer
-	autoyes       bool
-
-	// map of repo name to number of instances using it. Used to display the repo name only if there are
-	// multiple repos in play.
-	repos map[string]int
-}
-
-func NewList(spinner *spinner.Model, autoYes bool) *List {
-	return &List{
-		items:    []*session.Instance{},
-		renderer: &InstanceRenderer{spinner: spinner},
-		repos:    make(map[string]int),
-		autoyes:  autoYes,
-	}
-}
-
-// SetSize sets the height and width of the list.
-func (l *List) SetSize(width, height int) {
-	l.width = width
-	l.height = height
-	l.renderer.setWidth(width)
-}
-
-// SetSessionPreviewSize sets the height and width for the tmux sessions. This makes the stdout line have the correct
-// width and height. Instances whose tmux session has vanished are skipped
-// silently (ErrSessionGone) so an external `tmux kill-session` doesn't spam
-// ERROR logs on every window-resize (#496).
-func (l *List) SetSessionPreviewSize(width, height int) (err error) {
-	for i, item := range l.items {
-		if !item.Started() {
-			continue
-		}
-
-		if innerErr := item.SetPreviewSize(width, height); innerErr != nil {
-			if errors.Is(innerErr, tmux.ErrSessionGone) {
-				continue
-			}
-			err = errors.Join(
-				err, fmt.Errorf("could not set preview size for instance %d: %v", i, innerErr))
-		}
-	}
-	return
-}
-
-func (l *List) NumInstances() int {
-	return len(l.items)
-}
 
 // InstanceRenderer handles rendering of session.Instance objects
 type InstanceRenderer struct {
@@ -217,170 +163,4 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	text := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return text
-}
-
-func (l *List) String() string {
-	const titleText = " Instances "
-	const autoYesText = " auto-yes "
-
-	// Write the title.
-	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("\n")
-
-	// Write title line
-	// add padding of 2 because the border on list items adds some extra characters
-	titleWidth := AdjustPreviewWidth(l.width) + 2
-	if !l.autoyes {
-		b.WriteString(lipgloss.Place(
-			titleWidth, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(titleText)))
-	} else {
-		title := lipgloss.Place(
-			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(titleText))
-		autoYes := lipgloss.Place(
-			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom, autoYesStyle.Render(autoYesText))
-		b.WriteString(lipgloss.JoinHorizontal(
-			lipgloss.Top, title, autoYes))
-	}
-
-	b.WriteString("\n")
-	b.WriteString("\n")
-
-	// Render the list.
-	for i, item := range l.items {
-		b.WriteString(l.renderer.Render(item, i+1, i == l.selectedIdx, len(l.repos) > 1))
-		if i != len(l.items)-1 {
-			b.WriteString("\n\n")
-		}
-	}
-	return lipgloss.Place(l.width, l.height, lipgloss.Left, lipgloss.Top, b.String())
-}
-
-// Down selects the next item in the list.
-func (l *List) Down() {
-	if len(l.items) == 0 {
-		return
-	}
-	if l.selectedIdx < len(l.items)-1 {
-		l.selectedIdx++
-	}
-}
-
-// Kill kills the selected instance and removes it from the list. It returns
-// an error if the underlying kill fails, in which case the instance is NOT
-// removed so the user can retry.
-func (l *List) Kill() error {
-	if len(l.items) == 0 {
-		return nil
-	}
-	targetInstance := l.items[l.selectedIdx]
-
-	// Capture repo name before Kill(), because Kill() sets started=false
-	// which causes RepoName() to fail.
-	repoName, repoErr := targetInstance.RepoName()
-
-	// Kill the tmux session
-	if err := targetInstance.Kill(); err != nil {
-		return fmt.Errorf("could not kill instance: %w", err)
-	}
-
-	// If you delete the last one in the list, select the previous one.
-	if l.selectedIdx == len(l.items)-1 {
-		defer l.Up()
-	}
-
-	// Unregister the reponame.
-	if repoErr != nil {
-		log.ErrorLog.Printf("could not get repo name: %v", repoErr)
-	} else {
-		l.rmRepo(repoName)
-	}
-
-	// Since there's items after this, the selectedIdx can stay the same.
-	l.items = append(l.items[:l.selectedIdx], l.items[l.selectedIdx+1:]...)
-	return nil
-}
-
-func (l *List) Attach() (chan struct{}, error) {
-	if len(l.items) == 0 {
-		return nil, fmt.Errorf("no items")
-	}
-	targetInstance := l.items[l.selectedIdx]
-	return targetInstance.Attach()
-}
-
-// Up selects the prev item in the list.
-func (l *List) Up() {
-	if len(l.items) == 0 {
-		return
-	}
-	if l.selectedIdx > 0 {
-		l.selectedIdx--
-	}
-}
-
-func (l *List) addRepo(repo string) {
-	if _, ok := l.repos[repo]; !ok {
-		l.repos[repo] = 0
-	}
-	l.repos[repo]++
-}
-
-func (l *List) rmRepo(repo string) {
-	if _, ok := l.repos[repo]; !ok {
-		log.ErrorLog.Printf("repo %s not found", repo)
-		return
-	}
-	l.repos[repo]--
-	if l.repos[repo] == 0 {
-		delete(l.repos, repo)
-	}
-}
-
-// AddInstance adds a new instance to the list. It returns a finalizer function that should be called when the instance
-// is started. If the instance was restored from storage or is paused, you can call the finalizer immediately.
-// When creating a new one and entering the name, you want to call the finalizer once the name is done.
-func (l *List) AddInstance(instance *session.Instance) (finalize func()) {
-	l.items = append(l.items, instance)
-	// The finalizer registers the repo name once the instance is started.
-	return func() {
-		repoName, err := instance.RepoName()
-		if err != nil {
-			log.ErrorLog.Printf("could not get repo name: %v", err)
-			return
-		}
-
-		l.addRepo(repoName)
-	}
-}
-
-// GetSelectedInstance returns the currently selected instance
-func (l *List) GetSelectedInstance() *session.Instance {
-	if len(l.items) == 0 {
-		return nil
-	}
-	return l.items[l.selectedIdx]
-}
-
-// SetSelectedInstance sets the selected index. Noop if the index is out of bounds.
-func (l *List) SetSelectedInstance(idx int) {
-	if idx >= len(l.items) {
-		return
-	}
-	l.selectedIdx = idx
-}
-
-// SelectInstance finds and selects the given instance in the list.
-func (l *List) SelectInstance(target *session.Instance) {
-	for i, inst := range l.items {
-		if inst == target {
-			l.SetSelectedInstance(i)
-			return
-		}
-	}
-}
-
-// GetInstances returns all instances in the list
-func (l *List) GetInstances() []*session.Instance {
-	return l.items
 }
