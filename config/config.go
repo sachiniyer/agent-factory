@@ -20,11 +20,14 @@ const (
 
 var aliasOutputRegex = regexp.MustCompile(`(?:aliased to|->|^[^/=\s]+\s*=)\s*(.+)`)
 
-// flagBoundaryRegex matches the first " -X" / " --X" sequence in a program
-// string, where X is an ASCII letter. The trailing letter requirement is
-// what distinguishes a real flag boundary from a literal " - " (space dash
-// space) that appears inside a directory name (issue #606).
-var flagBoundaryRegex = regexp.MustCompile(` -{1,2}[a-zA-Z]`)
+// flagBoundaryRegex matches the first " -X" / " --X" flag token in a
+// program string, where X is an ASCII letter and the token runs to the
+// next space or end-of-string without containing a path separator. The
+// trailing-letter requirement avoids matching literal " - " (space dash
+// space) inside a directory name (issue #606); the "no '/' before the
+// terminator" requirement avoids matching " -v2/" or " -Main/" inside a
+// directory name (issue #631).
+var flagBoundaryRegex = regexp.MustCompile(` -{1,2}[a-zA-Z][^/ ]*( |$)`)
 
 // GetConfigDir returns the path to the application's configuration directory.
 // If AGENT_FACTORY_HOME is set, it is used as the config directory.

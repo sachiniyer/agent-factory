@@ -434,6 +434,36 @@ func TestShellQuoteProgram(t *testing.T) {
 			want: "'/home/user/a - b - c/aider' --model x",
 		},
 		{
+			// Regression for #631: " -v2/" inside a directory name must not
+			// be treated as a flag boundary — the dash-letter sequence is
+			// followed by "/" before the next space, so it's part of a path
+			// segment, not a flag.
+			name: "dir name contains space-dash-letter-digits-slash",
+			in:   "/tmp/My Projects -v2/claude",
+			want: "'/tmp/My Projects -v2/claude'",
+		},
+		{
+			// Regression for #631: same shape but with a real trailing flag.
+			// Only the trailing " --bar" should be treated as the boundary.
+			name: "dir name contains space-dash-letters-slash, with long flag",
+			in:   "/tmp/Apps -Main/claude --bar",
+			want: "'/tmp/Apps -Main/claude' --bar",
+		},
+		{
+			// Regression for #631: " -v/" inside a directory name (no
+			// trailing chars between letter and "/") must not be a boundary.
+			name: "dir name ends with space-dash-letter-slash",
+			in:   "/tmp/foo -v/claude",
+			want: "'/tmp/foo -v/claude'",
+		},
+		{
+			// Real short flag (followed by space) must still be detected
+			// even when long flags also follow.
+			name: "short flag followed by long flag",
+			in:   "/path/agent -v --verbose",
+			want: "/path/agent -v --verbose",
+		},
+		{
 			name: "empty string",
 			in:   "",
 			want: "",
