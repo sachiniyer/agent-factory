@@ -39,6 +39,18 @@ jobs:
             exit 1
           fi
 
+      - name: Check for dead code
+        run: |
+          # Pin to a release compatible with the project's Go 1.24 toolchain.
+          # Newer x/tools (v0.45.0+) requires Go 1.25+.
+          go install golang.org/x/tools/cmd/deadcode@v0.36.0
+          out=$("$(go env GOPATH)/bin/deadcode" -test ./...)
+          if [ -n "$out" ]; then
+            echo "::error::Dead code detected. Remove the following or refactor so it's reachable:"
+            echo "$out"
+            exit 1
+          fi
+
   test:
     name: Test
     runs-on: ubuntu-latest

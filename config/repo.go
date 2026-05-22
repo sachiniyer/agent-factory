@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -145,17 +144,4 @@ func repoContextFromRoot(root string) *RepoContext {
 		Root: root,
 		ID:   RepoIDFromRoot(root),
 	}
-}
-
-// DataDir returns the path ~/.agent-factory/<subdir>/<repoID>/, creating it if necessary.
-func (rc *RepoContext) DataDir(subdir string) (string, error) {
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(configDir, subdir, rc.ID)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create data directory: %w", err)
-	}
-	return dir, nil
 }

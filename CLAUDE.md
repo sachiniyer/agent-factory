@@ -86,7 +86,10 @@ gofmt -w .
 # Must pass before PR merge
 golangci-lint run --timeout=3m --fast
 gofmt -l .   # should produce no output
+deadcode -test ./...   # should produce no output
 ```
+
+Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@latest`; CI installs the same binary on every run.
 
 ## Project Structure
 

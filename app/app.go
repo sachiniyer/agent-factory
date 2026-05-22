@@ -764,39 +764,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	return m.handleDefaultKeyPress(msg, name)
 }
 
-// jumpToInstance navigates the sidebar to the instance with the given title.
-func (m *home) jumpToInstance(title string) tea.Cmd {
-	for _, inst := range m.sidebar.GetInstances() {
-		if inst.Title == title {
-			// Expand instances section
-			m.sidebar.ExpandInstancesSection()
-			m.sidebar.SelectInstance(inst)
-			m.contentPane.SetMode(ui.ContentModeInstance)
-			return m.selectionChanged()
-		}
-	}
-	return m.handleError(fmt.Errorf("instance %q not found", title))
-}
-
-// attachToInstance finds the instance by title and attaches to it.
-func (m *home) attachToInstance(title string) (tea.Model, tea.Cmd) {
-	for _, inst := range m.sidebar.GetInstances() {
-		if inst.Title == title {
-			if inst.GetStatus() == session.Loading || !inst.TmuxAlive() {
-				return m, m.handleError(fmt.Errorf("instance %q is not ready", title))
-			}
-			m.sidebar.ExpandInstancesSection()
-			m.sidebar.SelectInstance(inst)
-			m.contentPane.SetMode(ui.ContentModeInstance)
-			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-				return m.attachOverlayCallback("attachToInstance",
-					fmt.Sprintf(" title=%s", title), inst.Attach)
-			})
-		}
-	}
-	return m, m.handleError(fmt.Errorf("instance %q not found", title))
-}
-
 // attachOverlayCallback runs the attach-overlay onDismiss lifecycle: emits
 // the detach-trace markers, invokes attach, arms the attached flag for the
 // duration of `<-ch`, then returns the tea.Cmd to emit the
@@ -810,10 +777,10 @@ func (m *home) attachToInstance(title string) (tea.Model, tea.Cmd) {
 // next process restart — exactly the kind of regression #598 wants to
 // avoid creating while fixing the original hang.
 //
-// Extracted so the three attach call-sites (handleEnter sidebar, handleEnter
-// terminal-tab, attachToInstance) all funnel through one place — and so the
-// pause-while-attached gating + the flag-clears-on-error path are testable
-// without spinning up real tmux.
+// Extracted so the attach call-sites (handleEnter sidebar, handleEnter
+// terminal-tab) all funnel through one place — and so the pause-while-attached
+// gating + the flag-clears-on-error path are testable without spinning up
+// real tmux.
 func (m *home) attachOverlayCallback(label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
 	detachTraceMark(label + "-onDismiss-entry" + traceSuffix)
 	ch, err := attach()

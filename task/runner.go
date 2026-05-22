@@ -33,32 +33,6 @@ func getPendingInstancesPath() (string, error) {
 	return filepath.Join(configDir, pendingInstancesFileName), nil
 }
 
-// appendPendingInstance appends an instance to the pending_instances.json file.
-// This file is used by the runner to avoid racing with the daemon on state.json.
-func appendPendingInstance(data session.InstanceData) error {
-	path, err := getPendingInstancesPath()
-	if err != nil {
-		return err
-	}
-
-	return config.WithFileLock(path, func() error {
-		var pending []session.InstanceData
-		if raw, err := os.ReadFile(path); err == nil {
-			if err := json.Unmarshal(raw, &pending); err != nil {
-				log.WarningLog.Printf("failed to parse pending instances file, starting fresh: %v", err)
-				pending = nil
-			}
-		}
-		pending = append(pending, data)
-
-		out, err := json.MarshalIndent(pending, "", "  ")
-		if err != nil {
-			return err
-		}
-		return config.AtomicWriteFile(path, out, 0644)
-	})
-}
-
 // LoadAndClearPendingInstances reads pending instances written by task runs
 // and removes the file. The TUI should call this at startup to merge them in.
 func LoadAndClearPendingInstances() ([]session.InstanceData, error) {

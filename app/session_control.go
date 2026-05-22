@@ -49,12 +49,6 @@ func SetSessionStarterForTest(f func(*session.Instance, sessionStartRequest) (*s
 	return func() { startSessionThroughDaemon = prev }
 }
 
-func SetSessionKillerForTest(f func(title, repoID string) error) func() {
-	prev := killSessionThroughDaemon
-	killSessionThroughDaemon = f
-	return func() { killSessionThroughDaemon = prev }
-}
-
 func SetRemoteImporterForTest(f func(repoPath string) ([]session.InstanceData, error)) func() {
 	prev := importRemoteSessionsThroughDaemon
 	importRemoteSessionsThroughDaemon = f
