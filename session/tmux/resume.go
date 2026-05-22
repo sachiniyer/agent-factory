@@ -58,20 +58,22 @@ func resumeProgram(program string) string {
 	case ProgramClaude:
 		for _, tok := range tokens {
 			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
-				strings.HasPrefix(tok, "--resume=") {
+				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") {
 				return program
 			}
 		}
 		return program + " --continue"
 	case ProgramCodex:
-		for _, tok := range tokens {
-			if tok == "resume" {
-				return program
-			}
-		}
+		// "resume" is a subcommand, not a flag, and codex only accepts it
+		// immediately after the codex token (or after "exec"). Checking any
+		// other position would false-positive on flag values like
+		// `codex --profile resume` (#632).
 		insertAt := agentIdx + 1
 		if insertAt < len(tokens) && tokens[insertAt] == "exec" {
 			insertAt++
+		}
+		if insertAt < len(tokens) && tokens[insertAt] == "resume" {
+			return program
 		}
 		newTokens := make([]string, 0, len(tokens)+2)
 		newTokens = append(newTokens, tokens[:insertAt]...)
@@ -87,7 +89,8 @@ func resumeProgram(program string) string {
 		return program + " --restore-chat-history"
 	case ProgramGemini:
 		for _, tok := range tokens {
-			if tok == "--resume" || tok == "-r" || strings.HasPrefix(tok, "--resume=") {
+			if tok == "--resume" || tok == "-r" ||
+				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") {
 				return program
 			}
 		}
