@@ -192,6 +192,18 @@ func TestGetBaseCommand(t *testing.T) {
 		{"/home/user/my - project/claude --foo", "claude"},
 		{"/home/user/my - project/codex", "codex"},
 		{"/home/user/a - b - c/aider --model x", "aider"},
+		// Issue #639: unquoted path with spaces where an intermediate dir
+		// is named like a supported agent. A naive left-to-right token scan
+		// would false-match on the intermediate "claude"/"codex" dir; the
+		// reconstructed-path-first logic returns the actual executable
+		// basename.
+		{"/home/user/claude backups/aider", "aider"},
+		{"/tmp/codex backups/claude", "claude"},
+		{"/Applications/Claude Code.app/Contents/MacOS/claude", "claude"},
+		{"aider --model x", "aider"},
+		// Unsupported bare name: no SupportedPrograms match anywhere, so
+		// the reconstructed basename (lowercased) is returned as-is.
+		{"unknown_agent", "unknown_agent"},
 	}
 	for _, tt := range tests {
 		got := getBaseCommand(tt.input)
