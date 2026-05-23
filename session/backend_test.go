@@ -273,6 +273,90 @@ func TestHookBackendStartRestore(t *testing.T) {
 	b.closePTY(i.Title)
 }
 
+// TestHookBackendStartRestoreDeadSession is a regression test for #645:
+// when list_cmd no longer reports the persisted remote session, Start in
+// the restore branch must return an error rather than silently marking the
+// instance as Ready. Without this guard, deleted/expired remote sessions
+// were restored with a green Ready dot in the sidebar even though attaching
+// was a silent no-op.
+func TestHookBackendStartRestoreDeadSession(t *testing.T) {
+	// list_cmd reports a different session, so our instance looks "dead".
+	b := makeHooksWithListName(t, "some-other-session")
+	i := &Instance{
+		Title:   "test-session",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	err := b.Start(i, false)
+	require.Error(t, err, "restore must fail when list_cmd does not report the session")
+	assert.Contains(t, err.Error(), "no longer exists")
+	assert.False(t, i.Started(), "instance must not be marked Started when remote session is gone")
+}
+
+// TestHookBackendStartRestoreListCmdFails covers the second leg of #645:
+// when list_cmd itself fails (e.g. network/auth error), we treat the
+// session as not-alive and refuse to mark it Started rather than
+// optimistically restoring a possibly-dead session.
+func TestHookBackendStartRestoreListCmdFails(t *testing.T) {
+	dir := t.TempDir()
+	listCmd := writeScript(t, dir, "list.sh", `exit 1`)
+	attachCmd := writeScript(t, dir, "attach.sh", `echo "attached"; sleep 0.1`)
+	b := &HookBackend{
+		Hooks: config.RemoteHooks{
+			ListCmd:   listCmd,
+			AttachCmd: attachCmd,
+		},
+	}
+	i := &Instance{
+		Title:   "test-session",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	err := b.Start(i, false)
+	require.Error(t, err)
+	assert.False(t, i.Started())
+}
+
+// TestHookBackendStartRestoreListCmdHangs covers the timeout path: when
+// list_cmd takes longer than restoreAliveTimeout, restore must return an
+// error rather than blocking the TUI startup indefinitely for every
+// persisted instance (#645).
+func TestHookBackendStartRestoreListCmdHangs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timeout-bound test in short mode")
+	}
+
+	dir := t.TempDir()
+	// Sleep long enough that the 2s restoreAliveTimeout fires first.
+	listCmd := writeScript(t, dir, "list.sh", `sleep 30; echo '[]'`)
+	attachCmd := writeScript(t, dir, "attach.sh", `echo "attached"; sleep 0.1`)
+	b := &HookBackend{
+		Hooks: config.RemoteHooks{
+			ListCmd:   listCmd,
+			AttachCmd: attachCmd,
+		},
+	}
+	i := &Instance{
+		Title:   "test-session",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	start := time.Now()
+	err := b.Start(i, false)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.False(t, i.Started())
+	// The bound is the TUI startup latency promise: even with a hung
+	// list_cmd, restore must return within a small multiple of
+	// restoreAliveTimeout.
+	assert.Less(t, elapsed, 5*time.Second,
+		"restore must abort within timeout when list_cmd hangs (got %v)", elapsed)
+}
+
 func TestHookBackendStartEmptyTitle(t *testing.T) {
 	b := makeHooks(t)
 	i := &Instance{
