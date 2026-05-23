@@ -160,8 +160,18 @@ func PlaceOverlay(
 		right := xansi.TruncateLeft(bgLine, pos, "")
 		bgLineWidth := ansi.PrintableRuneWidth(bgLine)
 		rightWidth := ansi.PrintableRuneWidth(right)
-		if rightWidth <= bgLineWidth-pos {
-			b.WriteString(ws.render(bgLineWidth - rightWidth - pos))
+		remainingWidth := bgLineWidth - pos
+		if rightWidth > remainingWidth {
+			// TruncateLeft returned more than fits because pos landed in the
+			// middle of a wide (CJK/emoji) grapheme and the whole cluster was
+			// preserved. Re-truncate from the right with the ANSI-aware helper
+			// so we don't render past bgLineWidth. The dropped half-cell shows
+			// as the leading pad below. (#647)
+			right = xansi.Truncate(right, remainingWidth, "")
+			rightWidth = ansi.PrintableRuneWidth(right)
+		}
+		if rightWidth < remainingWidth {
+			b.WriteString(ws.render(remainingWidth - rightWidth))
 		}
 		b.WriteString(right)
 	}
