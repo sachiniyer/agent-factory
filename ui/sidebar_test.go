@@ -362,9 +362,21 @@ func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
 		{name: "width42", terminalW: 42, expectNoOverflow: true, expectNoTitleTail: true},
 		{name: "width41", terminalW: 41, expectNoOverflow: true, expectNoTitleTail: true},
 		{name: "width40", terminalW: 40, expectNoOverflow: true, expectNoTitleTail: true},
-		// Even narrower — widthAvail <= 0 so the truncation block is skipped,
-		// but the row must still not contain a stray "..." artifact.
-		{name: "width30", terminalW: 30, expectNoTitleTail: true},
+		// Bug range from #646: widthAvail goes non-positive so the
+		// truncation block used to be skipped entirely and the rendered
+		// row spilled past sidebarW. Sweep 30..39 inclusive — every row
+		// must fit within the sidebar container width and must not leave
+		// a stray "..." artifact.
+		{name: "width39", terminalW: 39, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width38", terminalW: 38, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width37", terminalW: 37, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width36", terminalW: 36, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width35", terminalW: 35, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width34", terminalW: 34, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width33", terminalW: 33, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width32", terminalW: 32, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width31", terminalW: 31, expectNoOverflow: true, expectNoTitleTail: true},
+		{name: "width30", terminalW: 30, expectNoOverflow: true, expectNoTitleTail: true},
 	}
 
 	for _, tc := range cases {

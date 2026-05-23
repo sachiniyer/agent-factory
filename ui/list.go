@@ -84,7 +84,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		titleText = "[remote] " + titleText
 	}
 	widthAvail := r.width - 3 - runewidth.StringWidth(prefix) - 1
-	if widthAvail > 0 && runewidth.StringWidth(titleText) > widthAvail {
+	if widthAvail <= 0 {
+		// No room for any title text at this width; render just the prefix.
+		// lipgloss.Place doesn't clip oversize content, so leaving titleText
+		// intact here would spill past sidebarW (#646).
+		titleText = ""
+	} else if runewidth.StringWidth(titleText) > widthAvail {
 		// Drop the "..." tail when the container is too narrow to fit it,
 		// otherwise runewidth.Truncate returns content wider than widthAvail
 		// and lipgloss.Place won't clip the overflow.
@@ -93,6 +98,19 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 			tail = ""
 		}
 		titleText = runewidth.Truncate(titleText, widthAvail, tail)
+	}
+	// At very narrow widths (sidebarW ≤ 11, r.width ≤ 9) the row would still
+	// overflow sidebarW even with the bot's titleText="" fix above:
+	// titleStyle.Padding(1,1,0,1) and descStyle's matching horizontal padding
+	// each add 2 cells beyond r.width, exceeding the 10% buffer that
+	// AdjustPreviewWidth carves out below sidebarW. JoinVertical then pads the
+	// shorter title row up to the wider branchLine row, so the row spills past
+	// the sidebar container. Drop horizontal padding on both styles at narrow
+	// widths so the rendered row stays inside sidebarW (#646). Keep the top
+	// padding line so the existing test's line indexing still works.
+	if r.width <= 9 {
+		titleS = titleS.PaddingLeft(0).PaddingRight(0)
+		descS = descS.PaddingLeft(0).PaddingRight(0)
 	}
 	title := titleS.Render(lipgloss.JoinHorizontal(
 		lipgloss.Left,
