@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -286,6 +288,129 @@ func TestTaskPaneCreateModeCtrlCCancels(t *testing.T) {
 
 	assert.False(t, tp.IsCreating(), "Ctrl+C should exit create mode")
 	assert.False(t, tp.HasPendingCreate(), "Ctrl+C must not produce a pending create")
+}
+
+// editPathTo opens edit mode on the first task and overwrites the Path field
+// with newPath, then saves. Used by the ProjectPath-normalization regression
+// tests to drive only the Path input without disturbing the other fields.
+func editPathTo(t *testing.T, tp *TaskPane, newPath string) {
+	t.Helper()
+	tp.SetFocus(true)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // enter edit mode
+	if !tp.IsEditing() {
+		t.Fatalf("expected edit mode")
+	}
+	// Tab Name -> Prompt -> Cron -> Path
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+	// Clear current value then type the new one.
+	for range tp.editPath.Value() {
+		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	if newPath != "" {
+		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(newPath)})
+	}
+	// Tab Path -> Program -> Save, then submit.
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+}
+
+// TestTaskPaneEditModeNormalizesEmptyPath is the regression guard for #641:
+// editing ProjectPath to "" must normalize to the CWD (via filepath.Abs)
+// so the scheduler receives the same absolute path the TUI trigger would
+// produce. Prior to the fix the empty value was stored verbatim, causing
+// scheduled runs to fail with "repo path is required" while TUI triggers
+// silently fell back to CWD.
+func TestTaskPaneEditModeNormalizesEmptyPath(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	expected, err := filepath.Abs(cwd)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "0 0 * * *",
+		ProjectPath: "/tmp/repo",
+		Program:     "claude",
+		Enabled:     true,
+	}})
+
+	editPathTo(t, tp, "")
+
+	assert.False(t, tp.IsEditing(), "save should exit edit mode")
+	assert.Equal(t, "", tp.editError, "empty path must normalize, not surface an error")
+	tasks := tp.GetTasks()
+	if assert.Len(t, tasks, 1) {
+		assert.Equal(t, expected, tasks[0].ProjectPath,
+			"empty ProjectPath must be normalized to absolute CWD on save, matching the create path")
+	}
+}
+
+// TestTaskPaneEditModeNormalizesRelativePath verifies that editing
+// ProjectPath to a relative value resolves it via filepath.Abs at save
+// time, mirroring the create path (#641). Without this, the scheduler
+// would pass a relative path that resolves against the daemon's CWD
+// rather than the user's CWD.
+func TestTaskPaneEditModeNormalizesRelativePath(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	expected, err := filepath.Abs(filepath.Join(cwd, "relative"))
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "0 0 * * *",
+		ProjectPath: "/tmp/repo",
+		Program:     "claude",
+		Enabled:     true,
+	}})
+
+	editPathTo(t, tp, "./relative")
+
+	tasks := tp.GetTasks()
+	if assert.Len(t, tasks, 1) {
+		assert.Equal(t, expected, tasks[0].ProjectPath,
+			"relative ProjectPath must be resolved via filepath.Abs on save")
+	}
+}
+
+// TestTaskPaneEditModeKeepsAbsolutePath verifies that an already-absolute
+// ProjectPath is preserved verbatim across edit/save (#641).
+func TestTaskPaneEditModeKeepsAbsolutePath(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "0 0 * * *",
+		ProjectPath: "/tmp/old",
+		Program:     "claude",
+		Enabled:     true,
+	}})
+
+	editPathTo(t, tp, "/tmp/new-repo")
+
+	tasks := tp.GetTasks()
+	if assert.Len(t, tasks, 1) {
+		assert.Equal(t, "/tmp/new-repo", tasks[0].ProjectPath,
+			"absolute ProjectPath must be preserved verbatim across edit/save")
+	}
 }
 
 // TestTaskPaneListShowsAgentNameNotFullProgram confirms the list view collapses
