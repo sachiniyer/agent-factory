@@ -103,6 +103,21 @@ func splitShell(s string) []string {
 // and additionally tolerates unquoted absolute or relative paths whose
 // directory components contain spaces — common when users pass --program
 // with a path like "/home/my user/claude" via the CLI (issue #463).
+//
+// Authoritative principle: the basename of the RECONSTRUCTED command path
+// is the source of truth. The left-to-right token scan over
+// tmux.SupportedPrograms is a fallback ONLY for the case where
+// reconstruction lands on a non-agent basename — specifically, paths whose
+// directory components contain a literal " - " (issue #513) that breaks
+// the naive "join non-flag tokens" reconstruction by splitting at the
+// "-" token.
+//
+// Reorder rationale (issue #639): scanning all tokens left-to-right
+// BEFORE reconstruction false-matches on intermediate directories named
+// like a supported agent. For example "/home/user/claude backups/aider"
+// splits into ["/home/user/claude", "backups/aider"]; a leading scan
+// would match "claude" on the intermediate dir and return the wrong
+// agent for the actual "aider" executable.
 func getBaseCommand(program string) string {
 	program = strings.TrimSpace(program)
 	if len(program) == 0 {
@@ -112,12 +127,30 @@ func getBaseCommand(program string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	// If any token's basename matches a known agent (tmux.SupportedPrograms),
-	// prefer it. Handles unquoted paths whose directories contain literal
-	// " - " (issue #513): splitShell yields ["/home/u/my", "-", "proj/claude"]
-	// and the simple "join non-flag tokens" heuristic below stops at "-",
-	// landing on "my". Left-to-right wins so the leading executable still
-	// dominates when a flag value happens to point at another known agent.
+	cmd := parts[0]
+	// If the first token looks like an unquoted path (absolute or relative),
+	// greedily join the following non-flag tokens to recover the executable
+	// basename for inputs like `/home/my user/claude --foo` where the path
+	// contains spaces and was not quoted on the command line (#463).
+	if strings.HasPrefix(cmd, "/") || strings.HasPrefix(cmd, "./") || strings.HasPrefix(cmd, "../") {
+		end := 1
+		for end < len(parts) && !strings.HasPrefix(parts[end], "-") {
+			end++
+		}
+		cmd = strings.Join(parts[:end], " ")
+	}
+	reconstructed := strings.ToLower(filepath.Base(cmd))
+	for _, supported := range tmux.SupportedPrograms {
+		if reconstructed == supported {
+			return supported
+		}
+	}
+	// Fallback (#513/#537): reconstruction landed on a non-agent basename,
+	// which happens when an unquoted path contains a literal " - " segment
+	// — splitShell emits the "-" as its own token and the reconstruction
+	// loop stops there. Scan all tokens left-to-right for a supported
+	// program basename; left-to-right wins so the leading executable
+	// dominates if a flag value happens to point at another known agent.
 	for _, p := range parts {
 		base := strings.ToLower(filepath.Base(p))
 		for _, supported := range tmux.SupportedPrograms {
@@ -126,19 +159,7 @@ func getBaseCommand(program string) string {
 			}
 		}
 	}
-	cmd := parts[0]
-	// If the first token looks like an unquoted path (absolute or relative),
-	// assume following non-flag tokens are literal spaces in that path. This
-	// recovers the basename for inputs like `/home/my user/claude --foo`
-	// where the path contains spaces and was not quoted on the command line.
-	if strings.HasPrefix(cmd, "/") || strings.HasPrefix(cmd, "./") || strings.HasPrefix(cmd, "../") {
-		end := 1
-		for end < len(parts) && !strings.HasPrefix(parts[end], "-") {
-			end++
-		}
-		cmd = strings.Join(parts[:end], " ")
-	}
-	return strings.ToLower(filepath.Base(cmd))
+	return reconstructed
 }
 
 // BaseCommand extracts the lowercase executable basename from a program string.
