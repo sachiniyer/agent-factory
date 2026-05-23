@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,12 @@ import (
 
 	"github.com/creack/pty"
 )
+
+// restoreAliveTimeout bounds how long we wait for list_cmd to report on
+// whether a persisted remote session still exists. list_cmd is user-supplied
+// and may block on network/SSH; the restore path runs at TUI startup for
+// every persisted instance, so an unbounded wait would stall the TUI.
+const restoreAliveTimeout = 2 * time.Second
 
 // HookBackend implements Backend by delegating to user-provided shell scripts.
 type HookBackend struct {
@@ -110,8 +117,17 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	}
 
 	if !firstTimeSetup {
-		// Restoring from storage — just reconnect the preview PTY.
-		b.ensurePTY(i)
+		// Restoring from storage. Before marking the instance started,
+		// confirm that the remote session reported by list_cmd still
+		// exists. Without this check, deleted/expired remote sessions
+		// were restored and shown with a green Ready dot in the sidebar
+		// even though attaching was a silent no-op (#645).
+		if !b.isAliveWithTimeout(i, restoreAliveTimeout) {
+			return fmt.Errorf("remote session %q no longer exists in list_cmd output", i.Title)
+		}
+		if err := b.ensurePTY(i); err != nil {
+			return fmt.Errorf("failed to start preview process: %w", err)
+		}
 		i.mu.Lock()
 		i.started = true
 		i.mu.Unlock()
@@ -148,7 +164,12 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	i.started = true
 	i.mu.Unlock()
 
-	b.ensurePTY(i)
+	if err := b.ensurePTY(i); err != nil {
+		// launch_cmd succeeded so the remote session itself is alive; we
+		// just couldn't spin up the preview process. Log and continue —
+		// the user can still attach interactively.
+		log.WarningLog.Printf("hook backend: preview process failed for %s: %v", i.Title, err)
+	}
 	return nil
 }
 
@@ -268,7 +289,14 @@ func (b *HookBackend) Attach(i *Instance) (chan struct{}, error) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		defer b.ensurePTY(i) // restart preview process after detach
+		defer func() {
+			// Restart preview process after detach. Failure is non-fatal —
+			// the user can still re-attach interactively; we just lose the
+			// background preview snapshot.
+			if err := b.ensurePTY(i); err != nil {
+				log.WarningLog.Printf("hook backend: preview process failed to restart for %s: %v", i.Title, err)
+			}
+		}()
 
 		slug := hookNameForInstance(i)
 		cmd := exec.Command(b.Hooks.AttachCmd, slug)
@@ -301,7 +329,14 @@ func (b *HookBackend) SetPreviewSize(_ *Instance, _, _ int) error {
 }
 
 func (b *HookBackend) IsAlive(i *Instance) bool {
-	out, err := exec.Command(b.Hooks.ListCmd, "--json").CombinedOutput()
+	return b.isAliveWithTimeout(i, 0)
+}
+
+// isAliveWithTimeout asks list_cmd whether the remote session backing i is
+// currently running. A non-zero timeout bounds the wait; zero means "no
+// timeout" (matches the legacy IsAlive behavior used by the metadata tick).
+func (b *HookBackend) isAliveWithTimeout(i *Instance, timeout time.Duration) bool {
+	out, err := b.runListCmd(timeout)
 	if err != nil {
 		return false
 	}
@@ -324,6 +359,22 @@ func (b *HookBackend) IsAlive(i *Instance) bool {
 		}
 	}
 	return false
+}
+
+func (b *HookBackend) runListCmd(timeout time.Duration) ([]byte, error) {
+	if timeout <= 0 {
+		return exec.Command(b.Hooks.ListCmd, "--json").CombinedOutput()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, b.Hooks.ListCmd, "--json")
+	// WaitDelay bounds how long CombinedOutput keeps reading from the
+	// command's stdout/stderr after the context is cancelled. Without it,
+	// a list_cmd script that spawned a long-running child (e.g. `sleep
+	// 30`) would keep the read-side pipe open past the kill signal sent
+	// to the script itself, defeating the restore-path timeout (#645).
+	cmd.WaitDelay = 500 * time.Millisecond
+	return cmd.CombinedOutput()
 }
 
 func (b *HookBackend) CheckAndHandleTrustPrompt(_ *Instance) bool {
@@ -453,7 +504,7 @@ func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.W
 
 // --- Process management for preview capture ---
 
-func (b *HookBackend) ensurePTY(i *Instance) {
+func (b *HookBackend) ensurePTY(i *Instance) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -468,7 +519,7 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 		alive := !existing.closed
 		existing.mu.Unlock()
 		if alive {
-			return
+			return nil
 		}
 		delete(b.ptys, i.Title)
 	}
@@ -483,8 +534,7 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 	// the user attaches interactively.)
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
-		log.ErrorLog.Printf("failed to create pipe for preview of %s: %v", i.Title, err)
-		return
+		return fmt.Errorf("create pipe for preview of %s: %w", i.Title, err)
 	}
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stdoutW
@@ -492,8 +542,7 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 	if err := cmd.Start(); err != nil {
 		_ = stdoutR.Close()
 		_ = stdoutW.Close()
-		log.ErrorLog.Printf("failed to start attach_cmd for preview of %s: %v", i.Title, err)
-		return
+		return fmt.Errorf("start attach_cmd for preview of %s: %w", i.Title, err)
 	}
 	// Close the write end in the parent so reads get EOF when the child exits.
 	_ = stdoutW.Close()
@@ -538,6 +587,7 @@ func (b *HookBackend) ensurePTY(i *Instance) {
 		hp.closed = true
 		hp.mu.Unlock()
 	}()
+	return nil
 }
 
 func (b *HookBackend) closePTY(title string) {
