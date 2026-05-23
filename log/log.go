@@ -57,7 +57,21 @@ func Initialize(daemon bool) {
 
 	// Close any previously opened log file to avoid leaking file descriptors
 	// when Initialize is called multiple times (e.g. af tasks trigger -> RunTask).
+	// Redirect to stderr BEFORE closing for the same reason as Close (#642):
+	// concurrent Printfs holding the old logger pointer would otherwise race
+	// the file close and land on a closed fd. After reassignment below,
+	// further Printfs see the new loggers; any still using old pointers fall
+	// through to stderr instead of being dropped.
 	if globalLogFile != nil {
+		if InfoLog != nil {
+			InfoLog.SetOutput(os.Stderr)
+		}
+		if WarningLog != nil {
+			WarningLog.SetOutput(os.Stderr)
+		}
+		if ErrorLog != nil {
+			ErrorLog.SetOutput(os.Stderr)
+		}
 		_ = globalLogFile.Close()
 		globalLogFile = nil
 	}
@@ -93,13 +107,12 @@ func Close() {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if globalLogFile != nil {
-		_ = globalLogFile.Close()
-		globalLogFile = nil
-	}
-	// Redirect any further log writes to stderr so that messages from
-	// goroutines that outlive Close() are not silently dropped to a closed
-	// fd. log.Logger.SetOutput is documented as safe for concurrent use.
+	// Redirect to stderr BEFORE closing the file. SetOutput and Output share
+	// each *log.Logger's internal mutex, so a concurrent Printf either fully
+	// precedes the redirect (and completes its write to the still-open file)
+	// or fully follows it (and writes to stderr). Closing after the redirect
+	// guarantees no Printf ever lands on a closed fd. Reversing this order
+	// loses messages logged in the gap between Close and SetOutput (#642).
 	if InfoLog != nil {
 		InfoLog.SetOutput(os.Stderr)
 	}
@@ -108,6 +121,10 @@ func Close() {
 	}
 	if ErrorLog != nil {
 		ErrorLog.SetOutput(os.Stderr)
+	}
+	if globalLogFile != nil {
+		_ = globalLogFile.Close()
+		globalLogFile = nil
 	}
 	fmt.Fprintln(os.Stderr, "wrote logs to "+logFileName)
 }
