@@ -89,6 +89,48 @@ func TestResumeProgram(t *testing.T) {
 			"codex --model resume",
 			"codex resume --last --model resume",
 		},
+		// Codex shell-expansion preservation (#640): the codex rewrite must
+		// preserve user metacharacters ($VAR, ~, *, ?, globs) verbatim. A
+		// prior implementation tokenize+rejoined the program string and
+		// defensively single-quoted any token containing shell metachars,
+		// turning `--model $MODEL` into `--model '$MODEL'` and breaking
+		// expansion on respawn. The fix splices " resume --last" into the
+		// original string at a known byte offset instead.
+		{
+			"codex preserves $VAR in flag value",
+			"codex --model $MODEL",
+			"codex resume --last --model $MODEL",
+		},
+		{
+			"codex preserves ~ in flag value",
+			"codex --profile ~/profiles/foo",
+			"codex resume --last --profile ~/profiles/foo",
+		},
+		{
+			"codex exec preserves $VAR after subcommand",
+			"codex exec --model $MODEL ./prompt.md",
+			"codex exec resume --last --model $MODEL ./prompt.md",
+		},
+		{
+			"codex absolute path preserves $VAR",
+			"/usr/local/bin/codex --model $MODEL",
+			"/usr/local/bin/codex resume --last --model $MODEL",
+		},
+		{
+			"codex double-quoted path with spaces preserves quotes",
+			`"/path with spaces/codex" --model $MODEL`,
+			`"/path with spaces/codex" resume --last --model $MODEL`,
+		},
+		{
+			"codex preserves quoted glob in flag value",
+			"codex --include 'models/*.txt'",
+			"codex resume --last --include 'models/*.txt'",
+		},
+		{
+			"codex preserves bare glob in flag value",
+			"codex --include models/*.txt",
+			"codex resume --last --include models/*.txt",
+		},
 
 		// Aider: append --restore-chat-history at the end. Position-
 		// independent flag, so the original program string is preserved
@@ -244,6 +286,12 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"codex --profile resume",
 		"codex --profile=resume",
 		"codex exec --profile resume",
+		// #640 — shell-expansion-preserving splice must also be idempotent.
+		"codex --model $MODEL",
+		"codex exec --model $MODEL ./prompt.md",
+		"codex --profile ~/profiles/foo",
+		"codex --include 'models/*.txt'",
+		`"/path with spaces/codex" --model $MODEL`,
 	} {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)

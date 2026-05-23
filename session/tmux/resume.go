@@ -10,15 +10,20 @@ import (
 // #595). For agents without a resume-most-recent flag, programs that already
 // include one, and unknown programs, returns program unchanged.
 //
-// Agent-specific rewrites:
+// Agent-specific rewrites — all four paths preserve the original program
+// string verbatim (modulo the inserted resume tokens) so user shell quoting,
+// $VAR / ~ / glob metacharacters survive respawn unchanged (#640):
 //
 //   - claude: append --continue at the end. claude's resume flags are
 //     position-independent, so appending preserves the original program
 //     string verbatim (including any shell quoting on the executable
 //     path — see #569).
-//   - codex: insert "resume --last" immediately after the codex token,
-//     or after "exec" if it follows codex. Subcommand position matters
-//     for codex, so this can't be a tail append.
+//   - codex: splice " resume --last" into the original program string at
+//     the byte offset right after the codex (or "codex exec") token.
+//     Subcommand position matters for codex, so this can't be a tail
+//     append; but a tokenize+rejoin round-trip would defensively quote
+//     metachars in user flags (#640 regression of #596) — splicing the
+//     original avoids that.
 //   - aider: append --restore-chat-history at the end. Reads
 //     .aider.chat.history.md from cwd if present; silently falls back to
 //     a fresh chat if absent. Skipped if the user passed an explicit
@@ -30,7 +35,7 @@ import (
 // All four CLIs silently fall back to a fresh session when no prior session
 // exists in cwd, so the rewrite is safe to apply unconditionally.
 func resumeProgram(program string) string {
-	tokens := splitShellTokens(program)
+	tokens, ends := splitShellTokens(program)
 	if len(tokens) == 0 {
 		return program
 	}
@@ -75,11 +80,14 @@ func resumeProgram(program string) string {
 		if insertAt < len(tokens) && tokens[insertAt] == "resume" {
 			return program
 		}
-		newTokens := make([]string, 0, len(tokens)+2)
-		newTokens = append(newTokens, tokens[:insertAt]...)
-		newTokens = append(newTokens, "resume", "--last")
-		newTokens = append(newTokens, tokens[insertAt:]...)
-		return shellJoinTokens(newTokens)
+		// Splice " resume --last" into the ORIGINAL program string at the
+		// byte offset right after the codex (or "codex exec") token so
+		// the user's quoting / $VAR / ~ / * / ? all pass through
+		// untouched. A tokenize+rejoin round-trip would defensively
+		// single-quote those metachars and break shell expansion on
+		// respawn (#640).
+		off := ends[insertAt-1]
+		return program[:off] + " resume --last" + program[off:]
 	case ProgramAider:
 		for _, tok := range tokens {
 			if tok == "--restore-chat-history" || tok == "--no-restore-chat-history" {
@@ -102,11 +110,14 @@ func resumeProgram(program string) string {
 // splitShellTokens tokenizes a shell-style command string, respecting single
 // quotes (no escapes), double quotes (with \" and \\ escapes), and backslash
 // escapes outside quotes. Adjacent runs concatenate into a single token (e.g.
-// 'foo'bar -> "foobar"). Unclosed quotes consume to end of input. Mirrors the
-// session.splitShell helper used by injectSystemPrompt — kept private here
-// to avoid an import cycle (session/tmux is imported by session).
-func splitShellTokens(s string) []string {
-	var tokens []string
+// 'foo'bar -> "foobar"). Unclosed quotes consume to end of input.
+//
+// Returns the tokens alongside ends[i], the byte offset in s immediately
+// after token i ends (one past any closing quote). resumeProgram's codex
+// rewrite uses these offsets to splice text into the original string
+// without round-tripping through a join step that would defensively quote
+// shell metacharacters (#640).
+func splitShellTokens(s string) (tokens []string, ends []int) {
 	var cur strings.Builder
 	inToken := false
 	i := 0
@@ -116,6 +127,7 @@ func splitShellTokens(s string) []string {
 		case ' ', '\t':
 			if inToken {
 				tokens = append(tokens, cur.String())
+				ends = append(ends, i)
 				cur.Reset()
 				inToken = false
 			}
@@ -164,42 +176,7 @@ func splitShellTokens(s string) []string {
 	}
 	if inToken {
 		tokens = append(tokens, cur.String())
+		ends = append(ends, i)
 	}
-	return tokens
-}
-
-// shellJoinTokens joins tokens with spaces, single-quoting any token that
-// would otherwise be reinterpreted by the shell. Used to rebuild a program
-// string after token-level surgery in resumeProgram.
-func shellJoinTokens(tokens []string) string {
-	var b strings.Builder
-	for i, tok := range tokens {
-		if i > 0 {
-			b.WriteByte(' ')
-		}
-		if needsShellQuote(tok) {
-			b.WriteByte('\'')
-			b.WriteString(strings.ReplaceAll(tok, "'", `'\''`))
-			b.WriteByte('\'')
-		} else {
-			b.WriteString(tok)
-		}
-	}
-	return b.String()
-}
-
-func needsShellQuote(s string) bool {
-	if s == "" {
-		return true
-	}
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case ' ', '\t', '\n', '\'', '"', '\\',
-			'$', '`', '*', '?', '[', ']',
-			'(', ')', '{', '}', '|', '&',
-			';', '<', '>', '#', '~', '!':
-			return true
-		}
-	}
-	return false
+	return tokens, ends
 }
