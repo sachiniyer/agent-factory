@@ -205,3 +205,86 @@ func TestPlaceOverlayTrueColorBackgroundFade(t *testing.T) {
 		t.Fatalf("BUG CONFIRMED: true-color background was faded as foreground")
 	}
 }
+
+// TestPlaceOverlayCJKWideCharStraddle is a regression guard for #647. When the
+// position after the foreground falls inside a wide (CJK) grapheme,
+// xansi.TruncateLeft preserves the entire grapheme — returning a string whose
+// printable width is 1 cell larger than the remaining background space. The
+// pre-fix code wrote that right-side slab unconditionally and skipped padding,
+// producing a line 1 cell wider than the background.
+func TestPlaceOverlayCJKWideCharStraddle(t *testing.T) {
+	// bg: 7 ASCII + three 2-cell CJK = width 13.
+	// fg width 4 placed at x=4 → pos=8 lands inside the first 界.
+	bg := "abcdefg界界界"
+	fg := "XXXX"
+	bgWidth := ansi.PrintableRuneWidth(bg)
+
+	result := PlaceOverlay(4, 0, fg, bg, false)
+
+	gotWidth := ansi.PrintableRuneWidth(result)
+	if gotWidth != bgWidth {
+		t.Fatalf("PlaceOverlay overflow: got width %d, want %d (bg=%q result=%q)",
+			gotWidth, bgWidth, bg, result)
+	}
+}
+
+// TestPlaceOverlayCJKWideCharStraddleCentered exercises the centered variant
+// from the bug report: centering a width-2 fg on a width-12 bg yields placeX=5,
+// so pos=7 lands inside a CJK glyph at cells 7-8.
+func TestPlaceOverlayCJKWideCharStraddleCentered(t *testing.T) {
+	// bg: 6 ASCII + three 2-cell CJK = width 12. pos after fg = 5+2 = 7.
+	bg := "abcdef界界界"
+	fg := "YY"
+	bgWidth := ansi.PrintableRuneWidth(bg)
+
+	result := PlaceOverlay(0, 0, fg, bg, true)
+
+	gotWidth := ansi.PrintableRuneWidth(result)
+	if gotWidth != bgWidth {
+		t.Fatalf("PlaceOverlay centered overflow: got width %d, want %d (bg=%q result=%q)",
+			gotWidth, bgWidth, bg, result)
+	}
+}
+
+// TestPlaceOverlayASCIINoRegression is a guard that the #647 fix doesn't change
+// the ASCII-only path, where rightWidth always equals remainingWidth exactly.
+func TestPlaceOverlayASCIINoRegression(t *testing.T) {
+	bg := "abcdefghij" // width 10
+	fg := "XX"
+	bgWidth := ansi.PrintableRuneWidth(bg)
+
+	result := PlaceOverlay(3, 0, fg, bg, false)
+
+	gotWidth := ansi.PrintableRuneWidth(result)
+	if gotWidth != bgWidth {
+		t.Fatalf("ASCII PlaceOverlay width changed: got %d, want %d (result=%q)",
+			gotWidth, bgWidth, result)
+	}
+	if !strings.Contains(result, "abc") || !strings.Contains(result, "XX") || !strings.Contains(result, "fghij") {
+		t.Fatalf("ASCII composition incorrect: %q", result)
+	}
+}
+
+// TestPlaceOverlayCJKAlignedNoTruncation verifies that when pos lands cleanly
+// on a CJK grapheme boundary (even pos in this layout), TruncateLeft already
+// returns the exact remaining width and no re-truncation is needed. This guards
+// against the fix accidentally trimming a cell in the well-behaved case.
+func TestPlaceOverlayCJKAlignedNoTruncation(t *testing.T) {
+	// 6 ASCII + three 2-cell CJK = width 12. fg width 2 placed at x=6 →
+	// pos=8 lands exactly between the first and second CJK glyph.
+	bg := "abcdef界界界"
+	fg := "ZZ"
+	bgWidth := ansi.PrintableRuneWidth(bg)
+
+	result := PlaceOverlay(6, 0, fg, bg, false)
+
+	gotWidth := ansi.PrintableRuneWidth(result)
+	if gotWidth != bgWidth {
+		t.Fatalf("CJK-aligned PlaceOverlay width changed: got %d, want %d (result=%q)",
+			gotWidth, bgWidth, result)
+	}
+	// Both trailing CJK glyphs should survive since pos sits on the boundary.
+	if !strings.Contains(result, "界界") {
+		t.Fatalf("expected trailing CJK glyphs preserved, got: %q", result)
+	}
+}
