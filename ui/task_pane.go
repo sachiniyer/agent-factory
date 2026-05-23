@@ -2,9 +2,11 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
+
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
-	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -398,11 +400,20 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 					s.editError = fmt.Sprintf("invalid cron: %v", err)
 					return true
 				}
+				// Mirror the create path (app.handleTaskCreate): resolve
+				// the user-entered path to an absolute form so an empty
+				// or relative value behaves the same when the scheduler
+				// fires as it does in the TUI trigger (#641).
+				absPath, err := filepath.Abs(s.editPath.Value())
+				if err != nil {
+					s.editError = fmt.Sprintf("invalid path: %v", err)
+					return true
+				}
 				s.editError = ""
 				s.tasks[s.selectedIdx].Name = s.editName.Value()
 				s.tasks[s.selectedIdx].Prompt = s.editPrompt.Value()
 				s.tasks[s.selectedIdx].CronExpr = s.editCron.Value()
-				s.tasks[s.selectedIdx].ProjectPath = s.editPath.Value()
+				s.tasks[s.selectedIdx].ProjectPath = absPath
 				s.tasks[s.selectedIdx].Program = s.programValue()
 				s.dirty = true
 				s.editing = false
