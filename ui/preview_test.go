@@ -396,6 +396,88 @@ func TestPreviewExactFitDoesNotTruncate(t *testing.T) {
 	require.NotContains(t, rendered, "...")
 }
 
+// TestPreviewBottomTruncateShowsNewestLines is the regression test for #649:
+// when content exceeds the pane height, PreviewPane must keep the BOTTOM
+// p.height lines (newest output) — matching TerminalPane — rather than the
+// top p.height-1 lines plus a "..." marker. Showing the start of the output
+// while the agent has moved on is confusing UX.
+func TestPreviewBottomTruncateShowsNewestLines(t *testing.T) {
+	const totalLines = 100
+	const paneHeight = 10
+
+	lines := make([]string, totalLines)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line-%03d", i+1)
+	}
+	text := strings.Join(lines, "\n")
+
+	p := NewPreviewPane()
+	p.SetSize(80, paneHeight)
+	p.previewState = previewState{fallback: false, text: text}
+
+	rendered := p.String()
+
+	// The newest p.height lines must be present; the oldest lines must not.
+	for i := totalLines - paneHeight; i < totalLines; i++ {
+		require.Contains(t, rendered, lines[i],
+			"newest line %q must be visible after truncation", lines[i])
+	}
+	for i := 0; i < totalLines-paneHeight; i++ {
+		require.NotContains(t, rendered, lines[i],
+			"older line %q must NOT be visible after truncation", lines[i])
+	}
+
+	// Match TerminalPane: no "..." indicator.
+	require.NotContains(t, rendered, "...",
+		"bottom-truncation should not append a '...' marker")
+}
+
+// TestPreviewTrailingNewlineDoesNotTriggerTruncation guards the off-by-one
+// fix in #649: tmux capture-pane output frequently ends in "\n", which made
+// strings.Split produce len(lines) == p.height+1 even when the visible
+// content fits the pane. Before the fix, this took the truncation branch
+// and dropped a line.
+func TestPreviewTrailingNewlineDoesNotTriggerTruncation(t *testing.T) {
+	p := NewPreviewPane()
+	p.SetSize(80, 10)
+	// Five lines of content + trailing newline. Total visible content is 5
+	// lines, well below the 10-line budget; the trailing "\n" must not cause
+	// the renderer to truncate.
+	p.previewState = previewState{
+		fallback: false,
+		text:     "one\ntwo\nthree\nfour\nfive\n",
+	}
+
+	rendered := p.String()
+	require.Contains(t, rendered, "one",
+		"first line must remain visible — trailing newline must not trigger truncation")
+	require.Contains(t, rendered, "five",
+		"last content line must remain visible")
+	require.NotContains(t, rendered, "...",
+		"no truncation marker expected when content fits")
+}
+
+// TestPreviewTrailingNewlineAtExactHeight checks the boundary: content that
+// fills exactly p.height lines but ends in "\n" must not be truncated. The
+// trailing-empty strip exists to handle this case.
+func TestPreviewTrailingNewlineAtExactHeight(t *testing.T) {
+	const paneHeight = 5
+	contentLines := []string{"a", "b", "c", "d", "e"}
+	text := strings.Join(contentLines, "\n") + "\n"
+
+	p := NewPreviewPane()
+	p.SetSize(80, paneHeight)
+	p.previewState = previewState{fallback: false, text: text}
+
+	rendered := p.String()
+	for _, line := range contentLines {
+		require.Contains(t, rendered, line,
+			"line %q must remain visible at exact-fit boundary", line)
+	}
+	require.NotContains(t, rendered, "...",
+		"no truncation marker expected at exact-fit boundary")
+}
+
 // Helper function for max
 func max(a, b int) int {
 	if a > b {

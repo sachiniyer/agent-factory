@@ -218,11 +218,19 @@ func (p *PreviewPane) String() string {
 	// Normal mode display
 	lines := strings.Split(p.previewState.text, "\n")
 
-	// Truncate if we have more lines than available height
+	// strings.Split produces a trailing empty element when text ends in "\n"
+	// (common for terminal capture output). Drop it so the off-by-one does
+	// not trigger truncation when content actually fits, and so the truncate
+	// branch keeps the right slice of lines (#649).
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	// Truncate to the most recent p.height lines (match TerminalPane: show
+	// newest output, not oldest — #649).
 	if p.height > 0 {
 		if len(lines) > p.height {
-			lines = lines[:p.height-1]
-			lines = append(lines, "...")
+			lines = lines[len(lines)-p.height:]
 		} else {
 			// Pad with empty lines to fill available height
 			padding := p.height - len(lines)
