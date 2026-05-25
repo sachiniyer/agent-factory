@@ -2,13 +2,34 @@ package session
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+// resolveProgramForInstance returns the actual tmux command for an instance.
+// Resolution chain: agent enum -> cfg.ProgramOverrides[agent] (if set) ->
+// bare agent name. When AutoYes is set on a claude instance, the
+// --permission-mode bypassPermissions flag is appended to the resolved
+// command — claude needs the flag at exec time, and Instance.Program now
+// holds only the bare enum so the append can no longer happen in main.go.
+// A nil cfg (e.g. tests that don't materialize a config) falls back to the
+// raw Program string so legacy free-form values still reach tmux verbatim.
+func resolveProgramForInstance(i *Instance) string {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		log.WarningLog.Printf("failed to load config when resolving program for %q: %v", i.Title, err)
+		cfg = nil
+	}
+	resolved := config.ResolveProgram(cfg, i.Program)
+	if i.AutoYes && i.Program == tmux.ProgramClaude {
+		resolved = resolved + " --permission-mode bypassPermissions"
+	}
+	return resolved
+}
 
 // LocalBackend implements Backend using local tmux sessions and git worktrees.
 type LocalBackend struct{}
@@ -29,7 +50,10 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		// Use existing tmux session (useful for testing)
 		tmuxSession = existingSession
 	} else {
-		// Create new tmux session with repo-scoped name
+		// Create new tmux session with repo-scoped name. The program
+		// passed here is a placeholder — SetProgram below replaces it
+		// with the override-resolved + system-prompt-injected form
+		// before Start/Restore.
 		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, i.Path, i.Program)
 	}
 
@@ -99,7 +123,7 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		// Setting the program on the existing attach path is harmless:
 		// attach-session does not re-exec the program.
 		if workDir != "" {
-			tmuxSession.SetProgram(injectSystemPrompt(i.Program, i.Title, workDir))
+			tmuxSession.SetProgram(injectSystemPrompt(i.Program, resolveProgramForInstance(i), i.Title, workDir))
 		}
 		if err := tmuxSession.Restore(workDir); err != nil {
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
@@ -118,7 +142,7 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 
 		// Inject Agent Factory instructions into the session.
 		i.tmuxSession.SetProgram(
-			injectSystemPrompt(i.Program, i.Title, gw.GetWorktreePath()),
+			injectSystemPrompt(i.Program, resolveProgramForInstance(i), i.Title, gw.GetWorktreePath()),
 		)
 
 		// Create new session
@@ -305,13 +329,11 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	if !s || ts == nil {
 		return false
 	}
-	program := i.Program
-	if !strings.Contains(program, tmux.ProgramClaude) &&
-		!strings.Contains(program, tmux.ProgramAider) &&
-		!strings.Contains(program, tmux.ProgramGemini) {
-		return false
+	switch i.Program {
+	case tmux.ProgramClaude, tmux.ProgramAider, tmux.ProgramGemini:
+		return ts.CheckAndHandleTrustPrompt()
 	}
-	return ts.CheckAndHandleTrustPrompt()
+	return false
 }
 
 func (b *LocalBackend) TapEnter(i *Instance) {

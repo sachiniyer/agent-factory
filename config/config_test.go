@@ -2,11 +2,13 @@ package config
 
 import (
 	"fmt"
-	"github.com/sachiniyer/agent-factory/log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -123,17 +125,116 @@ func TestGetClaudeCommand(t *testing.T) {
 }
 
 func TestDefaultConfig(t *testing.T) {
-	t.Run("creates config with default values", func(t *testing.T) {
-		config := DefaultConfig()
+	t.Run("default_program is the bare claude enum and override carries the detected command", func(t *testing.T) {
+		// Force GetClaudeCommand to find a stub claude in PATH so the test
+		// exercises the auto-detect populate path independent of the dev
+		// machine layout.
+		tempDir := t.TempDir()
+		stub := filepath.Join(tempDir, "claude")
+		require.NoError(t, os.WriteFile(stub, []byte("#!/bin/bash\n"), 0755))
+		t.Setenv("PATH", tempDir+":"+os.Getenv("PATH"))
+		t.Setenv("SHELL", "/bin/bash")
 
-		assert.NotNil(t, config)
-		assert.NotEmpty(t, config.DefaultProgram)
-		assert.False(t, config.AutoYes)
-		assert.Equal(t, 1000, config.DaemonPollInterval)
-		assert.NotEmpty(t, config.BranchPrefix)
-		assert.True(t, strings.HasSuffix(config.BranchPrefix, "/"))
+		cfg := DefaultConfig()
+
+		require.NotNil(t, cfg)
+		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
+		assert.False(t, cfg.AutoYes)
+		assert.Equal(t, 1000, cfg.DaemonPollInterval)
+		assert.NotEmpty(t, cfg.BranchPrefix)
+		assert.True(t, strings.HasSuffix(cfg.BranchPrefix, "/"))
+
+		// The detected path with --dangerously-skip-permissions lands in the
+		// nested overrides map; default_program stays a bare enum.
+		require.NotNil(t, cfg.ProgramOverrides)
+		override, ok := cfg.ProgramOverrides[tmux.ProgramClaude]
+		require.True(t, ok, "expected program_overrides[claude] to be populated by auto-detect")
+		assert.Contains(t, override, "claude")
+		assert.Contains(t, override, "--dangerously-skip-permissions")
 	})
 
+	t.Run("default_program is enum even when claude is not on PATH", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		t.Setenv("SHELL", "/bin/bash")
+
+		cfg := DefaultConfig()
+
+		require.NotNil(t, cfg)
+		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
+		// No override populated when auto-detect fails — bare enum is
+		// resolved to a $PATH lookup at exec time.
+		assert.Empty(t, cfg.ProgramOverrides[tmux.ProgramClaude])
+	})
+}
+
+func TestValidateProgramEnum(t *testing.T) {
+	for _, name := range tmux.SupportedPrograms {
+		t.Run("accepts "+name, func(t *testing.T) {
+			assert.NoError(t, ValidateProgramEnum("field", name))
+		})
+	}
+
+	rejectCases := []struct {
+		name string
+		in   string
+	}{
+		{"path with flag", "/home/siyer/.local/bin/claude --dangerously-skip-permissions"},
+		{"unknown agent", "amp"},
+		{"agent with flags", "claude --model opus"},
+		{"empty", ""},
+		{"random word", "foo"},
+	}
+	for _, tc := range rejectCases {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			err := ValidateProgramEnum("default_program", tc.in)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "default_program")
+			assert.Contains(t, err.Error(), "program_overrides")
+		})
+	}
+}
+
+func TestResolveProgram(t *testing.T) {
+	t.Run("returns override when set", func(t *testing.T) {
+		cfg := &Config{
+			DefaultProgram: tmux.ProgramClaude,
+			ProgramOverrides: map[string]string{
+				tmux.ProgramClaude: "/home/me/claude --foo",
+			},
+		}
+		assert.Equal(t, "/home/me/claude --foo", ResolveProgram(cfg, tmux.ProgramClaude))
+	})
+
+	t.Run("returns bare enum when no override", func(t *testing.T) {
+		cfg := &Config{
+			DefaultProgram: tmux.ProgramClaude,
+		}
+		assert.Equal(t, tmux.ProgramClaude, ResolveProgram(cfg, tmux.ProgramClaude))
+	})
+
+	t.Run("returns bare enum when override is empty string", func(t *testing.T) {
+		cfg := &Config{
+			ProgramOverrides: map[string]string{
+				tmux.ProgramClaude: "",
+			},
+		}
+		assert.Equal(t, tmux.ProgramClaude, ResolveProgram(cfg, tmux.ProgramClaude))
+	})
+
+	t.Run("nil cfg returns agent unchanged", func(t *testing.T) {
+		assert.Equal(t, tmux.ProgramClaude, ResolveProgram(nil, tmux.ProgramClaude))
+	})
+
+	t.Run("override only applies to its own agent", func(t *testing.T) {
+		cfg := &Config{
+			ProgramOverrides: map[string]string{
+				tmux.ProgramClaude: "/home/me/claude",
+			},
+		}
+		assert.Equal(t, "/home/me/claude", ResolveProgram(cfg, tmux.ProgramClaude))
+		assert.Equal(t, tmux.ProgramCodex, ResolveProgram(cfg, tmux.ProgramCodex))
+		assert.Equal(t, tmux.ProgramAider, ResolveProgram(cfg, tmux.ProgramAider))
+	})
 }
 
 func TestGetConfigDir(t *testing.T) {
@@ -240,51 +341,120 @@ func TestGetConfigDir(t *testing.T) {
 
 func TestLoadConfig(t *testing.T) {
 	t.Run("returns default config when file doesn't exist", func(t *testing.T) {
-		// Use a temporary home directory to avoid interfering with real config
-		originalHome := os.Getenv("HOME")
-		tempHome := t.TempDir()
-		os.Setenv("HOME", tempHome)
-		defer os.Setenv("HOME", originalHome)
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-		config := LoadConfig()
+		cfg, err := LoadConfig()
 
-		assert.NotNil(t, config)
-		assert.NotEmpty(t, config.DefaultProgram)
-		assert.False(t, config.AutoYes)
-		assert.Equal(t, 1000, config.DaemonPollInterval)
-		assert.NotEmpty(t, config.BranchPrefix)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
+		assert.False(t, cfg.AutoYes)
+		assert.Equal(t, 1000, cfg.DaemonPollInterval)
+		assert.NotEmpty(t, cfg.BranchPrefix)
 	})
 
-	t.Run("loads valid config file", func(t *testing.T) {
-		// Create a temporary config directory
-		tempHome := t.TempDir()
-		configDir := filepath.Join(tempHome, ".agent-factory")
-		err := os.MkdirAll(configDir, 0755)
+	t.Run("loads valid config with enum default_program", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
 		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
 
-		// Create a test config file
 		configPath := filepath.Join(configDir, ConfigFileName)
 		configContent := `{
-			"default_program": "test-claude",
+			"default_program": "codex",
 			"auto_yes": true,
 			"daemon_poll_interval": 2000,
 			"branch_prefix": "test/"
 		}`
-		err = os.WriteFile(configPath, []byte(configContent), 0644)
+		require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
+
+		cfg, err := LoadConfig()
 		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "codex", cfg.DefaultProgram)
+		assert.True(t, cfg.AutoYes)
+		assert.Equal(t, 2000, cfg.DaemonPollInterval)
+		assert.Equal(t, "test/", cfg.BranchPrefix)
+	})
 
-		// Override HOME environment
-		originalHome := os.Getenv("HOME")
-		os.Setenv("HOME", tempHome)
-		defer os.Setenv("HOME", originalHome)
+	t.Run("loads program_overrides nested map", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
 
-		config := LoadConfig()
+		configPath := filepath.Join(configDir, ConfigFileName)
+		configContent := `{
+			"default_program": "claude",
+			"program_overrides": {
+				"claude": "/home/me/.local/bin/claude --dangerously-skip-permissions",
+				"codex": "/opt/codex/bin/codex --quiet"
+			}
+		}`
+		require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
 
-		assert.NotNil(t, config)
-		assert.Equal(t, "test-claude", config.DefaultProgram)
-		assert.True(t, config.AutoYes)
-		assert.Equal(t, 2000, config.DaemonPollInterval)
-		assert.Equal(t, "test/", config.BranchPrefix)
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "/home/me/.local/bin/claude --dangerously-skip-permissions",
+			cfg.ProgramOverrides[tmux.ProgramClaude])
+		assert.Equal(t, "/opt/codex/bin/codex --quiet",
+			cfg.ProgramOverrides[tmux.ProgramCodex])
+	})
+
+	t.Run("rejects legacy default_program with path-and-flags", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+
+		configPath := filepath.Join(configDir, ConfigFileName)
+		const legacy = "/home/siyer/.local/bin/claude --dangerously-skip-permissions"
+		content := fmt.Sprintf(`{"default_program": %q}`, legacy)
+		require.NoError(t, os.WriteFile(configPath, []byte(content), 0644))
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "default_program")
+		assert.Contains(t, err.Error(), "program_overrides")
+		assert.Contains(t, err.Error(), legacy)
+	})
+
+	t.Run("rejects unknown agent in default_program", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+
+		configPath := filepath.Join(configDir, ConfigFileName)
+		require.NoError(t, os.WriteFile(configPath, []byte(`{"default_program": "amp"}`), 0644))
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), `"amp"`)
+	})
+
+	t.Run("rejects unknown agent key in program_overrides", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+
+		configPath := filepath.Join(configDir, ConfigFileName)
+		content := `{
+			"default_program": "claude",
+			"program_overrides": {
+				"amp": "/opt/amp"
+			}
+		}`
+		require.NoError(t, os.WriteFile(configPath, []byte(content), 0644))
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "program_overrides key")
 	})
 
 	t.Run("clamps non-positive daemon_poll_interval to default", func(t *testing.T) {
@@ -300,213 +470,62 @@ func TestLoadConfig(t *testing.T) {
 
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				tempHome := t.TempDir()
-				configDir := filepath.Join(tempHome, ".agent-factory")
+				t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+				configDir, err := GetConfigDir()
+				require.NoError(t, err)
 				require.NoError(t, os.MkdirAll(configDir, 0755))
 
 				configPath := filepath.Join(configDir, ConfigFileName)
-				content := fmt.Sprintf(`{"daemon_poll_interval": %d}`, tc.raw)
+				content := fmt.Sprintf(`{"default_program": "claude", "daemon_poll_interval": %d}`, tc.raw)
 				require.NoError(t, os.WriteFile(configPath, []byte(content), 0644))
 
-				originalHome := os.Getenv("HOME")
-				os.Setenv("HOME", tempHome)
-				defer os.Setenv("HOME", originalHome)
-
-				config := LoadConfig()
-				assert.NotNil(t, config)
-				assert.Equal(t, tc.expected, config.DaemonPollInterval)
+				cfg, err := LoadConfig()
+				require.NoError(t, err)
+				require.NotNil(t, cfg)
+				assert.Equal(t, tc.expected, cfg.DaemonPollInterval)
 			})
 		}
 	})
 
-	t.Run("reapplies shell-quoting to user default_program with spaces", func(t *testing.T) {
-		// Regression for #569: a user-provided default_program with spaces
-		// (typical macOS App Bundle install) used to overwrite the quoted
-		// auto-detected value and reach tmux unquoted, breaking sh -c.
+	t.Run("returns default config on invalid JSON", func(t *testing.T) {
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
 		configDir, err := GetConfigDir()
 		require.NoError(t, err)
 		require.NoError(t, os.MkdirAll(configDir, 0755))
 
 		configPath := filepath.Join(configDir, ConfigFileName)
-		const userProgram = "/Applications/Claude Code.app/Contents/MacOS/claude --dangerously-skip-permissions"
-		content := fmt.Sprintf(`{"default_program": %q}`, userProgram)
-		require.NoError(t, os.WriteFile(configPath, []byte(content), 0644))
+		require.NoError(t, os.WriteFile(configPath, []byte(`{"invalid": json content}`), 0644))
 
-		config := LoadConfig()
-		assert.NotNil(t, config)
-		assert.Equal(t,
-			"'/Applications/Claude Code.app/Contents/MacOS/claude' --dangerously-skip-permissions",
-			config.DefaultProgram,
-		)
-	})
-
-	t.Run("returns default config on invalid JSON", func(t *testing.T) {
-		// Create a temporary config directory
-		tempHome := t.TempDir()
-		configDir := filepath.Join(tempHome, ".agent-factory")
-		err := os.MkdirAll(configDir, 0755)
+		cfg, err := LoadConfig()
 		require.NoError(t, err)
-
-		// Create an invalid config file
-		configPath := filepath.Join(configDir, ConfigFileName)
-		invalidContent := `{"invalid": json content}`
-		err = os.WriteFile(configPath, []byte(invalidContent), 0644)
-		require.NoError(t, err)
-
-		// Override HOME environment
-		originalHome := os.Getenv("HOME")
-		os.Setenv("HOME", tempHome)
-		defer os.Setenv("HOME", originalHome)
-
-		config := LoadConfig()
-
-		// Should return default config when JSON is invalid
-		assert.NotNil(t, config)
-		assert.NotEmpty(t, config.DefaultProgram)
-		assert.False(t, config.AutoYes)                  // Default value
-		assert.Equal(t, 1000, config.DaemonPollInterval) // Default value
+		require.NotNil(t, cfg)
+		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
 	})
-}
-
-func TestShellQuoteProgram(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{
-			name: "macOS App Bundle path",
-			in:   "/Applications/Claude Code.app/Contents/MacOS/claude",
-			want: "'/Applications/Claude Code.app/Contents/MacOS/claude'",
-		},
-		{
-			name: "path with apostrophe",
-			in:   "/Users/o'malley/bin/claude",
-			want: `'/Users/o'\''malley/bin/claude'`,
-		},
-		{
-			name: "path with trailing flags",
-			in:   "/Applications/Claude Code.app/Contents/MacOS/claude --dangerously-skip-permissions",
-			want: "'/Applications/Claude Code.app/Contents/MacOS/claude' --dangerously-skip-permissions",
-		},
-		{
-			name: "already single-quoted with flags",
-			in:   "'/Applications/Claude Code.app/Contents/MacOS/claude' --dangerously-skip-permissions",
-			want: "'/Applications/Claude Code.app/Contents/MacOS/claude' --dangerously-skip-permissions",
-		},
-		{
-			name: "already double-quoted",
-			in:   `"/Applications/Claude Code.app/Contents/MacOS/claude"`,
-			want: `"/Applications/Claude Code.app/Contents/MacOS/claude"`,
-		},
-		{
-			name: "plain identifier",
-			in:   "claude",
-			want: "claude",
-		},
-		{
-			name: "plain identifier with flags",
-			in:   "claude --dangerously-skip-permissions",
-			want: "claude --dangerously-skip-permissions",
-		},
-		{
-			name: "spaces and multiple flags",
-			in:   "/opt/My Tools/claude -v --dangerously-skip-permissions",
-			want: "'/opt/My Tools/claude' -v --dangerously-skip-permissions",
-		},
-		{
-			// Regression for #606: " - " in a directory name must not be
-			// treated as a flag boundary.
-			name: "dir name contains space-dash-space",
-			in:   "/home/user/my - project/claude",
-			want: "'/home/user/my - project/claude'",
-		},
-		{
-			name: "dir name contains space-dash-space, with long flag",
-			in:   "/home/user/my - project/claude --foo",
-			want: "'/home/user/my - project/claude' --foo",
-		},
-		{
-			name: "dir name contains multiple space-dash-space, with flag and value",
-			in:   "/home/user/a - b - c/aider --model x",
-			want: "'/home/user/a - b - c/aider' --model x",
-		},
-		{
-			// Regression for #631: " -v2/" inside a directory name must not
-			// be treated as a flag boundary — the dash-letter sequence is
-			// followed by "/" before the next space, so it's part of a path
-			// segment, not a flag.
-			name: "dir name contains space-dash-letter-digits-slash",
-			in:   "/tmp/My Projects -v2/claude",
-			want: "'/tmp/My Projects -v2/claude'",
-		},
-		{
-			// Regression for #631: same shape but with a real trailing flag.
-			// Only the trailing " --bar" should be treated as the boundary.
-			name: "dir name contains space-dash-letters-slash, with long flag",
-			in:   "/tmp/Apps -Main/claude --bar",
-			want: "'/tmp/Apps -Main/claude' --bar",
-		},
-		{
-			// Regression for #631: " -v/" inside a directory name (no
-			// trailing chars between letter and "/") must not be a boundary.
-			name: "dir name ends with space-dash-letter-slash",
-			in:   "/tmp/foo -v/claude",
-			want: "'/tmp/foo -v/claude'",
-		},
-		{
-			// Real short flag (followed by space) must still be detected
-			// even when long flags also follow.
-			name: "short flag followed by long flag",
-			in:   "/path/agent -v --verbose",
-			want: "/path/agent -v --verbose",
-		},
-		{
-			name: "empty string",
-			in:   "",
-			want: "",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, shellQuoteProgram(tc.in))
-		})
-	}
 }
 
 func TestSaveConfig(t *testing.T) {
 	t.Run("saves config to file", func(t *testing.T) {
-		// Create a temporary config directory
-		tempHome := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-		// Override HOME environment
-		originalHome := os.Getenv("HOME")
-		os.Setenv("HOME", tempHome)
-		defer os.Setenv("HOME", originalHome)
-
-		// Create a test config
 		testConfig := &Config{
-			DefaultProgram:     "test-program",
+			DefaultProgram:     tmux.ProgramClaude,
+			ProgramOverrides:   map[string]string{tmux.ProgramClaude: "/home/me/claude"},
 			AutoYes:            true,
 			DaemonPollInterval: 3000,
 			BranchPrefix:       "test-branch/",
 		}
 
-		err := SaveConfig(testConfig)
-		assert.NoError(t, err)
+		require.NoError(t, SaveConfig(testConfig))
 
-		// Verify the file was created
-		configDir := filepath.Join(tempHome, ".agent-factory")
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
 		configPath := filepath.Join(configDir, ConfigFileName)
-
 		assert.FileExists(t, configPath)
 
-		// Load and verify the content
-		loadedConfig := LoadConfig()
+		loadedConfig, err := LoadConfig()
+		require.NoError(t, err)
 		assert.Equal(t, testConfig.DefaultProgram, loadedConfig.DefaultProgram)
+		assert.Equal(t, testConfig.ProgramOverrides, loadedConfig.ProgramOverrides)
 		assert.Equal(t, testConfig.AutoYes, loadedConfig.AutoYes)
 		assert.Equal(t, testConfig.DaemonPollInterval, loadedConfig.DaemonPollInterval)
 		assert.Equal(t, testConfig.BranchPrefix, loadedConfig.BranchPrefix)

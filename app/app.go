@@ -130,7 +130,11 @@ type home struct {
 
 func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
 	// Load application config
-	appConfig := config.LoadConfig()
+	appConfig, err := config.LoadConfig()
+	if err != nil {
+		fmt.Printf("Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Apply configured detach key
 	if appConfig.DetachKeys != "" {

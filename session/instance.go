@@ -357,7 +357,7 @@ func (i *Instance) StartWithExistingWorktree(worktreePath, branchName string) er
 	i.Branch = branchName
 	i.mu.Unlock()
 
-	program := injectSystemPrompt(i.Program, i.Title, worktreePath)
+	program := injectSystemPrompt(i.Program, resolveProgramForInstance(i), i.Title, worktreePath)
 	tmuxSession := tmux.NewTmuxSessionForRepo(i.Title, i.Path, program)
 
 	i.mu.Lock()

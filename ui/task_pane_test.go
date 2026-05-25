@@ -3,7 +3,6 @@ package ui
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -210,20 +209,23 @@ func TestTaskPaneEditModePresetFromExistingProgram(t *testing.T) {
 	}
 }
 
-// TestTaskPaneEditModePreservesCustomProgram verifies that opening edit mode
-// on a task whose Program is a legacy free-text command preserves the raw
-// value verbatim — saving without explicit change must not collapse it to
-// a canonical agent name (#492).
-func TestTaskPaneEditModePreservesCustomProgram(t *testing.T) {
+// TestTaskPaneEditModeCollapsesLegacyProgramToDefault verifies that opening
+// edit mode on a task whose Program is a legacy free-text command collapses
+// the selector to the "(use config default)" sentinel. Saving rewrites the
+// Program to the empty string — the on-disk legacy value is not preserved
+// because per-task Program is now enum-only (#658) and save-side enum
+// validation would reject any free-text value. Users must explicitly choose
+// a SupportedPrograms entry (or accept the config default) on edit.
+func TestTaskPaneEditModeCollapsesLegacyProgramToDefault(t *testing.T) {
 	tp := NewTaskPane()
-	const raw = "/usr/local/bin/aider --model gpt-4"
+	const legacy = "/usr/local/bin/aider --model gpt-4"
 	tp.SetTasks([]task.Task{{
 		ID:          "abc",
 		Name:        "nightly",
 		Prompt:      "do it",
 		CronExpr:    "* * * * *",
 		ProjectPath: "/tmp/repo",
-		Program:     raw,
+		Program:     legacy,
 		Enabled:     true,
 	}})
 	tp.SetFocus(true)
@@ -239,8 +241,8 @@ func TestTaskPaneEditModePreservesCustomProgram(t *testing.T) {
 	assert.False(t, tp.IsEditing(), "save should exit edit mode")
 	tasks := tp.GetTasks()
 	if assert.Len(t, tasks, 1) {
-		assert.Equal(t, raw, tasks[0].Program,
-			"legacy free-text program must be preserved verbatim across edit/save")
+		assert.Equal(t, "", tasks[0].Program,
+			"legacy free-text program must collapse to the default sentinel")
 	}
 }
 
@@ -413,9 +415,10 @@ func TestTaskPaneEditModeKeepsAbsolutePath(t *testing.T) {
 	}
 }
 
-// TestTaskPaneListShowsAgentNameNotFullProgram confirms the list view collapses
-// a noisy program string (path + flags) down to the agent name for #455.
-func TestTaskPaneListShowsAgentNameNotFullProgram(t *testing.T) {
+// TestTaskPaneListShowsAgentName confirms the list view renders the per-task
+// agent enum name (#658 collapsed Program to the enum, so the rendering is
+// now a straight lookup).
+func TestTaskPaneListShowsAgentName(t *testing.T) {
 	tp := NewTaskPane()
 	tp.SetSize(80, 24)
 	tp.SetTasks([]task.Task{{
@@ -424,14 +427,31 @@ func TestTaskPaneListShowsAgentNameNotFullProgram(t *testing.T) {
 		Prompt:      "do it",
 		CronExpr:    "0 0 * * *",
 		ProjectPath: "/tmp/repo",
-		Program:     "/usr/local/bin/aider --model gpt-4",
+		Program:     "aider",
 		Enabled:     true,
 	}})
 
 	out := tp.String()
 	assert.Contains(t, out, "aider", "list view should render the agent name")
-	assert.False(t, strings.Contains(out, "/usr/local/bin/aider"),
-		"list view must not include the full program path")
-	assert.False(t, strings.Contains(out, "--model gpt-4"),
-		"list view must not include program flags")
+}
+
+// TestTaskPaneListShowsConfigDefaultWhenProgramEmpty confirms a task with no
+// per-task Program shows the "(use config default)" label rather than an
+// empty agent name.
+func TestTaskPaneListShowsConfigDefaultWhenProgramEmpty(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetSize(80, 24)
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "0 0 * * *",
+		ProjectPath: "/tmp/repo",
+		Program:     "",
+		Enabled:     true,
+	}})
+
+	out := tp.String()
+	assert.Contains(t, out, programDefaultLabel,
+		"list view should render the config-default sentinel for empty Program")
 }

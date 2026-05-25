@@ -59,6 +59,11 @@ func mockCmdExec(captureContent string, sessionExists bool) cmd_test.MockCmdExec
 // makeStartedInstance creates a minimal instance that reports as started with the given title.
 func makeStartedInstance(t *testing.T, title string) *session.Instance {
 	t.Helper()
+	// Isolate config reads from the developer's real ~/.agent-factory: the
+	// new strict default_program enum validation (#658) would otherwise pick
+	// up legacy "path with flags" values in the host config and fail the
+	// downstream NewGitWorktree -> LoadConfig call.
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	workdir := t.TempDir()
 	setupGitRepo(t, workdir)
 

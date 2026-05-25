@@ -98,7 +98,13 @@ var tasksAddCmd = &cobra.Command{
 
 		program := taskAddProgramFlag
 		if program == "" {
-			program = config.LoadConfig().DefaultProgram
+			cfg, err := config.LoadConfig()
+			if err != nil {
+				return jsonError(err)
+			}
+			program = cfg.DefaultProgram
+		} else if err := config.ValidateProgramEnum("--program flag", program); err != nil {
+			return jsonError(err)
 		}
 
 		id := task.GenerateID()

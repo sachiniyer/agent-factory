@@ -14,28 +14,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHandleStateSelectProgramSubstringCollision(t *testing.T) {
+// TestHandleStateSelectProgramSelectsEnum verifies that selecting an agent
+// from the program overlay writes the bare enum to pendingProgram. Under the
+// enum-only program model (#658), m.program itself is an enum, so the old
+// "preserve user's full path-and-flags when re-selecting the matching
+// agent" branch is gone — every selection is just the canonical agent name.
+func TestHandleStateSelectProgramSelectsEnum(t *testing.T) {
 	h := newTestHome(t)
-	h.program = "/tmp/claude-wrapper --flag"
+	h.program = tmux.ProgramClaude
 	h.selectionOverlay = overlay.NewSelectionOverlay("Select Program", tmux.SupportedPrograms)
 	h.selectionOverlay.SetSelectedIndex(0) // claude
 	h.state = stateSelectProgram
 
 	_, _ = h.handleStateSelectProgram(tea.KeyMsg{Type: tea.KeyEnter})
 
-	assert.Equal(t, "claude", h.pendingProgram)
+	assert.Equal(t, tmux.ProgramClaude, h.pendingProgram)
 }
 
-func TestHandleStateSelectProgramPreservesExactProgramFlags(t *testing.T) {
+// TestHandleStateSelectProgramSwitchesAgent verifies that switching from the
+// configured default to a different agent enum updates pendingProgram to the
+// new selection.
+func TestHandleStateSelectProgramSwitchesAgent(t *testing.T) {
 	h := newTestHome(t)
-	h.program = "/usr/local/bin/claude --dangerously-skip-permissions"
+	h.program = tmux.ProgramClaude
 	h.selectionOverlay = overlay.NewSelectionOverlay("Select Program", tmux.SupportedPrograms)
-	h.selectionOverlay.SetSelectedIndex(0) // claude
+	// Walk to codex (index 1 in SupportedPrograms).
+	h.selectionOverlay.SetSelectedIndex(1)
 	h.state = stateSelectProgram
 
 	_, _ = h.handleStateSelectProgram(tea.KeyMsg{Type: tea.KeyEnter})
 
-	assert.Equal(t, h.program, h.pendingProgram)
+	assert.Equal(t, tmux.ProgramCodex, h.pendingProgram)
 }
 
 // TestHandleContentPaneFocus_PendingCreateFlushesDirtyTaskState is the

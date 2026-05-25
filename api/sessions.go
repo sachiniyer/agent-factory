@@ -173,12 +173,18 @@ var sessionsCreateCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("session with title %q already exists", createNameFlag))
 		}
 
-		program := createProgramFlag
-		if program == "" {
-			program = config.LoadConfig().DefaultProgram
+		cfg, err := config.LoadConfig()
+		if err != nil {
+			return jsonError(err)
 		}
 
-		cfg := config.LoadConfig()
+		program := createProgramFlag
+		if program == "" {
+			program = cfg.DefaultProgram
+		} else if err := config.ValidateProgramEnum("--program flag", program); err != nil {
+			return jsonError(err)
+		}
+
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
 			Title:    createNameFlag,
 			RepoPath: repo.Root,
@@ -302,12 +308,18 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 				return jsonError(fmt.Errorf("session with title %q already exists", title))
 			}
 
-			program := sendPromptProgramFlag
-			if program == "" {
-				program = config.LoadConfig().DefaultProgram
+			cfg, err := config.LoadConfig()
+			if err != nil {
+				return jsonError(err)
 			}
 
-			cfg := config.LoadConfig()
+			program := sendPromptProgramFlag
+			if program == "" {
+				program = cfg.DefaultProgram
+			} else if err := config.ValidateProgramEnum("--program flag", program); err != nil {
+				return jsonError(err)
+			}
+
 			_, err = createSessionViaDaemon(daemon.CreateSessionRequest{
 				Title:    title,
 				RepoPath: repo.Root,

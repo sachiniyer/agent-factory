@@ -17,6 +17,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 type harness struct {
@@ -96,7 +97,7 @@ func TestConcurrentCLIClientsUseDaemonCoordinator(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := h.runResult("sessions", "--repo", h.repo, "create", "--name", name, "--program", "cat")
+			_, err := h.runResult("sessions", "--repo", h.repo, "create", "--name", name, "--program", tmux.ProgramClaude)
 			distinctErrs <- err
 		}()
 	}
@@ -104,7 +105,7 @@ func TestConcurrentCLIClientsUseDaemonCoordinator(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := h.runResult("sessions", "--repo", h.repo, "create", "--name", "dupe", "--program", "cat")
+			_, err := h.runResult("sessions", "--repo", h.repo, "create", "--name", "dupe", "--program", tmux.ProgramClaude)
 			duplicateErrs <- err
 		}()
 	}
@@ -150,7 +151,7 @@ func TestScheduledTaskRunnerUsesDaemonAndAllocatesRerunTitle(t *testing.T) {
 			"prompt":       "",
 			"cron_expr":    "* * * * *",
 			"project_path": h.repo,
-			"program":      "cat",
+			"program":      tmux.ProgramClaude,
 			"enabled":      true,
 			"created_at":   time.Now().Format(time.RFC3339Nano),
 		},
@@ -290,7 +291,15 @@ func newHarness(t *testing.T) *harness {
 	if err := os.Setenv("AGENT_FACTORY_HOME", home); err != nil {
 		t.Fatalf("setenv AGENT_FACTORY_HOME: %v", err)
 	}
-	writeConfig(t, home)
+	// The enum-only program model (#658) routes session.Program through
+	// session.injectSystemPrompt, which appends agent-specific flags
+	// (e.g. --plugin-dir for claude) to the resolved command. Plain `cat`
+	// errors out on those flags, so write a shell wrapper that swallows any
+	// args and behaves as a stdin-reading pane process. ProgramOverrides
+	// in testConfig points the claude enum at this wrapper.
+	wrapper := filepath.Join(home, "fake-agent.sh")
+	writeFile(t, wrapper, "#!/bin/sh\nexec cat\n", 0755)
+	writeConfigWithProgramPath(t, home, wrapper)
 
 	h := &harness{
 		t:    t,
@@ -334,7 +343,7 @@ func setupGitRepo(t *testing.T) string {
 }
 
 func (h *harness) createSession(name string) instanceData {
-	out := h.run("sessions", "--repo", h.repo, "create", "--name", name, "--program", "cat")
+	out := h.run("sessions", "--repo", h.repo, "create", "--name", name, "--program", tmux.ProgramClaude)
 	var data instanceData
 	if err := json.Unmarshal([]byte(out), &data); err != nil {
 		h.t.Fatalf("parse create response: %v\n%s", err, out)
@@ -427,9 +436,12 @@ func runExternal(t *testing.T, dir, name string, args ...string) string {
 	return string(out)
 }
 
-func writeConfig(t *testing.T, home string) {
+// writeConfigWithProgramPath persists the integration-test config with the
+// claude enum routed to a path-on-disk wrapper script (see newHarness).
+func writeConfigWithProgramPath(t *testing.T, home, programPath string) {
 	t.Helper()
 	cfg := testConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: programPath}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal config: %v", err)
@@ -439,7 +451,11 @@ func writeConfig(t *testing.T, home string) {
 
 func testConfig() *config.Config {
 	return &config.Config{
-		DefaultProgram:     "cat",
+		// DefaultProgram is restricted to a SupportedPrograms enum (#658).
+		// Integration tests pick "claude" and route it through
+		// ProgramOverrides (see writeConfigWithProgramPath) to a harmless
+		// wrapper script that doesn't need a real agent binary.
+		DefaultProgram:     tmux.ProgramClaude,
 		AutoYes:            false,
 		DaemonPollInterval: 100,
 		BranchPrefix:       "test/",

@@ -5,11 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/sachiniyer/agent-factory/config"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 const tasksFileName = "tasks.json"
@@ -123,6 +124,13 @@ func AddTask(t Task) error {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return err
 	}
+	// Empty Program means "fall back to the configured default_program at
+	// run time"; only validate when an explicit per-task override was set.
+	if t.Program != "" {
+		if err := config.ValidateProgramEnum("task program", t.Program); err != nil {
+			return err
+		}
+	}
 	path, err := getTasksPathFn()
 	if err != nil {
 		return err
@@ -216,6 +224,13 @@ func LoadTasksForCurrentRepo() ([]Task, error) {
 func UpdateTask(t Task) error {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return err
+	}
+	// Empty Program means "fall back to the configured default_program at
+	// run time"; only validate when an explicit per-task override was set.
+	if t.Program != "" {
+		if err := config.ValidateProgramEnum("task program", t.Program); err != nil {
+			return err
+		}
 	}
 	path, err := getTasksPathFn()
 	if err != nil {

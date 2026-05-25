@@ -14,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,7 +38,7 @@ func TestTUIRefreshSeesCLIChangesThroughDaemon(t *testing.T) {
 		killIntegrationDaemon(os.Getenv("AGENT_FACTORY_HOME"))
 	})
 
-	runIntegrationAFOK(t, bin, repoDir, "sessions", "--repo", repoDir, "create", "--name", "cli-made", "--program", "cat")
+	runIntegrationAFOK(t, bin, repoDir, "sessions", "--repo", repoDir, "create", "--name", "cli-made", "--program", tmux.ProgramClaude)
 	require.True(t, h.refreshExternalInstances(), "TUI refresh should import CLI-created session")
 	require.NotNil(t, findSidebarInstance(h, "cli-made"))
 
@@ -98,8 +99,14 @@ func runIntegrationAF(t *testing.T, bin, dir string, args ...string) (string, er
 
 func writeIntegrationConfig(t *testing.T, home string) {
 	t.Helper()
+	// Write a wrapper script that ignores any --plugin-dir / --dangerously-skip
+	// flags injectSystemPrompt would append; route the claude enum to it via
+	// ProgramOverrides so the CLI accepts --program claude (#658).
+	wrapper := filepath.Join(home, "fake-agent.sh")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nexec cat\n"), 0755))
 	cfg := &config.Config{
-		DefaultProgram:     "cat",
+		DefaultProgram:     tmux.ProgramClaude,
+		ProgramOverrides:   map[string]string{tmux.ProgramClaude: wrapper},
 		AutoYes:            false,
 		DaemonPollInterval: 100,
 		BranchPrefix:       "test/",

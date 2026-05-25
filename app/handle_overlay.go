@@ -60,15 +60,7 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if shouldClose {
 		if m.selectionOverlay.IsSubmitted() {
 			idx := m.selectionOverlay.GetSelectedIndex()
-			selected := tmux.SupportedPrograms[idx]
-			// If the user re-selected the program matching the default (which may
-			// contain flags like --dangerously-skip-permissions), keep the full
-			// default string. Otherwise use the bare program name.
-			if session.BaseCommand(m.program) == selected {
-				m.pendingProgram = m.program
-			} else {
-				m.pendingProgram = selected
-			}
+			m.pendingProgram = tmux.SupportedPrograms[idx]
 		}
 		m.selectionOverlay = nil
 		m.state = stateNew

@@ -35,8 +35,11 @@ var (
 			defer log.Close()
 
 			if daemonFlag {
-				cfg := config.LoadConfig()
-				err := daemon.RunDaemon(cfg)
+				cfg, err := config.LoadConfig()
+				if err != nil {
+					return err
+				}
+				err = daemon.RunDaemon(cfg)
 				if err != nil {
 					log.ErrorLog.Printf("failed to start daemon %v", err)
 				}
@@ -58,24 +61,25 @@ var (
 				return fmt.Errorf("failed to determine repo context: %w", err)
 			}
 
-			cfg := config.LoadConfig()
+			cfg, err := config.LoadConfig()
+			if err != nil {
+				return err
+			}
 
-			// Program flag overrides config
+			// Program flag overrides config. Both are restricted to bare
+			// agent names from tmux.SupportedPrograms; per-invocation path
+			// or flag overrides belong in program_overrides.
 			program := cfg.DefaultProgram
 			if programFlag != "" {
+				if err := config.ValidateProgramEnum("--program flag", programFlag); err != nil {
+					return err
+				}
 				program = programFlag
 			}
 			// AutoYes flag overrides config
 			autoYes := cfg.AutoYes
 			if autoYesFlag {
 				autoYes = true
-			}
-			// Match Claude by exact basename (issue #520). A substring check
-			// false-matched paths like /home/claude-user/bin/aider or wrapper
-			// scripts named claude-something, appending Claude's permission
-			// flag to non-Claude commands.
-			if autoYes && session.BaseCommand(program) == tmux.ProgramClaude {
-				program = program + " --permission-mode bypassPermissions"
 			}
 			if autoYes {
 				defer func() {
@@ -158,7 +162,10 @@ var (
 			log.Initialize(false)
 			defer log.Close()
 
-			cfg := config.LoadConfig()
+			cfg, err := config.LoadConfig()
+			if err != nil {
+				return err
+			}
 
 			configDir, err := config.GetConfigDir()
 			if err != nil {
