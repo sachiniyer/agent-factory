@@ -127,7 +127,7 @@ func AddTask(t Task) error {
 	// Empty Program means "fall back to the configured default_program at
 	// run time"; only validate when an explicit per-task override was set.
 	if t.Program != "" {
-		if err := config.ValidateProgramEnum("task program", t.Program); err != nil {
+		if err := config.ValidateProgramEnum("task program", "task program", t.Program); err != nil {
 			return err
 		}
 	}
@@ -228,7 +228,7 @@ func UpdateTask(t Task) error {
 	// Empty Program means "fall back to the configured default_program at
 	// run time"; only validate when an explicit per-task override was set.
 	if t.Program != "" {
-		if err := config.ValidateProgramEnum("task program", t.Program); err != nil {
+		if err := config.ValidateProgramEnum("task program", "task program", t.Program); err != nil {
 			return err
 		}
 	}

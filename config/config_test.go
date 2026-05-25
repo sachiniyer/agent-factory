@@ -170,7 +170,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestValidateProgramEnum(t *testing.T) {
 	for _, name := range tmux.SupportedPrograms {
 		t.Run("accepts "+name, func(t *testing.T) {
-			assert.NoError(t, ValidateProgramEnum("field", name))
+			assert.NoError(t, ValidateProgramEnum("field", "field", name))
 		})
 	}
 
@@ -186,7 +186,11 @@ func TestValidateProgramEnum(t *testing.T) {
 	}
 	for _, tc := range rejectCases {
 		t.Run("rejects "+tc.name, func(t *testing.T) {
-			err := ValidateProgramEnum("default_program", tc.in)
+			err := ValidateProgramEnum(
+				"Config issue in ~/.agent-factory/config.json: default_program",
+				"default_program",
+				tc.in,
+			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "default_program")
 			assert.Contains(t, err.Error(), "program_overrides")
@@ -198,6 +202,10 @@ func TestValidateProgramEnum(t *testing.T) {
 			// both sides of the message body.
 			assert.True(t, strings.HasPrefix(err.Error(), "\n\n"), "expected leading double newline, got %q", err.Error())
 			assert.True(t, strings.HasSuffix(err.Error(), "\n"), "expected trailing newline, got %q", err.Error())
+			// The "set X to the agent name" clause uses the bare referent,
+			// not the path-prefixed lead.
+			assert.Contains(t, err.Error(), "set default_program to the agent name")
+			assert.NotContains(t, err.Error(), "set Config issue in")
 		})
 	}
 }
@@ -478,6 +486,8 @@ func TestLoadConfig(t *testing.T) {
 		assert.Nil(t, cfg)
 		assert.Contains(t, err.Error(), "Config issue in ~/")
 		assert.Contains(t, err.Error(), "default_program")
+		// Sentence-internal referent stays bare — no path prefix mid-sentence.
+		assert.Contains(t, err.Error(), "set default_program to the agent name")
 	})
 
 	t.Run("rejects unknown agent in default_program", func(t *testing.T) {
