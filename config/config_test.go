@@ -190,8 +190,43 @@ func TestValidateProgramEnum(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "default_program")
 			assert.Contains(t, err.Error(), "program_overrides")
+			// Enum must render comma-separated so the message is readable
+			// when Cobra prefixes it with "Error: " (see #661).
+			assert.Contains(t, err.Error(), "[claude, codex, aider, gemini]")
+			// Leading "\n\n" + trailing "\n" pair with Cobra's "Error: "
+			// prefix and Println-added newline to produce a blank line on
+			// both sides of the message body.
+			assert.True(t, strings.HasPrefix(err.Error(), "\n\n"), "expected leading double newline, got %q", err.Error())
+			assert.True(t, strings.HasSuffix(err.Error(), "\n"), "expected trailing newline, got %q", err.Error())
 		})
 	}
+}
+
+func TestPrettyHomePath(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	t.Run("collapses home prefix to tilde", func(t *testing.T) {
+		assert.Equal(t,
+			"~/.agent-factory/config.json",
+			prettyHomePath(filepath.Join(homeDir, ".agent-factory", "config.json")),
+		)
+	})
+
+	t.Run("returns ~ for exact home dir", func(t *testing.T) {
+		assert.Equal(t, "~", prettyHomePath(homeDir))
+	})
+
+	t.Run("returns input unchanged when no home prefix", func(t *testing.T) {
+		assert.Equal(t, "/tmp/foo/bar", prettyHomePath("/tmp/foo/bar"))
+	})
+
+	t.Run("does not collapse a path that shares a prefix substring with home", func(t *testing.T) {
+		// "/home/alice-other/foo" must not be mangled when home is "/home/alice".
+		// Build the sibling by appending a suffix to the home basename.
+		sibling := homeDir + "-other/foo"
+		assert.Equal(t, sibling, prettyHomePath(sibling))
+	})
 }
 
 func TestResolveProgram(t *testing.T) {
@@ -419,6 +454,30 @@ func TestLoadConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), "default_program")
 		assert.Contains(t, err.Error(), "program_overrides")
 		assert.Contains(t, err.Error(), legacy)
+	})
+
+	t.Run("error references home-relative config path", func(t *testing.T) {
+		// Set AGENT_FACTORY_HOME under $HOME so prettyHomePath collapses it
+		// to a ~/-rooted string in the error message (see #661).
+		homeDir, err := os.UserHomeDir()
+		require.NoError(t, err)
+		tmpUnderHome, err := os.MkdirTemp(homeDir, "agent-factory-test-")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.RemoveAll(tmpUnderHome) })
+
+		t.Setenv("AGENT_FACTORY_HOME", tmpUnderHome)
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+
+		configPath := filepath.Join(configDir, ConfigFileName)
+		require.NoError(t, os.WriteFile(configPath, []byte(`{"default_program": "amp"}`), 0644))
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "Config issue in ~/")
+		assert.Contains(t, err.Error(), "default_program")
 	})
 
 	t.Run("rejects unknown agent in default_program", func(t *testing.T) {

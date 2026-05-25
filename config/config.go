@@ -73,20 +73,44 @@ type Config struct {
 
 // ValidateProgramEnum returns nil when name is one of tmux.SupportedPrograms.
 // Otherwise it returns a user-facing migration error explaining how to move a
-// legacy "path with flags" value into the new program_overrides map.
+// legacy "path with flags" value into the new program_overrides map. The
+// returned message is wrapped in leading and trailing newlines so that when
+// Cobra prefixes it with "Error: " the body is visually separated from the
+// usage block (see #661).
 func ValidateProgramEnum(field, name string) error {
 	for _, supported := range tmux.SupportedPrograms {
 		if name == supported {
 			return nil
 		}
 	}
+	// Cobra renders this via `fmt.Fprintln(stderr, "Error:", err)` which
+	// adds a single trailing newline. Leading "\n\n" gives a blank line
+	// after the literal "Error:" prefix; trailing "\n" combined with
+	// Fprintln's own newline yields a blank line before "Usage:".
 	return fmt.Errorf(
-		"%s must be one of %v, got %q. To preserve a custom path or flags, set %s to the agent name and move the full command into program_overrides. Example: %q: %q, %q: { %q: %q }",
-		field, tmux.SupportedPrograms, name,
+		"\n\n%s must be one of [%s], got %q. To preserve a custom path or flags, set %s to the agent name and move the full command into program_overrides. Example: \"default_program\": \"claude\", \"program_overrides\": { \"claude\": %q }\n",
+		field, strings.Join(tmux.SupportedPrograms, ", "), name,
 		field,
-		"default_program", tmux.ProgramClaude,
-		"program_overrides", tmux.ProgramClaude, name,
+		name,
 	)
+}
+
+// prettyHomePath returns absPath with the user's home directory prefix
+// collapsed to "~". Used to render config-file paths in user-facing errors
+// without leaking the absolute filesystem layout. Returns absPath unchanged
+// when the home directory cannot be determined or is not a prefix.
+func prettyHomePath(absPath string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		return absPath
+	}
+	if absPath == homeDir {
+		return "~"
+	}
+	if strings.HasPrefix(absPath, homeDir+string(filepath.Separator)) {
+		return "~" + absPath[len(homeDir):]
+	}
+	return absPath
 }
 
 // ResolveProgram returns the actual tmux invocation for an agent. When
@@ -234,11 +258,12 @@ func LoadConfig() (*Config, error) {
 		return DefaultConfig(), nil
 	}
 
-	if err := ValidateProgramEnum("config.json: default_program", config.DefaultProgram); err != nil {
+	prettyConfigPath := prettyHomePath(configPath)
+	if err := ValidateProgramEnum(fmt.Sprintf("Config issue in %s: default_program", prettyConfigPath), config.DefaultProgram); err != nil {
 		return nil, err
 	}
 	for key := range config.ProgramOverrides {
-		if err := ValidateProgramEnum("config.json: program_overrides key", key); err != nil {
+		if err := ValidateProgramEnum(fmt.Sprintf("Config issue in %s: program_overrides key", prettyConfigPath), key); err != nil {
 			return nil, err
 		}
 	}
