@@ -78,7 +78,7 @@ go build -o /tmp/af-release-smoke .
 /tmp/af-release-smoke version
 /tmp/af-release-smoke debug
 
-/tmp/af-release-smoke sessions --repo "$tmp_repo" create --name smoke --program cat
+/tmp/af-release-smoke sessions --repo "$tmp_repo" create --name smoke --program claude
 /tmp/af-release-smoke sessions --repo "$tmp_repo" list
 /tmp/af-release-smoke sessions send-prompt smoke "release-smoke"
 /tmp/af-release-smoke sessions preview smoke
@@ -120,7 +120,7 @@ Do not cut or publish a release if any of these are true:
 
 Non-blocking, known limits:
 - Real Claude/Aider/Codex/Gemini interactive behavior is not fully automated;
-  tests use `cat` and fake backends for deterministic runs.
+  tests use a fake wrapper script (routed via `program_overrides`) and fake backends for deterministic runs.
 - Real systemd and launchd scheduling should be manually smoke-tested on their
   native OS before a release that changes scheduler code.
 - `af upgrade` requires a published release asset, so end-to-end upgrade is a
