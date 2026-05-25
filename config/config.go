@@ -73,24 +73,26 @@ type Config struct {
 
 // ValidateProgramEnum returns nil when name is one of tmux.SupportedPrograms.
 // Otherwise it returns a user-facing migration error explaining how to move a
-// legacy "path with flags" value into the new program_overrides map. The
-// returned message is wrapped in leading and trailing newlines so that when
-// Cobra prefixes it with "Error: " the body is visually separated from the
-// usage block (see #661).
-func ValidateProgramEnum(field, name string) error {
+// legacy "path with flags" value into the new program_overrides map.
+//
+// lead is the full label rendered at the start of the message — it may
+// include a path prefix (e.g. "Config issue in ~/.agent-factory/config.json:
+// default_program") to anchor the error to a specific file. referent is the
+// short, sentence-internal name (e.g. "default_program") used in the "set X
+// to the agent name" clause; for non-config call sites lead and referent are
+// the same string. The message is wrapped in leading "\n\n" and trailing
+// "\n" so it visually separates from Cobra's "Error: " prefix and the
+// trailing "Usage:" block (see #661).
+func ValidateProgramEnum(lead, referent, name string) error {
 	for _, supported := range tmux.SupportedPrograms {
 		if name == supported {
 			return nil
 		}
 	}
-	// Cobra renders this via `fmt.Fprintln(stderr, "Error:", err)` which
-	// adds a single trailing newline. Leading "\n\n" gives a blank line
-	// after the literal "Error:" prefix; trailing "\n" combined with
-	// Fprintln's own newline yields a blank line before "Usage:".
 	return fmt.Errorf(
 		"\n\n%s must be one of [%s], got %q. To preserve a custom path or flags, set %s to the agent name and move the full command into program_overrides. Example: \"default_program\": \"claude\", \"program_overrides\": { \"claude\": %q }\n",
-		field, strings.Join(tmux.SupportedPrograms, ", "), name,
-		field,
+		lead, strings.Join(tmux.SupportedPrograms, ", "), name,
+		referent,
 		name,
 	)
 }
@@ -259,11 +261,19 @@ func LoadConfig() (*Config, error) {
 	}
 
 	prettyConfigPath := prettyHomePath(configPath)
-	if err := ValidateProgramEnum(fmt.Sprintf("Config issue in %s: default_program", prettyConfigPath), config.DefaultProgram); err != nil {
+	if err := ValidateProgramEnum(
+		fmt.Sprintf("Config issue in %s: default_program", prettyConfigPath),
+		"default_program",
+		config.DefaultProgram,
+	); err != nil {
 		return nil, err
 	}
 	for key := range config.ProgramOverrides {
-		if err := ValidateProgramEnum(fmt.Sprintf("Config issue in %s: program_overrides key", prettyConfigPath), key); err != nil {
+		if err := ValidateProgramEnum(
+			fmt.Sprintf("Config issue in %s: program_overrides key", prettyConfigPath),
+			"program_overrides key",
+			key,
+		); err != nil {
 			return nil, err
 		}
 	}

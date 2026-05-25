@@ -181,7 +181,7 @@ var sessionsCreateCmd = &cobra.Command{
 		program := createProgramFlag
 		if program == "" {
 			program = cfg.DefaultProgram
-		} else if err := config.ValidateProgramEnum("--program flag", program); err != nil {
+		} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program); err != nil {
 			return jsonError(err)
 		}
 
@@ -316,7 +316,7 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 			program := sendPromptProgramFlag
 			if program == "" {
 				program = cfg.DefaultProgram
-			} else if err := config.ValidateProgramEnum("--program flag", program); err != nil {
+			} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program); err != nil {
 				return jsonError(err)
 			}
 
