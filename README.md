@@ -139,25 +139,33 @@ Configuration lives at `~/.agent-factory/config.json`:
 
 ```json
 {
-  "default_program": "claude --dangerously-skip-permissions",
+  "default_program": "claude",
+  "program_overrides": {
+    "claude": "/home/me/.local/bin/claude --dangerously-skip-permissions"
+  },
   "auto_yes": false,
   "daemon_poll_interval": 1000,
-  "branch_prefix": "username/",
+  "branch_prefix": "username/"
 }
 ```
 
 | Field | Description |
 |-------|-------------|
-| `default_program` | AI agent command to run (auto-detected) |
+| `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`. |
+| `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`. |
 | `auto_yes` | Auto-accept agent prompts |
 | `daemon_poll_interval` | Daemon polling interval in ms |
 | `branch_prefix` | Prefix for worktree branches (defaults to `username/`) |
 
-Override the program per-session with `-p`:
+Override the per-session agent with `-p`:
 
 ```bash
-af -p "aider --model ollama_chat/gemma3:1b"
+af -p aider
 ```
+
+`-p` and the per-task `program` field both accept a bare agent enum only. To
+pass a custom path or flags for an agent, set `program_overrides.<agent>` in
+your config — every session that launches that agent will use the override.
 
 ## Upstream
 

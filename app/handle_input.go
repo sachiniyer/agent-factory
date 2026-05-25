@@ -98,10 +98,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open program selection overlay
 		items := make([]string, len(tmux.SupportedPrograms))
 		selectedIdx := 0
-		baseProgram := session.BaseCommand(m.pendingProgram)
 		for i, p := range tmux.SupportedPrograms {
 			items[i] = p
-			if baseProgram == p {
+			if m.pendingProgram == p {
 				selectedIdx = i
 			}
 		}

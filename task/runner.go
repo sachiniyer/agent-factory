@@ -215,7 +215,10 @@ func RunTask(taskID string) error {
 	}
 
 	baseTitle := TaskRunBaseTitle(*t)
-	cfg := config.LoadConfig()
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
 	data, err := daemon.CreateSession(daemon.CreateSessionRequest{
 		TitleBase: baseTitle,
 		RepoPath:  t.ProjectPath,

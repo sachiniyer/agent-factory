@@ -34,6 +34,12 @@ func setupTestEnvironment(t *testing.T, cmdExec cmd_test.MockCmdExec) *testSetup
 	// Initialize logging
 	log.Initialize(false)
 
+	// Isolate config reads from the developer's real ~/.agent-factory:
+	// instance.Start -> NewGitWorktree -> LoadConfig would otherwise pick up
+	// the host's config and trip the strict default_program enum check
+	// introduced in #658.
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
 	// Set up a temp working directory
 	workdir := t.TempDir()
 
@@ -621,6 +627,9 @@ func TestPreviewFallbackMatchesNormalModeHeight(t *testing.T) {
 func setupTwoInstances(t *testing.T, previewA, previewB string) (*session.Instance, *session.Instance, func()) {
 	t.Helper()
 	log.Initialize(false)
+
+	// Isolate config reads — see setupTestEnvironment for details (#658).
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	workdir := t.TempDir()
 	setupGitRepo(t, workdir)

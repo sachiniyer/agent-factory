@@ -454,32 +454,3 @@ func TestSetDetachedSizeReturnsErrSessionGoneWhenPtmxNil(t *testing.T) {
 	err := session.SetDetachedSize(80, 24)
 	require.ErrorIs(t, err, ErrSessionGone)
 }
-
-func TestAgentNameFromProgram(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"empty", "", ""},
-		{"whitespace only", "   ", ""},
-		{"bare canonical name", "claude", "claude"},
-		{"canonical with flags", "claude --dangerously-skip-permissions", "claude"},
-		{"absolute path", "/home/user/.local/bin/claude --foo", "claude"},
-		{"aider with model flag", "/usr/local/bin/aider --model gpt-4", "aider"},
-		{"codex bare", "codex", "codex"},
-		{"gemini in path", "/opt/gemini/bin/gemini --quiet", "gemini"},
-		{"unknown binary with flags", "foo --bar", "foo"},
-		{"unknown absolute path", "/opt/tools/foo --bar baz", "foo"},
-		{"uppercase canonical", "CLAUDE --foo", "claude"},
-		// amp is intentionally not in SupportedPrograms (see #494); the helper
-		// must still degrade gracefully and yield the basename so reintroducing
-		// it requires an explicit decision.
-		{"amp falls through basename", "amp", "amp"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, AgentNameFromProgram(tc.in))
-		})
-	}
-}

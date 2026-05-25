@@ -3,31 +3,24 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/sachiniyer/agent-factory/log"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 const (
 	ConfigFileName            = "config.json"
-	defaultProgram            = "claude"
+	defaultProgram            = tmux.ProgramClaude
 	defaultDaemonPollInterval = 1000
 )
 
 var aliasOutputRegex = regexp.MustCompile(`(?:aliased to|->|^[^/=\s]+\s*=)\s*(.+)`)
-
-// flagBoundaryRegex matches the first " -X" / " --X" flag token in a
-// program string, where X is an ASCII letter and the token runs to the
-// next space or end-of-string without containing a path separator. The
-// trailing-letter requirement avoids matching literal " - " (space dash
-// space) inside a directory name (issue #606); the "no '/' before the
-// terminator" requirement avoids matching " -v2/" or " -Main/" inside a
-// directory name (issue #631).
-var flagBoundaryRegex = regexp.MustCompile(` -{1,2}[a-zA-Z][^/ ]*( |$)`)
 
 // GetConfigDir returns the path to the application's configuration directory.
 // If AGENT_FACTORY_HOME is set, it is used as the config directory.
@@ -59,8 +52,15 @@ func GetConfigDir() (string, error) {
 
 // Config represents the application configuration
 type Config struct {
-	// DefaultProgram is the default program to run in new instances
+	// DefaultProgram is the default agent program name. Must be one of
+	// tmux.SupportedPrograms (e.g. "claude", "codex", "aider", "gemini").
 	DefaultProgram string `json:"default_program"`
+	// ProgramOverrides maps an agent name (key) to the full command string
+	// (value) used when invoking that agent under tmux. Keys must be in
+	// tmux.SupportedPrograms; values are arbitrary shell command strings
+	// (typically a full path with flags). When unset for an agent, the
+	// bare agent name is used and resolved via $PATH.
+	ProgramOverrides map[string]string `json:"program_overrides,omitempty"`
 	// AutoYes is a flag to automatically accept all prompts.
 	AutoYes bool `json:"auto_yes"`
 	// DaemonPollInterval is the interval (ms) at which the daemon polls sessions for autoyes mode.
@@ -71,53 +71,47 @@ type Config struct {
 	DetachKeys string `json:"detach_keys"`
 }
 
-// shellQuoteProgram returns a tmux-safe form of program. tmux passes a
-// session's program string to `sh -c`, so paths containing spaces or
-// apostrophes must be shell-quoted or the shell will split them. The input
-// may be a bare program path or a path followed by flags; the first
-// space-dash-letter sequence is treated as the flag boundary so only the
-// path portion is quoted and trailing flags are preserved verbatim. The
-// trailing-letter requirement avoids false matches on literal " - " (space
-// dash space) inside a directory name (issue #606). Values whose path
-// portion is already wrapped in matching single or double quotes are
-// returned unchanged to avoid double-quoting user-provided config.
-func shellQuoteProgram(program string) string {
-	if program == "" {
-		return program
-	}
-
-	path, suffix := program, ""
-	if loc := flagBoundaryRegex.FindStringIndex(program); loc != nil {
-		path, suffix = program[:loc[0]], program[loc[0]:]
-	}
-
-	if len(path) >= 2 {
-		first, last := path[0], path[len(path)-1]
-		if (first == '\'' && last == '\'') || (first == '"' && last == '"') {
-			return program
+// ValidateProgramEnum returns nil when name is one of tmux.SupportedPrograms.
+// Otherwise it returns a user-facing migration error explaining how to move a
+// legacy "path with flags" value into the new program_overrides map.
+func ValidateProgramEnum(field, name string) error {
+	for _, supported := range tmux.SupportedPrograms {
+		if name == supported {
+			return nil
 		}
 	}
-
-	if !strings.ContainsAny(path, " '") {
-		return program
-	}
-
-	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'" + suffix
+	return fmt.Errorf(
+		"%s must be one of %v, got %q. To preserve a custom path or flags, set %s to the agent name and move the full command into program_overrides. Example: %q: %q, %q: { %q: %q }",
+		field, tmux.SupportedPrograms, name,
+		field,
+		"default_program", tmux.ProgramClaude,
+		"program_overrides", tmux.ProgramClaude, name,
+	)
 }
 
-// DefaultConfig returns the default configuration
-func DefaultConfig() *Config {
-	program, err := GetClaudeCommand()
-	if err != nil {
-		log.ErrorLog.Printf("failed to get claude command: %v", err)
-		program = defaultProgram
+// ResolveProgram returns the actual tmux invocation for an agent. When
+// cfg.ProgramOverrides has a non-empty entry for the agent, that value is
+// returned verbatim; otherwise the bare agent name is returned (relying on
+// $PATH at exec time). A nil config or an empty agent returns the agent
+// unchanged so callers can safely pass legacy free-form values through.
+func ResolveProgram(cfg *Config, agent string) string {
+	if cfg == nil || agent == "" {
+		return agent
 	}
+	if override, ok := cfg.ProgramOverrides[agent]; ok && override != "" {
+		return override
+	}
+	return agent
+}
 
-	program = shellQuoteProgram(program)
-	program = program + " --dangerously-skip-permissions"
-
-	return &Config{
-		DefaultProgram:     program,
+// DefaultConfig returns the default configuration. The auto-detected claude
+// command (e.g. "/home/user/.local/bin/claude") is stored in
+// ProgramOverrides["claude"] together with --dangerously-skip-permissions
+// rather than being concatenated into DefaultProgram, which is restricted to
+// a bare agent enum name.
+func DefaultConfig() *Config {
+	cfg := &Config{
+		DefaultProgram:     defaultProgram,
 		AutoYes:            false,
 		DaemonPollInterval: defaultDaemonPollInterval,
 		BranchPrefix: func() string {
@@ -130,6 +124,30 @@ func DefaultConfig() *Config {
 		}(),
 		DetachKeys: "ctrl-w",
 	}
+
+	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
+		cfg.ProgramOverrides = map[string]string{
+			tmux.ProgramClaude: shellQuotePath(claudePath) + " --dangerously-skip-permissions",
+		}
+	} else if err != nil {
+		log.ErrorLog.Printf("failed to get claude command: %v", err)
+	}
+
+	return cfg
+}
+
+// shellQuotePath wraps a path that contains shell-special characters
+// (spaces, apostrophes) in single quotes, escaping any embedded apostrophes
+// with the standard POSIX '\” idiom. Paths free of those characters are
+// returned unchanged. Used by DefaultConfig when persisting auto-detected
+// claude paths into ProgramOverrides — the value is passed to `sh -c` by
+// tmux, so paths with spaces (e.g. macOS App Bundles, #569) would otherwise
+// be split into separate tokens.
+func shellQuotePath(path string) string {
+	if path == "" || !strings.ContainsAny(path, " '") {
+		return path
+	}
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
 // GetClaudeCommand attempts to find the "claude" command in the user's shell
@@ -182,11 +200,16 @@ func GetClaudeCommand() (string, error) {
 	return "", fmt.Errorf("claude command not found in aliases or PATH")
 }
 
-func LoadConfig() *Config {
+// LoadConfig reads the user's config.json, validates it, and returns the
+// resulting Config. A missing file is materialized from DefaultConfig (which
+// is always valid). A file present on disk that fails enum validation
+// returns an actionable migration error — there is no implicit migration
+// from legacy "path with flags" values; the user must rewrite their config.
+func LoadConfig() (*Config, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
 		log.ErrorLog.Printf("failed to get config directory: %v", err)
-		return DefaultConfig()
+		return DefaultConfig(), nil
 	}
 
 	configPath := filepath.Join(configDir, ConfigFileName)
@@ -198,30 +221,34 @@ func LoadConfig() *Config {
 			if saveErr := saveConfig(defaultCfg); saveErr != nil {
 				log.WarningLog.Printf("failed to save default config: %v", saveErr)
 			}
-			return defaultCfg
+			return defaultCfg, nil
 		}
 
 		log.WarningLog.Printf("failed to get config file: %v", err)
-		return DefaultConfig()
+		return DefaultConfig(), nil
 	}
 
 	config := DefaultConfig()
 	if err := json.Unmarshal(data, config); err != nil {
 		log.ErrorLog.Printf("failed to parse config file: %v", err)
-		return DefaultConfig()
+		return DefaultConfig(), nil
 	}
 
-	// User-provided default_program overwrites the auto-detected (and
-	// already-quoted) value from DefaultConfig, so re-apply the same
-	// shell-quoting before handing it to tmux. See issue #569.
-	config.DefaultProgram = shellQuoteProgram(config.DefaultProgram)
+	if err := ValidateProgramEnum("config.json: default_program", config.DefaultProgram); err != nil {
+		return nil, err
+	}
+	for key := range config.ProgramOverrides {
+		if err := ValidateProgramEnum("config.json: program_overrides key", key); err != nil {
+			return nil, err
+		}
+	}
 
 	if config.DaemonPollInterval <= 0 {
 		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)
 		config.DaemonPollInterval = defaultDaemonPollInterval
 	}
 
-	return config
+	return config, nil
 }
 
 // saveConfig saves the configuration to disk

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -29,7 +31,7 @@ func TestInjectSystemPrompt_Claude(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("claude", "test-session", dir)
+	result := injectSystemPrompt(tmux.ProgramClaude, "claude", "test-session", dir)
 
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir flag, got %q", result)
@@ -42,14 +44,16 @@ func TestInjectSystemPrompt_Claude(t *testing.T) {
 	}
 }
 
-func TestInjectSystemPrompt_ClaudeWithArgs(t *testing.T) {
+func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("claude --model opus", "my-session", dir)
+	// The resolved form (from program_overrides) carries the path-and-flags;
+	// injectSystemPrompt appends --plugin-dir to it.
+	result := injectSystemPrompt(tmux.ProgramClaude, "/usr/local/bin/claude --model opus", "my-session", dir)
 
-	if !strings.HasPrefix(result, "claude --model opus") {
-		t.Errorf("expected original args preserved, got %q", result)
+	if !strings.HasPrefix(result, "/usr/local/bin/claude --model opus") {
+		t.Errorf("expected resolved form preserved, got %q", result)
 	}
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir flag, got %q", result)
@@ -58,7 +62,7 @@ func TestInjectSystemPrompt_ClaudeWithArgs(t *testing.T) {
 
 func TestInjectSystemPrompt_Codex(t *testing.T) {
 	dir := t.TempDir()
-	result := injectSystemPrompt("codex", "test-session", dir)
+	result := injectSystemPrompt(tmux.ProgramCodex, "codex", "test-session", dir)
 
 	if !strings.Contains(result, "-c") {
 		t.Errorf("expected -c flag for codex, got %q", result)
@@ -80,159 +84,33 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 	}
 }
 
-func TestInjectSystemPrompt_CodexWithArgs(t *testing.T) {
+func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 	dir := t.TempDir()
-	result := injectSystemPrompt("codex --full-auto", "my-session", dir)
+	result := injectSystemPrompt(tmux.ProgramCodex, "codex --full-auto", "my-session", dir)
 
 	if !strings.HasPrefix(result, "codex --full-auto") {
-		t.Errorf("expected original args preserved, got %q", result)
+		t.Errorf("expected resolved form preserved, got %q", result)
 	}
 	if !strings.Contains(result, "developer_instructions=") {
 		t.Errorf("expected developer_instructions flag, got %q", result)
 	}
 }
 
-func TestInjectSystemPrompt_UnknownProgram(t *testing.T) {
+func TestInjectSystemPrompt_Aider(t *testing.T) {
 	dir := t.TempDir()
-	result := injectSystemPrompt("amp", "test-session", dir)
+	result := injectSystemPrompt(tmux.ProgramAider, "aider", "test-session", dir)
 
-	if result != "amp" {
-		t.Errorf("expected program unchanged for unsupported tool, got %q", result)
-	}
-
-	// Should NOT write any files
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		t.Errorf("unexpected file written for unsupported program: %s", e.Name())
+	if result != "aider" {
+		t.Errorf("expected aider unchanged (no system-prompt flag), got %q", result)
 	}
 }
 
-func TestInjectSystemPrompt_PathContainingClaude(t *testing.T) {
+func TestInjectSystemPrompt_Gemini(t *testing.T) {
 	dir := t.TempDir()
-	// A tool whose path contains "claude" but is not actually claude
-	result := injectSystemPrompt("/home/claude-user/bin/mytool", "test-session", dir)
+	result := injectSystemPrompt(tmux.ProgramGemini, "gemini", "test-session", dir)
 
-	if result != "/home/claude-user/bin/mytool" {
-		t.Errorf("expected program unchanged when path contains 'claude' but exe is not claude, got %q", result)
-	}
-}
-
-func TestInjectSystemPrompt_PathContainingCodex(t *testing.T) {
-	dir := t.TempDir()
-	// A tool whose path contains "codex" but is not actually codex
-	result := injectSystemPrompt("/home/user/codex-projects/aider", "test-session", dir)
-
-	if result != "/home/user/codex-projects/aider" {
-		t.Errorf("expected program unchanged when path contains 'codex' but exe is not codex, got %q", result)
-	}
-}
-
-func TestInjectSystemPrompt_ClaudeFullPath(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", dir)
-
-	result := injectSystemPrompt("/usr/local/bin/claude --model opus", "test-session", dir)
-
-	if !strings.Contains(result, "--plugin-dir") {
-		t.Errorf("expected --plugin-dir flag for full-path claude, got %q", result)
-	}
-	if !strings.HasPrefix(result, "/usr/local/bin/claude --model opus") {
-		t.Errorf("expected original args preserved, got %q", result)
-	}
-}
-
-func TestInjectSystemPrompt_ClaudeCode(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", dir)
-
-	result := injectSystemPrompt("claude-code", "test-session", dir)
-
-	if !strings.Contains(result, "--plugin-dir") {
-		t.Errorf("expected --plugin-dir flag for claude-code, got %q", result)
-	}
-}
-
-func TestGetBaseCommand(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"claude", "claude"},
-		{"claude --model opus", "claude"},
-		{"/usr/local/bin/claude", "claude"},
-		{"/home/user/claude-projects/aider", "aider"},
-		{"codex --full-auto", "codex"},
-		{"/usr/bin/codex", "codex"},
-		{"", ""},
-		{"Claude", "claude"},
-		// Single-quoted path (config.go quotes paths containing spaces).
-		{"'/home/user/my apps/claude'", "claude"},
-		{"'/home/user/my apps/claude' --model opus", "claude"},
-		// POSIX escape idiom '\'' for an embedded apostrophe inside a
-		// single-quoted path. Regression test for issue #254.
-		{"'/home/user/o'\\''brien/my apps/claude'", "claude"},
-		{"'/home/user/o'\\''brien/my apps/claude' --model opus", "claude"},
-		{"'/home/user/o'\\''brien/codex'", "codex"},
-		// Double-quoted path.
-		{"\"/home/user/my apps/claude\"", "claude"},
-		// Issue #463: unquoted CLI --program path with spaces.
-		{"/home/my user/claude", "claude"},
-		{"/home/my user/claude --foo", "claude"},
-		{"/Applications/My Apps/claude", "claude"},
-		// Quoted path containing spaces with trailing flags.
-		{"\"/home/my user/claude\" --foo", "claude"},
-		{"'/home/my user/claude' --foo", "claude"},
-		// Backslash-escaped space in an unquoted path.
-		{"/home/me\\ name/claude --foo", "claude"},
-		// Issue #513: unquoted path whose directory contains literal " - ".
-		// splitShell produces ["/home/user/my", "-", "project/claude"] and
-		// the simple reconcat heuristic stops at "-"; the SupportedPrograms
-		// basename match recovers the right answer.
-		{"/home/user/my - project/claude", "claude"},
-		{"/home/user/my - project/claude --foo", "claude"},
-		{"/home/user/my - project/codex", "codex"},
-		{"/home/user/a - b - c/aider --model x", "aider"},
-		// Issue #639: unquoted path with spaces where an intermediate dir
-		// is named like a supported agent. A naive left-to-right token scan
-		// would false-match on the intermediate "claude"/"codex" dir; the
-		// reconstructed-path-first logic returns the actual executable
-		// basename.
-		{"/home/user/claude backups/aider", "aider"},
-		{"/tmp/codex backups/claude", "claude"},
-		{"/Applications/Claude Code.app/Contents/MacOS/claude", "claude"},
-		{"aider --model x", "aider"},
-		// Unsupported bare name: no SupportedPrograms match anywhere, so
-		// the reconstructed basename (lowercased) is returned as-is.
-		{"unknown_agent", "unknown_agent"},
-	}
-	for _, tt := range tests {
-		got := getBaseCommand(tt.input)
-		if got != tt.expected {
-			t.Errorf("getBaseCommand(%q) = %q, want %q", tt.input, got, tt.expected)
-		}
-	}
-}
-
-// TestGetBaseCommand_RoundTripWithShellQuote verifies that getBaseCommand
-// correctly parses output from shellQuote (same quoting format used by
-// config.go for paths with spaces), including paths with embedded apostrophes.
-func TestGetBaseCommand_RoundTripWithShellQuote(t *testing.T) {
-	tests := []struct {
-		path     string
-		expected string
-	}{
-		{"/home/user/my apps/claude", "claude"},
-		{"/home/user/o'brien/my apps/claude", "claude"},
-		{"/home/user/o'brien/codex", "codex"},
-		{"/plain/claude", "claude"},
-	}
-	for _, tt := range tests {
-		quoted := shellQuote(tt.path)
-		got := getBaseCommand(quoted)
-		if got != tt.expected {
-			t.Errorf("getBaseCommand(shellQuote(%q)) = getBaseCommand(%q) = %q, want %q",
-				tt.path, quoted, got, tt.expected)
-		}
+	if result != "gemini" {
+		t.Errorf("expected gemini unchanged (no system-prompt flag), got %q", result)
 	}
 }
 

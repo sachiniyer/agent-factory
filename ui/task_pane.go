@@ -31,17 +31,12 @@ type TaskPane struct {
 	editPath   textinput.Model
 	// Program selector state. editProgramOptions is the list of choices shown
 	// inline (index 0 is always the "use config default" entry, followed by
-	// tmux.SupportedPrograms, optionally followed by a "(custom: ...)" entry
-	// preserving an unrecognized legacy program string from before #492).
+	// tmux.SupportedPrograms). Per-task Program is restricted to the agent
+	// enum (#658); per-task paths-with-flags are out of scope.
 	editProgramOptions []string
 	editProgramIdx     int
-	// editProgramCustom holds the raw legacy program string when the existing
-	// task.Program doesn't match any canonical option. The selector renders
-	// "(custom: <raw>)" for it and writes the raw value back on save unless
-	// the user chooses a different option.
-	editProgramCustom string
-	editError         string // last validation error shown to the user
-	focusIndex        int    // 0=name, 1=prompt, 2=cron, 3=path, 4=program, 5=save button
+	editError          string // last validation error shown to the user
+	focusIndex         int    // 0=name, 1=prompt, 2=cron, 3=path, 4=program, 5=save button
 
 	// Create mode
 	creating       bool
@@ -159,43 +154,36 @@ func (s *TaskPane) EnterCreateMode(defaultPath string) {
 
 // setProgramFromValue initializes the selector state from a stored Program
 // string. An empty value selects "(use config default)"; a value matching a
-// SupportedPrograms entry pre-selects that canonical option; anything else is
-// preserved verbatim as a "(custom: <raw>)" option so editing other fields
-// can't accidentally rewrite a legacy command line.
+// SupportedPrograms entry pre-selects that canonical option; any non-enum
+// value (legacy task data from before #658) is treated as the default so
+// the user can re-pick a canonical option without losing edits to other
+// fields. Save-side validation rejects non-enum Program writes outright.
 func (s *TaskPane) setProgramFromValue(value string) {
-	opts := make([]string, 0, len(tmux.SupportedPrograms)+2)
+	opts := make([]string, 0, len(tmux.SupportedPrograms)+1)
 	opts = append(opts, programDefaultLabel)
 	opts = append(opts, tmux.SupportedPrograms...)
+	s.editProgramOptions = opts
 
 	trimmed := strings.TrimSpace(value)
-	s.editProgramCustom = ""
 	if trimmed == "" {
-		s.editProgramOptions = opts
 		s.editProgramIdx = 0
 		return
 	}
 	for i, p := range tmux.SupportedPrograms {
 		if trimmed == p {
-			s.editProgramOptions = opts
 			s.editProgramIdx = i + 1
 			return
 		}
 	}
-	s.editProgramCustom = value
-	opts = append(opts, fmt.Sprintf("(custom: %s)", value))
-	s.editProgramOptions = opts
-	s.editProgramIdx = len(opts) - 1
+	s.editProgramIdx = 0
 }
 
 // programValue returns the Program string corresponding to the current
-// selector state: "" for the default option, the raw custom string for the
-// custom entry, or the canonical agent name otherwise.
+// selector state: "" for the default option, or the canonical agent name
+// otherwise.
 func (s *TaskPane) programValue() string {
 	if s.editProgramIdx <= 0 || s.editProgramIdx >= len(s.editProgramOptions) {
 		return ""
-	}
-	if s.editProgramCustom != "" && s.editProgramIdx == len(s.editProgramOptions)-1 {
-		return s.editProgramCustom
 	}
 	return s.editProgramOptions[s.editProgramIdx]
 }
@@ -551,7 +539,11 @@ func (s *TaskPane) renderListMode() string {
 		if tsk.LastRunAt != nil {
 			lastRun = tsk.LastRunAt.Format("Jan 02 15:04")
 		}
-		detail := fmt.Sprintf("    %s • last: %s", tmux.AgentNameFromProgram(tsk.Program), lastRun)
+		programLabel := tsk.Program
+		if programLabel == "" {
+			programLabel = programDefaultLabel
+		}
+		detail := fmt.Sprintf("    %s • last: %s", programLabel, lastRun)
 		if tsk.LastRunStatus != "" {
 			detail += " (" + tsk.LastRunStatus + ")"
 		}

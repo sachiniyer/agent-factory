@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,27 +29,6 @@ const ProgramGemini = "gemini"
 
 // SupportedPrograms is the canonical list of known agent programs.
 var SupportedPrograms = []string{ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini}
-
-// AgentNameFromProgram extracts a short, user-facing agent name from a program
-// command string. It first looks for a known SupportedPrograms token (after
-// stripping any path prefix) and returns that canonical name. Otherwise it
-// returns the basename of the first whitespace-separated token, with no
-// directory and no flags. Empty input returns the empty string.
-func AgentNameFromProgram(prog string) string {
-	tokens := strings.Fields(strings.ToLower(prog))
-	if len(tokens) == 0 {
-		return ""
-	}
-	for _, tok := range tokens {
-		base := filepath.Base(tok)
-		for _, supported := range SupportedPrograms {
-			if base == supported {
-				return supported
-			}
-		}
-	}
-	return filepath.Base(tokens[0])
-}
 
 // TmuxSession represents a managed tmux session
 type TmuxSession struct {
