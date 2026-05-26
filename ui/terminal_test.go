@@ -483,6 +483,78 @@ func TestTerminalCloseForInstanceResetsScrollMode(t *testing.T) {
 	tp.mu.Unlock()
 }
 
+// TestTerminalFallbackResetsScrollMode is a regression test for #669.
+// Entering the fallback state (nil/!Started/IsRemote selection, or session-gone
+// errors) must reset isScrolling and clear the viewport. String() checks
+// isScrolling before fallback, so leaving scroll state intact would render
+// the prior instance's stale viewport content instead of the fallback message.
+func TestTerminalFallbackResetsScrollMode(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	priorInstance := makeStartedInstance(t, "prior-scroll")
+	defer func() { _ = priorInstance.Kill() }()
+
+	priorContent := "stale-history-from-prior-instance"
+	priorTs := newMockTmuxSession(t, "prior-scroll", mockCmdExec(priorContent, true))
+
+	enterScrollOnPrior := func(tp *TerminalPane) {
+		t.Helper()
+		injectSession(tp, priorInstance.Title, priorTs, priorInstance.GetWorktreePath())
+		require.NoError(t, tp.ScrollUp())
+		require.True(t, tp.IsScrolling(), "precondition: should be in scroll mode")
+		require.Contains(t, tp.viewport.View(), priorContent,
+			"precondition: viewport should hold prior instance's history")
+	}
+
+	t.Run("nil instance", func(t *testing.T) {
+		tp := NewTerminalPane()
+		tp.SetSize(80, 30)
+		enterScrollOnPrior(tp)
+
+		require.NoError(t, tp.UpdateContent(nil))
+
+		tp.mu.Lock()
+		require.True(t, tp.fallback, "should enter fallback for nil instance")
+		require.False(t, tp.isScrolling,
+			"setFallbackState must clear isScrolling so String() does not render stale viewport (#669)")
+		tp.mu.Unlock()
+
+		rendered := tp.String()
+		require.Contains(t, rendered, "Select an instance",
+			"String() must render fallback message, not stale viewport content")
+		require.NotContains(t, rendered, priorContent,
+			"String() must not render the prior instance's scroll-mode content")
+	})
+
+	t.Run("not started instance", func(t *testing.T) {
+		tp := NewTerminalPane()
+		tp.SetSize(80, 30)
+		enterScrollOnPrior(tp)
+
+		notStarted, err := session.NewInstance(session.InstanceOptions{
+			Title:   "not-started-669",
+			Path:    t.TempDir(),
+			Program: "bash",
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, tp.UpdateContent(notStarted))
+
+		tp.mu.Lock()
+		require.True(t, tp.fallback, "should enter fallback for unstarted instance")
+		require.False(t, tp.isScrolling,
+			"setFallbackState must clear isScrolling so String() does not render stale viewport (#669)")
+		tp.mu.Unlock()
+
+		rendered := tp.String()
+		require.Contains(t, rendered, "not started",
+			"String() must render fallback message, not stale viewport content")
+		require.NotContains(t, rendered, priorContent,
+			"String() must not render the prior instance's scroll-mode content")
+	})
+}
+
 type failingPtyFactory struct{}
 
 func (f failingPtyFactory) Start(*exec.Cmd) (*os.File, error) {

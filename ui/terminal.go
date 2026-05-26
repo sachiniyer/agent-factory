@@ -66,10 +66,17 @@ func (t *TerminalPane) SetSize(width, height int) {
 
 // setFallbackState sets the terminal pane to display a fallback message.
 // Caller must hold t.mu.
+//
+// Also resets scroll-mode state so fallback=true cannot coexist with
+// isScrolling=true. String() checks isScrolling before fallback, so leaving
+// scroll state intact when switching to a nil/unstarted/remote selection
+// would render the prior instance's viewport instead of the fallback (#669).
 func (t *TerminalPane) setFallbackState(message string) {
 	t.fallback = true
 	t.fallbackText = lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message)
 	t.content = ""
+	t.isScrolling = false
+	t.viewport.SetContent("")
 }
 
 // UpdateContent captures the tmux pane output for the terminal session.
