@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -424,6 +425,76 @@ func TestDaemonSaveReapsLegacyLoadingGhost(t *testing.T) {
 	}
 	assert.True(t, titles["alive"], "daemon-known instance should remain on disk")
 	assert.False(t, titles["ghost"], "legacy Loading ghost must be reaped by daemon save (#551)")
+}
+
+// TestDaemonSaveUsesResolvedRepoPathForSymlinkedRepo verifies that the daemon
+// computes the on-disk repo ID from the worktree's resolved repo path rather
+// than the (possibly symlinked) Instance.Path. Before the fix, an instance
+// created from a symlinked directory would be persisted under a *different*
+// repo ID than the TUI used, splitting the same repo's state across two
+// files and creating ghost sessions on subsequent reloads (#667).
+func TestDaemonSaveUsesResolvedRepoPathForSymlinkedRepo(t *testing.T) {
+	const resolvedRepoPath = "/tmp/test-repo-resolved"
+	const symlinkPath = "/tmp/test-repo-symlink"
+	ms := newMockStorage()
+
+	// Disk state pre-exists under the RESOLVED repo ID (this is what the
+	// TUI wrote — TUI does not recompute the ID on save).
+	seedDisk(t, ms, resolvedRepoPath, []InstanceData{
+		{Title: "from-tui", Path: symlinkPath, Worktree: GitWorktreeData{RepoPath: resolvedRepoPath}, Status: Running},
+	})
+
+	// The daemon loaded that instance: Path is the symlinked path, but its
+	// gitWorktree carries the resolved repo path (set during construction).
+	gw, err := git.NewGitWorktreeFromStorage(
+		resolvedRepoPath, "/tmp/test-repo-symlink-wt", "from-tui",
+		"branch-x", "deadbeef", false, true,
+	)
+	require.NoError(t, err)
+	inst := makeInstance("from-tui", symlinkPath, true)
+	inst.gitWorktree = gw
+
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+
+	require.NoError(t, storage.SaveInstances([]*Instance{inst}))
+
+	// The instance must be written back to the resolved-path repo ID,
+	// not the symlinked-path repo ID. Before the fix, the daemon would
+	// create a SECOND file under RepoIDFromRoot(symlinkPath).
+	resolvedID := config.RepoIDFromRoot(resolvedRepoPath)
+	symlinkID := config.RepoIDFromRoot(symlinkPath)
+	require.NotEqual(t, resolvedID, symlinkID, "test fixture: paths must hash to distinct IDs")
+
+	all := ms.GetAllInstances()
+	_, hasResolved := all[resolvedID]
+	_, hasSymlink := all[symlinkID]
+	assert.True(t, hasResolved, "instance must be saved under the resolved repo ID")
+	assert.False(t, hasSymlink, "instance must NOT be duplicated under the symlinked repo ID")
+
+	result := readDisk(t, ms, resolvedRepoPath)
+	require.Len(t, result, 1, "exactly one record should be persisted for the repo")
+	assert.Equal(t, "from-tui", result[0].Title)
+}
+
+// TestDaemonSaveFallsBackToPathForRemoteBackend verifies that the daemon
+// still groups by Instance.Path when no worktree is attached (load-bearing
+// for remote backends where Worktree.RepoPath is empty).
+func TestDaemonSaveFallsBackToPathForRemoteBackend(t *testing.T) {
+	const repoPath = "/tmp/test-repo-remote"
+	ms := newMockStorage()
+
+	// Remote-backend instance: no gitWorktree, Worktree.RepoPath empty.
+	inst := makeInstance("remote-1", repoPath, true)
+	require.Empty(t, inst.GetRepoPath(), "test fixture: remote instance must have empty resolved repo path")
+
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.SaveInstances([]*Instance{inst}))
+
+	result := readDisk(t, ms, repoPath)
+	require.Len(t, result, 1)
+	assert.Equal(t, "remote-1", result[0].Title)
 }
 
 // TestCollectRepoRoots verifies that Storage.CollectRepoRoots returns the
