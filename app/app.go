@@ -650,14 +650,12 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 			return instanceStartedMsg{instance: instance, err: err}
 		}
 
-		// Update task last run status.
-		if t, err := task.GetTask(taskID); err == nil {
-			now := time.Now()
-			t.LastRunAt = &now
-			t.LastRunStatus = "triggered"
-			if err := task.UpdateTask(*t); err != nil {
-				log.ErrorLog.Printf("failed to update task status: %v", err)
-			}
+		// Update task last run status. UpdateTaskStatus skips Program enum
+		// validation so legacy task records (pre-#658) still receive status
+		// bumps; see #664.
+		now := time.Now()
+		if err := task.UpdateTaskStatus(taskID, &now, "triggered"); err != nil {
+			log.ErrorLog.Printf("failed to update task status: %v", err)
 		}
 
 		return instanceStartedMsg{instance: instance, started: started, err: nil}

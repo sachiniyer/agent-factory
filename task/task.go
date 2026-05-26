@@ -221,6 +221,44 @@ func LoadTasksForCurrentRepo() ([]Task, error) {
 	return filtered, nil
 }
 
+// UpdateTaskStatus updates only the LastRunAt and LastRunStatus fields of the
+// task with the given ID. Unlike UpdateTask, it does not re-validate other
+// fields (notably Program), so pre-existing tasks whose Program value would
+// fail current enum validation can still have their run status bumped by the
+// scheduler and TUI dispatch paths. Returns an error if no task with the given
+// ID exists.
+func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) error {
+	if err := ValidateTaskID(taskID); err != nil {
+		return err
+	}
+	path, err := getTasksPathFn()
+	if err != nil {
+		return err
+	}
+	return config.WithFileLock(path, func() error {
+		tasks, err := LoadTasks()
+		if err != nil {
+			return err
+		}
+
+		found := false
+		for i := range tasks {
+			if tasks[i].ID == taskID {
+				tasks[i].LastRunAt = lastRunAt
+				tasks[i].LastRunStatus = lastRunStatus
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			return fmt.Errorf("task with id %q not found", taskID)
+		}
+
+		return saveTasks(tasks)
+	})
+}
+
 func UpdateTask(t Task) error {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return err
