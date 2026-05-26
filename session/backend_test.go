@@ -357,6 +357,41 @@ func TestHookBackendStartRestoreListCmdHangs(t *testing.T) {
 		"restore must abort within timeout when list_cmd hangs (got %v)", elapsed)
 }
 
+// TestHookBackendIsAliveListCmdHangs is the runtime analogue of
+// TestHookBackendStartRestoreListCmdHangs and the regression test for #666:
+// background reconciliation ticks call IsAlive every 3-5s on the TUI event
+// loop, so a list_cmd that SSHs to a wedged host must not be allowed to
+// freeze the UI indefinitely.
+func TestHookBackendIsAliveListCmdHangs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timeout-bound test in short mode")
+	}
+
+	dir := t.TempDir()
+	// Sleep well past runtimeAliveTimeout so the timeout, not the script,
+	// is what ends the call.
+	listCmd := writeScript(t, dir, "list.sh", `sleep 30; echo '[]'`)
+	b := &HookBackend{
+		Hooks: config.RemoteHooks{ListCmd: listCmd},
+	}
+	i := &Instance{
+		Title:   "test-session",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	start := time.Now()
+	alive := b.IsAlive(i)
+	elapsed := time.Since(start)
+
+	assert.False(t, alive, "IsAlive must report false when list_cmd hangs past timeout")
+	// runtimeAliveTimeout is 5s; allow a small buffer for WaitDelay (500ms)
+	// plus scheduling slack. The key bound is that IsAlive must NOT block
+	// anywhere near the script's 30s sleep — that was the #666 freeze.
+	assert.Less(t, elapsed, runtimeAliveTimeout+2*time.Second,
+		"IsAlive must return within runtimeAliveTimeout+tolerance when list_cmd hangs (got %v)", elapsed)
+}
+
 func TestHookBackendStartEmptyTitle(t *testing.T) {
 	b := makeHooks(t)
 	i := &Instance{

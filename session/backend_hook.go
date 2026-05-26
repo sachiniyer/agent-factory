@@ -23,7 +23,18 @@ import (
 // whether a persisted remote session still exists. list_cmd is user-supplied
 // and may block on network/SSH; the restore path runs at TUI startup for
 // every persisted instance, so an unbounded wait would stall the TUI.
+//
+// The restore path is intentionally aggressive: a session that was alive a
+// moment ago must respond promptly, so 2s is enough to clear out stale
+// entries without dragging out startup.
 const restoreAliveTimeout = 2 * time.Second
+
+// runtimeAliveTimeout bounds steady-state IsAlive checks issued from
+// background ticks (every 3-5s). list_cmd may SSH to remote hosts where
+// transient latency is routine, so this is intentionally more generous than
+// restoreAliveTimeout; the goal is to avoid freezing the TUI on a hanging
+// list_cmd (#666), not to fail fast on slow networks.
+const runtimeAliveTimeout = 5 * time.Second
 
 // HookBackend implements Backend by delegating to user-provided shell scripts.
 type HookBackend struct {
@@ -329,12 +340,15 @@ func (b *HookBackend) SetPreviewSize(_ *Instance, _, _ int) error {
 }
 
 func (b *HookBackend) IsAlive(i *Instance) bool {
-	return b.isAliveWithTimeout(i, 0)
+	return b.isAliveWithTimeout(i, runtimeAliveTimeout)
 }
 
 // isAliveWithTimeout asks list_cmd whether the remote session backing i is
-// currently running. A non-zero timeout bounds the wait; zero means "no
-// timeout" (matches the legacy IsAlive behavior used by the metadata tick).
+// currently running. A non-zero timeout bounds the wait; zero falls through
+// to an unbounded exec, which no production caller should use because
+// IsAlive runs on the TUI event loop and a hanging list_cmd would freeze the
+// UI (#666). Callers must pass either restoreAliveTimeout or
+// runtimeAliveTimeout.
 func (b *HookBackend) isAliveWithTimeout(i *Instance, timeout time.Duration) bool {
 	out, err := b.runListCmd(timeout)
 	if err != nil {
