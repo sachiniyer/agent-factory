@@ -91,12 +91,18 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		}
 	}
 
-	// Daemon mode: group in-memory instances by repo.
-	// Use d.Path (always set) rather than d.Worktree.RepoPath (empty for
-	// remote backends) so the grouping key is consistent with knownRepoIDs.
+	// Daemon mode: group in-memory instances by repo root.
+	// Prefer the worktree's resolved repo path so we share a repo ID with
+	// the TUI even when the instance was created from a symlinked path;
+	// fall back to Path for remote backends where Worktree.RepoPath is
+	// empty. This mirrors CollectRepoRoots (#667).
 	grouped := make(map[string][]InstanceData)
 	for _, d := range data {
-		rid := config.RepoIDFromRoot(d.Path)
+		root := d.Worktree.RepoPath
+		if root == "" {
+			root = d.Path
+		}
+		rid := config.RepoIDFromRoot(root)
 		grouped[rid] = append(grouped[rid], d)
 	}
 
@@ -104,7 +110,11 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	// that had all their in-memory instances killed (group would be empty).
 	knownRepoIDs := make(map[string]bool)
 	for _, inst := range instances {
-		rid := config.RepoIDFromRoot(inst.Path)
+		root := inst.GetRepoPath()
+		if root == "" {
+			root = inst.Path
+		}
+		rid := config.RepoIDFromRoot(root)
 		knownRepoIDs[rid] = true
 	}
 
@@ -120,7 +130,11 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// externally-added instances from other repos (issue #198).
 		repoMemTitlesAll := make(map[string]bool)
 		for _, inst := range instances {
-			if config.RepoIDFromRoot(inst.Path) == rid {
+			root := inst.GetRepoPath()
+			if root == "" {
+				root = inst.Path
+			}
+			if config.RepoIDFromRoot(root) == rid {
 				repoMemTitlesAll[inst.Title] = true
 			}
 		}

@@ -429,6 +429,21 @@ func (i *Instance) GetWorktreePath() string {
 	return gw.GetWorktreePath()
 }
 
+// GetRepoPath returns the resolved git repo path stored in the instance's
+// worktree, or empty string when no worktree is attached (e.g. a remote-
+// backend instance). Callers using the result to derive a repo ID must
+// fall back to Instance.Path when this is empty (#667).
+func (i *Instance) GetRepoPath() string {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+
+	if gw == nil {
+		return ""
+	}
+	return gw.GetRepoPath()
+}
+
 func (i *Instance) Started() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
