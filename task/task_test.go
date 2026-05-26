@@ -305,6 +305,55 @@ func TestUpdateTask_RejectsInvalidID(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid task id")
 }
 
+// TestUpdateTaskStatus_BypassesProgramValidation is the regression guard for
+// #664: scheduler/TUI status bumps must succeed on tasks whose stored Program
+// value would now fail enum validation (e.g. a legacy absolute path created
+// before #658 introduced the enum check).
+func TestUpdateTaskStatus_BypassesProgramValidation(t *testing.T) {
+	stored := []Task{
+		{ID: "legacy1", Name: "Pre-#658", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: "/tmp", Program: "/home/foo/bin/claude", Enabled: true},
+	}
+	setupTestTasks(t, stored)
+
+	now := time.Now().Truncate(time.Second)
+	require.NoError(t, UpdateTaskStatus("legacy1", &now, "started"))
+
+	got, err := GetTask("legacy1")
+	require.NoError(t, err)
+	require.NotNil(t, got.LastRunAt)
+	assert.True(t, got.LastRunAt.Equal(now))
+	assert.Equal(t, "started", got.LastRunStatus)
+	assert.Equal(t, "/home/foo/bin/claude", got.Program, "Program must not be touched by status updates")
+}
+
+// TestUpdateTaskStatus_NotFound verifies the not-found error path that the
+// runner / TUI rely on to log a meaningful failure when a task is deleted
+// mid-run.
+func TestUpdateTaskStatus_NotFound(t *testing.T) {
+	setupTestTasks(t, []Task{{ID: "exists"}})
+
+	now := time.Now()
+	err := UpdateTaskStatus("missing", &now, "started")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestUpdateTask_RejectsBadProgram is the regression guard that #664's fix
+// does NOT loosen validation on the user-edit path: UpdateTask must still
+// reject a non-enum Program so the TUI/CLI editor flows fail fast.
+func TestUpdateTask_RejectsBadProgram(t *testing.T) {
+	stored := []Task{
+		{ID: "edit1", Name: "Editable", Program: "claude", Enabled: true},
+	}
+	setupTestTasks(t, stored)
+
+	bad := stored[0]
+	bad.Program = "/home/foo/bin/claude"
+	err := UpdateTask(bad)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "task program")
+}
+
 func TestTaskNameInJSON(t *testing.T) {
 	s := Task{ID: "n1", Name: "My Task", Prompt: "do things"}
 	data, err := json.Marshal(s)

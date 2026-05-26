@@ -230,11 +230,11 @@ func RunTask(taskID string) error {
 		return fmt.Errorf("failed to start task session: %w", err)
 	}
 
-	// Update task status.
+	// Update task status. Use UpdateTaskStatus so we don't re-validate Program
+	// — the task already ran via daemon.CreateSession, and the stored Program
+	// value may predate current enum validation (see #664).
 	now := time.Now()
-	t.LastRunAt = &now
-	t.LastRunStatus = "started"
-	if err := UpdateTask(*t); err != nil {
+	if err := UpdateTaskStatus(taskID, &now, "started"); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 
