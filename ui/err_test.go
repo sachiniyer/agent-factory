@@ -171,6 +171,23 @@ func TestErrBoxStripsANSIVariants(t *testing.T) {
 	}
 }
 
+// TestErrBoxStripsCarriageReturns is a regression test for issue #668. Hook
+// scripts (see session/backend_hook.go, which wraps mixed stdout/stderr from
+// CombinedOutput into error messages) commonly emit \r from progress
+// indicators. A \r reaching the terminal moves the cursor to column 0,
+// overwriting lipgloss.Place's padding and corrupting the error box.
+func TestErrBoxStripsCarriageReturns(t *testing.T) {
+	e := NewErrBox()
+	e.SetSize(40, 1)
+	// Simulate a progress indicator that overwrites itself with \r.
+	e.SetError(errors.New("Loading...\rLoading....\rLoading.....\rReady"))
+
+	out := e.String()
+	if strings.Contains(out, "\r") {
+		t.Errorf("carriage return (\\r) leaked into rendered output, corrupting display: %q", out)
+	}
+}
+
 // stripANSI removes ANSI escape sequences (CSI) so width measurements
 // reflect only visible runes.
 func stripANSI(s string) string {

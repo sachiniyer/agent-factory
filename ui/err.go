@@ -49,6 +49,11 @@ func (e *ErrBox) String() string {
 		// plain text only — a bespoke regex repeatedly missed variants
 		// (#525 → #552 → #565).
 		err = xansi.Strip(err)
+		// xansi.Strip handles ANSI escapes but leaves bare \r untouched. Hook
+		// scripts commonly emit \r from progress indicators on stderr (see
+		// #668); a \r reaching the terminal moves the cursor back to column 0,
+		// overwriting lipgloss.Place's padding and corrupting the box.
+		err = strings.ReplaceAll(err, "\r", "")
 		lines := strings.Split(err, "\n")
 		err = strings.Join(lines, "//")
 		if runewidth.StringWidth(err) > e.width {
