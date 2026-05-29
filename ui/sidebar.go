@@ -390,9 +390,25 @@ func (s *Sidebar) ReplaceInstance(target, replacement *session.Instance) bool {
 	return false
 }
 
-// GetInstances returns all instances.
+// GetInstances returns all instances. The returned slice shares the sidebar's
+// backing array, so callers must only read it on the bubbletea event loop —
+// never hand it to a goroutine that outlives the call (see
+// GetInstancesSnapshot for that).
 func (s *Sidebar) GetInstances() []*session.Instance {
 	return s.instances
+}
+
+// GetInstancesSnapshot returns a copy of the instances slice for handing off
+// to a background goroutine. The metadata tick (#682) iterates the list on a
+// separate goroutine while the event loop may append/remove instances; copying
+// the slice header here (on the event loop, where mutations also happen) gives
+// the goroutine a private backing array so the two cannot race on the same
+// memory. The *session.Instance elements are shared, but each guards its own
+// fields with a mutex, so reading them across goroutines is safe.
+func (s *Sidebar) GetInstancesSnapshot() []*session.Instance {
+	out := make([]*session.Instance, len(s.instances))
+	copy(out, s.instances)
+	return out
 }
 
 // GetInstanceTitles returns a set of all instance titles for quick comparison.
