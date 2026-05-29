@@ -169,6 +169,67 @@ func TestSetupFromExistingBranch_SetsBaseCommitSHA(t *testing.T) {
 	require.NoError(t, gw.Cleanup())
 }
 
+// TestSetupFromExistingBranch_RecreatesAfterExternalDeletion is a regression
+// test for issue #695. When a worktree directory is deleted outside the tool
+// (rm -rf, disk cleanup, etc.) git keeps tracking the worktree internally, and
+// a subsequent `git worktree add <same-path>` can fail with "missing but
+// already registered worktree". This guards the user-facing contract: reusing
+// a session name whose worktree directory was deleted externally must recreate
+// the worktree successfully.
+//
+// setupFromExistingBranch recovers via `worktree remove -f` followed by
+// `worktree prune` (added for this fix) before re-adding. Recent git clears a
+// missing-but-registered worktree on `remove -f` alone, so this test passes
+// even without the prune on such versions; the prune mirrors setupNewWorktree
+// and covers older git where `remove` errors on a missing worktree and leaves
+// the stale registration that blocks `worktree add`.
+func TestSetupFromExistingBranch_RecreatesAfterExternalDeletion(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	repoRoot := createGitRepo(t)
+
+	// Initial commit so HEAD is valid.
+	cmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Pre-existing branch so Setup() takes the setupFromExistingBranch path.
+	cmd = exec.Command("git", "-C", repoRoot, "branch", "test/existing-branch")
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, _, err := NewGitWorktree(repoRoot, "existing-branch")
+	require.NoError(t, err)
+
+	// First setup succeeds and registers the worktree.
+	require.NoError(t, gw.Setup())
+	worktreePath := gw.GetWorktreePath()
+
+	// Simulate the user deleting the worktree directory out from under git
+	// (rm -rf). The registration in .git/worktrees/<name> survives.
+	require.NoError(t, os.RemoveAll(worktreePath))
+
+	// Recreating the session reuses the same path. Without the prune this
+	// fails with "missing but already registered worktree".
+	require.NoError(t, gw.Setup(),
+		"recreating a worktree after its directory was deleted externally should succeed")
+
+	// The worktree directory should exist again.
+	_, err = os.Stat(worktreePath)
+	require.NoError(t, err, "worktree directory should be recreated")
+
+	require.NoError(t, gw.Cleanup())
+}
+
 // TestCleanup_PreservesPreExistingBranch verifies that when Setup() reuses a
 // pre-existing local branch, Cleanup() does NOT delete it. Previously,
 // Cleanup() always ran `git branch -D <branch>`, destroying user work on any
