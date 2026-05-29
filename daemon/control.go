@@ -1010,9 +1010,10 @@ func startAndSendPrompt(instance *session.Instance, prompt string) error {
 	if instance.IsRemote() {
 		return nil
 	}
-	if prompt == "" {
-		return nil
-	}
+	// Always wait for readiness and dismiss trust prompts, even when no
+	// initial prompt is sent (#698). Skipping this on empty prompt left
+	// sessions stuck on the trust dialog, so a later send-prompt typed into
+	// the dialog instead of the agent.
 	if err := waitForReady(instance); err != nil {
 		return err
 	}
