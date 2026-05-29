@@ -83,17 +83,27 @@ type Config struct {
 // the same string. The message is wrapped in leading "\n\n" and trailing
 // "\n" so it visually separates from Cobra's "Error: " prefix and the
 // trailing "Usage:" block (see #661).
-func ValidateProgramEnum(lead, referent, name string) error {
+//
+// exampleValue is the command string rendered as the program_overrides example
+// value in the suggested fix. For default_program (and any call site where
+// name IS the user-supplied command) pass "" to fall back to using name. For
+// program_overrides key validation, name is the map key — not a command — so
+// the caller passes the corresponding map value here to keep the user's
+// original command in the example instead of replacing it with the key (#675).
+func ValidateProgramEnum(lead, referent, name, exampleValue string) error {
 	for _, supported := range tmux.SupportedPrograms {
 		if name == supported {
 			return nil
 		}
 	}
+	if exampleValue == "" {
+		exampleValue = name
+	}
 	return fmt.Errorf(
 		"\n\n%s must be one of [%s], got %q. To preserve a custom path or flags, set %s to the agent name and move the full command into program_overrides. Example: \"default_program\": \"claude\", \"program_overrides\": { \"claude\": %q }\n",
 		lead, strings.Join(tmux.SupportedPrograms, ", "), name,
 		referent,
-		name,
+		exampleValue,
 	)
 }
 
@@ -265,14 +275,16 @@ func LoadConfig() (*Config, error) {
 		fmt.Sprintf("Config issue in %s: default_program", prettyConfigPath),
 		"default_program",
 		config.DefaultProgram,
+		"",
 	); err != nil {
 		return nil, err
 	}
-	for key := range config.ProgramOverrides {
+	for key, value := range config.ProgramOverrides {
 		if err := ValidateProgramEnum(
 			fmt.Sprintf("Config issue in %s: program_overrides key", prettyConfigPath),
 			"program_overrides key",
 			key,
+			value,
 		); err != nil {
 			return nil, err
 		}
