@@ -49,6 +49,16 @@ func TestResumeProgram(t *testing.T) {
 		// flags if the CLI accepts `-r=VALUE` (same class as gemini's #633).
 		{"claude already -r=value", "claude -r=abc123", "claude -r=abc123"},
 		{"claude already -r=latest", "claude -r=latest", "claude -r=latest"},
+		// Short-option attached-value syntax (#685): claude parses `-r5` as
+		// `--resume 5`, so a second resume flag must not be appended.
+		{"claude already -rVALUE", "claude -r5", "claude -r5"},
+		{"claude already -rlatest", "claude -rlatest", "claude -rlatest"},
+		{"claude already -rabc123", "claude -rabc123", "claude -rabc123"},
+		{
+			"claude -rVALUE with other flags",
+			"claude --dangerously-skip-permissions -r5",
+			"claude --dangerously-skip-permissions -r5",
+		},
 
 		// Codex: insert "resume --last" after the codex token (subcommand
 		// position matters for codex; a tail append wouldn't parse).
@@ -227,6 +237,17 @@ func TestResumeProgram(t *testing.T) {
 		{"gemini already -r=numeric", "gemini -r=5", "gemini -r=5"},
 		{"gemini already -r=latest", "gemini -r=latest", "gemini -r=latest"},
 		{"gemini already -r=arbitrary", "gemini -r=anything", "gemini -r=anything"},
+		// Short-option attached-value syntax (#685): gemini parses `-r5` as
+		// `--resume 5`. Appending `--resume latest` would make gemini
+		// concatenate "5,latest" and fail with "Invalid session identifier".
+		{"gemini already -rVALUE", "gemini -r5", "gemini -r5"},
+		{"gemini already -rlatest", "gemini -rlatest", "gemini -rlatest"},
+		{"gemini already -rarbitrary", "gemini -ranything", "gemini -ranything"},
+		{
+			"gemini -rVALUE with other flags",
+			"gemini --model x -r5",
+			"gemini --model x -r5",
+		},
 
 		// Unknown programs are passed through unchanged so unrelated CLIs
 		// aren't accidentally rewritten.
@@ -281,8 +302,12 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"gemini --resume=5",
 		"gemini -r=5",
 		"gemini -r=latest",
+		"gemini -r5",
+		"gemini -rlatest",
 		"claude --resume=abc123",
 		"claude -r=abc123",
+		"claude -r5",
+		"claude -rlatest",
 		"codex --profile resume",
 		"codex --profile=resume",
 		"codex exec --profile resume",

@@ -63,7 +63,8 @@ func resumeProgram(program string) string {
 	case ProgramClaude:
 		for _, tok := range tokens {
 			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
-				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") {
+				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
+				isShortResumeWithAttachedValue(tok) {
 				return program
 			}
 		}
@@ -98,13 +99,25 @@ func resumeProgram(program string) string {
 	case ProgramGemini:
 		for _, tok := range tokens {
 			if tok == "--resume" || tok == "-r" ||
-				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") {
+				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
+				isShortResumeWithAttachedValue(tok) {
 				return program
 			}
 		}
 		return program + " --resume latest"
 	}
 	return program
+}
+
+// isShortResumeWithAttachedValue reports whether tok is the POSIX
+// attached-value form of the short resume flag, e.g. "-r5" or "-rlatest"
+// (#685). Both claude and gemini expose "-r" as their only "-r*" short flag
+// (per their --help output), so any "-r"-prefixed token with a non-"="
+// attached value is unambiguously a resume flag. The "=" forms ("-r" /
+// "-r=VALUE") are matched separately by the callers, so they're excluded here.
+// Not used for codex (resume is a subcommand) or aider (no "-r" resume flag).
+func isShortResumeWithAttachedValue(tok string) bool {
+	return strings.HasPrefix(tok, "-r") && len(tok) > 2 && tok[2] != '='
 }
 
 // splitShellTokens tokenizes a shell-style command string, respecting single
