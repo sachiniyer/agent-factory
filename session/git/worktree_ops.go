@@ -49,6 +49,15 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 	// Clean up any existing worktree first
 	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath) // Ignore error if worktree doesn't exist
 
+	// Prune stale worktree metadata BEFORE re-adding. If the worktree
+	// directory was deleted externally (rm -rf, disk cleanup, etc.), git
+	// still tracks it internally and `worktree add <same-path>` fails with
+	// "missing but already registered worktree". Recent git clears that
+	// registration on the `worktree remove -f` above, but older git errors
+	// ("is not a working tree") and leaves it behind; pruning here recovers
+	// either way. Mirrors the prune-before-add ordering in setupNewWorktree.
+	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
+
 	// Create a new worktree from the existing branch
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", g.worktreePath, g.branchName); err != nil {
 		return fmt.Errorf("failed to create worktree from branch %s: %w", g.branchName, err)
