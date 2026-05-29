@@ -1192,6 +1192,35 @@ exit 1
 		"error must surface captured stderr so users can debug list_cmd failures (#561)")
 }
 
+// TestListRemoteHookInstanceDataListCmdHangs is the regression test for #692:
+// ListRemoteHookInstanceData runs the user-supplied list_cmd at TUI startup
+// inside the daemon handler that the TUI blocks on over RPC (with no
+// client-side call deadline). A hanging list_cmd (e.g. SSH to a wedged host)
+// previously had no timeout here, so startup blocked for the full duration of
+// the script. The startup import path must abort within restoreAliveTimeout
+// plus a small tolerance for WaitDelay and scheduling slack.
+func TestListRemoteHookInstanceDataListCmdHangs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timeout-bound test in short mode")
+	}
+
+	dir := t.TempDir()
+	// Sleep well past restoreAliveTimeout so the timeout, not the script,
+	// is what ends the call.
+	listCmd := writeScript(t, dir, "list.sh", `sleep 30; echo '[]'`)
+
+	start := time.Now()
+	_, err := ListRemoteHookInstanceData("/repo/root", config.RemoteHooks{ListCmd: listCmd}, time.Now())
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "startup import must error when list_cmd hangs past timeout")
+	// restoreAliveTimeout is 2s; allow a buffer for WaitDelay (500ms) plus
+	// scheduling slack. The key bound is that startup must NOT block anywhere
+	// near the script's 30s sleep — that was the #692 hang.
+	assert.Less(t, elapsed, restoreAliveTimeout+2*time.Second,
+		"startup import must return within restoreAliveTimeout+tolerance when list_cmd hangs (got %v)", elapsed)
+}
+
 func TestRunHookAttachWithDetachKey(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
