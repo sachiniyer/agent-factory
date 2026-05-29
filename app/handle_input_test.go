@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -79,6 +81,58 @@ func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 
 	assert.False(t, returnEarly)
 	assert.Nil(t, cmd)
+}
+
+// TestHandleMenuHighlightingNewInstanceEnterTab is the regression guard for
+// issue #691: pressing Enter or Tab while naming a new instance must drive the
+// menu highlight animation. The bug (commit f294e5b) folded stateNew into the
+// early-return filter, which made the Enter→KeySubmitName / Tab→KeyChangeProgram
+// remapping — and thus the highlight render path — unreachable.
+func TestHandleMenuHighlightingNewInstanceEnterTab(t *testing.T) {
+	// Force a real color profile so lipgloss emits the underline escape that
+	// signals a highlighted menu option; the Ascii profile used by default in
+	// non-TTY test runs strips all styling and would hide the highlight.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	// lipgloss folds the underline attribute (SGR 4) into a combined escape
+	// such as "\x1b[4;38;5;99;4m" rather than a bare "\x1b[4m", so match the
+	// underline parameter at the head of a sequence.
+	const underline = "\x1b[4;"
+
+	cases := []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
+		{"tab", tea.KeyMsg{Type: tea.KeyTab}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			h.state = stateNew
+			h.menu.SetState(ui.StateNewInstance)
+			h.menu.SetSize(200, 3)
+
+			// Baseline: nothing highlighted before the keypress.
+			require.NotContains(t, h.menu.String(), underline,
+				"menu should not be highlighted before the keypress")
+
+			cmd, returnEarly := h.handleMenuHighlighting(tc.key)
+
+			// The keypress is intercepted so the highlight + re-emit fire.
+			assert.True(t, returnEarly, "Enter/Tab should be intercepted during stateNew")
+			assert.NotNil(t, cmd)
+			assert.True(t, h.keySent, "keySent guards the re-emitted key from re-highlighting")
+
+			// keydownCallback runs synchronously when the batch is built, so the
+			// menu now renders the matching option underlined.
+			assert.Contains(t, h.menu.String(), underline,
+				"menu highlight render path should run for %s during stateNew", tc.name)
+		})
+	}
 }
 
 func TestHandleStateNewRejectsDuplicateTitle(t *testing.T) {
