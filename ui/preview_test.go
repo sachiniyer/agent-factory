@@ -892,3 +892,45 @@ func TestPreviewSwitchInstanceResetsScroll(t *testing.T) {
 	require.NotContains(t, p.viewport.View(), previewA,
 		"stale viewport content from A must be cleared")
 }
+
+// TestScrollMouseDifferentInstanceResetsScrollMode is a regression test for
+// issue #702: the mouse-wheel scroll path (ScrollUp/ScrollDown) runs straight
+// off the bubbletea event loop and can fire before the async UpdateContent for
+// a newly selected instance has run. When the user is scrolling instance A and
+// the selection switches to B, a wheel scroll must NOT scroll A's stale
+// viewport — it must reset scroll mode and capture B's content, mirroring the
+// guard UpdateContent already had.
+func TestScrollMouseDifferentInstanceResetsScrollMode(t *testing.T) {
+	const previewA = "instance-A-content"
+	const previewB = "instance-B-content"
+
+	instA, instB, cleanup := setupTwoInstances(t, previewA, previewB)
+	defer cleanup()
+
+	p := NewPreviewPane()
+	p.SetSize(80, 30)
+
+	// Enter scroll mode on A via the mouse path (no prior UpdateContent).
+	require.NoError(t, p.ScrollUp(instA))
+	require.True(t, p.isScrolling, "should be scrolling A after ScrollUp(A)")
+	require.Contains(t, p.viewport.View(), previewA,
+		"precondition: viewport should hold A's captured content")
+
+	// Selection switches to B, but UpdateContent(B) has not run yet. A
+	// wheel-up arrives for B. Before the fix this scrolled A's stale viewport;
+	// now it must drop scroll state and re-capture B's content.
+	require.NoError(t, p.ScrollUp(instB))
+	require.True(t, p.isScrolling,
+		"should re-enter scroll mode for B after the switch")
+	require.Contains(t, p.viewport.View(), previewB,
+		"viewport must reflect B after the mouse scroll, not stale A")
+	require.NotContains(t, p.viewport.View(), previewA,
+		"stale viewport content from A must be cleared on the scroll path")
+
+	// The same must hold for the ScrollDown entry point.
+	require.NoError(t, p.ScrollDown(instA))
+	require.Contains(t, p.viewport.View(), previewA,
+		"ScrollDown on a switched-to instance must re-capture its content")
+	require.NotContains(t, p.viewport.View(), previewB,
+		"stale viewport content from B must be cleared on ScrollDown path")
+}
