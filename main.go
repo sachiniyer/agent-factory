@@ -72,7 +72,7 @@ var (
 			// or flag overrides belong in program_overrides.
 			program := cfg.DefaultProgram
 			if programFlag != "" {
-				if err := config.ValidateProgramEnum("--program flag", "--program flag", programFlag); err != nil {
+				if err := config.ValidateProgramEnum("--program flag", "--program flag", programFlag, ""); err != nil {
 					return err
 				}
 				program = programFlag

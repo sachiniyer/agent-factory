@@ -103,7 +103,7 @@ var tasksAddCmd = &cobra.Command{
 				return jsonError(err)
 			}
 			program = cfg.DefaultProgram
-		} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program); err != nil {
+		} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
 			return jsonError(err)
 		}
 

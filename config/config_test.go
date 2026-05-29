@@ -170,7 +170,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestValidateProgramEnum(t *testing.T) {
 	for _, name := range tmux.SupportedPrograms {
 		t.Run("accepts "+name, func(t *testing.T) {
-			assert.NoError(t, ValidateProgramEnum("field", "field", name))
+			assert.NoError(t, ValidateProgramEnum("field", "field", name, ""))
 		})
 	}
 
@@ -185,11 +185,14 @@ func TestValidateProgramEnum(t *testing.T) {
 		{"random word", "foo"},
 	}
 	for _, tc := range rejectCases {
+		// default_program-style: name IS the user-supplied command, so no
+		// exampleValue is passed and the message uses name as the example.
 		t.Run("rejects "+tc.name, func(t *testing.T) {
 			err := ValidateProgramEnum(
 				"Config issue in ~/.agent-factory/config.json: default_program",
 				"default_program",
 				tc.in,
+				"",
 			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "default_program")
@@ -206,8 +209,35 @@ func TestValidateProgramEnum(t *testing.T) {
 			// not the path-prefixed lead.
 			assert.Contains(t, err.Error(), "set default_program to the agent name")
 			assert.NotContains(t, err.Error(), "set Config issue in")
+			// With no exampleValue, the example override value falls back to
+			// name (the existing default_program behavior).
+			if tc.in != "" {
+				assert.Contains(t, err.Error(), fmt.Sprintf("{ \"claude\": %q }", tc.in))
+			}
 		})
 	}
+
+	// program_overrides-style: name is the map key (an invalid agent name)
+	// and exampleValue is the user's full command. The example must preserve
+	// the user's command, not echo the invalid key (#675).
+	t.Run("program_overrides preserves user command in example", func(t *testing.T) {
+		const (
+			key     = "amp"
+			command = "/opt/amp --some-flag"
+		)
+		err := ValidateProgramEnum(
+			"Config issue in ~/.agent-factory/config.json: program_overrides key",
+			"program_overrides key",
+			key,
+			command,
+		)
+		require.Error(t, err)
+		// The reported invalid value is still the key.
+		assert.Contains(t, err.Error(), fmt.Sprintf("got %q", key))
+		// The suggested example embeds the user's command, not the bare key.
+		assert.Contains(t, err.Error(), fmt.Sprintf("{ \"claude\": %q }", command))
+		assert.NotContains(t, err.Error(), fmt.Sprintf("{ \"claude\": %q }", key))
+	})
 }
 
 func TestPrettyHomePath(t *testing.T) {
