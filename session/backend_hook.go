@@ -351,7 +351,7 @@ func (b *HookBackend) IsAlive(i *Instance) bool {
 // UI (#666). Callers must pass either restoreAliveTimeout or
 // runtimeAliveTimeout.
 func (b *HookBackend) isAliveWithTimeout(i *Instance, timeout time.Duration) bool {
-	out, err := b.runListCmd(timeout)
+	out, err := runListCmd(b.Hooks.ListCmd, timeout)
 	// exec.ErrWaitDelay is non-fatal here (#676). runListCmd sets
 	// cmd.WaitDelay, so CombinedOutput returns ErrWaitDelay when the list_cmd
 	// script itself exited (per docs/remote-hooks.md, with code 0 on success)
@@ -383,18 +383,28 @@ func (b *HookBackend) isAliveWithTimeout(i *Instance, timeout time.Duration) boo
 	return false
 }
 
-func (b *HookBackend) runListCmd(timeout time.Duration) ([]byte, error) {
+// runListCmd executes the user-supplied list_cmd and returns its combined
+// output. A non-zero timeout bounds the wait via context + WaitDelay; zero
+// falls through to an unbounded exec, which no production caller should use.
+// Every list_cmd invocation runs on a path where an unbounded wait freezes
+// the UI, so each caller MUST pass a non-zero timeout:
+//   - IsAlive → runtimeAliveTimeout (steady-state TUI event loop, #666)
+//   - Start restore → restoreAliveTimeout (TUI startup, #645)
+//   - ListRemoteHookInstanceData → restoreAliveTimeout (startup import; the
+//     TUI blocks on this over RPC with no client-side deadline, so a hanging
+//     list_cmd would stall startup indefinitely, #692)
+func runListCmd(listCmd string, timeout time.Duration) ([]byte, error) {
 	if timeout <= 0 {
-		return exec.Command(b.Hooks.ListCmd, "--json").CombinedOutput()
+		return exec.Command(listCmd, "--json").CombinedOutput()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, b.Hooks.ListCmd, "--json")
+	cmd := exec.CommandContext(ctx, listCmd, "--json")
 	// WaitDelay bounds how long CombinedOutput keeps reading from the
 	// command's stdout/stderr after the context is cancelled. Without it,
 	// a list_cmd script that spawned a long-running child (e.g. `sleep
 	// 30`) would keep the read-side pipe open past the kill signal sent
-	// to the script itself, defeating the restore-path timeout (#645).
+	// to the script itself, defeating the timeout (#645).
 	cmd.WaitDelay = 500 * time.Millisecond
 	return cmd.CombinedOutput()
 }
@@ -412,8 +422,19 @@ func ListRemoteHookInstanceData(repoPath string, hooks config.RemoteHooks, now t
 		return nil, nil
 	}
 
-	out, err := exec.Command(hooks.ListCmd, "--json").CombinedOutput()
-	if err != nil {
+	// Bound the wait with restoreAliveTimeout (2s). This runs at TUI startup
+	// inside the daemon handler that the TUI blocks on over RPC, and the RPC
+	// client sets no call deadline, so an unbounded list_cmd would hang
+	// startup indefinitely (#692). Fast-fail is appropriate for a startup
+	// gate; the caller logs the error and proceeds with persisted sessions.
+	out, err := runListCmd(hooks.ListCmd, restoreAliveTimeout)
+	// exec.ErrWaitDelay is non-fatal here, mirroring isAliveWithTimeout (#676):
+	// runListCmd sets cmd.WaitDelay, so CombinedOutput returns ErrWaitDelay
+	// when the list_cmd script exited 0 with complete output but a backgrounded
+	// child still holds the stdout/stderr pipes open. Fall through to
+	// extractJSON + json.Unmarshal, which validate the payload; a genuinely
+	// broken or timed-out list_cmd produces no parseable JSON and still errors.
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return nil, fmt.Errorf("list_cmd failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
