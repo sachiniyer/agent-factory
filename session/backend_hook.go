@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -351,7 +352,14 @@ func (b *HookBackend) IsAlive(i *Instance) bool {
 // runtimeAliveTimeout.
 func (b *HookBackend) isAliveWithTimeout(i *Instance, timeout time.Duration) bool {
 	out, err := b.runListCmd(timeout)
-	if err != nil {
+	// exec.ErrWaitDelay is non-fatal here (#676). runListCmd sets
+	// cmd.WaitDelay, so CombinedOutput returns ErrWaitDelay when the list_cmd
+	// script itself exited (per docs/remote-hooks.md, with code 0 on success)
+	// but a backgrounded child still holds the stdout/stderr pipes open. In
+	// that case the script's output is already complete on stdout; fall
+	// through to extractJSON + json.Unmarshal, which validate it. A genuinely
+	// broken list_cmd produces no parseable JSON and still returns false.
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return false
 	}
 	// Mirror launch_cmd: list_cmd may write progress to stderr and JSON to
