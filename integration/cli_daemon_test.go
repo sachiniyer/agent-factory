@@ -297,8 +297,13 @@ func newHarness(t *testing.T) *harness {
 	// errors out on those flags, so write a shell wrapper that swallows any
 	// args and behaves as a stdin-reading pane process. ProgramOverrides
 	// in testConfig points the claude enum at this wrapper.
+	//
+	// The wrapper prints a "❯" ready prompt before reading stdin so the
+	// daemon's waitForReady loop recognises the pane as ready. The create
+	// path now always waits for readiness — even for empty-prompt sessions
+	// (#698) — so a real agent's startup prompt must be emulated here.
 	wrapper := filepath.Join(home, "fake-agent.sh")
-	writeFile(t, wrapper, "#!/bin/sh\nexec cat\n", 0755)
+	writeFile(t, wrapper, "#!/bin/sh\nprintf '❯ '\nexec cat\n", 0755)
 	writeConfigWithProgramPath(t, home, wrapper)
 
 	h := &harness{

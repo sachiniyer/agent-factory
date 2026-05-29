@@ -38,12 +38,22 @@ func setupControlRepo(t *testing.T) string {
 	return repo
 }
 
+// readyFakeBackend is a FakeBackend whose Preview reports a ready prompt so
+// that the daemon's waitForReady loop returns immediately. The create path
+// now always waits for readiness — even for empty-prompt sessions (#698) — so
+// the backend must look ready rather than returning blank Preview output.
+type readyFakeBackend struct {
+	*session.FakeBackend
+}
+
+func (readyFakeBackend) Preview(*session.Instance) (string, error) { return "ready\n❯", nil }
+
 func installInstantBackend(t *testing.T) {
 	t.Helper()
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {
 		backend := session.NewFakeBackend()
 		backend.CompleteStart()
-		return backend, nil
+		return readyFakeBackend{backend}, nil
 	})
 	t.Cleanup(restore)
 }

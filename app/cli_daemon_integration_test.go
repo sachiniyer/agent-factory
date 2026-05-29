@@ -102,8 +102,13 @@ func writeIntegrationConfig(t *testing.T, home string) {
 	// Write a wrapper script that ignores any --plugin-dir / --dangerously-skip
 	// flags injectSystemPrompt would append; route the claude enum to it via
 	// ProgramOverrides so the CLI accepts --program claude (#658).
+	//
+	// It prints a "❯" ready prompt before reading stdin so the daemon's
+	// waitForReady loop recognises the pane as ready. The create path now
+	// always waits for readiness — even for empty-prompt sessions (#698) — so
+	// a real agent's startup prompt must be emulated here.
 	wrapper := filepath.Join(home, "fake-agent.sh")
-	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nexec cat\n"), 0755))
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nprintf '❯ '\nexec cat\n"), 0755))
 	cfg := &config.Config{
 		DefaultProgram:     tmux.ProgramClaude,
 		ProgramOverrides:   map[string]string{tmux.ProgramClaude: wrapper},
