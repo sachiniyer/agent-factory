@@ -73,6 +73,28 @@ func (p *PreviewPane) SetSize(width, maxHeight int) {
 	p.viewport.Height = maxHeight
 }
 
+// dropStaleScrollState clears scroll-mode viewport content captured from a
+// previously selected instance and updates currentInstance. Caller must hold
+// p.mu.
+//
+// UpdateContent runs this on every refresh, but the mouse scroll path
+// (ScrollUp/ScrollDown) is driven straight off the bubbletea event loop and
+// can fire before the async UpdateContent for the newly selected instance has
+// run. Without this guard a wheel scroll would scroll the previous instance's
+// stale viewport instead of resetting scroll mode (#702). Consolidating the
+// reset here keeps the three entry points consistent — the same motivation as
+// the TerminalPane.setFallbackState consolidation in #669.
+func (p *PreviewPane) dropStaleScrollState(instance *session.Instance) {
+	if instance != p.currentInstance {
+		if p.isScrolling {
+			p.isScrolling = false
+			p.viewport.SetContent("")
+			p.viewport.GotoTop()
+		}
+		p.currentInstance = instance
+	}
+}
+
 // setFallbackState sets the preview state with fallback text and a message
 func (p *PreviewPane) setFallbackState(message string) {
 	p.previewState = previewState{
@@ -95,14 +117,7 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 	// scroll-mode viewport content captured from the previous instance.
 	// Otherwise switching instances while scrolling leaves the viewport
 	// pinned on the previous instance's output (issue #470).
-	if instance != p.currentInstance {
-		if p.isScrolling {
-			p.isScrolling = false
-			p.viewport.SetContent("")
-			p.viewport.GotoTop()
-		}
-		p.currentInstance = instance
-	}
+	p.dropStaleScrollState(instance)
 
 	switch {
 	case instance == nil:
@@ -251,6 +266,11 @@ func (p *PreviewPane) ScrollUp(instance *session.Instance) error {
 		return nil
 	}
 
+	// Reset scroll mode if the selection changed out from under us, so we
+	// capture the newly selected instance's content rather than scrolling the
+	// previous instance's stale viewport (#702).
+	p.dropStaleScrollState(instance)
+
 	if !p.isScrolling {
 		// Entering scroll mode - capture entire pane content including scrollback history
 		content, err := instance.PreviewFullHistory()
@@ -289,6 +309,11 @@ func (p *PreviewPane) ScrollDown(instance *session.Instance) error {
 	if instance == nil {
 		return nil
 	}
+
+	// Reset scroll mode if the selection changed out from under us, so we
+	// capture the newly selected instance's content rather than scrolling the
+	// previous instance's stale viewport (#702).
+	p.dropStaleScrollState(instance)
 
 	if !p.isScrolling {
 		// Entering scroll mode - capture entire pane content including scrollback history
