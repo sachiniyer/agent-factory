@@ -687,8 +687,30 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
+	// While naming a new instance the menu only shows the submit-name (enter)
+	// and change-program (tab) options, so those two keys are the only ones
+	// that should drive the highlight animation. Every other key is naming
+	// text and must pass through untouched — matching on msg.String() rather
+	// than GlobalKeyStringsMap also keeps "o" (a KeyEnter alias) usable as a
+	// literal name character. See #691: stateNew used to sit in the
+	// early-return filter below, which made this remapping unreachable.
+	if m.state == stateNew {
+		var name keys.KeyName
+		switch msg.String() {
+		case "enter":
+			name = keys.KeySubmitName
+		case "tab":
+			name = keys.KeyChangeProgram
+		default:
+			return nil, false
+		}
+		m.keySent = true
+		return tea.Batch(
+			func() tea.Msg { return msg },
+			m.keydownCallback(name)), true
+	}
 	if m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree ||
-		m.state == stateNew || m.state == stateSearch || m.state == stateSelectProgram {
+		m.state == stateSearch || m.state == stateSelectProgram {
 		return nil, false
 	}
 	// Don't highlight when content pane has focus
@@ -708,12 +730,6 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		return nil, false
 	}
 
-	if name == keys.KeyEnter && m.state == stateNew {
-		name = keys.KeySubmitName
-	}
-	if name == keys.KeyTab && m.state == stateNew {
-		name = keys.KeyChangeProgram
-	}
 	m.keySent = true
 	return tea.Batch(
 		func() tea.Msg { return msg },
