@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"sync/atomic"
+
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 
@@ -41,7 +43,11 @@ const (
 type TabbedWindow struct {
 	tabs []string
 
-	activeTab int
+	// activeTab is read from the background refreshPanesCmd goroutine
+	// (UpdatePreview/UpdateTerminal) while the bubbletea event loop writes it
+	// via Toggle/ToggleBack, so it is an atomic to avoid a data race (#684).
+	// The tab indices fit in an int32 (there are two tabs).
+	activeTab atomic.Int32
 	height    int
 	width     int
 
@@ -98,16 +104,18 @@ func (w *TabbedWindow) GetPreviewSize() (width, height int) {
 }
 
 func (w *TabbedWindow) Toggle() {
-	w.activeTab = (w.activeTab + 1) % len(w.tabs)
+	n := int32(len(w.tabs))
+	w.activeTab.Store((w.activeTab.Load() + 1) % n)
 }
 
 func (w *TabbedWindow) ToggleBack() {
-	w.activeTab = (w.activeTab - 1 + len(w.tabs)) % len(w.tabs)
+	n := int32(len(w.tabs))
+	w.activeTab.Store((w.activeTab.Load() - 1 + n) % n)
 }
 
 // UpdatePreview updates the content of the preview pane. instance may be nil.
 func (w *TabbedWindow) UpdatePreview(instance *session.Instance) error {
-	if w.activeTab != PreviewTab {
+	if int(w.activeTab.Load()) != PreviewTab {
 		return nil
 	}
 	return w.preview.UpdateContent(instance)
@@ -115,7 +123,7 @@ func (w *TabbedWindow) UpdatePreview(instance *session.Instance) error {
 
 // UpdateTerminal updates the terminal pane content. Only updates when terminal tab is active.
 func (w *TabbedWindow) UpdateTerminal(instance *session.Instance) error {
-	if w.activeTab != TerminalTab {
+	if int(w.activeTab.Load()) != TerminalTab {
 		return nil
 	}
 	return w.terminal.UpdateContent(instance)
@@ -128,7 +136,7 @@ func (w *TabbedWindow) ResetPreviewToNormalMode(instance *session.Instance) erro
 
 // Add these new methods for handling scroll events
 func (w *TabbedWindow) ScrollUp() {
-	switch w.activeTab {
+	switch int(w.activeTab.Load()) {
 	case PreviewTab:
 		err := w.preview.ScrollUp(w.instance)
 		if err != nil {
@@ -142,7 +150,7 @@ func (w *TabbedWindow) ScrollUp() {
 }
 
 func (w *TabbedWindow) ScrollDown() {
-	switch w.activeTab {
+	switch int(w.activeTab.Load()) {
 	case PreviewTab:
 		err := w.preview.ScrollDown(w.instance)
 		if err != nil {
@@ -157,17 +165,17 @@ func (w *TabbedWindow) ScrollDown() {
 
 // IsInPreviewTab returns true if the preview tab is currently active
 func (w *TabbedWindow) IsInPreviewTab() bool {
-	return w.activeTab == PreviewTab
+	return int(w.activeTab.Load()) == PreviewTab
 }
 
 // IsInTerminalTab returns true if the terminal tab is currently active
 func (w *TabbedWindow) IsInTerminalTab() bool {
-	return w.activeTab == TerminalTab
+	return int(w.activeTab.Load()) == TerminalTab
 }
 
 // GetActiveTab returns the currently active tab index
 func (w *TabbedWindow) GetActiveTab() int {
-	return w.activeTab
+	return int(w.activeTab.Load())
 }
 
 // AttachTerminal attaches to the terminal tmux session
@@ -207,6 +215,7 @@ func (w *TabbedWindow) String() string {
 
 	var renderedTabs []string
 
+	activeTab := int(w.activeTab.Load())
 	totalTabWidth := w.width
 	tabWidth := totalTabWidth / len(w.tabs)
 	lastTabWidth := totalTabWidth - tabWidth*(len(w.tabs)-1)
@@ -219,7 +228,7 @@ func (w *TabbedWindow) String() string {
 		}
 
 		var style lipgloss.Style
-		isFirst, isLast, isActive := i == 0, i == len(w.tabs)-1, i == w.activeTab
+		isFirst, isLast, isActive := i == 0, i == len(w.tabs)-1, i == activeTab
 		if isActive {
 			style = activeTabStyle
 		} else {
@@ -242,7 +251,7 @@ func (w *TabbedWindow) String() string {
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, renderedTabs...)
 	var content string
-	switch w.activeTab {
+	switch activeTab {
 	case PreviewTab:
 		content = w.preview.String()
 	case TerminalTab:

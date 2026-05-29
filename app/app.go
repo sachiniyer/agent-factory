@@ -355,7 +355,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.attached.Load() {
 			return m, tickUpdateMetadataCmd
 		}
-		instances := m.sidebar.GetInstances()
+		// Snapshot the instance list on the event loop before handing it to the
+		// background tick goroutine: GetInstances() shares the sidebar's backing
+		// array, which the event loop mutates via AddInstance/RemoveInstanceByTitle,
+		// so iterating it off-loop is a data race (#682). The copy is cheap and
+		// gives the goroutine a stable list to walk.
+		instances := m.sidebar.GetInstancesSnapshot()
 		return m, runMetadataTickCmd(instances)
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress {
