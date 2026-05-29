@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/api"
 	"github.com/sachiniyer/agent-factory/app"
@@ -190,8 +191,11 @@ var (
 )
 
 func init() {
+	// The --program flag is validated as an enum (bare agent name) via
+	// tmux.SupportedPrograms, so advertise exactly those accepted values.
 	rootCmd.Flags().StringVarP(&programFlag, "program", "p", "",
-		"Program to run in new instances (e.g. 'aider --model ollama_chat/gemma3:1b')")
+		fmt.Sprintf("Program to run in new instances (one of: %s)",
+			strings.Join(tmux.SupportedPrograms, ", ")))
 	rootCmd.Flags().BoolVarP(&autoYesFlag, "autoyes", "y", false,
 		"[experimental] If enabled, all instances will automatically accept prompts")
 	rootCmd.Flags().BoolVar(&daemonFlag, "daemon", false, "Run a program that loads all sessions"+
