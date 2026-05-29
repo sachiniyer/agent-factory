@@ -404,6 +404,19 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detachTraceMark("repaintAfterDetachMsg-handler-entry")
 		cmd := m.selectionChanged()
 		detachTraceMark("repaintAfterDetachMsg-handler-exit")
+		// The watchdog armed in attachOverlayCallback is ended when the
+		// post-detach paint completes (panesRefreshedMsg). That msg is only
+		// emitted by refreshPanesCmd, which selectionChanged dispatches only
+		// when an instance row is selected. When the selection has fallen back
+		// to a section header — e.g. the only instance was removed while the
+		// user was attached — selectionChanged returns nil, no
+		// panesRefreshedMsg ever arrives, and the watchdog would fire a
+		// spurious goroutine dump after slowDetachThreshold even though there
+		// were no panes to refresh. Cancel it here: a nil cmd means the detach
+		// already completed everything it was going to do (#683).
+		if cmd == nil {
+			endDetachWatchdog()
+		}
 		return m, cmd
 	case panesRefreshedMsg:
 		// The refresh cmd already wrote captured content into the mutex-
