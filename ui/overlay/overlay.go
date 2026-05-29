@@ -13,12 +13,95 @@ import (
 
 // Most of this code is modified from https://github.com/charmbracelet/lipgloss/pull/102
 
-// Pre-compiled regexes for ANSI color code replacement in overlay fade effect.
-var (
-	bgColorRegex     = regexp.MustCompile(`\x1b\[(?:[0-9;]*;)?48;[25];[0-9;]+m`)
-	fgColorRegex     = regexp.MustCompile(`\x1b\[(?:[0-9;]*;)?38;[25];[0-9;]+m`)
-	simpleColorRegex = regexp.MustCompile(`\x1b\[[0-9;]+m`)
+// Faded gray tones used by the overlay fade effect.
+const (
+	fadedFg = "38;5;240" // Medium gray foreground
+	fadedBg = "48;5;236" // Dark gray background
 )
+
+// sgrRegex matches any SGR (Select Graphic Rendition) sequence so the fade
+// pass can parse its parameters as a whole. A single pass over the full
+// sequence is required to correctly handle combined FG+BG sequences such as
+// \x1b[38;5;232;48;5;189m, which earlier per-color regexes mishandled by
+// dropping the foreground portion (#701).
+var sgrRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// extendedColorLen returns the number of tokens an extended-color introducer
+// (38 or 48) spans, given tokens[i] is the introducer. 38;5;n / 48;5;n span 3
+// tokens; 38;2;r;g;b / 48;2;r;g;b span 5. Consuming these together is what
+// prevents the inner parameters (e.g. the "5" in 48;5;189) from being
+// misread as a standalone attribute such as blink.
+func extendedColorLen(tokens []string, i int) int {
+	if i+1 < len(tokens) {
+		switch tokens[i+1] {
+		case "5":
+			return 3
+		case "2":
+			return 5
+		}
+	}
+	return 1
+}
+
+// fadeSGR rewrites a single SGR sequence to its faded equivalent. It detects
+// whether the sequence sets a foreground and/or background color (or any other
+// fadeable attribute) and emits faded gray codes for whichever are present,
+// combining both into one sequence when the input was combined. Pure resets
+// (\x1b[0m, \x1b[m) and sequences with no fadeable parameters are preserved
+// unchanged so styled regions still close correctly.
+func fadeSGR(match string) string {
+	params := strings.TrimSuffix(strings.TrimPrefix(match, "\x1b["), "m")
+	if params == "" || params == "0" {
+		return match
+	}
+
+	tokens := strings.Split(params, ";")
+	hasFg, hasBg, hasOtherFadeable := false, false, false
+	for i := 0; i < len(tokens); {
+		code, err := strconv.Atoi(tokens[i])
+		if err != nil || code == 0 {
+			i++
+			continue
+		}
+		switch {
+		case code == 38: // extended foreground (38;5;n or 38;2;r;g;b)
+			hasFg = true
+			i += extendedColorLen(tokens, i)
+		case code == 48: // extended background (48;5;n or 48;2;r;g;b)
+			hasBg = true
+			i += extendedColorLen(tokens, i)
+		case (code >= 30 && code <= 37) || (code >= 90 && code <= 97):
+			hasFg = true // basic/bright foreground
+			i++
+		case code == 7 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107):
+			hasBg = true // reverse video or basic/bright background
+			i++
+		default:
+			// Non-color attribute (bold, italic, …). Tracked separately so it
+			// doesn't inject a foreground gray when a real background color is
+			// present (preserving the bg-only fade of e.g. \x1b[1;41m).
+			hasOtherFadeable = true
+			i++
+		}
+	}
+
+	if !hasFg && !hasBg {
+		// Attribute-only sequence (e.g. bold \x1b[1m): fold to foreground gray,
+		// matching the long-standing behavior for such 16-color sequences.
+		if hasOtherFadeable {
+			return "\x1b[" + fadedFg + "m"
+		}
+		return match
+	}
+	parts := make([]string, 0, 2)
+	if hasFg {
+		parts = append(parts, fadedFg)
+	}
+	if hasBg {
+		parts = append(parts, fadedBg)
+	}
+	return "\x1b[" + strings.Join(parts, ";") + "m"
+}
 
 // WhitespaceOption sets a styling rule for rendering whitespace.
 type WhitespaceOption func(*whitespace)
@@ -65,46 +148,11 @@ func PlaceOverlay(
 	fadedBgLines := make([]string, len(bgLines))
 
 	for i, line := range bgLines {
-		// Replace background color codes with a faded version
-		content := bgColorRegex.ReplaceAllString(line, "\x1b[48;5;236m") // Dark gray background
-
-		// Replace foreground color codes with a faded version
-		content = fgColorRegex.ReplaceAllString(content, "\x1b[38;5;240m") // Medium gray foreground
-
-		// Replace simple color codes with a faded version. Handles both
-		// single-parameter (e.g. \x1b[37m) and multi-parameter (e.g.
-		// \x1b[1;37m) SGR sequences emitted by lipgloss in 16-color mode.
-		content = simpleColorRegex.ReplaceAllStringFunc(content, func(match string) string {
-			// Preserve pure reset (\x1b[0m) so styled regions still close.
-			if match == "\x1b[0m" {
-				return match
-			}
-			codeText := strings.TrimSuffix(strings.TrimPrefix(match, "\x1b["), "m")
-			isBg := false
-			hasFadeableParam := false
-			for _, p := range strings.Split(codeText, ";") {
-				code, err := strconv.Atoi(p)
-				if err != nil || code == 0 {
-					continue
-				}
-				hasFadeableParam = true
-				// SGR 48 catches the extended-bg replacement (\x1b[48;5;236m)
-				// that step 1 emits — without it, the loop misclassifies our
-				// own rewrite as foreground and re-fades it to fg gray (#564).
-				if code == 7 || code == 48 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107) {
-					isBg = true
-				}
-			}
-			if !hasFadeableParam {
-				return match
-			}
-			if isBg {
-				return "\x1b[48;5;236m" // Dark gray background
-			}
-			return "\x1b[38;5;240m" // Medium gray foreground
-		})
-
-		fadedBgLines[i] = content
+		// Fade every SGR sequence on the line in a single pass. Parsing each
+		// sequence whole lets combined FG+BG codes keep both colors (#701) while
+		// still graying standalone FG-only, BG-only, and 16-color/attribute
+		// sequences.
+		fadedBgLines[i] = sgrRegex.ReplaceAllStringFunc(line, fadeSGR)
 	}
 
 	// Replace the original background with the faded version
