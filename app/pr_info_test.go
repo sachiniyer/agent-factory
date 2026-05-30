@@ -103,6 +103,28 @@ func TestFetchPRInfoCmd_NoGitWorktree_ReturnsNil(t *testing.T) {
 	assert.Nil(t, fetchPRInfoCmd(inst, false))
 }
 
+// TestFetchPRInfoCmd_DetachedHead_ReturnsNil — a detached-HEAD worktree has a
+// non-empty repoPath but an empty branch (#687). fetchPRInfoCmd must skip the
+// fetch entirely so it never spawns `gh pr view ""` every tick. We force the
+// fetch (bypassing the freshness debounce) and assert the fetcher is never
+// invoked even though the instance is started, local, and has a worktree.
+func TestFetchPRInfoCmd_DetachedHead_ReturnsNil(t *testing.T) {
+	inst := newStartedInstanceWithWorktree(t, "detached")
+	inst.Branch = "" // detached HEAD: no branch to look up
+
+	var calls int32
+	restore := SetPRInfoFetcherForTest(func(repoPath, branch string) (*git.PRInfo, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, nil
+	})
+	defer restore()
+
+	assert.Nil(t, fetchPRInfoCmd(inst, true),
+		"detached-HEAD instance must not schedule a fetch")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&calls),
+		"fetcher must not be invoked for an empty branch (no gh pr view \"\")")
+}
+
 // TestFetchPRInfoCmd_Fresh_NotForced_DebouncesFetch — core laziness check:
 // within prInfoStaleAfter of the last fetch, non-forced calls are a no-op.
 func TestFetchPRInfoCmd_Fresh_NotForced_DebouncesFetch(t *testing.T) {

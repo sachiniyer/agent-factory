@@ -5,6 +5,21 @@ import (
 	"testing"
 )
 
+// TestFetchPRInfo_EmptyBranch verifies the (nil, nil) contract for a
+// detached-HEAD worktree (#694): an empty branch name has no PR to look up,
+// so FetchPRInfo must return (nil, nil) without shelling out to `gh`. This
+// holds whether or not `gh` is installed because the empty-branch guard runs
+// before the LookPath/exec path.
+func TestFetchPRInfo_EmptyBranch(t *testing.T) {
+	info, err := FetchPRInfo("/some/repo/path", "")
+	if err != nil {
+		t.Fatalf("empty branch should not be an error, got %v", err)
+	}
+	if info != nil {
+		t.Errorf("empty branch should yield nil PRInfo, got %+v", info)
+	}
+}
+
 func TestParsePRInfo(t *testing.T) {
 	tests := []struct {
 		name       string
