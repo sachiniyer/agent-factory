@@ -135,7 +135,11 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 		return nil
 	}
 	repoPath, branch := inst.FetchPRInfoSnapshot()
-	if repoPath == "" {
+	// An empty branch means a detached-HEAD worktree: there is no branch to
+	// look up, so skip the fetch entirely rather than spawning `gh pr view ""`
+	// on every tick. FetchPRInfo defends against this too, but stopping here
+	// avoids the goroutine and subprocess churn for the selected instance.
+	if repoPath == "" || branch == "" {
 		return nil
 	}
 	// Mark as fetched at kickoff so concurrent callers observe the debounce

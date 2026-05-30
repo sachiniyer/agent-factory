@@ -16,8 +16,21 @@ type PRInfo struct {
 }
 
 // FetchPRInfo runs `gh pr view` to look up a PR for the given branch.
-// Returns nil with no error if no PR exists or gh is not installed.
+//
+// It returns (nil, nil) — not an error — whenever there is no PR to look up.
+// That covers three by-design cases:
+//   - an empty branch name (a detached-HEAD worktree has no branch to query),
+//   - the `gh` binary not being installed,
+//   - `gh` reporting that the branch has no associated PR.
+//
+// A non-nil error is reserved for genuine failures (e.g. a transient `gh`
+// error or malformed output) so callers can preserve previously cached PR
+// info instead of clearing it.
 func FetchPRInfo(repoPath, branchName string) (*PRInfo, error) {
+	if branchName == "" {
+		return nil, nil
+	}
+
 	if _, err := exec.LookPath("gh"); err != nil {
 		return nil, nil
 	}
