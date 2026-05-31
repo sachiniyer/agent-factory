@@ -20,65 +20,80 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// codexYOLOBanner is the actual codex startup pane from
+// sachiniyer/agent-factory#714 — codex rendered its banner, the YOLO-mode
+// header, and the "›" (U+203A) input prompt, but the claude-only
+// isReadyContent never matched it, so waitForReady spun for the full 60s.
+const codexYOLOBanner = "╭───────────────────────────────────────────────╮\n" +
+	"│ >_ OpenAI Codex (v0.135.0)                    │\n" +
+	"│ permissions: YOLO mode                        │\n" +
+	"╰───────────────────────────────────────────────╯\n" +
+	"› Use /skills to list available skills"
+
 func TestIsReadyContent(t *testing.T) {
 	tests := []struct {
 		name    string
+		agent   string
 		content string
 		want    bool
 	}{
+		// claude (and the default/legacy fallback)
+		{"empty", "claude", "", false},
+		{"claude input prompt", "claude", "some output\n\n❯ ", true},
+		{"claude trust prompt", "claude", "Do you trust the files in this folder?\n1. Yes\n2. No", true},
+		{"claude mcp trust prompt", "claude", "Claude Code detected a new MCP server from `.mcp.json`.\n1. Use this MCP server", true},
 		{
-			name:    "empty",
-			content: "",
-			want:    false,
-		},
-		{
-			name:    "claude input prompt",
-			content: "some output\n\n❯ ",
-			want:    true,
-		},
-		{
-			name:    "claude trust prompt",
-			content: "Do you trust the files in this folder?\n1. Yes\n2. No",
-			want:    true,
-		},
-		{
-			name:    "claude mcp trust prompt",
-			content: "Claude Code detected a new MCP server from `.mcp.json`.\n1. Use this and all future MCP servers in this project\n2. Use this MCP server\n3. Continue without using this MCP server",
-			want:    true,
-		},
-		{
-			name: "aider trust prompt",
-			content: "Aider v0.1\nOpen documentation url for more info: https://aider.chat/docs/\n" +
+			name:  "claude doc trust prompt",
+			agent: "claude",
+			content: "Open documentation url for more info: https://docs/\n" +
 				"(Y)es/(N)o/(D)on't ask again [Yes]:",
 			want: true,
 		},
+		{"claude not ready", "claude", "installing dependencies...\nready soon", false},
+		// An unknown / legacy program falls through to the claude signals.
+		{"unknown program uses claude signals", "/usr/bin/some-tool", "some output\n❯ ", true},
+		{"unknown program not ready", "/usr/bin/some-tool", "compiling…", false},
+
+		// codex — regression case from #714.
+		{"codex YOLO banner with prompt (#714)", "codex", codexYOLOBanner, true},
+		{"codex bare prompt glyph", "codex", "some output\n› ", true},
+		{"codex trust folder prompt", "codex", "Do you trust this folder?\n> Yes", true},
+		// Codex must NOT be considered ready on claude's "❯" alone, and the
+		// banner box border ("╰") is not a codex ready signal by itself.
+		{"codex not ready on claude glyph", "codex", "rendering\n❯ ", false},
+		{"codex not ready on box border alone", "codex", "╭──╮\n│ x │\n╰──╯", false},
+
+		// aider
+		{"aider banner", "aider", "Aider v0.74.0\nMain model: ...", true},
+		{"aider input prompt", "aider", "some output\n> ", true},
 		{
-			name: "gemini trust prompt",
-			content: "Gemini CLI\nOpen documentation url for more info.\n" +
-				"(D)on't ask again",
+			name:  "aider doc trust prompt",
+			agent: "aider",
+			content: "Open documentation url for more info: https://aider.chat/docs/\n" +
+				"(Y)es/(N)o/(D)on't ask again [Yes]:",
 			want: true,
 		},
+		{"aider not ready", "aider", "loading model weights…", false},
+
+		// gemini (best-guess box-border signal — see #714)
+		{"gemini box frame", "gemini", "╭──╮\n│ Gemini │\n╰──╯", true},
 		{
-			name:    "only open documentation url without confirm",
-			content: "See Open documentation url for details about this command.",
-			want:    false,
+			name:    "gemini doc trust prompt",
+			agent:   "gemini",
+			content: "Gemini CLI\nOpen documentation url for more info.\n(D)on't ask again",
+			want:    true,
 		},
-		{
-			name:    "only dont ask again without doc url",
-			content: "Some prompt asking (D)on't ask again without the documentation prefix",
-			want:    false,
-		},
-		{
-			name:    "unrelated output",
-			content: "installing dependencies...\nready soon",
-			want:    false,
-		},
+		{"gemini not ready", "gemini", "starting gemini-cli…", false},
+
+		// shared doc-trust guard: both substrings required.
+		{"only open documentation url without confirm", "claude", "See Open documentation url for details.", false},
+		{"only dont ask again without doc url", "aider", "Some prompt asking (D)on't ask again", false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isReadyContent(tc.content); got != tc.want {
-				t.Errorf("isReadyContent(%q) = %v, want %v", tc.content, got, tc.want)
+			if got := isReadyContent(tc.content, tc.agent); got != tc.want {
+				t.Errorf("isReadyContent(%q, %q) = %v, want %v", tc.content, tc.agent, got, tc.want)
 			}
 		})
 	}

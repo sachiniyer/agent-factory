@@ -27,7 +27,7 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// detectAgentFromProgram maps a possibly-legacy Program value to its canonical
+// DetectAgentFromProgram maps a possibly-legacy Program value to its canonical
 // agent enum name (one of tmux.SupportedPrograms). Sessions persisted by
 // pre-#659 binaries may hold free-form Program strings — an absolute path
 // and/or trailing flags, e.g. "/home/foo/bin/claude --plugin-dir x" — rather
@@ -43,7 +43,7 @@ func shellQuote(s string) string {
 // unchanged, so we never inject Claude flags into a non-Claude session. This
 // is scoped purely to flag injection on restore; it is NOT a general-purpose
 // command parser and must not be reused as one.
-func detectAgentFromProgram(program string) string {
+func DetectAgentFromProgram(program string) string {
 	fields := strings.Fields(program)
 	if len(fields) == 0 {
 		return program
@@ -63,14 +63,14 @@ func detectAgentFromProgram(program string) string {
 // possibly a legacy free-form string on restored sessions) and resolved is
 // the actual command string to be passed to tmux (the agent name or the
 // configured program_overrides entry). agent is normalized via
-// detectAgentFromProgram so legacy paths still match; flags are appended to
+// DetectAgentFromProgram so legacy paths still match; flags are appended to
 // resolved.
 //
 // Strategy per tool:
 //   - Claude Code: --plugin-dir flag only (slash commands + /af-whoami for self-identification)
 //   - Codex: -c developer_instructions="..." flag (text-based, no plugin support)
 func injectSystemPrompt(agent, resolved, sessionTitle, worktreePath string) string {
-	agent = detectAgentFromProgram(agent)
+	agent = DetectAgentFromProgram(agent)
 	if agent == tmux.ProgramClaude {
 		pluginDir, err := ensurePluginDir()
 		if err != nil {

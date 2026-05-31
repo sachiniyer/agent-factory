@@ -7,7 +7,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-// detectAgentFromProgram is the normalization seam that lets restored sessions
+// DetectAgentFromProgram is the normalization seam that lets restored sessions
 // with legacy free-form Program values keep their agent-specific flags (#677).
 // It must recover the canonical agent for paths and path-plus-flags, leave the
 // bare enum untouched, and — critically — return unknown programs unchanged so
@@ -32,8 +32,8 @@ func TestDetectAgentFromProgram(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := detectAgentFromProgram(tt.program); got != tt.want {
-				t.Errorf("detectAgentFromProgram(%q) = %q, want %q", tt.program, got, tt.want)
+			if got := DetectAgentFromProgram(tt.program); got != tt.want {
+				t.Errorf("DetectAgentFromProgram(%q) = %q, want %q", tt.program, got, tt.want)
 			}
 		})
 	}

@@ -1035,6 +1035,11 @@ func startAndSendPrompt(instance *session.Instance, prompt string) error {
 }
 
 func waitForReady(instance *session.Instance) error {
+	// Resolve the canonical agent once so isReadyContent can match the right
+	// per-agent prompt signals. DetectAgentFromProgram normalizes legacy
+	// free-form Program values (e.g. "/home/foo/bin/codex"); a non-canonical
+	// value falls through to the Claude signals (the historical default).
+	agent := session.DetectAgentFromProgram(instance.Program)
 	timeout := time.After(waitForReadyTimeout)
 	ticker := time.NewTicker(waitForReadyPollInterval)
 	defer ticker.Stop()
@@ -1054,7 +1059,7 @@ func waitForReady(instance *session.Instance) error {
 			if err != nil {
 				continue
 			}
-			if isReadyContent(content) {
+			if isReadyContent(content, agent) {
 				return nil
 			}
 		}
@@ -1102,12 +1107,58 @@ func trimPaneSnippet(content string) string {
 	return out
 }
 
-func isReadyContent(content string) bool {
-	if strings.Contains(content, "❯") ||
-		strings.Contains(content, "Do you trust") ||
-		strings.Contains(content, "new MCP server") {
-		return true
+// isReadyContent reports whether the captured pane content indicates that the
+// given agent is ready for input — or is showing a trust/confirmation prompt
+// that downstream handlers (CheckAndHandleTrustPrompt) know how to dismiss.
+//
+// The ready signals differ per agent, so callers resolve the canonical agent
+// name (session.DetectAgentFromProgram, which handles legacy free-form Program
+// paths) and pass it here. An empty or non-canonical agent falls through to
+// the Claude signals, which was the historical behavior before this became
+// agent-aware: until #714 the check only matched Claude's prompt, so codex /
+// aider / gemini sessions never looked ready and waitForReady spun for the
+// full 60s timeout. (Exposed by #709 removing the empty-prompt early-return
+// that previously skipped waitForReady on the common create path.)
+func isReadyContent(content, agent string) bool {
+	switch agent {
+	case tmux.ProgramCodex:
+		// codex renders "›" (U+203A — distinct from claude's "❯" U+276F) as
+		// its input-prompt glyph after the banner, and "Do you trust this
+		// folder" for its workspace-trust dialog. See the pane capture in
+		// sachiniyer/agent-factory#714.
+		return strings.Contains(content, "›") ||
+			strings.Contains(content, "Do you trust this folder")
+	case tmux.ProgramAider:
+		// aider prints an "Aider v…" banner, then a line-start "> " input
+		// prompt. The shared doc-trust dialog is handled by isDocTrustPrompt.
+		return strings.Contains(content, "\n> ") ||
+			strings.Contains(content, "Aider v") ||
+			isDocTrustPrompt(content)
+	case tmux.ProgramGemini:
+		// Best-guess (#714): we have no in-the-wild gemini-cli pane capture.
+		// gemini-cli renders its prompt inside a box-drawing frame, so the
+		// closing "╰" corner is used as a weak readiness signal alongside the
+		// shared doc-trust dialog. TODO(#714): replace "╰" with a confirmed
+		// gemini-specific ready string once a real capture is available.
+		return strings.Contains(content, "╰") ||
+			isDocTrustPrompt(content)
+	default:
+		// claude and any unknown / legacy program (historical default): the
+		// "❯" (U+276F) input prompt, the trust dialog, the new-MCP-server
+		// confirmation, and the shared doc-trust dialog.
+		if strings.Contains(content, "❯") ||
+			strings.Contains(content, "Do you trust") ||
+			strings.Contains(content, "new MCP server") {
+			return true
+		}
+		return isDocTrustPrompt(content)
 	}
+}
+
+// isDocTrustPrompt reports whether content shows the documentation-link trust
+// dialog shared by aider/gemini (and surfaced by claude too). Both substrings
+// are required so an unrelated documentation link doesn't false-positive.
+func isDocTrustPrompt(content string) bool {
 	return strings.Contains(content, "Open documentation url") &&
 		strings.Contains(content, "(D)on't ask again")
 }
