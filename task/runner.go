@@ -64,29 +64,61 @@ func LoadAndClearPendingInstances() ([]session.InstanceData, error) {
 	return pending, err
 }
 
-// isReadyContent reports whether the captured pane content indicates the
-// program is ready for input or is showing a trust prompt that downstream
-// handlers know how to dismiss. It recognizes Claude Code's input prompt
-// and trust prompt as well as the Aider/Gemini trust prompt
-// ("Open documentation url" + "(D)on't ask again").
-func isReadyContent(content string) bool {
-	if strings.Contains(content, "❯") ||
-		strings.Contains(content, "Do you trust") ||
-		strings.Contains(content, "new MCP server") {
-		return true
+// isReadyContent reports whether the captured pane content indicates that the
+// given agent is ready for input — or is showing a trust/confirmation prompt
+// that downstream handlers know how to dismiss.
+//
+// The ready signals differ per agent, so callers resolve the canonical agent
+// name (session.DetectAgentFromProgram, which handles legacy free-form Program
+// paths) and pass it here. An empty or non-canonical agent falls through to
+// the Claude signals — the historical behavior before this became agent-aware
+// (#714). Kept in sync with daemon.isReadyContent; the two packages can't
+// share the helper without an import cycle (task already imports daemon).
+func isReadyContent(content, agent string) bool {
+	switch agent {
+	case tmux.ProgramCodex:
+		// codex renders "›" (U+203A — distinct from claude's "❯" U+276F) as
+		// its input-prompt glyph after the banner, and "Do you trust this
+		// folder" for its workspace-trust dialog (#714).
+		return strings.Contains(content, "›") ||
+			strings.Contains(content, "Do you trust this folder")
+	case tmux.ProgramAider:
+		// aider prints an "Aider v…" banner, then a line-start "> " prompt.
+		return strings.Contains(content, "\n> ") ||
+			strings.Contains(content, "Aider v") ||
+			isDocTrustPrompt(content)
+	case tmux.ProgramGemini:
+		// Best-guess (#714): no in-the-wild gemini-cli capture yet. The "╰"
+		// box-drawing corner of gemini-cli's frame is a weak readiness signal.
+		// TODO(#714): replace with a confirmed gemini-specific ready string.
+		return strings.Contains(content, "╰") ||
+			isDocTrustPrompt(content)
+	default:
+		// claude and any unknown / legacy program (historical default).
+		if strings.Contains(content, "❯") ||
+			strings.Contains(content, "Do you trust") ||
+			strings.Contains(content, "new MCP server") {
+			return true
+		}
+		return isDocTrustPrompt(content)
 	}
-	// Aider/Gemini trust prompt. Require both substrings to avoid false
-	// positives from documentation links unrelated to the trust prompt.
-	if strings.Contains(content, "Open documentation url") &&
-		strings.Contains(content, "(D)on't ask again") {
-		return true
-	}
-	return false
+}
+
+// isDocTrustPrompt reports whether content shows the documentation-link trust
+// dialog shared by aider/gemini (and surfaced by claude). Both substrings are
+// required to avoid false positives from unrelated documentation links.
+func isDocTrustPrompt(content string) bool {
+	return strings.Contains(content, "Open documentation url") &&
+		strings.Contains(content, "(D)on't ask again")
 }
 
 // WaitForReady polls the instance's tmux pane until the program shows its
-// input prompt (e.g. Claude Code's ">" prompt) or trust prompt, or times out after 60 seconds.
+// input prompt or trust prompt, or times out after 60 seconds.
 func WaitForReady(instance *session.Instance) error {
+	// Resolve the canonical agent once so isReadyContent matches the right
+	// per-agent prompt signals; legacy free-form Program values normalize via
+	// DetectAgentFromProgram and unknown values fall through to claude (#714).
+	agent := session.DetectAgentFromProgram(instance.Program)
 	timeout := time.After(waitForReadyTimeout)
 	ticker := time.NewTicker(waitForReadyPollInterval)
 	defer ticker.Stop()
@@ -106,7 +138,7 @@ func WaitForReady(instance *session.Instance) error {
 			if err != nil {
 				continue
 			}
-			if isReadyContent(content) {
+			if isReadyContent(content, agent) {
 				return nil
 			}
 		}

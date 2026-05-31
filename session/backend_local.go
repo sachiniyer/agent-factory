@@ -25,7 +25,7 @@ func resolveProgramForInstance(i *Instance) string {
 		cfg = nil
 	}
 	resolved := config.ResolveProgram(cfg, i.Program)
-	if i.AutoYes && detectAgentFromProgram(i.Program) == tmux.ProgramClaude {
+	if i.AutoYes && DetectAgentFromProgram(i.Program) == tmux.ProgramClaude {
 		resolved = resolved + " --permission-mode bypassPermissions"
 	}
 	return resolved
@@ -332,7 +332,7 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	// Normalize so restored sessions with legacy free-form Program values
 	// (e.g. "/home/foo/bin/claude") still get trust-prompt auto-handling —
 	// same persisted-state class of regression as #677.
-	switch detectAgentFromProgram(i.Program) {
+	switch DetectAgentFromProgram(i.Program) {
 	case tmux.ProgramClaude, tmux.ProgramAider, tmux.ProgramGemini:
 		return ts.CheckAndHandleTrustPrompt()
 	}

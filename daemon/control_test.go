@@ -561,6 +561,84 @@ func TestFormatWaitForReadyTimeoutError(t *testing.T) {
 	})
 }
 
+// codexYOLOBanner is the actual codex startup pane reported in
+// sachiniyer/agent-factory#714: codex rendered its banner, the YOLO-mode
+// header, and the "›" (U+203A) input prompt, but the claude-only
+// isReadyContent never matched it, so waitForReady spun for the full timeout.
+const codexYOLOBanner = "╭───────────────────────────────────────────────╮\n" +
+	"│ >_ OpenAI Codex (v0.135.0)                    │\n" +
+	"│ permissions: YOLO mode                        │\n" +
+	"╰───────────────────────────────────────────────╯\n" +
+	"› Use /skills to list available skills"
+
+// TestIsReadyContent covers the agent-aware ready detection added for #714.
+// Mirrors task.TestIsReadyContent — the two packages keep duplicate copies of
+// isReadyContent (no shared home without an import cycle), so both are tested.
+func TestIsReadyContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		agent   string
+		content string
+		want    bool
+	}{
+		// claude (and the default / legacy fallback)
+		{"empty", "claude", "", false},
+		{"claude input prompt", "claude", "some output\n\n❯ ", true},
+		{"claude trust prompt", "claude", "Do you trust the files in this folder?\n1. Yes", true},
+		{"claude mcp trust prompt", "claude", "detected a new MCP server from `.mcp.json`.", true},
+		{
+			name:    "claude doc trust prompt",
+			agent:   "claude",
+			content: "Open documentation url: https://docs/\n(Y)es/(N)o/(D)on't ask again [Yes]:",
+			want:    true,
+		},
+		{"claude not ready", "claude", "installing dependencies...", false},
+		// Unknown / legacy program falls through to the claude signals.
+		{"unknown program uses claude signals", "/usr/bin/some-tool", "out\n❯ ", true},
+		{"unknown program not ready", "/usr/bin/some-tool", "compiling…", false},
+
+		// codex — the #714 regression case.
+		{"codex YOLO banner with prompt (#714)", "codex", codexYOLOBanner, true},
+		{"codex bare prompt glyph", "codex", "some output\n› ", true},
+		{"codex trust folder prompt", "codex", "Do you trust this folder?\n> Yes", true},
+		{"codex not ready on claude glyph", "codex", "rendering\n❯ ", false},
+		{"codex not ready on box border alone", "codex", "╭──╮\n│ x │\n╰──╯", false},
+
+		// aider
+		{"aider banner", "aider", "Aider v0.74.0\nMain model: ...", true},
+		{"aider input prompt", "aider", "some output\n> ", true},
+		{
+			name:    "aider doc trust prompt",
+			agent:   "aider",
+			content: "Open documentation url: https://aider.chat/docs/\n(Y)es/(N)o/(D)on't ask again [Yes]:",
+			want:    true,
+		},
+		{"aider not ready", "aider", "loading model weights…", false},
+
+		// gemini (best-guess box-border signal — see #714)
+		{"gemini box frame", "gemini", "╭──╮\n│ Gemini │\n╰──╯", true},
+		{
+			name:    "gemini doc trust prompt",
+			agent:   "gemini",
+			content: "Gemini CLI\nOpen documentation url for more info.\n(D)on't ask again",
+			want:    true,
+		},
+		{"gemini not ready", "gemini", "starting gemini-cli…", false},
+
+		// shared doc-trust guard: both substrings required.
+		{"only open documentation url without confirm", "claude", "See Open documentation url for details.", false},
+		{"only dont ask again without doc url", "aider", "Some prompt asking (D)on't ask again", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isReadyContent(tc.content, tc.agent); got != tc.want {
+				t.Errorf("isReadyContent(%q, %q) = %v, want %v", tc.content, tc.agent, got, tc.want)
+			}
+		})
+	}
+}
+
 // stubGhostCleanup replaces both ghostCleanupWorktree and ghostKillTmuxByName
 // with recorders so tests can assert which teardown branches fired without
 // invoking real git / real tmux.
