@@ -360,6 +360,43 @@ func TestNextTaskRunTitleSkipsPersistedTitles(t *testing.T) {
 	}
 }
 
+// TestNextTaskRunTitleCaseInsensitive guards against #721: the persisted title
+// "Foo" must block the case-variant base "foo", so the next title is "foo-2"
+// rather than "foo". A case-sensitive check would hand back "foo", which the
+// daemon's EqualFold validation then rejects.
+func TestNextTaskRunTitleCaseInsensitive(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoID := "test-repo-title-case"
+	instancesPath, err := config.RepoInstancesPath(repoID)
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	preexisting := []session.InstanceData{
+		{Title: "Foo"},
+	}
+	preRaw, err := json.MarshalIndent(preexisting, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal preexisting: %v", err)
+	}
+	if err := os.WriteFile(instancesPath, preRaw, 0644); err != nil {
+		t.Fatalf("write preexisting: %v", err)
+	}
+
+	title, err := NextTaskRunTitle(repoID, "/tmp/repo", "foo", "claude")
+	if err != nil {
+		t.Fatalf("NextTaskRunTitle: %v", err)
+	}
+	if title != "foo-2" {
+		t.Fatalf("expected foo-2 (case-variant of persisted %q must collide), got %q", "Foo", title)
+	}
+}
+
 func TestTaskRunBaseTitleFallsBackToTaskID(t *testing.T) {
 	got := TaskRunBaseTitle(Task{ID: "abc123"})
 	if got != "task-abc123" {
