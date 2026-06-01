@@ -248,6 +248,35 @@ func (t *TerminalPane) Attach() (chan struct{}, error) {
 	return ts.Attach()
 }
 
+// AttachForInstance binds the terminal pane to the given instance, then
+// attaches. Deferred attach flows (the first-time attach help screen) must use
+// this rather than Attach(): while the help overlay is open, a background
+// refresh tick calls UpdateContent with the live (possibly drifted) selection,
+// which rebinds currentTitle. Attach() would then connect to whatever instance
+// is selected at dismiss time instead of the one the user pressed Enter on
+// (#716).
+//
+// ensureSessionLocked sets currentTitle only when the instance is started with
+// a live worktree; if it bailed early (the captured instance died during the
+// help screen) we refuse to attach rather than falling back to a possibly
+// drifted currentTitle.
+func (t *TerminalPane) AttachForInstance(instance *session.Instance) (chan struct{}, error) {
+	if instance == nil {
+		return nil, fmt.Errorf("no terminal session to attach to")
+	}
+	t.mu.Lock()
+	if err := t.ensureSessionLocked(instance); err != nil {
+		t.mu.Unlock()
+		return nil, err
+	}
+	if t.currentTitle != instance.Title {
+		t.mu.Unlock()
+		return nil, fmt.Errorf("terminal session for %q is no longer available", instance.Title)
+	}
+	t.mu.Unlock()
+	return t.Attach()
+}
+
 // Close kills all cached terminal tmux sessions and cleans up.
 func (t *TerminalPane) Close() {
 	t.mu.Lock()

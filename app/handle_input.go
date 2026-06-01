@@ -16,13 +16,17 @@ import (
 // handleStateNew handles key events when in stateNew (naming a new instance).
 func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
+		// Kill by the captured namingInstance pointer, not the live selection:
+		// background sync may have drifted the selection off the naming row, in
+		// which case selection-based Kill() silently no-ops and leaves a
+		// "Loading" zombie behind (#717). Kill before clearing the pointer.
+		if err := m.sidebar.KillInstance(m.namingInstance); err != nil {
+			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
+		}
 		m.state = stateDefault
 		m.namingInstance = nil
 		m.selectedWorktree = nil
 		m.availableWorktrees = nil
-		if err := m.sidebar.Kill(); err != nil {
-			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
-		}
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -134,7 +138,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(err)
 		}
 	case tea.KeyEsc:
-		if err := m.sidebar.Kill(); err != nil {
+		// Kill by the captured namingInstance pointer, not the live selection
+		// (#717) — see the ctrl+c branch above for the full rationale.
+		if err := m.sidebar.KillInstance(m.namingInstance); err != nil {
 			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
 		}
 		m.namingInstance = nil

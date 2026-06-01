@@ -598,3 +598,30 @@ func TestTerminalEnsureSessionReturnsStaleCleanupError(t *testing.T) {
 	require.Contains(t, err.Error(), "failed to close stale session")
 	require.Contains(t, err.Error(), "kill failed")
 }
+
+// TestTerminalAttachForInstanceRefusesUnboundInstance is part of the regression
+// guard for issue #716. AttachForInstance binds the terminal to the captured
+// instance before attaching, but ensureSessionLocked only sets currentTitle
+// when the instance is started with a live worktree. If it bails early (nil or
+// a captured instance that died while the help overlay was open), the method
+// must refuse to attach rather than fall back to a possibly-drifted
+// currentTitle — which is exactly the wrong-instance attach #716 fixes.
+func TestTerminalAttachForInstanceRefusesUnboundInstance(t *testing.T) {
+	tp := NewTerminalPane()
+
+	if _, err := tp.AttachForInstance(nil); err == nil {
+		t.Fatal("AttachForInstance(nil) must return an error, not attach")
+	}
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "unstarted",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	require.False(t, inst.Started(), "precondition: instance must not be started")
+
+	if _, err := tp.AttachForInstance(inst); err == nil {
+		t.Fatal("AttachForInstance must refuse to attach an instance it cannot bind")
+	}
+}

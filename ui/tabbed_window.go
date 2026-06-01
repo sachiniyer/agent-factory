@@ -178,9 +178,13 @@ func (w *TabbedWindow) GetActiveTab() int {
 	return int(w.activeTab.Load())
 }
 
-// AttachTerminal attaches to the terminal tmux session
-func (w *TabbedWindow) AttachTerminal() (chan struct{}, error) {
-	return w.terminal.Attach()
+// AttachTerminalForInstance attaches to the terminal session of the given
+// instance by binding the terminal pane to it first. Deferred attach flows
+// must use this rather than re-reading the live selection: the terminal's
+// bound instance (currentTitle) can be rebound by a background refresh while
+// the help overlay is open (#716).
+func (w *TabbedWindow) AttachTerminalForInstance(instance *session.Instance) (chan struct{}, error) {
+	return w.terminal.AttachForInstance(instance)
 }
 
 // CleanupTerminal closes the terminal session
