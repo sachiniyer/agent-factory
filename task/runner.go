@@ -320,9 +320,23 @@ func NextTaskRunTitle(repoID, repoPath, baseTitle, program string) (string, erro
 			return fmt.Errorf("failed to parse existing instances: %w", err)
 		}
 
-		used := make(map[string]bool, len(existing))
+		usedTitles := make([]string, 0, len(existing))
 		for _, data := range existing {
-			used[data.Title] = true
+			usedTitles = append(usedTitles, data.Title)
+		}
+
+		// Compare case-insensitively to match the daemon's title-conflict
+		// validation (strings.EqualFold, see daemon.findTitleConflictLocked).
+		// A case-sensitive check here would hand back a candidate (e.g.
+		// "nightly" when "Nightly" exists) that the daemon later rejects,
+		// turning every TUI-triggered run into a round-trip error. (#721)
+		titleTaken := func(candidate string) bool {
+			for _, used := range usedTitles {
+				if strings.EqualFold(used, candidate) {
+					return true
+				}
+			}
+			return false
 		}
 
 		for i := 1; i <= 10000; i++ {
@@ -330,7 +344,7 @@ func NextTaskRunTitle(repoID, repoPath, baseTitle, program string) (string, erro
 			if i > 1 {
 				candidate = fmt.Sprintf("%s-%d", baseTitle, i)
 			}
-			if used[candidate] {
+			if titleTaken(candidate) {
 				continue
 			}
 			if tmux.NewTmuxSessionForRepo(candidate, repoPath, program).DoesSessionExist() {
