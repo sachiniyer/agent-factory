@@ -173,7 +173,29 @@ func (g *GitWorktree) Cleanup() error {
 	if _, err := os.Stat(g.worktreePath); err == nil {
 		// Remove the worktree using git command
 		if _, err := g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath); err != nil {
-			errs = append(errs, err)
+			// When the worktree's `.git` pointer is corrupted, `git worktree
+			// remove -f` fails with "validation failed, cannot remove working
+			// tree" and leaves the directory orphaned on disk — previously the
+			// only escape was `af reset`. Fall back to removing the directory
+			// manually, mirroring CleanupWorktreesForRepo (#719). The Prune()
+			// below reconciles git's internal worktree metadata.
+			//
+			// Gate on "validation failed": unlike CleanupWorktreesForRepo,
+			// which only ever sees paths emitted by `git worktree list` (all
+			// real worktrees), g.worktreePath is a stored value with no such
+			// guarantee. "validation failed" means git DOES recognize the path
+			// as one of its registered worktrees, so removing the directory is
+			// safe. Other failures — notably "is not a working tree" — mean git
+			// does not own the path, so we surface the error instead of
+			// deleting it (preserves the best-effort Kill behavior of #478).
+			log.ErrorLog.Printf("failed to remove worktree %s: %v", g.worktreePath, err)
+			if strings.Contains(err.Error(), "validation failed") {
+				if removeErr := os.RemoveAll(g.worktreePath); removeErr != nil {
+					errs = append(errs, fmt.Errorf("failed to remove worktree directory %s: %w", g.worktreePath, removeErr))
+				}
+			} else {
+				errs = append(errs, err)
+			}
 		}
 	} else if !os.IsNotExist(err) {
 		// Only append error if it's not a "not exists" error

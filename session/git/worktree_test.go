@@ -374,6 +374,49 @@ func TestCleanup_PrunesBeforeBranchDelete(t *testing.T) {
 		"only the main worktree should remain, got:\n%s", string(out))
 }
 
+// TestCleanup_RemovesOrphanedDirectory is a regression test for #719. When the
+// worktree's `.git` pointer is corrupted, `git worktree remove -f` fails with
+// "validation failed" and leaves the directory on disk. Cleanup() must fall
+// back to os.RemoveAll so the orphaned directory does not leak disk space and
+// force the user into `af reset`. CleanupWorktreesForRepo already does this;
+// this verifies GitWorktree.Cleanup() follows the same fallback.
+func TestCleanup_RemovesOrphanedDirectory(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	repoRoot := createGitRepo(t)
+
+	// Initial commit so HEAD is valid (required for `worktree add`).
+	cmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, _, err := NewGitWorktree(repoRoot, "orphan")
+	require.NoError(t, err)
+	require.NoError(t, gw.Setup())
+
+	worktreePath := gw.GetWorktreePath()
+
+	// Corrupt the worktree by removing its `.git` pointer file so that
+	// `git worktree remove -f` fails validation and leaves the directory.
+	require.NoError(t, os.Remove(filepath.Join(worktreePath, ".git")))
+
+	// Cleanup may report errors, but it must remove the on-disk directory.
+	_ = gw.Cleanup()
+
+	_, err = os.Stat(worktreePath)
+	assert.True(t, os.IsNotExist(err),
+		"Cleanup() must remove the orphaned worktree directory when `git worktree remove` fails validation")
+}
+
 func TestNewGitWorktreeFromStorage_EmptyWorktreePath(t *testing.T) {
 	_, err := NewGitWorktreeFromStorage("/some/repo", "", "session", "branch", "abc123", false, true)
 	require.Error(t, err)
