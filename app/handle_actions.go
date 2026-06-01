@@ -209,13 +209,23 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		if selected == nil || selected.GetStatus() == session.Loading || !selected.TmuxAlive() {
 			return m, nil
 		}
+		// Capture the instance at Enter-press time — the synchronous moment the
+		// selection is provably current. For first-time attachers the attach is
+		// deferred until the help overlay is dismissed, and a background refresh
+		// can drift the selection onto a different instance in the meantime; the
+		// callbacks must attach to this captured instance, not re-read the live
+		// selection (#716).
 		if tw.IsInTerminalTab() {
 			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-				return m.attachOverlayCallback("handleEnter-terminal", "", tw.AttachTerminal)
+				return m.attachOverlayCallback("handleEnter-terminal", "", func() (chan struct{}, error) {
+					return tw.AttachTerminalForInstance(selected)
+				})
 			})
 		}
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return m.attachOverlayCallback("handleEnter-sidebar", "", m.sidebar.Attach)
+			return m.attachOverlayCallback("handleEnter-sidebar", "", func() (chan struct{}, error) {
+				return m.sidebar.AttachInstance(selected)
+			})
 		})
 	}
 	return m, nil

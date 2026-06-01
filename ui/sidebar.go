@@ -283,19 +283,38 @@ func (s *Sidebar) RegisterRepoForInstance(instance *session.Instance) {
 	s.addRepo(repoName)
 }
 
-// Kill kills the selected instance. It returns an error if the underlying
-// kill fails, in which case the instance is NOT removed from the sidebar
-// so the user can retry.
+// Kill kills the currently selected instance. It returns an error if the
+// underlying kill fails, in which case the instance is NOT removed from the
+// sidebar so the user can retry. See KillInstance for the pointer-based
+// variant that deferred/cancel flows must use.
 func (s *Sidebar) Kill() error {
-	sel := s.GetSelection()
-	if sel.Kind != SectionInstances || sel.IsHeader {
+	return s.KillInstance(s.GetSelectedInstance())
+}
+
+// KillInstance kills the given instance by pointer identity, independent of the
+// current selection. Deferred flows — most notably canceling a new instance
+// via Escape/ctrl+c — must use this rather than Kill(): background sync can
+// rebuild visibleItems and drift the selection off the target row between the
+// time the operation is initiated and the time it runs. Selection-based Kill()
+// would then silently no-op (selection landed on a section header) and leave
+// the naming instance behind as a "Loading" zombie (#717).
+//
+// A nil target or an instance no longer in the sidebar is a no-op, mirroring
+// Kill()'s tolerance for a stale selection.
+func (s *Sidebar) KillInstance(target *session.Instance) error {
+	if target == nil {
 		return nil
 	}
-	idx := sel.ItemIndex
-	if idx < 0 || idx >= len(s.instances) {
+	idx := -1
+	for i, inst := range s.instances {
+		if inst == target {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
 		return nil
 	}
-	target := s.instances[idx]
 	// Capture repo name before Kill(), because Kill() sets started=false
 	// which causes RepoName() to fail.
 	repoName, repoErr := target.RepoName()
@@ -312,13 +331,18 @@ func (s *Sidebar) Kill() error {
 	return nil
 }
 
-// Attach attaches to the selected instance.
-func (s *Sidebar) Attach() (chan struct{}, error) {
-	inst := s.GetSelectedInstance()
-	if inst == nil {
-		return nil, fmt.Errorf("no instance selected")
+// AttachInstance attaches to the given instance by pointer identity, but only
+// if it is still present in the sidebar. Deferred attach flows — the first-time
+// attach help screen, whose onDismiss callback runs after the overlay is
+// dismissed — must capture the instance at key-press time and attach through
+// this method rather than re-reading the live selection: a background refresh
+// can drift the selection onto a different instance while the help overlay is
+// open, so Attach() would connect to the wrong session (#716).
+func (s *Sidebar) AttachInstance(target *session.Instance) (chan struct{}, error) {
+	if target == nil || !s.ContainsInstance(target) {
+		return nil, fmt.Errorf("instance no longer exists")
 	}
-	return inst.Attach()
+	return target.Attach()
 }
 
 // GetSelectedInstance returns the currently selected instance, or nil.

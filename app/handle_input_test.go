@@ -135,6 +135,67 @@ func TestHandleMenuHighlightingNewInstanceEnterTab(t *testing.T) {
 	}
 }
 
+// TestCancelNamingRemovesZombieAfterSelectionDrift is the regression guard for
+// issue #717. While the user is naming a new instance, a background sync
+// (refreshExternalInstances) can remove a *preceding* instance, which rebuilds
+// the sidebar's visibleItems and drifts the selection off the naming row onto a
+// section header. The old cancel handlers called selection-based
+// sidebar.Kill(), which silently no-ops on a header — leaving the naming
+// instance behind as a "Loading" zombie. The fix kills by the captured
+// namingInstance pointer instead. Both cancel paths (Escape and ctrl+c) must
+// remove the zombie regardless of where the selection drifted.
+func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
+	cases := []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"escape", tea.KeyMsg{Type: tea.KeyEsc}},
+		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			h.state = stateNew
+
+			// A preceding instance that is NOT persisted to disk, so the next
+			// sync removes it. It is not Loading, so sync is allowed to remove
+			// it (Loading rows are protected as in-flight creations).
+			preceding := newLoadingInstance(t, "preceding")
+			preceding.SetStatus(session.Running)
+			h.sidebar.AddInstance(preceding)
+
+			// The naming instance: Loading, empty title — exactly what
+			// startNewInstance creates. It is selected (last row).
+			naming, err := session.NewInstance(session.InstanceOptions{
+				Title:   "",
+				Path:    t.TempDir(),
+				Program: "claude",
+			})
+			require.NoError(t, err)
+			naming.SetStatus(session.Loading)
+			h.sidebar.AddInstance(naming)
+			h.sidebar.SetSelectedInstance(h.sidebar.NumInstances() - 1)
+			h.namingInstance = naming
+
+			// Background sync removes `preceding` (absent on disk). This rebuilds
+			// visibleItems without adjusting selectedIdx, drifting the selection
+			// off the naming row onto a section header.
+			require.True(t, h.refreshExternalInstances(),
+				"sync should report a change after removing the non-persisted preceding instance")
+			require.Nil(t, h.sidebar.GetSelectedInstance(),
+				"precondition: selection must have drifted off the naming row onto a header")
+
+			_, _ = h.handleStateNew(tc.key)
+
+			assert.Equal(t, stateDefault, h.state, "cancel must return to the default state")
+			assert.Nil(t, h.namingInstance, "namingInstance pointer must be cleared on cancel")
+			assert.Equal(t, 0, h.sidebar.NumInstances(),
+				"the naming instance must be removed on cancel, not left as a Loading zombie; remaining titles: %v",
+				collectTitles(h.sidebar.GetInstances()))
+		})
+	}
+}
+
 func TestHandleStateNewRejectsDuplicateTitle(t *testing.T) {
 	h := newTestHome(t)
 	h.state = stateNew
