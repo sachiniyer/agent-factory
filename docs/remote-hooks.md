@@ -19,6 +19,8 @@ Add remote hooks to your per-repo config at `~/.agent-factory/repos/<repoID>/con
 
 Configuring `remote_hooks` enables the remote backend for that repo, but using it is explicit opt-in: press `N` in the TUI to create a remote session. Pressing `n` still creates a local tmux+git worktree session. When `remote_hooks` is absent, `N` is unavailable and all sessions are local.
 
+`launch_cmd`, `attach_cmd`, and `delete_cmd` are **required** — an empty value is rejected when the remote backend is resolved, with an error naming the missing field (e.g. `remote_hooks.launch_cmd is required`) rather than a cryptic `exec: no command` at operation time. `list_cmd` is optional: when it is empty, Agent Factory simply reports no remote sessions to enumerate (import/sync are skipped).
+
 ## Script Protocol
 
 All scripts must:
@@ -56,6 +58,8 @@ Starts a new remote agent session.
 
 Required fields: `name` (string), `status` (string: `running`).
 Additional fields are stored as metadata but not required.
+
+If `launch_cmd` exits 0 but its output cannot be parsed as the expected JSON object, Agent Factory assumes the remote session may have been created and invokes `delete_cmd --name <name>` best-effort to avoid orphaning it, then surfaces the parse error. Keep `launch_cmd` output limited to the JSON object (progress text on stderr) so this fallback is not triggered for healthy sessions.
 
 ### `list_cmd`
 

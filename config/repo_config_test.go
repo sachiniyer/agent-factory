@@ -231,3 +231,50 @@ func TestSaveRepoConfigAtomicWrite(t *testing.T) {
 		}
 	})
 }
+
+// TestRemoteHooksValidate covers the fail-fast guard added for #738: empty
+// (or whitespace-only) command strings for launch_cmd, attach_cmd, or
+// delete_cmd must produce an actionable error naming the offending field
+// rather than deferring to exec.Command's cryptic "exec: no command" at
+// operation time. list_cmd is intentionally optional (import/sync treat an
+// empty list_cmd as "no remote sessions to enumerate").
+func TestRemoteHooksValidate(t *testing.T) {
+	full := func() RemoteHooks {
+		return RemoteHooks{
+			LaunchCmd: "/bin/launch",
+			ListCmd:   "/bin/list",
+			AttachCmd: "/bin/attach",
+			DeleteCmd: "/bin/delete",
+		}
+	}
+
+	t.Run("fully populated is valid", func(t *testing.T) {
+		assert.NoError(t, full().Validate())
+	})
+
+	t.Run("empty list_cmd is allowed", func(t *testing.T) {
+		h := full()
+		h.ListCmd = ""
+		assert.NoError(t, h.Validate())
+	})
+
+	cases := []struct {
+		name    string
+		mutate  func(*RemoteHooks)
+		wantMsg string
+	}{
+		{"empty launch_cmd", func(h *RemoteHooks) { h.LaunchCmd = "" }, "remote_hooks.launch_cmd is required"},
+		{"whitespace launch_cmd", func(h *RemoteHooks) { h.LaunchCmd = "   " }, "remote_hooks.launch_cmd is required"},
+		{"empty attach_cmd", func(h *RemoteHooks) { h.AttachCmd = "" }, "remote_hooks.attach_cmd is required"},
+		{"empty delete_cmd", func(h *RemoteHooks) { h.DeleteCmd = "" }, "remote_hooks.delete_cmd is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := full()
+			tc.mutate(&h)
+			err := h.Validate()
+			require.Error(t, err)
+			assert.EqualError(t, err, tc.wantMsg)
+		})
+	}
+}

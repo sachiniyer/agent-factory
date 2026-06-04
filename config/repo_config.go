@@ -20,6 +20,31 @@ type RemoteHooks struct {
 	DeleteCmd string `json:"delete_cmd"`
 }
 
+// Validate checks that the command strings required to operate a remote hook
+// backend are non-empty. It is called at backend-resolution time rather than
+// at config load so that reading or rewriting a partially-configured repo
+// config never fails; the error only surfaces when agent-factory actually
+// needs to run the hooks.
+//
+// Without this guard, an empty command string defers to exec.Command(""),
+// which fails at operation time with Go's cryptic "exec: no command" and, on
+// the attach path, is swallowed in a goroutine so attach silently no-ops
+// (#738). list_cmd is intentionally not required here: import/sync paths treat
+// an empty list_cmd as "no remote sessions to enumerate" (see app/sync.go and
+// daemon/control.go), so requiring it would break that documented behavior.
+func (h RemoteHooks) Validate() error {
+	if strings.TrimSpace(h.LaunchCmd) == "" {
+		return fmt.Errorf("remote_hooks.launch_cmd is required")
+	}
+	if strings.TrimSpace(h.AttachCmd) == "" {
+		return fmt.Errorf("remote_hooks.attach_cmd is required")
+	}
+	if strings.TrimSpace(h.DeleteCmd) == "" {
+		return fmt.Errorf("remote_hooks.delete_cmd is required")
+	}
+	return nil
+}
+
 // RepoConfig holds per-repository configuration.
 type RepoConfig struct {
 	// PostWorktreeCommands are shell commands run asynchronously in the worktree

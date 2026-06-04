@@ -155,16 +155,27 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 		return fmt.Errorf("launch_cmd failed: %s: %w", string(out), err)
 	}
 
+	// launch_cmd exited 0, so the remote session may now exist on the remote
+	// host even though we have not yet parsed its metadata. From here on, any
+	// failure must trigger best-effort cleanup via delete_cmd, otherwise the
+	// remote session is orphaned: Start returns an error, the caller's Kill
+	// sees remoteMeta == nil and skips delete_cmd, and the session leaks
+	// permanently (#739). delete_cmd is invoked with the same slug launch_cmd
+	// received, which is the only identifier we have when the JSON is
+	// unparseable.
+
 	// The script writes progress to stderr and JSON to stdout.
 	// With CombinedOutput we get both mixed together. Try to find
 	// the first complete top-level JSON value in the output.
 	jsonStr := extractJSON(string(out))
 	if jsonStr == "" {
+		b.cleanupOrphanedLaunch(slug, i.Title)
 		return fmt.Errorf("launch_cmd returned no JSON in output: %s", string(out))
 	}
 
 	var meta map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &meta); err != nil {
+		b.cleanupOrphanedLaunch(slug, i.Title)
 		return fmt.Errorf("launch_cmd returned invalid JSON: %s: %w", jsonStr, err)
 	}
 
@@ -262,13 +273,39 @@ func (b *HookBackend) Kill(i *Instance) error {
 		return nil
 	}
 
-	args := []string{"--name", slug, "--json"}
-	out, err := exec.Command(b.Hooks.DeleteCmd, args...).CombinedOutput()
+	out, err := b.runDeleteCmd(slug)
 	if err != nil {
 		return fmt.Errorf("delete_cmd failed: %s: %w", string(out), err)
 	}
 
 	return nil
+}
+
+// runDeleteCmd invokes delete_cmd for the given hook name and returns its
+// combined output and error. Shared by Kill (which surfaces the error to the
+// user) and the orphan-cleanup path in Start (which logs it best-effort, #739)
+// so both stay in sync on how delete_cmd is invoked.
+func (b *HookBackend) runDeleteCmd(name string) ([]byte, error) {
+	return exec.Command(b.Hooks.DeleteCmd, "--name", name, "--json").CombinedOutput()
+}
+
+// cleanupOrphanedLaunch best-effort deletes a remote session that launch_cmd
+// created but whose metadata Start failed to parse (#739). It never retries
+// and never returns an error: the parse failure is the error the user sees,
+// and if delete_cmd also fails the user can clean up manually with delete_cmd.
+// slug is the --name launch_cmd was invoked with — the only identifier we have
+// once the JSON payload is unusable.
+func (b *HookBackend) cleanupOrphanedLaunch(slug, title string) {
+	out, err := b.runDeleteCmd(slug)
+	if err != nil {
+		log.WarningLog.Printf(
+			"hook backend: failed to clean up orphaned remote session %q (slug %q) after launch_cmd JSON parse failure; clean up manually via delete_cmd: %s: %v",
+			title, slug, strings.TrimSpace(string(out)), err)
+		return
+	}
+	log.WarningLog.Printf(
+		"hook backend: cleaned up orphaned remote session %q (slug %q) after launch_cmd JSON parse failure",
+		title, slug)
 }
 
 func (b *HookBackend) Preview(i *Instance) (string, error) {
