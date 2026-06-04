@@ -383,6 +383,95 @@ func TestCronToOnCalendarDOMSingleDayFanOut(t *testing.T) {
 	}, result)
 }
 
+// --- Leading-zero normalization (#743) ---
+//
+// ValidateCronExpr accepts leading zeros via strconv.Atoi, but the conversion
+// path previously used raw string tokens as dowNames keys, so "07"/"01-05"
+// produced invalid OnCalendar output: a single value silently dropped the DOW
+// constraint (fired daily instead of Sunday), and a range emitted ".." which
+// systemd rejects with "Invalid argument". The conversion must normalize
+// leading zeros identically to validation.
+
+// TestCronToOnCalendarDOWLeadingZeroSingle is the headline #743 repro: "07"
+// (Sunday with a leading zero) validated but produced "*-*-* 09:00:00" (daily)
+// because dowNames["07"] was "" and the DOW constraint was dropped.
+func TestCronToOnCalendarDOWLeadingZeroSingle(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 07")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Sun *-*-* 09:00:00"}, result)
+}
+
+// TestCronToOnCalendarDOWLeadingZeroSingleZero confirms "00" also normalizes to
+// Sunday (matching plain "0").
+func TestCronToOnCalendarDOWLeadingZeroSingleZero(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 00")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Sun *-*-* 09:00:00"}, result)
+}
+
+// TestCronToOnCalendarDOWLeadingZeroRange is the second #743 repro: "01-05"
+// previously produced "..  *-*-* 09:00:00" which systemd rejects, because
+// dowNames["01"] and dowNames["05"] were both "".
+func TestCronToOnCalendarDOWLeadingZeroRange(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 01-05")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Mon..Fri *-*-* 09:00:00"}, result)
+}
+
+// TestCronToOnCalendarDOWLeadingZeroSundayRange exercises the Sunday-start
+// expansion path with leading zeros ("00-03"); the start==0 branch must match
+// "00" as well as "0".
+func TestCronToOnCalendarDOWLeadingZeroSundayRange(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 00-03")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Sun,Mon,Tue,Wed *-*-* 09:00:00"}, result)
+}
+
+// TestCronToOnCalendarDOWLeadingZeroList covers a comma list with leading
+// zeros in each element.
+func TestCronToOnCalendarDOWLeadingZeroList(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 01,03,05")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Mon,Wed,Fri *-*-* 09:00:00"}, result)
+}
+
+// TestCronToOnCalendarDOWLeadingZeroListSundayDedupe confirms "00,07" (both
+// Sunday with leading zeros) dedupes to a single "Sun".
+func TestCronToOnCalendarDOWLeadingZeroListSundayDedupe(t *testing.T) {
+	result, err := CronToOnCalendar("0 9 * * 00,07")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Sun *-*-* 09:00:00"}, result)
+}
+
+// TestCronToOnCalendarAllFieldsLeadingZero exercises a leading zero in every
+// field at once: minute/hour/DOM/month normalize via zeroPad and DOW via
+// dowName. DOM=03 and DOW=Fri are both restricted, so the result fans out
+// under DOM/DOW OR-semantics (#522).
+func TestCronToOnCalendarAllFieldsLeadingZero(t *testing.T) {
+	result, err := CronToOnCalendar("01 02 03 04 05")
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"*-04-03 02:01:00",
+		"Fri *-04-* 02:01:00",
+	}, result)
+}
+
+// TestCronToOnCalendarStepLeadingZero verifies a leading zero in a step value
+// is stripped ("*/05" → "00/5", not "00/05").
+func TestCronToOnCalendarStepLeadingZero(t *testing.T) {
+	result, err := CronToOnCalendar("*/05 * * * *")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*-*-* *:00/5:00"}, result)
+}
+
+// TestCronToOnCalendarRangeStepLeadingZero verifies leading zeros are stripped
+// from both the range bounds (zero-padded) and the step.
+func TestCronToOnCalendarRangeStepLeadingZero(t *testing.T) {
+	result, err := CronToOnCalendar("00-30/05 * * * *")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*-*-* *:00..30/5:00"}, result)
+}
+
 // TestCronToOnCalendarDOWCoversAllNoSplit verifies the symmetric case where
 // DOW covers all 7 days. The OR collapses to "every day", so DOW is dropped
 // and only the DOM restriction remains in a single entry.
