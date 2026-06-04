@@ -18,6 +18,33 @@ var dowNames = map[string]string{
 	"7": "Sun",
 }
 
+// dowName returns the systemd day-of-week name for a single numeric cron token,
+// normalizing leading zeros (e.g. "07" → "Sun", "01" → "Mon") before the
+// dowNames lookup. ValidateCronExpr accepts leading zeros via strconv.Atoi, so
+// the conversion path must normalize identically or it emits invalid OnCalendar
+// output (a missing name yields ".." which systemd rejects, or drops the DOW
+// constraint so the timer fires daily). Non-numeric tokens — which only reach
+// here if a caller bypasses validation — return "", preserving the prior
+// raw-map-lookup behavior (#743).
+func dowName(token string) string {
+	v, err := strconv.Atoi(token)
+	if err != nil {
+		return ""
+	}
+	return dowNames[strconv.Itoa(v)]
+}
+
+// normalizeNum strips leading zeros from a numeric string (e.g. "05" → "5").
+// Non-numeric tokens are returned unchanged. Used to normalize step values
+// before emitting them to systemd, which expects bare integers (#743).
+func normalizeNum(s string) string {
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return s
+	}
+	return strconv.Itoa(v)
+}
+
 // ValidateCronExpr validates a 5-field cron expression (minute hour dom month dow).
 func ValidateCronExpr(expr string) error {
 	fields := strings.Fields(expr)
@@ -195,7 +222,7 @@ func convertTimeField(field string, oneIndexed bool) string {
 	if strings.Contains(field, "/") {
 		idx := strings.Index(field, "/")
 		base := field[:idx]
-		step := field[idx+1:]
+		step := normalizeNum(field[idx+1:])
 		if base == "*" {
 			if oneIndexed {
 				return fmt.Sprintf("01/%s", step)
@@ -285,7 +312,7 @@ func convertDOW(field string) string {
 	}
 
 	// Single value
-	return dowNames[field]
+	return dowName(field)
 }
 
 // convertSingleDOW converts a single DOW element (number or range) to a name.
@@ -308,7 +335,10 @@ func convertSingleDOW(part string) string {
 		start := part[:idx]
 		end := part[idx+1:]
 
-		if start == "0" {
+		// Match leading-zero forms too ("00" as well as "0"); strconv.Atoi
+		// normalizes both, but guard on err so non-numeric tokens (which
+		// Atoi maps to 0) don't falsely enter the Sunday-start branch.
+		if startVal, err := strconv.Atoi(start); err == nil && startVal == 0 {
 			endVal, _ := strconv.Atoi(end)
 			var names []string
 			for i := 0; i <= endVal; i++ {
@@ -317,9 +347,9 @@ func convertSingleDOW(part string) string {
 			return strings.Join(names, ",")
 		}
 
-		return fmt.Sprintf("%s..%s", dowNames[start], dowNames[end])
+		return fmt.Sprintf("%s..%s", dowName(start), dowName(end))
 	}
-	return dowNames[part]
+	return dowName(part)
 }
 
 // zeroPad pads a numeric string to 2 digits.
