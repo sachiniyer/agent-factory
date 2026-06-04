@@ -164,6 +164,30 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		}
 	}
 
+	// Preserve in-memory instances whose repo directory vanished from disk
+	// entirely (#736). LoadAllRepoInstances only returns repos that still have
+	// an on-disk instances directory, so an externally-deleted repo dir is
+	// simply absent from allInstances and would otherwise be dropped from
+	// `next`. This is a recoverable disk inconsistency — SaveInstances recreates
+	// missing repo directories — so we re-hydrate the prior instances and log
+	// loudly rather than silently abandoning running AutoYes sessions. This
+	// parallels the corrupted-JSON handling above, which also re-hydrates from
+	// `existing`. On startup (existing == nil) there is nothing to preserve.
+	if existing != nil {
+		warnedRepos := make(map[string]bool)
+		for key, inst := range existing {
+			repoID, _ := splitDaemonInstanceKey(key)
+			if _, ok := allInstances[repoID]; ok {
+				continue
+			}
+			if !warnedRepos[repoID] {
+				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory: %s", repoID)
+				warnedRepos[repoID] = true
+			}
+			next[key] = inst
+		}
+	}
+
 	return next, nil
 }
 

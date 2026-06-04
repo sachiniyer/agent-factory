@@ -103,17 +103,18 @@ var sessionsListCmd = &cobra.Command{
 				return jsonError(fmt.Errorf("failed to parse instances: %w", err))
 			}
 		} else {
-			allInstances, err := config.LoadAllRepoInstances()
+			// Don't silently substitute an empty/partial list when a repo
+			// file is corrupted (#730): loadAllInstancesAggregate warns naming
+			// each bad repo, and we fail loudly so users can tell "no sessions"
+			// apart from "sessions hidden behind a corrupt file."
+			data, corrupted, err := loadAllInstancesAggregate()
 			if err != nil {
 				return jsonError(err)
 			}
-			for _, raw := range allInstances {
-				var instances []session.InstanceData
-				if err := json.Unmarshal(raw, &instances); err != nil {
-					continue
-				}
-				allData = append(allData, instances...)
+			if len(corrupted) > 0 {
+				return jsonError(corruptedReposError(corrupted))
 			}
+			allData = data
 		}
 
 		if allData == nil {
@@ -427,9 +428,15 @@ var sessionsWhoamiCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to load instances: %w", err))
 		}
 
-		for _, raw := range allInstances {
+		var corrupted []string
+		for repoID, raw := range allInstances {
 			var instances []session.InstanceData
 			if err := json.Unmarshal(raw, &instances); err != nil {
+				// Warn and record rather than silently skip (#730): the
+				// current session's record may live in the corrupted repo,
+				// so a bare "not found" would mask the real cause.
+				log.WarningLog.Printf("skipping repo %s: corrupted instances.json: %v", repoID, err)
+				corrupted = append(corrupted, repoID)
 				continue
 			}
 			for i := range instances {
@@ -439,6 +446,9 @@ var sessionsWhoamiCmd = &cobra.Command{
 			}
 		}
 
+		if len(corrupted) > 0 {
+			return jsonError(fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, corruptedReposSuffix(corrupted)))
+		}
 		return jsonError(fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName))
 	},
 }

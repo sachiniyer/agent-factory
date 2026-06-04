@@ -1,0 +1,163 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+// captureWarnings redirects WarningLog output into a buffer for the duration
+// of a test so assertions can confirm corrupted/missing storage is surfaced
+// loudly rather than dropped silently (#730). It points the logger straight at
+// the buffer (rather than teeing through the prior writer) because sibling
+// tests can leave WarningLog attached to a since-closed fd — io.MultiWriter
+// aborts on the first writer's error, which would swallow the captured output.
+func captureWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&buf)
+	t.Cleanup(func() { log.WarningLog.SetOutput(prev) })
+	return &buf
+}
+
+// TestLoadAllInstancesAggregate_WarnsAndReportsCorruptedRepo is the regression
+// test for #730: aggregating sessions across repos must not silently skip a
+// repo whose instances.json is corrupted. The bad repo has to be both logged
+// (naming it) and reported back to the caller so `sessions list` can fail
+// loudly instead of returning a truncated list that looks like "no sessions."
+func TestLoadAllInstancesAggregate_WarnsAndReportsCorruptedRepo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	warnBuf := captureWarnings(t)
+
+	validRepoID := "valid-repo"
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "good-session"}})
+	if err != nil {
+		t.Fatalf("marshal valid: %v", err)
+	}
+	if err := config.SaveRepoInstances(validRepoID, validJSON); err != nil {
+		t.Fatalf("save valid repo: %v", err)
+	}
+
+	corruptedRepoID := "corrupted-repo"
+	if err := config.SaveRepoInstances(corruptedRepoID, json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupted repo: %v", err)
+	}
+
+	data, corrupted, err := loadAllInstancesAggregate()
+	if err != nil {
+		t.Fatalf("loadAllInstancesAggregate returned hard error: %v", err)
+	}
+	if len(corrupted) != 1 || corrupted[0] != corruptedRepoID {
+		t.Fatalf("expected corrupted=[%q], got %v", corruptedRepoID, corrupted)
+	}
+	// Valid data must still be parsed (the corruption is per-repo).
+	if len(data) != 1 || data[0].Title != "good-session" {
+		t.Fatalf("expected the valid repo's session to parse, got %+v", data)
+	}
+	if !strings.Contains(warnBuf.String(), corruptedRepoID) {
+		t.Fatalf("expected warning naming corrupted repo %q; got: %q", corruptedRepoID, warnBuf.String())
+	}
+
+	// corruptedReposError must name the bad repo so the CLI/API surfaces it.
+	cerr := corruptedReposError(corrupted)
+	if !strings.Contains(cerr.Error(), corruptedRepoID) {
+		t.Fatalf("expected structured error to name corrupted repo %q; got: %v", corruptedRepoID, cerr)
+	}
+}
+
+// TestLoadAllInstancesAggregate_EmptyNotCorrupted guards backward compatibility
+// (#730 constraint): empty/new instance stores must produce an empty result
+// with NO corruption reported and NO error — only malformed JSON counts as
+// corruption.
+func TestLoadAllInstancesAggregate_EmptyNotCorrupted(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	warnBuf := captureWarnings(t)
+
+	// No repos at all.
+	data, corrupted, err := loadAllInstancesAggregate()
+	if err != nil {
+		t.Fatalf("unexpected error with no repos: %v", err)
+	}
+	if len(corrupted) != 0 {
+		t.Fatalf("no repos should mean no corruption, got %v", corrupted)
+	}
+	if len(data) != 0 {
+		t.Fatalf("expected empty result, got %+v", data)
+	}
+
+	// A repo whose file holds an empty array is "new/empty", not corrupted.
+	if err := config.SaveRepoInstances("empty-repo", json.RawMessage("[]")); err != nil {
+		t.Fatalf("save empty repo: %v", err)
+	}
+	data, corrupted, err = loadAllInstancesAggregate()
+	if err != nil {
+		t.Fatalf("unexpected error with empty repo: %v", err)
+	}
+	if len(corrupted) != 0 {
+		t.Fatalf("empty array must not be treated as corruption, got %v", corrupted)
+	}
+	if len(data) != 0 {
+		t.Fatalf("expected empty result, got %+v", data)
+	}
+	if warnBuf.Len() != 0 {
+		t.Fatalf("empty/new stores should not warn; got: %q", warnBuf.String())
+	}
+}
+
+// TestFindInstanceByTitle_NamesCorruptedRepoOnNotFound covers #730 for the
+// title-lookup path: when the title is absent and a repo is corrupted, the
+// returned error must name the corrupted repo (so the user knows the session
+// may be hidden behind a bad file) rather than a bare "not found."
+func TestFindInstanceByTitle_NamesCorruptedRepoOnNotFound(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	warnBuf := captureWarnings(t)
+
+	corruptedRepoID := "corrupted-repo"
+	if err := config.SaveRepoInstances(corruptedRepoID, json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupted repo: %v", err)
+	}
+
+	_, _, err := findInstanceByTitle("ghost-title")
+	if err == nil {
+		t.Fatalf("expected error when title missing and a repo is corrupted")
+	}
+	if !strings.Contains(err.Error(), corruptedRepoID) {
+		t.Fatalf("expected error to name corrupted repo %q; got: %v", corruptedRepoID, err)
+	}
+	if !strings.Contains(warnBuf.String(), corruptedRepoID) {
+		t.Fatalf("expected warning naming corrupted repo %q; got: %q", corruptedRepoID, warnBuf.String())
+	}
+}
+
+// TestFindInstanceByTitle_PositiveLookupNotBlockedByCorruption verifies that a
+// corrupted repo does not prevent a successful lookup of a title that lives in
+// a healthy repo — corruption is warned about, not fatal to findable sessions.
+func TestFindInstanceByTitle_PositiveLookupNotBlockedByCorruption(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_ = captureWarnings(t)
+
+	if err := config.SaveRepoInstances("corrupted-repo", json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupted repo: %v", err)
+	}
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "findme"}})
+	if err != nil {
+		t.Fatalf("marshal valid: %v", err)
+	}
+	if err := config.SaveRepoInstances("valid-repo", validJSON); err != nil {
+		t.Fatalf("save valid repo: %v", err)
+	}
+
+	data, repoID, err := findInstanceByTitle("findme")
+	if err != nil {
+		t.Fatalf("expected to find session in healthy repo despite corruption elsewhere: %v", err)
+	}
+	if data.Title != "findme" || repoID != "valid-repo" {
+		t.Fatalf("unexpected lookup result: data=%+v repoID=%q", data, repoID)
+	}
+}
