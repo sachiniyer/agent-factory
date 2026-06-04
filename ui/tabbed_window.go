@@ -143,7 +143,7 @@ func (w *TabbedWindow) ScrollUp() {
 			log.InfoLog.Printf("tabbed window failed to scroll up: %v", err)
 		}
 	case TerminalTab:
-		if err := w.terminal.ScrollUp(); err != nil {
+		if err := w.terminal.ScrollUp(w.instance); err != nil {
 			log.InfoLog.Printf("tabbed window failed to scroll terminal up: %v", err)
 		}
 	}
@@ -157,7 +157,7 @@ func (w *TabbedWindow) ScrollDown() {
 			log.InfoLog.Printf("tabbed window failed to scroll down: %v", err)
 		}
 	case TerminalTab:
-		if err := w.terminal.ScrollDown(); err != nil {
+		if err := w.terminal.ScrollDown(w.instance); err != nil {
 			log.InfoLog.Printf("tabbed window failed to scroll terminal down: %v", err)
 		}
 	}
