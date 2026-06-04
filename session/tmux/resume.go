@@ -61,7 +61,12 @@ func resumeProgram(program string) string {
 
 	switch agent {
 	case ProgramClaude:
-		for _, tok := range tokens {
+		// Only scan tokens AFTER the agent token. Tokens before it belong to
+		// a wrapper command (e.g. `ionice -c 3 claude`, `taskset -c 0-3
+		// claude`) whose flags can collide with claude's resume flags and
+		// false-positive the already-has-resume check (#742). Mirrors the
+		// position-aware codex check below (#632).
+		for _, tok := range tokens[agentIdx+1:] {
 			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
 				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
 				isShortResumeWithAttachedValue(tok) {
@@ -90,14 +95,19 @@ func resumeProgram(program string) string {
 		off := ends[insertAt-1]
 		return program[:off] + " resume --last" + program[off:]
 	case ProgramAider:
-		for _, tok := range tokens {
+		// Only scan tokens after the agent token so wrapper-command flags
+		// can't false-positive the already-has-resume check (#742).
+		for _, tok := range tokens[agentIdx+1:] {
 			if tok == "--restore-chat-history" || tok == "--no-restore-chat-history" {
 				return program
 			}
 		}
 		return program + " --restore-chat-history"
 	case ProgramGemini:
-		for _, tok := range tokens {
+		// Only scan tokens after the agent token so wrapper-command flags
+		// (e.g. `ionice -c 3 gemini`) can't false-positive the
+		// already-has-resume check (#742).
+		for _, tok := range tokens[agentIdx+1:] {
 			if tok == "--resume" || tok == "-r" ||
 				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
 				isShortResumeWithAttachedValue(tok) {
