@@ -424,6 +424,130 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 	}
 }
 
+// TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory covers
+// #736: when a repo's instances directory is deleted externally while the
+// daemon is running, config.LoadAllRepoInstances no longer returns that repo,
+// so the polling refresh must preserve its in-memory instances (parallel to
+// the corrupted-JSON path) and log a warning naming the missing repo. Dropping
+// them would silently abandon a running AutoYes session.
+func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	var warnBuf bytes.Buffer
+	prevOut := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(io.MultiWriter(prevOut, &warnBuf))
+	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+
+	prevFromInstance := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
+
+	// A repo that stays on disk — proves we don't over-preserve and that the
+	// normal load path still works alongside a vanished repo.
+	presentRepoID := "present-repo"
+	presentJSON, err := json.Marshal([]session.InstanceData{{Title: "present-session"}})
+	if err != nil {
+		t.Fatalf("marshal present: %v", err)
+	}
+	if err := config.SaveRepoInstances(presentRepoID, presentJSON); err != nil {
+		t.Fatalf("save present repo: %v", err)
+	}
+
+	// A repo whose directory we delete out from under the daemon.
+	missingRepoID := "missing-repo"
+	missingJSON, err := json.Marshal([]session.InstanceData{{Title: "running-session"}})
+	if err != nil {
+		t.Fatalf("marshal missing: %v", err)
+	}
+	if err := config.SaveRepoInstances(missingRepoID, missingJSON); err != nil {
+		t.Fatalf("save missing repo: %v", err)
+	}
+
+	// In-memory state as if both sessions had already been loaded.
+	presentKey := daemonInstanceKey(presentRepoID, "present-session")
+	missingKey := daemonInstanceKey(missingRepoID, "running-session")
+	presentInst := &session.Instance{}
+	missingInst := &session.Instance{}
+	existing := map[string]*session.Instance{
+		presentKey: presentInst,
+		missingKey: missingInst,
+	}
+
+	// Remove the missing repo's directory entirely (not just the file), as an
+	// external `rm -rf` of the repo's storage would.
+	missingPath, err := config.RepoInstancesPath(missingRepoID)
+	if err != nil {
+		t.Fatalf("resolve missing repo path: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Dir(missingPath)); err != nil {
+		t.Fatalf("remove missing repo dir: %v", err)
+	}
+
+	got, err := refreshDaemonInstances(existing)
+	if err != nil {
+		t.Fatalf("refreshDaemonInstances returned error: %v", err)
+	}
+
+	if got[missingKey] != missingInst {
+		t.Fatalf("running AutoYes session for missing repo %q was dropped; in-memory instance must be preserved", missingRepoID)
+	}
+	if got[presentKey] != presentInst {
+		t.Fatalf("session for present repo %q should still be loaded", presentRepoID)
+	}
+	if !strings.Contains(warnBuf.String(), missingRepoID) {
+		t.Fatalf("expected warning naming missing repo %q; got: %q", missingRepoID, warnBuf.String())
+	}
+}
+
+// TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos guards the
+// startup path (existing == nil): there is no prior in-memory state to
+// preserve, so a missing repo must contribute nothing and not panic.
+func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	prevOut := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(io.Discard)
+	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+
+	got, err := refreshDaemonInstances(nil)
+	if err != nil {
+		t.Fatalf("startup refresh errored: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty map at startup with no repos, got %d entries", len(got))
+	}
+}
+
+// TestFindInstanceDataByTitle_NamesCorruptedRepoOnNotFound covers the all-repo
+// scan path (#730): a corrupted repo must be logged and named in the returned
+// error instead of silently skipped, so a title that could be hidden in the
+// bad file doesn't surface as a bare "not found."
+func TestFindInstanceDataByTitle_NamesCorruptedRepoOnNotFound(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	var warnBuf bytes.Buffer
+	prevOut := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(io.MultiWriter(prevOut, &warnBuf))
+	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
+
+	corruptedRepoID := "corrupted-repo"
+	if err := config.SaveRepoInstances(corruptedRepoID, json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupted repo: %v", err)
+	}
+
+	_, _, err := findInstanceDataByTitle("ghost-title", "")
+	if err == nil {
+		t.Fatalf("expected error when title missing and a repo is corrupted")
+	}
+	if !strings.Contains(err.Error(), corruptedRepoID) {
+		t.Fatalf("expected error to name corrupted repo %q; got: %v", corruptedRepoID, err)
+	}
+	if !strings.Contains(warnBuf.String(), corruptedRepoID) {
+		t.Fatalf("expected warning naming corrupted repo %q; got: %q", corruptedRepoID, warnBuf.String())
+	}
+}
+
 // TestStopDaemon_RefusesSelfPID verifies that StopDaemon refuses to kill the current test process
 // even if the PID file points at it.
 func TestStopDaemon_RefusesSelfPID(t *testing.T) {

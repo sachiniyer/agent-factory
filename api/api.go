@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -56,9 +59,15 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 		return nil, "", fmt.Errorf("failed to load instances: %w", err)
 	}
 
+	var corrupted []string
 	for repoID, raw := range allInstances {
 		var instances []session.InstanceData
 		if err := json.Unmarshal(raw, &instances); err != nil {
+			// Warn and record the corrupted repo rather than silently
+			// skipping it (#730). If the target title lives in this repo we
+			// would otherwise report a misleading "not found".
+			log.WarningLog.Printf("skipping repo %s: corrupted instances.json: %v", repoID, err)
+			corrupted = append(corrupted, repoID)
 			continue
 		}
 		for i := range instances {
@@ -67,7 +76,52 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 			}
 		}
 	}
+	if len(corrupted) > 0 {
+		return nil, "", fmt.Errorf("instance %q not found; %s", title, corruptedReposSuffix(corrupted))
+	}
 	return nil, "", fmt.Errorf("instance %q not found", title)
+}
+
+// corruptedReposSuffix builds a sorted, human-readable clause naming the repos
+// whose instances.json failed to parse. Callers use it to surface corruption
+// loudly instead of silently returning empty/partial results (#730).
+func corruptedReposSuffix(corrupted []string) string {
+	sort.Strings(corrupted)
+	return fmt.Sprintf("%d repo(s) have a corrupted instances.json and may be hiding it: %s", len(corrupted), strings.Join(corrupted, ", "))
+}
+
+// corruptedReposError builds a structured error for aggregate queries (e.g.
+// `sessions list`) that name the repos whose instances.json failed to parse.
+// Returning this instead of a silently-truncated result lets users tell "no
+// sessions exist" apart from "sessions exist but the file is corrupted" (#730).
+func corruptedReposError(corrupted []string) error {
+	sort.Strings(corrupted)
+	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s", len(corrupted), strings.Join(corrupted, ", "))
+}
+
+// loadAllInstancesAggregate aggregates instances across every repo, returning
+// the parsed entries plus the IDs of repos whose instances.json failed to
+// parse. Corrupted repos are logged (naming the repo) and reported via the
+// second return value so callers surface them instead of silently returning a
+// truncated list (#730). Empty/new repos parse cleanly to zero entries and are
+// not treated as corruption, preserving backward-compatible empty results.
+func loadAllInstancesAggregate() ([]session.InstanceData, []string, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return nil, nil, err
+	}
+	var allData []session.InstanceData
+	var corrupted []string
+	for repoID, raw := range allInstances {
+		var instances []session.InstanceData
+		if err := json.Unmarshal(raw, &instances); err != nil {
+			log.WarningLog.Printf("skipping repo %s: corrupted instances.json: %v", repoID, err)
+			corrupted = append(corrupted, repoID)
+			continue
+		}
+		allData = append(allData, instances...)
+	}
+	return allData, corrupted, nil
 }
 
 func repoHasInstanceTitle(repoID, title string) (bool, error) {

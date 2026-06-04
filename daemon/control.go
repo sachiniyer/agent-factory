@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -935,9 +936,15 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load instances: %w", err)
 	}
+	var corrupted []string
 	for rid, raw := range allInstances {
 		var data []session.InstanceData
 		if err := json.Unmarshal(raw, &data); err != nil {
+			// Warn and record the corrupted repo rather than silently
+			// skipping it (#730). If the target title lives in this repo we
+			// would otherwise report a misleading "not found".
+			log.WarningLog.Printf("daemon skipping repo %s: corrupted instances.json: %v", rid, err)
+			corrupted = append(corrupted, rid)
 			continue
 		}
 		for i := range data {
@@ -945,6 +952,10 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 				return &data[i], rid, nil
 			}
 		}
+	}
+	if len(corrupted) > 0 {
+		sort.Strings(corrupted)
+		return nil, "", fmt.Errorf("instance %q not found; %d repo(s) have a corrupted instances.json that may be hiding it: %s", title, len(corrupted), strings.Join(corrupted, ", "))
 	}
 	return nil, "", fmt.Errorf("instance %q not found", title)
 }
