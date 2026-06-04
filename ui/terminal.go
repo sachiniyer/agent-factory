@@ -64,6 +64,30 @@ func (t *TerminalPane) SetSize(width, height int) {
 	}
 }
 
+// dropStaleScrollState clears scroll-mode viewport content captured from a
+// previously selected instance. Caller must hold t.mu.
+//
+// UpdateContent runs this on every refresh, but the mouse/keyboard scroll path
+// (ScrollUp/ScrollDown) is driven straight off the bubbletea event loop and
+// can fire before the async UpdateContent for the newly selected instance has
+// run. Without this guard a scroll would re-capture and scroll the previous
+// instance's terminal history instead of resetting scroll mode (#746). Unlike
+// PreviewPane.dropStaleScrollState this does not adopt the new title:
+// currentTitle is owned by ensureSessionLocked, which only sets it once a live
+// session exists. Mirrors PreviewPane.dropStaleScrollState (#702), the same
+// motivation as the setFallbackState consolidation in #669.
+func (t *TerminalPane) dropStaleScrollState(instance *session.Instance) {
+	title := ""
+	if instance != nil {
+		title = instance.Title
+	}
+	if t.isScrolling && t.currentTitle != "" && t.currentTitle != title {
+		t.isScrolling = false
+		t.viewport.SetContent("")
+		t.viewport.GotoTop()
+	}
+}
+
 // setFallbackState sets the terminal pane to display a fallback message.
 // Caller must hold t.mu.
 //
@@ -104,19 +128,21 @@ func (t *TerminalPane) UpdateContent(instance *session.Instance) error {
 	// so ensureSessionLocked() runs and updates t.currentTitle. Otherwise
 	// Attach() would resolve t.sessions[t.currentTitle] to the previous
 	// instance's session (issue #384).
-	if t.isScrolling && t.currentTitle != "" && t.currentTitle != instance.Title {
-		t.isScrolling = false
-		t.viewport.SetContent("")
-	}
+	t.dropStaleScrollState(instance)
 
 	// Skip content updates while in scroll mode
 	if t.isScrolling {
 		return nil
 	}
 
-	// Ensure we have a terminal session for this instance
+	// Ensure we have a terminal session for this instance. On failure the
+	// instance has no usable session, so show a fallback rather than
+	// returning an error: the caller only logs it, leaving the previous
+	// instance's captured content on screen (#747). Mirrors the
+	// ErrSessionGone fallback handling below.
 	if err := t.ensureSessionLocked(instance); err != nil {
-		return err
+		t.setFallbackState(fmt.Sprintf("Failed to start terminal session: %v", err))
+		return nil
 	}
 
 	s, ok := t.sessions[t.currentTitle]
@@ -396,8 +422,16 @@ func (t *TerminalPane) String() string {
 
 // enterScrollMode captures the full terminal history and enters scroll mode.
 // Caller must hold t.mu.
-func (t *TerminalPane) enterScrollMode() error {
-	s, ok := t.sessions[t.currentTitle]
+//
+// Looks the session up by the selected instance's title rather than
+// t.currentTitle: in the scroll path UpdateContent may not have run yet, so
+// currentTitle can still name the previously selected instance and would
+// capture its history (#746).
+func (t *TerminalPane) enterScrollMode(instance *session.Instance) error {
+	if instance == nil {
+		return nil
+	}
+	s, ok := t.sessions[instance.Title]
 	if !ok || s.tmuxSession == nil || !s.tmuxSession.DoesSessionExist() {
 		return nil
 	}
@@ -416,26 +450,34 @@ func (t *TerminalPane) enterScrollMode() error {
 	t.viewport.SetContent(contentWithFooter)
 	t.viewport.GotoBottom()
 	t.isScrolling = true
+	// Adopt the scrolled instance as current. The scroll path can run before
+	// UpdateContent has bound currentTitle to the new selection; without this
+	// the next refresh's dropStaleScrollState would see a mismatched title and
+	// immediately discard the scroll the user just started (#746). Safe wrt
+	// #716 — we only get here once a live session for this instance exists.
+	t.currentTitle = instance.Title
 	return nil
 }
 
 // ScrollUp enters scroll mode (if not already) and scrolls up.
-func (t *TerminalPane) ScrollUp() error {
+func (t *TerminalPane) ScrollUp(instance *session.Instance) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.dropStaleScrollState(instance)
 	if !t.isScrolling {
-		return t.enterScrollMode()
+		return t.enterScrollMode(instance)
 	}
 	t.viewport.LineUp(1)
 	return nil
 }
 
 // ScrollDown enters scroll mode (if not already) and scrolls down.
-func (t *TerminalPane) ScrollDown() error {
+func (t *TerminalPane) ScrollDown(instance *session.Instance) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.dropStaleScrollState(instance)
 	if !t.isScrolling {
-		return t.enterScrollMode()
+		return t.enterScrollMode(instance)
 	}
 	t.viewport.LineDown(1)
 	return nil

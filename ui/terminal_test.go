@@ -305,7 +305,7 @@ func TestTerminalScrolling(t *testing.T) {
 	require.False(t, tp.IsScrolling(), "should not be scrolling initially")
 
 	// ScrollUp should enter scroll mode
-	err := tp.ScrollUp()
+	err := tp.ScrollUp(instance)
 	require.NoError(t, err)
 	require.True(t, tp.IsScrolling(), "should be in scroll mode after ScrollUp")
 
@@ -314,7 +314,7 @@ func TestTerminalScrolling(t *testing.T) {
 	require.NotEmpty(t, viewContent, "viewport should have content in scroll mode")
 
 	// ScrollDown should continue in scroll mode
-	err = tp.ScrollDown()
+	err = tp.ScrollDown(instance)
 	require.NoError(t, err)
 	require.True(t, tp.IsScrolling(), "should still be in scroll mode after ScrollDown")
 
@@ -451,7 +451,7 @@ func TestTerminalCloseForInstanceResetsScrollMode(t *testing.T) {
 	injectSession(tp, closedInstance.Title, closedTs, closedInstance.GetWorktreePath())
 
 	// Enter scroll mode on closedInstance — populates viewport, sets isScrolling=true.
-	require.NoError(t, tp.ScrollUp())
+	require.NoError(t, tp.ScrollUp(closedInstance))
 	require.True(t, tp.IsScrolling(), "precondition: should be in scroll mode after ScrollUp")
 
 	// Close the instance whose terminal we are scrolling. With the bug,
@@ -501,7 +501,7 @@ func TestTerminalFallbackResetsScrollMode(t *testing.T) {
 	enterScrollOnPrior := func(tp *TerminalPane) {
 		t.Helper()
 		injectSession(tp, priorInstance.Title, priorTs, priorInstance.GetWorktreePath())
-		require.NoError(t, tp.ScrollUp())
+		require.NoError(t, tp.ScrollUp(priorInstance))
 		require.True(t, tp.IsScrolling(), "precondition: should be in scroll mode")
 		require.Contains(t, tp.viewport.View(), priorContent,
 			"precondition: viewport should hold prior instance's history")
@@ -553,6 +553,121 @@ func TestTerminalFallbackResetsScrollMode(t *testing.T) {
 		require.NotContains(t, rendered, priorContent,
 			"String() must not render the prior instance's scroll-mode content")
 	})
+}
+
+// TestTerminalScrollUsesSelectedInstance is a regression test for #746.
+// The scroll path (ScrollUp/ScrollDown) is driven straight off the bubbletea
+// event loop and can fire before the async UpdateContent for a newly selected
+// instance has run, leaving t.currentTitle pointing at the previously selected
+// instance. Before the fix enterScrollMode captured t.sessions[t.currentTitle]
+// — the previous instance — so the user scrolled the wrong terminal's history.
+// The scroll path must key off the selected instance. Mirrors the PreviewPane
+// mouse-scroll guard (#702).
+func TestTerminalScrollUsesSelectedInstance(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const contentA = "terminal-history-from-instance-A"
+	const contentB = "terminal-history-from-instance-B"
+
+	instA := makeStartedInstance(t, "scroll-A")
+	defer func() { _ = instA.Kill() }()
+	instB := makeStartedInstance(t, "scroll-B")
+	defer func() { _ = instB.Kill() }()
+
+	tp := NewTerminalPane()
+	tp.SetSize(80, 30)
+
+	tsA := newMockTmuxSession(t, "scroll-A", mockCmdExec(contentA, true))
+	tsB := newMockTmuxSession(t, "scroll-B", mockCmdExec(contentB, true))
+
+	// A is selected and displayed: injectSession sets currentTitle == A.
+	injectSession(tp, instA.Title, tsA, instA.GetWorktreePath())
+
+	// B becomes selected, but UpdateTerminal(B) has not run yet — B's session
+	// is cached while currentTitle still names A. This is the race window the
+	// bug lives in.
+	tp.mu.Lock()
+	tp.sessions[instB.Title] = &terminalSession{
+		tmuxSession:  tsB,
+		worktreePath: instB.GetWorktreePath(),
+	}
+	tp.mu.Unlock()
+
+	// User scrolls while B is the selected instance.
+	require.NoError(t, tp.ScrollUp(instB))
+	require.True(t, tp.IsScrolling(), "should enter scroll mode for the selected instance")
+
+	rendered := tp.viewport.View()
+	require.Contains(t, rendered, contentB,
+		"scroll must capture the selected instance's (B) terminal history")
+	require.NotContains(t, rendered, contentA,
+		"scroll must not capture the previously selected instance's (A) history (#746)")
+
+	// enterScrollMode adopts B as current, so a subsequent refresh for B does
+	// not discard the scroll the user just started.
+	require.NoError(t, tp.UpdateContent(instB))
+	require.True(t, tp.IsScrolling(), "scroll on the selected instance must survive the next refresh")
+	require.Contains(t, tp.viewport.View(), contentB, "scroll content must remain B's history")
+}
+
+// TestTerminalSessionCreationFailureShowsFallback is a regression test for
+// #747. When ensureSessionLocked fails, the new instance has no usable session.
+// UpdateContent previously returned the error (which the caller only logs),
+// leaving the previous instance's captured content on screen. It must instead
+// drop into a fallback state — mirroring the ErrSessionGone handling — so the
+// stale content is replaced with a clear failure message.
+func TestTerminalSessionCreationFailureShowsFallback(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	tp := NewTerminalPane()
+	tp.SetSize(80, 30)
+
+	// A previously selected, working instance leaves content on screen.
+	const priorContent = "stale-output-from-prior-instance"
+	priorInstance := makeStartedInstance(t, "prior")
+	defer func() { _ = priorInstance.Kill() }()
+	priorTs := newMockTmuxSession(t, "prior", mockCmdExec(priorContent, true))
+	injectSession(tp, priorInstance.Title, priorTs, priorInstance.GetWorktreePath())
+	require.NoError(t, tp.UpdateContent(priorInstance))
+	tp.mu.Lock()
+	require.Equal(t, priorContent, tp.content, "precondition: prior instance content is displayed")
+	tp.mu.Unlock()
+
+	// Now select an instance whose terminal session creation fails.
+	failInstance := makeStartedInstance(t, "fails")
+	defer func() { _ = failInstance.Kill() }()
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "has-session") {
+				return fmt.Errorf("session does not exist")
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, nil },
+	}
+	oldFactory := newTerminalTmuxSessionForRepo
+	newTerminalTmuxSessionForRepo = func(name, program, shell string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionWithDeps(name, shell, failingPtyFactory{}, cmdExec)
+	}
+	t.Cleanup(func() { newTerminalTmuxSessionForRepo = oldFactory })
+
+	// UpdateContent must not propagate the error; it must set fallback state.
+	require.NoError(t, tp.UpdateContent(failInstance),
+		"session-creation failure must be handled as a fallback, not returned (#747)")
+
+	tp.mu.Lock()
+	require.True(t, tp.fallback, "must enter fallback state when session creation fails")
+	require.False(t, tp.isScrolling, "fallback must clear scroll state")
+	tp.mu.Unlock()
+
+	rendered := tp.String()
+	require.Contains(t, rendered, "Failed to start terminal session",
+		"must show a clear failure message")
+	require.NotContains(t, rendered, priorContent,
+		"must not render the previously selected instance's stale content (#747)")
 }
 
 type failingPtyFactory struct{}
