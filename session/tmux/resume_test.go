@@ -249,6 +249,75 @@ func TestResumeProgram(t *testing.T) {
 			"gemini --model x -r5",
 		},
 
+		// Wrapper-command flags must not be mistaken for agent resume flags
+		// (#742). The already-has-resume scan is position-aware: only tokens
+		// AFTER the agent token are inspected, so a wrapper flag like
+		// `ionice -c 3` or `taskset -c 0-3` (whose `-c` collides with claude's
+		// `--continue` short flag and gemini's flag space) doesn't suppress
+		// the legitimate resume append. Mirrors the codex position-aware
+		// check (#632).
+		//
+		// Critical regression case: `ionice -c 3 claude` previously matched
+		// the leading `-c` and returned the program unchanged, launching a
+		// fresh session and losing conversation history on respawn.
+		{"claude ionice wrapper", "ionice -c 3 claude", "ionice -c 3 claude --continue"},
+		{"claude taskset wrapper", "taskset -c 0-3 claude", "taskset -c 0-3 claude --continue"},
+		{
+			"claude wrapper with agent resume flag",
+			"ionice -c 3 claude --resume X",
+			"ionice -c 3 claude --resume X",
+		},
+		{
+			"claude wrapper with agent attached resume",
+			"ionice -c 3 claude -r5",
+			"ionice -c 3 claude -r5",
+		},
+		{
+			"claude env wrapper",
+			"env FOO=bar claude",
+			"env FOO=bar claude --continue",
+		},
+		// Aider wrappers: aider has no `-c` resume flag, but a wrapper whose
+		// flags happened to match would still be wrongly scanned pre-#742;
+		// guard the position-aware behavior regardless.
+		{
+			"aider ionice wrapper",
+			"ionice -c 3 aider",
+			"ionice -c 3 aider --restore-chat-history",
+		},
+		{
+			"aider wrapper with agent resume flag",
+			"ionice -c 3 aider --restore-chat-history",
+			"ionice -c 3 aider --restore-chat-history",
+		},
+		{
+			"aider wrapper with opt-out",
+			"ionice -c 3 aider --no-restore-chat-history",
+			"ionice -c 3 aider --no-restore-chat-history",
+		},
+		// Gemini wrappers: `ionice -c 3 gemini` must still get
+		// `--resume latest`; the `-c` belongs to ionice, not gemini.
+		{
+			"gemini ionice wrapper",
+			"ionice -c 3 gemini",
+			"ionice -c 3 gemini --resume latest",
+		},
+		{
+			"gemini taskset wrapper",
+			"taskset -c 0-3 gemini",
+			"taskset -c 0-3 gemini --resume latest",
+		},
+		{
+			"gemini wrapper with agent resume flag",
+			"ionice -c 3 gemini --resume 5",
+			"ionice -c 3 gemini --resume 5",
+		},
+		{
+			"gemini wrapper with agent attached resume",
+			"ionice -c 3 gemini -r5",
+			"ionice -c 3 gemini -r5",
+		},
+
 		// Unknown programs are passed through unchanged so unrelated CLIs
 		// aren't accidentally rewritten.
 		{"unknown program", "mytool --bar", "mytool --bar"},
@@ -317,6 +386,13 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"codex --profile ~/profiles/foo",
 		"codex --include 'models/*.txt'",
 		`"/path with spaces/codex" --model $MODEL`,
+		// #742 — wrapper-prefixed programs must be idempotent too.
+		"ionice -c 3 claude",
+		"taskset -c 0-3 claude",
+		"env FOO=bar claude",
+		"ionice -c 3 aider",
+		"ionice -c 3 gemini",
+		"taskset -c 0-3 gemini",
 	} {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)
