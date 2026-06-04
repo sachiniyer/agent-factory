@@ -24,6 +24,9 @@ func backendForRepoID(repoID string) (Backend, error) {
 		return nil, fmt.Errorf("failed to load repo config: %w", err)
 	}
 	if cfg.RemoteHooks != nil {
+		if err := cfg.RemoteHooks.Validate(); err != nil {
+			return nil, err
+		}
 		return &HookBackend{Hooks: *cfg.RemoteHooks}, nil
 	}
 	return &LocalBackend{}, nil
@@ -42,6 +45,9 @@ func loadHookBackendForPath(absPath string) (*HookBackend, error) {
 	}
 	if cfg.RemoteHooks == nil {
 		return nil, fmt.Errorf("no remote hooks configured for repo %s", repo.ID)
+	}
+	if err := cfg.RemoteHooks.Validate(); err != nil {
+		return nil, err
 	}
 	return &HookBackend{Hooks: *cfg.RemoteHooks}, nil
 }

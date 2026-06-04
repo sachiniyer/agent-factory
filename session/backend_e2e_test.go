@@ -357,6 +357,47 @@ func TestE2EBackendResolutionWithConfig(t *testing.T) {
 	assert.Equal(t, "remote", b.Type())
 }
 
+// TestE2EBackendResolutionRejectsEmptyHookCommands is the resolution-layer
+// regression test for #738: a remote_hooks config with an empty required
+// command string must fail fast at backend resolution with an actionable error
+// naming the offending field, rather than constructing a HookBackend that
+// later dies with exec's cryptic "exec: no command" at operation time.
+func TestE2EBackendResolutionRejectsEmptyHookCommands(t *testing.T) {
+	afHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "--local", "user.email", "test@empty.com")
+	runGit(t, repoDir, "config", "--local", "user.name", "Empty Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "f.txt"), []byte("x"), 0644))
+	runGit(t, repoDir, "add", "f.txt")
+	runGit(t, repoDir, "commit", "-m", "init")
+
+	repo, err := config.RepoFromPath(repoDir)
+	require.NoError(t, err)
+	// list_cmd is intentionally left empty here too, to confirm it remains
+	// optional: only launch_cmd should trip the guard.
+	cfg := &config.RepoConfig{
+		RemoteHooks: &config.RemoteHooks{
+			LaunchCmd: "",
+			AttachCmd: "/bin/echo",
+			DeleteCmd: "/bin/echo",
+		},
+	}
+	require.NoError(t, config.SaveRepoConfig(repo.ID, cfg))
+
+	_, err = backendForPath(repoDir)
+	require.Error(t, err, "resolution must reject an empty launch_cmd")
+	assert.Contains(t, err.Error(), "launch_cmd",
+		"error must name the offending field so the user can fix the config")
+
+	// loadHookBackendForPath shares the same guard.
+	_, err = loadHookBackendForPath(repoDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "launch_cmd")
+}
+
 // readStateFile reads and parses the sessions state file that the e2e hook
 // scripts maintain.
 func readStateFile(t *testing.T, _ string) []map[string]interface{} {
