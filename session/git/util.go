@@ -74,10 +74,35 @@ func randomHex(n int) string {
 	return fmt.Sprintf("%x", b)
 }
 
-// IsGitRepo checks if the given path is within a git repository
+// IsGitInstalled reports whether the git binary is available on PATH.
+func IsGitInstalled() bool {
+	_, err := exec.LookPath("git")
+	return err == nil
+}
+
+// IsGitRepo checks if the given path is within a git repository.
+//
+// Note: this returns false both when git is not installed and when the path is
+// not inside a repository. Callers that need to tell those cases apart (e.g.
+// to surface an actionable startup error) should use EnsureRepo instead.
 func IsGitRepo(path string) bool {
 	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
 	return cmd.Run() == nil
+}
+
+// EnsureRepo verifies that git is installed and that path is within a git
+// repository, returning an actionable error that distinguishes the two failure
+// modes. IsGitRepo collapses both into a bare false, which previously produced
+// a misleading "must be run from within a git repository" message for users
+// who simply did not have git installed (issue #737).
+func EnsureRepo(path string) error {
+	if !IsGitInstalled() {
+		return fmt.Errorf("git is not installed or could not be found in PATH; install git and ensure it is available in your PATH")
+	}
+	if !IsGitRepo(path) {
+		return fmt.Errorf("agent-factory must be run from within a git repository")
+	}
+	return nil
 }
 
 func findGitRepoRoot(path string) (string, error) {
