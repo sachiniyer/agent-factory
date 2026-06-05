@@ -1134,11 +1134,17 @@ func isReadyContent(content, agent string) bool {
 	switch agent {
 	case tmux.ProgramCodex:
 		// codex renders "›" (U+203A — distinct from claude's "❯" U+276F) as
-		// its input-prompt glyph after the banner, and "Do you trust this
-		// folder" for its workspace-trust dialog. See the pane capture in
+		// its input-prompt glyph after the banner. See the pane capture in
 		// sachiniyer/agent-factory#714.
-		return strings.Contains(content, "›") ||
-			strings.Contains(content, "Do you trust this folder")
+		//
+		// The workspace-trust dialog ("Do you trust this folder") is
+		// deliberately NOT a ready signal (#729): unlike claude's trust
+		// prompt, there is no codex-specific dismissal in
+		// CheckAndHandleTrustPrompt, so treating it as ready let the next
+		// user prompt get typed into the dialog. Waiting for the real "›"
+		// prompt is the safe behavior — the prompt is only sent once codex
+		// is genuinely ready for input. Regression from #714/#715.
+		return strings.Contains(content, "›")
 	case tmux.ProgramAider:
 		// aider prints an "Aider v…" banner, then a line-start "> " input
 		// prompt. The shared doc-trust dialog is handled by isDocTrustPrompt.

@@ -57,7 +57,11 @@ func TestIsReadyContent(t *testing.T) {
 		// codex — regression case from #714.
 		{"codex YOLO banner with prompt (#714)", "codex", codexYOLOBanner, true},
 		{"codex bare prompt glyph", "codex", "some output\n› ", true},
-		{"codex trust folder prompt", "codex", "Do you trust this folder?\n> Yes", true},
+		// #729: the workspace-trust dialog must NOT be treated as ready —
+		// no codex dismissal exists for it, so the prompt would be typed into
+		// the dialog. Wait for the real "›" prompt. Regression from #714/#715.
+		{"codex trust folder prompt is not ready (#729)", "codex", "Do you trust this folder?\n> Yes", false},
+		{"codex trust dialog with later prompt is ready (#729)", "codex", "Do you trust this folder?\n› ", true},
 		// Codex must NOT be considered ready on claude's "❯" alone, and the
 		// banner box border ("╰") is not a codex ready signal by itself.
 		{"codex not ready on claude glyph", "codex", "rendering\n❯ ", false},
