@@ -237,18 +237,31 @@ func GetClaudeCommand() (string, error) {
 }
 
 // LoadConfig reads the user's config.json, validates it, and returns the
-// resulting Config. A missing file is materialized from DefaultConfig (which
-// is always valid). A file present on disk that fails enum validation
-// returns an actionable migration error — there is no implicit migration
-// from legacy "path with flags" values; the user must rewrite their config.
+// resulting Config.
+//
+// Error handling distinguishes "no config yet" from "config present but
+// unusable" so a user whose settings are being ignored gets told why instead
+// of silently inheriting defaults (#734):
+//   - File does not exist → DefaultConfig() is materialized and saved, with no
+//     error. This is the first-run path and must keep working.
+//   - File exists but cannot be read (permission denied, disk error), is empty,
+//     or fails to parse → an error naming the file and the underlying cause is
+//     returned. Defaults are NOT substituted, since doing so would hide the
+//     user's broken config behind a working-looking app.
+//   - File parses but fails enum validation → an actionable migration error is
+//     returned (there is no implicit migration from legacy "path with flags"
+//     values; the user must rewrite their config).
+//
+// This mirrors the error-propagation contract already adopted by
+// LoadRepoConfig, where only os.IsNotExist yields defaults.
 func LoadConfig() (*Config, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
-		log.ErrorLog.Printf("failed to get config directory: %v", err)
-		return DefaultConfig(), nil
+		return nil, fmt.Errorf("failed to get config directory: %w", err)
 	}
 
 	configPath := filepath.Join(configDir, ConfigFileName)
+	prettyConfigPath := prettyHomePath(configPath)
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -260,17 +273,18 @@ func LoadConfig() (*Config, error) {
 			return defaultCfg, nil
 		}
 
-		log.WarningLog.Printf("failed to get config file: %v", err)
-		return DefaultConfig(), nil
+		return nil, fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
+	}
+
+	if len(data) == 0 {
+		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
 	}
 
 	config := DefaultConfig()
 	if err := json.Unmarshal(data, config); err != nil {
-		log.ErrorLog.Printf("failed to parse config file: %v", err)
-		return DefaultConfig(), nil
+		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
 	}
 
-	prettyConfigPath := prettyHomePath(configPath)
 	if err := ValidateProgramEnum(
 		fmt.Sprintf("Config issue in %s: default_program", prettyConfigPath),
 		"default_program",

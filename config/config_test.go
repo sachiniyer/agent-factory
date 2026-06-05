@@ -586,7 +586,9 @@ func TestLoadConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("returns default config on invalid JSON", func(t *testing.T) {
+	t.Run("surfaces parse error on invalid JSON instead of using defaults", func(t *testing.T) {
+		// A present-but-corrupt config must NOT be silently replaced by
+		// defaults — that hides a user's broken settings (#734).
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 		configDir, err := GetConfigDir()
 		require.NoError(t, err)
@@ -596,9 +598,49 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, os.WriteFile(configPath, []byte(`{"invalid": json content}`), 0644))
 
 		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "parse config file")
+		assert.Contains(t, err.Error(), ConfigFileName)
+	})
+
+	t.Run("surfaces error on empty config file", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
 		require.NoError(t, err)
-		require.NotNil(t, cfg)
-		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+
+		configPath := filepath.Join(configDir, ConfigFileName)
+		require.NoError(t, os.WriteFile(configPath, []byte(``), 0644))
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "empty")
+		assert.Contains(t, err.Error(), ConfigFileName)
+	})
+
+	t.Run("surfaces error when config file is unreadable", func(t *testing.T) {
+		// chmod 000 is honored only for non-root users; skip when running
+		// as root (e.g. some CI containers), where the read still succeeds.
+		if os.Geteuid() == 0 {
+			t.Skip("cannot exercise permission-denied path as root")
+		}
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+
+		configPath := filepath.Join(configDir, ConfigFileName)
+		require.NoError(t, os.WriteFile(configPath, []byte(`{"default_program": "codex"}`), 0644))
+		require.NoError(t, os.Chmod(configPath, 0000))
+		t.Cleanup(func() { _ = os.Chmod(configPath, 0644) })
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "read config file")
+		assert.Contains(t, err.Error(), ConfigFileName)
 	})
 }
 
