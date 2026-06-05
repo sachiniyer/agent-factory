@@ -283,6 +283,18 @@ func UpdateTask(t Task) error {
 		found := false
 		for i, existing := range tasks {
 			if existing.ID == t.ID {
+				// Preserve scheduler/system-managed fields from the freshly
+				// loaded record. UpdateTask is a user-edit path (name, prompt,
+				// cron, program, enabled); its caller may carry a stale copy of
+				// LastRunAt/LastRunStatus read before a concurrent scheduler run
+				// or manual trigger updated them (TOCTOU via GetTask outside the
+				// lock, or a stale TUI cache). Re-applying the caller's struct
+				// wholesale would clobber those fresher values. CreatedAt is
+				// immutable. UpdateTaskStatus remains the canonical path for the
+				// scheduler-owned status fields. See #731.
+				t.LastRunAt = existing.LastRunAt
+				t.LastRunStatus = existing.LastRunStatus
+				t.CreatedAt = existing.CreatedAt
 				tasks[i] = t
 				found = true
 				break
