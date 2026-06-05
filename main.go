@@ -53,8 +53,8 @@ var (
 				return fmt.Errorf("failed to get current directory: %w", err)
 			}
 
-			if !git.IsGitRepo(currentDir) {
-				return fmt.Errorf("error: agent-factory must be run from within a git repository")
+			if err := git.EnsureRepo(currentDir); err != nil {
+				return err
 			}
 
 			repo, err := config.CurrentRepo()

@@ -245,7 +245,11 @@ func RunTask(taskID string) error {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
-	// Validate project path.
+	// Validate project path. Distinguish a missing git binary from a path that
+	// simply is not a repo so the daemon surfaces an actionable error (#737).
+	if !git.IsGitInstalled() {
+		return fmt.Errorf("git is not installed or could not be found in PATH; install git and ensure it is available in your PATH")
+	}
 	if !git.IsGitRepo(t.ProjectPath) {
 		return fmt.Errorf("project path %s is not a valid git repository", t.ProjectPath)
 	}

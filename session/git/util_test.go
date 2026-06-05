@@ -155,3 +155,51 @@ func TestSanitizeBranchName_FallbackIsUnique(t *testing.T) {
 		t.Errorf("expected unique fallback names, got %q twice", a)
 	}
 }
+
+// TestEnsureRepo_DistinguishesMissingGit verifies the #737 fix: when git is not
+// on PATH, EnsureRepo reports a "git is not installed" error rather than the
+// misleading "must be run from within a git repository" message.
+func TestEnsureRepo_DistinguishesMissingGit(t *testing.T) {
+	// Point PATH at an empty directory so exec.LookPath("git") fails.
+	emptyDir := t.TempDir()
+	t.Setenv("PATH", emptyDir)
+
+	if IsGitInstalled() {
+		t.Fatal("expected IsGitInstalled() to be false with git absent from PATH")
+	}
+
+	err := EnsureRepo(emptyDir)
+	if err == nil {
+		t.Fatal("expected EnsureRepo to return an error when git is not installed")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "git is not installed") {
+		t.Errorf("expected missing-git error, got %q", msg)
+	}
+	if strings.Contains(msg, "must be run from within a git repository") {
+		t.Errorf("missing-git case must not return the non-repo message, got %q", msg)
+	}
+}
+
+// TestEnsureRepo_NonRepoWithGitInstalled verifies that when git is installed but
+// the path is not inside a repository, EnsureRepo returns the repo-context
+// message rather than the missing-git message.
+func TestEnsureRepo_NonRepoWithGitInstalled(t *testing.T) {
+	if !IsGitInstalled() {
+		t.Skip("git binary not available in test environment")
+	}
+	// A bare temp dir under the OS temp root is not inside a git repository.
+	nonRepo := t.TempDir()
+	// Guard against the rare case where the temp root itself is tracked.
+	if IsGitRepo(nonRepo) {
+		t.Skip("temp dir unexpectedly inside a git repository")
+	}
+
+	err := EnsureRepo(nonRepo)
+	if err == nil {
+		t.Fatal("expected EnsureRepo to return an error for a non-repo path")
+	}
+	if got := err.Error(); !strings.Contains(got, "must be run from within a git repository") {
+		t.Errorf("expected non-repo error, got %q", got)
+	}
+}
