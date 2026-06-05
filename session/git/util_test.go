@@ -115,9 +115,9 @@ func TestSanitizeBranchName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sanitizeBranchName(tt.input)
+			got := SanitizeBranchName(tt.input)
 			if got != tt.expected {
-				t.Errorf("sanitizeBranchName(%q) = %q, want %q", tt.input, got, tt.expected)
+				t.Errorf("SanitizeBranchName(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}
@@ -136,12 +136,12 @@ func TestSanitizeBranchName_FallbackOnEmpty(t *testing.T) {
 	}
 	for _, input := range inputs {
 		t.Run("input="+input, func(t *testing.T) {
-			got := sanitizeBranchName(input)
+			got := SanitizeBranchName(input)
 			if got == "" {
-				t.Errorf("sanitizeBranchName(%q) returned empty string, expected fallback name", input)
+				t.Errorf("SanitizeBranchName(%q) returned empty string, expected fallback name", input)
 			}
 			if !strings.HasPrefix(got, "session-") {
-				t.Errorf("sanitizeBranchName(%q) = %q, expected prefix \"session-\"", input, got)
+				t.Errorf("SanitizeBranchName(%q) = %q, expected prefix \"session-\"", input, got)
 			}
 		})
 	}
@@ -149,8 +149,8 @@ func TestSanitizeBranchName_FallbackOnEmpty(t *testing.T) {
 
 func TestSanitizeBranchName_FallbackIsUnique(t *testing.T) {
 	// Each call with an empty-producing input should return a unique fallback.
-	a := sanitizeBranchName("")
-	b := sanitizeBranchName("")
+	a := SanitizeBranchName("")
+	b := SanitizeBranchName("")
 	if a == b {
 		t.Errorf("expected unique fallback names, got %q twice", a)
 	}

@@ -15,10 +15,15 @@ var (
 	reMultiDash = regexp.MustCompile(`-+`)
 )
 
-// sanitizeBranchName transforms an arbitrary string into a Git branch name friendly string.
+// SanitizeBranchName transforms an arbitrary string into a Git branch name friendly string.
 // Note: Git branch names have several rules, so this function uses a simple approach
 // by allowing only a safe subset of characters.
-func sanitizeBranchName(s string) string {
+//
+// It is exported so the daemon can pre-validate that two distinct session titles
+// would not derive the same git branch (e.g. "A B" and "a-b" both -> "af-a-b"),
+// rejecting the collision before worktree setup fails with a cryptic git error
+// (sachiniyer/agent-factory#741, completing #605).
+func SanitizeBranchName(s string) string {
 	// Convert to lower-case
 	s = strings.ToLower(s)
 
