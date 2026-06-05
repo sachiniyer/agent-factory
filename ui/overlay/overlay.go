@@ -48,7 +48,10 @@ func extendedColorLen(tokens []string, i int) int {
 // fadeable attribute) and emits faded gray codes for whichever are present,
 // combining both into one sequence when the input was combined. Pure resets
 // (\x1b[0m, \x1b[m) and sequences with no fadeable parameters are preserved
-// unchanged so styled regions still close correctly.
+// unchanged so styled regions still close correctly. Default-color resets
+// (SGR 39 foreground, 49 background) are preserved verbatim rather than faded,
+// so a region that returns to the terminal default stays default instead of
+// gaining a spurious gray (#728).
 func fadeSGR(match string) string {
 	params := strings.TrimSuffix(strings.TrimPrefix(match, "\x1b["), "m")
 	if params == "" || params == "0" {
@@ -57,6 +60,7 @@ func fadeSGR(match string) string {
 
 	tokens := strings.Split(params, ";")
 	hasFg, hasBg, hasOtherFadeable := false, false, false
+	fgReset, bgReset := false, false
 	for i := 0; i < len(tokens); {
 		code, err := strconv.Atoi(tokens[i])
 		if err != nil || code == 0 {
@@ -70,6 +74,19 @@ func fadeSGR(match string) string {
 		case code == 48: // extended background (48;5;n or 48;2;r;g;b)
 			hasBg = true
 			i += extendedColorLen(tokens, i)
+		case code == 39: // reset foreground to default
+			// An explicit reset, NOT a color: the region wants the terminal
+			// default foreground, so it must be preserved verbatim rather than
+			// substituted with the faded gray (or, before #728, mis-folded to a
+			// faded foreground via the default branch).
+			fgReset = true
+			i++
+		case code == 49: // reset background to default
+			// An explicit reset, NOT a color. Preserve it so a default-bg region
+			// stays default; before #728 this fell into the default branch and
+			// wrongly emitted a faded *foreground* instead.
+			bgReset = true
+			i++
 		case (code >= 30 && code <= 37) || (code >= 90 && code <= 97):
 			hasFg = true // basic/bright foreground
 			i++
@@ -85,7 +102,7 @@ func fadeSGR(match string) string {
 		}
 	}
 
-	if !hasFg && !hasBg {
+	if !hasFg && !hasBg && !fgReset && !bgReset {
 		// Attribute-only sequence (e.g. bold \x1b[1m): fold to foreground gray,
 		// matching the long-standing behavior for such 16-color sequences.
 		if hasOtherFadeable {
@@ -94,11 +111,20 @@ func fadeSGR(match string) string {
 		return match
 	}
 	parts := make([]string, 0, 2)
-	if hasFg {
+	// A real color in a channel wins over a reset in the same sequence: it is
+	// what the region ends up showing, so emit the faded substitute. Otherwise
+	// a bare reset (39/49) is preserved so the channel returns to default.
+	switch {
+	case hasFg:
 		parts = append(parts, fadedFg)
+	case fgReset:
+		parts = append(parts, "39")
 	}
-	if hasBg {
+	switch {
+	case hasBg:
 		parts = append(parts, fadedBg)
+	case bgReset:
+		parts = append(parts, "49")
 	}
 	return "\x1b[" + strings.Join(parts, ";") + "m"
 }

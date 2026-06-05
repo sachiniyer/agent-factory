@@ -76,6 +76,19 @@ func TestFadeSGR(t *testing.T) {
 		{"bold-bg", "\x1b[1;41m", bg},
 		{"bold-only", "\x1b[1m", fg},
 		{"underline-fg", "\x1b[4;32m", fg},
+
+		// Default-color resets (#728): SGR 39/49 must be preserved verbatim, not
+		// faded. Before the fix, 49 fell into the default branch and wrongly
+		// produced a faded foreground.
+		{"bare-reset-bg", "\x1b[49m", "\x1b[49m"},
+		{"bare-reset-fg", "\x1b[39m", "\x1b[39m"},
+		{"reset-both", "\x1b[39;49m", "\x1b[39;49m"},
+		// Combined: a real color in one channel is faded; the other channel's
+		// reset is preserved, so colors that ARE set survive alongside the reset.
+		{"fg-color-plus-reset-bg", "\x1b[38;5;232;49m", "\x1b[38;5;240;49m"},
+		{"bg-color-plus-reset-fg", "\x1b[48;5;189;39m", "\x1b[39;48;5;236m"},
+		{"reset-bg-plus-fg-color", "\x1b[49;38;5;232m", "\x1b[38;5;240;49m"},
+		{"basic-bg-plus-reset-fg", "\x1b[41;39m", "\x1b[39;48;5;236m"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
