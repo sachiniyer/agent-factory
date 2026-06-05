@@ -166,6 +166,43 @@ func TestUpdateTaskNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
+// TestUpdateTaskPreservesSchedulerOwnedFields is the regression test for #731.
+// UpdateTask is a user-edit path; its caller may hold a stale copy of the
+// scheduler-owned status fields (read before a concurrent scheduler run or
+// manual trigger bumped them via UpdateTaskStatus). UpdateTask must NOT
+// clobber the fresher on-disk LastRunAt/LastRunStatus (nor the immutable
+// CreatedAt) when applying a user edit.
+func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	created := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
+	tasks := []Task{
+		{ID: "u1", Name: "Old Name", Prompt: "old prompt", CronExpr: "0 * * * *", Enabled: true, CreatedAt: created, LastRunAt: &t1, LastRunStatus: "started"},
+	}
+	setupTestTasks(t, tasks)
+
+	// Scheduler bumps the status to a fresher value via the canonical path.
+	t2 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, UpdateTaskStatus("u1", &t2, "completed"))
+
+	// User edit carries a STALE copy: LastRunAt=t1, LastRunStatus="started",
+	// plus an attempt to mutate CreatedAt. None of these should win.
+	stale := Task{ID: "u1", Name: "New Name", Prompt: "new prompt", CronExpr: "0 0 * * *", Enabled: false, CreatedAt: time.Time{}, LastRunAt: &t1, LastRunStatus: "started"}
+	require.NoError(t, UpdateTask(stale))
+
+	s, err := GetTask("u1")
+	require.NoError(t, err)
+	// User-editable fields applied.
+	assert.Equal(t, "New Name", s.Name)
+	assert.Equal(t, "new prompt", s.Prompt)
+	assert.Equal(t, "0 0 * * *", s.CronExpr)
+	assert.False(t, s.Enabled)
+	// Scheduler-owned fields preserved at the fresher disk values.
+	require.NotNil(t, s.LastRunAt)
+	assert.True(t, s.LastRunAt.Equal(t2), "LastRunAt must retain the fresher scheduler value t2, not regress to stale t1")
+	assert.Equal(t, "completed", s.LastRunStatus, "LastRunStatus must retain the fresher scheduler value, not regress to stale")
+	assert.True(t, s.CreatedAt.Equal(created), "CreatedAt is immutable and must be preserved from disk")
+}
+
 func TestGenerateID(t *testing.T) {
 	id1 := GenerateID()
 	id2 := GenerateID()
