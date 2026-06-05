@@ -93,3 +93,100 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 		t.Fatalf("unexpected create response: %+v", data)
 	}
 }
+
+// TestCLICreateCodexWaitsPastTrustPrompt is the regression test for
+// sachiniyer/agent-factory#729. The #714/#715 fix added "Do you trust this
+// folder" to codex's ready signals so waitForReady would exit on the trust
+// dialog — but codex has no trust-dismissal in CheckAndHandleTrustPrompt, so
+// the next user prompt was typed into the dialog instead of the agent.
+//
+// The fix removes the trust string from codex's ready set: a codex pane
+// showing only the trust dialog is NOT ready, and waitForReady must keep
+// waiting until the real "›" prompt appears. The fake codex wrapper prints
+// the trust dialog, holds it for a few seconds, then prints the "›" prompt —
+// mirroring codex resolving the dialog before becoming ready.
+//
+// Discriminator: with the bug, waitForReady exits on the trust dialog and the
+// create returns almost immediately; with the fix it must wait for the "›"
+// prompt, so the create cannot complete before the wrapper emits it.
+func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
+	requireTool(t, "git")
+	requireTool(t, "tmux")
+
+	home := t.TempDir()
+	repo := setupGitRepo(t)
+
+	// The wrapper prints codex's workspace-trust dialog (no "›"), holds it for
+	// trustHold, then prints the "›" prompt and reads stdin. The trust dialog
+	// alone must not satisfy waitForReady; only the trailing "›" does. The
+	// hold is set well above session-startup overhead (daemon launch + git
+	// worktree, observed ~6s) so the timing assertion below is unambiguous.
+	const trustHold = 12 * time.Second
+	wrapper := filepath.Join(home, "fake-codex-trust.sh")
+	writeFile(t, wrapper,
+		"#!/bin/sh\n"+
+			"printf 'OpenAI Codex (vX)\\nDo you trust this folder?\\n> 1. Yes\\n'\n"+
+			"sleep 12\n"+
+			"printf '\\342\\200\\272 '\n"+ // U+203A "›" in octal-escaped UTF-8
+			"exec cat\n",
+		0755)
+
+	cfg := testConfig()
+	cfg.DefaultProgram = tmux.ProgramCodex
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: wrapper}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	writeFile(t, filepath.Join(home, config.ConfigFileName), string(raw), 0644)
+
+	bin := buildBinary(t)
+	runAF := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "AGENT_FACTORY_HOME="+home, "TERM=xterm")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if ctx.Err() == context.DeadlineExceeded {
+			return stdout.String(), fmt.Errorf("timed out; stderr=%s", stderr.String())
+		}
+		if err != nil {
+			return stdout.String(), fmt.Errorf("%w; stderr=%s", err, stderr.String())
+		}
+		return stdout.String(), nil
+	}
+
+	t.Cleanup(func() {
+		_, _ = runAF("sessions", "kill", "codex-trust")
+		killDaemonFromHome(home)
+	})
+
+	start := time.Now()
+	out, err := runAF("sessions", "--repo", repo, "create", "--name", "codex-trust", "--program", tmux.ProgramCodex)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("create codex session failed: %v\n%s", err, out)
+	}
+
+	// With the #729 regression, the trust dialog counted as ready and the
+	// create returned at startup time (~6s) — before the wrapper emitted the
+	// "›" prompt at trustHold. The fix makes waitForReady block past the trust
+	// dialog, so the create cannot finish before the prompt appears. The
+	// threshold sits comfortably above startup overhead and below trustHold.
+	const minElapsed = trustHold - 3*time.Second
+	if elapsed < minElapsed {
+		t.Fatalf("create returned in %s (< %s), before the codex prompt appeared at ~%s: the trust dialog was treated as ready (#729 regression)", elapsed, minElapsed, trustHold)
+	}
+
+	var data instanceData
+	if err := json.Unmarshal([]byte(out), &data); err != nil {
+		t.Fatalf("parse create response: %v\n%s", err, out)
+	}
+	if data.Title != "codex-trust" {
+		t.Fatalf("unexpected create response: %+v", data)
+	}
+}

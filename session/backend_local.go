@@ -331,9 +331,11 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	}
 	// Normalize so restored sessions with legacy free-form Program values
 	// (e.g. "/home/foo/bin/claude") still get trust-prompt auto-handling —
-	// same persisted-state class of regression as #677.
+	// same persisted-state class of regression as #677. Codex was added in
+	// #729: it was previously excluded here, so a codex trust/confirmation
+	// dialog was never dismissed even though isReadyContent could surface it.
 	switch DetectAgentFromProgram(i.Program) {
-	case tmux.ProgramClaude, tmux.ProgramAider, tmux.ProgramGemini:
+	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini:
 		return ts.CheckAndHandleTrustPrompt()
 	}
 	return false

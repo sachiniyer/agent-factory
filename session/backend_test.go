@@ -655,6 +655,57 @@ func TestHookBackendCheckAndHandleTrustPrompt(t *testing.T) {
 	assert.False(t, b.CheckAndHandleTrustPrompt(i))
 }
 
+// TestLocalBackendCheckAndHandleTrustPromptDispatch verifies which agents are
+// routed through the tmux trust handler. Codex was excluded until #729, so a
+// codex trust/confirmation dialog was never dismissed even though
+// isReadyContent could surface it — letting the next user prompt get typed
+// into the dialog. Dispatch is observed by whether the handler reaches the
+// pane capture (tmux capture-pane); agents not in the set short-circuit to
+// false without capturing. Mirrors the NewTmuxSessionWithDeps + MockCmdExec
+// pattern used by the Kill best-effort tests above.
+func TestLocalBackendCheckAndHandleTrustPromptDispatch(t *testing.T) {
+	cases := []struct {
+		name         string
+		program      string
+		wantDispatch bool
+	}{
+		{"claude dispatches", tmux.ProgramClaude, true},
+		{"codex dispatches (#729)", tmux.ProgramCodex, true},
+		{"aider dispatches", tmux.ProgramAider, true},
+		{"gemini dispatches", tmux.ProgramGemini, true},
+		{"legacy codex path dispatches (#729)", "/usr/local/bin/codex", true},
+		{"unknown program does not dispatch", "some-other-tool", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured bool
+			cmdExec := cmd_test.MockCmdExec{
+				OutputFunc: func(*exec.Cmd) ([]byte, error) {
+					captured = true
+					// An idle pane with no trust prompt: the handler returns
+					// false regardless, but the capture call itself is the
+					// observable proof that the agent was dispatched.
+					return []byte("idle pane, no trust prompt"), nil
+				},
+				RunFunc: func(*exec.Cmd) error { return nil },
+			}
+			ts := tmux.NewTmuxSessionWithDeps("trust-dispatch", tc.program, nil, cmdExec)
+			inst := &Instance{
+				Title:       "trust-dispatch",
+				Program:     tc.program,
+				backend:     &LocalBackend{},
+				started:     true,
+				tmuxSession: ts,
+			}
+
+			inst.CheckAndHandleTrustPrompt()
+
+			assert.Equal(t, tc.wantDispatch, captured,
+				"capture-pane should run iff the agent is in the trust-handling set")
+		})
+	}
+}
+
 func TestHookBackendTapEnterIsNoop(t *testing.T) {
 	b := &HookBackend{Hooks: config.RemoteHooks{}}
 	i := &Instance{backend: b}
