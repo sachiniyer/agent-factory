@@ -19,7 +19,9 @@ Add remote hooks to your per-repo config at `~/.agent-factory/repos/<repoID>/con
 
 Configuring `remote_hooks` enables the remote backend for that repo, but using it is explicit opt-in: press `N` in the TUI to create a remote session. Pressing `n` still creates a local tmux+git worktree session. When `remote_hooks` is absent, `N` is unavailable and all sessions are local.
 
-`launch_cmd`, `attach_cmd`, and `delete_cmd` are **required** — an empty value is rejected when the remote backend is resolved, with an error naming the missing field (e.g. `remote_hooks.launch_cmd is required`) rather than a cryptic `exec: no command` at operation time. `list_cmd` is optional: when it is empty, Agent Factory simply reports no remote sessions to enumerate (import/sync are skipped).
+`launch_cmd`, `attach_cmd`, and `delete_cmd` are **required** — an empty value is rejected when the remote backend is resolved, with an error naming the missing field (e.g. `remote_hooks.launch_cmd is required`) rather than a cryptic `exec: no command` at operation time. `list_cmd` is **optional for import/sync only**: when it is empty, Agent Factory simply reports no remote sessions to enumerate (import/sync are skipped) and config validation does not reject it.
+
+> **Note:** `list_cmd` is **required for restore**. To carry remote sessions across restarts, Agent Factory re-runs `list_cmd` at startup to confirm each persisted session is still alive (#645). If `list_cmd` is empty, restore cannot verify liveness and the session is dropped with an actionable error naming the missing field — so configure `list_cmd` whenever you want remote sessions to survive restarts.
 
 ## Script Protocol
 
