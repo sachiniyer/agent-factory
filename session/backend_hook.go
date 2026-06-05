@@ -134,6 +134,17 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 		// exists. Without this check, deleted/expired remote sessions
 		// were restored and shown with a green Ready dot in the sidebar
 		// even though attaching was a silent no-op (#645).
+		//
+		// list_cmd is optional at config-validation time (import/sync treat
+		// an empty list_cmd as "no remote sessions to enumerate", #738), but
+		// restore has no other way to verify liveness. An empty list_cmd here
+		// would defer to exec.Command(""), which isAliveWithTimeout swallows
+		// into a false, surfacing the misleading "no longer exists" message
+		// below as if the session had been deleted remotely. Fail fast with an
+		// actionable message that names the missing field instead (#753).
+		if strings.TrimSpace(b.Hooks.ListCmd) == "" {
+			return fmt.Errorf("cannot restore remote session %q: list_cmd is required for restore (currently empty in config; add a list_cmd to remote_hooks so the agent can verify the remote session is still alive)", i.Title)
+		}
 		if !b.isAliveWithTimeout(i, restoreAliveTimeout) {
 			return fmt.Errorf("remote session %q no longer exists in list_cmd output", i.Title)
 		}

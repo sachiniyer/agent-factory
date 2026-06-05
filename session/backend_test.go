@@ -319,6 +319,41 @@ func TestHookBackendStartRestoreListCmdFails(t *testing.T) {
 	assert.False(t, i.Started())
 }
 
+// TestHookBackendStartRestoreEmptyListCmd is the regression test for #753:
+// list_cmd is optional at config-validation time (import/sync treat empty as
+// "nothing to enumerate", #738), but restore has no other way to verify
+// liveness. With an empty list_cmd, restore must fail fast with an actionable
+// error that names the missing field — not the misleading "no longer exists in
+// list_cmd output" message, which falsely implies the remote session was
+// deleted (it was the local config that was incomplete).
+func TestHookBackendStartRestoreEmptyListCmd(t *testing.T) {
+	dir := t.TempDir()
+	attachCmd := writeScript(t, dir, "attach.sh", `echo "attached"; sleep 0.1`)
+	b := &HookBackend{
+		Hooks: config.RemoteHooks{
+			// ListCmd intentionally empty.
+			AttachCmd: attachCmd,
+		},
+	}
+	i := &Instance{
+		Title:   "my-session",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	err := b.Start(i, false)
+	require.Error(t, err)
+	assert.False(t, i.Started())
+	assert.Contains(t, err.Error(), "list_cmd is required for restore",
+		"error must explain that restore needs list_cmd")
+	assert.Contains(t, err.Error(), "list_cmd",
+		"error must name the missing field")
+	// Must NOT use the misleading "no longer exists" wording reserved for the
+	// case where list_cmd is present but does not list the session.
+	assert.NotContains(t, err.Error(), "no longer exists",
+		"empty list_cmd must not be reported as a remotely-deleted session")
+}
+
 // TestHookBackendStartRestoreListCmdHangs covers the timeout path: when
 // list_cmd takes longer than restoreAliveTimeout, restore must return an
 // error rather than blocking the TUI startup indefinitely for every
