@@ -401,6 +401,44 @@ func TestNextTaskRunTitleCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestNextTaskRunTitleSanitizeCollision guards against #741 (completing #721):
+// the persisted title "My Task" must block the base "my-task" because both
+// sanitize to the same git branch, so the next title is "my-task-2". A check
+// that only compared case-insensitively would hand back "my-task", which the
+// daemon's branch-collision validation then rejects.
+func TestNextTaskRunTitleSanitizeCollision(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoID := "test-repo-title-sanitize"
+	instancesPath, err := config.RepoInstancesPath(repoID)
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	preexisting := []session.InstanceData{
+		{Title: "My Task"},
+	}
+	preRaw, err := json.MarshalIndent(preexisting, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal preexisting: %v", err)
+	}
+	if err := os.WriteFile(instancesPath, preRaw, 0644); err != nil {
+		t.Fatalf("write preexisting: %v", err)
+	}
+
+	title, err := NextTaskRunTitle(repoID, "/tmp/repo", "my-task", "claude")
+	if err != nil {
+		t.Fatalf("NextTaskRunTitle: %v", err)
+	}
+	if title != "my-task-2" {
+		t.Fatalf("expected my-task-2 (sanitize-variant of persisted %q must collide), got %q", "My Task", title)
+	}
+}
+
 func TestTaskRunBaseTitleFallsBackToTaskID(t *testing.T) {
 	got := TaskRunBaseTitle(Task{ID: "abc123"})
 	if got != "task-abc123" {

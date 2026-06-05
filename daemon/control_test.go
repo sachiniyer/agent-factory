@@ -248,7 +248,7 @@ func TestManagerCreateSessionIgnoresLoadingGhost(t *testing.T) {
 }
 
 // TestManagerCreateSessionRejectsCaseVariantTitle is a regression test for
-// sachiniyer/agent-factory#605. sanitizeBranchName lowercases titles when
+// sachiniyer/agent-factory#605. git.SanitizeBranchName lowercases titles when
 // deriving git branch names, so two case-variant titles ("MyApp" and "myapp")
 // would map to the same branch. The daemon used to validate titles
 // case-sensitively, accept both, and let the second worktree create fail with
@@ -285,8 +285,8 @@ func TestManagerCreateSessionRejectsCaseVariantTitle(t *testing.T) {
 	if !strings.Contains(msg, "myapp") || !strings.Contains(msg, "MyApp") {
 		t.Fatalf("expected error to name both titles, got: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(msg), "case-insensitive") {
-		t.Fatalf("expected error to mention case-insensitive conflict, got: %v", err)
+	if !strings.Contains(strings.ToLower(msg), "branch") {
+		t.Fatalf("expected error to mention the shared git branch, got: %v", err)
 	}
 }
 
@@ -328,6 +328,68 @@ func TestManagerCreateSessionRejectsCaseVariantTitleFromDisk(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "MyApp") {
 		t.Fatalf("expected error to name the on-disk title, got: %v", err)
+	}
+}
+
+// TestManagerCreateSessionRejectsSanitizeCollision is a regression test for
+// sachiniyer/agent-factory#741, which completes #605. git.SanitizeBranchName
+// normalizes more than case: it turns spaces into dashes, strips unsafe chars,
+// and collapses dashes. So "A B" and "a-b" both derive the same branch (e.g.
+// "<prefix>/a-b") even though they differ by more than case. The #605 fix only compared titles
+// case-insensitively, so it accepted both and let the second worktree create
+// fail with a cryptic git error. The daemon now compares the derived branch and
+// rejects the collision up front.
+func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := manager.CreateSession(CreateSessionRequest{
+		Title:    "A B",
+		RepoPath: repoPath,
+		Program:  "claude",
+		AutoYes:  true,
+	}); err != nil {
+		t.Fatalf("first CreateSession: %v", err)
+	}
+
+	_, err = manager.CreateSession(CreateSessionRequest{
+		Title:    "a-b",
+		RepoPath: repoPath,
+		Program:  "claude",
+		AutoYes:  true,
+	})
+	if err == nil {
+		t.Fatalf("expected sanitize-collision title to be rejected")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "a-b") || !strings.Contains(msg, "A B") {
+		t.Fatalf("expected error to name both titles, got: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(msg), "branch") {
+		t.Fatalf("expected error to mention the shared git branch, got: %v", err)
+	}
+
+	// The case-only path from #605 must still work: "Foo" then "foo" collides.
+	if _, err := manager.CreateSession(CreateSessionRequest{
+		Title:    "Foo",
+		RepoPath: repoPath,
+		Program:  "claude",
+		AutoYes:  true,
+	}); err != nil {
+		t.Fatalf("CreateSession Foo: %v", err)
+	}
+	if _, err := manager.CreateSession(CreateSessionRequest{
+		Title:    "foo",
+		RepoPath: repoPath,
+		Program:  "claude",
+		AutoYes:  true,
+	}); err == nil {
+		t.Fatalf("expected case-variant title \"foo\" to still be rejected (#605)")
 	}
 }
 

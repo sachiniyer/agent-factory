@@ -333,14 +333,26 @@ func NextTaskRunTitle(repoID, repoPath, baseTitle, program string) (string, erro
 			usedTitles = append(usedTitles, data.Title)
 		}
 
-		// Compare case-insensitively to match the daemon's title-conflict
-		// validation (strings.EqualFold, see daemon.findTitleConflictLocked).
-		// A case-sensitive check here would hand back a candidate (e.g.
-		// "nightly" when "Nightly" exists) that the daemon later rejects,
-		// turning every TUI-triggered run into a round-trip error. (#721)
+		// Mirror the daemon's title-conflict validation so we never hand back a
+		// candidate the daemon would reject, which would turn every
+		// TUI-triggered run into a round-trip error. The daemon rejects titles
+		// that collide either case-insensitively or after branch sanitization
+		// (see daemon.titlesCollide / git.SanitizeBranchName). A candidate like
+		// "nightly" collides with an existing "Nightly" (#721); "my-task"
+		// collides with "My Task" once both sanitize to the same branch (#741).
+		// LoadConfig supplies the same BranchPrefix the worktree layer uses;
+		// fall back to case-insensitive-only if it is unavailable.
+		branchPrefix := ""
+		if cfg, cfgErr := config.LoadConfig(); cfgErr == nil {
+			branchPrefix = cfg.BranchPrefix
+		}
 		titleTaken := func(candidate string) bool {
+			candidateBranch := git.SanitizeBranchName(branchPrefix + candidate)
 			for _, used := range usedTitles {
 				if strings.EqualFold(used, candidate) {
+					return true
+				}
+				if git.SanitizeBranchName(branchPrefix+used) == candidateBranch {
 					return true
 				}
 			}

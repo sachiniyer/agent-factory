@@ -656,11 +656,12 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 	if title == "" {
 		return fmt.Errorf("session title is required")
 	}
-	// Title comparisons are case-insensitive: sanitizeBranchName lowercases
-	// titles when deriving git branch names, so two case-variant titles
-	// (e.g. "MyApp" and "myapp") would map to the same branch and the
-	// second worktree create would fail with a cryptic git error. Reject
-	// the conflict here, before any worktree or tmux setup runs. (#605)
+	// Titles are sanitized into git branch names (git.SanitizeBranchName
+	// lowercases, turns spaces into dashes, strips unsafe chars, and collapses
+	// dashes), so distinct titles can map to the same branch: "MyApp"/"myapp"
+	// (#605) or "A B"/"a-b" (#741) both collide. The second worktree create
+	// would otherwise fail with a cryptic git error, so reject the conflict
+	// here, before any worktree or tmux setup runs.
 	if existing, kind := m.findTitleConflictLocked(repoID, title, diskData); existing != "" {
 		switch {
 		case existing == title:
@@ -669,7 +670,7 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 			}
 			return fmt.Errorf("session with title %q already exists", title)
 		default:
-			return fmt.Errorf("session titled %q conflicts with existing session %q (case-insensitive comparison; sanitize collides at git layer)", title, existing)
+			return fmt.Errorf("session titled %q conflicts with existing session %q: both sanitize to the same git branch %q", title, existing, m.branchForTitle(title))
 		}
 	}
 	if remote {
@@ -703,14 +704,17 @@ const (
 )
 
 // findTitleConflictLocked returns the existing title that conflicts with the
-// given candidate under case-insensitive comparison, along with the source of
-// the conflict. An empty result means the title is available. Comparisons are
-// case-insensitive so that titles which would collide at the git branch layer
-// (sanitizeBranchName lowercases) are rejected before worktree setup. (#605)
+// given candidate, along with the source of the conflict. An empty result means
+// the title is available. Two titles conflict when they derive the same git
+// branch name: branches are produced by git.SanitizeBranchName, which lowercases
+// and normalizes (spaces -> dashes, unsafe chars stripped, dashes collapsed),
+// so distinct titles like "MyApp"/"myapp" (#605) or "A B"/"a-b" (#741) can map
+// to one branch. Rejecting the collision here keeps the second worktree create
+// from failing with a cryptic git error.
 func (m *Manager) findTitleConflictLocked(repoID, title string, diskData []session.InstanceData) (string, titleConflictKind) {
 	for key := range m.reservedTitles {
 		rid, existing := splitDaemonInstanceKey(key)
-		if rid == repoID && strings.EqualFold(existing, title) {
+		if rid == repoID && m.titlesCollide(existing, title) {
 			return existing, titleConflictReserved
 		}
 	}
@@ -719,12 +723,12 @@ func (m *Manager) findTitleConflictLocked(repoID, title string, diskData []sessi
 		if rid != repoID || inst == nil {
 			continue
 		}
-		if strings.EqualFold(inst.Title, title) {
+		if m.titlesCollide(inst.Title, title) {
 			return inst.Title, titleConflictLive
 		}
 	}
 	for _, data := range diskData {
-		if !strings.EqualFold(data.Title, title) {
+		if !m.titlesCollide(data.Title, title) {
 			continue
 		}
 		// Loading entries are transient TUI state with an empty worktree
@@ -738,6 +742,26 @@ func (m *Manager) findTitleConflictLocked(repoID, title string, diskData []sessi
 		return data.Title, titleConflictDisk
 	}
 	return "", titleConflictNone
+}
+
+// titlesCollide reports whether two session titles cannot coexist in the same
+// repo because they would derive the same git branch. Exact (case-insensitive)
+// duplicates always collide; beyond that, the titles collide when they sanitize
+// to the same branch name (e.g. "A B" and "a-b" -> "af-a-b"). The EqualFold
+// guard also covers titles made only of unsafe characters, whose sanitized
+// branch is a random fallback that would otherwise never compare equal.
+func (m *Manager) titlesCollide(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	return m.branchForTitle(a) == m.branchForTitle(b)
+}
+
+// branchForTitle derives the git branch name for a session title using the same
+// prefix and sanitization the git worktree layer applies, so the daemon can
+// detect branch collisions before worktree setup runs.
+func (m *Manager) branchForTitle(title string) string {
+	return git.SanitizeBranchName(m.cfg.BranchPrefix + title)
 }
 
 func (m *Manager) KillSession(req KillSessionRequest) error {

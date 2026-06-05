@@ -122,7 +122,7 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 	branchName := fmt.Sprintf("%s%s", cfg.BranchPrefix, sessionName)
 	// Sanitize the final branch name to handle invalid characters from any source
 	// (e.g., backslashes from Windows domain usernames like DOMAIN\user)
-	branchName = sanitizeBranchName(branchName)
+	branchName = SanitizeBranchName(branchName)
 
 	// Convert repoPath to absolute path
 	absPath, err := filepath.Abs(repoPath)
