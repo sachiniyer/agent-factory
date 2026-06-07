@@ -84,6 +84,36 @@ func TestHookCancellation_BackgroundedGrandchildKilledByGroupSignal(t *testing.T
 	}
 }
 
+// TestHookCompletion_BackgroundedGrandchildKilled is the regression test for
+// #769. A hook that backgrounds a process and exits immediately (no `wait`)
+// used to leak the grandchild: the watchdog exited via doneCh on normal
+// completion before any cancellation, so nothing ever signalled the process
+// group. With the fix, the group is SIGKILL'd on every exit path — including
+// normal completion with no cancellation at all — so the grandchild dies.
+func TestHookCompletion_BackgroundedGrandchildKilled(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	// No `wait`: the shell backgrounds sleep, records its pid, and exits 0
+	// immediately. The context is never cancelled, so the leak is only caught
+	// by the completion-path group kill.
+	repoPath := freshRepoConfig(t, []string{
+		fmt.Sprintf(`sleep 30 & echo $! > %q`, pidFile),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	RunPostWorktreeHooksAsync(ctx, repoPath, t.TempDir())
+
+	pid := waitForPidFile(t, pidFile, 5*time.Second)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+	// cmd.Wait unblocks ~hookWaitDelay after the shell exits, then the group
+	// kill fires; allow margin over that bound for the grandchild to be reaped.
+	if !waitForProcessExit(pid, 6*time.Second) {
+		t.Fatalf("backgrounded grandchild pid %d survived hook completion — process group not killed on the success path", pid)
+	}
+}
+
 // freshRepoConfig isolates the per-test config dir via AGENT_FACTORY_HOME,
 // writes a repo config with the given post-worktree commands, and returns a
 // repo path the test should hand to RunPostWorktreeHooksAsync. The repo path
