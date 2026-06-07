@@ -16,13 +16,13 @@ func countDicts(xml string) int {
 
 // TestCronToCalendarIntervalXML_NoDoubleTrigger verifies that when DOW is
 // syntactically restricted but covers all possible weekdays (e.g., 0-6),
-// the schedule collapses to a single wildcard-day dict rather than
-// emitting both a DOM dict and 7 DOW dicts (which would double-fire on
-// the overlap day).
+// the DOW side is dropped — emitting a single DOM dict rather than a DOM
+// dict plus 7 DOW dicts (which would double-fire on the overlap day). The
+// surviving DOM=1 constraint must be preserved so the schedule stays
+// monthly on the 1st (regression for #770).
 func TestCronToCalendarIntervalXML_NoDoubleTrigger(t *testing.T) {
-	// DOW=0-6 covers every weekday. Under cron OR semantics, this is
-	// equivalent to "every day at 09:00"; launchd must receive a single
-	// dict with only Hour and Minute.
+	// DOW=0-6 covers every weekday, so it is an effective wildcard and is
+	// dropped; DOM=1 survives, leaving a single monthly dict.
 	xml, err := cronToCalendarIntervalXML("0 9 1 * 0-6")
 	require.NoError(t, err)
 
@@ -30,14 +30,16 @@ func TestCronToCalendarIntervalXML_NoDoubleTrigger(t *testing.T) {
 	assert.Contains(t, xml, "<key>Hour</key>")
 	assert.Contains(t, xml, "<integer>9</integer>")
 	assert.Contains(t, xml, "<key>Minute</key>")
-	assert.Contains(t, xml, "<integer>0</integer>")
-	assert.NotContains(t, xml, "<key>Day</key>", "Day key must be omitted when DOW covers all")
+	assert.Contains(t, xml, "<key>Day</key>", "Day must be preserved so the schedule stays monthly")
+	assert.Contains(t, xml, "<integer>1</integer>")
 	assert.NotContains(t, xml, "<key>Weekday</key>", "Weekday key must be omitted when DOW covers all")
 }
 
-// TestCronToCalendarIntervalXML_DOMCoversAll verifies the symmetric case
-// where DOM covers all 31 possible values. Under cron OR semantics this
-// also collapses to "every day".
+// TestCronToCalendarIntervalXML_DOMCoversAll verifies the case where DOM
+// covers all 31 possible values while DOW stays restricted. Only the DOM
+// side is an effective wildcard, so it must be dropped while the surviving
+// DOW constraint keeps the schedule weekly (regression for #770: clearing
+// both fields silently turned this into a daily schedule).
 func TestCronToCalendarIntervalXML_DOMCoversAll(t *testing.T) {
 	xml, err := cronToCalendarIntervalXML("30 8 1-31 * 1")
 	require.NoError(t, err)
@@ -48,17 +50,20 @@ func TestCronToCalendarIntervalXML_DOMCoversAll(t *testing.T) {
 	assert.Contains(t, xml, "<key>Minute</key>")
 	assert.Contains(t, xml, "<integer>30</integer>")
 	assert.NotContains(t, xml, "<key>Day</key>", "Day key must be omitted when DOM covers all")
-	assert.NotContains(t, xml, "<key>Weekday</key>", "Weekday key must be omitted when DOM covers all")
+	assert.Contains(t, xml, "<key>Weekday</key>", "Weekday must be preserved so the schedule stays weekly")
+	assert.Contains(t, xml, "<integer>1</integer>")
 }
 
 // TestCronToCalendarIntervalXML_DOWStepCoversAll verifies that a step
-// expression that expands to every weekday also triggers the collapse.
+// expression that expands to every weekday neutralizes only the DOW side,
+// leaving the DOM=15 constraint intact (monthly on the 15th).
 func TestCronToCalendarIntervalXML_DOWStepCoversAll(t *testing.T) {
 	xml, err := cronToCalendarIntervalXML("0 9 15 * */1")
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, countDicts(xml), "expected a single dict, got:\n%s", xml)
-	assert.NotContains(t, xml, "<key>Day</key>")
+	assert.Contains(t, xml, "<key>Day</key>", "Day must be preserved so the schedule stays monthly")
+	assert.Contains(t, xml, "<integer>15</integer>")
 	assert.NotContains(t, xml, "<key>Weekday</key>")
 }
 
@@ -99,15 +104,43 @@ func TestCronToCalendarIntervalXML_WildcardDOW(t *testing.T) {
 }
 
 // TestCronToCalendarIntervalXML_DOW7NormalizesAndCoversAll verifies that
-// a DOW range of 1-7 (where 7 normalizes to 0) covers all weekdays and
-// triggers the collapse.
+// a DOW range of 1-7 (where 7 normalizes to 0) covers all weekdays and so
+// the DOW side is dropped, while DOM=15 is preserved (monthly on the 15th).
+// Regression for #770: previously both fields were cleared, firing daily.
 func TestCronToCalendarIntervalXML_DOW7NormalizesAndCoversAll(t *testing.T) {
 	xml, err := cronToCalendarIntervalXML("0 9 15 * 1-7")
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, countDicts(xml), "expected a single dict, got:\n%s", xml)
-	assert.NotContains(t, xml, "<key>Day</key>")
+	assert.Contains(t, xml, "<key>Day</key>", "Day must be preserved so the schedule stays monthly")
+	assert.Contains(t, xml, "<integer>15</integer>")
 	assert.NotContains(t, xml, "<key>Weekday</key>")
+}
+
+// TestCronToCalendarIntervalXML_MonthlyDOWWildcardRange is the #770
+// regression for the issue's primary example: DOM=1 with DOW=1-7 (an
+// effective wildcard) must stay monthly on the 1st, not collapse to daily.
+func TestCronToCalendarIntervalXML_MonthlyDOWWildcardRange(t *testing.T) {
+	xml, err := cronToCalendarIntervalXML("0 0 1 * 1-7")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, countDicts(xml), "expected a single dict, got:\n%s", xml)
+	assert.Contains(t, xml, "<key>Day</key>", "Day must be preserved so the schedule stays monthly")
+	assert.Contains(t, xml, "<integer>1</integer>")
+	assert.NotContains(t, xml, "<key>Weekday</key>")
+}
+
+// TestCronToCalendarIntervalXML_WeeklyDOMWildcardRange is the #770
+// regression for the symmetric example: DOW=1 (Monday) with DOM=1-31 (an
+// effective wildcard) must stay weekly on Monday, not collapse to daily.
+func TestCronToCalendarIntervalXML_WeeklyDOMWildcardRange(t *testing.T) {
+	xml, err := cronToCalendarIntervalXML("0 0 1-31 * 1")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, countDicts(xml), "expected a single dict, got:\n%s", xml)
+	assert.NotContains(t, xml, "<key>Day</key>")
+	assert.Contains(t, xml, "<key>Weekday</key>", "Weekday must be preserved so the schedule stays weekly")
+	assert.Contains(t, xml, "<integer>1</integer>")
 }
 
 func TestCronToCalendarIntervalXML_AllWildcards(t *testing.T) {
