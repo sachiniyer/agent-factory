@@ -154,6 +154,28 @@ func findLiveInstanceByTitle(title string) (*session.Instance, string, error) {
 	return instance, repoID, nil
 }
 
+// instanceTitleExistsInScope reports whether a session with the given title
+// exists within the resolved repo scope (#776). An empty repoID preserves the
+// prior all-repo search; a non-empty one confines the check to that repo so a
+// same-titled session in a different repo can never satisfy the pre-check.
+// Mirrors how resolveRepoID() scopes the other sessions subcommands (list,
+// kill). This is a pure existence check: unlike findLiveInstanceByTitle it does
+// not restore (and Start) the instance, since callers only need to know whether
+// the title is taken in scope and the daemon does its own session restore on
+// delivery.
+func instanceTitleExistsInScope(repoID, title string) (bool, error) {
+	if repoID != "" {
+		return repoHasInstanceTitle(repoID, title)
+	}
+	if _, _, err := findInstanceByTitle(title); err != nil {
+		// findInstanceByTitle errors only on not-found / corruption; treat
+		// either as "not present in scope", matching the prior all-repo
+		// behavior where the pre-check error drove the create-vs-error branch.
+		return false, nil
+	}
+	return true, nil
+}
+
 // jsonOut marshals v to JSON and writes to stdout.
 func jsonOut(v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
