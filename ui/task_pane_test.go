@@ -455,3 +455,41 @@ func TestTaskPaneListShowsConfigDefaultWhenProgramEmpty(t *testing.T) {
 	assert.Contains(t, out, programDefaultLabel,
 		"list view should render the config-default sentinel for empty Program")
 }
+
+// TestTaskPaneConsumeDeletedClearsState verifies that deleting a task and then
+// consuming the deletion clears both the pending-deletion slice and the dirty
+// flag, so a second save pass finds nothing to reprocess. Regression test for
+// #763: saveContentPaneState previously read GetDeleted() without clearing it,
+// so pressing ESC (save) twice re-ran the deletion loop on an already-removed
+// task, tripping the rollback path that re-installs an orphaned scheduler.
+func TestTaskPaneConsumeDeletedClearsState(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{
+		{ID: "a", Name: "alpha"},
+		{ID: "b", Name: "beta"},
+	})
+
+	// Select and delete the first task (the "D" key in normal mode). The pane
+	// only handles keys while focused.
+	tp.SetFocus(true)
+	tp.selectedIdx = 0
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+
+	assert.True(t, tp.IsDirty(), "deleting a task must mark the pane dirty")
+
+	// First save consumes the deletion: the deleted task is returned exactly
+	// once, and the pane state is cleared.
+	first := tp.ConsumeDeleted()
+	if assert.Len(t, first, 1, "first save should surface the deleted task once") {
+		assert.Equal(t, "a", first[0].ID)
+	}
+	assert.False(t, tp.IsDirty(),
+		"consuming the deletion must clear the dirty flag so updates aren't re-run")
+
+	// Second save (e.g. ESC pressed again) must find nothing to process, so the
+	// deletion loop in saveContentPaneState never re-runs RemoveScheduler/
+	// RemoveTask and can't re-install an orphaned scheduler.
+	second := tp.ConsumeDeleted()
+	assert.Empty(t, second,
+		"second save must not reprocess an already-deleted task (#763)")
+}

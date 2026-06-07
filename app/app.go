@@ -538,7 +538,7 @@ func (m *home) saveContentPaneState() {
 				}
 			}
 		}
-		for _, tsk := range sp.GetDeleted() {
+		for _, tsk := range sp.ConsumeDeleted() {
 			// Tear down the scheduler before deleting the task record so
 			// a phantom timer can't keep firing for a deleted task. If
 			// RemoveTask then fails, re-install the scheduler so the
