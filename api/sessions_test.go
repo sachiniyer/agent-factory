@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -287,6 +288,129 @@ func TestSessionsKill_UnknownTitle(t *testing.T) {
 
 	if err := sessionsKillCmd.RunE(sessionsKillCmd, []string{"does-not-exist"}); err == nil {
 		t.Fatalf("expected error for unknown session, got nil")
+	}
+}
+
+// TestSessionsKill_HonorsRepoScoping is the regression test for issue #761.
+// Two repos each hold a session with the same title. Killing it with
+// `--repo <repoA>` must scope the kill to repo A's session: the CLI must pass
+// the resolved RepoID to the daemon, and only repo A's entry may be removed.
+// Previously the --repo flag was dropped on the floor, so the kill ran in
+// all-repo mode and could destroy the wrong repo's session.
+func TestSessionsKill_HonorsRepoScoping(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	// Repo A is a real git repo so resolveRepoID(--repo) can compute its ID
+	// the same way the running CLI would.
+	repoARoot := filepath.Join(tmp, "repo-a")
+	if err := os.MkdirAll(repoARoot, 0755); err != nil {
+		t.Fatalf("mkdir repo A: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoARoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init repo A: %v (%s)", err, out)
+	}
+	repoA, err := config.RepoFromPath(repoARoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath repo A: %v", err)
+	}
+
+	// Repo B is a distinct synthetic repo on disk holding a same-titled session.
+	repoBID := "repo-b-synthetic"
+	if repoBID == repoA.ID {
+		t.Fatalf("test setup: synthetic repo B ID collided with repo A")
+	}
+
+	const title = "shared-title"
+	rawA, err := json.Marshal([]session.InstanceData{{Title: title, Path: repoARoot}})
+	if err != nil {
+		t.Fatalf("marshal repo A instances: %v", err)
+	}
+	rawB, err := json.Marshal([]session.InstanceData{{Title: title, Path: tmp}})
+	if err != nil {
+		t.Fatalf("marshal repo B instances: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoA.ID, rawA); err != nil {
+		t.Fatalf("save repo A instances: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoBID, rawB); err != nil {
+		t.Fatalf("save repo B instances: %v", err)
+	}
+
+	// Point --repo at repo A and capture the request the CLI hands to the
+	// daemon. The stub also mirrors the daemon's repo-scoped delete so we can
+	// assert at the storage level that only repo A's session is removed.
+	prevRepoFlag := repoFlag
+	repoFlag = repoARoot
+	defer func() { repoFlag = prevRepoFlag }()
+
+	var gotReq daemon.KillSessionRequest
+	prevKill := killSessionViaDaemon
+	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {
+		gotReq = req
+		if req.RepoID == "" {
+			return errors.New("RepoID empty: --repo scoping was dropped")
+		}
+		return config.UpdateRepoInstances(req.RepoID, func(raw json.RawMessage) (json.RawMessage, error) {
+			var instances []session.InstanceData
+			if err := json.Unmarshal(raw, &instances); err != nil {
+				return nil, err
+			}
+			kept := instances[:0]
+			for _, inst := range instances {
+				if inst.Title != req.Title {
+					kept = append(kept, inst)
+				}
+			}
+			return json.Marshal(kept)
+		})
+	}
+	defer func() { killSessionViaDaemon = prevKill }()
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStdout, origStderr := os.Stdout, os.Stderr
+	os.Stdout = devnull
+	os.Stderr = devnull
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	}()
+
+	if err := sessionsKillCmd.RunE(sessionsKillCmd, []string{title}); err != nil {
+		t.Fatalf("sessionsKillCmd returned error: %v", err)
+	}
+
+	if gotReq.RepoID != repoA.ID {
+		t.Fatalf("kill request RepoID = %q, want repo A %q", gotReq.RepoID, repoA.ID)
+	}
+
+	// Repo A's session must be gone; repo B's same-titled session must survive.
+	gotA, err := config.LoadRepoInstances(repoA.ID)
+	if err != nil {
+		t.Fatalf("load repo A instances: %v", err)
+	}
+	var instancesA []session.InstanceData
+	if err := json.Unmarshal(gotA, &instancesA); err != nil {
+		t.Fatalf("unmarshal repo A: %v", err)
+	}
+	if len(instancesA) != 0 {
+		t.Fatalf("expected repo A session killed, still present: %+v", instancesA)
+	}
+
+	gotB, err := config.LoadRepoInstances(repoBID)
+	if err != nil {
+		t.Fatalf("load repo B instances: %v", err)
+	}
+	var instancesB []session.InstanceData
+	if err := json.Unmarshal(gotB, &instancesB); err != nil {
+		t.Fatalf("unmarshal repo B: %v", err)
+	}
+	if len(instancesB) != 1 || instancesB[0].Title != title {
+		t.Fatalf("repo B's same-titled session must be untouched, got: %+v", instancesB)
 	}
 }
 

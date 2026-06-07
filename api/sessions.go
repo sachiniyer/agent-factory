@@ -373,7 +373,16 @@ var sessionsKillCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
-		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0]}); err != nil {
+		// Honor --repo scoping (#761). An empty repoID preserves the prior
+		// all-repo search; a non-empty one confines the kill to that repo so a
+		// same-titled session in a different repo is never destroyed by
+		// mistake. Mirrors sessionsListCmd's resolveRepoID() usage.
+		repoID, err := resolveRepoID()
+		if err != nil {
+			return jsonError(err)
+		}
+
+		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID}); err != nil {
 			return jsonError(err)
 		}
 
