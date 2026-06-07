@@ -116,6 +116,34 @@ func TestLoadSaveRepoInstances_RejectsTraversal(t *testing.T) {
 	assert.Equal(t, originalBytes, after, "sentinel file should not have been modified")
 }
 
+// TestLoadRepoInstances_SurfacesReadError verifies that an existing-but-
+// unreadable instances.json produces an error rather than a silent empty list.
+// This is the load-side guarantee behind #766: callers must be able to tell
+// "no sessions" apart from "couldn't read sessions" so read-modify-write paths
+// don't clobber present-but-unreadable data. A missing file is a separate case
+// (covered elsewhere) and must continue to yield "[]" with no error.
+func TestLoadRepoInstances_SurfacesReadError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based permission denial is ineffective when running as root")
+	}
+	tempHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tempHome)
+
+	repoID := RepoIDFromRoot("/path/to/repo")
+	require.NoError(t, SaveRepoInstances(repoID, json.RawMessage(`[{"title":"keep-me"}]`)))
+
+	path, err := repoInstancesPath(repoID)
+	require.NoError(t, err)
+
+	// Make the file unreadable, simulating a transient permission/I/O error.
+	require.NoError(t, os.Chmod(path, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+
+	_, err = LoadRepoInstances(repoID)
+	require.Error(t, err, "an unreadable instances.json must surface an error, not an empty list")
+	assert.False(t, os.IsNotExist(err), "error must be a read/permission failure, not a missing-file case")
+}
+
 // TestSaveRepoInstances_RoundTrip is a smoke test that the legitimate path
 // still works end-to-end after the validation change.
 func TestSaveRepoInstances_RoundTrip(t *testing.T) {
