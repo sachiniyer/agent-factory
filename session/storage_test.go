@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,9 @@ import (
 type mockInstanceStorage struct {
 	mu   sync.Mutex
 	data map[string]json.RawMessage
+	// readErr, when non-nil, makes GetInstances fail to simulate a transient
+	// read failure (permission denied, I/O error) on instances.json.
+	readErr error
 }
 
 func newMockStorage() *mockInstanceStorage {
@@ -29,10 +33,13 @@ func (m *mockInstanceStorage) SaveInstances(repoID string, instancesJSON json.Ra
 	return nil
 }
 
-func (m *mockInstanceStorage) GetInstances(repoID string) json.RawMessage {
+func (m *mockInstanceStorage) GetInstances(repoID string) (json.RawMessage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.data[repoID]
+	if m.readErr != nil {
+		return nil, m.readErr
+	}
+	return m.data[repoID], nil
 }
 
 func (m *mockInstanceStorage) GetAllInstances() map[string]json.RawMessage {
@@ -286,6 +293,40 @@ func TestDaemonSaveCrossRepoTitleCollision(t *testing.T) {
 	}
 	assert.True(t, titlesB["other-b"], "repo B's in-memory instance should be saved")
 	assert.True(t, titlesB["shared"], "repo B's externally-added instance with title colliding with a different repo's daemon instance must be preserved")
+}
+
+// TestRepoSaveAbortsOnReadError is the core regression test for #766. When the
+// existing instances.json cannot be read (a transient permission/I/O error, as
+// opposed to a missing file), saveRepoInstances must NOT treat disk as empty
+// and merge-then-overwrite — that silently and permanently drops sessions that
+// are present on disk. The save must surface the error and leave disk untouched.
+func TestRepoSaveAbortsOnReadError(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	// Seed disk with a real, present-on-disk session.
+	seedDisk(t, ms, repoPath, []InstanceData{
+		{Title: "on-disk", Path: repoPath, Status: Running},
+	})
+	// Snapshot the exact bytes so we can prove they are untouched afterwards.
+	before := append(json.RawMessage(nil), ms.data[repoID]...)
+
+	// Reads now fail (e.g. EACCES / EIO on instances.json).
+	ms.readErr = errors.New("permission denied")
+
+	// The TUI has a different session in memory; a naive merge against an
+	// empty disk state would write only this one and erase "on-disk".
+	inMem := makeInstance("in-memory", repoPath, true)
+	storage, err := NewStorage(ms, repoID)
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{inMem})
+	require.Error(t, err, "SaveInstances must surface the read error instead of overwriting disk")
+
+	// Disk bytes must be exactly what we seeded — no empty/partial overwrite.
+	assert.Equal(t, string(before), string(ms.data[repoID]),
+		"on-disk session data must be preserved when the existing file cannot be read (#766)")
 }
 
 func TestDaemonSaveNoInstances(t *testing.T) {

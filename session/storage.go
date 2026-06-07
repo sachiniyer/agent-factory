@@ -144,8 +144,16 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 			return pathErr
 		}
 		if err := config.WithFileLock(path, func() error {
-			// Read existing disk state inside the lock.
-			diskJSON := s.state.GetInstances(rid)
+			// Read existing disk state inside the lock. A genuine read
+			// failure (permission denied, I/O error) must abort this repo's
+			// save: merging against the empty list GetInstances used to
+			// return would overwrite instances.json and permanently drop
+			// sessions that are present on disk but momentarily unreadable
+			// (#766). Missing files still come back as "[]" with a nil error.
+			diskJSON, err := s.state.GetInstances(rid)
+			if err != nil {
+				return fmt.Errorf("refusing to overwrite repo %s: failed to read existing instances: %w", rid, err)
+			}
 			var diskData []InstanceData
 			if diskJSON != nil && string(diskJSON) != "[]" && string(diskJSON) != "null" {
 				if err := json.Unmarshal(diskJSON, &diskData); err != nil {
@@ -213,7 +221,13 @@ func (s *Storage) saveRepoInstances(instances []*Instance) error {
 		return pathErr
 	}
 	return config.WithFileLock(path, func() error {
-		raw := s.state.GetInstances(s.repoID)
+		// A transient read failure must not be mistaken for "no sessions":
+		// merging against an empty disk state and writing the result back
+		// would clobber the unreadable-but-present instances.json (#766).
+		raw, err := s.state.GetInstances(s.repoID)
+		if err != nil {
+			return fmt.Errorf("refusing to overwrite repo %s: failed to read existing instances: %w", s.repoID, err)
+		}
 		var diskData []InstanceData
 		if raw != nil && string(raw) != "[]" && string(raw) != "null" {
 			if err := json.Unmarshal(raw, &diskData); err != nil {
@@ -276,8 +290,13 @@ func (s *Storage) saveRepoInstances(instances []*Instance) error {
 func (s *Storage) LoadInstances() ([]*Instance, error) {
 	var allJSON map[string]json.RawMessage
 	if s.repoID != "" {
-		// TUI mode: load just this repo
-		raw := s.state.GetInstances(s.repoID)
+		// TUI mode: load just this repo. Surface read errors so startup can
+		// report "couldn't read your sessions" instead of silently showing
+		// an empty list that looks like a fresh install (#766).
+		raw, err := s.state.GetInstances(s.repoID)
+		if err != nil {
+			return nil, err
+		}
 		allJSON = map[string]json.RawMessage{s.repoID: raw}
 	} else {
 		// Daemon mode: load all repos
@@ -318,7 +337,10 @@ func (s *Storage) DeleteInstance(title string) error {
 		return pathErr
 	}
 	return config.WithFileLock(path, func() error {
-		raw := s.state.GetInstances(s.repoID)
+		raw, err := s.state.GetInstances(s.repoID)
+		if err != nil {
+			return err
+		}
 		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
 			return fmt.Errorf("instance not found: %s", title)
 		}
@@ -354,7 +376,10 @@ func (s *Storage) DeleteInstance(title string) error {
 // constructing live Instance objects (no tmux session restoration).
 // Used for lightweight comparison against in-memory state.
 func (s *Storage) LoadInstanceData() ([]InstanceData, error) {
-	raw := s.state.GetInstances(s.repoID)
+	raw, err := s.state.GetInstances(s.repoID)
+	if err != nil {
+		return nil, err
+	}
 	if raw == nil || string(raw) == "[]" || string(raw) == "null" {
 		return nil, nil
 	}

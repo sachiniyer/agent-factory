@@ -20,7 +20,13 @@ type InstanceStorage interface {
 	// SaveInstances saves the raw instance data for a specific repo.
 	SaveInstances(repoID string, instancesJSON json.RawMessage) error
 	// GetInstances returns the raw instance data for a specific repo.
-	GetInstances(repoID string) json.RawMessage
+	//
+	// A missing instances file yields "[]" with a nil error so first-run
+	// callers proceed normally. Any other failure (permission denied,
+	// I/O/NFS error, truncation) is PROPAGATED rather than masked as an
+	// empty list — read-modify-write callers must not merge against, and
+	// then overwrite, disk state they failed to read (#766).
+	GetInstances(repoID string) (json.RawMessage, error)
 	// GetAllInstances returns instance data for all repos, keyed by repo ID.
 	GetAllInstances() map[string]json.RawMessage
 	// DeleteAllInstances removes all stored instances across all repos.
@@ -253,13 +259,12 @@ func (s *State) SaveInstances(repoID string, instancesJSON json.RawMessage) erro
 	return SaveRepoInstances(repoID, instancesJSON)
 }
 
-func (s *State) GetInstances(repoID string) json.RawMessage {
-	data, err := LoadRepoInstances(repoID)
-	if err != nil {
-		log.ErrorLog.Printf("failed to load repo instances: %v", err)
-		return json.RawMessage("[]")
-	}
-	return data
+func (s *State) GetInstances(repoID string) (json.RawMessage, error) {
+	// LoadRepoInstances already distinguishes "missing file" (-> "[]", nil)
+	// from a genuine read error, so surface its result verbatim. Swallowing
+	// the error here is what let saveRepoInstances merge against an empty
+	// disk state and clobber unreadable-but-present sessions (#766).
+	return LoadRepoInstances(repoID)
 }
 
 func (s *State) GetAllInstances() map[string]json.RawMessage {
