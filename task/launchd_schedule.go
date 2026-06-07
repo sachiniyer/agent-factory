@@ -120,13 +120,19 @@ func cronToCalendarIntervalXML(cronExpr string) (string, error) {
 
 	// Detect when DOM or DOW is syntactically restricted but semantically
 	// covers all possible values (e.g., DOW=0-6 or DOM=1-31). Under cron OR
-	// semantics, "X OR every-day" collapses to "every day", so both the DOM
-	// and DOW restrictions become irrelevant and we emit a single
-	// wildcard-day dict.
+	// semantics, "X OR every-day" collapses to "every day", so an
+	// effective-wildcard side is irrelevant and must be dropped to a
+	// wildcard. Clear only the field that covers all values — clearing both
+	// would erase the surviving constraint and silently turn a monthly
+	// (e.g. "0 9 15 * 1-7") or weekly (e.g. "0 9 1-31 * 1") schedule into a
+	// daily one. This mirrors the systemd path in CronToOnCalendar, which
+	// neutralizes DOM and DOW independently.
 	dowCoversAll := expanded[dowIdx].vals != nil && len(expanded[dowIdx].vals) >= 7
 	domCoversAll := expanded[domIdx].vals != nil && len(expanded[domIdx].vals) >= 31
-	if dowCoversAll || domCoversAll {
+	if dowCoversAll {
 		expanded[dowIdx].vals = nil
+	}
+	if domCoversAll {
 		expanded[domIdx].vals = nil
 	}
 
