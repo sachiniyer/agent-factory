@@ -285,8 +285,20 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 		title := args[0]
 		prompt := args[1]
 
-		_, _, err := findLiveInstanceByTitle(title)
+		// Honor --repo scoping (#776, follow-up to #761/#775). An empty repoID
+		// preserves the prior all-repo search; a non-empty one confines both
+		// the existence pre-check and the delivery to that repo so a
+		// same-titled session in a different repo never receives the prompt.
+		repoID, err := resolveRepoID()
 		if err != nil {
+			return jsonError(err)
+		}
+
+		exists, err := instanceTitleExistsInScope(repoID, title)
+		if err != nil {
+			return jsonError(err)
+		}
+		if !exists {
 			if !sendPromptCreateFlag {
 				return jsonError(fmt.Errorf("instance %q not found. Use --create to auto-create the session, or run: af sessions create --name %q --prompt <prompt>", title, title))
 			}
@@ -334,7 +346,7 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 			return jsonOut(map[string]bool{"ok": true})
 		}
 
-		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: title, Prompt: prompt}); err != nil {
+		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: prompt}); err != nil {
 			return jsonError(err)
 		}
 		return jsonOut(map[string]bool{"ok": true})

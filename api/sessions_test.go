@@ -414,6 +414,102 @@ func TestSessionsKill_HonorsRepoScoping(t *testing.T) {
 	}
 }
 
+// TestSessionsSendPrompt_HonorsRepoScoping is the regression test for issue
+// #776 (follow-up to #761/#775). Two repos each hold a session with the same
+// title. Sending a prompt with `--repo <repoA>` must scope delivery to repo
+// A's session: the existence pre-check must look only in repo A, and the CLI
+// must pass repo A's RepoID to the daemon so a same-titled session in repo B
+// can never receive the prompt. Previously --repo was dropped on the floor and
+// the all-repo search could deliver to the wrong repo.
+func TestSessionsSendPrompt_HonorsRepoScoping(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	// Repo A is a real git repo so resolveRepoID(--repo) can compute its ID
+	// the same way the running CLI would.
+	repoARoot := filepath.Join(tmp, "repo-a")
+	if err := os.MkdirAll(repoARoot, 0755); err != nil {
+		t.Fatalf("mkdir repo A: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoARoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init repo A: %v (%s)", err, out)
+	}
+	repoA, err := config.RepoFromPath(repoARoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath repo A: %v", err)
+	}
+
+	// Repo B is a distinct synthetic repo on disk holding a same-titled session.
+	repoBID := "repo-b-synthetic"
+	if repoBID == repoA.ID {
+		t.Fatalf("test setup: synthetic repo B ID collided with repo A")
+	}
+
+	const title = "shared-title"
+	const prompt = "do the thing"
+
+	rawA, err := json.Marshal([]session.InstanceData{{Title: title, Path: repoARoot}})
+	if err != nil {
+		t.Fatalf("marshal repo A instances: %v", err)
+	}
+	rawB, err := json.Marshal([]session.InstanceData{{Title: title, Path: tmp}})
+	if err != nil {
+		t.Fatalf("marshal repo B instances: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoA.ID, rawA); err != nil {
+		t.Fatalf("save repo A instances: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoBID, rawB); err != nil {
+		t.Fatalf("save repo B instances: %v", err)
+	}
+
+	// Point --repo at repo A and capture the request the CLI hands to the
+	// daemon. The daemon's findSession scopes on RepoID (proven elsewhere), so
+	// asserting the request carries repo A's RepoID proves the prompt can't be
+	// delivered to repo B's same-titled session.
+	prevRepoFlag := repoFlag
+	repoFlag = repoARoot
+	defer func() { repoFlag = prevRepoFlag }()
+
+	var gotReq daemon.SendPromptRequest
+	prevSend := sendPromptViaDaemon
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+		gotReq = req
+		if req.RepoID == "" {
+			return errors.New("RepoID empty: --repo scoping was dropped")
+		}
+		return nil
+	}
+	defer func() { sendPromptViaDaemon = prevSend }()
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStdout, origStderr := os.Stdout, os.Stderr
+	os.Stdout = devnull
+	os.Stderr = devnull
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	}()
+
+	if err := sessionsSendPromptCmd.RunE(sessionsSendPromptCmd, []string{title, prompt}); err != nil {
+		t.Fatalf("sessionsSendPromptCmd returned error: %v", err)
+	}
+
+	if gotReq.RepoID != repoA.ID {
+		t.Fatalf("send-prompt request RepoID = %q, want repo A %q", gotReq.RepoID, repoA.ID)
+	}
+	if gotReq.Title != title {
+		t.Fatalf("send-prompt request Title = %q, want %q", gotReq.Title, title)
+	}
+	if gotReq.Prompt != prompt {
+		t.Fatalf("send-prompt request Prompt = %q, want %q", gotReq.Prompt, prompt)
+	}
+}
+
 func stubKillSessionDirect() func() {
 	prev := killSessionViaDaemon
 	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {
