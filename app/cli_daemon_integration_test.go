@@ -47,6 +47,66 @@ func TestTUIRefreshSeesCLIChangesThroughDaemon(t *testing.T) {
 	require.Nil(t, findSidebarInstance(h, "cli-made"))
 }
 
+// TestTUIRefreshSwapsKillRecreatedSameTitle is the regression test for #765.
+//
+// When a session is killed and recreated under the SAME title via the CLI
+// WITHOUT an intervening refresh, the sidebar holds a dead in-memory instance
+// while a fresh, live instance exists on disk. The old title-only
+// reconciliation skipped both the add (title already present) and the remove
+// (title still on disk), so the corpse permanently shadowed the new session:
+// the user could neither attach nor preview it. refreshExternalInstances must
+// detect the stale instance (its tmux session is gone) and swap it for the
+// recreated on-disk one.
+func TestTUIRefreshSwapsKillRecreatedSameTitle(t *testing.T) {
+	skipIfRealBackendDepsMissing(t)
+
+	bin := buildIntegrationBinary(t)
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+
+	h := newTestHome(t)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+	h.storage, err = session.NewStorage(config.DefaultState(), repo.ID)
+	require.NoError(t, err)
+	writeIntegrationConfig(t, os.Getenv("AGENT_FACTORY_HOME"))
+
+	t.Cleanup(func() {
+		_, _ = runIntegrationAF(t, bin, repoDir, "sessions", "kill", "recreated")
+		killIntegrationDaemon(os.Getenv("AGENT_FACTORY_HOME"))
+	})
+
+	// Create the session and import it into the sidebar.
+	runIntegrationAFOK(t, bin, repoDir, "sessions", "--repo", repoDir, "create", "--name", "recreated", "--program", tmux.ProgramClaude)
+	require.True(t, h.refreshExternalInstances(), "TUI refresh should import CLI-created session")
+	original := findSidebarInstance(h, "recreated")
+	require.NotNil(t, original)
+	require.True(t, original.TmuxAlive(), "imported instance should be alive")
+
+	// Kill then recreate the SAME title via the CLI, with NO refresh in
+	// between. The in-memory instance now points at a dead tmux session while
+	// a brand-new live instance sits on disk under the same title.
+	runIntegrationAFOK(t, bin, repoDir, "sessions", "kill", "recreated")
+	require.False(t, original.TmuxAlive(), "killed instance's tmux session must be gone")
+	runIntegrationAFOK(t, bin, repoDir, "sessions", "--repo", repoDir, "create", "--name", "recreated", "--program", tmux.ProgramClaude)
+
+	require.True(t, h.refreshExternalInstances(), "TUI refresh should swap the stale instance")
+
+	// Exactly one "recreated" instance, and it must be the new live one — not
+	// the dead corpse we started with.
+	var matches []*session.Instance
+	for _, inst := range h.sidebar.GetInstances() {
+		if inst.Title == "recreated" {
+			matches = append(matches, inst)
+		}
+	}
+	require.Len(t, matches, 1, "sidebar must hold exactly one instance for the reused title")
+	swapped := matches[0]
+	require.NotSame(t, original, swapped, "sidebar must hold the recreated instance, not the dead one")
+	require.True(t, swapped.TmuxAlive(), "swapped-in instance must be attachable (live tmux session)")
+}
+
 func findSidebarInstance(h *home, title string) *session.Instance {
 	for _, inst := range h.sidebar.GetInstances() {
 		if inst.Title == title {

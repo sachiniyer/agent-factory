@@ -201,7 +201,7 @@ func (m *home) mergePendingInstances() int {
 				if existing.Title != data.Title {
 					continue
 				}
-				if pendingInstanceCollisionShouldSkip(existing.GetWorktreePath(), data.Worktree.WorktreePath, existing.TmuxAlive()) {
+				if instanceCollisionShouldSkip(existing.GetWorktreePath(), data.Worktree.WorktreePath, existing.CreatedAt, data.CreatedAt, existing.TmuxAlive()) {
 					log.WarningLog.Printf("skipping pending instance %q: already exists and is alive", data.Title)
 					skip = true
 				} else {
@@ -282,18 +282,57 @@ func (m *home) refreshExternalInstances() bool {
 
 	changed := false
 
-	// Add instances that exist on disk but not in sidebar.
+	// Add instances that exist on disk, and replace stale sidebar instances
+	// whose title was reused by a CLI kill+recreate.
+	//
+	// A title present in both the sidebar and on disk usually means the
+	// instance is unchanged, so we skip it. But when a session is killed and
+	// recreated under the same title via the CLI, the dead in-memory instance
+	// shadows the freshly created on-disk one: title-only membership makes the
+	// add pass skip it and the remove pass keep the corpse, leaving the new
+	// session invisible (#765). Reuse the same liveness/staleness check as
+	// mergePendingInstances — when the colliding sidebar instance is stale
+	// (different worktree, its tmux session is gone, or it was superseded by a
+	// more recently created on-disk record) swap it for the disk instance.
+	// Construct the replacement BEFORE removing the existing entry so a
+	// transient FromInstanceData failure can't drop it from disk on save.
 	for _, d := range diskData {
-		if !sidebarTitles[d.Title] {
-			inst, err := session.FromInstanceData(d)
-			if err != nil {
-				log.WarningLog.Printf("failed to restore external instance %q: %v", d.Title, err)
+		shouldReplace := false
+		if sidebarTitles[d.Title] {
+			skip := true
+			for _, existing := range m.sidebar.GetInstances() {
+				if existing.Title != d.Title {
+					continue
+				}
+				if !instanceCollisionShouldSkip(existing.GetWorktreePath(), d.Worktree.WorktreePath, existing.CreatedAt, d.CreatedAt, existing.TmuxAlive()) {
+					skip = false
+					shouldReplace = true
+				}
+				break
+			}
+			if skip {
 				continue
 			}
-			m.sidebar.AddInstance(inst)()
-			inst.SetAutoYes(m.autoYes)
-			changed = true
 		}
+
+		inst, err := session.FromInstanceData(d)
+		if err != nil {
+			log.WarningLog.Printf("failed to restore external instance %q: %v", d.Title, err)
+			// Leave any colliding sidebar instance untouched so SaveInstances
+			// does not drop it from disk.
+			continue
+		}
+
+		if shouldReplace {
+			log.InfoLog.Printf("swapping stale sidebar instance %q for recreated on-disk instance", d.Title)
+			m.sidebar.RemoveInstanceByTitle(d.Title)
+			delete(sidebarTitles, d.Title)
+		}
+
+		m.sidebar.AddInstance(inst)()
+		inst.SetAutoYes(m.autoYes)
+		sidebarTitles[d.Title] = true
+		changed = true
 	}
 
 	// Remove instances that exist in sidebar but not on disk.
@@ -313,19 +352,29 @@ func (m *home) refreshExternalInstances() bool {
 	return changed
 }
 
-// pendingInstanceCollisionShouldSkip decides whether to skip a pending
-// instance when an instance with the same title already exists in the
-// sidebar. It returns true when the pending instance should be skipped
-// (sidebar instance is still valid), false when the sidebar instance is
-// stale and should be replaced.
+// instanceCollisionShouldSkip decides whether to keep an existing sidebar
+// instance when an incoming on-disk or pending instance reuses its title. It
+// returns true when the incoming instance should be skipped (the sidebar
+// instance is still the authoritative live session), false when the sidebar
+// instance is stale and must be replaced.
 //
-// If both worktree paths are known and differ, the sidebar instance is
-// stale regardless of TmuxAlive() — a scheduled task rerun creates a new
-// worktree with a numeric suffix and a tmux session with the same name,
-// so TmuxAlive() would incorrectly report the sidebar instance as live.
+// The incoming instance supersedes the existing one when:
+//   - both worktree paths are known and differ — a scheduled task rerun
+//     creates a new worktree with a numeric suffix while reusing the tmux
+//     session name, so TmuxAlive() would wrongly report the sidebar instance
+//     as live (issue #255); or
+//   - the incoming record was created more recently — a CLI kill+recreate
+//     reuses the same title, and because both the worktree path and the tmux
+//     session name are derived deterministically from the title, the recreated
+//     session collides with the corpse on both. Neither worktree nor
+//     TmuxAlive() can then distinguish them; the newer CreatedAt can (#765).
+//
 // Otherwise, fall back to the tmuxAlive signal.
-func pendingInstanceCollisionShouldSkip(existingWorktreePath, pendingWorktreePath string, tmuxAlive bool) bool {
-	if existingWorktreePath != "" && pendingWorktreePath != "" && existingWorktreePath != pendingWorktreePath {
+func instanceCollisionShouldSkip(existingWorktreePath, incomingWorktreePath string, existingCreatedAt, incomingCreatedAt time.Time, tmuxAlive bool) bool {
+	if existingWorktreePath != "" && incomingWorktreePath != "" && existingWorktreePath != incomingWorktreePath {
+		return false
+	}
+	if incomingCreatedAt.After(existingCreatedAt) {
 		return false
 	}
 	return tmuxAlive

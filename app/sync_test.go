@@ -13,77 +13,122 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPendingInstanceCollisionShouldSkip covers the decision logic used by
-// mergePendingInstances when a scheduled-task rerun produces a pending
-// instance whose title collides with an existing sidebar instance. See
-// issue #255: a rerun recreates the same tmux session name under a new
-// worktree path, so TmuxAlive() alone cannot tell whether the sidebar
-// instance is still valid.
-func TestPendingInstanceCollisionShouldSkip(t *testing.T) {
+// TestInstanceCollisionShouldSkip covers the decision logic used by both
+// mergePendingInstances and refreshExternalInstances when an incoming on-disk
+// or pending instance reuses the title of an existing sidebar instance.
+//
+// Issue #255: a scheduled-task rerun recreates the same tmux session name
+// under a new worktree path, so TmuxAlive() alone cannot tell whether the
+// sidebar instance is still valid — the differing worktree must.
+//
+// Issue #765: a CLI kill+recreate reuses the title, and because the worktree
+// path and tmux session name are both derived deterministically from the
+// title, the recreated session collides with the corpse on both. Only the
+// newer CreatedAt distinguishes them.
+func TestInstanceCollisionShouldSkip(t *testing.T) {
+	// Default timestamps: incoming created at or before existing, so the
+	// CreatedAt rule never fires unless a case overrides it. Avoids
+	// time.Now() so the cases stay deterministic.
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+
 	cases := []struct {
 		name             string
 		existingWorktree string
-		pendingWorktree  string
+		incomingWorktree string
+		existingCreated  time.Time
+		incomingCreated  time.Time
 		tmuxAlive        bool
 		wantSkip         bool
 	}{
 		{
 			name:             "worktree paths differ and tmux alive -> replace (issue #255)",
 			existingWorktree: "/repo/worktrees/task",
-			pendingWorktree:  "/repo/worktrees/task-2",
+			incomingWorktree: "/repo/worktrees/task-2",
+			existingCreated:  base,
+			incomingCreated:  base,
 			tmuxAlive:        true,
 			wantSkip:         false,
 		},
 		{
 			name:             "worktree paths differ and tmux dead -> replace",
 			existingWorktree: "/repo/worktrees/task",
-			pendingWorktree:  "/repo/worktrees/task-2",
+			incomingWorktree: "/repo/worktrees/task-2",
+			existingCreated:  base,
+			incomingCreated:  base,
 			tmuxAlive:        false,
 			wantSkip:         false,
 		},
 		{
 			name:             "worktree paths match and tmux alive -> skip",
 			existingWorktree: "/repo/worktrees/task",
-			pendingWorktree:  "/repo/worktrees/task",
+			incomingWorktree: "/repo/worktrees/task",
+			existingCreated:  base,
+			incomingCreated:  base,
 			tmuxAlive:        true,
 			wantSkip:         true,
 		},
 		{
 			name:             "worktree paths match and tmux dead -> replace",
 			existingWorktree: "/repo/worktrees/task",
-			pendingWorktree:  "/repo/worktrees/task",
+			incomingWorktree: "/repo/worktrees/task",
+			existingCreated:  base,
+			incomingCreated:  base,
 			tmuxAlive:        false,
 			wantSkip:         false,
 		},
 		{
 			name:             "existing worktree unknown and tmux alive -> skip",
 			existingWorktree: "",
-			pendingWorktree:  "/repo/worktrees/task",
+			incomingWorktree: "/repo/worktrees/task",
+			existingCreated:  base,
+			incomingCreated:  base,
 			tmuxAlive:        true,
 			wantSkip:         true,
 		},
 		{
 			name:             "pending worktree unknown and tmux alive -> skip",
 			existingWorktree: "/repo/worktrees/task",
-			pendingWorktree:  "",
+			incomingWorktree: "",
+			existingCreated:  base,
+			incomingCreated:  base,
 			tmuxAlive:        true,
 			wantSkip:         true,
 		},
 		{
 			name:             "both worktrees unknown and tmux dead -> replace",
 			existingWorktree: "",
-			pendingWorktree:  "",
+			incomingWorktree: "",
+			existingCreated:  base,
+			incomingCreated:  base,
 			tmuxAlive:        false,
 			wantSkip:         false,
+		},
+		{
+			name:             "same worktree, tmux alive (name reused), incoming newer -> replace (issue #765)",
+			existingWorktree: "/repo/worktrees/task",
+			incomingWorktree: "/repo/worktrees/task",
+			existingCreated:  base,
+			incomingCreated:  base.Add(time.Minute),
+			tmuxAlive:        true,
+			wantSkip:         false,
+		},
+		{
+			name:             "same worktree, tmux alive, incoming same age -> skip (unchanged session)",
+			existingWorktree: "/repo/worktrees/task",
+			incomingWorktree: "/repo/worktrees/task",
+			existingCreated:  base,
+			incomingCreated:  base,
+			tmuxAlive:        true,
+			wantSkip:         true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := pendingInstanceCollisionShouldSkip(tc.existingWorktree, tc.pendingWorktree, tc.tmuxAlive)
+			got := instanceCollisionShouldSkip(tc.existingWorktree, tc.incomingWorktree, tc.existingCreated, tc.incomingCreated, tc.tmuxAlive)
 			if got != tc.wantSkip {
-				t.Fatalf("pendingInstanceCollisionShouldSkip(%q, %q, %v) = %v; want %v",
-					tc.existingWorktree, tc.pendingWorktree, tc.tmuxAlive, got, tc.wantSkip)
+				t.Fatalf("instanceCollisionShouldSkip(%q, %q, %v, %v, %v) = %v; want %v",
+					tc.existingWorktree, tc.incomingWorktree, tc.existingCreated, tc.incomingCreated, tc.tmuxAlive, got, tc.wantSkip)
 			}
 		})
 	}
