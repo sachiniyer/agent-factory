@@ -80,9 +80,9 @@ go build -o /tmp/af-release-smoke .
 
 /tmp/af-release-smoke sessions --repo "$tmp_repo" create --name smoke --program claude
 /tmp/af-release-smoke sessions --repo "$tmp_repo" list
-/tmp/af-release-smoke sessions send-prompt smoke "release-smoke"
+/tmp/af-release-smoke sessions --repo "$tmp_repo" send-prompt smoke "release-smoke"
 /tmp/af-release-smoke sessions preview smoke
-/tmp/af-release-smoke sessions kill smoke
+/tmp/af-release-smoke sessions --repo "$tmp_repo" kill smoke
 /tmp/af-release-smoke sessions --repo "$tmp_repo" list
 ```
 
