@@ -231,10 +231,11 @@ func (t *TmuxSession) Start(workDir string) error {
 		select {
 		case <-timeout:
 			ptmx.Close()
+			timeoutErr := fmt.Errorf("timed out waiting for tmux session %s", t.sanitizedName)
 			if cleanupErr := t.Close(); cleanupErr != nil {
-				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
 			}
-			return fmt.Errorf("timed out waiting for tmux session %s: %v", t.sanitizedName, err)
+			return timeoutErr
 		default:
 			time.Sleep(sleepDuration)
 			// Exponential backoff up to 50ms max

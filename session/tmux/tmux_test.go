@@ -265,6 +265,60 @@ func TestStartTmuxSession(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestStartTimeoutCleanupSucceeds guards issue #696: when the session never
+// appears before the startup timeout and cleanup succeeds, the error must
+// describe the timeout without rendering a nil error as the literal "<nil>".
+func TestStartTimeoutCleanupSucceeds(t *testing.T) {
+	ptyFactory := NewMockPtyFactory(t)
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			// Session never appears; kill-session (cleanup) succeeds.
+			if strings.Contains(cmd.String(), "has-session") {
+				return fmt.Errorf("session not found")
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+	}
+
+	session := newTmuxSession(toTmuxName("timeout-ok", ""), "claude", ptyFactory, cmdExec)
+
+	err := session.Start(t.TempDir())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "timed out waiting for tmux session af_timeout-ok")
+	require.NotContains(t, err.Error(), "<nil>")
+	require.NotContains(t, err.Error(), "cleanup error")
+}
+
+// TestStartTimeoutCleanupFails is the companion to the #696 guard: when
+// cleanup also fails, the timeout error must include the cleanup cause.
+func TestStartTimeoutCleanupFails(t *testing.T) {
+	ptyFactory := NewMockPtyFactory(t)
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "has-session") {
+				return fmt.Errorf("session not found")
+			}
+			if strings.Contains(cmd.String(), "kill-session") {
+				return fmt.Errorf("kill-session exploded")
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+	}
+
+	session := newTmuxSession(toTmuxName("timeout-bad", ""), "claude", ptyFactory, cmdExec)
+
+	err := session.Start(t.TempDir())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "timed out waiting for tmux session af_timeout-bad")
+	require.Contains(t, err.Error(), "cleanup error")
+	require.Contains(t, err.Error(), "kill-session exploded")
+	require.NotContains(t, err.Error(), "<nil>")
+}
+
 // captureErrorLog redirects log.ErrorLog at the test's ErrorLog into the
 // returned buffer for the duration of the test, restoring the previous
 // destination on cleanup.
