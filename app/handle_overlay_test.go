@@ -63,26 +63,12 @@ func TestHandleStateSelectProgramSwitchesAgent(t *testing.T) {
 // reload.
 //
 // We assert directly on tasks.json after driving the handler with the same
-// key sequence a user would press. handleTaskCreate also calls
-// task.InstallScheduler under the hood, which shells out to `systemctl --user`
-// — that step is flaky in CI containers without a user systemd manager.
-// Independent of whether InstallScheduler succeeds:
-//   - on success, LoadTasksForCurrentRepo + SetTasks reload the (already-saved)
-//     toggle from disk;
-//   - on failure, handleTaskCreate rolls back the new task via RemoveTask, but
-//     saveContentPaneState has already persisted the toggle.
-//
-// Either way the on-disk Enabled bit must reflect the user's toggle. Without
-// the fix it would still be `true` on disk because saveContentPaneState never
-// ran. We redirect HOME so scheduler writes land in a tempdir, which keeps the
-// test from polluting the developer's real systemd-user units even on the
-// platforms where the systemctl call would succeed against a real session.
+// key sequence a user would press. handleTaskCreate's daemon reload poke is
+// stubbed by newTestHome, so the only side effect under test is the disk
+// write: the on-disk Enabled bit must reflect the user's toggle. Without the
+// fix it would still be `true` on disk because saveContentPaneState never ran.
 func TestHandleContentPaneFocus_PendingCreateFlushesDirtyTaskState(t *testing.T) {
 	h := newTestHome(t)
-	// Keep any task.InstallScheduler/RemoveScheduler file writes inside the
-	// test tempdir so a real user-systemd doesn't end up with stale units
-	// pointing into deleted tempdirs after the test exits.
-	t.Setenv("HOME", t.TempDir())
 
 	repoDir := setupRealRepo(t)
 	t.Chdir(repoDir)
@@ -138,9 +124,8 @@ func TestHandleContentPaneFocus_PendingCreateFlushesDirtyTaskState(t *testing.T)
 
 	// Submit. This sets pendingCreate inside TaskPane and then the focus
 	// handler's HasPendingCreate branch runs — which is the code path the fix
-	// modifies. We don't care whether handleTaskCreate's downstream
-	// InstallScheduler ultimately succeeds; we only care that the toggle is on
-	// disk by the time the dust settles.
+	// modifies. We only care that the toggle is on disk by the time the dust
+	// settles.
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyEnter})
 
 	diskAfter, err := task.LoadTasks()

@@ -487,8 +487,8 @@ func TestTaskPaneConsumeDeletedClearsState(t *testing.T) {
 		"consuming the deletion must clear the dirty flag so updates aren't re-run")
 
 	// Second save (e.g. ESC pressed again) must find nothing to process, so the
-	// deletion loop in saveContentPaneState never re-runs RemoveScheduler/
-	// RemoveTask and can't re-install an orphaned scheduler.
+	// deletion loop in saveContentPaneState never re-runs RemoveTask on
+	// records that no longer exist.
 	second := tp.ConsumeDeleted()
 	assert.Empty(t, second,
 		"second save must not reprocess an already-deleted task (#763)")

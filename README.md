@@ -55,7 +55,10 @@ Each session runs an AI agent in an isolated git worktree with its own branch. S
 
 ### Tasks
 
-Create recurring automated tasks with cron expressions. Tasks are backed by systemd timers (Linux).
+Create recurring automated tasks with cron expressions. Tasks are scheduled by
+the agent-factory daemon, which starts automatically whenever `af` runs and an
+enabled task exists. To keep schedules firing across reboots without opening
+`af`, install the daemon's autostart unit with `af daemon install`.
 
 | Key | Action |
 |-----|--------|
@@ -113,7 +116,18 @@ af tasks add --name "Daily triage" --prompt "..." --cron "0 9 * * *" --program c
 af tasks get <id>                                              # fetch one task
 af tasks trigger <id>                                          # run task immediately
 af tasks update <id> --cron "..." --prompt "..." --enabled true
-af tasks remove <id>                                           # delete a task + its systemd unit
+af tasks remove <id>                                           # delete a task
+```
+
+### Daemon
+
+The background daemon hosts task cron schedules and autoyes mode. It starts on
+demand; installing it as a user-level autostart unit (systemd user service on
+Linux, launchd agent on macOS) keeps scheduled tasks firing after reboots.
+
+```bash
+af daemon install                                              # register autostart at login
+af daemon uninstall                                            # remove the autostart unit
 ```
 
 ## Maintenance

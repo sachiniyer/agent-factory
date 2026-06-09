@@ -2,9 +2,9 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -528,38 +528,33 @@ func (m *home) saveContentPaneState() {
 			if err := task.UpdateTask(tsk); err != nil {
 				log.ErrorLog.Printf("failed to update task: %v", err)
 			}
-			if tsk.Enabled {
-				if err := task.InstallScheduler(tsk); err != nil {
-					log.WarningLog.Printf("failed to install timer: %v", err)
-				}
-			} else {
-				if err := task.RemoveScheduler(tsk); err != nil {
-					log.WarningLog.Printf("failed to remove timer: %v", err)
-				}
-			}
 		}
 		for _, tsk := range sp.ConsumeDeleted() {
-			// Tear down the scheduler before deleting the task record so
-			// a phantom timer can't keep firing for a deleted task. If
-			// RemoveTask then fails, re-install the scheduler so the
-			// listed task is at least still firing on its schedule
-			// (fixes #457).
-			if err := task.RemoveScheduler(tsk); err != nil {
-				log.WarningLog.Printf("failed to remove timer: %v", err)
-				continue
-			}
 			if err := task.RemoveTask(tsk.ID); err != nil {
 				log.ErrorLog.Printf("failed to remove task: %v", err)
-				if rbErr := task.InstallScheduler(tsk); rbErr != nil {
-					log.ErrorLog.Printf("failed to roll back scheduler after RemoveTask failure: %v", rbErr)
-				}
 			}
 		}
+		// Schedules live in the daemon (#782): a single reload poke after
+		// the batched writes brings its cron entries in sync.
+		reloadDaemonTaskSchedules()
 		// Refresh sidebar
 		tasks, err := task.LoadTasksForCurrentRepo()
 		if err == nil {
 			m.sidebar.SetTasks(tasks)
 		}
+	}
+}
+
+// reloadDaemonTaskSchedulesFn is indirected so TUI tests can observe the poke
+// without dialing (or spawning) a real daemon.
+var reloadDaemonTaskSchedulesFn = daemon.ReloadTasks
+
+// reloadDaemonTaskSchedules asks the daemon to re-read tasks.json after a
+// TUI-side task edit. Best-effort: the daemon reloads all tasks at every
+// start, so a failed poke only delays the change until then.
+func reloadDaemonTaskSchedules() {
+	if err := reloadDaemonTaskSchedulesFn(); err != nil {
+		log.WarningLog.Printf("task change saved, but the daemon schedule reload failed (the change applies at next daemon start): %v", err)
 	}
 }
 
@@ -594,26 +589,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if err := task.AddTask(t); err != nil {
 		return m.handleError(fmt.Errorf("failed to save task: %v", err))
 	}
-	if err := task.InstallScheduler(t); err != nil {
-		// InstallScheduler writes the systemd unit/timer (or launchd
-		// plist) to disk BEFORE running systemctl/launchctl, so a
-		// failure on the external command leaves the scheduler files
-		// behind. RemoveTask alone only clears the JSON record, so we
-		// must also call RemoveScheduler to clean up those files
-		// (fixes #458). Both rollbacks are best-effort and run
-		// independently; failures are folded into the returned error so
-		// the user knows what to clean up manually.
-		msg := fmt.Sprintf("failed to install task scheduler: %v", err)
-		if rmSchedErr := task.RemoveScheduler(t); rmSchedErr != nil {
-			log.ErrorLog.Printf("failed to remove scheduler files during rollback: %v", rmSchedErr)
-			msg += fmt.Sprintf("; scheduler file cleanup also failed: %v", rmSchedErr)
-		}
-		if removeErr := task.RemoveTask(t.ID); removeErr != nil {
-			log.ErrorLog.Printf("failed to rollback task after scheduler install failure: %v", removeErr)
-			msg += fmt.Sprintf("; task record rollback also failed: %v", removeErr)
-		}
-		return m.handleError(errors.New(msg))
-	}
+	reloadDaemonTaskSchedules()
 	// Refresh sidebar and task pane
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {

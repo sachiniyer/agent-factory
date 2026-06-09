@@ -25,6 +25,12 @@ func newTestHome(t *testing.T) *home {
 	tmp := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
+	// Task save paths poke the daemon to reload schedules (#782); stub the
+	// poke so tests never dial — or spawn — a real daemon.
+	origReload := reloadDaemonTaskSchedulesFn
+	reloadDaemonTaskSchedulesFn = func() error { return nil }
+	t.Cleanup(func() { reloadDaemonTaskSchedulesFn = origReload })
+
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sidebar := ui.NewSidebar(&spin, false)
 	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewTerminalPane())

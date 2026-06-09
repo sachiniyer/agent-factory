@@ -220,6 +220,10 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 		osExecutableFn = prevExe
 		requestDaemonShutdownFn = prevShutdown
 	})
+	prevRespawn := respawnDaemonForTasksFn
+	respawnCalls := 0
+	respawnDaemonForTasksFn = func() { respawnCalls++ }
+	t.Cleanup(func() { respawnDaemonForTasksFn = prevRespawn })
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
@@ -238,6 +242,9 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	}
 	if shutdownCalls != 1 {
 		t.Fatalf("expected one Shutdown call, got %d", shutdownCalls)
+	}
+	if respawnCalls != 1 {
+		t.Fatalf("expected the daemon respawn check to run once after shutdown, got %d", respawnCalls)
 	}
 	got, err := os.ReadFile(tempBin)
 	if err != nil {
@@ -283,6 +290,10 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 		osExecutableFn = prevExe
 		requestDaemonShutdownFn = prevShutdown
 	})
+	prevRespawn := respawnDaemonForTasksFn
+	respawnCalls := 0
+	respawnDaemonForTasksFn = func() { respawnCalls++ }
+	t.Cleanup(func() { respawnDaemonForTasksFn = prevRespawn })
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
@@ -295,6 +306,9 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 
 	if err := autoUpdate(); err != nil {
 		t.Fatalf("autoUpdate should not fail when Shutdown errors, got: %v", err)
+	}
+	if respawnCalls != 0 {
+		t.Fatalf("no respawn check should run when shutdown errored, got %d", respawnCalls)
 	}
 }
 

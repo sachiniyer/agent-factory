@@ -406,7 +406,7 @@ func TestControlServerCreateAndKillSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	closeServer, err := startControlServer(manager, nil)
+	closeServer, err := startControlServer(manager, nil, nil)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestControlServerShutdownClosesChannel(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	shutdownCh := make(chan struct{})
-	closeServer, err := startControlServer(manager, shutdownCh)
+	closeServer, err := startControlServer(manager, nil, shutdownCh)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestRequestShutdownSuccess(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	shutdownCh := make(chan struct{})
-	closeServer, err := startControlServer(manager, shutdownCh)
+	closeServer, err := startControlServer(manager, nil, shutdownCh)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
@@ -559,150 +559,6 @@ func TestRequestShutdownSuccess(t *testing.T) {
 	case <-shutdownCh:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("shutdownCh was not closed after RequestShutdown")
-	}
-}
-
-// TestFormatWaitForReadyTimeoutError covers the UX half of
-// sachiniyer/agent-factory#502: when waitForReady gives up, the returned
-// error must carry a trimmed snippet of the captured pane content so the
-// user-facing TUI shows what the agent was doing — not just "timed out".
-// Empty captured content collapses back to the bare timeout message so
-// users don't see a dangling "last pane content:" header.
-func TestFormatWaitForReadyTimeoutError(t *testing.T) {
-	timeout := 60 * time.Second
-
-	t.Run("happy case appends trimmed snippet", func(t *testing.T) {
-		// >5 lines and well under 400 bytes — should keep only the last 5.
-		content := "boot 1\nboot 2\nboot 3\nLoading config...\nConnecting to MCP server...\nStill waiting on handshake\nAlmost there..."
-		got := formatWaitForReadyTimeoutError(timeout, content).Error()
-
-		wantHeader := "timed out waiting for program to start (1m0s)\nlast pane content:"
-		if !strings.HasPrefix(got, wantHeader) {
-			t.Fatalf("missing header.\n got=%q\nwant prefix=%q", got, wantHeader)
-		}
-		if !strings.Contains(got, "  Almost there...") {
-			t.Errorf("expected indented snippet line in error, got %q", got)
-		}
-		if !strings.Contains(got, "  Loading config...") {
-			t.Errorf("expected last-5-lines window to include 'Loading config...', got %q", got)
-		}
-		if strings.Contains(got, "boot 1") || strings.Contains(got, "boot 2") {
-			t.Errorf("expected oldest lines to be trimmed off, got %q", got)
-		}
-	})
-
-	t.Run("empty content omits header entirely", func(t *testing.T) {
-		got := formatWaitForReadyTimeoutError(timeout, "").Error()
-		want := "timed out waiting for program to start (1m0s)"
-		if got != want {
-			t.Fatalf("empty content error mismatch.\n got=%q\nwant=%q", got, want)
-		}
-	})
-
-	t.Run("whitespace-only content treated as empty", func(t *testing.T) {
-		got := formatWaitForReadyTimeoutError(timeout, "\n\n   \n\n").Error()
-		want := "timed out waiting for program to start (1m0s)"
-		if got != want {
-			t.Fatalf("whitespace-only content error mismatch.\n got=%q\nwant=%q", got, want)
-		}
-	})
-
-	t.Run("long content is byte-capped", func(t *testing.T) {
-		// One huge line well over the 400-byte cap.
-		long := strings.Repeat("x", 1200)
-		got := formatWaitForReadyTimeoutError(timeout, long).Error()
-		// Header + "\n  " + at most 400 bytes of snippet.
-		header := "timed out waiting for program to start (1m0s)\nlast pane content:\n  "
-		if !strings.HasPrefix(got, header) {
-			t.Fatalf("missing header prefix, got %q", got)
-		}
-		snippet := strings.TrimPrefix(got, header)
-		if len(snippet) > 400 {
-			t.Errorf("snippet not capped: len=%d, want <=400", len(snippet))
-		}
-	})
-}
-
-// codexYOLOBanner is the actual codex startup pane reported in
-// sachiniyer/agent-factory#714: codex rendered its banner, the YOLO-mode
-// header, and the "›" (U+203A) input prompt, but the claude-only
-// isReadyContent never matched it, so waitForReady spun for the full timeout.
-const codexYOLOBanner = "╭───────────────────────────────────────────────╮\n" +
-	"│ >_ OpenAI Codex (v0.135.0)                    │\n" +
-	"│ permissions: YOLO mode                        │\n" +
-	"╰───────────────────────────────────────────────╯\n" +
-	"› Use /skills to list available skills"
-
-// TestIsReadyContent covers the agent-aware ready detection added for #714.
-// Mirrors task.TestIsReadyContent — the two packages keep duplicate copies of
-// isReadyContent (no shared home without an import cycle), so both are tested.
-func TestIsReadyContent(t *testing.T) {
-	tests := []struct {
-		name    string
-		agent   string
-		content string
-		want    bool
-	}{
-		// claude (and the default / legacy fallback)
-		{"empty", "claude", "", false},
-		{"claude input prompt", "claude", "some output\n\n❯ ", true},
-		{"claude trust prompt", "claude", "Do you trust the files in this folder?\n1. Yes", true},
-		{"claude mcp trust prompt", "claude", "detected a new MCP server from `.mcp.json`.", true},
-		{
-			name:    "claude doc trust prompt",
-			agent:   "claude",
-			content: "Open documentation url: https://docs/\n(Y)es/(N)o/(D)on't ask again [Yes]:",
-			want:    true,
-		},
-		{"claude not ready", "claude", "installing dependencies...", false},
-		// Unknown / legacy program falls through to the claude signals.
-		{"unknown program uses claude signals", "/usr/bin/some-tool", "out\n❯ ", true},
-		{"unknown program not ready", "/usr/bin/some-tool", "compiling…", false},
-
-		// codex — the #714 regression case.
-		{"codex YOLO banner with prompt (#714)", "codex", codexYOLOBanner, true},
-		{"codex bare prompt glyph", "codex", "some output\n› ", true},
-		// #729: the workspace-trust dialog must NOT be treated as ready —
-		// there is no codex dismissal for it, so waitForReady must keep
-		// waiting for the real "›" prompt rather than letting the user's
-		// prompt be typed into the dialog. Regression from #714/#715.
-		{"codex trust folder prompt is not ready (#729)", "codex", "Do you trust this folder?\n> Yes", false},
-		{"codex trust dialog with later prompt is ready (#729)", "codex", "Do you trust this folder?\n› ", true},
-		{"codex not ready on claude glyph", "codex", "rendering\n❯ ", false},
-		{"codex not ready on box border alone", "codex", "╭──╮\n│ x │\n╰──╯", false},
-
-		// aider
-		{"aider banner", "aider", "Aider v0.74.0\nMain model: ...", true},
-		{"aider input prompt", "aider", "some output\n> ", true},
-		{
-			name:    "aider doc trust prompt",
-			agent:   "aider",
-			content: "Open documentation url: https://aider.chat/docs/\n(Y)es/(N)o/(D)on't ask again [Yes]:",
-			want:    true,
-		},
-		{"aider not ready", "aider", "loading model weights…", false},
-
-		// gemini (best-guess box-border signal — see #714)
-		{"gemini box frame", "gemini", "╭──╮\n│ Gemini │\n╰──╯", true},
-		{
-			name:    "gemini doc trust prompt",
-			agent:   "gemini",
-			content: "Gemini CLI\nOpen documentation url for more info.\n(D)on't ask again",
-			want:    true,
-		},
-		{"gemini not ready", "gemini", "starting gemini-cli…", false},
-
-		// shared doc-trust guard: both substrings required.
-		{"only open documentation url without confirm", "claude", "See Open documentation url for details.", false},
-		{"only dont ask again without doc url", "aider", "Some prompt asking (D)on't ask again", false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isReadyContent(tc.content, tc.agent); got != tc.want {
-				t.Errorf("isReadyContent(%q, %q) = %v, want %v", tc.content, tc.agent, got, tc.want)
-			}
-		})
 	}
 }
 

@@ -7,11 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -72,8 +70,9 @@ func LoadAndClearPendingInstances() ([]session.InstanceData, error) {
 // name (session.DetectAgentFromProgram, which handles legacy free-form Program
 // paths) and pass it here. An empty or non-canonical agent falls through to
 // the Claude signals — the historical behavior before this became agent-aware
-// (#714). Kept in sync with daemon.isReadyContent; the two packages can't
-// share the helper without an import cycle (task already imports daemon).
+// (#714). This is the single copy: the daemon reaches it via
+// task.StartAndSendPrompt (daemon imports task since #782 inverted the old
+// task→daemon dependency).
 func isReadyContent(content, agent string) bool {
 	switch agent {
 	case tmux.ProgramCodex:
@@ -188,114 +187,6 @@ func trimPaneSnippet(content string) string {
 		out = out[len(out)-400:]
 	}
 	return out
-}
-
-// RunTask executes a task by creating a new instance,
-// sending the prompt, and registering it in the application state.
-func RunTask(taskID string) error {
-	log.Initialize(false)
-	defer log.Close()
-
-	// Validate the task ID before it flows into any filesystem path. The
-	// CLI boundary also validates, but RunTask is exposed via `af task run`
-	// (the hidden scheduler entry point) and via the API, so this is the
-	// shared chokepoint that protects every caller.
-	if err := ValidateTaskID(taskID); err != nil {
-		return err
-	}
-
-	// Load the task first so a nonexistent ID never causes a lock file to
-	// be created. The original ordering wrote a lock for any caller-supplied
-	// ID before validation (issue #575).
-	t, err := GetTask(taskID)
-	if err != nil {
-		return fmt.Errorf("failed to load task: %w", err)
-	}
-
-	if !t.Enabled {
-		return fmt.Errorf("task %s is disabled", taskID)
-	}
-
-	// Create lock file to prevent overlapping runs.
-	configDir, err := config.GetConfigDir()
-	if err != nil {
-		return fmt.Errorf("failed to get config directory: %w", err)
-	}
-	lockDir := filepath.Join(configDir, "locks")
-	if err := os.MkdirAll(lockDir, 0755); err != nil {
-		return fmt.Errorf("failed to create lock directory: %w", err)
-	}
-	lockPath := filepath.Join(lockDir, "task-"+taskID+".lock")
-	// Defense in depth: even after ValidateTaskID, confirm the joined path
-	// remains inside lockDir. ValidateTaskID already rejects "..", "/",
-	// and "\", so this is a belt-and-suspenders check matching the
-	// config.repoInstancesPath pattern.
-	cleanLockDir := filepath.Clean(lockDir) + string(filepath.Separator)
-	if !strings.HasPrefix(filepath.Clean(lockPath), cleanLockDir) {
-		return fmt.Errorf("invalid task id: resolved lock path escapes locks directory")
-	}
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open lock file: %w", err)
-	}
-	defer lockFile.Close()
-
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("another run is already active for task %s", taskID)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-
-	// Validate project path. Distinguish a missing git binary from a path that
-	// simply is not a repo so the daemon surfaces an actionable error (#737).
-	if !git.IsGitInstalled() {
-		return fmt.Errorf("git is not installed or could not be found in PATH; install git and ensure it is available in your PATH")
-	}
-	if !git.IsGitRepo(t.ProjectPath) {
-		return fmt.Errorf("project path %s is not a valid git repository", t.ProjectPath)
-	}
-
-	baseTitle := TaskRunBaseTitle(*t)
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-	data, err := daemon.CreateSession(daemon.CreateSessionRequest{
-		TitleBase: baseTitle,
-		RepoPath:  t.ProjectPath,
-		Program:   t.Program,
-		Prompt:    t.Prompt,
-		AutoYes:   cfg.AutoYes,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to start task session: %w", err)
-	}
-
-	// Update task status. Use UpdateTaskStatus so we don't re-validate Program
-	// — the task already ran via daemon.CreateSession, and the stored Program
-	// value may predate current enum validation (see #664).
-	now := time.Now()
-	if err := UpdateTaskStatus(taskID, &now, "started"); err != nil {
-		log.ErrorLog.Printf("failed to update task status: %v", err)
-	}
-
-	log.InfoLog.Printf("task %s started successfully as instance %s", taskID, data.Title)
-	return nil
-}
-
-func appendTaskRunnerInstanceFn(data session.InstanceData) func(json.RawMessage) (json.RawMessage, error) {
-	return func(raw json.RawMessage) (json.RawMessage, error) {
-		var existing []session.InstanceData
-		if err := json.Unmarshal(raw, &existing); err != nil {
-			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
-		}
-		for i := range existing {
-			if existing[i].Title == data.Title {
-				return nil, fmt.Errorf("session with title %q already exists", data.Title)
-			}
-		}
-		existing = append(existing, data)
-		return json.MarshalIndent(existing, "", "  ")
-	}
 }
 
 // TaskRunBaseTitle returns the preferred title for a task-created session.

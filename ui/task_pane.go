@@ -81,10 +81,9 @@ func (s *TaskPane) GetTasks() []task.Task {
 
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's
 // dirty state so a subsequent save can't reprocess already-deleted tasks. The
-// deletion loop in saveContentPaneState removes schedulers and task records as
-// a side effect, so re-running it would call RemoveScheduler/RemoveTask on
-// records that no longer exist and trip the rollback path that re-installs an
-// orphaned scheduler (fixes #763).
+// deletion loop in saveContentPaneState removes task records as a side
+// effect, so re-running it would call RemoveTask on records that no longer
+// exist and log spurious errors (fixes #763).
 func (s *TaskPane) ConsumeDeleted() []task.Task {
 	deleted := s.deleted
 	s.deleted = nil

@@ -17,7 +17,6 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
-	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/spf13/cobra"
 )
@@ -89,6 +88,10 @@ var (
 					}
 				}()
 			}
+			// The daemon hosts the task cron scheduler (#782), so make sure
+			// it is up whenever an enabled task exists. In the background:
+			// daemon launch can take a few seconds and must not delay the TUI.
+			go ensureDaemonForTasks()
 			// Check for updates in the background (non-blocking).
 			autoUpdateInBackground()
 
@@ -198,8 +201,8 @@ func init() {
 			strings.Join(tmux.SupportedPrograms, ", ")))
 	rootCmd.Flags().BoolVarP(&autoYesFlag, "autoyes", "y", false,
 		"[experimental] If enabled, all instances will automatically accept prompts")
-	rootCmd.Flags().BoolVar(&daemonFlag, "daemon", false, "Run a program that loads all sessions"+
-		" and runs autoyes mode on them.")
+	rootCmd.Flags().BoolVar(&daemonFlag, "daemon", false, "Run the background daemon that schedules"+
+		" tasks and runs autoyes mode on all sessions.")
 
 	// Hide the daemonFlag as it's only for internal use
 	err := rootCmd.Flags().MarkHidden("daemon")
@@ -211,7 +214,7 @@ func init() {
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(upgradeCmd)
-	rootCmd.AddCommand(task.TaskCmd)
+	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(api.SessionsCmd)
 	rootCmd.AddCommand(api.TasksCmd)
 }

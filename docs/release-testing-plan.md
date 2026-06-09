@@ -53,7 +53,7 @@ Expected result:
 | Daemon coordination | Integration tests cover stale socket recovery, dead daemon restart, duplicate create races, and daemon-owned mutations. | Verify `daemon.sock` and `daemon.pid` are created in a temp `AGENT_FACTORY_HOME`, then removed or replaced after kill/restart. |
 | TUI creation and sync | App E2E tests cover async creation, navigation while creating, TUI refresh seeing CLI changes, and real TUI creation with real tmux/git under the race detector. | Launch `af` in a temp repo, create one `cat` session, switch preview/terminal tabs, then kill it. |
 | Git worktrees | Session/git tests cover worktree naming, collisions, linked worktrees, branch cleanup, prune before delete, and missing paths. | After kill/reset, run `git worktree list` and confirm no test worktree remains. |
-| Scheduled tasks | Unit tests cover cron parsing, systemd/launchd rendering, task CRUD, and task runner storage. Integration tests run the same task twice and verify `name` then `name-2`. | On a Linux machine with systemd user timers, add/list/remove one task and confirm the timer exists then disappears. On macOS, verify launchd plist load/unload on a real host before macOS-targeted releases. |
+| Scheduled tasks | Unit tests cover cron parsing/validation agreement, the in-daemon scheduler (registration, CRUD reload, firing), the legacy-unit upgrade sweep, daemon autostart unit generation, task CRUD, and task runner storage. Integration tests run the same task twice and verify `name` then `name-2`. | Add a task with a cron one minute out, confirm the daemon fires it (a session appears), then remove the task and confirm the schedule is gone via another fire window. Verify `af daemon install`/`uninstall` on Linux (systemd user service) and macOS (launchd agent) before releases that change daemon lifecycle code. |
 | Remote hooks | Session and integration tests cover launch/list/import/attach/delete protocols, bad JSON, command failures, duplicate imports, and imported display-title deletion. | Configure `examples/remote-hooks` or a repo-local fake hook set, import, preview, and delete a remote session. |
 | Reset/cleanup | Unit tests cover ghost sessions and worktree cleanup helpers. | With temp `AGENT_FACTORY_HOME`, create two sessions, run `af reset`, then confirm tmux sessions, worktrees, and stored instances are gone. |
 | Upgrade/release artifacts | Unit tests cover binary download (success, non-200, stalled body, stalled headers), archive extraction, and daemon restart after binary swap; CI builds Linux/macOS artifacts. | Download the release tarball for the host platform, unpack it, run `af version`, and test `af upgrade` from the previous release binary. |
@@ -121,7 +121,8 @@ Do not cut or publish a release if any of these are true:
 Non-blocking, known limits:
 - Real Claude/Aider/Codex/Gemini interactive behavior is not fully automated;
   tests use a fake wrapper script (routed via `program_overrides`) and fake backends for deterministic runs.
-- Real systemd and launchd scheduling should be manually smoke-tested on their
-  native OS before a release that changes scheduler code.
+- The `af daemon install` autostart unit (systemd user service / launchd
+  agent) should be manually smoke-tested on its native OS before a release
+  that changes daemon lifecycle code.
 - `af upgrade` requires a published release asset, so end-to-end upgrade is a
   post-publish verification step.

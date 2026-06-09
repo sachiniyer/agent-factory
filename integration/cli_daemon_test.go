@@ -157,8 +157,10 @@ func TestScheduledTaskRunnerUsesDaemonAndAllocatesRerunTitle(t *testing.T) {
 		},
 	})
 
-	h.run("task", "run", "task-one")
-	h.run("task", "run", "task-one")
+	// `af tasks trigger` rides the same daemon.RunTask path the in-daemon
+	// cron scheduler fires (#782), so this also covers scheduled runs.
+	h.run("tasks", "trigger", "task-one")
+	h.run("tasks", "trigger", "task-one")
 
 	sessions := h.listSessions()
 	assertTitles(t, sessions, "nightly", "nightly-2")
