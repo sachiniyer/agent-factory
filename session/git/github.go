@@ -15,13 +15,21 @@ type PRInfo struct {
 	State  string `json:"state"`
 }
 
-// FetchPRInfo runs `gh pr view` to look up a PR for the given branch.
+// FetchPRInfo runs `gh pr list --head <branch>` to look up a PR for the
+// given branch. `--head` always treats its argument as a branch name, unlike
+// `gh pr view <arg>` which disambiguates an all-numeric argument as a PR
+// NUMBER — so a branch named "123" used to resolve to PR #123 (#740).
+//
+// `--state all` plus the open-first selection in parsePRList mirrors how
+// `gh pr view <branch>` resolves a branch: prefer the open PR, but still
+// surface a merged/closed one so the sidebar keeps showing a session's PR
+// after it merges.
 //
 // It returns (nil, nil) — not an error — whenever there is no PR to look up.
 // That covers three by-design cases:
 //   - an empty branch name (a detached-HEAD worktree has no branch to query),
 //   - the `gh` binary not being installed,
-//   - `gh` reporting that the branch has no associated PR.
+//   - no PR existing for the branch (`gh pr list` prints an empty array).
 //
 // A non-nil error is reserved for genuine failures (e.g. a transient `gh`
 // error or malformed output) so callers can preserve previously cached PR
@@ -35,34 +43,40 @@ func FetchPRInfo(repoPath, branchName string) (*PRInfo, error) {
 		return nil, nil
 	}
 
-	cmd := exec.Command("gh", "pr", "view", branchName, "--json", "number,title,url,state")
+	cmd := exec.Command("gh", "pr", "list", "--head", branchName, "--state", "all",
+		"--json", "number,title,url,state", "--limit", "10")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr := string(exitErr.Stderr)
-			if strings.Contains(stderr, "no pull requests found") ||
-				strings.Contains(stderr, "Could not resolve to a PullRequest") {
-				return nil, nil // genuinely no PR
-			}
-		}
 		return nil, fmt.Errorf("failed to fetch PR info: %w", err)
 	}
 
-	return parsePRInfo(out)
+	return parsePRList(out)
 }
 
-// parsePRInfo parses the JSON output from `gh pr view`.
-// Returns (nil, nil) only when the output clearly indicates no PR exists
-// (i.e. PR number of 0). On malformed JSON it returns an error so that
-// callers preserve previously cached PR info rather than clearing it.
-func parsePRInfo(out []byte) (*PRInfo, error) {
-	var info PRInfo
-	if err := json.Unmarshal(out, &info); err != nil {
+// parsePRList parses the JSON array output from `gh pr list` and selects the
+// PR to display: the first open PR if one exists, otherwise the first entry
+// (gh orders by creation date, newest first). Returns (nil, nil) when the
+// array is empty, i.e. the branch has no PR. On malformed JSON it returns an
+// error so that callers preserve previously cached PR info rather than
+// clearing it.
+func parsePRList(out []byte) (*PRInfo, error) {
+	var prs []PRInfo
+	if err := json.Unmarshal(out, &prs); err != nil {
 		return nil, fmt.Errorf("failed to parse PR info JSON: %w", err)
 	}
-	if info.Number == 0 {
+	if len(prs) == 0 {
 		return nil, nil
 	}
-	return &info, nil
+	selected := prs[0]
+	for _, pr := range prs {
+		if strings.EqualFold(pr.State, "OPEN") {
+			selected = pr
+			break
+		}
+	}
+	if selected.Number == 0 {
+		return nil, nil
+	}
+	return &selected, nil
 }
