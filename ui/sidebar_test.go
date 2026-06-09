@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -309,6 +310,137 @@ func TestSidebarRender(t *testing.T) {
 	rendered := s.String()
 	assert.Contains(t, rendered, "Instances (1)")
 	assert.NotEmpty(t, rendered)
+}
+
+// indicatorArrows reports which "▲/▼ N more" scroll-indicator rows are present
+// in the rendered output. Detection keys on the "more" text because expanded
+// section headers also use a "▼ " arrow.
+func indicatorArrows(out string) (up, down bool) {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "more") {
+			continue
+		}
+		if strings.Contains(line, "▲") {
+			up = true
+		}
+		if strings.Contains(line, "▼") {
+			down = true
+		}
+	}
+	return up, down
+}
+
+// newWindowingSidebar builds a sidebar with n instances titled win-00..win-NN
+// for the #787 windowing tests.
+func newWindowingSidebar(t *testing.T, n int) *Sidebar {
+	t.Helper()
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false)
+	dir := t.TempDir()
+	for i := 0; i < n; i++ {
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title: fmt.Sprintf("win-%02d", i), Path: dir, Program: "test",
+		})
+		require.NoError(t, err)
+		s.AddInstance(inst)
+	}
+	return s
+}
+
+// TestSidebarWindowsLongInstanceListToAllocation is the regression test for
+// #787: lipgloss.Place pads but never truncates, so before windowing 25
+// instances at a 20-line allocation rendered ~100 lines and pushed the menu
+// and error box below the fold. The sidebar must render exactly its allocated
+// height regardless of instance count, with the selected row always inside
+// the rendered window.
+func TestSidebarWindowsLongInstanceListToAllocation(t *testing.T) {
+	const w, h = 40, 20
+
+	cases := []struct {
+		name    string
+		sel     func(s *Sidebar)
+		visible string
+	}{
+		{"top (Instances header)", func(s *Sidebar) {}, "Instances (25)"},
+		{"middle instance", func(s *Sidebar) { s.SetSelectedInstance(12) }, "win-12"},
+		{"bottom instance", func(s *Sidebar) { s.SetSelectedInstance(24) }, "win-24"},
+		{"trailing Hooks header", func(s *Sidebar) {
+			s.SetSelectedInstance(24)
+			s.Down() // Tasks header
+			s.Down() // Hooks header
+		}, "Hooks"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newWindowingSidebar(t, 25)
+			s.SetSize(w, h)
+			tc.sel(s)
+
+			out := s.String()
+			require.Equal(t, h, renderedLineCount(out),
+				"sidebar must render exactly the allocated height")
+			assert.Contains(t, out, tc.visible,
+				"selected row must be inside the rendered window")
+		})
+	}
+}
+
+// TestSidebarWindowScrollsWithSelection walks the selection from the top of
+// the list to the bottom and back. At every step the rendered output must
+// stay at the allocated height and contain the selected row, and the ▲/▼
+// indicators must only appear when rows are actually hidden on that side.
+func TestSidebarWindowScrollsWithSelection(t *testing.T) {
+	const w, h = 40, 20
+
+	s := newWindowingSidebar(t, 25)
+	s.SetSize(w, h)
+
+	check := func(step string) {
+		out := s.String()
+		require.Equal(t, h, renderedLineCount(out), "%s: height must stay at the allocation", step)
+		if inst := s.GetSelectedInstance(); inst != nil {
+			assert.Contains(t, out, inst.Title, "%s: selected instance must be visible", step)
+		}
+	}
+
+	// Walk down through every row (1 header + 25 instances + 2 headers).
+	check("initial")
+	for i := 0; i < len(s.visibleItems)-1; i++ {
+		s.Down()
+		check(fmt.Sprintf("down %d", i))
+	}
+	// At the very bottom nothing is hidden below, so only ▲ may show.
+	up, down := indicatorArrows(s.String())
+	assert.True(t, up, "rows above must be indicated at the bottom")
+	assert.False(t, down, "nothing is hidden below at the bottom")
+
+	// Walk back up to the top.
+	for i := 0; i < len(s.visibleItems)-1; i++ {
+		s.Up()
+		check(fmt.Sprintf("up %d", i))
+	}
+	top := s.String()
+	assert.Contains(t, top, "win-00", "first instance must be visible at the top")
+	up, down = indicatorArrows(top)
+	assert.False(t, up, "nothing is hidden above at the top")
+	assert.True(t, down, "rows below must be indicated at the top")
+}
+
+// TestSidebarShortListRendersUnwindowed verifies the fast path: when the list
+// fits the allocation the sidebar renders as before — every row visible, no
+// scroll indicators, output padded to exactly the allocated height.
+func TestSidebarShortListRendersUnwindowed(t *testing.T) {
+	const w, h = 40, 30
+
+	s := newWindowingSidebar(t, 2)
+	s.SetSize(w, h)
+
+	out := s.String()
+	require.Equal(t, h, renderedLineCount(out))
+	assert.Contains(t, out, "win-00")
+	assert.Contains(t, out, "win-01")
+	assert.NotContains(t, out, "more", "short lists must not show scroll indicators")
 }
 
 // renderForTerminal renders an instance at the sidebar width app.go derives
