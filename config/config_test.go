@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,13 +25,31 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
+// requireBash skips the test when /bin/bash (or any bash on PATH) is not
+// available, and returns the resolved bash path. The bash-alias integration
+// tests spawn a real interactive bash.
+func requireBash(t *testing.T) string {
+	t.Helper()
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available on this system")
+	}
+	return bashPath
+}
+
+// writeGuardedBashrc writes a .bashrc into homeDir that mimics the standard
+// distro layout: an early return for non-interactive shells (as shipped in
+// e.g. Ubuntu's default ~/.bashrc) followed by the given alias definition.
+// Alias detection must survive that guard (#688).
+func writeGuardedBashrc(t *testing.T, homeDir, aliasValue string) {
+	t.Helper()
+	bashrc := "case $- in\n    *i*) ;;\n      *) return;;\nesac\n" +
+		"alias claude='" + aliasValue + "'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".bashrc"), []byte(bashrc), 0644))
+}
+
 func TestGetClaudeCommand(t *testing.T) {
-	originalShell := os.Getenv("SHELL")
 	originalPath := os.Getenv("PATH")
-	defer func() {
-		os.Setenv("SHELL", originalShell)
-		os.Setenv("PATH", originalPath)
-	}()
 
 	t.Run("finds claude in PATH", func(t *testing.T) {
 		// Create a temporary directory with a mock claude executable
@@ -41,9 +60,11 @@ func TestGetClaudeCommand(t *testing.T) {
 		err := os.WriteFile(claudePath, []byte("#!/bin/bash\necho 'mock claude'"), 0755)
 		require.NoError(t, err)
 
-		// Set PATH to include our temp directory
-		os.Setenv("PATH", tempDir+":"+originalPath)
-		os.Setenv("SHELL", "/bin/bash")
+		// Set PATH to include our temp directory; isolate HOME so the
+		// interactive bash probe doesn't read the dev machine's ~/.bashrc.
+		t.Setenv("PATH", tempDir+":"+originalPath)
+		t.Setenv("SHELL", "/bin/bash")
+		t.Setenv("HOME", t.TempDir())
 
 		result, err := GetClaudeCommand()
 
@@ -54,8 +75,9 @@ func TestGetClaudeCommand(t *testing.T) {
 	t.Run("handles missing claude command", func(t *testing.T) {
 		// Set PATH to a directory that doesn't contain claude
 		tempDir := t.TempDir()
-		os.Setenv("PATH", tempDir)
-		os.Setenv("SHELL", "/bin/bash")
+		t.Setenv("PATH", tempDir)
+		t.Setenv("SHELL", "/bin/bash")
+		t.Setenv("HOME", t.TempDir())
 
 		result, err := GetClaudeCommand()
 
@@ -74,7 +96,9 @@ func TestGetClaudeCommand(t *testing.T) {
 		require.NoError(t, err)
 
 		// Set PATH and unset SHELL
-		os.Setenv("PATH", tempDir+":"+originalPath)
+		t.Setenv("PATH", tempDir+":"+originalPath)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("SHELL", "")
 		os.Unsetenv("SHELL")
 
 		result, err := GetClaudeCommand()
@@ -83,44 +107,60 @@ func TestGetClaudeCommand(t *testing.T) {
 		assert.True(t, strings.Contains(result, "claude"))
 	})
 
-	t.Run("handles alias parsing", func(t *testing.T) {
-		// Test core alias formats. Keep this regex in sync with the one used in
-		// GetClaudeCommand so the test exercises the real extraction logic.
-		extract := func(output string) (string, bool) {
-			matches := aliasOutputRegex.FindStringSubmatch(output)
-			if len(matches) < 2 {
-				return "", false
-			}
-			return strings.TrimSpace(matches[1]), true
+	t.Run("detects bash alias with flags", func(t *testing.T) {
+		// End-to-end: a claude alias defined in a distro-style guarded
+		// ~/.bashrc must be detected including its flags, even with no
+		// claude binary on PATH (#688).
+		bashPath := requireBash(t)
+		homeDir := t.TempDir()
+		writeGuardedBashrc(t, homeDir, "/custom/bin/claude --model opus")
+
+		t.Setenv("HOME", homeDir)
+		t.Setenv("SHELL", bashPath)
+		t.Setenv("PATH", t.TempDir()) // no claude on PATH — alias is the only source
+
+		result, err := GetClaudeCommand()
+
+		require.NoError(t, err)
+		assert.Equal(t, "/custom/bin/claude --model opus", result)
+	})
+
+	t.Run("handles probe output parsing", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			output string
+			want   string
+		}{
+			// zsh `which` builtin alias format.
+			{"zsh alias", "claude: aliased to /usr/local/bin/claude", "/usr/local/bin/claude"},
+			// Alias path containing spaces (e.g. macOS app bundle) must be preserved.
+			{"zsh alias with spaces", "claude: aliased to /Applications/Claude Code.app/Contents/MacOS/claude", "/Applications/Claude Code.app/Contents/MacOS/claude"},
+			// bash `type` builtin alias format wraps the value in `...'.
+			{"bash type alias", "claude is aliased to `/usr/local/bin/claude --model opus'", "/usr/local/bin/claude --model opus"},
+			{"bash type alias unicode quotes", "claude is aliased to ‘/usr/local/bin/claude --model opus’", "/usr/local/bin/claude --model opus"},
+			// bash `type` output for a PATH-resolved binary.
+			{"bash type path", "claude is /usr/local/bin/claude", "/usr/local/bin/claude"},
+			// Arrow format with spaces in the path.
+			{"arrow format", "claude -> /path/with spaces/claude", "/path/with spaces/claude"},
+			// Equals format with trailing whitespace should be trimmed.
+			{"equals format", "claude=/path/with spaces/claude   ", "/path/with spaces/claude"},
+			// Direct path (no alias).
+			{"plain path", "/usr/local/bin/claude", "/usr/local/bin/claude"},
+			// Direct path containing "=" is still a path, not an alias assignment.
+			{"path containing equals", "/tmp/test=dir/bin/claude", "/tmp/test=dir/bin/claude"},
+			// Interactive rc files may print noise (motd hints, echoes)
+			// before the probe result — the matching line must still win.
+			{"noise before alias", "To run a command as administrator, use sudo.\n\nclaude is aliased to `/opt/claude --fast'", "/opt/claude --fast"},
+			// A function carries no usable path; fall back to PATH lookup.
+			{"bash type function", "claude is a function\nclaude () \n{ \n    echo hi\n}", ""},
+			{"bash type builtin", "claude is a shell builtin", ""},
+			{"empty output", "\n\n", ""},
 		}
-
-		// Standard alias format
-		got, ok := extract("claude: aliased to /usr/local/bin/claude")
-		assert.True(t, ok)
-		assert.Equal(t, "/usr/local/bin/claude", got)
-
-		// Alias path containing spaces (e.g. macOS app bundle) must be preserved.
-		got, ok = extract("claude: aliased to /Applications/Claude Code.app/Contents/MacOS/claude")
-		assert.True(t, ok)
-		assert.Equal(t, "/Applications/Claude Code.app/Contents/MacOS/claude", got)
-
-		// Arrow format with spaces in the path.
-		got, ok = extract("claude -> /path/with spaces/claude")
-		assert.True(t, ok)
-		assert.Equal(t, "/path/with spaces/claude", got)
-
-		// Equals format with trailing whitespace should be trimmed.
-		got, ok = extract("claude=/path/with spaces/claude   ")
-		assert.True(t, ok)
-		assert.Equal(t, "/path/with spaces/claude", got)
-
-		// Direct path (no alias)
-		_, ok = extract("/usr/local/bin/claude")
-		assert.False(t, ok)
-
-		// Direct path containing "=" is still a path, not an alias assignment.
-		_, ok = extract("/tmp/test=dir/bin/claude")
-		assert.False(t, ok)
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				assert.Equal(t, tc.want, parseCommandProbeOutput(tc.output))
+			})
+		}
 	})
 }
 
@@ -134,6 +174,7 @@ func TestDefaultConfig(t *testing.T) {
 		require.NoError(t, os.WriteFile(stub, []byte("#!/bin/bash\n"), 0755))
 		t.Setenv("PATH", tempDir+":"+os.Getenv("PATH"))
 		t.Setenv("SHELL", "/bin/bash")
+		t.Setenv("HOME", t.TempDir())
 
 		cfg := DefaultConfig()
 
@@ -156,6 +197,7 @@ func TestDefaultConfig(t *testing.T) {
 	t.Run("default_program is enum even when claude is not on PATH", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
 		t.Setenv("SHELL", "/bin/bash")
+		t.Setenv("HOME", t.TempDir())
 
 		cfg := DefaultConfig()
 
@@ -164,6 +206,49 @@ func TestDefaultConfig(t *testing.T) {
 		// No override populated when auto-detect fails — bare enum is
 		// resolved to a $PATH lookup at exec time.
 		assert.Empty(t, cfg.ProgramOverrides[tmux.ProgramClaude])
+	})
+
+	t.Run("bash alias with flags lands in override unquoted", func(t *testing.T) {
+		// An alias value is already shell syntax: it must reach the
+		// override verbatim, NOT wrapped in quotes by shellQuotePath as a
+		// single "path" (#688).
+		bashPath := requireBash(t)
+		homeDir := t.TempDir()
+		writeGuardedBashrc(t, homeDir, "/custom/bin/claude --model opus")
+
+		t.Setenv("HOME", homeDir)
+		t.Setenv("SHELL", bashPath)
+		t.Setenv("PATH", t.TempDir())
+
+		cfg := DefaultConfig()
+
+		require.NotNil(t, cfg)
+		assert.Equal(t,
+			"/custom/bin/claude --model opus --dangerously-skip-permissions",
+			cfg.ProgramOverrides[tmux.ProgramClaude])
+	})
+
+	t.Run("alias to existing path with spaces is still quoted", func(t *testing.T) {
+		// A detected value that is a real on-disk path keeps the #569
+		// quoting treatment so tmux's `sh -c` doesn't split it.
+		bashPath := requireBash(t)
+		homeDir := t.TempDir()
+		binDir := filepath.Join(t.TempDir(), "Claude Code")
+		require.NoError(t, os.MkdirAll(binDir, 0755))
+		target := filepath.Join(binDir, "claude")
+		require.NoError(t, os.WriteFile(target, []byte("#!/bin/bash\n"), 0755))
+		writeGuardedBashrc(t, homeDir, target)
+
+		t.Setenv("HOME", homeDir)
+		t.Setenv("SHELL", bashPath)
+		t.Setenv("PATH", t.TempDir())
+
+		cfg := DefaultConfig()
+
+		require.NotNil(t, cfg)
+		assert.Equal(t,
+			"'"+target+"' --dangerously-skip-permissions",
+			cfg.ProgramOverrides[tmux.ProgramClaude])
 	})
 }
 

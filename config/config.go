@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -21,6 +23,10 @@ const (
 )
 
 var aliasOutputRegex = regexp.MustCompile(`(?:aliased to|->|^[^/=\s]+\s*=)\s*(.+)`)
+
+// bashTypeOutputRegex matches the bash `type` builtin's output for a
+// PATH-resolved command, e.g. "claude is /usr/local/bin/claude".
+var bashTypeOutputRegex = regexp.MustCompile(`^\S+ is (/.+)$`)
 
 // GetConfigDir returns the path to the application's configuration directory.
 // If AGENT_FACTORY_HOME is set, it is used as the config directory.
@@ -162,8 +168,16 @@ func DefaultConfig() *Config {
 	}
 
 	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
+		// An alias can resolve to a full command with flags (e.g. "claude
+		// --model opus"), which is already shell syntax and must not be
+		// re-quoted wholesale. Only a bare path that exists on disk gets the
+		// space/apostrophe quoting treatment (#569).
+		command := claudePath
+		if _, statErr := os.Stat(claudePath); statErr == nil {
+			command = shellQuotePath(claudePath)
+		}
 		cfg.ProgramOverrides = map[string]string{
-			tmux.ProgramClaude: shellQuotePath(claudePath) + " --dangerously-skip-permissions",
+			tmux.ProgramClaude: command + " --dangerously-skip-permissions",
 		}
 	} else if err != nil {
 		log.ErrorLog.Printf("failed to get claude command: %v", err)
@@ -188,7 +202,7 @@ func shellQuotePath(path string) string {
 
 // GetClaudeCommand attempts to find the "claude" command in the user's shell
 // It checks in the following order:
-// 1. Shell alias resolution: using "which" command
+// 1. Shell alias resolution (zsh's `which` builtin, bash's `type` builtin)
 // 2. PATH lookup
 //
 // If both fail, it returns an error.
@@ -198,31 +212,29 @@ func GetClaudeCommand() (string, error) {
 		shell = "/bin/bash" // Default to bash if SHELL is not set
 	}
 
-	// Force the shell to load the user's profile and then run the command
-	// For zsh, source .zshrc; for bash, source .bashrc
-	var shellCmd string
+	var args []string
 	if strings.Contains(shell, "zsh") {
-		shellCmd = "source ~/.zshrc &>/dev/null || true; which claude"
+		// zsh's `which` is a builtin that reports aliases ("claude: aliased
+		// to ..."), so sourcing the rc file is enough to surface them.
+		args = []string{"-c", "source ~/.zshrc &>/dev/null || true; which claude"}
 	} else if strings.Contains(shell, "bash") {
-		shellCmd = "source ~/.bashrc &>/dev/null || true; which claude"
+		// bash needs an interactive shell for alias detection: the external
+		// `which` binary cannot see aliases at all, and distro ~/.bashrc
+		// files typically return early in non-interactive shells, so the
+		// alias would not even be defined under plain `bash -c`. -i sources
+		// ~/.bashrc, and the `type` builtin reports aliases (#688).
+		args = []string{"-i", "-c", "type claude"}
 	} else {
-		shellCmd = "which claude"
+		args = []string{"-c", "which claude"}
 	}
 
-	cmd := exec.Command(shell, "-c", shellCmd)
-	output, err := cmd.Output()
+	// Interactive rc files can block (start tmux, wait for input, ...);
+	// don't let first-run config generation hang on them.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, shell, args...).Output()
 	if err == nil && len(output) > 0 {
-		path := strings.TrimSpace(string(output))
-		if path != "" {
-			// Check if the output is an alias definition and extract the actual path
-			// Handle formats like "claude: aliased to /path/to/claude" or other shell-specific formats
-			// Capture everything after the alias marker so paths containing spaces
-			// (e.g. "/Applications/Claude Code.app/.../claude") are preserved; trim
-			// surrounding whitespace afterwards.
-			matches := aliasOutputRegex.FindStringSubmatch(path)
-			if len(matches) > 1 {
-				path = strings.TrimSpace(matches[1])
-			}
+		if path := parseCommandProbeOutput(string(output)); path != "" {
 			return path, nil
 		}
 	}
@@ -234,6 +246,41 @@ func GetClaudeCommand() (string, error) {
 	}
 
 	return "", fmt.Errorf("claude command not found in aliases or PATH")
+}
+
+// parseCommandProbeOutput extracts the claude command (a path, possibly
+// followed by alias-provided flags) from the shell probe output produced in
+// GetClaudeCommand. Interactive rc files may print unrelated text to stdout
+// (motd hints, echo statements), so each line is tried until one matches a
+// known format:
+//   - zsh `which` alias output:  "claude: aliased to /path/claude --flag"
+//   - bash `type` alias output:  "claude is aliased to `/path/claude --flag'"
+//   - bash `type` path output:   "claude is /path/claude"
+//   - plain `which` output:      "/path/claude"
+//
+// Returns "" when no line carries a usable command (e.g. "claude is a
+// function"), letting the caller fall back to a PATH lookup.
+func parseCommandProbeOutput(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Capture everything after the alias marker so paths containing
+		// spaces (e.g. "/Applications/Claude Code.app/.../claude") are
+		// preserved. bash's `type` wraps the alias value in `...' (or, in
+		// some locales, Unicode ‘...’) quotes — strip those.
+		if matches := aliasOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
+			return strings.TrimSpace(strings.Trim(strings.TrimSpace(matches[1]), "`'‘’\""))
+		}
+		if matches := bashTypeOutputRegex.FindStringSubmatch(line); len(matches) > 1 {
+			return matches[1]
+		}
+		if strings.HasPrefix(line, "/") {
+			return line
+		}
+	}
+	return ""
 }
 
 // LoadConfig reads the user's config.json, validates it, and returns the
