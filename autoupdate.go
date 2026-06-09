@@ -112,6 +112,12 @@ func autoUpdate() error {
 	default:
 		log.InfoLog.Printf("auto-update: updated to %s (effective on next launch)", latestVersion)
 	}
+	if shutdownErr == nil && result != daemon.ShutdownNoDaemon {
+		// The daemon hosts task cron schedules (#782); respawn it from the
+		// freshly written binary when enabled tasks exist, instead of
+		// leaving schedules dark until the next af invocation.
+		respawnDaemonForTasksFn()
+	}
 	return nil
 }
 

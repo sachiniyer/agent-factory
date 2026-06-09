@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 
@@ -20,13 +21,24 @@ var TasksCmd = &cobra.Command{
 	Short: "Manage tasks",
 }
 
-// Indirected so tests can stub out scheduler side effects.
+// Indirected so tests can stub the daemon RPCs (reload poke, task run)
+// without dialing — or spawning — a real daemon.
 var (
-	installScheduler = task.InstallScheduler
-	removeScheduler  = task.RemoveScheduler
-	updateTask       = task.UpdateTask
-	removeTask       = task.RemoveTask
+	reloadDaemonTasks = daemon.ReloadTasks
+	runTask           = daemon.RunTask
 )
+
+// pokeDaemonTasksReload asks the daemon to re-read tasks.json so a CRUD
+// change takes effect immediately. Best-effort by design: the daemon reloads
+// the full task list at every start, so even if this poke fails the saved
+// change is picked up the next time the daemon comes up. That eventual
+// consistency is what removed the install/rollback complexity of the old
+// per-task timer model (#324, #457, #458, #762).
+func pokeDaemonTasksReload() {
+	if err := reloadDaemonTasks(); err != nil {
+		log.WarningLog.Printf("task change saved, but the daemon schedule reload failed (the change applies at next daemon start): %v", err)
+	}
+}
 
 var tasksListCmd = &cobra.Command{
 	Use:   "list",
@@ -123,27 +135,7 @@ var tasksAddCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to add task: %w", err))
 		}
 
-		if err := installScheduler(s); err != nil {
-			// InstallScheduler writes the systemd unit/timer (or launchd
-			// plist) to disk BEFORE running systemctl/launchctl, so a
-			// failure on the external command leaves the scheduler files
-			// behind. RemoveTask alone only clears the JSON record, so
-			// we must also call RemoveScheduler to clean up those files
-			// (fixes #458). Both rollbacks are best-effort and run
-			// independently — if one fails the other is still attempted,
-			// and any failures are folded into the returned error so the
-			// user knows what to clean up manually.
-			msg := fmt.Sprintf("failed to install task scheduler: %v", err)
-			if rmSchedErr := removeScheduler(s); rmSchedErr != nil {
-				log.ErrorLog.Printf("failed to remove scheduler files during rollback: %v", rmSchedErr)
-				msg += fmt.Sprintf("; scheduler file cleanup also failed: %v", rmSchedErr)
-			}
-			if removeErr := removeTask(s.ID); removeErr != nil {
-				log.ErrorLog.Printf("failed to rollback task after scheduler install failure: %v", removeErr)
-				msg += fmt.Sprintf("; task record rollback also failed: %v", removeErr)
-			}
-			return jsonError(errors.New(msg))
-		}
+		pokeDaemonTasksReload()
 
 		return jsonOut(map[string]any{"id": id})
 	},
@@ -161,33 +153,11 @@ var tasksRemoveCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		s, err := task.GetTask(args[0])
-		if err != nil {
-			return jsonError(fmt.Errorf("failed to get task: %w", err))
+		if err := task.RemoveTask(args[0]); err != nil {
+			return jsonError(fmt.Errorf("failed to remove task: %w", err))
 		}
 
-		if err := removeScheduler(*s); err != nil {
-			return jsonError(fmt.Errorf("failed to remove task scheduler: %w", err))
-		}
-
-		if err := removeTask(args[0]); err != nil {
-			// Scheduler was already torn down, so a half-removed task
-			// would be listed in `af tasks list` with no firing timer
-			// (fixes #457). Best-effort re-install of the scheduler
-			// puts the system back into a consistent state. If that
-			// also fails, surface both errors and tell the user how to
-			// recover manually.
-			if rbErr := installScheduler(*s); rbErr != nil {
-				return jsonError(fmt.Errorf(
-					"failed to remove task: %w; scheduler rollback also failed: %v; task record remains with no active scheduler — delete it manually from ~/.agent-factory/tasks.json or rerun 'af tasks remove %s' once the underlying issue is resolved",
-					err, rbErr, args[0],
-				))
-			}
-			return jsonError(fmt.Errorf(
-				"failed to remove task: %w; scheduler was re-installed so the task continues to fire on schedule — rerun 'af tasks remove %s' once the underlying issue is resolved",
-				err, args[0],
-			))
-		}
+		pokeDaemonTasksReload()
 
 		return jsonOut(map[string]bool{"ok": true})
 	},
@@ -226,7 +196,7 @@ var tasksRunCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		if err := task.RunTask(args[0]); err != nil {
+		if err := runTask(args[0]); err != nil {
 			return jsonError(fmt.Errorf("failed to trigger task: %w", err))
 		}
 
@@ -273,27 +243,17 @@ var tasksUpdateCmd = &cobra.Command{
 			s.Prompt = taskUpdatePromptFlag
 		}
 
-		cronChanged := false
 		if taskUpdateCronFlag != "" {
 			if err := task.ValidateCronExpr(taskUpdateCronFlag); err != nil {
 				return jsonError(fmt.Errorf("invalid cron expression: %w", err))
 			}
 			s.CronExpr = taskUpdateCronFlag
-			cronChanged = true
 		}
 
-		enabledChanged := false
-		wasEnabled := s.Enabled
 		switch taskUpdateEnabledFlag {
 		case "true":
-			if !s.Enabled {
-				enabledChanged = true
-			}
 			s.Enabled = true
 		case "false":
-			if s.Enabled {
-				enabledChanged = true
-			}
 			s.Enabled = false
 		case "":
 			// not changed
@@ -301,77 +261,11 @@ var tasksUpdateCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("--enabled must be 'true' or 'false'"))
 		}
 
-		// Reconcile scheduler state whenever the cron expression or the
-		// Enabled flag changes. When the task is disabled we always remove
-		// the scheduler (even if cron changed), so a disabled task never
-		// has an active timer. When enabled we (re)install the scheduler
-		// with the new cron. See #258.
-		oldCron := ""
-		schedulerInstalled := false
-		schedulerRemoved := false
-		if cronChanged || enabledChanged {
-			if old, err := task.GetTask(s.ID); err == nil {
-				oldCron = old.CronExpr
-			}
-
-			if s.Enabled {
-				// Install the new scheduler (overwrites existing unit/plist
-				// because the scheduler key is the task ID).
-				if err := installScheduler(*s); err != nil {
-					// Installation failed — attempt to re-install the old
-					// scheduler so the task doesn't end up unscheduled
-					// (fixes #160). Only meaningful if the task was already
-					// enabled with a previous cron.
-					if oldCron != "" && wasEnabled {
-						rollback := *s
-						rollback.CronExpr = oldCron
-						if rbErr := installScheduler(rollback); rbErr != nil {
-							log.ErrorLog.Printf("failed to rollback scheduler to old cron %q: %v", oldCron, rbErr)
-						}
-					}
-					return jsonError(fmt.Errorf("failed to reinstall scheduler: %w", err))
-				}
-				schedulerInstalled = true
-			} else {
-				if err := removeScheduler(*s); err != nil {
-					return jsonError(fmt.Errorf("failed to remove task scheduler: %w", err))
-				}
-				schedulerRemoved = true
-			}
-		}
-
-		if err := updateTask(*s); err != nil {
-			// Roll back the scheduler change so the system doesn't stay
-			// in an inconsistent state where the scheduler reflects new
-			// settings but the JSON still has the old ones (fixes #324).
-			// Mirrors the install-failure rollback above; best-effort.
-			if schedulerInstalled {
-				if wasEnabled && oldCron != "" {
-					// Previously enabled — restore old cron.
-					rollback := *s
-					rollback.CronExpr = oldCron
-					if rbErr := installScheduler(rollback); rbErr != nil {
-						log.ErrorLog.Printf("failed to rollback scheduler after updateTask failure: %v", rbErr)
-					}
-				} else {
-					// Was disabled — undo the install by removing.
-					rollback := *s
-					rollback.Enabled = false
-					if rbErr := removeScheduler(rollback); rbErr != nil {
-						log.ErrorLog.Printf("failed to rollback scheduler after updateTask failure: %v", rbErr)
-					}
-				}
-			} else if schedulerRemoved && wasEnabled && oldCron != "" {
-				// Was enabled — re-install with old cron to undo the removal.
-				rollback := *s
-				rollback.Enabled = true
-				rollback.CronExpr = oldCron
-				if rbErr := installScheduler(rollback); rbErr != nil {
-					log.ErrorLog.Printf("failed to rollback scheduler after updateTask failure: %v", rbErr)
-				}
-			}
+		if err := task.UpdateTask(*s); err != nil {
 			return jsonError(fmt.Errorf("failed to update task: %w", err))
 		}
+
+		pokeDaemonTasksReload()
 
 		return jsonOut(s)
 	},

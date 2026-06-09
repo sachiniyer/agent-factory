@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -184,152 +185,6 @@ func TestLoadAndClearPendingInstances_Corrupted(t *testing.T) {
 	}
 }
 
-// runnerAppendInstance exercises the legacy append helper kept for storage
-// merge regression coverage without spinning up a full session fixture.
-func runnerAppendInstance(repoID string, data session.InstanceData) error {
-	return config.UpdateRepoInstances(repoID, appendTaskRunnerInstanceFn(data))
-}
-
-// TestRunTask_WritesToPerRepoStorage is legacy regression coverage for issue
-// #334: scheduled instances must end up in per-repo instances.json so the
-// daemon can see them.
-func TestRunTask_WritesToPerRepoStorage(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", tmp)
-
-	repoID := "test-repo-334"
-	instancesPath, err := config.RepoInstancesPath(repoID)
-	if err != nil {
-		t.Fatalf("RepoInstancesPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	data := session.InstanceData{Title: "task-instance", AutoYes: true}
-	if err := runnerAppendInstance(repoID, data); err != nil {
-		t.Fatalf("runnerAppendInstance: %v", err)
-	}
-
-	raw, err := config.LoadRepoInstances(repoID)
-	if err != nil {
-		t.Fatalf("LoadRepoInstances: %v", err)
-	}
-	var got []session.InstanceData
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("expected 1 instance in per-repo storage, got %d: %+v", len(got), got)
-	}
-	if got[0].Title != "task-instance" {
-		t.Fatalf("unexpected instance title: %q", got[0].Title)
-	}
-	if !got[0].AutoYes {
-		t.Fatalf("expected AutoYes=true on persisted instance so the daemon picks it up")
-	}
-}
-
-// TestRunTask_AppendsToExistingPerRepoStorage verifies that the runner's
-// append callback preserves existing instances written by other paths
-// (e.g. the API or TUI), so concurrent writers don't clobber each other.
-func TestRunTask_AppendsToExistingPerRepoStorage(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", tmp)
-
-	repoID := "test-repo-334-merge"
-	instancesPath, err := config.RepoInstancesPath(repoID)
-	if err != nil {
-		t.Fatalf("RepoInstancesPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	// Pre-populate with an existing instance, simulating one created via
-	// the API or TUI.
-	preexisting := []session.InstanceData{{Title: "existing-from-api"}}
-	preRaw, err := json.MarshalIndent(preexisting, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal preexisting: %v", err)
-	}
-	if err := os.WriteFile(instancesPath, preRaw, 0644); err != nil {
-		t.Fatalf("write preexisting: %v", err)
-	}
-
-	if err := runnerAppendInstance(repoID, session.InstanceData{Title: "task-instance"}); err != nil {
-		t.Fatalf("runnerAppendInstance: %v", err)
-	}
-
-	raw, err := config.LoadRepoInstances(repoID)
-	if err != nil {
-		t.Fatalf("LoadRepoInstances: %v", err)
-	}
-	var got []session.InstanceData
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 instances after append, got %d: %+v", len(got), got)
-	}
-	if got[0].Title != "existing-from-api" || got[1].Title != "task-instance" {
-		t.Fatalf("unexpected merged instances: %+v", got)
-	}
-}
-
-func TestRunTask_RejectsDuplicateTitleInPerRepoStorage(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", tmp)
-
-	repoID := "test-repo-dup"
-	instancesPath, err := config.RepoInstancesPath(repoID)
-	if err != nil {
-		t.Fatalf("RepoInstancesPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	preexisting := []session.InstanceData{{
-		Title: "task-instance",
-		Worktree: session.GitWorktreeData{
-			WorktreePath: "/repo/worktrees/task-instance",
-		},
-	}}
-	preRaw, err := json.MarshalIndent(preexisting, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal preexisting: %v", err)
-	}
-	if err := os.WriteFile(instancesPath, preRaw, 0644); err != nil {
-		t.Fatalf("write preexisting: %v", err)
-	}
-
-	err = runnerAppendInstance(repoID, session.InstanceData{
-		Title: "task-instance",
-		Worktree: session.GitWorktreeData{
-			WorktreePath: "/repo/worktrees/task-instance-2",
-		},
-	})
-	if err == nil {
-		t.Fatalf("expected duplicate title error")
-	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	raw, err := config.LoadRepoInstances(repoID)
-	if err != nil {
-		t.Fatalf("LoadRepoInstances: %v", err)
-	}
-	var got []session.InstanceData
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(got) != 1 || got[0].Worktree.WorktreePath != "/repo/worktrees/task-instance" {
-		t.Fatalf("duplicate append should preserve original storage, got %+v", got)
-	}
-}
-
 func TestNextTaskRunTitleSkipsPersistedTitles(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
@@ -446,49 +301,63 @@ func TestTaskRunBaseTitleFallsBackToTaskID(t *testing.T) {
 	}
 }
 
-// TestRunTask_PathTraversalCreatesLockOutsideLocksDir is the regression test
-// for issue #575: a user-supplied task ID containing path-traversal sequences
-// must not cause a lock file to be created outside ~/.agent-factory/locks/.
-// Before the fix RunTask called filepath.Join(lockDir, "task-"+taskID+".lock")
-// without validating taskID, so an ID like "foo/../../rogue/pwned" produced a
-// lock file in an arbitrary writable directory.
-func TestRunTask_PathTraversalCreatesLockOutsideLocksDir(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", tmp)
+// TestFormatWaitForReadyTimeoutError covers the UX half of
+// sachiniyer/agent-factory#502: when WaitForReady gives up, the returned
+// error must carry a trimmed snippet of the captured pane content so the
+// user-facing TUI shows what the agent was doing — not just "timed out".
+// Empty captured content collapses back to the bare timeout message so
+// users don't see a dangling "last pane content:" header.
+func TestFormatWaitForReadyTimeoutError(t *testing.T) {
+	timeout := 60 * time.Second
 
-	// Pre-create the rogue parent so an unchecked OpenFile would succeed:
-	// without the directory the file open errors out for the wrong reason
-	// and the test would pass against the unpatched code too. We want to
-	// prove that even when the rogue path is writable, the call refuses.
-	rogueDir := filepath.Join(tmp, "rogue")
-	if err := os.MkdirAll(rogueDir, 0755); err != nil {
-		t.Fatalf("setup rogue dir: %v", err)
-	}
+	t.Run("happy case appends trimmed snippet", func(t *testing.T) {
+		// >5 lines and well under 400 bytes — should keep only the last 5.
+		content := "boot 1\nboot 2\nboot 3\nLoading config...\nConnecting to MCP server...\nStill waiting on handshake\nAlmost there..."
+		got := formatWaitForReadyTimeoutError(timeout, content).Error()
 
-	// Same payload as the issue report.
-	payload := "foo/../../rogue/pwned"
-
-	err := RunTask(payload)
-	if err == nil {
-		t.Fatalf("expected error when triggering task with path-traversal ID")
-	}
-
-	roguePath := filepath.Join(rogueDir, "pwned.lock")
-	if _, statErr := os.Stat(roguePath); statErr == nil {
-		t.Fatalf("SECURITY: path traversal allowed lock file creation outside locks directory at %s", roguePath)
-	} else if !os.IsNotExist(statErr) {
-		t.Fatalf("unexpected stat error checking rogue lock path: %v", statErr)
-	}
-
-	// Also confirm nothing was written into the legitimate locks dir for a
-	// task ID that does not correspond to a real task — i.e., the lock is
-	// only created after GetTask succeeds.
-	locksDir := filepath.Join(tmp, "locks")
-	if entries, err := os.ReadDir(locksDir); err == nil && len(entries) > 0 {
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			names = append(names, e.Name())
+		wantHeader := "timed out waiting for program to start (1m0s)\nlast pane content:"
+		if !strings.HasPrefix(got, wantHeader) {
+			t.Fatalf("missing header.\n got=%q\nwant prefix=%q", got, wantHeader)
 		}
-		t.Fatalf("expected no lock files for invalid/nonexistent task, found: %v", names)
-	}
+		if !strings.Contains(got, "  Almost there...") {
+			t.Errorf("expected indented snippet line in error, got %q", got)
+		}
+		if !strings.Contains(got, "  Loading config...") {
+			t.Errorf("expected last-5-lines window to include 'Loading config...', got %q", got)
+		}
+		if strings.Contains(got, "boot 1") || strings.Contains(got, "boot 2") {
+			t.Errorf("expected oldest lines to be trimmed off, got %q", got)
+		}
+	})
+
+	t.Run("empty content omits header entirely", func(t *testing.T) {
+		got := formatWaitForReadyTimeoutError(timeout, "").Error()
+		want := "timed out waiting for program to start (1m0s)"
+		if got != want {
+			t.Fatalf("empty content error mismatch.\n got=%q\nwant=%q", got, want)
+		}
+	})
+
+	t.Run("whitespace-only content treated as empty", func(t *testing.T) {
+		got := formatWaitForReadyTimeoutError(timeout, "\n\n   \n\n").Error()
+		want := "timed out waiting for program to start (1m0s)"
+		if got != want {
+			t.Fatalf("whitespace-only content error mismatch.\n got=%q\nwant=%q", got, want)
+		}
+	})
+
+	t.Run("long content is byte-capped", func(t *testing.T) {
+		// One huge line well over the 400-byte cap.
+		long := strings.Repeat("x", 1200)
+		got := formatWaitForReadyTimeoutError(timeout, long).Error()
+		// Header + "\n  " + at most 400 bytes of snippet.
+		header := "timed out waiting for program to start (1m0s)\nlast pane content:\n  "
+		if !strings.HasPrefix(got, header) {
+			t.Fatalf("missing header prefix, got %q", got)
+		}
+		snippet := strings.TrimPrefix(got, header)
+		if len(snippet) > 400 {
+			t.Errorf("snippet not capped: len=%d, want <=400", len(snippet))
+		}
+	})
 }

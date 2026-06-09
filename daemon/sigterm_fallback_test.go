@@ -66,6 +66,10 @@ func TestRunDaemonPIDFileLifecycle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	installInstantBackend(t)
+	// RunDaemon sweeps legacy per-task units at startup (#782); point the
+	// sweep at empty temp dirs so the test never touches the host's real
+	// unit directories or shells out to systemctl/launchctl.
+	stubLegacyUnitSweep(t)
 
 	pidPath := filepath.Join(home, "daemon.pid")
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {

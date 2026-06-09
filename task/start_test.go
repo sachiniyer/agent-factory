@@ -98,6 +98,36 @@ func TestStartAndSendPrompt_BoundsPersistentTrustPrompt(t *testing.T) {
 	}
 }
 
+// TestStartAndSendPrompt_EmptyPromptStillHandlesTrust is the regression test
+// for #698: a session created without an initial prompt must still wait for
+// readiness and dismiss trust prompts, even though no prompt is sent. This
+// also covers the daemon's CreateSession path, which delegates here (#782).
+func TestStartAndSendPrompt_EmptyPromptStillHandlesTrust(t *testing.T) {
+	backend := &startBackend{}
+	if err := StartAndSendPrompt(newStartTestInstance(t, backend), ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if backend.trustChecks == 0 {
+		t.Fatalf("trust prompt handling must run for empty-prompt sessions (#698)")
+	}
+	if backend.sentPrompt != "" {
+		t.Fatalf("no prompt should be sent for empty prompt, got %q", backend.sentPrompt)
+	}
+}
+
+func TestStartAndSendPrompt_NonEmptyPromptSends(t *testing.T) {
+	backend := &startBackend{}
+	if err := StartAndSendPrompt(newStartTestInstance(t, backend), "do work"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if backend.trustChecks == 0 {
+		t.Fatalf("trust prompt handling must run before sending the prompt")
+	}
+	if backend.sentPrompt != "do work" {
+		t.Fatalf("expected prompt to be sent, got %q", backend.sentPrompt)
+	}
+}
+
 func TestStartAndSendPrompt_AllowsSequentialTrustPrompts(t *testing.T) {
 	oldDelay := trustPromptRetryDelay
 	oldPoll := waitForReadyPollInterval

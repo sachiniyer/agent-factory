@@ -102,8 +102,8 @@ Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadc
 - `session/tmux/` — tmux PTY integration
 - `config/` — configuration and state management
 - `api/` — REST/JSON API for sessions and tasks
-- `task/` — task scheduling, cron, systemd/launchd
-- `daemon/` — background daemon for autoyes mode
+- `task/` — task store, cron validation/parsing, session-start helpers
+- `daemon/` — always-on background daemon: task cron scheduler, autoyes mode, control-socket RPCs, autostart unit
 - `cmd/` — CLI command utilities
 - `log/` — logging
 - `docs/` — documentation (remote hooks, etc.)

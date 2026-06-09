@@ -18,16 +18,39 @@ import (
 	"time"
 )
 
-// RunDaemon runs the daemon process, serves the local control plane, and
-// iterates over all sessions to run AutoYes mode on them.
+// RunDaemon runs the daemon process: it serves the local control plane,
+// evaluates task cron schedules in-process, and iterates over all sessions to
+// run AutoYes mode on them.
 func RunDaemon(cfg *config.Config) error {
 	log.InfoLog.Printf("starting daemon")
+
+	// Refuse to run two daemons against the same control socket. EnsureDaemon
+	// pings before launching, but a daemon started directly (af --daemon, the
+	// autostart unit, or two racing af invocations) would otherwise steal the
+	// socket from a live daemon and leave duplicate AutoYes/scheduler loops.
+	// Exiting cleanly matters: under the autostart unit a non-zero exit would
+	// trip Restart=on-failure into a retry loop against the live daemon.
+	if err := pingDaemon(); err == nil {
+		log.InfoLog.Printf("another agent-factory daemon is already serving the control socket; exiting")
+		return nil
+	}
+
 	manager, err := NewManager(cfg)
 	if err != nil {
 		return err
 	}
+
+	// Remove per-task timer units left behind by pre-#782 versions; the
+	// in-process scheduler below replaces them.
+	sweepLegacyTaskUnits()
+
+	scheduler := newTaskScheduler()
+	if err := scheduler.Reload(); err != nil {
+		log.WarningLog.Printf("failed to load task schedules: %v", err)
+	}
+
 	shutdownCh := make(chan struct{})
-	closeControl, err := startControlServer(manager, shutdownCh)
+	closeControl, err := startControlServer(manager, scheduler, shutdownCh)
 	if err != nil {
 		return fmt.Errorf("failed to start daemon control server: %w", err)
 	}
@@ -36,6 +59,11 @@ func RunDaemon(cfg *config.Config) error {
 			log.WarningLog.Printf("failed to close daemon control socket: %v", err)
 		}
 	}()
+
+	// Start schedule evaluation only after the control server is up: a task
+	// firing immediately goes through the CreateSession RPC on our own socket.
+	scheduler.Start()
+	defer scheduler.Stop()
 
 	// Write our PID so `af upgrade`'s SIGTERM fallback (#504) can find the
 	// running daemon. Both the SIGTERM and Shutdown-RPC exit paths fall
