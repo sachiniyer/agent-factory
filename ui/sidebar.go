@@ -46,11 +46,20 @@ var sectionHeaderSelectedStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
+var windowIndicatorStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+
 // Sidebar is the unified left navigation pane with collapsible sections.
 type Sidebar struct {
 	sections     []SidebarSection
 	visibleItems []SidebarItem
 	selectedIdx  int
+
+	// scrollOffset is the index into visibleItems of the first rendered row
+	// when the list is too tall for the allocation. It is adjusted lazily in
+	// String() (rebuilds can shift indices between renders), scrolling
+	// minimally so the selected row stays visible.
+	scrollOffset int
 
 	// Data
 	instances []*session.Instance
@@ -504,8 +513,50 @@ func (s *Sidebar) rmRepo(repo string) {
 	}
 }
 
-// String renders the sidebar.
+// String renders the sidebar. The item list is windowed around the selection
+// (#787): lipgloss.Place pads short content but never truncates, so rendering
+// every row would overflow the allocation once enough instances exist and push
+// the menu/error box below the fold. A blind clamp (the #700 fix for the
+// content pane) would be wrong here because the selected row can sit below the
+// fold while navigating — instead the rendered slice scrolls so the selection
+// is always visible, with "▲/▼ N more" rows marking hidden items.
 func (s *Sidebar) String() string {
+	// Chrome above the item list: one leading blank line plus the title row.
+	const chromeLines = 2
+
+	// Render every visible row up front and measure real heights: instance
+	// rows are multi-line (title + branch, plus an optional PR line), so the
+	// window math cannot assume one line per item.
+	rows := make([]string, len(s.visibleItems))
+	heights := make([]int, len(s.visibleItems))
+	totalLines := 0
+	for i, item := range s.visibleItems {
+		isSelected := i == s.selectedIdx
+		if item.IsHeader {
+			rows[i] = s.renderHeader(item.Kind, isSelected)
+		} else {
+			switch item.Kind {
+			case SectionInstances:
+				rows[i] = s.renderInstance(item.ItemIndex, isSelected)
+			}
+		}
+		heights[i] = lipgloss.Height(rows[i])
+		totalLines += heights[i]
+	}
+
+	avail := s.height - chromeLines
+	start, end := 0, len(rows)
+	hiddenAbove, hiddenBelow := 0, 0
+	if s.height > 0 && totalLines > avail {
+		s.scrollToSelection(heights, avail)
+		start = s.scrollOffset
+		end, _, _ = fitWindow(heights, start, avail)
+		hiddenAbove = start
+		hiddenBelow = len(rows) - end
+	} else {
+		s.scrollOffset = 0
+	}
+
 	var b strings.Builder
 	b.WriteString("\n")
 
@@ -521,22 +572,117 @@ func (s *Sidebar) String() string {
 			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom, autoYesStyle.Render(" auto-yes "))
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, title, autoYes))
 	}
-	b.WriteString("\n")
 
-	for i, item := range s.visibleItems {
-		isSelected := i == s.selectedIdx
-		if item.IsHeader {
-			b.WriteString(s.renderHeader(item.Kind, isSelected))
-		} else {
-			switch item.Kind {
-			case SectionInstances:
-				b.WriteString(s.renderInstance(item.ItemIndex, isSelected))
-			}
-		}
+	if hiddenAbove > 0 {
 		b.WriteString("\n")
+		b.WriteString(s.renderWindowIndicator("▲", hiddenAbove))
+	}
+	for i := start; i < end; i++ {
+		b.WriteString("\n")
+		b.WriteString(rows[i])
+	}
+	if hiddenBelow > 0 {
+		b.WriteString("\n")
+		b.WriteString(s.renderWindowIndicator("▼", hiddenBelow))
 	}
 
-	return lipgloss.Place(s.width, s.height, lipgloss.Left, lipgloss.Top, b.String())
+	out := lipgloss.Place(s.width, s.height, lipgloss.Left, lipgloss.Top, b.String())
+	// Safety clamp: fitWindow force-includes the first windowed row even when
+	// it alone exceeds the budget (e.g. a tall PR row at a tiny height), and
+	// lipgloss.Place will not truncate the overflow.
+	if s.height > 0 {
+		if lines := strings.Split(out, "\n"); len(lines) > s.height {
+			out = strings.Join(lines[:s.height], "\n")
+		}
+	}
+	return out
+}
+
+// scrollToSelection clamps scrollOffset and moves it minimally so the selected
+// row is fully inside the rendered window. Only called when the list overflows
+// the allocation.
+func (s *Sidebar) scrollToSelection(heights []int, avail int) {
+	n := len(heights)
+	if s.scrollOffset > n-1 {
+		s.scrollOffset = n - 1
+	}
+	if s.scrollOffset < 0 {
+		s.scrollOffset = 0
+	}
+	if s.selectedIdx < s.scrollOffset {
+		s.scrollOffset = s.selectedIdx
+	}
+	for s.scrollOffset < s.selectedIdx {
+		end, _, _ := fitWindow(heights, s.scrollOffset, avail)
+		if s.selectedIdx < end {
+			break
+		}
+		s.scrollOffset++
+	}
+	// Fill from the bottom: when the tail of the list fits starting one row
+	// earlier (items were removed or the selection sits at the end), scroll
+	// up to use the slack rather than render dead space below the last item.
+	for s.scrollOffset > 0 {
+		if end, _, _ := fitWindow(heights, s.scrollOffset-1, avail); end < n {
+			break
+		}
+		s.scrollOffset--
+	}
+}
+
+// fitWindow returns the exclusive end index of the rows that fit when
+// rendering starts at offset within avail lines, plus whether "▲"/"▼"
+// indicator rows (one line each) are needed. heights[i] is the rendered line
+// count of visibleItems[i].
+func fitWindow(heights []int, offset, avail int) (end int, topInd, botInd bool) {
+	n := len(heights)
+	topInd = offset > 0
+	for {
+		budget := avail
+		if topInd {
+			budget--
+		}
+		if botInd {
+			budget--
+		}
+		end = offset
+		used := 0
+		for end < n && used+heights[end] <= budget {
+			used += heights[end]
+			end++
+		}
+		if end == offset && offset < n {
+			// Force at least one row so scrolling can always reach the
+			// selection; String()'s final clamp bounds any overflow.
+			end = offset + 1
+		}
+		if end == n || botInd {
+			return end, topInd, botInd
+		}
+		// Rows remain below: reserve a line for the "▼" indicator and refit.
+		// Shrinking the budget can only shrink end, so this converges in one
+		// extra pass.
+		botInd = true
+	}
+}
+
+// renderWindowIndicator renders the one-line "▲ N more" / "▼ N more" marker
+// shown in place of rows scrolled out of the window.
+func (s *Sidebar) renderWindowIndicator(arrow string, hidden int) string {
+	w := AdjustPreviewWidth(s.width)
+	text := fmt.Sprintf("%s %d more", arrow, hidden)
+	if w > 0 && runewidth.StringWidth(text) > w {
+		// Same narrow-width handling as renderHeader: drop the "..." tail when
+		// it would itself overflow, since lipgloss.Place won't clip oversize
+		// content.
+		tail := "..."
+		if w < runewidth.StringWidth(tail) {
+			tail = ""
+		}
+		text = runewidth.Truncate(text, w, tail)
+	}
+	return windowIndicatorStyle.Padding(0, 1).Render(
+		lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))
 }
 
 func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
