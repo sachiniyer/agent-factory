@@ -50,9 +50,17 @@ func RunDaemon(cfg *config.Config) error {
 	}
 
 	shutdownCh := make(chan struct{})
-	closeControl, err := startControlServer(manager, scheduler, shutdownCh)
+	closeControl, alreadyRunning, err := bindControlServerExclusive(manager, scheduler, shutdownCh)
 	if err != nil {
 		return fmt.Errorf("failed to start daemon control server: %w", err)
+	}
+	if alreadyRunning {
+		// A concurrent daemon won the ping→bind race while we were setting
+		// up: both of us passed the unsynchronized ping above before either
+		// bound (#718). Exit cleanly for the same Restart=on-failure reason
+		// as the guard at the top of this function.
+		log.InfoLog.Printf("another agent-factory daemon bound the control socket first; exiting")
+		return nil
 	}
 	defer func() {
 		if err := closeControl(); err != nil {
@@ -417,7 +425,23 @@ func StopDaemon() error {
 // already-gone because the daemon's own SIGTERM handler removes it via
 // removeDaemonPIDFile() before exiting — so on the SIGTERM-success path we
 // race with the daemon's own cleanup.
+//
+// A NEW daemon can also start during StopDaemon's signal/poll window (the
+// autostart unit racing `af daemon install`, or an upgrade respawn) and bind
+// the control socket before this cleanup runs. Removing the socket then would
+// unlink the live daemon's socket file: the daemon keeps serving the
+// unreachable inode, pings against the path fail, and the next EnsureDaemon
+// spawns yet another daemon while the first leaks (#767). So if anything
+// ANSWERS on the socket, the runtime files belong to a live daemon — leave
+// them all in place. The daemon we just stopped cannot answer: its listener
+// died with the process. The worst false positive (a ping answered by a
+// process still mid-SIGKILL) merely leaves a stale socket behind, which the
+// next spawn's bind path replaces.
 func cleanupDaemonRuntimeFiles(pidFile string) {
+	if err := pingDaemon(); err == nil {
+		log.InfoLog.Printf("a live daemon answered on the control socket after stop; leaving its runtime files in place")
+		return
+	}
 	if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
 		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
 	}
