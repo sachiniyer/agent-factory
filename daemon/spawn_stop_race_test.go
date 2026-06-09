@@ -21,7 +21,7 @@ func startTestControlServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	closeServer, err := startControlServer(manager, nil, nil)
+	closeServer, err := startControlServer(manager, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestBindControlServerExclusive_ExactlyOneBinds(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-startBarrier
-			closeFn, alreadyRunning, err := bindControlServerExclusive(managers[i], nil, nil)
+			closeFn, alreadyRunning, err := bindControlServerExclusive(managers[i], nil, nil, nil)
 			results[i] = result{closeFn: closeFn, alreadyRunning: alreadyRunning, err: err}
 		}(i)
 	}

@@ -110,20 +110,30 @@ af sessions kill <title>                                       # kill + clean up
 
 ### Tasks
 
+A task fires either on a schedule (`--cron`) or whenever a long-running watch
+script emits a stdout line (`--watch-cmd`) — exactly one of the two. By
+default each fire creates a fresh session; `--target-session` instead sends
+the prompt into an existing session by title (auto-created if missing). Watch
+prompts may reference the emitted line as `{{line}}`; with no prompt the raw
+line is delivered.
+
 ```bash
-af tasks list                                                  # list scheduled tasks
+af tasks list                                                  # list tasks
 af tasks add --name "Daily triage" --prompt "..." --cron "0 9 * * *" --program claude
+af tasks add --name "gh-issues" --watch-cmd "gh-issue-watch.sh" \
+  --prompt "Triage: {{line}}" --target-session captain         # event-driven task
 af tasks get <id>                                              # fetch one task
-af tasks trigger <id>                                          # run task immediately
+af tasks trigger <id>                                          # run a cron task immediately
 af tasks update <id> --cron "..." --prompt "..." --enabled true
 af tasks remove <id>                                           # delete a task
 ```
 
 ### Daemon
 
-The background daemon hosts task cron schedules and autoyes mode. It starts on
-demand; installing it as a user-level autostart unit (systemd user service on
-Linux, launchd agent on macOS) keeps scheduled tasks firing after reboots.
+The background daemon hosts task cron schedules, watch-task scripts, and
+autoyes mode. It starts on demand; installing it as a user-level autostart
+unit (systemd user service on Linux, launchd agent on macOS) keeps scheduled
+tasks firing after reboots.
 
 ```bash
 af daemon install                                              # register autostart at login

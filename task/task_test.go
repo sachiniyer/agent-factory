@@ -239,7 +239,7 @@ func TestLoadTaskWithoutProgramFieldFallsBackToEmpty(t *testing.T) {
 // through the TUI must survive a SaveTasks -> LoadTasks round-trip.
 func TestUpdateTaskPersistsProgram(t *testing.T) {
 	tasks := []Task{
-		{ID: "p1", Name: "Original", Program: "claude", Enabled: true},
+		{ID: "p1", Name: "Original", Program: "claude", CronExpr: "0 3 * * *", Enabled: true},
 	}
 	setupTestTasks(t, tasks)
 
@@ -380,7 +380,7 @@ func TestUpdateTaskStatus_NotFound(t *testing.T) {
 // reject a non-enum Program so the TUI/CLI editor flows fail fast.
 func TestUpdateTask_RejectsBadProgram(t *testing.T) {
 	stored := []Task{
-		{ID: "edit1", Name: "Editable", Program: "claude", Enabled: true},
+		{ID: "edit1", Name: "Editable", Program: "claude", CronExpr: "0 3 * * *", Enabled: true},
 	}
 	setupTestTasks(t, stored)
 
@@ -402,4 +402,103 @@ func TestTaskNameInJSON(t *testing.T) {
 	data2, err := json.Marshal(s2)
 	require.NoError(t, err)
 	assert.NotContains(t, string(data2), `"name"`)
+}
+
+// TestValidateTrigger pins the #782 trigger contract: both triggers set is
+// always invalid, an enabled task needs exactly one, and a disabled task with
+// neither is tolerated as a draft.
+func TestValidateTrigger(t *testing.T) {
+	cases := []struct {
+		name    string
+		cron    string
+		watch   string
+		enabled bool
+		wantErr bool
+	}{
+		{"enabled cron only", "0 3 * * *", "", true, false},
+		{"enabled watch only", "", "tail -f log", true, false},
+		{"enabled both", "0 3 * * *", "tail -f log", true, true},
+		{"enabled neither", "", "", true, true},
+		{"enabled whitespace counts as unset", "   ", "  ", true, true},
+		{"disabled cron only", "0 3 * * *", "", false, false},
+		{"disabled watch only", "", "tail -f log", false, false},
+		{"disabled both", "0 3 * * *", "tail -f log", false, true},
+		{"disabled neither (draft)", "", "", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tsk := Task{ID: "aaaa0001", CronExpr: tc.cron, WatchCmd: tc.watch, Enabled: tc.enabled}
+			err := tsk.ValidateTrigger()
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestAddTask_EnforcesTriggerContract verifies the store-level chokepoint:
+// AddTask and UpdateTask refuse tasks that violate the trigger rule, whatever
+// surface produced them.
+func TestAddTask_EnforcesTriggerContract(t *testing.T) {
+	setupTestTasks(t, []Task{})
+
+	bad := Task{ID: "bbbb0001", Prompt: "p", CronExpr: "0 3 * * *", WatchCmd: "tail -f x", Enabled: true, CreatedAt: time.Now()}
+	require.Error(t, AddTask(bad))
+
+	noTrigger := Task{ID: "bbbb0002", Prompt: "p", Enabled: true, CreatedAt: time.Now()}
+	require.Error(t, AddTask(noTrigger))
+
+	watch := Task{ID: "bbbb0003", WatchCmd: "tail -f x", Enabled: true, CreatedAt: time.Now()}
+	require.NoError(t, AddTask(watch))
+
+	// Updating the watch task to also carry a cron must be refused.
+	watch.CronExpr = "0 3 * * *"
+	require.Error(t, UpdateTask(watch))
+}
+
+// TestWatchFieldsJSONRoundTrip pins the wire contract: the new fields are
+// omitted when empty (backward-compatible JSON for existing cron tasks) and
+// round-trip when set.
+func TestWatchFieldsJSONRoundTrip(t *testing.T) {
+	cronTask := Task{ID: "cccc0001", Prompt: "p", CronExpr: "0 3 * * *", Enabled: true}
+	data, err := json.Marshal(cronTask)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "watch_cmd")
+	assert.NotContains(t, string(data), "target_session")
+
+	watchTask := Task{ID: "cccc0002", WatchCmd: "tail -f x", TargetSession: "captain", Enabled: true}
+	data, err = json.Marshal(watchTask)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "cron_expr")
+
+	var back Task
+	require.NoError(t, json.Unmarshal(data, &back))
+	assert.Equal(t, "tail -f x", back.WatchCmd)
+	assert.Equal(t, "captain", back.TargetSession)
+}
+
+// TestRenderWatchPrompt pins the {{line}} templating contract for watch
+// events: empty prompt defaults to the raw line; otherwise every {{line}}
+// occurrence is substituted.
+func TestRenderWatchPrompt(t *testing.T) {
+	cases := []struct {
+		name   string
+		prompt string
+		line   string
+		want   string
+	}{
+		{"empty prompt defaults to line", "", "new issue #9", "new issue #9"},
+		{"whitespace prompt defaults to line", "   ", "new issue #9", "new issue #9"},
+		{"substitutes line", "Triage: {{line}}", "new issue #9", "Triage: new issue #9"},
+		{"substitutes all occurrences", "{{line}} and {{line}}", "x", "x and x"},
+		{"no placeholder leaves prompt as-is", "fixed prompt", "ignored", "fixed prompt"},
+		{"empty line with placeholder", "Triage: {{line}}", "", "Triage: "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, RenderWatchPrompt(tc.prompt, tc.line))
+		})
+	}
 }

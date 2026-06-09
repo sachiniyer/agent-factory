@@ -10,7 +10,7 @@ import (
 // functions are pinned here instead.
 
 func TestSystemdAutostartUnitContent(t *testing.T) {
-	got := systemdAutostartUnit("/home/user/.local/bin/af", "/usr/bin:/bin", "/bin/zsh")
+	got := systemdAutostartUnit("/home/user/.local/bin/af", "/usr/bin:/bin", "/bin/zsh", "")
 	want := `[Unit]
 Description=Agent Factory daemon (task scheduler + autoyes)
 
@@ -33,7 +33,7 @@ WantedBy=default.target
 // binary path with spaces must stay one ExecStart argument, and % / $ must
 // be doubled so systemd does not expand them as specifiers/variables.
 func TestSystemdAutostartUnitEscapesSpecials(t *testing.T) {
-	got := systemdAutostartUnit("/opt/my tools/af", "/usr/bin:/home/u/100%path:$HOME/bin", "/bin/bash")
+	got := systemdAutostartUnit("/opt/my tools/af", "/usr/bin:/home/u/100%path:$HOME/bin", "/bin/bash", "")
 	if !strings.Contains(got, `ExecStart="/opt/my tools/af" --daemon`) {
 		t.Errorf("path with spaces must be quoted in ExecStart, got:\n%s", got)
 	}
@@ -43,7 +43,7 @@ func TestSystemdAutostartUnitEscapesSpecials(t *testing.T) {
 }
 
 func TestLaunchdAutostartPlistContent(t *testing.T) {
-	got := launchdAutostartPlist("/Users/user/.local/bin/af", "/usr/bin:/bin", "/bin/zsh", "/Users/user/.agent-factory/daemon-launchd.log")
+	got := launchdAutostartPlist("/Users/user/.local/bin/af", "/usr/bin:/bin", "/bin/zsh", "", "/Users/user/.agent-factory/daemon-launchd.log")
 	want := `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -84,11 +84,50 @@ func TestLaunchdAutostartPlistContent(t *testing.T) {
 // TestLaunchdAutostartPlistEscapesXML guards against a path containing XML
 // metacharacters breaking the plist.
 func TestLaunchdAutostartPlistEscapesXML(t *testing.T) {
-	got := launchdAutostartPlist("/opt/a&b/af", "/usr/bin", "/bin/sh", "/tmp/<log>.log")
+	got := launchdAutostartPlist("/opt/a&b/af", "/usr/bin", "/bin/sh", "", "/tmp/<log>.log")
 	if !strings.Contains(got, "<string>/opt/a&amp;b/af</string>") {
 		t.Errorf("& must be XML-escaped in the binary path, got:\n%s", got)
 	}
 	if !strings.Contains(got, "<string>/tmp/&lt;log&gt;.log</string>") {
 		t.Errorf("< and > must be XML-escaped in the log path, got:\n%s", got)
+	}
+}
+
+// TestSystemdAutostartUnitCapturesAgentFactoryHome pins the #782 phase-2 nit:
+// when the installing shell has AGENT_FACTORY_HOME set, the unit must carry it
+// into the daemon's environment, or the supervised daemon would serve the
+// default home instead of the custom one.
+func TestSystemdAutostartUnitCapturesAgentFactoryHome(t *testing.T) {
+	got := systemdAutostartUnit("/home/user/.local/bin/af", "/usr/bin:/bin", "/bin/zsh", "/srv/af-home")
+	want := `[Unit]
+Description=Agent Factory daemon (task scheduler + autoyes)
+
+[Service]
+ExecStart="/home/user/.local/bin/af" --daemon
+Restart=on-failure
+RestartSec=5
+Environment=PATH=/usr/bin:/bin
+Environment=SHELL=/bin/zsh
+Environment=AGENT_FACTORY_HOME=/srv/af-home
+
+[Install]
+WantedBy=default.target
+`
+	if got != want {
+		t.Fatalf("systemd unit content mismatch.\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestLaunchdAutostartPlistCapturesAgentFactoryHome is the launchd variant of
+// the AGENT_FACTORY_HOME capture, including XML escaping of the value.
+func TestLaunchdAutostartPlistCapturesAgentFactoryHome(t *testing.T) {
+	got := launchdAutostartPlist("/Users/user/.local/bin/af", "/usr/bin:/bin", "/bin/zsh", "/Users/user/af homes/<a&b>", "/Users/user/.agent-factory/daemon-launchd.log")
+	wantEntry := `        <key>SHELL</key>
+        <string>/bin/zsh</string>
+        <key>AGENT_FACTORY_HOME</key>
+        <string>/Users/user/af homes/&lt;a&amp;b&gt;</string>
+    </dict>`
+	if !strings.Contains(got, wantEntry) {
+		t.Fatalf("plist must carry an escaped AGENT_FACTORY_HOME inside EnvironmentVariables, got:\n%s", got)
 	}
 }

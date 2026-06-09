@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -45,16 +46,62 @@ func ValidateTaskID(taskID string) error {
 }
 
 type Task struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name,omitempty"`
-	Prompt        string     `json:"prompt"`
-	CronExpr      string     `json:"cron_expr"`
+	ID     string `json:"id"`
+	Name   string `json:"name,omitempty"`
+	Prompt string `json:"prompt"`
+	// Exactly one of CronExpr (time trigger) and WatchCmd (event trigger) is
+	// set on an enabled task — see ValidateTrigger. A watch task runs WatchCmd
+	// as a long-lived script under the daemon; each stdout line it emits is one
+	// event (#782 phase 2).
+	CronExpr string `json:"cron_expr,omitempty"`
+	WatchCmd string `json:"watch_cmd,omitempty"`
+	// TargetSession routes deliveries into an existing session by title
+	// (auto-created with ProjectPath/Program if missing). Empty keeps the
+	// historical behavior of creating a fresh session per run.
+	TargetSession string     `json:"target_session,omitempty"`
 	ProjectPath   string     `json:"project_path"`
 	Program       string     `json:"program"`
 	Enabled       bool       `json:"enabled"`
 	CreatedAt     time.Time  `json:"created_at"`
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
 	LastRunStatus string     `json:"last_run_status,omitempty"`
+}
+
+// IsWatch reports whether the task is event-triggered (WatchCmd) rather than
+// time-triggered (CronExpr).
+func (t Task) IsWatch() bool {
+	return strings.TrimSpace(t.WatchCmd) != ""
+}
+
+// ValidateTrigger enforces the trigger contract from #782: a task with both
+// CronExpr and WatchCmd set is always invalid (ambiguous), and an enabled
+// task must have exactly one of the two. A disabled task with neither is
+// tolerated as a draft so hand-edited or legacy records never brick the
+// store.
+func (t Task) ValidateTrigger() error {
+	hasCron := strings.TrimSpace(t.CronExpr) != ""
+	hasWatch := strings.TrimSpace(t.WatchCmd) != ""
+	if hasCron && hasWatch {
+		return fmt.Errorf("task %s sets both cron_expr and watch_cmd; exactly one trigger is allowed", t.ID)
+	}
+	if t.Enabled && !hasCron && !hasWatch {
+		return fmt.Errorf("task %s is enabled but has neither cron_expr nor watch_cmd; exactly one trigger is required", t.ID)
+	}
+	return nil
+}
+
+// watchLinePlaceholder is the template token in a watch task's prompt that is
+// replaced with the emitted stdout line at delivery time.
+const watchLinePlaceholder = "{{line}}"
+
+// RenderWatchPrompt renders the prompt for one watch event. An empty (or
+// whitespace-only) prompt defaults to the raw emitted line; otherwise every
+// {{line}} occurrence in the prompt is substituted with the line.
+func RenderWatchPrompt(prompt, line string) string {
+	if strings.TrimSpace(prompt) == "" {
+		return line
+	}
+	return strings.ReplaceAll(prompt, watchLinePlaceholder, line)
 }
 
 // getTasksPathFn is the function used to resolve the tasks file path.
@@ -122,6 +169,9 @@ func saveTasks(tasks []Task) error {
 
 func AddTask(t Task) error {
 	if err := ValidateTaskID(t.ID); err != nil {
+		return err
+	}
+	if err := t.ValidateTrigger(); err != nil {
 		return err
 	}
 	// Empty Program means "fall back to the configured default_program at
@@ -261,6 +311,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 
 func UpdateTask(t Task) error {
 	if err := ValidateTaskID(t.ID); err != nil {
+		return err
+	}
+	if err := t.ValidateTrigger(); err != nil {
 		return err
 	}
 	// Empty Program means "fall back to the configured default_program at

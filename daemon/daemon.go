@@ -48,9 +48,10 @@ func RunDaemon(cfg *config.Config) error {
 	if err := scheduler.Reload(); err != nil {
 		log.WarningLog.Printf("failed to load task schedules: %v", err)
 	}
+	watchers := newWatcherSupervisor()
 
 	shutdownCh := make(chan struct{})
-	closeControl, alreadyRunning, err := bindControlServerExclusive(manager, scheduler, shutdownCh)
+	closeControl, alreadyRunning, err := bindControlServerExclusive(manager, scheduler, watchers, shutdownCh)
 	if err != nil {
 		return fmt.Errorf("failed to start daemon control server: %w", err)
 	}
@@ -72,6 +73,16 @@ func RunDaemon(cfg *config.Config) error {
 	// firing immediately goes through the CreateSession RPC on our own socket.
 	scheduler.Start()
 	defer scheduler.Stop()
+
+	// Same ordering constraint for the watch-task supervisor: its event
+	// deliveries also loop back through our own control socket, so the first
+	// watcher spawns only once the server is accepting. The deferred Stop
+	// runs before the deferred closeControl (LIFO), so in-flight deliveries
+	// during shutdown still find a live socket.
+	if err := watchers.Reload(); err != nil {
+		log.WarningLog.Printf("failed to start task watchers: %v", err)
+	}
+	defer watchers.Stop()
 
 	// Write our PID so `af upgrade`'s SIGTERM fallback (#504) can find the
 	// running daemon. Both the SIGTERM and Shutdown-RPC exit paths fall

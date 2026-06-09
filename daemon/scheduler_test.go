@@ -28,6 +28,9 @@ func TestSchedulerReloadRegistersEnabledValidTasks(t *testing.T) {
 			{ID: "aaaa0002", CronExpr: "*/5 * * * *", Enabled: false},
 			{ID: "aaaa0003", CronExpr: "not a cron", Enabled: true},
 			{ID: "aaaa0004", CronExpr: "0 0 * * 7", Enabled: true},
+			// Watch tasks are event-triggered and belong to the watcher
+			// supervisor, never the cron scheduler (#782 phase 2).
+			{ID: "aaaa0005", WatchCmd: "tail -f log", Enabled: true},
 		}, nil
 	}
 

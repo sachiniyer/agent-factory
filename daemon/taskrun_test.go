@@ -1,11 +1,16 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -76,5 +81,222 @@ func TestRunTask_RefusesDisabledTask(t *testing.T) {
 	err := RunTask("eeee0001")
 	if err == nil {
 		t.Fatalf("expected error running a disabled task")
+	}
+}
+
+// setupTaskRepo creates a throwaway git repo so config.RepoFromPath inside
+// the delivery path succeeds. Returns the repo path.
+func setupTaskRepo(t *testing.T) string {
+	t.Helper()
+	repo := filepath.Join(t.TempDir(), "repo")
+	for _, args := range [][]string{
+		{"init", repo},
+		{"-C", repo, "config", "user.email", "test@example.com"},
+		{"-C", repo, "config", "user.name", "Test User"},
+		{"-C", repo, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return repo
+}
+
+// stubTaskDelivery swaps the daemon RPC indirections used by
+// deliverTaskPrompt for in-memory recorders and restores them on cleanup.
+func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]SendPromptRequest) {
+	t.Helper()
+	var creates []CreateSessionRequest
+	var sends []SendPromptRequest
+	origCreate := createSessionForTask
+	origSend := sendPromptForTask
+	createSessionForTask = func(req CreateSessionRequest) (*session.InstanceData, error) {
+		creates = append(creates, req)
+		title := req.Title
+		if title == "" {
+			title = req.TitleBase
+		}
+		return &session.InstanceData{Title: title}, nil
+	}
+	sendPromptForTask = func(req SendPromptRequest) error {
+		sends = append(sends, req)
+		return nil
+	}
+	t.Cleanup(func() {
+		createSessionForTask = origCreate
+		sendPromptForTask = origSend
+	})
+	return &creates, &sends
+}
+
+// seedTargetSession persists a bare instance record so the delivery path sees
+// the target session as existing.
+func seedTargetSession(t *testing.T, repoPath, title string) {
+	t.Helper()
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	raw, err := json.Marshal([]session.InstanceData{{Title: title}})
+	if err != nil {
+		t.Fatalf("marshal instance data: %v", err)
+	}
+	if err := config.SaveRepoInstances(repo.ID, raw); err != nil {
+		t.Fatalf("SaveRepoInstances: %v", err)
+	}
+}
+
+// TestRunTask_RefusesWatchTask pins that a watch task can never be fired
+// manually: there is no event line to render the prompt with.
+func TestRunTask_RefusesWatchTask(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	if err := task.AddTask(task.Task{
+		ID:        "ffff0001",
+		WatchCmd:  "tail -f log",
+		Enabled:   true,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	err := RunTask("ffff0001")
+	if err == nil {
+		t.Fatalf("expected error running a watch task manually")
+	}
+	if !strings.Contains(err.Error(), "watch task") {
+		t.Fatalf("error should explain the watch-task refusal, got: %v", err)
+	}
+}
+
+// TestDeliverTaskPrompt_CreatesSessionWithoutTarget pins the historical
+// delivery mode: no target_session means a fresh session per run, titled from
+// the task name.
+func TestDeliverTaskPrompt_CreatesSessionWithoutTarget(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupTaskRepo(t)
+	creates, sends := stubTaskDelivery(t)
+
+	tsk := &task.Task{ID: "ffff0002", Name: "nightly", Prompt: "do it", CronExpr: "0 3 * * *", ProjectPath: repo, Enabled: true}
+	status, err := deliverTaskPrompt(tsk, tsk.Prompt)
+	if err != nil {
+		t.Fatalf("deliverTaskPrompt: %v", err)
+	}
+	if status != "started" {
+		t.Fatalf("status = %q, want started", status)
+	}
+	if len(*sends) != 0 {
+		t.Fatalf("expected no SendPrompt calls, got %d", len(*sends))
+	}
+	if len(*creates) != 1 {
+		t.Fatalf("expected 1 CreateSession call, got %d", len(*creates))
+	}
+	got := (*creates)[0]
+	if got.TitleBase != "nightly" || got.Title != "" {
+		t.Fatalf("create should use TitleBase=nightly (collision-suffixed by the daemon), got Title=%q TitleBase=%q", got.Title, got.TitleBase)
+	}
+	if got.Prompt != "do it" {
+		t.Fatalf("create prompt = %q, want %q", got.Prompt, "do it")
+	}
+}
+
+// TestDeliverTaskPrompt_SendsIntoExistingTargetSession verifies the new
+// delivery mode: with target_session set and the session present, the prompt
+// is sent into it (repo-scoped) instead of creating a session.
+func TestDeliverTaskPrompt_SendsIntoExistingTargetSession(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupTaskRepo(t)
+	creates, sends := stubTaskDelivery(t)
+	seedTargetSession(t, repo, "captain")
+
+	tsk := &task.Task{ID: "ffff0003", Name: "gh-issues", Prompt: "Triage: {{line}}", WatchCmd: "watch.sh", TargetSession: "captain", ProjectPath: repo, Enabled: true}
+	status, err := deliverTaskPrompt(tsk, "Triage: new issue")
+	if err != nil {
+		t.Fatalf("deliverTaskPrompt: %v", err)
+	}
+	if status != "sent" {
+		t.Fatalf("status = %q, want sent", status)
+	}
+	if len(*creates) != 0 {
+		t.Fatalf("expected no CreateSession calls, got %d", len(*creates))
+	}
+	if len(*sends) != 1 {
+		t.Fatalf("expected 1 SendPrompt call, got %d", len(*sends))
+	}
+	got := (*sends)[0]
+	repoCtx, err := config.RepoFromPath(repo)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	if got.Title != "captain" || got.RepoID != repoCtx.ID || got.Prompt != "Triage: new issue" {
+		t.Fatalf("unexpected SendPrompt request: %+v", got)
+	}
+}
+
+// TestDeliverTaskPrompt_AutoCreatesMissingTargetSession pins the
+// Sachin-approved missing-target behavior (#782): auto-create the session
+// with the task's project_path/program and deliver the prompt as its initial
+// prompt, mirroring `af sessions send-prompt --create`.
+func TestDeliverTaskPrompt_AutoCreatesMissingTargetSession(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupTaskRepo(t)
+	creates, sends := stubTaskDelivery(t)
+
+	tsk := &task.Task{ID: "ffff0004", Name: "gh-issues", WatchCmd: "watch.sh", TargetSession: "captain", ProjectPath: repo, Program: "claude", Enabled: true}
+	status, err := deliverTaskPrompt(tsk, "new issue #9")
+	if err != nil {
+		t.Fatalf("deliverTaskPrompt: %v", err)
+	}
+	if status != "started" {
+		t.Fatalf("status = %q, want started", status)
+	}
+	if len(*sends) != 0 {
+		t.Fatalf("expected no SendPrompt calls, got %d", len(*sends))
+	}
+	if len(*creates) != 1 {
+		t.Fatalf("expected 1 CreateSession call, got %d", len(*creates))
+	}
+	got := (*creates)[0]
+	if got.Title != "captain" {
+		t.Fatalf("auto-create must use the exact target title, got %q", got.Title)
+	}
+	if got.RepoPath != repo || got.Program != "claude" || got.Prompt != "new issue #9" {
+		t.Fatalf("unexpected CreateSession request: %+v", got)
+	}
+}
+
+// TestRunTask_CronTaskHonorsTargetSession verifies the scheduled-send mode
+// end to end through RunTask: a cron task with target_session sends its
+// prompt into the live session and records the "sent" status.
+func TestRunTask_CronTaskHonorsTargetSession(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupTaskRepo(t)
+	_, sends := stubTaskDelivery(t)
+	seedTargetSession(t, repo, "captain")
+
+	if err := task.AddTask(task.Task{
+		ID:            "ffff0005",
+		Name:          "ping",
+		Prompt:        "scheduled check-in",
+		CronExpr:      "0 3 * * *",
+		TargetSession: "captain",
+		ProjectPath:   repo,
+		Enabled:       true,
+		CreatedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	if err := RunTask("ffff0005"); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(*sends) != 1 || (*sends)[0].Prompt != "scheduled check-in" {
+		t.Fatalf("expected one scheduled send, got %+v", *sends)
+	}
+	got, err := task.GetTask("ffff0005")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.LastRunStatus != "sent" || got.LastRunAt == nil {
+		t.Fatalf("expected LastRunStatus=sent with LastRunAt set, got status=%q at=%v", got.LastRunStatus, got.LastRunAt)
 	}
 }
