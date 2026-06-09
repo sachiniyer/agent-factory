@@ -180,34 +180,38 @@ func (c *ContentPane) renderInlinePane(content string) string {
 		return ""
 	}
 
-	style := windowStyle.Width(w).Height(c.height - windowStyle.GetVerticalFrameSize() - 2)
-	wrapped := style.Render(
-		lipgloss.Place(
-			w-windowStyle.GetHorizontalFrameSize(),
-			c.height-windowStyle.GetVerticalFrameSize()-2,
-			lipgloss.Left, lipgloss.Top,
-			content))
+	innerWidth := w - windowStyle.GetHorizontalFrameSize()
+	// The -2 budgets for the two spacer lines the JoinVertical("\n", ...)
+	// below emits, mirroring TabbedWindow.String's height math so inline
+	// panes line up with the tabbed window.
+	innerHeight := c.height - windowStyle.GetVerticalFrameSize() - 2
+	if innerHeight < 0 {
+		innerHeight = 0
+	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, "\n", wrapped)
+	// lipgloss.Place pads short content but never truncates tall content, and
+	// the window border's Width re-wraps lines wider than the frame. Wrap to
+	// the frame width first, then clamp to the height budget, so the pane can
+	// never render taller than its SetSize allocation and push the menu and
+	// error box off-screen (#700).
+	wrapped := strings.Split(lipgloss.NewStyle().Width(innerWidth).Render(content), "\n")
+	if len(wrapped) > innerHeight {
+		wrapped = wrapped[:innerHeight]
+	}
+
+	window := windowStyle.Width(w).Render(
+		lipgloss.Place(
+			innerWidth, innerHeight,
+			lipgloss.Left, lipgloss.Top,
+			strings.Join(wrapped, "\n")))
+
+	return lipgloss.JoinVertical(lipgloss.Left, "\n", window)
 }
 
 func (c *ContentPane) renderEmptyPane() string {
-	w := AdjustPreviewWidth(c.width)
-	if w <= 0 || c.height <= 0 {
-		return ""
-	}
-
 	emptyStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
-	content := emptyStyle.Render(strings.Repeat("\n", 3) + "  Select an item from the sidebar")
-	style := windowStyle.Width(w).Height(c.height - windowStyle.GetVerticalFrameSize() - 2)
-	wrapped := style.Render(
-		lipgloss.Place(
-			w-windowStyle.GetHorizontalFrameSize(),
-			c.height-windowStyle.GetVerticalFrameSize()-2,
-			lipgloss.Left, lipgloss.Top,
-			content))
-
-	return lipgloss.JoinVertical(lipgloss.Left, "\n", wrapped)
+	return c.renderInlinePane(
+		emptyStyle.Render(strings.Repeat("\n", 3) + "  Select an item from the sidebar"))
 }

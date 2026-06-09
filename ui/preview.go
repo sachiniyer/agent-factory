@@ -199,35 +199,10 @@ func (p *PreviewPane) String() string {
 		// p.height, so we use p.height directly to match normal mode (which
 		// pads to the full p.height). Subtracting again here would
 		// double-count chrome and leave a trailing blank line (#616).
-		availableHeight := p.height
-
-		// Count the number of lines in the fallback text
-		fallbackLines := len(strings.Split(p.previewState.text, "\n"))
-
-		// Calculate padding needed above and below to center the content
-		totalPadding := availableHeight - fallbackLines
-		topPadding := 0
-		bottomPadding := 0
-		if totalPadding > 0 {
-			topPadding = totalPadding / 2
-			bottomPadding = totalPadding - topPadding // accounts for odd numbers
-		}
-
-		// Build the centered content
-		var lines []string
-		if topPadding > 0 {
-			lines = append(lines, strings.Repeat("\n", topPadding))
-		}
-		lines = append(lines, p.previewState.text)
-		if bottomPadding > 0 {
-			lines = append(lines, strings.Repeat("\n", bottomPadding))
-		}
-
-		// Center both vertically and horizontally
-		return previewPaneStyle.
-			Width(p.width).
-			Align(lipgloss.Center).
-			Render(strings.Join(lines, ""))
+		// renderCenteredFallback centers using the wrapped line count: on
+		// narrow panes Width(p.width) wraps the ASCII art, and padding
+		// computed from the pre-wrap count miscenters and overflows (#699).
+		return renderCenteredFallback(previewPaneStyle, p.previewState.text, p.width, p.height)
 	}
 
 	// Normal mode display

@@ -378,30 +378,13 @@ func (t *TerminalPane) String() string {
 	content := t.content
 
 	if fallback {
-		// 3 = tab bar height (border + padding + text), 4 = window style frame (top/bottom border + padding)
-		availableHeight := height - 3 - 4
-		fallbackLines := len(strings.Split(fallbackText, "\n"))
-		totalPadding := availableHeight - fallbackLines
-		topPadding := 0
-		bottomPadding := 0
-		if totalPadding > 0 {
-			topPadding = totalPadding / 2
-			bottomPadding = totalPadding - topPadding
-		}
-
-		var lines []string
-		if topPadding > 0 {
-			lines = append(lines, strings.Repeat("\n", topPadding))
-		}
-		lines = append(lines, fallbackText)
-		if bottomPadding > 0 {
-			lines = append(lines, strings.Repeat("\n", bottomPadding))
-		}
-
-		return terminalPaneStyle.
-			Width(width).
-			Align(lipgloss.Center).
-			Render(strings.Join(lines, ""))
+		// TabbedWindow.SetSize already strips tab-bar and window-frame chrome
+		// before sizing this pane, so height is the content height — use it
+		// directly, like normal mode below pads to the full height.
+		// Subtracting chrome again here rendered the fallback 7 lines short
+		// and centered it 4 lines too high (#703). PreviewPane had the same
+		// double subtraction and was fixed the same way (#616).
+		return renderCenteredFallback(terminalPaneStyle, fallbackText, width, height)
 	}
 
 	// Normal mode: show captured content
