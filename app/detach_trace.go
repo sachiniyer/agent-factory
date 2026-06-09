@@ -13,14 +13,21 @@ import (
 )
 
 // detachTraceEnabled gates the [detach-trace] markers emitted on the
-// post-detach hot path. Defaulting to true means real users hit by issue
-// #598 capture diagnostic markers in agent-factory.log automatically — the
-// prior two attempts at this bug (#560, #593) shipped synthetic
-// microbenches that did not reproduce what users actually hit, so we need
-// data from real slow detaches. log.WarningLog writes are buffered through
-// the Go log package and are cheap; gating still gives us a flip-the-switch
-// off in case it ever proves otherwise.
-var detachTraceEnabled = true
+// post-detach hot path. The default-on instrumentation existed to gather
+// data from real slow detaches during the #598 investigation; with #598
+// resolved (#601/#602 bounded detach via the SIGKILL fallback) the markers
+// only bloat agent-factory.log — they fire on every selection change, pane
+// refresh, and metadata tick (#788). Now opt-in via AF_DETACH_TRACE=1 so
+// the step-level diagnostics stay one flag away if detach perf regresses.
+// The slow-detach watchdog below is NOT gated by this — it is silent in
+// the steady state and remains the always-on regression tripwire.
+var detachTraceEnabled = detachTraceEnabledFromEnv()
+
+// detachTraceEnabledFromEnv reports whether AF_DETACH_TRACE=1 is set.
+// Split out from the var initializer so tests can exercise the env parsing.
+func detachTraceEnabledFromEnv() bool {
+	return os.Getenv("AF_DETACH_TRACE") == "1"
+}
 
 // slowDetachThreshold is the elapsed window above which startSlowDetachWatchdog
 // takes a goroutine dump. 2s is well above the post-detach paint budget
@@ -111,8 +118,12 @@ func dumpSlowDetach(label string, start time.Time) {
 		log.WarningLog.Printf("[detach-trace] failed to write slow-dump trailer: %v", err)
 		return
 	}
-	log.WarningLog.Printf("[detach-trace] SLOW DETACH (%s) elapsed=%v — goroutine dump appended to %s",
-		label, elapsed, dumpPath)
+	hint := ""
+	if !detachTraceEnabled {
+		hint = " — re-run with AF_DETACH_TRACE=1 for step-level tracing"
+	}
+	log.WarningLog.Printf("[detach-trace] SLOW DETACH (%s) elapsed=%v — goroutine dump appended to %s%s",
+		label, elapsed, dumpPath, hint)
 }
 
 // startSlowDetachWatchdog spawns a goroutine that waits up to
@@ -122,13 +133,12 @@ func dumpSlowDetach(label string, start time.Time) {
 // channel — callers MUST close it when the detach completes (or abandon
 // it, in which case the watchdog leaks for one cycle plus the wait).
 //
-// No-op when detachTraceEnabled is false: returns a non-nil channel so
-// callers' close(done) does not panic, but the goroutine never sleeps.
+// Deliberately NOT gated by detachTraceEnabled: the watchdog is silent
+// unless a detach actually exceeds the threshold, and a dump from a user
+// who never set AF_DETACH_TRACE is exactly how we detect a detach-perf
+// regression in the wild (#788).
 func startSlowDetachWatchdog(label string) chan struct{} {
 	done := make(chan struct{})
-	if !detachTraceEnabled {
-		return done
-	}
 	start := time.Now()
 	go func() {
 		select {

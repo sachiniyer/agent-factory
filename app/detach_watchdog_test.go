@@ -83,8 +83,11 @@ func TestWatchdog_NoSpuriousDumpAfterHeaderDetach(t *testing.T) {
 	require.NoError(t, err)
 	dumpPath := filepath.Join(configDir, detachSlowDumpFileName)
 
+	// Pin the marker gate OFF: the watchdog must arm and dump regardless of
+	// AF_DETACH_TRACE (#788) — a dump from a user who never set the env var
+	// is how detach-perf regressions get noticed in the wild.
 	prev := detachTraceEnabled
-	detachTraceEnabled = true
+	detachTraceEnabled = false
 	t.Cleanup(func() { detachTraceEnabled = prev })
 
 	// --- Control: an un-canceled watchdog DOES write a dump after the
