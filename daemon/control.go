@@ -418,9 +418,63 @@ func (s *controlServer) ImportRemoteHookSessions(req ImportRemoteHookSessionsReq
 	return nil
 }
 
+// daemonSpawnLockTarget returns the lock target whose adjacent flock file
+// (daemon.spawn.lock, via config.WithFileLock) serializes the daemon spawn
+// window across processes.
+func daemonSpawnLockTarget() (string, error) {
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "daemon.spawn"), nil
+}
+
+// testHookSpawnPingPassed runs between the under-lock ping re-check and the
+// socket bind in bindControlServerExclusive. Tests substitute it to hold a
+// spawner inside that window and prove a concurrent spawner cannot enter it
+// at the same time. No-op in production.
+var testHookSpawnPingPassed = func() {}
+
+// bindControlServerExclusive re-checks for a live daemon and binds the
+// control socket while holding an exclusive cross-process file lock, making
+// the ping→bind sequence atomic across processes. RunDaemon's top-of-function
+// ping guard rejects the common duplicate-daemon cases, but two daemons
+// starting near-simultaneously can both pass that ping before either binds;
+// the second startControlServer would then unlink and rebind the socket path,
+// orphaning the first daemon — alive and looping, but unreachable (#718).
+//
+// The lock is held only for the ping+bind window, not the daemon lifetime,
+// and flock is released by the kernel if the holder dies, so a crashed
+// spawner cannot wedge future spawns.
+//
+// Returns alreadyRunning=true when a live daemon answered the under-lock
+// ping; the caller must exit cleanly (a non-zero exit would trip the
+// autostart unit's Restart=on-failure into a retry loop against the live
+// daemon).
+func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, shutdownCh chan struct{}) (closeFn func() error, alreadyRunning bool, err error) {
+	lockTarget, lockTargetErr := daemonSpawnLockTarget()
+	if lockTargetErr != nil {
+		return nil, false, lockTargetErr
+	}
+	lockErr := config.WithFileLock(lockTarget, func() error {
+		if pingErr := pingDaemon(); pingErr == nil {
+			alreadyRunning = true
+			return nil
+		}
+		testHookSpawnPingPassed()
+		var serverErr error
+		closeFn, serverErr = startControlServer(manager, scheduler, shutdownCh)
+		return serverErr
+	})
+	if lockErr != nil {
+		return nil, false, lockErr
+	}
+	return closeFn, alreadyRunning, nil
+}
+
 // startControlServer registers the control RPC service on the Unix socket and
-// returns a cleanup function that closes the listener and removes the socket
-// file. When shutdownCh is non-nil, the Shutdown RPC will close it on the
+// returns a cleanup function that closes the listener (which also unlinks the
+// socket file). When shutdownCh is non-nil, the Shutdown RPC will close it on the
 // first invocation, allowing the daemon main loop to exit on RPC request.
 // scheduler may be nil for servers that do not host task schedules (tests);
 // the ReloadTasks RPC then returns an error.
@@ -464,9 +518,13 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, shutdownCh c
 	}()
 
 	return func() error {
-		err := listener.Close()
-		_ = os.Remove(socketPath)
-		return err
+		// Closing the listener also unlinks the socket file (net's default
+		// unlink-on-close for unix listeners it created). Deliberately no
+		// explicit os.Remove here: between the close-unlink and an explicit
+		// Remove, a new daemon can pass its ping check and bind a fresh
+		// socket at the same path, and the Remove would delete the new
+		// daemon's socket, orphaning it — the same race class as #718/#767.
+		return listener.Close()
 	}, nil
 }
 
