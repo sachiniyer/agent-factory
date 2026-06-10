@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -561,13 +562,26 @@ func reloadDaemonTaskSchedules() {
 // handleTaskCreate processes a pending task creation from the inline form.
 func (m *home) handleTaskCreate() tea.Cmd {
 	sp := m.contentPane.TaskPane()
-	name, prompt, cronExpr, projectPath, program := sp.ConsumePendingCreate()
+	name, prompt, cronExpr, watchCmd, targetSession, projectPath, program := sp.ConsumePendingCreate()
 
 	if name == "" {
 		return m.handleError(fmt.Errorf("task name is required"))
 	}
-	if err := task.ValidateCronExpr(cronExpr); err != nil {
-		return m.handleError(fmt.Errorf("invalid cron: %v", err))
+	// Re-validate the trigger contract behind the form (#782): exactly one of
+	// cron / watch cmd, and cron tasks need a prompt — there is no event line
+	// to fall back to. Mirrors `af tasks add` (api/tasks.go).
+	hasCron := cronExpr != ""
+	hasWatch := watchCmd != ""
+	if hasCron == hasWatch {
+		return m.handleError(fmt.Errorf("exactly one of cron or watch cmd is required"))
+	}
+	if hasCron {
+		if strings.TrimSpace(prompt) == "" {
+			return m.handleError(fmt.Errorf("prompt must be non-empty"))
+		}
+		if err := task.ValidateCronExpr(cronExpr); err != nil {
+			return m.handleError(fmt.Errorf("invalid cron: %v", err))
+		}
 	}
 	absPath, err := filepath.Abs(projectPath)
 	if err != nil {
@@ -577,14 +591,16 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		program = m.program
 	}
 	t := task.Task{
-		ID:          task.GenerateID(),
-		Name:        name,
-		Prompt:      prompt,
-		CronExpr:    cronExpr,
-		ProjectPath: absPath,
-		Program:     program,
-		Enabled:     true,
-		CreatedAt:   time.Now(),
+		ID:            task.GenerateID(),
+		Name:          name,
+		Prompt:        prompt,
+		CronExpr:      cronExpr,
+		WatchCmd:      watchCmd,
+		TargetSession: targetSession,
+		ProjectPath:   absPath,
+		Program:       program,
+		Enabled:       true,
+		CreatedAt:     time.Now(),
 	}
 	if err := task.AddTask(t); err != nil {
 		return m.handleError(fmt.Errorf("failed to save task: %v", err))

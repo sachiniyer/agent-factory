@@ -121,6 +121,8 @@ func TestTaskPaneCreateModeRejectsEmptyPrompt(t *testing.T) {
 			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
 
 			// Walk to Save and submit.
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> watch
+			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> target
 			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> path
 			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> program
 			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> save
@@ -142,14 +144,14 @@ func TestTaskPaneCreateModeSelectorDefaultsToConfigDefault(t *testing.T) {
 	tp.EnterCreateMode("/tmp/repo")
 	fillCreateForm(t, tp, "daily")
 
-	// Walk to the Save button (index 5) without touching the Program selector.
-	for i := 0; i < 5; i++ {
+	// Walk to the Save button without touching the Program selector.
+	for i := 0; i < taskFocusCount-1; i++ {
 		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.True(t, tp.HasPendingCreate(), "submit should mark a pending create")
-	_, _, _, _, program := tp.ConsumePendingCreate()
+	_, _, _, _, _, _, program := tp.ConsumePendingCreate()
 	assert.Equal(t, "", program, "default selector option must persist an empty Program")
 }
 
@@ -161,9 +163,9 @@ func TestTaskPaneCreateModeSelectorPicksCanonicalAgent(t *testing.T) {
 	tp.EnterCreateMode("/tmp/repo")
 	fillCreateForm(t, tp, "daily")
 
-	// Walk to the Program field (index 4) and step the selector to "claude"
+	// Walk to the Program field and step the selector to "claude"
 	// (option index 1: 0 is the default sentinel, 1 is the first supported).
-	for i := 0; i < 4; i++ {
+	for i := 0; i < taskFocusProgram; i++ {
 		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
@@ -172,7 +174,7 @@ func TestTaskPaneCreateModeSelectorPicksCanonicalAgent(t *testing.T) {
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.True(t, tp.HasPendingCreate(), "submit should mark a pending create")
-	_, _, _, _, program := tp.ConsumePendingCreate()
+	_, _, _, _, _, _, program := tp.ConsumePendingCreate()
 	assert.Equal(t, "claude", program, "selector must persist the canonical agent name")
 }
 
@@ -196,7 +198,7 @@ func TestTaskPaneEditModePresetFromExistingProgram(t *testing.T) {
 	assert.True(t, tp.IsEditing())
 
 	// Tab to Save and submit without touching the selector.
-	for i := 0; i < 5; i++ {
+	for i := 0; i < taskFocusCount-1; i++ {
 		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
@@ -233,7 +235,7 @@ func TestTaskPaneEditModeCollapsesLegacyProgramToDefault(t *testing.T) {
 	assert.True(t, tp.IsEditing())
 
 	// Tab to Save and submit without touching the selector.
-	for i := 0; i < 5; i++ {
+	for i := 0; i < taskFocusCount-1; i++ {
 		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
@@ -302,10 +304,10 @@ func editPathTo(t *testing.T, tp *TaskPane, newPath string) {
 	if !tp.IsEditing() {
 		t.Fatalf("expected edit mode")
 	}
-	// Tab Name -> Prompt -> Cron -> Path
-	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
-	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
-	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+	// Tab Name -> Prompt -> Cron -> Watch -> Target -> Path
+	for i := 0; i < taskFocusPath; i++ {
+		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+	}
 	// Clear current value then type the new one.
 	for range tp.editPath.Value() {
 		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyBackspace})
@@ -492,4 +494,203 @@ func TestTaskPaneConsumeDeletedClearsState(t *testing.T) {
 	second := tp.ConsumeDeleted()
 	assert.Empty(t, second,
 		"second save must not reprocess an already-deleted task (#763)")
+}
+
+// tabTo advances the edit-form focus from its current position to the given
+// focus stop by pressing Tab. Assumes focus starts at taskFocusName.
+func tabTo(tp *TaskPane, target int) {
+	for i := 0; i < target; i++ {
+		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+	}
+}
+
+// TestTaskPaneCreateModeRejectsBothTriggers covers the exactly-one trigger
+// contract from #782 on the create form: filling both Cron and Watch must
+// surface an inline validation error and keep the form open, mirroring the
+// `af tasks add` CLI validation.
+func TestTaskPaneCreateModeRejectsBothTriggers(t *testing.T) {
+	tp := NewTaskPane()
+	tp.EnterCreateMode("/tmp/repo")
+	fillCreateForm(t, tp, "both") // name, prompt, cron
+
+	tabTo(tp, taskFocusWatch)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("tail -F log")})
+	tabTo(tp, taskFocusSave-taskFocusWatch)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.False(t, tp.HasPendingCreate(), "two triggers must not produce a pending create")
+	assert.True(t, tp.IsCreating(), "form must stay open so user can fix the error")
+	assert.Equal(t, "cron and watch cmd are mutually exclusive; set exactly one", tp.editError)
+}
+
+// TestTaskPaneCreateModeRejectsNoTrigger covers the other half of the
+// exactly-one contract: submitting with neither Cron nor Watch filled must
+// surface an inline error instead of creating an unfireable task.
+func TestTaskPaneCreateModeRejectsNoTrigger(t *testing.T) {
+	tp := NewTaskPane()
+	tp.EnterCreateMode("/tmp/repo")
+
+	// Name and prompt only — no trigger.
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("untriggered")})
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do something")})
+	tabTo(tp, taskFocusSave-taskFocusPrompt)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.False(t, tp.HasPendingCreate(), "no trigger must not produce a pending create")
+	assert.True(t, tp.IsCreating(), "form must stay open so user can fix the error")
+	assert.Equal(t, "exactly one of cron or watch cmd is required", tp.editError)
+}
+
+// TestTaskPaneCreateModeWatchTask drives a full watch-task create: watch cmd
+// and target session filled, prompt left empty (a watch task may omit it —
+// each event defaults to the raw emitted line). The pending create must carry
+// the new fields and no cron.
+func TestTaskPaneCreateModeWatchTask(t *testing.T) {
+	tp := NewTaskPane()
+	tp.EnterCreateMode("/tmp/repo")
+
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("gh-issues")})
+	tabTo(tp, taskFocusWatch)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("gh-issue-watch.sh")})
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> target
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("captain")})
+	tabTo(tp, taskFocusSave-taskFocusTarget)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.True(t, tp.HasPendingCreate(), "a watch task with an empty prompt is valid")
+	assert.Equal(t, "", tp.editError)
+	_, prompt, cron, watchCmd, targetSession, _, _ := tp.ConsumePendingCreate()
+	assert.Equal(t, "", prompt)
+	assert.Equal(t, "", cron)
+	assert.Equal(t, "gh-issue-watch.sh", watchCmd)
+	assert.Equal(t, "captain", targetSession)
+}
+
+// TestTaskPaneEditModeSwitchCronToWatch verifies the edit form can retrigger
+// an existing cron task as a watch task: clearing Cron and filling Watch must
+// save WatchCmd and leave CronExpr empty (phase 3 of #782 replaced the
+// phase-2 stopgap that froze watch-task triggers in the TUI).
+func TestTaskPaneEditModeSwitchCronToWatch(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "0 0 * * *",
+		ProjectPath: "/tmp/repo",
+		Program:     "claude",
+		Enabled:     true,
+	}})
+	tp.SetFocus(true)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // enter edit mode
+	assert.True(t, tp.IsEditing())
+
+	tabTo(tp, taskFocusCron)
+	for range tp.editCron.Value() {
+		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> watch
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("tail -F app.log")})
+	tabTo(tp, taskFocusSave-taskFocusWatch)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.False(t, tp.IsEditing(), "save should exit edit mode")
+	assert.Equal(t, "", tp.editError)
+	tasks := tp.GetTasks()
+	if assert.Len(t, tasks, 1) {
+		assert.Equal(t, "", tasks[0].CronExpr)
+		assert.Equal(t, "tail -F app.log", tasks[0].WatchCmd)
+	}
+}
+
+// TestTaskPaneEditModeRejectsBothTriggers verifies the edit form surfaces the
+// exactly-one inline error when a cron task gains a watch cmd without the
+// cron being cleared.
+func TestTaskPaneEditModeRejectsBothTriggers(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "0 0 * * *",
+		ProjectPath: "/tmp/repo",
+		Enabled:     true,
+	}})
+	tp.SetFocus(true)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.True(t, tp.IsEditing())
+
+	tabTo(tp, taskFocusWatch)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("tail -F app.log")})
+	tabTo(tp, taskFocusSave-taskFocusWatch)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.True(t, tp.IsEditing(), "form must stay open so user can fix the error")
+	assert.Equal(t, "cron and watch cmd are mutually exclusive; set exactly one", tp.editError)
+	tasks := tp.GetTasks()
+	if assert.Len(t, tasks, 1) {
+		assert.Equal(t, "", tasks[0].WatchCmd, "rejected edit must not be written back")
+	}
+}
+
+// TestTaskPaneListRendersWatchStatus pins the list-row surface for watch
+// tasks (#782 phase 3): the trigger column shows the watch command, and the
+// status derived from the daemon-persisted fields reads watching (enabled,
+// no terminal status), errored (crash loop), or stopped (clean exit or
+// disabled).
+func TestTaskPaneListRendersWatchStatus(t *testing.T) {
+	cases := []struct {
+		name          string
+		enabled       bool
+		lastRunStatus string
+		want          string
+	}{
+		{"enabled fresh", true, "", "[watching]"},
+		{"enabled delivering", true, "sent", "[watching]"},
+		{"crash loop", true, "errored", "[errored]"},
+		{"clean exit", true, "stopped", "[stopped]"},
+		{"disabled", false, "sent", "[stopped]"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tp := NewTaskPane()
+			tp.SetSize(120, 24)
+			tp.SetTasks([]task.Task{{
+				ID:            "abc",
+				Name:          "gh-issues",
+				WatchCmd:      "gh-issue-watch.sh",
+				TargetSession: "captain",
+				ProjectPath:   "/tmp/repo",
+				Enabled:       c.enabled,
+				LastRunStatus: c.lastRunStatus,
+			}})
+
+			out := tp.String()
+			assert.Contains(t, out, "watch: gh-issue-watch.sh",
+				"watch rows must show the trigger kind and command")
+			assert.Contains(t, out, c.want)
+			assert.Contains(t, out, "→ captain",
+				"rows must surface the target session delivery")
+		})
+	}
+}
+
+// TestTaskPaneListCronRowHasNoWatchStatus confirms cron rows are unchanged:
+// they render the cron expression and no watch-status bracket.
+func TestTaskPaneListCronRowHasNoWatchStatus(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetSize(120, 24)
+	tp.SetTasks([]task.Task{{
+		ID:       "abc",
+		Name:     "nightly",
+		Prompt:   "do it",
+		CronExpr: "0 0 * * *",
+		Enabled:  true,
+	}})
+
+	out := tp.String()
+	assert.Contains(t, out, "0 0 * * *")
+	assert.NotContains(t, out, "[watching]")
+	assert.NotContains(t, out, "→ ")
 }

@@ -118,6 +118,8 @@ func TestHandleContentPaneFocus_PendingCreateFlushesDirtyTaskState(t *testing.T)
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do other thing")})
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> cron
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
+	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> watch cmd
+	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> path
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> program
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> save button

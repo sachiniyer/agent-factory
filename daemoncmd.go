@@ -18,11 +18,11 @@ import (
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Manage the background daemon that schedules tasks",
-	Long: `The agent-factory daemon runs task cron schedules in-process and drives
-autoyes mode. It starts automatically when you run af and at least one
-enabled task exists. Install it as a user-level autostart unit (systemd user
-service on Linux, launchd agent on macOS) so scheduled tasks keep firing
-after reboots, even when af is never opened.`,
+	Long: `The agent-factory daemon runs task cron schedules in-process, supervises
+watch-task scripts, and drives autoyes mode. It starts automatically when you
+run af and at least one enabled task exists. Install it as a user-level
+autostart unit (systemd user service on Linux, launchd agent on macOS) so
+tasks keep firing after reboots, even when af is never opened.`,
 }
 
 var daemonInstallCmd = &cobra.Command{
