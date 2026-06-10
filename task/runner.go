@@ -83,7 +83,7 @@ func isReadyContent(content, agent string) bool {
 		// deliberately NOT a ready signal (#729): there is no codex-specific
 		// dismissal in CheckAndHandleTrustPrompt, so treating it as ready let
 		// the next user prompt get typed into the dialog. Wait for the real
-		// "›" prompt instead. Kept in sync with daemon.isReadyContent.
+		// "›" prompt instead.
 		return strings.Contains(content, "›")
 	case tmux.ProgramAider:
 		// aider prints an "Aider v…" banner, then a line-start "> " prompt.

@@ -104,6 +104,25 @@ Agent Factory runs this command behind a local PTY and intercepts the configured
 
 Agent Factory also uses this script for the preview pane by running it in a background process and capturing its output.
 
+#### Preview output contract
+
+Preview output is rendered **inside a TUI pane**, not on a raw terminal. Two rules apply to the captured stream:
+
+- **Control sequences are stripped.** Cursor movement, erase, scroll-region, alt-screen, and mode sequences (e.g. `\033[H`, `\033[?1049h`, `\033[?25l`), OSC strings, and bare carriage returns are removed before rendering — only SGR color sequences (`\033[...m`) and plain text (with `\n`/`\t`) reach the pane. Scripts don't need to avoid emitting these, but they have no effect.
+- **`\033[2J` (clear screen) starts a fresh snapshot.** Everything captured before the last `\033[2J` is discarded, so a clear-then-capture loop replaces the previous frame instead of concatenating stale ones.
+
+A preview-friendly capture loop looks like:
+
+```bash
+while true; do
+  printf '\033[2J\033[H'
+  ssh user@host "tmux capture-pane -p -e -t $NAME"
+  sleep 1
+done
+```
+
+Each iteration becomes the new preview frame. `capture-pane -e` keeps colors; they are preserved in the pane.
+
 ## Example
 
 See `examples/remote-hooks/` for skeleton scripts that implement this protocol.
