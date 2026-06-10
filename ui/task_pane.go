@@ -546,16 +546,19 @@ func (s *TaskPane) String() string {
 // watchTaskStatus derives the supervision state shown for a watch task from
 // the fields the daemon persists (#782 phase 2): the watcher supervisor
 // records "stopped" (script exited 0) and "errored" (crash loop) in
-// LastRunStatus; any other value on an enabled watch task means the daemon
-// (re-)arms its watcher on start/reload, i.e. "watching". A disabled watch
-// task has no watcher, so it reads "stopped".
+// LastRunStatus — since #797 the latter as "errored: <why>", which the
+// detail row renders in full; any other value on an enabled watch task means
+// the daemon (re-)arms its watcher on start/reload, i.e. "watching". A
+// disabled watch task has no watcher, so it reads "stopped".
 func watchTaskStatus(tsk task.Task) string {
 	if !tsk.Enabled {
 		return "stopped"
 	}
-	switch tsk.LastRunStatus {
-	case "stopped", "errored":
-		return tsk.LastRunStatus
+	switch {
+	case tsk.LastRunStatus == "stopped":
+		return "stopped"
+	case tsk.LastRunStatus == "errored" || strings.HasPrefix(tsk.LastRunStatus, "errored:"):
+		return "errored"
 	}
 	return "watching"
 }

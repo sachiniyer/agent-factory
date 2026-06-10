@@ -649,6 +649,7 @@ func TestTaskPaneListRendersWatchStatus(t *testing.T) {
 		{"enabled fresh", true, "", "[watching]"},
 		{"enabled delivering", true, "sent", "[watching]"},
 		{"crash loop", true, "errored", "[errored]"},
+		{"crash loop with summary", true, "errored: exit status 1: WARN lock held", "[errored]"},
 		{"clean exit", true, "stopped", "[stopped]"},
 		{"disabled", false, "sent", "[stopped]"},
 	}
@@ -672,6 +673,10 @@ func TestTaskPaneListRendersWatchStatus(t *testing.T) {
 			assert.Contains(t, out, c.want)
 			assert.Contains(t, out, "→ captain",
 				"rows must surface the target session delivery")
+			if c.lastRunStatus != "" {
+				assert.Contains(t, out, "("+c.lastRunStatus+")",
+					"the detail row must render the raw status — including the #797 failure summary — in full")
+			}
 		})
 	}
 }
