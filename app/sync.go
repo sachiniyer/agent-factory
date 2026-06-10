@@ -201,7 +201,7 @@ func (m *home) mergePendingInstances() int {
 				if existing.Title != data.Title {
 					continue
 				}
-				if instanceCollisionShouldSkip(existing.GetWorktreePath(), data.Worktree.WorktreePath, existing.CreatedAt, data.CreatedAt, existing.TmuxAlive()) {
+				if instanceCollisionShouldSkip(existing.GetWorktreePath(), data.Worktree.WorktreePath, existing.CreatedAt, data.CreatedAt, existing.TmuxAlive(), existing.GetStatus() == session.Loading) {
 					log.WarningLog.Printf("skipping pending instance %q: already exists and is alive", data.Title)
 					skip = true
 				} else {
@@ -304,7 +304,7 @@ func (m *home) refreshExternalInstances() bool {
 				if existing.Title != d.Title {
 					continue
 				}
-				if !instanceCollisionShouldSkip(existing.GetWorktreePath(), d.Worktree.WorktreePath, existing.CreatedAt, d.CreatedAt, existing.TmuxAlive()) {
+				if !instanceCollisionShouldSkip(existing.GetWorktreePath(), d.Worktree.WorktreePath, existing.CreatedAt, d.CreatedAt, existing.TmuxAlive(), existing.GetStatus() == session.Loading) {
 					skip = false
 					shouldReplace = true
 				}
@@ -358,6 +358,15 @@ func (m *home) refreshExternalInstances() bool {
 // instance is still the authoritative live session), false when the sidebar
 // instance is stale and must be replaced.
 //
+// A Loading sidebar instance is never replaced (#808): it is the placeholder
+// for an in-flight TUI creation of this very session — the daemon persists
+// the record to instances.json before the start RPC returns, so the on-disk
+// row appearing while the placeholder is still Loading is the normal
+// mid-create state, not a stale corpse. Its CreatedAt also predates the
+// daemon-side record, so the #765 newer-CreatedAt rule below would otherwise
+// always swap it, orphaning the pointer the instanceStartedMsg handler later
+// passes to ReplaceInstance and leaving two same-title sidebar rows.
+//
 // The incoming instance supersedes the existing one when:
 //   - both worktree paths are known and differ — a scheduled task rerun
 //     creates a new worktree with a numeric suffix while reusing the tmux
@@ -370,7 +379,10 @@ func (m *home) refreshExternalInstances() bool {
 //     TmuxAlive() can then distinguish them; the newer CreatedAt can (#765).
 //
 // Otherwise, fall back to the tmuxAlive signal.
-func instanceCollisionShouldSkip(existingWorktreePath, incomingWorktreePath string, existingCreatedAt, incomingCreatedAt time.Time, tmuxAlive bool) bool {
+func instanceCollisionShouldSkip(existingWorktreePath, incomingWorktreePath string, existingCreatedAt, incomingCreatedAt time.Time, tmuxAlive, existingLoading bool) bool {
+	if existingLoading {
+		return true
+	}
 	if existingWorktreePath != "" && incomingWorktreePath != "" && existingWorktreePath != incomingWorktreePath {
 		return false
 	}

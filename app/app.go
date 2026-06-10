@@ -470,7 +470,16 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if started != msg.instance {
 			if !m.sidebar.ReplaceInstance(msg.instance, started) && !m.sidebar.ContainsInstance(started) {
-				m.sidebar.AddInstance(started)
+				// The Loading placeholder may have been swapped for a
+				// disk-built copy of this same session by a background sync
+				// while the start RPC was in flight; both Replace and
+				// Contains are pointer-based and miss it. Adding
+				// unconditionally would leave two sidebar rows — and two
+				// persisted records — for one session (#808), so replace any
+				// same-title row instead.
+				if !m.sidebar.ReplaceInstanceByTitle(started.Title, started) {
+					m.sidebar.AddInstance(started)
+				}
 			}
 		} else if !m.sidebar.ContainsInstance(started) {
 			m.sidebar.AddInstance(started)

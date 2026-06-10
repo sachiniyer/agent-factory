@@ -71,6 +71,33 @@ func NewStorage(state config.InstanceStorage, repoID string) (*Storage, error) {
 	}, nil
 }
 
+// dedupeInstanceData collapses records that share a title, keeping the one
+// with the newest UpdatedAt (ties keep the earliest occurrence, so in-memory
+// records — which both save paths place ahead of disk-only records — win).
+// Titles are unique per repo (the daemon's findTitleConflictLocked enforces
+// this on create), so two same-title records in one repo's list are always
+// the same logical session written twice (#808). Deduping at the save/load
+// chokepoints prevents new duplicates from persisting and collapses any
+// existing on-disk duplicate on the next clean save.
+func dedupeInstanceData(data []InstanceData) []InstanceData {
+	if len(data) < 2 {
+		return data
+	}
+	index := make(map[string]int, len(data))
+	out := make([]InstanceData, 0, len(data))
+	for _, d := range data {
+		if i, ok := index[d.Title]; ok {
+			if d.UpdatedAt.After(out[i].UpdatedAt) {
+				out[i] = d
+			}
+			continue
+		}
+		index[d.Title] = len(out)
+		out = append(out, d)
+	}
+	return out
+}
+
 // SaveInstances saves the list of instances to disk under file locks.
 // Loading instances are excluded — they represent in-flight TUI session
 // creations whose worktree is not yet populated, so they cannot be
@@ -197,7 +224,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 				merged = append(merged, dd)
 			}
 
-			jsonData, err := json.Marshal(merged)
+			jsonData, err := json.Marshal(dedupeInstanceData(merged))
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
 			}
@@ -278,7 +305,7 @@ func (s *Storage) saveRepoInstances(instances []*Instance) error {
 			merged = append(merged, disk)
 		}
 
-		jsonData, err := json.Marshal(merged)
+		jsonData, err := json.Marshal(dedupeInstanceData(merged))
 		if err != nil {
 			return fmt.Errorf("failed to marshal instances: %w", err)
 		}
@@ -312,6 +339,10 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 		if err := json.Unmarshal(jsonData, &instancesData); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
 		}
+		// Collapse duplicate records written before the dedup-on-save fix
+		// (#808) so a dup-containing file yields one sidebar row per session
+		// immediately, not just after the next save rewrites the file.
+		instancesData = dedupeInstanceData(instancesData)
 		for _, data := range instancesData {
 			instance, err := FromInstanceData(data)
 			if err != nil {
@@ -387,7 +418,7 @@ func (s *Storage) LoadInstanceData() ([]InstanceData, error) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
 	}
-	return data, nil
+	return dedupeInstanceData(data), nil
 }
 
 // DeleteAllInstances removes all stored instances

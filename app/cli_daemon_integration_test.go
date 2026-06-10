@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -192,4 +193,96 @@ func killIntegrationDaemon(home string) {
 	if proc, err := os.FindProcess(pid); err == nil {
 		_ = proc.Kill()
 	}
+}
+
+// TestTUIRefreshDoesNotSwapLoadingPlaceholder is the regression test for #808.
+//
+// The daemon persists a new session to instances.json BEFORE the create RPC
+// returns, so while the TUI's Loading placeholder is still in the sidebar,
+// the on-disk record for the same title already exists with a newer
+// CreatedAt. The #765 swap logic treated that newer record as a CLI
+// kill+recreate and swapped the placeholder out; the instanceStartedMsg
+// handler then missed it (pointer-based ReplaceInstance/ContainsInstance)
+// and re-added the started instance, leaving two same-title sidebar rows
+// that SaveInstances persisted as byte-identical duplicate records.
+func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
+	skipIfRealBackendDepsMissing(t)
+
+	bin := buildIntegrationBinary(t)
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+
+	h := newTestHome(t)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+	h.storage, err = session.NewStorage(config.DefaultState(), repo.ID)
+	require.NoError(t, err)
+	writeIntegrationConfig(t, os.Getenv("AGENT_FACTORY_HOME"))
+
+	t.Cleanup(func() {
+		_, _ = runIntegrationAF(t, bin, repoDir, "sessions", "kill", "scripts")
+		killIntegrationDaemon(os.Getenv("AGENT_FACTORY_HOME"))
+	})
+
+	// The TUI's placeholder for an in-flight create of "scripts".
+	placeholder, err := session.NewInstance(session.InstanceOptions{
+		Title:   "scripts",
+		Path:    repoDir,
+		Program: tmux.ProgramClaude,
+	})
+	require.NoError(t, err)
+	placeholder.SetStatus(session.Loading)
+	h.sidebar.AddInstance(placeholder)
+
+	// The daemon persists the session record mid-create — emulated by a CLI
+	// create, which goes through the same daemon CreateSession path the TUI
+	// start RPC uses.
+	runIntegrationAFOK(t, bin, repoDir, "sessions", "--repo", repoDir, "create", "--name", "scripts", "--program", tmux.ProgramClaude)
+
+	// A refresh tick fires while the placeholder is still Loading. It must
+	// not swap the placeholder out from under the in-flight create.
+	require.False(t, h.refreshExternalInstances(), "refresh must leave the Loading placeholder alone")
+	require.Same(t, placeholder, findSidebarInstance(h, "scripts"),
+		"the Loading placeholder must stay in the sidebar until its start completes (#808)")
+
+	// The start RPC completes, returning a freshly-built instance — exactly
+	// what startSessionThroughDaemon produces via FromInstanceData.
+	diskData, err := h.storage.LoadInstanceData()
+	require.NoError(t, err)
+	var rec *session.InstanceData
+	for i := range diskData {
+		if diskData[i].Title == "scripts" {
+			rec = &diskData[i]
+		}
+	}
+	require.NotNil(t, rec, "daemon must have persisted the session before the RPC returned")
+	started, err := session.FromInstanceData(*rec)
+	require.NoError(t, err)
+
+	_, _ = h.Update(instanceStartedMsg{instance: placeholder, started: started})
+
+	var matches []*session.Instance
+	for _, inst := range h.sidebar.GetInstances() {
+		if inst.Title == "scripts" {
+			matches = append(matches, inst)
+		}
+	}
+	require.Len(t, matches, 1, "one logical session must occupy exactly one sidebar row (#808)")
+	require.Same(t, started, matches[0])
+
+	// The next save must persist exactly one record. Read the raw file (not
+	// LoadInstanceData, which now dedupes on load) to assert the on-disk state.
+	require.NoError(t, h.storage.SaveInstances(h.sidebar.GetInstances()))
+	raw, err := config.DefaultState().GetInstances(repo.ID)
+	require.NoError(t, err)
+	var onDisk []session.InstanceData
+	require.NoError(t, json.Unmarshal(raw, &onDisk))
+	count := 0
+	for _, d := range onDisk {
+		if d.Title == "scripts" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "instances.json must hold exactly one record for the title (#808)")
 }

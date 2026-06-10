@@ -612,3 +612,121 @@ func TestCollectRepoRootsSkipsEmpty(t *testing.T) {
 	_, hasEmpty := roots[""]
 	assert.False(t, hasEmpty, "empty repo root should be skipped")
 }
+
+// --- Issue #808: instances.json held byte-identical duplicate records -----
+//
+// One logical session can be written twice when the sidebar briefly holds two
+// Instance objects with the same title (a disk-built copy swapped in by
+// refreshExternalInstances plus the started instance re-added by the
+// instanceStartedMsg handler). The storage layer dedupes by title at every
+// save/load chokepoint so neither mode can persist a duplicate, and an
+// existing on-disk duplicate collapses on the next clean save.
+
+func TestDedupeInstanceDataKeepsFreshest(t *testing.T) {
+	base := time.Date(2026, 6, 10, 11, 38, 47, 75861804, time.UTC)
+	older := InstanceData{Title: "scripts", Path: "/repo/stale", UpdatedAt: base}
+	newer := InstanceData{Title: "scripts", Path: "/repo/fresh", UpdatedAt: base.Add(time.Second)}
+	other := InstanceData{Title: "other", Path: "/repo", UpdatedAt: base}
+
+	out := dedupeInstanceData([]InstanceData{older, newer, other})
+	require.Len(t, out, 2)
+	assert.Equal(t, "scripts", out[0].Title)
+	assert.Equal(t, "/repo/fresh", out[0].Path, "the record with the newest UpdatedAt must win")
+	assert.Equal(t, "other", out[1].Title)
+
+	// Byte-identical duplicates (equal UpdatedAt) collapse to the first
+	// occurrence — the order both save paths put in-memory records first.
+	out = dedupeInstanceData([]InstanceData{older, older})
+	require.Len(t, out, 1)
+	assert.Equal(t, "/repo/stale", out[0].Path)
+}
+
+// TestTUISaveCollapsesOnDiskDuplicate is the one-time collapse: a file
+// already containing a byte-identical duplicate is rewritten clean by the
+// next save, even with nothing in memory.
+func TestTUISaveCollapsesOnDiskDuplicate(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	const repoPath = "/tmp/test-repo-808"
+	ms := newMockStorage()
+
+	created := time.Date(2026, 6, 10, 11, 38, 47, 75861804, time.UTC)
+	dup := InstanceData{Title: "scripts", Path: repoPath, CreatedAt: created, UpdatedAt: created}
+	seedDisk(t, ms, repoPath, []InstanceData{dup, dup})
+
+	storage, err := NewStorage(ms, config.RepoIDFromRoot(repoPath))
+	require.NoError(t, err)
+	require.NoError(t, storage.SaveInstances(nil))
+
+	result := readDisk(t, ms, repoPath)
+	require.Len(t, result, 1, "byte-identical duplicate must collapse on save")
+	assert.Equal(t, "scripts", result[0].Title)
+}
+
+// TestTUISaveCollapsesDuplicateInMemoryInstances covers the #808 write path:
+// the sidebar holds two live Instance objects for one session; TUI-mode save
+// must persist exactly one record.
+func TestTUISaveCollapsesDuplicateInMemoryInstances(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	const repoPath = "/tmp/test-repo-808"
+	ms := newMockStorage()
+
+	// The daemon persisted the session before the TUI's start RPC returned.
+	seedDisk(t, ms, repoPath, []InstanceData{{Title: "scripts", Path: repoPath}})
+
+	storage, err := NewStorage(ms, config.RepoIDFromRoot(repoPath))
+	require.NoError(t, err)
+
+	diskCopy := makeInstance("scripts", repoPath, true)
+	startedTwin := makeInstance("scripts", repoPath, true)
+	require.NoError(t, storage.SaveInstances([]*Instance{diskCopy, startedTwin}))
+
+	result := readDisk(t, ms, repoPath)
+	require.Len(t, result, 1, "two in-memory objects for one session must persist as one record")
+	assert.Equal(t, "scripts", result[0].Title)
+}
+
+// TestDaemonSaveCollapsesOnDiskDuplicate covers daemon-mode save: an
+// externally-added session that exists twice on disk (and is unknown to the
+// daemon) must be preserved exactly once.
+func TestDaemonSaveCollapsesOnDiskDuplicate(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	const repoPath = "/tmp/test-repo-808"
+	ms := newMockStorage()
+
+	created := time.Date(2026, 6, 10, 11, 38, 47, 75861804, time.UTC)
+	dup := InstanceData{Title: "scripts", Path: repoPath, CreatedAt: created, UpdatedAt: created}
+	seedDisk(t, ms, repoPath, []InstanceData{
+		{Title: "instance-A", Path: repoPath},
+		dup,
+		dup,
+	})
+
+	storage, err := NewStorage(ms, "") // daemon mode
+	require.NoError(t, err)
+	require.NoError(t, storage.SaveInstances([]*Instance{makeInstance("instance-A", repoPath, true)}))
+
+	result := readDisk(t, ms, repoPath)
+	counts := make(map[string]int)
+	for _, d := range result {
+		counts[d.Title]++
+	}
+	assert.Equal(t, map[string]int{"instance-A": 1, "scripts": 1}, counts)
+}
+
+// TestLoadInstanceDataCollapsesDuplicates: the data feed used by
+// refreshExternalInstances must never present the same title twice.
+func TestLoadInstanceDataCollapsesDuplicates(t *testing.T) {
+	const repoPath = "/tmp/test-repo-808"
+	ms := newMockStorage()
+
+	dup := InstanceData{Title: "scripts", Path: repoPath}
+	seedDisk(t, ms, repoPath, []InstanceData{dup, dup})
+
+	storage, err := NewStorage(ms, config.RepoIDFromRoot(repoPath))
+	require.NoError(t, err)
+
+	data, err := storage.LoadInstanceData()
+	require.NoError(t, err)
+	require.Len(t, data, 1)
+	assert.Equal(t, "scripts", data[0].Title)
+}
