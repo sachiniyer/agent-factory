@@ -20,6 +20,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -30,7 +31,14 @@ import (
 func TestMain(m *testing.M) {
 	log.Initialize(false)
 	defer log.Close()
-	os.Exit(m.Run())
+	// #837: fail the package loudly if any test touches the real config.json.
+	verifyRealConfig := testguard.ConfigTripwire()
+	code := m.Run()
+	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 // --- Backend interface compliance ---

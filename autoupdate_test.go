@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
@@ -34,7 +36,14 @@ func TestMain(m *testing.M) {
 	// autoUpdate() calls log.ErrorLog.Printf, which panics if logging has not
 	// been initialized. Initialize once for the whole package test binary.
 	aflog.Initialize(false)
-	os.Exit(m.Run())
+	// #837: fail the package loudly if any test touches the real config.json.
+	verifyRealConfig := testguard.ConfigTripwire()
+	code := m.Run()
+	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 // withTestHome points config.GetConfigDir at a temp dir for the duration of

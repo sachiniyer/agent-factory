@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
@@ -21,7 +22,13 @@ func TestMain(m *testing.M) {
 	log.Initialize(false)
 	defer log.Close()
 
+	// #837: fail the package loudly if any test touches the real config.json.
+	verifyRealConfig := testguard.ConfigTripwire()
 	exitCode := m.Run()
+	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		exitCode = 1
+	}
 	os.Exit(exitCode)
 }
 
@@ -408,11 +415,8 @@ func TestGetConfigDir(t *testing.T) {
 	})
 
 	t.Run("uses AGENT_FACTORY_HOME when set", func(t *testing.T) {
-		originalVal := os.Getenv("AGENT_FACTORY_HOME")
-		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
-
 		customDir := t.TempDir()
-		os.Setenv("AGENT_FACTORY_HOME", customDir)
+		t.Setenv("AGENT_FACTORY_HOME", customDir)
 
 		configDir, err := GetConfigDir()
 		assert.NoError(t, err)
@@ -420,10 +424,7 @@ func TestGetConfigDir(t *testing.T) {
 	})
 
 	t.Run("expands tilde in AGENT_FACTORY_HOME", func(t *testing.T) {
-		originalVal := os.Getenv("AGENT_FACTORY_HOME")
-		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
-
-		os.Setenv("AGENT_FACTORY_HOME", "~/.my-custom-config")
+		t.Setenv("AGENT_FACTORY_HOME", "~/.my-custom-config")
 
 		homeDir, err := os.UserHomeDir()
 		require.NoError(t, err)
@@ -434,10 +435,7 @@ func TestGetConfigDir(t *testing.T) {
 	})
 
 	t.Run("falls back to default when AGENT_FACTORY_HOME is empty", func(t *testing.T) {
-		originalVal := os.Getenv("AGENT_FACTORY_HOME")
-		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
-
-		os.Setenv("AGENT_FACTORY_HOME", "")
+		t.Setenv("AGENT_FACTORY_HOME", "")
 
 		configDir, err := GetConfigDir()
 		assert.NoError(t, err)
@@ -445,10 +443,7 @@ func TestGetConfigDir(t *testing.T) {
 	})
 
 	t.Run("returns home dir when AGENT_FACTORY_HOME is exactly ~", func(t *testing.T) {
-		originalVal := os.Getenv("AGENT_FACTORY_HOME")
-		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
-
-		os.Setenv("AGENT_FACTORY_HOME", "~")
+		t.Setenv("AGENT_FACTORY_HOME", "~")
 
 		homeDir, err := os.UserHomeDir()
 		require.NoError(t, err)
@@ -459,10 +454,7 @@ func TestGetConfigDir(t *testing.T) {
 	})
 
 	t.Run("expands ~/foo correctly", func(t *testing.T) {
-		originalVal := os.Getenv("AGENT_FACTORY_HOME")
-		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
-
-		os.Setenv("AGENT_FACTORY_HOME", "~/foo")
+		t.Setenv("AGENT_FACTORY_HOME", "~/foo")
 
 		homeDir, err := os.UserHomeDir()
 		require.NoError(t, err)
@@ -473,10 +465,7 @@ func TestGetConfigDir(t *testing.T) {
 	})
 
 	t.Run("returns error for malformed ~.config", func(t *testing.T) {
-		originalVal := os.Getenv("AGENT_FACTORY_HOME")
-		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
-
-		os.Setenv("AGENT_FACTORY_HOME", "~.config")
+		t.Setenv("AGENT_FACTORY_HOME", "~.config")
 
 		configDir, err := GetConfigDir()
 		assert.Error(t, err)
@@ -485,10 +474,7 @@ func TestGetConfigDir(t *testing.T) {
 	})
 
 	t.Run("returns error for malformed ~config", func(t *testing.T) {
-		originalVal := os.Getenv("AGENT_FACTORY_HOME")
-		defer os.Setenv("AGENT_FACTORY_HOME", originalVal)
-
-		os.Setenv("AGENT_FACTORY_HOME", "~config")
+		t.Setenv("AGENT_FACTORY_HOME", "~config")
 
 		configDir, err := GetConfigDir()
 		assert.Error(t, err)

@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"fmt"
 	stdlog "log"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,12 +21,30 @@ import (
 func TestMain(m *testing.M) {
 	log.Initialize(false)
 	defer log.Close()
-	os.Exit(m.Run())
+	// #837: fail the package loudly if any test touches the real config.json.
+	verifyRealConfig := testguard.ConfigTripwire()
+	code := m.Run()
+	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+// sandboxHome points HOME and AGENT_FACTORY_HOME at a fresh temp dir.
+// Overriding HOME alone is not enough: config.GetConfigDir prefers
+// AGENT_FACTORY_HOME, so in any environment that exports it, the
+// config.SaveConfig calls below would write into the user's real config
+// dir (#837).
+func sandboxHome(t *testing.T) {
+	t.Helper()
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(tempHome, ".agent-factory"))
 }
 
 func TestGetWorktreeDirectoryForRepo(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
@@ -39,8 +59,7 @@ func TestGetWorktreeDirectoryForRepo_RequiresRepoPath(t *testing.T) {
 }
 
 func TestNewGitWorktree_CleanName(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 	repoName := filepath.Base(repoRoot)
@@ -63,8 +82,7 @@ func TestNewGitWorktree_CleanName(t *testing.T) {
 }
 
 func TestNewGitWorktree_CollisionSuffix(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 	repoName := filepath.Base(repoRoot)
@@ -101,8 +119,7 @@ func TestNewGitWorktree_CollisionSuffix(t *testing.T) {
 }
 
 func TestNewGitWorktree_StatErrorReturns(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 	cfg := config.DefaultConfig()
@@ -125,8 +142,7 @@ func TestNewGitWorktree_StatErrorReturns(t *testing.T) {
 }
 
 func TestSetupFromExistingBranch_SetsBaseCommitSHA(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
@@ -184,8 +200,7 @@ func TestSetupFromExistingBranch_SetsBaseCommitSHA(t *testing.T) {
 // and covers older git where `remove` errors on a missing worktree and leaves
 // the stale registration that blocks `worktree add`.
 func TestSetupFromExistingBranch_RecreatesAfterExternalDeletion(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
@@ -235,8 +250,7 @@ func TestSetupFromExistingBranch_RecreatesAfterExternalDeletion(t *testing.T) {
 // Cleanup() always ran `git branch -D <branch>`, destroying user work on any
 // branch whose name happened to match the session's derived branch name.
 func TestCleanup_PreservesPreExistingBranch(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
@@ -280,8 +294,7 @@ func TestCleanup_PreservesPreExistingBranch(t *testing.T) {
 // branch itself, Cleanup() still deletes it (preserving existing behavior for
 // branches that the session owns).
 func TestCleanup_DeletesBranchWeCreated(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
@@ -323,8 +336,7 @@ func TestCleanup_DeletesBranchWeCreated(t *testing.T) {
 // CleanupWorktreesForRepo already prunes before branch deletion (#330);
 // this verifies GitWorktree.Cleanup() follows the same order.
 func TestCleanup_PrunesBeforeBranchDelete(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
@@ -381,8 +393,7 @@ func TestCleanup_PrunesBeforeBranchDelete(t *testing.T) {
 // force the user into `af reset`. CleanupWorktreesForRepo already does this;
 // this verifies GitWorktree.Cleanup() follows the same fallback.
 func TestCleanup_RemovesOrphanedDirectory(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
@@ -430,8 +441,7 @@ func TestCleanup_RemovesOrphanedDirectory(t *testing.T) {
 // real git: `worktree remove` fails ("is not a working tree") while the
 // registration is already gone and the directory is fully populated on disk.
 func TestCleanup_RemovesDirWhenGitDeregistered(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
@@ -488,8 +498,7 @@ func TestCleanup_RemovesDirWhenGitDeregistered(t *testing.T) {
 // of that class: a single `-f` refuses to remove it and the registration
 // stays put.
 func TestCleanup_SurfacesErrorWhenGitStillOwnsWorktree(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
@@ -573,8 +582,7 @@ func TestCleanup_EmptyWorktreePath(t *testing.T) {
 }
 
 func TestFindGitRepoRoot_ResolvesLinkedWorktree(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	// Create a main repo with an initial commit (required for worktree add)
 	repoRoot := createGitRepo(t)
@@ -600,8 +608,7 @@ func TestFindGitRepoRoot_ResolvesLinkedWorktree(t *testing.T) {
 }
 
 func TestGetWorktreeDirectoryForRepo_FromLinkedWorktree(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	// Create a main repo with an initial commit
 	repoRoot := createGitRepo(t)
@@ -672,8 +679,7 @@ func createGitRepo(t *testing.T) string {
 // Without an intervening `git worktree prune`, `git branch -D` reports the
 // branch is "in use" and the orphaned branch is left behind.
 func TestCleanupWorktreesForRepo_PrunesBeforeBranchDelete(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 	env := append(os.Environ(),
@@ -729,8 +735,7 @@ func TestCleanupWorktreesForRepo_RejectsEmpty(t *testing.T) {
 // process's current working directory. This is the core of the #265 fix:
 // `af reset` must be able to clean worktrees in repos OTHER than the cwd.
 func TestCleanupWorktreesForRepo_CleansGivenRepo(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	sandboxHome(t)
 
 	// Build a repo, make an initial commit, and add a linked worktree.
 	repoRoot := createGitRepo(t)

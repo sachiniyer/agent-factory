@@ -312,17 +312,100 @@ func LoadConfig() (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Create and save default config if file doesn't exist
-			defaultCfg := DefaultConfig()
-			if saveErr := saveConfig(defaultCfg); saveErr != nil {
-				log.WarningLog.Printf("failed to save default config: %v", saveErr)
-			}
-			return defaultCfg, nil
+			return materializeDefaultConfig(configDir, configPath, prettyConfigPath)
 		}
 
 		return nil, fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
 	}
 
+	return parseConfig(data, prettyConfigPath)
+}
+
+// materializeRaceHookForTest, when non-nil, runs between LoadConfig observing
+// a missing config.json and the exclusive create below. Tests use it to
+// recreate the file in that window and pin the lost-race behavior.
+var materializeRaceHookForTest func()
+
+// materializeDefaultConfig handles the missing-config.json branch of
+// LoadConfig. A missing file is only expected on first run; when the config
+// dir visibly already carries state, the user's settings file was deleted out
+// from under us, and regenerating defaults silently would disguise the loss
+// as normal operation (#837) — so that case logs at ERROR level before
+// materializing (the app still needs a config to run). The write itself is
+// create-exclusive: if another process recreates config.json between our read
+// and our create, that file wins and is returned instead of being clobbered.
+func materializeDefaultConfig(configDir, configPath, prettyConfigPath string) (*Config, error) {
+	if configDirInitialized(configDir) {
+		log.ErrorLog.Printf("config.json missing from an initialized config dir (%s) — materializing defaults; previous settings are lost", prettyHomePath(configDir))
+	}
+	if materializeRaceHookForTest != nil {
+		materializeRaceHookForTest()
+	}
+
+	defaultCfg := DefaultConfig()
+	created, saveErr := writeConfigIfMissing(configPath, defaultCfg)
+	if saveErr != nil {
+		log.WarningLog.Printf("failed to save default config: %v", saveErr)
+		return defaultCfg, nil
+	}
+	if !created {
+		// Lost the create race: a concurrent process wrote config.json after
+		// our read. Treat its file as authoritative.
+		if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
+			return parseConfig(data, prettyConfigPath)
+		}
+		// The concurrent file vanished or is empty; fall back to in-memory
+		// defaults without another write attempt.
+	}
+	return defaultCfg, nil
+}
+
+// configDirInitialized reports whether configDir already carries application
+// state — an instances/ or repos/ subdirectory, or a daemon.pid — meaning a
+// missing config.json there is a settings loss, not a first run.
+func configDirInitialized(configDir string) bool {
+	for _, marker := range []string{"instances", "repos"} {
+		if fi, err := os.Stat(filepath.Join(configDir, marker)); err == nil && fi.IsDir() {
+			return true
+		}
+	}
+	_, err := os.Stat(filepath.Join(configDir, "daemon.pid"))
+	return err == nil
+}
+
+// writeConfigIfMissing persists config to configPath with O_CREATE|O_EXCL
+// semantics. Returns created=false (and no error) when the file already
+// exists, so a concurrently recreated config is never overwritten.
+func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		return false, fmt.Errorf("failed to create config directory: %w", err)
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	f, err := os.OpenFile(configPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		if os.IsExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to create config file: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return true, fmt.Errorf("failed to write config file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return true, fmt.Errorf("failed to close config file: %w", err)
+	}
+	return true, nil
+}
+
+// parseConfig validates and unmarshals raw config.json bytes on top of the
+// defaults. Split from LoadConfig so the materialize lost-race path can run
+// the identical validation on a concurrently written file.
+func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
 	}
