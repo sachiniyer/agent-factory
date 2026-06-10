@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -158,9 +161,17 @@ func TestWatcherBackoffAndCrashLoopBreaker(t *testing.T) {
 	}
 	waitUntil(t, 10*time.Second, "crash-loop breaker to trip", func() bool {
 		statuses := rec.statusesSnapshot()
-		return len(statuses) > 0 && statuses[len(statuses)-1] == "bbbb0001:errored"
+		return len(statuses) > 0 && strings.HasPrefix(statuses[len(statuses)-1], "bbbb0001:errored")
 	})
 	elapsed := time.Since(start)
+
+	// Every "run" line was delivered as an event, so the failure tail is
+	// empty: the persisted summary is just the errored prefix and exit status
+	// (#797), with no stray separator.
+	statuses := rec.statusesSnapshot()
+	if got := statuses[len(statuses)-1]; got != "bbbb0001:errored: exit status 3" {
+		t.Fatalf("breaker status = %q, want %q", got, "bbbb0001:errored: exit status 3")
+	}
 
 	events := rec.eventsSnapshot()
 	if len(events) != s.crashMaxExits {
@@ -450,6 +461,186 @@ func TestDeliverWatchEvent_RendersTemplateAndRecordsStatus(t *testing.T) {
 	}
 	if len(*sends) != 1 {
 		t.Fatalf("disabled task still received an event: %+v", *sends)
+	}
+}
+
+// syncBuffer is a mutex-guarded bytes.Buffer so tests can read captured log
+// output while watcher goroutines may still be writing it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureWatcherLogs redirects the daemon's warning and error loggers into
+// buffers for the test's duration.
+func captureWatcherLogs(t *testing.T) (warn, errBuf *syncBuffer) {
+	t.Helper()
+	warn, errBuf = &syncBuffer{}, &syncBuffer{}
+	prevWarn, prevErr := aflog.WarningLog.Writer(), aflog.ErrorLog.Writer()
+	aflog.WarningLog.SetOutput(warn)
+	aflog.ErrorLog.SetOutput(errBuf)
+	t.Cleanup(func() {
+		aflog.WarningLog.SetOutput(prevWarn)
+		aflog.ErrorLog.SetOutput(prevErr)
+	})
+	return warn, errBuf
+}
+
+// TestWatcherFailureLogsIncludeOutputTail replays the #797 support case: a
+// script writes its complaint to stderr and exits non-zero, leaving nothing
+// in the event stream. The restart warning and the crash-loop breaker message
+// must carry the buffered output tail, and the breaker must persist
+// "errored: <exit>: <first line>" so `af tasks list` / the TUI show why.
+func TestWatcherFailureLogsIncludeOutputTail(t *testing.T) {
+	warn, errBuf := captureWatcherLogs(t)
+	dir := t.TempDir()
+	script := `echo "[iv-monitor] WARN another instance holds the lock; exiting" >&2; exit 1`
+	s, rec := newTestSupervisor(t, staticTasks(watchTask("ab970001", script, dir)))
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "crash-loop breaker to trip", func() bool {
+		statuses := rec.statusesSnapshot()
+		return len(statuses) > 0 && strings.HasPrefix(statuses[len(statuses)-1], "ab970001:errored")
+	})
+
+	wantLine := "[iv-monitor] WARN another instance holds the lock; exiting"
+	if got := warn.String(); !strings.Contains(got, "restarting in") || !strings.Contains(got, "last output:\n  "+wantLine) {
+		t.Fatalf("restart warning missing the output tail, got:\n%s", got)
+	}
+	if got := errBuf.String(); !strings.Contains(got, "giving up until the next reload or re-enable; last output:\n  "+wantLine) {
+		t.Fatalf("breaker message missing the output tail, got:\n%s", got)
+	}
+	statuses := rec.statusesSnapshot()
+	if got, want := statuses[len(statuses)-1], "ab970001:errored: exit status 1: "+wantLine; got != want {
+		t.Fatalf("persisted status = %q, want %q", got, want)
+	}
+}
+
+// TestWatcherTailCapturesNonDeliveredStdout pins the stdout leg of the #797
+// tail: lines whose delivery failed and unterminated trailing output both
+// land in the failure tail (oldest first), while the tail stays out of the
+// way on the happy path — delivered events are never buffered.
+func TestWatcherTailCapturesNonDeliveredStdout(t *testing.T) {
+	_, errBuf := captureWatcherLogs(t)
+	dir := t.TempDir()
+	script := `echo "lock contention detected"; printf "death rattle"; exit 1`
+	s, rec := newTestSupervisor(t, staticTasks(watchTask("ab970002", script, dir)))
+	s.deliver = func(taskID, line string) error {
+		_ = rec.deliver(taskID, line)
+		return errors.New("session spawn failed")
+	}
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "crash-loop breaker to trip", func() bool {
+		statuses := rec.statusesSnapshot()
+		return len(statuses) > 0 && strings.HasPrefix(statuses[len(statuses)-1], "ab970002:errored")
+	})
+
+	if got := errBuf.String(); !strings.Contains(got, "last output:\n  lock contention detected\n  death rattle") {
+		t.Fatalf("breaker message missing the stdout tail, got:\n%s", got)
+	}
+	statuses := rec.statusesSnapshot()
+	if got, want := statuses[len(statuses)-1], "ab970002:errored: exit status 1: lock contention detected"; got != want {
+		t.Fatalf("persisted status = %q, want %q", got, want)
+	}
+}
+
+// TestTailBufferCaps pins the ring-buffer bounds: at most watcherTailMaxLines
+// lines and watcherTailMaxBytes bytes are retained (newest win), a single
+// overlong line is truncated rather than evicting everything, blank lines are
+// skipped, and the persisted failure summary respects its own cap.
+func TestTailBufferCaps(t *testing.T) {
+	b := &tailBuffer{}
+	for i := 0; i < 100; i++ {
+		b.add(fmt.Sprintf("spam line %03d", i))
+	}
+	b.add("   ")
+	b.add("")
+	lines := strings.Split(strings.TrimPrefix(b.logSuffix(), "; last output:\n  "), "\n  ")
+	if len(lines) > watcherTailMaxLines {
+		t.Fatalf("tail kept %d lines, cap is %d", len(lines), watcherTailMaxLines)
+	}
+	if got := lines[len(lines)-1]; got != "spam line 099" {
+		t.Fatalf("newest line = %q, want the last one written", got)
+	}
+	if total := len(strings.Join(lines, "")); total > watcherTailMaxBytes {
+		t.Fatalf("tail holds %d bytes, cap is %d", total, watcherTailMaxBytes)
+	}
+
+	b.add(strings.Repeat("x", 3*watcherTailMaxBytes))
+	if first := b.firstLine(); len(first) != watcherTailMaxBytes || strings.Trim(first, "x") != "" {
+		t.Fatalf("overlong line not truncated to the byte cap: len=%d", len(first))
+	}
+
+	summary := failureSummary(errors.New("exit status 1"), b)
+	if !strings.HasPrefix(summary, "errored: exit status 1: xxx") {
+		t.Fatalf("summary = %.60q..., want errored prefix + first line", summary)
+	}
+	if len(summary) > watcherStatusSummaryMax+len("…") {
+		t.Fatalf("summary length %d exceeds cap %d", len(summary), watcherStatusSummaryMax)
+	}
+
+	if empty := (&tailBuffer{}); empty.logSuffix() != "" || empty.firstLine() != "" {
+		t.Fatalf("empty tail must render nothing, got %q / %q", empty.logSuffix(), empty.firstLine())
+	}
+}
+
+// TestWatcherShutdownSigtermIsNotAFailure covers the unit-restart race: a
+// supervising init system SIGTERMs the whole control group, so the watch
+// script can die before the daemon's own shutdown reaches the supervisor.
+// That death must not log a failed/restarting warning, count toward the
+// crash-loop breaker, or persist a status — it is a stop, not a failure.
+func TestWatcherShutdownSigtermIsNotAFailure(t *testing.T) {
+	warn, errBuf := captureWatcherLogs(t)
+	dir := t.TempDir()
+	script := `echo $$; while true; do sleep 0.1; done`
+	s, rec := newTestSupervisor(t, staticTasks(watchTask("ab970003", script, dir)))
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 5*time.Second, "script to report its PID", func() bool {
+		return len(rec.eventsSnapshot()) == 1
+	})
+	pid, err := strconv.Atoi(strings.TrimPrefix(rec.eventsSnapshot()[0], "ab970003:"))
+	if err != nil {
+		t.Fatalf("event is not a PID: %v", err)
+	}
+
+	// The unit manager's group SIGTERM reaches the child directly; the
+	// daemon's shutdown (s.Stop) follows a beat later.
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM script: %v", err)
+	}
+	s.Stop()
+
+	if got := warn.String(); strings.Contains(got, "watch command failed") {
+		t.Fatalf("shutdown SIGTERM logged as a failure:\n%s", got)
+	}
+	if got := errBuf.String(); strings.Contains(got, "giving up") {
+		t.Fatalf("shutdown SIGTERM counted toward the crash-loop breaker:\n%s", got)
+	}
+	if statuses := rec.statusesSnapshot(); len(statuses) != 0 {
+		t.Fatalf("shutdown SIGTERM persisted a status: %v", statuses)
+	}
+	if events := rec.eventsSnapshot(); len(events) != 1 {
+		t.Fatalf("watcher restarted after shutdown SIGTERM: %v", events)
 	}
 }
 

@@ -33,6 +33,11 @@ import (
 //   - ≥5 non-zero exits within 10 minutes = crash loop (status "errored",
 //     restarts stop until the next reload)
 //   - events above 10/min per task are dropped with a logged warning
+//   - each run buffers its recent output (last 10 lines / 2KB: stdout lines
+//     that did not become delivered events, plus stderr). Non-zero exits log
+//     that tail, and the crash-loop breaker persists "errored: <exit>:
+//     <first line>" into last_run_status so `af tasks list` and the TUI
+//     show why the task errored (#797)
 const (
 	// maxWatchLineBytes caps how much of a single stdout line becomes an
 	// event; the rest of the line is discarded with a logged note.
@@ -48,6 +53,18 @@ const (
 	// before escalating to a process-group SIGKILL. Mirrors
 	// sigtermFallbackGrace on the daemon-shutdown path.
 	watcherStopGrace = 5 * time.Second
+
+	// watcherTailMaxLines/watcherTailMaxBytes bound the per-run buffer of
+	// recent script output kept for failure diagnostics (#797): stdout
+	// lines that did not become delivered events, plus stderr. The byte cap
+	// applies both per line and to the buffer total.
+	watcherTailMaxLines = 10
+	watcherTailMaxBytes = 2 * 1024
+
+	// watcherStatusSummaryMax caps the failure summary the crash-loop
+	// breaker persists into the task's last_run_status, so tasks.json and
+	// the TUI detail row stay readable.
+	watcherStatusSummaryMax = 256
 )
 
 // watcherSupervisor owns the running watch-task processes. Reload reconciles
@@ -219,6 +236,76 @@ func stopWatchers(ws []*taskWatcher) {
 	wg.Wait()
 }
 
+// tailBuffer is a small bounded ring of one script run's most recent output
+// lines — stdout lines that did not become delivered events, plus stderr —
+// kept so a failing run's log line can show WHY the script died instead of a
+// bare exit status (#797). Bounded to watcherTailMaxLines lines and
+// watcherTailMaxBytes total bytes, always retaining at least the newest line.
+type tailBuffer struct {
+	mu    sync.Mutex
+	lines []string
+	size  int
+}
+
+// add records one output line, trimming the line terminator and capping the
+// line at watcherTailMaxBytes. Blank lines are skipped — they carry no
+// diagnostics and would evict lines that do.
+func (b *tailBuffer) add(line string) {
+	line = strings.TrimRight(line, "\r\n")
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	if len(line) > watcherTailMaxBytes {
+		line = line[:watcherTailMaxBytes]
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lines = append(b.lines, line)
+	b.size += len(line)
+	for len(b.lines) > 1 && (len(b.lines) > watcherTailMaxLines || b.size > watcherTailMaxBytes) {
+		b.size -= len(b.lines[0])
+		b.lines = b.lines[1:]
+	}
+}
+
+// logSuffix renders the buffered output for appending to a failure log line:
+// "; last output:" plus one indented line each, or "" when the run produced
+// nothing to show (so failure logs never grow an empty trailer).
+func (b *tailBuffer) logSuffix() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.lines) == 0 {
+		return ""
+	}
+	return "; last output:\n  " + strings.Join(b.lines, "\n  ")
+}
+
+// firstLine returns the oldest buffered line — usually the script's initial
+// complaint — for the persisted status summary.
+func (b *tailBuffer) firstLine() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.lines) == 0 {
+		return ""
+	}
+	return b.lines[0]
+}
+
+// failureSummary builds the status the crash-loop breaker persists:
+// "errored: <exit error>: <first buffered line>", capped at
+// watcherStatusSummaryMax. The "errored" prefix is what the TUI keys the
+// supervision state off (ui.watchTaskStatus), so it must come first.
+func failureSummary(runErr error, tail *tailBuffer) string {
+	summary := "errored: " + runErr.Error()
+	if first := tail.firstLine(); first != "" {
+		summary += ": " + first
+	}
+	if len(summary) > watcherStatusSummaryMax {
+		summary = summary[:watcherStatusSummaryMax] + "…"
+	}
+	return summary
+}
+
 // taskWatcher supervises one watch task: it restarts the script with backoff
 // on failure and feeds its stdout lines to the supervisor's deliver hook.
 // Deliveries are serialized in emission order — the single reader goroutine
@@ -282,8 +369,11 @@ func (w *taskWatcher) run() {
 		}
 
 		started := time.Now()
-		runErr := w.runOnce()
+		tail, runErr := w.runOnce()
 		if w.stopRequested() {
+			if runErr != nil {
+				log.InfoLog.Printf("watch task %s: watch command terminated during stop/reload (%v); not a failure", w.taskID, runErr)
+			}
 			return
 		}
 
@@ -291,6 +381,21 @@ func (w *taskWatcher) run() {
 			log.InfoLog.Printf("watch task %s: watch command exited cleanly; stopped until the next reload or re-enable", w.taskID)
 			w.sup.setStatus(w.taskID, "stopped")
 			return
+		}
+
+		// A SIGTERM-shaped death is often daemon shutdown or a unit restart
+		// reaching the child before the stop request reaches this loop — unit
+		// managers signal the whole control group, not just the daemon. Give
+		// the stop channel a grace before treating it as a script failure, so
+		// shutdown doesn't log spurious failed/restarting warnings or count
+		// toward the crash-loop breaker.
+		if exitedFromSignal(runErr, syscall.SIGTERM) {
+			select {
+			case <-w.stopCh:
+				log.InfoLog.Printf("watch task %s: watch command terminated during stop/reload; not a failure", w.taskID)
+				return
+			case <-time.After(w.sup.stopGrace):
+			}
 		}
 
 		now := time.Now()
@@ -301,8 +406,8 @@ func (w *taskWatcher) run() {
 		}
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
-			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until the next reload or re-enable", w.taskID, len(failures), w.sup.crashWindow, runErr)
-			w.sup.setStatus(w.taskID, "errored")
+			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until the next reload or re-enable%s", w.taskID, len(failures), w.sup.crashWindow, runErr, tail.logSuffix())
+			w.sup.setStatus(w.taskID, failureSummary(runErr, tail))
 			return
 		}
 
@@ -311,7 +416,7 @@ func (w *taskWatcher) run() {
 		if now.Sub(started) >= w.sup.crashWindow {
 			backoff = w.sup.baseBackoff
 		}
-		log.WarningLog.Printf("watch task %s: watch command failed (%v); restarting in %s", w.taskID, runErr, backoff)
+		log.WarningLog.Printf("watch task %s: watch command failed (%v); restarting in %s%s", w.taskID, runErr, backoff, tail.logSuffix())
 		select {
 		case <-w.stopCh:
 			return
@@ -324,9 +429,22 @@ func (w *taskWatcher) run() {
 	}
 }
 
+// exitedFromSignal reports whether err is an exec exit caused by the given
+// signal (as opposed to a non-zero exit code or a start failure).
+func exitedFromSignal(err error, sig syscall.Signal) bool {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return false
+	}
+	ws, ok := ee.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled() && ws.Signal() == sig
+}
+
 // runOnce spawns the script once and consumes its stdout until the shell
-// exits. Returns nil on exit 0, the exit/start error otherwise.
-func (w *taskWatcher) runOnce() error {
+// exits. Returns nil on exit 0, the exit/start error otherwise, plus the
+// run's output tail (never nil) for the caller's failure logging.
+func (w *taskWatcher) runOnce() (*tailBuffer, error) {
+	tail := &tailBuffer{}
 	cmd := exec.Command(w.sup.shell, "-c", w.cmdStr)
 	cmd.Dir = w.dir
 	cmd.Env = append(os.Environ(),
@@ -340,13 +458,15 @@ func (w *taskWatcher) runOnce() error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// stderr appends to the per-task log. A logging failure must not take the
-	// watcher down — stderr just goes to the void for this run.
+	// watcher down — the failure tail below still captures stderr for this
+	// run even when the file can't be opened.
+	var stderrFile *os.File
 	if logPath, err := w.sup.logPath(w.taskID); err != nil {
 		log.WarningLog.Printf("watch task %s: cannot resolve stderr log path: %v", w.taskID, err)
 	} else if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err != nil {
 		log.WarningLog.Printf("watch task %s: cannot open stderr log: %v", w.taskID, err)
 	} else {
-		cmd.Stderr = f
+		stderrFile = f
 		defer f.Close()
 	}
 
@@ -357,23 +477,59 @@ func (w *taskWatcher) runOnce() error {
 	// group-kill below reaps them.
 	r, pw, err := os.Pipe()
 	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
+		return tail, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 	cmd.Stdout = pw
+
+	// stderr flows through a pipe we own for the same reasons, teed to the
+	// per-task log and into the failure tail (#797). Pipe failure degrades to
+	// the pre-#797 direct-to-file wiring rather than failing the run.
+	var stderrR, stderrW *os.File
+	if er, ew, perr := os.Pipe(); perr != nil {
+		log.WarningLog.Printf("watch task %s: cannot create stderr pipe (stderr won't appear in failure logs): %v", w.taskID, perr)
+		if stderrFile != nil {
+			cmd.Stderr = stderrFile
+		}
+	} else {
+		stderrR, stderrW = er, ew
+		cmd.Stderr = stderrW
+	}
 
 	if err := cmd.Start(); err != nil {
 		_ = r.Close()
 		_ = pw.Close()
-		return err
+		if stderrR != nil {
+			_ = stderrR.Close()
+			_ = stderrW.Close()
+		}
+		return tail, err
 	}
 	_ = pw.Close() // the child holds its own dup
+	if stderrW != nil {
+		_ = stderrW.Close()
+	}
 
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
 		defer r.Close()
-		w.consumeLines(r)
+		w.consumeLines(r, tail)
 	}()
+
+	stderrDone := make(chan struct{})
+	if stderrR == nil {
+		close(stderrDone)
+	} else {
+		var sink io.Writer
+		if stderrFile != nil {
+			sink = stderrFile
+		}
+		go func() {
+			defer close(stderrDone)
+			defer stderrR.Close()
+			w.consumeStderr(stderrR, sink, tail)
+		}()
+	}
 
 	// Watchdog for stop requests: SIGTERM the group so the script can clean
 	// up, escalate to a group SIGKILL after the grace.
@@ -395,24 +551,26 @@ func (w *taskWatcher) runOnce() error {
 	close(waitDone)
 
 	// Group-kill on every exit path (#769): backgrounded grandchildren must
-	// not outlive the watcher. This also closes any inherited stdout write
-	// ends, so the reader goroutine is guaranteed to reach EOF.
+	// not outlive the watcher. This also closes any inherited stdout/stderr
+	// write ends, so both reader goroutines are guaranteed to reach EOF.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	<-readerDone
+	<-stderrDone
 
-	return waitErr
+	return tail, waitErr
 }
 
 // consumeLines turns newline-terminated stdout lines into events. Lines over
 // maxWatchLineBytes are truncated to the cap and the remainder discarded with
-// a logged note; unterminated trailing output at EOF is not an event.
-func (w *taskWatcher) consumeLines(r io.Reader) {
+// a logged note; unterminated trailing output at EOF is not an event but is
+// kept in the failure tail — it is often the script's death rattle (#797).
+func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer) {
 	br := bufio.NewReaderSize(r, maxWatchLineBytes)
 	for {
 		chunk, err := br.ReadSlice('\n')
 		switch {
 		case err == nil:
-			w.handleEvent(strings.TrimRight(string(chunk), "\r\n"))
+			w.handleEvent(strings.TrimRight(string(chunk), "\r\n"), tail)
 		case errors.Is(err, bufio.ErrBufferFull):
 			// ReadSlice's buffer filled before a newline: keep the first
 			// maxWatchLineBytes as the event and discard the rest of the line.
@@ -430,13 +588,15 @@ func (w *taskWatcher) consumeLines(r io.Reader) {
 			if tailErr != nil {
 				// The stream ended before the line did — never
 				// newline-terminated, so not an event.
+				tail.add(line)
 				return
 			}
 			log.WarningLog.Printf("watch task %s: stdout line exceeded %d bytes; truncated (%d bytes discarded)", w.taskID, maxWatchLineBytes, discarded)
-			w.handleEvent(line)
+			w.handleEvent(line, tail)
 		case errors.Is(err, io.EOF):
 			if len(chunk) > 0 {
 				log.WarningLog.Printf("watch task %s: discarding %d bytes of unterminated stdout output (events must be newline-terminated lines)", w.taskID, len(chunk))
+				tail.add(string(chunk))
 			}
 			return
 		default:
@@ -445,9 +605,41 @@ func (w *taskWatcher) consumeLines(r io.Reader) {
 	}
 }
 
+// consumeStderr tees the script's stderr to the per-task log file (when one
+// could be opened) and keeps complete lines in the failure tail, so a script
+// whose own redirections starve the log file is still diagnosable from the
+// daemon log on failure (#797).
+func (w *taskWatcher) consumeStderr(r io.Reader, logFile io.Writer, tail *tailBuffer) {
+	br := bufio.NewReaderSize(r, 4*1024)
+	atLineStart := true
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if len(chunk) > 0 {
+			if logFile != nil {
+				_, _ = logFile.Write(chunk)
+			}
+			if atLineStart {
+				tail.add(string(chunk))
+			}
+		}
+		switch {
+		case err == nil:
+			atLineStart = true
+		case errors.Is(err, bufio.ErrBufferFull):
+			// Only an overlong line's first chunk lands in the tail (add caps
+			// it anyway); the rest still reaches the log file above.
+			atLineStart = false
+		default:
+			return
+		}
+	}
+}
+
 // handleEvent applies the per-task rate limit and delivers the event. Called
 // from the single reader goroutine, so deliveries stay serialized in order.
-func (w *taskWatcher) handleEvent(line string) {
+// Lines that do not become a delivered event — rate-dropped or failed
+// deliveries — go to the failure tail instead (#797).
+func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	now := time.Now()
 	w.mu.Lock()
 	cut := 0
@@ -468,6 +660,7 @@ func (w *taskWatcher) handleEvent(line string) {
 		if logIt {
 			log.WarningLog.Printf("watch task %s: event rate exceeded %d/min; dropping excess events (%d dropped so far)", w.taskID, w.sup.eventsPerMinute, dropped)
 		}
+		tail.add(line)
 		return
 	}
 	w.eventTimes = append(w.eventTimes, now)
@@ -475,6 +668,7 @@ func (w *taskWatcher) handleEvent(line string) {
 
 	if err := w.sup.deliver(w.taskID, line); err != nil {
 		log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
+		tail.add(line)
 	}
 }
 
@@ -505,8 +699,9 @@ func deliverWatchEvent(taskID, line string) error {
 	return nil
 }
 
-// persistWatcherStatus records a watcher lifecycle status ("stopped",
-// "errored") on the task. LastRunAt is preserved — it tracks event
+// persistWatcherStatus records a watcher lifecycle status on the task:
+// "stopped", or "errored: <exit>: <first output line>" from the crash-loop
+// breaker (#797). LastRunAt is preserved — it tracks event
 // deliveries, not supervision changes. UpdateTaskStatus skips Program enum
 // validation so legacy task records still receive status bumps (#664).
 func persistWatcherStatus(taskID, status string) {
