@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
 )
@@ -166,4 +167,62 @@ func TestContentPaneRendersExactlyAllocatedHeight(t *testing.T) {
 	// the layout does not jump when switching sidebar selections.
 	cp.SetMode(ContentModeInstance)
 	require.Equal(t, h, renderedLineCount(tw.String()), "tabbed window")
+}
+
+// renderedWidth returns the widest line of a component's output, measured in
+// terminal cells (lipgloss.Width is ANSI- and wide-rune-aware).
+func renderedWidth(s string) int {
+	widest := 0
+	for _, line := range strings.Split(s, "\n") {
+		if lw := lipgloss.Width(line); lw > widest {
+			widest = lw
+		}
+	}
+	return widest
+}
+
+// TestContentPaneInlinePanesMatchAllocatedWidth is the regression test for
+// #821, the width counterpart of the #786 height fix above. windowStyle is
+// bordered, and lipgloss Style.Width sets the *inner* content width — so
+// renderInlinePane's .Width(w) call rendered w+frame total columns, making
+// the tasks/hooks/empty panes 2 columns wider than the tabbed window and
+// shifting the layout when switching between sidebar selections.
+func TestContentPaneInlinePanesMatchAllocatedWidth(t *testing.T) {
+	for _, tc := range []struct{ w, h int }{
+		{56, 21}, // 80x24 terminal (see TestContentPaneRendersExactlyAllocatedHeight)
+		{84, 27}, // 120x30 terminal
+	} {
+		// Both the inline panes and the tabbed window carve their window
+		// width out of the allocation the same way.
+		want := AdjustPreviewWidth(tc.w)
+
+		tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+		cp := NewContentPane(tw)
+		cp.SetSize(tc.w, tc.h)
+
+		cp.SetMode(ContentModeEmpty)
+		require.Equal(t, want, renderedWidth(cp.String()),
+			"%dx%d: empty mode", tc.w, tc.h)
+
+		cp.SetMode(ContentModeTasks)
+		require.Equal(t, want, renderedWidth(cp.String()),
+			"%dx%d: tasks mode, no tasks", tc.w, tc.h)
+
+		cp.TaskPane().SetTasks([]task.Task{
+			{ID: "t", Name: strings.Repeat("long-task-name-", 8), Prompt: "p"},
+		})
+		require.Equal(t, want, renderedWidth(cp.String()),
+			"%dx%d: tasks mode with over-wide content", tc.w, tc.h)
+
+		cp.HooksPane().SetCommands([]string{strings.Repeat("hook-cmd ", 20)})
+		cp.SetMode(ContentModeHooks)
+		require.Equal(t, want, renderedWidth(cp.String()),
+			"%dx%d: hooks mode with over-wide content", tc.w, tc.h)
+
+		// Inline panes must render exactly as wide as the tabbed window so
+		// the border column does not move when switching sidebar selections.
+		cp.SetMode(ContentModeInstance)
+		require.Equal(t, want, renderedWidth(tw.String()),
+			"%dx%d: tabbed window", tc.w, tc.h)
+	}
 }

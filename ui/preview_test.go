@@ -527,6 +527,44 @@ func TestPreviewResetToNormalModeNilInstance(t *testing.T) {
 		"rendered content must not be the stale scroll-mode viewport after reset")
 }
 
+// TestPreviewResetToNormalModeLoadingShowsFallback is a regression test for
+// issue #823. Exiting scroll mode on a Loading instance wrote
+// {fallback:false, text:""} into previewState — Preview() returns empty
+// content while the workspace is still being set up — so the pane rendered
+// completely blank for at least one frame until the next async UpdateContent
+// tick. ResetToNormalMode must keep the same "Setting up workspace..."
+// fallback that UpdateContent shows for Loading instances.
+func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "loading", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStatus(session.Loading)
+
+	p := NewPreviewPane()
+	p.SetSize(80, 30)
+	require.NoError(t, p.UpdateContent(inst))
+	require.True(t, p.previewState.fallback,
+		"precondition: Loading instance shows the fallback in normal mode")
+
+	require.NoError(t, p.ScrollUp(inst))
+	require.True(t, p.isScrolling, "precondition: ScrollUp enters scroll mode")
+
+	require.NoError(t, p.ResetToNormalMode(inst))
+	require.False(t, p.isScrolling,
+		"isScrolling must be false after ResetToNormalMode")
+	require.True(t, p.previewState.fallback,
+		"exiting scroll mode on a Loading instance must keep the fallback state")
+	require.Contains(t, p.previewState.text, "Setting up workspace...",
+		"fallback text must be the Loading message")
+	require.Contains(t, p.String(), "Setting up workspace...",
+		"rendered frame must show the Loading fallback, not a blank pane")
+}
+
 // TestPreviewFallbackHeightNoDoubleCounting ensures that the fallback welcome
 // screen does not over-subtract lines for borders/margins that
 // TabbedWindow.SetSize has already stripped. Previously it subtracted 7, which

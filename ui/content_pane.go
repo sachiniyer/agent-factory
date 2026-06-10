@@ -181,6 +181,9 @@ func (c *ContentPane) renderInlinePane(content string) string {
 	}
 
 	innerWidth := w - windowStyle.GetHorizontalFrameSize()
+	if innerWidth < 0 {
+		innerWidth = 0
+	}
 	// The -2 budgets for the two spacer lines the JoinVertical("\n", ...)
 	// below emits, mirroring TabbedWindow.String's height math so inline
 	// panes line up with the tabbed window.
@@ -189,17 +192,20 @@ func (c *ContentPane) renderInlinePane(content string) string {
 		innerHeight = 0
 	}
 
-	// lipgloss.Place pads short content but never truncates tall content, and
-	// the window border's Width re-wraps lines wider than the frame. Wrap to
-	// the frame width first, then clamp to the height budget, so the pane can
-	// never render taller than its SetSize allocation and push the menu and
-	// error box off-screen (#700).
+	// lipgloss.Place pads short content but never truncates or wraps:
+	// over-tall content pushes the menu and error box off-screen (#700) and
+	// over-wide lines stretch the border box past the allocation. Wrap to the
+	// frame width first, then clamp to the height budget.
 	wrapped := strings.Split(lipgloss.NewStyle().Width(innerWidth).Render(content), "\n")
 	if len(wrapped) > innerHeight {
 		wrapped = wrapped[:innerHeight]
 	}
 
-	window := windowStyle.Width(w).Render(
+	// windowStyle is bordered, and Style.Width sets the *inner* width — so
+	// .Width(w) here rendered w+frame total columns, 2 wider than allocated
+	// (#821). Match TabbedWindow.String: size the content via lipgloss.Place
+	// and let the border add the frame on top.
+	window := windowStyle.Render(
 		lipgloss.Place(
 			innerWidth, innerHeight,
 			lipgloss.Left, lipgloss.Top,

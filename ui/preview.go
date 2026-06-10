@@ -341,6 +341,15 @@ func (p *PreviewPane) ResetToNormalMode(instance *session.Instance) error {
 	}
 
 	if wasScrolling {
+		// Mirror UpdateContent's Loading guard (#823): a Loading instance's
+		// Preview() returns empty content, and writing {fallback:false, text:""}
+		// here blanks the pane for a frame until the next async refresh. Keep
+		// the "Setting up workspace..." fallback instead.
+		if instance.GetStatus() == session.Loading {
+			p.setFallbackState("Setting up workspace...")
+			return nil
+		}
+
 		// Immediately update content instead of waiting for next UpdateContent call
 		content, err := instance.Preview()
 		if err != nil {
