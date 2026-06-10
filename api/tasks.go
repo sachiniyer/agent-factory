@@ -79,10 +79,12 @@ var tasksListCmd = &cobra.Command{
 }
 
 var (
-	taskAddNameFlag    string
-	taskAddPromptFlag  string
-	taskAddCronFlag    string
-	taskAddProgramFlag string
+	taskAddNameFlag          string
+	taskAddPromptFlag        string
+	taskAddCronFlag          string
+	taskAddWatchCmdFlag      string
+	taskAddTargetSessionFlag string
+	taskAddProgramFlag       string
 )
 
 var tasksAddCmd = &cobra.Command{
@@ -97,15 +99,24 @@ var tasksAddCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("--repo is required: %w", err))
 		}
 
-		// MarkFlagRequired only enforces presence, so --prompt "" or
-		// whitespace-only values slip past Cobra and create tasks that
-		// no-op when triggered (#517).
-		if strings.TrimSpace(taskAddPromptFlag) == "" {
-			return jsonError(errors.New("prompt must be non-empty"))
+		hasCron := strings.TrimSpace(taskAddCronFlag) != ""
+		hasWatch := strings.TrimSpace(taskAddWatchCmdFlag) != ""
+		if hasCron == hasWatch {
+			return jsonError(errors.New("exactly one of --cron or --watch-cmd is required"))
 		}
 
-		if err := task.ValidateCronExpr(taskAddCronFlag); err != nil {
-			return jsonError(fmt.Errorf("invalid cron expression: %w", err))
+		if hasCron {
+			// Cron tasks need a prompt — there is no event line to fall back
+			// to. Trim-validate because MarkFlagRequired-style presence checks
+			// let whitespace-only values create no-op tasks (#517). Watch
+			// tasks may omit the prompt: each delivery defaults to the raw
+			// emitted line (#782).
+			if strings.TrimSpace(taskAddPromptFlag) == "" {
+				return jsonError(errors.New("prompt must be non-empty"))
+			}
+			if err := task.ValidateCronExpr(taskAddCronFlag); err != nil {
+				return jsonError(fmt.Errorf("invalid cron expression: %w", err))
+			}
 		}
 
 		program := taskAddProgramFlag
@@ -121,14 +132,16 @@ var tasksAddCmd = &cobra.Command{
 
 		id := task.GenerateID()
 		s := task.Task{
-			ID:          id,
-			Name:        taskAddNameFlag,
-			Prompt:      taskAddPromptFlag,
-			CronExpr:    taskAddCronFlag,
-			ProjectPath: repo.Root,
-			Program:     program,
-			Enabled:     true,
-			CreatedAt:   time.Now(),
+			ID:            id,
+			Name:          taskAddNameFlag,
+			Prompt:        taskAddPromptFlag,
+			CronExpr:      strings.TrimSpace(taskAddCronFlag),
+			WatchCmd:      strings.TrimSpace(taskAddWatchCmdFlag),
+			TargetSession: taskAddTargetSessionFlag,
+			ProjectPath:   repo.Root,
+			Program:       program,
+			Enabled:       true,
+			CreatedAt:     time.Now(),
 		}
 
 		if err := task.AddTask(s); err != nil {
@@ -205,10 +218,12 @@ var tasksRunCmd = &cobra.Command{
 }
 
 var (
-	taskUpdateNameFlag    string
-	taskUpdatePromptFlag  string
-	taskUpdateCronFlag    string
-	taskUpdateEnabledFlag string
+	taskUpdateNameFlag          string
+	taskUpdatePromptFlag        string
+	taskUpdateCronFlag          string
+	taskUpdateWatchCmdFlag      string
+	taskUpdateTargetSessionFlag string
+	taskUpdateEnabledFlag       string
 )
 
 var tasksUpdateCmd = &cobra.Command{
@@ -243,11 +258,33 @@ var tasksUpdateCmd = &cobra.Command{
 			s.Prompt = taskUpdatePromptFlag
 		}
 
+		if taskUpdateCronFlag != "" && taskUpdateWatchCmdFlag != "" {
+			return jsonError(errors.New("--cron and --watch-cmd are mutually exclusive; a task has exactly one trigger"))
+		}
 		if taskUpdateCronFlag != "" {
 			if err := task.ValidateCronExpr(taskUpdateCronFlag); err != nil {
 				return jsonError(fmt.Errorf("invalid cron expression: %w", err))
 			}
+			// Watch tasks may have an empty prompt (events default to the raw
+			// line), but a cron fire has no line to fall back to — switching
+			// triggers must supply one.
+			if s.WatchCmd != "" && strings.TrimSpace(s.Prompt) == "" {
+				return jsonError(errors.New("switching to a cron trigger needs a prompt; set one with --prompt"))
+			}
+			// Setting one trigger clears the other so the exactly-one rule
+			// holds when switching a watch task back to a schedule.
 			s.CronExpr = taskUpdateCronFlag
+			s.WatchCmd = ""
+		}
+		if taskUpdateWatchCmdFlag != "" {
+			s.WatchCmd = strings.TrimSpace(taskUpdateWatchCmdFlag)
+			s.CronExpr = ""
+		}
+		// --target-session "" is a meaningful value (revert to
+		// create-a-session-per-run), so distinguish "flag not given" from
+		// "given as empty" instead of treating "" as unchanged.
+		if cmd.Flags().Changed("target-session") {
+			s.TargetSession = taskUpdateTargetSessionFlag
 		}
 
 		switch taskUpdateEnabledFlag {

@@ -406,7 +406,7 @@ func TestControlServerCreateAndKillSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	closeServer, err := startControlServer(manager, nil, nil)
+	closeServer, err := startControlServer(manager, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestControlServerShutdownClosesChannel(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	shutdownCh := make(chan struct{})
-	closeServer, err := startControlServer(manager, nil, shutdownCh)
+	closeServer, err := startControlServer(manager, nil, nil, shutdownCh)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestRequestShutdownSuccess(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	shutdownCh := make(chan struct{})
-	closeServer, err := startControlServer(manager, nil, shutdownCh)
+	closeServer, err := startControlServer(manager, nil, nil, shutdownCh)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}

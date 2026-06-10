@@ -52,7 +52,14 @@ func sanitizeEnvValue(v string) string {
 // daemon running. PATH and SHELL are captured at install time because the
 // systemd user manager starts services with a minimal environment, and the
 // daemon needs the user's real PATH to find tmux and the agent programs.
-func systemdAutostartUnit(execPath, pathEnv, shellEnv string) string {
+// AGENT_FACTORY_HOME is captured for the same reason when the installing
+// shell has it set: without it the unit's daemon would serve the default
+// home instead of the custom one (#782).
+func systemdAutostartUnit(execPath, pathEnv, shellEnv, agentFactoryHome string) string {
+	envLines := fmt.Sprintf("Environment=PATH=%s\nEnvironment=SHELL=%s", sanitizeEnvValue(pathEnv), sanitizeEnvValue(shellEnv))
+	if agentFactoryHome != "" {
+		envLines += "\nEnvironment=AGENT_FACTORY_HOME=" + sanitizeEnvValue(agentFactoryHome)
+	}
 	return fmt.Sprintf(`[Unit]
 Description=Agent Factory daemon (task scheduler + autoyes)
 
@@ -60,20 +67,24 @@ Description=Agent Factory daemon (task scheduler + autoyes)
 ExecStart=%s --daemon
 Restart=on-failure
 RestartSec=5
-Environment=PATH=%s
-Environment=SHELL=%s
+%s
 
 [Install]
 WantedBy=default.target
-`, quoteExecStartPath(execPath), sanitizeEnvValue(pathEnv), sanitizeEnvValue(shellEnv))
+`, quoteExecStartPath(execPath), envLines)
 }
 
 // launchdAutostartPlist renders the launchd agent that keeps the daemon
 // running on macOS. KeepAlive on unsuccessful exit mirrors the systemd
 // Restart=on-failure behavior; logPath captures crashes that happen before
-// the daemon's own logging is up.
-func launchdAutostartPlist(execPath, pathEnv, shellEnv, logPath string) string {
+// the daemon's own logging is up. AGENT_FACTORY_HOME is captured when set,
+// matching the systemd unit (#782).
+func launchdAutostartPlist(execPath, pathEnv, shellEnv, agentFactoryHome, logPath string) string {
 	esc := html.EscapeString
+	homeEntry := ""
+	if agentFactoryHome != "" {
+		homeEntry = fmt.Sprintf("        <key>AGENT_FACTORY_HOME</key>\n        <string>%s</string>\n", esc(agentFactoryHome))
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -98,14 +109,14 @@ func launchdAutostartPlist(execPath, pathEnv, shellEnv, logPath string) string {
         <string>%s</string>
         <key>SHELL</key>
         <string>%s</string>
-    </dict>
+%s    </dict>
     <key>StandardOutPath</key>
     <string>%s</string>
     <key>StandardErrorPath</key>
     <string>%s</string>
 </dict>
 </plist>
-`, autostartLaunchdLabel, esc(execPath), esc(pathEnv), esc(shellEnv), esc(logPath), esc(logPath))
+`, autostartLaunchdLabel, esc(execPath), esc(pathEnv), esc(shellEnv), homeEntry, esc(logPath), esc(logPath))
 }
 
 // InstallAutostart registers the daemon for autostart at login: a systemd
@@ -129,7 +140,7 @@ func InstallAutostart() (string, error) {
 			return "", fmt.Errorf("failed to create systemd user directory: %w", err)
 		}
 		unitPath := filepath.Join(dir, autostartUnitName)
-		content := systemdAutostartUnit(execPath, os.Getenv("PATH"), os.Getenv("SHELL"))
+		content := systemdAutostartUnit(execPath, os.Getenv("PATH"), os.Getenv("SHELL"), os.Getenv("AGENT_FACTORY_HOME"))
 		if err := config.AtomicWriteFile(unitPath, []byte(content), 0644); err != nil {
 			return "", fmt.Errorf("failed to write unit file: %w", err)
 		}
@@ -160,7 +171,7 @@ func InstallAutostart() (string, error) {
 			return "", fmt.Errorf("failed to get config directory: %w", err)
 		}
 		logPath := filepath.Join(configDir, "daemon-launchd.log")
-		content := launchdAutostartPlist(execPath, os.Getenv("PATH"), os.Getenv("SHELL"), logPath)
+		content := launchdAutostartPlist(execPath, os.Getenv("PATH"), os.Getenv("SHELL"), os.Getenv("AGENT_FACTORY_HOME"), logPath)
 		// Unload a previous agent first so launchctl load picks up the new file.
 		_ = exec.Command("launchctl", "unload", plistPath).Run()
 		if err := config.AtomicWriteFile(plistPath, []byte(content), 0644); err != nil {

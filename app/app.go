@@ -607,6 +607,12 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 		return m.handleError(fmt.Errorf("no task selected"))
 	}
 
+	// Watch tasks fire from their watch command's stdout; a manual trigger
+	// has no event line to render the prompt with. Mirrors daemon.RunTask.
+	if tsk.IsWatch() {
+		return m.handleError(fmt.Errorf("task %q is a watch task; it fires when its watch command emits output", task.TaskRunBaseTitle(*tsk)))
+	}
+
 	repo, err := config.RepoFromPath(tsk.ProjectPath)
 	if err != nil {
 		return m.handleError(fmt.Errorf("failed to resolve repo for task path: %w", err))

@@ -14,12 +14,97 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// RunTask executes a task by creating a new session via the daemon's
-// CreateSession path and recording the run status on the task. It is the
-// single firing path for tasks: the in-daemon cron scheduler and the
-// `af tasks trigger` CLI both land here. When called from inside the daemon
-// the CreateSession RPC loops back through the daemon's own control socket,
-// so both callers share one code path.
+// Indirected so delivery tests can observe the daemon RPCs without dialing —
+// or spawning — a real daemon. Both helpers loop back through the daemon's
+// own control socket when called from inside the daemon process.
+var (
+	createSessionForTask = CreateSession
+	sendPromptForTask    = SendPrompt
+)
+
+// deliverTaskPrompt delivers one rendered prompt for a task and returns the
+// status string to record on it. With TargetSession empty it creates a fresh
+// session per run (the historical task behavior, status "started"). With
+// TargetSession set it sends the prompt into that session (status "sent"),
+// auto-creating the session with the task's ProjectPath/Program when it does
+// not exist yet (Sachin-approved in #782, mirroring `af sessions send-prompt
+// --create`). The target session is looked up in the task's own repo so a
+// same-titled session in an unrelated repo can never receive the prompt.
+func deliverTaskPrompt(t *task.Task, prompt string) (string, error) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if t.TargetSession == "" {
+		data, err := createSessionForTask(CreateSessionRequest{
+			TitleBase: task.TaskRunBaseTitle(*t),
+			RepoPath:  t.ProjectPath,
+			Program:   t.Program,
+			Prompt:    prompt,
+			AutoYes:   cfg.AutoYes,
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to start task session: %w", err)
+		}
+		log.InfoLog.Printf("task %s started successfully as instance %s", t.ID, data.Title)
+		return "started", nil
+	}
+
+	repo, err := config.RepoFromPath(t.ProjectPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve repo for task path: %w", err)
+	}
+	exists, err := repoHasSessionTitle(repo.ID, t.TargetSession)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		if _, err := createSessionForTask(CreateSessionRequest{
+			Title:    t.TargetSession,
+			RepoPath: t.ProjectPath,
+			Program:  t.Program,
+			Prompt:   prompt,
+			AutoYes:  cfg.AutoYes,
+		}); err != nil {
+			return "", fmt.Errorf("failed to auto-create target session %q: %w", t.TargetSession, err)
+		}
+		log.InfoLog.Printf("task %s auto-created target session %q and delivered the prompt", t.ID, t.TargetSession)
+		return "started", nil
+	}
+	if err := sendPromptForTask(SendPromptRequest{
+		Title:  t.TargetSession,
+		RepoID: repo.ID,
+		Prompt: prompt,
+	}); err != nil {
+		return "", fmt.Errorf("failed to send prompt to target session %q: %w", t.TargetSession, err)
+	}
+	log.InfoLog.Printf("task %s sent prompt to target session %q", t.ID, t.TargetSession)
+	return "sent", nil
+}
+
+// repoHasSessionTitle reports whether a persisted session with the given
+// title exists in the repo. Mirrors api.repoHasInstanceTitle, which daemon/
+// cannot import without a cycle.
+func repoHasSessionTitle(repoID, title string) (bool, error) {
+	data, err := loadRepoInstanceData(repoID)
+	if err != nil {
+		return false, err
+	}
+	for i := range data {
+		if data[i].Title == title {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// RunTask executes a cron task by delivering its prompt (create a session,
+// or send into TargetSession) and recording the run status. It is the single
+// firing path for cron tasks: the in-daemon scheduler and the `af tasks
+// trigger` CLI both land here. Watch tasks are refused — they fire from
+// their watch command's stdout, and a manual trigger has no event line to
+// render the prompt with.
 func RunTask(taskID string) error {
 	// Validate the task ID before it flows into any filesystem path. The
 	// CLI boundary also validates, but this is the shared chokepoint that
@@ -38,6 +123,10 @@ func RunTask(taskID string) error {
 
 	if !t.Enabled {
 		return fmt.Errorf("task %s is disabled", taskID)
+	}
+
+	if t.IsWatch() {
+		return fmt.Errorf("task %s is a watch task; it fires when its watch command emits output, not on manual trigger", taskID)
 	}
 
 	// Create lock file to prevent overlapping runs.
@@ -78,30 +167,17 @@ func RunTask(taskID string) error {
 		return fmt.Errorf("project path %s is not a valid git repository", t.ProjectPath)
 	}
 
-	baseTitle := task.TaskRunBaseTitle(*t)
-	cfg, err := config.LoadConfig()
+	status, err := deliverTaskPrompt(t, t.Prompt)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-	data, err := CreateSession(CreateSessionRequest{
-		TitleBase: baseTitle,
-		RepoPath:  t.ProjectPath,
-		Program:   t.Program,
-		Prompt:    t.Prompt,
-		AutoYes:   cfg.AutoYes,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to start task session: %w", err)
+		return err
 	}
 
 	// Update task status. Use UpdateTaskStatus so we don't re-validate Program
-	// — the task already ran via CreateSession, and the stored Program value
-	// may predate current enum validation (see #664).
+	// — the task already ran via deliverTaskPrompt, and the stored Program
+	// value may predate current enum validation (see #664).
 	now := time.Now()
-	if err := task.UpdateTaskStatus(taskID, &now, "started"); err != nil {
+	if err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
-
-	log.InfoLog.Printf("task %s started successfully as instance %s", taskID, data.Title)
 	return nil
 }

@@ -327,6 +327,7 @@ func isRPCMethodNotFoundErr(err error) bool {
 type controlServer struct {
 	manager      *Manager
 	scheduler    *taskScheduler
+	watchers     *watcherSupervisor
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
 }
@@ -342,6 +343,14 @@ func (s *controlServer) ReloadTasks(_ ReloadTasksRequest, resp *ReloadTasksRespo
 	}
 	if err := s.scheduler.Reload(); err != nil {
 		return err
+	}
+	// Watch tasks live in the watcher supervisor; one reload poke re-arms
+	// both trigger types (#782 phase 2). Nil only in tests that exercise the
+	// scheduler alone.
+	if s.watchers != nil {
+		if err := s.watchers.Reload(); err != nil {
+			return err
+		}
 	}
 	resp.OK = true
 	return nil
@@ -451,7 +460,7 @@ var testHookSpawnPingPassed = func() {}
 // ping; the caller must exit cleanly (a non-zero exit would trip the
 // autostart unit's Restart=on-failure into a retry loop against the live
 // daemon).
-func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, shutdownCh chan struct{}) (closeFn func() error, alreadyRunning bool, err error) {
+func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, watchers *watcherSupervisor, shutdownCh chan struct{}) (closeFn func() error, alreadyRunning bool, err error) {
 	lockTarget, lockTargetErr := daemonSpawnLockTarget()
 	if lockTargetErr != nil {
 		return nil, false, lockTargetErr
@@ -463,7 +472,7 @@ func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, shut
 		}
 		testHookSpawnPingPassed()
 		var serverErr error
-		closeFn, serverErr = startControlServer(manager, scheduler, shutdownCh)
+		closeFn, serverErr = startControlServer(manager, scheduler, watchers, shutdownCh)
 		return serverErr
 	})
 	if lockErr != nil {
@@ -477,8 +486,9 @@ func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, shut
 // socket file). When shutdownCh is non-nil, the Shutdown RPC will close it on the
 // first invocation, allowing the daemon main loop to exit on RPC request.
 // scheduler may be nil for servers that do not host task schedules (tests);
-// the ReloadTasks RPC then returns an error.
-func startControlServer(manager *Manager, scheduler *taskScheduler, shutdownCh chan struct{}) (func() error, error) {
+// the ReloadTasks RPC then returns an error. watchers may likewise be nil,
+// in which case ReloadTasks only refreshes cron entries.
+func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *watcherSupervisor, shutdownCh chan struct{}) (func() error, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
 		return nil, err
@@ -501,6 +511,7 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, shutdownCh c
 	if err := server.RegisterName(controlServiceName, &controlServer{
 		manager:    manager,
 		scheduler:  scheduler,
+		watchers:   watchers,
 		shutdownCh: shutdownCh,
 	}); err != nil {
 		_ = listener.Close()

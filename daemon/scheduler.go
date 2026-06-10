@@ -78,6 +78,11 @@ func (s *taskScheduler) Reload() error {
 		if !t.Enabled {
 			continue
 		}
+		// Watch tasks are event-triggered: the watcher supervisor hosts them,
+		// not the cron scheduler (#782 phase 2).
+		if t.IsWatch() {
+			continue
+		}
 		schedule, err := s.parse(t.CronExpr)
 		if err != nil {
 			log.WarningLog.Printf("task %s has an invalid cron expression %q, not scheduling it: %v", t.ID, t.CronExpr, err)

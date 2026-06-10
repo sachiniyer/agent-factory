@@ -387,13 +387,26 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 					s.editError = "name is required"
 					return true
 				}
-				if strings.TrimSpace(s.editPrompt.Value()) == "" {
-					s.editError = "prompt must be non-empty"
-					return true
-				}
-				if err := task.ValidateCronExpr(s.editCron.Value()); err != nil {
-					s.editError = fmt.Sprintf("invalid cron: %v", err)
-					return true
+				// Watch tasks (#782 phase 2) have no cron expression and may
+				// have an empty prompt (each event defaults to the raw line).
+				// The edit form gains watch-cmd/target-session fields in
+				// phase 3; until then the cron field must stay empty so the
+				// save can't produce a task with two triggers.
+				isWatch := s.tasks[s.selectedIdx].WatchCmd != ""
+				if isWatch {
+					if strings.TrimSpace(s.editCron.Value()) != "" {
+						s.editError = "this is a watch task; cron must stay empty (edit the trigger with af tasks update)"
+						return true
+					}
+				} else {
+					if strings.TrimSpace(s.editPrompt.Value()) == "" {
+						s.editError = "prompt must be non-empty"
+						return true
+					}
+					if err := task.ValidateCronExpr(s.editCron.Value()); err != nil {
+						s.editError = fmt.Sprintf("invalid cron: %v", err)
+						return true
+					}
 				}
 				// Mirror the create path (app.handleTaskCreate): resolve
 				// the user-entered path to an absolute form so an empty
@@ -520,11 +533,17 @@ func (s *TaskPane) renderListMode() string {
 		}
 
 		isSelected := i == s.selectedIdx
+		// Watch tasks have no cron expression; show their trigger instead.
+		// Editing the watch fields in the TUI lands in phase 3 of #782.
+		trigger := tsk.CronExpr
+		if tsk.WatchCmd != "" {
+			trigger = "watch: " + tsk.WatchCmd
+		}
 		var header string
 		if tsk.Name != "" {
-			header = fmt.Sprintf("%s %s  %s", status, tsk.Name, tsk.CronExpr)
+			header = fmt.Sprintf("%s %s  %s", status, tsk.Name, trigger)
 		} else {
-			header = fmt.Sprintf("%s %s", status, tsk.CronExpr)
+			header = fmt.Sprintf("%s %s", status, trigger)
 		}
 
 		if isSelected && s.hasFocus {
