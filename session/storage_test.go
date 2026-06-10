@@ -83,6 +83,8 @@ func readDisk(t *testing.T, ms *mockInstanceStorage, repoPath string) []Instance
 
 // makeInstance creates a minimal Instance for testing.
 // started controls whether the instance appears started.
+// Its backend is a LocalBackend with no tmux session, so TmuxAlive()
+// reports false — the shape of a session that died or was killed.
 func makeInstance(title, repoPath string, started bool) *Instance {
 	i := &Instance{
 		Title:     title,
@@ -92,6 +94,16 @@ func makeInstance(title, repoPath string, started bool) *Instance {
 		backend:   &LocalBackend{},
 		started:   started,
 	}
+	return i
+}
+
+// makeAliveInstance creates a minimal started Instance whose backend reports
+// the session alive, for tests modeling live sessions. Live sessions must be
+// persisted even when their disk record is missing (#736 territory); only
+// dead-AND-deleted instances are dropped by the save merge (#819).
+func makeAliveInstance(title, repoPath string) *Instance {
+	i := makeInstance(title, repoPath, true)
+	i.backend = &FakeBackend{}
 	return i
 }
 
@@ -229,8 +241,9 @@ func TestDaemonSaveEmptyDisk(t *testing.T) {
 	const repoPath = "/tmp/test-repo"
 	ms := newMockStorage()
 
-	// No existing disk state.
-	instanceA := makeInstance("instance-A", repoPath, true)
+	// No existing disk state. The instance must be alive to be persisted —
+	// a dead instance with no disk record is treated as externally killed (#819).
+	instanceA := makeAliveInstance("instance-A", repoPath)
 
 	storage, err := NewStorage(ms, "")
 	require.NoError(t, err)
@@ -266,7 +279,7 @@ func TestDaemonSaveCrossRepoTitleCollision(t *testing.T) {
 	// visit repo B).
 	instanceAShared := makeInstance("shared", repoPathA, true)
 	instanceAShared.Branch = "branch-a"
-	instanceBOther := makeInstance("other-b", repoPathB, true)
+	instanceBOther := makeAliveInstance("other-b", repoPathB)
 
 	storage, err := NewStorage(ms, "")
 	require.NoError(t, err)
@@ -383,6 +396,83 @@ func TestRepoSaveDoesNotResurrectDeadDiskMissingInstance(t *testing.T) {
 
 	result := readDisk(t, ms, repoPath)
 	assert.Empty(t, result, "stale TUI memory must not recreate a deleted instance record")
+}
+
+// TestDaemonSaveDoesNotResurrectDeadDiskMissingInstance is the daemon-mode
+// counterpart of the TUI test above (#819). If tmux is killed externally and
+// the disk record is deleted by another process before the daemon's next
+// refresh tick, a shutdown-triggered save runs with stale memory — it must
+// not write the dead session back to disk, where it would block title reuse
+// and fail to restore.
+func TestDaemonSaveDoesNotResurrectDeadDiskMissingInstance(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	ms := newMockStorage()
+
+	// The repo has another live session on disk, so the daemon's save
+	// definitely visits and rewrites this repo's file.
+	seedDisk(t, ms, repoPath, []InstanceData{
+		{Title: "other-session", Path: repoPath, Status: Running},
+	})
+
+	// Looks started in daemon memory, but its tmux session is dead and its
+	// disk record was deleted by another process.
+	stale := makeInstance("stale", repoPath, true)
+	other := makeInstance("other-session", repoPath, true)
+
+	storage, err := NewStorage(ms, "") // daemon mode
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{other, stale})
+	require.NoError(t, err)
+
+	result := readDisk(t, ms, repoPath)
+	titles := make(map[string]bool)
+	for _, d := range result {
+		titles[d.Title] = true
+	}
+	assert.False(t, titles["stale"], "stale daemon memory must not recreate a deleted instance record (#819)")
+	assert.True(t, titles["other-session"], "the surviving session must still be saved")
+}
+
+// TestDaemonSavePreservesAliveDiskMissingInstance is the #819 counter-case:
+// when the disk record is missing but the tmux session is still ALIVE (e.g.
+// instances.json was wiped externally, #736 territory), the daemon must
+// rewrite the record, not drop the live session.
+func TestDaemonSavePreservesAliveDiskMissingInstance(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	ms := newMockStorage()
+
+	alive := makeAliveInstance("alive", repoPath)
+
+	storage, err := NewStorage(ms, "") // daemon mode
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{alive})
+	require.NoError(t, err)
+
+	result := readDisk(t, ms, repoPath)
+	require.Len(t, result, 1, "live session with a missing disk record must be re-persisted")
+	assert.Equal(t, "alive", result[0].Title)
+}
+
+// TestRepoSavePreservesAliveDiskMissingInstance mirrors the counter-case for
+// the TUI path, guarding the shared merge helper from both call sites.
+func TestRepoSavePreservesAliveDiskMissingInstance(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	alive := makeAliveInstance("alive", repoPath)
+
+	storage, err := NewStorage(ms, repoID)
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{alive})
+	require.NoError(t, err)
+
+	result := readDisk(t, ms, repoPath)
+	require.Len(t, result, 1, "live session with a missing disk record must be re-persisted")
+	assert.Equal(t, "alive", result[0].Title)
 }
 
 // TestRepoSaveDropsLoadingFromMemory is a regression test for
@@ -526,7 +616,7 @@ func TestDaemonSaveFallsBackToPathForRemoteBackend(t *testing.T) {
 	ms := newMockStorage()
 
 	// Remote-backend instance: no gitWorktree, Worktree.RepoPath empty.
-	inst := makeInstance("remote-1", repoPath, true)
+	inst := makeAliveInstance("remote-1", repoPath)
 	require.Empty(t, inst.GetRepoPath(), "test fixture: remote instance must have empty resolved repo path")
 
 	storage, err := NewStorage(ms, "")

@@ -98,6 +98,74 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 	return out
 }
 
+// mergeInstancesWithDisk applies the save-merge rules shared by the TUI and
+// daemon save paths to one repo's worth of state. It returns the records to
+// persist; callers still dedupe (#808), marshal, and write under the lock.
+//
+//   - In-memory instances take precedence over their disk records.
+//   - Loading instances are never persisted — their worktree is not yet
+//     populated, so FromInstanceData cannot restore them, and an orphaned
+//     record would block title reuse via the daemon's collision check (#551).
+//   - Non-started instances are dropped.
+//   - An in-memory instance whose disk record was removed by another process
+//     AND whose backing session is dead is dropped instead of being
+//     resurrected from stale memory (#819). If the session is still alive,
+//     the record is rewritten — an externally wiped or truncated file must
+//     not take live sessions down with it.
+//   - Disk-only records are preserved as externally-added, except legacy
+//     Loading ghosts (#551) and titles in knownTitles.
+//
+// knownTitles is the set of ALL in-memory titles for this repo, including
+// non-started ones. It distinguishes "killed in this process" (the stale
+// disk record must not be preserved) from "added externally on disk". The
+// daemon passes its per-repo title set; the TUI passes nil because it
+// deletes killed sessions from disk explicitly rather than via save-merge.
+func mergeInstancesWithDisk(instances []*Instance, diskData []InstanceData, knownTitles map[string]bool) []InstanceData {
+	diskTitles := make(map[string]bool, len(diskData))
+	for _, disk := range diskData {
+		diskTitles[disk.Title] = true
+	}
+
+	merged := make([]InstanceData, 0, len(instances)+len(diskData))
+	memTitles := make(map[string]bool, len(instances))
+	for _, instance := range instances {
+		if instance.GetStatus() == Loading {
+			continue
+		}
+		if !instance.Started() {
+			continue
+		}
+		// If another process deleted the disk record and the backing
+		// session is gone, don't resurrect it from stale memory.
+		if !diskTitles[instance.Title] && !instance.TmuxAlive() {
+			continue
+		}
+		merged = append(merged, instance.ToInstanceData())
+		memTitles[instance.Title] = true
+	}
+
+	for _, disk := range diskData {
+		if memTitles[disk.Title] {
+			// Already covered by the in-memory version.
+			continue
+		}
+		if knownTitles[disk.Title] {
+			// Known in memory but filtered out above (e.g. killed).
+			// Don't preserve the stale disk record.
+			continue
+		}
+		// Disk-only Loading entries are stale pre-save records from a
+		// start that never completed. External CLI/task creates are only
+		// persisted after startup succeeds, so they arrive as non-Loading.
+		if disk.Status == Loading {
+			continue
+		}
+		// Externally added instance — keep it.
+		merged = append(merged, disk)
+	}
+	return merged
+}
+
 // SaveInstances saves the list of instances to disk under file locks.
 // Loading instances are excluded — they represent in-flight TUI session
 // creations whose worktree is not yet populated, so they cannot be
@@ -110,62 +178,36 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		return s.saveRepoInstances(instances)
 	}
 
-	// Convert instances to InstanceData
-	data := make([]InstanceData, 0)
-	for _, instance := range instances {
-		if instance.Started() {
-			data = append(data, instance.ToInstanceData())
-		}
-	}
-
 	// Daemon mode: group in-memory instances by repo root.
 	// Prefer the worktree's resolved repo path so we share a repo ID with
 	// the TUI even when the instance was created from a symlinked path;
 	// fall back to Path for remote backends where Worktree.RepoPath is
-	// empty. This mirrors CollectRepoRoots (#667).
-	grouped := make(map[string][]InstanceData)
-	for _, d := range data {
-		root := d.Worktree.RepoPath
-		if root == "" {
-			root = d.Path
-		}
-		rid := config.RepoIDFromRoot(root)
-		grouped[rid] = append(grouped[rid], d)
-	}
-
-	// Collect repo IDs that the daemon knows about so we visit repos
-	// that had all their in-memory instances killed (group would be empty).
-	knownRepoIDs := make(map[string]bool)
+	// empty. This mirrors CollectRepoRoots (#667). All instances are
+	// grouped — including non-started ones — so repos whose sessions were
+	// all killed are still visited and their records removed.
+	//
+	// The per-repo title sets must be scoped per-repo, not global: a
+	// global set across all repos causes cross-repo title collisions to
+	// drop legitimate externally-added instances from other repos (#198).
+	grouped := make(map[string][]*Instance)
+	repoTitles := make(map[string]map[string]bool)
 	for _, inst := range instances {
 		root := inst.GetRepoPath()
 		if root == "" {
 			root = inst.Path
 		}
 		rid := config.RepoIDFromRoot(root)
-		knownRepoIDs[rid] = true
+		grouped[rid] = append(grouped[rid], inst)
+		if repoTitles[rid] == nil {
+			repoTitles[rid] = make(map[string]bool)
+		}
+		repoTitles[rid][inst.Title] = true
 	}
 
-	// Merge each repo's in-memory state with disk state.
-	for rid := range knownRepoIDs {
-		group := grouped[rid] // may be nil if all instances for this repo were killed
-
-		// Build a per-repo set of ALL in-memory instance titles (including
-		// non-started/non-loading ones) belonging to THIS repo. This is used
-		// to distinguish "killed in daemon" from "added externally on disk".
-		// IMPORTANT: this must be scoped per-repo. Using a global set across
-		// all repos causes cross-repo title collisions to drop legitimate
-		// externally-added instances from other repos (issue #198).
-		repoMemTitlesAll := make(map[string]bool)
-		for _, inst := range instances {
-			root := inst.GetRepoPath()
-			if root == "" {
-				root = inst.Path
-			}
-			if config.RepoIDFromRoot(root) == rid {
-				repoMemTitlesAll[inst.Title] = true
-			}
-		}
-
+	// Merge each repo's in-memory state with disk state. Repos that exist
+	// ONLY on disk (no in-memory instances at all) were never loaded by
+	// the daemon; we never write to them, so they are naturally preserved.
+	for rid, group := range grouped {
 		path, pathErr := config.RepoInstancesPath(rid)
 		if pathErr != nil {
 			return pathErr
@@ -189,40 +231,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 				}
 			}
 
-			// Build set of in-memory titles for this repo's group for
-			// quick lookup when replacing disk entries.
-			memTitles := make(map[string]bool, len(group))
-			for _, d := range group {
-				memTitles[d.Title] = true
-			}
-
-			// Start with the in-memory instances (they take precedence).
-			merged := make([]InstanceData, 0, len(group)+len(diskData))
-			merged = append(merged, group...)
-
-			// Preserve disk-only instances that were NOT known to the
-			// daemon (i.e. added externally while the daemon was running).
-			for _, dd := range diskData {
-				if memTitles[dd.Title] {
-					// Already covered by the in-memory version.
-					continue
-				}
-				if repoMemTitlesAll[dd.Title] {
-					// The daemon knew about this instance in THIS repo but
-					// it is no longer started/loading (e.g. killed). Don't
-					// preserve it.
-					continue
-				}
-				// Legacy Loading ghosts (#551) left by older binaries
-				// would block title reuse via the daemon's collision
-				// check. Drop them on the next save instead of
-				// preserving them as "external".
-				if dd.Status == Loading {
-					continue
-				}
-				// Externally added instance — keep it.
-				merged = append(merged, dd)
-			}
+			merged := mergeInstancesWithDisk(group, diskData, repoTitles[rid])
 
 			jsonData, err := json.Marshal(dedupeInstanceData(merged))
 			if err != nil {
@@ -233,11 +242,6 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 			return err
 		}
 	}
-
-	// Handle repos that exist ONLY on disk (no in-memory instances at all).
-	// These repos were never loaded by the daemon, so we must not touch them.
-	// Since we only iterate knownRepoIDs above, disk-only repos are
-	// naturally preserved (we never write to them).
 
 	return nil
 }
@@ -262,48 +266,7 @@ func (s *Storage) saveRepoInstances(instances []*Instance) error {
 			}
 		}
 
-		diskTitles := make(map[string]bool, len(diskData))
-		for _, disk := range diskData {
-			diskTitles[disk.Title] = true
-		}
-
-		data := make([]InstanceData, 0)
-		memTitles := make(map[string]bool)
-		for _, instance := range instances {
-			// Loading is transient TUI state — its worktree is not yet
-			// populated, so FromInstanceData cannot restore it. Persisting
-			// it would leave an orphan that the daemon's title-collision
-			// check would treat as live (#551).
-			if instance.GetStatus() == Loading {
-				continue
-			}
-			if !instance.Started() {
-				continue
-			}
-			// If another process deleted the disk record and the backing
-			// session is gone, don't resurrect it from stale TUI memory.
-			if !diskTitles[instance.Title] && !instance.TmuxAlive() {
-				continue
-			}
-			d := instance.ToInstanceData()
-			data = append(data, d)
-			memTitles[d.Title] = true
-		}
-
-		merged := make([]InstanceData, 0, len(data)+len(diskData))
-		merged = append(merged, data...)
-		for _, disk := range diskData {
-			if memTitles[disk.Title] {
-				continue
-			}
-			// Disk-only Loading entries are stale pre-save records from a TUI
-			// start that never completed. External CLI/task creates are only
-			// persisted after startup succeeds, so they arrive as non-Loading.
-			if disk.Status == Loading {
-				continue
-			}
-			merged = append(merged, disk)
-		}
+		merged := mergeInstancesWithDisk(instances, diskData, nil)
 
 		jsonData, err := json.Marshal(dedupeInstanceData(merged))
 		if err != nil {
