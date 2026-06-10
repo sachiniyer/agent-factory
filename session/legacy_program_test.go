@@ -109,6 +109,38 @@ func TestResolveProgramForInstance_LegacyAutoYes(t *testing.T) {
 	}
 }
 
+// Regression for #818: pre-#659 binaries appended --permission-mode
+// bypassPermissions at create-time and persisted the full string into
+// Instance.Program, so a restored legacy AutoYes session already carries the
+// flag — the restore-time append must not duplicate it.
+func TestResolveProgramForInstance_LegacyAutoYesFlagAlreadyPresent(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	i := &Instance{
+		Program: "/home/foo/bin/claude --permission-mode bypassPermissions",
+		AutoYes: true,
+	}
+	result := resolveProgramForInstance(i)
+	if got := strings.Count(result, "--permission-mode"); got != 1 {
+		t.Errorf("expected exactly one --permission-mode flag, got %d in %q", got, result)
+	}
+}
+
+// Companion to the #818 case: the =-attached spelling must also suppress the
+// append.
+func TestResolveProgramForInstance_LegacyAutoYesEqualsFormAlreadyPresent(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	i := &Instance{
+		Program: "/home/foo/bin/claude --permission-mode=bypassPermissions",
+		AutoYes: true,
+	}
+	result := resolveProgramForInstance(i)
+	if got := strings.Count(result, "--permission-mode"); got != 1 {
+		t.Errorf("expected exactly one --permission-mode flag, got %d in %q", got, result)
+	}
+}
+
 // Defensive guard for the AutoYes branch: an unknown AutoYes program must NOT
 // get the Claude-only bypassPermissions flag.
 func TestResolveProgramForInstance_UnknownAutoYesNoFlag(t *testing.T) {
