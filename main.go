@@ -91,7 +91,7 @@ var (
 					}
 				}()
 			}
-			// The daemon hosts the task cron scheduler (#782), so make sure
+			// The daemon hosts the task scheduler (#782), so make sure
 			// it is up whenever an enabled task exists. In the background:
 			// daemon launch can take a few seconds and must not delay the TUI.
 			go ensureDaemonForTasks()

@@ -338,7 +338,7 @@ func UpdateTask(t Task) error {
 			if existing.ID == t.ID {
 				// Preserve scheduler/system-managed fields from the freshly
 				// loaded record. UpdateTask is a user-edit path (name, prompt,
-				// cron, program, enabled); its caller may carry a stale copy of
+				// cron/watch_cmd, target_session, program, enabled); its caller may carry a stale copy of
 				// LastRunAt/LastRunStatus read before a concurrent scheduler run
 				// or manual trigger updated them (TOCTOU via GetTask outside the
 				// lock, or a stale TUI cache). Re-applying the caller's struct

@@ -10,10 +10,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The daemon is the single always-on host for task cron schedules and autoyes
-// mode (#782). It starts automatically whenever af runs and an enabled task
-// exists; `af daemon install` additionally registers a user-level autostart
-// unit so schedules survive logouts and reboots without ever opening af.
+// The daemon is the single always-on host for task schedules (cron and watch
+// scripts) and autoyes mode (#782). It starts automatically whenever af runs
+// and an enabled task exists; `af daemon install` additionally registers a
+// user-level autostart unit so schedules survive logouts and reboots without
+// ever opening af.
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
