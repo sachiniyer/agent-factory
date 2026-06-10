@@ -191,6 +191,79 @@ func InstallAutostart() (string, error) {
 	}
 }
 
+// Injection points for tests, mirroring legacy_units.go: the GOOS the
+// restart helpers act on, the unit-directory resolvers, and the external
+// command runner, so the upgrade respawn path can be exercised hermetically
+// without touching the host's real autostart unit or invoking
+// systemctl/launchctl.
+var (
+	autostartGOOS            = runtime.GOOS
+	autostartSystemdUserDir  = defaultSystemdUserDir
+	autostartLaunchAgentsDir = defaultLaunchAgentsDir
+	autostartUnitCommand     = runAutostartUnitCommand
+)
+
+func runAutostartUnitCommand(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+// autostartUnitFilePath returns the path of the unit file InstallAutostart
+// writes for the current platform, or "" when autostart is unsupported here.
+func autostartUnitFilePath() (string, error) {
+	switch autostartGOOS {
+	case "linux":
+		dir, err := autostartSystemdUserDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, autostartUnitName), nil
+	case "darwin":
+		dir, err := autostartLaunchAgentsDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, autostartLaunchdLabel+".plist"), nil
+	default:
+		return "", nil
+	}
+}
+
+// AutostartInstalled reports whether the daemon autostart unit installed by
+// InstallAutostart is present on this machine.
+func AutostartInstalled() bool {
+	path, err := autostartUnitFilePath()
+	if err != nil || path == "" {
+		return false
+	}
+	_, err = os.Stat(path)
+	return err == nil
+}
+
+// RestartAutostartUnit restarts the daemon through the OS service manager —
+// `systemctl --user restart` on Linux, `launchctl kickstart -k` on macOS — so
+// the daemon stays supervised. Used by the upgrade/auto-update respawn path
+// (#796): the Shutdown RPC is a clean exit that Restart=on-failure
+// deliberately does not restart, so respawning via launchDaemonProcess would
+// leave the unit inactive and demote the daemon to an unsupervised ad-hoc
+// child until the next login.
+func RestartAutostartUnit() error {
+	switch autostartGOOS {
+	case "linux":
+		if out, err := autostartUnitCommand("systemctl", "--user", "restart", autostartUnitName); err != nil {
+			return fmt.Errorf("systemctl --user restart %s failed: %w\n%s", autostartUnitName, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	case "darwin":
+		target := fmt.Sprintf("gui/%d/%s", os.Getuid(), autostartLaunchdLabel)
+		if out, err := autostartUnitCommand("launchctl", "kickstart", "-k", target); err != nil {
+			return fmt.Errorf("launchctl kickstart -k %s failed: %w\n%s", target, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	default:
+		return fmt.Errorf("daemon autostart is not supported on %s", autostartGOOS)
+	}
+}
+
 // UninstallAutostart removes the daemon autostart unit installed by
 // InstallAutostart. The daemon itself keeps running until it exits or is
 // stopped; it just no longer restarts at login. Returns the path of the
