@@ -343,8 +343,15 @@ func (b *HookBackend) Attach(i *Instance) (chan struct{}, error) {
 		return nil, fmt.Errorf("cannot attach instance that has not been started")
 	}
 
-	// Stop the background preview process so it doesn't compete.
-	b.closePTY(i.Title)
+	// Stop the background preview process so it doesn't compete, but reap it
+	// in the background: Attach runs on the bubbletea event loop, and waiting
+	// out the 2s grace period here froze the whole TUI whenever the preview
+	// process didn't exit promptly (#817). The dying preview only writes into
+	// its own buffer via its own pipe (see stopPreview), so it cannot
+	// interleave output with the interactive attach_cmd started below.
+	if hp := b.stopPreview(i.Title); hp != nil {
+		go hp.reap()
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -661,10 +668,11 @@ func (b *HookBackend) ensurePTY(i *Instance) error {
 		}
 		// The reader has hit EOF or an error, which means the attach_cmd
 		// child has closed its stdout (typically because it exited).
-		// If closePTY already marked us closed, it owns the Wait() call
-		// (and may need to Kill the process); otherwise the child exited
-		// on its own, so we Wait() here to reap it and mark the entry
-		// closed so a subsequent ensurePTY call can recreate it.
+		// If stopPreview already marked us closed, the detaching caller
+		// owns the Wait() call via reap (and may need to Kill the
+		// process); otherwise the child exited on its own, so we Wait()
+		// here to reap it and mark the entry closed so a subsequent
+		// ensurePTY call can recreate it.
 		hp.mu.Lock()
 		alreadyClosed := hp.closed
 		hp.mu.Unlock()
@@ -681,27 +689,56 @@ func (b *HookBackend) ensurePTY(i *Instance) error {
 	return nil
 }
 
-func (b *HookBackend) closePTY(title string) {
+// stopPreview removes the preview entry for title and signals its process to
+// stop, without waiting for it to exit. It returns the detached hookPTY (nil
+// if none was registered) so the caller decides where to pay the grace-period
+// wait in reap: Kill reaps synchronously so the preview process is gone before
+// delete_cmd tears down the remote session it is connected to; Attach reaps in
+// a background goroutine because it runs on the bubbletea event loop, where a
+// blocking wait freezes the TUI (#817).
+//
+// The entry is deleted from b.ptys before the process exits. That is safe:
+// once detached, the dying process can only write into its own hp.buf via its
+// own pipe — Preview no longer finds the entry, and a replacement started by
+// ensurePTY gets a fresh pipe and buffer, so output cannot interleave.
+// Closing the pipe's read end makes the process's next write fail with EPIPE,
+// nudging well-behaved attach scripts to exit during the grace period.
+func (b *HookBackend) stopPreview(title string) *hookPTY {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	hp, ok := b.ptys[title]
 	if !ok {
-		return
+		return nil
 	}
+	delete(b.ptys, title)
+
 	hp.mu.Lock()
 	hp.closed = true
 	hp.mu.Unlock()
 
 	_ = hp.stdout.Close()
-	// Give the process a moment to exit, then kill if needed.
-	done := hp.waitAsync()
+	return hp
+}
+
+// reap gives the detached preview process a moment to exit, then kills it.
+// It blocks for up to the 2s grace period, so it must never run on the TUI
+// event loop — see stopPreview for which callers reap where.
+func (hp *hookPTY) reap() {
 	select {
-	case <-done:
+	case <-hp.waitAsync():
 	case <-time.After(2 * time.Second):
 		_ = hp.cmd.Process.Kill()
 	}
-	delete(b.ptys, title)
+}
+
+// closePTY synchronously stops and reaps the preview process for title.
+// Used by Kill (delete_cmd must not race a live preview connection) and by
+// test cleanup; Attach uses stopPreview + a background reap instead (#817).
+func (b *HookBackend) closePTY(title string) {
+	if hp := b.stopPreview(title); hp != nil {
+		hp.reap()
+	}
 }
 
 func (hp *hookPTY) waitAsync() <-chan struct{} {
