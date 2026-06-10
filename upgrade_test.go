@@ -217,10 +217,10 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 		osExecutableFn = prevExe
 		requestDaemonShutdownFn = prevShutdown
 	})
-	prevRespawn := respawnDaemonForTasksFn
+	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonForTasksFn = func() { respawnCalls++ }
-	t.Cleanup(func() { respawnDaemonForTasksFn = prevRespawn })
+	respawnDaemonFn = func() { respawnCalls++ }
+	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
@@ -268,10 +268,10 @@ func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
 		osExecutableFn = prevExe
 		requestDaemonShutdownFn = prevShutdown
 	})
-	prevRespawn := respawnDaemonForTasksFn
+	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonForTasksFn = func() { respawnCalls++ }
-	t.Cleanup(func() { respawnDaemonForTasksFn = prevRespawn })
+	respawnDaemonFn = func() { respawnCalls++ }
+	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		// Mirror what daemon.RequestShutdown returns when no daemon is
@@ -315,10 +315,10 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 		osExecutableFn = prevExe
 		requestDaemonShutdownFn = prevShutdown
 	})
-	prevRespawn := respawnDaemonForTasksFn
+	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonForTasksFn = func() { respawnCalls++ }
-	t.Cleanup(func() { respawnDaemonForTasksFn = prevRespawn })
+	respawnDaemonFn = func() { respawnCalls++ }
+	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		return daemon.ShutdownNoDaemon, errors.New("simulated rpc failure")
@@ -358,10 +358,10 @@ func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
 		osExecutableFn = prevExe
 		requestDaemonShutdownFn = prevShutdown
 	})
-	prevRespawn := respawnDaemonForTasksFn
+	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonForTasksFn = func() { respawnCalls++ }
-	t.Cleanup(func() { respawnDaemonForTasksFn = prevRespawn })
+	respawnDaemonFn = func() { respawnCalls++ }
+	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		return daemon.ShutdownViaSIGTERM, nil

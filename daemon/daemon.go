@@ -269,6 +269,21 @@ func launchDaemonProcess() error {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
+	pid, err := startDaemonChild(execPath)
+	if err != nil {
+		return err
+	}
+
+	log.InfoLog.Printf("started daemon child process with PID: %d", pid)
+
+	// The child writes its own PID file from RunDaemon (#504).
+	return nil
+}
+
+// startDaemonChild starts execPath --daemon detached from the parent and
+// returns its PID. Split from launchDaemonProcess so tests can spawn a
+// short-lived stub instead of re-executing the real binary with --daemon.
+func startDaemonChild(execPath string) (int, error) {
 	cmd := exec.Command(execPath, "--daemon")
 
 	// Detach the process from the parent
@@ -280,14 +295,18 @@ func launchDaemonProcess() error {
 	cmd.SysProcAttr = getSysProcAttr()
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start child process: %w", err)
+		return 0, fmt.Errorf("failed to start child process: %w", err)
 	}
 
-	log.InfoLog.Printf("started daemon child process with PID: %d", cmd.Process.Pid)
+	// Setsid detaches the child's session but the kernel still parents it
+	// here, so it must be reaped or each exited daemon lingers as a zombie
+	// for the life of the TUI — one per upgrade/respawn cycle (#816). Same
+	// pattern as session/tmux/pty.go.
+	go func() {
+		_ = cmd.Wait()
+	}()
 
-	// The child writes its own PID file from RunDaemon (#504). Don't wait for
-	// the child to exit, it's detached.
-	return nil
+	return cmd.Process.Pid, nil
 }
 
 // daemonPIDFilePath returns the path to the daemon PID file, or "" if the

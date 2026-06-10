@@ -220,10 +220,10 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 		osExecutableFn = prevExe
 		requestDaemonShutdownFn = prevShutdown
 	})
-	prevRespawn := respawnDaemonForTasksFn
+	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonForTasksFn = func() { respawnCalls++ }
-	t.Cleanup(func() { respawnDaemonForTasksFn = prevRespawn })
+	respawnDaemonFn = func() { respawnCalls++ }
+	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
@@ -290,10 +290,10 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 		osExecutableFn = prevExe
 		requestDaemonShutdownFn = prevShutdown
 	})
-	prevRespawn := respawnDaemonForTasksFn
+	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonForTasksFn = func() { respawnCalls++ }
-	t.Cleanup(func() { respawnDaemonForTasksFn = prevRespawn })
+	respawnDaemonFn = func() { respawnCalls++ }
+	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"

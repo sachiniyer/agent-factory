@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// Tests for the unit-aware upgrade respawn (#796). All three collaborators
-// are stubbed so nothing here touches the real systemctl/launchctl or spawns
-// a daemon process — a real supervised daemon may be running on the machine
-// executing these tests.
+// Tests for the unit-aware upgrade respawn (#796) and the unconditional
+// fallback (#813). All three collaborators are stubbed so nothing here
+// touches the real systemctl/launchctl or spawns a daemon process — a real
+// supervised daemon may be running on the machine executing these tests.
 
 // stubRespawnCollaborators replaces the autostart-detection, unit-restart,
 // and ad-hoc-spawn hooks used by respawnDaemonAfterUpgrade, restoring them on
@@ -17,11 +17,11 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 	t.Helper()
 	prevInstalled := autostartInstalledFn
 	prevRestart := restartAutostartUnitFn
-	prevEnsure := ensureDaemonForTasksFn
+	prevEnsure := ensureDaemonFn
 	t.Cleanup(func() {
 		autostartInstalledFn = prevInstalled
 		restartAutostartUnitFn = prevRestart
-		ensureDaemonForTasksFn = prevEnsure
+		ensureDaemonFn = prevEnsure
 	})
 	restartCalls = new(int)
 	ensureCalls = new(int)
@@ -30,7 +30,10 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 		*restartCalls++
 		return restartErr
 	}
-	ensureDaemonForTasksFn = func() { *ensureCalls++ }
+	ensureDaemonFn = func() error {
+		*ensureCalls++
+		return nil
+	}
 	return restartCalls, ensureCalls
 }
 
@@ -51,8 +54,8 @@ func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 	}
 }
 
-// TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc pins the pre-#796 behavior
-// for installs without an autostart unit: the task-gated ad-hoc spawn.
+// TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc: installs without an
+// autostart unit fall back to an ad-hoc daemon spawn.
 func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
@@ -79,5 +82,23 @@ func TestRespawnAfterUpgradeFallsBackWhenRestartFails(t *testing.T) {
 	}
 	if *ensureCalls != 1 {
 		t.Fatalf("ad-hoc spawns = %d, want 1 (fallback after a failed unit restart)", *ensureCalls)
+	}
+}
+
+// TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks pins the #813 fix: the
+// post-upgrade fallback must respawn unconditionally, not only when an
+// enabled task exists. Callers only invoke the respawn after stopping a
+// running daemon, and that daemon may have been serving autoyes mode alone.
+// AGENT_FACTORY_HOME points at an empty temp dir so the task store is
+// guaranteed empty — if the enabled-task gate ever creeps back into the
+// respawn path, this test fails.
+func TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_, ensureCalls := stubRespawnCollaborators(t, false, nil)
+
+	respawnDaemonAfterUpgrade()
+
+	if *ensureCalls != 1 {
+		t.Fatalf("ad-hoc spawns = %d, want 1 even with zero enabled tasks (autoyes-only daemon must be restored, #813)", *ensureCalls)
 	}
 }
