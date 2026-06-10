@@ -96,6 +96,22 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 	}
 }
 
+// Regression for #820: a user who deliberately sets developer_instructions in
+// their program_overrides must keep their value — codex's -c is last-wins per
+// key, so appending ours would clobber it.
+func TestInjectSystemPrompt_CodexExistingDeveloperInstructions(t *testing.T) {
+	dir := t.TempDir()
+	resolved := `codex -c 'developer_instructions=my custom prompt'`
+	result := injectSystemPrompt(tmux.ProgramCodex, resolved, "my-session", dir)
+
+	if result != resolved {
+		t.Errorf("expected resolved form unchanged, got %q", result)
+	}
+	if got := strings.Count(result, "developer_instructions="); got != 1 {
+		t.Errorf("expected exactly one developer_instructions flag, got %d in %q", got, result)
+	}
+}
+
 func TestInjectSystemPrompt_Aider(t *testing.T) {
 	dir := t.TempDir()
 	result := injectSystemPrompt(tmux.ProgramAider, "aider", "test-session", dir)

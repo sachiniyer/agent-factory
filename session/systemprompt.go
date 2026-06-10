@@ -77,9 +77,21 @@ func injectSystemPrompt(agent, resolved, sessionTitle, worktreePath string) stri
 			log.WarningLog.Printf("failed to set up plugin directory, slash commands unavailable: %v", err)
 			return resolved
 		}
+		// Unconditional append is safe here, unlike the AutoYes (#818) and
+		// codex (#820) flags: no binary has ever persisted --plugin-dir into
+		// Instance.Program (the injected form only reaches tmux SetProgram),
+		// and claude's --plugin-dir is repeatable, so one in a user's
+		// program_overrides is additive rather than a conflict.
 		return resolved + " --plugin-dir " + shellQuote(pluginDir)
 	}
 	if agent == tmux.ProgramCodex {
+		// Skip when the resolved command already carries a
+		// developer_instructions override — e.g. a deliberate
+		// program_overrides entry (#820). codex's -c is last-wins for the
+		// same key, so appending ours would silently clobber the user's.
+		if strings.Contains(resolved, "developer_instructions=") {
+			return resolved
+		}
 		return resolved + " -c " + shellQuote("developer_instructions="+codexSystemPrompt)
 	}
 	return resolved

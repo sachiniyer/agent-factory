@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -40,7 +41,14 @@ func resolveProgramForInstance(i *Instance) string {
 		cfg = loaded
 	}
 	resolved := config.ResolveProgram(cfg, i.Program)
-	if i.AutoYes && DetectAgentFromProgram(i.Program) == tmux.ProgramClaude {
+	if i.AutoYes && DetectAgentFromProgram(i.Program) == tmux.ProgramClaude &&
+		// Sessions persisted by pre-#659 binaries got the flag appended at
+		// create-time in main.go (19c0dd9), so legacy Instance.Program values
+		// can already carry it; appending again duplicates the flag on every
+		// restore (#818). A substring check suffices: claude exposes no short
+		// form of --permission-mode, and the check also matches the
+		// =-attached spelling.
+		!strings.Contains(resolved, "--permission-mode") {
 		resolved = resolved + " --permission-mode bypassPermissions"
 	}
 	return resolved
