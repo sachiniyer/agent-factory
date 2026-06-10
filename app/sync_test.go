@@ -38,8 +38,29 @@ func TestInstanceCollisionShouldSkip(t *testing.T) {
 		existingCreated  time.Time
 		incomingCreated  time.Time
 		tmuxAlive        bool
+		existingLoading  bool
 		wantSkip         bool
 	}{
+		{
+			name:             "existing Loading, incoming newer -> skip (in-flight create, issue #808)",
+			existingWorktree: "",
+			incomingWorktree: "/repo/worktrees/task",
+			existingCreated:  base,
+			incomingCreated:  base.Add(time.Second),
+			tmuxAlive:        false,
+			existingLoading:  true,
+			wantSkip:         true,
+		},
+		{
+			name:             "existing Loading, differing worktrees and tmux dead -> skip (issue #808)",
+			existingWorktree: "/repo/worktrees/task",
+			incomingWorktree: "/repo/worktrees/task-2",
+			existingCreated:  base,
+			incomingCreated:  base,
+			tmuxAlive:        false,
+			existingLoading:  true,
+			wantSkip:         true,
+		},
 		{
 			name:             "worktree paths differ and tmux alive -> replace (issue #255)",
 			existingWorktree: "/repo/worktrees/task",
@@ -125,10 +146,10 @@ func TestInstanceCollisionShouldSkip(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := instanceCollisionShouldSkip(tc.existingWorktree, tc.incomingWorktree, tc.existingCreated, tc.incomingCreated, tc.tmuxAlive)
+			got := instanceCollisionShouldSkip(tc.existingWorktree, tc.incomingWorktree, tc.existingCreated, tc.incomingCreated, tc.tmuxAlive, tc.existingLoading)
 			if got != tc.wantSkip {
-				t.Fatalf("instanceCollisionShouldSkip(%q, %q, %v, %v, %v) = %v; want %v",
-					tc.existingWorktree, tc.incomingWorktree, tc.existingCreated, tc.incomingCreated, tc.tmuxAlive, got, tc.wantSkip)
+				t.Fatalf("instanceCollisionShouldSkip(%q, %q, %v, %v, %v, %v) = %v; want %v",
+					tc.existingWorktree, tc.incomingWorktree, tc.existingCreated, tc.incomingCreated, tc.tmuxAlive, tc.existingLoading, got, tc.wantSkip)
 			}
 		})
 	}

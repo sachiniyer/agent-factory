@@ -287,3 +287,35 @@ func TestInstanceStarted_TimeoutError_EmptyContentOmitsHeader(t *testing.T) {
 	assert.Contains(t, rendered, "timed out waiting for program to start")
 	assert.NotContains(t, rendered, "last pane content:")
 }
+
+// TestInstanceStarted_ReplacesSwappedSameTitleRow is the #808 regression.
+//
+// While a start RPC is in flight, the daemon persists the new session to
+// instances.json before responding, so a background sync can swap the
+// Loading placeholder for a disk-built copy of that same session. When the
+// start then completes, ReplaceInstance(placeholder, started) misses (the
+// placeholder pointer is gone) and ContainsInstance(started) is also
+// pointer-based — re-adding unconditionally left two sidebar rows with one
+// title, which SaveInstances persisted as byte-identical duplicate records.
+// The handler must fall back to replacing the same-title row.
+func TestInstanceStarted_ReplacesSwappedSameTitleRow(t *testing.T) {
+	h := newTestHome(t)
+
+	// The placeholder the user created; a background sync already swapped it
+	// out of the sidebar for a disk-built copy of the same session.
+	placeholder := newLoadingInstance(t, "scripts")
+	diskCopy := newLoadingInstance(t, "scripts")
+	diskCopy.SetStartedForTest(true)
+	diskCopy.SetStatus(session.Running)
+	h.sidebar.AddInstance(diskCopy)
+
+	started := newLoadingInstance(t, "scripts")
+	started.SetStartedForTest(true)
+
+	_, _ = h.Update(instanceStartedMsg{instance: placeholder, started: started})
+
+	instances := h.sidebar.GetInstances()
+	require.Len(t, instances, 1, "one logical session must occupy exactly one sidebar row (#808)")
+	assert.Same(t, started, instances[0], "the started instance must replace the disk-built copy")
+	assert.Equal(t, session.Running, started.Status)
+}

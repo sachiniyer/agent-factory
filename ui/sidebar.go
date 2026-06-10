@@ -423,6 +423,22 @@ func (s *Sidebar) ReplaceInstance(target, replacement *session.Instance) bool {
 	return false
 }
 
+// ReplaceInstanceByTitle swaps the sidebar instance carrying the given title
+// for replacement, preserving the selected row. Returns false when no
+// instance has that title. Used by the instance-start handler when its
+// pointer-based ReplaceInstance misses: a background sync may have swapped
+// the Loading placeholder for a disk-built copy of the same session while
+// the start RPC was in flight, and re-adding the started instance would
+// leave two sidebar rows — and two persisted records — with one title (#808).
+func (s *Sidebar) ReplaceInstanceByTitle(title string, replacement *session.Instance) bool {
+	for _, inst := range s.instances {
+		if inst.Title == title {
+			return s.ReplaceInstance(inst, replacement)
+		}
+	}
+	return false
+}
+
 // GetInstances returns all instances. The returned slice shares the sidebar's
 // backing array, so callers must only read it on the bubbletea event loop —
 // never hand it to a goroutine that outlives the call (see
