@@ -290,9 +290,10 @@ func newHarness(t *testing.T) *harness {
 	requireTool(t, "tmux")
 
 	home := t.TempDir()
-	if err := os.Setenv("AGENT_FACTORY_HOME", home); err != nil {
-		t.Fatalf("setenv AGENT_FACTORY_HOME: %v", err)
-	}
+	// t.Setenv (not os.Setenv) so the variable is restored when the test
+	// ends; an unrestored value leaks the previous test's (deleted) tempdir
+	// into every later test in the package (#837 audit).
+	t.Setenv("AGENT_FACTORY_HOME", home)
 	// The enum-only program model (#658) routes session.Program through
 	// session.injectSystemPrompt, which appends agent-specific flags
 	// (e.g. --plugin-dir for claude) to the resolved command. Plain `cat`

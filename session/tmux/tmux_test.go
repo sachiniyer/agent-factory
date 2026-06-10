@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 
 	"github.com/stretchr/testify/require"
@@ -24,7 +25,14 @@ import (
 func TestMain(m *testing.M) {
 	aflog.Initialize(false)
 	defer aflog.Close()
-	os.Exit(m.Run())
+	// #837: fail the package loudly if any test touches the real config.json.
+	verifyRealConfig := testguard.ConfigTripwire()
+	code := m.Run()
+	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 type MockPtyFactory struct {

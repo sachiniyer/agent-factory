@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -23,8 +24,15 @@ func TestMain(m *testing.M) {
 	log.Initialize(false)
 	defer log.Close()
 
+	// #837: fail the package loudly if any test touches the real config.json.
+	verifyRealConfig := testguard.ConfigTripwire()
+
 	// Run all tests
 	exitCode := m.Run()
+	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		exitCode = 1
+	}
 
 	// Exit with the same code as the tests
 	os.Exit(exitCode)
