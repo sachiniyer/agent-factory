@@ -174,7 +174,7 @@ var sessionsCreateCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("session with title %q already exists", createNameFlag))
 		}
 
-		cfg, err := config.LoadConfig()
+		cfg, err := config.ResolveConfig(repo.Root)
 		if err != nil {
 			return jsonError(err)
 		}
@@ -321,7 +321,7 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 				return jsonError(fmt.Errorf("session with title %q already exists", title))
 			}
 
-			cfg, err := config.LoadConfig()
+			cfg, err := config.ResolveConfig(repo.Root)
 			if err != nil {
 				return jsonError(err)
 			}

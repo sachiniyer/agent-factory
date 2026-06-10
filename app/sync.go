@@ -397,18 +397,17 @@ func upsertInstanceDataByTitle(existing, incoming []session.InstanceData) []sess
 }
 
 func (m *home) importRemoteHookSessions() int {
-	repoCfg, err := config.LoadRepoConfig(m.repoID)
-	if err != nil {
-		log.WarningLog.Printf("failed to load repo config for remote import: %v", err)
-		return 0
-	}
-	if repoCfg.RemoteHooks == nil || repoCfg.RemoteHooks.ListCmd == "" {
-		return 0
-	}
-
 	repo, err := config.CurrentRepo()
 	if err != nil {
 		log.WarningLog.Printf("failed to resolve repo for remote import: %v", err)
+		return 0
+	}
+	repoCfg, err := config.ResolveConfig(repo.Root)
+	if err != nil {
+		log.WarningLog.Printf("failed to resolve repo config for remote import: %v", err)
+		return 0
+	}
+	if repoCfg.RemoteHooks == nil || repoCfg.RemoteHooks.ListCmd == "" {
 		return 0
 	}
 

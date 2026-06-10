@@ -4,7 +4,7 @@ Agent Factory supports remote machine backends via user-provided hook scripts. W
 
 ## Configuration
 
-Add remote hooks to your per-repo config at `~/.agent-factory/repos/<repoID>/config.json`:
+Add remote hooks to the repo's own config file at `<repo-root>/.agent-factory/config.json` (check it into the repo so every clone gets the same backend):
 
 ```json
 {
@@ -16,6 +16,8 @@ Add remote hooks to your per-repo config at `~/.agent-factory/repos/<repoID>/con
   }
 }
 ```
+
+`remote_hooks` is an in-repo-only setting — it describes the repository, so it is not accepted in the global `~/.agent-factory/config.json`. The previous location, `~/.agent-factory/repos/<repoID>/config.json`, is **deprecated**: it keeps working for one more release as a fallback (with a warning in the log pointing here), and is ignored whenever the in-repo file sets `remote_hooks`. See the README's [Configuration](../README.md#configuration) section for the full precedence rules.
 
 Configuring `remote_hooks` enables the remote backend for that repo, but using it is explicit opt-in: press `N` in the TUI to create a remote session. Pressing `n` still creates a local tmux+git worktree session. When `remote_hooks` is absent, `N` is unavailable and all sessions are local.
 

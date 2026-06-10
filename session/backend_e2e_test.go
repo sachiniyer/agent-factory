@@ -410,3 +410,44 @@ func readStateFile(t *testing.T, _ string) []map[string]interface{} {
 	require.NoError(t, json.Unmarshal(raw, &sessions))
 	return sessions
 }
+
+// TestE2EBackendResolutionWithInRepoConfig verifies that backendForPath reads
+// the in-repo .agent-factory/config.json (#800) and that it shadows the
+// legacy per-repo location.
+func TestE2EBackendResolutionWithInRepoConfig(t *testing.T) {
+	afHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "--local", "user.email", "test@inrepo.com")
+	runGit(t, repoDir, "config", "--local", "user.name", "InRepo Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "f.txt"), []byte("x"), 0644))
+	runGit(t, repoDir, "add", "f.txt")
+	runGit(t, repoDir, "commit", "-m", "init")
+
+	// In-repo remote_hooks alone resolve the remote backend.
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, config.InRepoConfigDirName), 0755))
+	require.NoError(t, os.WriteFile(config.InRepoConfigPath(repoDir),
+		[]byte(`{"remote_hooks": {"launch_cmd": "/bin/echo in-repo", "list_cmd": "/bin/echo", "attach_cmd": "/bin/echo", "delete_cmd": "/bin/echo"}}`), 0644))
+
+	b, err := backendForPath(repoDir)
+	require.NoError(t, err)
+	require.Equal(t, "remote", b.Type())
+
+	// A conflicting legacy config is shadowed by the in-repo file.
+	repo, err := config.RepoFromPath(repoDir)
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoConfig(repo.ID, &config.RepoConfig{
+		RemoteHooks: &config.RemoteHooks{
+			LaunchCmd: "/bin/echo legacy",
+			ListCmd:   "/bin/echo",
+			AttachCmd: "/bin/echo",
+			DeleteCmd: "/bin/echo",
+		},
+	}))
+
+	hook, err := loadHookBackendForPath(repoDir)
+	require.NoError(t, err)
+	assert.Equal(t, "/bin/echo in-repo", hook.Hooks.LaunchCmd)
+}

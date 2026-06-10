@@ -61,7 +61,10 @@ var (
 				return fmt.Errorf("failed to determine repo context: %w", err)
 			}
 
-			cfg, err := config.LoadConfig()
+			// Resolve the effective config for this repo: app defaults ->
+			// global ~/.agent-factory/config.json -> the repo's own
+			// .agent-factory/config.json (#800).
+			cfg, err := config.ResolveConfig(repo.Root)
 			if err != nil {
 				return err
 			}
@@ -96,7 +99,7 @@ var (
 			autoUpdateInBackground()
 
 			app.Version = version
-			return app.Run(ctx, program, autoYes, repo.ID)
+			return app.Run(ctx, program, autoYes, repo)
 		},
 	}
 

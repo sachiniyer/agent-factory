@@ -28,9 +28,9 @@ import (
 var Version string
 
 // Run is the main entrypoint into the application.
-func Run(ctx context.Context, program string, autoYes bool, repoID string) error {
+func Run(ctx context.Context, program string, autoYes bool, repo *config.RepoContext) error {
 	p := tea.NewProgram(
-		newHome(ctx, program, autoYes, repoID),
+		newHome(ctx, program, autoYes, repo),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(), // Mouse scroll
 	)
@@ -64,6 +64,9 @@ type home struct {
 	program string
 	autoYes bool
 	repoID  string
+	// repoRoot is the main-worktree root of the repo this TUI run is scoped
+	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
+	repoRoot string
 
 	// storage is the interface for saving/loading data to/from the app's state
 	storage *session.Storage
@@ -129,7 +132,8 @@ type home struct {
 	attached atomic.Bool
 }
 
-func newHome(ctx context.Context, program string, autoYes bool, repoID string) *home {
+func newHome(ctx context.Context, program string, autoYes bool, repo *config.RepoContext) *home {
+	repoID := repo.ID
 	// Load application config
 	appConfig, err := config.LoadConfig()
 	if err != nil {
@@ -170,6 +174,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		program:     program,
 		autoYes:     autoYes,
 		repoID:      repoID,
+		repoRoot:    repo.Root,
 		state:       stateDefault,
 		appState:    appState,
 	}
@@ -206,10 +211,11 @@ func newHome(ctx context.Context, program string, autoYes bool, repoID string) *
 		h.contentPane.TaskPane().SetTasks(tasks)
 	}
 
-	// Load hooks for sidebar display and hooks pane
-	repoCfg, err := config.LoadRepoConfig(repoID)
+	// Load hooks for sidebar display and hooks pane. ResolveConfig applies
+	// the in-repo .agent-factory/config.json over the legacy per-repo file.
+	repoCfg, err := config.ResolveConfig(repo.Root)
 	if err != nil {
-		log.WarningLog.Printf("failed to load repo config: %v", err)
+		log.WarningLog.Printf("failed to resolve repo config: %v", err)
 	} else {
 		h.sidebar.SetHookCount(len(repoCfg.PostWorktreeCommands))
 		h.contentPane.HooksPane().SetCommands(repoCfg.PostWorktreeCommands)
@@ -511,14 +517,14 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 func (m *home) saveContentPaneState() {
 	hp := m.contentPane.HooksPane()
 	if hp.IsDirty() {
-		repoCfg, err := config.LoadRepoConfig(m.repoID)
-		if err != nil {
-			log.ErrorLog.Printf("failed to save hooks: could not load repo config: %v", err)
+		// Hook edits are written to the in-repo .agent-factory/config.json —
+		// the canonical location for post_worktree_commands since #800. The
+		// legacy ~/.agent-factory/repos/<id>/config.json stays untouched as a
+		// read-only fallback; the saved in-repo key (even when emptied)
+		// shadows it.
+		if err := config.SaveInRepoPostWorktreeCommands(m.repoRoot, hp.GetCommands()); err != nil {
+			log.ErrorLog.Printf("failed to save hooks: %v", err)
 		} else {
-			repoCfg.PostWorktreeCommands = hp.GetCommands()
-			if err := config.SaveRepoConfig(m.repoID, repoCfg); err != nil {
-				log.ErrorLog.Printf("failed to save hooks: %v", err)
-			}
 			m.sidebar.SetHookCount(len(hp.GetCommands()))
 		}
 	}
