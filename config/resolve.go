@@ -38,7 +38,10 @@ type ResolvedConfig struct {
 	// legacy ~/.agent-factory/repos/<id>/config.json value.
 	PostWorktreeCommands []string
 	// RemoteHooks is the effective remote hook backend config, with the
-	// same in-repo-then-legacy resolution as PostWorktreeCommands.
+	// same in-repo-then-legacy resolution as PostWorktreeCommands. Command
+	// values that were relative filesystem paths have been rewritten to
+	// absolute paths under repoRoot (#834); consumers can exec them without
+	// caring about the process cwd.
 	RemoteHooks *RemoteHooks
 }
 
@@ -94,6 +97,19 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 			res.RemoteHooks = inRepo.RemoteHooks
 		}
 		logInRepoConfigLoaded(repoID, repoRoot, inRepo, raw)
+	}
+
+	// Rewrite relative hook command paths to absolute against repoRoot
+	// (#834). This is the single chokepoint for the rewrite: every exec of a
+	// hook command — launch/list/attach/delete, startup import, restore
+	// liveness, preview — receives its RemoteHooks from ResolveConfig, so
+	// resolving here covers them all. repoRoot is the main worktree root, so
+	// sessions in linked worktrees resolve hooks against the repository whose
+	// config file was loaded, never against a worktree path. The rewrite
+	// applies to the legacy-location value too, so both sources behave
+	// identically.
+	if res.RemoteHooks != nil {
+		res.RemoteHooks = res.RemoteHooks.resolveCommandPaths(repoRoot)
 	}
 
 	warnLegacyRepoConfig(repoID, repoRoot, legacy, inRepo)

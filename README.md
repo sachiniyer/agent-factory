@@ -222,6 +222,8 @@ A repository can carry its own configuration in `<repo-root>/.agent-factory/conf
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `"post_worktree_commands": []`. |
 | `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys` | Global only. Setting them in-repo is rejected with an error naming the key. |
 
+Relative `remote_hooks` paths (like `./infra/launch.sh` above) resolve against the repository root — the repo whose `.agent-factory/config.json` was loaded; for sessions in linked worktrees that is the main repository root — so checked-in hook scripts work no matter what the working directory of `af` or its daemon is. Bare names without a path separator (e.g. `bash`) keep normal `$PATH` lookup. See [docs/remote-hooks.md](docs/remote-hooks.md#command-path-resolution) for the full rules.
+
 Note that an in-repo config executes what it configures: `post_worktree_commands` run after each worktree is created, `remote_hooks` and `program_overrides` values are invoked as shell commands. Cloning a repository and running `af` in it implies trusting that repo's `.agent-factory/config.json`. The first time a config carrying such fields loads (and whenever its content changes), `af` records one log line naming the fields and the file's content hash.
 
 ## Upstream

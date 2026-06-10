@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -409,6 +410,193 @@ func readStateFile(t *testing.T, _ string) []map[string]interface{} {
 	var sessions []map[string]interface{}
 	require.NoError(t, json.Unmarshal(raw, &sessions))
 	return sessions
+}
+
+// setupE2ERelativeHooksRepo creates a real git repo whose in-repo config
+// declares remote_hooks as repo-relative paths (#834), with the hook scripts
+// checked into the repo under .agent-factory/hooks/. The scripts track
+// sessions in a plain-text state file (one name per line) so the test needs
+// no python3. Returns the repo dir and the state file path.
+func setupE2ERelativeHooksRepo(t *testing.T) (string, string) {
+	t.Helper()
+
+	afHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "--local", "user.email", "test@rel.com")
+	runGit(t, repoDir, "config", "--local", "user.name", "Rel Test")
+
+	stateFile := filepath.Join(t.TempDir(), "sessions.txt")
+	require.NoError(t, os.WriteFile(stateFile, nil, 0644))
+
+	hooksDir := filepath.Join(repoDir, config.InRepoConfigDirName, "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0755))
+
+	writeE2EScript(t, hooksDir, "launch.sh", `
+STATE_FILE="`+stateFile+`"
+NAME=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) NAME="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+if [ -z "$NAME" ]; then echo "error: --name required" >&2; exit 1; fi
+echo "$NAME" >> "$STATE_FILE"
+echo "{\"name\": \"$NAME\", \"status\": \"running\"}"
+`)
+
+	writeE2EScript(t, hooksDir, "list.sh", `
+STATE_FILE="`+stateFile+`"
+OUT="["
+SEP=""
+while IFS= read -r n; do
+  [ -z "$n" ] && continue
+  OUT="$OUT$SEP{\"name\": \"$n\", \"status\": \"running\"}"
+  SEP=","
+done < "$STATE_FILE"
+echo "$OUT]"
+`)
+
+	writeE2EScript(t, hooksDir, "attach.sh", `
+NAME="$1"
+echo "=== Remote Session: $NAME ==="
+sleep 0.2
+`)
+
+	writeE2EScript(t, hooksDir, "delete.sh", `
+STATE_FILE="`+stateFile+`"
+NAME=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) NAME="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+if [ -z "$NAME" ]; then echo "error: --name required" >&2; exit 1; fi
+grep -v -x -F "$NAME" "$STATE_FILE" > "$STATE_FILE.tmp" || true
+mv "$STATE_FILE.tmp" "$STATE_FILE"
+echo "{\"name\": \"$NAME\", \"deleted\": true}"
+`)
+
+	// The whole point: the config carries repo-relative commands.
+	require.NoError(t, os.WriteFile(config.InRepoConfigPath(repoDir), []byte(`{
+  "remote_hooks": {
+    "launch_cmd": "./.agent-factory/hooks/launch.sh",
+    "list_cmd": "./.agent-factory/hooks/list.sh",
+    "attach_cmd": "./.agent-factory/hooks/attach.sh",
+    "delete_cmd": "./.agent-factory/hooks/delete.sh"
+  }
+}`), 0644))
+
+	runGit(t, repoDir, "add", "-A")
+	runGit(t, repoDir, "commit", "-m", "init with relative remote_hooks")
+
+	return repoDir, stateFile
+}
+
+// readLineStateFile reads the one-name-per-line session state file kept by
+// the relative-hooks scripts.
+func readLineStateFile(t *testing.T, stateFile string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(stateFile)
+	require.NoError(t, err)
+	var names []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line != "" {
+			names = append(names, line)
+		}
+	}
+	return names
+}
+
+// TestE2ERemoteHooksRelativePaths is the acceptance test for #834: an in-repo
+// remote_hooks config written with repo-relative paths must work even though
+// the process cwd is not the repo root (the daemon's cwd is unrelated to the
+// repo). Before the fix, exec resolved "./..." against the cwd and every hook
+// failed with "no such file or directory".
+func TestE2ERemoteHooksRelativePaths(t *testing.T) {
+	repoDir, stateFile := setupE2ERelativeHooksRepo(t)
+
+	repo, err := config.RepoFromPath(repoDir)
+	require.NoError(t, err)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NotEqual(t, repo.Root, cwd, "test must run with cwd outside the repo for the relative paths to be meaningful")
+
+	// Backend resolution rewrites the commands to absolute paths under the
+	// repo root before they reach any exec site.
+	hook, err := loadHookBackendForPath(repoDir)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/launch.sh"), hook.Hooks.LaunchCmd)
+	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/list.sh"), hook.Hooks.ListCmd)
+	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/attach.sh"), hook.Hooks.AttachCmd)
+	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/delete.sh"), hook.Hooks.DeleteCmd)
+
+	// Full lifecycle: launch_cmd, list_cmd (liveness), attach_cmd (preview),
+	// and delete_cmd all execute from a cwd outside the repo.
+	instance, err := NewInstance(InstanceOptions{
+		Title:       "rel-hooks",
+		Path:        repoDir,
+		Program:     "claude",
+		ForceRemote: true,
+	})
+	require.NoError(t, err)
+	require.True(t, instance.IsRemote())
+
+	require.NoError(t, instance.Start(true))
+	assert.Equal(t, []string{slugify("rel-hooks")}, readLineStateFile(t, stateFile), "launch_cmd must have run")
+	assert.True(t, instance.TmuxAlive(), "list_cmd must report the session as running")
+
+	// Startup import goes through the same resolved config.
+	imported, err := ListRemoteHookInstanceData(repo.Root, hook.Hooks, time.Now())
+	require.NoError(t, err)
+	require.Len(t, imported, 1)
+	assert.Equal(t, slugify("rel-hooks"), imported[0].Branch)
+
+	require.NoError(t, instance.Kill())
+	assert.Empty(t, readLineStateFile(t, stateFile), "delete_cmd must have run")
+}
+
+// TestE2ERemoteHooksRelativePathsLinkedWorktree pins the linked-worktree rule
+// from #834: relative hook paths resolve against the main repository root —
+// the root whose .agent-factory/config.json was loaded — never against the
+// linked worktree's own path.
+func TestE2ERemoteHooksRelativePathsLinkedWorktree(t *testing.T) {
+	repoDir, stateFile := setupE2ERelativeHooksRepo(t)
+
+	worktreeDir := filepath.Join(t.TempDir(), "linked-wt")
+	runGit(t, repoDir, "worktree", "add", worktreeDir, "-b", "wt-branch")
+
+	repo, err := config.RepoFromPath(worktreeDir)
+	require.NoError(t, err)
+	mainRepo, err := config.RepoFromPath(repoDir)
+	require.NoError(t, err)
+	require.Equal(t, mainRepo.Root, repo.Root, "linked worktree must resolve to the main repo root")
+
+	hook, err := loadHookBackendForPath(worktreeDir)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(mainRepo.Root, ".agent-factory/hooks/launch.sh"), hook.Hooks.LaunchCmd,
+		"hooks must resolve against the main repo root, not the worktree")
+	assert.NotContains(t, hook.Hooks.LaunchCmd, worktreeDir)
+
+	// And they execute: launch + delete through an instance rooted at the
+	// linked worktree.
+	instance, err := NewInstance(InstanceOptions{
+		Title:       "wt-session",
+		Path:        worktreeDir,
+		Program:     "claude",
+		ForceRemote: true,
+	})
+	require.NoError(t, err)
+	require.True(t, instance.IsRemote())
+
+	require.NoError(t, instance.Start(true))
+	assert.Equal(t, []string{slugify("wt-session")}, readLineStateFile(t, stateFile))
+	require.NoError(t, instance.Kill())
+	assert.Empty(t, readLineStateFile(t, stateFile))
 }
 
 // TestE2EBackendResolutionWithInRepoConfig verifies that backendForPath reads
