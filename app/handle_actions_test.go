@@ -1,6 +1,9 @@
 package app
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -78,4 +81,47 @@ func TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift(t *testing.T) {
 
 	require.Equal(t, []string{"instance-a"}, attachLog,
 		"attach must target the instance captured at Enter-press time, not the drifted selection")
+}
+
+// TestKillConfirmationWarning is the regression guard for issue #815. Kill
+// force-removes the worktree (`git worktree remove -f`), bypassing git's own
+// refusal to delete a dirty worktree, so the confirmation dialog's warning is
+// the only safety gate. The old code only warned when `git status` succeeded
+// AND reported changes; a failing status check (corrupted worktree, missing
+// git metadata) silently produced no warning while deletion still proceeded.
+// The check must fail closed: a status error yields a could-not-verify
+// warning, not silence.
+func TestKillConfirmationWarning(t *testing.T) {
+	gitInit := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		cmd := exec.Command("git", "-C", dir, "init")
+		require.NoError(t, cmd.Run(), "git init failed")
+		return dir
+	}
+
+	t.Run("clean worktree produces no warning", func(t *testing.T) {
+		dir := gitInit(t)
+		require.Empty(t, killConfirmationWarning(dir))
+	})
+
+	t.Run("dirty worktree warns about uncommitted changes", func(t *testing.T) {
+		dir := gitInit(t)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("data"), 0o644))
+		warning := killConfirmationWarning(dir)
+		require.Contains(t, warning, "uncommitted changes that will be lost")
+		require.NotContains(t, warning, "Could not verify")
+	})
+
+	t.Run("status check failure fails closed with could-not-verify warning", func(t *testing.T) {
+		// A plain directory that is not a git repository makes `git status` fail.
+		warning := killConfirmationWarning(t.TempDir())
+		require.Contains(t, warning, "Could not verify worktree status")
+		require.Contains(t, warning, "uncommitted changes that will be lost")
+	})
+
+	t.Run("nonexistent worktree path fails closed", func(t *testing.T) {
+		warning := killConfirmationWarning(filepath.Join(t.TempDir(), "gone"))
+		require.Contains(t, warning, "Could not verify worktree status")
+	})
 }
