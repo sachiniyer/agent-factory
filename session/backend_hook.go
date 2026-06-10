@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,32 @@ type hookPTY struct {
 }
 
 var slugRegexp = regexp.MustCompile(`[^a-z0-9-]`)
+
+// ed2Marker is ED2 (erase entire display). The documented remote preview
+// pattern (docs/remote-hooks.md) emits it at the top of every capture-loop
+// iteration, so hookPTY ingestion treats it as a snapshot boundary (#810).
+var ed2Marker = []byte("\x1b[2J")
+
+// ingest appends a chunk of attach_cmd output to the preview buffer.
+//
+// ED2 (\x1b[2J) marks the start of a fresh snapshot: the documented preview
+// contract is a clear-screen + capture loop, so everything up to and
+// including the last ED2 is a stale frame and is dropped instead of
+// concatenated (#810). The search runs over the accumulated buffer, not just
+// the incoming chunk, so a sequence split across read boundaries is detected
+// once its tail arrives — the head bytes are already in buf.
+func (hp *hookPTY) ingest(chunk []byte) {
+	const maxBuf = 64 * 1024
+	hp.mu.Lock()
+	defer hp.mu.Unlock()
+	hp.buf = append(hp.buf, chunk...)
+	if idx := bytes.LastIndex(hp.buf, ed2Marker); idx >= 0 {
+		hp.buf = hp.buf[idx+len(ed2Marker):]
+	}
+	if len(hp.buf) > maxBuf {
+		hp.buf = hp.buf[len(hp.buf)-maxBuf:]
+	}
+}
 
 // Slugify converts a title to a slug-safe string for hook scripts.
 // The slug is part of the public remote hook protocol documented in
@@ -325,8 +352,14 @@ func (b *HookBackend) Preview(i *Instance) (string, error) {
 		return "", nil
 	}
 	hp.mu.Lock()
-	defer hp.mu.Unlock()
-	return string(hp.buf), nil
+	raw := string(hp.buf)
+	hp.mu.Unlock()
+	// Never return the raw stream: attach_cmd output is a PTY stream whose
+	// control sequences would be executed by the real terminal when the
+	// preview pane is flushed, corrupting the whole TUI (#810). Sanitizing
+	// happens outside the lock so the ingestion goroutine is never blocked
+	// on it.
+	return sanitizeHookPreview(raw), nil
 }
 
 func (b *HookBackend) PreviewFullHistory(i *Instance) (string, error) {
@@ -641,19 +674,14 @@ func (b *HookBackend) ensurePTY(i *Instance) error {
 	hp := &hookPTY{cmd: cmd, stdout: stdoutR, waitDone: make(chan struct{})}
 	b.ptys[i.Title] = hp
 
-	// Background goroutine reads output into a ring buffer.
+	// Background goroutine reads output into a ring buffer with ED2
+	// snapshot-reset semantics (see hookPTY.ingest).
 	go func() {
 		buf := make([]byte, 4096)
-		const maxBuf = 64 * 1024
 		for {
 			n, err := stdoutR.Read(buf)
 			if n > 0 {
-				hp.mu.Lock()
-				hp.buf = append(hp.buf, buf[:n]...)
-				if len(hp.buf) > maxBuf {
-					hp.buf = hp.buf[len(hp.buf)-maxBuf:]
-				}
-				hp.mu.Unlock()
+				hp.ingest(buf[:n])
 			}
 			if err != nil {
 				break
@@ -717,6 +745,26 @@ func (hp *hookPTY) waitAsync() <-chan struct{} {
 func (hp *hookPTY) wait() error {
 	<-hp.waitAsync()
 	return hp.waitErr
+}
+
+// SetPreviewBufferForTest seeds the raw preview buffer for title, creating
+// the entry if needed. Exported in a non-test file (mirroring FakeBackend)
+// so ui tests can drive the hook preview path through PreviewPane without
+// spawning a real attach_cmd process.
+func (b *HookBackend) SetPreviewBufferForTest(title string, data []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ptys == nil {
+		b.ptys = make(map[string]*hookPTY)
+	}
+	hp, ok := b.ptys[title]
+	if !ok {
+		hp = &hookPTY{waitDone: make(chan struct{})}
+		b.ptys[title] = hp
+	}
+	hp.mu.Lock()
+	hp.buf = append([]byte(nil), data...)
+	hp.mu.Unlock()
 }
 
 func (b *HookBackend) getPTY(title string) *hookPTY {
