@@ -78,21 +78,23 @@ func TestLocalBackendKillBestEffort_TmuxFails(t *testing.T) {
 	require.NoError(t, inst.Kill(), "second kill on a cleared instance must be a no-op")
 }
 
-// TestLocalBackendKillBestEffort_WorktreeFails reproduces the exact scenario
-// from issue #478: the git worktree cleanup fails because the path is no
-// longer a working tree, and the user is stuck unable to delete the session.
-// After the fix, Kill logs a warning and returns nil so the caller can
-// remove the row from the sidebar and the persisted record.
+// TestLocalBackendKillBestEffort_WorktreeFails covers the issue #478
+// guarantee: when worktree cleanup genuinely fails, Kill logs a warning and
+// returns nil so the caller can remove the row from the sidebar and the
+// persisted record. The original #478 scenario (path exists but is no longer
+// a working tree) now self-heals via the #802 ownership check — see
+// TestLocalBackendKill_RecoversStaleWorktreeDir — so this test provokes a
+// failure that still surfaces: the stored repo path is not a git repo, every
+// git command fails, and `git worktree list` being unreadable means Cleanup
+// cannot establish ownership and must NOT delete the directory.
 func TestLocalBackendKillBestEffort_WorktreeFails(t *testing.T) {
-	repoRoot := initTempGitRepo(t)
+	notARepo := filepath.Join(t.TempDir(), "not-a-repo")
+	require.NoError(t, os.MkdirAll(notARepo, 0755))
 
-	// Create a real directory that exists but is NOT a git worktree.
-	// `git worktree remove -f` on this path returns the "is not a working
-	// tree" error pattern users see in the issue.
 	stalePath := filepath.Join(t.TempDir(), "stale-worktree")
 	require.NoError(t, os.MkdirAll(stalePath, 0755))
 
-	gw, err := git.NewGitWorktreeFromStorage(repoRoot, stalePath, "issue-478", "issue-478-branch", "", false, false)
+	gw, err := git.NewGitWorktreeFromStorage(notARepo, stalePath, "issue-478", "issue-478-branch", "", false, false)
 	require.NoError(t, err)
 
 	inst := &Instance{
@@ -111,7 +113,45 @@ func TestLocalBackendKillBestEffort_WorktreeFails(t *testing.T) {
 	logged := buf.String()
 	assert.Contains(t, logged, "issue-478", "warning must include instance title")
 	assert.Contains(t, logged, "git worktree cleanup failed")
-	assert.Contains(t, logged, "is not a working tree", "warning should preserve the underlying git error so users can diagnose")
+	assert.Contains(t, logged, "not a git repository", "warning should preserve the underlying git error so users can diagnose")
+
+	// Safety: with ownership unknown (worktree list unreadable), the
+	// directory must be left alone.
+	_, statErr := os.Stat(stalePath)
+	assert.NoError(t, statErr, "Cleanup must not delete a directory whose git ownership it cannot establish")
+}
+
+// TestLocalBackendKill_RecoversStaleWorktreeDir pins the #802 behavior change
+// to the original #478 scenario: the stored path exists on disk but git does
+// not register it as a worktree (`worktree remove` fails, `worktree list`
+// omits it). Instead of surfacing "is not a working tree" and leaking the
+// directory, Kill now removes it and completes cleanly.
+func TestLocalBackendKill_RecoversStaleWorktreeDir(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+
+	stalePath := filepath.Join(t.TempDir(), "stale-worktree")
+	require.NoError(t, os.MkdirAll(stalePath, 0755))
+
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, stalePath, "stale-dir", "stale-dir-branch", "", false, false)
+	require.NoError(t, err)
+
+	inst := &Instance{
+		Title:       "stale-dir",
+		backend:     &LocalBackend{},
+		started:     true,
+		gitWorktree: gw,
+	}
+
+	buf := captureWarningLog(t)
+
+	require.NoError(t, inst.Kill())
+	assert.Nil(t, inst.gitWorktree)
+
+	_, statErr := os.Stat(stalePath)
+	assert.True(t, os.IsNotExist(statErr),
+		"Kill must remove a leftover directory git no longer registers as a worktree (#802)")
+	assert.NotContains(t, buf.String(), "git worktree cleanup failed",
+		"recovered cleanup should not warn")
 }
 
 // TestLocalBackendKillBestEffort_BothFail covers the multi-component failure
@@ -128,10 +168,13 @@ func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 	}
 	ts := tmux.NewTmuxSessionWithDeps("both-fail", "bash", nil, cmdExec)
 
-	repoRoot := initTempGitRepo(t)
+	// Non-repo path: every git command fails, so the worktree cleanup error
+	// surfaces (ownership unknown — see TestLocalBackendKillBestEffort_WorktreeFails).
+	notARepo := filepath.Join(t.TempDir(), "not-a-repo")
+	require.NoError(t, os.MkdirAll(notARepo, 0755))
 	stalePath := filepath.Join(t.TempDir(), "stale")
 	require.NoError(t, os.MkdirAll(stalePath, 0755))
-	gw, err := git.NewGitWorktreeFromStorage(repoRoot, stalePath, "both-fail", "both-fail-branch", "", false, false)
+	gw, err := git.NewGitWorktreeFromStorage(notARepo, stalePath, "both-fail", "both-fail-branch", "", false, false)
 	require.NoError(t, err)
 
 	inst := &Instance{
@@ -151,7 +194,7 @@ func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 	logged := buf.String()
 	assert.Contains(t, logged, "tmux cleanup failed")
 	assert.Contains(t, logged, "git worktree cleanup failed")
-	assert.Equal(t, 2, strings.Count(logged, "both-fail"), "title should appear in both component warnings")
+	assert.Equal(t, 2, strings.Count(logged, `kill "both-fail":`), "title should appear in both component warnings")
 }
 
 // captureWarningLog redirects log.WarningLog to a buffer for the duration of

@@ -926,6 +926,71 @@ func (t *TmuxSession) Close() error {
 	return errors.New(errMsg)
 }
 
+// paneExitWait bounds how long CloseAndWaitForPaneExit blocks for the pane
+// process to die. Long enough for an agent to handle SIGHUP and flush state,
+// short enough that teardown of a wedged process doesn't hang the caller.
+const paneExitWait = 3 * time.Second
+
+// CloseAndWaitForPaneExit terminates the tmux session like Close, then waits
+// (bounded by paneExitWait) until the pane's root process has actually
+// exited. `tmux kill-session` only delivers SIGHUP and returns immediately;
+// an agent that is still flushing state files (.claude/, .turbo/, ...) races
+// any directory removal that follows and leaves a half-deleted worktree
+// behind ("Directory not empty", #802). Callers that delete the session's
+// worktree right after teardown must use this instead of Close.
+func (t *TmuxSession) CloseAndWaitForPaneExit() error {
+	pid, pidErr := t.panePID()
+	closeErr := t.Close()
+	if pidErr != nil {
+		// Session already gone (or unqueryable) — nothing to wait on.
+		return closeErr
+	}
+	if !waitForPIDExit(pid, paneExitWait) {
+		log.WarningLog.Printf("tmux session %s: pane process %d still alive %v after kill-session; "+
+			"worktree cleanup may race with its in-flight writes", t.sanitizedName, pid, paneExitWait)
+	}
+	return closeErr
+}
+
+// panePID returns the PID of the root process running in the session's pane
+// (the agent program). Must be called before kill-session — afterwards there
+// is nothing left to query.
+func (t *TmuxSession) panePID() (int, error) {
+	// `-t=` forces an exact session match, mirroring DoesSessionExist.
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", fmt.Sprintf("=%s", t.sanitizedName), "#{pane_pid}")
+	output, err := t.cmdExec.Output(cmd)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query pane pid: %w", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("unexpected pane pid output %q", string(output))
+	}
+	return pid, nil
+}
+
+// waitForPIDExit polls pid with signal 0 until the process is gone or the
+// timeout elapses. Returns true when the process exited within the timeout.
+// The tmux server reaps its dead children promptly, so a lingering zombie
+// (signal 0 succeeds on zombies) does not realistically pin this to the full
+// timeout.
+func waitForPIDExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			return true
+		}
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // SetDetachedSize set the width and height of the session while detached. This makes the
 // tmux output conform to the specified shape.
 func (t *TmuxSession) SetDetachedSize(width, height int) error {
