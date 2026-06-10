@@ -96,6 +96,27 @@ type ShutdownResponse struct {
 	OK bool
 }
 
+// daemonStartingErrText is the wire-visible text of the warm-up error. net/rpc
+// flattens server-side errors into plain strings, so clients cannot errors.Is
+// against a sentinel value; IsDaemonStartingErr matches this text instead.
+const daemonStartingErrText = "agent-factory daemon is starting (restoring sessions); retry shortly"
+
+// errDaemonStarting is returned by state-dependent RPC handlers in the window
+// between the control-socket bind and the completion of the instance restore
+// (#829). The socket now binds before the restore, which can take minutes on
+// remote-hook repos, so this window is user-visible.
+func errDaemonStarting() error {
+	return errors.New(daemonStartingErrText)
+}
+
+// IsDaemonStartingErr reports whether an RPC client error means the daemon is
+// up but still restoring instances. Callers should treat it as retryable: the
+// daemon is alive (EnsureDaemon's ping succeeds, so it must NOT spawn another)
+// and the same request succeeds once the restore finishes.
+func IsDaemonStartingErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), daemonStartingErrText)
+}
+
 // DaemonSocketPath returns the Unix socket path used by the local control
 // plane.
 func DaemonSocketPath() (string, error) {
@@ -122,7 +143,7 @@ func EnsureDaemon() error {
 		log.WarningLog.Printf("failed to stop stale daemon before launch: %v", err)
 	}
 
-	if err := launchDaemonProcess(); err != nil {
+	if err := launchDaemonProcessFn(); err != nil {
 		return err
 	}
 
@@ -144,11 +165,33 @@ func pingDaemon() error {
 	return callDaemonNoEnsure("Ping", PingRequest{}, &resp)
 }
 
+// daemonWarmupWait bounds how long RPC clients wait for a warming daemon
+// (socket bound, instance restore still running — #829) before surfacing the
+// typed starting error. It mirrors daemonReadyTimeout, the wait callers
+// already tolerated pre-#829 when EnsureDaemon polled for the socket: a local
+// restore completes well inside this window so CLI/TUI calls just work, while
+// a minutes-long remote-hook restore fails fast with an actionable message
+// instead of hanging the caller. daemonWarmupPoll is the retry cadence.
+const (
+	daemonWarmupWait = daemonReadyTimeout
+	daemonWarmupPoll = 100 * time.Millisecond
+)
+
 func callDaemon(method string, req any, resp any) error {
 	if err := EnsureDaemon(); err != nil {
 		return err
 	}
-	return callDaemonNoEnsure(method, req, resp)
+	err := callDaemonNoEnsure(method, req, resp)
+	// A warming daemon rejects state-dependent RPCs until its instance
+	// restore completes (#829). Retry briefly so callers that race a fresh
+	// daemon spawn (CLI create right after boot, task runs after an upgrade
+	// respawn) succeed without every call site growing retry logic.
+	deadline := time.Now().Add(daemonWarmupWait)
+	for IsDaemonStartingErr(err) && time.Now().Before(deadline) {
+		time.Sleep(daemonWarmupPoll)
+		err = callDaemonNoEnsure(method, req, resp)
+	}
+	return err
 }
 
 func callDaemonNoEnsure(method string, req any, resp any) error {
@@ -341,6 +384,15 @@ func (s *controlServer) ReloadTasks(_ ReloadTasksRequest, resp *ReloadTasksRespo
 	if s.scheduler == nil {
 		return fmt.Errorf("this daemon does not host a task scheduler")
 	}
+	// During warm-up (#829) the scheduler and watcher supervisor have not
+	// started yet; RunDaemon reloads both from tasks.json right after the
+	// restore completes, so a change the caller just wrote is picked up then.
+	// Ack instead of erroring — the write is already durable and there is
+	// nothing running to reload.
+	if s.manager != nil && !s.manager.Ready() {
+		resp.OK = true
+		return nil
+	}
 	if err := s.scheduler.Reload(); err != nil {
 		return err
 	}
@@ -373,7 +425,23 @@ func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) erro
 	return nil
 }
 
+// requireManagerReady gates RPC handlers that read or mutate restored session
+// state. During warm-up (socket bound, restore still running — #829) they fail
+// fast with errDaemonStarting rather than operating on an empty instance map:
+// a CreateSession could race the restore into duplicate Instances, and a
+// KillSession/SendPrompt would construct throwaway instances from disk that
+// the restore then orphans. Ping and Shutdown stay available throughout.
+func (s *controlServer) requireManagerReady() error {
+	if s.manager == nil || s.manager.Ready() {
+		return nil
+	}
+	return errDaemonStarting()
+}
+
 func (s *controlServer) CreateSession(req CreateSessionRequest, resp *CreateSessionResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
 	data, err := s.manager.CreateSession(req)
 	if err != nil {
 		return err
@@ -383,6 +451,9 @@ func (s *controlServer) CreateSession(req CreateSessionRequest, resp *CreateSess
 }
 
 func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -394,6 +465,9 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 }
 
 func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -419,6 +493,9 @@ func validateRPCRepoID(repoID string) error {
 }
 
 func (s *controlServer) ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest, resp *ImportRemoteHookSessionsResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
 	data, err := s.manager.ImportRemoteHookSessions(req)
 	if err != nil {
 		return err
@@ -543,6 +620,12 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 type Manager struct {
 	cfg *config.Config
 
+	// ready is closed once the initial instance restore has completed. Until
+	// then the daemon is "warming up": the control socket is already bound
+	// (#829) but state-dependent RPCs return errDaemonStarting.
+	ready     chan struct{}
+	readyOnce sync.Once
+
 	mu                  sync.Mutex
 	storage             *session.Storage
 	instances           map[string]*session.Instance
@@ -551,24 +634,68 @@ type Manager struct {
 	repoStartLocks      map[string]*sync.Mutex
 }
 
+// NewManager constructs a manager and synchronously restores all persisted
+// instances into it, returning only once the manager is ready. RunDaemon
+// deliberately does NOT use this: it builds the shell with newManagerShell,
+// binds the control socket, and only then runs RestoreInstances — the restore
+// can take minutes on remote-hook repos and must not delay the bind (#829).
 func NewManager(cfg *config.Config) (*Manager, error) {
+	manager, err := newManagerShell(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := manager.RestoreInstances(); err != nil {
+		return nil, err
+	}
+	return manager, nil
+}
+
+// newManagerShell constructs a Manager with no instances loaded. The manager
+// reports !Ready() until RestoreInstances completes.
+func newManagerShell(cfg *config.Config) (*Manager, error) {
 	state := config.LoadState()
 	storage, err := session.NewStorage(state, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
-	instances, err := refreshDaemonInstances(nil)
-	if err != nil {
-		return nil, err
-	}
 	return &Manager{
 		cfg:                 cfg,
+		ready:               make(chan struct{}),
 		storage:             storage,
-		instances:           instances,
+		instances:           make(map[string]*session.Instance),
 		reservedTitles:      make(map[string]struct{}),
 		reservedRemoteNames: make(map[string]struct{}),
 		repoStartLocks:      make(map[string]*sync.Mutex),
 	}, nil
+}
+
+// RestoreInstances loads every repo's persisted instances into the manager
+// and marks it ready. This is the slow part of daemon startup — restoring a
+// remote-hook session shells out to the repo's list_cmd (often ssh) per
+// session — which is why RunDaemon runs it only after the control socket is
+// bound (#829). Replacing the instance map wholesale is safe: every RPC that
+// mutates it is gated on Ready, and the refresh poll loop starts after the
+// restore completes.
+func (m *Manager) RestoreInstances() error {
+	instances, err := refreshDaemonInstances(nil)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.instances = instances
+	m.mu.Unlock()
+	m.readyOnce.Do(func() { close(m.ready) })
+	return nil
+}
+
+// Ready reports whether the initial instance restore has completed.
+func (m *Manager) Ready() bool {
+	select {
+	case <-m.ready:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Manager) RefreshInstances() error {

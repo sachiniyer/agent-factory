@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -425,6 +426,14 @@ func (m *home) importRemoteHookSessions() int {
 
 	listed, err := importRemoteSessionsThroughDaemon(repo.Root)
 	if err != nil {
+		if daemon.IsDaemonStartingErr(err) {
+			// The daemon is up but still restoring instances (#829); not a
+			// failure. Already-persisted remote sessions were loaded from
+			// storage above, and newly-discovered ones import on the next
+			// TUI launch once the daemon is warm.
+			log.InfoLog.Printf("daemon still restoring instances; skipping remote hook import this launch")
+			return 0
+		}
 		log.WarningLog.Printf("failed to list remote hook sessions: %v", err)
 		return 0
 	}

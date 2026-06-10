@@ -18,9 +18,23 @@ import (
 	"time"
 )
 
+// restoreManagerForStartup is the warm-up restore entry point RunDaemon uses.
+// Package-level so tests can inject a slow or gated restore and prove the
+// control socket binds and serves before the restore completes (#829).
+var restoreManagerForStartup = func(m *Manager) error { return m.RestoreInstances() }
+
 // RunDaemon runs the daemon process: it serves the local control plane,
 // evaluates task cron schedules in-process, supervises watch-task scripts,
 // and iterates over all sessions to run AutoYes mode on them.
+//
+// Startup ordering matters (#829): the control socket binds BEFORE the
+// instance restore, which can take minutes on remote-hook repos (list_cmd /
+// ssh per session). Pre-#829 the restore ran first, so every concurrent
+// EnsureDaemon found no socket and spawned another daemon that burned a full
+// restore before losing the bind race. During the warm-up window Ping and
+// Shutdown work and state-dependent RPCs return errDaemonStarting; the
+// scheduler, watcher supervisor, and AutoYes poll loop start only after the
+// restore because they act on restored state.
 func RunDaemon(cfg *config.Config) error {
 	log.InfoLog.Printf("starting daemon")
 
@@ -35,19 +49,14 @@ func RunDaemon(cfg *config.Config) error {
 		return nil
 	}
 
-	manager, err := NewManager(cfg)
+	// Shell only — no restore yet, so the bind below happens within
+	// milliseconds of process start.
+	manager, err := newManagerShell(cfg)
 	if err != nil {
 		return err
 	}
 
-	// Remove per-task timer units left behind by pre-#782 versions; the
-	// in-process scheduler below replaces them.
-	sweepLegacyTaskUnits()
-
 	scheduler := newTaskScheduler()
-	if err := scheduler.Reload(); err != nil {
-		log.WarningLog.Printf("failed to load task schedules: %v", err)
-	}
 	watchers := newWatcherSupervisor()
 
 	shutdownCh := make(chan struct{})
@@ -69,8 +78,62 @@ func RunDaemon(cfg *config.Config) error {
 		}
 	}()
 
-	// Start schedule evaluation only after the control server is up: a task
-	// firing immediately goes through the CreateSession RPC on our own socket.
+	// Write our PID as soon as the socket is bound so `af upgrade`'s SIGTERM
+	// fallback (#504) and StopDaemon can find a still-warming daemon. Both
+	// the SIGTERM and Shutdown-RPC exit paths fall through to the deferred
+	// cleanup, so the file is removed on any graceful shutdown. A stale file
+	// is harmless — readers verify the live process's cmdline before
+	// signaling it.
+	if err := writeDaemonPIDFile(); err != nil {
+		log.WarningLog.Printf("failed to write daemon PID file: %v", err)
+	} else {
+		defer removeDaemonPIDFile()
+	}
+
+	// Notify on SIGINT (Ctrl+C) and SIGTERM, and watch for a Shutdown RPC.
+	// The RPC path is used by `af upgrade` / autoUpdate after writing a new
+	// binary so the next RPC respawns the daemon from the fresh image (#498).
+	// Registered before the restore so both exit paths work during warm-up.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Run the restore concurrently so a shutdown or signal during warm-up
+	// exits promptly instead of hanging behind minutes of list_cmd/ssh. The
+	// warm-up exit paths deliberately skip SaveInstances: nothing has been
+	// restored, and saving the empty instance map would wipe every persisted
+	// session.
+	log.InfoLog.Printf("control socket bound; restoring instances")
+	restoreDone := make(chan error, 1)
+	// Capture the seam on the main flow: reading the package var inside the
+	// goroutine would race with tests restoring it after RunDaemon returns.
+	restore := restoreManagerForStartup
+	go func() { restoreDone <- restore(manager) }()
+	select {
+	case restoreErr := <-restoreDone:
+		if restoreErr != nil {
+			// Same outcome as a pre-#829 NewManager failure: exit non-zero
+			// and let the autostart unit's Restart=on-failure retry.
+			return fmt.Errorf("failed to restore instances: %w", restoreErr)
+		}
+	case sig := <-sigChan:
+		log.InfoLog.Printf("received signal %s during instance restore; exiting", sig.String())
+		return nil
+	case <-shutdownCh:
+		log.InfoLog.Printf("received shutdown request via control socket during instance restore; exiting")
+		return nil
+	}
+	log.InfoLog.Printf("instance restore complete; daemon ready")
+
+	// Remove per-task timer units left behind by pre-#782 versions; the
+	// in-process scheduler below replaces them.
+	sweepLegacyTaskUnits()
+
+	// Start schedule evaluation only after the control server is up and the
+	// restore has finished: a task firing immediately goes through the
+	// CreateSession RPC on our own socket, which requires a ready manager.
+	if err := scheduler.Reload(); err != nil {
+		log.WarningLog.Printf("failed to load task schedules: %v", err)
+	}
 	scheduler.Start()
 	defer scheduler.Stop()
 
@@ -83,17 +146,6 @@ func RunDaemon(cfg *config.Config) error {
 		log.WarningLog.Printf("failed to start task watchers: %v", err)
 	}
 	defer watchers.Stop()
-
-	// Write our PID so `af upgrade`'s SIGTERM fallback (#504) can find the
-	// running daemon. Both the SIGTERM and Shutdown-RPC exit paths fall
-	// through to the deferred cleanup, so the file is removed on any graceful
-	// shutdown. A stale file is harmless — readers verify the live process's
-	// cmdline before signaling it.
-	if err := writeDaemonPIDFile(); err != nil {
-		log.WarningLog.Printf("failed to write daemon PID file: %v", err)
-	} else {
-		defer removeDaemonPIDFile()
-	}
 
 	pollInterval := time.Duration(cfg.DaemonPollInterval) * time.Millisecond
 
@@ -127,11 +179,8 @@ func RunDaemon(cfg *config.Config) error {
 		}
 	}()
 
-	// Notify on SIGINT (Ctrl+C) and SIGTERM, and watch for a Shutdown RPC.
-	// The RPC path is used by `af upgrade` / autoUpdate after writing a new
-	// binary so the next RPC respawns the daemon from the fresh image (#498).
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	// Block until a signal or a Shutdown RPC ends the daemon (sigChan and
+	// shutdownCh were armed before the restore above).
 	select {
 	case sig := <-sigChan:
 		log.InfoLog.Printf("received signal %s", sig.String())
@@ -261,6 +310,11 @@ func daemonInstances(instanceMap map[string]*session.Instance) []*session.Instan
 func LaunchDaemon() error {
 	return EnsureDaemon()
 }
+
+// launchDaemonProcessFn is the spawn entry point EnsureDaemon uses.
+// Package-level so tests can record or suppress real daemon spawns and prove
+// a bound-but-warming daemon is treated as running, never respawned (#829).
+var launchDaemonProcessFn = launchDaemonProcess
 
 func launchDaemonProcess() error {
 	// Find the agent-factory binary.
