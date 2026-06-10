@@ -32,6 +32,10 @@ type RemoteHooks struct {
 // (#738). list_cmd is intentionally not required here: import/sync paths treat
 // an empty list_cmd as "no remote sessions to enumerate" (see app/sync.go and
 // daemon/control.go), so requiring it would break that documented behavior.
+//
+// Callers receive hooks whose relative paths were already rewritten by
+// resolveCommandPaths, but resolution leaves empty values empty, so these
+// errors always reflect the value the user wrote in the config file.
 func (h RemoteHooks) Validate() error {
 	if strings.TrimSpace(h.LaunchCmd) == "" {
 		return fmt.Errorf("remote_hooks.launch_cmd is required")
@@ -43,6 +47,42 @@ func (h RemoteHooks) Validate() error {
 		return fmt.Errorf("remote_hooks.delete_cmd is required")
 	}
 	return nil
+}
+
+// resolveCommandPaths returns a copy of h with every command value that is a
+// relative filesystem path rewritten to an absolute path under repoRoot, so
+// the hooks execute correctly no matter what the process cwd is — the daemon
+// in particular runs hook commands with a cwd unrelated to the repo (#834).
+// The value receiver makes the copy: the loaded config struct is never
+// mutated.
+func (h RemoteHooks) resolveCommandPaths(repoRoot string) *RemoteHooks {
+	h.LaunchCmd = resolveHookCommandPath(repoRoot, h.LaunchCmd)
+	h.ListCmd = resolveHookCommandPath(repoRoot, h.ListCmd)
+	h.AttachCmd = resolveHookCommandPath(repoRoot, h.AttachCmd)
+	h.DeleteCmd = resolveHookCommandPath(repoRoot, h.DeleteCmd)
+	return &h
+}
+
+// resolveHookCommandPath rewrites a single hook command value that is a
+// relative filesystem path ("./infra/launch.sh", "infra/launch.sh",
+// "../shared/hooks/launch.sh") into an absolute path under repoRoot.
+//
+// Two kinds of values pass through unchanged, mirroring how exec.Command
+// treats its first argument (the whole string is the executable path; hook
+// commands are never shell-parsed):
+//   - absolute paths, which need no base directory;
+//   - bare names without any path separator ("bash", "coder-launch.sh"),
+//     which keep exec's $PATH lookup semantics — a separator is exactly what
+//     makes exec skip $PATH, so it is also what opts a value into repo-root
+//     resolution.
+//
+// Empty stays empty so RemoteHooks.Validate reports the missing field, not a
+// phantom path.
+func resolveHookCommandPath(repoRoot, cmd string) string {
+	if cmd == "" || filepath.IsAbs(cmd) || !strings.ContainsRune(cmd, filepath.Separator) {
+		return cmd
+	}
+	return filepath.Join(repoRoot, cmd)
 }
 
 // RepoConfig holds per-repository configuration.

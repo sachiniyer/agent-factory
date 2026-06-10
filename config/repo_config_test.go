@@ -278,3 +278,47 @@ func TestRemoteHooksValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveHookCommandPath(t *testing.T) {
+	const root = "/srv/repos/detail"
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"absolute unchanged", "/usr/local/bin/launch.sh", "/usr/local/bin/launch.sh"},
+		{"dot-slash relative resolved", "./.agent-factory/hooks/coder-launch.sh", root + "/.agent-factory/hooks/coder-launch.sh"},
+		{"bare relative resolved", "infra/launch.sh", root + "/infra/launch.sh"},
+		{"parent-relative resolved and cleaned", "../shared/launch.sh", "/srv/repos/shared/launch.sh"},
+		{"bare name keeps $PATH lookup", "coder-launch.sh", "coder-launch.sh"},
+		{"plain command keeps $PATH lookup", "bash", "bash"},
+		{"empty stays empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, resolveHookCommandPath(root, tc.cmd))
+		})
+	}
+}
+
+// TestRemoteHooksResolveCommandPaths verifies the copy semantics: the
+// returned hooks carry resolved paths while the receiver is untouched, so
+// ResolveConfig can never write rewritten values back through a loaded
+// config struct.
+func TestRemoteHooksResolveCommandPaths(t *testing.T) {
+	orig := RemoteHooks{
+		LaunchCmd: "./hooks/launch.sh",
+		ListCmd:   "/abs/list.sh",
+		AttachCmd: "ssh-attach",
+		DeleteCmd: "hooks/delete.sh",
+	}
+	resolved := orig.resolveCommandPaths("/repo")
+
+	assert.Equal(t, "/repo/hooks/launch.sh", resolved.LaunchCmd)
+	assert.Equal(t, "/abs/list.sh", resolved.ListCmd)
+	assert.Equal(t, "ssh-attach", resolved.AttachCmd)
+	assert.Equal(t, "/repo/hooks/delete.sh", resolved.DeleteCmd)
+
+	assert.Equal(t, "./hooks/launch.sh", orig.LaunchCmd, "receiver must not be mutated")
+	assert.Equal(t, "hooks/delete.sh", orig.DeleteCmd, "receiver must not be mutated")
+}

@@ -152,6 +152,57 @@ func TestResolveConfigRepoFields(t *testing.T) {
 	})
 }
 
+// TestResolveConfigResolvesHookPaths covers the #834 chokepoint: relative
+// remote_hooks command paths leave ResolveConfig as absolute paths under the
+// repo root, regardless of which config location supplied them, while
+// absolute paths and bare $PATH names pass through untouched.
+func TestResolveConfigResolvesHookPaths(t *testing.T) {
+	t.Run("in-repo relative paths resolve against repo root", func(t *testing.T) {
+		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
+		writeInRepoConfig(t, repoRoot, `{"remote_hooks": {
+			"launch_cmd": "./.agent-factory/hooks/launch.sh",
+			"list_cmd": "infra/list.sh",
+			"attach_cmd": "/abs/attach.sh",
+			"delete_cmd": "bash"
+		}}`)
+
+		res, err := ResolveConfig(repoRoot)
+		require.NoError(t, err)
+		require.NotNil(t, res.RemoteHooks)
+		assert.Equal(t, filepath.Join(repoRoot, ".agent-factory/hooks/launch.sh"), res.RemoteHooks.LaunchCmd)
+		assert.Equal(t, filepath.Join(repoRoot, "infra/list.sh"), res.RemoteHooks.ListCmd)
+		assert.Equal(t, "/abs/attach.sh", res.RemoteHooks.AttachCmd, "absolute path passes through")
+		assert.Equal(t, "bash", res.RemoteHooks.DeleteCmd, "bare name keeps $PATH lookup")
+	})
+
+	t.Run("legacy-location relative paths get the same resolution", func(t *testing.T) {
+		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
+		repoID := RepoIDFromRoot(repoRoot)
+		require.NoError(t, SaveRepoConfig(repoID, &RepoConfig{
+			RemoteHooks: &RemoteHooks{
+				LaunchCmd: "./hooks/launch.sh",
+				ListCmd:   "/abs/list.sh",
+				AttachCmd: "hooks/attach.sh",
+				DeleteCmd: "coder-delete",
+			},
+		}))
+
+		res, err := ResolveConfig(repoRoot)
+		require.NoError(t, err)
+		require.NotNil(t, res.RemoteHooks)
+		assert.Equal(t, filepath.Join(repoRoot, "hooks/launch.sh"), res.RemoteHooks.LaunchCmd)
+		assert.Equal(t, "/abs/list.sh", res.RemoteHooks.ListCmd)
+		assert.Equal(t, filepath.Join(repoRoot, "hooks/attach.sh"), res.RemoteHooks.AttachCmd)
+		assert.Equal(t, "coder-delete", res.RemoteHooks.DeleteCmd)
+
+		// The rewrite operates on a copy; a fresh load of the legacy config
+		// still sees the values the user wrote.
+		legacy, err := LoadRepoConfig(repoID)
+		require.NoError(t, err)
+		assert.Equal(t, "./hooks/launch.sh", legacy.RemoteHooks.LaunchCmd)
+	})
+}
+
 func TestResolveConfigLegacyDeprecationLog(t *testing.T) {
 	buf := captureLog(t, &aflog.WarningLog)
 	repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
