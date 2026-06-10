@@ -14,9 +14,9 @@ import (
 
 // The daemon autostart unit is the single OS-level unit agent-factory
 // installs: a user-level systemd service on Linux or a launchd agent on
-// macOS that keeps the daemon (and therefore the in-process task scheduler)
-// running across logins and reboots. Per-task timer units no longer exist
-// (#782).
+// macOS that keeps the daemon (and therefore its task scheduler and watcher
+// supervisor) running across logins and reboots. Per-task timer units no
+// longer exist (#782).
 
 const (
 	autostartUnitName     = "agent-factory-daemon.service"
