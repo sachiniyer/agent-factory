@@ -288,6 +288,95 @@ func TestTasksUpdate_RejectsEmptyPrompt(t *testing.T) {
 	}
 }
 
+func TestTasksUpdate_RejectsBlankWatchCmd(t *testing.T) {
+	// Whitespace-only --watch-cmd used to pass the != "" presence check,
+	// trim to "", and silently clear BOTH triggers. On disabled tasks
+	// ValidateTrigger tolerates the no-trigger draft state, so the wipe
+	// persisted with no error (#814).
+	for _, enabled := range []bool{true, false} {
+		for _, watch := range []string{"   ", "\t\n"} {
+			t.Run(fmt.Sprintf("enabled=%v/watch=%q", enabled, watch), func(t *testing.T) {
+				useTempConfig(t)
+				resetUpdateFlags(t)
+				calls := stubDaemon(t)
+
+				seedTask(t, task.Task{
+					ID:       "wb1",
+					Name:     "nightly",
+					Prompt:   "sweep",
+					CronExpr: "0 3 * * *",
+					Enabled:  enabled,
+				})
+
+				taskUpdateWatchCmdFlag = watch
+				err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"wb1"})
+
+				require.Error(t, err, "blank watch-cmd must be rejected")
+				assert.Contains(t, err.Error(), "watch-cmd must be non-empty")
+
+				got, err := task.GetTask("wb1")
+				require.NoError(t, err)
+				assert.Equal(t, "0 3 * * *", got.CronExpr, "existing trigger must survive a rejected update")
+				assert.Empty(t, got.WatchCmd)
+				assert.Zero(t, calls.reloads)
+			})
+		}
+	}
+}
+
+func TestTasksUpdate_RejectsBlankCron(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		for _, cron := range []string{"   ", "\t\n"} {
+			t.Run(fmt.Sprintf("enabled=%v/cron=%q", enabled, cron), func(t *testing.T) {
+				useTempConfig(t)
+				resetUpdateFlags(t)
+				calls := stubDaemon(t)
+
+				seedTask(t, task.Task{
+					ID:       "cb1",
+					Name:     "log watch",
+					WatchCmd: "tail -f errors.log",
+					Enabled:  enabled,
+				})
+
+				taskUpdateCronFlag = cron
+				err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"cb1"})
+
+				require.Error(t, err, "blank cron must be rejected")
+				assert.Contains(t, err.Error(), "cron expression must be non-empty")
+
+				got, err := task.GetTask("cb1")
+				require.NoError(t, err)
+				assert.Equal(t, "tail -f errors.log", got.WatchCmd, "existing trigger must survive a rejected update")
+				assert.Empty(t, got.CronExpr)
+				assert.Zero(t, calls.reloads)
+			})
+		}
+	}
+}
+
+func TestTasksUpdate_TrimsCronAndWatchCmd(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	stubDaemon(t)
+
+	seedTask(t, task.Task{ID: "tr1", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
+
+	taskUpdateWatchCmdFlag = "  tail -f errors.log  "
+	require.NoError(t, tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"tr1"}))
+	got, err := task.GetTask("tr1")
+	require.NoError(t, err)
+	assert.Equal(t, "tail -f errors.log", got.WatchCmd, "watch-cmd must be stored trimmed, matching the add path")
+
+	resetUpdateFlags(t)
+	taskUpdateCronFlag = "  30 6 * * 1  "
+	require.NoError(t, tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"tr1"}))
+	got, err = task.GetTask("tr1")
+	require.NoError(t, err)
+	assert.Equal(t, "30 6 * * 1", got.CronExpr, "cron must be stored trimmed, matching the add path")
+	assert.Empty(t, got.WatchCmd)
+}
+
 func TestTasksUpdate_RejectsBadEnabledValue(t *testing.T) {
 	useTempConfig(t)
 	resetUpdateFlags(t)

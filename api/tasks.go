@@ -261,6 +261,18 @@ var tasksUpdateCmd = &cobra.Command{
 		if taskUpdateCronFlag != "" && taskUpdateWatchCmdFlag != "" {
 			return jsonError(errors.New("--cron and --watch-cmd are mutually exclusive; a task has exactly one trigger"))
 		}
+		// Under partial-update semantics "" means "leave unchanged", so a
+		// blank value is never a request to clear a trigger — the supported
+		// way to clear one is to set the other, which clears its counterpart
+		// below. Whitespace-only values used to pass the != "" presence
+		// checks, trim to "", and silently wipe both triggers on disabled
+		// tasks, where ValidateTrigger tolerates the draft state (#814).
+		if taskUpdateCronFlag != "" && strings.TrimSpace(taskUpdateCronFlag) == "" {
+			return jsonError(errors.New("cron expression must be non-empty"))
+		}
+		if taskUpdateWatchCmdFlag != "" && strings.TrimSpace(taskUpdateWatchCmdFlag) == "" {
+			return jsonError(errors.New("watch-cmd must be non-empty"))
+		}
 		if taskUpdateCronFlag != "" {
 			if err := task.ValidateCronExpr(taskUpdateCronFlag); err != nil {
 				return jsonError(fmt.Errorf("invalid cron expression: %w", err))
@@ -273,7 +285,7 @@ var tasksUpdateCmd = &cobra.Command{
 			}
 			// Setting one trigger clears the other so the exactly-one rule
 			// holds when switching a watch task back to a schedule.
-			s.CronExpr = taskUpdateCronFlag
+			s.CronExpr = strings.TrimSpace(taskUpdateCronFlag)
 			s.WatchCmd = ""
 		}
 		if taskUpdateWatchCmdFlag != "" {
