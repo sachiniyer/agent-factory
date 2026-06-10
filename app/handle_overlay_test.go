@@ -114,11 +114,11 @@ func TestHandleContentPaneFocus_PendingCreateFlushesDirtyTaskState(t *testing.T)
 	require.True(t, tp.IsCreating(), "'n' must open the inline create form")
 
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("new-task")})
+	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector (cron stays selected)
+	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> cron value
+	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do other thing")})
-	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> cron
-	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
-	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> watch cmd
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> path
 	_, _, _ = h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> program
