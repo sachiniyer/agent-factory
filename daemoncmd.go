@@ -70,7 +70,39 @@ func init() {
 
 // respawnDaemonForTasksFn is indirected so upgrade/auto-update tests can
 // observe the respawn without launching a real daemon.
-var respawnDaemonForTasksFn = ensureDaemonForTasks
+var respawnDaemonForTasksFn = respawnDaemonAfterUpgrade
+
+// Indirection points so respawnDaemonAfterUpgrade tests can observe which
+// branch ran without touching the real systemctl/launchctl or spawning a
+// daemon process.
+var (
+	autostartInstalledFn   = daemon.AutostartInstalled
+	restartAutostartUnitFn = daemon.RestartAutostartUnit
+	ensureDaemonForTasksFn = ensureDaemonForTasks
+)
+
+// respawnDaemonAfterUpgrade restores the daemon that the upgrade/auto-update
+// path just stopped. The Shutdown RPC is a clean exit, and the autostart unit
+// uses Restart=on-failure (deliberately — Restart=always would make the
+// daemon unstoppable via RPC), so the service manager will not bring the
+// daemon back on its own. When the unit is installed, restart it through
+// systemctl/launchctl so the daemon stays supervised instead of being demoted
+// to an ad-hoc child that dies with the session and skips the next reboot
+// (#796). The unit runs unconditionally at login, so this branch is not gated
+// on enabled tasks — it restores exactly what was running before the upgrade.
+// Without a unit, or when the service manager call fails, fall back to the
+// task-gated ad-hoc spawn (the pre-#796 behavior).
+func respawnDaemonAfterUpgrade() {
+	if autostartInstalledFn() {
+		err := restartAutostartUnitFn()
+		if err == nil {
+			log.InfoLog.Printf("restarted the daemon autostart unit from the new binary")
+			return
+		}
+		log.WarningLog.Printf("failed to restart the daemon autostart unit; falling back to an ad-hoc daemon: %v", err)
+	}
+	ensureDaemonForTasksFn()
+}
 
 // ensureDaemonForTasks starts the daemon when any enabled task exists, so
 // cron schedules are evaluated even if the user never toggles autoyes.
