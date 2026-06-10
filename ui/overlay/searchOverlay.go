@@ -2,11 +2,13 @@ package overlay
 
 import (
 	"fmt"
+	"unicode"
+
 	"github.com/sachiniyer/agent-factory/session"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/text/unicode/norm"
 )
 
 // SearchResult holds a matched instance and its index in the original list.
@@ -101,10 +103,9 @@ func (s *SearchOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 
 func (s *SearchOverlay) updateResults() {
 	s.results = nil
-	query := strings.ToLower(s.query)
 
 	for i, inst := range s.all {
-		if s.matches(inst, query) {
+		if s.matches(inst, s.query) {
 			s.results = append(s.results, SearchResult{Instance: inst, Index: i})
 		}
 	}
@@ -122,22 +123,44 @@ func (s *SearchOverlay) matches(inst *session.Instance, query string) bool {
 	if query == "" {
 		return true
 	}
-	title := strings.ToLower(inst.Title)
-	branch := strings.ToLower(inst.GetBranch())
 
 	// Simple fuzzy: check if all query chars appear in order in the title or branch
-	return fuzzyMatch(query, title) || fuzzyMatch(query, branch)
+	return fuzzyMatch(query, inst.Title) || fuzzyMatch(query, inst.GetBranch())
 }
 
-// fuzzyMatch returns true if all characters in pattern appear in str in order.
+// fuzzyMatch returns true if all runes in pattern appear in str in order,
+// ignoring case. Both strings are NFC-normalized first so canonically
+// equivalent input (e.g. a decomposed "é" typed on macOS vs a composed one
+// from copy-paste) still matches.
 func fuzzyMatch(pattern, str string) bool {
+	patternRunes := []rune(norm.NFC.String(pattern))
+	if len(patternRunes) == 0 {
+		return true
+	}
 	pIdx := 0
-	for sIdx := 0; sIdx < len(str) && pIdx < len(pattern); sIdx++ {
-		if str[sIdx] == pattern[pIdx] {
+	for _, r := range norm.NFC.String(str) {
+		if runeEqualFold(r, patternRunes[pIdx]) {
 			pIdx++
+			if pIdx == len(patternRunes) {
+				return true
+			}
 		}
 	}
-	return pIdx == len(pattern)
+	return false
+}
+
+// runeEqualFold reports whether two runes are equal under Unicode simple
+// case folding, mirroring strings.EqualFold one rune at a time.
+func runeEqualFold(a, b rune) bool {
+	if a == b {
+		return true
+	}
+	for r := unicode.SimpleFold(a); r != a; r = unicode.SimpleFold(r) {
+		if r == b {
+			return true
+		}
+	}
+	return false
 }
 
 // Render renders the search overlay.
