@@ -30,7 +30,9 @@ The first run records the current UTC timestamp in the state file and only react
 
 ## Run it persistently
 
-The project's `task/` directory has fuller systemd / launchd integration for scheduled jobs; the snippets below are standalone and have no dependency on it.
+The recommended way to keep a poller like this running is a **watch task**: the agent-factory daemon supervises the script, restarts it with backoff on failure, and captures its stderr to a per-task log — see [docs/tasks.md](../../docs/tasks.md) and the leaner watch-task variant of this script at [examples/tasks/gh-issue-poll.sh](../tasks/gh-issue-poll.sh) (it emits events instead of calling `af sessions create` itself).
+
+If you'd rather not have the daemon supervise it, the snippets below run the script as a standalone OS unit with no dependency on Agent Factory's task system.
 
 ### Linux — systemd user unit
 

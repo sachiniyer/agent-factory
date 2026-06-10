@@ -153,6 +153,19 @@ func TestIsDaemonAbsentErr_RejectsMethodNotFound(t *testing.T) {
 	}
 }
 
+// stubDaemonScan replaces the host-wide pgrep scan with a controlled
+// candidate list for the duration of the test (#793). Without this, any
+// developer machine running the supervised daemon (`af daemon install`)
+// contributes a real `af --daemon` process to the scan, making every branch
+// that depends on the candidate count nondeterministic — and letting a test
+// SIGTERM the host's real daemon.
+func stubDaemonScan(t *testing.T, pids []int, err error) {
+	t.Helper()
+	orig := scanDaemonCandidatesFn
+	scanDaemonCandidatesFn = func() ([]int, error) { return pids, err }
+	t.Cleanup(func() { scanDaemonCandidatesFn = orig })
+}
+
 // spawnFakeDaemonWithDaemonFlag launches a long-lived child process whose
 // /proc/<pid>/cmdline contains "--daemon" as a discrete token. We use
 // bash's `exec -a` to rewrite argv[0] of `sleep` so the cmdline carries
@@ -255,12 +268,14 @@ func TestSigtermFallback_KillsPIDFileDaemon(t *testing.T) {
 
 // TestSigtermFallback_IgnoresNonMatchingCmdline guards against killing an
 // unrelated process whose PID happens to be in the PID file (e.g. PID
-// reuse). The fallback should fall through to pgrep, which on a clean test
-// env finds zero candidates and returns ShutdownNoDaemon — the unrelated
-// process must remain alive.
+// reuse). The fallback must reject the PID-file candidate on its cmdline and
+// fall through to the process scan — stubbed to zero candidates (#793) — so
+// the outcome is deterministic: ShutdownFailed, and the unrelated process
+// remains alive.
 func TestSigtermFallback_IgnoresNonMatchingCmdline(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	stubDaemonScan(t, nil, nil)
 
 	// sleep, no --daemon flag in its argv — cmdlineHasDaemonFlag must say no.
 	victim := exec.Command("sleep", "60")
@@ -277,10 +292,13 @@ func TestSigtermFallback_IgnoresNonMatchingCmdline(t *testing.T) {
 		t.Fatalf("write PID file: %v", err)
 	}
 
-	// We don't care which result the fallback returns (ShutdownNoDaemon or
-	// an ambiguous-pgrep error if the host has rogue `af --daemon` procs).
-	// We only require that the victim survives.
-	_, _ = sigtermFallback()
+	result, err := sigtermFallback()
+	if result != ShutdownFailed {
+		t.Errorf("sigtermFallback returned %v, want ShutdownFailed (PID-file candidate rejected, scan empty)", result)
+	}
+	if err == nil {
+		t.Errorf("sigtermFallback returned nil error; expected one carrying the recovery hint")
+	}
 
 	time.Sleep(100 * time.Millisecond)
 	if !pidLooksAlive(victim.Process.Pid) {
@@ -290,14 +308,17 @@ func TestSigtermFallback_IgnoresNonMatchingCmdline(t *testing.T) {
 }
 
 // TestSigtermFallback_DeadPID covers the dead-PID case: the PID file points
-// at a process that no longer exists, pgrep falls through to "no matches".
-// Per #553 the fallback's contract is invoked only after the Shutdown RPC
-// has proven the daemon is running, so "could not locate a PID" must be
-// reported as ShutdownFailed (not ShutdownNoDaemon) along with an actionable
-// recovery hint — anything else would silently leave the stale daemon up.
+// at a process that no longer exists, and the process scan finds no
+// candidates. Per #553 the fallback's contract is invoked only after the
+// Shutdown RPC has proven the daemon is running, so "could not locate a PID"
+// must be reported as ShutdownFailed (not ShutdownNoDaemon) along with an
+// actionable recovery hint — anything else would silently leave the stale
+// daemon up. The scan is stubbed to zero candidates so the stale-PID branch
+// is asserted deterministically regardless of host daemons (#793).
 func TestSigtermFallback_DeadPID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	stubDaemonScan(t, nil, nil)
 
 	// Pick a PID well above any realistic running PID. 0x7fffffff exceeds
 	// the default pid_max on both Linux (32768/4M) and macOS (99999).
@@ -320,6 +341,33 @@ func TestSigtermFallback_DeadPID(t *testing.T) {
 	}
 	if !strings.Contains(msg, strconv.Itoa(deadPID)) {
 		t.Errorf("sigtermFallback error %q missing stale PID-file pid=%d in source", msg, deadPID)
+	}
+}
+
+// TestSigtermFallback_AmbiguousCandidates covers the multiple-daemons branch,
+// previously untestable without real host daemons (#793): with no usable PID
+// file and a scan returning several candidates, the fallback must refuse to
+// guess, returning ShutdownFailed with an error naming every candidate PID.
+func TestSigtermFallback_AmbiguousCandidates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	stubDaemonScan(t, []int{11111, 22222}, nil)
+
+	result, err := sigtermFallback()
+	if result != ShutdownFailed {
+		t.Fatalf("sigtermFallback returned %v for ambiguous candidates, want ShutdownFailed", result)
+	}
+	if err == nil {
+		t.Fatalf("sigtermFallback returned nil error for ambiguous candidates")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "ambiguous") {
+		t.Errorf("sigtermFallback error %q missing 'ambiguous'", msg)
+	}
+	for _, pid := range []string{"11111", "22222"} {
+		if !strings.Contains(msg, pid) {
+			t.Errorf("sigtermFallback error %q missing candidate pid %s", msg, pid)
+		}
 	}
 }
 
@@ -455,24 +503,27 @@ func TestRequestShutdown_PreShutdownDaemon(t *testing.T) {
 		t.Fatalf("ping fake daemon: %v", err)
 	}
 
-	// The fallback's pgrep step would, on a busy host, find a real
-	// `af --daemon` process and try to signal it. That host-state
-	// dependency belongs in an integration test, not a unit test —
-	// here we only need to assert RequestShutdown completes without
-	// a panic and surfaces a Result/error consistent with the routing
-	// having reached the fallback. The result space (post-#553) is:
-	//   - ShutdownFailed, non-nil error (clean test host: pgrep found
-	//       no matches; or ambiguous pgrep matches; both fold into the
-	//       "daemon is provably running but unsignaled" bucket)
-	//   - ShutdownViaSIGTERM, nil       (host has a real daemon — uncommon)
+	// The fallback's process scan is stubbed to zero candidates (#793):
+	// unstubbed it is host-wide, and a host running the supervised daemon
+	// would either get SIGTERMed by this test or make the result
+	// nondeterministic. With no PID file and an empty scan, the only
+	// acceptable outcome is ShutdownFailed with a non-nil error — the
+	// daemon is provably running (Ping succeeded) but cannot be signaled.
 	// What is NOT acceptable: a panic, ShutdownViaRPC (would mean the
 	// fake daemon answered Shutdown, which it does not implement), or
 	// ShutdownNoDaemon (would contradict the proven-alive socket).
+	stubDaemonScan(t, nil, nil)
 	result, err := RequestShutdown()
 	if result == ShutdownViaRPC {
 		t.Fatalf("RequestShutdown returned ShutdownViaRPC; fake daemon has no Shutdown method — routing into the SIGTERM fallback is broken (err=%v)", err)
 	}
 	if result == ShutdownNoDaemon {
 		t.Fatalf("RequestShutdown returned ShutdownNoDaemon after a successful Ping; the socket proved the daemon is alive, so #553's invariant is violated (err=%v)", err)
+	}
+	if result != ShutdownFailed {
+		t.Fatalf("RequestShutdown returned %v, want ShutdownFailed (no PID file, scan stubbed empty)", result)
+	}
+	if err == nil {
+		t.Fatalf("RequestShutdown returned nil error; expected one carrying the recovery hint")
 	}
 }

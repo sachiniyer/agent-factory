@@ -79,7 +79,7 @@ func locateDaemonPID() (int, string, error) {
 		pidFileSource = fmt.Sprintf("pid-file pid=%d stale", pid)
 	}
 
-	pids, err := pgrepDaemonCandidates()
+	pids, err := scanDaemonCandidatesFn()
 	if err != nil {
 		if errors.Is(err, errPgrepUnavailable) {
 			return 0, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), nil
@@ -150,6 +150,15 @@ func pidLooksAlive(pid int) bool {
 	}
 	return true
 }
+
+// scanDaemonCandidatesFn is the process-scan entry point used by
+// locateDaemonPID. It is a function var so tests can substitute a controlled
+// candidate list: the real pgrep scan is host-wide, so on any machine running
+// the supervised daemon (`af daemon install`, the recommended setup since
+// #791) it finds that unrelated process and the stale-PID / no-candidates
+// branches become unreachable — and worse, a test exercising the fallback
+// could SIGTERM the host's real daemon (#793).
+var scanDaemonCandidatesFn = pgrepDaemonCandidates
 
 // errPgrepUnavailable signals that `pgrep` is not on PATH, distinct from
 // "pgrep ran and returned no matches". Surfaced by locateDaemonPID so the

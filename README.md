@@ -55,16 +55,20 @@ Each session runs an AI agent in an isolated git worktree with its own branch. S
 
 ### Tasks
 
-Create recurring automated tasks with cron expressions. Tasks are scheduled by
-the agent-factory daemon, which starts automatically whenever `af` runs and an
-enabled task exists. To keep schedules firing across reboots without opening
-`af`, install the daemon's autostart unit with `af daemon install`.
+Automated tasks deliver a prompt to an agent on a trigger: a cron schedule, or
+each stdout line of a long-running watch script. Each fire either creates a
+fresh session or sends the prompt into an existing one (target session). Tasks
+are hosted by the agent-factory daemon, which starts automatically whenever
+`af` runs and an enabled task exists. To keep tasks firing across reboots
+without opening `af`, install the daemon's autostart unit with
+`af daemon install`. See [docs/tasks.md](docs/tasks.md) for the full trigger ×
+delivery matrix and the watch-script contract.
 
 | Key | Action |
 |-----|--------|
 | `s` | Create a new task |
 | `S` | List tasks |
-| `r` | Run selected task now |
+| `r` | Run selected cron task now |
 
 ### GitHub PR Integration
 
@@ -115,7 +119,8 @@ script emits a stdout line (`--watch-cmd`) — exactly one of the two. By
 default each fire creates a fresh session; `--target-session` instead sends
 the prompt into an existing session by title (auto-created if missing). Watch
 prompts may reference the emitted line as `{{line}}`; with no prompt the raw
-line is delivered.
+line is delivered. Full reference: [docs/tasks.md](docs/tasks.md); runnable
+watch-script skeletons: [examples/tasks/](examples/tasks/).
 
 ```bash
 af tasks list                                                  # list tasks
