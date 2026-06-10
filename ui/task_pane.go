@@ -18,12 +18,17 @@ import (
 // string (the daemon then falls back to the user's configured default_program).
 const programDefaultLabel = "(use config default)"
 
-// Edit-form focus stops, in tab order.
+// Edit-form focus stops, in tab order. The form is grouped: Essentials
+// (name, trigger, prompt) then Delivery (target session, path, program).
+// The trigger is a two-step stop: a cron|watch type selector followed by the
+// matching value input — only the selected trigger's field is shown, which
+// makes the exactly-one-trigger contract (#782) structural instead of a
+// validation error.
 const (
-	taskFocusName = iota
+	taskFocusName         = iota
+	taskFocusTrigger      // trigger-type selector: cron | watch
+	taskFocusTriggerValue // cron expression or watch command, per the selector
 	taskFocusPrompt
-	taskFocusCron
-	taskFocusWatch
 	taskFocusTarget
 	taskFocusPath
 	taskFocusProgram
@@ -40,10 +45,15 @@ type TaskPane struct {
 	editing    bool
 	editName   textinput.Model
 	editPrompt textarea.Model
-	editCron   textinput.Model
-	editWatch  textinput.Model
-	editTarget textinput.Model
-	editPath   textinput.Model
+	// Trigger state: editTriggerIsWatch selects which of the two buffers is
+	// shown, edited, and saved. Both buffers stay alive so flipping the
+	// selector back and forth never loses typed input; save resolves to
+	// exactly one via triggerValues.
+	editTriggerIsWatch bool
+	editCron           textinput.Model
+	editWatch          textinput.Model
+	editTarget         textinput.Model
+	editPath           textinput.Model
 	// Program selector state. editProgramOptions is the list of choices shown
 	// inline (index 0 is always the "use config default" entry, followed by
 	// tmux.SupportedPrograms). Per-task Program is restricted to the agent
@@ -51,7 +61,8 @@ type TaskPane struct {
 	editProgramOptions []string
 	editProgramIdx     int
 	editError          string // last validation error shown to the user
-	focusIndex         int    // 0=name, 1=prompt, 2=cron, 3=watch, 4=target, 5=path, 6=program, 7=save button
+	editErrorField     int    // focus stop the error is rendered under (-1 = none)
+	focusIndex         int
 
 	// Create mode
 	creating       bool
@@ -135,10 +146,10 @@ func (s *TaskPane) IsCreating() bool {
 	return s.creating
 }
 
-// EnterCreateMode initializes empty edit fields for creating a new task.
-func (s *TaskPane) EnterCreateMode(defaultPath string) {
-	s.createPath = defaultPath
-
+// initForm builds the shared create/edit field set. A nil task initializes an
+// empty create form (path prefilled with defaultPath); otherwise the fields
+// are seeded from the task being edited.
+func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	name := textinput.New()
 	name.Placeholder = "Task name"
 	name.CharLimit = 64
@@ -151,7 +162,6 @@ func (s *TaskPane) EnterCreateMode(defaultPath string) {
 	prompt.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	prompt.CharLimit = 0
 	prompt.MaxHeight = 0
-	prompt.Placeholder = "Enter task prompt..."
 
 	cron := textinput.New()
 	cron.Placeholder = "0 9 * * 1-5"
@@ -169,9 +179,23 @@ func (s *TaskPane) EnterCreateMode(defaultPath string) {
 	target.Blur()
 
 	path := textinput.New()
-	path.SetValue(defaultPath)
 	path.CharLimit = 256
 	path.Blur()
+
+	if tsk != nil {
+		name.SetValue(tsk.Name)
+		prompt.SetValue(tsk.Prompt)
+		cron.SetValue(tsk.CronExpr)
+		watch.SetValue(tsk.WatchCmd)
+		target.SetValue(tsk.TargetSession)
+		path.SetValue(tsk.ProjectPath)
+		s.editTriggerIsWatch = tsk.IsWatch()
+		s.setProgramFromValue(tsk.Program)
+	} else {
+		path.SetValue(defaultPath)
+		s.editTriggerIsWatch = false
+		s.setProgramFromValue("")
+	}
 
 	s.editName = name
 	s.editPrompt = prompt
@@ -179,11 +203,17 @@ func (s *TaskPane) EnterCreateMode(defaultPath string) {
 	s.editWatch = watch
 	s.editTarget = target
 	s.editPath = path
-	s.setProgramFromValue("")
 	s.focusIndex = taskFocusName
+	s.editError = ""
+	s.editErrorField = -1
+}
+
+// EnterCreateMode initializes empty edit fields for creating a new task.
+func (s *TaskPane) EnterCreateMode(defaultPath string) {
+	s.createPath = defaultPath
+	s.initForm(nil, defaultPath)
 	s.creating = true
 	s.hasFocus = true
-	s.editError = ""
 }
 
 // setProgramFromValue initializes the selector state from a stored Program
@@ -222,6 +252,16 @@ func (s *TaskPane) programValue() string {
 	return s.editProgramOptions[s.editProgramIdx]
 }
 
+// triggerValues resolves the two trigger buffers to the exactly-one contract:
+// only the selected trigger type's value is returned; the inactive buffer is
+// discarded regardless of content, so a save can never produce both.
+func (s *TaskPane) triggerValues() (cron, watch string) {
+	if s.editTriggerIsWatch {
+		return "", strings.TrimSpace(s.editWatch.Value())
+	}
+	return strings.TrimSpace(s.editCron.Value()), ""
+}
+
 // HasPendingCreate returns true if a new task was submitted and needs saving.
 func (s *TaskPane) HasPendingCreate() bool {
 	return s.pendingCreate
@@ -231,8 +271,9 @@ func (s *TaskPane) HasPendingCreate() bool {
 // program is the user-supplied program override; empty means "use the caller's default".
 func (s *TaskPane) ConsumePendingCreate() (name, prompt, cron, watchCmd, targetSession, path, program string) {
 	s.pendingCreate = false
+	cronVal, watchVal := s.triggerValues()
 	return s.editName.Value(), s.editPrompt.Value(),
-		strings.TrimSpace(s.editCron.Value()), strings.TrimSpace(s.editWatch.Value()),
+		cronVal, watchVal,
 		s.editTarget.Value(), s.editPath.Value(), s.programValue()
 }
 
@@ -346,81 +387,38 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 
 func (s *TaskPane) enterEditMode() {
 	tsk := s.tasks[s.selectedIdx]
-
-	name := textinput.New()
-	name.SetValue(tsk.Name)
-	name.CharLimit = 64
-	name.Focus()
-
-	prompt := textarea.New()
-	prompt.ShowLineNumbers = false
-	prompt.Prompt = ""
-	prompt.Blur()
-	prompt.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	prompt.CharLimit = 0
-	prompt.MaxHeight = 0
-	prompt.SetValue(tsk.Prompt)
-
-	cron := textinput.New()
-	cron.SetValue(tsk.CronExpr)
-	cron.CharLimit = 64
-	cron.Blur()
-
-	watch := textinput.New()
-	watch.SetValue(tsk.WatchCmd)
-	watch.Placeholder = "long-running cmd; 1 stdout line = 1 event"
-	watch.CharLimit = 256
-	watch.Blur()
-
-	target := textinput.New()
-	target.SetValue(tsk.TargetSession)
-	target.Placeholder = "(new session per run)"
-	target.CharLimit = 64
-	target.Blur()
-
-	path := textinput.New()
-	path.SetValue(tsk.ProjectPath)
-	path.CharLimit = 256
-	path.Blur()
-
-	s.editName = name
-	s.editPrompt = prompt
-	s.editCron = cron
-	s.editWatch = watch
-	s.editTarget = target
-	s.editPath = path
-	s.setProgramFromValue(tsk.Program)
-	s.focusIndex = taskFocusName
+	s.initForm(&tsk, "")
 	s.editing = true
-	s.editError = ""
 }
 
 // validateForm enforces the shared create/edit form contract, mirroring
-// `af tasks add` (api/tasks.go): a name, exactly one of cron / watch cmd
-// (#782), and — for cron tasks only — a non-empty prompt plus a valid cron
-// expression. Watch tasks may omit the prompt: each event defaults to the raw
-// emitted line. Returns the inline error to surface, or "" when valid.
-func (s *TaskPane) validateForm() string {
+// `af tasks add` (api/tasks.go). The trigger-type selector already guarantees
+// at most one trigger, so validation reduces to: a name, a non-empty value
+// for the selected trigger, and — for cron tasks only — a valid cron
+// expression plus a non-empty prompt. Watch tasks may omit the prompt: each
+// event defaults to the raw emitted line. Returns the inline error and the
+// focus stop to render it under, or ("", -1) when valid.
+func (s *TaskPane) validateForm() (string, int) {
 	if s.editName.Value() == "" {
-		return "name is required"
+		return "name is required", taskFocusName
 	}
-	hasCron := strings.TrimSpace(s.editCron.Value()) != ""
-	hasWatch := strings.TrimSpace(s.editWatch.Value()) != ""
-	if hasCron && hasWatch {
-		return "cron and watch cmd are mutually exclusive; set exactly one"
-	}
-	if !hasCron && !hasWatch {
-		return "exactly one of cron or watch cmd is required"
-	}
-	if hasCron {
-		if strings.TrimSpace(s.editPrompt.Value()) == "" {
-			return "prompt must be non-empty"
+	if s.editTriggerIsWatch {
+		if strings.TrimSpace(s.editWatch.Value()) == "" {
+			return "watch command is required", taskFocusTriggerValue
 		}
-		if err := task.ValidateCronExpr(strings.TrimSpace(s.editCron.Value())); err != nil {
-			return fmt.Sprintf("invalid cron: %v", err)
-		}
+		return "", -1
 	}
-	return ""
+	cron := strings.TrimSpace(s.editCron.Value())
+	if cron == "" {
+		return "cron expression is required", taskFocusTriggerValue
+	}
+	if err := task.ValidateCronExpr(cron); err != nil {
+		return fmt.Sprintf("invalid cron: %v", err), taskFocusTriggerValue
+	}
+	if strings.TrimSpace(s.editPrompt.Value()) == "" {
+		return "prompt must be non-empty", taskFocusPrompt
+	}
+	return "", -1
 }
 
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
@@ -435,14 +433,18 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 		s.editing = false
 		s.creating = false
 		s.editError = ""
+		s.editErrorField = -1
 	case tea.KeyEnter:
 		if s.focusIndex == taskFocusSave {
-			if errMsg := s.validateForm(); errMsg != "" {
+			if errMsg, errField := s.validateForm(); errMsg != "" {
 				s.editError = errMsg
+				s.editErrorField = errField
 				return true
 			}
+			s.editError = ""
+			s.editErrorField = -1
+			cron, watch := s.triggerValues()
 			if s.creating {
-				s.editError = ""
 				s.pendingCreate = true
 				s.creating = false
 			} else {
@@ -453,13 +455,13 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 				absPath, err := filepath.Abs(s.editPath.Value())
 				if err != nil {
 					s.editError = fmt.Sprintf("invalid path: %v", err)
+					s.editErrorField = taskFocusPath
 					return true
 				}
-				s.editError = ""
 				s.tasks[s.selectedIdx].Name = s.editName.Value()
 				s.tasks[s.selectedIdx].Prompt = s.editPrompt.Value()
-				s.tasks[s.selectedIdx].CronExpr = strings.TrimSpace(s.editCron.Value())
-				s.tasks[s.selectedIdx].WatchCmd = strings.TrimSpace(s.editWatch.Value())
+				s.tasks[s.selectedIdx].CronExpr = cron
+				s.tasks[s.selectedIdx].WatchCmd = watch
 				s.tasks[s.selectedIdx].TargetSession = s.editTarget.Value()
 				s.tasks[s.selectedIdx].ProjectPath = absPath
 				s.tasks[s.selectedIdx].Program = s.programValue()
@@ -475,12 +477,16 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 		switch s.focusIndex {
 		case taskFocusName:
 			s.editName, _ = s.editName.Update(msg)
+		case taskFocusTrigger:
+			s.handleTriggerKey(msg)
+		case taskFocusTriggerValue:
+			if s.editTriggerIsWatch {
+				s.editWatch, _ = s.editWatch.Update(msg)
+			} else {
+				s.editCron, _ = s.editCron.Update(msg)
+			}
 		case taskFocusPrompt:
 			s.editPrompt, _ = s.editPrompt.Update(msg)
-		case taskFocusCron:
-			s.editCron, _ = s.editCron.Update(msg)
-		case taskFocusWatch:
-			s.editWatch, _ = s.editWatch.Update(msg)
 		case taskFocusTarget:
 			s.editTarget, _ = s.editTarget.Update(msg)
 		case taskFocusPath:
@@ -492,9 +498,21 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 	return true
 }
 
+// handleTriggerKey moves the trigger-type selector: cron sits on the left,
+// watch on the right. Other keys are ignored so the selector behaves like a
+// list, not a free-text input.
+func (s *TaskPane) handleTriggerKey(msg tea.KeyMsg) {
+	switch msg.String() {
+	case "left", "h", "up", "k":
+		s.editTriggerIsWatch = false
+	case "right", "l", "down", "j":
+		s.editTriggerIsWatch = true
+	}
+}
+
 // handleProgramKey moves the selector cursor when the Program field has focus.
-// Up/k and down/j navigate; other keys are ignored so the selector behaves
-// like a list, not a free-text input (#492).
+// Left/h and right/l step the selection (up/down work too); other keys are
+// ignored so the selector behaves like a list, not a free-text input (#492).
 func (s *TaskPane) handleProgramKey(msg tea.KeyMsg) {
 	if len(s.editProgramOptions) == 0 {
 		return
@@ -522,12 +540,14 @@ func (s *TaskPane) updateEditFocus() {
 	switch s.focusIndex {
 	case taskFocusName:
 		s.editName.Focus()
+	case taskFocusTriggerValue:
+		if s.editTriggerIsWatch {
+			s.editWatch.Focus()
+		} else {
+			s.editCron.Focus()
+		}
 	case taskFocusPrompt:
 		s.editPrompt.Focus()
-	case taskFocusCron:
-		s.editCron.Focus()
-	case taskFocusWatch:
-		s.editWatch.Focus()
 	case taskFocusTarget:
 		s.editTarget.Focus()
 	case taskFocusPath:
@@ -547,9 +567,9 @@ func (s *TaskPane) String() string {
 // the fields the daemon persists (#782 phase 2): the watcher supervisor
 // records "stopped" (script exited 0) and "errored" (crash loop) in
 // LastRunStatus — since #797 the latter as "errored: <why>", which the
-// detail row renders in full; any other value on an enabled watch task means
-// the daemon (re-)arms its watcher on start/reload, i.e. "watching". A
-// disabled watch task has no watcher, so it reads "stopped".
+// errored detail row renders in full; any other value on an enabled watch
+// task means the daemon (re-)arms its watcher on start/reload, i.e.
+// "watching". A disabled watch task has no watcher, so it reads "stopped".
 func watchTaskStatus(tsk task.Task) string {
 	if !tsk.Enabled {
 		return "stopped"
@@ -563,6 +583,26 @@ func watchTaskStatus(tsk task.Task) string {
 	return "watching"
 }
 
+// taskTriggerSummary is the one-line trigger column for a list row: the cron
+// expression, or the watch command with its supervision status.
+func taskTriggerSummary(tsk task.Task) string {
+	if tsk.IsWatch() {
+		return fmt.Sprintf("watch: %s [%s]", tsk.WatchCmd, watchTaskStatus(tsk))
+	}
+	if tsk.CronExpr == "" {
+		return "(no trigger)"
+	}
+	return tsk.CronExpr
+}
+
+// taskDeliverySummary is the one-line delivery column: where a fire lands.
+func taskDeliverySummary(tsk task.Task) string {
+	if tsk.TargetSession != "" {
+		return "→ " + tsk.TargetSession
+	}
+	return "new session"
+}
+
 func (s *TaskPane) renderListMode() string {
 	tStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
 	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
@@ -570,8 +610,7 @@ func (s *TaskPane) renderListMode() string {
 	disabledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
 	detailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-	promptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
-	sepLineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3C3C3C"))
+	erroredStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Tasks"))
@@ -582,19 +621,13 @@ func (s *TaskPane) renderListMode() string {
 		b.WriteString("\n")
 	}
 
-	// Available width for word-wrapping prompt text (account for indent)
-	wrapWidth := s.width - 6
-	if wrapWidth < 20 {
-		wrapWidth = 20
+	// Width available to the indented detail lines under the selected row.
+	detailWidth := s.width - 8
+	if detailWidth < 20 {
+		detailWidth = 20
 	}
 
 	for i, tsk := range s.tasks {
-		if i > 0 {
-			// Visual separator between tasks
-			sep := strings.Repeat("─", wrapWidth)
-			b.WriteString("  " + sepLineStyle.Render(sep) + "\n")
-		}
-
 		status := "[✓]"
 		style := enabledStyle
 		if !tsk.Enabled {
@@ -602,20 +635,15 @@ func (s *TaskPane) renderListMode() string {
 			style = disabledStyle
 		}
 
-		isSelected := i == s.selectedIdx
-		// Watch tasks have no cron expression; show their trigger and the
-		// watcher's supervision status instead (#782).
-		trigger := tsk.CronExpr
-		if tsk.IsWatch() {
-			trigger = fmt.Sprintf("watch: %s [%s]", tsk.WatchCmd, watchTaskStatus(tsk))
-		}
-		var header string
+		// One line per task: status, name, trigger, delivery.
+		parts := []string{status}
 		if tsk.Name != "" {
-			header = fmt.Sprintf("%s %s  %s", status, tsk.Name, trigger)
-		} else {
-			header = fmt.Sprintf("%s %s", status, trigger)
+			parts = append(parts, tsk.Name)
 		}
+		parts = append(parts, taskTriggerSummary(tsk), taskDeliverySummary(tsk))
+		header := strings.Join(parts, "  ")
 
+		isSelected := i == s.selectedIdx
 		if isSelected && s.hasFocus {
 			b.WriteString(selectedStyle.Render("▸ " + header))
 		} else {
@@ -623,36 +651,45 @@ func (s *TaskPane) renderListMode() string {
 		}
 		b.WriteString("\n")
 
-		// Full prompt text, word-wrapped
-		wrapped := taskPaneWordWrap(tsk.Prompt, wrapWidth)
-		for _, line := range wrapped {
-			b.WriteString(promptStyle.Render("    " + line))
+		// A crash-looped watcher gets its full #797 failure summary on a
+		// detail line — the only always-on detail, and only when errored.
+		if tsk.IsWatch() && strings.HasPrefix(tsk.LastRunStatus, "errored:") {
+			b.WriteString(erroredStyle.Render("      " + tsk.LastRunStatus))
 			b.WriteString("\n")
 		}
 
-		// Program and last run info for all items
-		lastRun := "never"
-		if tsk.LastRunAt != nil {
-			lastRun = tsk.LastRunAt.Format("Jan 02 15:04")
+		// The selected row expands with prompt + agent + last-run detail.
+		if isSelected {
+			if snippet := promptSnippet(tsk.Prompt, detailWidth); snippet != "" {
+				b.WriteString(detailStyle.Render("      " + snippet))
+				b.WriteString("\n")
+			}
+			lastRun := "never"
+			if tsk.LastRunAt != nil {
+				lastRun = tsk.LastRunAt.Format("Jan 02 15:04")
+			}
+			programLabel := tsk.Program
+			if programLabel == "" {
+				programLabel = programDefaultLabel
+			}
+			detail := fmt.Sprintf("      %s • last: %s", programLabel, lastRun)
+			if tsk.LastRunStatus != "" {
+				// The full errored summary already has its own line above;
+				// keep this column short.
+				statusLabel := tsk.LastRunStatus
+				if strings.HasPrefix(statusLabel, "errored:") {
+					statusLabel = "errored"
+				}
+				detail += " (" + statusLabel + ")"
+			}
+			b.WriteString(detailStyle.Render(detail))
+			b.WriteString("\n")
 		}
-		programLabel := tsk.Program
-		if programLabel == "" {
-			programLabel = programDefaultLabel
-		}
-		detail := fmt.Sprintf("    %s • last: %s", programLabel, lastRun)
-		if tsk.LastRunStatus != "" {
-			detail += " (" + tsk.LastRunStatus + ")"
-		}
-		if tsk.TargetSession != "" {
-			detail += " • → " + tsk.TargetSession
-		}
-		b.WriteString(detailStyle.Render(detail))
-		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
 	if s.hasFocus {
-		b.WriteString(hintStyle.Render("n new • enter edit • r run now • x toggle • D delete • esc back"))
+		b.WriteString(hintStyle.Render("↑/↓ select • n new • enter edit • r run now • x toggle • D delete • esc back"))
 	} else {
 		b.WriteString(hintStyle.Render("enter to focus and edit tasks"))
 	}
@@ -667,6 +704,9 @@ func (s *TaskPane) renderEditMode() string {
 		MarginBottom(1)
 
 	labelStyle := lipgloss.NewStyle().Bold(true)
+	groupStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7F7A7A"))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 
 	buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 	focusedButtonStyle := buttonStyle.
@@ -687,6 +727,26 @@ func (s *TaskPane) renderEditMode() string {
 	s.editTarget.Width = inputWidth
 	s.editPath.Width = inputWidth
 
+	// The prompt's role depends on the trigger: cron tasks require it, watch
+	// tasks default each event to the raw emitted line.
+	if s.editTriggerIsWatch {
+		s.editPrompt.Placeholder = "(optional) {{line}} expands to the event line"
+	} else {
+		s.editPrompt.Placeholder = "Enter task prompt..."
+	}
+
+	label := func(text string) string {
+		return labelStyle.Render(fmt.Sprintf("%-9s", text))
+	}
+	// fieldErr renders the inline validation message directly under the
+	// field it belongs to, instead of a global error footer.
+	fieldErr := func(field int) string {
+		if s.editError != "" && s.editErrorField == field {
+			return errorStyle.Render("  ! "+s.editError) + "\n"
+		}
+		return ""
+	}
+
 	var b strings.Builder
 	if s.creating {
 		b.WriteString(editTitleStyle.Render("New Task"))
@@ -695,106 +755,119 @@ func (s *TaskPane) renderEditMode() string {
 		b.WriteString(editTitleStyle.Render(fmt.Sprintf("Edit Task %s", tsk.ID)))
 	}
 	b.WriteString("\n")
-	b.WriteString(labelStyle.Render("Name:"))
-	b.WriteString("  ")
+
+	b.WriteString(groupStyle.Render("Essentials"))
+	b.WriteString("\n")
+	b.WriteString(label("Name:"))
 	b.WriteString(s.editName.View())
 	b.WriteString("\n")
+	b.WriteString(fieldErr(taskFocusName))
+	b.WriteString(label("Trigger:"))
+	b.WriteString(s.renderTriggerSelector())
+	b.WriteString("\n")
+	if s.editTriggerIsWatch {
+		b.WriteString(label("Watch:"))
+		b.WriteString(s.editWatch.View())
+	} else {
+		b.WriteString(label("Cron:"))
+		b.WriteString(s.editCron.View())
+	}
+	b.WriteString("\n")
+	b.WriteString(fieldErr(taskFocusTriggerValue))
 	b.WriteString(labelStyle.Render("Prompt:"))
+	if s.editTriggerIsWatch {
+		b.WriteString(hintStyle.Render(" (optional)"))
+	}
 	b.WriteString("\n")
 	b.WriteString(s.editPrompt.View())
-	b.WriteString("\n\n")
-	b.WriteString(labelStyle.Render("Cron:"))
-	b.WriteString("  ")
-	b.WriteString(s.editCron.View())
 	b.WriteString("\n")
-	b.WriteString(labelStyle.Render("Watch:"))
-	b.WriteString(" ")
-	b.WriteString(s.editWatch.View())
+	b.WriteString(fieldErr(taskFocusPrompt))
 	b.WriteString("\n")
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-	b.WriteString(hintStyle.Render("       trigger: set exactly one of Cron / Watch"))
+
+	b.WriteString(groupStyle.Render("Delivery"))
 	b.WriteString("\n")
-	b.WriteString(labelStyle.Render("Target:"))
-	b.WriteString(" ")
+	b.WriteString(label("Target:"))
 	b.WriteString(s.editTarget.View())
 	b.WriteString("\n")
-	b.WriteString(labelStyle.Render("Path:"))
-	b.WriteString("  ")
+	b.WriteString(label("Path:"))
 	b.WriteString(s.editPath.View())
 	b.WriteString("\n")
-	b.WriteString(labelStyle.Render("Program:"))
-	b.WriteString("\n")
+	b.WriteString(fieldErr(taskFocusPath))
+	b.WriteString(label("Program:"))
 	b.WriteString(s.renderProgramSelector())
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 
 	submitLabel := " Save "
 	if s.creating {
 		submitLabel = " Create "
 	}
 	if s.focusIndex == taskFocusSave {
-		b.WriteString("       " + focusedButtonStyle.Render(submitLabel))
+		b.WriteString(focusedButtonStyle.Render(submitLabel))
 	} else {
-		b.WriteString("       " + buttonStyle.Render(submitLabel))
+		b.WriteString(buttonStyle.Render(submitLabel))
 	}
-
-	if s.editError != "" {
-		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-		b.WriteString("\n\n")
-		b.WriteString(errorStyle.Render("! " + s.editError))
-	}
+	b.WriteString("\n\n")
+	b.WriteString(hintStyle.Render("tab next • shift+tab prev • enter save • esc cancel"))
 
 	return b.String()
 }
 
-// renderProgramSelector renders the inline agent selector. Focused selection
-// is highlighted in yellow with a ▸ marker; the unfocused row gets the
-// dim/focus-hint treatment used by the rest of the edit form.
+// renderTriggerSelector renders the inline cron|watch type selector on one
+// line. The selected type gets the ▸ marker (yellow when focused, dim
+// otherwise), matching the Program selector's treatment.
+func (s *TaskPane) renderTriggerSelector() string {
+	focused := s.focusIndex == taskFocusTrigger
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+
+	option := func(name string, sel bool) string {
+		switch {
+		case sel && focused:
+			return selectedStyle.Render("▸ " + name)
+		case sel:
+			return dimSelectedStyle.Render("▸ " + name)
+		default:
+			return normalStyle.Render("  " + name)
+		}
+	}
+	out := option("cron", !s.editTriggerIsWatch) + "  " + option("watch", s.editTriggerIsWatch)
+	if focused {
+		out += hintStyle.Render("   ←/→ switch")
+	}
+	return out
+}
+
+// renderProgramSelector renders the agent selector as a single line showing
+// the current choice; ←/→ steps through the options when focused.
 func (s *TaskPane) renderProgramSelector() string {
 	focused := s.focusIndex == taskFocusProgram
 	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
 	dimSelectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
 
-	var b strings.Builder
-	for i, opt := range s.editProgramOptions {
-		isSel := i == s.editProgramIdx
-		switch {
-		case isSel && focused:
-			b.WriteString("    " + selectedStyle.Render("▸ "+opt))
-		case isSel:
-			b.WriteString("    " + dimSelectedStyle.Render("▸ "+opt))
-		default:
-			b.WriteString("    " + normalStyle.Render("  "+opt))
-		}
-		b.WriteString("\n")
+	value := programDefaultLabel
+	if s.editProgramIdx >= 0 && s.editProgramIdx < len(s.editProgramOptions) {
+		value = s.editProgramOptions[s.editProgramIdx]
 	}
 	if focused {
-		hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-		b.WriteString("    " + hintStyle.Render("↑/↓ change agent"))
-		b.WriteString("\n")
+		return selectedStyle.Render("◂ "+value+" ▸") + hintStyle.Render("   ←/→ change agent")
 	}
-	return b.String()
+	return dimSelectedStyle.Render(value)
 }
 
-// taskPaneWordWrap wraps text to fit within maxWidth, breaking on word boundaries.
-func taskPaneWordWrap(text string, maxWidth int) []string {
-	if maxWidth <= 0 {
-		return []string{text}
+// promptSnippet collapses a prompt to a single line truncated to maxWidth,
+// for the selected list row's detail line.
+func promptSnippet(prompt string, maxWidth int) string {
+	fields := strings.Fields(prompt)
+	if len(fields) == 0 {
+		return ""
 	}
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return []string{}
+	line := strings.Join(fields, " ")
+	runes := []rune(line)
+	if maxWidth > 1 && len(runes) > maxWidth {
+		return string(runes[:maxWidth-1]) + "…"
 	}
-	var lines []string
-	current := words[0]
-	for _, word := range words[1:] {
-		if len(current)+1+len(word) > maxWidth {
-			lines = append(lines, current)
-			current = word
-		} else {
-			current += " " + word
-		}
-	}
-	lines = append(lines, current)
-	return lines
+	return line
 }
