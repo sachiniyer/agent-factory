@@ -176,21 +176,37 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 
 	// Check for uncommitted changes in the worktree (skip for remote sessions
 	// which have no local worktree).
-	hasChanges := false
+	warning := ""
 	if !selected.IsRemote() {
 		if wt := selected.GetWorktreePath(); wt != "" {
-			out, err := exec.Command("git", "-C", wt, "status", "--porcelain").Output()
-			if err == nil && len(strings.TrimSpace(string(out))) > 0 {
-				hasChanges = true
-			}
+			warning = killConfirmationWarning(wt)
 		}
 	}
 
 	message := fmt.Sprintf("[!] Kill session '%s'?", selectedTitle)
-	if hasChanges {
-		message = fmt.Sprintf("[!] Kill session '%s'?\n\nWARNING: This worktree has uncommitted changes that will be lost!", selectedTitle)
+	if warning != "" {
+		message += "\n\n" + warning
 	}
 	return m, m.confirmAction(message, killAction)
+}
+
+// killConfirmationWarning returns the data-loss warning line for the kill
+// confirmation dialog, or "" if the worktree at wt is verifiably clean. Kill
+// tears the worktree down with `git worktree remove -f`, which bypasses git's
+// own refusal to delete a dirty worktree, so this check is the only warning
+// the user gets. If `git status` itself fails we cannot prove the worktree is
+// clean — fail closed and warn that changes may be lost rather than silently
+// skipping the warning (#815).
+func killConfirmationWarning(wt string) string {
+	out, err := exec.Command("git", "-C", wt, "status", "--porcelain").Output()
+	if err != nil {
+		log.WarningLog.Printf("could not verify worktree status for %s before kill: %v", wt, err)
+		return fmt.Sprintf("WARNING: Could not verify worktree status (%v); it may contain uncommitted changes that will be lost!", err)
+	}
+	if len(strings.TrimSpace(string(out))) > 0 {
+		return "WARNING: This worktree has uncommitted changes that will be lost!"
+	}
+	return ""
 }
 
 // handleEnter handles the enter/open key action.

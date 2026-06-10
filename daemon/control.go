@@ -1107,6 +1107,10 @@ var ghostKillTmuxByName = func(sanitizedName string) error {
 
 // ghostCleanupWorktree performs best-effort worktree teardown for a ghost
 // session whose live restore failed. Package-level so tests can stub it.
+// Deliberately no uncommitted-changes check here, unlike the TUI kill path
+// (#815): this runs daemon-side with no user to warn, only for sessions whose
+// records are already unrestorable, and the caller has already committed to
+// deleting the record — a status probe could only block cleanup, not save data.
 var ghostCleanupWorktree = func(data *session.InstanceData, title string) {
 	if data.Worktree.RepoPath == "" || data.Worktree.WorktreePath == "" || data.Worktree.ExternalWorktree {
 		return
