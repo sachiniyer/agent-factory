@@ -19,8 +19,8 @@ import (
 )
 
 // RunDaemon runs the daemon process: it serves the local control plane,
-// evaluates task cron schedules in-process, and iterates over all sessions to
-// run AutoYes mode on them.
+// evaluates task cron schedules in-process, supervises watch-task scripts,
+// and iterates over all sessions to run AutoYes mode on them.
 func RunDaemon(cfg *config.Config) error {
 	log.InfoLog.Printf("starting daemon")
 
