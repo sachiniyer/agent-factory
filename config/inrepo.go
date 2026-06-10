@@ -227,6 +227,28 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	return &cfg, data, nil
 }
 
+// resolveSymlinksForCompare resolves symlinks in a path that may not exist
+// yet, for path-identity comparisons: the deepest existing ancestor is
+// resolved with filepath.EvalSymlinks and the non-existent remainder is
+// re-joined. Falls back to the cleaned input when nothing resolves, so a
+// comparison built on it is never weaker than comparing Clean-ed paths.
+func resolveSymlinksForCompare(path string) string {
+	path = filepath.Clean(path)
+	suffix := ""
+	for {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			return filepath.Join(resolved, suffix)
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return filepath.Join(path, suffix)
+		}
+		suffix = filepath.Join(filepath.Base(path), suffix)
+		path = parent
+	}
+}
+
 // SaveInRepoPostWorktreeCommands writes the given post-worktree commands into
 // the repo's in-repo config file — the canonical location for this field
 // since #800 — creating the file if needed and preserving every other field
@@ -238,13 +260,26 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 		return fmt.Errorf("repo root is required to save in-repo config")
 	}
 	path := InRepoConfigPath(repoRoot)
+	// Compare resolved paths, not Clean-ed strings (#812): a symlinked
+	// AGENT_FACTORY_HOME (or a symlinked .agent-factory dir) makes distinct
+	// strings name the same file, and these guards exist precisely for the
+	// aliased cases.
+	resolvedPath := resolveSymlinksForCompare(path)
 	// A repo rooted at the user's home directory makes the in-repo path
 	// collide with the global config file; writing hooks there would clobber
 	// the user's global settings.
 	if configDir, dirErr := GetConfigDir(); dirErr == nil {
-		if filepath.Clean(path) == filepath.Clean(filepath.Join(configDir, ConfigFileName)) {
-			return fmt.Errorf("in-repo config path %s collides with the global config file; not saving", prettyHomePath(path))
+		globalPath := filepath.Join(configDir, ConfigFileName)
+		if resolvedPath == resolveSymlinksForCompare(globalPath) {
+			return fmt.Errorf("in-repo config path %s collides with the global config file %s; not saving — run this from a repo whose root is not the config home", prettyHomePath(path), prettyHomePath(globalPath))
 		}
+	}
+	// Mirror the read-path containment guard for writes: a .agent-factory
+	// dir symlinked outside the repo must not receive the save. The read
+	// guard alone can't cover this — it only fires when the config file
+	// already exists at the resolved location.
+	if !strings.HasPrefix(resolvedPath, resolveSymlinksForCompare(repoRoot)+string(filepath.Separator)) {
+		return fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
 	}
 	data, err := readInRepoConfigFile(repoRoot)
 	if err != nil {

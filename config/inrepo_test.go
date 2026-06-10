@@ -201,6 +201,51 @@ func TestLoadInRepoConfigHomeRepoCollision(t *testing.T) {
 	assert.Contains(t, err.Error(), "collides")
 }
 
+// TestSaveInRepoSymlinkedConfigHomeCollision is the regression test for #812:
+// AGENT_FACTORY_HOME pointing at the repo's .agent-factory dir through a
+// symlink must still trip the save collision guard — filepath.Clean alone
+// compares the unequal strings and lets the save overwrite the global config.
+func TestSaveInRepoSymlinkedConfigHomeCollision(t *testing.T) {
+	repoRoot := t.TempDir()
+	realHome := filepath.Join(repoRoot, InRepoConfigDirName)
+	require.NoError(t, os.MkdirAll(realHome, 0755))
+	globalContent := `{"default_program": "claude", "auto_yes": true}`
+	globalFile := filepath.Join(realHome, ConfigFileName)
+	require.NoError(t, os.WriteFile(globalFile, []byte(globalContent), 0644))
+
+	linkHome := filepath.Join(t.TempDir(), "af-home-link")
+	require.NoError(t, os.Symlink(realHome, linkHome))
+	t.Setenv("AGENT_FACTORY_HOME", linkHome)
+
+	err := SaveInRepoPostWorktreeCommands(repoRoot, []string{"echo hi"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "collides")
+
+	data, err := os.ReadFile(globalFile)
+	require.NoError(t, err)
+	assert.JSONEq(t, globalContent, string(data), "global config must be untouched by the refused save")
+
+	// The read path must keep treating this layout as "no in-repo config".
+	cfg, raw, err := LoadInRepoConfig(repoRoot)
+	require.NoError(t, err)
+	assert.Nil(t, cfg)
+	assert.Nil(t, raw)
+}
+
+func TestSaveInRepoRefusesSymlinkDirOutsideRepo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	outsideDir := t.TempDir()
+	require.NoError(t, os.Symlink(outsideDir, filepath.Join(repoRoot, InRepoConfigDirName)))
+
+	err := SaveInRepoPostWorktreeCommands(repoRoot, []string{"echo hi"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the repository")
+
+	_, statErr := os.Stat(filepath.Join(outsideDir, ConfigFileName))
+	assert.True(t, os.IsNotExist(statErr), "nothing must be written outside the repo")
+}
+
 func TestSaveInRepoPostWorktreeCommands(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
@@ -234,5 +279,18 @@ func TestSaveInRepoPostWorktreeCommands(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, cfg.IsSet("post_worktree_commands"))
 		assert.Empty(t, cfg.PostWorktreeCommands)
+	})
+
+	t.Run("dir symlink that stays inside the repo still saves", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		realDir := filepath.Join(repoRoot, "cfg")
+		require.NoError(t, os.MkdirAll(realDir, 0755))
+		require.NoError(t, os.Symlink(realDir, filepath.Join(repoRoot, InRepoConfigDirName)))
+
+		require.NoError(t, SaveInRepoPostWorktreeCommands(repoRoot, []string{"make setup"}))
+
+		cfg, _, err := LoadInRepoConfig(repoRoot)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"make setup"}, cfg.PostWorktreeCommands)
 	})
 }
