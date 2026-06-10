@@ -613,6 +613,44 @@ func TestGhostCleanup_AllEmpty(t *testing.T) {
 	}
 }
 
+// TestGhostCleanup_TmuxBeforeWorktree pins the teardown ordering required by
+// #802: the tmux session (and with it the agent process) must be killed
+// BEFORE the worktree directory is deleted, otherwise the agent's in-flight
+// writes race git's recursive delete and leak a half-deleted directory.
+func TestGhostCleanup_TmuxBeforeWorktree(t *testing.T) {
+	var order []string
+	prevWT := ghostCleanupWorktree
+	prevTmux := ghostKillTmuxByName
+	ghostCleanupWorktree = func(data *session.InstanceData, title string) {
+		order = append(order, "worktree")
+	}
+	ghostKillTmuxByName = func(name string) error {
+		order = append(order, "tmux")
+		return nil
+	}
+	defer func() {
+		ghostCleanupWorktree = prevWT
+		ghostKillTmuxByName = prevTmux
+	}()
+
+	data := &session.InstanceData{
+		Title:    "ghost",
+		Program:  "claude",
+		TmuxName: "af_ghost",
+		Worktree: session.GitWorktreeData{
+			RepoPath:     "/tmp/repo",
+			WorktreePath: "/tmp/wt",
+			SessionName:  "ghost",
+			BranchName:   "af/ghost",
+		},
+	}
+	ghostCleanup(data, "ghost")
+
+	if len(order) != 2 || order[0] != "tmux" || order[1] != "worktree" {
+		t.Fatalf("expected tmux teardown before worktree cleanup (#802), got: %v", order)
+	}
+}
+
 // TestGhostKillTmuxByName_RefusesNonAfPrefix guards the validation in the
 // real ghostKillTmuxByName: a sanitized name without the af_ prefix would
 // only appear via storage corruption, and silently killing whatever tmux

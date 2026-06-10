@@ -37,7 +37,7 @@ var ghostKillTmuxByName = func(sanitizedName string) error {
 	if !strings.HasPrefix(sanitizedName, tmux.TmuxPrefix) {
 		return fmt.Errorf("refusing to kill tmux session without %q prefix: %q", tmux.TmuxPrefix, sanitizedName)
 	}
-	return tmux.NewTmuxSessionFromSanitizedName(sanitizedName, "").Close()
+	return tmux.NewTmuxSessionFromSanitizedName(sanitizedName, "").CloseAndWaitForPaneExit()
 }
 
 // ghostCleanupWorktree performs best-effort worktree teardown for a ghost
@@ -72,13 +72,15 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) {
 // resources. Tmux teardown is independent of worktree state (#516): a ghost
 // record can have an empty worktree path while a tmux session with the
 // persisted name is still running, so the two branches share no condition.
+// Tmux goes FIRST: a still-running agent writing into the worktree while git
+// recursively deletes it leaks a half-deleted directory (#802).
 func ghostCleanup(data *session.InstanceData, title string) {
-	ghostCleanupWorktree(data, title)
 	if data.TmuxName != "" {
 		if killErr := ghostKillTmuxByName(data.TmuxName); killErr != nil {
 			log.WarningLog.Printf("ghost session %q: tmux cleanup failed: %v", title, killErr)
 		}
 	}
+	ghostCleanupWorktree(data, title)
 }
 
 var sessionsListCmd = &cobra.Command{

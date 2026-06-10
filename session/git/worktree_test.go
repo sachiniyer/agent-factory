@@ -417,6 +417,119 @@ func TestCleanup_RemovesOrphanedDirectory(t *testing.T) {
 		"Cleanup() must remove the orphaned worktree directory when `git worktree remove` fails validation")
 }
 
+// TestCleanup_RemovesDirWhenGitDeregistered is the regression test for #802.
+// When `git worktree remove -f` fails AFTER git has already released the
+// registration — observed in real usage when the dying agent process wrote
+// into the tree mid-removal, so git deregistered the worktree and then its
+// recursive delete aborted with "Directory not empty" — the directory must
+// not leak. Cleanup() decides by ownership, not error strings: the path is
+// absent from `git worktree list`, so it falls back to os.RemoveAll.
+//
+// Simulated here by deleting the worktree's admin entry
+// (.git/worktrees/<name>), which produces the same post-failure state with
+// real git: `worktree remove` fails ("is not a working tree") while the
+// registration is already gone and the directory is fully populated on disk.
+func TestCleanup_RemovesDirWhenGitDeregistered(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	repoRoot := createGitRepo(t)
+
+	// Initial commit so HEAD is valid (required for `worktree add`).
+	cmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, branchName, err := NewGitWorktree(repoRoot, "deregistered")
+	require.NoError(t, err)
+	require.NoError(t, gw.Setup())
+
+	worktreePath := gw.GetWorktreePath()
+
+	// Drop the worktree's admin entry so git no longer registers the path
+	// while the directory itself survives on disk untouched.
+	adminDir := filepath.Join(repoRoot, ".git", "worktrees", filepath.Base(worktreePath))
+	require.NoError(t, os.RemoveAll(adminDir))
+
+	// Sanity: git has let go, the directory is still there.
+	registered, err := gw.isWorktreeRegistered()
+	require.NoError(t, err)
+	require.False(t, registered, "worktree should be deregistered after its admin entry is removed")
+	_, err = os.Stat(worktreePath)
+	require.NoError(t, err)
+
+	// Full recovery is expected: no error, directory gone, branch gone.
+	require.NoError(t, gw.Cleanup())
+
+	_, err = os.Stat(worktreePath)
+	assert.True(t, os.IsNotExist(err),
+		"Cleanup() must remove the worktree directory once git has deregistered it (#802)")
+
+	branchCmd := exec.Command("git", "-C", repoRoot, "branch", "--list", branchName)
+	out, err = branchCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Empty(t, strings.TrimSpace(string(out)),
+		"session-owned branch should be deleted after the deregistered worktree is cleaned up")
+}
+
+// TestCleanup_SurfacesErrorWhenGitStillOwnsWorktree is the safety counterpart
+// to the #802 fallback: when git still registers the worktree and the removal
+// failure is not the known #726 "validation failed" class, Cleanup() must
+// surface the error and leave the directory alone instead of deleting data it
+// cannot account for. A locked worktree is the simplest deterministic member
+// of that class: a single `-f` refuses to remove it and the registration
+// stays put.
+func TestCleanup_SurfacesErrorWhenGitStillOwnsWorktree(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	repoRoot := createGitRepo(t)
+
+	cmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, _, err := NewGitWorktree(repoRoot, "stillowned")
+	require.NoError(t, err)
+	require.NoError(t, gw.Setup())
+
+	worktreePath := gw.GetWorktreePath()
+
+	lockCmd := exec.Command("git", "-C", repoRoot, "worktree", "lock", worktreePath, "--reason", "still in use")
+	out, err = lockCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	err = gw.Cleanup()
+	require.Error(t, err,
+		"Cleanup() must surface the failure when git still owns the worktree and the cause is unknown")
+	assert.Contains(t, err.Error(), "locked")
+
+	// The directory must survive — it is still a registered git worktree.
+	_, statErr := os.Stat(worktreePath)
+	assert.NoError(t, statErr,
+		"Cleanup() must NOT delete a directory git still registers as a worktree")
+
+	registered, regErr := gw.isWorktreeRegistered()
+	require.NoError(t, regErr)
+	assert.True(t, registered)
+}
+
 func TestNewGitWorktreeFromStorage_EmptyWorktreePath(t *testing.T) {
 	_, err := NewGitWorktreeFromStorage("/some/repo", "", "session", "branch", "abc123", false, true)
 	require.Error(t, err)

@@ -172,7 +172,12 @@ func (b *LocalBackend) Kill(i *Instance) error {
 	i.mu.Unlock()
 
 	if ts != nil {
-		if err := ts.Close(); err != nil {
+		// Tear down tmux BEFORE the worktree cleanup below, and wait for the
+		// pane's agent process to actually exit: kill-session only SIGHUPs
+		// it, and an agent still flushing state mid-shutdown races git's
+		// recursive delete of the worktree, leaking a half-deleted directory
+		// ("Directory not empty", #802).
+		if err := ts.CloseAndWaitForPaneExit(); err != nil {
 			log.WarningLog.Printf("kill %q: tmux cleanup failed: %v", title, err)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -46,8 +47,12 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 	// We are reusing a pre-existing branch — Cleanup() must not delete it.
 	g.branchCreatedByUs = false
 
-	// Clean up any existing worktree first
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath) // Ignore error if worktree doesn't exist
+	// Clean up any existing worktree first. Ignore the error (the worktree
+	// usually doesn't exist) and, unlike Cleanup(), do NOT fall back to
+	// deleting the directory: at this point the path has not been
+	// established as a session-owned worktree, and a path that stays
+	// blocked surfaces loudly via the `worktree add` below (#802 audit).
+	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
 
 	// Prune stale worktree metadata BEFORE re-adding. If the worktree
 	// directory was deleted externally (rm -rf, disk cleanup, etc.), git
@@ -105,8 +110,12 @@ func (g *GitWorktree) setupNewWorktree() error {
 	// We are creating the branch ourselves — Cleanup() may delete it.
 	g.branchCreatedByUs = true
 
-	// Clean up any existing worktree first
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath) // Ignore error if worktree doesn't exist
+	// Clean up any existing worktree first. Ignore the error (the worktree
+	// usually doesn't exist) and, unlike Cleanup(), do NOT fall back to
+	// deleting the directory: at this point the path has not been
+	// established as a session-owned worktree, and a path that stays
+	// blocked surfaces loudly via the `worktree add` below (#802 audit).
+	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
 
 	// Prune stale worktree metadata BEFORE deleting the branch. If `worktree
 	// remove -f` above failed (corrupted .git pointer, etc.), git still tracks
@@ -173,23 +182,37 @@ func (g *GitWorktree) Cleanup() error {
 	if _, err := os.Stat(g.worktreePath); err == nil {
 		// Remove the worktree using git command
 		if _, err := g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath); err != nil {
-			// When the worktree's `.git` pointer is corrupted, `git worktree
-			// remove -f` fails with "validation failed, cannot remove working
-			// tree" and leaves the directory orphaned on disk — previously the
-			// only escape was `af reset`. Fall back to removing the directory
-			// manually, mirroring CleanupWorktreesForRepo (#719). The Prune()
-			// below reconciles git's internal worktree metadata.
-			//
-			// Gate on "validation failed": unlike CleanupWorktreesForRepo,
-			// which only ever sees paths emitted by `git worktree list` (all
-			// real worktrees), g.worktreePath is a stored value with no such
-			// guarantee. "validation failed" means git DOES recognize the path
-			// as one of its registered worktrees, so removing the directory is
-			// safe. Other failures — notably "is not a working tree" — mean git
-			// does not own the path, so we surface the error instead of
-			// deleting it (preserves the best-effort Kill behavior of #478).
 			log.ErrorLog.Printf("failed to remove worktree %s: %v", g.worktreePath, err)
-			if strings.Contains(err.Error(), "validation failed") {
+			// A failed `git worktree remove -f` may still have released the
+			// registration. Decide whether the directory is ours to delete
+			// by asking git, not by matching error strings (#802):
+			//
+			//   - Path no longer in `git worktree list`: git has let go of
+			//     the worktree but the directory survived. Observed when the
+			//     recursive delete aborts partway ("failed to delete ...:
+			//     Directory not empty") because the dying agent process wrote
+			//     into the tree mid-removal — git deregisters first, then
+			//     fails to finish deleting (#802). RemoveAll the leftovers;
+			//     the Prune() below reconciles any remaining metadata.
+			//   - Still registered + "validation failed": the worktree's
+			//     `.git` pointer is corrupted (#719/#726). git refuses to
+			//     remove it, but it is unambiguously one of our registered
+			//     worktrees, so deleting the directory is safe.
+			//   - Still registered + any other error (locked worktree,
+			//     submodules, permissions): git owns the path and we don't
+			//     know why removal failed — surface the error instead of
+			//     deleting data (preserves the best-effort Kill behavior of
+			//     #478).
+			removeDir := false
+			if registered, listErr := g.isWorktreeRegistered(); listErr == nil && !registered {
+				removeDir = true
+			} else if strings.Contains(err.Error(), "validation failed") {
+				// Also the path taken when `worktree list` itself failed
+				// (listErr != nil): without a readable registration we fall
+				// back to the conservative #726 string gate.
+				removeDir = true
+			}
+			if removeDir {
 				if removeErr := os.RemoveAll(g.worktreePath); removeErr != nil {
 					errs = append(errs, fmt.Errorf("failed to remove worktree directory %s: %w", g.worktreePath, removeErr))
 				}
@@ -236,6 +259,39 @@ func (g *GitWorktree) Cleanup() error {
 	}
 
 	return nil
+}
+
+// isWorktreeRegistered reports whether git still lists g.worktreePath as a
+// registered worktree of the repo. Used after a failed `git worktree remove`
+// to distinguish "git released the worktree but the directory survived"
+// (safe to delete manually, #802) from "git still owns the path" (not ours
+// to second-guess).
+func (g *GitWorktree) isWorktreeRegistered() (bool, error) {
+	output, err := g.runGitCommand(g.repoPath, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	target := normalizeWorktreePath(g.worktreePath)
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		if normalizeWorktreePath(strings.TrimPrefix(line, "worktree ")) == target {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// normalizeWorktreePath cleans the path and resolves symlinks (best-effort)
+// so `worktree list` output compares equal to a stored path even when one
+// side went through a symlinked parent (e.g. /tmp -> /private/tmp on macOS).
+func normalizeWorktreePath(p string) string {
+	p = filepath.Clean(p)
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
 }
 
 // Remove removes the worktree but keeps the branch
@@ -323,7 +379,11 @@ func CleanupWorktreesForRepo(repoRoot string) error {
 			removeCmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", wt.path)
 			if err := removeCmd.Run(); err != nil {
 				log.ErrorLog.Printf("failed to remove worktree %s: %v", wt.path, err)
-				// Fallback: remove directory manually
+				// Fallback: remove directory manually. Unconditional — no
+				// registration re-check needed here, unlike Cleanup(): wt.path
+				// was emitted by `git worktree list` moments ago, so git
+				// ownership is already established, and `af reset` semantics
+				// are "tear everything down" (#802 audit).
 				if err := os.RemoveAll(wt.path); err != nil {
 					log.ErrorLog.Printf("failed to remove worktree directory %s: %v", wt.path, err)
 				}
