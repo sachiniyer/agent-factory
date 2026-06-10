@@ -21,7 +21,7 @@ chmod +x /path/to/your/hooks/*.sh
 # Edit each script to add your infrastructure logic
 ```
 
-Then configure your repo to use them:
+Then configure your repo to use them in `<repo-root>/.agent-factory/config.json`:
 
 ```json
 {

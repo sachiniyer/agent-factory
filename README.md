@@ -164,7 +164,7 @@ This repo is autonomously maintained by Captain Claude, an AI maintainer running
 
 ## Configuration
 
-Configuration lives at `~/.agent-factory/config.json`:
+Global configuration lives at `~/.agent-factory/config.json`:
 
 ```json
 {
@@ -195,6 +195,34 @@ af -p aider
 `-p` and the per-task `program` field both accept a bare agent enum only. To
 pass a custom path or flags for an agent, set `program_overrides.<agent>` in
 your config — every session that launches that agent will use the override.
+
+### Per-repo configuration
+
+A repository can carry its own configuration in `<repo-root>/.agent-factory/config.json`. Precedence is **app defaults → global config → in-repo config**, merged field by field: an in-repo field overrides the global value only when it is set, and `program_overrides` merges per key (an in-repo entry wins for that agent; global entries for other agents still apply).
+
+```json
+{
+  "default_program": "codex",
+  "program_overrides": {
+    "codex": "/usr/local/bin/codex --profile work"
+  },
+  "post_worktree_commands": ["npm install"],
+  "remote_hooks": {
+    "launch_cmd": "./infra/launch.sh",
+    "list_cmd": "./infra/list.sh",
+    "attach_cmd": "./infra/attach.sh",
+    "delete_cmd": "./infra/delete.sh"
+  }
+}
+```
+
+| Field | Scope |
+|-------|-------|
+| `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
+| `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `"post_worktree_commands": []`. |
+| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys` | Global only. Setting them in-repo is rejected with an error naming the key. |
+
+Note that an in-repo config executes what it configures: `post_worktree_commands` run after each worktree is created, `remote_hooks` and `program_overrides` values are invoked as shell commands. Cloning a repository and running `af` in it implies trusting that repo's `.agent-factory/config.json`. The first time a config carrying such fields loads (and whenever its content changes), `af` records one log line naming the fields and the file's content hash.
 
 ## Upstream
 

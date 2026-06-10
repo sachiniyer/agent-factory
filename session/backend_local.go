@@ -12,17 +12,32 @@ import (
 
 // resolveProgramForInstance returns the actual tmux command for an instance.
 // Resolution chain: agent enum -> cfg.ProgramOverrides[agent] (if set) ->
-// bare agent name. When AutoYes is set on a claude instance, the
-// --permission-mode bypassPermissions flag is appended to the resolved
-// command — claude needs the flag at exec time, and Instance.Program now
-// holds only the bare enum so the append can no longer happen in main.go.
-// A nil cfg (e.g. tests that don't materialize a config) falls back to the
-// raw Program string so legacy free-form values still reach tmux verbatim.
+// bare agent name. The overrides come from the repo-resolved config (global
+// program_overrides merged with the repo's .agent-factory/config.json) when
+// the instance path belongs to a git repo; outside a repo, or when repo
+// resolution fails, the global config alone applies. When AutoYes is set on a
+// claude instance, the --permission-mode bypassPermissions flag is appended
+// to the resolved command — claude needs the flag at exec time, and
+// Instance.Program now holds only the bare enum so the append can no longer
+// happen in main.go. A nil cfg (e.g. tests that don't materialize a config)
+// falls back to the raw Program string so legacy free-form values still
+// reach tmux verbatim.
 func resolveProgramForInstance(i *Instance) string {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		log.WarningLog.Printf("failed to load config when resolving program for %q: %v", i.Title, err)
-		cfg = nil
+	var cfg *config.Config
+	if repo, err := config.RepoFromPath(i.Path); err == nil {
+		if resolved, rerr := config.ResolveConfig(repo.Root); rerr == nil {
+			cfg = &resolved.Config
+		} else {
+			log.WarningLog.Printf("failed to resolve repo config when resolving program for %q: %v", i.Title, rerr)
+		}
+	}
+	if cfg == nil {
+		loaded, err := config.LoadConfig()
+		if err != nil {
+			log.WarningLog.Printf("failed to load config when resolving program for %q: %v", i.Title, err)
+			loaded = nil
+		}
+		cfg = loaded
 	}
 	resolved := config.ResolveProgram(cfg, i.Program)
 	if i.AutoYes && DetectAgentFromProgram(i.Program) == tmux.ProgramClaude {

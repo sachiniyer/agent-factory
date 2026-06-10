@@ -55,29 +55,43 @@ type RepoConfig struct {
 	RemoteHooks *RemoteHooks `json:"remote_hooks,omitempty"`
 }
 
-// repoConfigPath validates repoID and returns the per-repo config file path.
-// Mirrors the validation + containment guard from repoInstancesPath so the
-// "repos/" tree is held to the same boundary as "instances/".
-func repoConfigPath(repoID string) (string, string, error) {
+// repoStateDir validates repoID and returns the per-repo state directory
+// (~/.agent-factory/repos/<id>). Mirrors the validation + containment guard
+// from repoInstancesPath so the "repos/" tree is held to the same boundary as
+// "instances/".
+func repoStateDir(repoID string) (string, error) {
 	if err := ValidateRepoID(repoID); err != nil {
-		return "", "", err
+		return "", err
 	}
 	configDir, err := GetConfigDir()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get config dir: %w", err)
+		return "", fmt.Errorf("failed to get config dir: %w", err)
 	}
 	parent := filepath.Join(configDir, "repos")
 	dir := filepath.Join(parent, repoID)
-	path := filepath.Join(dir, RepoConfigFileName)
 	cleanParent := filepath.Clean(parent) + string(filepath.Separator)
-	if !strings.HasPrefix(filepath.Clean(path), cleanParent) {
-		return "", "", fmt.Errorf("invalid repo id: resolved path escapes repos directory")
+	if !strings.HasPrefix(filepath.Clean(dir)+string(filepath.Separator), cleanParent) {
+		return "", fmt.Errorf("invalid repo id: resolved path escapes repos directory")
 	}
-	return dir, path, nil
+	return dir, nil
+}
+
+// repoConfigPath validates repoID and returns the per-repo config file path.
+func repoConfigPath(repoID string) (string, string, error) {
+	dir, err := repoStateDir(repoID)
+	if err != nil {
+		return "", "", err
+	}
+	return dir, filepath.Join(dir, RepoConfigFileName), nil
 }
 
 // LoadRepoConfig loads the per-repo config for the given repo ID.
 // Returns an empty config (not an error) if none exists.
+//
+// Legacy location: ~/.agent-factory/repos/<id>/config.json is superseded by
+// the in-repo .agent-factory/config.json (#800) and is read for one more
+// release as a fallback. Consumers must use ResolveConfig, which applies the
+// in-repo file over this one; do not read this directly.
 func LoadRepoConfig(repoID string) (*RepoConfig, error) {
 	_, path, err := repoConfigPath(repoID)
 	if err != nil {
@@ -98,6 +112,9 @@ func LoadRepoConfig(repoID string) (*RepoConfig, error) {
 }
 
 // SaveRepoConfig saves the per-repo config for the given repo ID.
+//
+// Legacy location: see LoadRepoConfig — new code writes the in-repo file
+// (e.g. SaveInRepoPostWorktreeCommands) instead of this legacy location.
 func SaveRepoConfig(repoID string, cfg *RepoConfig) error {
 	dir, path, err := repoConfigPath(repoID)
 	if err != nil {

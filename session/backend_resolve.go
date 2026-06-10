@@ -7,21 +7,17 @@ import (
 )
 
 // backendForPath returns the appropriate Backend for the given workspace path
-// by checking whether a remote hooks config exists for the repo.
+// by resolving the repo's effective config (in-repo .agent-factory/config.json
+// over the legacy per-repo location) and checking for remote hooks.
 func backendForPath(absPath string) (Backend, error) {
 	repo, err := config.RepoFromPath(absPath)
 	if err != nil {
 		// Not a git repo or can't resolve — default to local.
 		return &LocalBackend{}, nil
 	}
-	return backendForRepoID(repo.ID)
-}
-
-// backendForRepoID returns the appropriate Backend for a given repo ID.
-func backendForRepoID(repoID string) (Backend, error) {
-	cfg, err := config.LoadRepoConfig(repoID)
+	cfg, err := config.ResolveConfig(repo.Root)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load repo config: %w", err)
+		return nil, fmt.Errorf("failed to resolve repo config: %w", err)
 	}
 	if cfg.RemoteHooks != nil {
 		if err := cfg.RemoteHooks.Validate(); err != nil {
@@ -39,9 +35,9 @@ func loadHookBackendForPath(absPath string) (*HookBackend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve repo: %w", err)
 	}
-	cfg, err := config.LoadRepoConfig(repo.ID)
+	cfg, err := config.ResolveConfig(repo.Root)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load repo config: %w", err)
+		return nil, fmt.Errorf("failed to resolve repo config: %w", err)
 	}
 	if cfg.RemoteHooks == nil {
 		return nil, fmt.Errorf("no remote hooks configured for repo %s", repo.ID)

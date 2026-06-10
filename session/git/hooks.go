@@ -32,10 +32,9 @@ const hookWaitDelay = 2 * time.Second
 // outlive their parent hook.
 // Errors are logged but do not propagate.
 func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath string) {
-	repoID := config.RepoIDFromRoot(repoPath)
-	repoCfg, err := config.LoadRepoConfig(repoID)
+	repoCfg, err := config.ResolveConfig(repoPath)
 	if err != nil {
-		log.WarningLog.Printf("failed to load repo config for hooks: %v", err)
+		log.WarningLog.Printf("failed to resolve repo config for hooks: %v", err)
 		return
 	}
 	if len(repoCfg.PostWorktreeCommands) == 0 {

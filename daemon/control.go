@@ -598,7 +598,19 @@ func (m *Manager) refreshLocked() error {
 
 func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData, error) {
 	if req.Program == "" {
+		// Default from the repo-resolved config so an in-repo
+		// default_program applies to daemon-created sessions (task runs,
+		// API creates) too. Falls back to the daemon's global config when
+		// the repo path can't be resolved — reserveCreate will surface
+		// that error with more context right after.
 		req.Program = m.cfg.DefaultProgram
+		if req.RepoPath != "" {
+			if repo, err := config.RepoFromPath(req.RepoPath); err == nil {
+				if resolved, rerr := config.ResolveConfig(repo.Root); rerr == nil {
+					req.Program = resolved.DefaultProgram
+				}
+			}
+		}
 	}
 	repo, title, release, err := m.reserveCreate(req)
 	if err != nil {
@@ -952,7 +964,7 @@ func (m *Manager) ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest) 
 	if err != nil {
 		return nil, err
 	}
-	repoCfg, err := config.LoadRepoConfig(repo.ID)
+	repoCfg, err := config.ResolveConfig(repo.Root)
 	if err != nil {
 		return nil, err
 	}
