@@ -34,7 +34,11 @@ func TestLoadConfig_MaterializeSilentOnFirstRun(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
-	assert.Empty(t, errBuf.String(), "first-run materialization must not log at ERROR level")
+	// Don't assert an empty buffer: DefaultConfig() logs an unrelated ERROR
+	// ("failed to get claude command") on machines without claude on PATH
+	// (e.g. CI). First-run only has to skip the settings-loss warning.
+	assert.NotContains(t, errBuf.String(), "config.json missing from an initialized config dir",
+		"first-run materialization must not log the settings-loss error")
 	assert.FileExists(t, filepath.Join(home, ConfigFileName), "first run must persist the defaults")
 }
 
