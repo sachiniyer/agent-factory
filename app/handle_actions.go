@@ -247,6 +247,11 @@ func (m *home) handleOpenPR() (tea.Model, tea.Cmd) {
 	if err := openCmd.Start(); err != nil {
 		return m, m.handleError(fmt.Errorf("failed to open PR: %w", err))
 	}
+	// Reap the opener when it exits so it doesn't linger as a zombie for the
+	// life of the TUI (#816).
+	go func() {
+		_ = openCmd.Wait()
+	}()
 	return m, nil
 }
 

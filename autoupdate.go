@@ -113,10 +113,11 @@ func autoUpdate() error {
 		log.InfoLog.Printf("auto-update: updated to %s (effective on next launch)", latestVersion)
 	}
 	if shutdownErr == nil && result != daemon.ShutdownNoDaemon {
-		// The daemon hosts task schedules (#782); respawn it from the
-		// freshly written binary when enabled tasks exist, instead of
-		// leaving schedules dark until the next af invocation.
-		respawnDaemonForTasksFn()
+		// The daemon hosts task schedules and autoyes mode (#782); we just
+		// stopped a running one, so respawn it unconditionally from the
+		// freshly written binary instead of leaving schedules and autoyes
+		// sessions dark until the next af invocation (#813).
+		respawnDaemonFn()
 	}
 	return nil
 }

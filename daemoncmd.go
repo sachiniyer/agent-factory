@@ -69,9 +69,9 @@ func init() {
 	daemonCmd.AddCommand(daemonUninstallCmd)
 }
 
-// respawnDaemonForTasksFn is indirected so upgrade/auto-update tests can
-// observe the respawn without launching a real daemon.
-var respawnDaemonForTasksFn = respawnDaemonAfterUpgrade
+// respawnDaemonFn is indirected so upgrade/auto-update tests can observe the
+// respawn without launching a real daemon.
+var respawnDaemonFn = respawnDaemonAfterUpgrade
 
 // Indirection points so respawnDaemonAfterUpgrade tests can observe which
 // branch ran without touching the real systemctl/launchctl or spawning a
@@ -79,7 +79,7 @@ var respawnDaemonForTasksFn = respawnDaemonAfterUpgrade
 var (
 	autostartInstalledFn   = daemon.AutostartInstalled
 	restartAutostartUnitFn = daemon.RestartAutostartUnit
-	ensureDaemonForTasksFn = ensureDaemonForTasks
+	ensureDaemonFn         = daemon.EnsureDaemon
 )
 
 // respawnDaemonAfterUpgrade restores the daemon that the upgrade/auto-update
@@ -89,10 +89,15 @@ var (
 // daemon back on its own. When the unit is installed, restart it through
 // systemctl/launchctl so the daemon stays supervised instead of being demoted
 // to an ad-hoc child that dies with the session and skips the next reboot
-// (#796). The unit runs unconditionally at login, so this branch is not gated
-// on enabled tasks — it restores exactly what was running before the upgrade.
-// Without a unit, or when the service manager call fails, fall back to the
-// task-gated ad-hoc spawn (the pre-#796 behavior).
+// (#796). Without a unit, or when the service manager call fails, spawn an
+// ad-hoc daemon.
+//
+// Both branches respawn unconditionally: callers only reach this function
+// after stopping a running daemon, and that daemon may have been serving
+// autoyes mode with zero enabled tasks. Gating the fallback on enabled tasks
+// left autoyes-only users without a daemon until the next af run (#813). The
+// task gate belongs only on the cold-start path (ensureDaemonForTasks), where
+// nothing was running and "no enabled tasks" means there is nothing to start.
 func respawnDaemonAfterUpgrade() {
 	if autostartInstalledFn() {
 		err := restartAutostartUnitFn()
@@ -102,13 +107,19 @@ func respawnDaemonAfterUpgrade() {
 		}
 		log.WarningLog.Printf("failed to restart the daemon autostart unit; falling back to an ad-hoc daemon: %v", err)
 	}
-	ensureDaemonForTasksFn()
+	if err := ensureDaemonFn(); err != nil {
+		log.ErrorLog.Printf("failed to respawn daemon after upgrade: %v", err)
+	}
 }
 
 // ensureDaemonForTasks starts the daemon when any enabled task exists, so
 // cron schedules are evaluated even if the user never toggles autoyes.
 // Failures are logged rather than surfaced: the TUI is fully usable without
 // the daemon, and the next af invocation retries.
+//
+// The enabled-task gate is correct here and only here: this is the cold-start
+// path (af launch), where no daemon was previously running. The post-upgrade
+// respawn path must not use it — see respawnDaemonAfterUpgrade (#813).
 func ensureDaemonForTasks() {
 	tasks, err := task.LoadTasks()
 	if err != nil {
