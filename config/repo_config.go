@@ -18,6 +18,12 @@ type RemoteHooks struct {
 	ListCmd   string `json:"list_cmd"`
 	AttachCmd string `json:"attach_cmd"`
 	DeleteCmd string `json:"delete_cmd"`
+	// TerminalCmd, when set, powers the Terminal tab for remote sessions: it
+	// is invoked with the session's hook name and should open an interactive
+	// shell in the remote workspace (vs attach_cmd, which attaches to the
+	// agent's own tmux session). Optional — empty means the Terminal tab
+	// keeps its "not available" fallback for remote sessions (#843).
+	TerminalCmd string `json:"terminal_cmd,omitempty"`
 }
 
 // Validate checks that the command strings required to operate a remote hook
@@ -32,6 +38,9 @@ type RemoteHooks struct {
 // (#738). list_cmd is intentionally not required here: import/sync paths treat
 // an empty list_cmd as "no remote sessions to enumerate" (see app/sync.go and
 // daemon/control.go), so requiring it would break that documented behavior.
+// terminal_cmd is likewise optional (#843): it gates a single opt-in feature
+// (the Terminal tab for remote sessions), and when empty that tab shows its
+// "not available" fallback instead of erroring.
 //
 // Callers receive hooks whose relative paths were already rewritten by
 // resolveCommandPaths, but resolution leaves empty values empty, so these
@@ -60,6 +69,7 @@ func (h RemoteHooks) resolveCommandPaths(repoRoot string) *RemoteHooks {
 	h.ListCmd = resolveHookCommandPath(repoRoot, h.ListCmd)
 	h.AttachCmd = resolveHookCommandPath(repoRoot, h.AttachCmd)
 	h.DeleteCmd = resolveHookCommandPath(repoRoot, h.DeleteCmd)
+	h.TerminalCmd = resolveHookCommandPath(repoRoot, h.TerminalCmd)
 	return &h
 }
 

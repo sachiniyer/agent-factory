@@ -101,8 +101,8 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 
 	// Rewrite relative hook command paths to absolute against repoRoot
 	// (#834). This is the single chokepoint for the rewrite: every exec of a
-	// hook command — launch/list/attach/delete, startup import, restore
-	// liveness, preview — receives its RemoteHooks from ResolveConfig, so
+	// hook command — launch/list/attach/delete/terminal, startup import,
+	// restore liveness, preview — receives its RemoteHooks from ResolveConfig, so
 	// resolving here covers them all. repoRoot is the main worktree root, so
 	// sessions in linked worktrees resolve hooks against the repository whose
 	// config file was loaded, never against a worktree path. The rewrite

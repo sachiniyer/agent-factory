@@ -106,10 +106,11 @@ func TestRepoConfigRemoteHooks(t *testing.T) {
 func TestRemoteHooksJSON(t *testing.T) {
 	t.Run("marshals correctly", func(t *testing.T) {
 		hooks := RemoteHooks{
-			LaunchCmd: "/path/to/launch.sh",
-			ListCmd:   "/path/to/list.sh",
-			AttachCmd: "/path/to/attach.sh",
-			DeleteCmd: "/path/to/delete.sh",
+			LaunchCmd:   "/path/to/launch.sh",
+			ListCmd:     "/path/to/list.sh",
+			AttachCmd:   "/path/to/attach.sh",
+			DeleteCmd:   "/path/to/delete.sh",
+			TerminalCmd: "/path/to/terminal.sh",
 		}
 
 		data, err := json.Marshal(hooks)
@@ -123,10 +124,19 @@ func TestRemoteHooksJSON(t *testing.T) {
 		assert.Equal(t, "/path/to/list.sh", parsed["list_cmd"])
 		assert.Equal(t, "/path/to/attach.sh", parsed["attach_cmd"])
 		assert.Equal(t, "/path/to/delete.sh", parsed["delete_cmd"])
+		assert.Equal(t, "/path/to/terminal.sh", parsed["terminal_cmd"])
+	})
+
+	t.Run("empty terminal_cmd is omitted from JSON", func(t *testing.T) {
+		// terminal_cmd is optional, so configs that never set it round-trip
+		// byte-identically to the pre-#843 format.
+		data, err := json.Marshal(RemoteHooks{LaunchCmd: "/a"})
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), "terminal_cmd")
 	})
 
 	t.Run("unmarshals correctly", func(t *testing.T) {
-		jsonStr := `{"launch_cmd":"/a","list_cmd":"/b","attach_cmd":"/c","delete_cmd":"/d"}`
+		jsonStr := `{"launch_cmd":"/a","list_cmd":"/b","attach_cmd":"/c","delete_cmd":"/d","terminal_cmd":"/e"}`
 		var hooks RemoteHooks
 		err := json.Unmarshal([]byte(jsonStr), &hooks)
 		require.NoError(t, err)
@@ -134,6 +144,7 @@ func TestRemoteHooksJSON(t *testing.T) {
 		assert.Equal(t, "/b", hooks.ListCmd)
 		assert.Equal(t, "/c", hooks.AttachCmd)
 		assert.Equal(t, "/d", hooks.DeleteCmd)
+		assert.Equal(t, "/e", hooks.TerminalCmd)
 	})
 
 	t.Run("omitted when nil in RepoConfig", func(t *testing.T) {
@@ -258,6 +269,16 @@ func TestRemoteHooksValidate(t *testing.T) {
 		assert.NoError(t, h.Validate())
 	})
 
+	t.Run("empty terminal_cmd is allowed", func(t *testing.T) {
+		// terminal_cmd is optional (#843): empty just disables the Terminal
+		// tab for remote sessions, it is never a validation error. full()
+		// leaves it empty, and setting it must validate too.
+		assert.NoError(t, full().Validate())
+		h := full()
+		h.TerminalCmd = "/bin/terminal"
+		assert.NoError(t, h.Validate())
+	})
+
 	cases := []struct {
 		name    string
 		mutate  func(*RemoteHooks)
@@ -307,10 +328,11 @@ func TestResolveHookCommandPath(t *testing.T) {
 // config struct.
 func TestRemoteHooksResolveCommandPaths(t *testing.T) {
 	orig := RemoteHooks{
-		LaunchCmd: "./hooks/launch.sh",
-		ListCmd:   "/abs/list.sh",
-		AttachCmd: "ssh-attach",
-		DeleteCmd: "hooks/delete.sh",
+		LaunchCmd:   "./hooks/launch.sh",
+		ListCmd:     "/abs/list.sh",
+		AttachCmd:   "ssh-attach",
+		DeleteCmd:   "hooks/delete.sh",
+		TerminalCmd: "./hooks/terminal.sh",
 	}
 	resolved := orig.resolveCommandPaths("/repo")
 
@@ -318,7 +340,9 @@ func TestRemoteHooksResolveCommandPaths(t *testing.T) {
 	assert.Equal(t, "/abs/list.sh", resolved.ListCmd)
 	assert.Equal(t, "ssh-attach", resolved.AttachCmd)
 	assert.Equal(t, "/repo/hooks/delete.sh", resolved.DeleteCmd)
+	assert.Equal(t, "/repo/hooks/terminal.sh", resolved.TerminalCmd)
 
 	assert.Equal(t, "./hooks/launch.sh", orig.LaunchCmd, "receiver must not be mutated")
 	assert.Equal(t, "hooks/delete.sh", orig.DeleteCmd, "receiver must not be mutated")
+	assert.Equal(t, "./hooks/terminal.sh", orig.TerminalCmd, "receiver must not be mutated")
 }

@@ -466,6 +466,11 @@ echo "=== Remote Session: $NAME ==="
 sleep 0.2
 `)
 
+	writeE2EScript(t, hooksDir, "terminal.sh", `
+NAME="$1"
+echo "=== Remote Shell: $NAME ==="
+`)
+
 	writeE2EScript(t, hooksDir, "delete.sh", `
 STATE_FILE="`+stateFile+`"
 NAME=""
@@ -487,7 +492,8 @@ echo "{\"name\": \"$NAME\", \"deleted\": true}"
     "launch_cmd": "./.agent-factory/hooks/launch.sh",
     "list_cmd": "./.agent-factory/hooks/list.sh",
     "attach_cmd": "./.agent-factory/hooks/attach.sh",
-    "delete_cmd": "./.agent-factory/hooks/delete.sh"
+    "delete_cmd": "./.agent-factory/hooks/delete.sh",
+    "terminal_cmd": "./.agent-factory/hooks/terminal.sh"
   }
 }`), 0644))
 
@@ -534,6 +540,7 @@ func TestE2ERemoteHooksRelativePaths(t *testing.T) {
 	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/list.sh"), hook.Hooks.ListCmd)
 	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/attach.sh"), hook.Hooks.AttachCmd)
 	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/delete.sh"), hook.Hooks.DeleteCmd)
+	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/terminal.sh"), hook.Hooks.TerminalCmd)
 
 	// Full lifecycle: launch_cmd, list_cmd (liveness), attach_cmd (preview),
 	// and delete_cmd all execute from a cwd outside the repo.

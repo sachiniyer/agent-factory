@@ -568,6 +568,26 @@ func (i *Instance) IsRemote() bool {
 	return i.backend.Type() == "remote"
 }
 
+// SupportsRemoteTerminal reports whether this instance can open an interactive
+// terminal on its remote machine — i.e. it uses the remote hook backend and
+// the optional terminal_cmd hook is configured (#843).
+func (i *Instance) SupportsRemoteTerminal() bool {
+	hb, ok := i.backend.(*HookBackend)
+	return ok && hb.HasTerminalCmd()
+}
+
+// AttachRemoteTerminal opens an interactive terminal on the remote machine via
+// the terminal_cmd hook. The returned channel is closed when the user detaches
+// or the terminal_cmd process exits. Errors when the instance is not backed by
+// remote hooks or terminal_cmd is not configured.
+func (i *Instance) AttachRemoteTerminal() (chan struct{}, error) {
+	hb, ok := i.backend.(*HookBackend)
+	if !ok {
+		return nil, fmt.Errorf("remote terminal is only available for remote sessions")
+	}
+	return hb.AttachTerminal(i)
+}
+
 // GetBackend returns the backend for the instance (mainly for testing).
 func (i *Instance) GetBackend() Backend {
 	return i.backend

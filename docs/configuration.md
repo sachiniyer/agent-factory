@@ -58,7 +58,8 @@ A repository can carry its own configuration in `<repo-root>/.agent-factory/conf
     "launch_cmd": "./infra/launch.sh",
     "list_cmd": "./infra/list.sh",
     "attach_cmd": "./infra/attach.sh",
-    "delete_cmd": "./infra/delete.sh"
+    "delete_cmd": "./infra/delete.sh",
+    "terminal_cmd": "./infra/terminal.sh"
   }
 }
 ```

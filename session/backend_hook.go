@@ -92,9 +92,9 @@ func (hp *hookPTY) ingest(chunk []byte) {
 
 // Slugify converts a title to a slug-safe string for hook scripts.
 // The slug is part of the public remote hook protocol documented in
-// docs/remote-hooks.md: launch_cmd, list_cmd, attach_cmd, and delete_cmd all
-// receive this value unless the instance was imported with an explicit
-// remote_meta.name.
+// docs/remote-hooks.md: launch_cmd, list_cmd, attach_cmd, delete_cmd, and
+// terminal_cmd all receive this value unless the instance was imported with
+// an explicit remote_meta.name.
 func Slugify(title string) string {
 	s := strings.ToLower(title)
 	s = strings.ReplaceAll(s, " ", "-")
@@ -410,6 +410,46 @@ func (b *HookBackend) Attach(i *Instance) (chan struct{}, error) {
 		cmd := exec.Command(b.Hooks.AttachCmd, slug)
 		if err := runHookAttachWithDetach(cmd, os.Stdin, os.Stdout, os.Stderr); err != nil {
 			log.ErrorLog.Printf("attach_cmd error: %v", err)
+		}
+	}()
+	return done, nil
+}
+
+// HasTerminalCmd reports whether the optional terminal_cmd hook is configured.
+// When false, the Terminal tab keeps its "not available" fallback for remote
+// sessions (#843).
+func (b *HookBackend) HasTerminalCmd() bool {
+	return strings.TrimSpace(b.Hooks.TerminalCmd) != ""
+}
+
+// AttachTerminal gives interactive terminal access to the remote workspace by
+// running terminal_cmd behind a local PTY, with the same detach-key handling
+// as Attach. It powers the Terminal tab for remote sessions (#843): where
+// attach_cmd connects to the AGENT's session, terminal_cmd opens a plain
+// shell on the remote machine (typically `ssh <box>` into the workspace).
+//
+// Unlike Attach, the background preview process is left running: it captures
+// the agent's attach_cmd stream over its own pipe, while terminal_cmd talks to
+// a separate shell over its own PTY, so the two cannot compete for output.
+func (b *HookBackend) AttachTerminal(i *Instance) (chan struct{}, error) {
+	if !b.HasTerminalCmd() {
+		return nil, fmt.Errorf("remote terminal is not configured: add a terminal_cmd to remote_hooks to enable the Terminal tab for remote sessions")
+	}
+
+	i.mu.RLock()
+	s := i.started
+	i.mu.RUnlock()
+	if !s {
+		return nil, fmt.Errorf("cannot open remote terminal for instance that has not been started")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		slug := hookNameForInstance(i)
+		cmd := exec.Command(b.Hooks.TerminalCmd, slug)
+		if err := runHookAttachWithDetach(cmd, os.Stdin, os.Stdout, os.Stderr); err != nil {
+			log.ErrorLog.Printf("terminal_cmd error: %v", err)
 		}
 	}()
 	return done, nil

@@ -12,7 +12,8 @@ Add remote hooks to the repo's own config file at `<repo-root>/.agent-factory/co
     "launch_cmd": "./.agent-factory/hooks/launch.sh",
     "list_cmd": "./.agent-factory/hooks/list.sh",
     "attach_cmd": "./.agent-factory/hooks/attach.sh",
-    "delete_cmd": "./.agent-factory/hooks/delete.sh"
+    "delete_cmd": "./.agent-factory/hooks/delete.sh",
+    "terminal_cmd": "./.agent-factory/hooks/terminal.sh"
   }
 }
 ```
@@ -31,7 +32,7 @@ The same rules apply to `remote_hooks` values still read from the deprecated leg
 
 Configuring `remote_hooks` enables the remote backend for that repo, but using it is explicit opt-in: press `N` in the TUI to create a remote session. Pressing `n` still creates a local tmux+git worktree session. When `remote_hooks` is absent, `N` is unavailable and all sessions are local.
 
-`launch_cmd`, `attach_cmd`, and `delete_cmd` are **required** — an empty value is rejected when the remote backend is resolved, with an error naming the missing field (e.g. `remote_hooks.launch_cmd is required`) rather than a cryptic `exec: no command` at operation time. `list_cmd` is **optional for import/sync only**: when it is empty, Agent Factory simply reports no remote sessions to enumerate (import/sync are skipped) and config validation does not reject it.
+`launch_cmd`, `attach_cmd`, and `delete_cmd` are **required** — an empty value is rejected when the remote backend is resolved, with an error naming the missing field (e.g. `remote_hooks.launch_cmd is required`) rather than a cryptic `exec: no command` at operation time. `list_cmd` is **optional for import/sync only**: when it is empty, Agent Factory simply reports no remote sessions to enumerate (import/sync are skipped) and config validation does not reject it. `terminal_cmd` is **optional**: when set it powers the Terminal tab for remote sessions; when empty that tab shows a "not available" fallback and nothing else changes.
 
 > **Note:** `list_cmd` is **required for restore**. To carry remote sessions across restarts, Agent Factory re-runs `list_cmd` at startup to confirm each persisted session is still alive (#645). If `list_cmd` is empty, restore cannot verify liveness and the session is dropped with an actionable error naming the missing field — so configure `list_cmd` whenever you want remote sessions to survive restarts.
 
@@ -55,7 +56,7 @@ The `<name>` value passed to hooks is a slug derived from the session title:
 
 Examples: `"Fix Auth Bug"` becomes `fix-auth-bug`, `"my_app"` becomes `myapp`, and `"af-test"` stays `af-test`.
 
-This slug is the stable remote identity. Agent Factory passes it to `launch_cmd --name`, expects `list_cmd` to report it as `name`, passes it to `delete_cmd --name`, and passes it as the positional argument to `attach_cmd`. There is no hidden hash suffix.
+This slug is the stable remote identity. Agent Factory passes it to `launch_cmd --name`, expects `list_cmd` to report it as `name`, passes it to `delete_cmd --name`, and passes it as the positional argument to `attach_cmd` and `terminal_cmd`. There is no hidden hash suffix.
 
 When Agent Factory imports an existing remote session from `list_cmd`, the reported `name` is stored in `remote_meta.name` and remains authoritative even if the display title differs.
 
@@ -132,6 +133,18 @@ done
 ```
 
 Each iteration becomes the new preview frame. `capture-pane -e` keeps colors; they are preserved in the pane.
+
+### `terminal_cmd` (optional)
+
+Opens an interactive terminal on the machine hosting a session — this is what the TUI's **Terminal tab** runs for remote sessions. Where `attach_cmd` connects to the *agent's* session (e.g. `ssh -t host "tmux attach"`), `terminal_cmd` should drop the user into a *plain shell* in the session's workspace, the remote analogue of the local worktree terminal.
+
+**Arguments:** `<name>`
+
+**No JSON output** — like `attach_cmd`, this command takes over the terminal. It should behave like `ssh -t host "cd /workspace/$NAME && exec \$SHELL -l"`.
+
+Agent Factory runs this command behind a local PTY with the same detach-key handling as `attach_cmd`: the configured detach key terminates the local `terminal_cmd` process and returns to the TUI. The remote shell receives a hangup when the SSH client dies; use a remote tmux/screen session inside your script if you want the shell to survive detach.
+
+When `terminal_cmd` is not configured, the Terminal tab shows a "not available" fallback for remote sessions and nothing else changes. Unlike `attach_cmd`, this command is never used for preview capture — it only runs when the user attaches from the Terminal tab.
 
 ## Example
 
