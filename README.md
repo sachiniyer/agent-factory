@@ -65,7 +65,7 @@ See [docs/cli.md](docs/cli.md) for the complete command reference.
 
 ### Remote sessions
 
-With `remote_hooks` configured in a repo, `N` launches sessions on a remote backend (your own scripts: launch, list, attach, delete) and shows them alongside local ones with the same attach/kill/preview experience. See [docs/remote-hooks.md](docs/remote-hooks.md) for the script protocol.
+With `remote_hooks` configured in a repo, `N` launches sessions on a remote backend (your own scripts: launch, list, attach, delete, terminal) and shows them alongside local ones with the same attach/kill/preview experience. See [docs/remote-hooks.md](docs/remote-hooks.md) for the script protocol.
 
 ### Configuration
 
