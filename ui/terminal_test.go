@@ -3,11 +3,13 @@ package ui
 import (
 	"fmt"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -739,4 +741,101 @@ func TestTerminalAttachForInstanceRefusesUnboundInstance(t *testing.T) {
 	if _, err := tp.AttachForInstance(inst); err == nil {
 		t.Fatal("AttachForInstance must refuse to attach an instance it cannot bind")
 	}
+}
+
+// makeRemoteInstance creates a started instance backed by a HookBackend with
+// the given hooks, mirroring the preview_remote_test idiom.
+func makeRemoteInstance(t *testing.T, title string, hooks config.RemoteHooks) *session.Instance {
+	t.Helper()
+	instance, err := session.NewInstance(session.InstanceOptions{
+		Title:   title,
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	instance.SetBackend(&session.HookBackend{Hooks: hooks})
+	instance.SetStartedForTest(true)
+	require.True(t, instance.IsRemote(), "precondition: instance must report as remote")
+	return instance
+}
+
+// TestTerminalRemoteFallbackStates covers the #843 Terminal-tab UX for remote
+// sessions: with terminal_cmd configured the pane invites the user to attach;
+// without it the pane keeps the "not available" fallback and names the config
+// knob that enables the feature.
+func TestTerminalRemoteFallbackStates(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	t.Run("terminal_cmd configured shows attach prompt", func(t *testing.T) {
+		instance := makeRemoteInstance(t, "remote-843-on", config.RemoteHooks{TerminalCmd: "/bin/true"})
+
+		tp := NewTerminalPane()
+		tp.SetSize(80, 30)
+		require.NoError(t, tp.UpdateContent(instance))
+
+		tp.mu.Lock()
+		require.True(t, tp.fallback, "remote terminal is interactive-only; the pane stays in fallback mode")
+		tp.mu.Unlock()
+		rendered := tp.String()
+		require.Contains(t, rendered, "Press Enter to open a terminal",
+			"must invite the user to attach when terminal_cmd is configured")
+	})
+
+	t.Run("terminal_cmd absent keeps not-available fallback", func(t *testing.T) {
+		instance := makeRemoteInstance(t, "remote-843-off", config.RemoteHooks{})
+
+		tp := NewTerminalPane()
+		tp.SetSize(80, 30)
+		require.NoError(t, tp.UpdateContent(instance))
+
+		tp.mu.Lock()
+		require.True(t, tp.fallback)
+		require.Contains(t, tp.fallbackText, "not available for remote sessions")
+		require.Contains(t, tp.fallbackText, "terminal_cmd",
+			"fallback must name the config knob that enables the feature")
+		tp.mu.Unlock()
+	})
+}
+
+// TestTerminalAttachForInstanceRemote verifies the attach path for remote
+// instances (#843): with terminal_cmd configured AttachForInstance runs the
+// hook (bypassing the local tmux session cache); without it the attach is
+// refused with an error naming terminal_cmd.
+func TestTerminalAttachForInstanceRemote(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	t.Run("not configured refuses with actionable error", func(t *testing.T) {
+		instance := makeRemoteInstance(t, "remote-843-noattach", config.RemoteHooks{})
+
+		tp := NewTerminalPane()
+		_, err := tp.AttachForInstance(instance)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "terminal_cmd")
+	})
+
+	t.Run("configured runs terminal_cmd with the session slug", func(t *testing.T) {
+		dir := t.TempDir()
+		argsFile := filepath.Join(dir, "terminal-args")
+		script := filepath.Join(dir, "terminal.sh")
+		require.NoError(t, os.WriteFile(script,
+			[]byte("#!/bin/sh\necho \"$1\" > \""+argsFile+"\"\n"), 0755))
+
+		instance := makeRemoteInstance(t, "remote-843-attach", config.RemoteHooks{TerminalCmd: script})
+
+		tp := NewTerminalPane()
+		done, err := tp.AttachForInstance(instance)
+		require.NoError(t, err)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("terminal_cmd did not exit")
+		}
+
+		raw, err := os.ReadFile(argsFile)
+		require.NoError(t, err, "terminal_cmd should have run")
+		require.Equal(t, session.Slugify("remote-843-attach"), strings.TrimSpace(string(raw)),
+			"terminal_cmd must receive the session slug")
+	})
 }

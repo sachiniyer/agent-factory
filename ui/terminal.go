@@ -117,10 +117,17 @@ func (t *TerminalPane) UpdateContent(instance *session.Instance) error {
 		return nil
 	}
 
-	// Remote instances have no local worktree, so there's no terminal
-	// session to open. Show the preview pane output instead.
+	// Remote instances have no local worktree, so there's no local tmux
+	// session to capture. When terminal_cmd is configured the tab is an
+	// interactive-only surface (#843): prompt the user to attach. Otherwise
+	// keep the "not available" fallback and name the config knob that
+	// enables it.
 	if instance.IsRemote() {
-		t.setFallbackState("Terminal tab not available for remote sessions.\nUse the Preview tab to see session output.")
+		if instance.SupportsRemoteTerminal() {
+			t.setFallbackState("Press Enter to open a terminal on the remote machine.")
+		} else {
+			t.setFallbackState("Terminal tab not available for remote sessions.\nConfigure remote_hooks.terminal_cmd to enable it.\nUse the Preview tab to see session output.")
+		}
 		return nil
 	}
 
@@ -289,6 +296,17 @@ func (t *TerminalPane) Attach() (chan struct{}, error) {
 func (t *TerminalPane) AttachForInstance(instance *session.Instance) (chan struct{}, error) {
 	if instance == nil {
 		return nil, fmt.Errorf("no terminal session to attach to")
+	}
+	// Remote instances bypass the local tmux session cache entirely: the
+	// terminal_cmd hook runs behind its own PTY with the same detach-key
+	// plumbing as the remote agent attach (#843). The captured-instance
+	// semantics of this method are preserved — the hook is invoked on the
+	// instance the user pressed Enter on, not a drifted selection (#716).
+	if instance.IsRemote() {
+		if !instance.SupportsRemoteTerminal() {
+			return nil, fmt.Errorf("remote terminal is not configured: add a terminal_cmd to remote_hooks to enable the Terminal tab for remote sessions")
+		}
+		return instance.AttachRemoteTerminal()
 	}
 	t.mu.Lock()
 	if err := t.ensureSessionLocked(instance); err != nil {

@@ -12,6 +12,7 @@ For the full protocol specification, see [docs/remote-hooks.md](../../docs/remot
 | `list.sh` | List all running remote sessions |
 | `attach.sh` | Attach interactively to a session |
 | `delete.sh` | Tear down a session and clean up |
+| `terminal.sh` | Open an interactive shell in a session's workspace (optional — powers the Terminal tab) |
 
 ## Quick start
 
@@ -29,7 +30,8 @@ Then configure your repo to use them in `<repo-root>/.agent-factory/config.json`
     "launch_cmd": "/path/to/your/hooks/launch.sh",
     "list_cmd": "/path/to/your/hooks/list.sh",
     "attach_cmd": "/path/to/your/hooks/attach.sh",
-    "delete_cmd": "/path/to/your/hooks/delete.sh"
+    "delete_cmd": "/path/to/your/hooks/delete.sh",
+    "terminal_cmd": "/path/to/your/hooks/terminal.sh"
   }
 }
 ```

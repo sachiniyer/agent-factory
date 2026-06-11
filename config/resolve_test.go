@@ -163,7 +163,8 @@ func TestResolveConfigResolvesHookPaths(t *testing.T) {
 			"launch_cmd": "./.agent-factory/hooks/launch.sh",
 			"list_cmd": "infra/list.sh",
 			"attach_cmd": "/abs/attach.sh",
-			"delete_cmd": "bash"
+			"delete_cmd": "bash",
+			"terminal_cmd": "./.agent-factory/hooks/terminal.sh"
 		}}`)
 
 		res, err := ResolveConfig(repoRoot)
@@ -173,6 +174,25 @@ func TestResolveConfigResolvesHookPaths(t *testing.T) {
 		assert.Equal(t, filepath.Join(repoRoot, "infra/list.sh"), res.RemoteHooks.ListCmd)
 		assert.Equal(t, "/abs/attach.sh", res.RemoteHooks.AttachCmd, "absolute path passes through")
 		assert.Equal(t, "bash", res.RemoteHooks.DeleteCmd, "bare name keeps $PATH lookup")
+		assert.Equal(t, filepath.Join(repoRoot, ".agent-factory/hooks/terminal.sh"), res.RemoteHooks.TerminalCmd)
+	})
+
+	t.Run("missing terminal_cmd stays empty after resolution", func(t *testing.T) {
+		// Empty must survive the rewrite untouched (#843): the Terminal tab
+		// treats empty as "feature off", and a phantom path here would flip
+		// it on against a non-existent script.
+		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
+		writeInRepoConfig(t, repoRoot, `{"remote_hooks": {
+			"launch_cmd": "./hooks/launch.sh",
+			"list_cmd": "./hooks/list.sh",
+			"attach_cmd": "./hooks/attach.sh",
+			"delete_cmd": "./hooks/delete.sh"
+		}}`)
+
+		res, err := ResolveConfig(repoRoot)
+		require.NoError(t, err)
+		require.NotNil(t, res.RemoteHooks)
+		assert.Empty(t, res.RemoteHooks.TerminalCmd)
 	})
 
 	t.Run("legacy-location relative paths get the same resolution", func(t *testing.T) {
