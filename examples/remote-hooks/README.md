@@ -17,8 +17,9 @@ For the full protocol specification, see [docs/remote-hooks.md](../../docs/remot
 ## Quick start
 
 ```bash
-cp examples/remote-hooks/*.sh /path/to/your/hooks/
-chmod +x /path/to/your/hooks/*.sh
+mkdir -p .agent-factory/hooks
+cp examples/remote-hooks/*.sh .agent-factory/hooks/
+chmod +x .agent-factory/hooks/*.sh
 # Edit each script to add your infrastructure logic
 ```
 
@@ -27,11 +28,11 @@ Then configure your repo to use them in `<repo-root>/.agent-factory/config.json`
 ```json
 {
   "remote_hooks": {
-    "launch_cmd": "/path/to/your/hooks/launch.sh",
-    "list_cmd": "/path/to/your/hooks/list.sh",
-    "attach_cmd": "/path/to/your/hooks/attach.sh",
-    "delete_cmd": "/path/to/your/hooks/delete.sh",
-    "terminal_cmd": "/path/to/your/hooks/terminal.sh"
+    "launch_cmd": "./.agent-factory/hooks/launch.sh",
+    "list_cmd": "./.agent-factory/hooks/list.sh",
+    "attach_cmd": "./.agent-factory/hooks/attach.sh",
+    "delete_cmd": "./.agent-factory/hooks/delete.sh",
+    "terminal_cmd": "./.agent-factory/hooks/terminal.sh"
   }
 }
 ```
