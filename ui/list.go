@@ -43,6 +43,10 @@ var autoYesStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.Color("#1a1a1a"))
 
+// deletingTitleColor dims a mid-deletion row's title to the description gray
+// so it visually recedes while its teardown runs in the background (#844).
+var deletingTitleColor = lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"}
+
 // InstanceRenderer handles rendering of session.Instance objects
 type InstanceRenderer struct {
 	spinner *spinner.Model
@@ -69,9 +73,10 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	}
 
 	// add spinner next to title if it's running
+	status := i.GetStatus()
 	var join string
-	switch i.GetStatus() {
-	case session.Running, session.Loading:
+	switch status {
+	case session.Running, session.Loading, session.Deleting:
 		join = fmt.Sprintf("%s ", r.spinner.View())
 	case session.Ready:
 		join = readyStyle.Render(readyIcon)
@@ -82,6 +87,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	titleText := i.Title
 	if i.IsRemote() {
 		titleText = "[remote] " + titleText
+	}
+	// A deleting row keeps spinning but is explicitly marked and dimmed so it
+	// reads as "going away", not "busy working" (#844).
+	if status == session.Deleting {
+		titleText = "[deleting] " + titleText
+		titleS = titleS.Foreground(deletingTitleColor)
 	}
 	widthAvail := r.width - 3 - runewidth.StringWidth(prefix) - 1
 	if widthAvail <= 0 {

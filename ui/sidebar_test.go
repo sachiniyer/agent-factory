@@ -569,3 +569,25 @@ func TestInstanceRendererNarrowTerminalPRNoTail(t *testing.T) {
 			terminalW, prLine)
 	}
 }
+
+// TestInstanceRendererDeletingMarker pins the #844 sidebar treatment: a row
+// whose teardown is running in the background must carry an explicit
+// "[deleting]" marker (the spinner alone reads as "busy working").
+func TestInstanceRendererDeletingMarker(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "going-away",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+
+	inst.SetStatus(session.Ready)
+	before, _, _ := renderForTerminal(t, 120, inst, &spin)
+	assert.NotContains(t, before, "[deleting]")
+
+	inst.SetStatus(session.Deleting)
+	after, _, _ := renderForTerminal(t, 120, inst, &spin)
+	assert.Contains(t, after, "[deleting]", "deleting rows must be explicitly marked")
+	assert.Contains(t, after, "going-away", "the title must remain visible while deleting")
+}

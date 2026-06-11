@@ -401,6 +401,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case instanceChangedMsg:
 		return m, m.selectionChanged()
+	case startKillMsg:
+		// The row was already flipped to Deleting synchronously by the kill
+		// confirmation; dispatch the slow teardown off the event loop (#844).
+		return m, m.killInstanceCmd(msg.title)
+	case instanceKilledMsg:
+		return m.handleInstanceKilled(msg)
 	case repaintAfterDetachMsg:
 		// Trigger an immediate repaint with whatever content is already
 		// cached on the panes (rendered when bubbletea's main loop calls
@@ -1012,6 +1018,22 @@ func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
 type hideErrMsg struct{}
 type previewTickMsg struct{}
 type instanceChangedMsg struct{}
+
+// startKillMsg is emitted by the kill confirmation action right after the
+// target row has been marked Deleting on the event loop. Its handler
+// dispatches killInstanceCmd, which runs the slow teardown in a background
+// goroutine (#844).
+type startKillMsg struct {
+	title string
+}
+
+// instanceKilledMsg reports completion of an async kill. A nil err means the
+// daemon tore the session down and deleted its record; a non-nil err means
+// the session is still alive and the row must become retryable again.
+type instanceKilledMsg struct {
+	title string
+	err   error
+}
 
 // runOnEventLoopMsg is a test-only primitive: when received by Update, it
 // runs fn with the home pointer on the tea goroutine, then closes done.

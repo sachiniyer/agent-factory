@@ -138,40 +138,37 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	}
 }
 
-// handleKill handles the kill/delete session action.
+// handleKill handles the kill/delete session action. The confirmation only
+// flips the row to Deleting; the slow teardown (remote delete_cmd over ssh,
+// tmux kill, worktree removal) runs in killInstanceCmd's background goroutine
+// so the event loop never blocks on it (#844).
 func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil || selected.GetStatus() == session.Loading {
 		return m, nil
+	}
+	if selected.GetStatus() == session.Deleting {
+		return m, m.handleError(fmt.Errorf("session '%s' is already being deleted", selected.Title))
 	}
 
 	// Capture the title at confirmation time so that background tick events
 	// cannot change which instance we operate on.
 	selectedTitle := selected.Title
 
-	tw := m.contentPane.TabbedWindow()
+	// Runs synchronously in the confirmation overlay's OnConfirm, on the
+	// event loop — keep it fast. Marking Deleting here (not in the background
+	// cmd) guarantees the row is visibly deleting and kill/attach are fenced
+	// off before any other event can be processed.
 	killAction := func() tea.Msg {
-		tw.CleanupTerminalForInstance(selectedTitle)
-
-		var repoName string
-		var repoErr error = fmt.Errorf("instance not found")
 		for _, inst := range m.sidebar.GetInstances() {
 			if inst.Title == selectedTitle {
-				repoName, repoErr = inst.RepoName()
-				break
+				inst.SetStatus(session.Deleting)
+				return startKillMsg{title: selectedTitle}
 			}
 		}
-		if err := killSessionThroughDaemon(selectedTitle, m.repoID); err != nil {
-			log.ErrorLog.Printf("could not kill instance: %v", err)
-			return fmt.Errorf("failed to kill session '%s': %w", selectedTitle, err)
-		}
-		if repoErr == nil {
-			m.sidebar.RemoveInstanceByTitleWithRepo(selectedTitle, repoName)
-		} else {
-			m.sidebar.RemoveInstanceByTitle(selectedTitle)
-		}
-
-		return instanceChangedMsg{}
+		// The row was removed (e.g. by an external kill picked up by the
+		// background refresh) while the dialog was open; nothing to do.
+		return nil
 	}
 
 	// Check for uncommitted changes in the worktree (skip for remote sessions
@@ -188,6 +185,62 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		message += "\n\n" + warning
 	}
 	return m, m.confirmAction(message, killAction)
+}
+
+// killInstanceCmd returns a tea.Cmd that performs the actual session teardown
+// off the event loop. The daemon RPC blocks for the whole teardown — for
+// remote instances delete_cmd often runs over ssh and takes tens of seconds —
+// which is exactly why this must not run on the Update goroutine (#844). The
+// teardown itself (delete_cmd → tmux kill → worktree removal, #802 ordering)
+// is unchanged: it still goes through daemon.KillSession, which also keeps
+// the title blocked against reuse until the teardown completes.
+func (m *home) killInstanceCmd(title string) tea.Cmd {
+	tw := m.contentPane.TabbedWindow()
+	repoID := m.repoID
+	return func() tea.Msg {
+		tw.CleanupTerminalForInstance(title)
+		if err := killSessionThroughDaemon(title, repoID); err != nil {
+			log.ErrorLog.Printf("could not kill instance: %v", err)
+			return instanceKilledMsg{title: title, err: err}
+		}
+		return instanceKilledMsg{title: title}
+	}
+}
+
+// handleInstanceKilled finalizes an async kill on the event loop. On success
+// the row is removed from the sidebar (the daemon already deleted the disk
+// record). On failure the row flips back to Ready so the user can retry the
+// kill, and the underlying error — the evidence, per #797 — lands in the
+// error box.
+func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		for _, inst := range m.sidebar.GetInstances() {
+			if inst.Title == msg.title && inst.GetStatus() == session.Deleting {
+				inst.SetStatus(session.Ready)
+				break
+			}
+		}
+		return m, m.handleError(fmt.Errorf("failed to kill session '%s': %w", msg.title, msg.err))
+	}
+
+	// The TUI's in-memory instance is untouched by the daemon-side teardown,
+	// so its repo name is still resolvable here for repo-section bookkeeping.
+	// The row may already be gone when the background refresh noticed the
+	// deleted disk record first — both removals are no-ops then.
+	var repoName string
+	var repoErr error = fmt.Errorf("instance not found")
+	for _, inst := range m.sidebar.GetInstances() {
+		if inst.Title == msg.title {
+			repoName, repoErr = inst.RepoName()
+			break
+		}
+	}
+	if repoErr == nil {
+		m.sidebar.RemoveInstanceByTitleWithRepo(msg.title, repoName)
+	} else {
+		m.sidebar.RemoveInstanceByTitle(msg.title)
+	}
+	return m, m.selectionChanged()
 }
 
 // killConfirmationWarning returns the data-loss warning line for the kill
@@ -222,7 +275,13 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	// Instance selected
 	if sel.Kind == ui.SectionInstances {
 		selected := m.sidebar.GetSelectedInstance()
-		if selected == nil || selected.GetStatus() == session.Loading || !selected.TmuxAlive() {
+		if selected == nil || selected.GetStatus() == session.Loading {
+			return m, nil
+		}
+		if selected.GetStatus() == session.Deleting {
+			return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
+		}
+		if !selected.TmuxAlive() {
 			return m, nil
 		}
 		// Capture the instance at Enter-press time — the synchronous moment the
