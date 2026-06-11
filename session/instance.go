@@ -19,6 +19,11 @@ const (
 	Ready
 	// Loading is if the instance is loading (if we are setting it up).
 	Loading
+	// Deleting is if the instance is being torn down asynchronously after the
+	// user confirmed a kill. Like Loading it is transient in-memory state: it
+	// is never persisted (see mergeInstancesWithDisk) and the row is removed
+	// or reverted when the background teardown finishes (#844).
+	Deleting
 )
 
 // Instance is a running instance of claude code.
@@ -295,6 +300,22 @@ func (i *Instance) RepoName() (string, error) {
 func (i *Instance) SetStatus(status Status) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.Status = status
+}
+
+// SetStatusIfNotDeleting sets the status under the instance mutex unless the
+// instance is mid-deletion. The metadata tick runs off the event loop and
+// races the async kill flow (#844): between its own status check and its
+// store, the user can confirm a kill, and an unconditional Running/Ready
+// write would clobber the Deleting marker — re-enabling kill/attach on a
+// session whose teardown is already in flight. Only the kill completion
+// handler may move an instance out of Deleting, via SetStatus.
+func (i *Instance) SetStatusIfNotDeleting(status Status) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.Status == Deleting {
+		return
+	}
 	i.Status = status
 }
 

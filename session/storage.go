@@ -106,6 +106,12 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 //   - Loading instances are never persisted — their worktree is not yet
 //     populated, so FromInstanceData cannot restore them, and an orphaned
 //     record would block title reuse via the daemon's collision check (#551).
+//   - Deleting instances are likewise never persisted (#844): their teardown
+//     is in flight, and writing them back would resurrect the record after
+//     the daemon deletes it from disk. While teardown is still running the
+//     existing disk record (written before the kill) survives via the
+//     disk-only branch below, so a TUI crash mid-deletion does not lose the
+//     session; once the daemon removes the record, nothing rewrites it.
 //   - Non-started instances are dropped.
 //   - An in-memory instance whose disk record was removed by another process
 //     AND whose backing session is dead is dropped instead of being
@@ -129,7 +135,7 @@ func mergeInstancesWithDisk(instances []*Instance, diskData []InstanceData, know
 	merged := make([]InstanceData, 0, len(instances)+len(diskData))
 	memTitles := make(map[string]bool, len(instances))
 	for _, instance := range instances {
-		if instance.GetStatus() == Loading {
+		if status := instance.GetStatus(); status == Loading || status == Deleting {
 			continue
 		}
 		if !instance.Started() {

@@ -53,19 +53,26 @@ func runMetadataTick(instances []*session.Instance) {
 	tickStart := time.Now()
 	detachTraceMark("runMetadataTick-entry")
 	for _, instance := range instances {
-		if !instance.Started() || instance.GetStatus() == session.Loading {
+		// Deleting instances are skipped like Loading ones: their backing
+		// session is being torn down, so the capture-pane/status shell-outs
+		// would poke a dying session, and a status write would clobber the
+		// Deleting marker (#844).
+		if status := instance.GetStatus(); !instance.Started() || status == session.Loading || status == session.Deleting {
 			continue
 		}
 		instStart := time.Now()
 		instance.CheckAndHandleTrustPrompt()
 		updated, prompt := instance.HasUpdated()
+		// SetStatusIfNotDeleting, not SetStatus: the user can confirm a kill
+		// between this tick's status check above and the write below, and an
+		// unconditional write would un-mark the deleting row (#844).
 		if updated {
-			instance.SetStatus(session.Running)
+			instance.SetStatusIfNotDeleting(session.Running)
 		} else {
 			if prompt {
 				instance.TapEnter()
 			} else {
-				instance.SetStatus(session.Ready)
+				instance.SetStatusIfNotDeleting(session.Ready)
 			}
 		}
 		// Per-instance elapsed makes contention visible: if 1 of N tmux
@@ -202,7 +209,7 @@ func (m *home) mergePendingInstances() int {
 				if existing.Title != data.Title {
 					continue
 				}
-				if instanceCollisionShouldSkip(existing.GetWorktreePath(), data.Worktree.WorktreePath, existing.CreatedAt, data.CreatedAt, existing.TmuxAlive(), existing.GetStatus() == session.Loading) {
+				if instanceCollisionShouldSkip(existing.GetWorktreePath(), data.Worktree.WorktreePath, existing.CreatedAt, data.CreatedAt, existing.TmuxAlive(), isTransientStatus(existing.GetStatus())) {
 					log.WarningLog.Printf("skipping pending instance %q: already exists and is alive", data.Title)
 					skip = true
 				} else {
@@ -305,7 +312,7 @@ func (m *home) refreshExternalInstances() bool {
 				if existing.Title != d.Title {
 					continue
 				}
-				if !instanceCollisionShouldSkip(existing.GetWorktreePath(), d.Worktree.WorktreePath, existing.CreatedAt, d.CreatedAt, existing.TmuxAlive(), existing.GetStatus() == session.Loading) {
+				if !instanceCollisionShouldSkip(existing.GetWorktreePath(), d.Worktree.WorktreePath, existing.CreatedAt, d.CreatedAt, existing.TmuxAlive(), isTransientStatus(existing.GetStatus())) {
 					skip = false
 					shouldReplace = true
 				}
@@ -368,6 +375,12 @@ func (m *home) refreshExternalInstances() bool {
 // always swap it, orphaning the pointer the instanceStartedMsg handler later
 // passes to ReplaceInstance and leaving two same-title sidebar rows.
 //
+// A Deleting sidebar instance is likewise never replaced (#844): its on-disk
+// record legitimately still exists until the background teardown finishes,
+// and swapping the row for a disk-built copy would erase the Deleting marker —
+// resurrecting a kill-enabled row for a session that is mid-teardown. The
+// transient flag below covers both states.
+//
 // The incoming instance supersedes the existing one when:
 //   - both worktree paths are known and differ — a scheduled task rerun
 //     creates a new worktree with a numeric suffix while reusing the tmux
@@ -380,8 +393,8 @@ func (m *home) refreshExternalInstances() bool {
 //     TmuxAlive() can then distinguish them; the newer CreatedAt can (#765).
 //
 // Otherwise, fall back to the tmuxAlive signal.
-func instanceCollisionShouldSkip(existingWorktreePath, incomingWorktreePath string, existingCreatedAt, incomingCreatedAt time.Time, tmuxAlive, existingLoading bool) bool {
-	if existingLoading {
+func instanceCollisionShouldSkip(existingWorktreePath, incomingWorktreePath string, existingCreatedAt, incomingCreatedAt time.Time, tmuxAlive, existingTransient bool) bool {
+	if existingTransient {
 		return true
 	}
 	if existingWorktreePath != "" && incomingWorktreePath != "" && existingWorktreePath != incomingWorktreePath {
@@ -391,6 +404,14 @@ func instanceCollisionShouldSkip(existingWorktreePath, incomingWorktreePath stri
 		return false
 	}
 	return tmuxAlive
+}
+
+// isTransientStatus reports whether an in-memory sidebar instance is in a
+// state owned by an in-flight TUI operation — Loading (creation, #808) or
+// Deleting (async kill, #844) — during which background syncs must neither
+// replace nor reap it.
+func isTransientStatus(status session.Status) bool {
+	return status == session.Loading || status == session.Deleting
 }
 
 func upsertInstanceDataByTitle(existing, incoming []session.InstanceData) []session.InstanceData {

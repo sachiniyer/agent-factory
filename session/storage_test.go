@@ -499,6 +499,60 @@ func TestRepoSaveDropsLoadingFromMemory(t *testing.T) {
 	assert.Empty(t, result, "Loading instance must not be persisted to disk (#551)")
 }
 
+// TestRepoSaveDropsDeletingFromMemory is the #844 resurrection guard. While
+// an async kill is in flight the TUI's in-memory instance is Deleting and its
+// backing session can still look alive. Once the daemon finishes the teardown
+// and deletes the disk record, a TUI save must NOT re-persist the instance —
+// the "alive but disk-missing" rule (#819) that protects live sessions from
+// external file wipes would otherwise resurrect the killed session's record.
+func TestRepoSaveDropsDeletingFromMemory(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	// Alive backend + started + empty disk: exactly the shape #819 preserves —
+	// unless the instance is Deleting.
+	deleting := makeAliveInstance("mid-teardown", repoPath)
+	deleting.Status = Deleting
+
+	storage, err := NewStorage(ms, repoID)
+	require.NoError(t, err)
+
+	require.NoError(t, storage.SaveInstances([]*Instance{deleting}))
+
+	result := readDisk(t, ms, repoPath)
+	assert.Empty(t, result, "Deleting instance must never be persisted (#844)")
+}
+
+// TestRepoSavePreservesDiskRecordWhileDeleting covers the in-flight window of
+// an async kill: the daemon has not yet deleted the disk record, and a TUI
+// save runs. The record must survive untouched (so a TUI crash mid-deletion
+// loses nothing) and must keep its pre-kill status — Deleting itself is never
+// written to disk.
+func TestRepoSavePreservesDiskRecordWhileDeleting(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	seedDisk(t, ms, repoPath, []InstanceData{
+		{Title: "mid-teardown", Path: repoPath, Status: Running},
+	})
+
+	deleting := makeAliveInstance("mid-teardown", repoPath)
+	deleting.Status = Deleting
+
+	storage, err := NewStorage(ms, repoID)
+	require.NoError(t, err)
+
+	require.NoError(t, storage.SaveInstances([]*Instance{deleting}))
+
+	result := readDisk(t, ms, repoPath)
+	require.Len(t, result, 1, "the pre-kill disk record must survive the save")
+	assert.Equal(t, "mid-teardown", result[0].Title)
+	assert.Equal(t, Running, result[0].Status,
+		"the Deleting marker is in-memory only and must not reach disk")
+}
+
 // TestRepoSaveReapsLegacyLoadingGhost verifies that an older binary's
 // orphaned Loading record on disk is reaped on the next TUI save, even
 // when the in-memory state does not include a same-titled instance. The

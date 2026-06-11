@@ -116,3 +116,23 @@ func TestGetGitWorktree_RaceWithStart(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestSetStatusIfNotDeleting guards the #844 status fence: the metadata tick's
+// Running/Ready writes must not clobber a Deleting marker, while normal status
+// flow stays unaffected and the kill completion handler (which uses SetStatus)
+// can still move the instance out of Deleting.
+func TestSetStatusIfNotDeleting(t *testing.T) {
+	i := &Instance{Status: Ready}
+
+	i.SetStatusIfNotDeleting(Running)
+	require.Equal(t, Running, i.GetStatus(), "non-deleting status updates must pass through")
+
+	i.SetStatus(Deleting)
+	i.SetStatusIfNotDeleting(Running)
+	require.Equal(t, Deleting, i.GetStatus(), "tick writes must not clobber Deleting")
+	i.SetStatusIfNotDeleting(Ready)
+	require.Equal(t, Deleting, i.GetStatus())
+
+	i.SetStatus(Ready)
+	require.Equal(t, Ready, i.GetStatus(), "the kill handler's unconditional SetStatus must still work")
+}
