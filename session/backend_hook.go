@@ -165,15 +165,23 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 		// list_cmd is optional at config-validation time (import/sync treat
 		// an empty list_cmd as "no remote sessions to enumerate", #738), but
 		// restore has no other way to verify liveness. An empty list_cmd here
-		// would defer to exec.Command(""), which isAliveWithTimeout swallows
-		// into a false, surfacing the misleading "no longer exists" message
-		// below as if the session had been deleted remotely. Fail fast with an
-		// actionable message that names the missing field instead (#753).
+		// would surface as an opaque exec failure from isAliveWithTimeout.
+		// Fail fast with an actionable message that names the missing field
+		// instead (#753).
 		if strings.TrimSpace(b.Hooks.ListCmd) == "" {
 			return fmt.Errorf("cannot restore remote session %q: list_cmd is required for restore (currently empty in config; add a list_cmd to remote_hooks so the agent can verify the remote session is still alive)", i.Title)
 		}
-		if !b.isAliveWithTimeout(i, restoreAliveTimeout) {
-			return fmt.Errorf("remote session %q no longer exists in list_cmd output", i.Title)
+		// Distinguish "list_cmd could not be run" from "list_cmd ran and the
+		// session is absent" (#841): the first is a local config/network
+		// problem, the second a remote deletion or rename. For the absent
+		// case, naming what list_cmd DID return makes a hook-script rename
+		// self-diagnosing instead of requiring a manual list_cmd run.
+		alive, listed, aliveErr := b.isAliveWithTimeout(i, restoreAliveTimeout)
+		if aliveErr != nil {
+			return fmt.Errorf("cannot verify remote session %q: %w", i.Title, aliveErr)
+		}
+		if !alive {
+			return fmt.Errorf("remote session %q no longer exists in list_cmd output%s", i.Title, formatListedNames(listed))
 		}
 		if err := b.ensurePTY(i); err != nil {
 			return fmt.Errorf("failed to start preview process: %w", err)
@@ -429,46 +437,74 @@ func (b *HookBackend) SetPreviewSize(_ *Instance, _, _ int) error {
 }
 
 func (b *HookBackend) IsAlive(i *Instance) bool {
-	return b.isAliveWithTimeout(i, runtimeAliveTimeout)
+	alive, _, _ := b.isAliveWithTimeout(i, runtimeAliveTimeout)
+	return alive
 }
 
 // isAliveWithTimeout asks list_cmd whether the remote session backing i is
-// currently running. A non-zero timeout bounds the wait; zero falls through
-// to an unbounded exec, which no production caller should use because
-// IsAlive runs on the TUI event loop and a hanging list_cmd would freeze the
-// UI (#666). Callers must pass either restoreAliveTimeout or
-// runtimeAliveTimeout.
-func (b *HookBackend) isAliveWithTimeout(i *Instance, timeout time.Duration) bool {
-	out, err := runListCmd(b.Hooks.ListCmd, timeout)
+// currently running. The three outcomes are distinct (#841):
+//   - err != nil: list_cmd could not be run or its output was unparseable —
+//     this says nothing about whether the remote session exists, and callers
+//     that surface errors must NOT report it as "no longer exists".
+//   - alive false, err nil: list_cmd ran fine and the session is absent.
+//     listed carries the names list_cmd did report (nil for an empty list) so
+//     callers can make a rename mismatch self-diagnosing.
+//   - alive true: the session is listed with status "running".
+//
+// A non-zero timeout bounds the wait; zero falls through to an unbounded
+// exec, which no production caller should use because IsAlive runs on the
+// TUI event loop and a hanging list_cmd would freeze the UI (#666). Callers
+// must pass either restoreAliveTimeout or runtimeAliveTimeout.
+func (b *HookBackend) isAliveWithTimeout(i *Instance, timeout time.Duration) (alive bool, listed []string, err error) {
+	out, runErr := runListCmd(b.Hooks.ListCmd, timeout)
 	// exec.ErrWaitDelay is non-fatal here (#676). runListCmd sets
 	// cmd.WaitDelay, so CombinedOutput returns ErrWaitDelay when the list_cmd
 	// script itself exited (per docs/remote-hooks.md, with code 0 on success)
 	// but a backgrounded child still holds the stdout/stderr pipes open. In
 	// that case the script's output is already complete on stdout; fall
 	// through to extractJSON + json.Unmarshal, which validate it. A genuinely
-	// broken list_cmd produces no parseable JSON and still returns false.
-	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
-		return false
+	// broken list_cmd produces no parseable JSON and still errors below.
+	if runErr != nil && !errors.Is(runErr, exec.ErrWaitDelay) {
+		return false, nil, fmt.Errorf("list_cmd failed: %s: %w", strings.TrimSpace(string(out)), runErr)
 	}
 	// Mirror launch_cmd: list_cmd may write progress to stderr and JSON to
 	// stdout, so recover the JSON object from the combined output.
 	jsonStr := extractJSON(string(out))
 	if jsonStr == "" {
-		return false
+		return false, nil, fmt.Errorf("list_cmd returned no JSON in output: %s", strings.TrimSpace(string(out)))
 	}
 	var sessions []map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &sessions); err != nil {
-		return false
+		return false, nil, fmt.Errorf("list_cmd returned invalid JSON: %s: %w", jsonStr, err)
 	}
 	slug := hookNameForInstance(i)
 	for _, s := range sessions {
 		name, _ := s["name"].(string)
 		status, _ := s["status"].(string)
+		if name != "" {
+			listed = append(listed, name)
+		}
 		if name == slug && status == "running" {
-			return true
+			alive = true
 		}
 	}
-	return false
+	return alive, listed, nil
+}
+
+// formatListedNames renders the names list_cmd reported, for appending to the
+// "no longer exists in list_cmd output" restore error so a hook-script rename
+// is self-diagnosing (#841). An empty list yields "" to preserve the original
+// message for genuinely-empty list_cmd output; longer lists are capped so a
+// busy remote host cannot bloat the error.
+func formatListedNames(listed []string) string {
+	if len(listed) == 0 {
+		return ""
+	}
+	const maxNames = 5
+	if len(listed) > maxNames {
+		return fmt.Sprintf(" (listed: %s, and %d more)", strings.Join(listed[:maxNames], ", "), len(listed)-maxNames)
+	}
+	return fmt.Sprintf(" (listed: %s)", strings.Join(listed, ", "))
 }
 
 // runListCmd executes the user-supplied list_cmd and returns its combined
