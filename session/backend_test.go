@@ -332,6 +332,10 @@ func TestHookBackendStartRestore(t *testing.T) {
 // instance as Ready. Without this guard, deleted/expired remote sessions
 // were restored with a green Ready dot in the sidebar even though attaching
 // was a silent no-op.
+//
+// Since #841 the error must also name what list_cmd DID return, so a
+// hook-script rename (list_cmd reporting the session under a new name) is
+// self-diagnosing instead of requiring a manual list_cmd run.
 func TestHookBackendStartRestoreDeadSession(t *testing.T) {
 	// list_cmd reports a different session, so our instance looks "dead".
 	b := makeHooksWithListName(t, "some-other-session")
@@ -344,16 +348,17 @@ func TestHookBackendStartRestoreDeadSession(t *testing.T) {
 	err := b.Start(i, false)
 	require.Error(t, err, "restore must fail when list_cmd does not report the session")
 	assert.Contains(t, err.Error(), "no longer exists")
+	assert.Contains(t, err.Error(), "listed: some-other-session",
+		"error must include the names list_cmd did report so a rename mismatch is self-diagnosing (#841)")
 	assert.False(t, i.Started(), "instance must not be marked Started when remote session is gone")
 }
 
-// TestHookBackendStartRestoreListCmdFails covers the second leg of #645:
-// when list_cmd itself fails (e.g. network/auth error), we treat the
-// session as not-alive and refuse to mark it Started rather than
-// optimistically restoring a possibly-dead session.
-func TestHookBackendStartRestoreListCmdFails(t *testing.T) {
+// TestHookBackendStartRestoreEmptyList covers the genuinely-empty-list leg of
+// #841: when list_cmd runs fine but reports zero sessions, restore keeps the
+// plain "no longer exists" message without a bogus "(listed: ...)" suffix.
+func TestHookBackendStartRestoreEmptyList(t *testing.T) {
 	dir := t.TempDir()
-	listCmd := writeScript(t, dir, "list.sh", `exit 1`)
+	listCmd := writeScript(t, dir, "list.sh", `echo '[]'`)
 	attachCmd := writeScript(t, dir, "attach.sh", `echo "attached"; sleep 0.1`)
 	b := &HookBackend{
 		Hooks: config.RemoteHooks{
@@ -370,6 +375,87 @@ func TestHookBackendStartRestoreListCmdFails(t *testing.T) {
 	err := b.Start(i, false)
 	require.Error(t, err)
 	assert.False(t, i.Started())
+	assert.Contains(t, err.Error(), "no longer exists")
+	assert.NotContains(t, err.Error(), "listed:",
+		"an empty list must not grow a listed-names suffix")
+}
+
+// TestHookBackendStartRestoreListCmdFails covers the second leg of #645:
+// when list_cmd itself fails (e.g. network/auth error), we treat the
+// session as not-alive and refuse to mark it Started rather than
+// optimistically restoring a possibly-dead session.
+//
+// Since #841 the error must say that list_cmd failed — NOT the misleading
+// "no longer exists in list_cmd output", which implies list_cmd ran and the
+// session was deleted remotely when in fact nothing was verified.
+func TestHookBackendStartRestoreListCmdFails(t *testing.T) {
+	dir := t.TempDir()
+	listCmd := writeScript(t, dir, "list.sh", `echo "ssh: connect refused" >&2; exit 1`)
+	attachCmd := writeScript(t, dir, "attach.sh", `echo "attached"; sleep 0.1`)
+	b := &HookBackend{
+		Hooks: config.RemoteHooks{
+			ListCmd:   listCmd,
+			AttachCmd: attachCmd,
+		},
+	}
+	i := &Instance{
+		Title:   "test-session",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	err := b.Start(i, false)
+	require.Error(t, err)
+	assert.False(t, i.Started())
+	assert.Contains(t, err.Error(), "cannot verify remote session")
+	assert.Contains(t, err.Error(), "list_cmd failed",
+		"an exec failure must be reported as a list_cmd failure (#841)")
+	assert.Contains(t, err.Error(), "ssh: connect refused",
+		"the failure tail must carry list_cmd's own output")
+	assert.NotContains(t, err.Error(), "no longer exists",
+		"an exec failure must not be reported as a remotely-deleted session (#841)")
+}
+
+// TestHookBackendStartRestoreListCmdNoJSON covers the unparseable-output leg
+// of #841: list_cmd exits 0 but emits no JSON. Nothing was verified, so the
+// error must blame list_cmd's output, not claim the session was deleted.
+func TestHookBackendStartRestoreListCmdNoJSON(t *testing.T) {
+	dir := t.TempDir()
+	listCmd := writeScript(t, dir, "list.sh", `echo "usage: mytool list [--json]"`)
+	attachCmd := writeScript(t, dir, "attach.sh", `echo "attached"; sleep 0.1`)
+	b := &HookBackend{
+		Hooks: config.RemoteHooks{
+			ListCmd:   listCmd,
+			AttachCmd: attachCmd,
+		},
+	}
+	i := &Instance{
+		Title:   "test-session",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	err := b.Start(i, false)
+	require.Error(t, err)
+	assert.False(t, i.Started())
+	assert.Contains(t, err.Error(), "cannot verify remote session")
+	assert.Contains(t, err.Error(), "no JSON")
+	assert.NotContains(t, err.Error(), "no longer exists",
+		"unparseable list_cmd output must not be reported as a remotely-deleted session (#841)")
+}
+
+// TestFormatListedNames pins the listed-names suffix: empty (and nil) lists
+// keep the original bare message, short lists are joined verbatim, and lists
+// past the cap are truncated with a count so a busy remote host cannot bloat
+// the error (#841).
+func TestFormatListedNames(t *testing.T) {
+	assert.Equal(t, "", formatListedNames(nil))
+	assert.Equal(t, "", formatListedNames([]string{}))
+	assert.Equal(t, " (listed: a)", formatListedNames([]string{"a"}))
+	assert.Equal(t, " (listed: a, b, c, d, e)",
+		formatListedNames([]string{"a", "b", "c", "d", "e"}))
+	assert.Equal(t, " (listed: a, b, c, d, e, and 2 more)",
+		formatListedNames([]string{"a", "b", "c", "d", "e", "f", "g"}))
 }
 
 // TestHookBackendStartRestoreEmptyListCmd is the regression test for #753:
@@ -443,6 +529,10 @@ func TestHookBackendStartRestoreListCmdHangs(t *testing.T) {
 	// restoreAliveTimeout.
 	assert.Less(t, elapsed, 5*time.Second,
 		"restore must abort within timeout when list_cmd hangs (got %v)", elapsed)
+	// A timeout means nothing was verified, so it must be reported as a
+	// list_cmd failure, not as a remotely-deleted session (#841).
+	assert.NotContains(t, err.Error(), "no longer exists",
+		"a timed-out list_cmd must not be reported as a remotely-deleted session")
 }
 
 // TestHookBackendIsAliveListCmdHangs is the runtime analogue of
