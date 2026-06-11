@@ -187,7 +187,7 @@ func TestAttachOverlayCallback_ClearsFlagOnDetach(t *testing.T) {
 
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("test-attach", " title=t1", attach)
+		done <- h.attachOverlayCallback("test-attach", " title=t1", false, attach)
 	}()
 
 	// While the callback is blocked on <-ch the flag must be set.
@@ -224,7 +224,7 @@ func TestAttachOverlayCallback_LeavesFlagAloneWhenAttachErrors(t *testing.T) {
 	attachErr := errors.New("simulated attach failure")
 	attach := func() (chan struct{}, error) { return nil, attachErr }
 
-	cmd := h.attachOverlayCallback("test-attach", "", attach)
+	cmd := h.attachOverlayCallback("test-attach", "", false, attach)
 
 	assert.Nil(t, cmd, "attachOverlayCallback must return nil when attach fails")
 	assert.False(t, h.attached.Load(),
