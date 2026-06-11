@@ -113,6 +113,8 @@ Gives interactive terminal access to a running session (e.g., SSH + tmux attach)
 
 Agent Factory runs this command behind a local PTY and intercepts the configured detach key before forwarding input to the hook process. On detach, Agent Factory terminates the local `attach_cmd` process; remote tmux sessions should survive the client disconnect and be attachable again later.
 
+When the attach stream ends — whether by the detach key or natural exit — Agent Factory emits terminal reset sequences that restore the local terminal to a neutral state: main screen buffer, cursor visible, no scroll region, all mouse/focus/paste reporting modes off. Your script does not need to emit these sequences; Agent Factory handles cleanup automatically (#845).
+
 Agent Factory also uses this script for the preview pane by running it in a background process and capturing its output.
 
 #### Preview output contract
@@ -142,7 +144,7 @@ Opens an interactive terminal on the machine hosting a session — this is what 
 
 **No JSON output** — like `attach_cmd`, this command takes over the terminal. It should behave like `ssh -t host "cd /workspace/$NAME && exec \$SHELL -l"`.
 
-Agent Factory runs this command behind a local PTY with the same detach-key handling as `attach_cmd`: the configured detach key terminates the local `terminal_cmd` process and returns to the TUI. The remote shell receives a hangup when the SSH client dies; use a remote tmux/screen session inside your script if you want the shell to survive detach.
+Agent Factory runs this command behind a local PTY with the same detach-key handling as `attach_cmd`: the configured detach key terminates the local `terminal_cmd` process and returns to the TUI. The remote shell receives a hangup when the SSH client dies; use a remote tmux/screen session inside your script if you want the shell to survive detach. Terminal reset sequences are emitted on exit, just as with `attach_cmd` (#845).
 
 When `terminal_cmd` is not configured, the Terminal tab shows a "not available" fallback for remote sessions and nothing else changes. Unlike `attach_cmd`, this command is never used for preview capture — it only runs when the user attaches from the Terminal tab.
 
