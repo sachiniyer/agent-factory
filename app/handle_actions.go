@@ -291,14 +291,18 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		// callbacks must attach to this captured instance, not re-read the live
 		// selection (#716).
 		if tw.IsInTerminalTab() {
+			// The terminal tab always attaches a local tmux session (remote
+			// instances have no worktree to host one), so remote=false: the
+			// post-detach terminal handling is keyed to what was attached,
+			// not to the instance kind (#845).
 			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-				return m.attachOverlayCallback("handleEnter-terminal", "", func() (chan struct{}, error) {
+				return m.attachOverlayCallback("handleEnter-terminal", "", false, func() (chan struct{}, error) {
 					return tw.AttachTerminalForInstance(selected)
 				})
 			})
 		}
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return m.attachOverlayCallback("handleEnter-sidebar", "", func() (chan struct{}, error) {
+			return m.attachOverlayCallback("handleEnter-sidebar", "", selected.IsRemote(), func() (chan struct{}, error) {
 				return m.sidebar.AttachInstance(selected)
 			})
 		})

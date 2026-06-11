@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -819,11 +820,53 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	return m.handleDefaultKeyPress(msg, name)
 }
 
+// remoteDetachTerminalReassert re-establishes the terminal modes bubbletea
+// set at startup (see Run: WithAltScreen + WithMouseCellMotion, plus the
+// hidden cursor and the bracketed paste bubbletea enables by default) after a
+// remote attach stream has scribbled over them. The hook backend's neutral
+// restore (session.hookAttachTerminalRestore) hands the terminal back on the
+// MAIN screen with the cursor visible and all reporting modes off — correct
+// for the CLI attach path, but not the state this TUI runs in.
+//
+// Hand-rolled rather than bubbletea-native, for two reasons (#845):
+//   - bubbletea cannot re-assert state it believes is already set: the
+//     renderer's enterAltScreen() is a no-op while its altScreenActive
+//     bookkeeping is true, and that bookkeeping never saw the remote PTY's
+//     writes. An ExitAltScreen/EnterAltScreen dance defeats the guard, but
+//     runs as queued program msgs racing the post-detach msg backlog — diff
+//     frames could land on the main screen first, leaking TUI content into
+//     the shell's scrollback.
+//   - Writing synchronously here, while the Update goroutine is still blocked
+//     inside the onDismiss callback, guarantees the terminal is back in the
+//     state the renderer assumes before it can emit a single frame.
+//
+// The renderer's diff cache is still stale after this (it thinks the
+// pre-attach frame is on screen; the 1049h re-entry cleared it), so the
+// caller follows up with tea.ClearScreen — the native lever for "invalidate
+// the cache and repaint everything".
+const remoteDetachTerminalReassert = "" +
+	"\x1b[?1049h" + // re-enter the alt screen (terminal clears it)
+	"\x1b[?25l" + // bubbletea hid the cursor at startup; re-hide it
+	"\x1b[?1002h\x1b[?1006h" + // WithMouseCellMotion + SGR encoding
+	"\x1b[?2004h" // bracketed paste (bubbletea default-on)
+
+// remoteDetachResetWriter is where remoteDetachTerminalReassert is written —
+// the real terminal in production, swappable so tests can capture it.
+var remoteDetachResetWriter io.Writer = os.Stdout
+
 // attachOverlayCallback runs the attach-overlay onDismiss lifecycle: emits
 // the detach-trace markers, invokes attach, arms the attached flag for the
 // duration of `<-ch`, then returns the tea.Cmd to emit the
 // repaintAfterDetachMsg{}. Returns nil when attach itself fails so the
 // callback can be passed directly to showHelpScreen's onDismiss.
+//
+// remote selects the post-detach terminal handling. A local tmux detach
+// leaves the terminal exactly as the TUI expects (the long-lived tmux client
+// never replays its setup/teardown sequences across attach cycles), so the
+// flow is the plain repaint it has always been. A remote detach hands the
+// terminal back in the neutral state described on
+// remoteDetachTerminalReassert, so the TUI's modes are re-asserted before the
+// event loop resumes, and the repaint is preceded by tea.ClearScreen (#845).
 //
 // The defer on m.attached.Store(false) is load-bearing: it guarantees the
 // flag clears even if `<-ch` is woken by an abnormal close or a panic
@@ -836,7 +879,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 // terminal-tab) all funnel through one place — and so the pause-while-attached
 // gating + the flag-clears-on-error path are testable without spinning up
 // real tmux.
-func (m *home) attachOverlayCallback(label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
+func (m *home) attachOverlayCallback(label, traceSuffix string, remote bool, attach func() (chan struct{}, error)) tea.Cmd {
 	detachTraceMark(label + "-onDismiss-entry" + traceSuffix)
 	ch, err := attach()
 	if err != nil {
@@ -858,10 +901,21 @@ func (m *home) attachOverlayCallback(label, traceSuffix string, attach func() (c
 	// goroutine dump is appended to detach-slow.log so we can see which
 	// goroutine is blocked.
 	beginDetachWatchdog(label + traceSuffix)
-	return func() tea.Msg {
+	repaintCmd := func() tea.Msg {
 		detachTrace(detachStart, label+"-repaintAfterDetachMsg-emitted")
 		return repaintAfterDetachMsg{}
 	}
+	if remote {
+		// The hook backend wrote its neutral restore before closing ch, so
+		// this lands strictly after it. The Update goroutine is still blocked
+		// in this callback, so no renderer write can interleave (#845).
+		_, _ = io.WriteString(remoteDetachResetWriter, remoteDetachTerminalReassert)
+		// ClearScreen first so the renderer's stale diff cache is invalidated
+		// before the repaint flow runs; then the usual repaintAfterDetachMsg
+		// path, watchdog semantics (#683) included.
+		return tea.Sequence(tea.ClearScreen, repaintCmd)
+	}
+	return repaintCmd
 }
 
 // navigateToSection moves the sidebar selection to the header of the given section.
