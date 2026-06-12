@@ -77,9 +77,10 @@ var respawnDaemonFn = respawnDaemonAfterUpgrade
 // branch ran without touching the real systemctl/launchctl or spawning a
 // daemon process.
 var (
-	autostartInstalledFn   = daemon.AutostartInstalled
-	restartAutostartUnitFn = daemon.RestartAutostartUnit
-	ensureDaemonFn         = daemon.EnsureDaemon
+	autostartInstalledFn        = daemon.AutostartInstalled
+	restartAutostartUnitFn      = daemon.RestartAutostartUnit
+	ensureDaemonFn              = daemon.EnsureDaemon
+	waitForShutdownCompletionFn = daemon.WaitForShutdownCompletion
 )
 
 // respawnDaemonAfterUpgrade restores the daemon that the upgrade/auto-update
@@ -99,6 +100,18 @@ var (
 // task gate belongs only on the cold-start path (ensureDaemonForTasks), where
 // nothing was running and "no enabled tasks" means there is nothing to start.
 func respawnDaemonAfterUpgrade() {
+	// The Shutdown RPC acks before the daemon tears down, so the old daemon's
+	// control socket can still answer pings here. Respawning into that window
+	// makes EnsureDaemon — or the unit-restarted daemon's own startup ping
+	// guard — mistake the dying daemon for a live one and skip the spawn,
+	// leaving no daemon at all once it exits (#854). Wait for the socket to
+	// die first; the SIGTERM fallback already waited for process exit, so the
+	// wait returns immediately on that path. On timeout, warn and respawn
+	// anyway: a spawn skipped against a wedged daemon is no worse than not
+	// trying, and the next af invocation retries.
+	if err := waitForShutdownCompletionFn(); err != nil {
+		log.WarningLog.Printf("post-upgrade respawn: %v; respawning anyway, but the new daemon may see the old one as alive and exit — run af again if schedules stay dark", err)
+	}
 	if autostartInstalledFn() {
 		err := restartAutostartUnitFn()
 		if err == nil {

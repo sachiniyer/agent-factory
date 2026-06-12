@@ -331,6 +331,42 @@ func RequestShutdown() (ShutdownResult, error) {
 	return ShutdownViaRPC, nil
 }
 
+// shutdownCompleteGrace bounds how long WaitForShutdownCompletion polls for
+// the control socket to stop answering; shutdownCompletePoll is the cadence.
+// Package vars rather than constants so tests can shorten the timeout path,
+// mirroring stopDaemonGrace/stopDaemonPoll. The grace matches
+// sigtermFallbackGrace — the wait signalAndWait already imposes on the
+// SIGTERM path. The poll is tighter than sigtermFallbackPoll because the
+// normal RPC teardown completes just past shutdownAckGrace (50ms), so a 50ms
+// cadence usually resolves the wait on its first or second check.
+var (
+	shutdownCompleteGrace = sigtermFallbackGrace
+	shutdownCompletePoll  = shutdownAckGrace
+)
+
+// WaitForShutdownCompletion blocks until the daemon control socket stops
+// answering pings, bounded by shutdownCompleteGrace. The Shutdown RPC
+// acknowledges before the daemon tears down (shutdownAckGrace plus the
+// teardown tail), so a caller that respawns immediately after RequestShutdown
+// races the dying daemon: EnsureDaemon's liveness ping — or a unit-restarted
+// daemon's startup ping guard — can see the old socket still answering, skip
+// the spawn, and leave nothing running once the old daemon exits (#854).
+// Callers on the shutdown-then-respawn path must wait for this to return
+// before respawning. It mirrors signalAndWait's poll-until-dead discipline;
+// on the SIGTERM fallback path the process is already gone, so the first ping
+// fails and the wait returns immediately. Returns an error when the daemon is
+// still answering at the deadline — the caller should warn and proceed.
+func WaitForShutdownCompletion() error {
+	deadline := time.Now().Add(shutdownCompleteGrace)
+	for time.Now().Before(deadline) {
+		if pingDaemon() != nil {
+			return nil
+		}
+		time.Sleep(shutdownCompletePoll)
+	}
+	return fmt.Errorf("daemon control socket still answering %s after shutdown was acknowledged", shutdownCompleteGrace)
+}
+
 // isDaemonAbsentErr reports whether err from a dial/RPC call indicates that
 // no daemon is currently listening on the control socket (vs. some other
 // transport failure). Both ECONNREFUSED (stale socket, no listener) and
