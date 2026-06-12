@@ -132,6 +132,35 @@ func TestLoadInRepoConfigMalformed(t *testing.T) {
 	})
 }
 
+// TestIsPathStrictlyInside is the regression test for #852: the previous
+// strings.HasPrefix(path, root+Separator) check built the prefix "//" for a
+// repo rooted at the filesystem root (real in containers with WORKDIR /),
+// rejecting every valid child. The Rel-based helper must accept children of
+// "/" while still rejecting equality, siblings, and traversal escapes.
+func TestIsPathStrictlyInside(t *testing.T) {
+	sep := string(filepath.Separator)
+	cases := []struct {
+		name    string
+		absBase string
+		absDir  string
+		want    bool
+	}{
+		{"child of filesystem root", filepath.Join(sep, ".agent-factory", "config.json"), sep, true},
+		{"filesystem root is not inside itself", sep, sep, false},
+		{"child of normal repo", filepath.Join(sep, "repo", InRepoConfigDirName, "config.json"), filepath.Join(sep, "repo"), true},
+		{"repo root is not inside itself", filepath.Join(sep, "repo"), filepath.Join(sep, "repo"), false},
+		{"sibling sharing a string prefix", filepath.Join(sep, "repo2"), filepath.Join(sep, "repo"), false},
+		{"parent of the repo", sep, filepath.Join(sep, "repo"), false},
+		{"path outside the repo", filepath.Join(sep, "outside", "config.json"), filepath.Join(sep, "repo"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isPathStrictlyInside(tc.absBase, tc.absDir),
+				"isPathStrictlyInside(%q, %q)", tc.absBase, tc.absDir)
+		})
+	}
+}
+
 func TestLoadInRepoConfigTraversalSafety(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
