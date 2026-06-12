@@ -43,8 +43,9 @@ var autoYesStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.Color("#1a1a1a"))
 
-// deletingTitleColor dims a mid-deletion row's title to the description gray
-// so it visually recedes while its teardown runs in the background (#844).
+// deletingTitleColor dims a mid-deletion row — title and branch/PR lines —
+// to the description gray so it visually recedes while its teardown runs in
+// the background (#844, #853).
 var deletingTitleColor = lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"}
 
 // InstanceRenderer handles rendering of session.Instance objects
@@ -93,6 +94,10 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	if status == session.Deleting {
 		titleText = "[deleting] " + titleText
 		titleS = titleS.Foreground(deletingTitleColor)
+		// Dim the branch/PR lines too: on a selected row descS is the
+		// high-contrast selectedDescStyle, and leaving it bright makes the
+		// secondary lines stand out more than the dimmed title (#853).
+		descS = descS.Foreground(deletingTitleColor)
 	}
 	widthAvail := r.width - 3 - runewidth.StringWidth(prefix) - 1
 	if widthAvail <= 0 {
