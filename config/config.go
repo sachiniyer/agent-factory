@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -23,6 +25,16 @@ const (
 )
 
 var aliasOutputRegex = regexp.MustCompile(`(?:aliased to|->|^[^/=\s]+\s*=)\s*(.+)`)
+
+// probeWaitDelay bounds how long the claude shell probe's Output() call keeps
+// waiting for stdout/stderr EOF after the probe shell has exited (or the
+// context deadline has killed it). Interactive rc files commonly background
+// processes that inherit the capture pipes; without this bound Output()
+// blocks until those grandchildren exit — the context timeout kills only the
+// shell, not the pipe readers — hanging first-run config generation (#856).
+// It only elapses when something outlives the shell; a normal probe completes
+// its I/O at shell exit and returns instantly.
+const probeWaitDelay = time.Second
 
 // bashTypeOutputRegex matches the bash `type` builtin's output for a
 // PATH-resolved command, e.g. "claude is /usr/local/bin/claude".
@@ -232,7 +244,45 @@ func GetClaudeCommand() (string, error) {
 	// don't let first-run config generation hang on them.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, shell, args...).Output()
+	cmd := exec.CommandContext(ctx, shell, args...)
+	// Own process group so the whole probe tree — including processes the rc
+	// file backgrounded with `&` or `disown` — can be signaled together,
+	// mirroring the post-worktree hook runner (#610, #769).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// On the context deadline, SIGKILL the group rather than just the
+		// shell (the default Cancel), so a foreground rc command that is
+		// itself the thing hanging dies along with anything it spawned. A
+		// group already gone (ESRCH) maps to os.ErrProcessDone, which Wait
+		// ignores instead of reporting as a probe failure.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	// Bound the post-exit wait: a process backgrounded by the rc file
+	// inherits the stdout/stderr capture pipes, and without a bound Output()
+	// blocks on pipe EOF until that grandchild exits — even after the
+	// context deadline killed the shell (#856).
+	cmd.WaitDelay = probeWaitDelay
+	output, err := cmd.Output()
+	if cmd.Process != nil {
+		// Reap rc-file children that outlived the shell on every exit path —
+		// normal completion or timeout — so the probe never leaks processes
+		// (#769 pattern).
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The shell itself exited successfully, so the probe's output is
+		// already complete on the pipe; a backgrounded rc-file child merely
+		// held it open past probeWaitDelay. Not a probe failure — parse what
+		// arrived (#676 precedent).
+		log.WarningLog.Printf("claude probe: %s rc file left background processes holding the probe pipes; killed them", shell)
+		err = nil
+	}
 	if err == nil && len(output) > 0 {
 		if path := parseCommandProbeOutput(string(output)); path != "" {
 			return path, nil
