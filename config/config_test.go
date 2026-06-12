@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
@@ -42,6 +43,19 @@ func requireBash(t *testing.T) string {
 		t.Skip("bash not available on this system")
 	}
 	return bashPath
+}
+
+// requireSleep skips the test when no sleep binary is on PATH, and returns
+// its absolute path. The #856 regression tests embed it into a .bashrc that
+// runs under a deliberately emptied PATH, where a bare `sleep` would not
+// start and the pipe-holding scenario would silently not be exercised.
+func requireSleep(t *testing.T) string {
+	t.Helper()
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep not available on this system")
+	}
+	return sleepPath
 }
 
 // writeGuardedBashrc writes a .bashrc into homeDir that mimics the standard
@@ -130,6 +144,75 @@ func TestGetClaudeCommand(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, "/custom/bin/claude --model opus", result)
+	})
+
+	t.Run("returns within bound when rc file backgrounds a pipe-holding child", func(t *testing.T) {
+		// Regression test for #856: a .bashrc that backgrounds a process
+		// inheriting the shell's stdout/stderr leaves the probe's capture
+		// pipes open after the shell exits. Without cmd.WaitDelay, Output()
+		// blocks on pipe EOF until that child exits — past the 5s context
+		// timeout — hanging first-run config generation.
+		if testing.Short() {
+			t.Skip("skipping timeout-bound test in short mode")
+		}
+		bashPath := requireBash(t)
+		sleepPath := requireSleep(t)
+		homeDir := t.TempDir()
+		// Sleep well past the probe's context timeout so the WaitDelay
+		// bound, not the child exiting, is what unblocks the call. The
+		// absolute sleep path matters: the test PATH below is an empty dir,
+		// so a bare `sleep` would silently fail to start and nothing would
+		// hold the pipe. No claude alias and no claude on PATH → the probe
+		// must still fall through to the not-found error instead of hanging.
+		bashrc := "case $- in\n    *i*) ;;\n      *) return;;\nesac\n" +
+			sleepPath + " 30 &\n"
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".bashrc"), []byte(bashrc), 0644))
+
+		t.Setenv("HOME", homeDir)
+		t.Setenv("SHELL", bashPath)
+		t.Setenv("PATH", t.TempDir())
+
+		start := time.Now()
+		result, err := GetClaudeCommand()
+		elapsed := time.Since(start)
+
+		assert.Error(t, err)
+		assert.Equal(t, "", result)
+		// The shell exits immediately, so the probe should return after
+		// probeWaitDelay (1s), not the child's 30s sleep and not even the
+		// 5s context deadline. Allow generous scheduling slack for CI.
+		assert.Less(t, elapsed, 4*time.Second,
+			"probe must not block on a pipe-holding background child (got %v)", elapsed)
+	})
+
+	t.Run("parses alias output produced before a pipe-holding child", func(t *testing.T) {
+		// #856 companion: when the rc file both defines the alias and
+		// backgrounds a pipe-holder, the probe output is complete at shell
+		// exit — exec.ErrWaitDelay must be treated as non-fatal and the
+		// already-produced output parsed (#676 precedent).
+		if testing.Short() {
+			t.Skip("skipping timeout-bound test in short mode")
+		}
+		bashPath := requireBash(t)
+		sleepPath := requireSleep(t)
+		homeDir := t.TempDir()
+		bashrc := "case $- in\n    *i*) ;;\n      *) return;;\nesac\n" +
+			"alias claude='/custom/bin/claude --model opus'\n" +
+			sleepPath + " 30 &\n"
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".bashrc"), []byte(bashrc), 0644))
+
+		t.Setenv("HOME", homeDir)
+		t.Setenv("SHELL", bashPath)
+		t.Setenv("PATH", t.TempDir()) // no claude on PATH — alias is the only source
+
+		start := time.Now()
+		result, err := GetClaudeCommand()
+		elapsed := time.Since(start)
+
+		require.NoError(t, err)
+		assert.Equal(t, "/custom/bin/claude --model opus", result)
+		assert.Less(t, elapsed, 4*time.Second,
+			"probe must surface the alias without waiting for the background child (got %v)", elapsed)
 	})
 
 	t.Run("handles probe output parsing", func(t *testing.T) {
