@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -590,4 +591,61 @@ func TestInstanceRendererDeletingMarker(t *testing.T) {
 	after, _, _ := renderForTerminal(t, 120, inst, &spin)
 	assert.Contains(t, after, "[deleting]", "deleting rows must be explicitly marked")
 	assert.Contains(t, after, "going-away", "the title must remain visible while deleting")
+}
+
+// TestInstanceRendererDeletingDimsSelectedRow pins the #853 fix: a SELECTED
+// deleting row must dim its branch and PR lines along with the title. Before
+// the fix only titleS picked up deletingTitleColor, so the high-contrast
+// selectedDescStyle left the secondary lines brighter than the dimmed title.
+// (Unselected rows never showed the bug: listDescStyle is already the same
+// gray as deletingTitleColor.)
+func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
+	// Force a real color profile and a fixed background so lipgloss emits the
+	// foreground escapes the assertions match on; the Ascii profile used by
+	// default in non-TTY test runs strips all styling.
+	prevProfile := lipgloss.ColorProfile()
+	prevDark := lipgloss.HasDarkBackground()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	lipgloss.SetHasDarkBackground(true)
+	t.Cleanup(func() {
+		lipgloss.SetColorProfile(prevProfile)
+		lipgloss.SetHasDarkBackground(prevDark)
+	})
+
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "going-away",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+	inst.SetPRInfo(&git.PRInfo{Number: 7, Title: "teardown", State: "OPEN"})
+
+	// SGR foreground params of the dark-background deleting gray, e.g.
+	// "38;2;119;119;119" under TrueColor.
+	dimFG := termenv.RGBColor(deletingTitleColor.Dark).Sequence(false)
+
+	r := &InstanceRenderer{spinner: &spin}
+	r.setWidth(36)
+
+	renderLines := func() []string {
+		out := r.Render(inst, 1, true, false)
+		lines := strings.Split(out, "\n")
+		// [0] title top padding, [1] title, [2] branch line, [3] branch
+		// bottom padding, [4] PR line, [5] PR bottom padding.
+		require.GreaterOrEqual(t, len(lines), 5, "expected title, branch, and PR rows")
+		return lines
+	}
+
+	inst.SetStatus(session.Ready)
+	before := renderLines()
+	require.NotContains(t, before[1], dimFG, "selected title must not be dimmed before deletion")
+	require.NotContains(t, before[2], dimFG, "selected branch line must not be dimmed before deletion")
+	require.NotContains(t, before[4], dimFG, "selected PR line must not be dimmed before deletion")
+
+	inst.SetStatus(session.Deleting)
+	after := renderLines()
+	assert.Contains(t, after[1], dimFG, "selected deleting title must be dimmed")
+	assert.Contains(t, after[2], dimFG, "selected deleting branch line must be dimmed")
+	assert.Contains(t, after[4], dimFG, "selected deleting PR line must be dimmed")
 }
