@@ -57,9 +57,10 @@ func (s *taskScheduler) Stop() {
 
 // Reload re-reads tasks.json and replaces the scheduled entry set so it
 // reflects exactly the currently enabled tasks. A task whose cron expression
-// fails to parse is skipped with a warning rather than failing the whole
-// reload — the user-facing CRUD paths validate before saving, so this only
-// guards hand-edited files.
+// fails to parse, or whose ID duplicates one already scheduled in this pass,
+// is skipped with a warning rather than failing the whole reload — the
+// user-facing CRUD paths validate before saving, so this only guards
+// hand-edited files.
 func (s *taskScheduler) Reload() error {
 	tasks, err := s.loadTasks()
 	if err != nil {
@@ -74,6 +75,11 @@ func (s *taskScheduler) Reload() error {
 		delete(s.entries, id)
 	}
 
+	// s.entries is keyed by task ID, so a duplicate ID in a hand-edited
+	// tasks.json would overwrite the first entry ID and orphan its cron entry:
+	// untracked, it keeps firing and no later Reload can remove it until the
+	// daemon restarts (#855). Schedule only the first occurrence.
+	seen := make(map[string]struct{}, len(tasks))
 	for _, t := range tasks {
 		if !t.Enabled {
 			continue
@@ -83,6 +89,11 @@ func (s *taskScheduler) Reload() error {
 		if t.IsWatch() {
 			continue
 		}
+		if _, dup := seen[t.ID]; dup {
+			log.WarningLog.Printf("duplicate task ID %q in tasks.json, scheduling only its first occurrence", t.ID)
+			continue
+		}
+		seen[t.ID] = struct{}{}
 		schedule, err := s.parse(t.CronExpr)
 		if err != nil {
 			log.WarningLog.Printf("task %s has an invalid cron expression %q, not scheduling it: %v", t.ID, t.CronExpr, err)

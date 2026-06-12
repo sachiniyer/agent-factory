@@ -1,12 +1,16 @@
 package daemon
 
 import (
+	"bytes"
+	stdlog "log"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
 
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -153,5 +157,62 @@ func TestControlServerReloadTasksRPC(t *testing.T) {
 	none := &controlServer{}
 	if err := none.ReloadTasks(ReloadTasksRequest{}, &ReloadTasksResponse{}); err == nil {
 		t.Fatalf("expected error from a control server without a scheduler")
+	}
+}
+
+// TestSchedulerReloadDuplicateTaskIDs pins the #855 fix: a hand-edited
+// tasks.json with duplicate task IDs must produce exactly one schedule per ID
+// with a logged warning. Pre-fix, the second occurrence overwrote the first
+// entry ID in s.entries, leaving an untracked cron entry that kept firing —
+// and because cleanup iterates s.entries, no later Reload could remove it, so
+// correcting the file did not recover without a daemon restart. The
+// s.cron.Entries() counts are the orphan detector: they must match the
+// tracked entry set after every reload.
+func TestSchedulerReloadDuplicateTaskIDs(t *testing.T) {
+	var warnings bytes.Buffer
+	prevWarn := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "", 0)
+	t.Cleanup(func() { aflog.WarningLog = prevWarn })
+
+	s := newTaskScheduler()
+	tasks := []task.Task{
+		{ID: "ffff0001", CronExpr: "0 3 * * *", Enabled: true},
+		{ID: "ffff0001", CronExpr: "*/5 * * * *", Enabled: true},
+		{ID: "ffff0002", CronExpr: "0 4 * * *", Enabled: true},
+	}
+	s.loadTasks = func() ([]task.Task, error) { return tasks, nil }
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload with duplicate IDs: %v", err)
+	}
+	if got := sortedScheduledIDs(s); len(got) != 2 || got[0] != "ffff0001" || got[1] != "ffff0002" {
+		t.Fatalf("scheduled IDs = %v, want [ffff0001 ffff0002]", got)
+	}
+	if got := len(s.cron.Entries()); got != 2 {
+		t.Fatalf("cron entries = %d, want 2 (the duplicate must not schedule a second, untracked entry)", got)
+	}
+	if !strings.Contains(warnings.String(), `duplicate task ID "ffff0001"`) {
+		t.Fatalf("expected a duplicate-ID warning, got log output: %q", warnings.String())
+	}
+
+	// Correcting the file must recover fully without a daemon restart.
+	tasks = []task.Task{{ID: "ffff0002", CronExpr: "0 4 * * *", Enabled: true}}
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload after correction: %v", err)
+	}
+	if got := sortedScheduledIDs(s); len(got) != 1 || got[0] != "ffff0002" {
+		t.Fatalf("after correction: scheduled IDs = %v, want [ffff0002]", got)
+	}
+	if got := len(s.cron.Entries()); got != 1 {
+		t.Fatalf("after correction: cron entries = %d, want 1 (no orphaned entry may survive)", got)
+	}
+
+	// And an empty file leaves nothing behind to keep firing.
+	tasks = nil
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload to empty: %v", err)
+	}
+	if got := len(s.cron.Entries()); got != 0 {
+		t.Fatalf("after removing all tasks: cron entries = %d, want 0", got)
 	}
 }

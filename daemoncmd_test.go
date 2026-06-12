@@ -11,17 +11,22 @@ import (
 // supervised daemon may be running on the machine executing these tests.
 
 // stubRespawnCollaborators replaces the autostart-detection, unit-restart,
-// and ad-hoc-spawn hooks used by respawnDaemonAfterUpgrade, restoring them on
-// cleanup. It returns counters for the restart and ad-hoc paths.
+// ad-hoc-spawn, and shutdown-wait hooks used by respawnDaemonAfterUpgrade,
+// restoring them on cleanup. The shutdown wait is stubbed to an immediate nil
+// so no test here pings the host's control socket — a real supervised daemon
+// answering it would stall the wait for its full grace. It returns counters
+// for the restart and ad-hoc paths.
 func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (restartCalls, ensureCalls *int) {
 	t.Helper()
 	prevInstalled := autostartInstalledFn
 	prevRestart := restartAutostartUnitFn
 	prevEnsure := ensureDaemonFn
+	prevWait := waitForShutdownCompletionFn
 	t.Cleanup(func() {
 		autostartInstalledFn = prevInstalled
 		restartAutostartUnitFn = prevRestart
 		ensureDaemonFn = prevEnsure
+		waitForShutdownCompletionFn = prevWait
 	})
 	restartCalls = new(int)
 	ensureCalls = new(int)
@@ -34,6 +39,7 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 		*ensureCalls++
 		return nil
 	}
+	waitForShutdownCompletionFn = func() error { return nil }
 	return restartCalls, ensureCalls
 }
 
@@ -100,5 +106,49 @@ func TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks(t *testing.T) {
 
 	if *ensureCalls != 1 {
 		t.Fatalf("ad-hoc spawns = %d, want 1 even with zero enabled tasks (autoyes-only daemon must be restored, #813)", *ensureCalls)
+	}
+}
+
+// TestRespawnAfterUpgradeWaitsForShutdownFirst pins the #854 fix: the Shutdown
+// RPC acks before the old daemon tears down, so the respawn must wait for the
+// control socket to die before EITHER respawn branch runs — otherwise the new
+// daemon (ad-hoc EnsureDaemon ping or the unit-restarted daemon's startup ping
+// guard) sees the dying daemon as alive, skips the spawn, and nothing is left
+// running once it exits. Both branches are exercised; a wait timeout must
+// degrade to a respawn attempt, never a skipped one.
+func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		installed bool
+		waitErr   error
+		wantStep  string
+	}{
+		{name: "ad-hoc branch", installed: false, wantStep: "ensure"},
+		{name: "unit branch", installed: true, wantStep: "restart"},
+		{name: "wait timeout still respawns", installed: false, waitErr: errors.New("daemon control socket still answering"), wantStep: "ensure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubRespawnCollaborators(t, tc.installed, nil)
+			var seq []string
+			waitForShutdownCompletionFn = func() error {
+				seq = append(seq, "wait")
+				return tc.waitErr
+			}
+			prevRestart, prevEnsure := restartAutostartUnitFn, ensureDaemonFn
+			restartAutostartUnitFn = func() error {
+				seq = append(seq, "restart")
+				return prevRestart()
+			}
+			ensureDaemonFn = func() error {
+				seq = append(seq, "ensure")
+				return prevEnsure()
+			}
+
+			respawnDaemonAfterUpgrade()
+
+			if len(seq) != 2 || seq[0] != "wait" || seq[1] != tc.wantStep {
+				t.Fatalf("call sequence = %v, want [wait %s]", seq, tc.wantStep)
+			}
+		})
 	}
 }
