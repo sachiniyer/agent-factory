@@ -88,6 +88,24 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	"worktree_root":        true,
 }
 
+// isPathStrictlyInside reports whether absBase is a strict descendant of
+// absDir (absBase != absDir and absBase is not outside absDir). Both
+// arguments must be absolute, cleaned paths. Built on filepath.Rel rather
+// than strings.HasPrefix(path, dir+Separator) because the latter constructs
+// "//" when dir is the filesystem root, rejecting valid children of a repo
+// rooted at "/" (#852). Duplicates session/git.isPathStrictlyInside, which
+// this package cannot import without a cycle.
+func isPathStrictlyInside(absBase, absDir string) bool {
+	rel, err := filepath.Rel(absDir, absBase)
+	if err != nil {
+		return false
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
 // InRepoConfigPath returns the path of the in-repo config file for a repo
 // root. The file is optional; callers should use LoadInRepoConfig rather than
 // reading this path directly so symlink and file-type guards apply.
@@ -132,7 +150,7 @@ func readInRepoConfigFile(repoRoot string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve repo root %s: %w", repoRoot, err)
 	}
-	if !strings.HasPrefix(resolved, filepath.Clean(resolvedRoot)+string(filepath.Separator)) {
+	if !isPathStrictlyInside(resolved, filepath.Clean(resolvedRoot)) {
 		return nil, fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to read it", prettyHomePath(path), prettyHomePath(resolved))
 	}
 
@@ -278,7 +296,7 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 	// dir symlinked outside the repo must not receive the save. The read
 	// guard alone can't cover this — it only fires when the config file
 	// already exists at the resolved location.
-	if !strings.HasPrefix(resolvedPath, resolveSymlinksForCompare(repoRoot)+string(filepath.Separator)) {
+	if !isPathStrictlyInside(resolvedPath, resolveSymlinksForCompare(repoRoot)) {
 		return fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
 	}
 	data, err := readInRepoConfigFile(repoRoot)
