@@ -2,10 +2,10 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"syscall"
 	"testing"
-	"time"
 )
 
 // TestStartDaemonChildReapsExitedChild pins the #816 fix: startDaemonChild
@@ -29,12 +29,12 @@ func TestStartDaemonChildReapsExitedChild(t *testing.T) {
 		t.Fatalf("startDaemonChild: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return // child exited and was reaped
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("child PID %d still occupies a process-table slot 5s after exit; daemon child was not reaped (#816)", pid)
+	// `true` exits immediately; once startDaemonChild reaps it the kernel
+	// releases the PID and signal 0 returns ESRCH. Event-driven with a generous
+	// bound so a loaded runner cannot expire the wait before the reap lands
+	// (#878) — a genuine reap regression (#816) still fails, just after the
+	// generous timeout.
+	waitForReady(t, fmt.Sprintf("daemon child PID %d reaped (signal 0 -> ESRCH)", pid), func() bool {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	})
 }
