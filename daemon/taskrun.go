@@ -19,7 +19,7 @@ import (
 // own control socket when called from inside the daemon process.
 var (
 	createSessionForTask = CreateSession
-	sendPromptForTask    = SendPrompt
+	deliverPromptForTask = DeliverPrompt
 )
 
 // deliverTaskPrompt delivers one rendered prompt for a task and returns the
@@ -51,36 +51,22 @@ func deliverTaskPrompt(t *task.Task, prompt string) (string, error) {
 		return "started", nil
 	}
 
-	repo, err := config.RepoFromPath(t.ProjectPath)
+	// Route through the daemon's serialized create-or-send path. When several
+	// tasks fire at the same missing target_session, the daemon creates it once
+	// and delivers every prompt in order instead of dropping the losers of the
+	// creation race (#865). A Deleting target is surfaced, not silently dropped.
+	status, err := deliverPromptForTask(DeliverPromptRequest{
+		Title:    t.TargetSession,
+		RepoPath: t.ProjectPath,
+		Program:  t.Program,
+		Prompt:   prompt,
+		AutoYes:  cfg.AutoYes,
+	})
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve repo for task path: %w", err)
+		return "", fmt.Errorf("failed to deliver prompt to target session %q: %w", t.TargetSession, err)
 	}
-	exists, err := repoHasSessionTitle(repo.ID, t.TargetSession)
-	if err != nil {
-		return "", err
-	}
-	if !exists {
-		if _, err := createSessionForTask(CreateSessionRequest{
-			Title:    t.TargetSession,
-			RepoPath: t.ProjectPath,
-			Program:  t.Program,
-			Prompt:   prompt,
-			AutoYes:  cfg.AutoYes,
-		}); err != nil {
-			return "", fmt.Errorf("failed to auto-create target session %q: %w", t.TargetSession, err)
-		}
-		log.InfoLog.Printf("task %s auto-created target session %q and delivered the prompt", t.ID, t.TargetSession)
-		return "started", nil
-	}
-	if err := sendPromptForTask(SendPromptRequest{
-		Title:  t.TargetSession,
-		RepoID: repo.ID,
-		Prompt: prompt,
-	}); err != nil {
-		return "", fmt.Errorf("failed to send prompt to target session %q: %w", t.TargetSession, err)
-	}
-	log.InfoLog.Printf("task %s sent prompt to target session %q", t.ID, t.TargetSession)
-	return "sent", nil
+	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, t.TargetSession, status)
+	return status, nil
 }
 
 // repoHasSessionTitle reports whether a persisted session with the given

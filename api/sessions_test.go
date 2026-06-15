@@ -510,6 +510,77 @@ func TestSessionsSendPrompt_HonorsRepoScoping(t *testing.T) {
 	}
 }
 
+// TestSessionsSendPrompt_CreateRoutesThroughDeliverPrompt pins the
+// adjacent-call-site fix for #865: `af sessions send-prompt --create` must
+// hand the whole create-or-send decision to the daemon's serialized
+// DeliverPrompt path (so a target that pops into existence concurrently is
+// delivered into, not dropped) rather than doing its own check-then-create.
+func TestSessionsSendPrompt_CreateRoutesThroughDeliverPrompt(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoRoot := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+
+	const title = "captain"
+	const prompt = "triage the new issue"
+
+	prevRepoFlag := repoFlag
+	repoFlag = repoRoot
+	prevCreate := sendPromptCreateFlag
+	sendPromptCreateFlag = true
+	defer func() {
+		repoFlag = prevRepoFlag
+		sendPromptCreateFlag = prevCreate
+	}()
+
+	var gotReq daemon.DeliverPromptRequest
+	called := false
+	prevDeliver := deliverPromptViaDaemon
+	prevSend := sendPromptViaDaemon
+	deliverPromptViaDaemon = func(req daemon.DeliverPromptRequest) (string, error) {
+		gotReq = req
+		called = true
+		return "started", nil
+	}
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+		t.Fatalf("--create must not fall back to the plain send path; got %+v", req)
+		return nil
+	}
+	defer func() {
+		deliverPromptViaDaemon = prevDeliver
+		sendPromptViaDaemon = prevSend
+	}()
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStdout, origStderr := os.Stdout, os.Stderr
+	os.Stdout = devnull
+	os.Stderr = devnull
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	}()
+
+	if err := sessionsSendPromptCmd.RunE(sessionsSendPromptCmd, []string{title, prompt}); err != nil {
+		t.Fatalf("sessionsSendPromptCmd --create returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("--create did not route through DeliverPrompt")
+	}
+	if gotReq.Title != title || gotReq.Prompt != prompt || gotReq.RepoPath != repoRoot {
+		t.Fatalf("unexpected DeliverPrompt request: %+v", gotReq)
+	}
+}
+
 func stubKillSessionDirect() func() {
 	prev := killSessionViaDaemon
 	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {

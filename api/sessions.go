@@ -27,6 +27,7 @@ var (
 	createSessionViaDaemon = daemon.CreateSession
 	killSessionViaDaemon   = daemon.KillSession
 	sendPromptViaDaemon    = daemon.SendPrompt
+	deliverPromptViaDaemon = daemon.DeliverPrompt
 )
 
 // ghostKillTmuxByName issues a tmux kill-session for a persisted sanitized
@@ -296,16 +297,13 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 			return jsonError(err)
 		}
 
-		exists, err := instanceTitleExistsInScope(repoID, title)
-		if err != nil {
-			return jsonError(err)
-		}
-		if !exists {
-			if !sendPromptCreateFlag {
-				return jsonError(fmt.Errorf("instance %q not found. Use --create to auto-create the session, or run: af sessions create --name %q --prompt <prompt>", title, title))
-			}
-
-			// Auto-create the session
+		// --create routes through the daemon's serialized create-or-send path
+		// so a session that pops into existence concurrently (another
+		// --create, or a task delivering into the same target_session) is
+		// delivered into rather than racing creation and dropping a prompt
+		// (#865). The daemon decides create-vs-send under its per-target lock,
+		// so no existence pre-check is needed here.
+		if sendPromptCreateFlag {
 			repo, repoErr := resolveRepo()
 			if repoErr != nil {
 				return jsonError(fmt.Errorf("--repo is required when using --create: %w", repoErr))
@@ -313,14 +311,6 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 
 			if !git.IsGitRepo(repo.Root) {
 				return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
-			}
-
-			exists, err := repoHasInstanceTitle(repo.ID, title)
-			if err != nil {
-				return jsonError(err)
-			}
-			if exists {
-				return jsonError(fmt.Errorf("session with title %q already exists", title))
 			}
 
 			cfg, err := config.ResolveConfig(repo.Root)
@@ -335,17 +325,24 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 				return jsonError(err)
 			}
 
-			_, err = createSessionViaDaemon(daemon.CreateSessionRequest{
+			if _, err := deliverPromptViaDaemon(daemon.DeliverPromptRequest{
 				Title:    title,
 				RepoPath: repo.Root,
 				Program:  program,
 				Prompt:   prompt,
 				AutoYes:  cfg.AutoYes,
-			})
-			if err != nil {
+			}); err != nil {
 				return jsonError(err)
 			}
 			return jsonOut(map[string]bool{"ok": true})
+		}
+
+		exists, err := instanceTitleExistsInScope(repoID, title)
+		if err != nil {
+			return jsonError(err)
+		}
+		if !exists {
+			return jsonError(fmt.Errorf("instance %q not found. Use --create to auto-create the session, or run: af sessions create --name %q --prompt <prompt>", title, title))
 		}
 
 		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: prompt}); err != nil {

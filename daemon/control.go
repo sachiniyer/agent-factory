@@ -73,6 +73,28 @@ type SendPromptResponse struct {
 	OK bool
 }
 
+// DeliverPromptRequest asks the daemon to deliver a prompt to a target session,
+// auto-creating that session when it does not exist yet. It is the race-safe
+// successor to the deliverTaskPrompt "check existence, then create-or-send"
+// sequence that dropped a prompt whenever two deliveries to the same missing
+// target ran concurrently (#865). RepoPath (not RepoID) is required because a
+// create needs the worktree root; the repo ID is resolved from it.
+type DeliverPromptRequest struct {
+	Title    string
+	RepoPath string
+	Program  string
+	Prompt   string
+	AutoYes  bool
+}
+
+// DeliverPromptResponse reports how the prompt was delivered. Status is
+// "started" when this call created the target session (the prompt was its
+// initial prompt) and "sent" when it was sent into a session that already
+// existed — the same status vocabulary deliverTaskPrompt records on a task.
+type DeliverPromptResponse struct {
+	Status string
+}
+
 type ImportRemoteHookSessionsRequest struct {
 	RepoPath string
 }
@@ -233,6 +255,19 @@ func SendPrompt(req SendPromptRequest) error {
 		return err
 	}
 	return nil
+}
+
+// DeliverPrompt asks the daemon to deliver a prompt to a target session,
+// auto-creating it when missing. It returns the recorded status ("started" or
+// "sent"). Unlike a bare CreateSession-then-SendPrompt from the caller, the
+// whole create-or-send decision runs under the daemon's per-target lock, so
+// concurrent deliveries to the same shared target never drop a prompt (#865).
+func DeliverPrompt(req DeliverPromptRequest) (string, error) {
+	var resp DeliverPromptResponse
+	if err := callDaemon("DeliverPrompt", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.Status, nil
 }
 
 // ReloadTasks asks the daemon to re-read tasks.json and rebuild its cron
@@ -528,6 +563,18 @@ func validateRPCRepoID(repoID string) error {
 	return nil
 }
 
+func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPromptResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	status, err := s.manager.DeliverPrompt(req)
+	if err != nil {
+		return err
+	}
+	resp.Status = status
+	return nil
+}
+
 func (s *controlServer) ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest, resp *ImportRemoteHookSessionsResponse) error {
 	if err := s.requireManagerReady(); err != nil {
 		return err
@@ -668,6 +715,11 @@ type Manager struct {
 	reservedTitles      map[string]struct{}
 	reservedRemoteNames map[string]struct{}
 	repoStartLocks      map[string]*sync.Mutex
+	// targetLocks serializes DeliverPrompt per (repo, title) so concurrent
+	// deliveries to the same shared target session create it once and deliver
+	// the rest in arrival order instead of racing creation and dropping the
+	// losers' prompts (#865). Lazily populated like repoStartLocks.
+	targetLocks map[string]*sync.Mutex
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -702,6 +754,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		reservedTitles:      make(map[string]struct{}),
 		reservedRemoteNames: make(map[string]struct{}),
 		repoStartLocks:      make(map[string]*sync.Mutex),
+		targetLocks:         make(map[string]*sync.Mutex),
 	}, nil
 }
 
@@ -1079,6 +1132,156 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 		return fmt.Errorf("failed to send prompt: %w", err)
 	}
 	return nil
+}
+
+// targetDeliverWait bounds how long DeliverPrompt waits for a target session to
+// materialize after losing a creation race to a process outside this daemon
+// (e.g. `af sessions create`); targetDeliverPoll is the retry cadence. The wait
+// only matters on that cross-process path — in-daemon deliveries serialize on
+// the per-target lock and never enter it.
+var (
+	targetDeliverWait = 30 * time.Second
+	targetDeliverPoll = 100 * time.Millisecond
+)
+
+// DeliverPrompt delivers a prompt to a target session, auto-creating that
+// session when it does not exist. The whole create-or-send decision runs under
+// a per-(repo, title) lock, so concurrent deliveries to the same shared target
+// serialize: the first creates the session, the rest send into it in arrival
+// order. This is the fix for #865, where the pre-lock path let two deliveries
+// both observe "missing", both attempt creation, and dropped the loser's prompt
+// when reserveCreate rejected the duplicate. Returns "started" when this call
+// created the session and "sent" when it delivered into an existing one.
+func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
+	if req.Prompt == "" {
+		return "", fmt.Errorf("prompt is required")
+	}
+	if req.RepoPath == "" {
+		return "", fmt.Errorf("repo path is required")
+	}
+	repo, err := config.RepoFromPath(req.RepoPath)
+	if err != nil {
+		return "", err
+	}
+
+	unlock := m.lockTarget(repo.ID, req.Title)
+	defer unlock()
+
+	exists, deleting, err := m.targetSessionState(repo.ID, req.Title)
+	if err != nil {
+		return "", err
+	}
+	if deleting {
+		return "", fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title)
+	}
+	if exists {
+		if err := m.SendPrompt(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt}); err != nil {
+			return "", err
+		}
+		return "sent", nil
+	}
+
+	// The session is absent and, because deliveries to this target serialize on
+	// the per-target lock, no other in-daemon delivery is creating it. Create it
+	// now and deliver the prompt as its initial prompt.
+	if _, err := m.CreateSession(CreateSessionRequest{
+		Title:    req.Title,
+		RepoPath: req.RepoPath,
+		Program:  req.Program,
+		Prompt:   req.Prompt,
+		AutoYes:  req.AutoYes,
+	}); err != nil {
+		// A creator outside this daemon (a plain `af sessions create`, the API)
+		// can still claim the title between our check and reserveCreate. Rather
+		// than drop the prompt (#865), wait for the session to materialize and
+		// send into it. Genuine conflicts (branch collisions, config errors)
+		// are not retryable and surface as-is.
+		if isConcurrentCreateErr(err) {
+			if werr := m.waitForTargetSession(repo.ID, req.Title); werr != nil {
+				return "", werr
+			}
+			if serr := m.SendPrompt(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt}); serr != nil {
+				return "", serr
+			}
+			return "sent", nil
+		}
+		return "", fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
+	}
+	return "started", nil
+}
+
+// lockTarget acquires the per-(repo, title) delivery lock, creating it on first
+// use, and returns the unlock function. Mirrors startLockForRepo: the map is
+// guarded by m.mu but the returned mutex is held outside it, so a long-running
+// delivery never blocks unrelated manager operations.
+func (m *Manager) lockTarget(repoID, title string) func() {
+	m.mu.Lock()
+	key := daemonInstanceKey(repoID, title)
+	lock := m.targetLocks[key]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.targetLocks[key] = lock
+	}
+	m.mu.Unlock()
+
+	lock.Lock()
+	return lock.Unlock
+}
+
+// targetSessionState reports whether a session with the given title exists for
+// the repo (in memory or persisted) and whether its live instance is mid-
+// teardown. Deleting is transient in-memory state that is never persisted
+// (#844/#847), so only a live in-memory instance can carry it — a disk-only
+// record is treated as a normal existing session.
+func (m *Manager) targetSessionState(repoID, title string) (exists, deleting bool, err error) {
+	m.mu.Lock()
+	if rerr := m.refreshLocked(); rerr != nil {
+		m.mu.Unlock()
+		return false, false, rerr
+	}
+	inst := m.instances[daemonInstanceKey(repoID, title)]
+	m.mu.Unlock()
+	if inst != nil {
+		return true, inst.GetStatus() == session.Deleting, nil
+	}
+
+	exists, err = repoHasSessionTitle(repoID, title)
+	return exists, false, err
+}
+
+// waitForTargetSession blocks until the target session exists, surfacing a
+// Deleting session rather than delivering into it, bounded by targetDeliverWait.
+func (m *Manager) waitForTargetSession(repoID, title string) error {
+	deadline := time.Now().Add(targetDeliverWait)
+	for {
+		exists, deleting, err := m.targetSessionState(repoID, title)
+		if err != nil {
+			return err
+		}
+		if deleting {
+			return fmt.Errorf("target session %q is being deleted; prompt not delivered", title)
+		}
+		if exists {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out waiting for target session %q to be created", title)
+		}
+		time.Sleep(targetDeliverPoll)
+	}
+}
+
+// isConcurrentCreateErr reports whether a CreateSession failure means another
+// creator already claimed the exact title — the retryable race in #865. It
+// matches reserveCreate's "already reserved"/"already exists" rejections but
+// deliberately not the branch-collision error ("conflicts with existing
+// session"), which is a genuine configuration problem, not a transient race.
+func isConcurrentCreateErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "already reserved") || strings.Contains(s, "already exists")
 }
 
 func (m *Manager) findSession(title, repoID string) (*session.Instance, string, *session.InstanceData, error) {
