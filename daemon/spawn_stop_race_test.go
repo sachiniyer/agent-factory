@@ -68,16 +68,11 @@ func TestStopDaemon_PreservesNewDaemonSocket(t *testing.T) {
 		_, _ = cmd.Process.Wait()
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if isAgentFactoryDaemon(pid) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !isAgentFactoryDaemon(pid) {
-		t.Fatalf("fake daemon pid=%d not recognized as agent-factory daemon", pid)
-	}
+	// Event-driven readiness with a generous bound so a loaded runner cannot
+	// expire the old fixed 2s wait before the exec rewrites the cmdline (#878).
+	waitForReady(t, fmt.Sprintf("fake daemon pid=%d cmdline exposes --daemon", pid), func() bool {
+		return isAgentFactoryDaemon(pid)
+	})
 
 	// Reap A in a goroutine so /proc/<pid>/cmdline clears once it exits and
 	// the StopDaemon poll observes the death promptly.

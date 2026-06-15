@@ -186,15 +186,14 @@ func spawnFakeDaemonWithDaemonFlag(t *testing.T) *exec.Cmd {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake daemon: %v", err)
 	}
-	// Wait briefly for bash to exec into sleep so the cmdline we read is
-	// the post-exec one with the rewritten argv[0]. Re-check up to ~500ms.
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if isAgentFactoryDaemon(cmd.Process.Pid) {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Wait for bash to exec into sleep so the cmdline we read is the post-exec
+	// one with the rewritten argv[0]. Event-driven with a generous bound so a
+	// loaded CI runner cannot miss the window — the old fixed ~500ms wait could
+	// expire just before the exec landed, failing the caller's cmdline sanity
+	// check spuriously (#878).
+	waitForReady(t, "fake daemon cmdline exposes --daemon", func() bool {
+		return isAgentFactoryDaemon(cmd.Process.Pid)
+	})
 	return cmd
 }
 

@@ -168,17 +168,12 @@ func TestStopDaemon_SIGTERMFirst(t *testing.T) {
 		_, _ = cmd.Process.Wait()
 	}()
 
-	// Wait for the post-exec cmdline to be readable.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if isAgentFactoryDaemon(pid) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !isAgentFactoryDaemon(pid) {
-		t.Fatalf("fake daemon pid=%d not recognized as agent-factory daemon", pid)
-	}
+	// Wait for the post-exec cmdline to be readable. Event-driven with a
+	// generous bound so a loaded runner cannot expire the old fixed 2s wait
+	// before the exec lands (#878).
+	waitForReady(t, fmt.Sprintf("fake daemon pid=%d cmdline exposes --daemon", pid), func() bool {
+		return isAgentFactoryDaemon(pid)
+	})
 
 	// Reap in a goroutine so /proc/<pid>/cmdline clears once the process
 	// exits — otherwise pidLooksAlive keeps seeing the zombie as alive and
@@ -271,19 +266,15 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 		_, _ = cmd.Process.Wait()
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(readyFile); err == nil && isAgentFactoryDaemon(pid) {
-			break
+	// Wait until the trap is installed (sentinel present) AND the rewritten
+	// cmdline is visible. Event-driven with a generous bound so a loaded runner
+	// cannot expire the old fixed 2s wait before the child is ready (#878).
+	waitForReady(t, fmt.Sprintf("trap-ready sentinel + pid=%d cmdline exposes --daemon", pid), func() bool {
+		if _, err := os.Stat(readyFile); err != nil {
+			return false
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if _, err := os.Stat(readyFile); err != nil {
-		t.Fatalf("ready sentinel never appeared (trap not installed): %v", err)
-	}
-	if !isAgentFactoryDaemon(pid) {
-		t.Fatalf("fake daemon pid=%d cmdline does not match --daemon", pid)
-	}
+		return isAgentFactoryDaemon(pid)
+	})
 
 	exited := make(chan *os.ProcessState, 1)
 	go func() {
