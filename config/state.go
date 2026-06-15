@@ -28,7 +28,17 @@ type InstanceStorage interface {
 	// then overwrite, disk state they failed to read (#766).
 	GetInstances(repoID string) (json.RawMessage, error)
 	// GetAllInstances returns instance data for all repos, keyed by repo ID.
-	GetAllInstances() map[string]json.RawMessage
+	//
+	// A missing instances directory yields an empty map with a nil error so
+	// first-run callers proceed normally. A genuine failure to read the
+	// instances directory (permission denied, I/O error) is PROPAGATED rather
+	// than masked as an empty map: callers like `af reset` and the daemon must
+	// distinguish "no sessions exist" from "sessions exist but are unreadable"
+	// so they don't skip worktree cleanup or silently hide live sessions
+	// (#868). This mirrors GetInstances' single-repo error propagation (#766).
+	// Per-repo files that individually fail to read are skipped-and-warned by
+	// LoadAllRepoInstances, so they never surface as an error here.
+	GetAllInstances() (map[string]json.RawMessage, error)
 	// DeleteAllInstances removes all stored instances across all repos.
 	DeleteAllInstances() error
 }
@@ -267,13 +277,14 @@ func (s *State) GetInstances(repoID string) (json.RawMessage, error) {
 	return LoadRepoInstances(repoID)
 }
 
-func (s *State) GetAllInstances() map[string]json.RawMessage {
-	data, err := LoadAllRepoInstances()
-	if err != nil {
-		log.ErrorLog.Printf("failed to load all repo instances: %v", err)
-		return make(map[string]json.RawMessage)
-	}
-	return data
+func (s *State) GetAllInstances() (map[string]json.RawMessage, error) {
+	// LoadAllRepoInstances already distinguishes "first run" (instances dir
+	// missing -> empty map, nil) from a genuine directory read error, and
+	// skips-and-warns per-repo files it cannot read. Surface its result
+	// verbatim: swallowing the error as an empty map is what let reset skip
+	// worktree cleanup and the daemon hide unreadable-but-present sessions
+	// (#868).
+	return LoadAllRepoInstances()
 }
 
 func (s *State) DeleteAllInstances() error {
