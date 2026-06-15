@@ -308,14 +308,30 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tickUpdatePRInfoCmd, fetchPRInfoCmd(selected, true))
 	case prInfoUpdatedMsg:
 		detachTraceMark("prInfoUpdatedMsg-handler-entry")
+		// msg.instance is the pointer captured when the async gh fetch kicked
+		// off. A background refresh can swap it out of the sidebar while the
+		// fetch is in flight — RemoveInstanceByTitle + a rebuilt
+		// FromInstanceData pointer (#765) — orphaning it. Writing the result to
+		// that orphan loses the update from the UI and from persisted state.
+		// Re-resolve the live instance by title (mirroring the #808 fix to
+		// instanceStartedMsg) so the update lands on whatever instance now
+		// represents this session. If the session is gone entirely, drop the
+		// stale fetch result (#862).
+		target := msg.instance
+		if !m.sidebar.ContainsInstance(target) {
+			target = m.sidebar.GetInstanceByTitle(msg.instance.Title)
+		}
+		if target == nil {
+			return m, nil
+		}
 		if msg.err != nil {
 			log.WarningLog.Printf("PR info fetch failed for %q: %v", msg.instance.Title, msg.err)
 			// Mark as fetched anyway so we don't thrash retries on every
 			// selection change when the network is unreachable.
-			msg.instance.MarkPRInfoFetched()
+			target.MarkPRInfoFetched()
 			return m, nil
 		}
-		msg.instance.SetPRInfo(msg.info)
+		target.SetPRInfo(msg.info)
 		saveStart := time.Now()
 		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 			log.WarningLog.Printf("failed to save instances after PR update: %v", err)

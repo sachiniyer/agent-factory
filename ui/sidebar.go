@@ -439,6 +439,22 @@ func (s *Sidebar) ReplaceInstanceByTitle(title string, replacement *session.Inst
 	return false
 }
 
+// GetInstanceByTitle returns the sidebar instance carrying the given title, or
+// nil when none matches. Async handlers that captured an *Instance pointer
+// before awaiting a background fetch use this to re-resolve the live instance:
+// a background sync may have removed the captured instance and rebuilt a fresh
+// same-title copy via FromInstanceData while the fetch was in flight (#765),
+// orphaning the original pointer. Re-resolving by title lands the update on the
+// instance that currently represents the session (#862).
+func (s *Sidebar) GetInstanceByTitle(title string) *session.Instance {
+	for _, inst := range s.instances {
+		if inst.Title == title {
+			return inst
+		}
+	}
+	return nil
+}
+
 // GetInstances returns all instances. The returned slice shares the sidebar's
 // backing array, so callers must only read it on the bubbletea event loop —
 // never hand it to a goroutine that outlives the call (see

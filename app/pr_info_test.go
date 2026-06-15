@@ -321,6 +321,85 @@ func TestFetchPRInfoCmd_Force_StillRunsWhileFetchInFlight(t *testing.T) {
 		"force=true must bypass the kickoff-debounce the previous call set")
 }
 
+// ----------------------------------------------------------------------------
+// Regression tests for issue #862 (sachiniyer/agent-factory):
+// "PR info updates can be lost when an instance is swapped during async
+// refresh". Same race class as #777/#808: refreshExternalInstances swaps a
+// sidebar instance (RemoveInstanceByTitle + a rebuilt FromInstanceData pointer,
+// #765) while a PR fetch is in flight, orphaning the pointer the
+// prInfoUpdatedMsg handler captured at kickoff.
+// ----------------------------------------------------------------------------
+
+// TestPrInfoUpdatedMsg_InstanceSwappedDuringFetch_AppliesToLiveInstance — the
+// captured instance is swapped out for a fresh same-title copy while the fetch
+// is in flight. The completed update must land on the live sidebar instance,
+// not the orphan.
+func TestPrInfoUpdatedMsg_InstanceSwappedDuringFetch_AppliesToLiveInstance(t *testing.T) {
+	h := newTestHome(t)
+
+	orphan := newStartedInstance(t, "swapped")
+	h.sidebar.AddInstance(orphan)
+	h.sidebar.SetSelectedInstance(0)
+
+	// Simulate the #765 swap: remove the captured instance and add a fresh
+	// same-title copy (as FromInstanceData would build).
+	live := newStartedInstance(t, "swapped")
+	h.sidebar.RemoveInstanceByTitle("swapped")
+	h.sidebar.AddInstance(live)
+	require.NotSame(t, orphan, live, "sanity: swap must produce a distinct pointer")
+
+	info := &git.PRInfo{Number: 42, Title: "add feature", URL: "https://x/42", State: "OPEN"}
+	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, info: info})
+
+	got := live.GetPRInfo()
+	require.NotNil(t, got, "PR info must be applied to the live sidebar instance")
+	assert.Equal(t, 42, got.Number)
+	assert.Nil(t, orphan.GetPRInfo(), "the orphaned pointer must not receive the update")
+}
+
+// TestPrInfoUpdatedMsg_InstanceGoneDuringFetch_DropsUpdate — the session was
+// killed (no same-title replacement) while the fetch was in flight. The handler
+// must drop the stale result without panicking or resurrecting state.
+func TestPrInfoUpdatedMsg_InstanceGoneDuringFetch_DropsUpdate(t *testing.T) {
+	h := newTestHome(t)
+
+	orphan := newStartedInstance(t, "gone")
+	h.sidebar.AddInstance(orphan)
+	h.sidebar.SetSelectedInstance(0)
+	h.sidebar.RemoveInstanceByTitle("gone")
+
+	info := &git.PRInfo{Number: 7, Title: "lost", State: "OPEN"}
+	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, info: info})
+
+	assert.Nil(t, cmd)
+	assert.Nil(t, orphan.GetPRInfo(),
+		"an update for a session no longer in the sidebar must be dropped")
+}
+
+// TestPrInfoUpdatedMsg_Error_SwappedDuringFetch_MarksLiveInstance — the error
+// path must also re-resolve by title: MarkPRInfoFetched should debounce the
+// live instance, not the orphan.
+func TestPrInfoUpdatedMsg_Error_SwappedDuringFetch_MarksLiveInstance(t *testing.T) {
+	h := newTestHome(t)
+
+	orphan := newStartedInstance(t, "swapped")
+	h.sidebar.AddInstance(orphan)
+	h.sidebar.SetSelectedInstance(0)
+
+	live := newStartedInstance(t, "swapped")
+	h.sidebar.RemoveInstanceByTitle("swapped")
+	h.sidebar.AddInstance(live)
+	require.Greater(t, live.PRInfoAge(), 365*24*time.Hour,
+		"precondition: live instance is never-fetched")
+
+	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, err: errors.New("gh timeout")})
+
+	assert.Less(t, live.PRInfoAge(), time.Second,
+		"the live instance must be marked fetched to debounce retries")
+	assert.Greater(t, orphan.PRInfoAge(), 365*24*time.Hour,
+		"the orphaned pointer must be left untouched")
+}
+
 // sanity: exercise config.DefaultConfig / AppState wiring so a compile
 // regression in newTestHome stays within this package.
 func TestNewTestHome_BuildsSuccessfully(t *testing.T) {
