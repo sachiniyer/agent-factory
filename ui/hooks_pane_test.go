@@ -64,3 +64,42 @@ func TestHooksPaneSetCommandsRoundtripKeepsSelectedIdxValid(t *testing.T) {
 	assert.True(t, h.editing)
 	assert.Equal(t, "newcmd", h.editBuffer)
 }
+
+// TestHooksPaneRejectsWhitespaceOnlyAddedCommand verifies the #870 fix: a
+// whitespace-only command typed while adding is rejected rather than persisted
+// to the on-disk config (matching how watch/cron/remote-hook inputs validate).
+func TestHooksPaneRejectsWhitespaceOnlyAddedCommand(t *testing.T) {
+	h := NewHooksPane()
+	h.SetFocus(true)
+
+	// Start adding, type only whitespace, then save.
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeySpace})
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeySpace})
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeySpace})
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Empty(t, h.GetCommands(), "whitespace-only command must not be saved")
+	assert.False(t, h.IsDirty(), "rejecting a blank command must not dirty the pane")
+	assert.False(t, h.editing)
+	assert.False(t, h.adding)
+}
+
+// TestHooksPaneWhitespaceEditDoesNotClobberCommand verifies that editing an
+// existing command down to whitespace-only does not overwrite it with blank.
+func TestHooksPaneWhitespaceEditDoesNotClobberCommand(t *testing.T) {
+	h := NewHooksPane()
+	h.SetCommands([]string{"make test"})
+	h.SetFocus(true)
+
+	// Enter edit mode, clear the buffer, type whitespace, save.
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	for range "make test" {
+		h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeySpace})
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, []string{"make test"}, h.GetCommands(),
+		"whitespace-only edit must leave the existing command untouched")
+}

@@ -399,7 +399,7 @@ func (s *TaskPane) enterEditMode() {
 // event defaults to the raw emitted line. Returns the inline error and the
 // focus stop to render it under, or ("", -1) when valid.
 func (s *TaskPane) validateForm() (string, int) {
-	if s.editName.Value() == "" {
+	if strings.TrimSpace(s.editName.Value()) == "" {
 		return "name is required", taskFocusName
 	}
 	if s.editTriggerIsWatch {
