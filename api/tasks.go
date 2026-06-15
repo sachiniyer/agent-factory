@@ -224,6 +224,7 @@ var (
 	taskUpdateWatchCmdFlag      string
 	taskUpdateTargetSessionFlag string
 	taskUpdateEnabledFlag       string
+	taskUpdateProgramFlag       string
 )
 
 var tasksUpdateCmd = &cobra.Command{
@@ -308,6 +309,19 @@ var tasksUpdateCmd = &cobra.Command{
 			// not changed
 		default:
 			return jsonError(fmt.Errorf("--enabled must be 'true' or 'false'"))
+		}
+
+		// Partial-update semantics: "" means "leave unchanged" (mirroring
+		// --name and the add path's taskAddProgramFlag != "" guard). There is
+		// no "clear program" state — a task always runs *some* program — so an
+		// empty value is never a request to wipe it. Any non-empty value is
+		// validated against the same enum tasks add uses, keeping CLI/TUI
+		// parity (#866).
+		if taskUpdateProgramFlag != "" {
+			if err := config.ValidateProgramEnum("--program flag", "--program flag", taskUpdateProgramFlag, ""); err != nil {
+				return jsonError(err)
+			}
+			s.Program = taskUpdateProgramFlag
 		}
 
 		if err := task.UpdateTask(*s); err != nil {

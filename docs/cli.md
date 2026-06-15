@@ -46,12 +46,12 @@ af tasks list
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "... {{line}} ..."] [--target-session <title>]
 af tasks get <id>
-af tasks update <id> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--enabled true|false]
+af tasks update <id> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--program <agent>] [--enabled true|false]
 af tasks trigger <id>          # run a cron task immediately (cron tasks only)
 af tasks remove <id>
 ```
 
-Exactly one of `--cron` / `--watch-cmd` per task. On `update`, setting one trigger clears the other. `--target-session ""` explicitly reverts to create-a-session-per-run; omitting the flag leaves it untouched.
+Exactly one of `--cron` / `--watch-cmd` per task. On `update`, setting one trigger clears the other. `--target-session ""` explicitly reverts to create-a-session-per-run; omitting the flag leaves it untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 
 ## `af daemon`
 
