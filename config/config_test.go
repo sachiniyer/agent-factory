@@ -758,8 +758,13 @@ func TestLoadConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), ConfigFileName)
 	})
 
-	t.Run("surfaces error on empty config file", func(t *testing.T) {
+	t.Run("re-materializes defaults from an empty config file (#864)", func(t *testing.T) {
+		// An empty config.json is the fingerprint of a failed first-run write,
+		// not a user's settings. It must NOT wedge startup with the #758
+		// "config is empty" hard error; instead the stub is dropped and
+		// defaults regenerated so the next run parses cleanly.
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		fastShell(t)
 		configDir, err := GetConfigDir()
 		require.NoError(t, err)
 		require.NoError(t, os.MkdirAll(configDir, 0755))
@@ -768,10 +773,15 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, os.WriteFile(configPath, []byte(``), 0644))
 
 		cfg, err := LoadConfig()
-		require.Error(t, err)
-		assert.Nil(t, cfg)
-		assert.Contains(t, err.Error(), "empty")
-		assert.Contains(t, err.Error(), ConfigFileName)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, defaultProgram, cfg.DefaultProgram)
+
+		// The empty stub must be replaced by a real, non-empty config so a
+		// subsequent startup does not hit the empty-file path again.
+		data, err := os.ReadFile(configPath)
+		require.NoError(t, err)
+		assert.NotEmpty(t, data, "the empty stub must be regenerated, not left in place")
 	})
 
 	t.Run("surfaces error when config file is unreadable", func(t *testing.T) {
