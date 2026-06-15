@@ -11,6 +11,16 @@ type Backend interface {
 	// Kill terminates the session and cleans up all associated resources.
 	Kill(instance *Instance) error
 
+	// CloseAttachOnly releases the resources this Instance opened to view or
+	// drive the session (a tmux attach PTY, a remote preview process) WITHOUT
+	// destroying the underlying session, worktree, or remote record. It is the
+	// non-destructive sibling of Kill, used to discard a duplicate Instance
+	// built from disk that lost a race to the canonical, still-tracked
+	// Instance — see the daemon's findSession (#867). Killing such a duplicate
+	// would tear down state the canonical Instance shares; closing only its
+	// attach resources reclaims the PTY without that collateral damage.
+	CloseAttachOnly(instance *Instance) error
+
 	// Preview returns the current visible output of the session.
 	Preview(instance *Instance) (string, error)
 

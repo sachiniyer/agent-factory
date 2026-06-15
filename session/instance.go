@@ -402,6 +402,15 @@ func (i *Instance) Kill() error {
 	return i.backend.Kill(i)
 }
 
+// CloseAttachOnly releases the resources this instance opened to view or drive
+// its session (a tmux attach PTY, a remote preview process) without destroying
+// the session, worktree, or remote record. Use it — never Kill — to discard a
+// duplicate Instance built from disk that lost a race to the canonical tracked
+// Instance (#867); see Backend.CloseAttachOnly.
+func (i *Instance) CloseAttachOnly() error {
+	return i.backend.CloseAttachOnly(i)
+}
+
 func (i *Instance) Preview() (string, error) {
 	return i.backend.Preview(i)
 }

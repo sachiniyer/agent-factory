@@ -327,6 +327,20 @@ func (b *HookBackend) Kill(i *Instance) error {
 	return nil
 }
 
+// CloseAttachOnly stops this instance's preview process (closing its PTY/pipe)
+// WITHOUT invoking delete_cmd, so a duplicate Instance built from disk (#867)
+// can be discarded without deleting the live remote session that a canonical,
+// still-tracked Instance shares. It is the non-destructive sibling of Kill,
+// which additionally runs delete_cmd to tear the remote session down.
+func (b *HookBackend) CloseAttachOnly(i *Instance) error {
+	i.mu.Lock()
+	i.started = false
+	i.mu.Unlock()
+
+	b.closePTY(i.Title)
+	return nil
+}
+
 // runDeleteCmd invokes delete_cmd for the given hook name and returns its
 // combined output and error. Shared by Kill (which surfaces the error to the
 // user) and the orphan-cleanup path in Start (which logs it best-effort, #739)

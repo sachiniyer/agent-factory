@@ -1315,10 +1315,36 @@ func (m *Manager) findSession(title, repoID string) (*session.Instance, string, 
 	if err != nil {
 		return nil, "", nil, err
 	}
-	instance, restoreErr := session.FromInstanceData(*data)
+	instance, restoreErr := fromInstanceDataForRefresh(*data)
 	if restoreErr != nil {
 		return nil, rid, data, nil
 	}
+
+	// We built `instance` from disk with m.mu released, so a concurrent
+	// refresh (or another RPC) may have restored and registered the canonical
+	// Instance for this session during the window (#867). Returning our freshly
+	// built duplicate would hand the caller an *untracked* Instance: SendPrompt
+	// would leak its restore-time attach PTY, and KillSession would call
+	// instance.Kill() — tearing down the tmux session and worktree that the
+	// canonical, still-tracked Instance shares. Re-acquire the lock and:
+	//   - if a tracked Instance now exists, drop our duplicate (closing only
+	//     its attach resources, never the shared session) and operate on the
+	//     tracked one; otherwise
+	//   - register our Instance so callers operate on a tracked Instance, just
+	//     as the refresh loop would have, instead of an orphan.
+	key := daemonInstanceKey(rid, title)
+	m.mu.Lock()
+	if tracked := m.instances[key]; tracked != nil {
+		m.mu.Unlock()
+		if err := instance.CloseAttachOnly(); err != nil {
+			log.WarningLog.Printf("findSession %q: closing duplicate instance attach failed: %v", title, err)
+		}
+		return tracked, rid, data, nil
+	}
+	// Match the refresh loop: instances the daemon tracks always run AutoYes.
+	instance.SetAutoYes(true)
+	m.instances[key] = instance
+	m.mu.Unlock()
 	return instance, rid, data, nil
 }
 

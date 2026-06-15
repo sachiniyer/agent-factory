@@ -94,6 +94,11 @@ func (b *FakeBackend) Kill(instance *Instance) error {
 	return nil
 }
 
+// CloseAttachOnly is a no-op for the fake backend: it holds no real PTY to
+// release. Tests that need to distinguish a non-destructive close from a Kill
+// embed FakeBackend and override this (and Kill) to record the call.
+func (b *FakeBackend) CloseAttachOnly(*Instance) error { return nil }
+
 func (b *FakeBackend) Preview(*Instance) (string, error)            { return "", nil }
 func (b *FakeBackend) PreviewFullHistory(*Instance) (string, error) { return "", nil }
 func (b *FakeBackend) Attach(*Instance) (chan struct{}, error) {
