@@ -24,6 +24,8 @@ func (b *startBackend) Kill(instance *session.Instance) error {
 	return nil
 }
 
+func (b *startBackend) CloseAttachOnly(*session.Instance) error { return nil }
+
 func (b *startBackend) Preview(*session.Instance) (string, error) {
 	return "ready\n❯", nil
 }

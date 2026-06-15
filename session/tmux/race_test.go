@@ -333,3 +333,50 @@ func TestCloseWithoutAttach(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 }
+
+// TestCloseAttachOnly_DoesNotKillSession verifies the non-destructive close
+// added for sachiniyer/agent-factory#867: CloseAttachOnly releases the attach
+// PTY this client opened in Restore but must NEVER run `tmux kill-session`.
+// The daemon uses it to discard a duplicate Instance built from disk while the
+// canonical, still-tracked Instance shares the same live tmux session — a
+// kill-session there would tear that session out from under the canonical.
+func TestCloseAttachOnly_DoesNotKillSession(t *testing.T) {
+	ptyFactory := NewMockPtyFactory(t)
+	var killSessionCalls int
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "kill-session") {
+				killSessionCalls++
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return nil, nil },
+	}
+
+	session := newTmuxSession(toTmuxName("attach-only", ""), "claude", ptyFactory, cmdExec)
+	// Restore opens the attach PTY — the resource a daemon duplicate holds (#867).
+	if err := session.Restore(""); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if session.ptmx == nil {
+		t.Fatalf("Restore should have opened a PTY")
+	}
+
+	if err := session.CloseAttachOnly(); err != nil {
+		t.Fatalf("CloseAttachOnly: %v", err)
+	}
+
+	if killSessionCalls != 0 {
+		t.Fatalf("CloseAttachOnly issued %d kill-session calls; want 0 (must not kill the shared session)", killSessionCalls)
+	}
+	if session.ptmx != nil {
+		t.Fatalf("CloseAttachOnly must release the attach PTY (ptmx still set)")
+	}
+	// The PTY file must actually be closed (fd reclaimed), not just nil'd out.
+	if len(ptyFactory.files) != 1 {
+		t.Fatalf("expected exactly one PTY file, got %d", len(ptyFactory.files))
+	}
+	if err := ptyFactory.files[0].Close(); err == nil {
+		t.Fatalf("PTY file should already be closed by CloseAttachOnly")
+	}
+}

@@ -223,6 +223,33 @@ func (b *LocalBackend) Kill(i *Instance) error {
 	return nil
 }
 
+// CloseAttachOnly releases this instance's hold on the tmux session — the
+// attach PTY and the `tmux attach-session` child process — WITHOUT running
+// `tmux kill-session`. The server-side tmux session and the git worktree
+// behind it are left untouched. The daemon uses this to discard a duplicate
+// Instance built from disk that turned out to already be tracked in memory
+// (#867): the duplicate must surrender the PTY it opened during restore
+// without tearing down the live session the canonical Instance shares.
+func (b *LocalBackend) CloseAttachOnly(i *Instance) error {
+	i.mu.Lock()
+	ts := i.tmuxSession
+	i.started = false
+	i.mu.Unlock()
+
+	if ts == nil {
+		return nil
+	}
+
+	err := ts.CloseAttachOnly()
+
+	i.mu.Lock()
+	if i.tmuxSession == ts {
+		i.tmuxSession = nil
+	}
+	i.mu.Unlock()
+	return err
+}
+
 func (b *LocalBackend) Preview(i *Instance) (string, error) {
 	i.mu.RLock()
 	s := i.started
