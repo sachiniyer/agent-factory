@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -66,6 +67,25 @@ const (
 	// the TUI detail row stay readable.
 	watcherStatusSummaryMax = 256
 )
+
+// truncateRunes returns s limited to at most maxBytes bytes, cut on a UTF-8
+// rune boundary so the result is always valid UTF-8. Slicing a string by a
+// raw byte index can split a multi-byte rune, and encoding/json persists the
+// half rune as U+FFFD ("�"), corrupting non-ASCII failure diagnostics in
+// tasks.json (#863, a regression of #797/#799). Callers append any ellipsis
+// themselves so the cap covers only the retained content.
+func truncateRunes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	// maxBytes may land inside a rune; back up to the start of that rune so
+	// the cut falls on a boundary and s[:end] holds only whole runes.
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
+}
 
 // watcherSupervisor owns the running watch-task processes. Reload reconciles
 // them against tasks.json the same way taskScheduler.Reload reconciles cron
@@ -256,7 +276,7 @@ func (b *tailBuffer) add(line string) {
 		return
 	}
 	if len(line) > watcherTailMaxBytes {
-		line = line[:watcherTailMaxBytes]
+		line = truncateRunes(line, watcherTailMaxBytes)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -301,7 +321,7 @@ func failureSummary(runErr error, tail *tailBuffer) string {
 		summary += ": " + first
 	}
 	if len(summary) > watcherStatusSummaryMax {
-		summary = summary[:watcherStatusSummaryMax] + "…"
+		summary = truncateRunes(summary, watcherStatusSummaryMax) + "…"
 	}
 	return summary
 }
