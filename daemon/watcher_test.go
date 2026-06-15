@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
@@ -598,6 +599,93 @@ func TestTailBufferCaps(t *testing.T) {
 
 	if empty := (&tailBuffer{}); empty.logSuffix() != "" || empty.firstLine() != "" {
 		t.Fatalf("empty tail must render nothing, got %q / %q", empty.logSuffix(), empty.firstLine())
+	}
+}
+
+// TestTruncateRunesBoundary pins truncateRunes: it never cuts a multi-byte rune
+// in half (so the result is always valid UTF-8 with no U+FFFD), respects the
+// byte cap, and leaves content that already fits untouched.
+func TestTruncateRunesBoundary(t *testing.T) {
+	cases := []struct {
+		name string
+		rune string // a single rune, repeated to overflow the cap
+	}{
+		{"three-byte CJK", "世"},  // 3 bytes; cap not a multiple of 3
+		{"four-byte emoji", "🚀"}, // 4 bytes; cap lands mid-rune
+		{"two-byte latin", "é"},  // 2 bytes
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, cap := range []int{1, 5, 17, 256, 2048} {
+				s := strings.Repeat(tc.rune, cap) // far longer than cap bytes
+				got := truncateRunes(s, cap)
+				if len(got) > cap {
+					t.Fatalf("cap=%d: result %d bytes exceeds cap", cap, len(got))
+				}
+				if !utf8.ValidString(got) {
+					t.Fatalf("cap=%d: result is not valid UTF-8: %q", cap, got)
+				}
+				if strings.ContainsRune(got, utf8.RuneError) {
+					t.Fatalf("cap=%d: result contains U+FFFD: %q", cap, got)
+				}
+				// The retained bytes must be a whole-rune prefix of the input.
+				if !strings.HasPrefix(s, got) || len(got)%len(tc.rune) != 0 {
+					t.Fatalf("cap=%d: result %q is not a whole-rune prefix", cap, got)
+				}
+			}
+		})
+	}
+
+	// Content within the cap is returned verbatim, including the boundary case.
+	for _, s := range []string{"", "ascii ok", "世界", strings.Repeat("x", 256)} {
+		if got := truncateRunes(s, 256); got != s {
+			t.Fatalf("fitting input mutated: %q -> %q", s, got)
+		}
+	}
+}
+
+// TestFailureSummaryUTF8 guards the persisted crash-loop status (#863): a
+// multi-byte error message that overflows watcherStatusSummaryMax is cut on a
+// rune boundary, so tasks.json stores valid UTF-8 (no "�") and the cap still
+// holds once the ellipsis is appended.
+func TestFailureSummaryUTF8(t *testing.T) {
+	b := &tailBuffer{}
+	// A first line of emoji that, combined with the "errored: ..." prefix,
+	// pushes the summary well past the 256-byte cap with the boundary landing
+	// inside a 4-byte rune.
+	b.add(strings.Repeat("🚀", 200))
+	summary := failureSummary(errors.New("exit status 1"), b)
+
+	if !utf8.ValidString(summary) {
+		t.Fatalf("summary is not valid UTF-8: %q", summary)
+	}
+	if strings.ContainsRune(strings.TrimSuffix(summary, "…"), utf8.RuneError) {
+		t.Fatalf("summary contains U+FFFD: %q", summary)
+	}
+	if !strings.HasPrefix(summary, "errored: exit status 1: 🚀") {
+		t.Fatalf("summary lost its prefix: %.40q", summary)
+	}
+	if !strings.HasSuffix(summary, "…") {
+		t.Fatalf("truncated summary missing ellipsis: %.40q...", summary)
+	}
+	if len(summary) > watcherStatusSummaryMax+len("…") {
+		t.Fatalf("summary length %d exceeds cap %d", len(summary), watcherStatusSummaryMax+len("…"))
+	}
+
+	// A short multi-byte message fits and is persisted unchanged.
+	short := &tailBuffer{}
+	short.add("デプロイ失敗")
+	if got := failureSummary(errors.New("exit status 2"), short); got != "errored: exit status 2: デプロイ失敗" {
+		t.Fatalf("short multi-byte summary altered: %q", got)
+	}
+
+	// A multi-byte tail line longer than watcherTailMaxBytes is itself cut on a
+	// rune boundary by tailBuffer.add.
+	big := &tailBuffer{}
+	big.add(strings.Repeat("世", watcherTailMaxBytes)) // 3*2048 bytes in
+	first := big.firstLine()
+	if len(first) > watcherTailMaxBytes || !utf8.ValidString(first) || strings.ContainsRune(first, utf8.RuneError) {
+		t.Fatalf("tail line not rune-truncated: len=%d valid=%v", len(first), utf8.ValidString(first))
 	}
 }
 
