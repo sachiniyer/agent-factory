@@ -102,14 +102,18 @@ func setupTaskRepo(t *testing.T) string {
 	return repo
 }
 
-// stubTaskDelivery swaps the daemon RPC indirections used by
-// deliverTaskPrompt for in-memory recorders and restores them on cleanup.
-func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]SendPromptRequest) {
+// stubTaskDelivery swaps the daemon RPC indirections used by deliverTaskPrompt
+// for in-memory recorders and restores them on cleanup. createSessionForTask
+// backs the no-target path (a fresh session per run); deliverPromptForTask
+// backs the target_session path (the serialized create-or-send the daemon owns
+// since #865). The deliver recorder reports "sent" when the seeded target
+// exists and "started" otherwise, mirroring Manager.DeliverPrompt.
+func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]DeliverPromptRequest) {
 	t.Helper()
 	var creates []CreateSessionRequest
-	var sends []SendPromptRequest
+	var delivers []DeliverPromptRequest
 	origCreate := createSessionForTask
-	origSend := sendPromptForTask
+	origDeliver := deliverPromptForTask
 	createSessionForTask = func(req CreateSessionRequest) (*session.InstanceData, error) {
 		creates = append(creates, req)
 		title := req.Title
@@ -118,15 +122,26 @@ func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]SendPromptReque
 		}
 		return &session.InstanceData{Title: title}, nil
 	}
-	sendPromptForTask = func(req SendPromptRequest) error {
-		sends = append(sends, req)
-		return nil
+	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+		delivers = append(delivers, req)
+		repo, err := config.RepoFromPath(req.RepoPath)
+		if err != nil {
+			return "", err
+		}
+		exists, err := repoHasSessionTitle(repo.ID, req.Title)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return "sent", nil
+		}
+		return "started", nil
 	}
 	t.Cleanup(func() {
 		createSessionForTask = origCreate
-		sendPromptForTask = origSend
+		deliverPromptForTask = origDeliver
 	})
-	return &creates, &sends
+	return &creates, &delivers
 }
 
 // seedTargetSession persists a bare instance record so the delivery path sees
@@ -174,7 +189,7 @@ func TestRunTask_RefusesWatchTask(t *testing.T) {
 func TestDeliverTaskPrompt_CreatesSessionWithoutTarget(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupTaskRepo(t)
-	creates, sends := stubTaskDelivery(t)
+	creates, delivers := stubTaskDelivery(t)
 
 	tsk := &task.Task{ID: "ffff0002", Name: "nightly", Prompt: "do it", CronExpr: "0 3 * * *", ProjectPath: repo, Enabled: true}
 	status, err := deliverTaskPrompt(tsk, tsk.Prompt)
@@ -184,8 +199,8 @@ func TestDeliverTaskPrompt_CreatesSessionWithoutTarget(t *testing.T) {
 	if status != "started" {
 		t.Fatalf("status = %q, want started", status)
 	}
-	if len(*sends) != 0 {
-		t.Fatalf("expected no SendPrompt calls, got %d", len(*sends))
+	if len(*delivers) != 0 {
+		t.Fatalf("expected no DeliverPrompt calls, got %d", len(*delivers))
 	}
 	if len(*creates) != 1 {
 		t.Fatalf("expected 1 CreateSession call, got %d", len(*creates))
@@ -205,7 +220,7 @@ func TestDeliverTaskPrompt_CreatesSessionWithoutTarget(t *testing.T) {
 func TestDeliverTaskPrompt_SendsIntoExistingTargetSession(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupTaskRepo(t)
-	creates, sends := stubTaskDelivery(t)
+	creates, delivers := stubTaskDelivery(t)
 	seedTargetSession(t, repo, "captain")
 
 	tsk := &task.Task{ID: "ffff0003", Name: "gh-issues", Prompt: "Triage: {{line}}", WatchCmd: "watch.sh", TargetSession: "captain", ProjectPath: repo, Enabled: true}
@@ -219,27 +234,24 @@ func TestDeliverTaskPrompt_SendsIntoExistingTargetSession(t *testing.T) {
 	if len(*creates) != 0 {
 		t.Fatalf("expected no CreateSession calls, got %d", len(*creates))
 	}
-	if len(*sends) != 1 {
-		t.Fatalf("expected 1 SendPrompt call, got %d", len(*sends))
+	if len(*delivers) != 1 {
+		t.Fatalf("expected 1 DeliverPrompt call, got %d", len(*delivers))
 	}
-	got := (*sends)[0]
-	repoCtx, err := config.RepoFromPath(repo)
-	if err != nil {
-		t.Fatalf("RepoFromPath: %v", err)
-	}
-	if got.Title != "captain" || got.RepoID != repoCtx.ID || got.Prompt != "Triage: new issue" {
-		t.Fatalf("unexpected SendPrompt request: %+v", got)
+	got := (*delivers)[0]
+	if got.Title != "captain" || got.RepoPath != repo || got.Prompt != "Triage: new issue" {
+		t.Fatalf("unexpected DeliverPrompt request: %+v", got)
 	}
 }
 
 // TestDeliverTaskPrompt_AutoCreatesMissingTargetSession pins the
-// Sachin-approved missing-target behavior (#782): auto-create the session
-// with the task's project_path/program and deliver the prompt as its initial
-// prompt, mirroring `af sessions send-prompt --create`.
+// Sachin-approved missing-target behavior (#782): route the delivery through
+// the daemon's create-or-send path with the task's project_path/program so a
+// missing target_session is auto-created and the prompt delivered as its
+// initial prompt, mirroring `af sessions send-prompt --create`.
 func TestDeliverTaskPrompt_AutoCreatesMissingTargetSession(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupTaskRepo(t)
-	creates, sends := stubTaskDelivery(t)
+	creates, delivers := stubTaskDelivery(t)
 
 	tsk := &task.Task{ID: "ffff0004", Name: "gh-issues", WatchCmd: "watch.sh", TargetSession: "captain", ProjectPath: repo, Program: "claude", Enabled: true}
 	status, err := deliverTaskPrompt(tsk, "new issue #9")
@@ -249,18 +261,18 @@ func TestDeliverTaskPrompt_AutoCreatesMissingTargetSession(t *testing.T) {
 	if status != "started" {
 		t.Fatalf("status = %q, want started", status)
 	}
-	if len(*sends) != 0 {
-		t.Fatalf("expected no SendPrompt calls, got %d", len(*sends))
+	if len(*creates) != 0 {
+		t.Fatalf("expected no direct CreateSession calls (delivery is serialized in the daemon), got %d", len(*creates))
 	}
-	if len(*creates) != 1 {
-		t.Fatalf("expected 1 CreateSession call, got %d", len(*creates))
+	if len(*delivers) != 1 {
+		t.Fatalf("expected 1 DeliverPrompt call, got %d", len(*delivers))
 	}
-	got := (*creates)[0]
+	got := (*delivers)[0]
 	if got.Title != "captain" {
-		t.Fatalf("auto-create must use the exact target title, got %q", got.Title)
+		t.Fatalf("delivery must use the exact target title, got %q", got.Title)
 	}
 	if got.RepoPath != repo || got.Program != "claude" || got.Prompt != "new issue #9" {
-		t.Fatalf("unexpected CreateSession request: %+v", got)
+		t.Fatalf("unexpected DeliverPrompt request: %+v", got)
 	}
 }
 
@@ -270,7 +282,7 @@ func TestDeliverTaskPrompt_AutoCreatesMissingTargetSession(t *testing.T) {
 func TestRunTask_CronTaskHonorsTargetSession(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupTaskRepo(t)
-	_, sends := stubTaskDelivery(t)
+	_, delivers := stubTaskDelivery(t)
 	seedTargetSession(t, repo, "captain")
 
 	if err := task.AddTask(task.Task{
@@ -289,8 +301,8 @@ func TestRunTask_CronTaskHonorsTargetSession(t *testing.T) {
 	if err := RunTask("ffff0005"); err != nil {
 		t.Fatalf("RunTask: %v", err)
 	}
-	if len(*sends) != 1 || (*sends)[0].Prompt != "scheduled check-in" {
-		t.Fatalf("expected one scheduled send, got %+v", *sends)
+	if len(*delivers) != 1 || (*delivers)[0].Prompt != "scheduled check-in" {
+		t.Fatalf("expected one scheduled delivery, got %+v", *delivers)
 	}
 	got, err := task.GetTask("ffff0005")
 	if err != nil {
