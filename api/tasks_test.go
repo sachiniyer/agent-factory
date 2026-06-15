@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -64,6 +66,7 @@ func resetUpdateFlags(t *testing.T) {
 		taskUpdateWatchCmdFlag = ""
 		taskUpdateTargetSessionFlag = ""
 		taskUpdateEnabledFlag = ""
+		taskUpdateProgramFlag = ""
 		// --target-session uses Changed() semantics ("" is a meaningful
 		// value), so the cobra-level Changed marker must reset too.
 		tasksUpdateCmd.Flags().Lookup("target-session").Changed = false
@@ -87,6 +90,24 @@ func resetAddFlags(t *testing.T) {
 	}
 	t.Cleanup(reset)
 	reset()
+}
+
+// captureStdout redirects os.Stdout while fn runs and returns what jsonOut
+// printed, so a test can assert on the command's JSON output.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	fn()
+
+	require.NoError(t, w.Close())
+	data, err := io.ReadAll(r)
+	require.NoError(t, err)
+	return string(data)
 }
 
 // seedTask persists a single task for update tests.
@@ -593,4 +614,65 @@ func TestTasksUpdate_TargetSessionSetAndClear(t *testing.T) {
 	got, err = task.GetTask("ts1")
 	require.NoError(t, err)
 	assert.Empty(t, got.TargetSession, "explicit empty value must clear target_session")
+}
+
+// TestTasksUpdate_ProgramChange is the regression guard for #866: the CLI
+// `tasks update` gained a --program flag so the program field is editable from
+// the CLI, matching the TUI and the backend that already persisted it.
+func TestTasksUpdate_ProgramChange(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	calls := stubDaemon(t)
+
+	seedTask(t, task.Task{ID: "pr1", Prompt: "p", CronExpr: "0 9 * * *", Program: "claude", Enabled: true})
+
+	out := captureStdout(t, func() {
+		taskUpdateProgramFlag = "codex"
+		require.NoError(t, tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"pr1"}))
+	})
+
+	got, err := task.GetTask("pr1")
+	require.NoError(t, err)
+	assert.Equal(t, "codex", got.Program, "program must persist through update")
+	assert.Equal(t, 1, calls.reloads, "update must poke the daemon to reload schedules")
+	assert.Contains(t, out, `"program": "codex"`, "JSON output must reflect the new program")
+}
+
+// TestTasksUpdate_RejectsInvalidProgram pins that --program is validated
+// against the same enum the add path uses, and a bad value leaves the task
+// untouched.
+func TestTasksUpdate_RejectsInvalidProgram(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	calls := stubDaemon(t)
+
+	seedTask(t, task.Task{ID: "pr2", Prompt: "p", CronExpr: "0 9 * * *", Program: "claude", Enabled: true})
+
+	taskUpdateProgramFlag = "not-a-real-agent"
+	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"pr2"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--program flag must be one of")
+
+	got, err := task.GetTask("pr2")
+	require.NoError(t, err)
+	assert.Equal(t, "claude", got.Program, "program must remain unchanged on validation failure")
+	assert.Zero(t, calls.reloads, "no daemon poke when validation fails")
+}
+
+// TestTasksUpdate_OmittingProgramLeavesUnchanged pins the partial-update
+// contract: an update that does not pass --program must not touch the program.
+func TestTasksUpdate_OmittingProgramLeavesUnchanged(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	stubDaemon(t)
+
+	seedTask(t, task.Task{ID: "pr3", Prompt: "p", CronExpr: "0 9 * * *", Program: "aider", Enabled: true})
+
+	taskUpdateNameFlag = "renamed"
+	require.NoError(t, tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"pr3"}))
+
+	got, err := task.GetTask("pr3")
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", got.Name)
+	assert.Equal(t, "aider", got.Program, "absent --program must not change the program")
 }
