@@ -20,6 +20,9 @@ type mockInstanceStorage struct {
 	// readErr, when non-nil, makes GetInstances fail to simulate a transient
 	// read failure (permission denied, I/O error) on instances.json.
 	readErr error
+	// readAllErr, when non-nil, makes GetAllInstances fail to simulate an
+	// unreadable instances directory (permission denied, I/O error).
+	readAllErr error
 }
 
 func newMockStorage() *mockInstanceStorage {
@@ -42,14 +45,17 @@ func (m *mockInstanceStorage) GetInstances(repoID string) (json.RawMessage, erro
 	return m.data[repoID], nil
 }
 
-func (m *mockInstanceStorage) GetAllInstances() map[string]json.RawMessage {
+func (m *mockInstanceStorage) GetAllInstances() (map[string]json.RawMessage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.readAllErr != nil {
+		return nil, m.readAllErr
+	}
 	out := make(map[string]json.RawMessage, len(m.data))
 	for k, v := range m.data {
 		out[k] = v
 	}
-	return out
+	return out, nil
 }
 
 func (m *mockInstanceStorage) DeleteAllInstances() error {
@@ -651,7 +657,8 @@ func TestDaemonSaveUsesResolvedRepoPathForSymlinkedRepo(t *testing.T) {
 	symlinkID := config.RepoIDFromRoot(symlinkPath)
 	require.NotEqual(t, resolvedID, symlinkID, "test fixture: paths must hash to distinct IDs")
 
-	all := ms.GetAllInstances()
+	all, err := ms.GetAllInstances()
+	require.NoError(t, err)
 	_, hasResolved := all[resolvedID]
 	_, hasSymlink := all[symlinkID]
 	assert.True(t, hasResolved, "instance must be saved under the resolved repo ID")
@@ -755,6 +762,67 @@ func TestCollectRepoRootsSkipsEmpty(t *testing.T) {
 	assert.Contains(t, roots, repoA)
 	_, hasEmpty := roots[""]
 	assert.False(t, hasEmpty, "empty repo root should be skipped")
+}
+
+// TestCollectRepoRootsSurfacesUnreadableDir verifies that an unreadable
+// instances directory is surfaced as an error rather than masquerading as
+// "no sessions". Before #868, GetAllInstances swallowed the directory read
+// error into an empty map, so `af reset` would skip worktree cleanup for
+// every repo and leave orphaned worktrees behind.
+func TestCollectRepoRootsSurfacesUnreadableDir(t *testing.T) {
+	ms := newMockStorage()
+	// Seed a repo so a silent-empty result would be observably wrong.
+	seedDisk(t, ms, "/tmp/repo-a", []InstanceData{
+		{Title: "a1", Path: "/tmp/repo-a", Worktree: GitWorktreeData{RepoPath: "/tmp/repo-a"}},
+	})
+	ms.readAllErr = errors.New("permission denied")
+
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+
+	roots, err := storage.CollectRepoRoots()
+	require.Error(t, err, "an unreadable instances directory must surface an error")
+	assert.Nil(t, roots, "no roots should be returned when the directory is unreadable")
+}
+
+// TestCollectRepoRootsSkipsCorruptedRepo verifies that one repo's corrupted
+// instances.json does not abort the whole reset: CollectRepoRoots skips the
+// corrupted repo (with a warning) and still returns the roots for the others,
+// so `af reset` can clean up every other repo (#869).
+func TestCollectRepoRootsSkipsCorruptedRepo(t *testing.T) {
+	const repoA = "/tmp/repo-a"
+	const repoBad = "/tmp/repo-bad"
+	ms := newMockStorage()
+
+	seedDisk(t, ms, repoA, []InstanceData{
+		{Title: "a1", Path: repoA, Worktree: GitWorktreeData{RepoPath: repoA}},
+	})
+	// Corrupt the second repo's stored JSON.
+	ms.data[config.RepoIDFromRoot(repoBad)] = json.RawMessage(`{ this is not valid json`)
+
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+
+	roots, err := storage.CollectRepoRoots()
+	require.NoError(t, err, "a single corrupted repo must not abort root collection")
+	assert.Len(t, roots, 1, "the healthy repo's root should still be collected")
+	assert.Contains(t, roots, repoA)
+}
+
+// TestLoadInstancesDaemonSurfacesUnreadableDir verifies that daemon-mode
+// LoadInstances (repoID == "") surfaces an unreadable instances directory as
+// an error rather than presenting an empty session list that looks like a
+// fresh install while live sessions sit unreadable on disk (#868).
+func TestLoadInstancesDaemonSurfacesUnreadableDir(t *testing.T) {
+	ms := newMockStorage()
+	ms.readAllErr = errors.New("permission denied")
+
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+
+	instances, err := storage.LoadInstances()
+	require.Error(t, err, "the daemon must not hide an unreadable instances directory")
+	assert.Nil(t, instances)
 }
 
 // --- Issue #808: instances.json held byte-identical duplicate records -----

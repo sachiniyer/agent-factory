@@ -295,8 +295,15 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 		}
 		allJSON = map[string]json.RawMessage{s.repoID: raw}
 	} else {
-		// Daemon mode: load all repos
-		allJSON = s.state.GetAllInstances()
+		// Daemon mode: load all repos. Surface a directory-level read error so
+		// the daemon reports "couldn't read your sessions" instead of silently
+		// presenting an empty list that looks like a fresh install while live
+		// sessions sit unreadable on disk (#868).
+		all, err := s.state.GetAllInstances()
+		if err != nil {
+			return nil, err
+		}
+		allJSON = all
 	}
 
 	var instances []*Instance
@@ -405,14 +412,27 @@ func (s *Storage) DeleteAllInstances() error {
 // skipped. Callers should treat the result as best-effort.
 func (s *Storage) CollectRepoRoots() (map[string]struct{}, error) {
 	roots := make(map[string]struct{})
-	allJSON := s.state.GetAllInstances()
-	for _, jsonData := range allJSON {
+	// A directory-level read failure (permission denied, I/O error) is
+	// surfaced so `af reset` aborts with a clear message instead of treating
+	// an unreadable instances directory as "no sessions" and silently
+	// skipping worktree cleanup for every repo (#868). A missing directory
+	// (first run) still comes back as an empty map with a nil error.
+	allJSON, err := s.state.GetAllInstances()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read stored instances: %w", err)
+	}
+	for repoID, jsonData := range allJSON {
 		if jsonData == nil || string(jsonData) == "[]" || string(jsonData) == "null" {
 			continue
 		}
 		var instancesData []InstanceData
 		if err := json.Unmarshal(jsonData, &instancesData); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
+			// One repo's corrupted instances.json must not abort the whole
+			// reset: skip-and-warn (naming the repo) and continue collecting
+			// roots for the others, matching the daemon's per-repo recovery.
+			// Reset is exactly when corruption recovery is needed (#869).
+			log.WarningLog.Printf("skipping repo %s: corrupted instances.json: %v", repoID, err)
+			continue
 		}
 		for _, data := range instancesData {
 			// Prefer the worktree's repo path; fall back to the
