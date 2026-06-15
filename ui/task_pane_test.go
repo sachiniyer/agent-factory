@@ -143,6 +143,31 @@ func TestTaskPaneCreateModeRejectsEmptyPrompt(t *testing.T) {
 	}
 }
 
+// TestTaskPaneCreateModeRejectsWhitespaceName guards the adjacent-call-site
+// audit for #870: like the watch/cron/prompt fields, a whitespace-only task
+// name must be rejected rather than persisted as a blank name.
+func TestTaskPaneCreateModeRejectsWhitespaceName(t *testing.T) {
+	tp := NewTaskPane()
+	tp.EnterCreateMode("/tmp/repo")
+
+	// Whitespace-only name, otherwise-valid cron + prompt.
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("   ")})
+	tabTo(tp, 2) // -> trigger -> cron value
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do work")})
+
+	tabTo(tp, taskFocusSave-taskFocusPrompt)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.False(t, tp.HasPendingCreate(), "whitespace-only name must not produce a pending create")
+	assert.True(t, tp.IsCreating(), "form must stay open so the user can fix the error")
+	assert.Equal(t, "name is required", tp.editError,
+		"inline validation error must surface to the user")
+	assert.Equal(t, taskFocusName, tp.editErrorField,
+		"the error must render under the Name field")
+}
+
 // TestTaskPaneCreateModeSelectorDefaultsToConfigDefault verifies that creating
 // a new task without touching the Program selector persists "" so the daemon
 // uses the configured default_program. Regression test for #492.

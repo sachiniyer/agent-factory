@@ -138,7 +138,10 @@ func (h *HooksPane) handleNormalMode(msg tea.KeyMsg) bool {
 func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 	switch msg.Type {
 	case tea.KeyEnter:
-		if h.editBuffer != "" {
+		// Reject blank/whitespace-only commands so they neither persist to the
+		// on-disk config nor overwrite a non-empty command on edit (#870),
+		// matching how watch/cron/remote-hook inputs are validated.
+		if strings.TrimSpace(h.editBuffer) != "" {
 			if h.adding {
 				h.commands = append(h.commands, h.editBuffer)
 				h.selectedIdx = len(h.commands) - 1
