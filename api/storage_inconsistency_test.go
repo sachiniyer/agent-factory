@@ -135,6 +135,93 @@ func TestFindInstanceByTitle_NamesCorruptedRepoOnNotFound(t *testing.T) {
 	}
 }
 
+// TestInstanceTitleExistsInScope_AllRepoSurfacesCorruption is the regression
+// test for #861: in all-repo mode the send-prompt pre-check must propagate the
+// corruption-aware error from findInstanceByTitle (naming the bad repo) instead
+// of collapsing every miss to (false, nil) and letting the caller emit a bare
+// "not found." Otherwise users never learn a session may be hidden behind a
+// corrupted instances.json.
+func TestInstanceTitleExistsInScope_AllRepoSurfacesCorruption(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_ = captureWarnings(t)
+
+	corruptedRepoID := "corrupted-repo"
+	if err := config.SaveRepoInstances(corruptedRepoID, json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupted repo: %v", err)
+	}
+
+	exists, err := instanceTitleExistsInScope("", "ghost-title")
+	if err == nil {
+		t.Fatalf("expected corruption error in all-repo mode, got nil")
+	}
+	if exists {
+		t.Fatalf("expected exists=false when the title is missing")
+	}
+	if !strings.Contains(err.Error(), corruptedRepoID) {
+		t.Fatalf("expected error to name corrupted repo %q; got: %v", corruptedRepoID, err)
+	}
+}
+
+// TestInstanceTitleExistsInScope_AllRepoCleanNotFound verifies that a clean
+// miss (no corruption anywhere) still reports (false, nil) so the send-prompt
+// caller keeps driving the --create / friendly "not found" branch (#861).
+func TestInstanceTitleExistsInScope_AllRepoCleanNotFound(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_ = captureWarnings(t)
+
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "other-session"}})
+	if err != nil {
+		t.Fatalf("marshal valid: %v", err)
+	}
+	if err := config.SaveRepoInstances("valid-repo", validJSON); err != nil {
+		t.Fatalf("save valid repo: %v", err)
+	}
+
+	exists, err := instanceTitleExistsInScope("", "ghost-title")
+	if err != nil {
+		t.Fatalf("clean not-found must not error in all-repo mode; got: %v", err)
+	}
+	if exists {
+		t.Fatalf("expected exists=false for a missing title")
+	}
+}
+
+// TestInstanceTitleExistsInScope_ScopedUnaffectedByCorruption verifies that
+// --repo scoped mode (non-empty repoID) keeps checking only that repo: a clean
+// repo reports presence/absence without being tainted by corruption elsewhere,
+// preserving the #776 scoping behavior (#861).
+func TestInstanceTitleExistsInScope_ScopedUnaffectedByCorruption(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_ = captureWarnings(t)
+
+	if err := config.SaveRepoInstances("corrupted-repo", json.RawMessage("{not valid json")); err != nil {
+		t.Fatalf("save corrupted repo: %v", err)
+	}
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "scoped-session"}})
+	if err != nil {
+		t.Fatalf("marshal valid: %v", err)
+	}
+	if err := config.SaveRepoInstances("clean-repo", validJSON); err != nil {
+		t.Fatalf("save clean repo: %v", err)
+	}
+
+	exists, err := instanceTitleExistsInScope("clean-repo", "scoped-session")
+	if err != nil {
+		t.Fatalf("scoped lookup of a clean repo must not error: %v", err)
+	}
+	if !exists {
+		t.Fatalf("expected the scoped title to be found")
+	}
+
+	exists, err = instanceTitleExistsInScope("clean-repo", "ghost-title")
+	if err != nil {
+		t.Fatalf("scoped miss in a clean repo must not error: %v", err)
+	}
+	if exists {
+		t.Fatalf("expected a missing scoped title to report absent")
+	}
+}
+
 // TestFindInstanceByTitle_PositiveLookupNotBlockedByCorruption verifies that a
 // corrupted repo does not prevent a successful lookup of a title that lives in
 // a healthy repo — corruption is warned about, not fatal to findable sessions.
