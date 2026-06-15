@@ -104,6 +104,52 @@ func TestLoadConfig_MaterializeLosesRaceToConcurrentWrite(t *testing.T) {
 	assert.JSONEq(t, concurrent, string(data), "the concurrent file must not be clobbered by defaults")
 }
 
+func TestWriteConfigIfMissing_RemovesStubOnWriteFailure(t *testing.T) {
+	// Regression for #864: when the O_EXCL create succeeds but the write fails,
+	// writeConfigIfMissing must not leave a zero-byte config.json behind —
+	// otherwise the next LoadConfig sees a present-but-empty file and hard-errors.
+	home := t.TempDir()
+	configPath := filepath.Join(home, ConfigFileName)
+
+	writeConfigForceFailForTest = func() error {
+		return assert.AnError
+	}
+	t.Cleanup(func() { writeConfigForceFailForTest = nil })
+
+	created, err := writeConfigIfMissing(configPath, &Config{DefaultProgram: "claude"})
+	require.Error(t, err, "a failed write must surface an error")
+	assert.True(t, created, "the file was created (O_EXCL) before the write failed")
+	assert.Contains(t, err.Error(), "failed to write config file")
+
+	_, statErr := os.Stat(configPath)
+	assert.True(t, os.IsNotExist(statErr), "the zero-byte stub must be removed so the next run can retry")
+}
+
+func TestLoadConfig_RecoversAfterFailedFirstRunWrite(t *testing.T) {
+	// End-to-end #864: a failed first-run write leaves an empty config.json;
+	// the NEXT startup must recover (re-materialize defaults), not wedge.
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	fastShell(t)
+	configPath := filepath.Join(home, ConfigFileName)
+
+	// Reproduce the bug state directly: O_EXCL created the file, then the write
+	// failed before defense-in-depth cleanup existed, leaving a 0-byte stub.
+	require.NoError(t, os.WriteFile(configPath, []byte(``), 0644))
+	info, err := os.Stat(configPath)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), info.Size(), "precondition: empty stub on disk")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err, "the empty stub must not wedge startup")
+	require.NotNil(t, cfg)
+	assert.Equal(t, defaultProgram, cfg.DefaultProgram)
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.NotEmpty(t, data, "defaults must be re-materialized to a non-empty file")
+}
+
 func TestWriteConfigIfMissing_RefusesExistingFile(t *testing.T) {
 	home := t.TempDir()
 	configPath := filepath.Join(home, ConfigFileName)

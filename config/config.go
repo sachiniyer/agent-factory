@@ -339,12 +339,16 @@ func parseCommandProbeOutput(output string) string {
 // Error handling distinguishes "no config yet" from "config present but
 // unusable" so a user whose settings are being ignored gets told why instead
 // of silently inheriting defaults (#734):
-//   - File does not exist → DefaultConfig() is materialized and saved, with no
-//     error. This is the first-run path and must keep working.
-//   - File exists but cannot be read (permission denied, disk error), is empty,
-//     or fails to parse → an error naming the file and the underlying cause is
-//     returned. Defaults are NOT substituted, since doing so would hide the
-//     user's broken config behind a working-looking app.
+//   - File does not exist, or exists but is zero-byte → DefaultConfig() is
+//     materialized and saved, with no error. This is the first-run path and
+//     must keep working. An empty file is never a valid config; it is the
+//     fingerprint of a failed/partial first-run write (#864, a regression of
+//     #838), so the stub is removed and defaults regenerated rather than
+//     wedging every future startup.
+//   - File exists but cannot be read (permission denied, disk error), or is
+//     non-empty yet fails to parse → an error naming the file and the
+//     underlying cause is returned. Defaults are NOT substituted, since doing
+//     so would hide the user's broken config behind a working-looking app.
 //   - File parses but fails enum validation → an actionable migration error is
 //     returned (there is no implicit migration from legacy "path with flags"
 //     values; the user must rewrite their config).
@@ -366,6 +370,20 @@ func LoadConfig() (*Config, error) {
 		}
 
 		return nil, fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
+	}
+
+	// A zero-byte config.json is never something a user wrote on purpose: it is
+	// the fingerprint of a config write that created the file (O_EXCL) but died
+	// before its JSON body landed (#864, a regression of #838). Treat it like a
+	// missing file — drop the stub and re-materialize defaults — instead of
+	// wedging every future startup on the #758 "config is empty" hard error.
+	// Non-empty-but-corrupt files still fall through to parseConfig's loud
+	// error, since those may carry a user's salvageable settings (#734/#758).
+	if len(data) == 0 {
+		if rmErr := os.Remove(configPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			return nil, fmt.Errorf("failed to remove empty config file %s: %w", prettyConfigPath, rmErr)
+		}
+		return materializeDefaultConfig(configDir, configPath, prettyConfigPath)
 	}
 
 	return parseConfig(data, prettyConfigPath)
@@ -423,6 +441,13 @@ func configDirInitialized(configDir string) bool {
 	return err == nil
 }
 
+// writeConfigForceFailForTest, when non-nil, replaces the f.Write call in
+// writeConfigIfMissing with the returned error. Tests use it to exercise the
+// "write failed after O_EXCL created the file" path and assert the zero-byte
+// stub is cleaned up (#864) — a failure the real os.File.Write cannot be
+// induced to produce deterministically.
+var writeConfigForceFailForTest func() error
+
 // writeConfigIfMissing persists config to configPath with O_CREATE|O_EXCL
 // semantics. Returns created=false (and no error) when the file already
 // exists, so a concurrently recreated config is never overwritten.
@@ -442,9 +467,22 @@ func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
 		}
 		return false, fmt.Errorf("failed to create config file: %w", err)
 	}
-	if _, err := f.Write(data); err != nil {
+	writeErr := func() error {
+		if writeConfigForceFailForTest != nil {
+			return writeConfigForceFailForTest()
+		}
+		_, err := f.Write(data)
+		return err
+	}()
+	if writeErr != nil {
 		_ = f.Close()
-		return true, fmt.Errorf("failed to write config file: %w", err)
+		// Remove the freshly created stub so a failed write never leaves a
+		// zero-byte (or partial) config.json behind to wedge the next startup
+		// (#864). Only the write path cleans up: a Close error means the bytes
+		// already reached the file, so it may be a complete config worth
+		// keeping rather than discarding.
+		_ = os.Remove(configPath)
+		return true, fmt.Errorf("failed to write config file: %w", writeErr)
 	}
 	if err := f.Close(); err != nil {
 		return true, fmt.Errorf("failed to close config file: %w", err)
