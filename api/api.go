@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +52,14 @@ func resolveRepo() (*config.RepoContext, error) {
 	return config.CurrentRepo()
 }
 
+// errTitleNotFound marks a definitive not-found from findInstanceByTitle: the
+// title matched no instance and every repo's instances.json parsed cleanly. A
+// corruption-tainted search returns a different (un-wrapped) error so callers
+// like the send-prompt pre-check can tell "not present anywhere" apart from
+// "may be hidden behind a corrupted instances.json" and surface the latter
+// loudly instead of a misleading bare not-found (#861, follow-up to #730/#752).
+var errTitleNotFound = errors.New("not found")
+
 // findInstanceByTitle scans all repos for an instance matching the given title.
 // Returns the InstanceData and the repoID it belongs to.
 func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
@@ -79,7 +88,9 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	if len(corrupted) > 0 {
 		return nil, "", fmt.Errorf("instance %q not found; %s", title, corruptedReposSuffix(corrupted))
 	}
-	return nil, "", fmt.Errorf("instance %q not found", title)
+	// Wrap the sentinel so a clean miss stays distinguishable from a
+	// corruption-tainted miss (#861); the user-facing text is unchanged.
+	return nil, "", fmt.Errorf("instance %q %w", title, errTitleNotFound)
 }
 
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos
@@ -167,13 +178,20 @@ func instanceTitleExistsInScope(repoID, title string) (bool, error) {
 	if repoID != "" {
 		return repoHasInstanceTitle(repoID, title)
 	}
-	if _, _, err := findInstanceByTitle(title); err != nil {
-		// findInstanceByTitle errors only on not-found / corruption; treat
-		// either as "not present in scope", matching the prior all-repo
-		// behavior where the pre-check error drove the create-vs-error branch.
+	_, _, err := findInstanceByTitle(title)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, errTitleNotFound) {
+		// Definitive not-found with no corruption: report "not present" so the
+		// caller drives the create-vs-friendly-error branch as before.
 		return false, nil
 	}
-	return true, nil
+	// Corruption (or a load failure): propagate so send-prompt surfaces the
+	// corruption-aware message naming the bad repo instead of a misleading bare
+	// not-found (#861). The session may be hidden behind the unreadable file, so
+	// even --create must not silently make a duplicate.
+	return false, err
 }
 
 // jsonOut marshals v to JSON and writes to stdout.
