@@ -56,7 +56,7 @@ Expected result:
 | Scheduled tasks | Unit tests cover cron parsing/validation agreement, the in-daemon scheduler (registration, CRUD reload, firing), the watcher supervisor (event delivery, backoff, crash-loop breaker, rate limiting, process-group kills), target-session delivery, the legacy-unit upgrade sweep, daemon autostart unit generation, task CRUD, and task runner storage. Integration tests run the same task twice and verify `name` then `name-2`. | Add a task with a cron one minute out, confirm the daemon fires it (a session appears), then remove the task and confirm the schedule is gone via another fire window. Verify `af daemon install`/`uninstall` on Linux (systemd user service) and macOS (launchd agent) before releases that change daemon lifecycle code. |
 | Remote hooks | Session and integration tests cover launch/list/import/attach/delete/terminal protocols, bad JSON, command failures, duplicate imports, and imported display-title deletion. | Configure `examples/remote-hooks` or a repo-local fake hook set, import, preview, and delete a remote session. |
 | Reset/cleanup | Unit tests cover ghost sessions and worktree cleanup helpers. | With temp `AGENT_FACTORY_HOME`, create two sessions, run `af reset`, then confirm tmux sessions, worktrees, and stored instances are gone. |
-| Upgrade/release artifacts | Unit tests cover binary download (success, non-200, stalled body, stalled headers), archive extraction, and daemon restart after binary swap; CI builds Linux/macOS artifacts. | Download the release tarball for the host platform, unpack it, run `af version`, and test `af upgrade` from the previous release binary. |
+| Upgrade/release artifacts | Unit tests cover binary download (success, non-200, stalled body, stalled headers), archive extraction, and daemon restart after binary swap; CI builds Linux/macOS artifacts. | Download the release tarball for the host platform, unpack it, run `af version`, and test `af upgrade` from the previous release binary. Run `install.sh` into a temp `AF_INSTALL_DIR` and confirm it fetches the latest release and `af version` reports the new tag. |
 | UI rendering | UI tests cover sidebar/menu/task pane/preview/terminal layout and overlay behavior. | Open the TUI in a narrow terminal and a normal terminal, verify text does not overlap, and check help/confirmation overlays. |
 
 ## Manual Smoke
@@ -108,6 +108,17 @@ Expected result:
   `darwin-arm64`.
 - Each archive contains one executable named `agent-factory`.
 - The host-platform binary runs `version` and reports the new tag.
+
+Then confirm the no-Go install path fetches the freshly published release:
+
+```bash
+AF_INSTALL_DIR="$(mktemp -d)" sh install.sh
+```
+
+Expected result:
+- `install.sh` downloads `agent-factory-<os>-<arch>.tar.gz` via the
+  `releases/latest/download/...` redirect, installs `af`, and the printed
+  `af version` reports the new tag.
 
 ## Go/No-Go Criteria
 
