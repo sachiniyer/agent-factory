@@ -254,6 +254,57 @@ func TestGetClaudeCommand(t *testing.T) {
 	})
 }
 
+// TestGetClaudeCommandMemoized pins the #883 fix: repeated probes that share
+// the same SHELL/PATH/HOME must source the rc only once, while a changed HOME
+// re-probes under a new cache key. A heavy interactive rc otherwise ran the
+// bash probe up to four times per TUI startup.
+func TestGetClaudeCommandMemoized(t *testing.T) {
+	bashPath := requireBash(t)
+
+	// A .bashrc that records every interactive sourcing into a marker file and
+	// defines a claude alias, so the probe both succeeds and is countable.
+	writeCountingBashrc := func(homeDir, marker string) {
+		bashrc := "case $- in\n    *i*) ;;\n      *) return;;\nesac\n" +
+			"echo x >> '" + marker + "'\n" +
+			"alias claude='/custom/bin/claude'\n"
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".bashrc"), []byte(bashrc), 0644))
+	}
+	sourceCount := func(marker string) int {
+		data, err := os.ReadFile(marker)
+		if os.IsNotExist(err) {
+			return 0
+		}
+		require.NoError(t, err)
+		return strings.Count(string(data), "x")
+	}
+
+	home1 := t.TempDir()
+	marker1 := filepath.Join(t.TempDir(), "sourced")
+	writeCountingBashrc(home1, marker1)
+
+	t.Setenv("SHELL", bashPath)
+	t.Setenv("PATH", t.TempDir()) // no claude on PATH — the alias is the only source
+	t.Setenv("HOME", home1)
+
+	for i := 0; i < 3; i++ {
+		result, err := GetClaudeCommand()
+		require.NoError(t, err)
+		assert.Equal(t, "/custom/bin/claude", result)
+	}
+	assert.Equal(t, 1, sourceCount(marker1), "stable env should probe (source the rc) exactly once")
+
+	// Changing HOME must invalidate the cache and probe again.
+	home2 := t.TempDir()
+	marker2 := filepath.Join(t.TempDir(), "sourced")
+	writeCountingBashrc(home2, marker2)
+	t.Setenv("HOME", home2)
+
+	result, err := GetClaudeCommand()
+	require.NoError(t, err)
+	assert.Equal(t, "/custom/bin/claude", result)
+	assert.Equal(t, 1, sourceCount(marker2), "a changed HOME should re-probe under a new cache key")
+}
+
 func TestDefaultConfig(t *testing.T) {
 	t.Run("default_program is the bare claude enum and override carries the detected command", func(t *testing.T) {
 		// Force GetClaudeCommand to find a stub claude in PATH so the test

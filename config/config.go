@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -212,13 +213,56 @@ func shellQuotePath(path string) string {
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
+// claudeProbeResult caches a single (path, err) outcome of the claude shell
+// probe, keyed by the environment that determines it.
+type claudeProbeResult struct {
+	path string
+	err  error
+}
+
+var (
+	claudeProbeMu    sync.Mutex
+	claudeProbeCache = map[string]claudeProbeResult{}
+)
+
 // GetClaudeCommand attempts to find the "claude" command in the user's shell
 // It checks in the following order:
 // 1. Shell alias resolution (zsh's `which` builtin, bash's `type` builtin)
 // 2. PATH lookup
 //
 // If both fail, it returns an error.
+//
+// The result is memoized per process. A single TUI startup loads the config
+// up to four times (main's ResolveConfig, newHome's LoadConfig, the remote
+// hook import's ResolveConfig, and newHome's hooks ResolveConfig), and every
+// load rebuilds DefaultConfig — which ran this probe from scratch each time.
+// The probe spawns `bash -i` (or sources ~/.zshrc) to surface aliases, so on a
+// heavy interactive rc each call costs hundreds of milliseconds to seconds;
+// four of them dominated startup latency (#883). The claude resolution is a
+// pure function of SHELL, PATH, and HOME (HOME selects the rc file that can
+// define a claude alias), so caching on that triple collapses the four probes
+// into one while staying correct: any caller — or test — that changes those
+// vars gets a fresh probe under a new key.
 func GetClaudeCommand() (string, error) {
+	key := os.Getenv("SHELL") + "\x00" + os.Getenv("PATH") + "\x00" + os.Getenv("HOME")
+	claudeProbeMu.Lock()
+	cached, ok := claudeProbeCache[key]
+	claudeProbeMu.Unlock()
+	if ok {
+		return cached.path, cached.err
+	}
+
+	path, err := probeClaudeCommand()
+
+	claudeProbeMu.Lock()
+	claudeProbeCache[key] = claudeProbeResult{path: path, err: err}
+	claudeProbeMu.Unlock()
+	return path, err
+}
+
+// probeClaudeCommand performs the actual shell probe for the claude command.
+// GetClaudeCommand wraps it with per-environment memoization.
+func probeClaudeCommand() (string, error) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/bash" // Default to bash if SHELL is not set
