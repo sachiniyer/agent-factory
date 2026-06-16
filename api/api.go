@@ -19,16 +19,28 @@ var (
 	repoFlag string
 )
 
+// repoFromFlag resolves the --repo flag to a RepoContext. Its errors name the
+// offending path and distinguish "could not make the path absolute" from "the
+// path is not a git repository" so callers never mislabel a provided-but-invalid
+// --repo as missing (#892). Only call when repoFlag != "".
+func repoFromFlag() (*config.RepoContext, error) {
+	absPath, err := filepath.Abs(repoFlag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve --repo path %q: %w", repoFlag, err)
+	}
+	repo, err := config.RepoFromPath(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("--repo %q is not a valid git repository: %w", absPath, err)
+	}
+	return repo, nil
+}
+
 // resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
 func resolveRepoID() (string, error) {
 	if repoFlag != "" {
-		absPath, err := filepath.Abs(repoFlag)
+		repo, err := repoFromFlag()
 		if err != nil {
-			return "", fmt.Errorf("failed to resolve repo path: %w", err)
-		}
-		repo, err := config.RepoFromPath(absPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to get repo from path: %w", err)
+			return "", err
 		}
 		return repo.ID, nil
 	}
@@ -40,16 +52,22 @@ func resolveRepoID() (string, error) {
 	return repo.ID, nil
 }
 
-// resolveRepo resolves a *config.RepoContext from flags. Returns error if no repo specified and cwd is not a repo.
+// resolveRepo resolves a *config.RepoContext for commands that require a repo
+// (sessions create, tasks add). It returns fully-formed, user-facing errors so
+// callers can surface them directly without re-deriving the cause: a provided
+// `--repo` that does not resolve names the path, while an absent `--repo` whose
+// cwd is also not a repo reports that `--repo is required` (#892). Wrapping any
+// resolution failure as "--repo is required" — as the callers used to — was
+// wrong precisely when the user did pass `--repo` but pointed it at a non-repo.
 func resolveRepo() (*config.RepoContext, error) {
 	if repoFlag != "" {
-		absPath, err := filepath.Abs(repoFlag)
-		if err != nil {
-			return nil, fmt.Errorf("failed to resolve repo path: %w", err)
-		}
-		return config.RepoFromPath(absPath)
+		return repoFromFlag()
 	}
-	return config.CurrentRepo()
+	repo, err := config.CurrentRepo()
+	if err != nil {
+		return nil, fmt.Errorf("--repo is required: current directory is not a git repository: %w", err)
+	}
+	return repo, nil
 }
 
 // errTitleNotFound marks a definitive not-found from findInstanceByTitle: the
@@ -155,6 +173,50 @@ func repoHasInstanceTitle(repoID, title string) (bool, error) {
 // findLiveInstanceByTitle finds an instance by title and restores it as a live *Instance.
 func findLiveInstanceByTitle(title string) (*session.Instance, string, error) {
 	data, repoID, err := findInstanceByTitle(title)
+	if err != nil {
+		return nil, "", err
+	}
+	instance, err := session.FromInstanceData(*data)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to restore instance %q: %w", title, err)
+	}
+	return instance, repoID, nil
+}
+
+// findInstanceByTitleInScope finds an instance by title within the resolved repo
+// scope (#891). An empty repoID preserves the prior all-repo search; a non-empty
+// one confines the lookup to that repo so a same-titled session in a different
+// repo can never be selected. Mirrors how resolveRepoID() scopes the other
+// sessions subcommands (list, kill, send-prompt).
+func findInstanceByTitleInScope(repoID, title string) (*session.InstanceData, string, error) {
+	if repoID == "" {
+		return findInstanceByTitle(title)
+	}
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to load instances for repo %s: %w", repoID, err)
+	}
+	var instances []session.InstanceData
+	if err := json.Unmarshal(raw, &instances); err != nil {
+		return nil, "", fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+	}
+	for i := range instances {
+		if instances[i].Title == title {
+			return &instances[i], repoID, nil
+		}
+	}
+	// Wrap the sentinel so a scoped clean miss stays distinguishable from a
+	// corruption-tainted miss, mirroring findInstanceByTitle (#861).
+	return nil, "", fmt.Errorf("instance %q %w", title, errTitleNotFound)
+}
+
+// findLiveInstanceByTitleInScope finds an instance by title within the resolved
+// repo scope and restores it as a live *Instance (#891). It is the repo-scoped
+// counterpart of findLiveInstanceByTitle, used by attach so `--repo` confines
+// the attach to that repo's session instead of connecting the terminal to a
+// same-titled session in another repo.
+func findLiveInstanceByTitleInScope(repoID, title string) (*session.Instance, string, error) {
+	data, repoID, err := findInstanceByTitleInScope(repoID, title)
 	if err != nil {
 		return nil, "", err
 	}

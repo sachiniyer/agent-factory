@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -52,15 +51,14 @@ var tasksListCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to load tasks: %w", err))
 		}
 
-		// Filter by repo if --repo is set
+		// Filter by repo if --repo is set. --repo is an optional filter here (an
+		// absent flag lists every repo's tasks), but a provided-but-invalid path
+		// must still report the path it could not resolve rather than a generic
+		// message (#892). repoFromFlag supplies the path-naming error.
 		if repoFlag != "" {
-			absPath, err := filepath.Abs(repoFlag)
+			repo, err := repoFromFlag()
 			if err != nil {
-				return jsonError(fmt.Errorf("failed to resolve repo path: %w", err))
-			}
-			repo, err := config.RepoFromPath(absPath)
-			if err != nil {
-				return jsonError(fmt.Errorf("failed to get repo from path: %w", err))
+				return jsonError(err)
 			}
 			var filtered []task.Task
 			for _, s := range tasks {
@@ -94,9 +92,13 @@ var tasksAddCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
+		// resolveRepo already differentiates "--repo is required" (absent) from a
+		// provided-but-invalid path and names the offending path (#892), so
+		// surface its error verbatim instead of relabeling every failure as
+		// "required".
 		repo, err := resolveRepo()
 		if err != nil {
-			return jsonError(fmt.Errorf("--repo is required: %w", err))
+			return jsonError(err)
 		}
 
 		hasCron := strings.TrimSpace(taskAddCronFlag) != ""
