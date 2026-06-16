@@ -39,10 +39,25 @@ func ParseCron(expr string) (cron.Schedule, error) {
 // collapsed back to "*" even when it covers all seven days: a syntactically
 // restricted DOW participates in cron's DOM/DOW OR semantics, and rewriting
 // it to a wildcard would change which days match when DOM is also restricted.
+//
+// The 7→0 alias is applied to each comma-separated part *before* expansion
+// when 7 is the base of a step (e.g. "7/2" → "0/2"). Expanding first would
+// collapse "7/2" to the single value {7} — its step starts at the field's max
+// (7) so no further values follow — and then map it to {0}, silently turning
+// "every 2 days from Sunday" into "Sunday only" (#888). For every other shape
+// (a bare 7, a range bound of 7, a step that merely lands on 7) expansion
+// followed by normalizeDOWValues preserves the meaning, so those are left for
+// the expand path below.
 func normalizeDOWField(field string) string {
 	if field == "*" || !strings.Contains(field, "7") {
 		return field
 	}
+	listParts := strings.Split(field, ",")
+	for i, part := range listParts {
+		listParts[i] = normalizeDOWStepBase(part)
+	}
+	field = strings.Join(listParts, ",")
+
 	vals, err := expandCronField(field, 0, 7)
 	if err != nil || vals == nil {
 		return field
@@ -53,6 +68,22 @@ func normalizeDOWField(field string) string {
 		parts[i] = strconv.Itoa(v)
 	}
 	return strings.Join(parts, ",")
+}
+
+// normalizeDOWStepBase rewrites the Sunday alias 7→0 when it is the single-value
+// base of a step expression ("7/2" → "0/2", "07/2" → "0/2") so the step
+// survives expansion. Parts without a step, or whose step base is a wildcard or
+// a range, are returned unchanged: expandCronField enumerates them and
+// normalizeDOWValues maps any resulting 7 to 0 without losing information.
+func normalizeDOWStepBase(part string) string {
+	idx := strings.Index(part, "/")
+	if idx == -1 {
+		return part
+	}
+	if base := part[:idx]; base == "7" || base == "07" {
+		return "0" + part[idx:]
+	}
+	return part
 }
 
 // normalizeDOWValues maps weekday value 7 to 0 (both mean Sunday)
