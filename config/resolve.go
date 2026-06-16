@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,7 +162,17 @@ func warnLegacyRepoConfig(repoID, repoRoot string, legacy *RepoConfig, inRepo *I
 	if _, loaded := legacyDeprecationLogged.LoadOrStore(repoID, true); loaded {
 		return
 	}
-	legacyPath := fmt.Sprintf("~/.agent-factory/repos/%s/%s", repoID, RepoConfigFileName)
+	// Derive the legacy path from the same resolver the read uses
+	// (repoConfigPath -> repoStateDir -> GetConfigDir) so the warning names
+	// the real file even when AGENT_FACTORY_HOME relocates the config dir
+	// (#890). If resolution fails, still warn but omit the now-unknown source
+	// path rather than printing a wrong one.
+	_, legacyPath, err := repoConfigPath(repoID)
+	if err != nil {
+		log.WarningLog.Printf("deprecated: %s is still read from the legacy per-repo config location; move it to %s — the legacy location stops working in a future release",
+			strings.Join(fields, ", "), InRepoConfigPath(repoRoot))
+		return
+	}
 	log.WarningLog.Printf("deprecated: %s is still read from %s; move it to %s — the legacy location stops working in a future release",
-		strings.Join(fields, ", "), legacyPath, InRepoConfigPath(repoRoot))
+		strings.Join(fields, ", "), prettyHomePath(legacyPath), InRepoConfigPath(repoRoot))
 }

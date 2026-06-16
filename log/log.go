@@ -122,11 +122,17 @@ func Close() {
 	if ErrorLog != nil {
 		ErrorLog.SetOutput(os.Stderr)
 	}
+	// Only claim a file was written when one was actually opened. When
+	// Initialize fell back to stderr (or was never called), globalLogFile is
+	// nil and there is no file to point at (#894).
+	fileWasOpened := globalLogFile != nil
 	if globalLogFile != nil {
 		_ = globalLogFile.Close()
 		globalLogFile = nil
 	}
-	fmt.Fprintln(os.Stderr, "wrote logs to "+logFileName)
+	if fileWasOpened {
+		fmt.Fprintln(os.Stderr, "wrote logs to "+logFileName)
+	}
 }
 
 // Every is used to log at most once every timeout duration.

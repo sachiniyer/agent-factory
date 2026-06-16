@@ -3,6 +3,7 @@ package log
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -89,4 +90,67 @@ func TestCloseRedirectsToStderr(t *testing.T) {
 	if globalLogFile != nil {
 		t.Fatalf("expected globalLogFile to be nil after Close")
 	}
+}
+
+// TestCloseClaimsFileOnlyWhenOpened is the regression for
+// sachiniyer/agent-factory#894: Close() must print "wrote logs to <file>" only
+// when Initialize actually opened a log file. When the open fails (e.g. an
+// unwritable path) logging falls back to stderr, globalLogFile stays nil, and
+// claiming a file was written points the user at a file that does not exist.
+func TestCloseClaimsFileOnlyWhenOpened(t *testing.T) {
+	origName := logFileName
+	t.Cleanup(func() {
+		logFileName = origName
+		globalLogFile = nil
+	})
+
+	captureStderr := func(t *testing.T, fn func()) string {
+		t.Helper()
+		origStderr := os.Stderr
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe failed: %v", err)
+		}
+		os.Stderr = w
+		fn()
+		if err := w.Close(); err != nil {
+			t.Fatalf("close pipe writer: %v", err)
+		}
+		os.Stderr = origStderr
+		out, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatalf("read pipe: %v", err)
+		}
+		return string(out)
+	}
+
+	t.Run("no file opened: no wrote-logs claim", func(t *testing.T) {
+		// Parent directory does not exist, so OpenFile fails and Initialize
+		// falls back to stderr without setting globalLogFile.
+		logFileName = filepath.Join(t.TempDir(), "missing-dir", "agent-factory.log")
+		globalLogFile = nil
+		out := captureStderr(t, func() {
+			Initialize(false)
+			Close()
+		})
+		if globalLogFile != nil {
+			t.Fatalf("expected globalLogFile to stay nil after a failed Initialize")
+		}
+		if strings.Contains(out, "wrote logs to") {
+			t.Fatalf("Close() claimed logs were written though no file opened; stderr: %q", out)
+		}
+	})
+
+	t.Run("file opened: wrote-logs claim present", func(t *testing.T) {
+		logFileName = filepath.Join(t.TempDir(), "agent-factory.log")
+		globalLogFile = nil
+		out := captureStderr(t, func() {
+			Initialize(false)
+			Close()
+		})
+		want := "wrote logs to " + logFileName
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected Close() to print %q; stderr: %q", want, out)
+		}
+	})
 }
