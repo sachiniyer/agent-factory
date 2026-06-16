@@ -408,6 +408,14 @@ func (t *TerminalPane) String() string {
 	// Normal mode: show captured content
 	lines := strings.Split(content, "\n")
 
+	// strings.Split produces a trailing empty element when content ends in "\n"
+	// (common for tmux capture-pane output). Drop it so the off-by-one does not
+	// trigger truncation when content actually fits, and so the truncate branch
+	// keeps the right slice of lines. Mirrors PreviewPane.String() (#649, #898).
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
 	if height > 0 {
 		if len(lines) > height {
 			lines = lines[len(lines)-height:]
