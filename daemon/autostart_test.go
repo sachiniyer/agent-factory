@@ -30,15 +30,51 @@ WantedBy=default.target
 }
 
 // TestSystemdAutostartUnitEscapesSpecials pins the systemd quoting rules: a
-// binary path with spaces must stay one ExecStart argument, and % / $ must
-// be doubled so systemd does not expand them as specifiers/variables.
+// binary path with spaces must stay one ExecStart argument; '%' must be
+// doubled in Environment values so systemd does not expand it as a specifier;
+// '$' must be left literal because Environment= (unlike ExecStart=) performs
+// no variable expansion, so doubling it would corrupt the value (#893).
 func TestSystemdAutostartUnitEscapesSpecials(t *testing.T) {
 	got := systemdAutostartUnit("/opt/my tools/af", "/usr/bin:/home/u/100%path:$HOME/bin", "/bin/bash", "")
 	if !strings.Contains(got, `ExecStart="/opt/my tools/af" --daemon`) {
 		t.Errorf("path with spaces must be quoted in ExecStart, got:\n%s", got)
 	}
-	if !strings.Contains(got, "Environment=PATH=/usr/bin:/home/u/100%%path:$$HOME/bin") {
-		t.Errorf("%% and $ must be escaped in Environment values, got:\n%s", got)
+	if !strings.Contains(got, "Environment=PATH=/usr/bin:/home/u/100%%path:$HOME/bin") {
+		t.Errorf("%% must be doubled and $ left literal in Environment values, got:\n%s", got)
+	}
+}
+
+// TestSystemdAutostartUnitQuotesSpacedEnvValues is the #893 regression guard:
+// PATH/SHELL/AGENT_FACTORY_HOME values containing spaces must wrap the whole
+// NAME=value in double quotes so systemd parses one assignment instead of
+// splitting on the space and truncating the value.
+func TestSystemdAutostartUnitQuotesSpacedEnvValues(t *testing.T) {
+	got := systemdAutostartUnit("/home/user/.local/bin/af", "/usr/bin:/My Apps/bin", "/bin/zsh", "/srv/af home")
+	for _, want := range []string{
+		`Environment="PATH=/usr/bin:/My Apps/bin"`,
+		"Environment=SHELL=/bin/zsh",
+		`Environment="AGENT_FACTORY_HOME=/srv/af home"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// The unquoted, truncating form must not appear for the spaced PATH.
+	if strings.Contains(got, "Environment=PATH=/usr/bin:/My Apps/bin") &&
+		!strings.Contains(got, `Environment="PATH=/usr/bin:/My Apps/bin"`) {
+		t.Errorf("spaced PATH must be quoted, got:\n%s", got)
+	}
+}
+
+// TestSystemdAutostartUnitEscapesQuotesAndBackslashes pins the in-quote
+// C-escaping: a value carrying a double quote or backslash (alongside a space,
+// which triggers quoting) must escape those characters so the wrapped value
+// round-trips through systemd's unescaping parser.
+func TestSystemdAutostartUnitEscapesQuotesAndBackslashes(t *testing.T) {
+	got := systemdAutostartUnit("/home/user/.local/bin/af", `/usr/bin:/a "b"/x:/c\d/y`, "/bin/zsh", "")
+	want := `Environment="PATH=/usr/bin:/a \"b\"/x:/c\\d/y"`
+	if !strings.Contains(got, want) {
+		t.Errorf("expected escaped+quoted PATH %q in:\n%s", want, got)
 	}
 }
 
