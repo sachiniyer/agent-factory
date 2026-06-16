@@ -228,6 +228,54 @@ func TestTasksAdd_RejectsInvalidCron(t *testing.T) {
 	assert.Zero(t, calls.reloads)
 }
 
+// TestTasksAdd_InvalidRepoNamesPathNotRequired is half of the #892 regression:
+// when --repo is provided but points at a non-git directory, the error must name
+// the offending path and must NOT claim "--repo is required" — the user did
+// provide it. Previously every resolveRepo() failure was relabeled "required",
+// contradicting the user's own command.
+func TestTasksAdd_InvalidRepoNamesPathNotRequired(t *testing.T) {
+	useTempConfig(t)
+	resetAddFlags(t)
+	calls := stubDaemon(t)
+
+	// An existing directory that is not a git repository.
+	notARepo := t.TempDir()
+	repoFlag = notARepo
+
+	taskAddNameFlag = "x"
+	taskAddPromptFlag = "do it"
+	taskAddCronFlag = "0 9 * * *"
+	taskAddProgramFlag = "claude"
+
+	err := tasksAddCmd.RunE(tasksAddCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), notARepo, "error must name the invalid --repo path")
+	assert.Contains(t, err.Error(), "not a valid git repository")
+	assert.NotContains(t, err.Error(), "--repo is required", "must not claim --repo is missing when it was provided")
+	assert.Zero(t, calls.reloads, "no daemon poke when repo resolution fails")
+}
+
+// TestTasksAdd_AbsentRepoInNonRepoCwdSaysRequired is the other half of #892:
+// with no --repo and a cwd that is not a git repo, the error must report that
+// --repo is required (the only case where that wording is accurate).
+func TestTasksAdd_AbsentRepoInNonRepoCwdSaysRequired(t *testing.T) {
+	useTempConfig(t)
+	resetAddFlags(t) // leaves repoFlag = ""
+	stubDaemon(t)
+
+	// cwd must be outside any git repo so CurrentRepo() fails.
+	t.Chdir(t.TempDir())
+
+	taskAddNameFlag = "x"
+	taskAddPromptFlag = "do it"
+	taskAddCronFlag = "0 9 * * *"
+	taskAddProgramFlag = "claude"
+
+	err := tasksAddCmd.RunE(tasksAddCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--repo is required")
+}
+
 func TestTasksUpdate_DisablePersistsAndPokesDaemon(t *testing.T) {
 	useTempConfig(t)
 	resetUpdateFlags(t)

@@ -721,6 +721,80 @@ func stubGhostCleanup() (wtCalls *[]string, tmuxCalls *[]string, restore func())
 // persisted worktree path is empty but TmuxName is populated, the ghost
 // cleanup path must still attempt to kill the tmux session. Previously, tmux
 // teardown was never attempted from the ghost path, leaving an orphan that
+// TestSessionsCreate_InvalidRepoNamesPath is half of the #892 regression for
+// the sessions create path: a provided-but-invalid --repo must name the path and
+// must not be relabeled "--repo is required".
+func TestSessionsCreate_InvalidRepoNamesPath(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	notARepo := filepath.Join(tmp, "not-a-repo")
+	if err := os.MkdirAll(notARepo, 0755); err != nil {
+		t.Fatalf("mkdir not-a-repo: %v", err)
+	}
+
+	prevRepoFlag, prevName := repoFlag, createNameFlag
+	repoFlag = notARepo
+	createNameFlag = "sess"
+	defer func() { repoFlag, createNameFlag = prevRepoFlag, prevName }()
+
+	// jsonError writes to stderr; silence it.
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStderr := os.Stderr
+	os.Stderr = devnull
+	defer func() { os.Stderr = origStderr }()
+
+	err = sessionsCreateCmd.RunE(sessionsCreateCmd, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid --repo, got nil")
+	}
+	if !strings.Contains(err.Error(), notARepo) {
+		t.Fatalf("error must name the invalid --repo path %q, got: %v", notARepo, err)
+	}
+	if !strings.Contains(err.Error(), "not a valid git repository") {
+		t.Fatalf("error should explain the path is not a git repo, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "--repo is required") {
+		t.Fatalf("must not claim --repo is required when it was provided: %v", err)
+	}
+}
+
+// TestSessionsCreate_AbsentRepoInNonRepoCwdSaysRequired is the other half of
+// #892: no --repo and a non-repo cwd must report that --repo is required.
+func TestSessionsCreate_AbsentRepoInNonRepoCwdSaysRequired(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	prevRepoFlag, prevName := repoFlag, createNameFlag
+	repoFlag = ""
+	createNameFlag = "sess"
+	defer func() { repoFlag, createNameFlag = prevRepoFlag, prevName }()
+
+	// cwd must be outside any git repo so CurrentRepo() fails.
+	t.Chdir(t.TempDir())
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStderr := os.Stderr
+	os.Stderr = devnull
+	defer func() { os.Stderr = origStderr }()
+
+	err = sessionsCreateCmd.RunE(sessionsCreateCmd, nil)
+	if err == nil {
+		t.Fatal("expected error for absent --repo in non-repo cwd, got nil")
+	}
+	if !strings.Contains(err.Error(), "--repo is required") {
+		t.Fatalf("error should say --repo is required, got: %v", err)
+	}
+}
+
 // blocked recreation under the same title with "session already exists".
 func TestGhostCleanup_TmuxOrphan(t *testing.T) {
 	wtCalls, tmCalls, restore := stubGhostCleanup()

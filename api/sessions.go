@@ -156,9 +156,13 @@ var sessionsCreateCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
+		// resolveRepo already differentiates "--repo is required" (absent) from a
+		// provided-but-invalid path and names the offending path (#892), so
+		// surface its error verbatim instead of relabeling every failure as
+		// "required".
 		repo, err := resolveRepo()
 		if err != nil {
-			return jsonError(fmt.Errorf("--repo is required: %w", err))
+			return jsonError(err)
 		}
 
 		if !git.IsGitRepo(repo.Root) {
@@ -304,9 +308,14 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 		// (#865). The daemon decides create-vs-send under its per-target lock,
 		// so no existence pre-check is needed here.
 		if sendPromptCreateFlag {
+			// resolveRepo distinguishes absent --repo ("--repo is required")
+			// from a provided-but-invalid path and names it (#892). --create is
+			// the only send-prompt mode that needs a resolvable repo, so surface
+			// that error directly rather than relabeling an invalid path as
+			// "required".
 			repo, repoErr := resolveRepo()
 			if repoErr != nil {
-				return jsonError(fmt.Errorf("--repo is required when using --create: %w", repoErr))
+				return jsonError(repoErr)
 			}
 
 			if !git.IsGitRepo(repo.Root) {
