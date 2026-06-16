@@ -291,18 +291,23 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		// callbacks must attach to this captured instance, not re-read the live
 		// selection (#716).
 		if tw.IsInTerminalTab() {
-			// The terminal tab always attaches a local tmux session (remote
-			// instances have no worktree to host one), so remote=false: the
-			// post-detach terminal handling is keyed to what was attached,
-			// not to the instance kind (#845).
+			// The terminal tab attaches a local tmux session for local
+			// instances, but a remote instance's terminal_cmd PTY for remote
+			// ones (#843) — and that remote PTY hands the terminal back via
+			// session.hookAttachTerminalRestore (main screen, modes off), the
+			// same neutral state the sidebar remote attach leaves. So the
+			// post-detach handling must key off the instance's real
+			// remote-ness, exactly like the sidebar path below: a remote
+			// terminal_cmd detach needs the #845/#848 full reset + reassert,
+			// or the TUI keeps rendering on the main screen (#889).
 			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-				return m.attachOverlayCallback("handleEnter-terminal", "", false, func() (chan struct{}, error) {
+				return attachOverlayCallbackFn(m, "handleEnter-terminal", "", selected.IsRemote(), func() (chan struct{}, error) {
 					return tw.AttachTerminalForInstance(selected)
 				})
 			})
 		}
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return m.attachOverlayCallback("handleEnter-sidebar", "", selected.IsRemote(), func() (chan struct{}, error) {
+			return attachOverlayCallbackFn(m, "handleEnter-sidebar", "", selected.IsRemote(), func() (chan struct{}, error) {
 				return m.sidebar.AttachInstance(selected)
 			})
 		})

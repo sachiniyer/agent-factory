@@ -870,6 +870,16 @@ const remoteDetachTerminalReassert = "" +
 // the real terminal in production, swappable so tests can capture it.
 var remoteDetachResetWriter io.Writer = os.Stdout
 
+// attachOverlayCallbackFn is the indirection handleEnter reaches
+// attachOverlayCallback through. Production points it at the method; tests swap
+// it to substitute a hermetic attach func (no real tmux client or remote
+// terminal_cmd PTY) while preserving the real `remote` argument the call site
+// computed. That keeps the call-site decision exercised end to end — the #889
+// regression is that the terminal-tab site passed a hardcoded false instead of
+// selected.IsRemote(), which can only be caught by a test that drives the real
+// handleEnter and observes the post-detach reset keyed off that argument.
+var attachOverlayCallbackFn = (*home).attachOverlayCallback
+
 // attachOverlayCallback runs the attach-overlay onDismiss lifecycle: emits
 // the detach-trace markers, invokes attach, arms the attached flag for the
 // duration of `<-ch`, then returns the tea.Cmd to emit the
