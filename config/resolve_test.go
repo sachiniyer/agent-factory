@@ -235,6 +235,14 @@ func TestResolveConfigLegacyDeprecationLog(t *testing.T) {
 	assert.Contains(t, buf.String(), "post_worktree_commands")
 	assert.Contains(t, buf.String(), InRepoConfigPath(repoRoot))
 
+	// The warning must name the real legacy file, derived from the active
+	// config dir, not a hardcoded ~/.agent-factory path — AGENT_FACTORY_HOME
+	// relocates it here (#890).
+	_, legacyPath, lerr := repoConfigPath(repoID)
+	require.NoError(t, lerr)
+	assert.Contains(t, buf.String(), prettyHomePath(legacyPath))
+	assert.NotContains(t, buf.String(), "~/.agent-factory")
+
 	// Once per repo per process: a second resolve stays quiet.
 	buf.Reset()
 	_, err = ResolveConfig(repoRoot)

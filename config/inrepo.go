@@ -188,6 +188,14 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	}
 
 	prettyPath := prettyHomePath(InRepoConfigPath(repoRoot))
+	// Name the real global config file rather than a hardcoded
+	// ~/.agent-factory/config.json, which is wrong when AGENT_FACTORY_HOME
+	// relocates the config dir (same class of bug as #890). Fall back to a
+	// generic phrase if the config dir cannot be resolved.
+	globalConfigLocation := "the global config file"
+	if configDir, dirErr := GetConfigDir(); dirErr == nil {
+		globalConfigLocation = prettyHomePath(filepath.Join(configDir, ConfigFileName))
+	}
 	if len(data) == 0 {
 		return nil, nil, fmt.Errorf("in-repo config %s is empty; delete it or add valid JSON", prettyPath)
 	}
@@ -198,7 +206,7 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	}
 	for key := range rawKeys {
 		if inRepoGlobalOnlyKeys[key] {
-			return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to ~/.agent-factory/config.json and remove it from this file", prettyPath, key)
+			return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, globalConfigLocation)
 		}
 		allowed := false
 		for _, k := range inRepoAllowedKeys {

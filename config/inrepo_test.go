@@ -68,7 +68,8 @@ func TestLoadInRepoConfigEmptyValueIsSet(t *testing.T) {
 func TestLoadInRepoConfigRejectsGlobalOnlyKeys(t *testing.T) {
 	for _, key := range []string{"auto_yes", "branch_prefix", "daemon_poll_interval", "detach_keys", "worktree_root"} {
 		t.Run(key, func(t *testing.T) {
-			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			home := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", home)
 			repoRoot := t.TempDir()
 			writeInRepoConfig(t, repoRoot, `{"`+key+`": "x"}`)
 
@@ -76,7 +77,11 @@ func TestLoadInRepoConfigRejectsGlobalOnlyKeys(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), key)
 			assert.Contains(t, err.Error(), "global setting")
-			assert.Contains(t, err.Error(), "~/.agent-factory/config.json")
+			// The message must name the real global config file under the
+			// active config dir, not a hardcoded ~/.agent-factory path that
+			// AGENT_FACTORY_HOME has relocated (#890).
+			assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)))
+			assert.NotContains(t, err.Error(), "~/.agent-factory/config.json")
 		})
 	}
 }
