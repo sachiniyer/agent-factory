@@ -106,15 +106,22 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 					setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
 				}
 			} else {
-				// Restore: only clean up tmux session, preserve the worktree
-				// to avoid data loss.
+				// Restore: the server-side tmux session may already be live
+				// (has-session passed) and we only failed to allocate the
+				// local attach PTY — e.g. EMFILE/ENOMEM in Restore (#895).
+				// Use CloseAttachOnly, NOT Close: Close runs `tmux
+				// kill-session` and would destroy a recoverable live session
+				// (scrollback + running processes), turning a transient attach
+				// failure into data loss. CloseAttachOnly releases only the
+				// local attach resources this object opened and leaves the
+				// server session and its worktree intact for a later retry.
 				i.mu.Lock()
 				ts := i.tmuxSession
 				i.tmuxSession = nil
 				i.started = false
 				i.mu.Unlock()
 				if ts != nil {
-					if cleanupErr := ts.Close(); cleanupErr != nil {
+					if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 						setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
 					}
 				}

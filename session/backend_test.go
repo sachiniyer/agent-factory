@@ -1947,3 +1947,95 @@ func TestInstanceSupportsRemoteTerminal(t *testing.T) {
 		assert.Contains(t, err.Error(), "remote sessions")
 	})
 }
+
+// errPtyFactory is a tmux.PtyFactory whose Start always fails — it simulates a
+// PTY allocation failure (EMFILE/ENOMEM) on the attach path so a restore can
+// fail AFTER `tmux has-session` confirms the server-side session is alive.
+type errPtyFactory struct{ err error }
+
+func (e errPtyFactory) Start(_ *exec.Cmd) (*os.File, error) { return nil, e.err }
+func (e errPtyFactory) Close()                              {}
+
+// TestLocalBackendRestorePtyFailureDoesNotKillSession is the regression test
+// for issue #895. When restoring an existing instance, `tmux has-session`
+// confirms the server-side session is alive but the local attach PTY cannot be
+// allocated (EMFILE/ENOMEM), Restore returns an error. The deferred restore
+// cleanup in LocalBackend.Start must tear down only the local attach
+// resources (CloseAttachOnly) — it must NOT run `tmux kill-session`, which
+// would destroy a live, recoverable session (scrollback + running processes)
+// and turn a transient attach failure into data loss.
+func TestLocalBackendRestorePtyFailureDoesNotKillSession(t *testing.T) {
+	var mu sync.Mutex
+	var ran []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			mu.Lock()
+			ran = append(ran, strings.Join(c.Args, " "))
+			mu.Unlock()
+			// All commands (notably has-session) succeed → Restore takes the
+			// attach branch where the PTY allocation failure fires.
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+	}
+
+	ts := tmux.NewTmuxSessionWithDeps("restore-pty-fail", "claude",
+		errPtyFactory{err: fmt.Errorf("pty allocation failed")}, cmdExec)
+	inst := &Instance{
+		Title:       "restore-pty-fail",
+		backend:     &LocalBackend{},
+		started:     true,
+		tmuxSession: ts,
+	}
+
+	// firstTimeSetup=false → restore path. No gitWorktree is attached, so
+	// Restore is called with an empty workDir and a present session attaches
+	// (then fails at PTY) rather than re-spawning.
+	err := inst.backend.Start(inst, false)
+	require.Error(t, err, "restore must surface the PTY allocation failure")
+	assert.Contains(t, err.Error(), "pty allocation failed")
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, c := range ran {
+		assert.NotContains(t, c, "kill-session",
+			"restore PTY failure must NOT kill the live tmux session (#895); ran: %v", ran)
+	}
+
+	// The local attach was still torn down: the instance no longer holds the
+	// session and is marked not-started so a later retry is clean.
+	assert.Nil(t, inst.tmuxSession, "attach resources should be released on restore failure")
+	assert.False(t, inst.Started(), "instance should be marked not-started after a failed restore")
+}
+
+// TestLocalBackendKillRunsKillSession is the counterpart to #895: a genuine
+// Kill must still run `tmux kill-session`. This guards against an
+// over-correction that would leak live sessions by never killing them.
+func TestLocalBackendKillRunsKillSession(t *testing.T) {
+	var mu sync.Mutex
+	var killed bool
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "kill-session") {
+				mu.Lock()
+				killed = true
+				mu.Unlock()
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte(""), nil },
+	}
+
+	ts := tmux.NewTmuxSessionWithDeps("genuine-kill", "claude", nil, cmdExec)
+	inst := &Instance{
+		Title:       "genuine-kill",
+		backend:     &LocalBackend{},
+		started:     true,
+		tmuxSession: ts,
+	}
+
+	require.NoError(t, inst.Kill())
+	mu.Lock()
+	defer mu.Unlock()
+	assert.True(t, killed, "a genuine Kill must run tmux kill-session")
+}
