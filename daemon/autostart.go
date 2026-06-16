@@ -35,17 +35,33 @@ func quoteExecStartPath(p string) string {
 	return `"` + escaped + `"`
 }
 
-// sanitizeEnvValue makes a value safe for an Environment= assignment.
-// systemd does not apply shell-style quote parsing to Environment= values,
-// so surrounding quotes would be preserved literally. Newlines are also
-// disallowed by systemd in Environment= values; replace them with spaces
-// rather than emitting a syntactically invalid unit file.
-func sanitizeEnvValue(v string) string {
-	v = strings.ReplaceAll(v, "\n", " ")
-	v = strings.ReplaceAll(v, "\r", " ")
-	v = strings.ReplaceAll(v, `$`, `$$`)
-	v = strings.ReplaceAll(v, `%`, `%%`)
-	return v
+// formatSystemdEnvLine renders one `Environment=NAME=value` line so systemd
+// parses the whole value, spaces and all.
+//
+// systemd tokenizes Environment= with quote-aware, C-unescaping parsing
+// (systemd.exec(5)): unquoted whitespace splits a single line into several
+// independent assignments, and an unquoted backslash or quote is consumed as
+// an escape. So when the value contains whitespace, a quote, or a backslash,
+// the entire NAME=value is wrapped in double quotes with backslashes and
+// double quotes escaped C-style inside. Values with no such characters are
+// emitted bare to avoid needless churn.
+//
+// '%' is a systemd specifier and is always doubled. '$' is left literal:
+// unlike ExecStart=, Environment= performs no variable expansion (verified
+// with `systemctl show` / `systemd-analyze verify`), so doubling it would
+// corrupt the value into a literal "$$". Newlines and carriage returns, which
+// systemd rejects in unit files, are folded to spaces.
+func formatSystemdEnvLine(name, value string) string {
+	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, `%`, `%%`)
+	assignment := name + "=" + value
+	if !strings.ContainsAny(value, " \t\"'\\") {
+		return "Environment=" + assignment
+	}
+	assignment = strings.ReplaceAll(assignment, `\`, `\\`)
+	assignment = strings.ReplaceAll(assignment, `"`, `\"`)
+	return `Environment="` + assignment + `"`
 }
 
 // systemdAutostartUnit renders the user-level systemd service that keeps the
@@ -56,9 +72,9 @@ func sanitizeEnvValue(v string) string {
 // shell has it set: without it the unit's daemon would serve the default
 // home instead of the custom one (#782).
 func systemdAutostartUnit(execPath, pathEnv, shellEnv, agentFactoryHome string) string {
-	envLines := fmt.Sprintf("Environment=PATH=%s\nEnvironment=SHELL=%s", sanitizeEnvValue(pathEnv), sanitizeEnvValue(shellEnv))
+	envLines := formatSystemdEnvLine("PATH", pathEnv) + "\n" + formatSystemdEnvLine("SHELL", shellEnv)
 	if agentFactoryHome != "" {
-		envLines += "\nEnvironment=AGENT_FACTORY_HOME=" + sanitizeEnvValue(agentFactoryHome)
+		envLines += "\n" + formatSystemdEnvLine("AGENT_FACTORY_HOME", agentFactoryHome)
 	}
 	return fmt.Sprintf(`[Unit]
 Description=Agent Factory daemon (task scheduler + autoyes)
@@ -79,6 +95,11 @@ WantedBy=default.target
 // Restart=on-failure behavior; logPath captures crashes that happen before
 // the daemon's own logging is up. AGENT_FACTORY_HOME is captured when set,
 // matching the systemd unit (#782).
+//
+// Unlike the systemd Environment= line (#893), no extra quoting is needed for
+// values with spaces: each value is its own XML <string> element, so spaces
+// are ordinary text content. html.EscapeString only needs to neutralize the
+// XML metacharacters (& < > " ') that would otherwise break the markup.
 func launchdAutostartPlist(execPath, pathEnv, shellEnv, agentFactoryHome, logPath string) string {
 	esc := html.EscapeString
 	homeEntry := ""
