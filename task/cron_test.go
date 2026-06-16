@@ -183,19 +183,53 @@ func TestParseCronDOMWithDOWRangeEndingAtSeven(t *testing.T) {
 	assert.Equal(t, time.Date(2026, 2, 8, 0, 0, 0, 0, time.UTC), schedule.Next(fromSat))
 }
 
+// TestParseCronDOWStepFromSevenPreservesStep is the regression for #888: the
+// Sunday alias 7 used as a step base ("7/2") must keep its step and fire
+// Sun,Tue,Thu,Sat (≡ "0/2"), not collapse to Sunday-only.
+func TestParseCronDOWStepFromSevenPreservesStep(t *testing.T) {
+	seven, err := ParseCron("0 0 * * 7/2")
+	require.NoError(t, err)
+	zero, err := ParseCron("0 0 * * 0/2")
+	require.NoError(t, err)
+
+	// Walk a full week from a Saturday and confirm 7/2 fires on the same days
+	// as 0/2: Sun, Tue, Thu, Sat. 2026-06-13 is a Saturday.
+	from := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	want := []time.Time{
+		time.Date(2026, 6, 14, 0, 0, 0, 0, time.UTC), // Sunday
+		time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC), // Tuesday
+		time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC), // Thursday
+		time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC), // Saturday
+	}
+	cur7, cur0 := from, from
+	for _, w := range want {
+		cur7 = seven.Next(cur7)
+		cur0 = zero.Next(cur0)
+		assert.Equal(t, w, cur7, "7/2 must fire %s", w.Weekday())
+		assert.Equal(t, w, cur0, "0/2 must fire %s", w.Weekday())
+	}
+}
+
 func TestNormalizeDOWField(t *testing.T) {
 	cases := []struct {
 		in   string
 		want string
 	}{
 		{"*", "*"},
-		{"1-5", "1-5"}, // untouched: no 7 present
-		{"7", "0"},
-		{"07", "0"},
-		{"5-7", "0,5,6"},
-		{"1,7", "0,1"},
-		{"*/7", "0"},
-		{"0-7", "0,1,2,3,4,5,6"},
+		{"1-5", "1-5"},           // untouched: no 7 present
+		{"0/2", "0/2"},           // untouched: no 7, step preserved for robfig
+		{"*/2", "*/2"},           // untouched: no 7, step preserved for robfig
+		{"7", "0"},               // bare Sunday alias
+		{"07", "0"},              // leading-zero Sunday alias (#743)
+		{"5-7", "0,5,6"},         // range ending at 7
+		{"1,7", "0,1"},           // list containing 7
+		{"*/7", "0"},             // step that only lands on 0 and 7
+		{"7/2", "0,2,4,6"},       // step base 7 must keep its step (#888): Sun,Tue,Thu,Sat
+		{"07/2", "0,2,4,6"},      // leading-zero step base 7 (#888 + #743)
+		{"1/2", "1/2"},           // no 7 present; passes through untouched
+		{"3,7/2", "0,2,3,4,6"},   // 7-step base inside a list still keeps its step (#888)
+		{"0-7", "0,1,2,3,4,5,6"}, // full range incl. both Sunday aliases (#770: explicit list, never "*")
+		{"1-7", "0,1,2,3,4,5,6"}, // range to the 7 alias covers the whole week as a list (#770)
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, normalizeDOWField(tc.in), "normalizeDOWField(%q)", tc.in)
