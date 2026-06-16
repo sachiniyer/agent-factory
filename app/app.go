@@ -628,8 +628,12 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if program == "" {
 		program = m.program
 	}
+	id, err := task.GenerateID()
+	if err != nil {
+		return m.handleError(fmt.Errorf("failed to generate task id: %v", err))
+	}
 	t := task.Task{
-		ID:            task.GenerateID(),
+		ID:            id,
 		Name:          name,
 		Prompt:        prompt,
 		CronExpr:      cronExpr,

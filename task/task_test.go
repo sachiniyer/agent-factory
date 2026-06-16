@@ -2,6 +2,7 @@ package task
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,11 +205,37 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 }
 
 func TestGenerateID(t *testing.T) {
-	id1 := GenerateID()
-	id2 := GenerateID()
+	id1, err := GenerateID()
+	require.NoError(t, err)
+	id2, err := GenerateID()
+	require.NoError(t, err)
 	assert.Len(t, id1, 8) // 4 bytes = 8 hex chars
 	assert.Len(t, id2, 8)
 	assert.NotEqual(t, id1, id2)
+	assert.NotEqual(t, "00000000", id1, "a successful generation must never produce the all-zero ID")
+}
+
+// failingReader is an io.Reader that always fails, used to simulate an
+// unavailable system entropy source.
+type failingReader struct{}
+
+func (failingReader) Read(p []byte) (int, error) {
+	return 0, errors.New("entropy unavailable")
+}
+
+// TestGenerateIDEntropyFailure is the regression test for #897: when the
+// entropy source fails, GenerateID must return an error rather than silently
+// emit the predictable, collision-prone "00000000" ID that breaks first-match
+// get/remove/update semantics.
+func TestGenerateIDEntropyFailure(t *testing.T) {
+	orig := randReader
+	randReader = failingReader{}
+	t.Cleanup(func() { randReader = orig })
+
+	id, err := GenerateID()
+	require.Error(t, err, "GenerateID must surface the entropy failure")
+	assert.Empty(t, id, "no ID may be returned when entropy is unavailable")
+	assert.NotEqual(t, "00000000", id, "GenerateID must never emit the all-zero ID")
 }
 
 // TestLoadTaskWithoutProgramFieldFallsBackToEmpty verifies that a task record
@@ -293,8 +320,10 @@ func TestValidateTaskID_PathTraversalRejected(t *testing.T) {
 // GenerateID and the fixture IDs already used elsewhere in the test suite
 // continue to validate.
 func TestValidateTaskID_LegitimateAccepted(t *testing.T) {
+	genID, err := GenerateID()
+	require.NoError(t, err)
 	cases := []string{
-		GenerateID(), // 8 hex chars from production helper
+		genID, // 8 hex chars from production helper
 		"a1b2",
 		"abc1",
 		"x1",

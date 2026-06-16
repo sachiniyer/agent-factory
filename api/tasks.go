@@ -130,7 +130,10 @@ var tasksAddCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		id := task.GenerateID()
+		id, err := task.GenerateID()
+		if err != nil {
+			return jsonError(fmt.Errorf("failed to generate task id: %w", err))
+		}
 		s := task.Task{
 			ID:            id,
 			Name:          taskAddNameFlag,

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -245,10 +246,23 @@ func GetTask(id string) (*Task, error) {
 	return nil, fmt.Errorf("task with id %q not found", id)
 }
 
-func GenerateID() string {
+// randReader is the entropy source for GenerateID. It is a package variable so
+// tests can substitute a failing reader; production reads from crypto/rand.
+var randReader io.Reader = rand.Reader
+
+// GenerateID returns a random 8-character (4-byte) hex task ID. It returns an
+// error when the system entropy source is unavailable instead of silently
+// emitting the all-zero "00000000" ID: task IDs are the handle users pass to
+// `af tasks get/remove/update <id>`, and duplicate IDs make GetTask/RemoveTask/
+// UpdateTask (all first-match) operate on the wrong task — silent data loss.
+// Callers must fail the operation loudly rather than persist a zero/colliding
+// ID. See #897.
+func GenerateID() (string, error) {
 	b := make([]byte, 4)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := io.ReadFull(randReader, b); err != nil {
+		return "", fmt.Errorf("failed to generate random task ID: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // LoadTasksForCurrentRepo returns only tasks whose ProjectPath
