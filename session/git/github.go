@@ -1,11 +1,22 @@
 package git
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// ghNetworkTimeout bounds the `gh` API call in FetchPRInfo. Like the git fetch
+// in resolveOriginHead (#896), this is a network operation with no timeout of
+// its own: a stalled GitHub API request would otherwise block the sidebar's PR
+// refresh goroutine indefinitely. gh runs as the leaf of its own short-lived
+// invocation here, so a plain context deadline (no process-group teardown) is
+// sufficient.
+const ghNetworkTimeout = 30 * time.Second
 
 // PRInfo holds information about a GitHub pull request associated with a branch.
 type PRInfo struct {
@@ -43,11 +54,16 @@ func FetchPRInfo(repoPath, branchName string) (*PRInfo, error) {
 		return nil, nil
 	}
 
-	cmd := exec.Command("gh", "pr", "list", "--head", branchName, "--state", "all",
+	ctx, cancel := context.WithTimeout(context.Background(), ghNetworkTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--head", branchName, "--state", "all",
 		"--json", "number,title,url,state", "--limit", "10")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("gh pr list timed out after %s (GitHub unreachable or stalled): %w", ghNetworkTimeout, ctx.Err())
+		}
 		return nil, fmt.Errorf("failed to fetch PR info: %w", err)
 	}
 

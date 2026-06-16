@@ -92,8 +92,12 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 // It fetches from origin first, then tries origin/HEAD, origin/main, and origin/master.
 // Returns the commit SHA if successful, or empty string if no remote ref is available.
 func (g *GitWorktree) resolveOriginHead() string {
-	// Fetch from origin to ensure we have the latest refs (best-effort)
-	_, _ = g.runGitCommand(g.repoPath, "fetch", "origin")
+	// Fetch from origin to ensure we have the latest refs (best-effort). This
+	// is the one network call on the session-creation path, so it is bounded
+	// by networkGitTimeout: a stalled remote must not hang creation forever
+	// (#896). The error is intentionally ignored — on timeout or failure we
+	// fall through to whatever origin refs are already cached locally.
+	_, _ = g.runGitNetworkCommand(g.repoPath, "fetch", "origin")
 
 	// Try origin/HEAD (symbolic ref pointing to the default branch)
 	for _, ref := range []string{"origin/HEAD", "origin/main", "origin/master"} {
