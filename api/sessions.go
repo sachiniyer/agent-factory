@@ -410,7 +410,16 @@ var sessionsAttachCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
-		instance, _, err := findLiveInstanceByTitle(args[0])
+		// Honor --repo scoping (#891, same class as #761/#776). An empty repoID
+		// preserves the prior all-repo search; a non-empty one confines the
+		// attach to that repo so `attach <title> --repo <other>` can never
+		// connect the terminal to a same-titled session in a different repo.
+		repoID, err := resolveRepoID()
+		if err != nil {
+			return jsonError(err)
+		}
+
+		instance, _, err := findLiveInstanceByTitleInScope(repoID, args[0])
 		if err != nil {
 			return jsonError(err)
 		}

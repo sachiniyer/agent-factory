@@ -165,6 +165,50 @@ func findLiveInstanceByTitle(title string) (*session.Instance, string, error) {
 	return instance, repoID, nil
 }
 
+// findInstanceByTitleInScope finds an instance by title within the resolved repo
+// scope (#891). An empty repoID preserves the prior all-repo search; a non-empty
+// one confines the lookup to that repo so a same-titled session in a different
+// repo can never be selected. Mirrors how resolveRepoID() scopes the other
+// sessions subcommands (list, kill, send-prompt).
+func findInstanceByTitleInScope(repoID, title string) (*session.InstanceData, string, error) {
+	if repoID == "" {
+		return findInstanceByTitle(title)
+	}
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to load instances for repo %s: %w", repoID, err)
+	}
+	var instances []session.InstanceData
+	if err := json.Unmarshal(raw, &instances); err != nil {
+		return nil, "", fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+	}
+	for i := range instances {
+		if instances[i].Title == title {
+			return &instances[i], repoID, nil
+		}
+	}
+	// Wrap the sentinel so a scoped clean miss stays distinguishable from a
+	// corruption-tainted miss, mirroring findInstanceByTitle (#861).
+	return nil, "", fmt.Errorf("instance %q %w", title, errTitleNotFound)
+}
+
+// findLiveInstanceByTitleInScope finds an instance by title within the resolved
+// repo scope and restores it as a live *Instance (#891). It is the repo-scoped
+// counterpart of findLiveInstanceByTitle, used by attach so `--repo` confines
+// the attach to that repo's session instead of connecting the terminal to a
+// same-titled session in another repo.
+func findLiveInstanceByTitleInScope(repoID, title string) (*session.Instance, string, error) {
+	data, repoID, err := findInstanceByTitleInScope(repoID, title)
+	if err != nil {
+		return nil, "", err
+	}
+	instance, err := session.FromInstanceData(*data)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to restore instance %q: %w", title, err)
+	}
+	return instance, repoID, nil
+}
+
 // instanceTitleExistsInScope reports whether a session with the given title
 // exists within the resolved repo scope (#776). An empty repoID preserves the
 // prior all-repo search; a non-empty one confines the check to that repo so a

@@ -414,6 +414,111 @@ func TestSessionsKill_HonorsRepoScoping(t *testing.T) {
 	}
 }
 
+// TestSessionsAttach_HonorsRepoScoping is the regression test for issue #891
+// (same class as #761 kill / #776 send-prompt). Two repos each hold a session
+// with the same title but a distinct Path. Resolving the attach with
+// `--repo <repoA>` must select repo A's session, and `--repo <repoB>` repo B's,
+// so `attach <title> --repo <other>` can never connect the terminal to a
+// same-titled session in the wrong repo. Previously attach dropped --repo on the
+// floor and ran an all-repo lookup that could return either repo's session.
+//
+// The test exercises the resolveRepoID() + scoped-lookup steps attach's RunE now
+// runs, rather than RunE itself: the final findLiveInstanceByTitleInScope()
+// restores (and Starts) a live tmux session and instance.Attach() blocks on a
+// real terminal. The bug lived entirely in title selection — which repo's
+// instance is chosen — so pinning the data-level scoped lookup pins the fix.
+func TestSessionsAttach_HonorsRepoScoping(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	// Repo A is a real git repo so resolveRepoID(--repo) can compute its ID
+	// the same way the running CLI would.
+	repoARoot := filepath.Join(tmp, "repo-a")
+	if err := os.MkdirAll(repoARoot, 0755); err != nil {
+		t.Fatalf("mkdir repo A: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoARoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init repo A: %v (%s)", err, out)
+	}
+	repoA, err := config.RepoFromPath(repoARoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath repo A: %v", err)
+	}
+
+	// Repo B is a distinct synthetic repo on disk holding a same-titled session.
+	repoBID := "repo-b-synthetic"
+	if repoBID == repoA.ID {
+		t.Fatalf("test setup: synthetic repo B ID collided with repo A")
+	}
+
+	const title = "shared-title"
+
+	// Each repo's instance carries a distinct Path so the selected instance is
+	// identifiable by which repo it came from.
+	mk := func(root string) []session.InstanceData {
+		return []session.InstanceData{{Title: title, Path: root}}
+	}
+	rawA, err := json.Marshal(mk(repoARoot))
+	if err != nil {
+		t.Fatalf("marshal repo A instances: %v", err)
+	}
+	rawB, err := json.Marshal(mk(tmp))
+	if err != nil {
+		t.Fatalf("marshal repo B instances: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoA.ID, rawA); err != nil {
+		t.Fatalf("save repo A instances: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoBID, rawB); err != nil {
+		t.Fatalf("save repo B instances: %v", err)
+	}
+
+	// Point --repo at repo A and resolve the scope exactly as attach's RunE does.
+	prevRepoFlag := repoFlag
+	repoFlag = repoARoot
+	defer func() { repoFlag = prevRepoFlag }()
+
+	repoID, err := resolveRepoID()
+	if err != nil {
+		t.Fatalf("resolveRepoID: %v", err)
+	}
+	if repoID != repoA.ID {
+		t.Fatalf("resolveRepoID = %q, want repo A %q", repoID, repoA.ID)
+	}
+
+	dataA, gotRepoA, err := findInstanceByTitleInScope(repoID, title)
+	if err != nil {
+		t.Fatalf("scoped lookup for repo A: %v", err)
+	}
+	if gotRepoA != repoA.ID {
+		t.Fatalf("scoped lookup returned repoID %q, want repo A %q", gotRepoA, repoA.ID)
+	}
+	if dataA.Path != repoARoot {
+		t.Fatalf("attach selected the wrong repo's session: Path = %q, want repo A %q", dataA.Path, repoARoot)
+	}
+
+	// Scoping to repo B must select repo B's same-titled session, proving --repo
+	// actually drives the selection (not a coincidental first-match).
+	dataB, gotRepoB, err := findInstanceByTitleInScope(repoBID, title)
+	if err != nil {
+		t.Fatalf("scoped lookup for repo B: %v", err)
+	}
+	if gotRepoB != repoBID {
+		t.Fatalf("scoped lookup returned repoID %q, want repo B %q", gotRepoB, repoBID)
+	}
+	if dataB.Path != tmp {
+		t.Fatalf("repo B scope selected the wrong session: Path = %q, want repo B %q", dataB.Path, tmp)
+	}
+
+	// A title that does not exist in the scoped repo must be a clean not-found,
+	// not a fallback into another repo's matching session.
+	if _, _, err := findInstanceByTitleInScope(repoA.ID, "does-not-exist"); err == nil {
+		t.Fatalf("expected not-found for missing title in scope, got nil")
+	} else if !errors.Is(err, errTitleNotFound) {
+		t.Fatalf("expected errTitleNotFound for missing title in scope, got: %v", err)
+	}
+}
+
 // TestSessionsSendPrompt_HonorsRepoScoping is the regression test for issue
 // #776 (follow-up to #761/#775). Two repos each hold a session with the same
 // title. Sending a prompt with `--repo <repoA>` must scope delivery to repo
