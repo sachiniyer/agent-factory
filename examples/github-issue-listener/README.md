@@ -6,7 +6,7 @@ A small polling script that watches a GitHub repo for newly opened issues and sp
 
 - `gh` authenticated against the target repo (`gh auth status` should report you as logged in).
 - `jq` on `PATH`.
-- `af` on `PATH` (`./dev-install.sh` from the repo root).
+- `af` on `PATH` (install via `curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh`, or `./dev-install.sh` if building from source).
 
 ## Quick start
 
