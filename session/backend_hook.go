@@ -696,6 +696,14 @@ const hookAttachTerminalRestore = "" +
 	"\x1b[0m" + // SGR attributes reset
 	"\x1b[?25h" // cursor visible
 
+// hookAttachDrainTimeout bounds how long we wait for the PTY copy goroutine to
+// drain after the child exits. On the natural-exit path the master returns the
+// child's remaining buffered output and then EIO once the slave is gone, so
+// io.Copy terminates on its own — but a grandchild that inherited and kept the
+// slave open would keep the master from ever EOFing. 2s is generous for a
+// genuine drain while still bounding that pathological case (#912).
+const hookAttachDrainTimeout = 2 * time.Second
+
 func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer) error {
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -746,8 +754,22 @@ func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.W
 	}()
 
 	err = <-waitDone
-	_ = ptmx.Close()
-	<-copyDone
+
+	// Drain before closing. Now that the child (slave) has exited, io.Copy
+	// reads the master's remaining buffered output and then sees EIO, so it
+	// terminates on its own. Closing ptmx here — before copyDone — would race
+	// that final read and truncate the remote's last bytes (#912). The detach
+	// path already closed ptmx in detach(), so copyDone closes promptly there
+	// and this drain is a harmless no-op. Bound the wait in case a grandchild
+	// inherited the slave and is holding the master open: on timeout, force the
+	// close to unblock io.Copy, then still wait for copyDone.
+	select {
+	case <-copyDone:
+	case <-time.After(hookAttachDrainTimeout):
+		_ = ptmx.Close() // grandchild holding slave open; stop waiting
+		<-copyDone
+	}
+	_ = ptmx.Close() // idempotent; no-op if already closed
 
 	// Every byte of the remote stream has been flushed (copyDone), so this
 	// lands strictly after any modes the remote set. Emitted on every exit
