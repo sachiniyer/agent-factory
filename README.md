@@ -8,48 +8,15 @@ Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo sc
 
 ## Install
 
-Prerequisites: **tmux**, **git**, and at least one AI coding agent installed (e.g. [Claude Code](https://docs.anthropic.com/en/docs/claude-code)). **Go is not required** for the binary install below.
-
-Prebuilt binaries are published for Linux and macOS on amd64 and arm64.
+Prerequisites: **tmux**, **git**, and at least one AI coding agent (e.g. [Claude Code](https://docs.anthropic.com/en/docs/claude-code)). No Go required.
 
 ```bash
-# Recommended: download and install the latest release binary
 curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh
 ```
 
-This installs `af` to `~/.local/bin/af` (override with `AF_INSTALL_DIR`) and prints a PATH hint if that directory isn't on your `PATH`. To pin a release, pass `--version`:
+Installs the `af` binary (Linux/macOS, amd64/arm64) to `~/.local/bin` — override with `AF_INSTALL_DIR`, pin a release with `--version`. Re-run the script or `af upgrade` to update.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh -s -- --version v1.0.114
-```
-
-Re-running the script upgrades in place; you can also run `af upgrade` later.
-
-### Manual download
-
-If you'd rather not pipe a script to your shell, grab the tarball for your platform from the [Releases page](https://github.com/sachiniyer/agent-factory/releases/latest) and install it yourself. Replace `linux-amd64` with `linux-arm64`, `darwin-amd64`, or `darwin-arm64` as appropriate:
-
-```bash
-curl -fsSL -o agent-factory.tar.gz \
-  https://github.com/sachiniyer/agent-factory/releases/latest/download/agent-factory-linux-amd64.tar.gz
-tar xzf agent-factory.tar.gz          # extracts a single binary named `agent-factory`
-mkdir -p ~/.local/bin
-mv agent-factory ~/.local/bin/af
-chmod +x ~/.local/bin/af
-```
-
-### Building from source
-
-For contributors, or if no prebuilt binary fits your platform. Requires **Go 1.24+** in addition to the prerequisites above.
-
-```bash
-git clone https://github.com/sachiniyer/agent-factory.git
-cd agent-factory
-./dev-install.sh    # builds `af` and installs it to ~/.local/bin/ (override with BIN_DIR)
-
-# Or build the binary manually
-go build -o af .
-```
+**Other ways:** grab a tarball from the [Releases page](https://github.com/sachiniyer/agent-factory/releases/latest), or build from source (needs **Go 1.24+**) with `git clone https://github.com/sachiniyer/agent-factory.git && cd agent-factory && ./dev-install.sh`.
 
 ### Launch
 
