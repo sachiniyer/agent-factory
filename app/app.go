@@ -324,6 +324,16 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if target == nil {
 			return m, nil
 		}
+		// The title-only re-resolution above can land on a different session
+		// than the fetch was kicked off for: a user can kill the original
+		// instance and recreate one with the same title on a *different*
+		// branch while the gh fetch is in flight (#921). PR info is
+		// branch-specific, so applying a branch-X result to a branch-Y
+		// instance would show the wrong PR badge and persist it. Gate the
+		// apply on the captured branch still matching the resolved target.
+		if target.GetBranch() != msg.branch {
+			return m, nil
+		}
 		if msg.err != nil {
 			log.WarningLog.Printf("PR info fetch failed for %q: %v", msg.instance.Title, msg.err)
 			// Mark as fetched anyway so we don't thrash retries on every

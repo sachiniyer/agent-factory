@@ -400,6 +400,74 @@ func TestPrInfoUpdatedMsg_Error_SwappedDuringFetch_MarksLiveInstance(t *testing.
 		"the orphaned pointer must be left untouched")
 }
 
+// ----------------------------------------------------------------------------
+// Regression tests for issue #921 (sachiniyer/agent-factory):
+// "PR info updates can apply to the wrong worktree when an instance is
+// recreated with the same title on a different branch". The fetch captures the
+// branch at kickoff, but the title-only re-resolution in the prInfoUpdatedMsg
+// handler can land on a same-title instance now attached to a *different*
+// branch (kill + recreate while the fetch is in flight). PR info is
+// branch-specific, so the handler must drop the update when the resolved
+// target's branch no longer matches the captured one.
+// ----------------------------------------------------------------------------
+
+// TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate — the captured instance is
+// killed and a fresh same-title instance is created on a different branch while
+// the fetch is in flight. The title-only fallback resolves to that new
+// instance, but its branch differs from the fetch's branch, so the stale PR
+// info must NOT be applied.
+func TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate(t *testing.T) {
+	h := newTestHome(t)
+
+	// The instance the fetch was kicked off for, on branch X.
+	orphan := newStartedInstance(t, "reused")
+	orphan.Branch = "feature/x"
+	h.sidebar.AddInstance(orphan)
+	h.sidebar.SetSelectedInstance(0)
+
+	// User killed it and recreated a same-title instance on branch Y while the
+	// gh fetch was still running.
+	recreated := newStartedInstance(t, "reused")
+	recreated.Branch = "feature/y"
+	h.sidebar.RemoveInstanceByTitle("reused")
+	h.sidebar.AddInstance(recreated)
+
+	info := &git.PRInfo{Number: 42, Title: "branch X PR", State: "OPEN"}
+	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, branch: "feature/x", info: info})
+
+	assert.Nil(t, cmd)
+	assert.Nil(t, recreated.GetPRInfo(),
+		"a fetch for branch X must not write its PR info onto a same-title instance now on branch Y")
+	assert.Nil(t, orphan.GetPRInfo(),
+		"the orphaned pointer must not receive the update either")
+}
+
+// TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate — same swap as above, but the
+// recreated same-title instance is back on the original branch. The captured
+// branch matches, so the update applies to the live instance.
+func TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate(t *testing.T) {
+	h := newTestHome(t)
+
+	orphan := newStartedInstance(t, "reused")
+	orphan.Branch = "feature/x"
+	h.sidebar.AddInstance(orphan)
+	h.sidebar.SetSelectedInstance(0)
+
+	live := newStartedInstance(t, "reused")
+	live.Branch = "feature/x"
+	h.sidebar.RemoveInstanceByTitle("reused")
+	h.sidebar.AddInstance(live)
+	require.NotSame(t, orphan, live, "sanity: swap must produce a distinct pointer")
+
+	info := &git.PRInfo{Number: 42, Title: "branch X PR", State: "OPEN"}
+	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, branch: "feature/x", info: info})
+
+	got := live.GetPRInfo()
+	require.NotNil(t, got, "matching-branch update must apply to the live instance")
+	assert.Equal(t, 42, got.Number)
+	assert.Nil(t, orphan.GetPRInfo(), "the orphaned pointer must not receive the update")
+}
+
 // sanity: exercise config.DefaultConfig / AppState wiring so a compile
 // regression in newTestHome stays within this package.
 func TestNewTestHome_BuildsSuccessfully(t *testing.T) {
