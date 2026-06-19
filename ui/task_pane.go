@@ -2,9 +2,12 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 
@@ -208,8 +211,17 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	s.editErrorField = -1
 }
 
-// EnterCreateMode initializes empty edit fields for creating a new task.
+// EnterCreateMode initializes empty edit fields for creating a new task. An
+// empty defaultPath (e.g. the in-pane "n" handler before any explicit create
+// entry set s.createPath) falls back to the current working directory so the
+// path field is prefilled with a sensible, usually-valid value rather than an
+// empty string the #924 path validation would immediately reject.
 func (s *TaskPane) EnterCreateMode(defaultPath string) {
+	if defaultPath == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			defaultPath = cwd
+		}
+	}
 	s.createPath = defaultPath
 	s.initForm(nil, defaultPath)
 	s.creating = true
@@ -396,8 +408,10 @@ func (s *TaskPane) enterEditMode() {
 // at most one trigger, so validation reduces to: a name, a non-empty value
 // for the selected trigger, and — for cron tasks only — a valid cron
 // expression plus a non-empty prompt. Watch tasks may omit the prompt: each
-// event defaults to the raw emitted line. Returns the inline error and the
-// focus stop to render it under, or ("", -1) when valid.
+// event defaults to the raw emitted line. The project path is validated for
+// BOTH trigger types (#924): a corrupt or non-existent repo path used to be
+// saved silently and only surfaced when the scheduler fired. Returns the
+// inline error and the focus stop to render it under, or ("", -1) when valid.
 func (s *TaskPane) validateForm() (string, int) {
 	if strings.TrimSpace(s.editName.Value()) == "" {
 		return "name is required", taskFocusName
@@ -406,18 +420,35 @@ func (s *TaskPane) validateForm() (string, int) {
 		if strings.TrimSpace(s.editWatch.Value()) == "" {
 			return "watch command is required", taskFocusTriggerValue
 		}
-		return "", -1
+	} else {
+		cron := strings.TrimSpace(s.editCron.Value())
+		if cron == "" {
+			return "cron expression is required", taskFocusTriggerValue
+		}
+		if err := task.ValidateCronExpr(cron); err != nil {
+			return fmt.Sprintf("invalid cron: %v", err), taskFocusTriggerValue
+		}
+		if strings.TrimSpace(s.editPrompt.Value()) == "" {
+			return "prompt must be non-empty", taskFocusPrompt
+		}
 	}
-	cron := strings.TrimSpace(s.editCron.Value())
-	if cron == "" {
-		return "cron expression is required", taskFocusTriggerValue
+
+	// Expand a leading ~ (filepath.Abs does not), resolve to absolute, and
+	// require a real git repo — the same check RunTask/the watcher apply at
+	// fire time (git.IsGitRepo). Persist the normalized value back into the
+	// field so what we validate is exactly what gets stored (#924).
+	rawPath := strings.TrimSpace(s.editPath.Value())
+	if rawPath == "" {
+		return "project path is required", taskFocusPath
 	}
-	if err := task.ValidateCronExpr(cron); err != nil {
-		return fmt.Sprintf("invalid cron: %v", err), taskFocusTriggerValue
+	absPath, err := filepath.Abs(config.ExpandTilde(rawPath))
+	if err != nil {
+		return fmt.Sprintf("invalid path: %v", err), taskFocusPath
 	}
-	if strings.TrimSpace(s.editPrompt.Value()) == "" {
-		return "prompt must be non-empty", taskFocusPrompt
+	if !git.IsGitRepo(absPath) {
+		return fmt.Sprintf("%s is not a git repository", absPath), taskFocusPath
 	}
+	s.editPath.SetValue(absPath)
 	return "", -1
 }
 
@@ -448,11 +479,12 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 				s.pendingCreate = true
 				s.creating = false
 			} else {
-				// Mirror the create path (app.handleTaskCreate): resolve
-				// the user-entered path to an absolute form so an empty
-				// or relative value behaves the same when the scheduler
-				// fires as it does in the TUI trigger (#641).
-				absPath, err := filepath.Abs(s.editPath.Value())
+				// Mirror the create path (app.handleTaskCreate): expand a
+				// leading ~ then resolve to an absolute form so an empty or
+				// relative value behaves the same when the scheduler fires
+				// as it does in the TUI trigger (#641, #924). validateForm
+				// already normalized editPath, so this is idempotent.
+				absPath, err := filepath.Abs(config.ExpandTilde(s.editPath.Value()))
 				if err != nil {
 					s.editError = fmt.Sprintf("invalid path: %v", err)
 					s.editErrorField = taskFocusPath

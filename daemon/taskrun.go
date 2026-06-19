@@ -91,7 +91,7 @@ func repoHasSessionTitle(repoID, title string) (bool, error) {
 // trigger` CLI both land here. Watch tasks are refused — they fire from
 // their watch command's stdout, and a manual trigger has no event line to
 // render the prompt with.
-func RunTask(taskID string) error {
+func RunTask(taskID string) (err error) {
 	// Validate the task ID before it flows into any filesystem path. The
 	// CLI boundary also validates, but this is the shared chokepoint that
 	// protects every caller.
@@ -143,6 +143,25 @@ func RunTask(taskID string) error {
 		return fmt.Errorf("another run is already active for task %s", taskID)
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	// Once this fire holds the lock it owns the task's run status: every
+	// failure from here on — git missing, project path not a repo, or a
+	// delivery error — must be recorded so a cron task's LastRunStatus
+	// reflects the failure instead of going stale. Previously only the success
+	// path reached UpdateTaskStatus, so a bad project path left the TUI showing
+	// the prior run forever while the scheduler merely logged the error (#924).
+	// The success path writes its own status below; this defer fires only when
+	// err is non-nil, so the status is never double-written. The "errored:"
+	// prefix matches the watcher convention the TUI keys on (#797).
+	defer func() {
+		if err == nil {
+			return
+		}
+		now := time.Now()
+		if uerr := task.UpdateTaskStatus(taskID, &now, "errored: "+err.Error()); uerr != nil {
+			log.ErrorLog.Printf("failed to record errored status for task %s: %v", taskID, uerr)
+		}
+	}()
 
 	// Validate project path. Distinguish a missing git binary from a path that
 	// simply is not a repo so the daemon surfaces an actionable error (#737).

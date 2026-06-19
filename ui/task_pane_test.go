@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -9,6 +10,19 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/assert"
 )
+
+// newGitRepo creates a throwaway git repository and returns its absolute path.
+// validateForm now requires a task's project path to be a real git repo (#924),
+// so the create/edit success-path tests need a genuine repo rather than a
+// literal placeholder like "/tmp/repo".
+func newGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "init", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	return dir
+}
 
 // TestTaskPaneSetTasksEmptyResetsSelectedIdx verifies that calling SetTasks
 // with an empty slice leaves selectedIdx at a valid value (0) rather than -1.
@@ -173,7 +187,7 @@ func TestTaskPaneCreateModeRejectsWhitespaceName(t *testing.T) {
 // uses the configured default_program. Regression test for #492.
 func TestTaskPaneCreateModeSelectorDefaultsToConfigDefault(t *testing.T) {
 	tp := NewTaskPane()
-	tp.EnterCreateMode("/tmp/repo")
+	tp.EnterCreateMode(newGitRepo(t))
 	fillCreateForm(t, tp, "daily")
 
 	// Walk to the Save button without touching the Program selector.
@@ -190,7 +204,7 @@ func TestTaskPaneCreateModeSelectorDefaultsToConfigDefault(t *testing.T) {
 // bare name (no path, no flags). Regression test for #492.
 func TestTaskPaneCreateModeSelectorPicksCanonicalAgent(t *testing.T) {
 	tp := NewTaskPane()
-	tp.EnterCreateMode("/tmp/repo")
+	tp.EnterCreateMode(newGitRepo(t))
 	fillCreateForm(t, tp, "daily")
 
 	// Walk to the Program field and step the selector to "claude"
@@ -217,7 +231,7 @@ func TestTaskPaneEditModePresetFromExistingProgram(t *testing.T) {
 		Name:        "nightly",
 		Prompt:      "do it",
 		CronExpr:    "* * * * *",
-		ProjectPath: "/tmp/repo",
+		ProjectPath: newGitRepo(t),
 		Program:     "aider",
 		Enabled:     true,
 	}})
@@ -252,7 +266,7 @@ func TestTaskPaneEditModeCollapsesLegacyProgramToDefault(t *testing.T) {
 		Name:        "nightly",
 		Prompt:      "do it",
 		CronExpr:    "* * * * *",
-		ProjectPath: "/tmp/repo",
+		ProjectPath: newGitRepo(t),
 		Program:     legacy,
 		Enabled:     true,
 	}})
@@ -342,57 +356,48 @@ func editPathTo(t *testing.T, tp *TaskPane, newPath string) {
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 }
 
-// TestTaskPaneEditModeNormalizesEmptyPath is the regression guard for #641:
-// editing ProjectPath to "" must normalize to the CWD (via filepath.Abs)
-// so the scheduler receives the same absolute path the TUI trigger would
-// produce. Prior to the fix the empty value was stored verbatim, causing
-// scheduled runs to fail with "repo path is required" while TUI triggers
-// silently fell back to CWD.
-func TestTaskPaneEditModeNormalizesEmptyPath(t *testing.T) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	expected, err := filepath.Abs(cwd)
-	if err != nil {
-		t.Fatalf("abs: %v", err)
-	}
-
+// TestTaskPaneEditModeRejectsEmptyPath supersedes the #641 empty→CWD behavior:
+// since #924 the form validates the path on save, so clearing ProjectPath now
+// surfaces an inline error under the Path field instead of silently defaulting
+// to the CWD. The rejected edit must not be written back.
+func TestTaskPaneEditModeRejectsEmptyPath(t *testing.T) {
+	repo := newGitRepo(t)
 	tp := NewTaskPane()
 	tp.SetTasks([]task.Task{{
 		ID:          "abc",
 		Name:        "nightly",
 		Prompt:      "do it",
 		CronExpr:    "0 0 * * *",
-		ProjectPath: "/tmp/repo",
+		ProjectPath: repo,
 		Program:     "claude",
 		Enabled:     true,
 	}})
 
 	editPathTo(t, tp, "")
 
-	assert.False(t, tp.IsEditing(), "save should exit edit mode")
-	assert.Equal(t, "", tp.editError, "empty path must normalize, not surface an error")
+	assert.True(t, tp.IsEditing(), "form must stay open so the user can fix the error")
+	assert.Equal(t, "project path is required", tp.editError)
+	assert.Equal(t, taskFocusPath, tp.editErrorField)
 	tasks := tp.GetTasks()
 	if assert.Len(t, tasks, 1) {
-		assert.Equal(t, expected, tasks[0].ProjectPath,
-			"empty ProjectPath must be normalized to absolute CWD on save, matching the create path")
+		assert.Equal(t, repo, tasks[0].ProjectPath,
+			"rejected edit must not overwrite the stored path")
 	}
 }
 
 // TestTaskPaneEditModeNormalizesRelativePath verifies that editing
 // ProjectPath to a relative value resolves it via filepath.Abs at save
-// time, mirroring the create path (#641). Without this, the scheduler
-// would pass a relative path that resolves against the daemon's CWD
-// rather than the user's CWD.
+// time, mirroring the create path (#641). Since #924 the resolved path must
+// also be a real git repo, so the relative input points into a temp repo.
 func TestTaskPaneEditModeNormalizesRelativePath(t *testing.T) {
+	repo := newGitRepo(t)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	expected, err := filepath.Abs(filepath.Join(cwd, "relative"))
+	rel, err := filepath.Rel(cwd, repo)
 	if err != nil {
-		t.Fatalf("abs: %v", err)
+		t.Fatalf("rel: %v", err)
 	}
 
 	tp := NewTaskPane()
@@ -401,39 +406,44 @@ func TestTaskPaneEditModeNormalizesRelativePath(t *testing.T) {
 		Name:        "nightly",
 		Prompt:      "do it",
 		CronExpr:    "0 0 * * *",
-		ProjectPath: "/tmp/repo",
+		ProjectPath: repo,
 		Program:     "claude",
 		Enabled:     true,
 	}})
 
-	editPathTo(t, tp, "./relative")
+	editPathTo(t, tp, rel)
 
+	assert.False(t, tp.IsEditing(), "a relative path into a git repo must save")
+	assert.Equal(t, "", tp.editError)
 	tasks := tp.GetTasks()
 	if assert.Len(t, tasks, 1) {
-		assert.Equal(t, expected, tasks[0].ProjectPath,
+		assert.Equal(t, repo, tasks[0].ProjectPath,
 			"relative ProjectPath must be resolved via filepath.Abs on save")
 	}
 }
 
 // TestTaskPaneEditModeKeepsAbsolutePath verifies that an already-absolute
-// ProjectPath is preserved verbatim across edit/save (#641).
+// ProjectPath pointing at a git repo is preserved verbatim across edit/save
+// (#641, tightened by #924's git-repo validation).
 func TestTaskPaneEditModeKeepsAbsolutePath(t *testing.T) {
+	oldRepo := newGitRepo(t)
+	newRepo := newGitRepo(t)
 	tp := NewTaskPane()
 	tp.SetTasks([]task.Task{{
 		ID:          "abc",
 		Name:        "nightly",
 		Prompt:      "do it",
 		CronExpr:    "0 0 * * *",
-		ProjectPath: "/tmp/old",
+		ProjectPath: oldRepo,
 		Program:     "claude",
 		Enabled:     true,
 	}})
 
-	editPathTo(t, tp, "/tmp/new-repo")
+	editPathTo(t, tp, newRepo)
 
 	tasks := tp.GetTasks()
 	if assert.Len(t, tasks, 1) {
-		assert.Equal(t, "/tmp/new-repo", tasks[0].ProjectPath,
+		assert.Equal(t, newRepo, tasks[0].ProjectPath,
 			"absolute ProjectPath must be preserved verbatim across edit/save")
 	}
 }
@@ -524,7 +534,7 @@ func TestTaskPaneConsumeDeletedClearsState(t *testing.T) {
 // validation error is unrepresentable.
 func TestTaskPaneCreateModeInactiveTriggerNotSaved(t *testing.T) {
 	tp := NewTaskPane()
-	tp.EnterCreateMode("/tmp/repo")
+	tp.EnterCreateMode(newGitRepo(t))
 	fillCreateForm(t, tp, "both") // name, cron, prompt — cron type selected
 
 	// Flip the trigger type to watch and fill the watch command. The cron
@@ -586,7 +596,7 @@ func TestTaskPaneCreateModeRejectsEmptyWatch(t *testing.T) {
 // line). The pending create must carry the new fields and no cron.
 func TestTaskPaneCreateModeWatchTask(t *testing.T) {
 	tp := NewTaskPane()
-	tp.EnterCreateMode("/tmp/repo")
+	tp.EnterCreateMode(newGitRepo(t))
 
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("gh-issues")})
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector
@@ -607,6 +617,68 @@ func TestTaskPaneCreateModeWatchTask(t *testing.T) {
 	assert.Equal(t, "captain", targetSession)
 }
 
+// TestValidateFormPathValidation pins the #924 path contract: validateForm
+// rejects an empty, non-git, or unresolved-tilde project path for BOTH cron
+// and watch tasks, and accepts a real git repo — storing the expanded absolute
+// form so what is validated is exactly what gets persisted.
+func TestValidateFormPathValidation(t *testing.T) {
+	repo := newGitRepo(t)
+	nonRepo := t.TempDir() // a real directory that is not a git repo
+
+	newForm := func(trigger, path string) *TaskPane {
+		tp := NewTaskPane()
+		tsk := task.Task{Name: "t", ProjectPath: path}
+		if trigger == "watch" {
+			tsk.WatchCmd = "watch.sh"
+		} else {
+			tsk.CronExpr = "0 0 * * *"
+			tsk.Prompt = "do it"
+		}
+		tp.initForm(&tsk, "")
+		return tp
+	}
+
+	for _, trigger := range []string{"cron", "watch"} {
+		t.Run(trigger, func(t *testing.T) {
+			// Empty path rejected with focus on the path field.
+			msg, field := newForm(trigger, "").validateForm()
+			assert.Equal(t, "project path is required", msg)
+			assert.Equal(t, taskFocusPath, field)
+
+			// A tilde path that expands to a non-repo (home dir) is rejected —
+			// proving the value is expanded (not treated literally) and then
+			// validated.
+			msg, field = newForm(trigger, "~/definitely-not-a-repo-924").validateForm()
+			assert.NotEqual(t, "", msg, "a non-git tilde path must be rejected")
+			assert.Equal(t, taskFocusPath, field)
+
+			// A non-git absolute path is rejected.
+			msg, field = newForm(trigger, nonRepo).validateForm()
+			assert.NotEqual(t, "", msg, "a non-git path must be rejected")
+			assert.Equal(t, taskFocusPath, field)
+
+			// A valid git repo is accepted and stored normalized.
+			tp := newForm(trigger, repo)
+			msg, field = tp.validateForm()
+			assert.Equal(t, "", msg, "a valid git repo path must be accepted")
+			assert.Equal(t, -1, field)
+			assert.Equal(t, repo, tp.editPath.Value(),
+				"the validated path must be persisted in its normalized form")
+
+			// A "~" path expanding to a git repo is accepted, proving tilde
+			// expansion flows through validateForm and the stored value is the
+			// expanded absolute path.
+			t.Setenv("HOME", repo)
+			tp = newForm(trigger, "~")
+			msg, field = tp.validateForm()
+			assert.Equal(t, "", msg, "a tilde path resolving to a git repo must be accepted")
+			assert.Equal(t, -1, field)
+			assert.Equal(t, repo, tp.editPath.Value(),
+				"a leading ~ must be expanded to the home dir before storing")
+		})
+	}
+}
+
 // TestTaskPaneEditModeSwitchCronToWatch verifies the edit form can retrigger
 // an existing cron task as a watch task: flipping the trigger selector to
 // watch and filling the command must save WatchCmd and clear CronExpr — the
@@ -619,7 +691,7 @@ func TestTaskPaneEditModeSwitchCronToWatch(t *testing.T) {
 		Name:        "nightly",
 		Prompt:      "do it",
 		CronExpr:    "0 0 * * *",
-		ProjectPath: "/tmp/repo",
+		ProjectPath: newGitRepo(t),
 		Program:     "claude",
 		Enabled:     true,
 	}})
@@ -652,7 +724,7 @@ func TestTaskPaneEditModeSelectorPresetsFromWatchTask(t *testing.T) {
 		ID:          "abc",
 		Name:        "gh-issues",
 		WatchCmd:    "gh-issue-watch.sh",
-		ProjectPath: "/tmp/repo",
+		ProjectPath: newGitRepo(t),
 		Enabled:     true,
 	}})
 	tp.SetFocus(true)

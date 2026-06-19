@@ -312,3 +312,50 @@ func TestRunTask_CronTaskHonorsTargetSession(t *testing.T) {
 		t.Fatalf("expected LastRunStatus=sent with LastRunAt set, got status=%q at=%v", got.LastRunStatus, got.LastRunAt)
 	}
 }
+
+// TestRunTask_PersistsFailureStatusOnBadRepo is the #924 regression: a cron
+// task whose project path is not a git repo used to return early from RunTask
+// before reaching UpdateTaskStatus, so the scheduler only logged the error and
+// the TUI showed a stale LastRunStatus forever. RunTask must now record an
+// "errored" status on every failure that occurs once it owns the task's run.
+func TestRunTask_PersistsFailureStatusOnBadRepo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	// A real directory that is deliberately NOT a git repo. A prior successful
+	// run is simulated by seeding LastRunStatus so we can prove it is replaced,
+	// not merely left untouched.
+	notARepo := t.TempDir()
+	now := time.Now()
+	if err := task.AddTask(task.Task{
+		ID:            "dddd0001",
+		Name:          "broken",
+		Prompt:        "do it",
+		CronExpr:      "0 3 * * *",
+		ProjectPath:   notARepo,
+		Enabled:       true,
+		CreatedAt:     now,
+		LastRunAt:     &now,
+		LastRunStatus: "started",
+	}); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	err := RunTask("dddd0001")
+	if err == nil {
+		t.Fatalf("expected RunTask to fail on a non-git project path")
+	}
+	if !strings.Contains(err.Error(), "not a valid git repository") {
+		t.Fatalf("error should explain the git-repo failure, got: %v", err)
+	}
+
+	got, gerr := task.GetTask("dddd0001")
+	if gerr != nil {
+		t.Fatalf("GetTask: %v", gerr)
+	}
+	if !strings.HasPrefix(got.LastRunStatus, "errored") {
+		t.Fatalf("LastRunStatus must record the failure, got %q (must not stay stale at \"started\")", got.LastRunStatus)
+	}
+	if got.LastRunAt == nil || !got.LastRunAt.After(now) {
+		t.Fatalf("LastRunAt must advance to the failed run, got %v", got.LastRunAt)
+	}
+}
