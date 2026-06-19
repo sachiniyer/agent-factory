@@ -65,12 +65,11 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	prefix := fmt.Sprintf(" %d. ", idx)
 	// Each extra digit grows the prefix by one cell, which shifts the
 	// len(prefix)-derived branch/PR indentation and misaligns adjacent visible
-	// rows at the 9→10 and 99→100 boundaries. Trim one trailing space per extra
-	// digit tier so the prefix width holds steady into the triple digits (#871).
-	if idx >= 10 {
-		prefix = prefix[:len(prefix)-1]
-	}
-	if idx >= 100 {
+	// rows at every power-of-10 boundary (9→10, 99→100, 999→1000, …). Trim one
+	// trailing space per extra digit tier so the prefix width holds steady at
+	// any magnitude — the app generates titles up to 10000, so 4-digit indices
+	// are reachable (#871, #923).
+	for tier := 10; tier <= idx; tier *= 10 {
 		prefix = prefix[:len(prefix)-1]
 	}
 	titleS := selectedTitleStyle

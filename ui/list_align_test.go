@@ -51,7 +51,7 @@ func TestInstanceRendererPrefixAlignment(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
 	base := prLineIndent(t, 1, &spin)
-	for _, idx := range []int{9, 10, 11, 99, 100, 101, 999} {
+	for _, idx := range []int{9, 10, 11, 99, 100, 101, 999, 1000, 1001, 9999, 10000} {
 		got := prLineIndent(t, idx, &spin)
 		require.Equalf(t, base, got,
 			"PR line indent at idx=%d (%d) must match idx=1 (%d); prefix width drifted",
@@ -59,9 +59,11 @@ func TestInstanceRendererPrefixAlignment(t *testing.T) {
 	}
 }
 
-// TestInstanceRendererPrefixBoundaries explicitly pins the two digit-tier
-// boundaries that shift the prefix width: 9→10 (already handled) and 99→100
-// (the #871 fix). Adjacent rows that straddle a boundary must align.
+// TestInstanceRendererPrefixBoundaries explicitly pins the digit-tier
+// boundaries that shift the prefix width: 9→10 (originally handled), 99→100
+// (the #871 fix), and 999→1000 / 9999→10000 (the #923 fix). Adjacent rows that
+// straddle a boundary must align. The app generates titles up to 10000, so the
+// 4-digit boundary is reachable.
 func TestInstanceRendererPrefixBoundaries(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
@@ -69,4 +71,8 @@ func TestInstanceRendererPrefixBoundaries(t *testing.T) {
 		"rows 9 and 10 must share the same indent")
 	require.Equal(t, prLineIndent(t, 99, &spin), prLineIndent(t, 100, &spin),
 		"rows 99 and 100 must share the same indent")
+	require.Equal(t, prLineIndent(t, 999, &spin), prLineIndent(t, 1000, &spin),
+		"rows 999 and 1000 must share the same indent")
+	require.Equal(t, prLineIndent(t, 9999, &spin), prLineIndent(t, 10000, &spin),
+		"rows 9999 and 10000 must share the same indent")
 }
