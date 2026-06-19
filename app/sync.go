@@ -28,8 +28,12 @@ type tickRefreshExternalMessage struct{}
 // prInfoUpdatedMsg is returned by an async PR info fetch.
 // info is nil when the fetch resolved to "no PR for this branch".
 // err is set for transient errors — the handler keeps the cached value.
+// branch is the worktree branch captured at fetch kickoff (the same value
+// passed to prInfoFetcher); the handler drops the update if the re-resolved
+// target instance is no longer on that branch (#921).
 type prInfoUpdatedMsg struct {
 	instance *session.Instance
+	branch   string
 	info     *git.PRInfo
 	err      error
 }
@@ -163,7 +167,7 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 		detachTraceMark("fetchPRInfoCmd-goroutine-entry")
 		info, err := prInfoFetcher(repoPath, branch)
 		detachTrace(fetchStart, "fetchPRInfoCmd-prInfoFetcher-returned")
-		return prInfoUpdatedMsg{instance: inst, info: info, err: err}
+		return prInfoUpdatedMsg{instance: inst, branch: branch, info: info, err: err}
 	}
 }
 
