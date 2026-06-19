@@ -296,20 +296,27 @@ func extractJSON(output string) string {
 func (b *HookBackend) Kill(i *Instance) error {
 	slug := hookNameForInstance(i)
 
-	// Snapshot whether a remote session was ever allocated before clearing
-	// state. If Start never ran successfully there is nothing for delete_cmd
-	// to clean up — invoking it would surface as a confusing failure against
-	// a slug the user-provided script has never heard of. Mirrors
-	// LocalBackend.Kill's tmuxSession/gitWorktree guards.
+	// Snapshot whether a remote session was ever allocated. If Start never ran
+	// successfully there is nothing for delete_cmd to clean up — invoking it
+	// would surface as a confusing failure against a slug the user-provided
+	// script has never heard of. Mirrors LocalBackend.Kill's
+	// tmuxSession/gitWorktree guards.
 	//
 	// Mark the instance as stopped BEFORE any resource cleanup so that the
 	// instance is in a consistent state even if delete_cmd fails. Otherwise
 	// the PTY could be closed while started=true, leaving the session
 	// appearing running but unusable (empty preview, broken attach).
+	//
+	// Crucially, do NOT clear remoteMeta here. The daemon retains and reuses
+	// the same *Instance pointer across RPC calls (a failed kill leaves the
+	// instance in m.instances), so if we cleared remoteMeta before delete_cmd
+	// succeeded, a retried Kill would compute hadRemote == false, skip
+	// delete_cmd, and return nil — silently leaking the remote session (#922).
+	// remoteMeta is only cleared once delete_cmd has actually torn the remote
+	// session down (below), so a retry after a delete_cmd failure runs it again.
 	i.mu.Lock()
 	hadRemote := i.remoteMeta != nil
 	i.started = false
-	i.remoteMeta = nil
 	i.mu.Unlock()
 
 	b.closePTY(i.Title)
@@ -319,10 +326,23 @@ func (b *HookBackend) Kill(i *Instance) error {
 		return nil
 	}
 
+	// runDeleteCmd is slow (network/SSH) so it runs WITHOUT the lock held.
 	out, err := b.runDeleteCmd(slug)
 	if err != nil {
+		// Leave remoteMeta intact so a subsequent Kill on this same Instance
+		// re-runs delete_cmd. The remote session may still be alive.
 		return fmt.Errorf("delete_cmd failed: %s: %w", string(out), err)
 	}
+
+	// delete_cmd succeeded: the remote session is gone, so clear remoteMeta.
+	// Concurrency: two Kills racing on the same Instance both read hadRemote
+	// == true before either clears it, so both may run delete_cmd. delete_cmd
+	// against an already-deleted session is the worst case (a redundant,
+	// typically idempotent call) — never a leak, which is the semantics we
+	// optimize for here. We re-take the lock only to clear the field.
+	i.mu.Lock()
+	i.remoteMeta = nil
+	i.mu.Unlock()
 
 	return nil
 }
