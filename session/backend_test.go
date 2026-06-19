@@ -637,6 +637,82 @@ func TestHookBackendKillUnallocatedSkipsDeleteCmd(t *testing.T) {
 	assert.Nil(t, i.remoteMeta)
 }
 
+// TestHookBackendKillRetryAfterFailure is the regression test for #922: when
+// delete_cmd fails, Kill must NOT clear remoteMeta, so a retried Kill on the
+// same *Instance (the daemon reuses the pointer across RPC calls) still sees a
+// remote allocation and re-runs delete_cmd. Before the fix, the early
+// remoteMeta = nil meant the retry computed hadRemote == false, skipped
+// delete_cmd, returned nil, and leaked the remote session.
+//
+// delete_cmd appends a line to a counter file on every invocation and exits
+// non-zero or zero depending on a "succeed" flag file, so the test can flip it
+// from failing to succeeding between the two Kill calls and count invocations.
+func TestHookBackendKillRetryAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "delete-calls")
+	succeedFlag := filepath.Join(dir, "delete-should-succeed")
+
+	launchCmd := writeScript(t, dir, "launch.sh",
+		`echo '{"name": "'"$2"'", "status": "running"}'`)
+	attachCmd := writeScript(t, dir, "attach.sh",
+		`echo "attached to $1"; sleep 0.1`)
+	// Record the call, then succeed only once the flag file exists; otherwise
+	// fail so the first Kill returns an error.
+	deleteCmd := writeScript(t, dir, "delete.sh",
+		`echo x >> `+counter+`
+if [ -f `+succeedFlag+` ]; then
+  echo '{"deleted": true}'
+  exit 0
+fi
+echo "delete failed" >&2
+exit 1`)
+
+	b := &HookBackend{
+		Hooks: config.RemoteHooks{
+			LaunchCmd: launchCmd,
+			AttachCmd: attachCmd,
+			DeleteCmd: deleteCmd,
+		},
+	}
+	i := &Instance{
+		Title:   "test-session",
+		Path:    t.TempDir(),
+		backend: b,
+	}
+
+	// Start a remote session so remoteMeta is populated.
+	require.NoError(t, b.Start(i, true))
+	require.NotNil(t, i.remoteMeta)
+
+	deleteCalls := func() int {
+		data, err := os.ReadFile(counter)
+		if os.IsNotExist(err) {
+			return 0
+		}
+		require.NoError(t, err)
+		return strings.Count(string(data), "x")
+	}
+
+	// First Kill: delete_cmd fails. Kill must return an error, must have
+	// invoked delete_cmd exactly once, and must NOT have cleared remoteMeta.
+	err := b.Kill(i)
+	require.Error(t, err, "Kill should surface the delete_cmd failure")
+	assert.Equal(t, 1, deleteCalls(), "delete_cmd should have run once on the first Kill")
+	assert.NotNil(t, i.remoteMeta,
+		"remoteMeta must survive a failed delete_cmd so a retry can re-run it (#922)")
+
+	// Flip delete_cmd to succeed, then retry. The retry must re-run delete_cmd
+	// (total 2), return no error, and clear remoteMeta now that the remote
+	// session is actually gone.
+	require.NoError(t, os.WriteFile(succeedFlag, []byte("y"), 0644))
+
+	err = b.Kill(i)
+	require.NoError(t, err, "retried Kill should succeed once delete_cmd succeeds")
+	assert.Equal(t, 2, deleteCalls(),
+		"delete_cmd must run again on retry — skipping it would leak the remote session (#922)")
+	assert.Nil(t, i.remoteMeta, "remoteMeta should be cleared after delete_cmd succeeds")
+}
+
 func TestHookBackendPreview(t *testing.T) {
 	b := makeHooks(t)
 	i := &Instance{
@@ -1065,14 +1141,16 @@ func TestHookBackendKillDeleteCmdFails(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "delete_cmd failed")
 
-	// Even when delete_cmd fails, the instance must be marked stopped and
-	// its remote metadata cleared so that the UI doesn't show it as running
-	// while its PTY is already closed (see issue #266).
+	// Even when delete_cmd fails, the instance must be marked stopped so the
+	// UI doesn't show it as running while its PTY is already closed (#266).
+	// remoteMeta, however, must be PRESERVED on failure: it is the only record
+	// that a remote session was allocated, and a retried Kill needs it to
+	// re-run delete_cmd. Clearing it early leaked the remote session (#922).
 	assert.False(t, i.Started(), "instance should be stopped after failed Kill")
 	i.mu.RLock()
 	meta := i.remoteMeta
 	i.mu.RUnlock()
-	assert.Nil(t, meta, "remoteMeta should be cleared after failed Kill")
+	assert.NotNil(t, meta, "remoteMeta should be preserved after a failed Kill so a retry can re-run delete_cmd (#922)")
 	// The PTY should have been cleaned up too.
 	assert.Nil(t, b.getPTY(i.Title), "PTY should be closed after failed Kill")
 }
