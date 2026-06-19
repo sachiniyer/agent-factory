@@ -112,6 +112,14 @@ func (t *TerminalPane) UpdateContent(instance *session.Instance) error {
 		t.setFallbackState("Select an instance to open a terminal")
 		return nil
 	}
+	// A Deleting instance reports Started()==false during teardown, so without
+	// this it would fall through to the "Instance is not started yet." fallback
+	// below — misleading while the session is going away (#920). Mirror the
+	// preview pane's transient-status handling.
+	if instance.GetStatus() == session.Deleting {
+		t.setFallbackState("Tearing down session...")
+		return nil
+	}
 	if !instance.Started() {
 		t.setFallbackState("Instance is not started yet.")
 		return nil

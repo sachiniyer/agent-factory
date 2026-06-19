@@ -565,6 +565,46 @@ func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
 		"rendered frame must show the Loading fallback, not a blank pane")
 }
 
+// TestPreviewUpdateContentDeletingShowsTeardownFallback is the regression test
+// for issue #920 (regression of #847). The UpdateContent switch handled the
+// Loading transient status but not Deleting, so a Deleting instance — whose
+// backend Kill() drops the PTY before the (possibly slow) delete_cmd, leaving
+// Preview() == ("", nil) and Started() == false — fell through to the generic
+// "Please enter a name for the instance." fallback. That message is misleading
+// during teardown and, for remote sessions, can persist for the whole 10-60s
+// delete. UpdateContent must show the "Tearing down session..." fallback for a
+// Deleting instance instead.
+func TestPreviewUpdateContentDeletingShowsTeardownFallback(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "deleting", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStatus(session.Deleting)
+
+	// Precondition: this instance has empty preview content and is not started,
+	// exactly the state that previously produced the wrong "Please enter a
+	// name" fallback.
+	require.False(t, inst.Started(),
+		"precondition: a Deleting instance reports Started()==false")
+
+	p := NewPreviewPane()
+	p.SetSize(80, 30)
+	require.NoError(t, p.UpdateContent(inst))
+
+	require.True(t, p.previewState.fallback,
+		"Deleting instance must render a fallback")
+	require.Contains(t, p.previewState.text, "Tearing down session...",
+		"Deleting instance must show the teardown fallback")
+	require.NotContains(t, p.previewState.text, "Please enter a name",
+		"Deleting instance must NOT show the not-started fallback (#920)")
+	require.Contains(t, p.String(), "Tearing down session...",
+		"rendered frame must show the teardown fallback")
+}
+
 // TestPreviewFallbackHeightNoDoubleCounting ensures that the fallback welcome
 // screen does not over-subtract lines for borders/margins that
 // TabbedWindow.SetSize has already stripped. Previously it subtracted 7, which

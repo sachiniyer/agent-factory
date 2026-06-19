@@ -212,6 +212,33 @@ func TestTerminalFallbackStates(t *testing.T) {
 		require.Contains(t, tp.fallbackText, "not started", "fallback text should indicate not started")
 		tp.mu.Unlock()
 	})
+
+	// Regression for #920: a Deleting instance reports Started()==false during
+	// teardown. Without an explicit Deleting case it falls through to the
+	// "Instance is not started yet." fallback, which is misleading while the
+	// session is going away. UpdateContent must show "Tearing down session..."
+	// instead — mirroring the preview pane's transient-status handling.
+	t.Run("deleting instance", func(t *testing.T) {
+		instance, err := session.NewInstance(session.InstanceOptions{
+			Title:   "deleting-inst",
+			Path:    t.TempDir(),
+			Program: "bash",
+		})
+		require.NoError(t, err)
+		instance.SetBackend(session.NewFakeBackend())
+		instance.SetStatus(session.Deleting)
+
+		err = tp.UpdateContent(instance)
+		require.NoError(t, err)
+
+		tp.mu.Lock()
+		require.True(t, tp.fallback, "should be in fallback mode for deleting instance")
+		require.Contains(t, tp.fallbackText, "Tearing down session...",
+			"deleting instance must show the teardown fallback")
+		require.NotContains(t, tp.fallbackText, "not started",
+			"deleting instance must NOT show the not-started fallback (#920)")
+		tp.mu.Unlock()
+	})
 }
 
 func TestTerminalSessionCaching(t *testing.T) {

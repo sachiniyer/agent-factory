@@ -126,6 +126,16 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 	case instance.GetStatus() == session.Loading:
 		p.setFallbackState("Setting up workspace...")
 		return nil
+	case instance.GetStatus() == session.Deleting:
+		// Mirror the Loading case for the other transient status (#920,
+		// regression of #847). During teardown a backend's Kill() can drop the
+		// PTY before the (possibly slow, 10-60s for remote) delete_cmd runs, so
+		// Preview() returns ("", nil) and Started()==false — without this the
+		// generic "Please enter a name for the instance." fallback below would
+		// claim throughout the delete. isTransientStatus already pairs
+		// Loading+Deleting; the preview pane was the last place that didn't.
+		p.setFallbackState("Tearing down session...")
+		return nil
 	}
 
 	var content string
@@ -347,6 +357,13 @@ func (p *PreviewPane) ResetToNormalMode(instance *session.Instance) error {
 		// the "Setting up workspace..." fallback instead.
 		if instance.GetStatus() == session.Loading {
 			p.setFallbackState("Setting up workspace...")
+			return nil
+		}
+		// Same blank-pane hazard for the other transient status: exiting scroll
+		// mode on a Deleting instance must keep the teardown fallback rather
+		// than blank the pane on an empty Preview() (#920).
+		if instance.GetStatus() == session.Deleting {
+			p.setFallbackState("Tearing down session...")
 			return nil
 		}
 
