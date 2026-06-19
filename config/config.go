@@ -41,25 +41,46 @@ const probeWaitDelay = time.Second
 // PATH-resolved command, e.g. "claude is /usr/local/bin/claude".
 var bashTypeOutputRegex = regexp.MustCompile(`^\S+ is (/.+)$`)
 
+// ExpandTilde expands a leading "~" or "~/" in path to the current user's home
+// directory: a bare "~" becomes the home dir and "~/foo" becomes <home>/foo.
+// Every other input is returned unchanged — absolute paths, relative paths, the
+// empty string, and "~user" forms (which the Go standard library cannot
+// resolve). If the home directory cannot be determined, path is returned as-is.
+// filepath.Abs does NOT expand "~", so callers resolving user-entered paths
+// must run them through this helper first (#924).
+func ExpandTilde(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return homeDir
+	}
+	return filepath.Join(homeDir, path[2:])
+}
+
 // GetConfigDir returns the path to the application's configuration directory.
 // If AGENT_FACTORY_HOME is set, it is used as the config directory.
 // Otherwise, defaults to ~/.agent-factory.
 func GetConfigDir() (string, error) {
 	if envDir := os.Getenv("AGENT_FACTORY_HOME"); envDir != "" {
-		if strings.HasPrefix(envDir, "~") {
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				return "", fmt.Errorf("failed to expand home directory: %w", err)
-			}
-			if envDir == "~" {
-				return homeDir, nil
-			}
-			if !strings.HasPrefix(envDir, "~/") {
-				return "", fmt.Errorf("AGENT_FACTORY_HOME: invalid tilde format %q (expected ~ or ~/path)", envDir)
-			}
-			envDir = filepath.Join(homeDir, envDir[2:])
+		// "~user" forms are unresolvable; reject them explicitly rather than
+		// treating "~user" as a literal directory name.
+		if strings.HasPrefix(envDir, "~") && envDir != "~" && !strings.HasPrefix(envDir, "~/") {
+			return "", fmt.Errorf("AGENT_FACTORY_HOME: invalid tilde format %q (expected ~ or ~/path)", envDir)
 		}
-		return envDir, nil
+		expanded := ExpandTilde(envDir)
+		// ExpandTilde returns the input unchanged when the home directory
+		// cannot be resolved; for a "~"/"~/" prefix that is a hard failure
+		// here (unlike user-supplied project paths, the config dir must be a
+		// real location), so surface it rather than using a literal "~" path.
+		if strings.HasPrefix(envDir, "~") && expanded == envDir {
+			return "", fmt.Errorf("failed to expand home directory in AGENT_FACTORY_HOME %q", envDir)
+		}
+		return expanded, nil
 	}
 
 	homeDir, err := os.UserHomeDir()

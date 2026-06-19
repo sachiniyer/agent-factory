@@ -631,7 +631,10 @@ func (m *home) handleTaskCreate() tea.Cmd {
 			return m.handleError(fmt.Errorf("invalid cron: %v", err))
 		}
 	}
-	absPath, err := filepath.Abs(projectPath)
+	// Expand a leading ~ before resolving to absolute — filepath.Abs does not
+	// expand "~", so "~/project" would otherwise become "<cwd>/~/project"
+	// (#924). validateForm already normalized the field, so this is idempotent.
+	absPath, err := filepath.Abs(config.ExpandTilde(projectPath))
 	if err != nil {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
