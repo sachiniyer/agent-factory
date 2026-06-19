@@ -71,16 +71,24 @@ func normalizeDOWField(field string) string {
 }
 
 // normalizeDOWStepBase rewrites the Sunday alias 7→0 when it is the single-value
-// base of a step expression ("7/2" → "0/2", "07/2" → "0/2") so the step
-// survives expansion. Parts without a step, or whose step base is a wildcard or
-// a range, are returned unchanged: expandCronField enumerates them and
-// normalizeDOWValues maps any resulting 7 to 0 without losing information.
+// base of a step expression ("7/2" → "0/2", "07/2" → "0/2", "007/2" → "0/2") so
+// the step survives expansion. The base is parsed numerically to match
+// ValidateCronExpr, which accepts arbitrary leading zeros via strconv.Atoi: a
+// string-equality check against only "7"/"07" would let validated forms like
+// "007/2" bypass normalization and schedule Sunday-only (#915). Parts without a
+// step, or whose step base is non-numeric (a wildcard or a range), are returned
+// unchanged: expandCronField enumerates them and normalizeDOWValues maps any
+// resulting 7 to 0 without losing information.
 func normalizeDOWStepBase(part string) string {
 	idx := strings.Index(part, "/")
 	if idx == -1 {
 		return part
 	}
-	if base := part[:idx]; base == "7" || base == "07" {
+	val, err := strconv.Atoi(part[:idx])
+	if err != nil {
+		return part // non-numeric base such as "*" or a range like "1-7"
+	}
+	if val == 7 {
 		return "0" + part[idx:]
 	}
 	return part
