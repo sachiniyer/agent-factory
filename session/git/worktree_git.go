@@ -53,7 +53,13 @@ func (g *GitWorktree) runGitNetworkCommand(path string, args ...string) (string,
 	ctx, cancel := context.WithTimeout(context.Background(), networkGitTimeout)
 	defer cancel()
 	output, err := g.runGitCommandContext(ctx, path, args...)
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	// Only treat a tripped deadline as a timeout when the command actually
+	// failed. runGitCommandContext converts an exec.ErrWaitDelay (git itself
+	// exited successfully, only a transport child held the capture pipe open
+	// past the deadline) into err == nil; without the err != nil guard that
+	// race would surface as a false timeout even though the fetch succeeded
+	// (#914). github.go's FetchPRInfo guards the same way.
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return output, fmt.Errorf("git %s timed out after %s (remote unreachable or stalled): %w",
 			strings.Join(args, " "), networkGitTimeout, ctx.Err())
 	}

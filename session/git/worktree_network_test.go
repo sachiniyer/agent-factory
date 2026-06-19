@@ -126,3 +126,31 @@ func TestRunGitNetworkCommand_NormalFetchSucceeds(t *testing.T) {
 	out, err := (&GitWorktree{}).runGitNetworkCommand(repoRoot, "fetch", "origin")
 	require.NoError(t, err, "a healthy fetch must succeed: %s", out)
 }
+
+// TestRunGitNetworkCommand_NoFalseTimeoutWhenGitSucceeds verifies that a
+// successful git command does not return a timeout error even if the context
+// deadline expires during pipe cleanup. This guards against the race where git
+// exits before the deadline but a transport child holds stdout open, so
+// cmd.Output returns exec.ErrWaitDelay which runGitCommandContext converts to a
+// nil error; runGitNetworkCommand must not then report a false timeout (#914).
+func TestRunGitNetworkCommand_NoFalseTimeoutWhenGitSucceeds(t *testing.T) {
+	sandboxHome(t)
+
+	// Create a repo and a local origin to fetch from (hermetic, no network).
+	origin := createGitRepo(t)
+	runGit(t, origin, "commit", "--allow-empty", "-m", "initial")
+
+	repoRoot := createGitRepo(t)
+	runGit(t, repoRoot, "remote", "add", "origin", origin)
+
+	// A tight timeout: longer than the local fetch needs, but short enough to
+	// keep the test fast.
+	shortenNetworkTimeout(t, 5*time.Second)
+
+	// Run the fetch repeatedly to widen the window for the (rare) ErrWaitDelay
+	// race; with the err != nil guard every successful fetch is error-free.
+	for i := 0; i < 10; i++ {
+		out, err := (&GitWorktree{}).runGitNetworkCommand(repoRoot, "fetch", "origin")
+		require.NoError(t, err, "a successful fetch must not return a timeout error: %s", out)
+	}
+}
