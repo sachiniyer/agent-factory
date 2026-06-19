@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // promptRecorder collects every prompt that reaches a session's backend, across
@@ -309,9 +311,15 @@ func TestIsConcurrentCreateErr(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{"reserved", fmt.Errorf("session with title %q is already reserved", "captain"), true},
-		{"exists", fmt.Errorf("session with title %q already exists", "captain"), true},
+		{"reserved", fmt.Errorf("session with title %q is already reserved: %w", "captain", errConcurrentCreate), true},
+		{"exists", fmt.Errorf("session with title %q already exists: %w", "captain", errConcurrentCreate), true},
 		{"branch collision", fmt.Errorf("session titled %q conflicts with existing session %q: both sanitize to the same git branch %q", "A B", "a-b", "af-a-b"), false},
+		// #916: a tmux orphan is terminal, not a retryable concurrent-create —
+		// even though its message used to contain the "already exists" substring.
+		{"tmux orphan", fmt.Errorf("conflicting tmux session %q is already running; no agent-factory session owns it. Clean it up with: tmux kill-session -t %s", "captain", "af-abc_captain"), false},
+		// A plain "already exists" string with no sentinel must not be treated as
+		// retryable: classification keys off errConcurrentCreate, not the text.
+		{"unwrapped exists", fmt.Errorf("session with title %q already exists", "captain"), false},
 		{"nil", nil, false},
 		{"unrelated", fmt.Errorf("git is not installed"), false},
 	}
@@ -319,5 +327,73 @@ func TestIsConcurrentCreateErr(t *testing.T) {
 		if got := isConcurrentCreateErr(tc.err); got != tc.want {
 			t.Errorf("%s: isConcurrentCreateErr = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestDeliverPrompt_TmuxOrphanReturnsImmediatelyWithError pins the #916 fix: a
+// tmux session with no daemon/disk record is a terminal conflict, not a
+// retryable concurrent-create. DeliverPrompt must fail fast with an actionable
+// message instead of waiting out waitForTargetSession's 30s timeout.
+func TestDeliverPrompt_TmuxOrphanReturnsImmediatelyWithError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires tmux; skipped in -short")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Unique throwaway title so we never collide with a real af session, and
+	// derive the tmux name the SAME way the app does rather than hardcoding a
+	// format string (the app's scheme is not the issue's `af_<hash>_<title>`).
+	const program = "claude"
+	orphanTitle := fmt.Sprintf("orphan-916-%d", time.Now().UnixNano())
+	orphan := tmux.NewTmuxSessionForRepo(orphanTitle, repo.Root, program)
+	tmuxName := orphan.SanitizedName()
+
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", tmuxName).CombinedOutput(); err != nil {
+		t.Skipf("cannot create tmux session (no usable tmux server?): %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-session", "-t", tmuxName).Run()
+	})
+
+	// The orphan must exist in tmux but carry no daemon/disk record.
+	if !tmux.NewTmuxSessionForRepo(orphanTitle, repo.Root, program).DoesSessionExist() {
+		t.Fatal("orphan tmux session should exist after creation")
+	}
+	if exists, _, err := manager.targetSessionState(repo.ID, orphanTitle); err != nil {
+		t.Fatalf("targetSessionState: %v", err)
+	} else if exists {
+		t.Fatal("orphan title should NOT exist in daemon state")
+	}
+
+	start := time.Now()
+	_, err = manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    orphanTitle,
+		RepoPath: repoPath,
+		Program:  program,
+		Prompt:   "test",
+	})
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Errorf("DeliverPrompt took %v; expected immediate return for a tmux orphan, not a wait-out of the %v concurrent-create timeout", elapsed, targetDeliverWait)
+	}
+	if err == nil {
+		t.Fatal("expected a tmux-conflict error, got nil")
+	}
+	if !strings.Contains(err.Error(), "tmux session") {
+		t.Errorf("expected error to mention the tmux conflict, got: %v", err)
 	}
 }

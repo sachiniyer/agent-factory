@@ -990,9 +990,9 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		switch {
 		case existing == title:
 			if kind == titleConflictReserved {
-				return fmt.Errorf("session with title %q is already reserved", title)
+				return fmt.Errorf("session with title %q is already reserved: %w", title, errConcurrentCreate)
 			}
-			return fmt.Errorf("session with title %q already exists", title)
+			return fmt.Errorf("session with title %q already exists: %w", title, errConcurrentCreate)
 		default:
 			return fmt.Errorf("session titled %q conflicts with existing session %q: both sanitize to the same git branch %q", title, existing, m.branchForTitle(title))
 		}
@@ -1012,8 +1012,13 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		}
 		return nil
 	}
-	if tmux.NewTmuxSessionForRepo(title, repoPath, program).DoesSessionExist() {
-		return fmt.Errorf("tmux session for title %q already exists", title)
+	if tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program); tmuxSession.DoesSessionExist() {
+		// A tmux session exists with no daemon reservation, in-memory instance,
+		// or disk record — an orphan left by a crash or an external process.
+		// No creator will ever finish it, so this stays a plain error (not
+		// errConcurrentCreate): DeliverPrompt must fail fast with cleanup
+		// guidance rather than wait out waitForTargetSession's timeout (#916).
+		return fmt.Errorf("conflicting tmux session %q is already running; no agent-factory session owns it. Clean it up with: tmux kill-session -t %s", title, tmuxSession.SanitizedName())
 	}
 	return nil
 }
@@ -1271,17 +1276,23 @@ func (m *Manager) waitForTargetSession(repoID, title string) error {
 	}
 }
 
-// isConcurrentCreateErr reports whether a CreateSession failure means another
-// creator already claimed the exact title — the retryable race in #865. It
-// matches reserveCreate's "already reserved"/"already exists" rejections but
-// deliberately not the branch-collision error ("conflicts with existing
-// session"), which is a genuine configuration problem, not a transient race.
+// errConcurrentCreate marks the retryable race in #865: another creator already
+// claimed the exact title between DeliverPrompt's existence check and its
+// reserveCreate, so the session will materialize shortly and waiting-then-sending
+// is correct. Only the genuine in-flight reservation/record rejections wrap it
+// (see validateTitleAvailableLocked and appendInstanceData). Terminal conflicts
+// — a tmux orphan with no daemon/disk record (#916), a branch collision, or a
+// remote hook-name clash — stay plain so DeliverPrompt surfaces them immediately
+// instead of waiting out waitForTargetSession's timeout.
+var errConcurrentCreate = errors.New("concurrent create in progress")
+
+// isConcurrentCreateErr reports whether a CreateSession failure is the retryable
+// concurrent-create race in #865. Substring matching on "already exists" used to
+// also catch the tmux-orphan rejection (#916), which is terminal and would never
+// resolve by waiting; classification now keys off the errConcurrentCreate
+// sentinel so only genuinely-retryable rejections trigger wait-then-send.
 func isConcurrentCreateErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "already reserved") || strings.Contains(s, "already exists")
+	return errors.Is(err, errConcurrentCreate)
 }
 
 func (m *Manager) findSession(title, repoID string) (*session.Instance, string, *session.InstanceData, error) {
@@ -1423,7 +1434,7 @@ func appendInstanceData(repoID string, data session.InstanceData) error {
 				existing[i] = data
 				return json.MarshalIndent(existing, "", "  ")
 			}
-			return nil, fmt.Errorf("session with title %q already exists", data.Title)
+			return nil, fmt.Errorf("session with title %q already exists: %w", data.Title, errConcurrentCreate)
 		}
 		existing = append(existing, data)
 		return json.MarshalIndent(existing, "", "  ")
