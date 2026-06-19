@@ -101,6 +101,8 @@ var validCronCorpus = []string{
 	"0 0 * * 1,7",    // list containing 7
 	"0 0 * * */7",    // step landing on 0 and 7
 	"0 0 * * 7/2",    // single-with-step starting at 7
+	"0 0 * * 007/2",  // multi-leading-zero step base 7 (#915)
+	"0 0 * * 0007/2", // even more leading zeros on the step base (#915)
 	"0 0 * * 0-7",    // full range incl. both Sunday aliases
 	"0 0 1 * 5-7",    // DOM restricted + DOW range with 7 (OR semantics)
 }
@@ -210,6 +212,36 @@ func TestParseCronDOWStepFromSevenPreservesStep(t *testing.T) {
 	}
 }
 
+// TestParseCronDOWStepWithLeadingZeroBaseMatchesSeven is the regression for
+// #915: a DOW step base of 7 written with arbitrary leading zeros ("007/2",
+// "0007/2") must normalize numerically — exactly as ValidateCronExpr parses it —
+// and schedule the same days as "7/2" (Sun,Tue,Thu,Sat), not collapse to
+// Sunday-only. The pre-fix string-equality check matched only "7"/"07", so the
+// validator accepted these forms while the scheduler silently fired them wrong,
+// breaking the #782 validator↔scheduler agreement gate.
+func TestParseCronDOWStepWithLeadingZeroBaseMatchesSeven(t *testing.T) {
+	reference, err := ParseCron("0 0 * * 7/2")
+	require.NoError(t, err)
+
+	for _, expr := range []string{"0 0 * * 007/2", "0 0 * * 0007/2"} {
+		// The validator must accept it (it parses the base numerically)...
+		require.NoError(t, ValidateCronExpr(expr), "ValidateCronExpr must accept %q", expr)
+		// ...and the scheduler must too.
+		sched, err := ParseCron(expr)
+		require.NoError(t, err, "ParseCron must accept %q", expr)
+
+		// The first 7 firings must match "7/2" exactly (Sun,Tue,Thu,Sat,...),
+		// proving the leading-zero form is not interpreted as Sunday-only.
+		from := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) // a Saturday
+		curRef, curTest := from, from
+		for i := 0; i < 7; i++ {
+			curRef = reference.Next(curRef)
+			curTest = sched.Next(curTest)
+			assert.Equal(t, curRef, curTest, "%q firing %d must match 7/2", expr, i)
+		}
+	}
+}
+
 func TestNormalizeDOWField(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -226,6 +258,8 @@ func TestNormalizeDOWField(t *testing.T) {
 		{"*/7", "0"},             // step that only lands on 0 and 7
 		{"7/2", "0,2,4,6"},       // step base 7 must keep its step (#888): Sun,Tue,Thu,Sat
 		{"07/2", "0,2,4,6"},      // leading-zero step base 7 (#888 + #743)
+		{"007/2", "0,2,4,6"},     // multi-leading-zero step base 7 (#915): numeric parse, not string compare
+		{"0007/2", "0,2,4,6"},    // arbitrary leading zeros on the step base (#915)
 		{"1/2", "1/2"},           // no 7 present; passes through untouched
 		{"3,7/2", "0,2,3,4,6"},   // 7-step base inside a list still keeps its step (#888)
 		{"0-7", "0,1,2,3,4,5,6"}, // full range incl. both Sunday aliases (#770: explicit list, never "*")
