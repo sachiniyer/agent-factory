@@ -171,7 +171,7 @@ func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 }
 
 func (h *HooksPane) String() string {
-	tStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
+	tStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7cb8bb"))
 	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
 	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
