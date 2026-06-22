@@ -66,7 +66,7 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 
 	var tmuxSession *tmux.TmuxSession
 	i.mu.RLock()
-	existingSession := i.tmuxSession
+	existingSession := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if existingSession != nil {
@@ -81,7 +81,7 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	}
 
 	i.mu.Lock()
-	i.tmuxSession = tmuxSession
+	i.setTmuxLocked(tmuxSession)
 	i.mu.Unlock()
 
 	if firstTimeSetup {
@@ -116,8 +116,8 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 				// local attach resources this object opened and leaves the
 				// server session and its worktree intact for a later retry.
 				i.mu.Lock()
-				ts := i.tmuxSession
-				i.tmuxSession = nil
+				ts := i.tmuxLocked()
+				i.setTmuxLocked(nil)
 				i.started = false
 				i.mu.Unlock()
 				if ts != nil {
@@ -171,12 +171,12 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		}
 
 		// Inject Agent Factory instructions into the session.
-		i.tmuxSession.SetProgram(
+		tmuxSession.SetProgram(
 			injectSystemPrompt(i.Program, resolveProgramForInstance(i), i.Title, gw.GetWorktreePath()),
 		)
 
 		// Create new session
-		if err := i.tmuxSession.Start(gw.GetWorktreePath()); err != nil {
+		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {
 			// Cleanup git worktree if tmux session creation fails
 			if cleanupErr := gw.Cleanup(); cleanupErr != nil {
 				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
@@ -195,7 +195,7 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 // caller can always proceed to remove the persisted record. See issue #478.
 func (b *LocalBackend) Kill(i *Instance) error {
 	i.mu.Lock()
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	gw := i.gitWorktree
 	title := i.Title
 	i.started = false
@@ -219,8 +219,8 @@ func (b *LocalBackend) Kill(i *Instance) error {
 	}
 
 	i.mu.Lock()
-	if i.tmuxSession == ts {
-		i.tmuxSession = nil
+	if i.tmuxLocked() == ts {
+		i.setTmuxLocked(nil)
 	}
 	if i.gitWorktree == gw {
 		i.gitWorktree = nil
@@ -239,7 +239,7 @@ func (b *LocalBackend) Kill(i *Instance) error {
 // without tearing down the live session the canonical Instance shares.
 func (b *LocalBackend) CloseAttachOnly(i *Instance) error {
 	i.mu.Lock()
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.started = false
 	i.mu.Unlock()
 
@@ -250,8 +250,8 @@ func (b *LocalBackend) CloseAttachOnly(i *Instance) error {
 	err := ts.CloseAttachOnly()
 
 	i.mu.Lock()
-	if i.tmuxSession == ts {
-		i.tmuxSession = nil
+	if i.tmuxLocked() == ts {
+		i.setTmuxLocked(nil)
 	}
 	i.mu.Unlock()
 	return err
@@ -260,7 +260,7 @@ func (b *LocalBackend) CloseAttachOnly(i *Instance) error {
 func (b *LocalBackend) Preview(i *Instance) (string, error) {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s || ts == nil {
@@ -272,7 +272,7 @@ func (b *LocalBackend) Preview(i *Instance) (string, error) {
 func (b *LocalBackend) PreviewFullHistory(i *Instance) (string, error) {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s || ts == nil {
@@ -284,7 +284,7 @@ func (b *LocalBackend) PreviewFullHistory(i *Instance) (string, error) {
 func (b *LocalBackend) Attach(i *Instance) (chan struct{}, error) {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s || ts == nil {
@@ -296,7 +296,7 @@ func (b *LocalBackend) Attach(i *Instance) (chan struct{}, error) {
 func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool) {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s || ts == nil {
@@ -308,7 +308,7 @@ func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool) {
 func (b *LocalBackend) SendPrompt(i *Instance, prompt string) error {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s {
@@ -332,7 +332,7 @@ func (b *LocalBackend) SendPrompt(i *Instance, prompt string) error {
 func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s {
@@ -347,7 +347,7 @@ func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
 func (b *LocalBackend) SendKeys(i *Instance, keys string) error {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s {
@@ -362,7 +362,7 @@ func (b *LocalBackend) SendKeys(i *Instance, keys string) error {
 func (b *LocalBackend) SetPreviewSize(i *Instance, width, height int) error {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s || ts == nil {
@@ -373,7 +373,7 @@ func (b *LocalBackend) SetPreviewSize(i *Instance, width, height int) error {
 
 func (b *LocalBackend) IsAlive(i *Instance) bool {
 	i.mu.RLock()
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if ts == nil {
@@ -385,7 +385,7 @@ func (b *LocalBackend) IsAlive(i *Instance) bool {
 func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s || ts == nil {
@@ -406,7 +406,7 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 func (b *LocalBackend) TapEnter(i *Instance) {
 	i.mu.RLock()
 	s := i.started
-	ts := i.tmuxSession
+	ts := i.tmuxLocked()
 	autoYes := i.AutoYes
 	i.mu.RUnlock()
 
