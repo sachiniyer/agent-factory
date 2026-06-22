@@ -18,7 +18,9 @@ var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 // returns the number of leading whitespace cells in front of the "PR #" text.
 // The PR line is indented by strings.Repeat(" ", len(prefix)) plus a constant
 // style padding, so any idx-dependent change in the indent reflects a change
-// in the numbered prefix width (#871).
+// in the numbered prefix width (#871). indexWidth is pinned to 5 to model a
+// list large enough to contain idx=10000: every row in that list pads to 5
+// digits, so all indices must share one indent (#923).
 func prLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{
@@ -30,7 +32,8 @@ func prLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
 	inst.SetPRInfo(&git.PRInfo{Number: 42, Title: "do a thing", State: "OPEN"})
 
 	r := &InstanceRenderer{spinner: spin}
-	r.setWidth(60) // wide enough to render the full PR line
+	r.setWidth(60)   // wide enough to render the full PR line
+	r.indexWidth = 5 // model a list whose largest index is 10000 (5 digits)
 
 	out := r.Render(inst, idx, false, false)
 	for _, line := range strings.Split(out, "\n") {
@@ -56,6 +59,52 @@ func TestInstanceRendererPrefixAlignment(t *testing.T) {
 		require.Equalf(t, base, got,
 			"PR line indent at idx=%d (%d) must match idx=1 (%d); prefix width drifted",
 			idx, got, base)
+	}
+}
+
+// renderRow renders an instance at the given 1-based display index and returns
+// the ANSI-stripped rendered output.
+func renderRow(t *testing.T, idx int, spin *spinner.Model) string {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "feature",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+
+	r := &InstanceRenderer{spinner: spin}
+	r.setWidth(60) // wide enough to render the full index prefix and title
+
+	out := r.Render(inst, idx, false, false)
+	return ansiEscape.ReplaceAllString(out, "")
+}
+
+// TestInstanceRendererPrefixContent guards against the regression in #939: the
+// trim-loop introduced by #923 held the prefix width constant by deleting the
+// rightmost char per digit tier, which corrupted content — the dot vanished at
+// idx≥100 and a digit at idx≥1000 ("1000" rendered as "100"). The fixed-width
+// pad must show the full index followed by a dot at every magnitude.
+func TestInstanceRendererPrefixContent(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+
+	for _, tc := range []struct {
+		idx  int
+		want string
+	}{
+		{1, "1. "},
+		{9, "9. "},
+		{99, "99. "},
+		{100, "100. "},
+		{999, "999. "},
+		{1000, "1000. "},
+		{9999, "9999. "},
+		{10000, "10000. "},
+	} {
+		out := renderRow(t, tc.idx, &spin)
+		require.Containsf(t, out, tc.want,
+			"rendered row for idx=%d must contain %q (full number + dot), got:\n%s",
+			tc.idx, tc.want, out)
 	}
 }
 
