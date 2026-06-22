@@ -5,6 +5,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -47,8 +48,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if other == instance {
 				continue
 			}
-			if other.Title == instance.Title {
-				return m, m.handleError(fmt.Errorf("a session titled %q already exists", instance.Title))
+			// Mirror the daemon's authoritative collision rule (git.TitlesCollide:
+			// case-insensitive equality OR same sanitized branch) so the naming
+			// flow rejects what the daemon would reject after submit, instead of
+			// only catching exact duplicates and deferring case/branch variants
+			// to a post-Start error (#936).
+			if git.TitlesCollide(other.Title, instance.Title, m.appConfig.BranchPrefix) {
+				return m, m.handleError(fmt.Errorf("a session titled %q conflicts with existing session %q", instance.Title, other.Title))
 			}
 		}
 		if instance.IsRemote() {

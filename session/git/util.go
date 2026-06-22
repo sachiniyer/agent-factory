@@ -72,6 +72,33 @@ func SanitizeBranchName(s string) string {
 	return s
 }
 
+// BranchForTitle derives the git branch name a session title would receive,
+// applying the same prefix + sanitization the worktree layer uses when it
+// actually creates the branch (see worktree.go's "<prefix><title>" ->
+// SanitizeBranchName). Exported so both the daemon's authoritative create-time
+// validation and the TUI's pre-submit naming check derive branches identically.
+func BranchForTitle(branchPrefix, title string) string {
+	return SanitizeBranchName(branchPrefix + title)
+}
+
+// TitlesCollide reports whether two session titles cannot coexist in the same
+// repo because they would derive the same git branch. Exact (case-insensitive)
+// duplicates always collide (#605); beyond that, titles collide when they
+// sanitize to the same branch name, e.g. "A B" and "a-b" -> "af-a-b" (#741).
+// The EqualFold guard also covers titles made only of unsafe characters, whose
+// sanitized branch is a random fallback that would otherwise never compare
+// equal.
+//
+// This is the single source of truth for title collisions: the daemon calls it
+// at create time and the TUI calls it in its naming pre-check, so the two can
+// never drift apart again (#936).
+func TitlesCollide(a, b, branchPrefix string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	return BranchForTitle(branchPrefix, a) == BranchForTitle(branchPrefix, b)
+}
+
 // randomHex returns a hex string of n random bytes (2n hex characters).
 func randomHex(n int) string {
 	b := make([]byte, n)

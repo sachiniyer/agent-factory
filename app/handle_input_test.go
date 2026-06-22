@@ -224,6 +224,53 @@ func TestHandleStateNewRejectsDuplicateTitle(t *testing.T) {
 	assert.Contains(t, h.errBox.String(), "fix-bug")
 }
 
+// TestHandleStateNewRejectsCaseVariantTitle covers #936: the naming pre-check
+// must reject a case variant of an existing title (e.g. "myapp" when "MyApp"
+// exists), mirroring the daemon's case-insensitive collision rule. Before the
+// fix the TUI compared titles with == and would accept this, only for the
+// daemon to reject it after submit.
+func TestHandleStateNewRejectsCaseVariantTitle(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing string
+		naming   string
+	}{
+		{name: "case variant (#605)", existing: "MyApp", naming: "myapp"},
+		{name: "space vs dash sanitize collision (#741)", existing: "fix bug", naming: "fix-bug"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			h.state = stateNew
+			h.errBox.SetSize(120, 1)
+
+			existing, err := session.NewInstance(session.InstanceOptions{
+				Title:   tc.existing,
+				Path:    t.TempDir(),
+				Program: "claude",
+			})
+			require.NoError(t, err)
+			h.sidebar.AddInstance(existing)
+
+			naming, err := session.NewInstance(session.InstanceOptions{
+				Title:   tc.naming,
+				Path:    t.TempDir(),
+				Program: "claude",
+			})
+			require.NoError(t, err)
+			h.namingInstance = naming
+
+			_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+			assert.Equal(t, stateNew, h.state, "naming flow must stay open on a collision")
+			require.NotNil(t, h.namingInstance, "naming instance must not be submitted")
+			assert.Equal(t, tc.naming, h.namingInstance.Title)
+			assert.Contains(t, h.errBox.String(), tc.existing,
+				"error must name the conflicting existing session")
+		})
+	}
+}
+
 func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	h := newTestHome(t)
 	h.state = stateNew
