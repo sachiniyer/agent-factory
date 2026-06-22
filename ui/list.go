@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -52,6 +53,14 @@ var deletingTitleColor = lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777
 type InstanceRenderer struct {
 	spinner *spinner.Model
 	width   int
+	// indexWidth is the number of digits to left-pad the 1-based row index to,
+	// so every row in a list shares one prefix width and the branch/PR lines
+	// stay aligned across power-of-10 boundaries (9→10, 99→100, …). The caller
+	// sets it to the digit count of the largest index in the list; a small list
+	// keeps the original single-digit prefix and pays no extra width. When it is
+	// 0 (or smaller than idx's own digit count) Render falls back to idx's width
+	// so the index is never truncated (#871, #923, #939).
+	indexWidth int
 }
 
 func (r *InstanceRenderer) setWidth(width int) {
@@ -62,16 +71,22 @@ func (r *InstanceRenderer) setWidth(width int) {
 const branchIcon = "Ꮧ"
 
 func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, hasMultipleRepos bool) string {
-	prefix := fmt.Sprintf(" %d. ", idx)
 	// Each extra digit grows the prefix by one cell, which shifts the
 	// len(prefix)-derived branch/PR indentation and misaligns adjacent visible
-	// rows at every power-of-10 boundary (9→10, 99→100, 999→1000, …). Trim one
-	// trailing space per extra digit tier so the prefix width holds steady at
-	// any magnitude — the app generates titles up to 10000, so 4-digit indices
-	// are reachable (#871, #923).
-	for tier := 10; tier <= idx; tier *= 10 {
-		prefix = prefix[:len(prefix)-1]
+	// rows at every power-of-10 boundary (9→10, 99→100, 999→1000, …). Left-pad
+	// the NUMBER (right-justified) to a width derived from the largest index in
+	// the list so every row's prefix is the same width while the dot and full
+	// index are always preserved. An earlier trim-loop (#923) held width by
+	// deleting the rightmost char per tier, which corrupted content — dropping
+	// the dot at idx≥100 and a digit at idx≥1000 (e.g. 1000 rendered as "100").
+	// Padding keeps the same alignment without eating content, and because the
+	// width tracks the list size a small list still renders the original
+	// single-digit prefix (#871, #923, #939).
+	digits := r.indexWidth
+	if d := len(strconv.Itoa(idx)); d > digits {
+		digits = d
 	}
+	prefix := fmt.Sprintf(" %*d. ", digits, idx)
 	titleS := selectedTitleStyle
 	descS := selectedDescStyle
 	if !selected {

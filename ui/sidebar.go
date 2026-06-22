@@ -7,6 +7,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -772,5 +773,9 @@ func (s *Sidebar) renderInstance(idx int, selected bool) string {
 	if idx < 0 || idx >= len(s.instances) {
 		return ""
 	}
+	// Pad the index to the digit width of the largest 1-based index in the list
+	// so every row's prefix is the same width and the branch/PR lines align,
+	// without widening the common small-list case (#871, #923, #939).
+	s.renderer.indexWidth = len(strconv.Itoa(len(s.instances)))
 	return s.renderer.Render(s.instances[idx], idx+1, selected, len(s.repos) > 1)
 }
