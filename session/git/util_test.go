@@ -156,6 +156,56 @@ func TestSanitizeBranchName_FallbackIsUnique(t *testing.T) {
 	}
 }
 
+func TestBranchForTitle(t *testing.T) {
+	if got := BranchForTitle("af-", "MyApp"); got != "af-myapp" {
+		t.Errorf("BranchForTitle(\"af-\", \"MyApp\") = %q, want %q", got, "af-myapp")
+	}
+	if got := BranchForTitle("af-", "A B"); got != "af-a-b" {
+		t.Errorf("BranchForTitle(\"af-\", \"A B\") = %q, want %q", got, "af-a-b")
+	}
+	if got := BranchForTitle("", "feature"); got != "feature" {
+		t.Errorf("BranchForTitle(\"\", \"feature\") = %q, want %q", got, "feature")
+	}
+}
+
+// TestTitlesCollide pins the shared collision rule used by both the daemon's
+// authoritative create-time check and the TUI's naming pre-check (#936). The
+// rule is: case-insensitive equality OR sanitize-to-the-same-branch.
+func TestTitlesCollide(t *testing.T) {
+	tests := []struct {
+		name   string
+		a      string
+		b      string
+		prefix string
+		want   bool
+	}{
+		{name: "exact match collides", a: "myapp", b: "myapp", prefix: "af-", want: true},
+		{name: "case variant collides (#605)", a: "MyApp", b: "myapp", prefix: "af-", want: true},
+		{name: "uppercase vs mixed case collides", a: "MYAPP", b: "MyApp", prefix: "af-", want: true},
+		{name: "space vs dash sanitize collision (#741)", a: "a b", b: "a-b", prefix: "af-", want: true},
+		{name: "space-and-case sanitize collision", a: "My App", b: "my-app", prefix: "af-", want: true},
+		{name: "distinct names do not collide", a: "alpha", b: "beta", prefix: "af-", want: false},
+		{name: "substring is not a collision", a: "app", b: "myapp", prefix: "af-", want: false},
+		// With an empty prefix, unsafe-only titles sanitize to a random
+		// "session-<hex>" fallback that never compares equal across calls. The
+		// EqualFold guard is what still makes two identical such titles collide,
+		// and keeps two different ones from colliding by accident.
+		{name: "identical unsafe-only titles collide via EqualFold guard", a: "!!!", b: "!!!", prefix: "", want: true},
+		{name: "distinct unsafe-only titles do not collide via random fallback", a: "!!!", b: "???", prefix: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TitlesCollide(tt.a, tt.b, tt.prefix); got != tt.want {
+				t.Errorf("TitlesCollide(%q, %q, %q) = %v, want %v", tt.a, tt.b, tt.prefix, got, tt.want)
+			}
+			// Collision is symmetric.
+			if got := TitlesCollide(tt.b, tt.a, tt.prefix); got != tt.want {
+				t.Errorf("TitlesCollide(%q, %q, %q) = %v, want %v (symmetry)", tt.b, tt.a, tt.prefix, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestEnsureRepo_DistinguishesMissingGit verifies the #737 fix: when git is not
 // on PATH, EnsureRepo reports a "git is not installed" error rather than the
 // misleading "must be run from within a git repository" message.

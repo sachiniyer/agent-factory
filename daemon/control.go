@@ -1074,23 +1074,18 @@ func (m *Manager) findTitleConflictLocked(repoID, title string, diskData []sessi
 }
 
 // titlesCollide reports whether two session titles cannot coexist in the same
-// repo because they would derive the same git branch. Exact (case-insensitive)
-// duplicates always collide; beyond that, the titles collide when they sanitize
-// to the same branch name (e.g. "A B" and "a-b" -> "af-a-b"). The EqualFold
-// guard also covers titles made only of unsafe characters, whose sanitized
-// branch is a random fallback that would otherwise never compare equal.
+// repo because they would derive the same git branch. It delegates to the shared
+// git.TitlesCollide helper so the daemon's authoritative validation and the
+// TUI's naming pre-check stay in lockstep (#936).
 func (m *Manager) titlesCollide(a, b string) bool {
-	if strings.EqualFold(a, b) {
-		return true
-	}
-	return m.branchForTitle(a) == m.branchForTitle(b)
+	return git.TitlesCollide(a, b, m.cfg.BranchPrefix)
 }
 
 // branchForTitle derives the git branch name for a session title using the same
 // prefix and sanitization the git worktree layer applies, so the daemon can
 // detect branch collisions before worktree setup runs.
 func (m *Manager) branchForTitle(title string) string {
-	return git.SanitizeBranchName(m.cfg.BranchPrefix + title)
+	return git.BranchForTitle(m.cfg.BranchPrefix, title)
 }
 
 func (m *Manager) KillSession(req KillSessionRequest) error {
