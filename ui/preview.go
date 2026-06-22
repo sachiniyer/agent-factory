@@ -146,6 +146,14 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 		// Loading+Deleting; the preview pane was the last place that didn't.
 		p.setFallbackState("Tearing down session...")
 		return nil
+	case instance.GetStatus() == session.Dead:
+		// The metadata tick marks a session Dead once its backing tmux/remote
+		// session is gone (#935). The Preview() shell-out below already renders
+		// this fallback on the ErrSessionGone error path, but that races the
+		// async tick; keying off the status too makes the fallback synchronous
+		// with the sidebar's dead-dot so the panes never disagree.
+		p.setFallbackState("Session no longer running.")
+		return nil
 	}
 
 	var content string
@@ -376,6 +384,13 @@ func (p *PreviewPane) ResetToNormalMode(instance *session.Instance) error {
 		// than blank the pane on an empty Preview() (#920).
 		if instance.GetStatus() == session.Deleting {
 			p.setFallbackState("Tearing down session...")
+			return nil
+		}
+		// And for a dead session — exiting scroll mode must keep the
+		// session-gone fallback rather than blank the pane on an empty/erroring
+		// Preview() (#935), mirroring the Loading/Deleting guards above.
+		if instance.GetStatus() == session.Dead {
+			p.setFallbackState("Session no longer running.")
 			return nil
 		}
 
