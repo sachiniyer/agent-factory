@@ -70,17 +70,17 @@ func TestLocalBackendKillBestEffort_TmuxFails(t *testing.T) {
 	}
 	ts := tmux.NewTmuxSessionWithDeps("best-effort-tmux", "bash", nil, cmdExec)
 	inst := &Instance{
-		Title:       "best-effort-tmux",
-		backend:     &LocalBackend{},
-		started:     true,
-		tmuxSession: ts,
+		Title:   "best-effort-tmux",
+		backend: &LocalBackend{},
+		started: true,
+		Tabs:    []*Tab{newAgentTab(ts)},
 	}
 
 	buf := captureWarningLog(t)
 
 	require.NoError(t, inst.Kill(), "tmux cleanup failure must not block deletion")
 	assert.False(t, inst.Started(), "started flag should be cleared")
-	assert.Nil(t, inst.tmuxSession, "tmux pointer should be cleared so a retry is a clean no-op")
+	assert.Nil(t, inst.tmuxLocked(), "tmux pointer should be cleared so a retry is a clean no-op")
 
 	logged := buf.String()
 	assert.Contains(t, logged, "best-effort-tmux", "warning must include instance title for correlation in agent-factory.log")
@@ -192,14 +192,14 @@ func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 		Title:       "both-fail",
 		backend:     &LocalBackend{},
 		started:     true,
-		tmuxSession: ts,
+		Tabs:        []*Tab{newAgentTab(ts)},
 		gitWorktree: gw,
 	}
 
 	buf := captureWarningLog(t)
 
 	require.NoError(t, inst.Kill())
-	assert.Nil(t, inst.tmuxSession)
+	assert.Nil(t, inst.tmuxLocked())
 	assert.Nil(t, inst.gitWorktree)
 
 	logged := buf.String()
@@ -946,11 +946,11 @@ func TestLocalBackendCheckAndHandleTrustPromptDispatch(t *testing.T) {
 			}
 			ts := tmux.NewTmuxSessionWithDeps("trust-dispatch", tc.program, nil, cmdExec)
 			inst := &Instance{
-				Title:       "trust-dispatch",
-				Program:     tc.program,
-				backend:     &LocalBackend{},
-				started:     true,
-				tmuxSession: ts,
+				Title:   "trust-dispatch",
+				Program: tc.program,
+				backend: &LocalBackend{},
+				started: true,
+				Tabs:    []*Tab{newAgentTab(ts)},
 			}
 
 			inst.CheckAndHandleTrustPrompt()
@@ -1889,7 +1889,7 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 		Path:        repoRoot,
 		Program:     "claude",
 		backend:     &LocalBackend{},
-		tmuxSession: ts,
+		Tabs:        []*Tab{newAgentTab(ts)},
 		gitWorktree: gw,
 	}
 
@@ -2060,10 +2060,10 @@ func TestLocalBackendRestorePtyFailureDoesNotKillSession(t *testing.T) {
 	ts := tmux.NewTmuxSessionWithDeps("restore-pty-fail", "claude",
 		errPtyFactory{err: fmt.Errorf("pty allocation failed")}, cmdExec)
 	inst := &Instance{
-		Title:       "restore-pty-fail",
-		backend:     &LocalBackend{},
-		started:     true,
-		tmuxSession: ts,
+		Title:   "restore-pty-fail",
+		backend: &LocalBackend{},
+		started: true,
+		Tabs:    []*Tab{newAgentTab(ts)},
 	}
 
 	// firstTimeSetup=false → restore path. No gitWorktree is attached, so
@@ -2082,7 +2082,7 @@ func TestLocalBackendRestorePtyFailureDoesNotKillSession(t *testing.T) {
 
 	// The local attach was still torn down: the instance no longer holds the
 	// session and is marked not-started so a later retry is clean.
-	assert.Nil(t, inst.tmuxSession, "attach resources should be released on restore failure")
+	assert.Nil(t, inst.tmuxLocked(), "attach resources should be released on restore failure")
 	assert.False(t, inst.Started(), "instance should be marked not-started after a failed restore")
 }
 
@@ -2106,10 +2106,10 @@ func TestLocalBackendKillRunsKillSession(t *testing.T) {
 
 	ts := tmux.NewTmuxSessionWithDeps("genuine-kill", "claude", nil, cmdExec)
 	inst := &Instance{
-		Title:       "genuine-kill",
-		backend:     &LocalBackend{},
-		started:     true,
-		tmuxSession: ts,
+		Title:   "genuine-kill",
+		backend: &LocalBackend{},
+		started: true,
+		Tabs:    []*Tab{newAgentTab(ts)},
 	}
 
 	require.NoError(t, inst.Kill())

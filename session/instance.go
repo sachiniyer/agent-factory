@@ -41,7 +41,8 @@ const (
 type Instance struct {
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):
-	// started, Status, tmuxSession, gitWorktree, prInfo, diffStats.
+	// started, Status, Tabs (and the agent tab's tmux session), gitWorktree,
+	// prInfo, diffStats.
 	mu sync.RWMutex
 
 	// Title is the title of the instance.
@@ -83,10 +84,41 @@ type Instance struct {
 	// The below fields are initialized upon calling Start().
 
 	started bool
-	// tmuxSession is the tmux session for the instance.
-	tmuxSession *tmux.TmuxSession
+	// Tabs is the instance's ordered list of tabs. In PR 1 of the #930
+	// ephemeral-tabs epic this holds exactly one Agent-kind tab (Tabs[0]) that
+	// wraps the instance's single tmux session; every tmux-touching method
+	// routes through it via tmuxLocked/setTmuxLocked. Remote/hook-backed
+	// instances drive their agent session through hook commands and so carry no
+	// tmux-backed tab. Later PRs add shell/process tabs, lifecycle, and per-tab
+	// persistence.
+	Tabs []*Tab
 	// gitWorktree is the git worktree for the instance.
 	gitWorktree *git.GitWorktree
+}
+
+// tmuxLocked returns the agent tab's tmux session, or nil when the instance has
+// no agent tab yet (not started) or is remote. Callers must hold i.mu (read or
+// write).
+func (i *Instance) tmuxLocked() *tmux.TmuxSession {
+	if len(i.Tabs) == 0 {
+		return nil
+	}
+	return i.Tabs[0].tmux
+}
+
+// setTmuxLocked stores ts as the agent tab's tmux session, materializing the
+// single Agent tab on first assignment so the agent session is always Tabs[0].
+// Passing nil clears the session but leaves the tab in place (and is a no-op
+// before the agent tab exists). Callers must hold i.mu for writing.
+func (i *Instance) setTmuxLocked(ts *tmux.TmuxSession) {
+	if len(i.Tabs) == 0 {
+		if ts == nil {
+			return
+		}
+		i.Tabs = []*Tab{newAgentTab(ts)}
+		return
+	}
+	i.Tabs[0].tmux = ts
 }
 
 // ToInstanceData converts an Instance to its serializable form
@@ -114,9 +146,11 @@ func (i *Instance) ToInstanceData() InstanceData {
 		data.RemoteMeta = i.remoteMeta
 	}
 
-	// Persist the tmux session name so we can restore it exactly
-	if i.tmuxSession != nil {
-		data.TmuxName = i.tmuxSession.SanitizedName()
+	// Persist the tmux session name so we can restore it exactly. The agent
+	// tab's session is the instance's single persisted session in PR 1 — the
+	// on-disk format is unchanged (no Tabs field yet).
+	if ts := i.tmuxLocked(); ts != nil {
+		data.TmuxName = ts.SanitizedName()
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -199,10 +233,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// Pre-set the tmux session with the correct name for backward compat.
 		// If TmuxName was persisted, use it exactly; otherwise fall back to
 		// the legacy naming scheme (no repo hash) so old sessions still restore.
+		// The reconstructed session becomes the instance's single Agent tab.
 		if data.TmuxName != "" {
-			instance.tmuxSession = tmux.NewTmuxSessionFromSanitizedName(data.TmuxName, data.Program)
+			instance.setTmuxLocked(tmux.NewTmuxSessionFromSanitizedName(data.TmuxName, data.Program))
 		} else {
-			instance.tmuxSession = tmux.NewTmuxSession(data.Title, data.Program)
+			instance.setTmuxLocked(tmux.NewTmuxSession(data.Title, data.Program))
 		}
 	}
 
@@ -393,7 +428,7 @@ func (i *Instance) StartWithExistingWorktree(worktreePath, branchName string) er
 	tmuxSession := tmux.NewTmuxSessionForRepo(i.Title, i.Path, program)
 
 	i.mu.Lock()
-	i.tmuxSession = tmuxSession
+	i.setTmuxLocked(tmuxSession)
 	i.mu.Unlock()
 
 	// Start is I/O; do not hold the lock.
@@ -572,9 +607,10 @@ func (i *Instance) PreviewFullHistory() (string, error) {
 	return i.backend.PreviewFullHistory(i)
 }
 
-// SetTmuxSession sets the tmux session for testing purposes
+// SetTmuxSession sets the agent tab's tmux session for testing purposes,
+// materializing the single Agent tab if needed.
 func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
-	i.tmuxSession = session
+	i.setTmuxLocked(session)
 }
 
 // SetStartedForTest toggles the started flag for testing purposes. Prefer
