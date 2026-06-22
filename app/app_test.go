@@ -117,7 +117,7 @@ func TestConfirmationModalStateTransitions(t *testing.T) {
 func TestConfirmationModalKeyHandling(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sidebar := ui.NewSidebar(&spin, false)
-	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewTerminalPane())
+	tw := ui.NewTabbedWindow(ui.NewTabPane())
 	cp := ui.NewContentPane(tw)
 
 	// Create enough of home struct to test handleKeyPress in confirmation state
@@ -240,7 +240,7 @@ func TestConfirmationMessageFormatting(t *testing.T) {
 func TestConfirmationFlowSimulation(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sidebar := ui.NewSidebar(&spin, false)
-	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewTerminalPane())
+	tw := ui.NewTabbedWindow(ui.NewTabPane())
 	cp := ui.NewContentPane(tw)
 
 	// Add test instance
@@ -452,7 +452,7 @@ func TestMultipleConfirmationsDontInterfere(t *testing.T) {
 func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sidebar := ui.NewSidebar(&spin, false)
-	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewTerminalPane())
+	tw := ui.NewTabbedWindow(ui.NewTabPane())
 	cp := ui.NewContentPane(tw)
 
 	h := &home{

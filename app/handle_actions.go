@@ -195,10 +195,11 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 // is unchanged: it still goes through daemon.KillSession, which also keeps
 // the title blocked against reuse until the teardown completes.
 func (m *home) killInstanceCmd(title string) tea.Cmd {
-	tw := m.contentPane.TabbedWindow()
 	repoID := m.repoID
 	return func() tea.Msg {
-		tw.CleanupTerminalForInstance(title)
+		// The shell tab's tmux session is owned by the instance and torn down by
+		// LocalBackend.Kill (looping all tabs) inside the daemon teardown — there
+		// is no longer a UI-side terminal cache to clean up (#930 PR 2).
 		if err := killSessionThroughDaemon(title, repoID); err != nil {
 			log.ErrorLog.Printf("could not kill instance: %v", err)
 			return instanceKilledMsg{title: title, err: err}

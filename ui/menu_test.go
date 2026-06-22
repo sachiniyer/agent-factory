@@ -14,7 +14,7 @@ func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 	m := NewMenu()
 	// Use a non-loading instance so addInstanceOptions renders the full menu.
 	m.SetInstance(&session.Instance{Status: session.Ready})
-	m.SetActiveTab(TerminalTab)
+	m.SetActiveTab(1)
 
 	var gotShiftUp, gotShiftDown int
 	for _, k := range m.options {
@@ -41,7 +41,7 @@ func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 func TestMenuPreviewTabShowsBothScrollKeys(t *testing.T) {
 	m := NewMenu()
 	m.SetInstance(&session.Instance{Status: session.Ready})
-	m.SetActiveTab(PreviewTab)
+	m.SetActiveTab(0)
 
 	var gotShiftUp, gotShiftDown int
 	for _, k := range m.options {

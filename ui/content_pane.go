@@ -144,20 +144,12 @@ func (c *ContentPane) ScrollDown() {
 	}
 }
 
-// UpdatePreview delegates to TabbedWindow.
-func (c *ContentPane) UpdatePreview(instance *session.Instance) error {
+// UpdateContent delegates to TabbedWindow, refreshing the active tab's pane.
+func (c *ContentPane) UpdateContent(instance *session.Instance) error {
 	if c.mode != ContentModeInstance {
 		return nil
 	}
-	return c.tabbedWindow.UpdatePreview(instance)
-}
-
-// UpdateTerminal delegates to TabbedWindow.
-func (c *ContentPane) UpdateTerminal(instance *session.Instance) error {
-	if c.mode != ContentModeInstance {
-		return nil
-	}
-	return c.tabbedWindow.UpdateTerminal(instance)
+	return c.tabbedWindow.UpdateContent(instance)
 }
 
 // String renders the content pane.

@@ -186,7 +186,63 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		}
 	}
 
+	// Promote the per-instance terminal into a real Shell tab (#930 PR 2). This
+	// is best-effort: a shell-tab failure leaves the instance fully usable with
+	// just the agent tab (the terminal tab renders a fallback), so it must not
+	// fail the whole start. Runs after the agent session is up so the shell tab
+	// can be a sibling of it (sharing tmux deps).
+	b.setupShellTab(i)
+
 	return nil
+}
+
+// setupShellTab ensures the instance has a live Shell tab. On a fresh start (or
+// a legacy restore that predates persisted tabs) it creates a $SHELL session as
+// a sibling of the agent session; on restore of a persisted shell tab it
+// reconnects to the exact tmux session by name so the terminal survives an
+// af/daemon restart.
+func (b *LocalBackend) setupShellTab(i *Instance) {
+	i.mu.RLock()
+	agentTmux := i.tmuxLocked()
+	shell := i.shellTabLocked()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+
+	if agentTmux == nil || gw == nil {
+		return
+	}
+	worktreePath := gw.GetWorktreePath()
+	if worktreePath == "" {
+		return
+	}
+
+	// Restore a persisted shell session: reconnect, re-spawning in the worktree
+	// only if the tmux server died across a reboot (Restore handles both).
+	if shell != nil && shell.tmux != nil {
+		if err := shell.tmux.Restore(worktreePath); err != nil {
+			log.WarningLog.Printf("restore shell tab for %q failed: %v", i.Title, err)
+		}
+		return
+	}
+
+	// Create a fresh shell session as a sibling of the agent session so it
+	// inherits the agent's PTY factory / executor — real in production, mock in
+	// tests — keeping the create path hermetic. The name extends the agent
+	// session's name deterministically so it is collision-free and restorable
+	// by exact name.
+	shellTmux := agentTmux.NewSiblingSession(agentTmux.SanitizedName()+shellTmuxSuffix, defaultShell())
+	if err := shellTmux.Start(worktreePath); err != nil {
+		log.WarningLog.Printf("start shell tab for %q failed: %v", i.Title, err)
+		return
+	}
+
+	i.mu.Lock()
+	if existing := i.shellTabLocked(); existing != nil {
+		existing.tmux = shellTmux
+	} else {
+		i.Tabs = append(i.Tabs, newShellTab(shellTmux))
+	}
+	i.mu.Unlock()
 }
 
 // Kill is best-effort: each cleanup step runs independently and a failure in
@@ -195,20 +251,33 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 // caller can always proceed to remove the persisted record. See issue #478.
 func (b *LocalBackend) Kill(i *Instance) error {
 	i.mu.Lock()
-	ts := i.tmuxLocked()
+	// Snapshot every tab's tmux session under the lock. PR 2 of #930 gives an
+	// instance N tabs (agent + shell today), so Kill tears down each tab's
+	// session, not just the agent's.
+	type tabSession struct {
+		name string
+		ts   *tmux.TmuxSession
+	}
+	sessions := make([]tabSession, 0, len(i.Tabs))
+	for _, tab := range i.Tabs {
+		if tab.tmux != nil {
+			sessions = append(sessions, tabSession{name: tab.Name, ts: tab.tmux})
+		}
+	}
 	gw := i.gitWorktree
 	title := i.Title
 	i.started = false
 	i.mu.Unlock()
 
-	if ts != nil {
-		// Tear down tmux BEFORE the worktree cleanup below, and wait for the
-		// pane's agent process to actually exit: kill-session only SIGHUPs
-		// it, and an agent still flushing state mid-shutdown races git's
-		// recursive delete of the worktree, leaking a half-deleted directory
-		// ("Directory not empty", #802).
-		if err := ts.CloseAndWaitForPaneExit(); err != nil {
-			log.WarningLog.Printf("kill %q: tmux cleanup failed: %v", title, err)
+	// Tear down every tab's tmux session BEFORE the worktree cleanup below, and
+	// wait for each pane's process to actually exit: kill-session only SIGHUPs
+	// it, and a process still flushing state mid-shutdown races git's recursive
+	// delete of the worktree, leaking a half-deleted directory ("Directory not
+	// empty", #802). The ordering — all panes exit, then remove the worktree
+	// once — is preserved across all tabs.
+	for _, s := range sessions {
+		if err := s.ts.CloseAndWaitForPaneExit(); err != nil {
+			log.WarningLog.Printf("kill %q: tmux cleanup for tab %q failed: %v", title, s.name, err)
 		}
 	}
 
@@ -219,8 +288,8 @@ func (b *LocalBackend) Kill(i *Instance) error {
 	}
 
 	i.mu.Lock()
-	if i.tmuxLocked() == ts {
-		i.setTmuxLocked(nil)
+	for _, tab := range i.Tabs {
+		tab.tmux = nil
 	}
 	if i.gitWorktree == gw {
 		i.gitWorktree = nil

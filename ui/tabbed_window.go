@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -32,39 +33,76 @@ var (
 			Border(lipgloss.NormalBorder(), false, true, true, true)
 )
 
-const (
-	PreviewTab int = iota
-	TerminalTab
-)
+// defaultTabLabels are the labels shown before an instance is selected (or for
+// remote instances, which carry no tmux-backed tabs). They preserve the exact
+// pre-#930 two-tab bar so the UX is identical: slot 0 is the agent ("Preview")
+// tab, slot 1 the terminal tab.
+var defaultTabLabels = []string{"Preview", "Terminal"}
 
 // TabbedWindow has tabs at the top of a pane which can be selected. The tabs
-// take up one rune of height.
+// take up one rune of height. The tab list is sourced from the selected
+// instance's Tabs (#930 PR 2): every tab renders through one shared TabPane by
+// capturing the selected tab's session.
 type TabbedWindow struct {
-	tabs []string
-
 	// activeTab is read from the background refreshPanesCmd goroutine
-	// (UpdatePreview/UpdateTerminal) while the bubbletea event loop writes it
-	// via Toggle/ToggleBack, so it is an atomic to avoid a data race (#684).
-	// The tab indices fit in an int32 (there are two tabs).
+	// (UpdateContent) while the bubbletea event loop writes it via
+	// Toggle/ToggleBack, so it is an atomic to avoid a data race (#684).
 	activeTab atomic.Int32
 	height    int
 	width     int
 
-	preview  *PreviewPane
-	terminal *TerminalPane
+	tab      *TabPane
 	instance *session.Instance
 }
 
-func NewTabbedWindow(preview *PreviewPane, terminal *TerminalPane) *TabbedWindow {
+func NewTabbedWindow(tab *TabPane) *TabbedWindow {
 	return &TabbedWindow{
-		tabs:     []string{"Preview", "Terminal"},
-		preview:  preview,
-		terminal: terminal,
+		tab: tab,
 	}
 }
 
 func (w *TabbedWindow) SetInstance(instance *session.Instance) {
 	w.instance = instance
+}
+
+// tabLabels returns the labels for the current instance's tabs, always at least
+// the two default slots so the bar is identical to the pre-#930 UX. Agent tabs
+// render as "Preview", shell tabs as "Terminal"; any future Process tab renders
+// under its own name.
+func (w *TabbedWindow) tabLabels() []string {
+	labels := append([]string(nil), defaultTabLabels...)
+	if w.instance == nil {
+		return labels
+	}
+	for idx, tab := range w.instance.GetTabs() {
+		label := labelForTab(tab)
+		if idx < len(labels) {
+			labels[idx] = label
+		} else {
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
+
+func labelForTab(tab *session.Tab) string {
+	switch tab.Kind {
+	case session.TabKindAgent:
+		return "Preview"
+	case session.TabKindShell:
+		return "Terminal"
+	default:
+		if tab.Name != "" {
+			return tab.Name
+		}
+		return "Tab"
+	}
+}
+
+// isAgentSlot reports whether the active tab index is the agent tab (index 0).
+// Index 0 is always the agent tab; every other slot is a shell/terminal tab.
+func (w *TabbedWindow) isAgentSlot() bool {
+	return int(w.activeTab.Load()) == 0
 }
 
 // AdjustPreviewWidth adjusts the width of the preview pane to be 90% of the provided width.
@@ -84,9 +122,8 @@ func (w *TabbedWindow) SetSize(width, height int) {
 	contentHeight := height - tabHeight - windowStyle.GetVerticalFrameSize() - 2
 	contentWidth := w.width - windowStyle.GetHorizontalFrameSize()
 
-	// Clamp to zero so tiny terminals don't produce negative dimensions,
-	// which would otherwise overflow when later cast to uint16 (e.g. by
-	// pty.Setsize for the tmux preview/terminal panes).
+	// Clamp to zero so tiny terminals don't produce negative dimensions, which
+	// would otherwise overflow when later cast to uint16 (e.g. by pty.Setsize).
 	if contentHeight < 0 {
 		contentHeight = 0
 	}
@@ -94,121 +131,91 @@ func (w *TabbedWindow) SetSize(width, height int) {
 		contentWidth = 0
 	}
 
-	w.preview.SetSize(contentWidth, contentHeight)
-	w.terminal.SetSize(contentWidth, contentHeight)
+	w.tab.SetSize(contentWidth, contentHeight)
 }
 
 func (w *TabbedWindow) GetPreviewSize() (width, height int) {
-	return w.preview.width, w.preview.height
+	return w.tab.width, w.tab.height
 }
 
 func (w *TabbedWindow) Toggle() {
-	n := int32(len(w.tabs))
+	n := int32(len(w.tabLabels()))
+	if n <= 0 {
+		return
+	}
 	w.activeTab.Store((w.activeTab.Load() + 1) % n)
 }
 
 func (w *TabbedWindow) ToggleBack() {
-	n := int32(len(w.tabs))
+	n := int32(len(w.tabLabels()))
+	if n <= 0 {
+		return
+	}
 	w.activeTab.Store((w.activeTab.Load() - 1 + n) % n)
 }
 
-// UpdatePreview updates the content of the preview pane. instance may be nil.
-func (w *TabbedWindow) UpdatePreview(instance *session.Instance) error {
-	if int(w.activeTab.Load()) != PreviewTab {
-		return nil
-	}
-	return w.preview.UpdateContent(instance)
+// UpdateContent updates the content of the active tab's pane. instance may be
+// nil. Replaces the former UpdatePreview/UpdateTerminal split now that one pane
+// renders whichever tab is selected.
+func (w *TabbedWindow) UpdateContent(instance *session.Instance) error {
+	return w.tab.UpdateContent(instance, w.isAgentSlot())
 }
 
-// UpdateTerminal updates the terminal pane content. Only updates when terminal tab is active.
-func (w *TabbedWindow) UpdateTerminal(instance *session.Instance) error {
-	if int(w.activeTab.Load()) != TerminalTab {
-		return nil
-	}
-	return w.terminal.UpdateContent(instance)
+// ResetToNormalMode resets the active tab's pane to normal (non-scroll) mode.
+func (w *TabbedWindow) ResetToNormalMode(instance *session.Instance) error {
+	return w.tab.ResetToNormalMode(instance, w.isAgentSlot())
 }
 
-// ResetPreviewToNormalMode resets the preview pane to normal mode
-func (w *TabbedWindow) ResetPreviewToNormalMode(instance *session.Instance) error {
-	return w.preview.ResetToNormalMode(instance)
-}
-
-// Add these new methods for handling scroll events
 func (w *TabbedWindow) ScrollUp() {
-	switch int(w.activeTab.Load()) {
-	case PreviewTab:
-		err := w.preview.ScrollUp(w.instance)
-		if err != nil {
-			log.InfoLog.Printf("tabbed window failed to scroll up: %v", err)
-		}
-	case TerminalTab:
-		if err := w.terminal.ScrollUp(w.instance); err != nil {
-			log.InfoLog.Printf("tabbed window failed to scroll terminal up: %v", err)
-		}
+	if err := w.tab.ScrollUp(w.instance, w.isAgentSlot()); err != nil {
+		log.InfoLog.Printf("tabbed window failed to scroll up: %v", err)
 	}
 }
 
 func (w *TabbedWindow) ScrollDown() {
-	switch int(w.activeTab.Load()) {
-	case PreviewTab:
-		err := w.preview.ScrollDown(w.instance)
-		if err != nil {
-			log.InfoLog.Printf("tabbed window failed to scroll down: %v", err)
-		}
-	case TerminalTab:
-		if err := w.terminal.ScrollDown(w.instance); err != nil {
-			log.InfoLog.Printf("tabbed window failed to scroll terminal down: %v", err)
-		}
+	if err := w.tab.ScrollDown(w.instance, w.isAgentSlot()); err != nil {
+		log.InfoLog.Printf("tabbed window failed to scroll down: %v", err)
 	}
 }
 
-// IsInPreviewTab returns true if the preview tab is currently active
+// IsInPreviewTab returns true if the agent (Preview) tab is currently active.
 func (w *TabbedWindow) IsInPreviewTab() bool {
-	return int(w.activeTab.Load()) == PreviewTab
+	return w.isAgentSlot()
 }
 
-// IsInTerminalTab returns true if the terminal tab is currently active
+// IsInTerminalTab returns true if a non-agent (terminal) tab is currently
+// active.
 func (w *TabbedWindow) IsInTerminalTab() bool {
-	return int(w.activeTab.Load()) == TerminalTab
+	return !w.isAgentSlot()
 }
 
-// GetActiveTab returns the currently active tab index
+// GetActiveTab returns the currently active tab index.
 func (w *TabbedWindow) GetActiveTab() int {
 	return int(w.activeTab.Load())
 }
 
-// AttachTerminalForInstance attaches to the terminal session of the given
-// instance by binding the terminal pane to it first. Deferred attach flows
-// must use this rather than re-reading the live selection: the terminal's
-// bound instance (currentTitle) can be rebound by a background refresh while
-// the help overlay is open (#716).
+// AttachTerminalForInstance attaches to the terminal (shell) tab of the given
+// instance. Capturing the instance — rather than re-reading the live selection
+// — keeps deferred attach flows safe from selection drift while the help
+// overlay is open (#716): the shell session belongs to this instance, so there
+// is no title-keyed cache to drift. Remote instances route to the terminal_cmd
+// hook (#843).
 func (w *TabbedWindow) AttachTerminalForInstance(instance *session.Instance) (chan struct{}, error) {
-	return w.terminal.AttachForInstance(instance)
+	if instance == nil {
+		return nil, fmt.Errorf("no terminal session to attach to")
+	}
+	if instance.IsRemote() {
+		if !instance.SupportsRemoteTerminal() {
+			return nil, fmt.Errorf("remote terminal is not configured: add a terminal_cmd to remote_hooks to enable the Terminal tab for remote sessions")
+		}
+		return instance.AttachRemoteTerminal()
+	}
+	return instance.AttachShellTab()
 }
 
-// CleanupTerminal closes the terminal session
-func (w *TabbedWindow) CleanupTerminal() {
-	w.terminal.Close()
-}
-
-// CleanupTerminalForInstance closes the cached terminal session for the given instance title.
-func (w *TabbedWindow) CleanupTerminalForInstance(title string) {
-	w.terminal.CloseForInstance(title)
-}
-
-// IsPreviewInScrollMode returns true if the preview pane is in scroll mode
-func (w *TabbedWindow) IsPreviewInScrollMode() bool {
-	return w.preview.IsScrolling()
-}
-
-// IsTerminalInScrollMode returns true if the terminal pane is in scroll mode
-func (w *TabbedWindow) IsTerminalInScrollMode() bool {
-	return w.terminal.IsScrolling()
-}
-
-// ResetTerminalToNormalMode exits scroll mode on the terminal pane
-func (w *TabbedWindow) ResetTerminalToNormalMode() {
-	w.terminal.ResetToNormalMode()
+// IsInScrollMode returns true if the active tab's pane is in scroll mode.
+func (w *TabbedWindow) IsInScrollMode() bool {
+	return w.tab.IsScrolling()
 }
 
 func (w *TabbedWindow) String() string {
@@ -216,22 +223,27 @@ func (w *TabbedWindow) String() string {
 		return ""
 	}
 
+	labels := w.tabLabels()
+	if len(labels) == 0 {
+		labels = defaultTabLabels
+	}
+
 	var renderedTabs []string
 
 	activeTab := int(w.activeTab.Load())
 	totalTabWidth := w.width
-	tabWidth := totalTabWidth / len(w.tabs)
-	lastTabWidth := totalTabWidth - tabWidth*(len(w.tabs)-1)
-	tabHeight := activeTabStyle.GetVerticalFrameSize() + 1 // get padding border margin size + 1 for character height
+	tabWidth := totalTabWidth / len(labels)
+	lastTabWidth := totalTabWidth - tabWidth*(len(labels)-1)
+	tabHeight := activeTabStyle.GetVerticalFrameSize() + 1 // padding/border/margin + 1 for char height
 
-	for i, t := range w.tabs {
+	for i, t := range labels {
 		width := tabWidth
-		if i == len(w.tabs)-1 {
+		if i == len(labels)-1 {
 			width = lastTabWidth
 		}
 
 		var style lipgloss.Style
-		isFirst, isLast, isActive := i == 0, i == len(w.tabs)-1, i == activeTab
+		isFirst, isLast, isActive := i == 0, i == len(labels)-1, i == activeTab
 		if isActive {
 			style = activeTabStyle
 		} else {
@@ -253,13 +265,7 @@ func (w *TabbedWindow) String() string {
 	}
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, renderedTabs...)
-	var content string
-	switch activeTab {
-	case PreviewTab:
-		content = w.preview.String()
-	case TerminalTab:
-		content = w.terminal.String()
-	}
+	content := w.tab.String()
 	contentWidth := w.width - windowStyle.GetHorizontalFrameSize()
 	if contentWidth < 0 {
 		contentWidth = 0

@@ -50,7 +50,7 @@ func TestPreviewFallbackWrappedArtMatchesAllocatedHeight(t *testing.T) {
 		{48, 60},
 		{80, 30}, // wide enough that the art does not wrap
 	} {
-		p := NewPreviewPane()
+		p := NewTabPane()
 		p.SetSize(tc.w, tc.h)
 		p.setFallbackState("msg")
 
@@ -68,7 +68,7 @@ func TestPreviewFallbackCentersWrappedLineCount(t *testing.T) {
 		{48, 60}, // art wraps at this width
 		{80, 30}, // art does not wrap
 	} {
-		p := NewPreviewPane()
+		p := NewTabPane()
 		p.SetSize(tc.w, tc.h)
 		p.setFallbackState("msg")
 		out := p.String()
@@ -91,16 +91,15 @@ func TestPreviewFallbackCentersWrappedLineCount(t *testing.T) {
 // the same allocation. PreviewPane had the identical bug, fixed for #616.
 func TestTerminalFallbackMatchesNormalModeHeight(t *testing.T) {
 	for _, h := range []int{20, 25, 30, 50} {
-		fb := NewTerminalPane()
+		fb := NewTabPane()
 		fb.SetSize(80, h)
 		fb.setFallbackState("Select an instance to open a terminal")
 		require.Equal(t, h, renderedLineCount(fb.String()),
 			"height=%d: fallback must render exactly the allocated height", h)
 
-		normal := NewTerminalPane()
+		normal := NewTabPane()
 		normal.SetSize(80, h)
-		normal.fallback = false
-		normal.content = "line1\nline2"
+		normal.content = tabContentState{fallback: false, text: "line1\nline2"}
 		require.Equal(t, h, renderedLineCount(normal.String()),
 			"height=%d: normal mode must render exactly the allocated height", h)
 	}
@@ -115,7 +114,7 @@ func TestTerminalFallbackWrappedArtMatchesAllocatedHeight(t *testing.T) {
 		{48, 30},
 		{80, 30},
 	} {
-		tp := NewTerminalPane()
+		tp := NewTabPane()
 		tp.SetSize(tc.w, tc.h)
 		tp.setFallbackState("msg")
 		require.Equal(t, tc.h, renderedLineCount(tp.String()),
@@ -144,7 +143,7 @@ func TestContentPaneRendersExactlyAllocatedHeight(t *testing.T) {
 		hooks = append(hooks, strings.Repeat("hook-cmd ", 20))
 	}
 
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	cp := NewContentPane(tw)
 	cp.SetSize(w, h)
 
@@ -196,7 +195,7 @@ func TestContentPaneInlinePanesMatchAllocatedWidth(t *testing.T) {
 		// width out of the allocation the same way.
 		want := AdjustPreviewWidth(tc.w)
 
-		tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+		tw := NewTabbedWindow(NewTabPane())
 		cp := NewContentPane(tw)
 		cp.SetSize(tc.w, tc.h)
 
