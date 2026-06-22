@@ -22,9 +22,11 @@ import (
 //  1. If ~/.config/agent-factory/daemon.pid exists, parse it. Verify the PID
 //     is alive AND its command line contains "--daemon" as a discrete token
 //     (defensive against PID reuse — the file may be stale).
-//  2. Otherwise (or if the PID file is missing), scan with `pgrep -f
-//     "af --daemon"`, filter out /tmp/Test* paths (Go test binaries) and the
-//     current process, and require exactly one candidate.
+//  2. Otherwise (or if the PID file is missing), scan with `pgrep -f --
+//     '--daemon'`, keep only processes whose binary is `af` or
+//     `agent-factory` (#937 — source builds run under the latter name),
+//     filter out /tmp/Test* paths (Go test binaries) and the current
+//     process, and require exactly one candidate.
 //
 // Returns ShutdownViaSIGTERM when a signal was delivered, or ShutdownFailed
 // with an actionable error when the daemon (which is provably running — the
@@ -36,14 +38,14 @@ func sigtermFallback() (ShutdownResult, error) {
 	pid, source, err := locateDaemonPID()
 	if err != nil {
 		return ShutdownFailed, fmt.Errorf(
-			"sigterm fallback failed: %w; run 'pkill -f \"af --daemon\"' to stop the old daemon manually before retrying `af upgrade`",
+			"sigterm fallback failed: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			err,
 		)
 	}
 	if pid == 0 {
 		return ShutdownFailed, fmt.Errorf(
 			"sigterm fallback: daemon is running on the control socket but no PID candidate was found (%s); "+
-				"run 'pkill -f \"af --daemon\"' to stop the old daemon manually before retrying `af upgrade`",
+				"run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			source,
 		)
 	}
@@ -51,7 +53,7 @@ func sigtermFallback() (ShutdownResult, error) {
 	log.InfoLog.Printf("sigterm fallback: signaling pre-#501 daemon (pid=%d source=%s)", pid, source)
 	if err := signalAndWait(pid); err != nil {
 		return ShutdownFailed, fmt.Errorf(
-			"sigterm fallback for daemon pid %d: %w; run 'pkill -f \"af --daemon\"' to stop the old daemon manually before retrying `af upgrade`",
+			"sigterm fallback for daemon pid %d: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			pid, err,
 		)
 	}
@@ -93,7 +95,7 @@ func locateDaemonPID() (int, string, error) {
 		return pids[0], "pgrep", nil
 	default:
 		return 0, "", fmt.Errorf(
-			"sigterm fallback: ambiguous, found %d `af --daemon` processes (%s) — "+
+			"sigterm fallback: ambiguous, found %d `--daemon` processes (%s) — "+
 				"kill the right one manually then re-run `af upgrade`",
 			len(pids), formatPIDList(pids),
 		)
@@ -166,17 +168,22 @@ var scanDaemonCandidatesFn = pgrepDaemonCandidates
 // daemon as absent (#553).
 var errPgrepUnavailable = errors.New("pgrep not found in PATH")
 
-// pgrepDaemonCandidates scans for processes whose full command line contains
-// "af --daemon", excluding Go test binaries living under /tmp/Test* and the
-// current process. We rely on pgrep -f rather than parsing /proc directly so
-// the path works on both Linux and macOS.
+// pgrepDaemonCandidates scans for processes whose full command line carries a
+// "--daemon" token, then keeps only those whose binary is `af` or
+// `agent-factory`. The `--` before the pattern stops pgrep from treating the
+// leading-dash pattern as a flag. We match the bare `--daemon` token rather
+// than "af --daemon" so source-built daemons running as `agent-factory
+// --daemon` are found too (#937); cmdlineIsDaemonBinary restores the
+// binary-name specificity the old substring gave. Go test binaries living
+// under /tmp/Test* and the current process are excluded. We rely on pgrep -f
+// rather than parsing /proc directly so the path works on both Linux and macOS.
 func pgrepDaemonCandidates() ([]int, error) {
 	pgrep, err := exec.LookPath("pgrep")
 	if err != nil {
 		log.WarningLog.Printf("sigterm fallback: pgrep not found in PATH; cannot scan for daemons: %v", err)
 		return nil, fmt.Errorf("%w: %v", errPgrepUnavailable, err)
 	}
-	out, err := exec.Command(pgrep, "-f", "af --daemon").Output()
+	out, err := exec.Command(pgrep, "-f", "--", "--daemon").Output()
 	if err != nil {
 		// pgrep exits 1 when there are no matches. Treat that as zero
 		// candidates rather than an error.
@@ -202,8 +209,10 @@ func pgrepDaemonCandidates() ([]int, error) {
 		}
 		// Defensive: re-read the cmdline and require it to (a) contain
 		// "--daemon" as a discrete token (pgrep -f does substring matching,
-		// not token matching) and (b) not be a Go test binary (these live
-		// under /tmp/Test... when invoked from `go test`).
+		// not token matching), (b) belong to an `af`/`agent-factory` binary so
+		// the broad `--daemon` pattern can't match an unrelated daemon (#937),
+		// and (c) not be a Go test binary (these live under /tmp/Test... when
+		// invoked from `go test`).
 		cmdline := readProcCmdline(pid)
 		if cmdline == "" {
 			cmdline = readPsArgs(pid)
@@ -212,6 +221,9 @@ func pgrepDaemonCandidates() ([]int, error) {
 			continue
 		}
 		if !cmdlineHasDaemonFlag(cmdline) {
+			continue
+		}
+		if !cmdlineIsDaemonBinary(cmdline) {
 			continue
 		}
 		if isTestBinaryCmdline(cmdline) {

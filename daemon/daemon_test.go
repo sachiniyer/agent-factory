@@ -66,8 +66,12 @@ func TestStopDaemon_DoesNotKillUnrelatedPID(t *testing.T) {
 		t.Fatalf("failed to write PID file: %v", err)
 	}
 
-	if err := StopDaemon(); err != nil {
+	stopped, err := StopDaemon()
+	if err != nil {
 		t.Fatalf("StopDaemon returned error: %v", err)
+	}
+	if stopped {
+		t.Fatalf("StopDaemon reported stopped=true for an unrelated PID; expected false")
 	}
 
 	// Give the process a brief moment; if StopDaemon killed it (the bug), it will have exited.
@@ -83,13 +87,21 @@ func TestStopDaemon_DoesNotKillUnrelatedPID(t *testing.T) {
 	}
 }
 
-// TestStopDaemon_NoPIDFile verifies StopDaemon succeeds silently when there is no PID file.
+// TestStopDaemon_NoPIDFile verifies StopDaemon succeeds silently when there is
+// no PID file AND reports stopped=false so callers don't claim a phantom
+// success (#937). Pre-1.0.69 daemons write no PID file, so this no-op path is
+// exactly the case `af reset` must not describe as "daemon has been stopped".
+// Hermetic: a fresh temp config dir, no real daemon involved, nothing signaled.
 func TestStopDaemon_NoPIDFile(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
-	if err := StopDaemon(); err != nil {
+	stopped, err := StopDaemon()
+	if err != nil {
 		t.Fatalf("StopDaemon with no PID file should succeed, got: %v", err)
+	}
+	if stopped {
+		t.Fatalf("StopDaemon with no PID file should report stopped=false (did nothing), got true")
 	}
 }
 
@@ -108,8 +120,12 @@ func TestStopDaemon_NonExistentPID(t *testing.T) {
 		t.Fatalf("failed to write PID file: %v", err)
 	}
 
-	if err := StopDaemon(); err != nil {
+	stopped, err := StopDaemon()
+	if err != nil {
 		t.Fatalf("StopDaemon returned error for dead PID: %v", err)
+	}
+	if stopped {
+		t.Fatalf("StopDaemon reported stopped=true for a dead PID; expected false")
 	}
 
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
@@ -137,6 +153,34 @@ func TestCmdlineHasDaemonFlag(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := cmdlineHasDaemonFlag(tt.cmdline); got != tt.want {
 				t.Errorf("cmdlineHasDaemonFlag(%q) = %v, want %v", tt.cmdline, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCmdlineIsDaemonBinary verifies the host-wide pgrep scan keeps only
+// agent-factory daemon binaries — installed `af` or source-built
+// `agent-factory` — so broadening the pgrep pattern to a bare `--daemon` can't
+// claim an unrelated `--daemon` process (#937). Pure string logic; nothing is
+// signaled.
+func TestCmdlineIsDaemonBinary(t *testing.T) {
+	tests := []struct {
+		name    string
+		cmdline string
+		want    bool
+	}{
+		{name: "empty", cmdline: "", want: false},
+		{name: "installed af binary", cmdline: "/home/u/.local/bin/af --daemon", want: true},
+		{name: "source-built agent-factory binary", cmdline: "/home/u/src/agent-factory --daemon", want: true},
+		{name: "bare af in PATH", cmdline: "af --daemon", want: true},
+		{name: "bare agent-factory in PATH", cmdline: "agent-factory --daemon", want: true},
+		{name: "unrelated daemon", cmdline: "/usr/bin/dockerd --daemon", want: false},
+		{name: "lookalike suffix", cmdline: "/usr/bin/not-agent-factory --daemon", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cmdlineIsDaemonBinary(tt.cmdline); got != tt.want {
+				t.Errorf("cmdlineIsDaemonBinary(%q) = %v, want %v", tt.cmdline, got, tt.want)
 			}
 		})
 	}
@@ -190,8 +234,12 @@ func TestStopDaemon_SIGTERMFirst(t *testing.T) {
 	}
 
 	start := time.Now()
-	if err := StopDaemon(); err != nil {
+	stopped, err := StopDaemon()
+	if err != nil {
 		t.Fatalf("StopDaemon: %v", err)
+	}
+	if !stopped {
+		t.Fatalf("StopDaemon reported stopped=false after signaling a live fake daemon; expected true")
 	}
 	elapsed := time.Since(start)
 
@@ -288,8 +336,12 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 	}
 
 	start := time.Now()
-	if err := StopDaemon(); err != nil {
+	stopped, err := StopDaemon()
+	if err != nil {
 		t.Fatalf("StopDaemon: %v", err)
+	}
+	if !stopped {
+		t.Fatalf("StopDaemon reported stopped=false after signaling a live fake daemon; expected true")
 	}
 	elapsed := time.Since(start)
 
@@ -558,8 +610,12 @@ func TestStopDaemon_RefusesSelfPID(t *testing.T) {
 	}
 
 	// If StopDaemon killed us, the test binary would exit with signal: killed.
-	if err := StopDaemon(); err != nil {
+	stopped, err := StopDaemon()
+	if err != nil {
 		t.Fatalf("StopDaemon returned error: %v", err)
+	}
+	if stopped {
+		t.Fatalf("StopDaemon reported stopped=true for our own PID; expected false")
 	}
 
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {

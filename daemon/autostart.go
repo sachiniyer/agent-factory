@@ -169,7 +169,7 @@ func InstallAutostart() (string, error) {
 			return "", fmt.Errorf("failed to reload systemd user daemon: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
 		// Hand over from any ad-hoc daemon to the supervised one.
-		if err := StopDaemon(); err != nil {
+		if _, err := StopDaemon(); err != nil {
 			return "", fmt.Errorf("failed to stop the running daemon before enabling the service: %w", err)
 		}
 		if out, err := exec.Command("systemctl", "--user", "enable", "--now", autostartUnitName).CombinedOutput(); err != nil {
@@ -199,7 +199,7 @@ func InstallAutostart() (string, error) {
 			return "", fmt.Errorf("failed to write plist file: %w", err)
 		}
 		// Hand over from any ad-hoc daemon to the supervised one.
-		if err := StopDaemon(); err != nil {
+		if _, err := StopDaemon(); err != nil {
 			return "", fmt.Errorf("failed to stop the running daemon before loading the agent: %w", err)
 		}
 		if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {

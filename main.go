@@ -110,11 +110,20 @@ var (
 			log.Initialize(false)
 			defer log.Close()
 
-			// Kill any daemon that's running first.
-			if err := daemon.StopDaemon(); err != nil {
+			// Kill any daemon that's running first. StopDaemon only finds
+			// daemons that wrote a PID file; a pre-1.0.69 daemon leaves none,
+			// so only claim success when we actually stopped one (#937).
+			stopped, err := daemon.StopDaemon()
+			if err != nil {
 				return err
 			}
-			fmt.Println("daemon has been stopped")
+			if stopped {
+				fmt.Println("daemon has been stopped")
+			} else {
+				fmt.Println("No managed daemon was stopped (no PID file, or the recorded process was already gone). " +
+					"If an old daemon is still running (e.g. one built from source as `agent-factory --daemon`), " +
+					"stop it with: pkill -f -- '--daemon'")
+			}
 
 			// Clean up resources before deleting storage records
 			if err := tmux.CleanupSessions(cmdutil.MakeExecutor()); err != nil {

@@ -17,6 +17,21 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
+// assertBinaryAgnosticDaemonHint checks that a SIGTERM-fallback recovery
+// message points at a binary-name-agnostic kill command (#937). The old hint
+// `pkill -f "af --daemon"` does not match daemons built from source as
+// `agent-factory --daemon`, so we both require the new form and assert the
+// stale binary-specific one is gone.
+func assertBinaryAgnosticDaemonHint(t *testing.T, msg string) {
+	t.Helper()
+	if !strings.Contains(msg, `pkill -f -- '--daemon'`) {
+		t.Errorf("error %q missing binary-agnostic recovery hint `pkill -f -- '--daemon'`", msg)
+	}
+	if strings.Contains(msg, `pkill -f "af --daemon"`) {
+		t.Errorf("error %q still uses the binary-specific hint `pkill -f \"af --daemon\"`, which misses `agent-factory --daemon` (#937)", msg)
+	}
+}
+
 // TestWriteDaemonPIDFile_AtomicAndPermissions verifies that writing the PID
 // file produces a 0600 file containing the current process's PID (#504).
 func TestWriteDaemonPIDFile_AtomicAndPermissions(t *testing.T) {
@@ -335,9 +350,7 @@ func TestSigtermFallback_DeadPID(t *testing.T) {
 		t.Fatalf("sigtermFallback returned nil error for dead PID; expected one carrying the recovery hint")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, `pkill -f "af --daemon"`) {
-		t.Errorf("sigtermFallback error %q missing recovery hint with `pkill -f \"af --daemon\"`", msg)
-	}
+	assertBinaryAgnosticDaemonHint(t, msg)
 	if !strings.Contains(msg, strconv.Itoa(deadPID)) {
 		t.Errorf("sigtermFallback error %q missing stale PID-file pid=%d in source", msg, deadPID)
 	}
@@ -374,8 +387,8 @@ func TestSigtermFallback_AmbiguousCandidates(t *testing.T) {
 // proved the daemon is listening on the socket, but the fallback path has
 // no PID file to consult AND pgrep is unavailable. Returning ShutdownNoDaemon
 // would contradict the established state and leave the stale daemon running;
-// the fix is to return ShutdownFailed with an actionable error pointing at
-// `pkill -f "af --daemon"`.
+// the fix is to return ShutdownFailed with an actionable error pointing at a
+// binary-name-agnostic `pkill -f -- '--daemon'`.
 func TestSigtermFallback_NoPIDFileAndNoPgrep(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -392,9 +405,7 @@ func TestSigtermFallback_NoPIDFileAndNoPgrep(t *testing.T) {
 		t.Fatalf("sigtermFallback returned nil error; expected one carrying the recovery hint")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, `pkill -f "af --daemon"`) {
-		t.Errorf("sigtermFallback error %q missing recovery hint with `pkill -f \"af --daemon\"`", msg)
-	}
+	assertBinaryAgnosticDaemonHint(t, msg)
 	if !strings.Contains(msg, "pgrep unavailable") {
 		t.Errorf("sigtermFallback error %q missing `pgrep unavailable` source", msg)
 	}

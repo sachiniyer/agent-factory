@@ -408,39 +408,45 @@ var (
 	stopDaemonPoll  = sigtermFallbackPoll
 )
 
-// StopDaemon attempts to stop a running daemon process if it exists. Returns no error if the daemon is not found
-// (assumes the daemon does not exist). It verifies the PID actually belongs to an agent-factory daemon before
-// signaling it, so a stale or reused PID in the PID file can't take down an unrelated process.
+// StopDaemon attempts to stop a running daemon process if it exists. The bool
+// return reports whether a live agent-factory daemon was actually signaled: it
+// is false (with a nil error) when there was nothing to stop — no PID file, an
+// invalid/stale PID, a dead process, or a PID that doesn't look like an
+// agent-factory daemon. Callers that surface a user-facing "stopped" message
+// must gate on it (#937): a daemon predating the PID file (pre-1.0.69) leaves
+// no daemon.pid, so a true success line here would be a lie. It verifies the
+// PID actually belongs to an agent-factory daemon before signaling it, so a
+// stale or reused PID in the PID file can't take down an unrelated process.
 //
 // Shutdown is graceful by default: SIGTERM gives the daemon's signal handler a
 // chance to run SaveInstances() and clean up the PID file (see RunDaemon). We
 // only escalate to SIGKILL if the daemon does not exit within stopDaemonGrace,
 // matching the SIGTERM-first pattern in signalAndWait (#571).
-func StopDaemon() error {
+func StopDaemon() (bool, error) {
 	pidDir, err := config.GetConfigDir()
 	if err != nil {
-		return fmt.Errorf("failed to get config directory: %w", err)
+		return false, fmt.Errorf("failed to get config directory: %w", err)
 	}
 
 	pidFile := filepath.Join(pidDir, "daemon.pid")
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("failed to read PID file: %w", err)
+		return false, fmt.Errorf("failed to read PID file: %w", err)
 	}
 
 	var pid int
 	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
-		return fmt.Errorf("invalid PID file format: %w", err)
+		return false, fmt.Errorf("invalid PID file format: %w", err)
 	}
 
 	// Defensively refuse to kill our own process or obviously invalid PIDs.
 	if pid <= 1 || pid == os.Getpid() {
 		log.InfoLog.Printf("daemon PID file contained invalid PID %d; removing stale file", pid)
 		_ = os.Remove(pidFile)
-		return nil
+		return false, nil
 	}
 
 	proc, err := os.FindProcess(pid)
@@ -448,14 +454,14 @@ func StopDaemon() error {
 		// On unix, FindProcess never returns an error, but handle it defensively anyway.
 		log.InfoLog.Printf("daemon process (PID: %d) not found; removing stale PID file", pid)
 		_ = os.Remove(pidFile)
-		return nil
+		return false, nil
 	}
 
 	// Check the process exists at all. Signal 0 is a no-op that just validates permissions/existence.
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		log.InfoLog.Printf("daemon process (PID: %d) is not running (%v); removing stale PID file", pid, err)
 		_ = os.Remove(pidFile)
-		return nil
+		return false, nil
 	}
 
 	// Verify the process is actually an agent-factory daemon before signaling it. If we can't verify,
@@ -463,7 +469,7 @@ func StopDaemon() error {
 	if !isAgentFactoryDaemon(pid) {
 		log.InfoLog.Printf("PID %d does not look like an agent-factory daemon; removing stale PID file", pid)
 		_ = os.Remove(pidFile)
-		return nil
+		return false, nil
 	}
 
 	// Send SIGTERM so the daemon's signal handler can SaveInstances() before
@@ -474,9 +480,9 @@ func StopDaemon() error {
 		if errIsProcessGone(err) {
 			log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
 			cleanupDaemonRuntimeFiles(pidFile)
-			return nil
+			return true, nil
 		}
-		return fmt.Errorf("failed to signal daemon process: %w", err)
+		return false, fmt.Errorf("failed to signal daemon process: %w", err)
 	}
 
 	// Poll for graceful exit.
@@ -495,13 +501,13 @@ func StopDaemon() error {
 	} else {
 		log.WarningLog.Printf("daemon process (PID: %d) did not exit within %s of SIGTERM; escalating to SIGKILL", pid, stopDaemonGrace)
 		if err := proc.Signal(syscall.SIGKILL); err != nil && !errIsProcessGone(err) {
-			return fmt.Errorf("failed to stop daemon process: %w", err)
+			return false, fmt.Errorf("failed to stop daemon process: %w", err)
 		}
 	}
 
 	cleanupDaemonRuntimeFiles(pidFile)
 	log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
-	return nil
+	return true, nil
 }
 
 // cleanupDaemonRuntimeFiles removes the PID file and (best-effort) the control
@@ -563,6 +569,26 @@ func cmdlineHasDaemonFlag(cmdline string) bool {
 		}
 	}
 	return false
+}
+
+// cmdlineIsDaemonBinary reports whether the executable in cmdline is an
+// agent-factory daemon binary: installed as "af" or built from source
+// (`go build .`) as "agent-factory". The host-wide pgrep scan in
+// sigterm_fallback.go matches any process carrying a "--daemon" token, so this
+// restores the binary-name specificity that the old "af --daemon" substring
+// pattern provided — while still catching source-built `agent-factory --daemon`
+// daemons that the old pattern missed (#937).
+func cmdlineIsDaemonBinary(cmdline string) bool {
+	fields := strings.Fields(cmdline)
+	if len(fields) == 0 {
+		return false
+	}
+	switch filepath.Base(fields[0]) {
+	case "af", "agent-factory":
+		return true
+	default:
+		return false
+	}
 }
 
 // readProcCmdline returns the full command line for pid via /proc/<pid>/cmdline (Linux).
