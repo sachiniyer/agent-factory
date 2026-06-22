@@ -96,6 +96,12 @@ func (*noSessionErr) Error() string { return "session does not exist" }
 func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
+	// Isolate config reads from the developer's real ~/.agent-factory: Start ->
+	// resolveProgramForInstance -> config.LoadConfig materializes a default
+	// config.json when none exists, which would escape the sandbox and trip the
+	// #837 config guard (and, under `go test ./...`'s shared $HOME, the guard in
+	// concurrently-running packages too).
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const repoPath = "/tmp/restart-survival-repo"
 	const agentName = "af_abc123_restart"
@@ -175,6 +181,10 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 func TestRestartSurvival_BackCompatSynthesizesTabs(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
+	// Isolate config reads from the real ~/.agent-factory (see the sibling test
+	// for the full rationale): FromInstanceData -> Start -> LoadConfig would
+	// otherwise materialize a real config.json and trip the #837 guard.
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const repoPath = "/tmp/backcompat-repo"
 	const legacyName = "af_legacy_agent" // no repo hash form, exact legacy name
