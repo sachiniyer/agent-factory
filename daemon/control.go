@@ -161,7 +161,7 @@ func EnsureDaemon() error {
 	// A previous daemon version may have a PID file but no control socket. Stop
 	// it before launching the control-plane daemon so we do not run duplicate
 	// AutoYes loops.
-	if err := StopDaemon(); err != nil {
+	if _, err := StopDaemon(); err != nil {
 		log.WarningLog.Printf("failed to stop stale daemon before launch: %v", err)
 	}
 

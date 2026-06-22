@@ -83,7 +83,7 @@ func TestStopDaemon_PreservesNewDaemonSocket(t *testing.T) {
 		t.Fatalf("write PID file: %v", err)
 	}
 
-	if err := StopDaemon(); err != nil {
+	if _, err := StopDaemon(); err != nil {
 		t.Fatalf("StopDaemon: %v", err)
 	}
 
