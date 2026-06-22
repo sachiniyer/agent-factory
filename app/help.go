@@ -110,7 +110,7 @@ func (h helpTypeInstanceAttach) mask() uint32 {
 }
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(lipgloss.Color("#7cb8bb"))
+	titleStyle  = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(ui.AccentColor)
 	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#36CFC9"))
 	keyStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
 	descStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
