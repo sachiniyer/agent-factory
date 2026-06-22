@@ -95,12 +95,22 @@ func (p *PreviewPane) dropStaleScrollState(instance *session.Instance) {
 	}
 }
 
-// setFallbackState sets the preview state with fallback text and a message
+// setFallbackState sets the preview state with fallback text and a message.
+// Caller must hold p.mu.
+//
+// Also resets scroll-mode state so fallback==true cannot coexist with
+// isScrolling==true. String() checks isScrolling before fallback, so leaving
+// scroll state intact when entering a fallback (nil/Loading/Deleting/
+// session-gone) would render the prior instance's stale viewport instead of
+// the fallback message. Mirrors the TerminalPane.setFallbackState invariant
+// established in #672.
 func (p *PreviewPane) setFallbackState(message string) {
 	p.previewState = previewState{
 		fallback: true,
 		text:     lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message),
 	}
+	p.isScrolling = false
+	p.viewport.SetContent("")
 }
 
 // Updates the preview pane content with the tmux pane content. Safe to call
@@ -147,7 +157,9 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 		content, err = instance.PreviewFullHistory()
 		if err != nil {
 			if errors.Is(err, tmux.ErrSessionGone) {
-				p.isScrolling = false
+				// setFallbackState now clears scroll state and the stale
+				// viewport, so the fallback renders even though we were mid-
+				// scroll-capture (#940).
 				p.setFallbackState("Session no longer running.")
 				return nil
 			}
