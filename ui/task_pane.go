@@ -636,7 +636,7 @@ func taskDeliverySummary(tsk task.Task) string {
 }
 
 func (s *TaskPane) renderListMode() string {
-	tStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7cb8bb"))
+	tStyle := lipgloss.NewStyle().Bold(true).Foreground(AccentColor)
 	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
 	enabledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#36CFC9"))
 	disabledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
@@ -731,7 +731,7 @@ func (s *TaskPane) renderListMode() string {
 
 func (s *TaskPane) renderEditMode() string {
 	editTitleStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("62")).
+		Foreground(AccentColor).
 		Bold(true).
 		MarginBottom(1)
 
@@ -742,7 +742,7 @@ func (s *TaskPane) renderEditMode() string {
 
 	buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 	focusedButtonStyle := buttonStyle.
-		Background(lipgloss.Color("62")).
+		Background(AccentColor).
 		Foreground(lipgloss.Color("0"))
 
 	inputWidth := s.width - 6

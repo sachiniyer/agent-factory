@@ -48,7 +48,7 @@ var selectedDescStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
 var mainTitle = lipgloss.NewStyle().
-	Background(lipgloss.Color("62")).
+	Background(AccentColor).
 	Foreground(lipgloss.Color("230"))
 
 var autoYesStyle = lipgloss.NewStyle().

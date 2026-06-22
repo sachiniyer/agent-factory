@@ -3,6 +3,8 @@ package overlay
 import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/sachiniyer/agent-factory/ui"
 )
 
 // TextOverlay represents a text screen overlay
@@ -50,7 +52,7 @@ func (t *TextOverlay) Render(opts ...WhitespaceOption) string {
 	// Create styles
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
+		BorderForeground(ui.AccentColor).
 		Padding(1, 2).
 		Width(t.width)
 
