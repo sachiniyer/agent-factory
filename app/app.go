@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -544,8 +545,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *home) handleQuit() (tea.Model, tea.Cmd) {
-	// Save any dirty task/hooks state
-	m.saveContentPaneState()
+	// Save any dirty task/hooks state. On failure the panes were reloaded to
+	// match disk; abort the quit and surface the error (mirroring the
+	// SaveInstances path below) so the user sees the dropped edit instead of
+	// losing it silently on the way out.
+	if err := m.saveContentPaneState(); err != nil {
+		return m, m.handleError(err)
+	}
 
 	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 		return m, m.handleError(err)
@@ -555,8 +561,20 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	return m, tea.Quit
 }
 
-// saveContentPaneState persists any changes from the task/hooks panes.
-func (m *home) saveContentPaneState() {
+// saveContentPaneState persists any changes from the task/hooks panes and
+// returns a non-nil error if any task persist operation failed.
+//
+// Recovery semantics on a task-save failure (#934): we reload BOTH the sidebar
+// and the TaskPane from disk so the two panes always agree and always reflect
+// the committed on-disk state — never a mix of stale in-memory edits in one
+// pane and disk state in the other. Reloading clears the TaskPane's dirty flag,
+// which means a failed edit is discarded rather than left dangling; we
+// therefore return the error so callers surface it (via handleError) and the
+// dropped edit is never silent. We deliberately do NOT keep dirty=true for an
+// in-place retry: after the reload the in-memory edits are gone, so a lingering
+// dirty flag would point at nothing. The user re-applies the edit from a
+// known-consistent state instead.
+func (m *home) saveContentPaneState() error {
 	hp := m.contentPane.HooksPane()
 	if hp.IsDirty() {
 		// Hook edits are written to the in-repo .agent-factory/config.json —
@@ -572,26 +590,39 @@ func (m *home) saveContentPaneState() {
 	}
 
 	sp := m.contentPane.TaskPane()
-	if sp.IsDirty() {
-		for _, tsk := range sp.GetTasks() {
-			if err := task.UpdateTask(tsk); err != nil {
-				log.ErrorLog.Printf("failed to update task: %v", err)
-			}
-		}
-		for _, tsk := range sp.ConsumeDeleted() {
-			if err := task.RemoveTask(tsk.ID); err != nil {
-				log.ErrorLog.Printf("failed to remove task: %v", err)
-			}
-		}
-		// Schedules live in the daemon (#782): a single reload poke after
-		// the batched writes brings its cron entries in sync.
-		reloadDaemonTaskSchedules()
-		// Refresh sidebar
-		tasks, err := task.LoadTasksForCurrentRepo()
-		if err == nil {
-			m.sidebar.SetTasks(tasks)
+	if !sp.IsDirty() {
+		return nil
+	}
+
+	// Collect every persist failure instead of swallowing them: a partial
+	// failure must still surface so the user knows their edit didn't fully
+	// land (matches api/tasks.go, which propagates these errors).
+	var saveErr error
+	for _, tsk := range sp.GetTasks() {
+		if err := task.UpdateTask(tsk); err != nil {
+			log.ErrorLog.Printf("failed to update task: %v", err)
+			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save task %q: %w", tsk.Name, err))
 		}
 	}
+	for _, tsk := range sp.ConsumeDeleted() {
+		if err := task.RemoveTask(tsk.ID); err != nil {
+			log.ErrorLog.Printf("failed to remove task: %v", err)
+			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
+		}
+	}
+	// Schedules live in the daemon (#782): a single reload poke after
+	// the batched writes brings its cron entries in sync.
+	reloadDaemonTaskSchedules()
+	// Reload BOTH panes from disk so the TaskPane and sidebar can never diverge
+	// (#934): whatever actually committed, both panes now show it.
+	tasks, err := task.LoadTasksForCurrentRepo()
+	if err == nil {
+		m.sidebar.SetTasks(tasks)
+		sp.SetTasks(tasks)
+	} else {
+		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
+	}
+	return saveErr
 }
 
 // reloadDaemonTaskSchedulesFn is indirected so TUI tests can observe the poke

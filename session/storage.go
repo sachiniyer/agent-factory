@@ -268,7 +268,14 @@ func (s *Storage) saveRepoInstances(instances []*Instance) error {
 		var diskData []InstanceData
 		if raw != nil && string(raw) != "[]" && string(raw) != "null" {
 			if err := json.Unmarshal(raw, &diskData); err != nil {
-				return fmt.Errorf("failed to parse existing instances for repo %s: %w", s.repoID, err)
+				// Corruption is recoverable session state, not a reason to
+				// trap the user: mirror the daemon's SaveInstances branch and
+				// overwrite the unparseable file with in-memory state. A parse
+				// failure here previously aborted the save, and since both quit
+				// keys route through handleQuit (which returns early without
+				// tea.Quit on save error), it left the TUI unable to exit (#938).
+				log.WarningLog.Printf("failed to parse existing instances for repo %s, overwriting: %v", s.repoID, err)
+				diskData = nil
 			}
 		}
 

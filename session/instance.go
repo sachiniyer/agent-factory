@@ -24,6 +24,17 @@ const (
 	// is never persisted (see mergeInstancesWithDisk) and the row is removed
 	// or reverted when the background teardown finishes (#844).
 	Deleting
+	// Dead is when the underlying tmux/remote session has vanished out from
+	// under us (e.g. the tmux server was killed externally). The row is a
+	// corpse: the user can no longer attach to it (handleEnter surfaces an
+	// error instead of silently swallowing Enter) but can still kill it. A
+	// dead session's HasUpdated latches (false,false) — the same value a
+	// healthy idle session returns — so without an explicit liveness probe the
+	// metadata tick would repaint it Ready (green dot) forever, making a corpse
+	// masquerade as healthy (#935). Unlike Loading/Deleting this is NOT
+	// in-flight TUI state: it is persisted and background syncs may still reap
+	// or replace the row, so it is deliberately excluded from isTransientStatus.
+	Dead
 )
 
 // Instance is a running instance of claude code.

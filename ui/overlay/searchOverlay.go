@@ -5,6 +5,7 @@ import (
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -165,7 +166,7 @@ func runeEqualFold(a, b rune) bool {
 
 // Render renders the search overlay.
 func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7cb8bb"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ui.AccentColor)
 	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
 	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
@@ -246,7 +247,7 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7cb8bb")).
+		BorderForeground(ui.AccentColor).
 		Padding(1, 2).
 		Width(s.width)
 

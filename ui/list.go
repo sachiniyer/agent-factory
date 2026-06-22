@@ -15,8 +15,19 @@ import (
 
 const readyIcon = "● "
 
+// deadIcon is hollow (not the filled readyIcon) so a dead session differs from
+// a healthy Ready one by shape as well as color — the distinction survives low
+// contrast and color-blindness (#935).
+const deadIcon = "○ "
+
 var readyStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#51bd73", Dark: "#51bd73"})
+
+// deadStyle paints the status dot of a session whose backing tmux/remote
+// session has vanished (#935). A muted gray — the same recede treatment used
+// for a deleting row — keeps a corpse from reading as a healthy green session.
+var deadStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
 var titleStyle = lipgloss.NewStyle().
 	Padding(1, 1, 0, 1).
@@ -37,7 +48,7 @@ var selectedDescStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
 var mainTitle = lipgloss.NewStyle().
-	Background(lipgloss.Color("62")).
+	Background(AccentColor).
 	Foreground(lipgloss.Color("230"))
 
 var autoYesStyle = lipgloss.NewStyle().
@@ -102,6 +113,8 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		join = fmt.Sprintf("%s ", r.spinner.View())
 	case session.Ready:
 		join = readyStyle.Render(readyIcon)
+	case session.Dead:
+		join = deadStyle.Render(deadIcon)
 	default:
 	}
 

@@ -168,9 +168,12 @@ func (m *home) handleContentPaneFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 		return m, nil, false
 	}
 
-	// If focus was released (Esc), save state
+	// If focus was released (Esc), save state. A failed save reloads both panes
+	// to match disk and is surfaced inline so the dropped edit isn't silent.
 	if !m.contentPane.HasFocus() {
-		m.saveContentPaneState()
+		if err := m.saveContentPaneState(); err != nil {
+			return m, m.handleError(err), true
+		}
 	}
 
 	// Check if a new task was submitted via the inline form
@@ -181,8 +184,12 @@ func (m *home) handleContentPaneFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 		// handleTaskCreate writes the new task to disk and then reloads
 		// every task via SetTasks, which clears the dirty flag and any
 		// unsaved toggle/edit/delete. Flush those changes first so the
-		// reload picks them up (#578).
-		m.saveContentPaneState()
+		// reload picks them up (#578). If that flush fails, surface it and
+		// skip the create: the pending toggle/edit didn't persist, so we
+		// don't want handleTaskCreate's reload to silently discard it (#934).
+		if err := m.saveContentPaneState(); err != nil {
+			return m, m.handleError(err), true
+		}
 		return m, m.handleTaskCreate(), true
 	}
 	if sp.HasPendingTrigger() {

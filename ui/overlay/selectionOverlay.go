@@ -3,6 +3,8 @@ package overlay
 import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/sachiniyer/agent-factory/ui"
 )
 
 // SelectionOverlay represents a selection list overlay for choosing from items
@@ -76,7 +78,7 @@ func (s *SelectionOverlay) SetWidth(width int) {
 
 // Render renders the selection overlay
 func (s *SelectionOverlay) Render(opts ...WhitespaceOption) string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7cb8bb"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ui.AccentColor)
 	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
 	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
@@ -95,7 +97,7 @@ func (s *SelectionOverlay) Render(opts ...WhitespaceOption) string {
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7cb8bb")).
+		BorderForeground(ui.AccentColor).
 		Padding(1, 2).
 		Width(s.width)
 

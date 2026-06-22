@@ -282,7 +282,12 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 			return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
 		}
 		if !selected.TmuxAlive() {
-			return m, nil
+			// The backing session has vanished, so attaching is impossible.
+			// Surface an actionable error instead of swallowing Enter, mirroring
+			// the Deleting path above — a silent return left the user unsure
+			// whether the keypress registered while the sidebar still showed a
+			// green Ready dot (#935).
+			return m, m.handleError(fmt.Errorf("session '%s' is no longer running", selected.Title))
 		}
 		// Capture the instance at Enter-press time — the synchronous moment the
 		// selection is provably current. For first-time attachers the attach is

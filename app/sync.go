@@ -75,6 +75,14 @@ func runMetadataTick(instances []*session.Instance) {
 		} else {
 			if prompt {
 				instance.TapEnter()
+			} else if !instance.TmuxAlive() {
+				// HasUpdated returned (false,false), which a healthy idle
+				// session and a dead one (monitor.dead / ErrSessionGone) both
+				// produce — indistinguishable on their own. Probe liveness only
+				// on this idle branch (not every tick) so a vanished session is
+				// marked Dead and rendered distinctly rather than repainted as a
+				// green Ready dot it can no longer back (#935).
+				instance.SetStatusIfNotDeleting(session.Dead)
 			} else {
 				instance.SetStatusIfNotDeleting(session.Ready)
 			}
