@@ -33,8 +33,12 @@ const staleScrollMarker = "STALE-SCROLL-VIEWPORT-CONTENT"
 // `inst` so UpdateContent's dropStaleScrollState guard does not pre-emptively
 // reset scroll mode on its own — we want to prove setFallbackState is what
 // clears it.
-func enterScrollWithStaleViewport(p *PreviewPane, inst *session.Instance) {
+func enterScrollWithStaleViewport(p *TabPane, inst *session.Instance) {
 	p.currentInstance = inst
+	// Adopt the agent slot too, so dropStaleView sees no (instance, slot) change
+	// when UpdateContent(inst, true) runs — we want to prove setFallbackState is
+	// what clears scroll mode, not the view-change guard.
+	p.currentAgentSlot = true
 	p.isScrolling = true
 	p.viewport.SetContent(staleScrollMarker)
 }
@@ -53,15 +57,15 @@ func TestPreviewScrollModeThenDeletingFallback(t *testing.T) {
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatus(session.Deleting)
 
-	p := NewPreviewPane()
+	p := NewTabPane()
 	p.SetSize(80, 30)
 	enterScrollWithStaleViewport(p, inst)
 
-	require.NoError(t, p.UpdateContent(inst))
+	require.NoError(t, p.UpdateContent(inst, true))
 
 	require.False(t, p.isScrolling,
 		"entering the Deleting fallback must exit scroll mode")
-	require.True(t, p.previewState.fallback,
+	require.True(t, p.content.fallback,
 		"Deleting instance must render a fallback")
 	require.NotContains(t, p.viewport.View(), staleScrollMarker,
 		"stale viewport content must be cleared on fallback")
@@ -79,18 +83,20 @@ func TestPreviewScrollModeThenNilInstanceFallback(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	p := NewPreviewPane()
+	p := NewTabPane()
 	p.SetSize(80, 30)
-	// currentInstance stays nil so UpdateContent(nil)'s dropStaleScrollState
-	// (nil == nil) does not reset scroll itself — setFallbackState must.
+	// currentInstance stays nil and we adopt the agent slot so dropStaleView
+	// (nil==nil, slot unchanged) does not reset scroll itself — setFallbackState
+	// must.
+	p.currentAgentSlot = true
 	p.isScrolling = true
 	p.viewport.SetContent(staleScrollMarker)
 
-	require.NoError(t, p.UpdateContent(nil))
+	require.NoError(t, p.UpdateContent(nil, true))
 
 	require.False(t, p.isScrolling,
 		"the nil-instance fallback must exit scroll mode")
-	require.True(t, p.previewState.fallback)
+	require.True(t, p.content.fallback)
 	require.NotContains(t, p.viewport.View(), staleScrollMarker,
 		"stale viewport content must be cleared on fallback")
 
@@ -113,15 +119,15 @@ func TestPreviewScrollModeThenLoadingFallback(t *testing.T) {
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatus(session.Loading)
 
-	p := NewPreviewPane()
+	p := NewTabPane()
 	p.SetSize(80, 30)
 	enterScrollWithStaleViewport(p, inst)
 
-	require.NoError(t, p.UpdateContent(inst))
+	require.NoError(t, p.UpdateContent(inst, true))
 
 	require.False(t, p.isScrolling,
 		"entering the Loading fallback must exit scroll mode")
-	require.True(t, p.previewState.fallback)
+	require.True(t, p.content.fallback)
 	require.NotContains(t, p.viewport.View(), staleScrollMarker)
 
 	rendered := p.String()
@@ -145,13 +151,13 @@ func TestPreviewScrollModeViewportContentCleared(t *testing.T) {
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatus(session.Deleting)
 
-	p := NewPreviewPane()
+	p := NewTabPane()
 	p.SetSize(80, 30)
 	enterScrollWithStaleViewport(p, inst)
 	require.Contains(t, p.viewport.View(), staleScrollMarker,
 		"precondition: viewport holds stale scroll content")
 
-	require.NoError(t, p.UpdateContent(inst))
+	require.NoError(t, p.UpdateContent(inst, true))
 
 	require.False(t, p.isScrolling, "scroll mode must be exited")
 	require.NotContains(t, p.viewport.View(), staleScrollMarker,
@@ -199,24 +205,24 @@ func TestPreviewScrollModeThenSessionGoneFallback(t *testing.T) {
 	setup := setupTestEnvironment(t, cmdExec)
 	defer setup.cleanupFn()
 
-	p := NewPreviewPane()
+	p := NewTabPane()
 	p.SetSize(80, 30)
 
 	// Register currentInstance via a live render so ScrollUp's dropStaleScrollState
 	// guard does not reset scroll on the instance-switch path.
-	require.NoError(t, p.UpdateContent(setup.instance))
+	require.NoError(t, p.UpdateContent(setup.instance, true))
 
 	// Session vanishes; entering scroll mode now fails the PreviewFullHistory
 	// capture with ErrSessionGone and routes through setFallbackState.
 	sessionGone.Store(true)
 
-	require.NoError(t, p.ScrollUp(setup.instance))
+	require.NoError(t, p.ScrollUp(setup.instance, true))
 
 	require.False(t, p.isScrolling,
 		"session-gone while entering scroll mode must not leave the pane scrolling")
-	require.True(t, p.previewState.fallback,
+	require.True(t, p.content.fallback,
 		"preview must enter fallback state when the session is gone")
-	require.Contains(t, p.previewState.text, "Session no longer running")
+	require.Contains(t, p.content.text, "Session no longer running")
 	require.NotContains(t, p.viewport.View(), "hello world",
 		"viewport must not retain stale captured content under the fallback")
 	require.Contains(t, p.String(), "Session no longer running",

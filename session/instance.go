@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -106,6 +107,94 @@ func (i *Instance) tmuxLocked() *tmux.TmuxSession {
 	return i.Tabs[0].tmux
 }
 
+// shellTabLocked returns the instance's Shell-kind tab (the terminal tab), or
+// nil if it has none yet. Callers must hold i.mu (read or write).
+func (i *Instance) shellTabLocked() *Tab {
+	for _, t := range i.Tabs {
+		if t.Kind == TabKindShell {
+			return t
+		}
+	}
+	return nil
+}
+
+// GetTabs returns a snapshot of the instance's tab list under the instance
+// mutex. The returned slice is a copy so callers (the UI tab bar) can iterate
+// without racing concurrent tab mutation; the *Tab elements' Name/Kind are set
+// once at creation and never mutated, so they are safe to read.
+func (i *Instance) GetTabs() []*Tab {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	out := make([]*Tab, len(i.Tabs))
+	copy(out, i.Tabs)
+	return out
+}
+
+// PreviewShellTab captures the detached content of the instance's shell tab.
+// Returns ("", nil) when the instance is not started or has no live shell tab
+// session, and tmux.ErrSessionGone when the session vanished — mirroring
+// Instance.Preview for the agent tab so the UI can degrade gracefully.
+func (i *Instance) PreviewShellTab() (string, error) {
+	i.mu.RLock()
+	started := i.started
+	tab := i.shellTabLocked()
+	i.mu.RUnlock()
+	if !started || tab == nil || tab.tmux == nil {
+		return "", nil
+	}
+	return tab.tmux.CapturePaneContent()
+}
+
+// PreviewShellTabFullHistory captures the shell tab's full scrollback, used
+// when entering scroll mode. Same nil/started guards as PreviewShellTab.
+func (i *Instance) PreviewShellTabFullHistory() (string, error) {
+	i.mu.RLock()
+	started := i.started
+	tab := i.shellTabLocked()
+	i.mu.RUnlock()
+	if !started || tab == nil || tab.tmux == nil {
+		return "", nil
+	}
+	return tab.tmux.CapturePaneContentWithOptions("-", "-")
+}
+
+// ShellTabAlive reports whether the instance has a live shell tab tmux session.
+func (i *Instance) ShellTabAlive() bool {
+	i.mu.RLock()
+	tab := i.shellTabLocked()
+	i.mu.RUnlock()
+	return tab != nil && tab.tmux != nil && tab.tmux.DoesSessionExist()
+}
+
+// AttachShellTab attaches (interactive PTY) to the instance's shell tab. The
+// captured-instance semantics that protect deferred attach flows from selection
+// drift (#716) are inherent here: the shell session belongs to this instance,
+// so there is no title-keyed cache to drift.
+func (i *Instance) AttachShellTab() (chan struct{}, error) {
+	i.mu.RLock()
+	tab := i.shellTabLocked()
+	i.mu.RUnlock()
+	if tab == nil || tab.tmux == nil {
+		return nil, fmt.Errorf("no terminal session to attach to")
+	}
+	if !tab.tmux.DoesSessionExist() {
+		return nil, fmt.Errorf("terminal session does not exist")
+	}
+	return tab.tmux.Attach()
+}
+
+// SetShellTabDetachedSize resizes the detached shell tab session so its capture
+// matches the pane dimensions. A no-op when there is no live shell tab.
+func (i *Instance) SetShellTabDetachedSize(width, height int) error {
+	i.mu.RLock()
+	tab := i.shellTabLocked()
+	i.mu.RUnlock()
+	if tab == nil || tab.tmux == nil {
+		return nil
+	}
+	return tab.tmux.SetDetachedSize(width, height)
+}
+
 // setTmuxLocked stores ts as the agent tab's tmux session, materializing the
 // single Agent tab on first assignment so the agent session is always Tabs[0].
 // Passing nil clears the session but leaves the tab in place (and is a no-op
@@ -146,9 +235,23 @@ func (i *Instance) ToInstanceData() InstanceData {
 		data.RemoteMeta = i.remoteMeta
 	}
 
-	// Persist the tmux session name so we can restore it exactly. The agent
-	// tab's session is the instance's single persisted session in PR 1 — the
-	// on-disk format is unchanged (no Tabs field yet).
+	// Persist each tab so the full agent+shell tab list survives a restart
+	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
+	// each tab's tmux session by its exact persisted name, reconnecting live
+	// sessions across an af/daemon restart. Remote instances carry no tmux-
+	// backed tabs, so this serializes nothing for them (their tabs are
+	// synthesized on load).
+	for _, tab := range i.Tabs {
+		td := TabData{Name: tab.Name, Kind: tab.Kind, Command: tab.Command}
+		if tab.tmux != nil {
+			td.TmuxName = tab.tmux.SanitizedName()
+		}
+		data.Tabs = append(data.Tabs, td)
+	}
+
+	// Keep writing the legacy single TmuxName field (set from the agent tab) for
+	// one release: a binary rolled back to before #930 PR 2 still finds the
+	// agent session by its exact name, and old readers ignore the new Tabs list.
 	if ts := i.tmuxLocked(); ts != nil {
 		data.TmuxName = ts.SanitizedName()
 	}
@@ -230,15 +333,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		}
 		instance.gitWorktree = gw
 
-		// Pre-set the tmux session with the correct name for backward compat.
-		// If TmuxName was persisted, use it exactly; otherwise fall back to
-		// the legacy naming scheme (no repo hash) so old sessions still restore.
-		// The reconstructed session becomes the instance's single Agent tab.
-		if data.TmuxName != "" {
-			instance.setTmuxLocked(tmux.NewTmuxSessionFromSanitizedName(data.TmuxName, data.Program))
-		} else {
-			instance.setTmuxLocked(tmux.NewTmuxSession(data.Title, data.Program))
-		}
+		// Rebuild the instance's tab list from disk so every tab (agent + shell)
+		// reconnects to its exact tmux session across an af/daemon restart — the
+		// load-bearing #930 requirement. LocalBackend.Start(false) then restores
+		// each tab's session.
+		restoreLocalTabs(instance, data)
 	}
 
 	if data.PRInfo.Number != 0 {
@@ -255,6 +354,74 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 
 	return instance, nil
+}
+
+// restoreTmuxSession constructs a tmux session for an exact persisted name. It
+// is a package var (not a direct call) so restore-survival tests can inject
+// mock-backed sessions and stay hermetic; production uses the real constructor.
+var restoreTmuxSession = tmux.NewTmuxSessionFromSanitizedName
+
+// restoreLocalTabs rebuilds a local instance's tab list from persisted data.
+//
+//   - New format (data.Tabs present): each tab is reconstructed in order, and
+//     any tab with a persisted tmux name is bound to that exact session so
+//     LocalBackend.Start can reconnect it across a restart.
+//   - Legacy format (no data.Tabs, written before #930 PR 2): synthesize the
+//     single Agent tab from the legacy TmuxName/Program — keeping the EXACT
+//     legacy tmux name so an existing live agent session survives the upgrade —
+//     and leave the shell tab for LocalBackend.Start to create fresh.
+func restoreLocalTabs(instance *Instance, data InstanceData) {
+	if len(data.Tabs) > 0 {
+		for _, td := range data.Tabs {
+			kind := tabKindForData(td.Kind)
+			var ts *tmux.TmuxSession
+			if td.TmuxName != "" {
+				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
+			}
+			instance.Tabs = append(instance.Tabs, &Tab{
+				Name:    td.Name,
+				Kind:    kind,
+				Command: td.Command,
+				tmux:    ts,
+			})
+		}
+		return
+	}
+
+	// Legacy single-session format: the agent tab keeps its exact legacy name.
+	if data.TmuxName != "" {
+		instance.setTmuxLocked(restoreTmuxSession(data.TmuxName, data.Program))
+	} else {
+		instance.setTmuxLocked(tmux.NewTmuxSession(data.Title, data.Program))
+	}
+}
+
+// tabProgram resolves the program a tab's tmux session runs, by kind: the agent
+// program for Agent tabs, $SHELL for Shell tabs, and the explicit command for
+// Process tabs (falling back to $SHELL when empty).
+func tabProgram(kind TabKind, command, agentProgram string) string {
+	switch kind {
+	case TabKindAgent:
+		return agentProgram
+	case TabKindProcess:
+		if command != "" {
+			return command
+		}
+		return defaultShell()
+	default:
+		return defaultShell()
+	}
+}
+
+// defaultShell returns the user's $SHELL, falling back to /bin/sh — exactly the
+// resolution the old UI terminal cache used (ui/terminal.go) before the shell
+// tab was promoted onto the Instance.
+func defaultShell() string {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	return shell
 }
 
 // Options for creating a new instance

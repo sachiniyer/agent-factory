@@ -22,10 +22,24 @@ type InstanceData struct {
 
 	Program     string                 `json:"program"`
 	TmuxName    string                 `json:"tmux_name,omitempty"`
+	Tabs        []TabData              `json:"tabs,omitempty"`
 	Worktree    GitWorktreeData        `json:"worktree"`
 	PRInfo      PRInfoData             `json:"pr_info,omitempty"`
 	BackendType string                 `json:"backend_type,omitempty"`
 	RemoteMeta  map[string]interface{} `json:"remote_meta,omitempty"`
+}
+
+// TabData is the serializable form of a session.Tab. The full list is persisted
+// (and restored by exact TmuxName) so every tab — agent and shell alike —
+// reconnects to its tmux session across an af/daemon restart (#930). The field
+// is omitempty + additive, mirroring the BranchCreatedByUs back-compat
+// precedent: instances.json written before #930 PR 2 simply has no Tabs, and
+// FromInstanceData synthesizes [agent, shell] from the legacy TmuxName/Program.
+type TabData struct {
+	Name     string  `json:"name"`
+	Kind     TabKind `json:"kind"`
+	Command  string  `json:"command,omitempty"`
+	TmuxName string  `json:"tmux_name,omitempty"`
 }
 
 // PRInfoData represents the serializable data of a PRInfo

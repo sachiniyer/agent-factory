@@ -9,7 +9,7 @@ import (
 )
 
 func TestContentPaneModeSwitch(t *testing.T) {
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	cp := NewContentPane(tw)
 
 	assert.Equal(t, ContentModeEmpty, cp.GetMode())
@@ -23,7 +23,7 @@ func TestContentPaneModeSwitch(t *testing.T) {
 }
 
 func TestContentPaneFocus(t *testing.T) {
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	cp := NewContentPane(tw)
 
 	// No focus initially
@@ -47,7 +47,7 @@ func TestContentPaneFocus(t *testing.T) {
 }
 
 func TestContentPaneTaskFocus(t *testing.T) {
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	cp := NewContentPane(tw)
 
 	cp.SetMode(ContentModeTasks)
@@ -61,7 +61,7 @@ func TestContentPaneTaskFocus(t *testing.T) {
 }
 
 func TestContentPaneModeSwitchUnfocuses(t *testing.T) {
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	cp := NewContentPane(tw)
 
 	// Focus task pane
@@ -75,7 +75,7 @@ func TestContentPaneModeSwitchUnfocuses(t *testing.T) {
 }
 
 func TestContentPaneSetSizeMatchesRenderHeight(t *testing.T) {
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	cp := NewContentPane(tw)
 
 	const w, h = 80, 30
@@ -96,7 +96,7 @@ func TestContentPaneSetSizeMatchesRenderHeight(t *testing.T) {
 // rather than being a no-op as in #524. Both shift+up/down keys and mouse
 // wheel events feed into these same methods.
 func TestContentPaneScrollRoutesToTaskPane(t *testing.T) {
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	cp := NewContentPane(tw)
 	cp.SetMode(ContentModeTasks)
 	cp.TaskPane().SetTasks([]task.Task{
@@ -127,7 +127,7 @@ func TestContentPaneScrollRoutesToTaskPane(t *testing.T) {
 // TestContentPaneScrollRoutesToHooksPane is the hooks-mode counterpart of the
 // task-pane test above. Regression test for #524.
 func TestContentPaneScrollRoutesToHooksPane(t *testing.T) {
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	cp := NewContentPane(tw)
 	cp.SetMode(ContentModeHooks)
 	cp.HooksPane().SetCommands([]string{"make build", "make test", "make lint"})
@@ -152,7 +152,7 @@ func TestContentPaneScrollRoutesToHooksPane(t *testing.T) {
 // TestContentPaneScrollEmptyModeNoOp verifies scroll in modes without lists
 // remains a safe no-op (no panics, no side-effects on other panes).
 func TestContentPaneScrollEmptyModeNoOp(t *testing.T) {
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	cp := NewContentPane(tw)
 	cp.TaskPane().SetTasks([]task.Task{{ID: "a"}, {ID: "b"}})
 	cp.HooksPane().SetCommands([]string{"x", "y"})
@@ -201,7 +201,7 @@ func TestHooksPaneScrollNoOpDuringEdit(t *testing.T) {
 }
 
 func TestContentPaneRender(t *testing.T) {
-	tw := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	tw := NewTabbedWindow(NewTabPane())
 	tw.SetSize(80, 30)
 	cp := NewContentPane(tw)
 	cp.SetSize(80, 30)

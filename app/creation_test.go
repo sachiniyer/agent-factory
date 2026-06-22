@@ -33,7 +33,7 @@ func newTestHome(t *testing.T) *home {
 
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sidebar := ui.NewSidebar(&spin, false)
-	tw := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewTerminalPane())
+	tw := ui.NewTabbedWindow(ui.NewTabPane())
 	cp := ui.NewContentPane(tw)
 
 	state := config.DefaultState()

@@ -1,56 +1,76 @@
 package ui
 
 import (
+	"bytes"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// newMockTmuxSession creates a mock tmux session backed by MockCmdExec.
-// The returned session will report as existing and support capture-pane commands.
-func newMockTmuxSession(t *testing.T, name string, cmdExec cmd_test.MockCmdExec) *tmux.TmuxSession {
-	t.Helper()
-	ptyFactory := &MockPtyFactory{
-		t:       t,
-		cmdExec: cmdExec,
+// These tests cover the terminal (Shell) tab on the merged TabPane (#930 PR 2).
+// The shell session is now owned by the Instance and created at start, so the
+// tests drive a started local instance and exercise the shell slot
+// (isAgentSlot=false) of TabPane. The hard-won TerminalPane fixes survive here:
+// #920 Deleting fallback, #669 fallback-resets-scroll, #746 scroll-uses-selected
+// view, #496 session-gone fallback (no ERROR log), and the #843 remote
+// terminal_cmd behavior.
+
+// tmuxTargetName extracts the tmux session name from a command's -t/-s flag,
+// handling both "-t name" / "-s name" and "-t=name" / "-s=name" spellings.
+func tmuxTargetName(cmd *exec.Cmd) string {
+	for i, a := range cmd.Args {
+		switch {
+		case (a == "-t" || a == "-s") && i+1 < len(cmd.Args):
+			return cmd.Args[i+1]
+		case strings.HasPrefix(a, "-t="):
+			return strings.TrimPrefix(a, "-t=")
+		case strings.HasPrefix(a, "-s="):
+			return strings.TrimPrefix(a, "-s=")
+		}
 	}
-	return tmux.NewTmuxSessionWithDeps(name, "bash", ptyFactory, cmdExec)
+	return ""
 }
 
-// mockCmdExec returns a MockCmdExec that simulates a working tmux session.
-// captureContent is returned for capture-pane commands.
-func mockCmdExec(captureContent string, sessionExists bool) cmd_test.MockCmdExec {
+// shellMockExec returns a tmux mock that tracks session existence per name, so
+// an instance's agent session and its shell sibling are independent (sharing a
+// single existence flag would make the shell session's Start fail with "already
+// exists"). capture-pane returns captureContent.
+func shellMockExec(captureContent string) cmd_test.MockCmdExec {
+	existing := map[string]bool{}
 	return cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
-			cmdStr := cmd.String()
-			if strings.Contains(cmdStr, "has-session") {
-				if sessionExists {
+			s := cmd.String()
+			name := tmuxTargetName(cmd)
+			switch {
+			case strings.Contains(s, "has-session"):
+				if existing[name] {
 					return nil
 				}
 				return fmt.Errorf("session does not exist")
-			}
-			if strings.Contains(cmdStr, "new-session") {
+			case strings.Contains(s, "new-session"):
+				existing[name] = true
 				return nil
-			}
-			if strings.Contains(cmdStr, "kill-session") {
+			case strings.Contains(s, "kill-session"):
+				delete(existing, name)
 				return nil
 			}
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
-			cmdStr := cmd.String()
-			if strings.Contains(cmdStr, "capture-pane") {
+			if strings.Contains(cmd.String(), "capture-pane") {
 				return []byte(captureContent), nil
 			}
 			return []byte(""), nil
@@ -58,720 +78,35 @@ func mockCmdExec(captureContent string, sessionExists bool) cmd_test.MockCmdExec
 	}
 }
 
-// makeStartedInstance creates a minimal instance that reports as started with the given title.
-func makeStartedInstance(t *testing.T, title string) *session.Instance {
+// makeShellInstance creates a started local instance with a live agent + shell
+// tab pair. The shell tab is created by LocalBackend.Start as a sibling of the
+// injected mock agent session, so its capture returns captureContent and stays
+// hermetic.
+func makeShellInstance(t *testing.T, title, captureContent string) *session.Instance {
 	t.Helper()
-	// Isolate config reads from the developer's real ~/.agent-factory: the
-	// new strict default_program enum validation (#658) would otherwise pick
-	// up legacy "path with flags" values in the host config and fail the
-	// downstream NewGitWorktree -> LoadConfig call.
+	// Isolate config reads from the developer's real ~/.agent-factory (#658).
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	workdir := t.TempDir()
 	setupGitRepo(t, workdir)
 
-	random := time.Now().UnixNano() % 10000000
-	sessionName := fmt.Sprintf("test-terminal-%s-%d-%d", title, time.Now().UnixNano(), random)
-
-	sessionCreated := false
-	cmdExec := cmd_test.MockCmdExec{
-		RunFunc: func(cmd *exec.Cmd) error {
-			cmdStr := cmd.String()
-			if strings.Contains(cmdStr, "has-session") {
-				if sessionCreated {
-					return nil
-				}
-				return fmt.Errorf("session does not exist")
-			}
-			if strings.Contains(cmdStr, "new-session") {
-				sessionCreated = true
-				return nil
-			}
-			return nil
-		},
-		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
-			return []byte(""), nil
-		},
-	}
-
-	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:   sessionName,
-		Path:    workdir,
-		Program: "bash",
-		AutoYes: false,
-	})
-	require.NoError(t, err)
-
-	ptyFactory := &MockPtyFactory{
-		t:       t,
-		cmdExec: cmdExec,
-	}
-	tmuxSession := tmux.NewTmuxSessionWithDeps(sessionName, "bash", ptyFactory, cmdExec)
-	instance.SetTmuxSession(tmuxSession)
-
-	err = instance.Start(true)
-	require.NoError(t, err)
-
-	return instance
-}
-
-// injectSession injects a mock tmux session into the TerminalPane's sessions map.
-func injectSession(tp *TerminalPane, title string, ts *tmux.TmuxSession, worktreePath string) {
-	tp.mu.Lock()
-	defer tp.mu.Unlock()
-	tp.sessions[title] = &terminalSession{
-		tmuxSession:  ts,
-		worktreePath: worktreePath,
-	}
-	tp.currentTitle = title
-}
-
-func TestTerminalUpdateContent(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	expectedContent := "$ whoami\nuser\n$ ls\nfile1.txt  file2.txt"
-
-	cmdExec := mockCmdExec(expectedContent, true)
-
-	instance := makeStartedInstance(t, "update-content")
-	defer func() { _ = instance.Kill() }()
-
-	tp := NewTerminalPane()
-	tp.SetSize(80, 30)
-
-	// Inject a mock session that returns expectedContent on capture-pane.
-	// Use the instance's actual worktree path so the cache lookup treats
-	// the pre-populated session as a valid match (see #222).
-	ts := newMockTmuxSession(t, "mock-update", cmdExec)
-	// Start the session so DoesSessionExist returns true
-	injectSession(tp, instance.Title, ts, instance.GetWorktreePath())
-
-	// UpdateContent should set fallback=false and capture content
-	err := tp.UpdateContent(instance)
-	require.NoError(t, err)
-
-	tp.mu.Lock()
-	require.False(t, tp.fallback, "should not be in fallback mode after successful content update")
-	require.Equal(t, expectedContent, tp.content, "content should match captured pane output")
-	tp.mu.Unlock()
-
-	// Verify String() output contains the content
-	rendered := tp.String()
-	require.Contains(t, rendered, "whoami", "rendered output should contain captured content")
-}
-
-func TestTerminalFallbackStates(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	tp := NewTerminalPane()
-	tp.SetSize(80, 30)
-
-	t.Run("nil instance", func(t *testing.T) {
-		err := tp.UpdateContent(nil)
-		require.NoError(t, err)
-
-		tp.mu.Lock()
-		require.True(t, tp.fallback, "should be in fallback mode for nil instance")
-		require.Contains(t, tp.fallbackText, "Select an instance", "fallback text should prompt to select instance")
-		require.Empty(t, tp.content, "content should be empty in fallback mode")
-		tp.mu.Unlock()
-	})
-
-	t.Run("not started instance", func(t *testing.T) {
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   "not-started-inst",
-			Path:    t.TempDir(),
-			Program: "bash",
-		})
-		require.NoError(t, err)
-
-		err = tp.UpdateContent(instance)
-		require.NoError(t, err)
-
-		tp.mu.Lock()
-		require.True(t, tp.fallback, "should be in fallback mode for not started instance")
-		require.Contains(t, tp.fallbackText, "not started", "fallback text should mention not started")
-		tp.mu.Unlock()
-	})
-
-	t.Run("not started instance", func(t *testing.T) {
-		// Create an instance that hasn't been started
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   "not-started",
-			Path:    t.TempDir(),
-			Program: "bash",
-		})
-		require.NoError(t, err)
-
-		err = tp.UpdateContent(instance)
-		require.NoError(t, err)
-
-		tp.mu.Lock()
-		require.True(t, tp.fallback, "should be in fallback mode for not-started instance")
-		require.Contains(t, tp.fallbackText, "not started", "fallback text should indicate not started")
-		tp.mu.Unlock()
-	})
-
-	// Regression for #920: a Deleting instance reports Started()==false during
-	// teardown. Without an explicit Deleting case it falls through to the
-	// "Instance is not started yet." fallback, which is misleading while the
-	// session is going away. UpdateContent must show "Tearing down session..."
-	// instead — mirroring the preview pane's transient-status handling.
-	t.Run("deleting instance", func(t *testing.T) {
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   "deleting-inst",
-			Path:    t.TempDir(),
-			Program: "bash",
-		})
-		require.NoError(t, err)
-		instance.SetBackend(session.NewFakeBackend())
-		instance.SetStatus(session.Deleting)
-
-		err = tp.UpdateContent(instance)
-		require.NoError(t, err)
-
-		tp.mu.Lock()
-		require.True(t, tp.fallback, "should be in fallback mode for deleting instance")
-		require.Contains(t, tp.fallbackText, "Tearing down session...",
-			"deleting instance must show the teardown fallback")
-		require.NotContains(t, tp.fallbackText, "not started",
-			"deleting instance must NOT show the not-started fallback (#920)")
-		tp.mu.Unlock()
-	})
-}
-
-func TestTerminalSessionCaching(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	tp := NewTerminalPane()
-	tp.SetSize(80, 30)
-
-	content1 := "session-1-content"
-	cmdExec1 := mockCmdExec(content1, true)
-	ts1 := newMockTmuxSession(t, "cache-test-1", cmdExec1)
-
-	content2 := "session-2-content"
-	cmdExec2 := mockCmdExec(content2, true)
-	ts2 := newMockTmuxSession(t, "cache-test-2", cmdExec2)
-
-	instance1 := makeStartedInstance(t, "cache1")
-	defer func() { _ = instance1.Kill() }()
-	instance2 := makeStartedInstance(t, "cache2")
-	defer func() { _ = instance2.Kill() }()
-
-	// Inject two separate sessions. Use each instance's actual worktree path
-	// so the cache lookup accepts the pre-populated mocks (see #222).
-	injectSession(tp, instance1.Title, ts1, instance1.GetWorktreePath())
-
-	tp.mu.Lock()
-	tp.sessions[instance2.Title] = &terminalSession{
-		tmuxSession:  ts2,
-		worktreePath: instance2.GetWorktreePath(),
-	}
-	tp.mu.Unlock()
-
-	// Switch to instance1 and capture
-	tp.mu.Lock()
-	tp.currentTitle = instance1.Title
-	tp.mu.Unlock()
-
-	err := tp.UpdateContent(instance1)
-	require.NoError(t, err)
-	tp.mu.Lock()
-	require.Equal(t, content1, tp.content)
-	tp.mu.Unlock()
-
-	// Switch to instance2 and capture
-	tp.mu.Lock()
-	tp.currentTitle = instance2.Title
-	tp.mu.Unlock()
-
-	err = tp.UpdateContent(instance2)
-	require.NoError(t, err)
-	tp.mu.Lock()
-	require.Equal(t, content2, tp.content)
-	tp.mu.Unlock()
-
-	// Switch back to instance1 — session should still exist (cached)
-	tp.mu.Lock()
-	tp.currentTitle = instance1.Title
-	tp.mu.Unlock()
-
-	err = tp.UpdateContent(instance1)
-	require.NoError(t, err)
-	tp.mu.Lock()
-	require.Equal(t, content1, tp.content, "should get cached session content when switching back")
-	// Verify both sessions are still in the map
-	require.Len(t, tp.sessions, 2, "both sessions should be cached")
-	tp.mu.Unlock()
-}
-
-func TestTerminalScrolling(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	// Create content with many lines for scrolling
-	const numLines = 100
-	lines := make([]string, numLines)
-	for i := range numLines {
-		lines[i] = fmt.Sprintf("line %d", i+1)
-	}
-	fullContent := strings.Join(lines, "\n")
-
-	cmdExec := mockCmdExec(fullContent, true)
-	instance := makeStartedInstance(t, "scroll")
-	defer func() { _ = instance.Kill() }()
-
-	tp := NewTerminalPane()
-	tp.SetSize(80, 30)
-
-	ts := newMockTmuxSession(t, "scroll-test", cmdExec)
-	injectSession(tp, instance.Title, ts, t.TempDir())
-
-	// Initially not scrolling
-	require.False(t, tp.IsScrolling(), "should not be scrolling initially")
-
-	// ScrollUp should enter scroll mode
-	err := tp.ScrollUp(instance)
-	require.NoError(t, err)
-	require.True(t, tp.IsScrolling(), "should be in scroll mode after ScrollUp")
-
-	// Viewport should contain the content
-	viewContent := tp.viewport.View()
-	require.NotEmpty(t, viewContent, "viewport should have content in scroll mode")
-
-	// ScrollDown should continue in scroll mode
-	err = tp.ScrollDown(instance)
-	require.NoError(t, err)
-	require.True(t, tp.IsScrolling(), "should still be in scroll mode after ScrollDown")
-
-	// ResetToNormalMode should exit scroll mode
-	tp.ResetToNormalMode()
-	require.False(t, tp.IsScrolling(), "should not be scrolling after ResetToNormalMode")
-
-	// Viewport content should be cleared
-	tp.mu.Lock()
-	require.False(t, tp.isScrolling, "isScrolling should be false")
-	tp.mu.Unlock()
-}
-
-// TestTerminalTitleCollisionBug verifies that the terminal session cache does
-// not reuse a cached entry when a different instance (different worktreePath)
-// happens to share the same Title. Titles can collide across CLI, task
-// runner, and TUI instances. Without verifying worktreePath, the second
-// instance's terminal tab would silently point at the first instance's
-// worktree — dangerous (e.g. `rm -rf *` in the wrong directory). See #222.
-func TestTerminalTitleCollisionBug(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	tp := NewTerminalPane()
-	tp.SetSize(80, 30)
-
-	// Create a started instance with a real git worktree. This instance's
-	// GetWorktreePath() returns a valid directory we can start tmux in.
-	instance := makeStartedInstance(t, "collision")
-	defer func() { _ = instance.Kill() }()
-
-	realWorktreePath := instance.GetWorktreePath()
-	require.NotEmpty(t, realWorktreePath, "test precondition: instance must have a worktree path")
-
-	// Pre-populate the cache with a DIFFERENT (stale) worktreePath under the
-	// same Title. This simulates a prior instance with the same title that
-	// has since been replaced by one with a new worktree.
-	stalePath := t.TempDir()
-	require.NotEqual(t, realWorktreePath, stalePath, "test precondition: paths must differ")
-
-	staleCmdExec := mockCmdExec("stale-session-content", true)
-	staleTs := newMockTmuxSession(t, "stale-collision", staleCmdExec)
-	injectSession(tp, instance.Title, staleTs, stalePath)
-
-	// Trigger the cache lookup path. With the bug, the stale entry is reused
-	// because only the Title is checked. With the fix, the entry is evicted
-	// and a new session is created for the correct worktreePath.
-	err := tp.ensureSession(instance)
-	require.NoError(t, err)
-
-	tp.mu.Lock()
-	cached, ok := tp.sessions[instance.Title]
-	tp.mu.Unlock()
-	require.True(t, ok, "cache should still contain an entry for the instance's title")
-	require.Equal(t, realWorktreePath, cached.worktreePath,
-		"cached terminal session must point at the instance's actual worktree, not a collided stale entry")
-
-	// Clean up any real tmux session created by the fix path so it doesn't
-	// leak across tests.
-	if cached.tmuxSession != nil {
-		_ = cached.tmuxSession.Close()
-	}
-}
-
-func TestTerminalCloseForInstance(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	tp := NewTerminalPane()
-	tp.SetSize(80, 30)
-
-	content := "some content"
-	cmdExec := mockCmdExec(content, true)
-
-	instance1 := makeStartedInstance(t, "close1")
-	defer func() { _ = instance1.Kill() }()
-	instance2 := makeStartedInstance(t, "close2")
-	defer func() { _ = instance2.Kill() }()
-
-	ts1 := newMockTmuxSession(t, "close-test-1", cmdExec)
-	ts2 := newMockTmuxSession(t, "close-test-2", cmdExec)
-
-	injectSession(tp, instance1.Title, ts1, t.TempDir())
-	tp.mu.Lock()
-	tp.sessions[instance2.Title] = &terminalSession{
-		tmuxSession:  ts2,
-		worktreePath: t.TempDir(),
-	}
-	tp.mu.Unlock()
-
-	// Verify both sessions exist
-	tp.mu.Lock()
-	require.Len(t, tp.sessions, 2)
-	tp.mu.Unlock()
-
-	// Close instance1's session
-	tp.CloseForInstance(instance1.Title)
-
-	// Only instance2 should remain
-	tp.mu.Lock()
-	require.Len(t, tp.sessions, 1, "should have only 1 session after closing instance1")
-	_, exists := tp.sessions[instance1.Title]
-	require.False(t, exists, "instance1 session should be removed")
-	_, exists = tp.sessions[instance2.Title]
-	require.True(t, exists, "instance2 session should still exist")
-	require.Empty(t, tp.currentTitle, "currentTitle should be cleared when closing current instance")
-	tp.mu.Unlock()
-
-	// Closing a non-existent instance should not panic
-	tp.CloseForInstance("non-existent")
-
-	tp.mu.Lock()
-	require.Len(t, tp.sessions, 1, "non-existent close should not affect existing sessions")
-	tp.mu.Unlock()
-}
-
-// TestTerminalCloseForInstanceResetsScrollMode is a regression test for #619.
-// CloseForInstance must clear isScrolling when it clears the current-title
-// state; otherwise UpdateContent's isScrolling guard suppresses content
-// updates on the next selection, leaving the pane stuck on stale (empty)
-// content until the user presses ESC. Regression of #407.
-func TestTerminalCloseForInstanceResetsScrollMode(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	tp := NewTerminalPane()
-	tp.SetSize(80, 30)
-
-	// Instance whose terminal is being viewed in scroll mode.
-	closedInstance := makeStartedInstance(t, "closed")
-	defer func() { _ = closedInstance.Kill() }()
-
-	closedTs := newMockTmuxSession(t, "closed-scroll", mockCmdExec("history-content", true))
-	injectSession(tp, closedInstance.Title, closedTs, closedInstance.GetWorktreePath())
-
-	// Enter scroll mode on closedInstance — populates viewport, sets isScrolling=true.
-	require.NoError(t, tp.ScrollUp(closedInstance))
-	require.True(t, tp.IsScrolling(), "precondition: should be in scroll mode after ScrollUp")
-
-	// Close the instance whose terminal we are scrolling. With the bug,
-	// currentTitle/content are cleared but isScrolling stays true.
-	tp.CloseForInstance(closedInstance.Title)
-
-	tp.mu.Lock()
-	require.False(t, tp.isScrolling,
-		"CloseForInstance must reset isScrolling when clearing currentTitle (#619)")
-	require.Empty(t, tp.currentTitle, "currentTitle should be cleared")
-	tp.mu.Unlock()
-	require.False(t, tp.IsScrolling(), "IsScrolling() must report false after CloseForInstance")
-
-	// Selecting a new instance must now render its content, not be silently
-	// suppressed by the stale scroll-mode guard.
-	nextContent := "fresh-content"
-	nextInstance := makeStartedInstance(t, "next")
-	defer func() { _ = nextInstance.Kill() }()
-
-	nextTs := newMockTmuxSession(t, "next-scroll", mockCmdExec(nextContent, true))
-	injectSession(tp, nextInstance.Title, nextTs, nextInstance.GetWorktreePath())
-
-	require.NoError(t, tp.UpdateContent(nextInstance))
-
-	tp.mu.Lock()
-	require.False(t, tp.fallback, "should not be in fallback after UpdateContent on next instance")
-	require.Equal(t, nextContent, tp.content,
-		"UpdateContent must capture fresh content after CloseForInstance (would be empty if isScrolling guard still suppressed it)")
-	tp.mu.Unlock()
-}
-
-// TestTerminalFallbackResetsScrollMode is a regression test for #669.
-// Entering the fallback state (nil/!Started/IsRemote selection, or session-gone
-// errors) must reset isScrolling and clear the viewport. String() checks
-// isScrolling before fallback, so leaving scroll state intact would render
-// the prior instance's stale viewport content instead of the fallback message.
-func TestTerminalFallbackResetsScrollMode(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	priorInstance := makeStartedInstance(t, "prior-scroll")
-	defer func() { _ = priorInstance.Kill() }()
-
-	priorContent := "stale-history-from-prior-instance"
-	priorTs := newMockTmuxSession(t, "prior-scroll", mockCmdExec(priorContent, true))
-
-	enterScrollOnPrior := func(tp *TerminalPane) {
-		t.Helper()
-		injectSession(tp, priorInstance.Title, priorTs, priorInstance.GetWorktreePath())
-		require.NoError(t, tp.ScrollUp(priorInstance))
-		require.True(t, tp.IsScrolling(), "precondition: should be in scroll mode")
-		require.Contains(t, tp.viewport.View(), priorContent,
-			"precondition: viewport should hold prior instance's history")
-	}
-
-	t.Run("nil instance", func(t *testing.T) {
-		tp := NewTerminalPane()
-		tp.SetSize(80, 30)
-		enterScrollOnPrior(tp)
-
-		require.NoError(t, tp.UpdateContent(nil))
-
-		tp.mu.Lock()
-		require.True(t, tp.fallback, "should enter fallback for nil instance")
-		require.False(t, tp.isScrolling,
-			"setFallbackState must clear isScrolling so String() does not render stale viewport (#669)")
-		tp.mu.Unlock()
-
-		rendered := tp.String()
-		require.Contains(t, rendered, "Select an instance",
-			"String() must render fallback message, not stale viewport content")
-		require.NotContains(t, rendered, priorContent,
-			"String() must not render the prior instance's scroll-mode content")
-	})
-
-	t.Run("not started instance", func(t *testing.T) {
-		tp := NewTerminalPane()
-		tp.SetSize(80, 30)
-		enterScrollOnPrior(tp)
-
-		notStarted, err := session.NewInstance(session.InstanceOptions{
-			Title:   "not-started-669",
-			Path:    t.TempDir(),
-			Program: "bash",
-		})
-		require.NoError(t, err)
-
-		require.NoError(t, tp.UpdateContent(notStarted))
-
-		tp.mu.Lock()
-		require.True(t, tp.fallback, "should enter fallback for unstarted instance")
-		require.False(t, tp.isScrolling,
-			"setFallbackState must clear isScrolling so String() does not render stale viewport (#669)")
-		tp.mu.Unlock()
-
-		rendered := tp.String()
-		require.Contains(t, rendered, "not started",
-			"String() must render fallback message, not stale viewport content")
-		require.NotContains(t, rendered, priorContent,
-			"String() must not render the prior instance's scroll-mode content")
-	})
-}
-
-// TestTerminalScrollUsesSelectedInstance is a regression test for #746.
-// The scroll path (ScrollUp/ScrollDown) is driven straight off the bubbletea
-// event loop and can fire before the async UpdateContent for a newly selected
-// instance has run, leaving t.currentTitle pointing at the previously selected
-// instance. Before the fix enterScrollMode captured t.sessions[t.currentTitle]
-// — the previous instance — so the user scrolled the wrong terminal's history.
-// The scroll path must key off the selected instance. Mirrors the PreviewPane
-// mouse-scroll guard (#702).
-func TestTerminalScrollUsesSelectedInstance(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	const contentA = "terminal-history-from-instance-A"
-	const contentB = "terminal-history-from-instance-B"
-
-	instA := makeStartedInstance(t, "scroll-A")
-	defer func() { _ = instA.Kill() }()
-	instB := makeStartedInstance(t, "scroll-B")
-	defer func() { _ = instB.Kill() }()
-
-	tp := NewTerminalPane()
-	tp.SetSize(80, 30)
-
-	tsA := newMockTmuxSession(t, "scroll-A", mockCmdExec(contentA, true))
-	tsB := newMockTmuxSession(t, "scroll-B", mockCmdExec(contentB, true))
-
-	// A is selected and displayed: injectSession sets currentTitle == A.
-	injectSession(tp, instA.Title, tsA, instA.GetWorktreePath())
-
-	// B becomes selected, but UpdateTerminal(B) has not run yet — B's session
-	// is cached while currentTitle still names A. This is the race window the
-	// bug lives in.
-	tp.mu.Lock()
-	tp.sessions[instB.Title] = &terminalSession{
-		tmuxSession:  tsB,
-		worktreePath: instB.GetWorktreePath(),
-	}
-	tp.mu.Unlock()
-
-	// User scrolls while B is the selected instance.
-	require.NoError(t, tp.ScrollUp(instB))
-	require.True(t, tp.IsScrolling(), "should enter scroll mode for the selected instance")
-
-	rendered := tp.viewport.View()
-	require.Contains(t, rendered, contentB,
-		"scroll must capture the selected instance's (B) terminal history")
-	require.NotContains(t, rendered, contentA,
-		"scroll must not capture the previously selected instance's (A) history (#746)")
-
-	// enterScrollMode adopts B as current, so a subsequent refresh for B does
-	// not discard the scroll the user just started.
-	require.NoError(t, tp.UpdateContent(instB))
-	require.True(t, tp.IsScrolling(), "scroll on the selected instance must survive the next refresh")
-	require.Contains(t, tp.viewport.View(), contentB, "scroll content must remain B's history")
-}
-
-// TestTerminalSessionCreationFailureShowsFallback is a regression test for
-// #747. When ensureSessionLocked fails, the new instance has no usable session.
-// UpdateContent previously returned the error (which the caller only logs),
-// leaving the previous instance's captured content on screen. It must instead
-// drop into a fallback state — mirroring the ErrSessionGone handling — so the
-// stale content is replaced with a clear failure message.
-func TestTerminalSessionCreationFailureShowsFallback(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	tp := NewTerminalPane()
-	tp.SetSize(80, 30)
-
-	// A previously selected, working instance leaves content on screen.
-	const priorContent = "stale-output-from-prior-instance"
-	priorInstance := makeStartedInstance(t, "prior")
-	defer func() { _ = priorInstance.Kill() }()
-	priorTs := newMockTmuxSession(t, "prior", mockCmdExec(priorContent, true))
-	injectSession(tp, priorInstance.Title, priorTs, priorInstance.GetWorktreePath())
-	require.NoError(t, tp.UpdateContent(priorInstance))
-	tp.mu.Lock()
-	require.Equal(t, priorContent, tp.content, "precondition: prior instance content is displayed")
-	tp.mu.Unlock()
-
-	// Now select an instance whose terminal session creation fails.
-	failInstance := makeStartedInstance(t, "fails")
-	defer func() { _ = failInstance.Kill() }()
-
-	cmdExec := cmd_test.MockCmdExec{
-		RunFunc: func(cmd *exec.Cmd) error {
-			if strings.Contains(cmd.String(), "has-session") {
-				return fmt.Errorf("session does not exist")
-			}
-			return nil
-		},
-		OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, nil },
-	}
-	oldFactory := newTerminalTmuxSessionForRepo
-	newTerminalTmuxSessionForRepo = func(name, program, shell string) *tmux.TmuxSession {
-		return tmux.NewTmuxSessionWithDeps(name, shell, failingPtyFactory{}, cmdExec)
-	}
-	t.Cleanup(func() { newTerminalTmuxSessionForRepo = oldFactory })
-
-	// UpdateContent must not propagate the error; it must set fallback state.
-	require.NoError(t, tp.UpdateContent(failInstance),
-		"session-creation failure must be handled as a fallback, not returned (#747)")
-
-	tp.mu.Lock()
-	require.True(t, tp.fallback, "must enter fallback state when session creation fails")
-	require.False(t, tp.isScrolling, "fallback must clear scroll state")
-	tp.mu.Unlock()
-
-	rendered := tp.String()
-	require.Contains(t, rendered, "Failed to start terminal session",
-		"must show a clear failure message")
-	require.NotContains(t, rendered, priorContent,
-		"must not render the previously selected instance's stale content (#747)")
-}
-
-type failingPtyFactory struct{}
-
-func (f failingPtyFactory) Start(*exec.Cmd) (*os.File, error) {
-	return nil, fmt.Errorf("restore failed")
-}
-
-func (f failingPtyFactory) Close() {}
-
-func TestTerminalEnsureSessionReturnsStaleCleanupError(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	instance := makeStartedInstance(t, "stale-cleanup")
-	defer func() { _ = instance.Kill() }()
-
-	cmdExec := cmd_test.MockCmdExec{
-		RunFunc: func(cmd *exec.Cmd) error {
-			cmdStr := cmd.String()
-			if strings.Contains(cmdStr, "has-session") {
-				return nil
-			}
-			if strings.Contains(cmdStr, "kill-session") {
-				return fmt.Errorf("kill failed")
-			}
-			return nil
-		},
-		OutputFunc: func(*exec.Cmd) ([]byte, error) {
-			return nil, nil
-		},
-	}
-
-	oldFactory := newTerminalTmuxSessionForRepo
-	newTerminalTmuxSessionForRepo = func(name, program, shell string) *tmux.TmuxSession {
-		return tmux.NewTmuxSessionWithDeps(name, shell, failingPtyFactory{}, cmdExec)
-	}
-	t.Cleanup(func() { newTerminalTmuxSessionForRepo = oldFactory })
-
-	tp := NewTerminalPane()
-	err := tp.ensureSession(instance)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "failed to close stale session")
-	require.Contains(t, err.Error(), "kill failed")
-}
-
-// TestTerminalAttachForInstanceRefusesUnboundInstance is part of the regression
-// guard for issue #716. AttachForInstance binds the terminal to the captured
-// instance before attaching, but ensureSessionLocked only sets currentTitle
-// when the instance is started with a live worktree. If it bails early (nil or
-// a captured instance that died while the help overlay was open), the method
-// must refuse to attach rather than fall back to a possibly-drifted
-// currentTitle — which is exactly the wrong-instance attach #716 fixes.
-func TestTerminalAttachForInstanceRefusesUnboundInstance(t *testing.T) {
-	tp := NewTerminalPane()
-
-	if _, err := tp.AttachForInstance(nil); err == nil {
-		t.Fatal("AttachForInstance(nil) must return an error, not attach")
-	}
+	name := fmt.Sprintf("test-shell-%s-%d", title, time.Now().UnixNano())
+	cmdExec := shellMockExec(captureContent)
 
 	inst, err := session.NewInstance(session.InstanceOptions{
-		Title:   "unstarted",
-		Path:    t.TempDir(),
-		Program: "claude",
+		Title:   name,
+		Path:    workdir,
+		Program: "bash",
 	})
 	require.NoError(t, err)
-	require.False(t, inst.Started(), "precondition: instance must not be started")
 
-	if _, err := tp.AttachForInstance(inst); err == nil {
-		t.Fatal("AttachForInstance must refuse to attach an instance it cannot bind")
-	}
+	pty := &MockPtyFactory{t: t, cmdExec: cmdExec}
+	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
+	require.NoError(t, inst.Start(true))
+	return inst
 }
 
-// makeRemoteInstance creates a started instance backed by a HookBackend with
-// the given hooks, mirroring the preview_remote_test idiom.
+// makeRemoteInstance creates a started instance backed by a HookBackend with the
+// given hooks.
 func makeRemoteInstance(t *testing.T, title string, hooks config.RemoteHooks) *session.Instance {
 	t.Helper()
 	instance, err := session.NewInstance(session.InstanceOptions{
@@ -786,58 +121,338 @@ func makeRemoteInstance(t *testing.T, title string, hooks config.RemoteHooks) *s
 	return instance
 }
 
-// TestTerminalRemoteFallbackStates covers the #843 Terminal-tab UX for remote
-// sessions: with terminal_cmd configured the pane invites the user to attach;
-// without it the pane keeps the "not available" fallback and names the config
-// knob that enables the feature.
-func TestTerminalRemoteFallbackStates(t *testing.T) {
+func TestTabPaneShellUpdateContent(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const expected = "$ whoami\nuser\n$ ls\nfile1.txt  file2.txt"
+	inst := makeShellInstance(t, "update", expected)
+	defer func() { _ = inst.Kill() }()
+
+	p := NewTabPane()
+	p.SetSize(80, 30)
+
+	require.NoError(t, p.UpdateContent(inst, false))
+
+	p.mu.Lock()
+	require.False(t, p.content.fallback, "should not be in fallback after successful shell capture")
+	require.Equal(t, expected, p.content.text, "content should match the shell pane capture")
+	p.mu.Unlock()
+
+	require.Contains(t, p.String(), "whoami", "rendered output should contain the captured content")
+}
+
+func TestTabPaneShellFallbackStates(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	p := NewTabPane()
+	p.SetSize(80, 30)
+
+	t.Run("nil instance", func(t *testing.T) {
+		require.NoError(t, p.UpdateContent(nil, false))
+		p.mu.Lock()
+		require.True(t, p.content.fallback)
+		require.Contains(t, p.content.text, "Select an instance")
+		p.mu.Unlock()
+	})
+
+	t.Run("not started instance", func(t *testing.T) {
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title: "not-started", Path: t.TempDir(), Program: "bash",
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, p.UpdateContent(inst, false))
+		p.mu.Lock()
+		require.True(t, p.content.fallback)
+		require.Contains(t, p.content.text, "not started")
+		p.mu.Unlock()
+	})
+
+	// #920: a Deleting instance reports Started()==false during teardown. It
+	// must show "Tearing down session..." rather than the not-started fallback.
+	t.Run("deleting instance", func(t *testing.T) {
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title: "deleting", Path: t.TempDir(), Program: "bash",
+		})
+		require.NoError(t, err)
+		inst.SetBackend(session.NewFakeBackend())
+		inst.SetStatus(session.Deleting)
+
+		require.NoError(t, p.UpdateContent(inst, false))
+		p.mu.Lock()
+		require.True(t, p.content.fallback)
+		require.Contains(t, p.content.text, "Tearing down session...")
+		require.NotContains(t, p.content.text, "not started",
+			"deleting instance must NOT show the not-started fallback (#920)")
+		p.mu.Unlock()
+	})
+}
+
+func TestTabPaneShellScrolling(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const numLines = 100
+	lines := make([]string, numLines)
+	for i := range numLines {
+		lines[i] = fmt.Sprintf("line %d", i+1)
+	}
+	inst := makeShellInstance(t, "scroll", strings.Join(lines, "\n"))
+	defer func() { _ = inst.Kill() }()
+
+	p := NewTabPane()
+	p.SetSize(80, 30)
+
+	require.False(t, p.IsScrolling(), "should not be scrolling initially")
+
+	require.NoError(t, p.ScrollUp(inst, false))
+	require.True(t, p.IsScrolling(), "ScrollUp should enter scroll mode")
+	require.NotEmpty(t, p.viewport.View(), "viewport should have content in scroll mode")
+
+	require.NoError(t, p.ScrollDown(inst, false))
+	require.True(t, p.IsScrolling(), "should still be scrolling after ScrollDown")
+
+	require.NoError(t, p.ResetToNormalMode(inst, false))
+	require.False(t, p.IsScrolling(), "ResetToNormalMode should exit scroll mode")
+}
+
+// TestTabPaneShellFallbackResetsScrollMode is the #669 regression for the shell
+// slot: entering a fallback (nil/!Started) while scrolling must exit scroll mode
+// and clear the viewport, so String() (which checks isScrolling first) renders
+// the fallback message, not the prior view's scroll content.
+func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const priorContent = "stale-history-from-prior-instance"
+	prior := makeShellInstance(t, "prior", priorContent)
+	defer func() { _ = prior.Kill() }()
+
+	t.Run("nil instance", func(t *testing.T) {
+		p := NewTabPane()
+		p.SetSize(80, 30)
+		require.NoError(t, p.ScrollUp(prior, false))
+		require.True(t, p.IsScrolling(), "precondition: in scroll mode")
+		require.Contains(t, p.viewport.View(), priorContent)
+
+		require.NoError(t, p.UpdateContent(nil, false))
+
+		p.mu.Lock()
+		require.True(t, p.content.fallback)
+		require.False(t, p.isScrolling, "fallback must clear scroll state (#669)")
+		p.mu.Unlock()
+
+		rendered := p.String()
+		require.Contains(t, rendered, "Select an instance")
+		require.NotContains(t, rendered, priorContent)
+	})
+
+	t.Run("not started instance", func(t *testing.T) {
+		p := NewTabPane()
+		p.SetSize(80, 30)
+		require.NoError(t, p.ScrollUp(prior, false))
+		require.True(t, p.IsScrolling())
+
+		notStarted, err := session.NewInstance(session.InstanceOptions{
+			Title: "not-started-669", Path: t.TempDir(), Program: "bash",
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, p.UpdateContent(notStarted, false))
+
+		p.mu.Lock()
+		require.True(t, p.content.fallback)
+		require.False(t, p.isScrolling)
+		p.mu.Unlock()
+
+		rendered := p.String()
+		require.Contains(t, rendered, "not started")
+		require.NotContains(t, rendered, priorContent)
+	})
+}
+
+// TestTabPaneShellScrollUsesSelectedView is the #746 regression: the scroll path
+// runs off the bubbletea loop and can fire before the async UpdateContent for a
+// newly selected instance. Capture is keyed off the passed instance (not a
+// title cache), so scrolling must reflect the selected instance's shell history,
+// never the previously rendered instance's.
+func TestTabPaneShellScrollUsesSelectedView(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const contentA = "terminal-history-from-instance-A"
+	const contentB = "terminal-history-from-instance-B"
+	instA := makeShellInstance(t, "A", contentA)
+	defer func() { _ = instA.Kill() }()
+	instB := makeShellInstance(t, "B", contentB)
+	defer func() { _ = instB.Kill() }()
+
+	p := NewTabPane()
+	p.SetSize(80, 30)
+
+	// A is rendered first, so it becomes the current view.
+	require.NoError(t, p.UpdateContent(instA, false))
+
+	// User scrolls while B is the selected instance, before UpdateContent(B) ran.
+	require.NoError(t, p.ScrollUp(instB, false))
+	require.True(t, p.IsScrolling())
+	require.Contains(t, p.viewport.View(), contentB,
+		"scroll must capture the selected instance's (B) shell history")
+	require.NotContains(t, p.viewport.View(), contentA,
+		"scroll must not capture the previously rendered instance's (A) history (#746)")
+
+	// The scroll survives the next refresh for B.
+	require.NoError(t, p.UpdateContent(instB, false))
+	require.True(t, p.IsScrolling())
+	require.Contains(t, p.viewport.View(), contentB)
+}
+
+// TestTabPaneSwitchTabResetsScroll verifies that switching tab SLOTS (same
+// instance) while scrolling resets scroll mode — the unified pane shares one
+// scroll state across both tabs, so the agent-tab viewport must not leak into a
+// shell-tab render.
+func TestTabPaneSwitchTabResetsScroll(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst := makeShellInstance(t, "switch", "agent-and-shell-content")
+	defer func() { _ = inst.Kill() }()
+
+	p := NewTabPane()
+	p.SetSize(80, 30)
+
+	// Scroll on the agent slot.
+	require.NoError(t, p.ScrollUp(inst, true))
+	require.True(t, p.IsScrolling())
+
+	// Switch to the shell slot for the SAME instance: scroll must reset.
+	require.NoError(t, p.UpdateContent(inst, false))
+	require.False(t, p.IsScrolling(),
+		"switching tabs must drop the previous tab's scroll state")
+}
+
+// TestTabPaneShellSessionGoneFallback is the #496 regression for the shell slot:
+// when the shell session vanishes the pane must enter a fallback rather than
+// propagate an error that handleError logs at ERROR every tick.
+func TestTabPaneShellSessionGoneFallback(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	var gone atomic.Bool
+	existing := map[string]bool{}
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			name := tmuxTargetName(cmd)
+			switch {
+			case strings.Contains(s, "has-session"):
+				if gone.Load() {
+					return fmt.Errorf("session gone")
+				}
+				if existing[name] {
+					return nil
+				}
+				return fmt.Errorf("session does not exist")
+			case strings.Contains(s, "new-session"):
+				existing[name] = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "capture-pane") {
+				if gone.Load() {
+					return nil, fmt.Errorf("exit status 1")
+				}
+				return []byte("hello world"), nil
+			}
+			return []byte(""), nil
+		},
+	}
+
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	workdir := t.TempDir()
+	setupGitRepo(t, workdir)
+	name := fmt.Sprintf("test-shell-gone-%d", time.Now().UnixNano())
+	inst, err := session.NewInstance(session.InstanceOptions{Title: name, Path: workdir, Program: "bash"})
+	require.NoError(t, err)
+	pty := &MockPtyFactory{t: t, cmdExec: cmdExec}
+	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
+	require.NoError(t, inst.Start(true))
+	defer func() { _ = inst.Kill() }()
+
+	p := NewTabPane()
+	p.SetSize(80, 30)
+
+	// Happy path: shell content renders.
+	require.NoError(t, p.UpdateContent(inst, false))
+	p.mu.Lock()
+	require.False(t, p.content.fallback)
+	require.Contains(t, p.content.text, "hello world")
+	p.mu.Unlock()
+
+	// Session vanishes; prove UpdateContent does not log at ERROR.
+	var errBuf bytes.Buffer
+	prev := log.ErrorLog.Writer()
+	log.ErrorLog.SetOutput(&errBuf)
+	defer log.ErrorLog.SetOutput(prev)
+
+	gone.Store(true)
+
+	require.NoError(t, p.UpdateContent(inst, false),
+		"a gone shell session must NOT bubble an error up to handleError (#496)")
+	p.mu.Lock()
+	require.True(t, p.content.fallback, "shell pane must enter a fallback when the session is gone")
+	require.Contains(t, p.content.text, "Terminal session")
+	p.mu.Unlock()
+	require.Empty(t, errBuf.String(), "no ERROR log line on the session-gone fallback path")
+}
+
+// TestTabPaneRemoteFallbackStates covers the #843 Terminal-tab UX for remote
+// sessions on the merged pane.
+func TestTabPaneRemoteFallbackStates(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
 	t.Run("terminal_cmd configured shows attach prompt", func(t *testing.T) {
-		instance := makeRemoteInstance(t, "remote-843-on", config.RemoteHooks{TerminalCmd: "/bin/true"})
-
-		tp := NewTerminalPane()
-		tp.SetSize(80, 30)
-		require.NoError(t, tp.UpdateContent(instance))
-
-		tp.mu.Lock()
-		require.True(t, tp.fallback, "remote terminal is interactive-only; the pane stays in fallback mode")
-		tp.mu.Unlock()
-		rendered := tp.String()
-		require.Contains(t, rendered, "Press Enter to open a terminal",
-			"must invite the user to attach when terminal_cmd is configured")
+		inst := makeRemoteInstance(t, "remote-843-on", config.RemoteHooks{TerminalCmd: "/bin/true"})
+		p := NewTabPane()
+		p.SetSize(80, 30)
+		require.NoError(t, p.UpdateContent(inst, false))
+		p.mu.Lock()
+		require.True(t, p.content.fallback)
+		p.mu.Unlock()
+		require.Contains(t, p.String(), "Press Enter to open a terminal")
 	})
 
 	t.Run("terminal_cmd absent keeps not-available fallback", func(t *testing.T) {
-		instance := makeRemoteInstance(t, "remote-843-off", config.RemoteHooks{})
-
-		tp := NewTerminalPane()
-		tp.SetSize(80, 30)
-		require.NoError(t, tp.UpdateContent(instance))
-
-		tp.mu.Lock()
-		require.True(t, tp.fallback)
-		require.Contains(t, tp.fallbackText, "not available for remote sessions")
-		require.Contains(t, tp.fallbackText, "terminal_cmd",
-			"fallback must name the config knob that enables the feature")
-		tp.mu.Unlock()
+		inst := makeRemoteInstance(t, "remote-843-off", config.RemoteHooks{})
+		p := NewTabPane()
+		p.SetSize(80, 30)
+		require.NoError(t, p.UpdateContent(inst, false))
+		p.mu.Lock()
+		require.True(t, p.content.fallback)
+		require.Contains(t, p.content.text, "not available for remote sessions")
+		require.Contains(t, p.content.text, "terminal_cmd")
+		p.mu.Unlock()
 	})
 }
 
-// TestTerminalAttachForInstanceRemote verifies the attach path for remote
-// instances (#843): with terminal_cmd configured AttachForInstance runs the
-// hook (bypassing the local tmux session cache); without it the attach is
-// refused with an error naming terminal_cmd.
-func TestTerminalAttachForInstanceRemote(t *testing.T) {
+// TestTabbedWindowAttachTerminalRemote verifies the shell-tab attach path for
+// remote instances (#843) via TabbedWindow.AttachTerminalForInstance: with
+// terminal_cmd configured it runs the hook (with the session slug); without it
+// the attach is refused with an error naming terminal_cmd.
+func TestTabbedWindowAttachTerminalRemote(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	t.Run("not configured refuses with actionable error", func(t *testing.T) {
-		instance := makeRemoteInstance(t, "remote-843-noattach", config.RemoteHooks{})
+	tw := NewTabbedWindow(NewTabPane())
 
-		tp := NewTerminalPane()
-		_, err := tp.AttachForInstance(instance)
+	t.Run("not configured refuses with actionable error", func(t *testing.T) {
+		inst := makeRemoteInstance(t, "remote-843-noattach", config.RemoteHooks{})
+		_, err := tw.AttachTerminalForInstance(inst)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "terminal_cmd")
 	})
@@ -849,10 +464,8 @@ func TestTerminalAttachForInstanceRemote(t *testing.T) {
 		require.NoError(t, os.WriteFile(script,
 			[]byte("#!/bin/sh\necho \"$1\" > \""+argsFile+"\"\n"), 0755))
 
-		instance := makeRemoteInstance(t, "remote-843-attach", config.RemoteHooks{TerminalCmd: script})
-
-		tp := NewTerminalPane()
-		done, err := tp.AttachForInstance(instance)
+		inst := makeRemoteInstance(t, "remote-843-attach", config.RemoteHooks{TerminalCmd: script})
+		done, err := tw.AttachTerminalForInstance(inst)
 		require.NoError(t, err)
 		select {
 		case <-done:
@@ -865,4 +478,26 @@ func TestTerminalAttachForInstanceRemote(t *testing.T) {
 		require.Equal(t, session.Slugify("remote-843-attach"), strings.TrimSpace(string(raw)),
 			"terminal_cmd must receive the session slug")
 	})
+}
+
+// TestTabbedWindowAttachTerminalRefusesNil guards the #716 captured-instance
+// contract: AttachTerminalForInstance(nil) must error, and an instance with no
+// live shell tab must refuse to attach rather than attaching the wrong session.
+func TestTabbedWindowAttachTerminalRefusesNil(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	tw := NewTabbedWindow(NewTabPane())
+
+	_, err := tw.AttachTerminalForInstance(nil)
+	require.Error(t, err, "AttachTerminalForInstance(nil) must error, not attach")
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "unstarted", Path: t.TempDir(), Program: "claude",
+	})
+	require.NoError(t, err)
+	require.False(t, inst.Started(), "precondition: instance must not be started")
+
+	_, err = tw.AttachTerminalForInstance(inst)
+	require.Error(t, err, "an instance with no live shell tab must refuse to attach")
 }

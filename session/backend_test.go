@@ -84,7 +84,7 @@ func TestLocalBackendKillBestEffort_TmuxFails(t *testing.T) {
 
 	logged := buf.String()
 	assert.Contains(t, logged, "best-effort-tmux", "warning must include instance title for correlation in agent-factory.log")
-	assert.Contains(t, logged, "tmux cleanup failed")
+	assert.Contains(t, logged, "tmux cleanup for tab")
 
 	require.NoError(t, inst.Kill(), "second kill on a cleared instance must be a no-op")
 }
@@ -203,7 +203,7 @@ func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 	assert.Nil(t, inst.gitWorktree)
 
 	logged := buf.String()
-	assert.Contains(t, logged, "tmux cleanup failed")
+	assert.Contains(t, logged, "tmux cleanup for tab")
 	assert.Contains(t, logged, "git worktree cleanup failed")
 	assert.Equal(t, 2, strings.Count(logged, `kill "both-fail":`), "title should appear in both component warnings")
 }

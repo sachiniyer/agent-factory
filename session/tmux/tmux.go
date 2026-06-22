@@ -182,6 +182,14 @@ func NewTmuxSessionWithDeps(name string, program string, ptyFactory PtyFactory, 
 	return newTmuxSession(toTmuxName(name, ""), program, ptyFactory, cmdExec)
 }
 
+// NewTmuxSessionFromSanitizedNameWithDeps creates a TmuxSession with an exact
+// pre-computed name AND injected dependencies. Used by restore-survival tests
+// that reconstruct sessions by their exact persisted names while keeping the
+// tmux interactions mock-backed (hermetic).
+func NewTmuxSessionFromSanitizedNameWithDeps(sanitizedName, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
+	return newTmuxSession(sanitizedName, program, ptyFactory, cmdExec)
+}
+
 // SanitizedName returns the sanitized tmux session name.
 func (t *TmuxSession) SanitizedName() string {
 	return t.sanitizedName
@@ -199,6 +207,18 @@ func newTmuxSession(sanitizedName string, program string, ptyFactory PtyFactory,
 // SetProgram updates the program command before the session is started.
 func (t *TmuxSession) SetProgram(program string) {
 	t.program = program
+}
+
+// NewSiblingSession builds a second TmuxSession in the same worktree that
+// shares this session's PTY factory and command executor. Used for the #930
+// per-tab sessions (e.g. an instance's shell tab alongside its agent tab):
+// the sibling inherits the agent session's dependencies so a mock-backed agent
+// session produces a mock-backed sibling in tests, keeping them hermetic, while
+// production sessions get the real factory/executor. sanitizedName is the exact
+// tmux session name (already repo-scoped/sanitized by the caller); program is
+// the command to run.
+func (t *TmuxSession) NewSiblingSession(sanitizedName, program string) *TmuxSession {
+	return newTmuxSession(sanitizedName, program, t.ptyFactory, t.cmdExec)
 }
 
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in

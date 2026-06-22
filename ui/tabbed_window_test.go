@@ -27,14 +27,14 @@ func TestTabbedWindowSetSizeClampsNegativeDimensions(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+			w := NewTabbedWindow(NewTabPane())
 			w.SetSize(tc.width, tc.height)
 
 			previewW, previewH := w.GetPreviewSize()
 			assert.GreaterOrEqual(t, previewW, 0, "preview width should be clamped to >= 0")
 			assert.GreaterOrEqual(t, previewH, 0, "preview height should be clamped to >= 0")
-			assert.GreaterOrEqual(t, w.terminal.width, 0, "terminal width should be clamped to >= 0")
-			assert.GreaterOrEqual(t, w.terminal.height, 0, "terminal height should be clamped to >= 0")
+			assert.GreaterOrEqual(t, w.tab.width, 0, "terminal width should be clamped to >= 0")
+			assert.GreaterOrEqual(t, w.tab.height, 0, "terminal height should be clamped to >= 0")
 		})
 	}
 }
@@ -42,7 +42,7 @@ func TestTabbedWindowSetSizeClampsNegativeDimensions(t *testing.T) {
 // TestTabbedWindowSetSizeNormal sanity-checks that reasonable sizes still
 // produce positive content dimensions.
 func TestTabbedWindowSetSizeNormal(t *testing.T) {
-	w := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	w := NewTabbedWindow(NewTabPane())
 	w.SetSize(200, 100)
 
 	previewW, previewH := w.GetPreviewSize()
@@ -51,9 +51,9 @@ func TestTabbedWindowSetSizeNormal(t *testing.T) {
 }
 
 func TestTabbedWindowStringDoesNotExceedConfiguredWidth(t *testing.T) {
-	w := NewTabbedWindow(NewPreviewPane(), NewTerminalPane())
+	w := NewTabbedWindow(NewTabPane())
 	w.SetSize(100, 30)
-	w.preview.previewState = previewState{text: "content"}
+	w.tab.content = tabContentState{text: "content"}
 
 	rendered := w.String()
 	maxWidth := 0

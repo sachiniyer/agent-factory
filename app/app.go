@@ -163,7 +163,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		os.Exit(1)
 	}
 
-	tabbedWindow := ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewTerminalPane())
+	tabbedWindow := ui.NewTabbedWindow(ui.NewTabPane())
 
 	h := &home{
 		ctx:         ctx,
@@ -556,8 +556,11 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
 		return m, m.handleError(err)
 	}
-	tw := m.contentPane.TabbedWindow()
-	tw.CleanupTerminal()
+	// Do NOT tear down tab sessions on quit: as of #930 PR 2 each instance owns
+	// its agent and shell tab tmux sessions, and they must survive an af restart
+	// so the user reconnects to them on next launch (Sachin's persistence
+	// requirement). Killing an instance still tears its tabs down via
+	// LocalBackend.Kill.
 	return m, tea.Quit
 }
 
@@ -851,16 +854,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	if msg.Type == tea.KeyEsc {
 		if m.contentPane.GetMode() == ui.ContentModeInstance {
 			tw := m.contentPane.TabbedWindow()
-			if tw.IsInPreviewTab() && tw.IsPreviewInScrollMode() {
+			if tw.IsInScrollMode() {
 				selected := m.sidebar.GetSelectedInstance()
-				err := tw.ResetPreviewToNormalMode(selected)
-				if err != nil {
+				if err := tw.ResetToNormalMode(selected); err != nil {
 					return m, m.handleError(err)
 				}
-				return m, m.selectionChanged()
-			}
-			if tw.IsInTerminalTab() && tw.IsTerminalInScrollMode() {
-				tw.ResetTerminalToNormalMode()
 				return m, m.selectionChanged()
 			}
 		}
@@ -1086,35 +1084,27 @@ func (m *home) selectionChanged() tea.Cmd {
 	return tea.Batch(prFetch, refreshCmd)
 }
 
-// panesRefreshedMsg signals that the off-loop preview/terminal capture
-// finished. The msg itself carries no payload — bubbletea calls View() after
-// every Update return regardless of the msg type, and PreviewPane /
-// TerminalPane already published the captured content into their own
-// mutex-guarded state inside the goroutine. Sending the msg back is what
-// actually wakes the event loop so View() runs against the fresh content.
+// panesRefreshedMsg signals that the off-loop tab capture finished. The msg
+// itself carries no payload — bubbletea calls View() after every Update return
+// regardless of the msg type, and TabPane already published the captured
+// content into its own mutex-guarded state inside the goroutine. Sending the
+// msg back is what actually wakes the event loop so View() runs against the
+// fresh content.
 type panesRefreshedMsg struct{}
 
-// refreshPanesCmd runs UpdatePreview + UpdateTerminal off the bubbletea
-// Update goroutine. Each shells out to `tmux capture-pane` (~3–5ms locally),
-// and previously those two calls compounded to a ~7–10ms event-loop block on
-// every previewTickMsg (every 100ms) and on every post-detach repaint.
-// PreviewPane and TerminalPane both serialise their capture writes against
-// String() reads with internal mutexes, so the goroutine can mutate the
+// refreshPanesCmd runs the active tab's capture off the bubbletea Update
+// goroutine. It shells out to `tmux capture-pane` (~3–5ms locally), which
+// previously blocked the event loop on every previewTickMsg (every 100ms) and
+// on every post-detach repaint. TabPane serialises its capture writes against
+// String() reads with an internal mutex, so the goroutine can mutate the
 // captured content concurrently with the renderer (#579).
 func refreshPanesCmd(tw *ui.TabbedWindow, selected *session.Instance) tea.Cmd {
 	return func() tea.Msg {
 		cmdStart := time.Now()
 		detachTraceMark("refreshPanesCmd-goroutine-entry")
-		previewStart := time.Now()
-		if err := tw.UpdatePreview(selected); err != nil {
-			log.WarningLog.Printf("UpdatePreview failed: %v", err)
+		if err := tw.UpdateContent(selected); err != nil {
+			log.WarningLog.Printf("UpdateContent failed: %v", err)
 		}
-		detachTrace(previewStart, "refreshPanesCmd-UpdatePreview-returned")
-		terminalStart := time.Now()
-		if err := tw.UpdateTerminal(selected); err != nil {
-			log.WarningLog.Printf("UpdateTerminal failed: %v", err)
-		}
-		detachTrace(terminalStart, "refreshPanesCmd-UpdateTerminal-returned")
 		detachTrace(cmdStart, "refreshPanesCmd-goroutine-exit")
 		return panesRefreshedMsg{}
 	}
