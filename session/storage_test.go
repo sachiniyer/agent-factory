@@ -348,6 +348,59 @@ func TestRepoSaveAbortsOnReadError(t *testing.T) {
 		"on-disk session data must be preserved when the existing file cannot be read (#766)")
 }
 
+// TestRepoSaveOverwritesCorruptedInstances verifies that when instances.json
+// becomes corrupted mid-session (unparseable JSON, NOT a read error), the TUI
+// save path recovers by warning and overwriting with in-memory state instead
+// of returning an error. A returned error would propagate up through
+// handleQuit, which aborts the quit (no tea.Quit) on save failure — trapping
+// the user in an infinite error loop with force-kill the only escape (#938).
+// This mirrors the daemon's SaveInstances corruption recovery exactly.
+func TestRepoSaveOverwritesCorruptedInstances(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	// Disk holds garbage that fails json.Unmarshal — not a read error, but a
+	// successfully-read-yet-unparseable file (corruption mid-session).
+	ms.data[repoID] = json.RawMessage(`{not valid json`)
+
+	// Alive so the #819 dead-and-disk-missing drop doesn't remove it once the
+	// corrupted disk is treated as empty.
+	inMem := makeAliveInstance("in-memory", repoPath)
+	storage, err := NewStorage(ms, repoID)
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{inMem})
+	require.NoError(t, err, "corrupted instances.json must not block the save (and thus quit) — it should be overwritten (#938)")
+
+	// In-memory state must now be persisted over the corruption.
+	result := readDisk(t, ms, repoPath)
+	require.Len(t, result, 1, "in-memory instance should be written over the corrupted file")
+	assert.Equal(t, "in-memory", result[0].Title)
+}
+
+// TestDaemonSaveOverwritesCorruptedInstances is the adjacent-call-site mirror
+// of the TUI test above: the daemon path already recovered from corruption,
+// and this pins that behavior so the two save paths stay in lockstep (#938).
+func TestDaemonSaveOverwritesCorruptedInstances(t *testing.T) {
+	const repoPath = "/tmp/test-repo"
+	repoID := config.RepoIDFromRoot(repoPath)
+	ms := newMockStorage()
+
+	ms.data[repoID] = json.RawMessage(`{not valid json`)
+
+	inMem := makeAliveInstance("in-memory", repoPath)
+	storage, err := NewStorage(ms, "") // daemon mode (empty repoID)
+	require.NoError(t, err)
+
+	err = storage.SaveInstances([]*Instance{inMem})
+	require.NoError(t, err, "daemon must overwrite corrupted instances.json rather than abort")
+
+	result := readDisk(t, ms, repoPath)
+	require.Len(t, result, 1)
+	assert.Equal(t, "in-memory", result[0].Title)
+}
+
 func TestDaemonSaveNoInstances(t *testing.T) {
 	ms := newMockStorage()
 
