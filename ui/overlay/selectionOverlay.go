@@ -76,7 +76,7 @@ func (s *SelectionOverlay) SetWidth(width int) {
 
 // Render renders the selection overlay
 func (s *SelectionOverlay) Render(opts ...WhitespaceOption) string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7cb8bb"))
 	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
 	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
@@ -95,7 +95,7 @@ func (s *SelectionOverlay) Render(opts ...WhitespaceOption) string {
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7D56F4")).
+		BorderForeground(lipgloss.Color("#7cb8bb")).
 		Padding(1, 2).
 		Width(s.width)
 

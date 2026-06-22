@@ -24,7 +24,7 @@ var sepStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{
 	Dark:  "#3C3C3C",
 })
 
-var actionGroupStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("99"))
+var actionGroupStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7cb8bb"))
 
 var separator = " • "
 var verticalSeparator = " │ "
