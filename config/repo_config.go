@@ -88,7 +88,17 @@ func (h RemoteHooks) resolveCommandPaths(repoRoot string) *RemoteHooks {
 //
 // Empty stays empty so RemoteHooks.Validate reports the missing field, not a
 // phantom path.
+//
+// Surrounding whitespace is trimmed first so the IsAbs/separator decision and
+// the value handed to exec.Command both see the path the user intended:
+// without this, "   /bin/launch.sh" looks relative (IsAbs is false) and gets
+// joined onto repoRoot, while "/bin/launch.sh   " is returned untrimmed and
+// fails exec with "no such file or directory" (#933). Only the surrounding
+// whitespace of the command token is trimmed; a command's arguments are not
+// touched because hook commands are never shell-parsed (the whole string is
+// the executable path).
 func resolveHookCommandPath(repoRoot, cmd string) string {
+	cmd = strings.TrimSpace(cmd)
 	if cmd == "" || filepath.IsAbs(cmd) || !strings.ContainsRune(cmd, filepath.Separator) {
 		return cmd
 	}

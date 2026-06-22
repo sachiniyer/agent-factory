@@ -322,6 +322,33 @@ func TestResolveHookCommandPath(t *testing.T) {
 	}
 }
 
+// TestResolveHookCommandPathWhitespace covers leading/trailing whitespace
+// around the command token: it is trimmed before the IsAbs/separator decision
+// and the join, so absolute paths stay absolute, relative paths still resolve
+// under repoRoot, and bare names keep their $PATH lookup (#933).
+func TestResolveHookCommandPathWhitespace(t *testing.T) {
+	const root = "/srv/repos/detail"
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"leading whitespace on absolute path", "   /usr/local/bin/launch.sh", "/usr/local/bin/launch.sh"},
+		{"trailing whitespace on absolute path", "/usr/local/bin/launch.sh   ", "/usr/local/bin/launch.sh"},
+		{"leading whitespace on relative path", "   ./hooks/launch.sh", root + "/hooks/launch.sh"},
+		{"trailing whitespace on relative path", "./hooks/launch.sh   ", root + "/hooks/launch.sh"},
+		{"leading whitespace on bare name", "   bash", "bash"},
+		{"trailing whitespace on bare name", "bash   ", "bash"},
+		{"whitespace-only stays empty", "   ", ""},
+		{"empty stays empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, resolveHookCommandPath(root, tc.cmd))
+		})
+	}
+}
+
 // TestRemoteHooksResolveCommandPaths verifies the copy semantics: the
 // returned hooks carry resolved paths while the receiver is untouched, so
 // ResolveConfig can never write rewritten values back through a loaded
