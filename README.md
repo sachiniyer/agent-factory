@@ -36,12 +36,21 @@ Each session is one agent running in its own git worktree on its own branch — 
 | Key | Action |
 |-----|--------|
 | `n` | Create a new session |
-| `Enter` / `o` | Attach to the selected session |
+| `Enter` / `o` | Attach to the selected session's active tab |
 | `Ctrl-w` | Detach (configurable via `detach_keys`) |
 | `D` | Kill the session and clean up its worktree |
-| `Tab` | Switch between the preview and terminal panes |
+| `Tab` / `Shift-Tab` | Cycle forward / back through the session's tabs |
+| `1`–`9` | Jump straight to a tab by number |
+| `t` | Open a new shell tab in the session's worktree |
+| `w` | Close the active tab (the agent tab can't be closed) |
 
 When a session's branch has an open pull request, `p` opens it in the browser and `P` copies its URL.
+
+#### Tabs
+
+Every session opens with two tabs: an **agent** tab (the AI agent, shown as *Preview*) and a **shell** tab (*Terminal*) running `$SHELL` in the worktree. Press `t` to spawn more shell tabs (up to nine per session), `w` to close the active one, and `Tab` / `1`–`9` to move between them. Attaching (`Enter`) drops you into whichever tab is active. Tabs are ephemeral but persisted: they survive an `af`/daemon restart, reconnecting to their live processes. You can also spawn a tab running an arbitrary command from the CLI with `af sessions tab-create` (see below).
+
+Remote sessions are tab-driven too, with one limitation: the hook protocol can't run arbitrary commands on the remote host, so a remote session has an agent tab always and a single terminal tab **only when** its repo configures `remote_hooks.terminal_cmd` (`t` and `tab-create` are rejected for remote sessions). See [docs/remote-hooks.md](docs/remote-hooks.md).
 
 ### Tasks
 

@@ -74,6 +74,24 @@ func newShellTab(ts *tmux.TmuxSession) *Tab {
 	return &Tab{Name: shellTabName, Kind: TabKindShell, tmux: ts}
 }
 
+// newRemoteAgentTab returns the Agent tab for a remote/hook-backed instance
+// (#930 PR 6). Like every remote tab it carries no tmux session: the agent
+// surface is driven by attach_cmd and the hook preview process, not a local
+// tmux session. It lets remote instances be tab-driven through the same Tabs
+// list as local ones.
+func newRemoteAgentTab() *Tab {
+	return &Tab{Name: agentTabName, Kind: TabKindAgent}
+}
+
+// newRemoteTerminalTab returns the Shell-kind terminal tab for a remote instance
+// whose terminal_cmd hook is configured (#930 PR 6). It has no tmux session;
+// attaching and previewing route through the terminal_cmd hook flow
+// (HookBackend.AttachTerminal). Only created when HasTerminalCmd() is true, so a
+// remote instance without terminal_cmd carries just the agent tab.
+func newRemoteTerminalTab() *Tab {
+	return &Tab{Name: shellTabName, Kind: TabKindShell}
+}
+
 // tabKindForData clamps a persisted TabKind to a known value, defaulting to
 // TabKindShell for any unexpected value written by a newer binary so a forward-
 // incompatible record degrades to a plain shell tab rather than an agent tab.

@@ -377,7 +377,9 @@ The tab persists and reconnects across a daemon/af restart like every other tab.
 If --name is omitted, a name is derived from the command's basename; the name is
 made unique within the session (auto-suffixed -2, -3, …). The resolved tab name
 is printed on success so scripts/agents can address it. Not available for remote
-sessions, which have no local worktree.`,
+sessions: they have no local worktree and the hook protocol can't run arbitrary
+commands — a remote session's only terminal tab comes from
+remote_hooks.terminal_cmd.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)

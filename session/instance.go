@@ -437,10 +437,12 @@ func (i *Instance) ToInstanceData() InstanceData {
 
 	// Persist each tab so the full agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
-	// each tab's tmux session by its exact persisted name, reconnecting live
-	// sessions across an af/daemon restart. Remote instances carry no tmux-
-	// backed tabs, so this serializes nothing for them (their tabs are
-	// synthesized on load).
+	// each local tab's tmux session by its exact persisted name, reconnecting
+	// live sessions across an af/daemon restart. Remote tabs (agent + optional
+	// terminal) carry no tmux session, so they serialize with an empty TmuxName;
+	// on restore HookBackend.Start re-derives them from the live terminal_cmd
+	// config (syncRemoteTabs) rather than from this serialized list, so a
+	// terminal_cmd added or removed while af was down is honored.
 	for _, tab := range i.Tabs {
 		td := TabData{Name: tab.Name, Kind: tab.Kind, Command: tab.Command}
 		if tab.tmux != nil {

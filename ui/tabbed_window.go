@@ -33,10 +33,10 @@ var (
 			Border(lipgloss.NormalBorder(), false, true, true, true)
 )
 
-// defaultTabLabels are the labels shown before an instance is selected (or for
-// remote instances, which carry no tmux-backed tabs). They preserve the exact
-// pre-#930 two-tab bar so the UX is identical: slot 0 is the agent ("Preview")
-// tab, slot 1 the terminal tab.
+// defaultTabLabels are the labels shown before an instance is selected, or for
+// one whose tabs haven't materialized yet. They preserve the exact pre-#930
+// two-tab bar so the UX is identical: slot 0 is the agent ("Preview") tab, slot
+// 1 the terminal tab.
 var defaultTabLabels = []string{"Preview", "Terminal"}
 
 // TabbedWindow has tabs at the top of a pane which can be selected. The tabs
@@ -109,11 +109,28 @@ func (w *TabbedWindow) SelectLastTab() {
 	w.SelectTab(len(w.tabLabels()) - 1)
 }
 
-// tabLabels returns the labels for the current instance's tabs, always at least
-// the two default slots so the bar is identical to the pre-#930 UX. Agent tabs
-// render as "Preview", shell tabs as "Terminal"; any future Process tab renders
-// under its own name.
+// tabLabels returns the labels for the current instance's tabs. Agent tabs
+// render as "Preview", shell tabs as "Terminal"; any Process tab renders under
+// its own name.
+//
+// Remote instances are tab-driven too (#930 PR 6): their real tab set is the
+// agent tab plus a terminal tab only when terminal_cmd is configured, so the
+// bar reflects exactly those tabs — a terminal_cmd-less remote shows a single
+// tab rather than the local two-tab default. Local instances keep the
+// default-padded bar (always at least the two slots) so the header count never
+// dips below two mid-start, identical to the pre-#930 UX.
 func (w *TabbedWindow) tabLabels() []string {
+	if w.instance != nil && w.instance.IsRemote() {
+		if tabs := w.instance.GetTabs(); len(tabs) > 0 {
+			labels := make([]string, len(tabs))
+			for i, tab := range tabs {
+				labels[i] = labelForTab(tab)
+			}
+			return labels
+		}
+		// Pre-start remote (no tabs yet): fall through to the default bar.
+	}
+
 	labels := append([]string(nil), defaultTabLabels...)
 	if w.instance == nil {
 		return labels

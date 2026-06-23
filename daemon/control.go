@@ -1175,8 +1175,10 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 // is persisted immediately (ToInstanceData serializes its command + tmux name,
 // and restoreLocalTabs reconnects it by exact name on reload) so it survives a
 // daemon/af restart — Sachin's hard #930 requirement. Rejected for remote/hook
-// instances (no local worktree to run a command in), an empty command, or an
-// instance already at the soft cap (maxTabs, enforced by AddProcessTab).
+// instances (no local worktree, and the hook protocol can't run arbitrary
+// commands — a remote session's only terminal tab is the terminal_cmd one), an
+// empty command, or an instance already at the soft cap (maxTabs, enforced by
+// AddProcessTab).
 func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	if strings.TrimSpace(req.Command) == "" {
 		return "", fmt.Errorf("a process tab requires a non-empty command (--command)")
@@ -1190,7 +1192,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		return "", fmt.Errorf("failed to restore instance %q", req.Title)
 	}
 	if instance.IsRemote() {
-		return "", fmt.Errorf("cannot create a process tab on remote session %q: it has no local worktree to run a command in", req.Title)
+		return "", fmt.Errorf("cannot create a process tab on remote session %q: remote sessions have no local worktree and the hook protocol can't run arbitrary commands; their terminal tab comes from remote_hooks.terminal_cmd", req.Title)
 	}
 
 	// Serialize against other create/tab mutations on this repo, mirroring

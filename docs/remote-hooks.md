@@ -138,7 +138,7 @@ Each iteration becomes the new preview frame. `capture-pane -e` keeps colors; th
 
 ### `terminal_cmd` (optional)
 
-Opens an interactive terminal on the machine hosting a session — this is what the TUI's **Terminal tab** runs for remote sessions. Where `attach_cmd` connects to the *agent's* session (e.g. `ssh -t host "tmux attach"`), `terminal_cmd` should drop the user into a *plain shell* in the session's workspace, the remote analogue of the local worktree terminal.
+Opens an interactive terminal on the machine hosting a session. This is what backs a remote session's **Terminal tab**: where `attach_cmd` connects to the *agent's* session (e.g. `ssh -t host "tmux attach"`), `terminal_cmd` should drop the user into a *plain shell* in the session's workspace, the remote analogue of the local worktree terminal.
 
 **Arguments:** `<name>`
 
@@ -146,7 +146,15 @@ Opens an interactive terminal on the machine hosting a session — this is what 
 
 Agent Factory runs this command behind a local PTY with the same detach-key handling as `attach_cmd`: the configured detach key terminates the local `terminal_cmd` process and returns to the TUI. The remote shell receives a hangup when the SSH client dies; use a remote tmux/screen session inside your script if you want the shell to survive detach. Terminal reset sequences are emitted on exit, just as with `attach_cmd` (#845).
 
-When `terminal_cmd` is not configured, the Terminal tab shows a "not available" fallback for remote sessions and nothing else changes. Unlike `attach_cmd`, this command is never used for preview capture — it only runs when the user attaches from the Terminal tab.
+#### `terminal_cmd` and the tab model
+
+Remote sessions follow the same ephemeral-tab model as local ones (see the README "Tabs" section), with one structural difference driven by the protocol:
+
+- A remote session **always** has an agent tab (driven by `attach_cmd` and the preview loop above).
+- It has a **terminal tab if and only if `terminal_cmd` is configured.** Attaching to that tab runs `terminal_cmd`; previewing it shows a "Press Enter to open a terminal" prompt (the surface is interactive-only — `terminal_cmd` is never used for preview capture).
+- When `terminal_cmd` is **not** configured, a remote session has only its agent tab, and the would-be Terminal tab shows a "not available — configure `remote_hooks.terminal_cmd`" fallback.
+
+Because the protocol has no run-arbitrary-command verb, remote sessions **cannot** host extra process tabs: the `t` new-tab key and `af sessions tab-create` are rejected for remote sessions with a message pointing at `terminal_cmd`. A remote session's terminal tab is the one defined by `terminal_cmd` and nothing else. These tabs persist across an `af`/daemon restart like local tabs, but are reconstructed from your live `terminal_cmd` config on restore rather than from any saved local session — so adding or removing `terminal_cmd` while `af` is down is honored on the next start.
 
 ## Example
 
