@@ -47,7 +47,7 @@ func TestPreviewRemoteHookStripsControlSequences(t *testing.T) {
 
 	pane := NewTabPane()
 	pane.SetSize(80, 24)
-	require.NoError(t, pane.UpdateContent(instance, true))
+	require.NoError(t, pane.UpdateContent(instance, 0))
 	out := pane.String()
 
 	require.Contains(t, out, "hello")

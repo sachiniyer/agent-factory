@@ -860,6 +860,17 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleQuit()
 	}
 
+	// Number-key tab jump (1-9): jump directly to that tab in the instance
+	// tabbed window (#930 PR 4). Handled here, before the GlobalKeyStringsMap
+	// lookup, because digits are dispatched manually rather than mapped to a
+	// KeyName. Gated to the instance view so digits typed into a focused
+	// task/hooks pane (handled above) or elsewhere pass through untouched.
+	if m.contentPane.GetMode() == ui.ContentModeInstance && len(msg.Runes) == 1 {
+		if r := msg.Runes[0]; r >= '1' && r <= '9' {
+			return m.handleTabJump(int(r - '0'))
+		}
+	}
+
 	name, ok := keys.GlobalKeyStringsMap[msg.String()]
 	if !ok {
 		return m, nil

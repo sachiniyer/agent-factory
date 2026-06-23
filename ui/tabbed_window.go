@@ -63,6 +63,50 @@ func NewTabbedWindow(tab *TabPane) *TabbedWindow {
 
 func (w *TabbedWindow) SetInstance(instance *session.Instance) {
 	w.instance = instance
+	// Tab counts vary per instance (#930 PR 4): switching to an instance with
+	// fewer tabs must not leave activeTab pointing past the end, which would make
+	// isAgentSlot() lie and the number/Toggle math operate on a phantom slot.
+	w.clampActiveTab()
+}
+
+// clampActiveTab bounds activeTab into [0, len(tabLabels())-1]. Called whenever
+// the tab set may have shrunk (instance switch, tab close) so the index never
+// dangles out of range.
+func (w *TabbedWindow) clampActiveTab() {
+	n := int32(len(w.tabLabels()))
+	if n <= 0 {
+		w.activeTab.Store(0)
+		return
+	}
+	if cur := w.activeTab.Load(); cur >= n {
+		w.activeTab.Store(n - 1)
+	} else if cur < 0 {
+		w.activeTab.Store(0)
+	}
+}
+
+// JumpToTab selects the tab at the 0-based idx, returning true if it exists.
+// Out-of-range indices are a no-op (false) so an unused number key does nothing
+// (#930 PR 4).
+func (w *TabbedWindow) JumpToTab(idx int) bool {
+	if idx < 0 || idx >= len(w.tabLabels()) {
+		return false
+	}
+	w.activeTab.Store(int32(idx))
+	return true
+}
+
+// SelectTab sets the active tab to idx, clamped into range. Used after a tab
+// close to land on a neighbor.
+func (w *TabbedWindow) SelectTab(idx int) {
+	w.activeTab.Store(int32(idx))
+	w.clampActiveTab()
+}
+
+// SelectLastTab selects the final tab. Used after a new tab is appended so the
+// freshly created tab becomes active (#930 PR 4).
+func (w *TabbedWindow) SelectLastTab() {
+	w.SelectTab(len(w.tabLabels()) - 1)
 }
 
 // tabLabels returns the labels for the current instance's tabs, always at least
@@ -158,22 +202,22 @@ func (w *TabbedWindow) ToggleBack() {
 // nil. Replaces the former UpdatePreview/UpdateTerminal split now that one pane
 // renders whichever tab is selected.
 func (w *TabbedWindow) UpdateContent(instance *session.Instance) error {
-	return w.tab.UpdateContent(instance, w.isAgentSlot())
+	return w.tab.UpdateContent(instance, int(w.activeTab.Load()))
 }
 
 // ResetToNormalMode resets the active tab's pane to normal (non-scroll) mode.
 func (w *TabbedWindow) ResetToNormalMode(instance *session.Instance) error {
-	return w.tab.ResetToNormalMode(instance, w.isAgentSlot())
+	return w.tab.ResetToNormalMode(instance, int(w.activeTab.Load()))
 }
 
 func (w *TabbedWindow) ScrollUp() {
-	if err := w.tab.ScrollUp(w.instance, w.isAgentSlot()); err != nil {
+	if err := w.tab.ScrollUp(w.instance, int(w.activeTab.Load())); err != nil {
 		log.InfoLog.Printf("tabbed window failed to scroll up: %v", err)
 	}
 }
 
 func (w *TabbedWindow) ScrollDown() {
-	if err := w.tab.ScrollDown(w.instance, w.isAgentSlot()); err != nil {
+	if err := w.tab.ScrollDown(w.instance, int(w.activeTab.Load())); err != nil {
 		log.InfoLog.Printf("tabbed window failed to scroll down: %v", err)
 	}
 }
@@ -200,7 +244,7 @@ func (w *TabbedWindow) GetActiveTab() int {
 // overlay is open (#716): the shell session belongs to this instance, so there
 // is no title-keyed cache to drift. Remote instances route to the terminal_cmd
 // hook (#843).
-func (w *TabbedWindow) AttachTerminalForInstance(instance *session.Instance) (chan struct{}, error) {
+func (w *TabbedWindow) AttachTerminalForInstance(instance *session.Instance, tabIdx int) (chan struct{}, error) {
 	if instance == nil {
 		return nil, fmt.Errorf("no terminal session to attach to")
 	}
@@ -210,7 +254,7 @@ func (w *TabbedWindow) AttachTerminalForInstance(instance *session.Instance) (ch
 		}
 		return instance.AttachRemoteTerminal()
 	}
-	return instance.AttachShellTab()
+	return instance.AttachTab(tabIdx)
 }
 
 // IsInScrollMode returns true if the active tab's pane is in scroll mode.

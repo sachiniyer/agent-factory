@@ -186,26 +186,28 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		}
 	}
 
-	// Promote the per-instance terminal into a real Shell tab (#930 PR 2). This
-	// is best-effort: a shell-tab failure leaves the instance fully usable with
-	// just the agent tab (the terminal tab renders a fallback), so it must not
-	// fail the whole start. Runs after the agent session is up so the shell tab
-	// can be a sibling of it (sharing tmux deps).
-	b.setupShellTab(i)
+	// Bring up the instance's non-agent tabs (#930 PR 2/4). This is best-effort:
+	// a tab failure leaves the instance fully usable with just the agent tab (the
+	// failed tab renders a fallback), so it must not fail the whole start. Runs
+	// after the agent session is up so each tab can be a sibling of it (sharing
+	// tmux deps).
+	b.setupTabs(i)
 
 	return nil
 }
 
-// setupShellTab ensures the instance has a live Shell tab. On a fresh start (or
-// a legacy restore that predates persisted tabs) it creates a $SHELL session as
-// a sibling of the agent session; on restore of a persisted shell tab it
-// reconnects to the exact tmux session by name so the terminal survives an
-// af/daemon restart.
-func (b *LocalBackend) setupShellTab(i *Instance) {
+// setupTabs brings up an instance's non-agent tabs after its agent session is
+// live. On restore it reconnects every persisted tab (shell and any later
+// process tabs) to its exact tmux session by name so they survive an af/daemon
+// restart, re-spawning in the worktree only if the tmux server died across a
+// reboot (Restore handles both). On a fresh start — or a legacy restore that
+// predates persisted tabs — when no live shell tab exists it creates the default
+// $SHELL tab as a sibling of the agent session.
+func (b *LocalBackend) setupTabs(i *Instance) {
 	i.mu.RLock()
 	agentTmux := i.tmuxLocked()
-	shell := i.shellTabLocked()
 	gw := i.gitWorktree
+	tabs := append([]*Tab(nil), i.Tabs...)
 	i.mu.RUnlock()
 
 	if agentTmux == nil || gw == nil {
@@ -216,12 +218,22 @@ func (b *LocalBackend) setupShellTab(i *Instance) {
 		return
 	}
 
-	// Restore a persisted shell session: reconnect, re-spawning in the worktree
-	// only if the tmux server died across a reboot (Restore handles both).
-	if shell != nil && shell.tmux != nil {
-		if err := shell.tmux.Restore(worktreePath); err != nil {
-			log.WarningLog.Printf("restore shell tab for %q failed: %v", i.Title, err)
+	// Reconnect every persisted non-agent tab that carries a session (Tabs[0] is
+	// the agent tab, already restored by Start). Track whether at least one live
+	// shell tab exists so we don't also create a duplicate default below.
+	hasLiveShell := false
+	for idx, tab := range tabs {
+		if idx == 0 || tab.tmux == nil {
+			continue
 		}
+		if err := tab.tmux.Restore(worktreePath); err != nil {
+			log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
+		}
+		if tab.Kind == TabKindShell {
+			hasLiveShell = true
+		}
+	}
+	if hasLiveShell {
 		return
 	}
 

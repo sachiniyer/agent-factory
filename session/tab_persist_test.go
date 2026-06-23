@@ -170,7 +170,7 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 	assert.Equal(t, TabKindShell, tabs[1].Kind)
 	assert.Equal(t, shellName, tabs[1].tmux.SanitizedName(),
 		"shell tab must reconnect to its exact persisted tmux session")
-	assert.True(t, restored.ShellTabAlive(),
+	assert.True(t, restored.TabAlive(1),
 		"the restored shell tab session must be live (reconnected) after restart")
 }
 
@@ -225,5 +225,5 @@ func TestRestartSurvival_BackCompatSynthesizesTabs(t *testing.T) {
 	assert.Equal(t, TabKindShell, tabs[1].Kind)
 	assert.Equal(t, shellName, tabs[1].tmux.SanitizedName(),
 		"shell tab must be created fresh with the derived __shell name")
-	assert.True(t, restored.ShellTabAlive(), "the synthesized shell tab must be live")
+	assert.True(t, restored.TabAlive(1), "the synthesized shell tab must be live")
 }

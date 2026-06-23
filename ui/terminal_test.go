@@ -132,7 +132,7 @@ func TestTabPaneShellUpdateContent(t *testing.T) {
 	p := NewTabPane()
 	p.SetSize(80, 30)
 
-	require.NoError(t, p.UpdateContent(inst, false))
+	require.NoError(t, p.UpdateContent(inst, 1))
 
 	p.mu.Lock()
 	require.False(t, p.content.fallback, "should not be in fallback after successful shell capture")
@@ -150,7 +150,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 	p.SetSize(80, 30)
 
 	t.Run("nil instance", func(t *testing.T) {
-		require.NoError(t, p.UpdateContent(nil, false))
+		require.NoError(t, p.UpdateContent(nil, 1))
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
 		require.Contains(t, p.content.text, "Select an instance")
@@ -163,7 +163,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		require.NoError(t, p.UpdateContent(inst, false))
+		require.NoError(t, p.UpdateContent(inst, 1))
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
 		require.Contains(t, p.content.text, "not started")
@@ -180,7 +180,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 		inst.SetBackend(session.NewFakeBackend())
 		inst.SetStatus(session.Deleting)
 
-		require.NoError(t, p.UpdateContent(inst, false))
+		require.NoError(t, p.UpdateContent(inst, 1))
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
 		require.Contains(t, p.content.text, "Tearing down session...")
@@ -207,14 +207,14 @@ func TestTabPaneShellScrolling(t *testing.T) {
 
 	require.False(t, p.IsScrolling(), "should not be scrolling initially")
 
-	require.NoError(t, p.ScrollUp(inst, false))
+	require.NoError(t, p.ScrollUp(inst, 1))
 	require.True(t, p.IsScrolling(), "ScrollUp should enter scroll mode")
 	require.NotEmpty(t, p.viewport.View(), "viewport should have content in scroll mode")
 
-	require.NoError(t, p.ScrollDown(inst, false))
+	require.NoError(t, p.ScrollDown(inst, 1))
 	require.True(t, p.IsScrolling(), "should still be scrolling after ScrollDown")
 
-	require.NoError(t, p.ResetToNormalMode(inst, false))
+	require.NoError(t, p.ResetToNormalMode(inst, 1))
 	require.False(t, p.IsScrolling(), "ResetToNormalMode should exit scroll mode")
 }
 
@@ -233,11 +233,11 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 	t.Run("nil instance", func(t *testing.T) {
 		p := NewTabPane()
 		p.SetSize(80, 30)
-		require.NoError(t, p.ScrollUp(prior, false))
+		require.NoError(t, p.ScrollUp(prior, 1))
 		require.True(t, p.IsScrolling(), "precondition: in scroll mode")
 		require.Contains(t, p.viewport.View(), priorContent)
 
-		require.NoError(t, p.UpdateContent(nil, false))
+		require.NoError(t, p.UpdateContent(nil, 1))
 
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
@@ -252,7 +252,7 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 	t.Run("not started instance", func(t *testing.T) {
 		p := NewTabPane()
 		p.SetSize(80, 30)
-		require.NoError(t, p.ScrollUp(prior, false))
+		require.NoError(t, p.ScrollUp(prior, 1))
 		require.True(t, p.IsScrolling())
 
 		notStarted, err := session.NewInstance(session.InstanceOptions{
@@ -260,7 +260,7 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		require.NoError(t, p.UpdateContent(notStarted, false))
+		require.NoError(t, p.UpdateContent(notStarted, 1))
 
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
@@ -293,10 +293,10 @@ func TestTabPaneShellScrollUsesSelectedView(t *testing.T) {
 	p.SetSize(80, 30)
 
 	// A is rendered first, so it becomes the current view.
-	require.NoError(t, p.UpdateContent(instA, false))
+	require.NoError(t, p.UpdateContent(instA, 1))
 
 	// User scrolls while B is the selected instance, before UpdateContent(B) ran.
-	require.NoError(t, p.ScrollUp(instB, false))
+	require.NoError(t, p.ScrollUp(instB, 1))
 	require.True(t, p.IsScrolling())
 	require.Contains(t, p.viewport.View(), contentB,
 		"scroll must capture the selected instance's (B) shell history")
@@ -304,7 +304,7 @@ func TestTabPaneShellScrollUsesSelectedView(t *testing.T) {
 		"scroll must not capture the previously rendered instance's (A) history (#746)")
 
 	// The scroll survives the next refresh for B.
-	require.NoError(t, p.UpdateContent(instB, false))
+	require.NoError(t, p.UpdateContent(instB, 1))
 	require.True(t, p.IsScrolling())
 	require.Contains(t, p.viewport.View(), contentB)
 }
@@ -324,11 +324,11 @@ func TestTabPaneSwitchTabResetsScroll(t *testing.T) {
 	p.SetSize(80, 30)
 
 	// Scroll on the agent slot.
-	require.NoError(t, p.ScrollUp(inst, true))
+	require.NoError(t, p.ScrollUp(inst, 0))
 	require.True(t, p.IsScrolling())
 
 	// Switch to the shell slot for the SAME instance: scroll must reset.
-	require.NoError(t, p.UpdateContent(inst, false))
+	require.NoError(t, p.UpdateContent(inst, 1))
 	require.False(t, p.IsScrolling(),
 		"switching tabs must drop the previous tab's scroll state")
 }
@@ -387,7 +387,7 @@ func TestTabPaneShellSessionGoneFallback(t *testing.T) {
 	p.SetSize(80, 30)
 
 	// Happy path: shell content renders.
-	require.NoError(t, p.UpdateContent(inst, false))
+	require.NoError(t, p.UpdateContent(inst, 1))
 	p.mu.Lock()
 	require.False(t, p.content.fallback)
 	require.Contains(t, p.content.text, "hello world")
@@ -401,7 +401,7 @@ func TestTabPaneShellSessionGoneFallback(t *testing.T) {
 
 	gone.Store(true)
 
-	require.NoError(t, p.UpdateContent(inst, false),
+	require.NoError(t, p.UpdateContent(inst, 1),
 		"a gone shell session must NOT bubble an error up to handleError (#496)")
 	p.mu.Lock()
 	require.True(t, p.content.fallback, "shell pane must enter a fallback when the session is gone")
@@ -420,7 +420,7 @@ func TestTabPaneRemoteFallbackStates(t *testing.T) {
 		inst := makeRemoteInstance(t, "remote-843-on", config.RemoteHooks{TerminalCmd: "/bin/true"})
 		p := NewTabPane()
 		p.SetSize(80, 30)
-		require.NoError(t, p.UpdateContent(inst, false))
+		require.NoError(t, p.UpdateContent(inst, 1))
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
 		p.mu.Unlock()
@@ -431,7 +431,7 @@ func TestTabPaneRemoteFallbackStates(t *testing.T) {
 		inst := makeRemoteInstance(t, "remote-843-off", config.RemoteHooks{})
 		p := NewTabPane()
 		p.SetSize(80, 30)
-		require.NoError(t, p.UpdateContent(inst, false))
+		require.NoError(t, p.UpdateContent(inst, 1))
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
 		require.Contains(t, p.content.text, "not available for remote sessions")
@@ -452,7 +452,7 @@ func TestTabbedWindowAttachTerminalRemote(t *testing.T) {
 
 	t.Run("not configured refuses with actionable error", func(t *testing.T) {
 		inst := makeRemoteInstance(t, "remote-843-noattach", config.RemoteHooks{})
-		_, err := tw.AttachTerminalForInstance(inst)
+		_, err := tw.AttachTerminalForInstance(inst, 1)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "terminal_cmd")
 	})
@@ -465,7 +465,7 @@ func TestTabbedWindowAttachTerminalRemote(t *testing.T) {
 			[]byte("#!/bin/sh\necho \"$1\" > \""+argsFile+"\"\n"), 0755))
 
 		inst := makeRemoteInstance(t, "remote-843-attach", config.RemoteHooks{TerminalCmd: script})
-		done, err := tw.AttachTerminalForInstance(inst)
+		done, err := tw.AttachTerminalForInstance(inst, 1)
 		require.NoError(t, err)
 		select {
 		case <-done:
@@ -489,7 +489,7 @@ func TestTabbedWindowAttachTerminalRefusesNil(t *testing.T) {
 
 	tw := NewTabbedWindow(NewTabPane())
 
-	_, err := tw.AttachTerminalForInstance(nil)
+	_, err := tw.AttachTerminalForInstance(nil, 1)
 	require.Error(t, err, "AttachTerminalForInstance(nil) must error, not attach")
 
 	inst, err := session.NewInstance(session.InstanceOptions{
@@ -498,6 +498,6 @@ func TestTabbedWindowAttachTerminalRefusesNil(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, inst.Started(), "precondition: instance must not be started")
 
-	_, err = tw.AttachTerminalForInstance(inst)
+	_, err = tw.AttachTerminalForInstance(inst, 1)
 	require.Error(t, err, "an instance with no live shell tab must refuse to attach")
 }

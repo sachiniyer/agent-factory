@@ -65,14 +65,15 @@ type TabPane struct {
 	isScrolling bool
 	viewport    viewport.Model
 
-	// currentInstance + currentAgentSlot identify the (instance, tab-slot) view
+	// currentInstance + currentTab identify the (instance, tab-index) view
 	// currently rendered. UpdateContent/ScrollUp/ScrollDown reset scroll-mode
 	// state when either changes so switching instances OR tabs while scrolling
 	// does not leave the viewport pinned on the previous view's content
-	// (#470/#702/#746). currentInstance is also used to resize the shell tab's
-	// detached session when the pane is resized.
-	currentInstance  *session.Instance
-	currentAgentSlot bool
+	// (#470/#702/#746). currentTab is the 0-based tab index (0 is the agent tab);
+	// it is also used to resize the active shell tab's detached session when the
+	// pane is resized.
+	currentInstance *session.Instance
+	currentTab      int
 }
 
 func NewTabPane() *TabPane {
@@ -96,11 +97,11 @@ func (p *TabPane) SetSize(width, maxHeight int) {
 	p.height = maxHeight
 	p.viewport.Width = width
 	p.viewport.Height = maxHeight
-	// Keep the detached shell session sized to the pane so its capture matches
-	// what the agent preview shows (the old TerminalPane.SetSize behavior,
-	// generalized onto the Instance).
-	if p.currentInstance != nil && !p.currentAgentSlot {
-		_ = p.currentInstance.SetShellTabDetachedSize(width, maxHeight)
+	// Keep the active shell tab's detached session sized to the pane so its
+	// capture matches what the agent preview shows (the old TerminalPane.SetSize
+	// behavior, generalized onto the Instance's tab index).
+	if p.currentInstance != nil && p.currentTab != 0 {
+		_ = p.currentInstance.SetTabDetachedSize(p.currentTab, width, maxHeight)
 	}
 }
 
@@ -114,15 +115,15 @@ func (p *TabPane) SetSize(width, maxHeight int) {
 // this guard a scroll would scroll the previous view's stale viewport instead
 // of resetting scroll mode (#702/#746). Consolidating the reset here keeps the
 // entry points consistent (the #669 motivation).
-func (p *TabPane) dropStaleView(instance *session.Instance, isAgentSlot bool) {
-	if instance != p.currentInstance || isAgentSlot != p.currentAgentSlot {
+func (p *TabPane) dropStaleView(instance *session.Instance, activeTab int) {
+	if instance != p.currentInstance || activeTab != p.currentTab {
 		if p.isScrolling {
 			p.isScrolling = false
 			p.viewport.SetContent("")
 			p.viewport.GotoTop()
 		}
 		p.currentInstance = instance
-		p.currentAgentSlot = isAgentSlot
+		p.currentTab = activeTab
 	}
 }
 
@@ -144,18 +145,19 @@ func (p *TabPane) setFallbackState(message string) {
 }
 
 // UpdateContent captures the selected tab's content. Safe to call from a
-// goroutine — it serialises against String() via p.mu (#579). isAgentSlot is
-// true when the selected tab is the agent tab (index 0): it selects the capture
-// source (backend preview vs the shell tab's tmux) and the fallback copy, so the
-// merged pane reproduces the old PreviewPane and TerminalPane behaviors exactly.
-func (p *TabPane) UpdateContent(instance *session.Instance, isAgentSlot bool) error {
+// goroutine — it serialises against String() via p.mu (#579). activeTab is the
+// 0-based selected tab index: index 0 is the agent tab (captured via the backend
+// preview), any other index is a shell/process tab captured straight from that
+// tab's tmux session. The slot selects the capture source and the fallback copy,
+// so the merged pane reproduces the old PreviewPane and TerminalPane behaviors.
+func (p *TabPane) UpdateContent(instance *session.Instance, activeTab int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.dropStaleView(instance, isAgentSlot)
-	if isAgentSlot {
+	p.dropStaleView(instance, activeTab)
+	if activeTab == 0 {
 		return p.updateAgentLocked(instance)
 	}
-	return p.updateShellLocked(instance)
+	return p.updateShellLocked(instance, activeTab)
 }
 
 // updateAgentLocked reproduces the former PreviewPane.UpdateContent. Caller
@@ -223,9 +225,9 @@ func (p *TabPane) updateAgentLocked(instance *session.Instance) error {
 	return nil
 }
 
-// updateShellLocked reproduces the former TerminalPane.UpdateContent. Caller
-// must hold p.mu.
-func (p *TabPane) updateShellLocked(instance *session.Instance) error {
+// updateShellLocked reproduces the former TerminalPane.UpdateContent for the
+// shell/process tab at activeTab. Caller must hold p.mu.
+func (p *TabPane) updateShellLocked(instance *session.Instance, activeTab int) error {
 	if instance == nil {
 		p.setFallbackState("Select an instance to open a terminal")
 		return nil
@@ -260,15 +262,15 @@ func (p *TabPane) updateShellLocked(instance *session.Instance) error {
 		return nil
 	}
 
-	// The shell tab session is owned by the Instance and created at start. If it
-	// is not alive, show a fallback rather than leaving the previous view's
-	// content on screen (#747, generalized to the persisted shell tab).
-	if !instance.ShellTabAlive() {
+	// The tab's session is owned by the Instance and created at start (or by the
+	// new-tab hotkey). If it is not alive, show a fallback rather than leaving the
+	// previous view's content on screen (#747, generalized to the persisted tab).
+	if !instance.TabAlive(activeTab) {
 		p.setFallbackState("Terminal session not available.")
 		return nil
 	}
 
-	content, err := instance.PreviewShellTab()
+	content, err := instance.PreviewTab(activeTab)
 	if err != nil {
 		// The alive pre-check above can race an external kill: fall through to a
 		// fallback instead of propagating an error logged at ERROR (#496).
@@ -326,7 +328,7 @@ func (p *TabPane) String() string {
 }
 
 // ScrollUp enters scroll mode (if not already) and scrolls up.
-func (p *TabPane) ScrollUp(instance *session.Instance, isAgentSlot bool) error {
+func (p *TabPane) ScrollUp(instance *session.Instance, activeTab int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if instance == nil {
@@ -334,9 +336,9 @@ func (p *TabPane) ScrollUp(instance *session.Instance, isAgentSlot bool) error {
 	}
 	// Reset scroll mode if the view changed out from under us, so we capture the
 	// newly selected view's content rather than scrolling stale content (#702).
-	p.dropStaleView(instance, isAgentSlot)
+	p.dropStaleView(instance, activeTab)
 	if !p.isScrolling {
-		if err := p.enterScrollModeLocked(instance, isAgentSlot); err != nil {
+		if err := p.enterScrollModeLocked(instance, activeTab); err != nil {
 			return err
 		}
 		return nil
@@ -346,15 +348,15 @@ func (p *TabPane) ScrollUp(instance *session.Instance, isAgentSlot bool) error {
 }
 
 // ScrollDown enters scroll mode (if not already) and scrolls down.
-func (p *TabPane) ScrollDown(instance *session.Instance, isAgentSlot bool) error {
+func (p *TabPane) ScrollDown(instance *session.Instance, activeTab int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if instance == nil {
 		return nil
 	}
-	p.dropStaleView(instance, isAgentSlot)
+	p.dropStaleView(instance, activeTab)
 	if !p.isScrolling {
-		if err := p.enterScrollModeLocked(instance, isAgentSlot); err != nil {
+		if err := p.enterScrollModeLocked(instance, activeTab); err != nil {
 			return err
 		}
 		return nil
@@ -365,22 +367,22 @@ func (p *TabPane) ScrollDown(instance *session.Instance, isAgentSlot bool) error
 
 // enterScrollModeLocked captures the selected view's full scrollback and enters
 // scroll mode. Caller must hold p.mu. Capture is keyed off the passed instance
-// + slot, never a cached title, so the wrong view can never be captured
+// + tab index, never a cached title, so the wrong view can never be captured
 // (#746/#384).
-func (p *TabPane) enterScrollModeLocked(instance *session.Instance, isAgentSlot bool) error {
+func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab int) error {
 	var content string
 	var err error
-	if isAgentSlot {
+	if activeTab == 0 {
 		content, err = instance.PreviewFullHistory()
 	} else {
-		if !instance.ShellTabAlive() {
+		if !instance.TabAlive(activeTab) {
 			return nil
 		}
-		content, err = instance.PreviewShellTabFullHistory()
+		content, err = instance.PreviewTabFullHistory(activeTab)
 	}
 	if err != nil {
 		if errors.Is(err, tmux.ErrSessionGone) {
-			if isAgentSlot {
+			if activeTab == 0 {
 				p.setFallbackState("Session no longer running.")
 			} else {
 				p.setFallbackState("Terminal session no longer running.")
@@ -397,7 +399,7 @@ func (p *TabPane) enterScrollModeLocked(instance *session.Instance, isAgentSlot 
 }
 
 // ResetToNormalMode exits scroll mode and returns to normal content display.
-func (p *TabPane) ResetToNormalMode(instance *session.Instance, isAgentSlot bool) error {
+func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Always clear scroll state first so pressing ESC while no instance is
@@ -414,9 +416,9 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, isAgentSlot bool
 		return nil
 	}
 
-	// The shell slot simply returns to live capture on the next refresh — no
-	// re-capture here (the former TerminalPane.ResetToNormalMode behavior).
-	if !isAgentSlot {
+	// A shell/process slot simply returns to live capture on the next refresh —
+	// no re-capture here (the former TerminalPane.ResetToNormalMode behavior).
+	if activeTab != 0 {
 		return nil
 	}
 

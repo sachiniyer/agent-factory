@@ -130,69 +130,176 @@ func (i *Instance) GetTabs() []*Tab {
 	return out
 }
 
-// PreviewShellTab captures the detached content of the instance's shell tab.
-// Returns ("", nil) when the instance is not started or has no live shell tab
-// session, and tmux.ErrSessionGone when the session vanished — mirroring
-// Instance.Preview for the agent tab so the UI can degrade gracefully.
-func (i *Instance) PreviewShellTab() (string, error) {
-	i.mu.RLock()
-	started := i.started
-	tab := i.shellTabLocked()
-	i.mu.RUnlock()
-	if !started || tab == nil || tab.tmux == nil {
-		return "", nil
-	}
-	return tab.tmux.CapturePaneContent()
-}
-
-// PreviewShellTabFullHistory captures the shell tab's full scrollback, used
-// when entering scroll mode. Same nil/started guards as PreviewShellTab.
-func (i *Instance) PreviewShellTabFullHistory() (string, error) {
-	i.mu.RLock()
-	started := i.started
-	tab := i.shellTabLocked()
-	i.mu.RUnlock()
-	if !started || tab == nil || tab.tmux == nil {
-		return "", nil
-	}
-	return tab.tmux.CapturePaneContentWithOptions("-", "-")
-}
-
-// ShellTabAlive reports whether the instance has a live shell tab tmux session.
-func (i *Instance) ShellTabAlive() bool {
-	i.mu.RLock()
-	tab := i.shellTabLocked()
-	i.mu.RUnlock()
-	return tab != nil && tab.tmux != nil && tab.tmux.DoesSessionExist()
-}
-
-// AttachShellTab attaches (interactive PTY) to the instance's shell tab. The
-// captured-instance semantics that protect deferred attach flows from selection
-// drift (#716) are inherent here: the shell session belongs to this instance,
-// so there is no title-keyed cache to drift.
-func (i *Instance) AttachShellTab() (chan struct{}, error) {
-	i.mu.RLock()
-	tab := i.shellTabLocked()
-	i.mu.RUnlock()
-	if tab == nil || tab.tmux == nil {
-		return nil, fmt.Errorf("no terminal session to attach to")
-	}
-	if !tab.tmux.DoesSessionExist() {
-		return nil, fmt.Errorf("terminal session does not exist")
-	}
-	return tab.tmux.Attach()
-}
-
-// SetShellTabDetachedSize resizes the detached shell tab session so its capture
-// matches the pane dimensions. A no-op when there is no live shell tab.
-func (i *Instance) SetShellTabDetachedSize(width, height int) error {
-	i.mu.RLock()
-	tab := i.shellTabLocked()
-	i.mu.RUnlock()
-	if tab == nil || tab.tmux == nil {
+// tabTmuxAtLocked returns the tmux session of the tab at idx, or nil when idx
+// is out of range or the tab has no session. Callers must hold i.mu.
+func (i *Instance) tabTmuxAtLocked(idx int) *tmux.TmuxSession {
+	if idx < 0 || idx >= len(i.Tabs) {
 		return nil
 	}
-	return tab.tmux.SetDetachedSize(width, height)
+	return i.Tabs[idx].tmux
+}
+
+// PreviewTab captures the detached content of the tab at idx. Returns ("", nil)
+// when the instance is not started or the tab has no live session, and
+// tmux.ErrSessionGone when the session vanished — mirroring Instance.Preview for
+// the agent tab so the UI can degrade gracefully. idx is the same 0-based index
+// the UI tab bar uses (0 is the agent tab; 1+ are shell/process tabs).
+func (i *Instance) PreviewTab(idx int) (string, error) {
+	i.mu.RLock()
+	started := i.started
+	ts := i.tabTmuxAtLocked(idx)
+	i.mu.RUnlock()
+	if !started || ts == nil {
+		return "", nil
+	}
+	return ts.CapturePaneContent()
+}
+
+// PreviewTabFullHistory captures the full scrollback of the tab at idx, used
+// when entering scroll mode. Same nil/started guards as PreviewTab.
+func (i *Instance) PreviewTabFullHistory(idx int) (string, error) {
+	i.mu.RLock()
+	started := i.started
+	ts := i.tabTmuxAtLocked(idx)
+	i.mu.RUnlock()
+	if !started || ts == nil {
+		return "", nil
+	}
+	return ts.CapturePaneContentWithOptions("-", "-")
+}
+
+// TabAlive reports whether the tab at idx has a live tmux session.
+func (i *Instance) TabAlive(idx int) bool {
+	i.mu.RLock()
+	ts := i.tabTmuxAtLocked(idx)
+	i.mu.RUnlock()
+	return ts != nil && ts.DoesSessionExist()
+}
+
+// AttachTab attaches (interactive PTY) to the tab at idx. The captured-instance
+// semantics that protect deferred attach flows from selection drift (#716) are
+// inherent here: the tab's session belongs to this instance, so there is no
+// title-keyed cache to drift.
+func (i *Instance) AttachTab(idx int) (chan struct{}, error) {
+	i.mu.RLock()
+	ts := i.tabTmuxAtLocked(idx)
+	i.mu.RUnlock()
+	if ts == nil {
+		return nil, fmt.Errorf("no terminal session to attach to")
+	}
+	if !ts.DoesSessionExist() {
+		return nil, fmt.Errorf("terminal session does not exist")
+	}
+	return ts.Attach()
+}
+
+// SetTabDetachedSize resizes the detached session of the tab at idx so its
+// capture matches the pane dimensions. A no-op when the tab has no live session.
+func (i *Instance) SetTabDetachedSize(idx, width, height int) error {
+	i.mu.RLock()
+	ts := i.tabTmuxAtLocked(idx)
+	i.mu.RUnlock()
+	if ts == nil {
+		return nil
+	}
+	return ts.SetDetachedSize(width, height)
+}
+
+// TabCount returns the number of tabs the instance currently holds.
+func (i *Instance) TabCount() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return len(i.Tabs)
+}
+
+// AddShellTab spawns a new Shell-kind tab running $SHELL in the instance's
+// worktree, appends it to Tabs, and returns it. Local instances only — remote
+// instances have no local worktree, so callers must reject IsRemote() before
+// calling. The new tab's display name is unique within the instance ("shell",
+// then "shell-2", "shell-3", …) and its tmux session name is derived from it so
+// it is collision-free and restorable by exact name across a restart (#930 PR
+// 4). Errors when the instance is not started, has no agent session/worktree, or
+// already holds maxTabs tabs.
+func (i *Instance) AddShellTab() (*Tab, error) {
+	i.mu.RLock()
+	started := i.started
+	agentTmux := i.tmuxLocked()
+	gw := i.gitWorktree
+	displayName := uniqueShellName(i.Tabs)
+	nTabs := len(i.Tabs)
+	i.mu.RUnlock()
+
+	if !started || agentTmux == nil || gw == nil {
+		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
+	}
+	if nTabs >= maxTabs {
+		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
+	}
+	worktreePath := gw.GetWorktreePath()
+	if worktreePath == "" {
+		return nil, fmt.Errorf("cannot add a tab without a worktree")
+	}
+
+	// Spawn outside the lock: Start shells out to `tmux new-session` and polls
+	// for the session to appear, which must not block other readers of i.mu. The
+	// tmux name is derived from the agent session + the unique display name so it
+	// is collision-free and restorable by exact name.
+	tmuxName := agentTmux.SanitizedName() + "__" + displayName
+	shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
+	if err := shellTmux.Start(worktreePath); err != nil {
+		return nil, fmt.Errorf("failed to start shell tab: %w", err)
+	}
+
+	tab := newShellTab(shellTmux)
+	tab.Name = displayName
+	i.mu.Lock()
+	i.Tabs = append(i.Tabs, tab)
+	i.mu.Unlock()
+	return tab, nil
+}
+
+// CloseTab kills the tab at idx and removes it from Tabs. The agent tab (idx 0)
+// is unclosable; CloseTab errors on idx 0 or any out-of-range index. The tab is
+// removed from Tabs regardless of whether the tmux teardown succeeds (best-
+// effort, matching LocalBackend.Kill) so a broken session can't wedge the tab
+// list. Unlike Kill this does not wait for the pane to exit: the worktree is not
+// being removed, so there is no #802 delete race to guard against.
+func (i *Instance) CloseTab(idx int) error {
+	i.mu.Lock()
+	if idx <= 0 || idx >= len(i.Tabs) {
+		i.mu.Unlock()
+		return fmt.Errorf("tab cannot be closed")
+	}
+	tab := i.Tabs[idx]
+	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
+	i.mu.Unlock()
+
+	if tab.tmux == nil {
+		return nil
+	}
+	if err := tab.tmux.Close(); err != nil {
+		return fmt.Errorf("failed to close tab %q: %w", tab.Name, err)
+	}
+	return nil
+}
+
+// uniqueShellName returns a shell-tab display name not already used by any tab
+// in tabs: "shell", then "shell-2", "shell-3", … Names are unique per instance
+// so each tab's derived tmux session name is collision-free.
+func uniqueShellName(tabs []*Tab) string {
+	used := make(map[string]bool, len(tabs))
+	for _, t := range tabs {
+		used[t.Name] = true
+	}
+	if !used[shellTabName] {
+		return shellTabName
+	}
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s-%d", shellTabName, n)
+		if !used[candidate] {
+			return candidate
+		}
+	}
 }
 
 // setTmuxLocked stores ts as the agent tab's tmux session, materializing the

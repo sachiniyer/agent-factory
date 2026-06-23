@@ -238,7 +238,7 @@ func TestPreviewScrolling(t *testing.T) {
 	previewPane.SetSize(80, 30) // Set reasonable size for testing
 
 	// Step 1: Check initial content - should show normal preview mode
-	err = previewPane.UpdateContent(setup.instance, true)
+	err = previewPane.UpdateContent(setup.instance, 0)
 	require.NoError(t, err)
 
 	// Verify we're not in scrolling mode initially
@@ -253,7 +253,7 @@ func TestPreviewScrolling(t *testing.T) {
 	require.Contains(t, fullHistory, "1", "Full history should contain earliest output")
 
 	// Step 3: Enter scroll mode
-	err = previewPane.ScrollUp(setup.instance, true)
+	err = previewPane.ScrollUp(setup.instance, 0)
 	require.NoError(t, err)
 
 	// Verify we entered scrolling mode
@@ -268,7 +268,7 @@ func TestPreviewScrolling(t *testing.T) {
 
 	// Step 5: Scroll up multiple times to get to the top
 	for range 50 {
-		err = previewPane.ScrollUp(setup.instance, true)
+		err = previewPane.ScrollUp(setup.instance, 0)
 		require.NoError(t, err)
 	}
 
@@ -278,7 +278,7 @@ func TestPreviewScrolling(t *testing.T) {
 
 	// Step 6: Scroll down multiple times
 	for range 25 {
-		err = previewPane.ScrollDown(setup.instance, true)
+		err = previewPane.ScrollDown(setup.instance, 0)
 		require.NoError(t, err)
 	}
 
@@ -287,7 +287,7 @@ func TestPreviewScrolling(t *testing.T) {
 	t.Logf("Viewport after scrolling down: %q", viewportAfterScrollDown)
 
 	// Step 7: Reset to normal mode
-	err = previewPane.ResetToNormalMode(setup.instance, true)
+	err = previewPane.ResetToNormalMode(setup.instance, 0)
 	require.NoError(t, err)
 
 	// Verify we exited scrolling mode
@@ -372,7 +372,7 @@ func TestPreviewContentWithoutScrolling(t *testing.T) {
 	previewPane.SetSize(80, 30) // Set reasonable size for testing
 
 	// Update the preview content (this should display the content without scrolling)
-	err := previewPane.UpdateContent(setup.instance, true)
+	err := previewPane.UpdateContent(setup.instance, 0)
 	require.NoError(t, err)
 
 	// Verify we're not in scrolling mode
@@ -515,7 +515,7 @@ func TestPreviewResetToNormalModeNilInstance(t *testing.T) {
 		"precondition: viewport should hold stale content")
 
 	// Calling ResetToNormalMode with nil must still clear scroll state.
-	err := p.ResetToNormalMode(nil, true)
+	err := p.ResetToNormalMode(nil, 0)
 	require.NoError(t, err)
 
 	require.False(t, p.isScrolling,
@@ -547,14 +547,14 @@ func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
 
 	p := NewTabPane()
 	p.SetSize(80, 30)
-	require.NoError(t, p.UpdateContent(inst, true))
+	require.NoError(t, p.UpdateContent(inst, 0))
 	require.True(t, p.content.fallback,
 		"precondition: Loading instance shows the fallback in normal mode")
 
-	require.NoError(t, p.ScrollUp(inst, true))
+	require.NoError(t, p.ScrollUp(inst, 0))
 	require.True(t, p.isScrolling, "precondition: ScrollUp enters scroll mode")
 
-	require.NoError(t, p.ResetToNormalMode(inst, true))
+	require.NoError(t, p.ResetToNormalMode(inst, 0))
 	require.False(t, p.isScrolling,
 		"isScrolling must be false after ResetToNormalMode")
 	require.True(t, p.content.fallback,
@@ -593,7 +593,7 @@ func TestPreviewUpdateContentDeletingShowsTeardownFallback(t *testing.T) {
 
 	p := NewTabPane()
 	p.SetSize(80, 30)
-	require.NoError(t, p.UpdateContent(inst, true))
+	require.NoError(t, p.UpdateContent(inst, 0))
 
 	require.True(t, p.content.fallback,
 		"Deleting instance must render a fallback")
@@ -833,7 +833,7 @@ func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
 	p.SetSize(80, 30)
 
 	// Happy path first: session alive, normal content renders.
-	require.NoError(t, p.UpdateContent(setup.instance, true))
+	require.NoError(t, p.UpdateContent(setup.instance, 0))
 	require.False(t, p.content.fallback,
 		"happy path must not render fallback")
 	require.Contains(t, p.content.text, "hello world")
@@ -847,7 +847,7 @@ func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
 
 	sessionGone.Store(true)
 
-	err := p.UpdateContent(setup.instance, true)
+	err := p.UpdateContent(setup.instance, 0)
 	require.NoError(t, err,
 		"dead session must NOT bubble an error up to handleError")
 	require.True(t, p.content.fallback,
@@ -914,7 +914,7 @@ func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 	// (our mock returns expectedContent) and must clear the stale fallback
 	// flag at the same time, otherwise String() would render the captured
 	// terminal output with centered fallback styling.
-	require.NoError(t, p.ResetToNormalMode(setup.instance, true))
+	require.NoError(t, p.ResetToNormalMode(setup.instance, 0))
 
 	require.False(t, p.isScrolling, "should exit scroll mode")
 	require.Equal(t, expectedContent, p.content.text,
@@ -949,18 +949,18 @@ func TestPreviewSwitchInstanceResetsScroll(t *testing.T) {
 	p.SetSize(80, 30)
 
 	// Render A normally, then enter scroll mode on A.
-	require.NoError(t, p.UpdateContent(instA, true))
-	require.NoError(t, p.ScrollUp(instA, true))
+	require.NoError(t, p.UpdateContent(instA, 0))
+	require.NoError(t, p.ScrollUp(instA, 0))
 	require.True(t, p.isScrolling, "should be scrolling after ScrollUp on A")
 
 	// Re-render the SAME instance while scrolling: scroll state must
 	// survive (this is the original behavior the #470 fix must not break).
-	require.NoError(t, p.UpdateContent(instA, true))
+	require.NoError(t, p.UpdateContent(instA, 0))
 	require.True(t, p.isScrolling,
 		"re-rendering the same instance must preserve scroll mode")
 
 	// Now switch to B. Scroll state must be cleared and B's content rendered.
-	require.NoError(t, p.UpdateContent(instB, true))
+	require.NoError(t, p.UpdateContent(instB, 0))
 	require.False(t, p.isScrolling,
 		"switching to a different instance must exit scroll mode")
 	require.False(t, p.content.fallback,
@@ -989,7 +989,7 @@ func TestScrollMouseDifferentInstanceResetsScrollMode(t *testing.T) {
 	p.SetSize(80, 30)
 
 	// Enter scroll mode on A via the mouse path (no prior UpdateContent).
-	require.NoError(t, p.ScrollUp(instA, true))
+	require.NoError(t, p.ScrollUp(instA, 0))
 	require.True(t, p.isScrolling, "should be scrolling A after ScrollUp(A)")
 	require.Contains(t, p.viewport.View(), previewA,
 		"precondition: viewport should hold A's captured content")
@@ -997,7 +997,7 @@ func TestScrollMouseDifferentInstanceResetsScrollMode(t *testing.T) {
 	// Selection switches to B, but UpdateContent(B) has not run yet. A
 	// wheel-up arrives for B. Before the fix this scrolled A's stale viewport;
 	// now it must drop scroll state and re-capture B's content.
-	require.NoError(t, p.ScrollUp(instB, true))
+	require.NoError(t, p.ScrollUp(instB, 0))
 	require.True(t, p.isScrolling,
 		"should re-enter scroll mode for B after the switch")
 	require.Contains(t, p.viewport.View(), previewB,
@@ -1006,7 +1006,7 @@ func TestScrollMouseDifferentInstanceResetsScrollMode(t *testing.T) {
 		"stale viewport content from A must be cleared on the scroll path")
 
 	// The same must hold for the ScrollDown entry point.
-	require.NoError(t, p.ScrollDown(instA, true))
+	require.NoError(t, p.ScrollDown(instA, 0))
 	require.Contains(t, p.viewport.View(), previewA,
 		"ScrollDown on a switched-to instance must re-capture its content")
 	require.NotContains(t, p.viewport.View(), previewB,

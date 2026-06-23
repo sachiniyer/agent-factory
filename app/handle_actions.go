@@ -124,6 +124,12 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		}
 		return m, nil
 
+	// Tab lifecycle (instance mode only)
+	case keys.KeyNewTab:
+		return m.handleNewTab()
+	case keys.KeyCloseTab:
+		return m.handleCloseTab()
+
 	// Instance actions
 	case keys.KeyKill:
 		return m.handleKill()
@@ -303,9 +309,14 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 			// remote-ness, exactly like the sidebar path below: a remote
 			// terminal_cmd detach needs the #845/#848 full reset + reassert,
 			// or the TUI keeps rendering on the main screen (#889).
+			// Capture the active tab index at Enter-press time alongside the
+			// instance (#716): a background refresh could otherwise drift the
+			// selection — or the user could change tabs while the help overlay is
+			// open — before the deferred attach callback runs.
+			activeTab := tw.GetActiveTab()
 			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 				return attachOverlayCallbackFn(m, "handleEnter-terminal", "", selected.IsRemote(), func() (chan struct{}, error) {
-					return tw.AttachTerminalForInstance(selected)
+					return tw.AttachTerminalForInstance(selected, activeTab)
 				})
 			})
 		}
@@ -316,6 +327,84 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		})
 	}
 	return m, nil
+}
+
+// handleNewTab spawns a new shell tab in the selected instance and selects it
+// (#930 PR 4). Single keypress, no prompt: the tab runs $SHELL in the instance's
+// worktree. Remote instances have no local worktree, so new-tab is unsupported
+// there and surfaces the same "not available for remote" guidance as the remote
+// terminal tab. The soft cap (max 9 tabs) is enforced by Instance.AddShellTab,
+// whose error is surfaced verbatim. The grown tab list is persisted so the new
+// tab survives a restart (Sachin's #930 requirement).
+func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
+	if m.contentPane.GetMode() != ui.ContentModeInstance {
+		return m, nil
+	}
+	selected := m.sidebar.GetSelectedInstance()
+	if selected == nil {
+		return m, nil
+	}
+	if status := selected.GetStatus(); status == session.Loading || status == session.Deleting {
+		return m, nil
+	}
+	if selected.IsRemote() {
+		return m, m.handleError(fmt.Errorf("new tabs are not available for remote sessions"))
+	}
+	if _, err := selected.AddShellTab(); err != nil {
+		return m, m.handleError(err)
+	}
+	tw := m.contentPane.TabbedWindow()
+	tw.SelectLastTab()
+	m.menu.SetActiveTab(tw.GetActiveTab())
+	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
+		log.ErrorLog.Printf("failed to persist new tab: %v", err)
+	}
+	return m, m.selectionChanged()
+}
+
+// handleCloseTab closes the active tab of the selected instance and selects the
+// previous (left) tab (#930 PR 4). The agent tab (index 0) is unclosable — w on
+// it is a gentle no-op message pointing at D for killing the whole session.
+// Remote instances carry only the synthetic agent/terminal slots, neither of
+// which is a real closable Tab. The shrunk tab list is persisted.
+func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
+	if m.contentPane.GetMode() != ui.ContentModeInstance {
+		return m, nil
+	}
+	selected := m.sidebar.GetSelectedInstance()
+	if selected == nil {
+		return m, nil
+	}
+	tw := m.contentPane.TabbedWindow()
+	idx := tw.GetActiveTab()
+	if idx <= 0 {
+		return m, m.handleError(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
+	}
+	if selected.IsRemote() {
+		return m, m.handleError(fmt.Errorf("remote session tabs can't be closed"))
+	}
+	if err := selected.CloseTab(idx); err != nil {
+		return m, m.handleError(err)
+	}
+	// Prefer the left/previous neighbor; SelectTab clamps so this is always in
+	// range (idx >= 1, so idx-1 >= 0).
+	tw.SelectTab(idx - 1)
+	m.menu.SetActiveTab(tw.GetActiveTab())
+	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
+		log.ErrorLog.Printf("failed to persist tab close: %v", err)
+	}
+	return m, m.selectionChanged()
+}
+
+// handleTabJump jumps the tabbed window to a 1-based tab number (the 1-9 number
+// keys). Out-of-range numbers are a no-op (#930 PR 4).
+func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
+	tw := m.contentPane.TabbedWindow()
+	if !tw.JumpToTab(oneBased - 1) {
+		return m, nil
+	}
+	m.menu.SetActiveTab(tw.GetActiveTab())
+	return m, m.selectionChanged()
 }
 
 // handleOpenPR opens the PR URL in the browser.

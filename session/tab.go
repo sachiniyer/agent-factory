@@ -15,6 +15,11 @@ const shellTabName = "shell"
 // exact name across a restart.
 const shellTmuxSuffix = "__shell"
 
+// maxTabs is the soft cap on tabs per instance (#930 PR 4). It matches the 1-9
+// number-key jump range: a session can hold the agent tab plus up to eight
+// shell/process tabs, all reachable by a single number key.
+const maxTabs = 9
+
 // TabKind enumerates the kinds of process a Tab can host within an instance's
 // worktree. PR 1 of the #930 ephemeral-tabs epic only materializes the Agent
 // kind (the single per-instance agent session); Shell and Process are defined
