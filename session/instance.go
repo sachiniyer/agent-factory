@@ -259,6 +259,15 @@ func (i *Instance) ToInstanceData() InstanceData {
 	// Only include worktree data if gitWorktree is initialized
 	if i.gitWorktree != nil {
 		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
+		// ExternalWorktree is legacy back-compat (#930 PR 3): the create-on-
+		// existing-worktree feature that set it true was removed, so new
+		// instances always serialize false here. We still write/read whatever
+		// the worktree reports so pre-existing instances created by the old
+		// feature keep externalWorktree=true and Cleanup() keeps skipping
+		// their user-owned worktree+branch. A future PR drops the field once
+		// no persisted instance carries it. (BranchCreatedByUs is NOT legacy —
+		// it still flips false on the normal path when Setup reuses an existing
+		// branch; see git/worktree_ops.go setupFromExistingBranch.)
 		data.Worktree = GitWorktreeData{
 			RepoPath:          i.gitWorktree.GetRepoPath(),
 			WorktreePath:      i.gitWorktree.GetWorktreePath(),
@@ -572,42 +581,6 @@ func (i *Instance) GetTitle() string {
 // firstTimeSetup is true if this is a new instance. Otherwise, it's one loaded from storage.
 func (i *Instance) Start(firstTimeSetup bool) error {
 	return i.backend.Start(i, firstTimeSetup)
-}
-
-// StartWithExistingWorktree starts the instance using an existing worktree
-// instead of creating a new one. The worktree and branch are not deleted on kill.
-func (i *Instance) StartWithExistingWorktree(worktreePath, branchName string) error {
-	if i.Title == "" {
-		return fmt.Errorf("instance title cannot be empty")
-	}
-
-	gitWorktree, err := git.NewGitWorktreeFromExistingWorktree(i.Path, worktreePath, branchName)
-	if err != nil {
-		return fmt.Errorf("failed to create git worktree reference: %w", err)
-	}
-
-	i.mu.Lock()
-	i.gitWorktree = gitWorktree
-	i.Branch = branchName
-	i.mu.Unlock()
-
-	program := injectSystemPrompt(i.Program, resolveProgramForInstance(i), i.Title, worktreePath)
-	tmuxSession := tmux.NewTmuxSessionForRepo(i.Title, i.Path, program)
-
-	i.mu.Lock()
-	i.setTmuxLocked(tmuxSession)
-	i.mu.Unlock()
-
-	// Start is I/O; do not hold the lock.
-	if err := tmuxSession.Start(worktreePath); err != nil {
-		return fmt.Errorf("failed to start tmux session: %w", err)
-	}
-
-	i.mu.Lock()
-	i.started = true
-	i.mu.Unlock()
-
-	return nil
 }
 
 // Kill terminates the instance and cleans up all resources

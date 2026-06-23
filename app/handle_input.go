@@ -26,8 +26,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateDefault
 		m.namingInstance = nil
-		m.selectedWorktree = nil
-		m.availableWorktrees = nil
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -80,9 +78,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
 
-		selectedWt := m.selectedWorktree
-		m.selectedWorktree = nil
-		m.availableWorktrees = nil
 		startCmd := func() tea.Msg {
 			req := sessionStartRequest{
 				Title:       instance.Title,
@@ -90,10 +85,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				Program:     instance.Program,
 				AutoYes:     m.autoYes,
 				ForceRemote: instance.IsRemote(),
-			}
-			if selectedWt != nil {
-				req.ExistingWorktreePath = selectedWt.Path
-				req.ExistingWorktreeBranch = selectedWt.Branch
 			}
 			started, err := startSessionThroughDaemon(instance, req)
 			return instanceStartedMsg{
@@ -151,8 +142,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.namingInstance = nil
 		m.state = stateDefault
-		m.selectedWorktree = nil
-		m.availableWorktrees = nil
 		cmd := m.selectionChanged()
 
 		// Menu.SetState rebuilds the options slice; call it synchronously

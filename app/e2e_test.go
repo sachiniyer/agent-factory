@@ -97,13 +97,7 @@ func installDirectSessionStarter(t *testing.T) {
 			}
 		}
 		inst.Program = req.Program
-		var err error
-		if req.ExistingWorktreePath != "" {
-			err = inst.StartWithExistingWorktree(req.ExistingWorktreePath, req.ExistingWorktreeBranch)
-		} else {
-			err = inst.Start(true)
-		}
-		if err != nil {
+		if err := inst.Start(true); err != nil {
 			return nil, err
 		}
 		if req.Prompt != "" {

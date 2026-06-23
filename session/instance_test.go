@@ -97,7 +97,7 @@ func TestGetGitWorktree_RaceWithStart(t *testing.T) {
 	wg.Add(2)
 
 	// Writer goroutine: mirrors the lock-protected writes in
-	// StartWithExistingWorktree (i.gitWorktree, then i.started).
+	// LocalBackend.Start (i.gitWorktree, then i.started).
 	go func() {
 		defer wg.Done()
 		for n := 0; n < iterations; n++ {

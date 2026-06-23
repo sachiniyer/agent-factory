@@ -60,7 +60,7 @@ type Menu struct {
 	keyDown keys.KeyName
 }
 
-var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeyAttach, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
+var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
 var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName, keys.KeyChangeProgram}
 
 func NewMenu() *Menu {
@@ -173,7 +173,7 @@ func (m *Menu) addInstanceOptions() {
 	}
 
 	// Instance management group
-	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyAttach, keys.KeyKill}
+	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyKill}
 
 	// Action group
 	actionGroup := []keys.KeyName{keys.KeyEnter}
