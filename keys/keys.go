@@ -18,6 +18,10 @@ const (
 	KeyShiftTab   // ShiftTab cycles panes in reverse.
 	KeySubmitName // SubmitName is a special keybinding for submitting the name of a new instance.
 
+	KeyNewTab   // NewTab spawns a new shell tab in the selected instance (#930 PR 4).
+	KeyCloseTab // CloseTab closes the active (non-agent) tab (#930 PR 4).
+	KeyJumpTab  // JumpTab is the 1-9 number-key jump hint; dispatched manually, menu/help only.
+
 	KeyNewRemote // Key for creating a new remote instance
 	KeyHelp      // Key for showing help screen
 
@@ -60,6 +64,8 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"q":          KeyQuit,
 	"tab":        KeyTab,
 	"shift+tab":  KeyShiftTab,
+	"t":          KeyNewTab,
+	"w":          KeyCloseTab,
 	"?":          KeyHelp,
 	"s":          KeyTask,
 	"S":          KeyTaskList,
@@ -125,6 +131,18 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	KeyShiftTab: key.NewBinding(
 		key.WithKeys("shift+tab"),
 		key.WithHelp("shift+tab", "prev tab"),
+	),
+	KeyNewTab: key.NewBinding(
+		key.WithKeys("t"),
+		key.WithHelp("t", "new tab"),
+	),
+	KeyCloseTab: key.NewBinding(
+		key.WithKeys("w"),
+		key.WithHelp("w", "close tab"),
+	),
+	KeyJumpTab: key.NewBinding(
+		key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"),
+		key.WithHelp("1-9", "jump tab"),
 	),
 	KeyTask: key.NewBinding(
 		key.WithKeys("s"),

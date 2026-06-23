@@ -135,11 +135,11 @@ func (m *Menu) updateOptions() {
 	switch m.state {
 	case StateEmpty:
 		m.options = defaultMenuOptions
-		// Groups: creation (n, N, a) | search (/) | system (?, q)
+		// Groups: creation (n, N) | search (/) | system (?, q)
 		m.groups = []menuGroup{
-			{start: 0, end: 3, isAction: true},
-			{start: 3, end: 4, isAction: false},
-			{start: 4, end: 6, isAction: false},
+			{start: 0, end: 2, isAction: true},
+			{start: 2, end: 3, isAction: false},
+			{start: 3, end: 5, isAction: false},
 		}
 	case StateDefault:
 		if m.instance != nil {
@@ -149,9 +149,9 @@ func (m *Menu) updateOptions() {
 			// When there is no instance, show the empty state
 			m.options = defaultMenuOptions
 			m.groups = []menuGroup{
-				{start: 0, end: 3, isAction: true},
-				{start: 3, end: 4, isAction: false},
-				{start: 4, end: 6, isAction: false},
+				{start: 0, end: 2, isAction: true},
+				{start: 2, end: 3, isAction: false},
+				{start: 3, end: 5, isAction: false},
 			}
 		}
 	case StateNewInstance:
@@ -184,24 +184,30 @@ func (m *Menu) addInstanceOptions() {
 	actionGroup = append(actionGroup, keys.KeyShiftUp)
 	actionGroup = append(actionGroup, keys.KeyShiftDown)
 
+	// Tab group: cycle, create, close, and number-jump (#930 PR 4).
+	tabGroup := []keys.KeyName{keys.KeyTab, keys.KeyNewTab, keys.KeyCloseTab, keys.KeyJumpTab}
+
 	// System group
-	systemGroup := []keys.KeyName{keys.KeyTab, keys.KeyHelp, keys.KeyQuit}
+	systemGroup := []keys.KeyName{keys.KeyHelp, keys.KeyQuit}
 
 	// Combine all groups and compute boundaries
 	mgmtEnd := len(mgmtGroup)
 	actionEnd := mgmtEnd + len(actionGroup)
-	systemEnd := actionEnd + len(systemGroup)
+	tabEnd := actionEnd + len(tabGroup)
+	systemEnd := tabEnd + len(systemGroup)
 
 	options := make([]keys.KeyName, 0, systemEnd)
 	options = append(options, mgmtGroup...)
 	options = append(options, actionGroup...)
+	options = append(options, tabGroup...)
 	options = append(options, systemGroup...)
 
 	m.options = options
 	m.groups = []menuGroup{
 		{start: 0, end: mgmtEnd, isAction: false},
 		{start: mgmtEnd, end: actionEnd, isAction: true},
-		{start: actionEnd, end: systemEnd, isAction: false},
+		{start: actionEnd, end: tabEnd, isAction: false},
+		{start: tabEnd, end: systemEnd, isAction: false},
 	}
 }
 

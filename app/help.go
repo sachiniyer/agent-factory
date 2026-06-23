@@ -62,10 +62,15 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("p")+descStyle.Render("         - Open PR in browser"),
 		keyStyle.Render("P")+descStyle.Render("         - Copy PR URL to clipboard"),
 		"",
+		headerStyle.Render("Tabs:"),
+		keyStyle.Render("tab")+descStyle.Render("       - Switch to the next tab"),
+		keyStyle.Render("shift+tab")+descStyle.Render(" - Switch to the previous tab"),
+		keyStyle.Render("1-9")+descStyle.Render("       - Jump directly to a tab by number"),
+		keyStyle.Render("t")+descStyle.Render("         - Open a new terminal tab"),
+		keyStyle.Render("w")+descStyle.Render("         - Close the current tab (the agent tab can't be closed)"),
+		keyStyle.Render("shift-↓/↑")+descStyle.Render(" - Scroll in the current tab"),
+		"",
 		headerStyle.Render("Other:"),
-		keyStyle.Render("tab")+descStyle.Render("       - Switch between preview and terminal tabs"),
-		keyStyle.Render("shift+tab")+descStyle.Render(" - Switch tabs in reverse"),
-		keyStyle.Render("shift-↓/↑")+descStyle.Render(" - Scroll in preview/terminal view"),
 		keyStyle.Render("q")+descStyle.Render("         - Quit the application"),
 	)
 	return content
@@ -83,7 +88,7 @@ func (h helpTypeInstanceStart) toContent() string {
 		"",
 		headerStyle.Render("Managing:"),
 		keyStyle.Render("↵/o")+descStyle.Render("   - Attach to the session to interact with it directly"),
-		keyStyle.Render("tab")+descStyle.Render("   - Switch between preview and terminal tabs"),
+		keyStyle.Render("tab")+descStyle.Render("   - Switch between tabs (t new tab, w close, 1-9 jump)"),
 		keyStyle.Render("D")+descStyle.Render("     - Kill (delete) the selected session"),
 	)
 	return content
