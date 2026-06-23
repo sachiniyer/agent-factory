@@ -28,6 +28,7 @@ var (
 	killSessionViaDaemon   = daemon.KillSession
 	sendPromptViaDaemon    = daemon.SendPrompt
 	deliverPromptViaDaemon = daemon.DeliverPrompt
+	createTabViaDaemon     = daemon.CreateTab
 )
 
 // ghostKillTmuxByName issues a tmux kill-session for a persisted sanitized
@@ -358,6 +359,53 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 			return jsonError(err)
 		}
 		return jsonOut(map[string]bool{"ok": true})
+	},
+}
+
+var (
+	tabCreateCommandFlag string
+	tabCreateNameFlag    string
+)
+
+var sessionsTabCreateCmd = &cobra.Command{
+	Use:   "tab-create <title>",
+	Short: "Spawn a process tab running a command in a session's worktree",
+	Long: `Create a new tab in an existing session that runs the given command in the
+session's git worktree (e.g. a data explorer TUI or a test watcher).
+
+The tab persists and reconnects across a daemon/af restart like every other tab.
+If --name is omitted, a name is derived from the command's basename; the name is
+made unique within the session (auto-suffixed -2, -3, …). The resolved tab name
+is printed on success so scripts/agents can address it. Not available for remote
+sessions, which have no local worktree.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		if strings.TrimSpace(tabCreateCommandFlag) == "" {
+			return jsonError(fmt.Errorf("--command is required"))
+		}
+
+		// Honor --repo scoping (#891, same class as kill/send-prompt/attach). An
+		// empty repoID preserves the all-repo search; a non-empty one confines the
+		// session lookup to that repo so a same-titled session in another repo
+		// never receives the tab.
+		repoID, err := resolveRepoID()
+		if err != nil {
+			return jsonError(err)
+		}
+
+		name, err := createTabViaDaemon(daemon.CreateTabRequest{
+			Title:   args[0],
+			RepoID:  repoID,
+			Command: tabCreateCommandFlag,
+			Name:    tabCreateNameFlag,
+		})
+		if err != nil {
+			return jsonError(err)
+		}
+		return jsonOut(map[string]string{"name": name})
 	},
 }
 

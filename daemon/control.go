@@ -93,6 +93,22 @@ type DeliverPromptResponse struct {
 	Status string
 }
 
+// CreateTabRequest asks the daemon to spawn a Process-kind tab running Command
+// in the target session's worktree (#930 PR 5). Title selects the session;
+// RepoID scopes the lookup like the other sessions verbs (empty = all-repo).
+// Name is the optional display name (a default is derived from Command's
+// basename when empty); the resolved, collision-suffixed name is returned.
+type CreateTabRequest struct {
+	Title   string
+	RepoID  string
+	Command string
+	Name    string
+}
+
+type CreateTabResponse struct {
+	Name string
+}
+
 type ImportRemoteHookSessionsRequest struct {
 	RepoPath string
 }
@@ -235,6 +251,17 @@ func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 		return nil, err
 	}
 	return &resp.Instance, nil
+}
+
+// CreateTab asks the daemon to spawn, persist, and report a new process tab on
+// an existing session. It returns the resolved (collision-suffixed) tab name so
+// scripts/agents can address the tab.
+func CreateTab(req CreateTabRequest) (string, error) {
+	var resp CreateTabResponse
+	if err := callDaemon("CreateTab", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.Name, nil
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.
@@ -516,6 +543,21 @@ func (s *controlServer) CreateSession(req CreateSessionRequest, resp *CreateSess
 		return err
 	}
 	resp.Instance = data
+	return nil
+}
+
+func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	name, err := s.manager.CreateTab(req)
+	if err != nil {
+		return err
+	}
+	resp.Name = name
 	return nil
 }
 
@@ -1123,6 +1165,55 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 		return fmt.Errorf("failed to send prompt: %w", err)
 	}
 	return nil
+}
+
+// CreateTab spawns a Process-kind tab running req.Command in the target
+// session's worktree, persists the grown tab list, and returns the resolved tab
+// name (#930 PR 5). It mirrors CreateSession's discipline: the find+spawn+persist
+// runs under the per-repo start lock so a concurrent CreateSession/CreateTab on
+// the same repo can't race the tab list or derive a duplicate name. The new tab
+// is persisted immediately (ToInstanceData serializes its command + tmux name,
+// and restoreLocalTabs reconnects it by exact name on reload) so it survives a
+// daemon/af restart — Sachin's hard #930 requirement. Rejected for remote/hook
+// instances (no local worktree to run a command in), an empty command, or an
+// instance already at the soft cap (maxTabs, enforced by AddProcessTab).
+func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
+	if strings.TrimSpace(req.Command) == "" {
+		return "", fmt.Errorf("a process tab requires a non-empty command (--command)")
+	}
+
+	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+	if err != nil {
+		return "", err
+	}
+	if instance == nil {
+		return "", fmt.Errorf("failed to restore instance %q", req.Title)
+	}
+	if instance.IsRemote() {
+		return "", fmt.Errorf("cannot create a process tab on remote session %q: it has no local worktree to run a command in", req.Title)
+	}
+
+	// Serialize against other create/tab mutations on this repo, mirroring
+	// CreateSession, so two concurrent CreateTab calls never derive the same name
+	// or interleave a spawn-then-persist with another save.
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+
+	tab, err := instance.AddProcessTab(req.Command, req.Name)
+	if err != nil {
+		return "", err
+	}
+
+	if err := m.SaveInstances(); err != nil {
+		// Roll back the just-spawned tab so a persist failure does not leave a
+		// live tmux session that vanishes from the tab list on restart.
+		if closeErr := instance.CloseTab(instance.TabCount() - 1); closeErr != nil {
+			log.WarningLog.Printf("CreateTab %q: rolling back unpersisted tab failed: %v", req.Title, closeErr)
+		}
+		return "", fmt.Errorf("failed to persist new tab: %w", err)
+	}
+	return tab.Name, nil
 }
 
 // targetDeliverWait bounds how long DeliverPrompt waits for a target session to
