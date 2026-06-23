@@ -89,9 +89,6 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeySearch:
 		return m.showSearchOverlay()
 
-	case keys.KeyAttach:
-		return m.showAttachWorktreeOverlay()
-
 	// Hooks configuration
 	case keys.KeyHooks:
 		m.navigateToSection(ui.SectionHooks)

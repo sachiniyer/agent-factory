@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -55,7 +54,15 @@ type GitWorktree struct {
 	branchName string
 	// Base commit hash for the worktree
 	baseCommitSHA string
-	// externalWorktree is true if the worktree was not created by agent-factory
+	// externalWorktree is true if the worktree was not created by agent-factory.
+	//
+	// Legacy back-compat (#930 PR 3): this was only ever set true by the
+	// removed create-on-existing-worktree feature. No code path sets it true
+	// anymore, so every newly created worktree has it false. It is still read
+	// from storage and honored by Cleanup() (which no-ops for external
+	// worktrees) so pre-existing instances created by the old feature do not
+	// have their user-owned worktree/branch destroyed on kill. A future PR
+	// drops this field once no persisted instance carries it.
 	externalWorktree bool
 	// branchCreatedByUs is true if this session created the underlying branch
 	// itself (via setupNewWorktree). When false, Cleanup() must NOT delete the
@@ -66,13 +73,6 @@ type GitWorktree struct {
 	// outlive the worktree itself.
 	hooksCtx    context.Context
 	hooksCancel context.CancelFunc
-}
-
-// WorktreeInfo holds information about an existing git worktree
-type WorktreeInfo struct {
-	Path           string
-	Branch         string
-	IsMainWorktree bool
 }
 
 // IsExternalWorktree returns true if this worktree was not created by agent-factory
@@ -213,104 +213,4 @@ func (g *GitWorktree) GetRepoName() string {
 // GetBaseCommitSHA returns the base commit SHA for the worktree
 func (g *GitWorktree) GetBaseCommitSHA() string {
 	return g.baseCommitSHA
-}
-
-// NewGitWorktreeFromExistingWorktree creates a GitWorktree that points at an existing worktree
-// not created by agent-factory. It determines the baseCommitSHA via git merge-base.
-func NewGitWorktreeFromExistingWorktree(repoPath, worktreePath, branchName string) (*GitWorktree, error) {
-	// Resolve the repo root
-	absRepo, err := filepath.Abs(repoPath)
-	if err != nil {
-		absRepo = repoPath
-	}
-	repoRoot, err := findGitRepoRoot(absRepo)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find git repo root: %w", err)
-	}
-
-	// Get the base commit SHA via merge-base between HEAD and the branch
-	cmd := exec.Command("git", "-C", repoRoot, "merge-base", "HEAD", branchName)
-	output, err := cmd.Output()
-	baseCommitSHA := ""
-	if err == nil {
-		baseCommitSHA = strings.TrimSpace(string(output))
-	} else {
-		// Fallback: use HEAD if merge-base fails (e.g. detached HEAD)
-		cmd2 := exec.Command("git", "-C", repoRoot, "rev-parse", "HEAD")
-		out2, err2 := cmd2.Output()
-		if err2 == nil {
-			baseCommitSHA = strings.TrimSpace(string(out2))
-		}
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	return &GitWorktree{
-		repoPath:          repoRoot,
-		worktreePath:      worktreePath,
-		worktreeDir:       filepath.Dir(worktreePath),
-		branchName:        branchName,
-		baseCommitSHA:     baseCommitSHA,
-		externalWorktree:  true,
-		branchCreatedByUs: false,
-		hooksCtx:          ctx,
-		hooksCancel:       cancel,
-	}, nil
-}
-
-// ListWorktrees returns all worktrees for the given repo, including the main worktree.
-// The main worktree (root tree) is marked with IsMainWorktree=true.
-func ListWorktrees(repoPath string) ([]WorktreeInfo, error) {
-	absPath, err := filepath.Abs(repoPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get absolute path: %w", err)
-	}
-
-	repoRoot, err := findGitRepoRoot(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find git repo root: %w", err)
-	}
-
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list worktrees: %w", err)
-	}
-
-	var worktrees []WorktreeInfo
-	currentPath := ""
-	currentBranch := ""
-	isFirst := true
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "worktree ") {
-			currentPath = strings.TrimPrefix(line, "worktree ")
-		} else if strings.HasPrefix(line, "branch ") {
-			branchPath := strings.TrimPrefix(line, "branch ")
-			currentBranch = strings.TrimPrefix(branchPath, "refs/heads/")
-		} else if line == "" {
-			if currentPath != "" {
-				worktrees = append(worktrees, WorktreeInfo{
-					Path:           currentPath,
-					Branch:         currentBranch,
-					IsMainWorktree: isFirst,
-				})
-				isFirst = false
-			}
-			currentPath = ""
-			currentBranch = ""
-		}
-	}
-	// Handle last entry if output doesn't end with a blank line
-	if currentPath != "" {
-		worktrees = append(worktrees, WorktreeInfo{
-			Path:           currentPath,
-			Branch:         currentBranch,
-			IsMainWorktree: isFirst,
-		})
-	}
-
-	if len(worktrees) == 0 {
-		return nil, nil
-	}
-	return worktrees, nil
 }

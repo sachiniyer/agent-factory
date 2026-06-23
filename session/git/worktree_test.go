@@ -328,6 +328,65 @@ func TestCleanup_DeletesBranchWeCreated(t *testing.T) {
 		"branch created by the session should be deleted by Cleanup")
 }
 
+// TestCleanup_LegacyExternalWorktreeIsPreserved is the #930 PR 3 back-compat
+// safety. PR 3 removed the create-on-existing-worktree feature, but instances
+// persisted by the OLD feature carry externalWorktree=true /
+// branchCreatedByUs=false on disk. When such a record is restored via
+// NewGitWorktreeFromStorage and later killed, Cleanup() must remain a no-op:
+// it must NOT remove the user's worktree directory or delete their branch.
+// Removing the legacy field handling now would destroy user data on kill — so
+// it stays until a future PR confirms no persisted instance carries it.
+func TestCleanup_LegacyExternalWorktreeIsPreserved(t *testing.T) {
+	sandboxHome(t)
+
+	repoRoot := createGitRepo(t)
+	env := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+
+	// Initial commit so HEAD is valid.
+	commitCmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	commitCmd.Env = env
+	out, err := commitCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// A user-owned branch + worktree, exactly what the removed feature would
+	// have attached an instance to.
+	branchCmd := exec.Command("git", "-C", repoRoot, "branch", "user/keep-me")
+	out, err = branchCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	externalWtPath := filepath.Join(t.TempDir(), "external-wt")
+	addCmd := exec.Command("git", "-C", repoRoot, "worktree", "add", externalWtPath, "user/keep-me")
+	out, err = addCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Restore the instance from disk the way FromInstanceData does for a record
+	// written by the old feature: externalWorktree=true, branchCreatedByUs=false.
+	gw, err := NewGitWorktreeFromStorage(
+		repoRoot, externalWtPath, "legacy", "user/keep-me", "",
+		true,  // externalWorktree (legacy)
+		false, // branchCreatedByUs
+	)
+	require.NoError(t, err)
+	require.True(t, gw.IsExternalWorktree(), "restored legacy worktree must report external")
+
+	// Cleanup must be a no-op for an external worktree.
+	require.NoError(t, gw.Cleanup())
+
+	// The worktree directory must still exist.
+	_, statErr := os.Stat(externalWtPath)
+	require.NoError(t, statErr,
+		"external worktree directory must NOT be removed by Cleanup (#930 PR 3 back-compat)")
+
+	// The branch must still exist.
+	verifyCmd := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "refs/heads/user/keep-me")
+	out, err = verifyCmd.CombinedOutput()
+	require.NoError(t, err,
+		"user-owned branch must NOT be deleted by Cleanup; output: %s", string(out))
+}
+
 // TestCleanup_PrunesBeforeBranchDelete is a regression test for #611. When
 // `git worktree remove -f` fails (e.g. the worktree's `.git` pointer file
 // has been removed externally), git retains internal worktree metadata.

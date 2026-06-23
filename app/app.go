@@ -9,7 +9,6 @@ import (
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -50,8 +49,6 @@ const (
 	stateHelp
 	// stateConfirm is the state when a confirmation modal is displayed.
 	stateConfirm
-	// stateSelectWorktree is the state when the user is selecting an existing worktree.
-	stateSelectWorktree
 	// stateSearch is the state when the user is searching sessions.
 	stateSearch
 	// stateSelectProgram is the state when the user is selecting a program during naming.
@@ -109,14 +106,10 @@ type home struct {
 	// action so that handleStateConfirm can forward it to the Bubble Tea
 	// event loop after OnConfirm runs.
 	pendingConfirmMsg tea.Msg
-	// selectionOverlay handles worktree selection
+	// selectionOverlay handles program selection during new-instance naming
 	selectionOverlay *overlay.SelectionOverlay
 	// searchOverlay handles session search
 	searchOverlay *overlay.SearchOverlay
-	// selectedWorktree stores the worktree info selected by the user for attach
-	selectedWorktree *git.WorktreeInfo
-	// availableWorktrees stores the worktrees shown in the selection overlay
-	availableWorktrees []git.WorktreeInfo
 	// pendingProgram tracks the program selected during new instance naming
 	pendingProgram string
 
@@ -796,7 +789,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			func() tea.Msg { return msg },
 			m.keydownCallback(name)), true
 	}
-	if m.state == stateHelp || m.state == stateConfirm || m.state == stateSelectWorktree ||
+	if m.state == stateHelp || m.state == stateConfirm ||
 		m.state == stateSearch || m.state == stateSelectProgram {
 		return nil, false
 	}
@@ -835,8 +828,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleHelpState(msg)
 	case stateNew:
 		return m.handleStateNew(msg)
-	case stateSelectWorktree:
-		return m.handleStateSelectWorktree(msg)
 	case stateConfirm:
 		return m.handleStateConfirm(msg)
 	case stateSearch:
@@ -1230,11 +1221,6 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("confirmation overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true)
-	} else if m.state == stateSelectWorktree {
-		if m.selectionOverlay == nil {
-			log.ErrorLog.Printf("selection overlay is nil")
-		}
-		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
 	} else if m.state == stateSearch {
 		if m.searchOverlay == nil {
 			log.ErrorLog.Printf("search overlay is nil")

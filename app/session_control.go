@@ -6,28 +6,24 @@ import (
 )
 
 type sessionStartRequest struct {
-	Title                  string
-	TitleBase              string
-	RepoPath               string
-	Program                string
-	Prompt                 string
-	AutoYes                bool
-	ForceRemote            bool
-	ExistingWorktreePath   string
-	ExistingWorktreeBranch string
+	Title       string
+	TitleBase   string
+	RepoPath    string
+	Program     string
+	Prompt      string
+	AutoYes     bool
+	ForceRemote bool
 }
 
 var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartRequest) (*session.Instance, error) {
 	data, err := daemon.CreateSession(daemon.CreateSessionRequest{
-		Title:                  req.Title,
-		TitleBase:              req.TitleBase,
-		RepoPath:               req.RepoPath,
-		Program:                req.Program,
-		Prompt:                 req.Prompt,
-		AutoYes:                req.AutoYes,
-		ForceRemote:            req.ForceRemote,
-		ExistingWorktreePath:   req.ExistingWorktreePath,
-		ExistingWorktreeBranch: req.ExistingWorktreeBranch,
+		Title:       req.Title,
+		TitleBase:   req.TitleBase,
+		RepoPath:    req.RepoPath,
+		Program:     req.Program,
+		Prompt:      req.Prompt,
+		AutoYes:     req.AutoYes,
+		ForceRemote: req.ForceRemote,
 	})
 	if err != nil {
 		return nil, err

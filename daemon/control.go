@@ -39,15 +39,13 @@ var ensureDaemonMu sync.Mutex
 // CreateSessionRequest is the daemon-owned session creation contract used by
 // the TUI, CLI, and scheduled task runner.
 type CreateSessionRequest struct {
-	Title                  string
-	TitleBase              string
-	RepoPath               string
-	Program                string
-	Prompt                 string
-	AutoYes                bool
-	ForceRemote            bool
-	ExistingWorktreePath   string
-	ExistingWorktreeBranch string
+	Title       string
+	TitleBase   string
+	RepoPath    string
+	Program     string
+	Prompt      string
+	AutoYes     bool
+	ForceRemote bool
 }
 
 type CreateSessionResponse struct {
@@ -849,16 +847,9 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 		return session.InstanceData{}, err
 	}
 
-	if req.ExistingWorktreePath != "" && req.ForceRemote {
-		return session.InstanceData{}, fmt.Errorf("remote sessions cannot use an existing local worktree")
-	}
-
-	if req.ExistingWorktreePath != "" {
-		err = instance.StartWithExistingWorktree(req.ExistingWorktreePath, req.ExistingWorktreeBranch)
-	} else {
-		err = task.StartAndSendPrompt(instance, req.Prompt)
-	}
-	if err != nil {
+	// Every instance now owns a fresh worktree 1:1 (#930 PR 3 removed the
+	// create-on-existing-worktree path): there is a single creation flow.
+	if err = task.StartAndSendPrompt(instance, req.Prompt); err != nil {
 		_ = instance.Kill()
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", err)
 	}

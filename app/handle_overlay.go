@@ -4,55 +4,12 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/keys"
-	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
-
-// handleStateSelectWorktree handles key events during worktree selection.
-func (m *home) handleStateSelectWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	shouldClose := m.selectionOverlay.HandleKeyPress(msg)
-	if shouldClose {
-		if m.selectionOverlay.IsSubmitted() {
-			idx := m.selectionOverlay.GetSelectedIndex()
-			wt := m.availableWorktrees[idx]
-			m.selectedWorktree = &wt
-			m.selectionOverlay = nil
-			m.pendingProgram = m.program
-
-			instance, err := session.NewInstance(session.InstanceOptions{
-				Title:   "",
-				Path:    ".",
-				Program: m.pendingProgram,
-			})
-			if err != nil {
-				m.selectedWorktree = nil
-				m.state = stateDefault
-				m.menu.SetState(ui.StateDefault)
-				return m, m.handleError(err)
-			}
-
-			instance.SetStatus(session.Loading)
-			m.sidebar.AddInstance(instance)
-			m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
-			m.namingInstance = instance
-			m.state = stateNew
-			m.menu.SetState(ui.StateNewInstance)
-			return m, nil
-		}
-		m.selectionOverlay = nil
-		m.selectedWorktree = nil
-		m.availableWorktrees = nil
-		m.state = stateDefault
-		m.menu.SetState(ui.StateDefault)
-		return m, nil
-	}
-	return m, nil
-}
 
 // handleStateSelectProgram handles key events during program selection.
 func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -103,45 +60,6 @@ func (m *home) handleStateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateDefault
 		return m, tea.Sequence(tea.WindowSize(), m.selectionChanged())
 	}
-	return m, nil
-}
-
-// showAttachWorktreeOverlay displays the worktree selection overlay.
-func (m *home) showAttachWorktreeOverlay() (tea.Model, tea.Cmd) {
-	worktrees, err := git.ListWorktrees(".")
-	if err != nil {
-		return m, m.handleError(fmt.Errorf("failed to list worktrees: %v", err))
-	}
-	if len(worktrees) == 0 {
-		return m, m.handleError(fmt.Errorf("no worktrees found"))
-	}
-
-	trackedPaths := make(map[string]bool)
-	for _, inst := range m.sidebar.GetInstances() {
-		if p := inst.GetWorktreePath(); p != "" {
-			trackedPaths[p] = true
-		}
-	}
-
-	items := make([]string, len(worktrees))
-	for i, wt := range worktrees {
-		label := wt.Path
-		if wt.Branch != "" {
-			label = fmt.Sprintf("%s (%s)", wt.Branch, wt.Path)
-		}
-		if wt.IsMainWorktree {
-			label += " [root]"
-		}
-		if trackedPaths[wt.Path] {
-			label += " [has session]"
-		}
-		items[i] = label
-	}
-
-	m.availableWorktrees = worktrees
-	m.selectionOverlay = overlay.NewSelectionOverlay("Attach to existing worktree", items)
-	m.selectionOverlay.SetWidth(60)
-	m.state = stateSelectWorktree
 	return m, nil
 }
 
