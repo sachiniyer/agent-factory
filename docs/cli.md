@@ -73,4 +73,4 @@ af upgrade             # self-upgrade to the latest GitHub release (Linux/macOS)
 af reset               # nuclear option — see below
 ```
 
-`af reset` stops the daemon, kills **all** Agent Factory tmux sessions, removes **every linked git worktree (and its branch)** from each repo that has stored sessions — including worktrees you created by hand — and deletes all stored session records. Use it to recover from a corrupted state, not for day-to-day cleanup — `af sessions kill <title>` (or `D` in the TUI) removes a single session cleanly.
+`af reset` attempts to stop the daemon (and reports honestly if it couldn't — e.g. a source-built `agent-factory --daemon` that left no PID file), kills **all** Agent Factory tmux sessions, removes **every linked git worktree (and its branch)** from each repo that has stored sessions — including worktrees you created by hand — and deletes all stored session records. Use it to recover from a corrupted state, not for day-to-day cleanup — `af sessions kill <title>` (or `D` in the TUI) removes a single session cleanly.
