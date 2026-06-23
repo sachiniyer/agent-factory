@@ -287,10 +287,15 @@ func init() {
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptCreateFlag, "create", false, "Auto-create the session if it doesn't exist")
 	sessionsSendPromptCmd.Flags().StringVar(&sendPromptProgramFlag, "program", "", "Program to run when creating a new session (defaults to config default)")
 
+	sessionsTabCreateCmd.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in the new tab (required)")
+	sessionsTabCreateCmd.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name (defaults to the command basename; auto-suffixed on collision)")
+	sessionsTabCreateCmd.MarkFlagRequired("command")
+
 	SessionsCmd.AddCommand(sessionsListCmd)
 	SessionsCmd.AddCommand(sessionsGetCmd)
 	SessionsCmd.AddCommand(sessionsCreateCmd)
 	SessionsCmd.AddCommand(sessionsSendPromptCmd)
+	SessionsCmd.AddCommand(sessionsTabCreateCmd)
 	SessionsCmd.AddCommand(sessionsPreviewCmd)
 	SessionsCmd.AddCommand(sessionsKillCmd)
 	SessionsCmd.AddCommand(sessionsAttachCmd)

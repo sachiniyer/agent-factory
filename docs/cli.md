@@ -26,6 +26,7 @@ af sessions get <title>                                   # fetch one session
 af sessions create --name <title> [--prompt "..."] [--program <agent>]
 af sessions send-prompt <title> "..."                     # append a prompt to a session
 af sessions send-prompt <title> "..." --create            # send-or-create
+af sessions tab-create <title> --command "<cmd>"          # spawn a process tab in the session's worktree
 af sessions preview <title>                               # snapshot the session's pane
 af sessions attach <title>                                # attach interactively (foreground)
 af sessions whoami                                        # report the session this shell is inside
@@ -36,6 +37,7 @@ Flags:
 
 - `create`: `--name` (required), `--prompt` (initial prompt to send), `--program` (agent enum, defaults to the configured `default_program`).
 - `send-prompt`: `--create` auto-creates the session if it doesn't exist; `--program` picks the agent when creating.
+- `tab-create`: `--command` (required) is run in the session's git worktree as a new tab; `--name` sets the tab's display name (defaults to the command's basename, auto-suffixed `-2`, `-3`, … on collision). The resolved tab name is printed as `{"name": "..."}` so scripts/agents can address it. The tab persists and reconnects across a daemon/`af` restart like every other tab. Not available for remote sessions (no local worktree); refused once a session already holds 9 tabs.
 
 ## `af tasks`
 

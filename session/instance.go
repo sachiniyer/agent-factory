@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -258,6 +260,58 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	return tab, nil
 }
 
+// AddProcessTab spawns a new Process-kind tab running command in the instance's
+// worktree, appends it to Tabs, and returns it (#930 PR 5). It is the
+// CLI/agent-driven counterpart of AddShellTab: instead of $SHELL it runs an
+// arbitrary command, so an agent can prompt-spawn a tab hosting a data explorer,
+// test watcher, etc. Local instances only — remote instances have no local
+// worktree, so callers must reject IsRemote() before calling. The display name is
+// requestedName when non-empty, otherwise derived from the command's basename;
+// it is sanitized and made unique within the instance ("btop", "btop-2", …) so
+// its derived tmux session name is collision-free and restorable by exact name
+// across a restart. Errors on an empty command, an instance that is not started /
+// has no worktree, or one already at maxTabs.
+func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
+	if strings.TrimSpace(command) == "" {
+		return nil, fmt.Errorf("a process tab requires a non-empty command")
+	}
+
+	i.mu.RLock()
+	started := i.started
+	agentTmux := i.tmuxLocked()
+	gw := i.gitWorktree
+	displayName := uniqueTabName(i.Tabs, processTabBaseName(requestedName, command))
+	nTabs := len(i.Tabs)
+	i.mu.RUnlock()
+
+	if !started || agentTmux == nil || gw == nil {
+		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
+	}
+	if nTabs >= maxTabs {
+		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
+	}
+	worktreePath := gw.GetWorktreePath()
+	if worktreePath == "" {
+		return nil, fmt.Errorf("cannot add a tab without a worktree")
+	}
+
+	// Spawn outside the lock (see AddShellTab): the tmux name is derived from the
+	// agent session + the unique, sanitized display name so it is collision-free
+	// and restorable by exact name. The sibling inherits the agent session's PTY
+	// factory / executor — real in production, mock in tests.
+	tmuxName := agentTmux.SanitizedName() + "__" + displayName
+	procTmux := agentTmux.NewSiblingSession(tmuxName, command)
+	if err := procTmux.Start(worktreePath); err != nil {
+		return nil, fmt.Errorf("failed to start process tab: %w", err)
+	}
+
+	tab := &Tab{Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux}
+	i.mu.Lock()
+	i.Tabs = append(i.Tabs, tab)
+	i.mu.Unlock()
+	return tab, nil
+}
+
 // CloseTab kills the tab at idx and removes it from Tabs. The agent tab (idx 0)
 // is unclosable; CloseTab errors on idx 0 or any out-of-range index. The tab is
 // removed from Tabs regardless of whether the tmux teardown succeeds (best-
@@ -284,22 +338,61 @@ func (i *Instance) CloseTab(idx int) error {
 }
 
 // uniqueShellName returns a shell-tab display name not already used by any tab
-// in tabs: "shell", then "shell-2", "shell-3", … Names are unique per instance
-// so each tab's derived tmux session name is collision-free.
+// in tabs: "shell", then "shell-2", "shell-3", …
 func uniqueShellName(tabs []*Tab) string {
+	return uniqueTabName(tabs, shellTabName)
+}
+
+// uniqueTabName returns base, or base with the lowest free "-N" suffix (N>=2),
+// such that the result is not already a tab name in tabs. Tab names are unique
+// per instance so each tab's derived tmux session name is collision-free. This
+// is the shared collision handling for both shell tabs (AddShellTab) and
+// CLI-spawned process tabs (AddProcessTab).
+func uniqueTabName(tabs []*Tab, base string) string {
 	used := make(map[string]bool, len(tabs))
 	for _, t := range tabs {
 		used[t.Name] = true
 	}
-	if !used[shellTabName] {
-		return shellTabName
+	if !used[base] {
+		return base
 	}
 	for n := 2; ; n++ {
-		candidate := fmt.Sprintf("%s-%d", shellTabName, n)
+		candidate := fmt.Sprintf("%s-%d", base, n)
 		if !used[candidate] {
 			return candidate
 		}
 	}
+}
+
+// tabNameUnsafe matches any run of characters that must not appear in a tab's
+// derived tmux session name (the agent session name + "__" + the tab name).
+// tmux silently rewrites '.', ':', '#', '$' in session names, so a name
+// containing them would not round-trip on restore; whitespace and path
+// separators are likewise collapsed. Anything outside [A-Za-z0-9_-] becomes a
+// single '-'.
+var tabNameUnsafe = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
+
+// sanitizeTabName converts a requested or derived tab name into a token safe to
+// embed in a tmux session name and stable across a save/restore round-trip.
+// Returns "" when nothing usable remains so callers can fall back to a default.
+func sanitizeTabName(name string) string {
+	return strings.Trim(tabNameUnsafe.ReplaceAllString(name, "-"), "-")
+}
+
+// processTabBaseName picks the base display name for a new Process tab: the
+// sanitized requestedName when the caller passed --name, otherwise the sanitized
+// basename of the command's first word ("/usr/bin/btop -t" -> "btop"). Falls back
+// to "process" when neither yields a usable token.
+func processTabBaseName(requestedName, command string) string {
+	if base := sanitizeTabName(requestedName); base != "" {
+		return base
+	}
+	if fields := strings.Fields(command); len(fields) > 0 {
+		if base := sanitizeTabName(filepath.Base(fields[0])); base != "" {
+			return base
+		}
+	}
+	return "process"
 }
 
 // setTmuxLocked stores ts as the agent tab's tmux session, materializing the

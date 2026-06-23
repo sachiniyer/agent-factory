@@ -56,6 +56,7 @@ Everything the TUI does is scriptable — `af sessions` and `af tasks` print JSO
 ```bash
 af sessions create --name fix-auth-bug --prompt "Fix the login redirect loop"
 af sessions preview fix-auth-bug
+af sessions tab-create fix-auth-bug --command "btop"   # spawn a process tab in the worktree
 af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * * *"
 ```
 

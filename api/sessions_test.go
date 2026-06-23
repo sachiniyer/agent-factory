@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -683,6 +684,118 @@ func TestSessionsSendPrompt_CreateRoutesThroughDeliverPrompt(t *testing.T) {
 	}
 	if gotReq.Title != title || gotReq.Prompt != prompt || gotReq.RepoPath != repoRoot {
 		t.Fatalf("unexpected DeliverPrompt request: %+v", gotReq)
+	}
+}
+
+// TestSessionsTabCreate_RequiresCommand verifies tab-create rejects an empty
+// --command before reaching the daemon.
+func TestSessionsTabCreate_RequiresCommand(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	prevRepoFlag, prevCmd := repoFlag, tabCreateCommandFlag
+	repoFlag = ""
+	tabCreateCommandFlag = "   "
+	defer func() { repoFlag, tabCreateCommandFlag = prevRepoFlag, prevCmd }()
+
+	called := false
+	prevCreate := createTabViaDaemon
+	createTabViaDaemon = func(req daemon.CreateTabRequest) (string, error) {
+		called = true
+		return "", nil
+	}
+	defer func() { createTabViaDaemon = prevCreate }()
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStderr := os.Stderr
+	os.Stderr = devnull
+	defer func() { os.Stderr = origStderr }()
+
+	if err := sessionsTabCreateCmd.RunE(sessionsTabCreateCmd, []string{"sess"}); err == nil {
+		t.Fatal("expected error for empty --command, got nil")
+	} else if !strings.Contains(err.Error(), "--command is required") {
+		t.Fatalf("expected --command-required error, got: %v", err)
+	}
+	if called {
+		t.Fatal("an empty command must not reach the daemon")
+	}
+}
+
+// TestSessionsTabCreate_HonorsRepoScopingAndReturnsName verifies tab-create
+// passes the resolved RepoID (--repo scoping, #891 class), the title, and the
+// command to the daemon, and prints the resolved tab name as JSON.
+func TestSessionsTabCreate_HonorsRepoScopingAndReturnsName(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoRoot := filepath.Join(tmp, "repo-a")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	repo, err := config.RepoFromPath(repoRoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	const title = "worker"
+
+	prevRepoFlag, prevCmd, prevName := repoFlag, tabCreateCommandFlag, tabCreateNameFlag
+	repoFlag = repoRoot
+	tabCreateCommandFlag = "btop -t"
+	tabCreateNameFlag = ""
+	defer func() {
+		repoFlag, tabCreateCommandFlag, tabCreateNameFlag = prevRepoFlag, prevCmd, prevName
+	}()
+
+	var gotReq daemon.CreateTabRequest
+	prevCreate := createTabViaDaemon
+	createTabViaDaemon = func(req daemon.CreateTabRequest) (string, error) {
+		gotReq = req
+		if req.RepoID == "" {
+			return "", errors.New("RepoID empty: --repo scoping was dropped")
+		}
+		return "btop-2", nil // the resolved (collision-suffixed) name
+	}
+	defer func() { createTabViaDaemon = prevCreate }()
+
+	// Capture stdout so we can assert the resolved name is emitted as JSON.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	runErr := sessionsTabCreateCmd.RunE(sessionsTabCreateCmd, []string{title})
+	w.Close()
+	os.Stdout = origStdout
+	out, _ := io.ReadAll(r)
+	if runErr != nil {
+		t.Fatalf("tab-create returned error: %v", runErr)
+	}
+
+	if gotReq.RepoID != repo.ID {
+		t.Fatalf("tab-create RepoID = %q, want %q", gotReq.RepoID, repo.ID)
+	}
+	if gotReq.Title != title {
+		t.Fatalf("tab-create Title = %q, want %q", gotReq.Title, title)
+	}
+	if gotReq.Command != "btop -t" {
+		t.Fatalf("tab-create Command = %q, want %q", gotReq.Command, "btop -t")
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("output is not JSON (%q): %v", string(out), err)
+	}
+	if parsed["name"] != "btop-2" {
+		t.Fatalf("JSON output name = %q, want %q (resolved tab name)", parsed["name"], "btop-2")
 	}
 }
 
