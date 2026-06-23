@@ -109,6 +109,42 @@ type CreateTabResponse struct {
 	Name string
 }
 
+// CloseTabRequest asks the daemon to close a non-agent tab of a session and
+// persist the shrunk tab list (#960 PR 1). Title selects the session; RepoID
+// scopes the lookup like the other sessions verbs (empty = all-repo). The tab
+// is identified by TabName (preferred); when TabName is empty TabIndex selects
+// the tab by its 0-based position. The agent tab (index 0) cannot be closed —
+// use KillSession to tear down the whole session — and remote sessions' tabs
+// are fixed by their hook config, so closing them is refused. This mirrors the
+// TUI's `w` rule (handleCloseTab) and #930 PR 4/PR 6 semantics.
+type CloseTabRequest struct {
+	Title    string
+	RepoID   string
+	TabName  string
+	TabIndex int
+}
+
+type CloseTabResponse struct {
+	Name string
+}
+
+// SetPRInfoRequest records (or clears) the GitHub PR info for a session and
+// persists it (#960 PR 1). Title selects the session; RepoID scopes the lookup
+// (empty = all-repo). A zero-value PRInfo (Number 0) clears the recorded info,
+// matching how pr_info round-trips through storage (FromInstanceData treats
+// Number 0 as "no PR"). This is the daemon-side write that the TUI performs
+// today via prInfoUpdatedMsg + a full-list save (#921); PR 1 only adds the
+// mutation — the TUI is not switched to it until PR 2.
+type SetPRInfoRequest struct {
+	Title  string
+	RepoID string
+	PRInfo session.PRInfoData
+}
+
+type SetPRInfoResponse struct {
+	OK bool
+}
+
 type ImportRemoteHookSessionsRequest struct {
 	RepoPath string
 }
@@ -262,6 +298,26 @@ func CreateTab(req CreateTabRequest) (string, error) {
 		return "", err
 	}
 	return resp.Name, nil
+}
+
+// CloseTab asks the daemon to close a non-agent tab on an existing session and
+// returns the resolved name of the tab that was closed. It is the close-side
+// counterpart of CreateTab.
+func CloseTab(req CloseTabRequest) (string, error) {
+	var resp CloseTabResponse
+	if err := callDaemon("CloseTab", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.Name, nil
+}
+
+// SetPRInfo asks the daemon to record (or clear) a session's GitHub PR info.
+func SetPRInfo(req SetPRInfoRequest) error {
+	var resp SetPRInfoResponse
+	if err := callDaemon("SetPRInfo", req, &resp); err != nil {
+		return err
+	}
+	return nil
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.
@@ -558,6 +614,35 @@ func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse)
 		return err
 	}
 	resp.Name = name
+	return nil
+}
+
+func (s *controlServer) CloseTab(req CloseTabRequest, resp *CloseTabResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	name, err := s.manager.CloseTab(req)
+	if err != nil {
+		return err
+	}
+	resp.Name = name
+	return nil
+}
+
+func (s *controlServer) SetPRInfo(req SetPRInfoRequest, resp *SetPRInfoResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	if err := s.manager.SetPRInfo(req); err != nil {
+		return err
+	}
+	resp.OK = true
 	return nil
 }
 
@@ -1218,6 +1303,117 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	return tab.Name, nil
 }
 
+// CloseTab closes a non-agent tab of the target session, kills its tmux
+// session, and persists the shrunk tab list (#960 PR 1). It is the close-side
+// counterpart of CreateTab and mirrors its discipline: find the session, run
+// the mutate+persist under the per-repo start lock so a concurrent
+// CreateSession/CreateTab/CloseTab on the same repo can't interleave with the
+// tab-list write, and persist through the targeted per-repo writer
+// (persistInstanceData) rather than a whole-list SaveInstances — the
+// clobber-safe single-writer direction of #960.
+//
+// The tab is resolved by TabName when set, otherwise by TabIndex. The agent
+// tab (index 0) is unclosable (KillSession tears down the whole session
+// instead) and remote sessions' tabs are fixed by their hook config, matching
+// the TUI's `w` rule (handleCloseTab). Returns the resolved name of the closed
+// tab. Unlike CreateTab there is no rollback on persist failure: CloseTab has
+// already killed the tab's tmux session, so there is nothing live left to
+// orphan — the in-memory list (tab removed) is the more accurate state, and the
+// stale disk record is harmless (its session is dead and won't reconnect).
+func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
+	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+	if err != nil {
+		return "", err
+	}
+	if instance == nil {
+		return "", fmt.Errorf("failed to restore instance %q", req.Title)
+	}
+	if instance.IsRemote() {
+		return "", fmt.Errorf("cannot close a tab on remote session %q: its tabs are fixed by remote_hooks config, not user-managed", req.Title)
+	}
+
+	// Serialize against other create/tab mutations on this repo, mirroring
+	// CreateTab, so the tab-list mutate+persist never interleaves with another
+	// save on the same repo.
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+
+	// Resolve the target tab. TabName takes precedence; otherwise TabIndex.
+	tabs := instance.GetTabs()
+	idx := req.TabIndex
+	name := req.TabName
+	if name != "" {
+		idx = -1
+		for i, tab := range tabs {
+			if tab.Name == name {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return "", fmt.Errorf("session %q has no tab named %q", req.Title, name)
+		}
+	} else {
+		if idx < 0 || idx >= len(tabs) {
+			return "", fmt.Errorf("session %q has no tab at index %d", req.Title, idx)
+		}
+		name = tabs[idx].Name
+	}
+	if idx == 0 {
+		return "", fmt.Errorf("the agent tab of session %q can't be closed; kill the session instead", req.Title)
+	}
+
+	if err := instance.CloseTab(idx); err != nil {
+		return "", err
+	}
+
+	if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
+		return "", fmt.Errorf("failed to persist tab close: %w", err)
+	}
+	return name, nil
+}
+
+// SetPRInfo records (or clears) the GitHub PR info for the target session and
+// persists it (#960 PR 1). A zero-value PRInfo (Number 0) clears the recorded
+// info. It mirrors CreateTab's discipline — find, mutate+persist under the
+// per-repo start lock, persist through the targeted writer (persistInstanceData)
+// — and rolls the in-memory value back on persist failure so memory and disk
+// stay consistent. This is the daemon-side write the TUI performs today via
+// prInfoUpdatedMsg + a full-list save (#921); the TUI is switched to it in PR 2.
+func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
+	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+	if err != nil {
+		return err
+	}
+	if instance == nil {
+		return fmt.Errorf("failed to restore instance %q", req.Title)
+	}
+
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+
+	var info *git.PRInfo
+	if req.PRInfo.Number != 0 {
+		info = &git.PRInfo{
+			Number: req.PRInfo.Number,
+			Title:  req.PRInfo.Title,
+			URL:    req.PRInfo.URL,
+			State:  req.PRInfo.State,
+		}
+	}
+	prev := instance.GetPRInfo()
+	instance.SetPRInfo(info)
+
+	if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
+		// Keep memory consistent with disk on a persist failure.
+		instance.SetPRInfo(prev)
+		return fmt.Errorf("failed to persist PR info: %w", err)
+	}
+	return nil
+}
+
 // targetDeliverWait bounds how long DeliverPrompt waits for a target session to
 // materialize after losing a creation race to a process outside this daemon
 // (e.g. `af sessions create`); targetDeliverPoll is the retry cadence. The wait
@@ -1518,6 +1714,42 @@ func appendInstanceData(repoID string, data session.InstanceData) error {
 		existing = append(existing, data)
 		return json.MarshalIndent(existing, "", "  ")
 	})
+}
+
+// persistInstanceData replaces the on-disk record for data.Title in repoID's
+// instances file with data, under the per-repo file lock, leaving every other
+// record untouched. It is the targeted, clobber-safe persist primitive for
+// in-place mutations of an existing session (CloseTab, SetPRInfo) — the
+// single-writer direction of #960 — analogous to appendInstanceData for
+// creates and storage.DeleteInstance for kills. It deliberately does NOT use a
+// whole-list SaveInstances, which would re-serialize the manager's entire view
+// and reintroduce the dual-writer clobber surface #960 is retiring. Errors when
+// no record with that title exists (the caller already resolved a live
+// instance, so a missing disk record means storage drifted out from under us).
+func persistInstanceData(repoID string, data session.InstanceData) error {
+	found := false
+	if err := config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
+		var existing []session.InstanceData
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
+		}
+		for i := range existing {
+			if existing[i].Title == data.Title {
+				existing[i] = data
+				found = true
+				return json.MarshalIndent(existing, "", "  ")
+			}
+		}
+		// Leave the file unchanged when the record is absent; the caller turns
+		// !found into an error below.
+		return raw, nil
+	}); err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("instance %q not found in storage", data.Title)
+	}
+	return nil
 }
 
 func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
