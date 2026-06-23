@@ -189,6 +189,7 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 		i.mu.Lock()
 		i.started = true
 		i.mu.Unlock()
+		b.syncRemoteTabs(i)
 		return nil
 	}
 
@@ -232,6 +233,8 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	}
 	i.started = true
 	i.mu.Unlock()
+
+	b.syncRemoteTabs(i)
 
 	if err := b.ensurePTY(i); err != nil {
 		// launch_cmd succeeded so the remote session itself is alive; we
@@ -450,10 +453,29 @@ func (b *HookBackend) Attach(i *Instance) (chan struct{}, error) {
 }
 
 // HasTerminalCmd reports whether the optional terminal_cmd hook is configured.
-// When false, the Terminal tab keeps its "not available" fallback for remote
-// sessions (#843).
+// When false, a remote instance carries only its agent tab and AttachTerminal /
+// SupportsRemoteTerminal report the "not available" guidance (#843).
 func (b *HookBackend) HasTerminalCmd() bool {
 	return strings.TrimSpace(b.Hooks.TerminalCmd) != ""
+}
+
+// syncRemoteTabs rebuilds i.Tabs to the uniform remote tab model: the agent tab
+// always, plus a terminal tab when terminal_cmd is configured (#930 PR 6).
+// Remote tabs carry no tmux session — the agent tab is driven by attach_cmd and
+// the hook preview process, the terminal tab by terminal_cmd — so the list is
+// derived from the live hook config here rather than restored from a persisted
+// tmux name. Both Start paths call it (fresh launch and restore), and it is
+// idempotent: a re-run after a terminal_cmd config change re-derives the
+// correct tabs, which is exactly why a restore reconstructs the terminal tab
+// from config instead of from whatever was serialized.
+func (b *HookBackend) syncRemoteTabs(i *Instance) {
+	tabs := []*Tab{newRemoteAgentTab()}
+	if b.HasTerminalCmd() {
+		tabs = append(tabs, newRemoteTerminalTab())
+	}
+	i.mu.Lock()
+	i.Tabs = tabs
+	i.mu.Unlock()
 }
 
 // AttachTerminal gives interactive terminal access to the remote workspace by

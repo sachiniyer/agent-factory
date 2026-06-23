@@ -331,11 +331,12 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 
 // handleNewTab spawns a new shell tab in the selected instance and selects it
 // (#930 PR 4). Single keypress, no prompt: the tab runs $SHELL in the instance's
-// worktree. Remote instances have no local worktree, so new-tab is unsupported
-// there and surfaces the same "not available for remote" guidance as the remote
-// terminal tab. The soft cap (max 9 tabs) is enforced by Instance.AddShellTab,
-// whose error is surfaced verbatim. The grown tab list is persisted so the new
-// tab survives a restart (Sachin's #930 requirement).
+// worktree. Remote instances have no local worktree and the hook protocol has no
+// run-arbitrary-command verb, so new-tab is unsupported there: a remote session's
+// only terminal tab is the one derived from remote_hooks.terminal_cmd (#930 PR 6).
+// The soft cap (max 9 tabs) is enforced by Instance.AddShellTab, whose error is
+// surfaced verbatim. The grown tab list is persisted so the new tab survives a
+// restart (Sachin's #930 requirement).
 func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 	if m.contentPane.GetMode() != ui.ContentModeInstance {
 		return m, nil
@@ -348,7 +349,7 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if selected.IsRemote() {
-		return m, m.handleError(fmt.Errorf("new tabs are not available for remote sessions"))
+		return m, m.handleError(fmt.Errorf("remote sessions don't support new process tabs; their terminal tab comes from remote_hooks.terminal_cmd and arbitrary remote processes aren't supported"))
 	}
 	if _, err := selected.AddShellTab(); err != nil {
 		return m, m.handleError(err)
@@ -364,9 +365,10 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 
 // handleCloseTab closes the active tab of the selected instance and selects the
 // previous (left) tab (#930 PR 4). The agent tab (index 0) is unclosable — w on
-// it is a gentle no-op message pointing at D for killing the whole session.
-// Remote instances carry only the synthetic agent/terminal slots, neither of
-// which is a real closable Tab. The shrunk tab list is persisted.
+// it is a gentle no-op message pointing at D for killing the whole session. A
+// remote instance's tabs (agent + optional terminal_cmd terminal) are fixed by
+// its hook config, not user-managed, so closing any of them is refused. The
+// shrunk tab list is persisted.
 func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if m.contentPane.GetMode() != ui.ContentModeInstance {
 		return m, nil

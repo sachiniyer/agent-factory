@@ -37,7 +37,7 @@ Flags:
 
 - `create`: `--name` (required), `--prompt` (initial prompt to send), `--program` (agent enum, defaults to the configured `default_program`).
 - `send-prompt`: `--create` auto-creates the session if it doesn't exist; `--program` picks the agent when creating.
-- `tab-create`: `--command` (required) is run in the session's git worktree as a new tab; `--name` sets the tab's display name (defaults to the command's basename, auto-suffixed `-2`, `-3`, … on collision). The resolved tab name is printed as `{"name": "..."}` so scripts/agents can address it. The tab persists and reconnects across a daemon/`af` restart like every other tab. Not available for remote sessions (no local worktree); refused once a session already holds 9 tabs.
+- `tab-create`: `--command` (required) is run in the session's git worktree as a new tab; `--name` sets the tab's display name (defaults to the command's basename, auto-suffixed `-2`, `-3`, … on collision). The resolved tab name is printed as `{"name": "..."}` so scripts/agents can address it. The tab persists and reconnects across a daemon/`af` restart like every other tab. Refused once a session already holds 9 tabs. **Not available for remote sessions:** they have no local worktree and the hook protocol can't run arbitrary commands — a remote session's only terminal tab comes from `remote_hooks.terminal_cmd` (see [remote-hooks.md](remote-hooks.md)).
 
 ## `af tasks`
 
