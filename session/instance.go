@@ -412,6 +412,116 @@ func (i *Instance) DropClosedTab(idx int) error {
 	return nil
 }
 
+// ReconcileTabsFromData updates this started local instance's tab list to match
+// `target`, the daemon's authoritative serialized tab list (#960 PR 3). The
+// daemon is the single owner of tab state, so the TUI mirrors it: tabs the
+// daemon added out-of-band (present in target, absent locally) are reconnected
+// to their EXACT persisted tmux session by name — like restoreLocalTabs — and
+// appended, so an out-of-band tab appears in the running TUI and is immediately
+// previewable/attachable (the #959 "live display" fix); tabs the daemon closed
+// (absent from target) are dropped locally WITHOUT re-killing their tmux session
+// (the daemon already tore it down — killing again would error on the gone
+// session). The agent tab (index 0) is never added or dropped: it is the
+// instance's own session and is always present. Returns whether the local list
+// changed. A no-op for a not-started instance, one without an agent session, or
+// a remote instance (callers skip IsRemote() — remote tabs come from hook
+// config, not the snapshot). Per-tab reconnect failures are collected into the
+// returned error after every other change is applied, so one bad tab can't wedge
+// the reconcile.
+func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
+	i.mu.RLock()
+	started := i.started
+	agentTmux := i.tmuxLocked()
+	gw := i.gitWorktree
+	program := i.Program
+	localNames := make(map[string]bool, len(i.Tabs))
+	for _, t := range i.Tabs {
+		localNames[t.Name] = true
+	}
+	i.mu.RUnlock()
+
+	if !started || agentTmux == nil || gw == nil {
+		return false, nil
+	}
+	worktreePath := gw.GetWorktreePath()
+
+	targetNames := make(map[string]bool, len(target))
+	for _, td := range target {
+		targetNames[td.Name] = true
+	}
+
+	changed := false
+
+	// Drop local non-agent tabs the daemon no longer lists. No kill: the daemon
+	// owns the teardown and already closed the tmux session (#960 PR 3).
+	for name := range localNames {
+		if targetNames[name] {
+			continue
+		}
+		if i.dropTabByName(name) {
+			changed = true
+		}
+	}
+
+	// Add daemon-listed tabs missing locally, reconnecting each to its exact
+	// persisted tmux session by name so it is immediately attachable.
+	var firstErr error
+	for _, td := range target {
+		if td.Kind == TabKindAgent || localNames[td.Name] {
+			continue
+		}
+		if td.TmuxName == "" || worktreePath == "" {
+			continue
+		}
+		kind := tabKindForData(td.Kind)
+		// The sibling inherits the agent session's PTY factory / executor (real
+		// in production, mock in tests), binding to the EXACT persisted name.
+		// Restore reconnects (re-spawning only if the session is genuinely gone),
+		// mirroring restoreLocalTabs + LocalBackend.setupTabs.
+		ts := agentTmux.NewSiblingSession(td.TmuxName, tabProgram(kind, td.Command, program))
+		if err := ts.Restore(worktreePath); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to reconnect tab %q: %w", td.Name, err)
+			}
+			continue
+		}
+		tab := &Tab{Name: td.Name, Kind: kind, Command: td.Command, tmux: ts}
+		i.mu.Lock()
+		// Re-check under the write lock: a concurrent reconcile/AddTab may have
+		// added this name while we reconnected outside the lock.
+		exists := false
+		for _, t := range i.Tabs {
+			if t.Name == td.Name {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			i.Tabs = append(i.Tabs, tab)
+			changed = true
+		}
+		i.mu.Unlock()
+	}
+	return changed, firstErr
+}
+
+// dropTabByName removes the named non-agent tab from the in-memory list WITHOUT
+// killing its tmux session — the no-kill counterpart of CloseTab used by
+// ReconcileTabsFromData when the daemon has already torn the session down (#960
+// PR 3). Returns whether a tab was removed. The agent tab (index 0) is never
+// dropped.
+func (i *Instance) dropTabByName(name string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for idx := 1; idx < len(i.Tabs); idx++ {
+		if i.Tabs[idx].Name == name {
+			i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // uniqueShellName returns a shell-tab display name not already used by any tab
 // in tabs: "shell", then "shell-2", "shell-3", …
 func uniqueShellName(tabs []*Tab) string {

@@ -63,6 +63,21 @@ var setPRInfoThroughDaemon = func(title, repoID string, info session.PRInfoData)
 	return daemon.SetPRInfo(daemon.SetPRInfoRequest{Title: title, RepoID: repoID, PRInfo: info})
 }
 
+// snapshotThroughDaemon fetches the daemon's authoritative session list for a
+// repo (#960 PR 3). It is the TUI's read path under the single-writer model: the
+// sidebar mirrors this projection instead of re-reading instances.json. A
+// package-level var so tests can inject a fake snapshot without a real daemon.
+var snapshotThroughDaemon = func(repoID string) ([]session.InstanceData, error) {
+	return daemon.Snapshot(daemon.SnapshotRequest{RepoID: repoID})
+}
+
+// buildInstanceFromSnapshot materializes a live, tab-reconnected *session.Instance
+// from a snapshot record — the same restore FromInstanceData performs, reconnecting
+// every tab to its persisted tmux session by name so a snapshot-discovered session
+// is immediately attachable. A package-level var so reconcile tests can inject a
+// fake builder and stay tmux-reattach-free (the #961 flake lesson).
+var buildInstanceFromSnapshot = session.FromInstanceData
+
 func SetSessionStarterForTest(f func(*session.Instance, sessionStartRequest) (*session.Instance, error)) func() {
 	prev := startSessionThroughDaemon
 	startSessionThroughDaemon = f
@@ -91,4 +106,16 @@ func SetPRInfoSetterForTest(f func(title, repoID string, info session.PRInfoData
 	prev := setPRInfoThroughDaemon
 	setPRInfoThroughDaemon = f
 	return func() { setPRInfoThroughDaemon = prev }
+}
+
+func SetSnapshotFetcherForTest(f func(repoID string) ([]session.InstanceData, error)) func() {
+	prev := snapshotThroughDaemon
+	snapshotThroughDaemon = f
+	return func() { snapshotThroughDaemon = prev }
+}
+
+func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {
+	prev := buildInstanceFromSnapshot
+	buildInstanceFromSnapshot = f
+	return func() { buildInstanceFromSnapshot = prev }
 }

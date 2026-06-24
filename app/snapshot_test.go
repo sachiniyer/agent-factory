@@ -1,0 +1,178 @@
+package app
+
+import (
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// newSnapshotTestInstance builds an unstarted, non-transient sidebar instance.
+// Unstarted is fine for the reconcile-orchestration tests: ReconcileTabsFromData
+// no-ops on a not-started instance, so these tests stay hermetic (no tmux), and
+// the tab-reconnect path is covered in the session package
+// (TestReconcileTabsFromData_AddsOutOfBandTab).
+func newSnapshotTestInstance(t *testing.T, title string) *session.Instance {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   title,
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	inst.SetStatus(session.Running)
+	return inst
+}
+
+// TestReconcileSnapshot_AddsAndRemovesSessions: whole sessions appearing in /
+// disappearing from the daemon snapshot are added to / removed from the sidebar.
+func TestReconcileSnapshot_AddsAndRemovesSessions(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+
+	keep := newSnapshotTestInstance(t, "keep")
+	h.sidebar.AddInstance(keep)
+
+	// Snapshot adds "new" alongside the existing "keep" (matched by CreatedAt).
+	added := h.reconcileSnapshot([]session.InstanceData{
+		keep.ToInstanceData(),
+		{Title: "new", CreatedAt: time.Now()},
+	})
+	assert.True(t, added, "a new session in the snapshot is a change")
+	require.NotNil(t, findSidebarInstance(h, "keep"))
+	require.NotNil(t, findSidebarInstance(h, "new"), "out-of-band session must appear in the sidebar")
+
+	// Snapshot drops "keep"; only "new" remains.
+	newInst := findSidebarInstance(h, "new")
+	removed := h.reconcileSnapshot([]session.InstanceData{newInst.ToInstanceData()})
+	assert.True(t, removed, "a session gone from the snapshot is a change")
+	assert.Nil(t, findSidebarInstance(h, "keep"), "session gone from the snapshot must leave the sidebar")
+	require.NotNil(t, findSidebarInstance(h, "new"))
+}
+
+// TestReconcileSnapshot_PreservesSelectionAndActiveTab: reconciling (including a
+// removal that shifts indices) must not drift the user's selected instance or
+// the active tab index (#684) — local-only view state survives a snapshot.
+func TestReconcileSnapshot_PreservesSelectionAndActiveTab(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+
+	a := newSnapshotTestInstance(t, "a")
+	b := newSnapshotTestInstance(t, "b")
+	c := newSnapshotTestInstance(t, "c")
+	h.sidebar.AddInstance(a)
+	h.sidebar.AddInstance(b)
+	h.sidebar.AddInstance(c)
+	h.sidebar.SelectInstance(b)
+	require.Same(t, b, h.sidebar.GetSelectedInstance())
+
+	tw := h.contentPane.TabbedWindow()
+	require.True(t, tw.JumpToTab(1), "set a non-zero active tab")
+	require.Equal(t, 1, tw.GetActiveTab())
+
+	// Drop "a" (precedes the selection, so its removal shifts indices) and add
+	// "d"; keep "b" and "c".
+	changed := h.reconcileSnapshot([]session.InstanceData{
+		b.ToInstanceData(),
+		c.ToInstanceData(),
+		{Title: "d", CreatedAt: time.Now()},
+	})
+	assert.True(t, changed)
+
+	require.Same(t, b, h.sidebar.GetSelectedInstance(),
+		"selection must stay pinned to b even though removing a preceding row shifted indices")
+	assert.Equal(t, 1, tw.GetActiveTab(),
+		"the active tab index must be preserved across a reconcile (reconcileSnapshot never touches the tabbed window)")
+	assert.Nil(t, findSidebarInstance(h, "a"))
+	require.NotNil(t, findSidebarInstance(h, "d"))
+}
+
+// TestReconcileSnapshot_NoChangeWhenUnchanged: an identical snapshot reports no
+// change (so the caller skips the repaint) and updates rows IN PLACE rather than
+// rebuilding them.
+func TestReconcileSnapshot_NoChangeWhenUnchanged(t *testing.T) {
+	h := newTestHome(t)
+	a := newSnapshotTestInstance(t, "a")
+	h.sidebar.AddInstance(a)
+
+	changed := h.reconcileSnapshot([]session.InstanceData{a.ToInstanceData()})
+	assert.False(t, changed, "an unchanged snapshot must not report a change (no repaint/flicker)")
+	require.Same(t, a, findSidebarInstance(h, "a"), "an existing row is updated in place, not rebuilt")
+}
+
+// TestReconcileSnapshot_SwapsKillRecreatedSameTitle: a same-title row whose
+// identity (CreatedAt) differs from the snapshot is a kill+recreate (#765); the
+// stale row is swapped for the recreated one rather than mutated in place.
+func TestReconcileSnapshot_SwapsKillRecreatedSameTitle(t *testing.T) {
+	h := newTestHome(t)
+
+	stale := newSnapshotTestInstance(t, "dup")
+	h.sidebar.AddInstance(stale)
+
+	recreated := newSnapshotTestInstance(t, "dup") // distinct pointer + CreatedAt
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return recreated, nil
+	}))
+
+	changed := h.reconcileSnapshot([]session.InstanceData{recreated.ToInstanceData()})
+	assert.True(t, changed)
+
+	var matches []*session.Instance
+	for _, inst := range h.sidebar.GetInstances() {
+		if inst.Title == "dup" {
+			matches = append(matches, inst)
+		}
+	}
+	require.Len(t, matches, 1, "exactly one row for the reused title")
+	require.Same(t, recreated, matches[0], "the recreated instance must replace the stale corpse")
+}
+
+// TestFetchSnapshotCmd_UsesFetcherSeam exercises the full off-loop fetch →
+// on-loop reconcile path through the injected SetSnapshotFetcherForTest seam: the
+// fetch command is scoped to the home's repo, and its result reconciles into the
+// sidebar — the #959 live-display flow with no real daemon.
+func TestFetchSnapshotCmd_UsesFetcherSeam(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+
+	called := false
+	t.Cleanup(SetSnapshotFetcherForTest(func(repoID string) ([]session.InstanceData, error) {
+		called = true
+		require.Equal(t, h.repoID, repoID, "the snapshot fetch must be scoped to this repo")
+		return []session.InstanceData{{Title: "viaseam", CreatedAt: time.Now()}}, nil
+	}))
+
+	msg := h.fetchSnapshotCmd()()
+	require.True(t, called, "fetchSnapshotCmd must call the snapshot fetcher seam")
+	snap, ok := msg.(snapshotFetchedMsg)
+	require.True(t, ok, "fetchSnapshotCmd must return a snapshotFetchedMsg")
+	require.NoError(t, snap.err)
+
+	require.True(t, h.handleSnapshot(snap), "the fetched session is a change")
+	require.NotNil(t, findSidebarInstance(h, "viaseam"),
+		"the snapshot fetched through the seam must reconcile into the sidebar")
+}
+
+// TestHandleSnapshot_WarmingDaemonLeavesSidebarIntact: a warming-daemon fetch
+// error is retryable, not a reason to drop the cold-start sidebar (#829).
+func TestHandleSnapshot_WarmingDaemonLeavesSidebarIntact(t *testing.T) {
+	h := newTestHome(t)
+	a := newSnapshotTestInstance(t, "a")
+	h.sidebar.AddInstance(a)
+
+	changed := h.handleSnapshot(snapshotFetchedMsg{
+		err: errors.New("agent-factory daemon is starting (restoring sessions); retry shortly"),
+	})
+	assert.False(t, changed)
+	require.Same(t, a, findSidebarInstance(h, "a"),
+		"a warming-daemon snapshot fetch must leave the sidebar intact for a retry")
+}
