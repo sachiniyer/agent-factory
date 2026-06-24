@@ -62,38 +62,3 @@ func TestHandleEnter_DeadSessionShowsError(t *testing.T) {
 	require.Contains(t, h.errBox.String(), "dead-session",
 		"the error must name the offending session")
 }
-
-// TestRunMetadataTick_DeadSessionNotMarkedReady is the status half of #935: the
-// periodic metadata tick must not repaint a session whose backing session has
-// vanished as Ready (green dot). HasUpdated latches (false,false) for a dead
-// session, which is indistinguishable from a healthy idle one, so the tick has
-// to probe liveness and mark it Dead instead.
-func TestRunMetadataTick_DeadSessionNotMarkedReady(t *testing.T) {
-	// Start from Running to prove the tick actively transitions it to Dead
-	// rather than merely leaving a pre-set status untouched.
-	inst := newDeadInstance(t, "dead-session", session.Running)
-
-	runMetadataTick([]*session.Instance{inst})
-
-	require.Equal(t, session.Dead, inst.GetStatus(),
-		"a dead session must be marked Dead, never Ready, by the metadata tick")
-}
-
-// TestRunMetadataTick_AliveIdleSessionStaysReady is the control for the test
-// above: a live, idle session (HasUpdated false,false but IsAlive true) must
-// still be marked Ready, proving the liveness probe didn't break the normal
-// idle path.
-func TestRunMetadataTick_AliveIdleSessionStaysReady(t *testing.T) {
-	inst, err := session.NewInstance(session.InstanceOptions{Title: "live-session", Path: t.TempDir(), Program: "claude"})
-	require.NoError(t, err)
-	// FakeBackend.IsAlive returns true and HasUpdated returns (false,false) —
-	// a healthy idle session.
-	inst.SetBackend(session.NewFakeBackend())
-	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Running)
-
-	runMetadataTick([]*session.Instance{inst})
-
-	require.Equal(t, session.Ready, inst.GetStatus(),
-		"a live idle session must still be marked Ready by the metadata tick")
-}

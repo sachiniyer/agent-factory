@@ -261,7 +261,6 @@ func (m *home) Init() tea.Cmd {
 			time.Sleep(100 * time.Millisecond)
 			return previewTickMsg{}
 		},
-		tickUpdateMetadataCmd,
 		tickUpdatePRInfoCmd,
 		tickRefreshExternalCmd,
 	)
@@ -389,32 +388,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.selectionChanged())
 		}
 		return m, tea.Batch(cmds...)
-	case tickUpdateMetadataMessage:
-		// Per-instance work (CheckAndHandleTrustPrompt + HasUpdated) is a
-		// tmux capture-pane shell-out per call. Iterating all instances on
-		// the bubbletea Update goroutine blocks the next render for ~10ms ×
-		// 2N (issue #559) — most visible when the queued tick fires right
-		// after tmux detach, because rendering can't catch up until the
-		// loop drains. Snapshot the instance list on the event loop and
-		// hand the work off to a goroutine so View() isn't blocked.
-		//
-		// While the user is attached, skip the per-instance work entirely:
-		// the sidebar is hidden, status flips have no visible effect, and
-		// the capture-pane calls were contending with the user's detach
-		// keystroke against the shared tmux server (#598). Keep the
-		// re-schedule cmd so the next tick fires within ~500ms of detach,
-		// catching the sidebar up promptly.
-		detachTraceMark("tickUpdateMetadataMessage-handler-entry")
-		if m.attached.Load() {
-			return m, tickUpdateMetadataCmd
-		}
-		// Snapshot the instance list on the event loop before handing it to the
-		// background tick goroutine: GetInstances() shares the sidebar's backing
-		// array, which the event loop mutates via AddInstance/RemoveInstanceByTitle,
-		// so iterating it off-loop is a data race (#682). The copy is cheap and
-		// gives the goroutine a stable list to walk.
-		instances := m.sidebar.GetInstancesSnapshot()
-		return m, runMetadataTickCmd(instances)
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress {
 			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {

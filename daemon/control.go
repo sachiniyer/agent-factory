@@ -971,6 +971,98 @@ func (m *Manager) InstancesSnapshot() []*session.Instance {
 	return daemonInstances(m.instances)
 }
 
+// RefreshStatuses recomputes every started instance's status the way the TUI
+// metadata tick used to (#935) and persists each transition through the
+// targeted single-writer path. With the daemon the sole owner of session state
+// (#960 PR 4/5), status is authoritative HERE and projected to the TUI via
+// Snapshot — the TUI no longer computes it. Called once per poll from RunDaemon,
+// alongside the AutoYes pass it now subsumes.
+//
+// The instance list is snapshotted under m.mu, then each instance's (possibly
+// slow) tmux probes run with the lock released so a hung capture-pane can't
+// block unrelated manager RPCs.
+func (m *Manager) RefreshStatuses() {
+	type entry struct {
+		repoID   string
+		instance *session.Instance
+	}
+	m.mu.Lock()
+	entries := make([]entry, 0, len(m.instances))
+	for key, inst := range m.instances {
+		repoID, _ := splitDaemonInstanceKey(key)
+		entries = append(entries, entry{repoID: repoID, instance: inst})
+	}
+	m.mu.Unlock()
+
+	for _, e := range entries {
+		m.refreshInstanceStatus(e.repoID, e.instance)
+	}
+}
+
+// refreshInstanceStatus mirrors the old runMetadataTick body for one instance:
+//   - skip unstarted instances and the transient TUI-owned states (a Loading
+//     session's tmux may not exist yet; a Deleting one is mid-teardown — probing
+//     or writing either would poke a dying session, #844);
+//   - dismiss a pending trust prompt (CheckAndHandleTrustPrompt), moved here from
+//     the TUI so it works whether or not a TUI is attached;
+//   - HasUpdated → Running; a waiting prompt → TapEnter (the AutoYes path, which
+//     this poll already owned — unchanged by #960);
+//   - otherwise probe liveness: a vanished tmux/remote session → Dead (never
+//     repainted Ready, the #935 invariant the hollow dead-dot rendering relies
+//     on), a live idle one → Ready.
+//
+// Status writes go through SetStatusIfNotDeleting so a concurrent kill's Deleting
+// marker is never clobbered. Only a real transition is persisted, and it persists
+// under the per-repo start lock (mirroring CreateTab/CloseTab/SetPRInfo) through
+// the targeted writer persistInstanceData — never a whole-list re-marshal, the
+// dual-writer clobber surface #960 PR 4 retired — so an idle session never churns
+// instances.json.
+func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instance) {
+	if instance == nil || !instance.Started() {
+		return
+	}
+	if status := instance.GetStatus(); status == session.Loading || status == session.Deleting {
+		return
+	}
+
+	instance.CheckAndHandleTrustPrompt()
+	before := instance.GetStatus()
+	updated, hasPrompt := instance.HasUpdated()
+	switch {
+	case updated:
+		instance.SetStatusIfNotDeleting(session.Running)
+	case hasPrompt:
+		// A waiting prompt: tap enter when AutoYes is on (TapEnter is a no-op
+		// otherwise) and leave the status for the next tick to resolve, exactly
+		// as runMetadataTick did.
+		instance.TapEnter()
+	case !instance.TmuxAlive():
+		// HasUpdated returned (false,false), which a healthy idle session and a
+		// dead one both produce — indistinguishable on their own. Probe liveness
+		// only on this idle branch so a vanished session is marked Dead and
+		// rendered distinctly rather than repainted as a green Ready dot it can
+		// no longer back (#935).
+		instance.SetStatusIfNotDeleting(session.Dead)
+	default:
+		instance.SetStatusIfNotDeleting(session.Ready)
+	}
+
+	after := instance.GetStatus()
+	if after == before || after == session.Deleting || after == session.Loading {
+		// No real transition, or a concurrent kill moved it to a transient state
+		// we must not persist. Only transitions touch disk.
+		return
+	}
+
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	err := persistInstanceData(repoID, instance.ToInstanceData())
+	repoStartLock.Unlock()
+	if err != nil {
+		log.WarningLog.Printf("daemon failed to persist status for %q: %v", instance.Title, err)
+	}
+}
+
 // SaveInstances writes the manager's authoritative in-memory instances to disk
 // as a straight per-repo marshal (#960 PR 4). With the daemon the sole writer of
 // instances.json there is no competing snapshot to reconcile, so this is no

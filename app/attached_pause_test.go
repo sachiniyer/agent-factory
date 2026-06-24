@@ -7,87 +7,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestTickUpdateMetadata_PausedWhileAttached is the regression test for #598:
-// while the user is inside an attached tmux session, the metadata tick must
-// not dispatch runMetadataTickCmd. The handler should return only the
-// re-schedule cmd so the next tick fires within ~500ms of detach — which is
-// what keeps the sidebar caught up without a multi-second backoff.
-//
-// Before the fix, runMetadataTickCmd ran every 500ms regardless of attach
-// state and shelled out to tmux capture-pane 2 × N times. With ~10 sessions
-// and an occasional slow capture, the resulting 40+ RPS against the shared
-// tmux server queued the user's detach key for tens of seconds (#598).
-func TestTickUpdateMetadata_PausedWhileAttached(t *testing.T) {
-	h := newTestHome(t)
-	a := instanceWithFakeBackend(t, "a")
-	h.sidebar.AddInstance(a)
-
-	h.attached.Store(true)
-	_, cmd := h.Update(tickUpdateMetadataMessage{})
-	require.NotNil(t, cmd, "handler must still return a re-schedule cmd while attached")
-
-	// The re-schedule cmd is the package-level tickUpdateMetadataCmd; the
-	// per-instance work cmd is runMetadataTickCmd(...). The only way to
-	// tell them apart cheaply is by what they return when invoked: the
-	// re-schedule sleeps then returns tickUpdateMetadataMessage{}; the
-	// work cmd runs CheckAndHandleTrustPrompt/HasUpdated on each instance
-	// and then returns tickUpdateMetadataMessage{}.
-	//
-	// Asserting on the function-pointer identity is the most direct check:
-	// while attached we must return the bare re-schedule var, not a
-	// freshly-constructed runMetadataTickCmd closure that captured the
-	// instance slice.
-	gotPtr := reflect.ValueOf(cmd).Pointer()
-	wantPtr := reflect.ValueOf(tickUpdateMetadataCmd).Pointer()
-	assert.Equal(t, wantPtr, gotPtr,
-		"while attached the handler must return tickUpdateMetadataCmd, "+
-			"not runMetadataTickCmd — otherwise capture-pane work runs in "+
-			"the background and contends with the user's detach key (#598)")
-
-	// And just to be sure: invoking the cmd must not have mutated the
-	// instance status (which is what runMetadataTickCmd would do via
-	// HasUpdated → Ready).
-	assert.Equal(t, session.Running, a.GetStatus(),
-		"instance status must not flip while attached — no per-instance "+
-			"capture-pane work should have run")
-}
-
-// TestTickUpdateMetadata_RunsWhenNotAttached is the symmetric test: with
-// attached=false, the handler must dispatch the work cmd as it always has.
-// This guards against the gate being too aggressive (e.g. an inverted
-// boolean) and silently breaking the sidebar Running/Ready status forever.
-func TestTickUpdateMetadata_RunsWhenNotAttached(t *testing.T) {
-	h := newTestHome(t)
-	a := instanceWithFakeBackend(t, "a")
-	h.sidebar.AddInstance(a)
-
-	require.False(t, h.attached.Load(), "test pre-condition: not attached")
-	_, cmd := h.Update(tickUpdateMetadataMessage{})
-	require.NotNil(t, cmd)
-
-	// Identity check the other way around: the cmd we got must NOT be the
-	// bare re-schedule cmd. It must be a freshly-constructed closure from
-	// runMetadataTickCmd.
-	gotPtr := reflect.ValueOf(cmd).Pointer()
-	wantPtr := reflect.ValueOf(tickUpdateMetadataCmd).Pointer()
-	assert.NotEqual(t, wantPtr, gotPtr,
-		"while not attached the handler must dispatch runMetadataTickCmd "+
-			"with the snapshot of instances, not the bare re-schedule cmd")
-
-	// Invoking the cmd should drive the FakeBackend HasUpdated path, which
-	// returns (updated=false, hasPrompt=false), flipping Running → Ready.
-	msg := cmd()
-	_, ok := msg.(tickUpdateMetadataMessage)
-	require.True(t, ok, "runMetadataTickCmd must re-emit tickUpdateMetadataMessage; got %T", msg)
-	assert.Equal(t, session.Ready, a.GetStatus(),
-		"work cmd must have executed against the instance")
-}
 
 // TestPreviewTick_PausedWhileAttached verifies that the previewTickMsg
 // handler skips selectionChanged (and therefore refreshPanesCmd, two

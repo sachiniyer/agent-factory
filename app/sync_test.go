@@ -91,76 +91,44 @@ func instanceWithFakeBackend(t *testing.T, title string) *session.Instance {
 	return inst
 }
 
-// TestTickUpdateMetadata_HandlerDispatchesOffEventLoop is the regression test
-// for issue #559: the tickUpdateMetadataMessage handler must not iterate
-// instances on the bubbletea Update goroutine. The loop body shells out to
-// tmux capture-pane per instance, so executing it synchronously blocks
-// rendering and is most visible right after detach when the queued tick
-// fires. The fix moves the iteration into a tea.Cmd that runs in a goroutine.
-//
-// We assert the handler returns quickly and the instance statuses are NOT
-// yet modified by the time Update returns — they only flip after the cmd
-// runs.
-func TestTickUpdateMetadata_HandlerDispatchesOffEventLoop(t *testing.T) {
+// TestReconcileSnapshot_MirrorsStatusOntoExistingRow is the TUI half of the
+// #960 PR 5 move: the TUI no longer computes status (runMetadataTick is gone) —
+// it renders the daemon's authoritative status straight from the Snapshot. A row
+// whose live status differs from the snapshot's must be updated in place to the
+// snapshot value, with no tmux probe of its own.
+func TestReconcileSnapshot_MirrorsStatusOntoExistingRow(t *testing.T) {
 	h := newTestHome(t)
-	a := instanceWithFakeBackend(t, "a")
-	b := instanceWithFakeBackend(t, "b")
-	c := instanceWithFakeBackend(t, "c")
-	h.sidebar.AddInstance(a)
-	h.sidebar.AddInstance(b)
-	h.sidebar.AddInstance(c)
+	inst := instanceWithFakeBackend(t, "a") // starts Running, started=true
+	h.sidebar.AddInstance(inst)
 
-	start := time.Now()
-	_, cmd := h.Update(tickUpdateMetadataMessage{})
-	elapsed := time.Since(start)
+	// The daemon's snapshot reports this session is now Dead. The TUI must adopt
+	// it verbatim — it does not re-derive Ready/Dead from a local probe.
+	data := inst.ToInstanceData()
+	data.Status = session.Dead
 
-	require.NotNil(t, cmd, "handler must return a re-schedule cmd")
-	// The handler should now return essentially instantly — the work is
-	// deferred to the returned cmd, which runs off the event loop.
-	assert.Less(t, elapsed, 5*time.Millisecond,
-		"Update must not block on per-instance work; saw %s", elapsed)
-	// Statuses remain unchanged at this point — the cmd hasn't run yet.
-	assert.Equal(t, session.Running, a.GetStatus())
-	assert.Equal(t, session.Running, b.GetStatus())
-	assert.Equal(t, session.Running, c.GetStatus())
+	changed := h.reconcileSnapshot([]session.InstanceData{data})
+
+	assert.True(t, changed, "mirroring a new status must report a change so the sidebar repaints")
+	assert.Equal(t, session.Dead, inst.GetStatus(),
+		"the TUI must render the daemon's snapshot status, not compute its own")
 }
 
-// TestRunMetadataTick_TransitionsRunningToReady checks the loop body still
-// performs its job when invoked off the event loop: a FakeBackend reports
-// no updates and no prompt, so each Running instance must flip to Ready.
-func TestRunMetadataTick_TransitionsRunningToReady(t *testing.T) {
-	a := instanceWithFakeBackend(t, "a")
-	b := instanceWithFakeBackend(t, "b")
+// TestReconcileSnapshot_LeavesTransientRowStatusAlone guards that a row the TUI
+// owns mid-operation (Loading creation #808, Deleting kill #844) is not
+// clobbered by the status mirror: the reconcile skips transient rows entirely.
+func TestReconcileSnapshot_LeavesTransientRowStatusAlone(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "a")
+	inst.SetStatus(session.Deleting)
+	h.sidebar.AddInstance(inst)
 
-	runMetadataTick([]*session.Instance{a, b})
+	data := inst.ToInstanceData()
+	data.Status = session.Ready // daemon doesn't know about the in-flight kill
 
-	assert.Equal(t, session.Ready, a.GetStatus())
-	assert.Equal(t, session.Ready, b.GetStatus())
-}
+	h.reconcileSnapshot([]session.InstanceData{data})
 
-// TestRunMetadataTick_SkipsLoadingAndUnstartedInstances mirrors the previous
-// synchronous handler's guard: instances that are still Loading or not
-// Started must not be probed (tmux session may not exist yet).
-func TestRunMetadataTick_SkipsLoadingAndUnstartedInstances(t *testing.T) {
-	loading := instanceWithFakeBackend(t, "loading")
-	loading.SetStatus(session.Loading)
-
-	unstarted, err := session.NewInstance(session.InstanceOptions{
-		Title:   "unstarted",
-		Path:    t.TempDir(),
-		Program: "claude",
-	})
-	require.NoError(t, err)
-	unstarted.SetBackend(session.NewFakeBackend())
-	// Deliberately leave started=false.
-	unstarted.SetStatus(session.Running)
-
-	runMetadataTick([]*session.Instance{loading, unstarted})
-
-	assert.Equal(t, session.Loading, loading.GetStatus(),
-		"Loading instance must not have its status overwritten")
-	assert.Equal(t, session.Running, unstarted.GetStatus(),
-		"unstarted instance must not have its status overwritten")
+	assert.Equal(t, session.Deleting, inst.GetStatus(),
+		"a mid-teardown row must keep its Deleting marker through a reconcile")
 }
 
 func TestImportRemoteHookSessionsAddsListCmdSessions(t *testing.T) {
