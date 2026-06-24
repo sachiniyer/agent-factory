@@ -67,8 +67,6 @@ type home struct {
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
 
-	// storage is the interface for saving/loading data to/from the app's state
-	storage *session.Storage
 	// snapshotFetcher fetches the daemon's authoritative session snapshot for
 	// this repo. It is a PER-home field, not a package global, precisely because
 	// fetchSnapshotCmd reads it from an off-loop tea.Cmd goroutine: a shared
@@ -154,15 +152,9 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		tmux.SetDetachKey(b, appConfig.DetachKeys)
 	}
 
-	// Load application state
+	// Load application state (seen-help-screens flags; #960 PR 6 the TUI no
+	// longer reads instances.json — the daemon owns it and answers Snapshot).
 	appState := config.LoadState()
-
-	// Initialize storage (repo-scoped)
-	storage, err := session.NewStorage(appState, repoID)
-	if err != nil {
-		fmt.Printf("Failed to initialize storage: %v\n", err)
-		os.Exit(1)
-	}
 
 	tabbedWindow := ui.NewTabbedWindow(ui.NewTabPane())
 
@@ -172,7 +164,6 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		menu:            ui.NewMenu(),
 		contentPane:     ui.NewContentPane(tabbedWindow),
 		errBox:          ui.NewErrBox(),
-		storage:         storage,
 		snapshotFetcher: snapshotThroughDaemon,
 		appConfig:       appConfig,
 		program:         program,
@@ -184,17 +175,13 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes)
 
-	// Load saved instances (scoped to current repo)
-	instances, err := storage.LoadInstances()
-	if err != nil {
-		fmt.Printf("Failed to load instances: %v\n", err)
+	// Cold-start the sidebar from the daemon's authoritative Snapshot (#960 PR 6).
+	// The TUI no longer reads instances.json — the daemon is the sole writer/owner
+	// of session state, so startup mirrors the same projection the refresh tick
+	// reconciles against. A warming daemon (#829) is waited out, not raced.
+	if err := h.coldStartFromSnapshot(); err != nil {
+		fmt.Printf("Failed to load sessions from daemon: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Add loaded instances to the sidebar
-	for _, instance := range instances {
-		h.sidebar.AddInstance(instance)()
-		instance.SetAutoYes(autoYes)
 	}
 
 	h.importRemoteHookSessions()

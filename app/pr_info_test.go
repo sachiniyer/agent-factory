@@ -472,7 +472,6 @@ func TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate(t *testing.T) {
 // regression in newTestHome stays within this package.
 func TestNewTestHome_BuildsSuccessfully(t *testing.T) {
 	h := newTestHome(t)
-	assert.NotNil(t, h.storage)
 	assert.NotNil(t, h.appState)
 	assert.Equal(t, uint32(0), h.appState.GetHelpScreensSeen())
 	_ = config.DefaultConfig() // touch to keep import if other tests shrink

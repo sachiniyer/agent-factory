@@ -139,8 +139,6 @@ func TestImportRemoteHookSessionsAddsListCmdSessions(t *testing.T) {
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
 	h.repoID = repo.ID
-	h.storage, err = session.NewStorage(config.DefaultState(), repo.ID)
-	require.NoError(t, err)
 
 	scriptDir := t.TempDir()
 	write := func(name, body string) string {

@@ -55,15 +55,12 @@ func newTestHome(t *testing.T) *home {
 
 	state := config.DefaultState()
 	repoID := "test-repo-" + filepath.Base(tmp)
-	storage, err := session.NewStorage(state, repoID)
-	require.NoError(t, err)
 
 	return &home{
 		ctx:       context.Background(),
 		state:     stateDefault,
 		appConfig: config.DefaultConfig(),
 		appState:  state,
-		storage:   storage,
 		// Default the snapshot fetcher to a failing stub so a test that incidentally
 		// runs the tick loop (e.g. the teatest e2e harness) never dials — or spawns
 		// — a real daemon. A FAILING fetch is the correct default: it mirrors
@@ -83,6 +80,20 @@ func newTestHome(t *testing.T) *home {
 		spinner:     spin,
 		repoID:      repoID,
 	}
+}
+
+// requireTUIInstancesEmpty asserts the TUI's repo instances file holds no
+// records. This is the structural single-writer guarantee (#960 PR 6): the TUI
+// no longer holds a session.Storage handle and has no write path, so its repo's
+// instances.json is never written by the TUI. Reads the store directly because
+// the home struct no longer carries a Storage field.
+func requireTUIInstancesEmpty(t *testing.T, h *home) {
+	t.Helper()
+	raw, err := config.DefaultState().GetInstances(h.repoID)
+	require.NoError(t, err)
+	empty := len(raw) == 0 || string(raw) == "[]" || string(raw) == "null"
+	require.True(t, empty,
+		"the TUI must hold no instances.json write path (daemon is the sole writer, #960): got %s", string(raw))
 }
 
 // newLoadingInstance returns an instance in Loading status, matching the UI
