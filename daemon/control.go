@@ -155,6 +155,19 @@ type SetPRInfoResponse struct {
 	OK bool
 }
 
+// SnapshotRequest asks the daemon for the authoritative session list of a repo
+// (#960 PR 3). RepoID scopes the read like the other sessions verbs (empty =
+// all repos). It is the read side of the single-writer model: the daemon's
+// in-memory instance map is the source of truth, so the TUI mirrors this
+// projection instead of re-reading instances.json off disk.
+type SnapshotRequest struct {
+	RepoID string
+}
+
+type SnapshotResponse struct {
+	Instances []session.InstanceData
+}
+
 type ImportRemoteHookSessionsRequest struct {
 	RepoPath string
 }
@@ -328,6 +341,19 @@ func SetPRInfo(req SetPRInfoRequest) error {
 		return err
 	}
 	return nil
+}
+
+// Snapshot asks the daemon for the authoritative session list of repoID (empty
+// = all repos). It is the TUI's read path under the single-writer model (#960
+// PR 3): the daemon owns session/tab state, so the TUI mirrors this projection
+// rather than re-reading instances.json. A warming daemon (#829) returns the
+// retryable starting error, which callDaemon already waits out.
+func Snapshot(req SnapshotRequest) ([]session.InstanceData, error) {
+	var resp SnapshotResponse
+	if err := callDaemon("Snapshot", req, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Instances, nil
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.
@@ -665,6 +691,17 @@ func (s *controlServer) SetPRInfo(req SetPRInfoRequest, resp *SetPRInfoResponse)
 	return nil
 }
 
+func (s *controlServer) Snapshot(req SnapshotRequest, resp *SnapshotResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	resp.Instances = s.manager.Snapshot(req.RepoID)
+	return nil
+}
+
 func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
 	if err := s.requireManagerReady(); err != nil {
 		return err
@@ -945,6 +982,43 @@ func (m *Manager) InstancesSnapshot() []*session.Instance {
 
 func (m *Manager) SaveInstances() error {
 	return m.storage.SaveInstances(m.InstancesSnapshot())
+}
+
+// Snapshot returns the authoritative InstanceData for every session the manager
+// owns, scoped to repoID (all repos when repoID is empty). It is the read side
+// of the single-writer model (#960 PR 3): the manager's in-memory instance map
+// IS the source of truth, so the TUI mirrors this projection instead of
+// re-reading instances.json. Pure read — it copies the instance pointers under
+// m.mu, then serializes each via ToInstanceData (which takes the instance's own
+// lock) OUTSIDE m.mu so a slow serialize never blocks a concurrent mutation.
+// Results are ordered by (repo, title) key for a stable diff, so the TUI
+// reconcile does not repaint on map-iteration jitter.
+func (m *Manager) Snapshot(repoID string) []session.InstanceData {
+	m.mu.Lock()
+	keys := make([]string, 0, len(m.instances))
+	for key := range m.instances {
+		if repoID != "" {
+			rid, _ := splitDaemonInstanceKey(key)
+			if rid != repoID {
+				continue
+			}
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	insts := make([]*session.Instance, 0, len(keys))
+	for _, key := range keys {
+		if inst := m.instances[key]; inst != nil {
+			insts = append(insts, inst)
+		}
+	}
+	m.mu.Unlock()
+
+	data := make([]session.InstanceData, 0, len(insts))
+	for _, inst := range insts {
+		data = append(data, inst.ToInstanceData())
+	}
+	return data
 }
 
 func (m *Manager) refreshLocked() error {

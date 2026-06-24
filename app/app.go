@@ -372,20 +372,26 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mergePendingInstances()
 		return m, tickPendingInstancesCmd
 	case tickRefreshExternalMessage:
-		// Logged even when the tick is a no-op so we can spot it racing
-		// with detach in the trace tail.
+		// The tick only PACES the loop; the actual Snapshot fetch runs off the
+		// event loop (it can block while a daemon warms up — #829) and comes back
+		// as snapshotFetchedMsg, which reconciles and re-arms the tick. Deliberately
+		// no reschedule here: re-arming from snapshotFetchedMsg keeps exactly one
+		// fetch in flight.
 		detachTraceMark("tickRefreshExternalMessage-handler-entry")
+		return m, m.fetchSnapshotCmd()
+	case snapshotFetchedMsg:
+		// Reconcile the sidebar to the daemon's authoritative snapshot on the
+		// event loop (sidebar mutation must stay here — #682), then re-arm the
+		// pacing tick. No TUI SaveInstances: the snapshot is a read-only mirror of
+		// state the daemon already persists, so there is nothing for the TUI to
+		// write back — and writing its whole-list view back is exactly the clobber
+		// the single-writer model retires (#959/#960).
+		detachTraceMark("snapshotFetchedMsg-handler-entry")
 		tickStart := time.Now()
-		changed := m.refreshExternalInstances()
-		detachTrace(tickStart, "tickRefreshExternalMessage-refreshExternalInstances-returned")
-		var cmds []tea.Cmd
-		cmds = append(cmds, tickRefreshExternalCmd)
+		changed := m.handleSnapshot(msg)
+		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
+		cmds := []tea.Cmd{tickRefreshExternalCmd}
 		if changed {
-			saveStart := time.Now()
-			if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-				log.WarningLog.Printf("failed to save instances after refresh: %v", err)
-			}
-			detachTrace(saveStart, "tickRefreshExternalMessage-SaveInstances-returned")
 			cmds = append(cmds, m.selectionChanged())
 		}
 		return m, tea.Batch(cmds...)

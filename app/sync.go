@@ -25,6 +25,16 @@ type tickUpdatePRInfoMessage struct{}
 type tickPendingInstancesMessage struct{}
 type tickRefreshExternalMessage struct{}
 
+// snapshotFetchedMsg carries the result of an off-loop daemon Snapshot fetch
+// back to the event loop, where reconcileSnapshot mutates the sidebar (sidebar
+// mutation must stay on the bubbletea loop — #682). err is non-nil on a failed
+// fetch; the handler retries (daemon warming) or falls back to the disk refresh
+// (version-skewed daemon without the Snapshot RPC).
+type snapshotFetchedMsg struct {
+	data []session.InstanceData
+	err  error
+}
+
 // prInfoUpdatedMsg is returned by an async PR info fetch.
 // info is nil when the fetch resolved to "no PR for this branch".
 // err is set for transient errors — the handler keeps the cached value.
@@ -120,12 +130,34 @@ var tickPendingInstancesCmd = func() tea.Msg {
 	return tickPendingInstancesMessage{}
 }
 
-// tickRefreshExternalCmd reconciles the sidebar with on-disk state
-// to pick up changes made via the CLI (e.g. `af sessions create/kill`).
-// Runs every 3s.
+// snapshotRefreshInterval is how often the TUI polls the daemon for the
+// authoritative session snapshot and reconciles its sidebar to it (#960 PR 3).
+// Tightened from the old 3s disk poll toward the ~500ms–1s the single-writer
+// design approved, so an out-of-band tab/session appears near-instantly. The
+// sleep is the gap BETWEEN reconciles (it precedes each tick), so a slow fetch
+// extends the period rather than overlapping the next one.
+const snapshotRefreshInterval = 750 * time.Millisecond
+
+// tickRefreshExternalCmd paces the snapshot reconcile loop: it sleeps one
+// interval, then emits tickRefreshExternalMessage, whose handler kicks off an
+// off-loop Snapshot fetch (fetchSnapshotCmd). The loop re-arms from the
+// snapshotFetchedMsg handler after each reconcile, so only one fetch is ever in
+// flight.
 var tickRefreshExternalCmd = func() tea.Msg {
-	time.Sleep(3 * time.Second)
+	time.Sleep(snapshotRefreshInterval)
 	return tickRefreshExternalMessage{}
+}
+
+// fetchSnapshotCmd fetches the daemon's authoritative session list off the event
+// loop (the RPC may briefly block while a daemon warms up — #829) and returns it
+// as a snapshotFetchedMsg for on-loop reconciliation. Mirrors runMetadataTickCmd:
+// the work runs in the tea.Cmd goroutine, the mutation happens in the handler.
+func (m *home) fetchSnapshotCmd() tea.Cmd {
+	repoID := m.repoID
+	return func() tea.Msg {
+		data, err := snapshotThroughDaemon(repoID)
+		return snapshotFetchedMsg{data: data, err: err}
+	}
 }
 
 // prInfoFetcher is the function used by fetchPRInfoCmd to retrieve PR info.
@@ -370,6 +402,214 @@ func (m *home) refreshExternalInstances() bool {
 	}
 
 	return changed
+}
+
+// handleSnapshot applies a fetched daemon snapshot to the sidebar and reports
+// whether anything changed (the caller repaints only on a diff). On a fetch
+// error it degrades rather than dropping the sidebar: a warming daemon (#829) is
+// retried on the next tick (callDaemon already waited out the warm-up window), a
+// version-skewed daemon without the Snapshot RPC falls back to the legacy
+// disk-based refresh (mirroring the SetPRInfo method-not-found fallback in #960
+// PR 2), and any other error is logged and skipped, leaving the last-known
+// sidebar intact.
+func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
+	if msg.err != nil {
+		if daemon.IsDaemonStartingErr(msg.err) {
+			// Daemon still restoring (#829); the cold-start LoadInstances already
+			// populated the sidebar. Retry next tick — nothing to reconcile yet.
+			return false
+		}
+		if daemon.IsRPCMethodNotFoundErr(msg.err) {
+			// Older daemon without the Snapshot RPC: fall back to the disk-based
+			// reconcile until it is upgraded. The on-disk format is frozen, so
+			// this stays correct across the rollout.
+			return m.refreshExternalInstances()
+		}
+		log.WarningLog.Printf("failed to fetch daemon snapshot: %v", msg.err)
+		return false
+	}
+	return m.reconcileSnapshot(msg.data)
+}
+
+// reconcileSnapshot mirrors the sidebar to the daemon's authoritative snapshot
+// (#960 PR 3). The daemon is the single owner of session/tab state, so the TUI
+// renders a projection of it:
+//   - sessions in the snapshot but missing locally are built (FromInstanceData,
+//     reconnecting tabs by tmux name) and added;
+//   - sessions gone from the snapshot are removed;
+//   - existing rows are updated IN PLACE — same *session.Instance pointer, only
+//     its tab list and PR info mutated — which is the #959 "live display" fix
+//     (an out-of-band tab now appears without a restart);
+//   - a same-title row whose identity (CreatedAt) differs from the snapshot is a
+//     kill+recreate of the title (#765); it is swapped for a freshly built
+//     instance so the dead corpse never shadows the live session.
+//
+// Local-only view state is preserved: existing rows keep their pointer (so the
+// TabbedWindow's active tab and the content pane's scroll/overlay are untouched),
+// and the selected instance is re-pinned by pointer after the reconcile so a
+// removal of a preceding row can't drift the cursor. Transient TUI-owned rows
+// (Loading creation #808, Deleting kill #844) are left entirely alone: the
+// daemon may not yet know about an in-flight create, and a mid-teardown row must
+// keep its marker. Returns whether anything changed.
+//
+// Because the snapshot IS the truth, this needs none of refreshExternalInstances'
+// dual-writer collision heuristics (instanceCollisionShouldSkip / the #765/#808
+// "is my in-memory row staler than disk" logic) — those defend the TUI's
+// *authoritative* copy against the daemon's writes; a pure mirror just needs an
+// identity check (CreatedAt) to tell "same session" from "title reused".
+//
+// STATUS is deliberately NOT mirrored onto existing rows here: the daemon does
+// not yet compute Ready/Dead (that moves to it in #960 PR 5), so its persisted
+// status is stale, and clobbering the locally-computed status would fight
+// runMetadataTick and flicker the dot. New rows still seed their status from the
+// snapshot (FromInstanceData carries it); full status mirroring lands in PR 5.
+func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
+	snapByTitle := make(map[string]session.InstanceData, len(data))
+	for _, d := range data {
+		snapByTitle[d.Title] = d
+	}
+
+	existing := make(map[string]*session.Instance, len(data))
+	for _, inst := range m.sidebar.GetInstances() {
+		existing[inst.Title] = inst
+	}
+
+	// Capture the selected instance so we can re-pin it after removals shift
+	// indices — selection must never drift because a snapshot arrived.
+	selected := m.sidebar.GetSelectedInstance()
+
+	changed := false
+
+	for _, d := range data {
+		inst := existing[d.Title]
+		if inst == nil {
+			if m.addInstanceFromSnapshot(d) {
+				changed = true
+			}
+			continue
+		}
+		// In-flight TUI operations own their row: leave Loading/Deleting alone.
+		if isTransientStatus(inst.GetStatus()) {
+			continue
+		}
+		if !inst.CreatedAt.Equal(d.CreatedAt) {
+			// Same title, different session — a kill+recreate reused the title
+			// (#765). Swap the stale row for the live one rather than mutating the
+			// corpse in place.
+			if m.swapInstanceFromSnapshot(d) {
+				changed = true
+			}
+			continue
+		}
+		if m.updateInstanceFromSnapshot(inst, d) {
+			changed = true
+		}
+	}
+
+	// Remove sessions the daemon no longer owns. Skip transient rows (an
+	// in-flight create the daemon doesn't list yet; a mid-teardown kill).
+	var toRemove []*session.Instance
+	for _, inst := range m.sidebar.GetInstances() {
+		if _, ok := snapByTitle[inst.Title]; ok {
+			continue
+		}
+		if isTransientStatus(inst.GetStatus()) {
+			continue
+		}
+		toRemove = append(toRemove, inst)
+	}
+	for _, inst := range toRemove {
+		m.sidebar.RemoveInstanceByTitle(inst.Title)
+		changed = true
+	}
+
+	// Re-pin the selection to the same instance if it survived the reconcile.
+	if selected != nil && m.sidebar.ContainsInstance(selected) {
+		m.sidebar.SelectInstance(selected)
+	}
+
+	return changed
+}
+
+// addInstanceFromSnapshot builds a live instance from a snapshot record and adds
+// it to the sidebar. Returns true on success (a real change). A build failure is
+// logged and skipped — a single unrestorable record must not abort the whole
+// reconcile.
+func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
+	inst, err := buildInstanceFromSnapshot(d)
+	if err != nil {
+		log.WarningLog.Printf("failed to build instance %q from snapshot: %v", d.Title, err)
+		return false
+	}
+	m.sidebar.AddInstance(inst)()
+	inst.SetAutoYes(m.autoYes)
+	return true
+}
+
+// swapInstanceFromSnapshot replaces a stale same-title sidebar row with a freshly
+// built instance for the recreated session (#765), preserving the selected row.
+// Built BEFORE the swap so a transient build failure leaves the existing row in
+// place rather than dropping it.
+func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
+	inst, err := buildInstanceFromSnapshot(d)
+	if err != nil {
+		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
+		return false
+	}
+	if !m.sidebar.ReplaceInstanceByTitle(d.Title, inst) {
+		// The row vanished between read and swap; add it fresh.
+		m.sidebar.AddInstance(inst)()
+	}
+	inst.SetAutoYes(m.autoYes)
+	return true
+}
+
+// updateInstanceFromSnapshot reconciles an existing sidebar row's tab list and
+// PR badge to the snapshot IN PLACE (same pointer, so view state survives).
+// Returns whether anything changed.
+func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
+	changed := false
+	// Remote instances' tabs come from hook config (terminal_cmd), not the
+	// snapshot, so the backend owns them — skip the tab reconcile.
+	if !inst.IsRemote() {
+		if tabsChanged, err := inst.ReconcileTabsFromData(d.Tabs); err != nil {
+			log.WarningLog.Printf("failed to reconcile tabs for %q from snapshot: %v", d.Title, err)
+			changed = changed || tabsChanged
+		} else if tabsChanged {
+			changed = true
+		}
+	}
+	// PR info mirrors the daemon's recorded value. This runs on the event loop,
+	// serialized with prInfoUpdatedMsg, so it never races the TUI's own
+	// fetch-then-write of the same badge.
+	if prInfoDiffersFromData(inst, d.PRInfo) {
+		inst.SetPRInfo(prInfoFromData(d.PRInfo))
+		changed = true
+	}
+	return changed
+}
+
+// prInfoFromData rebuilds a *git.PRInfo from its serialized form, returning nil
+// for the zero value (Number 0 = "no PR"), matching FromInstanceData.
+func prInfoFromData(d session.PRInfoData) *git.PRInfo {
+	if d.Number == 0 {
+		return nil
+	}
+	return &git.PRInfo{Number: d.Number, Title: d.Title, URL: d.URL, State: d.State}
+}
+
+// prInfoDiffersFromData reports whether an instance's in-memory PR info differs
+// from the snapshot's, so the reconcile only writes (and reports a change) on an
+// actual diff.
+func prInfoDiffersFromData(inst *session.Instance, d session.PRInfoData) bool {
+	cur := inst.GetPRInfo()
+	if d.Number == 0 {
+		return cur != nil
+	}
+	if cur == nil {
+		return true
+	}
+	return cur.Number != d.Number || cur.Title != d.Title || cur.URL != d.URL || cur.State != d.State
 }
 
 // instanceCollisionShouldSkip decides whether to keep an existing sidebar
