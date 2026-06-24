@@ -78,6 +78,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
 
+		// Capture the start seam on the event loop, before the goroutine: it is a
+		// package var swapped by test seams, so reading it inside the cmd goroutine
+		// would race a sibling parallel test's swap (the #960 PR 4 snapshot-race
+		// class). Reading it here pins the value for this cmd.
+		start := startSessionThroughDaemon
 		startCmd := func() tea.Msg {
 			req := sessionStartRequest{
 				Title:       instance.Title,
@@ -86,7 +91,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				AutoYes:     m.autoYes,
 				ForceRemote: instance.IsRemote(),
 			}
-			started, err := startSessionThroughDaemon(instance, req)
+			started, err := start(instance, req)
 			return instanceStartedMsg{
 				instance: instance,
 				started:  started,

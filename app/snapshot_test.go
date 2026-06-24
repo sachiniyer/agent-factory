@@ -135,9 +135,10 @@ func TestReconcileSnapshot_SwapsKillRecreatedSameTitle(t *testing.T) {
 }
 
 // TestFetchSnapshotCmd_UsesFetcherSeam exercises the full off-loop fetch →
-// on-loop reconcile path through the injected SetSnapshotFetcherForTest seam: the
-// fetch command is scoped to the home's repo, and its result reconciles into the
-// sidebar — the #959 live-display flow with no real daemon.
+// on-loop reconcile path through the per-home snapshotFetcher field: the fetch
+// command is scoped to the home's repo, and its result reconciles into the
+// sidebar — the #959 live-display flow with no real daemon. The fetcher is a home
+// field (not a package global), so this never races a sibling test's swap.
 func TestFetchSnapshotCmd_UsesFetcherSeam(t *testing.T) {
 	h := newTestHome(t)
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
@@ -145,11 +146,11 @@ func TestFetchSnapshotCmd_UsesFetcherSeam(t *testing.T) {
 	}))
 
 	called := false
-	t.Cleanup(SetSnapshotFetcherForTest(func(repoID string) ([]session.InstanceData, error) {
+	h.snapshotFetcher = func(repoID string) ([]session.InstanceData, error) {
 		called = true
 		require.Equal(t, h.repoID, repoID, "the snapshot fetch must be scoped to this repo")
 		return []session.InstanceData{{Title: "viaseam", CreatedAt: time.Now()}}, nil
-	}))
+	}
 
 	msg := h.fetchSnapshotCmd()()
 	require.True(t, called, "fetchSnapshotCmd must call the snapshot fetcher seam")

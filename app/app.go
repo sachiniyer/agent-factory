@@ -69,6 +69,14 @@ type home struct {
 
 	// storage is the interface for saving/loading data to/from the app's state
 	storage *session.Storage
+	// snapshotFetcher fetches the daemon's authoritative session snapshot for
+	// this repo. It is a PER-home field, not a package global, precisely because
+	// fetchSnapshotCmd reads it from an off-loop tea.Cmd goroutine: a shared
+	// mutable global swapped by a test seam would race that goroutine against a
+	// sibling test's swap under `go test -parallel`. Each home owns its fetcher,
+	// so there is no cross-test shared state to race. Defaults to
+	// snapshotThroughDaemon in production; tests assign a fake directly.
+	snapshotFetcher func(repoID string) ([]session.InstanceData, error)
 	// appConfig stores persistent application configuration
 	appConfig *config.Config
 	// appState stores persistent application state like seen help screens
@@ -159,19 +167,20 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	tabbedWindow := ui.NewTabbedWindow(ui.NewTabPane())
 
 	h := &home{
-		ctx:         ctx,
-		spinner:     spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		menu:        ui.NewMenu(),
-		contentPane: ui.NewContentPane(tabbedWindow),
-		errBox:      ui.NewErrBox(),
-		storage:     storage,
-		appConfig:   appConfig,
-		program:     program,
-		autoYes:     autoYes,
-		repoID:      repoID,
-		repoRoot:    repo.Root,
-		state:       stateDefault,
-		appState:    appState,
+		ctx:             ctx,
+		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		menu:            ui.NewMenu(),
+		contentPane:     ui.NewContentPane(tabbedWindow),
+		errBox:          ui.NewErrBox(),
+		storage:         storage,
+		snapshotFetcher: snapshotThroughDaemon,
+		appConfig:       appConfig,
+		program:         program,
+		autoYes:         autoYes,
+		repoID:          repoID,
+		repoRoot:        repo.Root,
+		state:           stateDefault,
+		appState:        appState,
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes)
 
@@ -752,8 +761,11 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 
 	prompt := tsk.Prompt
 	taskID := tsk.ID
+	// Capture the start seam on the event loop before the goroutine reads it, so a
+	// concurrent test-seam swap can't race the read (#960 PR 4 race-fix class).
+	start := startSessionThroughDaemon
 	startCmd := func() tea.Msg {
-		started, err := startSessionThroughDaemon(instance, sessionStartRequest{
+		started, err := start(instance, sessionStartRequest{
 			Title:    instance.Title,
 			RepoPath: instance.Path,
 			Program:  instance.Program,

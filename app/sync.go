@@ -151,9 +151,14 @@ var tickRefreshExternalCmd = func() tea.Msg {
 // as a snapshotFetchedMsg for on-loop reconciliation. Mirrors runMetadataTickCmd:
 // the work runs in the tea.Cmd goroutine, the mutation happens in the handler.
 func (m *home) fetchSnapshotCmd() tea.Cmd {
+	// Capture both the repo and the fetcher on the event loop, BEFORE the goroutine
+	// runs: the fetcher is a per-home field (not a shared global), and reading it
+	// here rather than inside the closure keeps the off-loop goroutine free of any
+	// field access that could race a concurrent reassignment (#960 PR 4 race fix).
 	repoID := m.repoID
+	fetch := m.snapshotFetcher
 	return func() tea.Msg {
-		data, err := snapshotThroughDaemon(repoID)
+		data, err := fetch(repoID)
 		return snapshotFetchedMsg{data: data, err: err}
 	}
 }
@@ -200,10 +205,15 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 	// returned. The completion handler bumps the timestamp again with the
 	// real result, so the fresh window starts from fetch completion.
 	inst.MarkPRInfoFetched()
+	// Capture the fetch seam on the event loop, before the goroutine reads it: it
+	// is a package var swapped by test seams, so reading it inside the cmd
+	// goroutine would race a sibling parallel test's swap (#960 PR 4 race-fix
+	// class). Reading it here pins the value for this fetch.
+	fetch := prInfoFetcher
 	return func() tea.Msg {
 		fetchStart := time.Now()
 		detachTraceMark("fetchPRInfoCmd-goroutine-entry")
-		info, err := prInfoFetcher(repoPath, branch)
+		info, err := fetch(repoPath, branch)
 		detachTrace(fetchStart, "fetchPRInfoCmd-prInfoFetcher-returned")
 		return prInfoUpdatedMsg{instance: inst, branch: branch, info: info, err: err}
 	}

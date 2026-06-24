@@ -199,11 +199,15 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 // the title blocked against reuse until the teardown completes.
 func (m *home) killInstanceCmd(title string) tea.Cmd {
 	repoID := m.repoID
+	// Capture the kill seam on the event loop, before the goroutine: it is a
+	// package var swapped by test seams, so reading it inside the cmd goroutine
+	// would race a sibling parallel test's swap (#960 PR 4 race-fix class).
+	kill := killSessionThroughDaemon
 	return func() tea.Msg {
 		// The shell tab's tmux session is owned by the instance and torn down by
 		// LocalBackend.Kill (looping all tabs) inside the daemon teardown — there
 		// is no longer a UI-side terminal cache to clean up (#930 PR 2).
-		if err := killSessionThroughDaemon(title, repoID); err != nil {
+		if err := kill(title, repoID); err != nil {
 			log.ErrorLog.Printf("could not kill instance: %v", err)
 			return instanceKilledMsg{title: title, err: err}
 		}
