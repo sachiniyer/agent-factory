@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,51 +14,10 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-const pendingInstancesFileName = "pending_instances.json"
-
 var (
 	waitForReadyTimeout      = 60 * time.Second
 	waitForReadyPollInterval = 500 * time.Millisecond
 )
-
-func getPendingInstancesPath() (string, error) {
-	configDir, err := config.GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, pendingInstancesFileName), nil
-}
-
-// LoadAndClearPendingInstances reads pending instances written by task runs
-// and removes the file. The TUI should call this at startup to merge them in.
-func LoadAndClearPendingInstances() ([]session.InstanceData, error) {
-	path, err := getPendingInstancesPath()
-	if err != nil {
-		return nil, err
-	}
-
-	var pending []session.InstanceData
-	err = config.WithFileLock(path, func() error {
-		raw, readErr := os.ReadFile(path)
-		if readErr != nil {
-			if os.IsNotExist(readErr) {
-				return nil
-			}
-			return readErr
-		}
-
-		if err := json.Unmarshal(raw, &pending); err != nil {
-			log.WarningLog.Printf("failed to parse pending instances file, discarding: %v", err)
-			pending = nil
-		}
-
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.WarningLog.Printf("failed to remove pending instances file: %v", err)
-		}
-		return nil
-	})
-	return pending, err
-}
 
 // isReadyContent reports whether the captured pane content indicates that the
 // given agent is ready for input — or is showing a trust/confirmation prompt

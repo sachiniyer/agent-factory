@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -200,11 +199,15 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 // the title blocked against reuse until the teardown completes.
 func (m *home) killInstanceCmd(title string) tea.Cmd {
 	repoID := m.repoID
+	// Capture the kill seam on the event loop, before the goroutine: it is a
+	// package var swapped by test seams, so reading it inside the cmd goroutine
+	// would race a sibling parallel test's swap (#960 PR 4 race-fix class).
+	kill := killSessionThroughDaemon
 	return func() tea.Msg {
 		// The shell tab's tmux session is owned by the instance and torn down by
 		// LocalBackend.Kill (looping all tabs) inside the daemon teardown — there
 		// is no longer a UI-side terminal cache to clean up (#930 PR 2).
-		if err := killSessionThroughDaemon(title, repoID); err != nil {
+		if err := kill(title, repoID); err != nil {
 			log.ErrorLog.Printf("could not kill instance: %v", err)
 			return instanceKilledMsg{title: title, err: err}
 		}
@@ -336,18 +339,13 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 // run-arbitrary-command verb, so new-tab is unsupported there: a remote session's
 // only terminal tab is the one derived from remote_hooks.terminal_cmd (#930 PR 6).
 //
-// The spawn+persist is routed through the daemon's CreateTab RPC (#960 PR 2): the
+// The spawn+persist is routed through the daemon's CreateTab RPC (#960): the
 // daemon — the single writer — owns the new tab so its authoritative view holds
-// it and the TUI no longer originates a tab write that the daemon's next save
-// could clobber (#959). The TUI reflects the daemon-created tab locally via
-// AttachShellTab for instant display (it reconnects to the session the daemon
-// spawned, never a second colliding spawn); full live reconcile lands in PR 3.
-//
-// Version skew: against an older daemon that predates the shell-aware CreateTab,
-// the RPC reports method-not-found and we fall back to the legacy local spawn +
-// full-list save so a stale daemon can't drop the mutation (belt-and-suspenders
-// until PR 4 removes the TUI writer). The daemon's soft cap (max tabs) error is
-// surfaced verbatim.
+// it and the TUI no longer originates a tab write at all (#959). The TUI reflects
+// the daemon-created tab locally via AttachShellTab for instant display (it
+// reconnects to the session the daemon spawned, never a second colliding spawn);
+// the snapshot reconcile (PR 3) keeps it mirrored thereafter. The daemon's soft
+// cap (max tabs) error is surfaced verbatim.
 func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 	if m.contentPane.GetMode() != ui.ContentModeInstance {
 		return m, nil
@@ -365,25 +363,13 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 
 	name, err := createShellTabThroughDaemon(selected.Title, m.repoID)
 	if err != nil {
-		if daemon.IsRPCMethodNotFoundErr(err) {
-			// Older daemon without the shell-aware CreateTab RPC: keep the legacy
-			// local-spawn + full-list save path so the mutation isn't lost.
-			if _, addErr := selected.AddShellTab(); addErr != nil {
-				return m, m.handleError(addErr)
-			}
-			if saveErr := m.storage.SaveInstances(m.sidebar.GetInstances()); saveErr != nil {
-				log.ErrorLog.Printf("failed to persist new tab: %v", saveErr)
-			}
-		} else {
-			return m, m.handleError(err)
-		}
-	} else {
-		// The daemon spawned and persisted the tab; reflect it locally for
-		// instant display without a second spawn. The daemon write is
-		// authoritative, so we do NOT save here.
-		if _, attachErr := selected.AttachShellTab(name); attachErr != nil {
-			return m, m.handleError(attachErr)
-		}
+		return m, m.handleError(err)
+	}
+	// The daemon spawned and persisted the tab; reflect it locally for instant
+	// display without a second spawn. The daemon write is authoritative, so the
+	// TUI never saves (#960 PR 4).
+	if _, attachErr := selected.AttachShellTab(name); attachErr != nil {
+		return m, m.handleError(attachErr)
 	}
 
 	tw := m.contentPane.TabbedWindow()
@@ -398,14 +384,13 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 // remote instance's tabs (agent + optional terminal_cmd terminal) are fixed by
 // its hook config, not user-managed, so closing any of them is refused.
 //
-// The kill+persist is routed through the daemon's CloseTab RPC (#960 PR 2): the
+// The kill+persist is routed through the daemon's CloseTab RPC (#960): the
 // daemon — the single writer — kills the tab's tmux and persists the shrunk
-// list, so the TUI no longer originates a tab write the daemon could clobber
-// (#959). The agent-tab and remote rules are still enforced TUI-side so the
-// friendly message shows without a round-trip (the RPC enforces them too). The
-// TUI drops the now-dead tab locally via DropClosedTab — a no-kill removal, since
-// the daemon already tore the tmux session down. Version skew falls back to the
-// legacy local CloseTab + full-list save on method-not-found.
+// list, so the TUI no longer originates a tab write at all (#959). The agent-tab
+// and remote rules are still enforced TUI-side so the friendly message shows
+// without a round-trip (the RPC enforces them too). The TUI drops the now-dead
+// tab locally via DropClosedTab — a no-kill removal, since the daemon already
+// tore the tmux session down.
 func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if m.contentPane.GetMode() != ui.ContentModeInstance {
 		return m, nil
@@ -429,25 +414,13 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	tabName := tabs[idx].Name
 
 	if err := closeTabThroughDaemon(selected.Title, m.repoID, tabName); err != nil {
-		if daemon.IsRPCMethodNotFoundErr(err) {
-			// Older daemon without the CloseTab RPC: keep the legacy local-kill +
-			// full-list save path so the mutation isn't lost.
-			if closeErr := selected.CloseTab(idx); closeErr != nil {
-				return m, m.handleError(closeErr)
-			}
-			if saveErr := m.storage.SaveInstances(m.sidebar.GetInstances()); saveErr != nil {
-				log.ErrorLog.Printf("failed to persist tab close: %v", saveErr)
-			}
-		} else {
-			return m, m.handleError(err)
-		}
-	} else {
-		// The daemon killed the tmux and persisted the shrunk list; drop the
-		// now-dead tab locally without re-killing. The daemon write is
-		// authoritative, so we do NOT save here.
-		if dropErr := selected.DropClosedTab(idx); dropErr != nil {
-			return m, m.handleError(dropErr)
-		}
+		return m, m.handleError(err)
+	}
+	// The daemon killed the tmux and persisted the shrunk list; drop the
+	// now-dead tab locally without re-killing. The daemon write is
+	// authoritative, so the TUI never saves (#960 PR 4).
+	if dropErr := selected.DropClosedTab(idx); dropErr != nil {
+		return m, m.handleError(dropErr)
 	}
 
 	// Prefer the left/previous neighbor; SelectTab clamps so this is always in

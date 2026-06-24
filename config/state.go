@@ -271,9 +271,10 @@ func (s *State) SaveInstances(repoID string, instancesJSON json.RawMessage) erro
 
 func (s *State) GetInstances(repoID string) (json.RawMessage, error) {
 	// LoadRepoInstances already distinguishes "missing file" (-> "[]", nil)
-	// from a genuine read error, so surface its result verbatim. Swallowing
-	// the error here is what let saveRepoInstances merge against an empty
-	// disk state and clobber unreadable-but-present sessions (#766).
+	// from a genuine read error, so surface its result verbatim. Swallowing the
+	// error here would let a read-modify-write writer (the daemon's targeted RMW
+	// primitives) merge against an empty disk state and clobber
+	// unreadable-but-present sessions (#766).
 	return LoadRepoInstances(repoID)
 }
 

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"net/rpc"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -9,12 +8,6 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
-
-// rpcMethodNotFound returns an error that daemon.IsRPCMethodNotFoundErr matches,
-// simulating a version-skewed daemon that predates a given verb.
-func rpcMethodNotFound(method string) error {
-	return rpc.ServerError("rpc: can't find method Control." + method)
-}
 
 // TestHandleNewTab_RoutesThroughDaemon_NoLocalSave proves the `t` mutation goes
 // through the daemon CreateTab RPC and does NOT fall back to a local full-list
@@ -44,30 +37,6 @@ func TestHandleNewTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	data, err := h.storage.LoadInstanceData()
 	require.NoError(t, err)
 	require.Empty(t, data, "daemon-success path must not write the TUI's storage")
-}
-
-// TestHandleNewTab_VersionSkewFallsBackToLocalSave proves that against an older
-// daemon lacking the shell-aware CreateTab RPC (method-not-found), `t` falls
-// back to the legacy local spawn + full-list save so the mutation isn't lost.
-func TestHandleNewTab_VersionSkewFallsBackToLocalSave(t *testing.T) {
-	h := newTestHome(t)
-	inst := startedLocalInstance(t, "skew-create")
-	selectInstance(h, inst)
-
-	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return "", rpcMethodNotFound("CreateTab")
-	})
-	defer restore()
-
-	_, _ = h.handleNewTab()
-
-	require.Equal(t, 3, inst.TabCount(), "fallback must still spawn the shell tab locally")
-
-	// The legacy path persists via the TUI's full-list save.
-	data, err := h.storage.LoadInstanceData()
-	require.NoError(t, err)
-	require.Len(t, data, 1, "fallback must persist the instance via the legacy save")
-	require.Len(t, data[0].Tabs, 3, "the persisted tab list must include the new shell tab")
 }
 
 // TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave proves the `w` mutation
@@ -102,34 +71,6 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	data, err := h.storage.LoadInstanceData()
 	require.NoError(t, err)
 	require.Empty(t, data, "daemon-success path must not write the TUI's storage")
-}
-
-// TestHandleCloseTab_VersionSkewFallsBackToLocalSave proves close falls back to
-// the legacy local kill + full-list save against an older daemon.
-func TestHandleCloseTab_VersionSkewFallsBackToLocalSave(t *testing.T) {
-	h := newTestHome(t)
-	inst := startedLocalInstance(t, "skew-close")
-	selectInstance(h, inst)
-
-	createRestore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return nextShellTabName(inst.GetTabs()), nil
-	})
-	defer createRestore()
-	closeRestore := SetTabCloserForTest(func(title, repoID, tabName string) error {
-		return rpcMethodNotFound("CloseTab")
-	})
-	defer closeRestore()
-
-	_, _ = h.handleNewTab()
-	require.Equal(t, 3, inst.TabCount())
-
-	_, _ = h.handleCloseTab()
-
-	require.Equal(t, 2, inst.TabCount(), "fallback must still close the tab locally")
-	data, err := h.storage.LoadInstanceData()
-	require.NoError(t, err)
-	require.Len(t, data, 1, "fallback must persist via the legacy save")
-	require.Len(t, data[0].Tabs, 2, "the persisted tab list must drop the closed tab")
 }
 
 // TestHandleCloseTab_AgentTabSkipsDaemon proves the agent-tab rule is enforced
@@ -182,6 +123,11 @@ func TestPrInfoUpdatedMsg_RoutesWriteThroughDaemon(t *testing.T) {
 	got := inst.GetPRInfo()
 	require.NotNil(t, got, "the badge must be applied in-memory for instant UX")
 	require.Equal(t, 42, got.Number)
+
+	// The daemon owns the persist; the TUI writes nothing to instances.json.
+	data, err := h.storage.LoadInstanceData()
+	require.NoError(t, err)
+	require.Empty(t, data, "daemon-success PR-info path must not write the TUI's storage")
 }
 
 // TestPrInfoUpdatedMsg_BranchMismatchSkipsDaemon proves the #921 branch guard
@@ -207,33 +153,4 @@ func TestPrInfoUpdatedMsg_BranchMismatchSkipsDaemon(t *testing.T) {
 
 	require.False(t, called, "a branch mismatch must not write PR info to the daemon")
 	require.Nil(t, inst.GetPRInfo(), "a branch mismatch must not apply the badge")
-}
-
-// TestPrInfoUpdatedMsg_VersionSkewFallsBackToLocalSave proves the PR-info write
-// falls back to the legacy full-list save against an older daemon, while still
-// applying the badge in-memory.
-func TestPrInfoUpdatedMsg_VersionSkewFallsBackToLocalSave(t *testing.T) {
-	h := newTestHome(t)
-	inst := startedLocalInstance(t, "pr-skew")
-	h.sidebar.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(0)
-
-	restore := SetPRInfoSetterForTest(func(title, repoID string, info session.PRInfoData) error {
-		return rpcMethodNotFound("SetPRInfo")
-	})
-	defer restore()
-
-	info := &sessiongit.PRInfo{Number: 7, Title: "legacy", URL: "https://x/7", State: "OPEN"}
-	// Match the captured branch to the instance's so the #921 guard lets the
-	// apply through (the focus here is the version-skew persist fallback).
-	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, branch: inst.GetBranch(), info: info})
-
-	got := inst.GetPRInfo()
-	require.NotNil(t, got, "the badge must still be applied in-memory")
-	require.Equal(t, 7, got.Number)
-
-	data, err := h.storage.LoadInstanceData()
-	require.NoError(t, err)
-	require.Len(t, data, 1, "fallback must persist the PR info via the legacy save")
-	require.Equal(t, 7, data[0].PRInfo.Number, "the persisted record must carry the PR number")
 }

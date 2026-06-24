@@ -10,16 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestHandleQuit_ReachesQuitWithCorruptedInstances is the app-level half of
-// sachiniyer/agent-factory#938. Both `q` and `Ctrl+C` route through
-// handleQuit, which saves session state before exiting and returns early
-// (showing an error overlay, no tea.Quit) on save failure. Before the fix, a
-// corrupted instances.json made the save fail every time, so the user could
-// never quit cleanly — force-kill was the only escape.
-//
-// With the TUI save path now overwriting unparseable disk state (mirroring the
-// daemon), handleQuit's save succeeds and it must return a tea.Quit command,
-// not an error overlay.
+// TestHandleQuit_ReachesQuitWithCorruptedInstances guards #938 under the
+// single-writer model. Both `q` and `Ctrl+C` route through handleQuit. As of
+// #960 PR 4 the TUI no longer writes instances.json at all — the daemon is the
+// sole writer — so a corrupted instances.json can never block the quit: handleQuit
+// only flushes task/hooks state and then reaches tea.Quit. This pins that a
+// corrupt session file on disk leaves the quit path entirely untouched (no error
+// overlay, no trapped user).
 func TestHandleQuit_ReachesQuitWithCorruptedInstances(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(500, 1)

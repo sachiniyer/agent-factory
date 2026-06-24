@@ -59,11 +59,23 @@ func newTestHome(t *testing.T) *home {
 	require.NoError(t, err)
 
 	return &home{
-		ctx:         context.Background(),
-		state:       stateDefault,
-		appConfig:   config.DefaultConfig(),
-		appState:    state,
-		storage:     storage,
+		ctx:       context.Background(),
+		state:     stateDefault,
+		appConfig: config.DefaultConfig(),
+		appState:  state,
+		storage:   storage,
+		// Default the snapshot fetcher to a failing stub so a test that incidentally
+		// runs the tick loop (e.g. the teatest e2e harness) never dials — or spawns
+		// — a real daemon. A FAILING fetch is the correct default: it mirrors
+		// "no daemon reachable", so handleSnapshot leaves the sidebar intact rather
+		// than reconciling it to an empty snapshot and wiping preloaded instances.
+		// (A nil,nil success would do exactly that — the #960 PR 4 race-fix must not
+		// regress this.) Tests exercising the fetch path assign their own fake to
+		// h.snapshotFetcher. The fetcher is a per-home field, not a shared global, so
+		// parallel tests can't race each other's swaps.
+		snapshotFetcher: func(string) ([]session.InstanceData, error) {
+			return nil, fmt.Errorf("snapshot fetcher not stubbed in test")
+		},
 		sidebar:     sidebar,
 		contentPane: cp,
 		menu:        ui.NewMenu(),

@@ -112,148 +112,55 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 	return out
 }
 
-// mergeInstancesWithDisk applies the save-merge rules shared by the TUI and
-// daemon save paths to one repo's worth of state. It returns the records to
-// persist; callers still dedupe (#808), marshal, and write under the lock.
+// SaveInstances persists the daemon's authoritative in-memory instances to
+// disk, grouped by repo. As of #960 PR 4 the daemon is the SOLE writer of
+// instances.json, so this is a straight marshal of the manager's per-repo
+// state, NOT a merge: there is no competing full-list writer to reconcile
+// against, so the old mergeInstancesWithDisk rule-zoo
+// (#551/#766/#808/#819/#844/#959) is gone. With one writer a clobber is
+// impossible by construction.
 //
-//   - In-memory instances take precedence over their disk records.
-//   - Loading instances are never persisted — their worktree is not yet
-//     populated, so FromInstanceData cannot restore them, and an orphaned
-//     record would block title reuse via the daemon's collision check (#551).
-//   - Deleting instances are likewise never persisted (#844): their teardown
-//     is in flight, and writing them back would resurrect the record after
-//     the daemon deletes it from disk. While teardown is still running the
-//     existing disk record (written before the kill) survives via the
-//     disk-only branch below, so a TUI crash mid-deletion does not lose the
-//     session; once the daemon removes the record, nothing rewrites it.
-//   - Non-started instances are dropped.
-//   - An in-memory instance whose disk record was removed by another process
-//     AND whose backing session is dead is dropped instead of being
-//     resurrected from stale memory (#819). If the session is still alive,
-//     the record is rewritten — an externally wiped or truncated file must
-//     not take live sessions down with it.
-//   - Disk-only records are preserved as externally-added, except legacy
-//     Loading ghosts (#551) and titles in knownTitles.
+// Only repos with at least one persistable in-memory instance are rewritten;
+// repos the daemon holds nothing for are left untouched — their records were
+// already removed by the targeted DeleteInstance on kill, or were never loaded.
+// Loading/Deleting/non-started instances are skipped: their worktree is not yet
+// populated (Loading) or is mid-teardown (Deleting), so FromInstanceData cannot
+// restore them.
 //
-// knownTitles is the set of ALL in-memory titles for this repo, including
-// non-started ones. It distinguishes "killed in this process" (the stale
-// disk record must not be preserved) from "added externally on disk". The
-// daemon passes its per-repo title set; the TUI passes nil because it
-// deletes killed sessions from disk explicitly rather than via save-merge.
-func mergeInstancesWithDisk(instances []*Instance, diskData []InstanceData, knownTitles map[string]bool) []InstanceData {
-	diskTitles := make(map[string]bool, len(diskData))
-	for _, disk := range diskData {
-		diskTitles[disk.Title] = true
-	}
-
-	merged := make([]InstanceData, 0, len(instances)+len(diskData))
-	memTitles := make(map[string]bool, len(instances))
-	for _, instance := range instances {
-		if status := instance.GetStatus(); status == Loading || status == Deleting {
-			continue
-		}
-		if !instance.Started() {
-			continue
-		}
-		// If another process deleted the disk record and the backing
-		// session is gone, don't resurrect it from stale memory.
-		if !diskTitles[instance.Title] && !instance.TmuxAlive() {
-			continue
-		}
-		merged = append(merged, instance.ToInstanceData())
-		memTitles[instance.Title] = true
-	}
-
-	for _, disk := range diskData {
-		if memTitles[disk.Title] {
-			// Already covered by the in-memory version.
-			continue
-		}
-		if knownTitles[disk.Title] {
-			// Known in memory but filtered out above (e.g. killed).
-			// Don't preserve the stale disk record.
-			continue
-		}
-		// Disk-only Loading entries are stale pre-save records from a
-		// start that never completed. External CLI/task creates are only
-		// persisted after startup succeeds, so they arrive as non-Loading.
-		if disk.Status == Loading {
-			continue
-		}
-		// Externally added instance — keep it.
-		merged = append(merged, disk)
-	}
-	return merged
-}
-
-// SaveInstances saves the list of instances to disk under file locks.
-// Loading instances are excluded — they represent in-flight TUI session
-// creations whose worktree is not yet populated, so they cannot be
-// restored via FromInstanceData. refreshExternalInstances already
-// protects in-memory Loading entries from being reaped, so they don't
-// need a disk presence. Persisting them risked orphaned records that
-// the daemon's title-collision check would treat as live (#551).
+// The targeted writers (appendInstanceData / persistInstanceData /
+// DeleteInstance) keep the disk current on every mutation; this full save is the
+// shutdown checkpoint. Records are deduped by title (#808) before marshaling.
+// Because the manager's memory is the source of truth, the save deliberately
+// does NOT read disk first: the file is overwritten with authoritative state, so
+// a corrupt or momentarily-stale file on disk is simply replaced, not merged.
 func (s *Storage) SaveInstances(instances []*Instance) error {
-	if s.repoID != "" {
-		return s.saveRepoInstances(instances)
-	}
-
-	// Daemon mode: group in-memory instances by repo root.
-	// Prefer the worktree's resolved repo path so we share a repo ID with
-	// the TUI even when the instance was created from a symlinked path;
-	// fall back to Path for remote backends where Worktree.RepoPath is
-	// empty. This mirrors CollectRepoRoots (#667). All instances are
-	// grouped — including non-started ones — so repos whose sessions were
-	// all killed are still visited and their records removed.
-	//
-	// The per-repo title sets must be scoped per-repo, not global: a
-	// global set across all repos causes cross-repo title collisions to
-	// drop legitimate externally-added instances from other repos (#198).
-	grouped := make(map[string][]*Instance)
-	repoTitles := make(map[string]map[string]bool)
+	// Group persistable in-memory instances by repo root. Prefer the worktree's
+	// resolved repo path so we share a repo ID with the TUI even for a session
+	// created from a symlinked path; fall back to Path for remote backends where
+	// Worktree.RepoPath is empty. This mirrors CollectRepoRoots (#667).
+	grouped := make(map[string][]InstanceData)
 	for _, inst := range instances {
+		if status := inst.GetStatus(); status == Loading || status == Deleting {
+			continue
+		}
+		if !inst.Started() {
+			continue
+		}
 		root := inst.GetRepoPath()
 		if root == "" {
 			root = inst.Path
 		}
 		rid := config.RepoIDFromRoot(root)
-		grouped[rid] = append(grouped[rid], inst)
-		if repoTitles[rid] == nil {
-			repoTitles[rid] = make(map[string]bool)
-		}
-		repoTitles[rid][inst.Title] = true
+		grouped[rid] = append(grouped[rid], inst.ToInstanceData())
 	}
 
-	// Merge each repo's in-memory state with disk state. Repos that exist
-	// ONLY on disk (no in-memory instances at all) were never loaded by
-	// the daemon; we never write to them, so they are naturally preserved.
 	for rid, group := range grouped {
 		path, pathErr := config.RepoInstancesPath(rid)
 		if pathErr != nil {
 			return pathErr
 		}
 		if err := config.WithFileLock(path, func() error {
-			// Read existing disk state inside the lock. A genuine read
-			// failure (permission denied, I/O error) must abort this repo's
-			// save: merging against the empty list GetInstances used to
-			// return would overwrite instances.json and permanently drop
-			// sessions that are present on disk but momentarily unreadable
-			// (#766). Missing files still come back as "[]" with a nil error.
-			diskJSON, err := s.state.GetInstances(rid)
-			if err != nil {
-				return fmt.Errorf("refusing to overwrite repo %s: failed to read existing instances: %w", rid, err)
-			}
-			var diskData []InstanceData
-			if diskJSON != nil && string(diskJSON) != "[]" && string(diskJSON) != "null" {
-				if err := json.Unmarshal(diskJSON, &diskData); err != nil {
-					log.WarningLog.Printf("failed to parse disk instances for repo %s, overwriting: %v", rid, err)
-					diskData = nil
-				}
-			}
-
-			merged := mergeInstancesWithDisk(group, diskData, repoTitles[rid])
-
-			jsonData, err := json.Marshal(dedupeInstanceData(merged))
+			jsonData, err := json.Marshal(dedupeInstanceData(group))
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
 			}
@@ -264,43 +171,6 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	}
 
 	return nil
-}
-
-func (s *Storage) saveRepoInstances(instances []*Instance) error {
-	path, pathErr := config.RepoInstancesPath(s.repoID)
-	if pathErr != nil {
-		return pathErr
-	}
-	return config.WithFileLock(path, func() error {
-		// A transient read failure must not be mistaken for "no sessions":
-		// merging against an empty disk state and writing the result back
-		// would clobber the unreadable-but-present instances.json (#766).
-		raw, err := s.state.GetInstances(s.repoID)
-		if err != nil {
-			return fmt.Errorf("refusing to overwrite repo %s: failed to read existing instances: %w", s.repoID, err)
-		}
-		var diskData []InstanceData
-		if raw != nil && string(raw) != "[]" && string(raw) != "null" {
-			if err := json.Unmarshal(raw, &diskData); err != nil {
-				// Corruption is recoverable session state, not a reason to
-				// trap the user: mirror the daemon's SaveInstances branch and
-				// overwrite the unparseable file with in-memory state. A parse
-				// failure here previously aborted the save, and since both quit
-				// keys route through handleQuit (which returns early without
-				// tea.Quit on save error), it left the TUI unable to exit (#938).
-				log.WarningLog.Printf("failed to parse existing instances for repo %s, overwriting: %v", s.repoID, err)
-				diskData = nil
-			}
-		}
-
-		merged := mergeInstancesWithDisk(instances, diskData, nil)
-
-		jsonData, err := json.Marshal(dedupeInstanceData(merged))
-		if err != nil {
-			return fmt.Errorf("failed to marshal instances: %w", err)
-		}
-		return s.state.SaveInstances(s.repoID, jsonData)
-	})
 }
 
 // LoadInstances loads the list of instances from disk.

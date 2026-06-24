@@ -65,9 +65,14 @@ var setPRInfoThroughDaemon = func(title, repoID string, info session.PRInfoData)
 
 // snapshotThroughDaemon fetches the daemon's authoritative session list for a
 // repo (#960 PR 3). It is the TUI's read path under the single-writer model: the
-// sidebar mirrors this projection instead of re-reading instances.json. A
-// package-level var so tests can inject a fake snapshot without a real daemon.
-var snapshotThroughDaemon = func(repoID string) ([]session.InstanceData, error) {
+// sidebar mirrors this projection instead of re-reading instances.json.
+//
+// This is the PRODUCTION default for home.snapshotFetcher — a plain function, NOT
+// a swappable package global. fetchSnapshotCmd reads the fetcher from an off-loop
+// goroutine, so a mutable global would race a test seam swap under
+// `go test -parallel`; the fetcher lives per-home instead, and tests assign a
+// fake to home.snapshotFetcher directly (#960 PR 4 race fix).
+func snapshotThroughDaemon(repoID string) ([]session.InstanceData, error) {
 	return daemon.Snapshot(daemon.SnapshotRequest{RepoID: repoID})
 }
 
@@ -106,12 +111,6 @@ func SetPRInfoSetterForTest(f func(title, repoID string, info session.PRInfoData
 	prev := setPRInfoThroughDaemon
 	setPRInfoThroughDaemon = f
 	return func() { setPRInfoThroughDaemon = prev }
-}
-
-func SetSnapshotFetcherForTest(f func(repoID string) ([]session.InstanceData, error)) func() {
-	prev := snapshotThroughDaemon
-	snapshotThroughDaemon = f
-	return func() { snapshotThroughDaemon = prev }
 }
 
 func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {
