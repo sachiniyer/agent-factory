@@ -48,9 +48,7 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 	// After every previously-persisting path, the TUI's instances.json is still
 	// empty — the TUI never wrote it, so an out-of-band daemon record can never be
 	// clobbered (#959).
-	data, err := h.storage.LoadInstanceData()
-	require.NoError(t, err)
-	require.Empty(t, data, "the TUI must hold no instances.json write path (daemon is the sole writer, #960 PR 4)")
+	requireTUIInstancesEmpty(t, h)
 }
 
 // TestSnapshotSurfacesOutOfBandSessionWithoutTUIWrite proves the other half of the
@@ -72,7 +70,5 @@ func TestSnapshotSurfacesOutOfBandSessionWithoutTUIWrite(t *testing.T) {
 		"the out-of-band session must surface via the snapshot reconcile")
 
 	// Mirroring daemon state must not cause the TUI to write instances.json.
-	data, err := h.storage.LoadInstanceData()
-	require.NoError(t, err)
-	require.Empty(t, data, "surfacing daemon state must not make the TUI write instances.json (#959/#960)")
+	requireTUIInstancesEmpty(t, h)
 }

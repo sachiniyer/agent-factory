@@ -34,9 +34,7 @@ func TestHandleNewTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	// On the daemon-success path nothing is written to the TUI's storage — the
 	// daemon is the single writer. The repo's instances file stays empty (the
 	// instance was never added to TUI storage in this test).
-	data, err := h.storage.LoadInstanceData()
-	require.NoError(t, err)
-	require.Empty(t, data, "daemon-success path must not write the TUI's storage")
+	requireTUIInstancesEmpty(t, h)
 }
 
 // TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave proves the `w` mutation
@@ -68,9 +66,7 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	require.Equal(t, "shell-2", gotTab, "CloseTab must target the active tab by name")
 	require.Equal(t, 2, inst.TabCount(), "the closed tab must be dropped locally")
 
-	data, err := h.storage.LoadInstanceData()
-	require.NoError(t, err)
-	require.Empty(t, data, "daemon-success path must not write the TUI's storage")
+	requireTUIInstancesEmpty(t, h)
 }
 
 // TestHandleCloseTab_AgentTabSkipsDaemon proves the agent-tab rule is enforced
@@ -125,9 +121,7 @@ func TestPrInfoUpdatedMsg_RoutesWriteThroughDaemon(t *testing.T) {
 	require.Equal(t, 42, got.Number)
 
 	// The daemon owns the persist; the TUI writes nothing to instances.json.
-	data, err := h.storage.LoadInstanceData()
-	require.NoError(t, err)
-	require.Empty(t, data, "daemon-success PR-info path must not write the TUI's storage")
+	requireTUIInstancesEmpty(t, h)
 }
 
 // TestPrInfoUpdatedMsg_BranchMismatchSkipsDaemon proves the #921 branch guard

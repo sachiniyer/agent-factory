@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -95,6 +96,76 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	}
 }
 
+// coldStartWarmupPoll paces the cold-start Snapshot retry while the daemon is
+// still restoring instances (#829). A package var so the warm-up retry path is
+// driven deterministically in tests without real sleeps.
+var coldStartWarmupPoll = 250 * time.Millisecond
+
+// coldStartWarmupWait bounds total cold-start waiting on a warming daemon. A
+// local restore completes in well under a second; the generous ceiling covers a
+// minutes-long remote-hook restore (#829) without hanging the launch forever if
+// the daemon is wedged reporting "starting".
+var coldStartWarmupWait = 2 * time.Minute
+
+// coldStartFromSnapshot populates the sidebar from the daemon's authoritative
+// Snapshot at startup, replacing the legacy instances.json disk read (#960 PR 6:
+// the TUI no longer reads the store — the daemon is the source of truth). Each
+// record is materialized the same way FromInstanceData restored a disk row,
+// reconnecting tabs to their tmux sessions by name so a restored session is
+// immediately attachable. A single unrestorable record is logged and skipped,
+// never aborting the whole cold start. Returns an error only on a hard
+// (non-warming) daemon failure, which newHome surfaces and exits on — there is
+// no standalone fallback anymore (#960 PR 6 dropped no-daemon mode).
+func (m *home) coldStartFromSnapshot() error {
+	data, err := m.fetchColdStartSnapshot()
+	if err != nil {
+		return err
+	}
+	for _, d := range data {
+		inst, err := buildInstanceFromSnapshot(d)
+		if err != nil {
+			// The session's tmux/worktree may have been destroyed externally;
+			// log and skip rather than failing the whole launch.
+			log.WarningLog.Printf("skipping session %q from snapshot: %v", d.Title, err)
+			continue
+		}
+		m.sidebar.AddInstance(inst)()
+		inst.SetAutoYes(m.autoYes)
+	}
+	return nil
+}
+
+// fetchColdStartSnapshot fetches the cold-start snapshot, tolerating a warming
+// daemon (#829) exactly like create/kill: callDaemon already waits out one
+// warm-up window internally, and this retries the whole fetch while the daemon
+// reports the typed "starting" error so a minutes-long restore yields the real
+// session list rather than an empty sidebar that looks like a fresh install
+// (#766/#868). On a hard error the daemon is unavailable and the launch aborts —
+// post-#782 the daemon is always-on, so there is no degraded standalone path.
+func (m *home) fetchColdStartSnapshot() ([]session.InstanceData, error) {
+	deadline := time.Now().Add(coldStartWarmupWait)
+	announced := false
+	for {
+		data, err := m.snapshotFetcher(m.repoID)
+		if err == nil {
+			return data, nil
+		}
+		if !daemon.IsDaemonStartingErr(err) {
+			return nil, err
+		}
+		if !announced {
+			// Pre-TUI stdout, matching newHome's other startup messages: tell the
+			// user we are waiting on the daemon rather than showing an empty list.
+			fmt.Println("Restoring sessions… (daemon warming up)")
+			announced = true
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("daemon is still restoring sessions after %s; try again in a moment", coldStartWarmupWait)
+		}
+		time.Sleep(coldStartWarmupPoll)
+	}
+}
+
 // prInfoFetcher is the function used by fetchPRInfoCmd to retrieve PR info.
 // It's a package-level variable (not a direct git.FetchPRInfo call) so
 // e2e tests can swap in a fake that returns canned data and counts calls —
@@ -164,7 +235,7 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 	if msg.err != nil {
 		if daemon.IsDaemonStartingErr(msg.err) {
-			// Daemon still restoring (#829); the cold-start LoadInstances already
+			// Daemon still restoring (#829); the cold-start Snapshot already
 			// populated the sidebar. Retry next tick — nothing to reconcile yet.
 			return false
 		}

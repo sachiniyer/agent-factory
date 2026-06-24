@@ -30,8 +30,6 @@ func TestTUIRefreshSeesCLIChangesThroughDaemon(t *testing.T) {
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
 	h.repoID = repo.ID
-	h.storage, err = session.NewStorage(config.DefaultState(), repo.ID)
-	require.NoError(t, err)
 	writeIntegrationConfig(t, os.Getenv("AGENT_FACTORY_HOME"))
 
 	t.Cleanup(func() {
@@ -69,8 +67,6 @@ func TestTUIRefreshSwapsKillRecreatedSameTitle(t *testing.T) {
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
 	h.repoID = repo.ID
-	h.storage, err = session.NewStorage(config.DefaultState(), repo.ID)
-	require.NoError(t, err)
 	writeIntegrationConfig(t, os.Getenv("AGENT_FACTORY_HOME"))
 
 	t.Cleanup(func() {
@@ -227,8 +223,6 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
 	h.repoID = repo.ID
-	h.storage, err = session.NewStorage(config.DefaultState(), repo.ID)
-	require.NoError(t, err)
 	writeIntegrationConfig(t, os.Getenv("AGENT_FACTORY_HOME"))
 
 	t.Cleanup(func() {
@@ -260,7 +254,9 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 
 	// The start RPC completes, returning a freshly-built instance — exactly
 	// what startSessionThroughDaemon produces via FromInstanceData.
-	diskData, err := h.storage.LoadInstanceData()
+	diskStore, err := session.NewStorage(config.DefaultState(), repo.ID)
+	require.NoError(t, err)
+	diskData, err := diskStore.LoadInstanceData()
 	require.NoError(t, err)
 	var rec *session.InstanceData
 	for i := range diskData {
