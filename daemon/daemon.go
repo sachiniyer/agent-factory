@@ -25,7 +25,8 @@ var restoreManagerForStartup = func(m *Manager) error { return m.RestoreInstance
 
 // RunDaemon runs the daemon process: it serves the local control plane,
 // evaluates task cron schedules in-process, supervises watch-task scripts,
-// and iterates over all sessions to run AutoYes mode on them.
+// and iterates over all sessions each poll to compute their authoritative
+// status (Ready/Dead/Running, #935/#960 PR 5) and run AutoYes mode on them.
 //
 // Startup ordering matters (#829): the control socket binds BEFORE the
 // instance restore, which can take minutes on remote-hook repos (list_cmd /
@@ -161,14 +162,11 @@ func RunDaemon(cfg *config.Config) error {
 				log.WarningLog.Printf("failed to refresh daemon instances: %v", err)
 			}
 
-			for _, instance := range manager.InstancesSnapshot() {
-				// We only store started instances, but check anyway.
-				if instance.Started() {
-					if _, hasPrompt := instance.HasUpdated(); hasPrompt {
-						instance.TapEnter()
-					}
-				}
-			}
+			// Compute and persist each session's status (Ready/Dead/Running) and
+			// run the AutoYes prompt-tap in the same pass. The daemon is the sole
+			// owner of status now (#960 PR 5): it computes the #935 liveness here
+			// and the TUI renders it from Snapshot instead of computing its own.
+			manager.RefreshStatuses()
 
 			// Handle stop before ticker.
 			select {

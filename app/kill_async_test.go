@@ -216,17 +216,3 @@ func TestInstanceKilled_RowAlreadyRemoved(t *testing.T) {
 	_, _ = h.Update(instanceKilledMsg{title: "already-gone"})
 	assert.Empty(t, h.sidebar.GetInstances())
 }
-
-// TestRunMetadataTick_SkipsDeletingInstances: the metadata tick must neither
-// shell into a mid-teardown session nor clobber its Deleting status with
-// Running/Ready (#844).
-func TestRunMetadataTick_SkipsDeletingInstances(t *testing.T) {
-	inst := newKillableInstance(t, "mid-teardown")
-	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Deleting)
-
-	runMetadataTick([]*session.Instance{inst})
-
-	assert.Equal(t, session.Deleting, inst.GetStatus(),
-		"metadata tick must not overwrite the Deleting status")
-}

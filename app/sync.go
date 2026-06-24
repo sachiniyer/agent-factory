@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,7 +17,6 @@ const prInfoStaleAfter = 60 * time.Second
 
 // -- Ticker message types --
 
-type tickUpdateMetadataMessage struct{}
 type tickUpdatePRInfoMessage struct{}
 type tickPendingInstancesMessage struct{}
 type tickRefreshExternalMessage struct{}
@@ -49,72 +47,6 @@ type prInfoUpdatedMsg struct {
 // -- Ticker commands --
 // Each ticker sleeps for a fixed interval, then returns its message type to
 // re-enter Update(). The ticker is re-scheduled at the end of its handler.
-
-var tickUpdateMetadataCmd = func() tea.Msg {
-	time.Sleep(500 * time.Millisecond)
-	return tickUpdateMetadataMessage{}
-}
-
-// runMetadataTick refreshes each started instance's status/prompt state by
-// shelling out to tmux capture-pane via CheckAndHandleTrustPrompt and
-// HasUpdated. Intended to run off the bubbletea Update goroutine (see
-// runMetadataTickCmd) so the per-instance tmux work does not block rendering.
-// Status mutations go through Instance.SetStatus, which holds the instance
-// mutex, so concurrent reads from the renderer remain safe.
-func runMetadataTick(instances []*session.Instance) {
-	tickStart := time.Now()
-	detachTraceMark("runMetadataTick-entry")
-	for _, instance := range instances {
-		// Deleting instances are skipped like Loading ones: their backing
-		// session is being torn down, so the capture-pane/status shell-outs
-		// would poke a dying session, and a status write would clobber the
-		// Deleting marker (#844).
-		if status := instance.GetStatus(); !instance.Started() || status == session.Loading || status == session.Deleting {
-			continue
-		}
-		instStart := time.Now()
-		instance.CheckAndHandleTrustPrompt()
-		updated, prompt := instance.HasUpdated()
-		// SetStatusIfNotDeleting, not SetStatus: the user can confirm a kill
-		// between this tick's status check above and the write below, and an
-		// unconditional write would un-mark the deleting row (#844).
-		if updated {
-			instance.SetStatusIfNotDeleting(session.Running)
-		} else {
-			if prompt {
-				instance.TapEnter()
-			} else if !instance.TmuxAlive() {
-				// HasUpdated returned (false,false), which a healthy idle
-				// session and a dead one (monitor.dead / ErrSessionGone) both
-				// produce — indistinguishable on their own. Probe liveness only
-				// on this idle branch (not every tick) so a vanished session is
-				// marked Dead and rendered distinctly rather than repainted as a
-				// green Ready dot it can no longer back (#935).
-				instance.SetStatusIfNotDeleting(session.Dead)
-			} else {
-				instance.SetStatusIfNotDeleting(session.Ready)
-			}
-		}
-		// Per-instance elapsed makes contention visible: if 1 of N tmux
-		// capture-pane shell-outs hangs, the marker for that instance
-		// will dominate the total while the others stay sub-10ms.
-		detachTraceFields(instStart, "runMetadataTick-instance-done",
-			fmt.Sprintf("title=%s", instance.Title))
-	}
-	detachTrace(tickStart, "runMetadataTick-exit")
-}
-
-// runMetadataTickCmd returns a tea.Cmd that performs the metadata tick work
-// for the supplied snapshot of instances off the event loop, then sleeps for
-// 500ms before re-emitting tickUpdateMetadataMessage. The sleep happens after
-// the work so two ticks can never overlap on the same tmux sessions.
-func runMetadataTickCmd(instances []*session.Instance) tea.Cmd {
-	return func() tea.Msg {
-		runMetadataTick(instances)
-		time.Sleep(500 * time.Millisecond)
-		return tickUpdateMetadataMessage{}
-	}
-}
 
 var tickUpdatePRInfoCmd = func() tea.Msg {
 	time.Sleep(60 * time.Second)
@@ -269,11 +201,12 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 // only to defend a competing TUI writer). A pure mirror just needs an identity
 // check (CreatedAt) to tell "same session" from "title reused".
 //
-// STATUS is deliberately NOT mirrored onto existing rows here: the daemon does
-// not yet compute Ready/Dead (that moves to it in #960 PR 5), so its persisted
-// status is stale, and clobbering the locally-computed status would fight
-// runMetadataTick and flicker the dot. New rows still seed their status from the
-// snapshot (FromInstanceData carries it); full status mirroring lands in PR 5.
+// STATUS (Ready/Dead/Running) is mirrored onto existing rows here (#960 PR 5):
+// the daemon's poll loop is now the sole authority that computes the #935
+// liveness, so the TUI renders the snapshot's status instead of computing its
+// own — the old runMetadataTick is gone. Transient TUI-owned rows
+// (Loading/Deleting) are skipped before the per-row update below, so the mirror
+// can't clobber an in-flight create or a mid-teardown kill.
 func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	snapByTitle := make(map[string]session.InstanceData, len(data))
 	for _, d := range data {
@@ -380,6 +313,15 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
+	// Mirror the daemon's authoritative status onto the row (#960 PR 5). The
+	// daemon poll loop computes Ready/Dead/Running (the #935 liveness) and the
+	// TUI renders it — it no longer computes status itself. The reconcile loop
+	// already skipped transient TUI-owned rows (Loading/Deleting) before calling
+	// here, so this never clobbers an in-flight create or a mid-teardown kill.
+	if inst.GetStatus() != d.Status {
+		inst.SetStatus(d.Status)
+		changed = true
+	}
 	// Remote instances' tabs come from hook config (terminal_cmd), not the
 	// snapshot, so the backend owns them — skip the tab reconcile.
 	if !inst.IsRemote() {
