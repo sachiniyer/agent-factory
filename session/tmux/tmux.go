@@ -929,7 +929,15 @@ func (t *TmuxSession) Close() error {
 
 	cmd := exec.Command("tmux", "kill-session", "-t", t.sanitizedName)
 	if err := t.cmdExec.Run(cmd); err != nil {
-		errs = append(errs, fmt.Errorf("error killing tmux session: %w", err))
+		// Idempotent teardown (#967): a kill-session that fails because the
+		// session is already gone has achieved Close's goal — a dead session
+		// is the desired end state. Only a session that survives the kill is a
+		// genuine failure. Probe has-session rather than matching tmux's bare
+		// "exit status 1", which it reuses for unrelated errors. Mirrors the
+		// `_`-ignored cleanup kill in Start (above).
+		if t.DoesSessionExist() {
+			errs = append(errs, fmt.Errorf("error killing tmux session: %w", err))
+		}
 	}
 
 	if len(errs) == 0 {
@@ -1106,9 +1114,16 @@ func (t *TmuxSession) updateWindowSize(cols, rows int) error {
 }
 
 func (t *TmuxSession) DoesSessionExist() bool {
+	return sessionExists(t.cmdExec, t.sanitizedName)
+}
+
+// sessionExists reports whether a tmux session with the exact name `name`
+// currently exists. Shared by DoesSessionExist and the receiver-less
+// CleanupSessions path so both probe identically.
+func sessionExists(cmdExec cmd.Executor, name string) bool {
 	// Using "-t name" does a prefix match, which is wrong. `-t=` does an exact match.
-	existsCmd := exec.Command("tmux", "has-session", fmt.Sprintf("-t=%s", t.sanitizedName))
-	return t.cmdExec.Run(existsCmd) == nil
+	existsCmd := exec.Command("tmux", "has-session", fmt.Sprintf("-t=%s", name))
+	return cmdExec.Run(existsCmd) == nil
 }
 
 // CapturePaneContent captures the content of the tmux pane. When the
@@ -1170,7 +1185,12 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	for _, match := range matches {
 		log.InfoLog.Printf("cleaning up session: %s", match)
 		if err := cmdExec.Run(exec.Command("tmux", "kill-session", "-t", match)); err != nil {
-			return fmt.Errorf("failed to kill tmux session %s: %v", match, err)
+			// Idempotent teardown (#967): a session can vanish between the
+			// `tmux ls` above and this kill (TOCTOU). A gone session is the
+			// goal of cleanup, so only a survivor is a real failure.
+			if sessionExists(cmdExec, match) {
+				return fmt.Errorf("failed to kill tmux session %s: %v", match, err)
+			}
 		}
 	}
 	return nil
