@@ -130,6 +130,71 @@ func TestAddShellTab_RejectedForUnstarted(t *testing.T) {
 	require.Equal(t, 0, inst.TabCount())
 }
 
+// TestAttachShellTab_ReconnectsExistingSessionNoSpawn verifies the no-spawn
+// reconnect path (#960 PR 2): when the daemon has already created the shell
+// session, AttachShellTab binds to that exact session and appends the tab
+// without issuing a second new-session that would collide.
+func TestAttachShellTab_ReconnectsExistingSessionNoSpawn(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const agentName = "af_tabs_attach"
+	// The daemon already spawned the sibling shell session.
+	inst := startedMockInstance(t, agentName, agentName+"__shell")
+
+	tab, err := inst.AttachShellTab("shell")
+	require.NoError(t, err)
+	assert.Equal(t, "shell", tab.Name)
+	assert.Equal(t, TabKindShell, tab.Kind)
+	assert.Equal(t, 2, inst.TabCount(), "the reconnected tab must be appended")
+	assert.True(t, inst.TabAlive(1), "the reconnected tab must be bound to the live session")
+	assert.Equal(t, agentName+"__shell", tab.tmux.SanitizedName(),
+		"the tab must bind to the exact daemon-derived session name")
+
+	// A second call for the same name is a no-op returning the existing tab —
+	// guards against a refresh racing ahead of the reconnect.
+	again, err := inst.AttachShellTab("shell")
+	require.NoError(t, err)
+	assert.Same(t, tab, again, "a duplicate attach must return the existing tab")
+	assert.Equal(t, 2, inst.TabCount(), "a duplicate attach must not append again")
+}
+
+// TestAttachShellTab_RejectedForUnstarted verifies AttachShellTab errors when the
+// instance has no live agent session/worktree.
+func TestAttachShellTab_RejectedForUnstarted(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, err := NewInstance(InstanceOptions{Title: "unstarted", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	_, err = inst.AttachShellTab("shell")
+	require.Error(t, err)
+	require.Equal(t, 0, inst.TabCount())
+}
+
+// TestDropClosedTab_RemovesWithoutKilling verifies the no-kill removal path
+// (#960 PR 2): DropClosedTab removes a tab from the list but does NOT tear down
+// its tmux session (the daemon already did), and still protects the agent tab.
+func TestDropClosedTab_RemovesWithoutKilling(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst := startedMockInstance(t, "af_tabs_drop")
+	tab, err := inst.AddShellTab()
+	require.NoError(t, err)
+	require.Equal(t, 2, inst.TabCount())
+	require.True(t, tab.tmux.DoesSessionExist())
+
+	require.Error(t, inst.DropClosedTab(0), "the agent tab must be undroppable")
+	require.Equal(t, 2, inst.TabCount(), "a rejected drop must not mutate the list")
+	require.Error(t, inst.DropClosedTab(9), "an out-of-range index must be rejected")
+
+	require.NoError(t, inst.DropClosedTab(1))
+	require.Equal(t, 1, inst.TabCount(), "drop must remove the tab from the list")
+	require.True(t, tab.tmux.DoesSessionExist(),
+		"DropClosedTab must NOT kill the tmux session (the daemon owns the kill)")
+}
+
 // TestUniqueShellName covers the per-instance naming sequence in isolation.
 func TestUniqueShellName(t *testing.T) {
 	assert.Equal(t, "shell", uniqueShellName(nil))

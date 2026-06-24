@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -334,9 +335,19 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 // worktree. Remote instances have no local worktree and the hook protocol has no
 // run-arbitrary-command verb, so new-tab is unsupported there: a remote session's
 // only terminal tab is the one derived from remote_hooks.terminal_cmd (#930 PR 6).
-// The soft cap (max 9 tabs) is enforced by Instance.AddShellTab, whose error is
-// surfaced verbatim. The grown tab list is persisted so the new tab survives a
-// restart (Sachin's #930 requirement).
+//
+// The spawn+persist is routed through the daemon's CreateTab RPC (#960 PR 2): the
+// daemon — the single writer — owns the new tab so its authoritative view holds
+// it and the TUI no longer originates a tab write that the daemon's next save
+// could clobber (#959). The TUI reflects the daemon-created tab locally via
+// AttachShellTab for instant display (it reconnects to the session the daemon
+// spawned, never a second colliding spawn); full live reconcile lands in PR 3.
+//
+// Version skew: against an older daemon that predates the shell-aware CreateTab,
+// the RPC reports method-not-found and we fall back to the legacy local spawn +
+// full-list save so a stale daemon can't drop the mutation (belt-and-suspenders
+// until PR 4 removes the TUI writer). The daemon's soft cap (max tabs) error is
+// surfaced verbatim.
 func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 	if m.contentPane.GetMode() != ui.ContentModeInstance {
 		return m, nil
@@ -351,15 +362,33 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 	if selected.IsRemote() {
 		return m, m.handleError(fmt.Errorf("remote sessions don't support new process tabs; their terminal tab comes from remote_hooks.terminal_cmd and arbitrary remote processes aren't supported"))
 	}
-	if _, err := selected.AddShellTab(); err != nil {
-		return m, m.handleError(err)
+
+	name, err := createShellTabThroughDaemon(selected.Title, m.repoID)
+	if err != nil {
+		if daemon.IsRPCMethodNotFoundErr(err) {
+			// Older daemon without the shell-aware CreateTab RPC: keep the legacy
+			// local-spawn + full-list save path so the mutation isn't lost.
+			if _, addErr := selected.AddShellTab(); addErr != nil {
+				return m, m.handleError(addErr)
+			}
+			if saveErr := m.storage.SaveInstances(m.sidebar.GetInstances()); saveErr != nil {
+				log.ErrorLog.Printf("failed to persist new tab: %v", saveErr)
+			}
+		} else {
+			return m, m.handleError(err)
+		}
+	} else {
+		// The daemon spawned and persisted the tab; reflect it locally for
+		// instant display without a second spawn. The daemon write is
+		// authoritative, so we do NOT save here.
+		if _, attachErr := selected.AttachShellTab(name); attachErr != nil {
+			return m, m.handleError(attachErr)
+		}
 	}
+
 	tw := m.contentPane.TabbedWindow()
 	tw.SelectLastTab()
 	m.menu.SetActiveTab(tw.GetActiveTab())
-	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-		log.ErrorLog.Printf("failed to persist new tab: %v", err)
-	}
 	return m, m.selectionChanged()
 }
 
@@ -367,8 +396,16 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 // previous (left) tab (#930 PR 4). The agent tab (index 0) is unclosable — w on
 // it is a gentle no-op message pointing at D for killing the whole session. A
 // remote instance's tabs (agent + optional terminal_cmd terminal) are fixed by
-// its hook config, not user-managed, so closing any of them is refused. The
-// shrunk tab list is persisted.
+// its hook config, not user-managed, so closing any of them is refused.
+//
+// The kill+persist is routed through the daemon's CloseTab RPC (#960 PR 2): the
+// daemon — the single writer — kills the tab's tmux and persists the shrunk
+// list, so the TUI no longer originates a tab write the daemon could clobber
+// (#959). The agent-tab and remote rules are still enforced TUI-side so the
+// friendly message shows without a round-trip (the RPC enforces them too). The
+// TUI drops the now-dead tab locally via DropClosedTab — a no-kill removal, since
+// the daemon already tore the tmux session down. Version skew falls back to the
+// legacy local CloseTab + full-list save on method-not-found.
 func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if m.contentPane.GetMode() != ui.ContentModeInstance {
 		return m, nil
@@ -385,16 +422,38 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if selected.IsRemote() {
 		return m, m.handleError(fmt.Errorf("remote session tabs can't be closed"))
 	}
-	if err := selected.CloseTab(idx); err != nil {
-		return m, m.handleError(err)
+	tabs := selected.GetTabs()
+	if idx >= len(tabs) {
+		return m, m.handleError(fmt.Errorf("tab cannot be closed"))
 	}
+	tabName := tabs[idx].Name
+
+	if err := closeTabThroughDaemon(selected.Title, m.repoID, tabName); err != nil {
+		if daemon.IsRPCMethodNotFoundErr(err) {
+			// Older daemon without the CloseTab RPC: keep the legacy local-kill +
+			// full-list save path so the mutation isn't lost.
+			if closeErr := selected.CloseTab(idx); closeErr != nil {
+				return m, m.handleError(closeErr)
+			}
+			if saveErr := m.storage.SaveInstances(m.sidebar.GetInstances()); saveErr != nil {
+				log.ErrorLog.Printf("failed to persist tab close: %v", saveErr)
+			}
+		} else {
+			return m, m.handleError(err)
+		}
+	} else {
+		// The daemon killed the tmux and persisted the shrunk list; drop the
+		// now-dead tab locally without re-killing. The daemon write is
+		// authoritative, so we do NOT save here.
+		if dropErr := selected.DropClosedTab(idx); dropErr != nil {
+			return m, m.handleError(dropErr)
+		}
+	}
+
 	// Prefer the left/previous neighbor; SelectTab clamps so this is always in
 	// range (idx >= 1, so idx-1 >= 0).
 	tw.SelectTab(idx - 1)
 	m.menu.SetActiveTab(tw.GetActiveTab())
-	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-		log.ErrorLog.Printf("failed to persist tab close: %v", err)
-	}
 	return m, m.selectionChanged()
 }
 

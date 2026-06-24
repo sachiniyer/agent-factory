@@ -231,3 +231,97 @@ func TestCreateTab_SpawnsPersistsAndReturnsName(t *testing.T) {
 		t.Fatalf("persisted process tab tmux name = %q, want %q", proc.TmuxName, agentName+"__btop")
 	}
 }
+
+// TestCreateTab_ShellSpawnsPersistsAndReturnsName verifies the shell-tab path
+// the TUI's `t` mutation routes to (#960 PR 2): Shell=true creates a Shell-kind
+// tab running $SHELL (ignoring Command), returns its auto-derived name, and
+// persists it so it survives a restart.
+func TestCreateTab_ShellSpawnsPersistsAndReturnsName(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "shellworker"
+	agentName := "af_" + title + "_agent"
+	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, agentName)
+
+	// Shell=true ignores Command and creates a $SHELL tab named "shell".
+	name, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true})
+	if err != nil {
+		t.Fatalf("CreateTab(shell): %v", err)
+	}
+	if name != "shell" {
+		t.Fatalf("resolved shell tab name = %q, want %q", name, "shell")
+	}
+
+	raw, err := config.LoadRepoInstances(repo.ID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+	var data []session.InstanceData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("unmarshal instances: %v", err)
+	}
+	if len(data) != 1 {
+		t.Fatalf("expected 1 persisted instance, got %d", len(data))
+	}
+	var shell *session.TabData
+	for i := range data[0].Tabs {
+		if data[0].Tabs[i].Kind == session.TabKindShell {
+			shell = &data[0].Tabs[i]
+		}
+	}
+	if shell == nil {
+		t.Fatalf("no persisted shell tab found in %+v", data[0].Tabs)
+	}
+	if shell.Name != "shell" {
+		t.Fatalf("persisted shell tab name = %q, want shell", shell.Name)
+	}
+	if shell.TmuxName != agentName+"__shell" {
+		t.Fatalf("persisted shell tab tmux name = %q, want %q", shell.TmuxName, agentName+"__shell")
+	}
+}
+
+// TestCreateTab_ShellRejectsRemoteInstance verifies the shell path also refuses
+// remote sessions (no local worktree), matching the process path and the TUI's
+// `t` rule.
+func TestCreateTab_ShellRejectsRemoteInstance(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "rem", Path: repoPath, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(remoteTypeBackend{session.NewFakeBackend()})
+	inst.SetStartedForTest(true)
+	seedDiskInstance(t, repo.ID, "rem", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
+	manager.mu.Unlock()
+
+	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Shell: true})
+	if err == nil {
+		t.Fatal("expected error for remote instance, got nil")
+	}
+	if !strings.Contains(err.Error(), "remote") {
+		t.Fatalf("expected remote-rejection error, got: %v", err)
+	}
+}

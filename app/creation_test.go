@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,6 +31,22 @@ func newTestHome(t *testing.T) *home {
 	origReload := reloadDaemonTaskSchedulesFn
 	reloadDaemonTaskSchedulesFn = func() error { return nil }
 	t.Cleanup(func() { reloadDaemonTaskSchedulesFn = origReload })
+
+	// The tab + PR-info mutations now route through daemon RPCs (#960 PR 2).
+	// Stub the seams with safe defaults so tests that incidentally trigger them
+	// never dial — or spawn — a real daemon. Tests exercising these paths
+	// override the relevant seam. createTab/closeTab default to an error so an
+	// unstubbed mutation fails loudly rather than reaching the daemon; setPRInfo
+	// defaults to a no-op so the in-memory PR-badge path stays exercisable.
+	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
+		return "", fmt.Errorf("createShellTabThroughDaemon not stubbed in test")
+	}))
+	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
+		return fmt.Errorf("closeTabThroughDaemon not stubbed in test")
+	}))
+	t.Cleanup(SetPRInfoSetterForTest(func(title, repoID string, info session.PRInfoData) error {
+		return nil
+	}))
 
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sidebar := ui.NewSidebar(&spin, false)
