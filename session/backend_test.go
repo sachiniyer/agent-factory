@@ -61,7 +61,13 @@ func TestHookBackendType(t *testing.T) {
 // (including the instance title) for diagnosis.
 func TestLocalBackendKillBestEffort_TmuxFails(t *testing.T) {
 	cmdExec := cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error {
+		RunFunc: func(c *exec.Cmd) error {
+			// has-session reports the session still present, so the failed
+			// kill-session is a GENUINE teardown failure rather than the
+			// idempotent already-gone no-op (#967). Everything else fails.
+			if strings.Contains(c.String(), "has-session") {
+				return nil
+			}
 			return errors.New("kill failed")
 		},
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
@@ -170,7 +176,12 @@ func TestLocalBackendKill_RecoversStaleWorktreeDir(t *testing.T) {
 // nil with a warning per component.
 func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 	cmdExec := cmd_test.MockCmdExec{
-		RunFunc: func(*exec.Cmd) error {
+		RunFunc: func(c *exec.Cmd) error {
+			// has-session reports present so the failed kill-session is a
+			// genuine teardown failure, not the #967 idempotent no-op.
+			if strings.Contains(c.String(), "has-session") {
+				return nil
+			}
 			return errors.New("kill failed")
 		},
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {

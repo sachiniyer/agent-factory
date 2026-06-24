@@ -300,17 +300,29 @@ func TestStartTimeoutCleanupSucceeds(t *testing.T) {
 }
 
 // TestStartTimeoutCleanupFails is the companion to the #696 guard: when
-// cleanup also fails, the timeout error must include the cleanup cause.
+// cleanup GENUINELY fails, the timeout error must include the cleanup cause.
+// Post-#967 a kill-session failure only counts as a cleanup failure if the
+// session survives the kill, so has-session reports the session present once
+// the cleanup kill is attempted (the poll loop still times out because the
+// session never appeared in time).
 func TestStartTimeoutCleanupFails(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
 
+	killAttempted := false
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
-			if strings.Contains(cmd.String(), "has-session") {
-				return fmt.Errorf("session not found")
-			}
 			if strings.Contains(cmd.String(), "kill-session") {
+				killAttempted = true
 				return fmt.Errorf("kill-session exploded")
+			}
+			if strings.Contains(cmd.String(), "has-session") {
+				// The poll loop sees the session missing (so Start times
+				// out); the post-kill Close probe sees it present, so the
+				// failed kill is a genuine cleanup failure that must surface.
+				if killAttempted {
+					return nil
+				}
+				return fmt.Errorf("session not found")
 			}
 			return nil
 		},
