@@ -337,6 +337,81 @@ func (i *Instance) CloseTab(idx int) error {
 	return nil
 }
 
+// AttachShellTab reconnects this local instance's in-memory tab list to a shell
+// tab that already exists server-side — one the daemon's CreateTab RPC just
+// spawned out-of-band (#960 PR 2). It is the no-spawn counterpart of
+// AddShellTab: the daemon owns the spawn (so its authoritative view holds the
+// tab and can't be clobbered), and the TUI only needs to reflect the new tab
+// locally for instant display. It binds to the EXACT tmux session the daemon
+// derived (agent session name + "__" + name) and Restores (reconnects) it,
+// mirroring restoreLocalTabs + LocalBackend.setupTabs, so the tab is immediately
+// previewable/attachable without a second spawn that would collide on the name.
+//
+// name is the resolved tab name returned by the daemon. Local instances only —
+// callers reject IsRemote() first. If a tab with that name is already present
+// (e.g. a refresh raced ahead) this is a no-op returning the existing tab.
+// Errors when the instance is not started or has no agent session/worktree.
+func (i *Instance) AttachShellTab(name string) (*Tab, error) {
+	i.mu.RLock()
+	started := i.started
+	agentTmux := i.tmuxLocked()
+	gw := i.gitWorktree
+	var existing *Tab
+	for _, t := range i.Tabs {
+		if t.Name == name {
+			existing = t
+			break
+		}
+	}
+	i.mu.RUnlock()
+
+	if existing != nil {
+		return existing, nil
+	}
+	if !started || agentTmux == nil || gw == nil {
+		return nil, fmt.Errorf("cannot attach a tab to an instance that is not started")
+	}
+	worktreePath := gw.GetWorktreePath()
+	if worktreePath == "" {
+		return nil, fmt.Errorf("cannot attach a tab without a worktree")
+	}
+
+	// Bind to the exact session name the daemon derived and reconnect to it. The
+	// sibling inherits the agent session's PTY factory / executor (real in
+	// production, mock in tests). Restore re-spawns only if the session is
+	// genuinely missing (its workDir is non-empty), matching setupTabs.
+	tmuxName := agentTmux.SanitizedName() + "__" + name
+	shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
+	if err := shellTmux.Restore(worktreePath); err != nil {
+		return nil, fmt.Errorf("failed to reconnect shell tab: %w", err)
+	}
+
+	tab := newShellTab(shellTmux)
+	tab.Name = name
+	i.mu.Lock()
+	i.Tabs = append(i.Tabs, tab)
+	i.mu.Unlock()
+	return tab, nil
+}
+
+// DropClosedTab removes the tab at idx from the in-memory list WITHOUT killing
+// its tmux session (#960 PR 2). It is the no-kill counterpart of CloseTab, used
+// when the daemon's CloseTab RPC has already torn the tmux session down: the
+// daemon owns the kill+persist, and the TUI only needs to drop the now-dead tab
+// from its local view for instant display. Killing again here would shell out a
+// second tmux kill-session that errors ("session not found") on the already-gone
+// session and surface a spurious failure. The agent tab (idx 0) is undroppable;
+// errors on idx 0 or any out-of-range index, mirroring CloseTab.
+func (i *Instance) DropClosedTab(idx int) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if idx <= 0 || idx >= len(i.Tabs) {
+		return fmt.Errorf("tab cannot be closed")
+	}
+	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
+	return nil
+}
+
 // uniqueShellName returns a shell-tab display name not already used by any tab
 // in tabs: "shell", then "shell-2", "shell-3", …
 func uniqueShellName(tabs []*Tab) string {

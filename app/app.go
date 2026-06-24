@@ -335,10 +335,35 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			target.MarkPRInfoFetched()
 			return m, nil
 		}
+		// Apply the fetched PR info to the in-memory instance immediately so the
+		// sidebar badge updates without waiting on the daemon round-trip. The
+		// gh-pr-view fetch stays TUI-side (#921, per-selection, debounced); only
+		// the persisted WRITE moves to the daemon (#960 PR 2) so the daemon — the
+		// single writer — owns it and the TUI no longer originates a full-list
+		// save the daemon could clobber (#959).
 		target.SetPRInfo(msg.info)
+		var prData session.PRInfoData
+		if msg.info != nil {
+			prData = session.PRInfoData{
+				Number: msg.info.Number,
+				Title:  msg.info.Title,
+				URL:    msg.info.URL,
+				State:  msg.info.State,
+			}
+		}
 		saveStart := time.Now()
-		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-			log.WarningLog.Printf("failed to save instances after PR update: %v", err)
+		if err := setPRInfoThroughDaemon(target.Title, m.repoID, prData); err != nil {
+			if daemon.IsRPCMethodNotFoundErr(err) {
+				// Older daemon without the SetPRInfo RPC: keep the legacy
+				// full-list save so the write isn't lost.
+				if saveErr := m.storage.SaveInstances(m.sidebar.GetInstances()); saveErr != nil {
+					log.WarningLog.Printf("failed to save instances after PR update: %v", saveErr)
+				}
+			} else {
+				// In-memory update already applied for the UI; surface the
+				// persist failure but don't drop the badge.
+				log.WarningLog.Printf("failed to persist PR info for %q via daemon: %v", target.Title, err)
+			}
 		}
 		detachTrace(saveStart, "prInfoUpdatedMsg-SaveInstances-returned")
 		return m, nil

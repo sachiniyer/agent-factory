@@ -93,16 +93,26 @@ type DeliverPromptResponse struct {
 	Status string
 }
 
-// CreateTabRequest asks the daemon to spawn a Process-kind tab running Command
-// in the target session's worktree (#930 PR 5). Title selects the session;
-// RepoID scopes the lookup like the other sessions verbs (empty = all-repo).
-// Name is the optional display name (a default is derived from Command's
-// basename when empty); the resolved, collision-suffixed name is returned.
+// CreateTabRequest asks the daemon to spawn a tab in the target session's
+// worktree. Title selects the session; RepoID scopes the lookup like the other
+// sessions verbs (empty = all-repo).
+//
+// Two kinds of tab can be created:
+//   - Process tab (Shell=false, the #930 PR 5 default): runs Command in the
+//     worktree. Name is the optional display name (a default is derived from
+//     Command's basename when empty). Command must be non-empty.
+//   - Shell tab (Shell=true): runs $SHELL in the worktree, exactly like the TUI's
+//     `t` key (Instance.AddShellTab). Command/Name are ignored; the name is the
+//     auto-derived unique "shell"/"shell-2"/… The TUI routes its `t` mutation
+//     here so the daemon — not the TUI — owns the tab write (#960 PR 2).
+//
+// Either way the resolved, collision-suffixed name is returned.
 type CreateTabRequest struct {
 	Title   string
 	RepoID  string
 	Command string
 	Name    string
+	Shell   bool
 }
 
 type CreateTabResponse struct {
@@ -517,6 +527,15 @@ func isRPCMethodNotFoundErr(err error) bool {
 	}
 	s := string(serverErr)
 	return strings.Contains(s, "can't find method") || strings.Contains(s, "can't find service")
+}
+
+// IsRPCMethodNotFoundErr reports whether err is the net/rpc server's
+// method-not-found reply — the daemon is alive on the control socket but does
+// not register the requested verb (a version-skewed, older daemon). RPC clients
+// (the TUI) use this to fall back to a legacy local path for a single mutation
+// until the daemon is upgraded (#960 PR 2), mirroring the Shutdown fallback.
+func IsRPCMethodNotFoundErr(err error) bool {
+	return isRPCMethodNotFoundErr(err)
 }
 
 type controlServer struct {
@@ -1265,7 +1284,7 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 // empty command, or an instance already at the soft cap (maxTabs, enforced by
 // AddProcessTab).
 func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
-	if strings.TrimSpace(req.Command) == "" {
+	if !req.Shell && strings.TrimSpace(req.Command) == "" {
 		return "", fmt.Errorf("a process tab requires a non-empty command (--command)")
 	}
 
@@ -1277,7 +1296,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		return "", fmt.Errorf("failed to restore instance %q", req.Title)
 	}
 	if instance.IsRemote() {
-		return "", fmt.Errorf("cannot create a process tab on remote session %q: remote sessions have no local worktree and the hook protocol can't run arbitrary commands; their terminal tab comes from remote_hooks.terminal_cmd", req.Title)
+		return "", fmt.Errorf("cannot create a tab on remote session %q: remote sessions have no local worktree and the hook protocol can't run arbitrary commands; their terminal tab comes from remote_hooks.terminal_cmd", req.Title)
 	}
 
 	// Serialize against other create/tab mutations on this repo, mirroring
@@ -1287,7 +1306,14 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
 
-	tab, err := instance.AddProcessTab(req.Command, req.Name)
+	// A shell tab runs $SHELL (the TUI `t` mutation, #960 PR 2); a process tab
+	// runs the requested command (the CLI/API path, #930 PR 5).
+	var tab *session.Tab
+	if req.Shell {
+		tab, err = instance.AddShellTab()
+	} else {
+		tab, err = instance.AddProcessTab(req.Command, req.Name)
+	}
 	if err != nil {
 		return "", err
 	}

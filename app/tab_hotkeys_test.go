@@ -125,16 +125,60 @@ func selectInstance(h *home, inst *session.Instance) {
 	h.contentPane.TabbedWindow().SetInstance(inst)
 }
 
+// nextShellTabName mirrors session.uniqueShellName ("shell", "shell-2", …) so a
+// stubbed daemon CreateTab returns the same name the real daemon would derive
+// from the instance's current tab list — letting AttachShellTab reconnect by the
+// expected name. Kept here (not imported) so production stays free of a
+// test-only export.
+func nextShellTabName(tabs []*session.Tab) string {
+	used := map[string]bool{}
+	for _, t := range tabs {
+		used[t.Name] = true
+	}
+	if !used["shell"] {
+		return "shell"
+	}
+	for n := 2; ; n++ {
+		c := fmt.Sprintf("shell-%d", n)
+		if !used[c] {
+			return c
+		}
+	}
+}
+
+// stubTabDaemonSeams installs daemon CreateTab/CloseTab seam stubs that simulate
+// the daemon hermetically against the single in-process instance (#960 PR 2):
+// CreateTab returns the next shell name (the TUI then reconnects via
+// AttachShellTab); CloseTab is a no-op (the TUI then drops the tab locally via
+// DropClosedTab). Records the calls so tests can assert routing went through the
+// RPC rather than a local save. Returns pointers to the call counters and a
+// restore func.
+func stubTabDaemonSeams(t *testing.T, inst *session.Instance) (created, closed *int) {
+	t.Helper()
+	var c, d int
+	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
+		c++
+		return nextShellTabName(inst.GetTabs()), nil
+	}))
+	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
+		d++
+		return nil
+	}))
+	return &c, &d
+}
+
 // TestHandleNewTabAppendsAndSelects: the new-tab hotkey appends a shell tab and
 // selects it.
 func TestHandleNewTabAppendsAndSelects(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "new")
 	selectInstance(h, inst)
+	created, _ := stubTabDaemonSeams(t, inst)
 	require.Equal(t, 2, inst.TabCount(), "start gives an agent + default shell tab")
 
 	_, _ = h.handleNewTab()
 
+	require.Equal(t, 1, *created, "new-tab must route through the daemon CreateTab RPC")
 	require.Equal(t, 3, inst.TabCount(), "new-tab must append a shell tab")
 	require.Equal(t, 2, h.contentPane.TabbedWindow().GetActiveTab(),
 		"the freshly created tab must be selected")
@@ -146,12 +190,14 @@ func TestHandleCloseTabSelectsNeighbor(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "close")
 	selectInstance(h, inst)
+	_, closed := stubTabDaemonSeams(t, inst)
 	_, _ = h.handleNewTab() // now agent + shell + shell-2, active = 2
 	require.Equal(t, 3, inst.TabCount())
 	require.Equal(t, 2, h.contentPane.TabbedWindow().GetActiveTab())
 
 	_, _ = h.handleCloseTab()
 
+	require.Equal(t, 1, *closed, "close must route through the daemon CloseTab RPC")
 	require.Equal(t, 2, inst.TabCount(), "close must remove the active tab")
 	require.Equal(t, 1, h.contentPane.TabbedWindow().GetActiveTab(),
 		"close must select the left neighbor")
@@ -196,6 +242,7 @@ func TestHandleTabJump(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "jump")
 	selectInstance(h, inst)
+	stubTabDaemonSeams(t, inst)
 	_, _ = h.handleNewTab() // agent + shell + shell-2 (3 tabs)
 	require.Equal(t, 3, inst.TabCount())
 
@@ -216,6 +263,7 @@ func TestNumberKeyRoutesToTabJump(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "route")
 	selectInstance(h, inst)
+	stubTabDaemonSeams(t, inst)
 	_, _ = h.handleNewTab() // 3 tabs
 
 	h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
