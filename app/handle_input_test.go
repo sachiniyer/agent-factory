@@ -136,10 +136,10 @@ func TestHandleMenuHighlightingNewInstanceEnterTab(t *testing.T) {
 }
 
 // TestCancelNamingRemovesZombieAfterSelectionDrift is the regression guard for
-// issue #717. While the user is naming a new instance, a background sync
-// (refreshExternalInstances) can remove a *preceding* instance, which rebuilds
-// the sidebar's visibleItems and drifts the selection off the naming row onto a
-// section header. The old cancel handlers called selection-based
+// issue #717. While the user is naming a new instance, a background sidebar
+// mutation can remove a *preceding* instance, which rebuilds the sidebar's
+// visibleItems and drifts the selection off the naming row onto a section
+// header. The old cancel handlers called selection-based
 // sidebar.Kill(), which silently no-ops on a header — leaving the naming
 // instance behind as a "Loading" zombie. The fix kills by the captured
 // namingInstance pointer instead. Both cancel paths (Escape and ctrl+c) must
@@ -177,11 +177,11 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 			h.sidebar.SetSelectedInstance(h.sidebar.NumInstances() - 1)
 			h.namingInstance = naming
 
-			// Background sync removes `preceding` (absent on disk). This rebuilds
+			// A background mutation removes `preceding` (a daemon-owned row the
+			// snapshot no longer lists). RemoveInstanceByTitle rebuilds
 			// visibleItems without adjusting selectedIdx, drifting the selection
 			// off the naming row onto a section header.
-			require.True(t, h.refreshExternalInstances(),
-				"sync should report a change after removing the non-persisted preceding instance")
+			h.sidebar.RemoveInstanceByTitle("preceding")
 			require.Nil(t, h.sidebar.GetSelectedInstance(),
 				"precondition: selection must have drifted off the naming row onto a header")
 

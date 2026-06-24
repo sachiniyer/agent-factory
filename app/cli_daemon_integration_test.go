@@ -40,11 +40,11 @@ func TestTUIRefreshSeesCLIChangesThroughDaemon(t *testing.T) {
 	})
 
 	runIntegrationAFOK(t, bin, repoDir, "sessions", "--repo", repoDir, "create", "--name", "cli-made", "--program", tmux.ProgramClaude)
-	require.True(t, h.refreshExternalInstances(), "TUI refresh should import CLI-created session")
+	require.True(t, reconcileFromDaemon(t, h), "TUI snapshot should import CLI-created session")
 	require.NotNil(t, findSidebarInstance(h, "cli-made"))
 
 	runIntegrationAFOK(t, bin, repoDir, "sessions", "kill", "cli-made")
-	require.True(t, h.refreshExternalInstances(), "TUI refresh should remove CLI-killed session")
+	require.True(t, reconcileFromDaemon(t, h), "TUI snapshot should remove CLI-killed session")
 	require.Nil(t, findSidebarInstance(h, "cli-made"))
 }
 
@@ -80,7 +80,7 @@ func TestTUIRefreshSwapsKillRecreatedSameTitle(t *testing.T) {
 
 	// Create the session and import it into the sidebar.
 	runIntegrationAFOK(t, bin, repoDir, "sessions", "--repo", repoDir, "create", "--name", "recreated", "--program", tmux.ProgramClaude)
-	require.True(t, h.refreshExternalInstances(), "TUI refresh should import CLI-created session")
+	require.True(t, reconcileFromDaemon(t, h), "TUI snapshot should import CLI-created session")
 	original := findSidebarInstance(h, "recreated")
 	require.NotNil(t, original)
 	require.True(t, original.TmuxAlive(), "imported instance should be alive")
@@ -92,7 +92,7 @@ func TestTUIRefreshSwapsKillRecreatedSameTitle(t *testing.T) {
 	require.False(t, original.TmuxAlive(), "killed instance's tmux session must be gone")
 	runIntegrationAFOK(t, bin, repoDir, "sessions", "--repo", repoDir, "create", "--name", "recreated", "--program", tmux.ProgramClaude)
 
-	require.True(t, h.refreshExternalInstances(), "TUI refresh should swap the stale instance")
+	require.True(t, reconcileFromDaemon(t, h), "TUI snapshot should swap the stale instance")
 
 	// Exactly one "recreated" instance, and it must be the new live one — not
 	// the dead corpse we started with.
@@ -115,6 +115,17 @@ func findSidebarInstance(h *home, title string) *session.Instance {
 		}
 	}
 	return nil
+}
+
+// reconcileFromDaemon fetches the daemon's authoritative snapshot for the home's
+// repo and reconciles the sidebar to it — the TUI's single sync path (#960 PR 4).
+// It replaces the deleted disk-based refreshExternalInstances in these
+// CLI→daemon→TUI integration checks.
+func reconcileFromDaemon(t *testing.T, h *home) bool {
+	t.Helper()
+	data, err := snapshotThroughDaemon(h.repoID)
+	require.NoError(t, err)
+	return h.reconcileSnapshot(data)
 }
 
 func buildIntegrationBinary(t *testing.T) string {
@@ -197,14 +208,14 @@ func killIntegrationDaemon(home string) {
 
 // TestTUIRefreshDoesNotSwapLoadingPlaceholder is the regression test for #808.
 //
-// The daemon persists a new session to instances.json BEFORE the create RPC
-// returns, so while the TUI's Loading placeholder is still in the sidebar,
-// the on-disk record for the same title already exists with a newer
-// CreatedAt. The #765 swap logic treated that newer record as a CLI
-// kill+recreate and swapped the placeholder out; the instanceStartedMsg
-// handler then missed it (pointer-based ReplaceInstance/ContainsInstance)
-// and re-added the started instance, leaving two same-title sidebar rows
-// that SaveInstances persisted as byte-identical duplicate records.
+// The daemon persists a new session (and lists it in its snapshot) BEFORE the
+// create RPC returns, so while the TUI's Loading placeholder is still in the
+// sidebar, the snapshot already carries the same title with a newer CreatedAt.
+// A naive #765 swap would treat that as a CLI kill+recreate and swap the
+// placeholder out; the instanceStartedMsg handler would then miss it
+// (pointer-based ReplaceInstance/ContainsInstance) and re-add the started
+// instance, leaving two same-title sidebar rows. reconcileSnapshot prevents this
+// by skipping transient (Loading/Deleting) rows entirely.
 func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 	skipIfRealBackendDepsMissing(t)
 
@@ -240,9 +251,10 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 	// start RPC uses.
 	runIntegrationAFOK(t, bin, repoDir, "sessions", "--repo", repoDir, "create", "--name", "scripts", "--program", tmux.ProgramClaude)
 
-	// A refresh tick fires while the placeholder is still Loading. It must
-	// not swap the placeholder out from under the in-flight create.
-	require.False(t, h.refreshExternalInstances(), "refresh must leave the Loading placeholder alone")
+	// A snapshot reconcile fires while the placeholder is still Loading. It must
+	// not swap the placeholder out from under the in-flight create: reconcileSnapshot
+	// skips transient (Loading/Deleting) rows entirely (#808).
+	require.False(t, reconcileFromDaemon(t, h), "snapshot reconcile must leave the Loading placeholder alone")
 	require.Same(t, placeholder, findSidebarInstance(h, "scripts"),
 		"the Loading placeholder must stay in the sidebar until its start completes (#808)")
 
@@ -271,9 +283,8 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 	require.Len(t, matches, 1, "one logical session must occupy exactly one sidebar row (#808)")
 	require.Same(t, started, matches[0])
 
-	// The next save must persist exactly one record. Read the raw file (not
-	// LoadInstanceData, which now dedupes on load) to assert the on-disk state.
-	require.NoError(t, h.storage.SaveInstances(h.sidebar.GetInstances()))
+	// The daemon — the sole writer (#960 PR 4) — already persisted exactly one
+	// record on create; the TUI writes nothing. Assert the on-disk state directly.
 	raw, err := config.DefaultState().GetInstances(repo.ID)
 	require.NoError(t, err)
 	var onDisk []session.InstanceData

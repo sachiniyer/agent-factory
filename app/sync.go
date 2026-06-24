@@ -1,7 +1,6 @@
 package app
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
-	"github.com/sachiniyer/agent-factory/task"
 )
 
 // prInfoStaleAfter is how long a fetched PR info entry is considered fresh.
@@ -213,217 +211,20 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 
 // -- Sync methods --
 
-// mergePendingInstances loads pending instances written by scheduled task runs,
-// adds matching ones to the sidebar, and routes others to their per-repo storage.
-func (m *home) mergePendingInstances() int {
-	pendingData, err := task.LoadAndClearPendingInstances()
-	if err != nil {
-		log.WarningLog.Printf("failed to load pending instances: %v", err)
-		return 0
-	}
-
-	sidebarTitles := m.sidebar.GetInstanceTitles()
-
-	var otherRepoPending []session.InstanceData
-	var mergedCount int
-	for _, data := range pendingData {
-		rid := config.RepoIDFromRoot(data.Worktree.RepoPath)
-		if rid != m.repoID {
-			otherRepoPending = append(otherRepoPending, data)
-			continue
-		}
-
-		// If an entry with the same title already exists in the sidebar, decide
-		// whether to replace it or skip the pending instance. A scheduled task
-		// rerun may recreate the same tmux session name under a different
-		// worktree path (worktrees gain a numeric suffix on collision), so we
-		// cannot rely on TmuxAlive() alone to tell whether the sidebar
-		// instance still reflects the pending one.
-		//
-		// We capture the collision decision BEFORE attempting FromInstanceData
-		// so that we only remove the existing sidebar instance after we know
-		// the replacement could be constructed. Otherwise a transient
-		// FromInstanceData failure plus a subsequent successful merge in the
-		// same batch would cause SaveInstances to overwrite disk without the
-		// removed entry, permanently losing it (issue #367).
-		shouldReplace := false
-		if sidebarTitles[data.Title] {
-			skip := false
-			for _, existing := range m.sidebar.GetInstances() {
-				if existing.Title != data.Title {
-					continue
-				}
-				if instanceCollisionShouldSkip(existing.GetWorktreePath(), data.Worktree.WorktreePath, existing.CreatedAt, data.CreatedAt, existing.TmuxAlive(), isTransientStatus(existing.GetStatus())) {
-					log.WarningLog.Printf("skipping pending instance %q: already exists and is alive", data.Title)
-					skip = true
-				} else {
-					shouldReplace = true
-				}
-				break
-			}
-			if skip {
-				continue
-			}
-		}
-
-		pendingInstance, err := session.FromInstanceData(data)
-		if err != nil {
-			log.WarningLog.Printf("failed to restore pending instance %s: %v", data.Title, err)
-			// Do NOT mutate the sidebar — the existing instance (if any)
-			// must remain so SaveInstances does not drop it from disk.
-			continue
-		}
-
-		if shouldReplace {
-			log.InfoLog.Printf("replacing stale instance %q with new pending instance", data.Title)
-			m.sidebar.RemoveInstanceByTitle(data.Title)
-			delete(sidebarTitles, data.Title)
-		}
-
-		m.sidebar.AddInstance(pendingInstance)()
-		pendingInstance.SetAutoYes(m.autoYes)
-		sidebarTitles[data.Title] = true
-		mergedCount++
-	}
-
-	if len(otherRepoPending) > 0 {
-		grouped := make(map[string][]session.InstanceData)
-		for _, d := range otherRepoPending {
-			rid := config.RepoIDFromRoot(d.Worktree.RepoPath)
-			grouped[rid] = append(grouped[rid], d)
-		}
-		for rid, group := range grouped {
-			if err := config.UpdateRepoInstances(rid, func(existing json.RawMessage) (json.RawMessage, error) {
-				var existingData []session.InstanceData
-				if existing != nil && string(existing) != "[]" && string(existing) != "null" {
-					if err := json.Unmarshal(existing, &existingData); err != nil {
-						return nil, fmt.Errorf("failed to parse existing instances for repo %s: %w", rid, err)
-					}
-				}
-				existingData = upsertInstanceDataByTitle(existingData, group)
-				return json.Marshal(existingData)
-			}); err != nil {
-				log.WarningLog.Printf("failed to merge pending instances for repo %s: %v", rid, err)
-			}
-		}
-	}
-
-	if mergedCount > 0 {
-		if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-			log.WarningLog.Printf("failed to save merged instances: %v", err)
-		}
-	}
-
-	return mergedCount
-}
-
-// refreshExternalInstances reconciles the sidebar's in-memory instances with
-// the on-disk instances.json. Returns true if anything changed.
-func (m *home) refreshExternalInstances() bool {
-	diskData, err := m.storage.LoadInstanceData()
-	if err != nil {
-		log.WarningLog.Printf("failed to load instance data for refresh: %v", err)
-		return false
-	}
-
-	sidebarTitles := m.sidebar.GetInstanceTitles()
-	diskTitles := make(map[string]bool, len(diskData))
-	for _, d := range diskData {
-		diskTitles[d.Title] = true
-	}
-
-	changed := false
-
-	// Add instances that exist on disk, and replace stale sidebar instances
-	// whose title was reused by a CLI kill+recreate.
-	//
-	// A title present in both the sidebar and on disk usually means the
-	// instance is unchanged, so we skip it. But when a session is killed and
-	// recreated under the same title via the CLI, the dead in-memory instance
-	// shadows the freshly created on-disk one: title-only membership makes the
-	// add pass skip it and the remove pass keep the corpse, leaving the new
-	// session invisible (#765). Reuse the same liveness/staleness check as
-	// mergePendingInstances — when the colliding sidebar instance is stale
-	// (different worktree, its tmux session is gone, or it was superseded by a
-	// more recently created on-disk record) swap it for the disk instance.
-	// Construct the replacement BEFORE removing the existing entry so a
-	// transient FromInstanceData failure can't drop it from disk on save.
-	for _, d := range diskData {
-		shouldReplace := false
-		if sidebarTitles[d.Title] {
-			skip := true
-			for _, existing := range m.sidebar.GetInstances() {
-				if existing.Title != d.Title {
-					continue
-				}
-				if !instanceCollisionShouldSkip(existing.GetWorktreePath(), d.Worktree.WorktreePath, existing.CreatedAt, d.CreatedAt, existing.TmuxAlive(), isTransientStatus(existing.GetStatus())) {
-					skip = false
-					shouldReplace = true
-				}
-				break
-			}
-			if skip {
-				continue
-			}
-		}
-
-		inst, err := session.FromInstanceData(d)
-		if err != nil {
-			log.WarningLog.Printf("failed to restore external instance %q: %v", d.Title, err)
-			// Leave any colliding sidebar instance untouched so SaveInstances
-			// does not drop it from disk.
-			continue
-		}
-
-		if shouldReplace {
-			log.InfoLog.Printf("swapping stale sidebar instance %q for recreated on-disk instance", d.Title)
-			m.sidebar.RemoveInstanceByTitle(d.Title)
-			delete(sidebarTitles, d.Title)
-		}
-
-		m.sidebar.AddInstance(inst)()
-		inst.SetAutoYes(m.autoYes)
-		sidebarTitles[d.Title] = true
-		changed = true
-	}
-
-	// Remove instances that exist in sidebar but not on disk.
-	// Skip instances with Loading status (TUI is currently creating them).
-	// Collect removals first to avoid modifying the slice during iteration.
-	var toRemove []*session.Instance
-	for _, inst := range m.sidebar.GetInstances() {
-		if !diskTitles[inst.Title] && inst.GetStatus() != session.Loading {
-			toRemove = append(toRemove, inst)
-		}
-	}
-	for _, inst := range toRemove {
-		m.sidebar.RemoveInstanceByTitle(inst.Title)
-		changed = true
-	}
-
-	return changed
-}
-
 // handleSnapshot applies a fetched daemon snapshot to the sidebar and reports
 // whether anything changed (the caller repaints only on a diff). On a fetch
 // error it degrades rather than dropping the sidebar: a warming daemon (#829) is
-// retried on the next tick (callDaemon already waited out the warm-up window), a
-// version-skewed daemon without the Snapshot RPC falls back to the legacy
-// disk-based refresh (mirroring the SetPRInfo method-not-found fallback in #960
-// PR 2), and any other error is logged and skipped, leaving the last-known
-// sidebar intact.
+// retried on the next tick (callDaemon already waited out the warm-up window),
+// and any other error is logged and skipped, leaving the last-known sidebar
+// intact. The Snapshot RPC is the TUI's ONLY sync path (#960 PR 4): the daemon is
+// the sole owner/writer of session state, so there is no disk-based reconcile to
+// fall back to.
 func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 	if msg.err != nil {
 		if daemon.IsDaemonStartingErr(msg.err) {
 			// Daemon still restoring (#829); the cold-start LoadInstances already
 			// populated the sidebar. Retry next tick — nothing to reconcile yet.
 			return false
-		}
-		if daemon.IsRPCMethodNotFoundErr(msg.err) {
-			// Older daemon without the Snapshot RPC: fall back to the disk-based
-			// reconcile until it is upgraded. The on-disk format is frozen, so
-			// this stays correct across the rollout.
-			return m.refreshExternalInstances()
 		}
 		log.WarningLog.Printf("failed to fetch daemon snapshot: %v", msg.err)
 		return false
@@ -452,11 +253,11 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 // daemon may not yet know about an in-flight create, and a mid-teardown row must
 // keep its marker. Returns whether anything changed.
 //
-// Because the snapshot IS the truth, this needs none of refreshExternalInstances'
-// dual-writer collision heuristics (instanceCollisionShouldSkip / the #765/#808
-// "is my in-memory row staler than disk" logic) — those defend the TUI's
-// *authoritative* copy against the daemon's writes; a pure mirror just needs an
-// identity check (CreatedAt) to tell "same session" from "title reused".
+// Because the snapshot IS the truth, this is the TUI's ONLY sync path (#960 PR 4
+// deleted the disk-based refresh and its dual-writer collision heuristics — the
+// #765/#808 "is my in-memory row staler than disk" guessing game that existed
+// only to defend a competing TUI writer). A pure mirror just needs an identity
+// check (CreatedAt) to tell "same session" from "title reused".
 //
 // STATUS is deliberately NOT mirrored onto existing rows here: the daemon does
 // not yet compute Ready/Dead (that moves to it in #960 PR 5), so its persisted
@@ -612,74 +413,12 @@ func prInfoDiffersFromData(inst *session.Instance, d session.PRInfoData) bool {
 	return cur.Number != d.Number || cur.Title != d.Title || cur.URL != d.URL || cur.State != d.State
 }
 
-// instanceCollisionShouldSkip decides whether to keep an existing sidebar
-// instance when an incoming on-disk or pending instance reuses its title. It
-// returns true when the incoming instance should be skipped (the sidebar
-// instance is still the authoritative live session), false when the sidebar
-// instance is stale and must be replaced.
-//
-// A Loading sidebar instance is never replaced (#808): it is the placeholder
-// for an in-flight TUI creation of this very session — the daemon persists
-// the record to instances.json before the start RPC returns, so the on-disk
-// row appearing while the placeholder is still Loading is the normal
-// mid-create state, not a stale corpse. Its CreatedAt also predates the
-// daemon-side record, so the #765 newer-CreatedAt rule below would otherwise
-// always swap it, orphaning the pointer the instanceStartedMsg handler later
-// passes to ReplaceInstance and leaving two same-title sidebar rows.
-//
-// A Deleting sidebar instance is likewise never replaced (#844): its on-disk
-// record legitimately still exists until the background teardown finishes,
-// and swapping the row for a disk-built copy would erase the Deleting marker —
-// resurrecting a kill-enabled row for a session that is mid-teardown. The
-// transient flag below covers both states.
-//
-// The incoming instance supersedes the existing one when:
-//   - both worktree paths are known and differ — a scheduled task rerun
-//     creates a new worktree with a numeric suffix while reusing the tmux
-//     session name, so TmuxAlive() would wrongly report the sidebar instance
-//     as live (issue #255); or
-//   - the incoming record was created more recently — a CLI kill+recreate
-//     reuses the same title, and because both the worktree path and the tmux
-//     session name are derived deterministically from the title, the recreated
-//     session collides with the corpse on both. Neither worktree nor
-//     TmuxAlive() can then distinguish them; the newer CreatedAt can (#765).
-//
-// Otherwise, fall back to the tmuxAlive signal.
-func instanceCollisionShouldSkip(existingWorktreePath, incomingWorktreePath string, existingCreatedAt, incomingCreatedAt time.Time, tmuxAlive, existingTransient bool) bool {
-	if existingTransient {
-		return true
-	}
-	if existingWorktreePath != "" && incomingWorktreePath != "" && existingWorktreePath != incomingWorktreePath {
-		return false
-	}
-	if incomingCreatedAt.After(existingCreatedAt) {
-		return false
-	}
-	return tmuxAlive
-}
-
 // isTransientStatus reports whether an in-memory sidebar instance is in a
 // state owned by an in-flight TUI operation — Loading (creation, #808) or
-// Deleting (async kill, #844) — during which background syncs must neither
-// replace nor reap it.
+// Deleting (async kill, #844) — during which the snapshot reconcile must
+// neither replace nor reap it.
 func isTransientStatus(status session.Status) bool {
 	return status == session.Loading || status == session.Deleting
-}
-
-func upsertInstanceDataByTitle(existing, incoming []session.InstanceData) []session.InstanceData {
-	index := make(map[string]int, len(existing))
-	for i := range existing {
-		index[existing[i].Title] = i
-	}
-	for _, data := range incoming {
-		if i, ok := index[data.Title]; ok {
-			existing[i] = data
-			continue
-		}
-		index[data.Title] = len(existing)
-		existing = append(existing, data)
-	}
-	return existing
 }
 
 func (m *home) importRemoteHookSessions() int {

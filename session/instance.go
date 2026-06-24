@@ -24,8 +24,8 @@ const (
 	Loading
 	// Deleting is if the instance is being torn down asynchronously after the
 	// user confirmed a kill. Like Loading it is transient in-memory state: it
-	// is never persisted (see mergeInstancesWithDisk) and the row is removed
-	// or reverted when the background teardown finishes (#844).
+	// is never persisted (SaveInstances skips Loading/Deleting) and the row is
+	// removed or reverted when the background teardown finishes (#844).
 	Deleting
 	// Dead is when the underlying tmux/remote session has vanished out from
 	// under us (e.g. the tmux server was killed externally). The row is a

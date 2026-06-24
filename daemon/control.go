@@ -555,15 +555,6 @@ func isRPCMethodNotFoundErr(err error) bool {
 	return strings.Contains(s, "can't find method") || strings.Contains(s, "can't find service")
 }
 
-// IsRPCMethodNotFoundErr reports whether err is the net/rpc server's
-// method-not-found reply — the daemon is alive on the control socket but does
-// not register the requested verb (a version-skewed, older daemon). RPC clients
-// (the TUI) use this to fall back to a legacy local path for a single mutation
-// until the daemon is upgraded (#960 PR 2), mirroring the Shutdown fallback.
-func IsRPCMethodNotFoundErr(err error) bool {
-	return isRPCMethodNotFoundErr(err)
-}
-
 type controlServer struct {
 	manager      *Manager
 	scheduler    *taskScheduler
@@ -980,6 +971,12 @@ func (m *Manager) InstancesSnapshot() []*session.Instance {
 	return daemonInstances(m.instances)
 }
 
+// SaveInstances writes the manager's authoritative in-memory instances to disk
+// as a straight per-repo marshal (#960 PR 4). With the daemon the sole writer of
+// instances.json there is no competing snapshot to reconcile, so this is no
+// longer a merge. Every mutation already persists through a targeted writer
+// (appendInstanceData / persistInstanceData / DeleteInstance) as it happens; this
+// full save is just the shutdown checkpoint.
 func (m *Manager) SaveInstances() error {
 	return m.storage.SaveInstances(m.InstancesSnapshot())
 }
@@ -1392,7 +1389,11 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		return "", err
 	}
 
-	if err := m.SaveInstances(); err != nil {
+	// Persist through the targeted per-repo writer (persistInstanceData) — the
+	// clobber-safe single-writer direction of #960 — rather than a whole-list
+	// SaveInstances, which would re-serialize the manager's entire view and was
+	// the dual-writer clobber surface PR 4 retires. Mirrors CloseTab/SetPRInfo.
+	if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
 		// Roll back the just-spawned tab so a persist failure does not leave a
 		// live tmux session that vanishes from the tab list on restart.
 		if closeErr := instance.CloseTab(instance.TabCount() - 1); closeErr != nil {

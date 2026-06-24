@@ -190,9 +190,6 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 
 	h.importRemoteHookSessions()
 
-	// Merge pending instances from task runs.
-	h.mergePendingInstances()
-
 	// Load tasks for sidebar display
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err != nil {
@@ -257,7 +254,6 @@ func (m *home) Init() tea.Cmd {
 		},
 		tickUpdateMetadataCmd,
 		tickUpdatePRInfoCmd,
-		tickPendingInstancesCmd,
 		tickRefreshExternalCmd,
 	)
 }
@@ -338,9 +334,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Apply the fetched PR info to the in-memory instance immediately so the
 		// sidebar badge updates without waiting on the daemon round-trip. The
 		// gh-pr-view fetch stays TUI-side (#921, per-selection, debounced); only
-		// the persisted WRITE moves to the daemon (#960 PR 2) so the daemon — the
-		// single writer — owns it and the TUI no longer originates a full-list
-		// save the daemon could clobber (#959).
+		// the persisted WRITE goes to the daemon (#960) — the single writer owns
+		// it, so the TUI never originates an instances.json write (#959).
 		target.SetPRInfo(msg.info)
 		var prData session.PRInfoData
 		if msg.info != nil {
@@ -353,24 +348,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		saveStart := time.Now()
 		if err := setPRInfoThroughDaemon(target.Title, m.repoID, prData); err != nil {
-			if daemon.IsRPCMethodNotFoundErr(err) {
-				// Older daemon without the SetPRInfo RPC: keep the legacy
-				// full-list save so the write isn't lost.
-				if saveErr := m.storage.SaveInstances(m.sidebar.GetInstances()); saveErr != nil {
-					log.WarningLog.Printf("failed to save instances after PR update: %v", saveErr)
-				}
-			} else {
-				// In-memory update already applied for the UI; surface the
-				// persist failure but don't drop the badge.
-				log.WarningLog.Printf("failed to persist PR info for %q via daemon: %v", target.Title, err)
-			}
+			// In-memory update already applied for the UI; surface the persist
+			// failure but don't drop the badge. callDaemon already waited out the
+			// daemon warm-up window (#829), so a residual error is a real failure,
+			// not version skew — there is no TUI write path to fall back to.
+			log.WarningLog.Printf("failed to persist PR info for %q via daemon: %v", target.Title, err)
 		}
-		detachTrace(saveStart, "prInfoUpdatedMsg-SaveInstances-returned")
+		detachTrace(saveStart, "prInfoUpdatedMsg-setPRInfoThroughDaemon-returned")
 		return m, nil
-	case tickPendingInstancesMessage:
-		detachTraceMark("tickPendingInstancesMessage-handler-entry")
-		m.mergePendingInstances()
-		return m, tickPendingInstancesCmd
 	case tickRefreshExternalMessage:
 		// The tick only PACES the loop; the actual Snapshot fetch runs off the
 		// event loop (it can block while a daemon warms up — #829) and comes back
@@ -515,9 +500,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if priorSelection != nil && priorSelection != msg.instance {
 				m.sidebar.SelectInstance(priorSelection)
 			}
-			if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-				log.ErrorLog.Printf("failed to save instances after failed start: %v", err)
-			}
+			// No instances.json write: the failed instance was a Loading
+			// placeholder, which is never persisted, and the daemon is the sole
+			// writer (#960 PR 4). Removing the in-memory row is the whole cleanup.
 
 			return m, tea.Batch(m.handleError(msg.err), m.selectionChanged())
 		}
@@ -570,16 +555,16 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	// Save any dirty task/hooks state. On failure the panes were reloaded to
-	// match disk; abort the quit and surface the error (mirroring the
-	// SaveInstances path below) so the user sees the dropped edit instead of
-	// losing it silently on the way out.
+	// match disk; abort the quit and surface the error so the user sees the
+	// dropped edit instead of losing it silently on the way out.
 	if err := m.saveContentPaneState(); err != nil {
 		return m, m.handleError(err)
 	}
 
-	if err := m.storage.SaveInstances(m.sidebar.GetInstances()); err != nil {
-		return m, m.handleError(err)
-	}
+	// No instances.json write on quit: the daemon is the sole writer (#960 PR 4)
+	// and every session/tab mutation already persisted through it as it
+	// happened. The TUI holds no authoritative instance state to flush.
+	//
 	// Do NOT tear down tab sessions on quit: as of #930 PR 2 each instance owns
 	// its agent and shell tab tmux sessions, and they must survive an af restart
 	// so the user reconnects to them on next launch (Sachin's persistence

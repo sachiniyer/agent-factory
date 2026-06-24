@@ -113,36 +113,6 @@ func makeAliveInstance(title, repoPath string) *Instance {
 	return i
 }
 
-func TestDaemonSavePreservesExternalInstances(t *testing.T) {
-	const repoPath = "/tmp/test-repo"
-	ms := newMockStorage()
-
-	// Seed disk with two instances: A (daemon-loaded) and B (added externally).
-	seedDisk(t, ms, repoPath, []InstanceData{
-		{Title: "instance-A", Path: repoPath},
-		{Title: "instance-B", Path: repoPath},
-	})
-
-	// The daemon only knows about instance-A (loaded at startup).
-	instanceA := makeInstance("instance-A", repoPath, true)
-
-	storage, err := NewStorage(ms, "") // daemon mode (empty repoID)
-	require.NoError(t, err)
-
-	// Save: daemon has only instance-A in memory.
-	err = storage.SaveInstances([]*Instance{instanceA})
-	require.NoError(t, err)
-
-	// Verify: both A and B should be on disk.
-	result := readDisk(t, ms, repoPath)
-	titles := make(map[string]bool)
-	for _, d := range result {
-		titles[d.Title] = true
-	}
-	assert.True(t, titles["instance-A"], "in-memory instance should be saved")
-	assert.True(t, titles["instance-B"], "externally-added instance should be preserved")
-}
-
 func TestDaemonSaveRemovesKilledInstances(t *testing.T) {
 	const repoPath = "/tmp/test-repo"
 	ms := newMockStorage()
@@ -171,43 +141,6 @@ func TestDaemonSaveRemovesKilledInstances(t *testing.T) {
 	}
 	assert.True(t, titles["instance-A"], "started instance should be saved")
 	assert.False(t, titles["instance-B"], "killed instance should not be preserved")
-}
-
-func TestDaemonSaveMergesCorrectly(t *testing.T) {
-	const repoPath = "/tmp/test-repo"
-	ms := newMockStorage()
-
-	// Disk has: A (daemon-known), B (external), C (daemon-known, will be killed).
-	seedDisk(t, ms, repoPath, []InstanceData{
-		{Title: "instance-A", Path: repoPath, Branch: "old-branch-a"},
-		{Title: "instance-B", Path: repoPath, Branch: "branch-b"},
-		{Title: "instance-C", Path: repoPath, Branch: "branch-c"},
-	})
-
-	// Daemon memory: A (started, updated), C (killed).
-	instanceA := makeInstance("instance-A", repoPath, true)
-	instanceA.Branch = "new-branch-a"                        // updated in memory
-	instanceC := makeInstance("instance-C", repoPath, false) // killed
-
-	storage, err := NewStorage(ms, "")
-	require.NoError(t, err)
-
-	err = storage.SaveInstances([]*Instance{instanceA, instanceC})
-	require.NoError(t, err)
-
-	result := readDisk(t, ms, repoPath)
-	titleMap := make(map[string]InstanceData)
-	for _, d := range result {
-		titleMap[d.Title] = d
-	}
-
-	// A should be present with updated data from memory.
-	assert.Contains(t, titleMap, "instance-A")
-	// B should be preserved (external).
-	assert.Contains(t, titleMap, "instance-B")
-	assert.Equal(t, "branch-b", titleMap["instance-B"].Branch)
-	// C should be gone (killed).
-	assert.NotContains(t, titleMap, "instance-C")
 }
 
 func TestDaemonSaveDoesNotTouchUnknownRepos(t *testing.T) {
@@ -262,126 +195,11 @@ func TestDaemonSaveEmptyDisk(t *testing.T) {
 	assert.Equal(t, "instance-A", result[0].Title)
 }
 
-// TestDaemonSaveCrossRepoTitleCollision verifies that when two repos have
-// instances with the same title, saving does not drop an externally-added
-// instance from one repo just because the daemon knows about a same-titled
-// instance in another repo. Regression test for #198.
-func TestDaemonSaveCrossRepoTitleCollision(t *testing.T) {
-	const repoPathA = "/tmp/repo-a"
-	const repoPathB = "/tmp/repo-b"
-	ms := newMockStorage()
-
-	// Repo A has instance "shared" known to the daemon.
-	// Repo B has instance "shared" added externally (NOT known to the daemon).
-	seedDisk(t, ms, repoPathA, []InstanceData{
-		{Title: "shared", Path: repoPathA, Branch: "branch-a"},
-	})
-	seedDisk(t, ms, repoPathB, []InstanceData{
-		{Title: "shared", Path: repoPathB, Branch: "branch-b"},
-	})
-
-	// Daemon knows about repo A's "shared" and also has some other instance
-	// in repo B so that repo B is a known repo (forcing SaveInstances to
-	// visit repo B).
-	instanceAShared := makeInstance("shared", repoPathA, true)
-	instanceAShared.Branch = "branch-a"
-	instanceBOther := makeAliveInstance("other-b", repoPathB)
-
-	storage, err := NewStorage(ms, "")
-	require.NoError(t, err)
-
-	err = storage.SaveInstances([]*Instance{instanceAShared, instanceBOther})
-	require.NoError(t, err)
-
-	// Repo A: "shared" should be present (in-memory copy).
-	resultA := readDisk(t, ms, repoPathA)
-	titlesA := make(map[string]bool)
-	for _, d := range resultA {
-		titlesA[d.Title] = true
-	}
-	assert.True(t, titlesA["shared"], "repo A's shared instance should be preserved")
-
-	// Repo B: BOTH "shared" (externally added) AND "other-b" (in-memory)
-	// should be present. Before the fix, "shared" would be dropped from
-	// repo B because the global allInMemoryTitles set contained "shared"
-	// (from repo A).
-	resultB := readDisk(t, ms, repoPathB)
-	titlesB := make(map[string]bool)
-	for _, d := range resultB {
-		titlesB[d.Title] = true
-	}
-	assert.True(t, titlesB["other-b"], "repo B's in-memory instance should be saved")
-	assert.True(t, titlesB["shared"], "repo B's externally-added instance with title colliding with a different repo's daemon instance must be preserved")
-}
-
-// TestRepoSaveAbortsOnReadError is the core regression test for #766. When the
-// existing instances.json cannot be read (a transient permission/I/O error, as
-// opposed to a missing file), saveRepoInstances must NOT treat disk as empty
-// and merge-then-overwrite — that silently and permanently drops sessions that
-// are present on disk. The save must surface the error and leave disk untouched.
-func TestRepoSaveAbortsOnReadError(t *testing.T) {
-	const repoPath = "/tmp/test-repo"
-	repoID := config.RepoIDFromRoot(repoPath)
-	ms := newMockStorage()
-
-	// Seed disk with a real, present-on-disk session.
-	seedDisk(t, ms, repoPath, []InstanceData{
-		{Title: "on-disk", Path: repoPath, Status: Running},
-	})
-	// Snapshot the exact bytes so we can prove they are untouched afterwards.
-	before := append(json.RawMessage(nil), ms.data[repoID]...)
-
-	// Reads now fail (e.g. EACCES / EIO on instances.json).
-	ms.readErr = errors.New("permission denied")
-
-	// The TUI has a different session in memory; a naive merge against an
-	// empty disk state would write only this one and erase "on-disk".
-	inMem := makeInstance("in-memory", repoPath, true)
-	storage, err := NewStorage(ms, repoID)
-	require.NoError(t, err)
-
-	err = storage.SaveInstances([]*Instance{inMem})
-	require.Error(t, err, "SaveInstances must surface the read error instead of overwriting disk")
-
-	// Disk bytes must be exactly what we seeded — no empty/partial overwrite.
-	assert.Equal(t, string(before), string(ms.data[repoID]),
-		"on-disk session data must be preserved when the existing file cannot be read (#766)")
-}
-
-// TestRepoSaveOverwritesCorruptedInstances verifies that when instances.json
-// becomes corrupted mid-session (unparseable JSON, NOT a read error), the TUI
-// save path recovers by warning and overwriting with in-memory state instead
-// of returning an error. A returned error would propagate up through
-// handleQuit, which aborts the quit (no tea.Quit) on save failure — trapping
-// the user in an infinite error loop with force-kill the only escape (#938).
-// This mirrors the daemon's SaveInstances corruption recovery exactly.
-func TestRepoSaveOverwritesCorruptedInstances(t *testing.T) {
-	const repoPath = "/tmp/test-repo"
-	repoID := config.RepoIDFromRoot(repoPath)
-	ms := newMockStorage()
-
-	// Disk holds garbage that fails json.Unmarshal — not a read error, but a
-	// successfully-read-yet-unparseable file (corruption mid-session).
-	ms.data[repoID] = json.RawMessage(`{not valid json`)
-
-	// Alive so the #819 dead-and-disk-missing drop doesn't remove it once the
-	// corrupted disk is treated as empty.
-	inMem := makeAliveInstance("in-memory", repoPath)
-	storage, err := NewStorage(ms, repoID)
-	require.NoError(t, err)
-
-	err = storage.SaveInstances([]*Instance{inMem})
-	require.NoError(t, err, "corrupted instances.json must not block the save (and thus quit) — it should be overwritten (#938)")
-
-	// In-memory state must now be persisted over the corruption.
-	result := readDisk(t, ms, repoPath)
-	require.Len(t, result, 1, "in-memory instance should be written over the corrupted file")
-	assert.Equal(t, "in-memory", result[0].Title)
-}
-
-// TestDaemonSaveOverwritesCorruptedInstances is the adjacent-call-site mirror
-// of the TUI test above: the daemon path already recovered from corruption,
-// and this pins that behavior so the two save paths stay in lockstep (#938).
+// TestDaemonSaveOverwritesCorruptedInstances pins that a corrupted
+// instances.json never blocks the daemon's save. As the sole writer the daemon
+// overwrites the file with its authoritative in-memory state without reading it
+// first (#960 PR 4), so unparseable bytes on disk are simply replaced — there is
+// no merge that could trip over them and abort the save (#938).
 func TestDaemonSaveOverwritesCorruptedInstances(t *testing.T) {
 	const repoPath = "/tmp/test-repo"
 	repoID := config.RepoIDFromRoot(repoPath)
@@ -412,91 +230,11 @@ func TestDaemonSaveNoInstances(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestRepoSavePreservesDiskOnlyInstances(t *testing.T) {
-	const repoPath = "/tmp/test-repo"
-	repoID := config.RepoIDFromRoot(repoPath)
-	ms := newMockStorage()
-
-	seedDisk(t, ms, repoPath, []InstanceData{
-		{Title: "loaded-in-tui", Path: repoPath, Status: Running, Branch: "old"},
-		{Title: "created-by-cli", Path: repoPath, Status: Running},
-	})
-
-	tuiInstance := makeInstance("loaded-in-tui", repoPath, true)
-	tuiInstance.Branch = "new"
-	storage, err := NewStorage(ms, repoID)
-	require.NoError(t, err)
-
-	err = storage.SaveInstances([]*Instance{tuiInstance})
-	require.NoError(t, err)
-
-	result := readDisk(t, ms, repoPath)
-	byTitle := make(map[string]InstanceData)
-	for _, d := range result {
-		byTitle[d.Title] = d
-	}
-	assert.Equal(t, "new", byTitle["loaded-in-tui"].Branch, "in-memory TUI instance should update its disk record")
-	assert.Contains(t, byTitle, "created-by-cli", "disk-only CLI/task instance must not be overwritten by TUI saves")
-}
-
-func TestRepoSaveDoesNotResurrectDeadDiskMissingInstance(t *testing.T) {
-	const repoPath = "/tmp/test-repo"
-	repoID := config.RepoIDFromRoot(repoPath)
-	ms := newMockStorage()
-
-	// This looks started in memory but has no tmux session, which is the
-	// shape left behind if another process already killed and deleted it.
-	stale := makeInstance("stale", repoPath, true)
-	storage, err := NewStorage(ms, repoID)
-	require.NoError(t, err)
-
-	err = storage.SaveInstances([]*Instance{stale})
-	require.NoError(t, err)
-
-	result := readDisk(t, ms, repoPath)
-	assert.Empty(t, result, "stale TUI memory must not recreate a deleted instance record")
-}
-
-// TestDaemonSaveDoesNotResurrectDeadDiskMissingInstance is the daemon-mode
-// counterpart of the TUI test above (#819). If tmux is killed externally and
-// the disk record is deleted by another process before the daemon's next
-// refresh tick, a shutdown-triggered save runs with stale memory — it must
-// not write the dead session back to disk, where it would block title reuse
-// and fail to restore.
-func TestDaemonSaveDoesNotResurrectDeadDiskMissingInstance(t *testing.T) {
-	const repoPath = "/tmp/test-repo"
-	ms := newMockStorage()
-
-	// The repo has another live session on disk, so the daemon's save
-	// definitely visits and rewrites this repo's file.
-	seedDisk(t, ms, repoPath, []InstanceData{
-		{Title: "other-session", Path: repoPath, Status: Running},
-	})
-
-	// Looks started in daemon memory, but its tmux session is dead and its
-	// disk record was deleted by another process.
-	stale := makeInstance("stale", repoPath, true)
-	other := makeInstance("other-session", repoPath, true)
-
-	storage, err := NewStorage(ms, "") // daemon mode
-	require.NoError(t, err)
-
-	err = storage.SaveInstances([]*Instance{other, stale})
-	require.NoError(t, err)
-
-	result := readDisk(t, ms, repoPath)
-	titles := make(map[string]bool)
-	for _, d := range result {
-		titles[d.Title] = true
-	}
-	assert.False(t, titles["stale"], "stale daemon memory must not recreate a deleted instance record (#819)")
-	assert.True(t, titles["other-session"], "the surviving session must still be saved")
-}
-
-// TestDaemonSavePreservesAliveDiskMissingInstance is the #819 counter-case:
-// when the disk record is missing but the tmux session is still ALIVE (e.g.
-// instances.json was wiped externally, #736 territory), the daemon must
-// rewrite the record, not drop the live session.
+// TestDaemonSavePreservesAliveDiskMissingInstance pins that a started session in
+// the daemon's authoritative memory is persisted even when its disk record is
+// missing (e.g. instances.json was wiped externally, #736 territory). The
+// straight per-repo marshal (#960 PR 4) writes the manager's in-memory state, so
+// the live session is re-persisted rather than lost.
 func TestDaemonSavePreservesAliveDiskMissingInstance(t *testing.T) {
 	const repoPath = "/tmp/test-repo"
 	ms := newMockStorage()
@@ -504,26 +242,6 @@ func TestDaemonSavePreservesAliveDiskMissingInstance(t *testing.T) {
 	alive := makeAliveInstance("alive", repoPath)
 
 	storage, err := NewStorage(ms, "") // daemon mode
-	require.NoError(t, err)
-
-	err = storage.SaveInstances([]*Instance{alive})
-	require.NoError(t, err)
-
-	result := readDisk(t, ms, repoPath)
-	require.Len(t, result, 1, "live session with a missing disk record must be re-persisted")
-	assert.Equal(t, "alive", result[0].Title)
-}
-
-// TestRepoSavePreservesAliveDiskMissingInstance mirrors the counter-case for
-// the TUI path, guarding the shared merge helper from both call sites.
-func TestRepoSavePreservesAliveDiskMissingInstance(t *testing.T) {
-	const repoPath = "/tmp/test-repo"
-	repoID := config.RepoIDFromRoot(repoPath)
-	ms := newMockStorage()
-
-	alive := makeAliveInstance("alive", repoPath)
-
-	storage, err := NewStorage(ms, repoID)
 	require.NoError(t, err)
 
 	err = storage.SaveInstances([]*Instance{alive})
@@ -581,35 +299,6 @@ func TestRepoSaveDropsDeletingFromMemory(t *testing.T) {
 
 	result := readDisk(t, ms, repoPath)
 	assert.Empty(t, result, "Deleting instance must never be persisted (#844)")
-}
-
-// TestRepoSavePreservesDiskRecordWhileDeleting covers the in-flight window of
-// an async kill: the daemon has not yet deleted the disk record, and a TUI
-// save runs. The record must survive untouched (so a TUI crash mid-deletion
-// loses nothing) and must keep its pre-kill status — Deleting itself is never
-// written to disk.
-func TestRepoSavePreservesDiskRecordWhileDeleting(t *testing.T) {
-	const repoPath = "/tmp/test-repo"
-	repoID := config.RepoIDFromRoot(repoPath)
-	ms := newMockStorage()
-
-	seedDisk(t, ms, repoPath, []InstanceData{
-		{Title: "mid-teardown", Path: repoPath, Status: Running},
-	})
-
-	deleting := makeAliveInstance("mid-teardown", repoPath)
-	deleting.Status = Deleting
-
-	storage, err := NewStorage(ms, repoID)
-	require.NoError(t, err)
-
-	require.NoError(t, storage.SaveInstances([]*Instance{deleting}))
-
-	result := readDisk(t, ms, repoPath)
-	require.Len(t, result, 1, "the pre-kill disk record must survive the save")
-	assert.Equal(t, "mid-teardown", result[0].Title)
-	assert.Equal(t, Running, result[0].Status,
-		"the Deleting marker is in-memory only and must not reach disk")
 }
 
 // TestRepoSaveReapsLegacyLoadingGhost verifies that an older binary's
@@ -880,12 +569,11 @@ func TestLoadInstancesDaemonSurfacesUnreadableDir(t *testing.T) {
 
 // --- Issue #808: instances.json held byte-identical duplicate records -----
 //
-// One logical session can be written twice when the sidebar briefly holds two
-// Instance objects with the same title (a disk-built copy swapped in by
-// refreshExternalInstances plus the started instance re-added by the
-// instanceStartedMsg handler). The storage layer dedupes by title at every
-// save/load chokepoint so neither mode can persist a duplicate, and an
-// existing on-disk duplicate collapses on the next clean save.
+// One logical session can be written twice when two Instance objects with the
+// same title transiently coexist (e.g. a snapshot-built copy plus the started
+// instance). The storage layer dedupes by title at every save/load chokepoint so
+// neither path can persist a duplicate, and an existing on-disk duplicate
+// collapses on the next load.
 
 func TestDedupeInstanceDataKeepsFreshest(t *testing.T) {
 	base := time.Date(2026, 6, 10, 11, 38, 47, 75861804, time.UTC)
@@ -906,39 +594,15 @@ func TestDedupeInstanceDataKeepsFreshest(t *testing.T) {
 	assert.Equal(t, "/repo/stale", out[0].Path)
 }
 
-// TestTUISaveCollapsesOnDiskDuplicate is the one-time collapse: a file
-// already containing a byte-identical duplicate is rewritten clean by the
-// next save, even with nothing in memory.
-func TestTUISaveCollapsesOnDiskDuplicate(t *testing.T) {
+// TestDaemonSaveCollapsesDuplicateInMemoryInstances covers the #808 write path:
+// two in-memory Instance objects for one logical session must persist as exactly
+// one record. The daemon dedupes by title at the save chokepoint.
+func TestDaemonSaveCollapsesDuplicateInMemoryInstances(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	const repoPath = "/tmp/test-repo-808"
 	ms := newMockStorage()
 
-	created := time.Date(2026, 6, 10, 11, 38, 47, 75861804, time.UTC)
-	dup := InstanceData{Title: "scripts", Path: repoPath, CreatedAt: created, UpdatedAt: created}
-	seedDisk(t, ms, repoPath, []InstanceData{dup, dup})
-
-	storage, err := NewStorage(ms, config.RepoIDFromRoot(repoPath))
-	require.NoError(t, err)
-	require.NoError(t, storage.SaveInstances(nil))
-
-	result := readDisk(t, ms, repoPath)
-	require.Len(t, result, 1, "byte-identical duplicate must collapse on save")
-	assert.Equal(t, "scripts", result[0].Title)
-}
-
-// TestTUISaveCollapsesDuplicateInMemoryInstances covers the #808 write path:
-// the sidebar holds two live Instance objects for one session; TUI-mode save
-// must persist exactly one record.
-func TestTUISaveCollapsesDuplicateInMemoryInstances(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	const repoPath = "/tmp/test-repo-808"
-	ms := newMockStorage()
-
-	// The daemon persisted the session before the TUI's start RPC returned.
-	seedDisk(t, ms, repoPath, []InstanceData{{Title: "scripts", Path: repoPath}})
-
-	storage, err := NewStorage(ms, config.RepoIDFromRoot(repoPath))
+	storage, err := NewStorage(ms, "") // daemon mode
 	require.NoError(t, err)
 
 	diskCopy := makeInstance("scripts", repoPath, true)
@@ -950,36 +614,8 @@ func TestTUISaveCollapsesDuplicateInMemoryInstances(t *testing.T) {
 	assert.Equal(t, "scripts", result[0].Title)
 }
 
-// TestDaemonSaveCollapsesOnDiskDuplicate covers daemon-mode save: an
-// externally-added session that exists twice on disk (and is unknown to the
-// daemon) must be preserved exactly once.
-func TestDaemonSaveCollapsesOnDiskDuplicate(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	const repoPath = "/tmp/test-repo-808"
-	ms := newMockStorage()
-
-	created := time.Date(2026, 6, 10, 11, 38, 47, 75861804, time.UTC)
-	dup := InstanceData{Title: "scripts", Path: repoPath, CreatedAt: created, UpdatedAt: created}
-	seedDisk(t, ms, repoPath, []InstanceData{
-		{Title: "instance-A", Path: repoPath},
-		dup,
-		dup,
-	})
-
-	storage, err := NewStorage(ms, "") // daemon mode
-	require.NoError(t, err)
-	require.NoError(t, storage.SaveInstances([]*Instance{makeInstance("instance-A", repoPath, true)}))
-
-	result := readDisk(t, ms, repoPath)
-	counts := make(map[string]int)
-	for _, d := range result {
-		counts[d.Title]++
-	}
-	assert.Equal(t, map[string]int{"instance-A": 1, "scripts": 1}, counts)
-}
-
-// TestLoadInstanceDataCollapsesDuplicates: the data feed used by
-// refreshExternalInstances must never present the same title twice.
+// TestLoadInstanceDataCollapsesDuplicates: the read feed used to assert on-disk
+// state must never present the same title twice (dedup on load, #808).
 func TestLoadInstanceDataCollapsesDuplicates(t *testing.T) {
 	const repoPath = "/tmp/test-repo-808"
 	ms := newMockStorage()
