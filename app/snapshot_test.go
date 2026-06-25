@@ -94,6 +94,45 @@ func TestReconcileSnapshot_PreservesSelectionAndActiveTab(t *testing.T) {
 	require.NotNil(t, findSidebarInstance(h, "d"))
 }
 
+// TestReconcileSnapshot_SelectionDriftAfterSwapAndRemoval: when the selected
+// instance is swapped (kill+recreate with same title) AND another preceding
+// instance is removed in the same reconcile cycle, the selection must stay on
+// the recreated instance, not drift to the wrong row (#969). The pre-fix re-pin
+// used pointer equality, which missed the rebuilt instance after the swap.
+func TestReconcileSnapshot_SelectionDriftAfterSwapAndRemoval(t *testing.T) {
+	h := newTestHome(t)
+
+	var rebuilt *session.Instance
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		inst := newSnapshotTestInstance(t, d.Title)
+		rebuilt = inst
+		return inst, nil
+	}))
+
+	a := newSnapshotTestInstance(t, "a")
+	b := newSnapshotTestInstance(t, "b")
+	c := newSnapshotTestInstance(t, "c")
+	h.sidebar.AddInstance(a)
+	h.sidebar.AddInstance(b)
+	h.sidebar.AddInstance(c)
+	h.sidebar.SelectInstance(b)
+	require.Same(t, b, h.sidebar.GetSelectedInstance(), "initial selection must be on b")
+
+	// Snapshot: b was recreated (same title, different CreatedAt), a is gone, c unchanged
+	bData := b.ToInstanceData()
+	bData.CreatedAt = time.Now().Add(time.Hour)
+	cData := c.ToInstanceData()
+
+	changed := h.reconcileSnapshot([]session.InstanceData{bData, cData})
+	assert.True(t, changed)
+
+	// Selection must follow the rebuilt "b" instance, not drift to c.
+	selected := h.sidebar.GetSelectedInstance()
+	require.NotNil(t, selected, "selection must not be nil")
+	assert.Same(t, rebuilt, selected,
+		"selection must stay on the recreated instance (b'), not drift to c")
+}
+
 // TestReconcileSnapshot_NoChangeWhenUnchanged: an identical snapshot reports no
 // change (so the caller skips the repaint) and updates rows IN PLACE rather than
 // rebuilding them.

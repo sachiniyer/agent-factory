@@ -407,14 +407,29 @@ func (s *Sidebar) ContainsInstance(target *session.Instance) bool {
 }
 
 // ReplaceInstance swaps an existing sidebar instance for replacement while
-// preserving the selected row when the replaced instance was selected.
+// preserving the selected row when the replaced instance was selected, and keeps
+// the repos map (which drives the multi-repo indicator) correct: the outgoing
+// instance's repo is decremented and the replacement's repo registered. A
+// kill+recreate can swap in an instance from a DIFFERENT repo (#971), so doing the
+// bookkeeping here — at the primitive — means every caller (ReplaceInstanceByTitle,
+// swapInstanceFromSnapshot, the instanceStartedMsg start path) stays correct
+// without remembering a separate RegisterRepoForInstance call. RepoName() errors
+// are skipped silently rather than logged: the outgoing row may be an unstarted
+// Loading placeholder (never registered, nothing to decrement) and either side may
+// be a remote instance with no local repo — both are normal, not failures.
 func (s *Sidebar) ReplaceInstance(target, replacement *session.Instance) bool {
 	for i, inst := range s.instances {
 		if inst != target {
 			continue
 		}
 		wasSelected := s.GetSelectedInstance() == inst
+		if repoName, err := inst.RepoName(); err == nil {
+			s.rmRepo(repoName)
+		}
 		s.instances[i] = replacement
+		if repoName, err := replacement.RepoName(); err == nil {
+			s.addRepo(repoName)
+		}
 		s.rebuildVisibleItems()
 		if wasSelected {
 			s.SetSelectedInstance(i)
