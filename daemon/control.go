@@ -1277,7 +1277,10 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 }
 
 func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, remote bool, diskData []session.InstanceData) error {
-	if title == "" {
+	// Whitespace-only titles (e.g. "   ") are non-empty and so slip past a bare
+	// == "" check, creating sessions with effectively blank names (#973). Trim
+	// before the emptiness gate; the TUI naming flow applies the same check.
+	if strings.TrimSpace(title) == "" {
 		return fmt.Errorf("session title is required")
 	}
 	// Titles are sanitized into git branch names (git.SanitizeBranchName

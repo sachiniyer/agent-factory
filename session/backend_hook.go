@@ -151,7 +151,7 @@ func hookNameForInstance(i *Instance) string {
 func (b *HookBackend) Type() string { return "remote" }
 
 func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
-	if i.Title == "" {
+	if strings.TrimSpace(i.Title) == "" {
 		return fmt.Errorf("instance title cannot be empty")
 	}
 

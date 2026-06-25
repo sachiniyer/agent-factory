@@ -224,6 +224,39 @@ func TestHandleStateNewRejectsDuplicateTitle(t *testing.T) {
 	assert.Contains(t, h.errBox.String(), "fix-bug")
 }
 
+// TestHandleStateNewWhitespaceViaRealInput is the regression guard for #973: a
+// title built entirely from spaces is non-empty (len > 0 and != ""), so the old
+// len()==0 check let it through to session creation, producing an invisible name
+// in the sidebar. Typing spaces and then Enter must leave the naming overlay open
+// and the namingInstance pointer intact (i.e. not submitted).
+func TestHandleStateNewWhitespaceViaRealInput(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	h.errBox.SetSize(120, 1)
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+
+	// Simulate the user typing three spaces in the naming flow: each KeySpace
+	// appends " " to instance.Title (the KeySpace branch in handle_input.go).
+	for i := 0; i < 3; i++ {
+		_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeySpace})
+	}
+	require.Equal(t, "   ", h.namingInstance.Title, "precondition: title is whitespace-only")
+
+	// Submit with Enter — must be rejected, keeping the flow open.
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateNew, h.state, "naming flow must stay open for whitespace-only title")
+	require.NotNil(t, h.namingInstance, "naming instance must not be submitted")
+	assert.Contains(t, h.errBox.String(), "title cannot be empty")
+}
+
 // TestHandleStateNewRejectsCaseVariantTitle covers #936: the naming pre-check
 // must reject a case variant of an existing title (e.g. "myapp" when "MyApp"
 // exists), mirroring the daemon's case-insensitive collision rule. Before the
