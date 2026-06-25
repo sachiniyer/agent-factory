@@ -54,6 +54,143 @@ func stubAutostartUnitCommand(t *testing.T, runErr error) *[][]string {
 	return &calls
 }
 
+// stubAutostartStopDaemon replaces the ad-hoc daemon stop InstallAutostart runs
+// during the handover with one that returns the given result, restoring the
+// production value on cleanup. Lets the install path be exercised without
+// signaling a real daemon.
+func stubAutostartStopDaemon(t *testing.T, stopped bool, err error) {
+	t.Helper()
+	prev := autostartStopDaemon
+	t.Cleanup(func() { autostartStopDaemon = prev })
+	autostartStopDaemon = func() (bool, error) { return stopped, err }
+}
+
+// stubAutostartUnitCommandFunc replaces the external command runner with fn,
+// recording each invocation, restoring the production value on cleanup. Use it
+// when a test needs a step (e.g. enable/load) to fail while the others succeed.
+func stubAutostartUnitCommandFunc(t *testing.T, fn func(name string, args ...string) ([]byte, error)) *[][]string {
+	t.Helper()
+	prev := autostartUnitCommand
+	t.Cleanup(func() { autostartUnitCommand = prev })
+	var calls [][]string
+	autostartUnitCommand = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		return fn(name, args...)
+	}
+	return &calls
+}
+
+// calledWith reports whether the recorded invocations include an exact match
+// for the given command and arguments.
+func calledWith(calls [][]string, want ...string) bool {
+	for _, c := range calls {
+		if strings.Join(c, " ") == strings.Join(want, " ") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestInstallAutostartEnablesUnitWhenStopDaemonFailsLinux is the core #974
+// guard: a failed ad-hoc→supervised daemon handover must NOT abort the install
+// before the unit is enabled. After InstallAutostart returns successfully the
+// unit file must be present AND the enable command must have run, so
+// AutostartInstalled does not later report a never-enabled unit as installed.
+func TestInstallAutostartEnablesUnitWhenStopDaemonFailsLinux(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	calls := stubAutostartUnitCommand(t, nil)
+	stubAutostartStopDaemon(t, false, errors.New("could not stop ad-hoc daemon"))
+
+	unitPath, err := InstallAutostart()
+	if err != nil {
+		t.Fatalf("InstallAutostart returned error despite a recoverable stop failure: %v", err)
+	}
+	if want := filepath.Join(dir, autostartUnitName); unitPath != want {
+		t.Fatalf("unit path = %q, want %q", unitPath, want)
+	}
+	if _, statErr := os.Stat(unitPath); statErr != nil {
+		t.Fatalf("unit file missing after install: %v", statErr)
+	}
+	if !AutostartInstalled() {
+		t.Fatalf("AutostartInstalled() = false after a successful install")
+	}
+	if !calledWith(*calls, "systemctl", "--user", "enable", "--now", autostartUnitName) {
+		t.Fatalf("enable did not run after the stop failure; calls = %v", *calls)
+	}
+}
+
+// TestInstallAutostartLoadsAgentWhenStopDaemonFailsDarwin is the macOS variant:
+// a stop failure must not block the launchctl load that makes autostart real.
+func TestInstallAutostartLoadsAgentWhenStopDaemonFailsDarwin(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	calls := stubAutostartUnitCommand(t, nil)
+	stubAutostartStopDaemon(t, false, errors.New("could not stop ad-hoc daemon"))
+
+	plistPath, err := InstallAutostart()
+	if err != nil {
+		t.Fatalf("InstallAutostart returned error despite a recoverable stop failure: %v", err)
+	}
+	if want := filepath.Join(dir, autostartLaunchdLabel+".plist"); plistPath != want {
+		t.Fatalf("plist path = %q, want %q", plistPath, want)
+	}
+	if _, statErr := os.Stat(plistPath); statErr != nil {
+		t.Fatalf("plist missing after install: %v", statErr)
+	}
+	if !AutostartInstalled() {
+		t.Fatalf("AutostartInstalled() = false after a successful install")
+	}
+	if !calledWith(*calls, "launchctl", "load", plistPath) {
+		t.Fatalf("load did not run after the stop failure; calls = %v", *calls)
+	}
+}
+
+// TestInstallAutostartRemovesUnitWhenEnableFailsLinux pins the #974 cleanup:
+// a hard enable failure must not leave a present-but-not-enabled unit file that
+// AutostartInstalled would misreport as installed.
+func TestInstallAutostartRemovesUnitWhenEnableFailsLinux(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	stubAutostartStopDaemon(t, true, nil)
+	stubAutostartUnitCommandFunc(t, func(name string, args ...string) ([]byte, error) {
+		if len(args) > 1 && args[1] == "enable" {
+			return []byte("enable failed"), errors.New("exit status 1")
+		}
+		return nil, nil
+	})
+
+	if _, err := InstallAutostart(); err == nil {
+		t.Fatalf("InstallAutostart succeeded despite a failing enable")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, autostartUnitName)); !os.IsNotExist(statErr) {
+		t.Fatalf("unit file should be cleaned up after enable failure; stat err = %v", statErr)
+	}
+	if AutostartInstalled() {
+		t.Fatalf("AutostartInstalled() = true after a failed install left no enabled unit")
+	}
+}
+
+// TestInstallAutostartRemovesPlistWhenLoadFailsDarwin is the macOS cleanup
+// variant: a hard launchctl load failure must not leave an orphaned plist.
+func TestInstallAutostartRemovesPlistWhenLoadFailsDarwin(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	stubAutostartStopDaemon(t, true, nil)
+	stubAutostartUnitCommandFunc(t, func(name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "load" {
+			return []byte("load failed"), errors.New("exit status 1")
+		}
+		return nil, nil
+	})
+
+	if _, err := InstallAutostart(); err == nil {
+		t.Fatalf("InstallAutostart succeeded despite a failing load")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, autostartLaunchdLabel+".plist")); !os.IsNotExist(statErr) {
+		t.Fatalf("plist should be cleaned up after load failure; stat err = %v", statErr)
+	}
+	if AutostartInstalled() {
+		t.Fatalf("AutostartInstalled() = true after a failed install left no loaded agent")
+	}
+}
+
 func TestAutostartInstalledLinux(t *testing.T) {
 	dir := withAutostartTestEnv(t, "linux")
 
