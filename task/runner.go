@@ -96,6 +96,14 @@ func WaitForReady(instance *session.Instance) error {
 		case <-ticker.C:
 			content, err := instance.Preview()
 			if err != nil {
+				// ErrSessionGone is a definitive, non-retryable failure: the
+				// tmux session no longer exists, so it can never become ready.
+				// Fail fast with a clear cause instead of polling the full
+				// timeout and returning a misleading "timed out" error (#976).
+				// Other errors are transient — keep polling.
+				if errors.Is(err, tmux.ErrSessionGone) {
+					return fmt.Errorf("session died while waiting for agent to start: %w", err)
+				}
 				continue
 			}
 			if isReadyContent(content, agent) {
