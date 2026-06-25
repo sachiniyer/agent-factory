@@ -2,10 +2,12 @@ package task
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // TestMain initializes the logger so that functions under test that write
@@ -288,4 +291,135 @@ func TestFormatWaitForReadyTimeoutError(t *testing.T) {
 			t.Errorf("snippet not capped: len=%d, want <=400", len(snippet))
 		}
 	})
+}
+
+// fakePreviewBackend embeds the package FakeBackend and overrides only
+// Preview so WaitForReady tests can drive the captured pane content (and the
+// error returned for it) without any real tmux session.
+type fakePreviewBackend struct {
+	*session.FakeBackend
+	previewFn func() (string, error)
+}
+
+func (b *fakePreviewBackend) Preview(*session.Instance) (string, error) {
+	return b.previewFn()
+}
+
+// newPreviewInstance returns an instance whose Preview() is driven by
+// previewFn, backed by a FakeBackend so no tmux/git resources are touched.
+func newPreviewInstance(t *testing.T, previewFn func() (string, error)) *session.Instance {
+	t.Helper()
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		return &fakePreviewBackend{FakeBackend: session.NewFakeBackend(), previewFn: previewFn}, nil
+	})
+	defer restore()
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "wait-ready", Path: t.TempDir(), Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	return inst
+}
+
+// setWaitForReadyTimingForTest shrinks the poll/timeout knobs so the polling
+// loop runs in milliseconds, and returns a restore func.
+func setWaitForReadyTimingForTest(timeout, poll time.Duration) func() {
+	prevTimeout, prevPoll := waitForReadyTimeout, waitForReadyPollInterval
+	waitForReadyTimeout, waitForReadyPollInterval = timeout, poll
+	return func() {
+		waitForReadyTimeout, waitForReadyPollInterval = prevTimeout, prevPoll
+	}
+}
+
+// TestWaitForReadyFailsFastWhenSessionGone is the core #976 fix: when
+// Preview() reports tmux.ErrSessionGone (a definitive, non-retryable death),
+// WaitForReady must return immediately with a clear "session died" error —
+// not poll the full timeout and return a misleading "timed out" message. The
+// 2s watchdog (well under the 10s timeout) fails the test if the loop is
+// still spinning, which is exactly the pre-fix behavior.
+func TestWaitForReadyFailsFastWhenSessionGone(t *testing.T) {
+	defer setWaitForReadyTimingForTest(10*time.Second, time.Millisecond)()
+
+	inst := newPreviewInstance(t, func() (string, error) {
+		return "", tmux.ErrSessionGone
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(inst) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error when the session is gone, got nil")
+		}
+		if !errors.Is(err, tmux.ErrSessionGone) {
+			t.Fatalf("error must wrap tmux.ErrSessionGone, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "session died while waiting for agent to start") {
+			t.Fatalf("error must explain the session died, got %q", err.Error())
+		}
+		if strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("must not be a misleading timeout error, got %q", err.Error())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady did not fail fast on ErrSessionGone; it is still polling")
+	}
+}
+
+// TestWaitForReadyKeepsPollingThroughTransientErrors guards the other half of
+// the fix: a transient (non-ErrSessionGone) Preview error must NOT abort the
+// loop — it keeps polling until the agent becomes ready.
+func TestWaitForReadyKeepsPollingThroughTransientErrors(t *testing.T) {
+	defer setWaitForReadyTimingForTest(10*time.Second, time.Millisecond)()
+
+	var calls int32
+	inst := newPreviewInstance(t, func() (string, error) {
+		if atomic.AddInt32(&calls, 1) < 5 {
+			return "", errors.New("transient capture failure")
+		}
+		return "ready now\n❯ ", nil
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(inst) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected nil once the agent is ready, got %v", err)
+		}
+		if got := atomic.LoadInt32(&calls); got < 5 {
+			t.Fatalf("expected polling to continue through transient errors (>=5 previews), got %d", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady never became ready despite transient-then-ready previews")
+	}
+}
+
+// TestWaitForReadyTimesOutOnPersistentTransientErrors confirms a persistent
+// transient error still falls through to the normal timeout path — it is not
+// misclassified as session death.
+func TestWaitForReadyTimesOutOnPersistentTransientErrors(t *testing.T) {
+	defer setWaitForReadyTimingForTest(50*time.Millisecond, time.Millisecond)()
+
+	inst := newPreviewInstance(t, func() (string, error) {
+		return "", errors.New("transient capture failure")
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(inst) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a timeout error, got nil")
+		}
+		if errors.Is(err, tmux.ErrSessionGone) {
+			t.Fatalf("a transient error must not be reported as session-gone, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("expected a timeout error, got %q", err.Error())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady never timed out on persistent transient errors")
+	}
 }
