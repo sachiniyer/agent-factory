@@ -781,7 +781,19 @@ func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.W
 		for {
 			n, err := stdin.Read(buf)
 			if n > 0 {
-				if n == 1 && buf[0] == tmux.DetachKeyByte {
+				// stdin.Read can batch the detach key with preceding bytes in a
+				// single read (buffered terminal input), so check the last byte
+				// rather than requiring it to be the sole byte — otherwise
+				// Ctrl-W is forwarded to the PTY and the detach is silently
+				// missed (#975). Forward any preceding bytes first so they still
+				// reach the remote session, preserving the surrounding
+				// write-error handling.
+				if buf[n-1] == tmux.DetachKeyByte {
+					if n > 1 {
+						if _, writeErr := ptmx.Write(buf[:n-1]); writeErr != nil {
+							return
+						}
+					}
 					detach()
 					return
 				}
