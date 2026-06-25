@@ -256,17 +256,24 @@ func (p *TabPane) updateShellLocked(instance *session.Instance, activeTab int) e
 		return nil
 	}
 
-	// Skip content updates while scrolling (the shell slot fills its viewport
-	// eagerly in enterScrollMode, not here).
-	if p.isScrolling {
-		return nil
-	}
-
 	// The tab's session is owned by the Instance and created at start (or by the
 	// new-tab hotkey). If it is not alive, show a fallback rather than leaving the
 	// previous view's content on screen (#747, generalized to the persisted tab).
+	//
+	// This runs BEFORE the scroll-mode guard below so a shell session killed
+	// externally while the user is scrolling transitions to the fallback instead
+	// of leaving stale scrollback pinned on screen forever (#977). setFallbackState
+	// clears scroll state, so String() (which checks isScrolling first) renders the
+	// fallback message. This mirrors the agent slot, whose Dead check also precedes
+	// its scroll guard in updateAgentLocked.
 	if !instance.TabAlive(activeTab) {
 		p.setFallbackState("Terminal session not available.")
+		return nil
+	}
+
+	// Skip content updates while scrolling (the shell slot fills its viewport
+	// eagerly in enterScrollMode, not here).
+	if p.isScrolling {
 		return nil
 	}
 
