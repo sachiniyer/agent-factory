@@ -431,6 +431,17 @@ const (
 	// daemon is still running the old binary; the caller must surface the
 	// recovery hint in the accompanying error. See #553.
 	ShutdownFailed
+	// ShutdownError means the control socket was present and a Shutdown RPC
+	// was attempted, but it failed with an error that does NOT prove the
+	// daemon absent and is NOT method-not-found: EACCES (socket exists but
+	// the caller lacks permission to connect), ECONNRESET/EPIPE (the
+	// connection was established then reset), or a dial timeout (the socket
+	// is bound but the listener is unresponsive). All of these imply a daemon
+	// WAS listening, so reporting ShutdownNoDaemon — documented as "no daemon
+	// was running" — would mislabel the outcome. The daemon's final state is
+	// unknown and it may still be running; the accompanying error carries the
+	// detail. See #978.
+	ShutdownError
 )
 
 // sigtermFallbackGrace is the max time we wait for a SIGTERM'd daemon to exit
@@ -450,10 +461,14 @@ const sigtermFallbackPoll = 100 * time.Millisecond
 // Returns (ShutdownNoDaemon, nil) when no daemon is running (no socket or
 // ECONNREFUSED), (ShutdownViaRPC, nil) when the Shutdown RPC acknowledged,
 // (ShutdownViaSIGTERM, nil) when the fallback signaled a real `af --daemon`
-// process, and (ShutdownFailed, err) when the daemon is provably running but
+// process, (ShutdownFailed, err) when the daemon is provably running but
 // the fallback could not locate or signal it (ambiguous pgrep matches, no
 // PID file with pgrep unavailable, permission denied on signal) — the
-// returned error carries the recovery hint the caller must surface.
+// returned error carries the recovery hint the caller must surface — and
+// (ShutdownError, err) when the socket was present but the Shutdown RPC
+// failed with a transport error that is neither daemon-absent nor
+// method-not-found (EACCES, ECONNRESET/EPIPE, dial timeout): a daemon was
+// listening but its final state is unknown (#978).
 func RequestShutdown() (ShutdownResult, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
@@ -475,7 +490,12 @@ func RequestShutdown() (ShutdownResult, error) {
 			// (pre-#501 binary). Fall through to the PID-based fallback.
 			return sigtermFallback()
 		}
-		return ShutdownNoDaemon, rpcErr
+		// The socket was present (os.Stat above succeeded) and the error is
+		// neither daemon-absent (ECONNREFUSED/ENOENT) nor method-not-found:
+		// EACCES, ECONNRESET/EPIPE, or a dial timeout. Something was listening,
+		// so ShutdownNoDaemon would mislabel this — report the ambiguous
+		// contacted-but-errored outcome instead (#978).
+		return ShutdownError, rpcErr
 	}
 	if !resp.OK {
 		return ShutdownNoDaemon, fmt.Errorf("daemon Shutdown RPC returned OK=false")

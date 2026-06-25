@@ -562,6 +562,57 @@ func TestRequestShutdownSuccess(t *testing.T) {
 	}
 }
 
+// TestRequestShutdownContactedButErrored verifies that when the control
+// socket has a real listener but the Shutdown RPC fails with a transport
+// error that is neither daemon-absent (ECONNREFUSED/ENOENT) nor
+// method-not-found, RequestShutdown reports ShutdownError — not the
+// "no daemon was running" ShutdownNoDaemon — since something WAS listening
+// when the shutdown was attempted (#978). It is fully hermetic: the listener
+// binds the tempdir socket and never touches a real daemon.
+func TestRequestShutdownContactedButErrored(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	socketPath, err := DaemonSocketPath()
+	if err != nil {
+		t.Fatalf("DaemonSocketPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// A listener that accepts the dial and immediately closes the connection
+	// without speaking net/rpc. The dial succeeds (so this is NOT
+	// ECONNREFUSED/ENOENT — a daemon WAS listening) and the client's response
+	// decode fails with EOF (so this is NOT an rpc.ServerError method-not-found
+	// either) — exactly the contacted-but-errored case the catch-all must
+	// classify as ShutdownError instead of mislabeling as ShutdownNoDaemon.
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	result, err := RequestShutdown()
+	if err == nil {
+		t.Fatalf("RequestShutdown returned nil error for a contacted-but-errored RPC; want the transport error propagated")
+	}
+	if result == ShutdownNoDaemon {
+		t.Fatalf("RequestShutdown mislabeled a contacted-but-errored RPC as ShutdownNoDaemon (#978)")
+	}
+	if result != ShutdownError {
+		t.Fatalf("RequestShutdown returned %v for a contacted-but-errored RPC, want ShutdownError", result)
+	}
+}
+
 // stubGhostCleanup replaces both ghostCleanupWorktree and ghostKillTmuxByName
 // with recorders so tests can assert which teardown branches fired without
 // invoking real git / real tmux.
