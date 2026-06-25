@@ -310,12 +310,17 @@ func (w *TabbedWindow) String() string {
 		} else {
 			style = inactiveTabStyle
 		}
+		// A single tab is both first and last, so the bottom-left and
+		// bottom-right corners must be decided independently — a mutually
+		// exclusive if/else-if chain would set only BottomLeft and leave
+		// BottomRight at its wrong default (#972).
 		border, _, _, _, _ := style.GetBorder()
 		if isFirst && isActive {
 			border.BottomLeft = "│"
 		} else if isFirst {
 			border.BottomLeft = "├"
-		} else if isLast && isActive {
+		}
+		if isLast && isActive {
 			border.BottomRight = "│"
 		} else if isLast {
 			border.BottomRight = "┤"
