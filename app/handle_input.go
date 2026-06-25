@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -39,7 +40,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Type {
 	case tea.KeyEnter:
-		if len(instance.Title) == 0 {
+		// Reject whitespace-only titles too: len()/== "" pass a "   " title
+		// through to session creation, producing an invisible name in the
+		// sidebar (#973). TrimSpace mirrors the daemon's validateTitleAvailableLocked.
+		if strings.TrimSpace(instance.Title) == "" {
 			return m, m.handleError(fmt.Errorf("title cannot be empty"))
 		}
 		for _, other := range m.sidebar.GetInstances() {

@@ -290,6 +290,30 @@ func TestManagerCreateSessionRejectsCaseVariantTitle(t *testing.T) {
 	}
 }
 
+// TestValidateTitleAvailableLockedRejectsWhitespace covers the daemon side of
+// #973: a whitespace-only title is non-empty, so the bare title == "" gate let it
+// through, letting the daemon create a session with an effectively blank name.
+// TrimSpace closes the gap and mirrors the TUI naming flow's check.
+func TestValidateTitleAvailableLockedRejectsWhitespace(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	manager, err := newManagerShell(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("newManagerShell: %v", err)
+	}
+
+	for _, title := range []string{"", " ", "   ", "\t", "\n  \t"} {
+		manager.mu.Lock()
+		err := manager.validateTitleAvailableLocked("repo-id", "/tmp/repo", title, "claude", false, nil)
+		manager.mu.Unlock()
+		if err == nil {
+			t.Fatalf("expected whitespace-only title %q to be rejected", title)
+		}
+		if !strings.Contains(err.Error(), "session title is required") {
+			t.Fatalf("title %q: expected \"session title is required\", got: %v", title, err)
+		}
+	}
+}
+
 // TestManagerCreateSessionRejectsCaseVariantTitleFromDisk covers the disk-side
 // branch of the #605 fix: a case-variant title persisted to disk from a prior
 // daemon run must still be rejected when the manager loads fresh and a new

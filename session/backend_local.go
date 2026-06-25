@@ -60,7 +60,7 @@ type LocalBackend struct{}
 func (b *LocalBackend) Type() string { return "local" }
 
 func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
-	if i.Title == "" {
+	if strings.TrimSpace(i.Title) == "" {
 		return fmt.Errorf("instance title cannot be empty")
 	}
 
