@@ -480,8 +480,19 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.started != nil {
 			started = msg.started
 		}
+		// A successful Replace now maintains the repos map itself (#971: it
+		// decrements the outgoing row's repo and registers the replacement's), so
+		// the explicit RegisterRepoForInstance below must be skipped on that path or
+		// it would double-count. The other paths (in-place start of an already-present
+		// Loading row, or a fresh add) need the explicit registration: the placeholder
+		// was added before it was started, so its AddInstance finalize registered
+		// nothing (RepoName fails until started), and no presence-changing primitive
+		// runs here to register it now.
+		swapped := false
 		if started != msg.instance {
-			if !m.sidebar.ReplaceInstance(msg.instance, started) && !m.sidebar.ContainsInstance(started) {
+			if m.sidebar.ReplaceInstance(msg.instance, started) {
+				swapped = true
+			} else if !m.sidebar.ContainsInstance(started) {
 				// The Loading placeholder may have been swapped for a
 				// disk-built copy of this same session by a background sync
 				// while the start RPC was in flight; both Replace and
@@ -489,7 +500,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// unconditionally would leave two sidebar rows — and two
 				// persisted records — for one session (#808), so replace any
 				// same-title row instead.
-				if !m.sidebar.ReplaceInstanceByTitle(started.Title, started) {
+				if m.sidebar.ReplaceInstanceByTitle(started.Title, started) {
+					swapped = true
+				} else {
 					m.sidebar.AddInstance(started)
 				}
 			}
@@ -498,7 +511,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		started.SetStatus(session.Running)
-		if !started.IsRemote() {
+		if !swapped && !started.IsRemote() {
 			m.sidebar.RegisterRepoForInstance(started)
 		}
 		started.SetAutoYes(m.autoYes)

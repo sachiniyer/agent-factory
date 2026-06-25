@@ -6,6 +6,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -648,4 +649,76 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 	assert.Contains(t, after[1], dimFG, "selected deleting title must be dimmed")
 	assert.Contains(t, after[2], dimFG, "selected deleting branch line must be dimmed")
 	assert.Contains(t, after[4], dimFG, "selected deleting PR line must be dimmed")
+}
+
+// newRepoInstance builds a started sidebar instance whose RepoName() resolves to
+// repoName, so the sidebar's repo bookkeeping (which drives the multi-repo
+// indicator) can be exercised. GetRepoName() is filepath.Base(repoPath), so the
+// worktree's repoPath ends in repoName.
+func newRepoInstance(t *testing.T, title, repoName string) *session.Instance {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   title,
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	inst.SetStartedForTest(true)
+	gw, err := git.NewGitWorktreeFromStorage(
+		filepath.Join(t.TempDir(), repoName), // repoPath base = repoName
+		filepath.Join(t.TempDir(), "worktree"),
+		title,
+		"branch",
+		"deadbeef",
+		false,
+		true,
+	)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	return inst
+}
+
+// TestReplaceInstanceRepoTrackingStaleEntry: replacing an instance with one from a
+// DIFFERENT repo must drop the outgoing instance's repo from the bookkeeping —
+// otherwise a kill+recreate that moves a session to another repo leaves a stale
+// repo entry and shows a phantom multi-repo indicator (#971).
+func TestReplaceInstanceRepoTrackingStaleEntry(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false)
+
+	a := newRepoInstance(t, "a", "repo-A")
+	c := newRepoInstance(t, "c", "repo-C")
+	s.AddInstance(a)()
+	s.AddInstance(c)()
+	require.Equal(t, 2, s.NumRepos())
+
+	// Replace the repo-A instance with one from repo-B.
+	b := newRepoInstance(t, "b", "repo-B")
+	require.True(t, s.ReplaceInstance(a, b))
+
+	_, staleA := s.repos["repo-A"]
+	assert.False(t, staleA, "outgoing instance's repo (repo-A) must be dropped after a cross-repo replace")
+	assert.Equal(t, 2, s.NumRepos(), "repos must be {repo-B, repo-C} after the replace")
+}
+
+// TestReplaceInstanceRepoTrackingMissingNew: replacing an instance with one from a
+// DIFFERENT repo must register the incoming instance's repo — otherwise the new
+// repo is invisible to the multi-repo indicator until the next full reload (#971).
+func TestReplaceInstanceRepoTrackingMissingNew(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false)
+
+	a := newRepoInstance(t, "a", "repo-A")
+	s.AddInstance(a)()
+	require.Equal(t, 1, s.NumRepos())
+
+	// Replace the only instance with one from repo-B.
+	b := newRepoInstance(t, "b", "repo-B")
+	require.True(t, s.ReplaceInstance(a, b))
+
+	_, hasB := s.repos["repo-B"]
+	assert.True(t, hasB, "incoming instance's repo (repo-B) must be registered after a cross-repo replace")
+	_, staleA := s.repos["repo-A"]
+	assert.False(t, staleA, "outgoing repo-A must not linger")
+	assert.Equal(t, 1, s.NumRepos(), "repos must be exactly {repo-B} after the replace")
 }

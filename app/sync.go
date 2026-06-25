@@ -260,8 +260,9 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 //
 // Local-only view state is preserved: existing rows keep their pointer (so the
 // TabbedWindow's active tab and the content pane's scroll/overlay are untouched),
-// and the selected instance is re-pinned by pointer after the reconcile so a
-// removal of a preceding row can't drift the cursor. Transient TUI-owned rows
+// and the selected instance is re-pinned by title after the reconcile so neither a
+// removal of a preceding row nor a same-title swap of the selected row can drift the
+// cursor (#969). Transient TUI-owned rows
 // (Loading creation #808, Deleting kill #844) are left entirely alone: the
 // daemon may not yet know about an in-flight create, and a mid-teardown row must
 // keep its marker. Returns whether anything changed.
@@ -289,9 +290,18 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		existing[inst.Title] = inst
 	}
 
-	// Capture the selected instance so we can re-pin it after removals shift
-	// indices — selection must never drift because a snapshot arrived.
-	selected := m.sidebar.GetSelectedInstance()
+	// Capture the selected instance's STABLE identity (title) so we can re-pin it
+	// after removals shift indices — selection must never drift because a snapshot
+	// arrived. Capturing the pointer would go stale when the selected row is itself
+	// swapped (same title, different CreatedAt) in this same cycle: swapInstanceFromSnapshot
+	// rebuilds a brand-new *session.Instance, orphaning the captured pointer, so a
+	// pointer-equality re-pin would miss it and selection would drift (#969). The
+	// title survives the swap because the rebuilt instance keeps it — the same
+	// title-based re-resolution the async handlers already use (GetInstanceByTitle).
+	var selectedTitle string
+	if selected := m.sidebar.GetSelectedInstance(); selected != nil {
+		selectedTitle = selected.Title
+	}
 
 	changed := false
 
@@ -338,9 +348,14 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		changed = true
 	}
 
-	// Re-pin the selection to the same instance if it survived the reconcile.
-	if selected != nil && m.sidebar.ContainsInstance(selected) {
-		m.sidebar.SelectInstance(selected)
+	// Re-pin the selection to the same logical instance (by title) if it survived
+	// the reconcile. Re-resolving by title correctly re-pins across a swap because
+	// the rebuilt instance keeps the same title (#969). If the selected title is
+	// gone from the snapshot, leave the sidebar's own clamp behavior as-is.
+	if selectedTitle != "" {
+		if inst := m.sidebar.GetInstanceByTitle(selectedTitle); inst != nil {
+			m.sidebar.SelectInstance(inst)
+		}
 	}
 
 	return changed
