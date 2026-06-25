@@ -738,8 +738,17 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 				continue
 			}
 
-			// Check for detach key
-			if nr == 1 && buf[0] == DetachKeyByte {
+			// Check for detach key. stdin.Read can batch the detach key with
+			// preceding bytes in a single read (buffered terminal input), so
+			// check the last byte rather than requiring it to be the sole byte
+			// — otherwise the detach key is forwarded to tmux and the detach is
+			// silently missed (#975). Forward any preceding bytes first so they
+			// still reach the session, matching the surrounding (best-effort)
+			// write-error handling.
+			if nr > 0 && buf[nr-1] == DetachKeyByte {
+				if nr > 1 {
+					_, _ = t.ptmx.Write(buf[:nr-1])
+				}
 				// Closest point to "user pressed detach" we can observe —
 				// the elapsed in this trace is whatever Detach() itself
 				// took, which matches what blocks the app-side <-ch.
