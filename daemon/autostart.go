@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The daemon autostart unit is the single OS-level unit agent-factory
@@ -142,21 +143,37 @@ func launchdAutostartPlist(execPath, pathEnv, shellEnv, agentFactoryHome, logPat
 
 // InstallAutostart registers the daemon for autostart at login: a systemd
 // user service on Linux, a launchd agent on macOS. Any daemon started ad hoc
-// (by EnsureDaemon) is stopped first so the supervised unit's daemon is the
-// only one running. Returns the path of the installed unit file.
+// (by EnsureDaemon) is handed over to the supervised unit. Returns the path of
+// the installed unit file.
+//
+// The invariant this function guarantees (#974): on success the unit is
+// ENABLED/LOADED, never merely written. Enabling (and `--now` starting) the
+// unit is the thing that makes autostart real and supervises future runs, so
+// it must not be skipped. Two failure modes used to break that:
+//
+//   - The ad-hoc→supervised handover stop is best-effort. A StopDaemon failure
+//     no longer aborts before enabling: the unit's `--now` start takes over the
+//     control socket per the #796/#798 handover, and the secondary ad-hoc
+//     daemon is left at worst enabled-but-inactive until the next login — far
+//     better than a present-but-not-enabled unit. (Previously a stop failure
+//     returned early, leaving the file on disk but never enabled.)
+//   - On a hard failure of the reload/enable/load step the just-written unit
+//     file is removed, so AutostartInstalled — which reports on file existence —
+//     can never misreport a not-enabled unit as installed and mislead the
+//     upgrade respawn path into RestartAutostartUnit on a unit that was never
+//     enabled.
 func InstallAutostart() (string, error) {
 	execPath, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	switch runtime.GOOS {
+	switch autostartGOOS {
 	case "linux":
-		home, err := os.UserHomeDir()
+		dir, err := autostartSystemdUserDir()
 		if err != nil {
-			return "", fmt.Errorf("failed to get home directory: %w", err)
+			return "", fmt.Errorf("failed to resolve systemd user directory: %w", err)
 		}
-		dir := filepath.Join(home, ".config", "systemd", "user")
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return "", fmt.Errorf("failed to create systemd user directory: %w", err)
 		}
@@ -165,24 +182,26 @@ func InstallAutostart() (string, error) {
 		if err := config.AtomicWriteFile(unitPath, []byte(content), 0644); err != nil {
 			return "", fmt.Errorf("failed to write unit file: %w", err)
 		}
-		if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+		if out, err := autostartUnitCommand("systemctl", "--user", "daemon-reload"); err != nil {
+			removeAutostartUnitFile(unitPath)
 			return "", fmt.Errorf("failed to reload systemd user daemon: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
-		// Hand over from any ad-hoc daemon to the supervised one.
-		if _, err := StopDaemon(); err != nil {
-			return "", fmt.Errorf("failed to stop the running daemon before enabling the service: %w", err)
+		// Hand any ad-hoc daemon over to the supervised one, but never let a
+		// stop failure block enabling — see the function comment (#974).
+		if _, err := autostartStopDaemon(); err != nil {
+			log.WarningLog.Printf("failed to stop the running daemon before enabling the autostart unit; enabling anyway: %v", err)
 		}
-		if out, err := exec.Command("systemctl", "--user", "enable", "--now", autostartUnitName).CombinedOutput(); err != nil {
+		if out, err := autostartUnitCommand("systemctl", "--user", "enable", "--now", autostartUnitName); err != nil {
+			removeAutostartUnitFile(unitPath)
 			return "", fmt.Errorf("failed to enable daemon service: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
 		return unitPath, nil
 
 	case "darwin":
-		home, err := os.UserHomeDir()
+		dir, err := autostartLaunchAgentsDir()
 		if err != nil {
-			return "", fmt.Errorf("failed to get home directory: %w", err)
+			return "", fmt.Errorf("failed to resolve LaunchAgents directory: %w", err)
 		}
-		dir := filepath.Join(home, "Library", "LaunchAgents")
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return "", fmt.Errorf("failed to create LaunchAgents directory: %w", err)
 		}
@@ -194,34 +213,48 @@ func InstallAutostart() (string, error) {
 		logPath := filepath.Join(configDir, "daemon-launchd.log")
 		content := launchdAutostartPlist(execPath, os.Getenv("PATH"), os.Getenv("SHELL"), os.Getenv("AGENT_FACTORY_HOME"), logPath)
 		// Unload a previous agent first so launchctl load picks up the new file.
-		_ = exec.Command("launchctl", "unload", plistPath).Run()
+		_, _ = autostartUnitCommand("launchctl", "unload", plistPath)
 		if err := config.AtomicWriteFile(plistPath, []byte(content), 0644); err != nil {
 			return "", fmt.Errorf("failed to write plist file: %w", err)
 		}
-		// Hand over from any ad-hoc daemon to the supervised one.
-		if _, err := StopDaemon(); err != nil {
-			return "", fmt.Errorf("failed to stop the running daemon before loading the agent: %w", err)
+		// Hand any ad-hoc daemon over to the supervised one, but never let a
+		// stop failure block loading — see the function comment (#974).
+		if _, err := autostartStopDaemon(); err != nil {
+			log.WarningLog.Printf("failed to stop the running daemon before loading the autostart agent; loading anyway: %v", err)
 		}
-		if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
+		if out, err := autostartUnitCommand("launchctl", "load", plistPath); err != nil {
+			removeAutostartUnitFile(plistPath)
 			return "", fmt.Errorf("failed to load launch agent: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
 		return plistPath, nil
 
 	default:
-		return "", fmt.Errorf("daemon autostart is not supported on %s (the daemon still starts automatically whenever you run af)", runtime.GOOS)
+		return "", fmt.Errorf("daemon autostart is not supported on %s (the daemon still starts automatically whenever you run af)", autostartGOOS)
 	}
 }
 
-// Injection points for tests, mirroring legacy_units.go: the GOOS the
-// restart helpers act on, the unit-directory resolvers, and the external
-// command runner, so the upgrade respawn path can be exercised hermetically
-// without touching the host's real autostart unit or invoking
-// systemctl/launchctl.
+// removeAutostartUnitFile deletes a just-written autostart unit/plist after a
+// later install step fails, so a hard failure never leaves a present-but-not-
+// enabled file that AutostartInstalled would misreport as installed (#974).
+// Best-effort: a cleanup failure is logged, not surfaced, since the original
+// install error is the one the caller must act on.
+func removeAutostartUnitFile(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.WarningLog.Printf("failed to clean up autostart unit %s after a failed install: %v", path, err)
+	}
+}
+
+// Injection points for tests, mirroring legacy_units.go: the GOOS the install
+// and restart helpers act on, the unit-directory resolvers, the external
+// command runner, and the ad-hoc daemon stop, so the install and upgrade
+// respawn paths can be exercised hermetically without touching the host's real
+// autostart unit, invoking systemctl/launchctl, or signaling a real daemon.
 var (
 	autostartGOOS            = runtime.GOOS
 	autostartSystemdUserDir  = defaultSystemdUserDir
 	autostartLaunchAgentsDir = defaultLaunchAgentsDir
 	autostartUnitCommand     = runAutostartUnitCommand
+	autostartStopDaemon      = StopDaemon
 )
 
 func runAutostartUnitCommand(name string, args ...string) ([]byte, error) {
