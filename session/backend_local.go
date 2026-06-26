@@ -244,7 +244,13 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 		if err := tab.tmux.Restore(worktreePath); err != nil {
 			log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
 		}
-		if tab.Kind == TabKindShell {
+		// Only count a shell tab as live when its tmux session actually exists
+		// server-side after Restore. Restore (and its re-spawn) can fail — e.g.
+		// the worktree was removed so `tmux new-session -c $workdir` errors —
+		// leaving a dead shell tab. Gating on presence alone (the old behavior)
+		// suppressed the fresh-shell fallback below and stranded the user with a
+		// dead terminal (#991).
+		if tab.Kind == TabKindShell && tab.tmux.DoesSessionExist() {
 			hasLiveShell = true
 		}
 	}
