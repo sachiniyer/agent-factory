@@ -365,6 +365,41 @@ func TestWaitForReadyFailsFastWhenSessionGone(t *testing.T) {
 	}
 }
 
+// TestWaitForReadyTimeoutCaseChecksErrSessionGone guards the second Preview()
+// call site (#989): if the session dies right at the timeout boundary so the
+// timeout case observes ErrSessionGone, WaitForReady must surface the same
+// actionable "session died" error (wrapping the sentinel) as the ticker case —
+// not a misleading generic timeout. Timing is set so the timeout (50ms) fires
+// before the first ticker tick (100ms), forcing the timeout branch.
+func TestWaitForReadyTimeoutCaseChecksErrSessionGone(t *testing.T) {
+	defer setWaitForReadyTimingForTest(50*time.Millisecond, 100*time.Millisecond)()
+
+	inst := newPreviewInstance(t, func() (string, error) {
+		return "", tmux.ErrSessionGone
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(inst) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error when the session is gone, got nil")
+		}
+		if !errors.Is(err, tmux.ErrSessionGone) {
+			t.Fatalf("error must wrap tmux.ErrSessionGone, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "session died while waiting for agent to start") {
+			t.Fatalf("error must explain the session died, got %q", err.Error())
+		}
+		if strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("must not be a misleading timeout error, got %q", err.Error())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady did not return on ErrSessionGone in the timeout case")
+	}
+}
+
 // TestWaitForReadyKeepsPollingThroughTransientErrors guards the other half of
 // the fix: a transient (non-ErrSessionGone) Preview error must NOT abort the
 // loop — it keeps polling until the agent becomes ready.

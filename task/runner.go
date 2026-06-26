@@ -88,6 +88,15 @@ func WaitForReady(instance *session.Instance) error {
 		case <-timeout:
 			content, err := instance.Preview()
 			if err != nil {
+				// Mirror the ticker case: ErrSessionGone is a definitive,
+				// non-retryable death, so surface the actionable "session died"
+				// cause even when it happens right at the timeout boundary —
+				// never the misleading generic timeout error (#979 fixed only
+				// the ticker case; #989 closes this gap so both Preview() call
+				// sites handle the sentinel identically).
+				if errors.Is(err, tmux.ErrSessionGone) {
+					return fmt.Errorf("session died while waiting for agent to start: %w", err)
+				}
 				log.ErrorLog.Printf("waitForReady timed out (preview also failed: %v)", err)
 				return formatWaitForReadyTimeoutError(waitForReadyTimeout, "")
 			}
