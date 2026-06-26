@@ -1048,14 +1048,23 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	instance.CheckAndHandleTrustPrompt()
 	before := instance.GetStatus()
 	updated, hasPrompt := instance.HasUpdated()
+	if hasPrompt {
+		// Tap enter whenever a prompt is waiting (TapEnter is a no-op unless
+		// AutoYes is on), independent of `updated` — exactly as the pre-#965
+		// AutoYes loop did with `if _, hasPrompt := instance.HasUpdated(); …`.
+		// A prompt's text is itself fresh output, so a just-appeared prompt
+		// commonly reports (updated, hasPrompt) == (true, true); folding the tap
+		// into the switch below `case updated` swallowed it on that first tick
+		// and only tapped on the next poll — a one-interval AutoYes delay (#992).
+		instance.TapEnter()
+	}
 	switch {
 	case updated:
 		instance.SetStatusIfNotDeleting(session.Running)
 	case hasPrompt:
-		// A waiting prompt: tap enter when AutoYes is on (TapEnter is a no-op
-		// otherwise) and leave the status for the next tick to resolve, exactly
-		// as runMetadataTick did.
-		instance.TapEnter()
+		// A waiting prompt with otherwise-unchanged output: leave the status for
+		// the next tick to resolve, exactly as runMetadataTick did. The
+		// prompt-tap already fired above regardless of `updated`.
 	case !instance.TmuxAlive():
 		// HasUpdated returned (false,false), which a healthy idle session and a
 		// dead one both produce — indistinguishable on their own. Probe liveness
