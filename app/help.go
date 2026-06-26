@@ -77,6 +77,15 @@ func (h helpTypeGeneral) toContent() string {
 }
 
 func (h helpTypeInstanceStart) toContent() string {
+	// Remote instances block `t` (new tab) and `w` (close tab) — those actions
+	// surface a "not available for remote" error (see handleNewTab /
+	// handleCloseTab in app/handle_actions.go) — so only advertise the tab keys
+	// that actually work for the instance type. Tab cycling and 1-9 jump work
+	// for both (#988).
+	tabHelp := keyStyle.Render("tab") + descStyle.Render("   - Switch between tabs (t new tab, w close, 1-9 jump)")
+	if h.instance.IsRemote() {
+		tabHelp = keyStyle.Render("tab") + descStyle.Render("   - Switch between tabs (1-9 jump)")
+	}
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Instance Created"),
 		"",
@@ -88,7 +97,7 @@ func (h helpTypeInstanceStart) toContent() string {
 		"",
 		headerStyle.Render("Managing:"),
 		keyStyle.Render("↵/o")+descStyle.Render("   - Attach to the session to interact with it directly"),
-		keyStyle.Render("tab")+descStyle.Render("   - Switch between tabs (t new tab, w close, 1-9 jump)"),
+		tabHelp,
 		keyStyle.Render("D")+descStyle.Render("     - Kill (delete) the selected session"),
 	)
 	return content

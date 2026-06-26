@@ -60,3 +60,57 @@ func TestMenuPreviewTabShowsBothScrollKeys(t *testing.T) {
 		t.Errorf("expected exactly 1 KeyShiftDown in preview tab menu, got %d", gotShiftDown)
 	}
 }
+
+// TestMenuRemoteInstanceOmitsUnsupportedTabKeys guards against regressing #988:
+// remote instances block `t` (new tab) and `w` (close tab) — those handlers
+// reject IsRemote() with an error — so the footer menu must only surface the
+// tab keys that actually work (cycle / 1-9 jump), while local instances keep
+// the full set.
+func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
+	remote := &session.Instance{Status: session.Ready}
+	remote.SetBackend(&session.HookBackend{})
+	if !remote.IsRemote() {
+		t.Fatal("sanity: instance should report as remote")
+	}
+
+	m := NewMenu()
+	m.SetInstance(remote)
+
+	var gotNewTab, gotCloseTab, gotTab, gotJump int
+	for _, k := range m.options {
+		switch k {
+		case keys.KeyNewTab:
+			gotNewTab++
+		case keys.KeyCloseTab:
+			gotCloseTab++
+		case keys.KeyTab:
+			gotTab++
+		case keys.KeyJumpTab:
+			gotJump++
+		}
+	}
+	if gotNewTab != 0 || gotCloseTab != 0 {
+		t.Errorf("remote menu must not surface t/w tab keys; got newTab=%d closeTab=%d", gotNewTab, gotCloseTab)
+	}
+	if gotTab != 1 || gotJump != 1 {
+		t.Errorf("remote menu should still surface tab cycle and 1-9 jump; got tab=%d jump=%d", gotTab, gotJump)
+	}
+
+	local := &session.Instance{Status: session.Ready}
+	if local.IsRemote() {
+		t.Fatal("sanity: instance should report as local")
+	}
+	m.SetInstance(local)
+	var localNewTab, localCloseTab int
+	for _, k := range m.options {
+		switch k {
+		case keys.KeyNewTab:
+			localNewTab++
+		case keys.KeyCloseTab:
+			localCloseTab++
+		}
+	}
+	if localNewTab != 1 || localCloseTab != 1 {
+		t.Errorf("local menu should surface t/w tab keys; got newTab=%d closeTab=%d", localNewTab, localCloseTab)
+	}
+}
