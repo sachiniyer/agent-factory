@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -255,8 +256,27 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	tab := newShellTab(shellTmux)
 	tab.Name = displayName
 	i.mu.Lock()
-	i.Tabs = append(i.Tabs, tab)
+	// Re-check started under the write lock before appending: we released the
+	// lock to spawn, and Kill (which does NOT take repoStartLock, so it is not
+	// serialized against CreateTab) can have flipped started=false and snapshotted
+	// Tabs for teardown in that window. Appending now would leak a tmux session
+	// that escapes Kill's teardown while its worktree is deleted (#990). Make the
+	// recheck and append atomic under one acquisition so no further race opens.
+	killed := !i.started
+	title := i.Title
+	if !killed {
+		i.Tabs = append(i.Tabs, tab)
+	}
 	i.mu.Unlock()
+	if killed {
+		// Tear down the just-spawned session so it does not outlive the worktree
+		// Kill is removing. Close is best-effort/idempotent (#967): a kill-session
+		// on an already-gone session is not an error.
+		if cerr := shellTmux.Close(); cerr != nil {
+			log.WarningLog.Printf("add shell tab to %q: closing orphaned tmux after kill race: %v", title, cerr)
+		}
+		return nil, fmt.Errorf("session was killed during tab creation")
+	}
 	return tab, nil
 }
 
@@ -307,8 +327,24 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 
 	tab := &Tab{Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux}
 	i.mu.Lock()
-	i.Tabs = append(i.Tabs, tab)
+	// Re-check started under the write lock before appending (see AddShellTab):
+	// Kill can have flipped started=false and snapshotted Tabs for teardown while
+	// we spawned outside the lock, so appending now would leak a tmux session whose
+	// worktree Kill then deletes (#990). Recheck + append are atomic under one
+	// acquisition.
+	killed := !i.started
+	title := i.Title
+	if !killed {
+		i.Tabs = append(i.Tabs, tab)
+	}
 	i.mu.Unlock()
+	if killed {
+		// Best-effort/idempotent teardown of the orphaned session (#967).
+		if cerr := procTmux.Close(); cerr != nil {
+			log.WarningLog.Printf("add process tab to %q: closing orphaned tmux after kill race: %v", title, cerr)
+		}
+		return nil, fmt.Errorf("session was killed during tab creation")
+	}
 	return tab, nil
 }
 
