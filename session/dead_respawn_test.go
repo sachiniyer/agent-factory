@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -125,6 +127,76 @@ func TestDeadInstance_NotRespawnedOnLoad(t *testing.T) {
 		"a Dead instance must load started=true so SaveInstances keeps it on disk")
 	assert.False(t, restored.TabAlive(0),
 		"the Dead agent session must not exist server-side after load")
+}
+
+// failFirstNewSessionPty is a PtyFactory that fails the first `tmux new-session`
+// it sees and forwards every other command to the mock executor (like
+// persistPtyFactory). It reproduces a persisted shell tab whose re-spawn fails
+// — e.g. the worktree was removed so `tmux new-session -c $workdir` errors —
+// while letting a subsequent fresh-shell creation succeed.
+type failFirstNewSessionPty struct {
+	t       *testing.T
+	cmdExec cmd_test.MockCmdExec
+	count   *int
+}
+
+func (p failFirstNewSessionPty) Start(cmd *exec.Cmd) (*os.File, error) {
+	if strings.Contains(cmd.String(), "new-session") {
+		*p.count++
+		if *p.count == 1 {
+			// Simulate the dead shell's re-spawn failing (vanished worktree).
+			// Returning an error here makes TmuxSession.Start fail fast without
+			// marking the session live, so the session stays absent server-side.
+			return nil, fmt.Errorf("new-session failed: worktree gone")
+		}
+	}
+	f, err := os.CreateTemp(p.t.TempDir(), "pty-")
+	if err == nil {
+		_ = p.cmdExec.Run(cmd)
+	}
+	return f, err
+}
+
+func (p failFirstNewSessionPty) Close() {}
+
+// TestRunningInstance_DeadShellTabReplacedWithFreshShellOnLoad is the #991
+// regression, exercised through the production path (FromInstanceData ->
+// Start(false) -> setupTabs). A Running instance restores with a live agent tab
+// but a shell tab whose tmux session is gone and whose re-spawn fails. Restore
+// must NOT leave that dead shell tab in place: with no LIVE shell after restore,
+// setupTabs must create a fresh default shell so the user lands on a working
+// terminal. Before the fix, hasLiveShell was set on tab presence alone, the
+// fallback was skipped, and TabAlive(1) stayed false (a dead terminal).
+func TestRunningInstance_DeadShellTabReplacedWithFreshShellOnLoad(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_991_agent"
+	shellName := agentName + shellTmuxSuffix
+
+	// The agent session is alive (reconnect path); the shell session is gone, so
+	// its restore hits the re-spawn branch — which the PTY fails on the first
+	// new-session. A later fresh-shell new-session succeeds.
+	var newSessions, ptyNewSessions int
+	exec := countingExec(map[string]bool{agentName: true}, &newSessions)
+	pty := failFirstNewSessionPty{t: t, cmdExec: exec, count: &ptyNewSessions}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	restored, err := FromInstanceData(deadInstanceData(t, Running, agentName, shellName))
+	require.NoError(t, err)
+
+	assert.True(t, restored.TabAlive(0), "the live agent tab must stay reconnected")
+	assert.True(t, restored.TabAlive(1),
+		"restore must replace the dead shell tab with a freshly-created live shell (#991)")
+	assert.Equal(t, 1, newSessions,
+		"exactly one fresh shell session must be spawned (the failed re-spawn never counted)")
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.True(t, restored.Started())
 }
 
 // TestLiveInstance_RespawnsMissingSessionOnLoad guards the seam from the other
