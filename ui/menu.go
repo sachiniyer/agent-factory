@@ -184,8 +184,14 @@ func (m *Menu) addInstanceOptions() {
 	actionGroup = append(actionGroup, keys.KeyShiftUp)
 	actionGroup = append(actionGroup, keys.KeyShiftDown)
 
-	// Tab group: cycle, create, close, and number-jump (#930 PR 4).
+	// Tab group: cycle, create, close, and number-jump (#930 PR 4). Remote
+	// instances block `t` (new tab) and `w` (close tab) — those handlers reject
+	// IsRemote() with an error — so only advertise the tab keys that actually
+	// work: cycle and number-jump (#988).
 	tabGroup := []keys.KeyName{keys.KeyTab, keys.KeyNewTab, keys.KeyCloseTab, keys.KeyJumpTab}
+	if m.instance != nil && m.instance.IsRemote() {
+		tabGroup = []keys.KeyName{keys.KeyTab, keys.KeyJumpTab}
+	}
 
 	// System group
 	systemGroup := []keys.KeyName{keys.KeyHelp, keys.KeyQuit}
