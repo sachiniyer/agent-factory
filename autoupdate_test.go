@@ -68,7 +68,9 @@ func withTestHome(t *testing.T) string {
 // TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable guards against the
 // regression tracked in issue #262: on Windows, when a newer release exists,
 // the early-return path must still call recordCheck() so the 24-hour throttle
-// fires and the GitHub API is not hit on every launch.
+// fires and the GitHub API is not hit on every launch. It also guards #1002:
+// the Windows skip must precede any network call, so the fetch seam here is a
+// tripwire that fails the test if invoked.
 func TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable(t *testing.T) {
 	dir := withTestHome(t)
 	infoBuf, errBuf := captureLogs(t)
@@ -84,12 +86,20 @@ func TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable(t *testing.T) {
 
 	runtimeGOOS = "windows"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	fetchCalls := 0
+	fetchLatestReleaseTagFn = func() (string, error) {
+		fetchCalls++
+		return "v1.0.1", nil
+	}
 
 	if err := autoUpdate(); err != nil {
 		t.Fatalf("autoUpdate returned error: %v", err)
 	}
 
+	// #1002: Windows must skip before touching the network.
+	if fetchCalls != 0 {
+		t.Fatalf("fetchLatestReleaseTagFn called %d times on Windows; expected 0 (network must be skipped before the GitHub check)", fetchCalls)
+	}
 	// last_update_check must exist so shouldCheck() returns false.
 	if _, err := os.Stat(filepath.Join(dir, lastCheckFile)); err != nil {
 		t.Fatalf("expected %s to be written after Windows early-return, got: %v",
@@ -108,10 +118,11 @@ func TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable(t *testing.T) {
 	}
 }
 
-// TestAutoUpdateWindowsRecordsCheckWhenNoUpdate exercises the pre-existing
-// code path where no update is available, which already recorded the check.
-// Included so both Windows branches are covered.
-func TestAutoUpdateWindowsRecordsCheckWhenNoUpdate(t *testing.T) {
+// TestAutoUpdateWindowsSkipsNetworkRegardlessOfVersion covers the Windows skip
+// for an up-to-date build. Since the skip now precedes the fetch (#1002), the
+// fetch seam is a tripwire: Windows must record the throttle and return without
+// any network call regardless of what version it is running.
+func TestAutoUpdateWindowsSkipsNetworkRegardlessOfVersion(t *testing.T) {
 	dir := withTestHome(t)
 
 	prevGOOS := runtimeGOOS
@@ -125,7 +136,10 @@ func TestAutoUpdateWindowsRecordsCheckWhenNoUpdate(t *testing.T) {
 
 	runtimeGOOS = "windows"
 	version = "1.0.1"
-	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	fetchLatestReleaseTagFn = func() (string, error) {
+		t.Fatalf("fetchLatestReleaseTagFn must not be called on Windows (#1002)")
+		return "", nil
+	}
 
 	if err := autoUpdate(); err != nil {
 		t.Fatalf("autoUpdate returned error: %v", err)
