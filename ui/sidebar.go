@@ -472,9 +472,12 @@ func (s *Sidebar) GetInstanceByTitle(title string) *session.Instance {
 }
 
 // GetInstances returns all instances. The returned slice shares the sidebar's
-// backing array, so callers must only read it on the bubbletea event loop —
-// never hand it to a goroutine that outlives the call (see
-// GetInstancesSnapshot for that).
+// backing array, so callers must only read it inline on the bubbletea event
+// loop and must NOT store it beyond the immediate call — never hand it to a
+// goroutine that outlives the call, and never stash it in an overlay or struct
+// field that survives past this call. A later append/remove mutates the shared
+// backing array in place, corrupting any retained slice (#1008). Use
+// GetInstancesSnapshot for anything that keeps the slice around.
 func (s *Sidebar) GetInstances() []*session.Instance {
 	return s.instances
 }
