@@ -55,6 +55,17 @@ func (s *SearchOverlay) IsSubmitted() bool {
 	return s.submitted
 }
 
+// ResultInstances returns the instances currently matching the query, in
+// display order. Exposed for tests that assert the overlay's list stays a
+// stable copy independent of later sidebar mutations (#1008).
+func (s *SearchOverlay) ResultInstances() []*session.Instance {
+	out := make([]*session.Instance, len(s.results))
+	for i, r := range s.results {
+		out[i] = r.Instance
+	}
+	return out
+}
+
 // GetSelectedInstance returns the instance the user selected, or nil.
 func (s *SearchOverlay) GetSelectedInstance() *session.Instance {
 	if s.submitted && len(s.results) > 0 && s.selectedIdx < len(s.results) {

@@ -65,7 +65,12 @@ func (m *home) handleStateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // showSearchOverlay displays the session search overlay.
 func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
-	instances := m.sidebar.GetInstances()
+	// The overlay outlives this call and holds onto the slice, while a
+	// background snapshotFetchedMsg reconcile can remove instances from the
+	// sidebar in place (append-shift on the shared backing array). Hand the
+	// overlay a stable copy so a later removal can't corrupt its list with
+	// duplicate/ghost entries (#1008).
+	instances := m.sidebar.GetInstancesSnapshot()
 	if len(instances) == 0 {
 		return m, m.handleError(fmt.Errorf("no sessions to search"))
 	}
