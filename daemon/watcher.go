@@ -431,22 +431,39 @@ func (w *taskWatcher) run() {
 			return
 		}
 
-		// A run that stayed healthy for a whole crash window earns a fresh
-		// backoff; otherwise keep doubling toward the cap.
-		if now.Sub(started) >= w.sup.crashWindow {
-			backoff = w.sup.baseBackoff
-		}
-		log.WarningLog.Printf("watch task %s: watch command failed (%v); restarting in %s%s", w.taskID, runErr, backoff, tail.logSuffix())
+		// A run that stayed healthy for a whole crash window restarts the
+		// backoff chain at baseBackoff; an unhealthy run keeps doubling toward
+		// the cap. The healthy reset must NOT also advance the backoff this
+		// cycle — otherwise the next quick failure would wait 2*baseBackoff
+		// instead of restarting the documented 1s→2s→4s… chain at baseBackoff
+		// (#1005).
+		healthy := now.Sub(started) >= w.sup.crashWindow
+		wait, next := nextBackoff(backoff, w.sup.baseBackoff, w.sup.maxBackoff, healthy)
+		log.WarningLog.Printf("watch task %s: watch command failed (%v); restarting in %s%s", w.taskID, runErr, wait, tail.logSuffix())
 		select {
 		case <-w.stopCh:
 			return
-		case <-time.After(backoff):
+		case <-time.After(wait):
 		}
-		backoff *= 2
-		if backoff > w.sup.maxBackoff {
-			backoff = w.sup.maxBackoff
-		}
+		backoff = next
 	}
+}
+
+// nextBackoff computes the delay before the next restart and the backoff to
+// carry into the following cycle. A run that stayed healthy for a whole crash
+// window resets the chain: it waits baseBackoff and leaves the carried backoff
+// at baseBackoff, so the next failure restarts the documented 1s→2s→4s…
+// sequence from the base rather than from 2*baseBackoff (#1005). An unhealthy
+// run waits the current backoff and doubles it toward maxBackoff for next time.
+func nextBackoff(current, base, max time.Duration, healthy bool) (wait, next time.Duration) {
+	if healthy {
+		return base, base
+	}
+	next = current * 2
+	if next > max {
+		next = max
+	}
+	return current, next
 }
 
 // exitedFromSignal reports whether err is an exec exit caused by the given
