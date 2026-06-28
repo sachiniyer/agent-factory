@@ -538,11 +538,17 @@ func cleanupDaemonRuntimeFiles(pidFile string) {
 	}
 }
 
-// isAgentFactoryDaemon checks whether the process at pid looks like an agent-factory daemon
-// (i.e. its command line contains the --daemon flag as a discrete argument). It tries
-// /proc/<pid>/cmdline first (Linux) and falls back to `ps -p <pid> -o args=` (macOS and other
-// unixes). If neither source yields a readable command line, returns false so callers treat the
-// PID as unverified.
+// isAgentFactoryDaemon checks whether the process at pid looks like an agent-factory daemon:
+// its command line must carry the --daemon flag as a discrete argument AND its executable must
+// be an agent-factory binary ("af" or "agent-factory"). It tries /proc/<pid>/cmdline first
+// (Linux) and falls back to `ps -p <pid> -o args=` (macOS and other unixes). If neither source
+// yields a readable command line, returns false so callers treat the PID as unverified.
+//
+// Both checks are required so that a stale PID file whose PID has been reused by an unrelated
+// process carrying a "--daemon" token (e.g. "sleep --daemon af-test") is not mistaken for our
+// daemon and signaled by StopDaemon/locateDaemonPID. This mirrors the host-wide pgrep scan in
+// sigterm_fallback.go, which already requires both cmdlineHasDaemonFlag and cmdlineIsDaemonBinary;
+// the two PID-validation paths must agree (#1004).
 //
 // We split the command line on whitespace and require an exact "--daemon" token (or a
 // "--daemon=..." form), so flags like --daemonize don't get matched as substrings.
@@ -554,7 +560,7 @@ func isAgentFactoryDaemon(pid int) bool {
 	if cmdline == "" {
 		return false
 	}
-	return cmdlineHasDaemonFlag(cmdline)
+	return cmdlineHasDaemonFlag(cmdline) && cmdlineIsDaemonBinary(cmdline)
 }
 
 // cmdlineHasDaemonFlag reports whether cmdline contains "--daemon" as a discrete argument
