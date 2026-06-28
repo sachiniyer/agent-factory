@@ -555,8 +555,17 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	return m, tea.Quit
 }
 
-// saveContentPaneState persists any changes from the task/hooks panes and
-// returns a non-nil error if any task persist operation failed.
+// saveContentPaneState persists any changes from the hooks/task panes and
+// returns a non-nil error if any persist operation failed. Both panes'
+// failures are accumulated so neither is dropped when both are dirty at once.
+//
+// Recovery semantics on a hooks-save failure (#1001): we leave the HooksPane
+// dirty and deliberately do NOT reload it from disk. The edit the user is
+// trying to save lives only in memory, so reloading would discard the very
+// edit they care about — the silent data loss this fix exists to prevent.
+// Returning the error lets callers (handleQuit / focus release) abort the
+// destructive action and surface it via handleError; the dirty pane preserves
+// the edit so the user can retry from where they left off.
 //
 // Recovery semantics on a task-save failure (#934): we reload BOTH the sidebar
 // and the TaskPane from disk so the two panes always agree and always reflect
@@ -569,6 +578,10 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 // dirty flag would point at nothing. The user re-applies the edit from a
 // known-consistent state instead.
 func (m *home) saveContentPaneState() error {
+	// Accumulate failures across both panes so a hooks error and a task error
+	// can never clobber one another (#1001).
+	var saveErr error
+
 	hp := m.contentPane.HooksPane()
 	if hp.IsDirty() {
 		// Hook edits are written to the in-repo .agent-factory/config.json —
@@ -576,8 +589,13 @@ func (m *home) saveContentPaneState() error {
 		// legacy ~/.agent-factory/repos/<id>/config.json stays untouched as a
 		// read-only fallback; the saved in-repo key (even when emptied)
 		// shadows it.
-		if err := config.SaveInRepoPostWorktreeCommands(m.repoRoot, hp.GetCommands()); err != nil {
+		if err := saveInRepoPostWorktreeCommandsFn(m.repoRoot, hp.GetCommands()); err != nil {
 			log.ErrorLog.Printf("failed to save hooks: %v", err)
+			// Surface the failure instead of swallowing it (#1001): callers
+			// abort the quit / focus release and show the error overlay rather
+			// than silently dropping the edit. The HooksPane stays dirty (see
+			// the recovery note above) so the in-memory edit survives for retry.
+			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save hooks: %w", err))
 		} else {
 			m.sidebar.SetHookCount(len(hp.GetCommands()))
 		}
@@ -585,13 +603,12 @@ func (m *home) saveContentPaneState() error {
 
 	sp := m.contentPane.TaskPane()
 	if !sp.IsDirty() {
-		return nil
+		return saveErr
 	}
 
 	// Collect every persist failure instead of swallowing them: a partial
 	// failure must still surface so the user knows their edit didn't fully
 	// land (matches api/tasks.go, which propagates these errors).
-	var saveErr error
 	for _, tsk := range sp.GetTasks() {
 		if err := task.UpdateTask(tsk); err != nil {
 			log.ErrorLog.Printf("failed to update task: %v", err)
@@ -622,6 +639,11 @@ func (m *home) saveContentPaneState() error {
 // reloadDaemonTaskSchedulesFn is indirected so TUI tests can observe the poke
 // without dialing (or spawning) a real daemon.
 var reloadDaemonTaskSchedulesFn = daemon.ReloadTasks
+
+// saveInRepoPostWorktreeCommandsFn is indirected so TUI tests can force a
+// hooks-save failure deterministically — without relying on filesystem
+// permission tricks that a root test runner would bypass (#1001).
+var saveInRepoPostWorktreeCommandsFn = config.SaveInRepoPostWorktreeCommands
 
 // reloadDaemonTaskSchedules asks the daemon to re-read tasks.json after a
 // TUI-side task edit. Best-effort: the daemon reloads all tasks at every
