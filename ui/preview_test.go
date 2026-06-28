@@ -714,12 +714,13 @@ func setupTwoInstances(t *testing.T, previewA, previewB string) (*session.Instan
 
 	existing := map[string]bool{}
 	sessionFor := func(cmd *exec.Cmd) string {
-		// tmux targets can be passed as either "-t <name>" / "-s <name>"
-		// (two args) or "-t=<name>" / "-s=<name>" (one arg). Handle both.
+		// tmux targets can be passed as "-t <name>" / "-s <name>" (two args),
+		// "-t=<name>" / "-s=<name>" (one arg), or the exact-match
+		// "-t =<name>:" / "-s =<name>:" form (#1006). Handle all of them.
 		for i, a := range cmd.Args {
 			switch {
 			case (a == "-t" || a == "-s") && i+1 < len(cmd.Args):
-				return cmd.Args[i+1]
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
 			case strings.HasPrefix(a, "-t="):
 				return strings.TrimPrefix(a, "-t=")
 			case strings.HasPrefix(a, "-s="):

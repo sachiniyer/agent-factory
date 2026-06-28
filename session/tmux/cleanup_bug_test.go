@@ -34,8 +34,8 @@ af_real_session: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
 
 	err := CleanupSessions(cmdExec)
 	require.NoError(t, err)
-	require.Equal(t, []string{"af_real_session"}, killedSessions,
-		"only `af_`-prefixed sessions should be killed; `my_af_project` must be left alone")
+	require.Equal(t, []string{"=af_real_session:"}, killedSessions,
+		"only `af_`-prefixed sessions should be killed, each via an `=name:` exact-match target (#1006); `my_af_project` must be left alone")
 }
 
 // TestCleanupSessionsHandlesMixedAndColonNames covers the full matrix from
@@ -66,6 +66,6 @@ af_a:b:c: 1 windows (created Wed May 20 12:03:00 2026) [179x47]`
 
 	err := CleanupSessions(cmdExec)
 	require.NoError(t, err)
-	require.Equal(t, []string{"af_real_session", "af_a"}, killedSessions,
-		"only `af_`-prefixed sessions should be killed, with `af_a:b:c` truncated to `af_a` and killed exactly once")
+	require.Equal(t, []string{"=af_real_session:", "=af_a:"}, killedSessions,
+		"only `af_`-prefixed sessions should be killed via `=name:` exact-match targets (#1006), with `af_a:b:c` truncated to `af_a` and killed exactly once")
 }

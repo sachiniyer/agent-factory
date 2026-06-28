@@ -146,7 +146,7 @@ func TestRestoreAttachesWhenSessionExists(t *testing.T) {
 	require.NoError(t, session.Restore("/some/work/dir"))
 
 	require.Equal(t, 1, len(ptyFactory.cmds), "expected exactly one PTY command (attach-session)")
-	require.Equal(t, "tmux attach-session -t af_existing", cmd2.ToString(ptyFactory.cmds[0]))
+	require.Equal(t, "tmux attach-session -t =af_existing:", cmd2.ToString(ptyFactory.cmds[0]))
 }
 
 // TestRestoreRespawnsWhenSessionMissing covers issue #386 case (b): when the
@@ -186,7 +186,7 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	require.Equal(t,
 		fmt.Sprintf("tmux new-session -d -s af_missing -c %s claude --continue", workdir),
 		cmd2.ToString(ptyFactory.cmds[0]))
-	require.Equal(t, "tmux attach-session -t af_missing", cmd2.ToString(ptyFactory.cmds[1]))
+	require.Equal(t, "tmux attach-session -t =af_missing:", cmd2.ToString(ptyFactory.cmds[1]))
 }
 
 // TestRestoreSurfacesPtyError covers issue #386 case (c): real failures
@@ -260,7 +260,7 @@ func TestStartTmuxSession(t *testing.T) {
 	require.Equal(t, 2, len(ptyFactory.cmds))
 	require.Equal(t, fmt.Sprintf("tmux new-session -d -s af_test-session -c %s claude", workdir),
 		cmd2.ToString(ptyFactory.cmds[0]))
-	require.Equal(t, "tmux attach-session -t af_test-session",
+	require.Equal(t, "tmux attach-session -t =af_test-session:",
 		cmd2.ToString(ptyFactory.cmds[1]))
 
 	require.Equal(t, 2, len(ptyFactory.files))

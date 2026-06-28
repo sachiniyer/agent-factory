@@ -30,7 +30,9 @@ func raceHookExec(alive map[string]bool, onNewSession func()) (cmd_test.MockCmdE
 		for i, a := range cmd.Args {
 			switch {
 			case (a == "-t" || a == "-s") && i+1 < len(cmd.Args):
-				return cmd.Args[i+1]
+				// Strip the exact-match `=name:` wrapper (`-t =name:`) so the modeled
+				// session name matches the bare key tmux resolves to (#1006).
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
 			case strings.HasPrefix(a, "-t="):
 				return strings.TrimPrefix(a, "-t=")
 			case strings.HasPrefix(a, "-s="):

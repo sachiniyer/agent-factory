@@ -29,12 +29,13 @@ import (
 // terminal_cmd behavior.
 
 // tmuxTargetName extracts the tmux session name from a command's -t/-s flag,
-// handling both "-t name" / "-s name" and "-t=name" / "-s=name" spellings.
+// handling "-t name" / "-s name", "-t=name" / "-s=name", and the exact-match
+// "-t =name:" / "-s =name:" spellings (#1006).
 func tmuxTargetName(cmd *exec.Cmd) string {
 	for i, a := range cmd.Args {
 		switch {
 		case (a == "-t" || a == "-s") && i+1 < len(cmd.Args):
-			return cmd.Args[i+1]
+			return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
 		case strings.HasPrefix(a, "-t="):
 			return strings.TrimPrefix(a, "-t=")
 		case strings.HasPrefix(a, "-s="):
