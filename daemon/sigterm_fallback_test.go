@@ -182,12 +182,14 @@ func stubDaemonScan(t *testing.T, pids []int, err error) {
 }
 
 // spawnFakeDaemonWithDaemonFlag launches a long-lived child process whose
-// /proc/<pid>/cmdline contains "--daemon" as a discrete token. We use
-// bash's `exec -a` to rewrite argv[0] of `sleep` so the cmdline carries
-// "--daemon" without sleep actually being asked to parse it as a flag (it
-// would reject "--daemon" as an invalid time interval). The single process
-// is just sleep, which terminates cleanly on SIGTERM — making this the
-// minimum-moving-parts way to test the fallback's SIGTERM path.
+// /proc/<pid>/cmdline presents an agent-factory daemon: an "af" argv[0] plus a
+// discrete "--daemon" token, satisfying both checks isAgentFactoryDaemon
+// requires (#1004). We use bash's `exec -a` to rewrite argv[0] so the cmdline
+// carries both without the underlying `sleep` actually being asked to parse
+// "--daemon" as a flag (it would reject "--daemon" as an invalid time
+// interval). The single process is just sleep, which terminates cleanly on
+// SIGTERM — making this the minimum-moving-parts way to test the fallback's
+// SIGTERM path.
 //
 // Returns the *exec.Cmd so the test can call cmd.Wait() to reap the zombie
 // after SIGTERM. Without that, kill(pid, 0) keeps returning success against
@@ -197,7 +199,7 @@ func spawnFakeDaemonWithDaemonFlag(t *testing.T) *exec.Cmd {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not available, skipping SIGTERM-fallback test: %v", err)
 	}
-	cmd := exec.Command("bash", "-c", "exec -a 'sleep --daemon af-test' sleep 60")
+	cmd := exec.Command("bash", "-c", "exec -a 'af --daemon af-test' sleep 60")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake daemon: %v", err)
 	}

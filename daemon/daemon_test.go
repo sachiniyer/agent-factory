@@ -186,6 +186,67 @@ func TestCmdlineIsDaemonBinary(t *testing.T) {
 	}
 }
 
+// TestIsAgentFactoryDaemon_RequiresBinaryName is the regression test for
+// #1004. isAgentFactoryDaemon validates PIDs sourced from the PID file
+// (StopDaemon / locateDaemonPID) and previously checked only for a discrete
+// "--daemon" token — never the binary name. That let a stale PID file whose
+// PID had been reused by an unrelated process carrying "--daemon" in its argv
+// be mistaken for our daemon and signaled. It must now require BOTH the
+// "--daemon" flag AND an af/agent-factory binary name, mirroring the pgrep
+// scan path (pgrepDaemonCandidates). Hermetic: spawns long-lived sleeps and
+// reads /proc cmdline; never signals any real daemon.
+func TestIsAgentFactoryDaemon_RequiresBinaryName(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+
+	// spawn launches `exec -a <argv0> sleep 60` and waits until the rewritten
+	// post-exec cmdline (carrying the af-test marker) is visible in /proc.
+	spawn := func(argv0 string) int {
+		t.Helper()
+		cmd := exec.Command("bash", "-c", fmt.Sprintf("exec -a %q sleep 60", argv0))
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start fake process: %v", err)
+		}
+		pid := cmd.Process.Pid
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		})
+		// Wait for the post-exec cmdline: the rewritten argv carries the
+		// "af-test" marker, and the "bash -c"/"exec -a" wrapper is gone once
+		// exec replaces the shell. Matching on "af-test" alone would fire on
+		// the pre-exec bash process (whose argv embeds the same script text).
+		waitForReady(t, fmt.Sprintf("pid=%d post-exec cmdline visible", pid), func() bool {
+			cmdline := readProcCmdline(pid)
+			if cmdline == "" {
+				cmdline = readPsArgs(pid)
+			}
+			return strings.Contains(cmdline, "af-test") && !strings.Contains(cmdline, "exec")
+		})
+		return pid
+	}
+
+	// The exact #1004 repro: "--daemon" present but argv[0] base is "sleep",
+	// not af/agent-factory. Pre-fix this returned true (the bug); it must now
+	// be false so StopDaemon/locateDaemonPID refuse to signal it.
+	nonAFPID := spawn("sleep --daemon af-test")
+	if isAgentFactoryDaemon(nonAFPID) {
+		t.Errorf("isAgentFactoryDaemon(pid with cmdline %q) = true; "+
+			"want false — a non-af process carrying --daemon must not be treated as our daemon (#1004)",
+			readProcCmdline(nonAFPID))
+	}
+
+	// A genuine agent-factory daemon cmdline (af argv[0] + --daemon) must still
+	// validate true, so the fix doesn't break the real stop/reset path.
+	afPID := spawn("af --daemon af-test")
+	if !isAgentFactoryDaemon(afPID) {
+		t.Errorf("isAgentFactoryDaemon(pid with cmdline %q) = false; "+
+			"want true — a real af --daemon process must still validate",
+			readProcCmdline(afPID))
+	}
+}
+
 // TestStopDaemon_SIGTERMFirst verifies that StopDaemon sends SIGTERM (giving
 // the daemon's signal handler a chance to run SaveInstances) and only
 // escalates to SIGKILL after the grace period. Regression test for #571 —
@@ -199,10 +260,11 @@ func TestStopDaemon_SIGTERMFirst(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	// Spawn a process that responds to SIGTERM by exiting (sleep's default
-	// behavior) and exposes "--daemon" as a discrete token in /proc cmdline
-	// (via bash's `exec -a` argv[0] rewrite). This is the same recipe used
-	// in TestSigtermFallback_KillsPIDFileDaemon.
-	cmd := exec.Command("bash", "-c", "exec -a 'sleep --daemon af-test' sleep 60")
+	// behavior) and presents an agent-factory daemon cmdline: an "af" argv[0]
+	// plus a discrete "--daemon" token (via bash's `exec -a` argv[0] rewrite),
+	// so it satisfies both checks isAgentFactoryDaemon now requires (#1004).
+	// This is the same recipe used in TestSigtermFallback_KillsPIDFileDaemon.
+	cmd := exec.Command("bash", "-c", "exec -a 'af --daemon af-test' sleep 60")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake daemon: %v", err)
 	}
@@ -294,14 +356,14 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 	// Inner bash sets SIGTERM to SIG_IGN via `trap '' TERM` (the empty-string
 	// form, which truly ignores the signal — `trap : TERM` would run a no-op
 	// but bash still terminates non-interactively after the handler). Outer
-	// bash uses `exec -a` to rewrite argv[0] so the cmdline contains
-	// "--daemon" as a discrete token (passes isAgentFactoryDaemon). A
-	// ready-file sentinel proves the trap was installed before SIGTERM lands,
-	// closing a race where the cmdline becomes visible while bash is still
-	// parsing the script.
+	// bash uses `exec -a` to rewrite argv[0] to an "af" binary name with a
+	// discrete "--daemon" token, so it passes both checks isAgentFactoryDaemon
+	// requires (#1004). A ready-file sentinel proves the trap was installed
+	// before SIGTERM lands, closing a race where the cmdline becomes visible
+	// while bash is still parsing the script.
 	readyFile := filepath.Join(tmpHome, "trap-ready")
 	script := fmt.Sprintf(
-		`exec -a 'bash --daemon af-test' bash -c 'trap "" TERM; : > %q; while :; do sleep 1; done'`,
+		`exec -a 'af --daemon af-test' bash -c 'trap "" TERM; : > %q; while :; do sleep 1; done'`,
 		readyFile,
 	)
 	cmd := exec.Command("bash", "-c", script)

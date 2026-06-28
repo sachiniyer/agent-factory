@@ -55,10 +55,10 @@ func TestStopDaemon_PreservesNewDaemonSocket(t *testing.T) {
 		t.Fatalf("control server not answering before StopDaemon: %v", err)
 	}
 
-	// Daemon A: a fake old daemon that exits on SIGTERM and exposes
-	// "--daemon" as a discrete cmdline token (same recipe as
-	// TestStopDaemon_SIGTERMFirst).
-	cmd := exec.Command("bash", "-c", "exec -a 'sleep --daemon af-test' sleep 60")
+	// Daemon A: a fake old daemon that exits on SIGTERM and presents an "af"
+	// argv[0] with a discrete "--daemon" cmdline token, satisfying both checks
+	// isAgentFactoryDaemon requires (same recipe as TestStopDaemon_SIGTERMFirst).
+	cmd := exec.Command("bash", "-c", "exec -a 'af --daemon af-test' sleep 60")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake daemon: %v", err)
 	}
