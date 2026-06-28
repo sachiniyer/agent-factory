@@ -2,11 +2,19 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
+	"os/exec"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+// errSessionAbsent makes the mock executor's has-session probe report "no such
+// session", driving DoesSessionExist to false for the #999 nil-monitor test.
+var errSessionAbsent = errors.New("no such session")
 
 // deadTmuxBackend is a FakeBackend whose IsAlive reports false, modelling a
 // tmux/remote session that vanished out from under the daemon — the #935
@@ -147,6 +155,44 @@ func TestRefreshStatuses_DeadSessionMarkedDeadNotReady(t *testing.T) {
 	}
 	if got := persistedStatus(t, repoID, "gone"); got != session.Dead {
 		t.Fatalf("persisted status = %v, want Dead", got)
+	}
+}
+
+// nilMonitorBackend routes HasUpdated and IsAlive through a REAL TmuxSession
+// that never had Restore called, so its monitor field is nil — the exact shape
+// of a persisted Dead instance reloaded after a daemon restart (#999). It
+// reproduces the production deref through RefreshStatuses; before the fix this
+// panicked and killed the refresh goroutine, zombifying the daemon.
+type nilMonitorBackend struct {
+	*session.FakeBackend
+	ts *tmux.TmuxSession
+}
+
+func (b nilMonitorBackend) HasUpdated(*session.Instance) (bool, bool) { return b.ts.HasUpdated() }
+func (b nilMonitorBackend) IsAlive(*session.Instance) bool            { return b.ts.DoesSessionExist() }
+
+// TestRefreshStatuses_DeadNilMonitorDoesNotPanic is the #999 regression at the
+// daemon poll layer: a persisted Dead instance whose TmuxSession has a nil
+// monitor (Start skipped Restore, #970) must survive a RefreshStatuses pass
+// without panicking. HasUpdated returns (false,false) and the idle liveness
+// probe confirms the vanished session, leaving it Dead.
+func TestRefreshStatuses_DeadNilMonitorDoesNotPanic(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	// has-session reports "gone" so the idle-branch liveness probe keeps it Dead;
+	// the nil monitor would panic HasUpdated before the fix regardless.
+	mockExec := cmd_test.MockCmdExec{
+		RunFunc:    func(*exec.Cmd) error { return errSessionAbsent },
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("content"), nil },
+	}
+	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_999_nil_monitor", "claude", tmux.MakePtyFactory(), mockExec)
+	backend := nilMonitorBackend{FakeBackend: session.NewFakeBackend(), ts: ts}
+	registerStarted(t, manager, repoID, repoPath, "corpse", backend, true, session.Dead)
+
+	manager.RefreshStatuses() // must not panic on the nil monitor
+
+	inst := manager.instances[daemonInstanceKey(repoID, "corpse")]
+	if got := inst.GetStatus(); got != session.Dead {
+		t.Fatalf("in-memory status = %v, want Dead (a restored corpse stays Dead)", got)
 	}
 }
 

@@ -629,9 +629,17 @@ func (t *TmuxSession) SendKeysCommand(text string) error {
 // HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if
 // the tmux pane has a prompt for aider or claude code.
 func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
+	// A nil monitor means Restore never ran for this session: a persisted Dead
+	// instance is loaded with started=true but LocalBackend.Start returns before
+	// Restore (which is the only place monitor is initialized) so the corpse is
+	// not re-spawned (#970). The daemon's refreshInstanceStatus still polls every
+	// started instance, so HasUpdated must treat "no live monitor" as
+	// nothing-to-report rather than panic on a nil deref and kill the refresh
+	// goroutine, zombifying the daemon (#999).
+	//
 	// Once the underlying tmux session has been confirmed gone, stay silent
 	// instead of relogging capture-pane failures every daemon tick (#489).
-	if t.monitor.dead {
+	if t.monitor == nil || t.monitor.dead {
 		return false, false
 	}
 
