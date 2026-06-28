@@ -33,33 +33,52 @@ func ParseCron(expr string) (cron.Schedule, error) {
 	return cronParser.Parse(strings.Join(fields, " "))
 }
 
-// normalizeDOWField rewrites a day-of-week field that mentions 7 (Sunday
-// alias) into an explicit value list with 7 mapped to 0, e.g. "5-7" →
-// "0,5,6". The result is deliberately kept as an explicit list rather than
-// collapsed back to "*" even when it covers all seven days: a syntactically
-// restricted DOW participates in cron's DOM/DOW OR semantics, and rewriting
-// it to a wildcard would change which days match when DOM is also restricted.
+// normalizeDOWField rewrites a day-of-week field that denotes 7 (Sunday alias)
+// into an explicit value list with 7 mapped to 0, e.g. "5-7" → "0,5,6". The
+// result is deliberately kept as an explicit list rather than collapsed back to
+// "*" even when it covers all seven days: a syntactically restricted DOW
+// participates in cron's DOM/DOW OR semantics, and rewriting it to a wildcard
+// would change which days match when DOM is also restricted.
 //
-// The 7→0 alias is applied to each comma-separated part *before* expansion
-// when 7 is the base of a step (e.g. "7/2" → "0/2"). Expanding first would
-// collapse "7/2" to the single value {7} — its step starts at the field's max
-// (7) so no further values follow — and then map it to {0}, silently turning
-// "every 2 days from Sunday" into "Sunday only" (#888). For every other shape
-// (a bare 7, a range bound of 7, a step that merely lands on 7) expansion
-// followed by normalizeDOWValues preserves the meaning, so those are left for
-// the expand path below.
+// Whether a field denotes Sunday is decided by *expanding* it (with max=7) and
+// checking for the value 7 — not by a literal "7" substring test. A literal
+// check misses step expressions like "1/2" that contain no "7" but expand to
+// [1,3,5,7]; those were passed unchanged to robfig (which bounds DOW to 0-6),
+// silently dropping Sunday (#1007).
+//
+// The 7→0 alias is applied to each comma-separated part *before* expansion when
+// 7 is the base of a step (e.g. "7/2" → "0/2"). Expanding first would collapse
+// "7/2" to the single value {7} — its step starts at the field's max (7) so no
+// further values follow — and then map it to {0}, silently turning "every 2
+// days from Sunday" into "Sunday only" (#888). Because that rewrite erases the
+// 7 from the expansion ("0/2" → [0,2,4,6]), a part whose step base was rewritten
+// is itself treated as denoting Sunday so it still normalizes to an explicit
+// list. For every other shape (a bare 7, a range bound of 7, a step that merely
+// lands on 7) expansion followed by normalizeDOWValues preserves the meaning.
 func normalizeDOWField(field string) string {
-	if field == "*" || !strings.Contains(field, "7") {
+	if field == "*" {
 		return field
 	}
 	listParts := strings.Split(field, ",")
+	rewroteStepBase := false
 	for i, part := range listParts {
-		listParts[i] = normalizeDOWStepBase(part)
+		if norm := normalizeDOWStepBase(part); norm != part {
+			listParts[i] = norm
+			rewroteStepBase = true
+		}
 	}
 	field = strings.Join(listParts, ",")
 
 	vals, err := expandCronField(field, 0, 7)
 	if err != nil || vals == nil {
+		return field
+	}
+	// Only rewrite into an explicit 0-based list when the field actually denotes
+	// Sunday: either its expansion includes the alias 7, or a "7/N" step base was
+	// rewritten to "0/N" above (whose expansion no longer shows a 7). Otherwise
+	// leave "*", ranges, and steps that never reach 7 untouched so they pass to
+	// robfig in their original shape.
+	if !containsSeven(vals) && !rewroteStepBase {
 		return field
 	}
 	vals = normalizeDOWValues(vals)
@@ -68,6 +87,18 @@ func normalizeDOWField(field string) string {
 		parts[i] = strconv.Itoa(v)
 	}
 	return strings.Join(parts, ",")
+}
+
+// containsSeven reports whether the expanded value list includes the Sunday
+// alias 7. expandCronField returns sorted values, so 7 (the field max) can only
+// be the final element, but a linear scan keeps the intent obvious.
+func containsSeven(vals []int) bool {
+	for _, v := range vals {
+		if v == 7 {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeDOWStepBase rewrites the Sunday alias 7→0 when it is the single-value
