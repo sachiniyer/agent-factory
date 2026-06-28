@@ -241,6 +241,16 @@ func TestGetClaudeCommand(t *testing.T) {
 			// Interactive rc files may print noise (motd hints, echoes)
 			// before the probe result — the matching line must still win.
 			{"noise before alias", "To run a command as administrator, use sudo.\n\nclaude is aliased to `/opt/claude --fast'", "/opt/claude --fast"},
+			// #1003: an rc-file noise line with a mid-line "->" must NOT match
+			// the arrow alternative and capture garbage; the real alias line
+			// that follows must win instead.
+			{"mid-line arrow noise before alias", "Type help -> for assistance\nclaude: aliased to /usr/local/bin/claude", "/usr/local/bin/claude"},
+			// A noise line with a mid-line "->" and no real alias anywhere must
+			// fall through to "" so GetClaudeCommand uses the PATH fallback.
+			{"mid-line arrow noise only", "Type help -> for assistance", ""},
+			// Decorative rc banners with "=>" / "->" must not be mistaken for
+			// either the arrow or the equals alias form.
+			{"banner arrow noise", "  => Welcome -> shell", ""},
 			// A function carries no usable path; fall back to PATH lookup.
 			{"bash type function", "claude is a function\nclaude () \n{ \n    echo hi\n}", ""},
 			{"bash type builtin", "claude is a shell builtin", ""},
