@@ -382,7 +382,15 @@ func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab in
 	if activeTab == 0 {
 		content, err = instance.PreviewFullHistory()
 	} else {
+		// An already-dead shell tab must transition to the fallback, not bare
+		// return: a bare return leaves p.content (fallback==false) holding the
+		// last-rendered capture and isScrolling==false, so String() renders stale
+		// terminal output instead of the dead-session message. This mirrors
+		// updateShellLocked's !TabAlive branch and the ErrSessionGone path below,
+		// which both set the same fallback — the early-return was the inconsistency
+		// (#998, sibling of #977/#984).
 		if !instance.TabAlive(activeTab) {
+			p.setFallbackState("Terminal session not available.")
 			return nil
 		}
 		content, err = instance.PreviewTabFullHistory(activeTab)

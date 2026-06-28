@@ -496,6 +496,98 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 		"stale scrollback must not remain on screen after the session dies (#977)")
 }
 
+// TestTabPaneShellScrollModeAlreadyDead is the #998 regression (sibling of
+// #977): entering scroll mode on a shell tab whose tmux session is ALREADY dead
+// before entry must transition to the "Terminal session not available." fallback
+// instead of leaving the last live capture pinned on screen. enterScrollModeLocked's
+// !TabAlive branch used to bare-return, leaving p.content (fallback==false) holding
+// stale terminal output and isScrolling==false, so String() rendered the stale
+// content. It must call setFallbackState, mirroring updateShellLocked's !TabAlive
+// branch and the ErrSessionGone capture path.
+func TestTabPaneShellScrollModeAlreadyDead(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const liveCapture = "live-shell-output-before-death"
+	var gone atomic.Bool
+	existing := map[string]bool{}
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			name := tmuxTargetName(cmd)
+			switch {
+			case strings.Contains(s, "has-session"):
+				if gone.Load() {
+					return fmt.Errorf("session gone")
+				}
+				if existing[name] {
+					return nil
+				}
+				return fmt.Errorf("session does not exist")
+			case strings.Contains(s, "new-session"):
+				existing[name] = true
+				return nil
+			case strings.Contains(s, "kill-session"):
+				delete(existing, name)
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "capture-pane") {
+				return []byte(liveCapture), nil
+			}
+			return []byte(""), nil
+		},
+	}
+
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	workdir := t.TempDir()
+	setupGitRepo(t, workdir)
+	name := fmt.Sprintf("test-shell-scroll-dead-%d", time.Now().UnixNano())
+	inst, err := session.NewInstance(session.InstanceOptions{Title: name, Path: workdir, Program: "bash"})
+	require.NoError(t, err)
+	pty := &MockPtyFactory{t: t, cmdExec: cmdExec}
+	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
+	require.NoError(t, inst.Start(true))
+	defer func() { _ = inst.Kill() }()
+
+	p := NewTabPane()
+	p.SetSize(80, 30)
+
+	// Render the live shell tab so p.content holds the last capture (stale content
+	// once the session dies) and currentInstance/currentTab are adopted (so the
+	// dropStaleView guard does not reset state on the ScrollUp path below).
+	require.NoError(t, p.UpdateContent(inst, 1))
+	require.False(t, p.IsScrolling(), "precondition: not yet scrolling")
+	require.Contains(t, p.String(), liveCapture,
+		"precondition: pane renders the live shell capture")
+
+	// The shell session is already dead before the user attempts to scroll.
+	gone.Store(true)
+
+	require.NoError(t, p.ScrollUp(inst, 1),
+		"entering scroll mode on a dead shell must not bubble an error")
+
+	p.mu.Lock()
+	stillScrolling := p.isScrolling
+	hasFallback := p.content.fallback
+	fallbackText := p.content.text
+	p.mu.Unlock()
+
+	require.False(t, stillScrolling,
+		"entering scroll mode on an already-dead shell must not leave the pane scrolling (#998)")
+	require.True(t, hasFallback,
+		"an already-dead shell must show a fallback on scroll-mode entry, not stale content (#998)")
+	require.Contains(t, fallbackText, "Terminal session not available.")
+
+	rendered := p.String()
+	require.Contains(t, rendered, "Terminal session not available.",
+		"rendered frame must show the dead-session fallback (#998)")
+	require.NotContains(t, rendered, liveCapture,
+		"stale terminal content must not remain on screen for an already-dead shell (#998)")
+}
+
 // TestTabPaneRemoteFallbackStates covers the #843 Terminal-tab UX for remote
 // sessions on the merged pane.
 func TestTabPaneRemoteFallbackStates(t *testing.T) {
