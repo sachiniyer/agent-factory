@@ -129,6 +129,46 @@ func TestDeadInstance_NotRespawnedOnLoad(t *testing.T) {
 		"the Dead agent session must not exist server-side after load")
 }
 
+// TestDeadInstance_HasUpdatedNilMonitor is the #999 regression, exercised
+// through the production path. A persisted Dead instance loads with
+// started=true but LocalBackend.Start returns before TmuxSession.Restore (the
+// only place the tmux monitor is initialized) so the corpse is not re-spawned
+// (#970). The daemon's refreshInstanceStatus still polls every started
+// instance via instance.HasUpdated(); before the fix that dereferenced a nil
+// monitor and panicked, killing the refresh goroutine and zombifying the
+// daemon. HasUpdated must instead return (false,false) — a session with no live
+// monitor has nothing to report.
+func TestDeadInstance_HasUpdatedNilMonitor(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_dead_hasupdated"
+	shellName := agentName + shellTmuxSuffix
+
+	// Both sessions are GONE (the kill that produced Dead): Start(false) returns
+	// at the Dead guard before Restore, so the agent TmuxSession's monitor is nil.
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	restored, err := FromInstanceData(deadInstanceData(t, Dead, agentName, shellName))
+	require.NoError(t, err)
+	require.Equal(t, Dead, restored.GetStatus())
+	require.True(t, restored.Started())
+
+	// This is the exact call refreshInstanceStatus makes every daemon tick.
+	// Before the nil-monitor guard it panicked here.
+	updated, hasPrompt := restored.HasUpdated()
+	assert.False(t, updated, "a restored Dead instance has nothing to report")
+	assert.False(t, hasPrompt)
+}
+
 // failFirstNewSessionPty is a PtyFactory that fails the first `tmux new-session`
 // it sees and forwards every other command to the mock executor (like
 // persistPtyFactory). It reproduces a persisted shell tab whose re-spawn fails
