@@ -79,6 +79,12 @@ func (t Task) IsWatch() bool {
 // task must have exactly one of the two. A disabled task with neither is
 // tolerated as a draft so hand-edited or legacy records never brick the
 // store.
+//
+// An enabled cron task must additionally carry a non-empty prompt (#1000). A
+// cron fire has no event line to fall back to, so the runtime skips an empty
+// prompt and produces a session that silently does nothing. Watch tasks are
+// exempt: an empty prompt defaults to the emitted line (see RenderWatchPrompt).
+// Disabled drafts are still tolerated regardless of prompt.
 func (t Task) ValidateTrigger() error {
 	hasCron := strings.TrimSpace(t.CronExpr) != ""
 	hasWatch := strings.TrimSpace(t.WatchCmd) != ""
@@ -87,6 +93,9 @@ func (t Task) ValidateTrigger() error {
 	}
 	if t.Enabled && !hasCron && !hasWatch {
 		return fmt.Errorf("task %s is enabled but has neither cron_expr nor watch_cmd; exactly one trigger is required", t.ID)
+	}
+	if t.Enabled && hasCron && strings.TrimSpace(t.Prompt) == "" {
+		return fmt.Errorf("task %s is an enabled cron task but has an empty prompt; a prompt is required", t.ID)
 	}
 	return nil
 }

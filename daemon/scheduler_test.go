@@ -58,7 +58,7 @@ func TestSchedulerReloadFollowsTaskCRUD(t *testing.T) {
 	s := newTaskScheduler()
 
 	mk := func(id string) task.Task {
-		return task.Task{ID: id, CronExpr: "0 3 * * *", Enabled: true, CreatedAt: time.Now()}
+		return task.Task{ID: id, Prompt: "p", CronExpr: "0 3 * * *", Enabled: true, CreatedAt: time.Now()}
 	}
 
 	// Add two tasks.

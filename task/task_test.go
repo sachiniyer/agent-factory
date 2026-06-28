@@ -266,7 +266,7 @@ func TestLoadTaskWithoutProgramFieldFallsBackToEmpty(t *testing.T) {
 // through the TUI must survive a SaveTasks -> LoadTasks round-trip.
 func TestUpdateTaskPersistsProgram(t *testing.T) {
 	tasks := []Task{
-		{ID: "p1", Name: "Original", Program: "claude", CronExpr: "0 3 * * *", Enabled: true},
+		{ID: "p1", Name: "Original", Prompt: "do the thing", Program: "claude", CronExpr: "0 3 * * *", Enabled: true},
 	}
 	setupTestTasks(t, tasks)
 
@@ -409,7 +409,7 @@ func TestUpdateTaskStatus_NotFound(t *testing.T) {
 // reject a non-enum Program so the TUI/CLI editor flows fail fast.
 func TestUpdateTask_RejectsBadProgram(t *testing.T) {
 	stored := []Task{
-		{ID: "edit1", Name: "Editable", Program: "claude", CronExpr: "0 3 * * *", Enabled: true},
+		{ID: "edit1", Name: "Editable", Prompt: "do the thing", Program: "claude", CronExpr: "0 3 * * *", Enabled: true},
 	}
 	setupTestTasks(t, stored)
 
@@ -435,28 +435,39 @@ func TestTaskNameInJSON(t *testing.T) {
 
 // TestValidateTrigger pins the #782 trigger contract: both triggers set is
 // always invalid, an enabled task needs exactly one, and a disabled task with
-// neither is tolerated as a draft.
+// neither is tolerated as a draft. It also pins the #1000 rule: an enabled cron
+// task must carry a non-empty prompt, while watch tasks and disabled drafts may
+// have an empty prompt.
 func TestValidateTrigger(t *testing.T) {
 	cases := []struct {
 		name    string
 		cron    string
 		watch   string
+		prompt  string
 		enabled bool
 		wantErr bool
 	}{
-		{"enabled cron only", "0 3 * * *", "", true, false},
-		{"enabled watch only", "", "tail -f log", true, false},
-		{"enabled both", "0 3 * * *", "tail -f log", true, true},
-		{"enabled neither", "", "", true, true},
-		{"enabled whitespace counts as unset", "   ", "  ", true, true},
-		{"disabled cron only", "0 3 * * *", "", false, false},
-		{"disabled watch only", "", "tail -f log", false, false},
-		{"disabled both", "0 3 * * *", "tail -f log", false, true},
-		{"disabled neither (draft)", "", "", false, false},
+		{"enabled cron only", "0 3 * * *", "", "do the thing", true, false},
+		{"enabled watch only", "", "tail -f log", "", true, false},
+		{"enabled both", "0 3 * * *", "tail -f log", "p", true, true},
+		{"enabled neither", "", "", "p", true, true},
+		{"enabled whitespace counts as unset", "   ", "  ", "p", true, true},
+		{"disabled cron only", "0 3 * * *", "", "", false, false},
+		{"disabled watch only", "", "tail -f log", "", false, false},
+		{"disabled both", "0 3 * * *", "tail -f log", "p", false, true},
+		{"disabled neither (draft)", "", "", "", false, false},
+		// #1000: enabling a cron task with an empty/whitespace prompt is a
+		// silent no-op at run time, so the model layer rejects it.
+		{"enabled cron empty prompt", "0 3 * * *", "", "", true, true},
+		{"enabled cron whitespace prompt", "0 3 * * *", "", "   ", true, true},
+		// Watch tasks legitimately default an empty prompt to the emitted line.
+		{"enabled watch empty prompt ok", "", "tail -f log", "", true, false},
+		// Disabled cron drafts with an empty prompt are tolerated.
+		{"disabled cron empty prompt (draft)", "0 3 * * *", "", "", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tsk := Task{ID: "aaaa0001", CronExpr: tc.cron, WatchCmd: tc.watch, Enabled: tc.enabled}
+			tsk := Task{ID: "aaaa0001", CronExpr: tc.cron, WatchCmd: tc.watch, Prompt: tc.prompt, Enabled: tc.enabled}
 			err := tsk.ValidateTrigger()
 			if tc.wantErr {
 				assert.Error(t, err)

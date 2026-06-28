@@ -281,7 +281,7 @@ func TestTasksUpdate_DisablePersistsAndPokesDaemon(t *testing.T) {
 	resetUpdateFlags(t)
 	calls := stubDaemon(t)
 
-	seedTask(t, task.Task{ID: "t1", CronExpr: "0 9 * * *", Enabled: true})
+	seedTask(t, task.Task{ID: "t1", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
 	taskUpdateEnabledFlag = "false"
 	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"t1"})
@@ -298,7 +298,7 @@ func TestTasksUpdate_CronChangePersistsAndPokesDaemon(t *testing.T) {
 	resetUpdateFlags(t)
 	calls := stubDaemon(t)
 
-	seedTask(t, task.Task{ID: "t2", CronExpr: "0 9 * * *", Enabled: true})
+	seedTask(t, task.Task{ID: "t2", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
 	taskUpdateCronFlag = "30 6 * * 1"
 	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"t2"})
@@ -315,7 +315,7 @@ func TestTasksUpdate_RejectsInvalidCron(t *testing.T) {
 	resetUpdateFlags(t)
 	calls := stubDaemon(t)
 
-	seedTask(t, task.Task{ID: "t3", CronExpr: "0 9 * * *", Enabled: true})
+	seedTask(t, task.Task{ID: "t3", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
 	taskUpdateCronFlag = "not a cron"
 	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"t3"})
@@ -451,7 +451,7 @@ func TestTasksUpdate_RejectsBadEnabledValue(t *testing.T) {
 	resetUpdateFlags(t)
 	calls := stubDaemon(t)
 
-	seedTask(t, task.Task{ID: "t4", CronExpr: "0 9 * * *", Enabled: true})
+	seedTask(t, task.Task{ID: "t4", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
 	taskUpdateEnabledFlag = "yes"
 	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"t4"})
@@ -464,7 +464,7 @@ func TestTasksRemove_RemovesTaskAndPokesDaemon(t *testing.T) {
 	useTempConfig(t)
 	calls := stubDaemon(t)
 
-	seedTask(t, task.Task{ID: "t5", CronExpr: "0 9 * * *", Enabled: true})
+	seedTask(t, task.Task{ID: "t5", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
 	err := tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"t5"})
 	require.NoError(t, err)
