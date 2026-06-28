@@ -236,7 +236,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	if err != nil {
 		// Cleanup any partially created session if any exists.
 		if t.DoesSessionExist() {
-			cleanupCmd := exec.Command("tmux", "kill-session", "-t", t.sanitizedName)
+			cleanupCmd := exec.Command("tmux", "kill-session", "-t", exactTarget(t.sanitizedName))
 			if cleanupErr := t.cmdExec.Run(cleanupCmd); cleanupErr != nil {
 				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 			}
@@ -267,13 +267,13 @@ func (t *TmuxSession) Start(workDir string) error {
 	ptmx.Close()
 
 	// Set history limit to enable scrollback (default is 2000, we'll use 10000 for more history)
-	historyCmd := exec.Command("tmux", "set-option", "-t", t.sanitizedName, "history-limit", "10000")
+	historyCmd := exec.Command("tmux", "set-option", "-t", exactTarget(t.sanitizedName), "history-limit", "10000")
 	if err := t.cmdExec.Run(historyCmd); err != nil {
 		log.InfoLog.Printf("Warning: failed to set history-limit for session %s: %v", t.sanitizedName, err)
 	}
 
 	// Enable mouse scrolling for the session
-	mouseCmd := exec.Command("tmux", "set-option", "-t", t.sanitizedName, "mouse", "on")
+	mouseCmd := exec.Command("tmux", "set-option", "-t", exactTarget(t.sanitizedName), "mouse", "on")
 	if err := t.cmdExec.Run(mouseCmd); err != nil {
 		log.InfoLog.Printf("Warning: failed to enable mouse scrolling for session %s: %v", t.sanitizedName, err)
 	}
@@ -343,7 +343,11 @@ func (t *TmuxSession) Restore(workDir string) error {
 		return t.Start(workDir)
 	}
 
-	attachCmd := exec.Command("tmux", "attach-session", "-t", t.sanitizedName)
+	// `=` forces an exact session match so a surviving sibling session (e.g.
+	// the `__shell` tab) can never be prefix-matched and attached instead of
+	// the agent session (#1006). killTmuxAttachByName's pgrep pattern must
+	// stay in lockstep with this argv.
+	attachCmd := exec.Command("tmux", "attach-session", "-t", exactTarget(t.sanitizedName))
 	ptmx, err := t.ptyFactory.Start(attachCmd)
 	if err != nil {
 		return fmt.Errorf("error opening PTY: %w", err)
@@ -481,15 +485,17 @@ var (
 // Returns the number of processes signalled and any error encountered.
 //
 // The pgrep pattern is anchored to the literal `tmux attach-session ... -t
-// <name>` invocation we run in Restore(), so the worst that can happen is
+// =<name>:` invocation we run in Restore(), so the worst that can happen is
 // missing a kill (graceful) — not killing the wrong process. A bare name
 // match could collide with other tmux invocations (e.g. `tmux kill-session
-// -t <name>`), which we explicitly do NOT want to interrupt mid-flight.
+// -t =<name>:`), which we explicitly do NOT want to interrupt mid-flight.
+// The `=<name>:` exact-match target must mirror exactTarget() / the
+// attach-session target in Restore() (#1006).
 //
 // Exit code 1 from pgrep means "no matches" and is treated as success
 // with 0 kills; any other exit code is surfaced as an error.
 func killTmuxAttachByName(sanitizedName string) (int, error) {
-	pattern := fmt.Sprintf(`tmux attach-session -t %s$`, regexp.QuoteMeta(sanitizedName))
+	pattern := fmt.Sprintf(`tmux attach-session -t =%s:$`, regexp.QuoteMeta(sanitizedName))
 	pids, err := pgrepRunnerVar(pattern)
 	if err != nil {
 		return 0, fmt.Errorf("pgrep -f %q: %w", pattern, err)
@@ -611,8 +617,10 @@ func (t *TmuxSession) SendKeys(keys string) error {
 // where the PTY connection may not persist. Text is sent literally (with -l flag)
 // followed by a pause to let terminal control sequences drain, then Enter to submit.
 func (t *TmuxSession) SendKeysCommand(text string) error {
-	// Send text literally to avoid key name interpretation
-	textCmd := exec.Command("tmux", "send-keys", "-t", t.sanitizedName, "-l", text)
+	// Send text literally to avoid key name interpretation. `=` forces an
+	// exact session match so input is never sent to a prefix-matched sibling
+	// session if the agent session has died (#1006).
+	textCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "-l", text)
 	if err := t.cmdExec.Run(textCmd); err != nil {
 		return fmt.Errorf("error sending text via send-keys: %w", err)
 	}
@@ -622,7 +630,7 @@ func (t *TmuxSession) SendKeysCommand(text string) error {
 	time.Sleep(500 * time.Millisecond)
 
 	// Send Enter separately to submit
-	enterCmd := exec.Command("tmux", "send-keys", "-t", t.sanitizedName, "Enter")
+	enterCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "Enter")
 	return t.cmdExec.Run(enterCmd)
 }
 
@@ -944,7 +952,7 @@ func (t *TmuxSession) Close() error {
 		t.attachCh = nil
 	}
 
-	cmd := exec.Command("tmux", "kill-session", "-t", t.sanitizedName)
+	cmd := exec.Command("tmux", "kill-session", "-t", exactTarget(t.sanitizedName))
 	if err := t.cmdExec.Run(cmd); err != nil {
 		// Idempotent teardown (#967): a kill-session that fails because the
 		// session is already gone has achieved Close's goal — a dead session
@@ -1066,8 +1074,10 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() error {
 // (the agent program). Must be called before kill-session — afterwards there
 // is nothing left to query.
 func (t *TmuxSession) panePID() (int, error) {
-	// `-t=` forces an exact session match, mirroring DoesSessionExist.
-	cmd := exec.Command("tmux", "display-message", "-p", "-t", fmt.Sprintf("=%s", t.sanitizedName), "#{pane_pid}")
+	// exactTarget forces an exact session match, mirroring DoesSessionExist.
+	// (The bare `=name` form returns an empty pane_pid for display-message —
+	// the trailing `:` in exactTarget is what makes the pid resolve. See #1006.)
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{pane_pid}")
 	output, err := t.cmdExec.Output(cmd)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query pane pid: %w", err)
@@ -1143,13 +1153,35 @@ func sessionExists(cmdExec cmd.Executor, name string) bool {
 	return cmdExec.Run(existsCmd) == nil
 }
 
+// exactTarget builds an exact-match `-t` target spec for the named session.
+//
+// tmux resolves a bare `-t name` by exact match first and then PREFIX match, so
+// once an agent session dies a bare target silently resolves to a surviving
+// sibling — e.g. the shell tab `<name>__shell` of which `<name>` is an exact
+// prefix. Capturing or sending to that sibling masks the dead agent and skips
+// the liveness check (#1006).
+//
+// The leading `=` forces an exact session match. The trailing `:` is required
+// for the pane-target commands (capture-pane, send-keys, set-option): without
+// it tmux parses `=name` as a bare pane spec and reports "can't find pane:
+// =name" even when the session exists. Appending the (empty) window component
+// makes tmux parse `=name` as the session and resolve to its active pane. The
+// session-target commands (kill-session, attach-session) accept the same form,
+// so every action command shares one exact-match spelling.
+func exactTarget(name string) string {
+	return fmt.Sprintf("=%s:", name)
+}
+
 // CapturePaneContent captures the content of the tmux pane. When the
 // capture fails and DoesSessionExist confirms the session is gone, the
 // returned error wraps ErrSessionGone so non-daemon callers can degrade
 // gracefully instead of logging at ERROR (#496).
 func (t *TmuxSession) CapturePaneContent() (string, error) {
-	// Add -e flag to preserve escape sequences (ANSI color codes)
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", t.sanitizedName)
+	// Add -e flag to preserve escape sequences (ANSI color codes). `=` forces
+	// an exact session match: without it tmux would prefix-match a surviving
+	// sibling session (e.g. the `__shell` tab) when the agent session has
+	// died, capturing the wrong pane and masking the dead agent (#1006).
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", exactTarget(t.sanitizedName))
 	output, err := t.cmdExec.Output(cmd)
 	if err != nil {
 		if !t.DoesSessionExist() {
@@ -1164,8 +1196,9 @@ func (t *TmuxSession) CapturePaneContent() (string, error) {
 // start and end specify the starting and ending line numbers (use "-" for the start/end of history).
 // Wraps ErrSessionGone when the session has vanished, mirroring CapturePaneContent.
 func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, error) {
-	// Add -e flag to preserve escape sequences (ANSI color codes)
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", t.sanitizedName)
+	// Add -e flag to preserve escape sequences (ANSI color codes). `=` forces
+	// an exact session match, mirroring CapturePaneContent (#1006).
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", exactTarget(t.sanitizedName))
 	output, err := t.cmdExec.Output(cmd)
 	if err != nil {
 		if !t.DoesSessionExist() {
@@ -1201,7 +1234,9 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 
 	for _, match := range matches {
 		log.InfoLog.Printf("cleaning up session: %s", match)
-		if err := cmdExec.Run(exec.Command("tmux", "kill-session", "-t", match)); err != nil {
+		// `=` forces an exact session match so a name extracted from `tmux ls`
+		// kills exactly that session and never a prefix-matching sibling (#1006).
+		if err := cmdExec.Run(exec.Command("tmux", "kill-session", "-t", exactTarget(match))); err != nil {
 			// Idempotent teardown (#967): a session can vanish between the
 			// `tmux ls` above and this kill (TOCTOU). A gone session is the
 			// goal of cleanup, so only a survivor is a real failure.

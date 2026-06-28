@@ -29,7 +29,9 @@ func deadAwareExec(alive map[string]bool) cmd_test.MockCmdExec {
 		for i, a := range c.Args {
 			switch {
 			case (a == "-t" || a == "-s") && i+1 < len(c.Args):
-				return c.Args[i+1]
+				// Strip the exact-match `=name:` wrapper (`-t =name:`) so the modeled
+				// session name matches the bare key tmux resolves to (#1006).
+				return strings.TrimSuffix(strings.TrimPrefix(c.Args[i+1], "="), ":")
 			case strings.HasPrefix(a, "-t="):
 				return strings.TrimPrefix(a, "-t=")
 			case strings.HasPrefix(a, "-s="):

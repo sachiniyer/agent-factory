@@ -86,7 +86,9 @@ af_stuck: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
 	nameOf := func(c *exec.Cmd) string {
 		for i, a := range c.Args {
 			if a == "-t" && i+1 < len(c.Args) {
-				return c.Args[i+1]
+				// Strip the exact-match `=name:` wrapper (`-t =name:`) so the modeled
+				// session name matches the bare key tmux resolves to (#1006).
+				return strings.TrimSuffix(strings.TrimPrefix(c.Args[i+1], "="), ":")
 			}
 			if strings.HasPrefix(a, "-t=") {
 				return strings.TrimPrefix(a, "-t=")
