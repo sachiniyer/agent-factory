@@ -46,6 +46,17 @@ func autoUpdate() error {
 	if !shouldCheck() {
 		return nil
 	}
+
+	// Auto-update is not supported on Windows, so skip before any network
+	// operations — there is nothing to fetch, download, or install (#1002).
+	// Still record the check so the 24-hour throttle fires and we don't probe
+	// shouldCheck() on every launch (#262). Use the runtimeGOOS seam so tests
+	// can exercise this branch without building for Windows.
+	if runtimeGOOS == "windows" {
+		recordCheck()
+		return nil
+	}
+
 	// Record the check up front so failure-prone steps below (network fetch,
 	// download, install) still honor the 24-hour throttle. Without this,
 	// persistent failures (blocked api.github.com, corp proxy, DNS) would
@@ -64,12 +75,9 @@ func autoUpdate() error {
 		return nil
 	}
 
+	// Windows already returned above, before any network call (#1002).
 	goos := runtimeGOOS
 	goarch := runtime.GOARCH
-	if goos == "windows" {
-		// Auto-update is not supported on Windows.
-		return nil
-	}
 
 	log.InfoLog.Printf("auto-update: updating from %s to %s", version, latestVersion)
 
