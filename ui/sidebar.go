@@ -130,6 +130,11 @@ func (s *Sidebar) SetHookCount(count int) {
 	s.rebuildVisibleItems()
 }
 
+// GetHookCount returns the currently displayed hook count.
+func (s *Sidebar) GetHookCount() int {
+	return s.hookCount
+}
+
 // GetTasks returns the current tasks.
 func (s *Sidebar) GetTasks() []task.Task {
 	return s.tasks

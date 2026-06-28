@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -241,4 +242,172 @@ func TestHandleContentPaneFocus_ValidationFailureLeavesTaskPaneStale(t *testing.
 	// lingering dirty flag would point at edits the reload already discarded.
 	assert.False(t, tp.IsDirty(),
 		"reloading from disk clears dirty; the dropped edit is communicated via the error, not a dangling dirty flag")
+}
+
+// dirtyHooksHome returns a home wired to a real repo with a single dirty,
+// unsaved hook edit ("echo test") in the HooksPane. The hooks-save seam is
+// left at the caller's discretion (default real save, or a stub).
+func dirtyHooksHome(t *testing.T) *home {
+	t.Helper()
+	h := newTestHome(t)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+	h.repoRoot = repo.Root
+
+	hp := h.contentPane.HooksPane()
+	hp.SetCommands([]string{})
+	h.contentPane.SetMode(ui.ContentModeHooks)
+	hp.SetFocus(true)
+	h.errBox.SetSize(500, 1)
+
+	// Add a hook: dirty in memory, not yet persisted.
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("echo test")})
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, hp.IsDirty(), "hooks should be dirty after edit")
+	require.Contains(t, hp.GetCommands(), "echo test")
+	return h
+}
+
+// stubHooksSaveFailure forces the hooks-save seam to fail and restores it after
+// the test. Returns the sentinel error it injects.
+func stubHooksSaveFailure(t *testing.T) error {
+	t.Helper()
+	wantErr := fmt.Errorf("injected hooks save failure")
+	orig := saveInRepoPostWorktreeCommandsFn
+	saveInRepoPostWorktreeCommandsFn = func(string, []string) error { return wantErr }
+	t.Cleanup(func() { saveInRepoPostWorktreeCommandsFn = orig })
+	return wantErr
+}
+
+// TestSaveContentPaneState_HooksSaveFailureReturnedAndPreserved is the core
+// regression guard for #1001. Before the fix, SaveInRepoPostWorktreeCommands
+// failures were only logged and saveContentPaneState returned nil, so the
+// caller never aborted the destructive action — the edit was lost silently.
+//
+// The fix returns the error AND deliberately leaves the HooksPane dirty (no
+// disk reload, unlike tasks) so the in-memory edit survives for the user to
+// retry.
+func TestSaveContentPaneState_HooksSaveFailureReturnedAndPreserved(t *testing.T) {
+	h := dirtyHooksHome(t)
+	wantErr := stubHooksSaveFailure(t)
+	hp := h.contentPane.HooksPane()
+
+	err := h.saveContentPaneState()
+	require.Error(t, err, "hooks save failure must be returned, not swallowed (#1001)")
+	assert.ErrorIs(t, err, wantErr)
+
+	assert.True(t, hp.IsDirty(),
+		"hooks pane must stay dirty so the edit survives for retry (#1001)")
+	assert.Contains(t, hp.GetCommands(), "echo test",
+		"the in-memory edit must be preserved, not reloaded away")
+}
+
+// TestHandleContentPaneFocus_HooksSaveFailureSurfacedOnEsc reproduces the exact
+// path from the issue's failing test: pressing Esc to release focus triggers
+// the save, and a hooks-save failure must now return an error-surfacing command
+// and show the error inline (previously cmd was nil and the errBox stayed empty).
+func TestHandleContentPaneFocus_HooksSaveFailureSurfacedOnEsc(t *testing.T) {
+	h := dirtyHooksHome(t)
+	stubHooksSaveFailure(t)
+	hp := h.contentPane.HooksPane()
+
+	_, cmd, consumed := h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyEsc})
+	require.True(t, consumed, "Esc must route through the focus handler")
+	require.NotNil(t, cmd, "a failed hooks save must return an error-surfacing command (#1001)")
+	assert.Contains(t, h.errBox.String(), "failed to save hooks",
+		"the hooks save failure must be surfaced to the user, not swallowed (#1001)")
+	assert.True(t, hp.IsDirty(), "the dropped edit must be preserved for retry (#1001)")
+}
+
+// TestHandleQuit_HooksSaveFailureAbortsQuit verifies the destructive path: a
+// hooks-save failure must abort the quit (surface the error via handleError)
+// rather than proceeding to tea.Quit and losing the edit. The errBox being set
+// is the discriminator — the tea.Quit path never touches it.
+func TestHandleQuit_HooksSaveFailureAbortsQuit(t *testing.T) {
+	h := dirtyHooksHome(t)
+	stubHooksSaveFailure(t)
+	hp := h.contentPane.HooksPane()
+
+	_, cmd := h.handleQuit()
+	require.NotNil(t, cmd, "a failed save must return a command (the handleError cmd)")
+	assert.Contains(t, h.errBox.String(), "failed to save hooks",
+		"quit must be aborted with the error surfaced, not proceed to tea.Quit (#1001)")
+	assert.True(t, hp.IsDirty(), "the edit must survive the aborted quit for retry (#1001)")
+}
+
+// TestHandleQuit_HooksSaveSuccessQuitsAndUpdatesHookCount verifies the success
+// path is unchanged: a clean save proceeds to tea.Quit and the sidebar hook
+// count reflects the saved edit.
+func TestHandleQuit_HooksSaveSuccessQuitsAndUpdatesHookCount(t *testing.T) {
+	h := dirtyHooksHome(t) // default seam performs a real, successful save
+
+	_, cmd := h.handleQuit()
+	require.NotNil(t, cmd, "handleQuit returns a command on the success path")
+	assert.NotContains(t, h.errBox.String(), "failed to save hooks",
+		"no error must be surfaced on a successful save")
+
+	// The returned command must be tea.Quit.
+	msg := cmd()
+	_, isQuit := msg.(tea.QuitMsg)
+	assert.True(t, isQuit, "a successful save must proceed to tea.Quit")
+
+	assert.Equal(t, 1, h.sidebar.GetHookCount(),
+		"the sidebar hook count must reflect the saved hook")
+
+	// The save actually landed on disk.
+	cfg, _, err := config.LoadInRepoConfig(h.repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"echo test"}, cfg.PostWorktreeCommands,
+		"the hook edit must be persisted to the in-repo config")
+}
+
+// TestSaveContentPaneState_HooksAndTaskFailuresBothSurfaced verifies that when
+// BOTH panes are dirty and BOTH fail, neither error is dropped — the hooks fix
+// must not clobber the task error (and vice versa).
+func TestSaveContentPaneState_HooksAndTaskFailuresBothSurfaced(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based write-failure injection is bypassed when running as root")
+	}
+	h := dirtyHooksHome(t)
+	wantHooksErr := stubHooksSaveFailure(t)
+
+	// Seed a task on disk and load it, then toggle it dirty.
+	existing := task.Task{
+		ID:          "existing-1001",
+		Name:        "nightly",
+		Prompt:      "do something",
+		CronExpr:    "* * * * *",
+		ProjectPath: h.repoRoot,
+		Program:     "claude",
+		Enabled:     true,
+		CreatedAt:   time.Now(),
+	}
+	require.NoError(t, task.AddTask(existing))
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	tp := h.contentPane.TaskPane()
+	tp.SetTasks(loaded)
+	h.contentPane.SetMode(ui.ContentModeTasks)
+	tp.SetFocus(true)
+	_, _, consumed := h.handleContentPaneFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	require.True(t, consumed)
+	require.True(t, tp.IsDirty(), "toggle must mark the task pane dirty")
+
+	// Make the task persist fail too: strip write permission from the config dir.
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(configDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(configDir, 0o700) })
+
+	err = h.saveContentPaneState()
+	require.Error(t, err, "both failures must surface")
+	assert.ErrorIs(t, err, wantHooksErr, "the hooks error must not be dropped")
+	assert.Contains(t, err.Error(), "failed to save task",
+		"the task error must not be dropped when hooks also fail")
 }
