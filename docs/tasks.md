@@ -30,7 +30,7 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `enabled` | Disabled tasks never fire; their watch script is stopped |
 | `last_run_at` / `last_run_status` | Set by the daemon: `started` (session created), `sent` (prompt delivered into a session), and for watch tasks `stopped` / `errored` (see below) |
 
-A task with both triggers set is always invalid. An enabled task must have exactly one; a disabled task with neither is tolerated as a draft.
+A task with both triggers set is always invalid. An enabled task must have exactly one; a disabled task with neither is tolerated as a draft. An enabled cron task must carry a non-empty prompt — there is no event line to fall back to. Watch tasks are exempt (empty prompt defaults to the emitted line). Disabled drafts are tolerated regardless of prompt.
 
 ## Cron tasks
 
