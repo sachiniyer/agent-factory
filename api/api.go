@@ -291,11 +291,15 @@ func init() {
 	sessionsTabCreateCmd.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name (defaults to the command basename; auto-suffixed on collision)")
 	sessionsTabCreateCmd.MarkFlagRequired("command")
 
+	sessionsTabDeleteCmd.Flags().StringVar(&tabDeleteNameFlag, "name", "", "Name of the tab to delete (required)")
+	sessionsTabDeleteCmd.MarkFlagRequired("name")
+
 	SessionsCmd.AddCommand(sessionsListCmd)
 	SessionsCmd.AddCommand(sessionsGetCmd)
 	SessionsCmd.AddCommand(sessionsCreateCmd)
 	SessionsCmd.AddCommand(sessionsSendPromptCmd)
 	SessionsCmd.AddCommand(sessionsTabCreateCmd)
+	SessionsCmd.AddCommand(sessionsTabDeleteCmd)
 	SessionsCmd.AddCommand(sessionsPreviewCmd)
 	SessionsCmd.AddCommand(sessionsKillCmd)
 	SessionsCmd.AddCommand(sessionsAttachCmd)

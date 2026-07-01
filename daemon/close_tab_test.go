@@ -98,6 +98,57 @@ func TestCloseTab_RejectsAgentTab(t *testing.T) {
 	}
 }
 
+// TestCloseTab_RejectsAgentTabByName verifies the agent tab is unclosable when
+// targeted by its name too, not just by index 0 — the name path is the one
+// `af sessions tab-delete --name` drives (#1021).
+func TestCloseTab_RejectsAgentTabByName(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "worker"
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
+	agentTab := inst.GetTabs()[0].Name
+
+	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: agentTab})
+	if err == nil {
+		t.Fatal("expected error closing the agent tab by name, got nil")
+	}
+	if !strings.Contains(err.Error(), "agent tab") {
+		t.Fatalf("expected agent-tab rejection, got: %v", err)
+	}
+	if inst.TabCount() != 1 {
+		t.Fatalf("agent tab must survive, got %d tabs", inst.TabCount())
+	}
+}
+
+// TestCloseTab_RejectsUnknownSession verifies targeting a session that doesn't
+// exist is a clear error, not a panic or silent success (#1021).
+func TestCloseTab_RejectsUnknownSession(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	_, err = manager.CloseTab(CloseTabRequest{Title: "ghost", TabName: "watcher"})
+	if err == nil {
+		t.Fatal("expected error for unknown session, got nil")
+	}
+	if !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("expected error naming the missing session, got: %v", err)
+	}
+}
+
 // TestCloseTab_RejectsUnknownTab verifies a name that matches no tab is
 // rejected rather than silently closing the wrong tab.
 func TestCloseTab_RejectsUnknownTab(t *testing.T) {

@@ -28,6 +28,7 @@ var (
 	sendPromptViaDaemon    = daemon.SendPrompt
 	deliverPromptViaDaemon = daemon.DeliverPrompt
 	createTabViaDaemon     = daemon.CreateTab
+	closeTabViaDaemon      = daemon.CloseTab
 )
 
 var sessionsListCmd = &cobra.Command{
@@ -312,6 +313,52 @@ remote_hooks.terminal_cmd.`,
 			RepoID:  repoID,
 			Command: tabCreateCommandFlag,
 			Name:    tabCreateNameFlag,
+		})
+		if err != nil {
+			return jsonError(err)
+		}
+		return jsonOut(map[string]string{"name": name})
+	},
+}
+
+var tabDeleteNameFlag string
+
+var sessionsTabDeleteCmd = &cobra.Command{
+	Use:   "tab-delete <title>",
+	Short: "Delete a single tab from a session",
+	Long: `Delete the named tab from an existing session — the counterpart of tab-create.
+
+The tab is removed from the daemon's session state and its tmux window is
+killed. The removal is persistent: the daemon will not respawn the tab, and it
+does not return on a daemon/af restart. The name to pass is the tab name
+tab-create printed (also visible in the TUI tab bar).
+
+The agent tab can't be deleted — use "af sessions kill" to tear down the whole
+session. Deleting a tab or session that doesn't exist is an error, not a
+silent success. Not available for remote sessions: their tabs are fixed by
+remote_hooks config.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		if strings.TrimSpace(tabDeleteNameFlag) == "" {
+			return jsonError(fmt.Errorf("--name is required"))
+		}
+
+		// Honor --repo scoping (#891 class), mirroring tab-create: an empty
+		// repoID preserves the all-repo search; a non-empty one confines the
+		// session lookup to that repo so a same-titled session in another repo
+		// never loses a tab.
+		repoID, err := resolveRepoID()
+		if err != nil {
+			return jsonError(err)
+		}
+
+		name, err := closeTabViaDaemon(daemon.CloseTabRequest{
+			Title:   args[0],
+			RepoID:  repoID,
+			TabName: tabDeleteNameFlag,
 		})
 		if err != nil {
 			return jsonError(err)
