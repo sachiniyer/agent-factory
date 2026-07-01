@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -714,5 +715,151 @@ func TestSessionsTabCreate_HonorsRepoScopingAndReturnsName(t *testing.T) {
 	}
 	if parsed["name"] != "btop-2" {
 		t.Fatalf("JSON output name = %q, want %q (resolved tab name)", parsed["name"], "btop-2")
+	}
+}
+
+// TestSessionsTabDelete_RequiresName verifies tab-delete rejects an empty
+// --name before reaching the daemon.
+func TestSessionsTabDelete_RequiresName(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	prevRepoFlag, prevName := repoFlag, tabDeleteNameFlag
+	repoFlag = ""
+	tabDeleteNameFlag = "   "
+	defer func() { repoFlag, tabDeleteNameFlag = prevRepoFlag, prevName }()
+
+	called := false
+	prevClose := closeTabViaDaemon
+	closeTabViaDaemon = func(req daemon.CloseTabRequest) (string, error) {
+		called = true
+		return "", nil
+	}
+	defer func() { closeTabViaDaemon = prevClose }()
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStderr := os.Stderr
+	os.Stderr = devnull
+	defer func() { os.Stderr = origStderr }()
+
+	if err := sessionsTabDeleteCmd.RunE(sessionsTabDeleteCmd, []string{"sess"}); err == nil {
+		t.Fatal("expected error for empty --name, got nil")
+	} else if !strings.Contains(err.Error(), "--name is required") {
+		t.Fatalf("expected --name-required error, got: %v", err)
+	}
+	if called {
+		t.Fatal("an empty name must not reach the daemon")
+	}
+}
+
+// TestSessionsTabDelete_HonorsRepoScopingAndReturnsName verifies tab-delete
+// passes the resolved RepoID (--repo scoping, #891 class), the title, and the
+// tab name to the daemon's CloseTab RPC, and prints the deleted tab's name as
+// JSON.
+func TestSessionsTabDelete_HonorsRepoScopingAndReturnsName(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoRoot := filepath.Join(tmp, "repo-a")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	repo, err := config.RepoFromPath(repoRoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	const title = "worker"
+
+	prevRepoFlag, prevName := repoFlag, tabDeleteNameFlag
+	repoFlag = repoRoot
+	tabDeleteNameFlag = "watcher"
+	defer func() { repoFlag, tabDeleteNameFlag = prevRepoFlag, prevName }()
+
+	var gotReq daemon.CloseTabRequest
+	prevClose := closeTabViaDaemon
+	closeTabViaDaemon = func(req daemon.CloseTabRequest) (string, error) {
+		gotReq = req
+		if req.RepoID == "" {
+			return "", errors.New("RepoID empty: --repo scoping was dropped")
+		}
+		return req.TabName, nil
+	}
+	defer func() { closeTabViaDaemon = prevClose }()
+
+	// Capture stdout so we can assert the deleted name is emitted as JSON.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	runErr := sessionsTabDeleteCmd.RunE(sessionsTabDeleteCmd, []string{title})
+	w.Close()
+	os.Stdout = origStdout
+	out, _ := io.ReadAll(r)
+	if runErr != nil {
+		t.Fatalf("tab-delete returned error: %v", runErr)
+	}
+
+	if gotReq.RepoID != repo.ID {
+		t.Fatalf("tab-delete RepoID = %q, want %q", gotReq.RepoID, repo.ID)
+	}
+	if gotReq.Title != title {
+		t.Fatalf("tab-delete Title = %q, want %q", gotReq.Title, title)
+	}
+	if gotReq.TabName != "watcher" {
+		t.Fatalf("tab-delete TabName = %q, want %q", gotReq.TabName, "watcher")
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("output is not JSON (%q): %v", string(out), err)
+	}
+	if parsed["name"] != "watcher" {
+		t.Fatalf("JSON output name = %q, want %q (deleted tab name)", parsed["name"], "watcher")
+	}
+}
+
+// TestSessionsTabDelete_SurfacesDaemonError verifies a daemon-side rejection
+// (unknown session, unknown tab, agent tab) is reported as an error — not a
+// panic and not a silent success.
+func TestSessionsTabDelete_SurfacesDaemonError(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	prevRepoFlag, prevName := repoFlag, tabDeleteNameFlag
+	repoFlag = ""
+	tabDeleteNameFlag = "ghost"
+	defer func() { repoFlag, tabDeleteNameFlag = prevRepoFlag, prevName }()
+
+	prevClose := closeTabViaDaemon
+	closeTabViaDaemon = func(req daemon.CloseTabRequest) (string, error) {
+		return "", fmt.Errorf("session %q has no tab named %q", req.Title, req.TabName)
+	}
+	defer func() { closeTabViaDaemon = prevClose }()
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	origStderr := os.Stderr
+	os.Stderr = devnull
+	defer func() { os.Stderr = origStderr }()
+
+	err = sessionsTabDeleteCmd.RunE(sessionsTabDeleteCmd, []string{"sess"})
+	if err == nil {
+		t.Fatal("expected the daemon error to surface, got nil")
+	}
+	if !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("expected error naming the missing tab, got: %v", err)
 	}
 }
