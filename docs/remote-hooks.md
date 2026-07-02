@@ -154,7 +154,7 @@ Remote sessions follow the same ephemeral-tab model as local ones (see the READM
 - It has a **terminal tab if and only if `terminal_cmd` is configured.** Attaching to that tab runs `terminal_cmd`; previewing it shows a "Press Enter to open a terminal" prompt (the surface is interactive-only — `terminal_cmd` is never used for preview capture).
 - When `terminal_cmd` is **not** configured, a remote session has only its agent tab, and the would-be Terminal tab shows a "not available — configure `remote_hooks.terminal_cmd`" fallback.
 
-Because the protocol has no run-arbitrary-command verb, remote sessions **cannot** host extra process tabs: the `t` new-tab key and `af sessions tab-create` are rejected for remote sessions with a message pointing at `terminal_cmd`. A remote session's terminal tab is the one defined by `terminal_cmd` and nothing else. These tabs persist across an `af`/daemon restart like local tabs, but are reconstructed from your live `terminal_cmd` config on restore rather than from any saved local session — so adding or removing `terminal_cmd` while `af` is down is honored on the next start.
+Because the protocol has no run-arbitrary-command verb, remote sessions **cannot** host extra process tabs: the `t` new-tab key, `af sessions tab-create`, and `af sessions tab-delete` are rejected for remote sessions with a message pointing at `terminal_cmd`. A remote session's terminal tab is the one defined by `terminal_cmd` and nothing else. These tabs persist across an `af`/daemon restart like local tabs, but are reconstructed from your live `terminal_cmd` config on restore rather than from any saved local session — so adding or removing `terminal_cmd` while `af` is down is honored on the next start.
 
 ## Example
 

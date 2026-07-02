@@ -19,7 +19,9 @@ Session commands:
   af sessions list                          List all sessions
   af sessions kill <title>                  Delete/kill a session
   af sessions send-prompt <title> <prompt>  Send a prompt to another session
-  af sessions preview <title>               View another session's terminal output`
+  af sessions preview <title>               View another session's terminal output
+  af sessions tab-create <title> --command <cmd>  Spawn a process tab in the worktree
+  af sessions tab-delete <title> --name <tab>     Delete a single tab`
 
 // shellQuote wraps a string in single quotes, escaping any embedded single quotes
 // using the standard shell idiom: replace ' with '\"
