@@ -298,16 +298,6 @@ func normalizeWorktreePath(p string) string {
 	return p
 }
 
-// Remove removes the worktree but keeps the branch
-func (g *GitWorktree) Remove() error {
-	// Remove the worktree using git command
-	if _, err := g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath); err != nil {
-		return fmt.Errorf("failed to remove worktree: %w", err)
-	}
-
-	return nil
-}
-
 // Prune removes all working tree administrative files and directories
 func (g *GitWorktree) Prune() error {
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "prune"); err != nil {
