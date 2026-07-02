@@ -19,7 +19,6 @@ const prInfoStaleAfter = 60 * time.Second
 // -- Ticker message types --
 
 type tickUpdatePRInfoMessage struct{}
-type tickPendingInstancesMessage struct{}
 type tickRefreshExternalMessage struct{}
 
 // snapshotFetchedMsg carries the result of an off-loop daemon Snapshot fetch
@@ -52,13 +51,6 @@ type prInfoUpdatedMsg struct {
 var tickUpdatePRInfoCmd = func() tea.Msg {
 	time.Sleep(60 * time.Second)
 	return tickUpdatePRInfoMessage{}
-}
-
-// tickPendingInstancesCmd processes one-shot pending instances written by
-// scheduled task runs (cleared after reading). Runs every 5s.
-var tickPendingInstancesCmd = func() tea.Msg {
-	time.Sleep(5 * time.Second)
-	return tickPendingInstancesMessage{}
 }
 
 // snapshotRefreshInterval is how often the TUI polls the daemon for the
