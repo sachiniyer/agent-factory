@@ -1,6 +1,8 @@
 package task
 
 import (
+	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -108,6 +110,11 @@ var validCronCorpus = []string{
 	"0 0 * * 1/2",    // step expanding to include 7 (Sunday) (#1007)
 	"0 0 * * 1/3",    // step expanding to include 7 (Sunday) (#1007)
 	"0 0 * * 2/5",    // step expanding to include 7 (Sunday) (#1007)
+	"0 0 * * 0-7/2",  // range-step ending at 7 whose expansion skips the 7 (#1064)
+	"0 0 * * 4-7/2",  // range-step ending at 7, expansion [4,6] — no Sunday (#1064)
+	"0 0 * * 1-7/3",  // range-step ending at 7 whose expansion lands on 7 (#1064)
+	"0 0 * * 0-07/2", // leading zero on the range end bound (#1064 + #915)
+	"0 0 * * 1,5-7",  // list mixing a plain value with a range ending at 7
 }
 
 // TestParseCronAcceptsEverythingValidateAccepts is the agreement gate between
@@ -120,6 +127,40 @@ func TestParseCronAcceptsEverythingValidateAccepts(t *testing.T) {
 		schedule, err := ParseCron(expr)
 		require.NoError(t, err, "ParseCron must accept %q (ValidateCronExpr does)", expr)
 		require.NotNil(t, schedule)
+	}
+}
+
+// TestParseCronAcceptsAllValidatedDOWParts exhaustively enumerates every DOW
+// part shape ValidateCronExpr accepts — single values, steps, ranges,
+// range-steps, wildcard steps, leading-zero variants, and two-part lists —
+// and asserts ParseCron schedules each one. This closes the whole class
+// behind #888/#915/#1007/#1064 (DOW forms the validator accepts but robfig
+// rejects or misschedules) rather than pinning individual reproductions: any
+// future normalization gap for a 0-7-bounded DOW shape fails here.
+func TestParseCronAcceptsAllValidatedDOWParts(t *testing.T) {
+	var parts []string
+	for v := 0; v <= 7; v++ {
+		parts = append(parts, strconv.Itoa(v), fmt.Sprintf("0%d", v))
+		for s := 1; s <= 7; s++ {
+			parts = append(parts, fmt.Sprintf("%d/%d", v, s))
+		}
+		for b := v; b <= 7; b++ {
+			parts = append(parts, fmt.Sprintf("%d-%d", v, b), fmt.Sprintf("%d-0%d", v, b))
+			for s := 1; s <= 7; s++ {
+				parts = append(parts, fmt.Sprintf("%d-%d/%d", v, b, s))
+			}
+		}
+	}
+	for s := 1; s <= 7; s++ {
+		parts = append(parts, fmt.Sprintf("*/%d", s))
+	}
+	for _, part := range parts {
+		for _, field := range []string{part, "1," + part, part + ",5-7"} {
+			expr := "0 0 * * " + field
+			require.NoError(t, ValidateCronExpr(expr), "corpus generator produced invalid %q", expr)
+			_, err := ParseCron(expr)
+			require.NoError(t, err, "ParseCron must accept %q (ValidateCronExpr does)", expr)
+		}
 	}
 }
 
@@ -271,6 +312,62 @@ func TestParseCronDOWStepExpandingToSevenFiresSunday(t *testing.T) {
 	}
 }
 
+// TestParseCronDOWRangeStepEndingAtSevenFiresCorrectDays is the regression for
+// #1064: a DOW range-step whose end bound is 7 but whose stepped expansion
+// skips the 7 (e.g. "0-7/2" → [0,2,4,6]) evaded both normalization guards, so
+// the raw "0-7/2" reached robfig and was rejected ("end of range (7) above
+// maximum (6)") — a validated cron the daemon could never schedule. The
+// normalized form must fire exactly the expansion's days: Sun,Tue,Thu,Sat for
+// "0-7/2", and Thu,Sat only for "4-7/2" (no Sunday invented by the rewrite).
+func TestParseCronDOWRangeStepEndingAtSevenFiresCorrectDays(t *testing.T) {
+	sched, err := ParseCron("0 0 * * 0-7/2")
+	require.NoError(t, err)
+	explicit, err := ParseCron("0 0 * * 0,2,4,6")
+	require.NoError(t, err)
+	// Walk two weeks from a Saturday: 2026-06-13.
+	from := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	cur, curExplicit := from, from
+	for i := 0; i < 8; i++ {
+		cur = sched.Next(cur)
+		curExplicit = explicit.Next(curExplicit)
+		assert.Equal(t, curExplicit, cur, "0-7/2 firing %d must match 0,2,4,6", i)
+	}
+
+	// "4-7/2" expands to {Thu,Sat}; the rewrite must not add Sunday.
+	sched47, err := ParseCron("0 0 * * 4-7/2")
+	require.NoError(t, err)
+	want := []time.Time{
+		time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC), // Thursday
+		time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC), // Saturday
+		time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC), // Thursday
+	}
+	cur = from
+	for i, w := range want {
+		cur = sched47.Next(cur)
+		assert.Equal(t, w, cur, "4-7/2 firing %d must be %s", i, w.Weekday())
+	}
+}
+
+// TestParseCronDOWListWithRangeEndingAtSevenKeepsSunday pins the mixed-list
+// shape from the #1064 audit: "1,5-7" must schedule Mon,Fri,Sat,Sun — the
+// range's Sunday (7) mapped to 0, never dropped by rewriting "5-7" to "5-6".
+func TestParseCronDOWListWithRangeEndingAtSevenKeepsSunday(t *testing.T) {
+	sched, err := ParseCron("0 0 * * 1,5-7")
+	require.NoError(t, err)
+	// 2026-06-13 is a Saturday; the very next firing must be Sunday 2026-06-14.
+	from := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	assert.Equal(t, time.Date(2026, 6, 14, 0, 0, 0, 0, time.UTC), sched.Next(from),
+		"1,5-7 must fire on Sunday")
+	explicit, err := ParseCron("0 0 * * 0,1,5,6")
+	require.NoError(t, err)
+	cur, curExplicit := from, from
+	for i := 0; i < 8; i++ {
+		cur = sched.Next(cur)
+		curExplicit = explicit.Next(curExplicit)
+		assert.Equal(t, curExplicit, cur, "1,5-7 firing %d must match 0,1,5,6", i)
+	}
+}
+
 func TestNormalizeDOWField(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -295,6 +392,11 @@ func TestNormalizeDOWField(t *testing.T) {
 		{"3,7/2", "0,2,3,4,6"},   // 7-step base inside a list still keeps its step (#888)
 		{"0-7", "0,1,2,3,4,5,6"}, // full range incl. both Sunday aliases (#770: explicit list, never "*")
 		{"1-7", "0,1,2,3,4,5,6"}, // range to the 7 alias covers the whole week as a list (#770)
+		{"0-7/2", "0,2,4,6"},     // range-step ending at 7 whose expansion skips 7 — raw "0-7/2" fails robfig (#1064)
+		{"0-07/2", "0,2,4,6"},    // leading zero on the range end bound: parsed numerically, not by substring (#1064 + #915)
+		{"4-7/2", "4,6"},         // range-step ending at 7 that never reaches Sunday: rewritten without inventing a 0 (#1064)
+		{"1-7/3", "0,1,4"},       // range-step ending at 7 that lands on 7: Sunday mapped to 0 (#1064)
+		{"1,5-7", "0,1,5,6"},     // list mixing a plain value with a range ending at 7
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, normalizeDOWField(tc.in), "normalizeDOWField(%q)", tc.in)
