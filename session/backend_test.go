@@ -2140,3 +2140,97 @@ func TestLocalBackendKillRunsKillSession(t *testing.T) {
 	defer mu.Unlock()
 	assert.True(t, killed, "a genuine Kill must run tmux kill-session")
 }
+
+// closeTrackingPtyFactory is a tmux.PtyFactory returning real temp files as
+// PTYs and recording every one it hands out, so a test can assert each was
+// closed (a second Close on an *os.File fails with os.ErrClosed).
+type closeTrackingPtyFactory struct {
+	t     *testing.T
+	mu    sync.Mutex
+	files []*os.File
+}
+
+func (f *closeTrackingPtyFactory) Start(_ *exec.Cmd) (*os.File, error) {
+	file, err := os.CreateTemp(f.t.TempDir(), "pty-")
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	f.files = append(f.files, file)
+	f.mu.Unlock()
+	return file, nil
+}
+
+func (f *closeTrackingPtyFactory) Close() {}
+
+// TestLocalBackendCloseAttachOnlyReleasesEveryTabPTY is the regression test
+// for issue #1065. The daemon discards a duplicate multi-tab Instance restored
+// from disk via CloseAttachOnly (#867); since #930 every tab owns its own
+// tmux session whose restore opened its own attach PTY, so CloseAttachOnly
+// must release the PTY of EVERY tab — not just the agent tab's — and it must
+// still never run `tmux kill-session`, because the server-side sessions are
+// shared with the canonical tracked Instance.
+func TestLocalBackendCloseAttachOnlyReleasesEveryTabPTY(t *testing.T) {
+	var mu sync.Mutex
+	var ran []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			mu.Lock()
+			ran = append(ran, strings.Join(c.Args, " "))
+			mu.Unlock()
+			// has-session succeeds → Restore takes the attach branch and opens
+			// a PTY for each session.
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+	}
+	pty := &closeTrackingPtyFactory{t: t}
+
+	agentTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent", "claude", pty, cmdExec)
+	shellTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent__shell", "/bin/sh", pty, cmdExec)
+	procTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent__btop", "btop", pty, cmdExec)
+	for _, ts := range []*tmux.TmuxSession{agentTs, shellTs, procTs} {
+		require.NoError(t, ts.Restore(""), "restore must attach and open a PTY")
+	}
+	pty.mu.Lock()
+	nOpened := len(pty.files)
+	pty.mu.Unlock()
+	require.Equal(t, 3, nOpened, "each tab's restore must have opened its own PTY")
+
+	inst := &Instance{
+		Title:   "dup",
+		backend: &LocalBackend{},
+		started: true,
+		Tabs: []*Tab{
+			newAgentTab(agentTs),
+			newShellTab(shellTs),
+			{Name: "btop", Kind: TabKindProcess, Command: "btop", tmux: procTs},
+		},
+	}
+
+	require.NoError(t, inst.CloseAttachOnly())
+
+	// Every tab's attach PTY was closed — the agent's AND the shell/process
+	// tabs' (the fds that leaked before the fix).
+	pty.mu.Lock()
+	files := append([]*os.File(nil), pty.files...)
+	pty.mu.Unlock()
+	for i, f := range files {
+		assert.ErrorIs(t, f.Close(), os.ErrClosed,
+			"PTY %d (%s) must already be closed by CloseAttachOnly", i, f.Name())
+	}
+
+	// No session was killed: they are shared with the canonical Instance.
+	mu.Lock()
+	for _, c := range ran {
+		assert.NotContains(t, c, "kill-session",
+			"CloseAttachOnly must never kill the shared tmux sessions; ran: %v", ran)
+	}
+	mu.Unlock()
+
+	// Every tab's tmux ref was cleared and the instance is not-started.
+	for _, tab := range inst.GetTabs() {
+		assert.Nil(t, tab.tmux, "tab %q tmux ref must be cleared", tab.Name)
+	}
+	assert.False(t, inst.Started(), "discarded duplicate must be marked not-started")
+}

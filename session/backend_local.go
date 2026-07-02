@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -115,6 +116,14 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 				// failure into data loss. CloseAttachOnly releases only the
 				// local attach resources this object opened and leaves the
 				// server session and its worktree intact for a later retry.
+				//
+				// Releasing only the AGENT tab here is deliberate (#1065):
+				// every restore failure point precedes setupTabs, so no other
+				// tab has opened its attach PTY yet, and their tmux refs must
+				// survive for a later retry to reconnect each tab by its exact
+				// persisted name. The discard-duplicate path
+				// (LocalBackend.CloseAttachOnly) is different: there setupTabs
+				// has already run, so it must release EVERY tab's PTY.
 				i.mu.Lock()
 				ts := i.tmuxLocked()
 				i.setTmuxLocked(nil)
@@ -332,31 +341,53 @@ func (b *LocalBackend) Kill(i *Instance) error {
 	return nil
 }
 
-// CloseAttachOnly releases this instance's hold on the tmux session — the
-// attach PTY and the `tmux attach-session` child process — WITHOUT running
-// `tmux kill-session`. The server-side tmux session and the git worktree
-// behind it are left untouched. The daemon uses this to discard a duplicate
+// CloseAttachOnly releases this instance's hold on its tmux sessions — the
+// attach PTYs and the `tmux attach-session` child processes — WITHOUT running
+// `tmux kill-session`. The server-side tmux sessions and the git worktree
+// behind them are left untouched. The daemon uses this to discard a duplicate
 // Instance built from disk that turned out to already be tracked in memory
-// (#867): the duplicate must surrender the PTY it opened during restore
-// without tearing down the live session the canonical Instance shares.
+// (#867): the duplicate must surrender the PTYs it opened during restore
+// without tearing down the live sessions the canonical Instance shares.
 func (b *LocalBackend) CloseAttachOnly(i *Instance) error {
+	// Snapshot every tab's tmux session under the lock, mirroring Kill. Since
+	// #930 an instance holds N tabs (agent + shell/process), and restoring the
+	// duplicate opened an attach PTY for EVERY tab (Start restores the agent
+	// tab, setupTabs the rest), so releasing only the agent tab's PTY leaked
+	// one fd per extra tab each time the daemon discarded a duplicate —
+	// eventually EMFILE in the long-running daemon (#1065).
+	type tabSession struct {
+		tab *Tab
+		ts  *tmux.TmuxSession
+	}
 	i.mu.Lock()
-	ts := i.tmuxLocked()
+	sessions := make([]tabSession, 0, len(i.Tabs))
+	for _, tab := range i.Tabs {
+		if tab.tmux != nil {
+			sessions = append(sessions, tabSession{tab: tab, ts: tab.tmux})
+		}
+	}
 	i.started = false
 	i.mu.Unlock()
 
-	if ts == nil {
-		return nil
+	// Close outside the lock: CloseAttachOnly blocks draining the attach
+	// goroutines, and holding i.mu across it would stall every reader.
+	var errs []error
+	for _, s := range sessions {
+		if err := s.ts.CloseAttachOnly(); err != nil {
+			errs = append(errs, fmt.Errorf("tab %q: %w", s.tab.Name, err))
+		}
 	}
-
-	err := ts.CloseAttachOnly()
 
 	i.mu.Lock()
-	if i.tmuxLocked() == ts {
-		i.setTmuxLocked(nil)
+	for _, s := range sessions {
+		// Only clear a ref that is still the session we closed: a concurrent
+		// Start may have swapped in a fresh session while the lock was released.
+		if s.tab.tmux == s.ts {
+			s.tab.tmux = nil
+		}
 	}
 	i.mu.Unlock()
-	return err
+	return errors.Join(errs...)
 }
 
 func (b *LocalBackend) Preview(i *Instance) (string, error) {
