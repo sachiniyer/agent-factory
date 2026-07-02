@@ -87,5 +87,5 @@ func TestColdStartFromSnapshot_HardErrorAborts(t *testing.T) {
 
 	err := h.coldStartFromSnapshot()
 	require.Error(t, err, "a hard daemon failure must abort cold start, not fall back to disk")
-	require.Empty(t, h.sidebar.GetInstances(), "no sidebar rows on a failed cold start")
+	require.Empty(t, h.store.GetInstances(), "no sidebar rows on a failed cold start")
 }

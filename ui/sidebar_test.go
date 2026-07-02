@@ -6,6 +6,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui/store"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,7 +21,7 @@ import (
 
 func TestSidebarInitialState(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	// Should have 3 sections
 	assert.Equal(t, 3, len(s.sections))
@@ -38,7 +39,7 @@ func TestSidebarInitialState(t *testing.T) {
 
 func TestSidebarNavigation(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	// Add some instances
 	inst1, _ := session.NewInstance(session.InstanceOptions{
@@ -47,8 +48,8 @@ func TestSidebarNavigation(t *testing.T) {
 	inst2, _ := session.NewInstance(session.InstanceOptions{
 		Title: "inst2", Path: t.TempDir(), Program: "test",
 	})
-	s.AddInstance(inst1)
-	s.AddInstance(inst2)
+	addTestInstance(s, inst1)
+	addTestInstance(s, inst2)
 
 	// Start on Instances header
 	sel := s.GetSelection()
@@ -86,12 +87,12 @@ func TestSidebarNavigation(t *testing.T) {
 
 func TestSidebarExpandCollapse(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	inst, _ := session.NewInstance(session.InstanceOptions{
 		Title: "inst", Path: t.TempDir(), Program: "test",
 	})
-	s.AddInstance(inst)
+	addTestInstance(s, inst)
 
 	// Initially Instances is expanded, so we should see header + 1 instance + other headers
 	initialCount := len(s.visibleItems)
@@ -112,7 +113,7 @@ func TestSidebarExpandCollapse(t *testing.T) {
 
 func TestSidebarToggleSection(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	// Toggle Instances (starts expanded)
 	s.ToggleSection()
@@ -124,12 +125,12 @@ func TestSidebarToggleSection(t *testing.T) {
 
 func TestSidebarJumpSections(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	inst, _ := session.NewInstance(session.InstanceOptions{
 		Title: "inst", Path: t.TempDir(), Program: "test",
 	})
-	s.AddInstance(inst)
+	addTestInstance(s, inst)
 
 	// Start on Instances header
 	sel := s.GetSelection()
@@ -152,12 +153,12 @@ func TestSidebarJumpSections(t *testing.T) {
 
 func TestSidebarCollapseFromChild(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	inst, _ := session.NewInstance(session.InstanceOptions{
 		Title: "inst", Path: t.TempDir(), Program: "test",
 	})
-	s.AddInstance(inst)
+	addTestInstance(s, inst)
 
 	// Navigate to instance child
 	s.Down()
@@ -174,17 +175,17 @@ func TestSidebarCollapseFromChild(t *testing.T) {
 
 func TestSidebarInstanceManagement(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
-	assert.Equal(t, 0, s.NumInstances())
+	assert.Equal(t, 0, s.proj.NumInstances())
 
 	inst, _ := session.NewInstance(session.InstanceOptions{
 		Title: "test", Path: t.TempDir(), Program: "test",
 	})
-	s.AddInstance(inst)
-	assert.Equal(t, 1, s.NumInstances())
+	addTestInstance(s, inst)
+	assert.Equal(t, 1, s.proj.NumInstances())
 
-	instances := s.GetInstances()
+	instances := s.proj.GetInstances()
 	assert.Len(t, instances, 1)
 	assert.Equal(t, "test", instances[0].Title)
 }
@@ -208,7 +209,7 @@ func (b *goneSetPreviewSizeBackend) SetPreviewSize(*session.Instance, int, int) 
 // at ERROR on every window-resize.
 func TestSidebarSetSessionPreviewSizeSkipsErrSessionGone(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "dead", Path: t.TempDir(), Program: "test",
@@ -216,15 +217,15 @@ func TestSidebarSetSessionPreviewSizeSkipsErrSessionGone(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetBackend(&goneSetPreviewSizeBackend{FakeBackend: session.NewFakeBackend()})
 	inst.SetStartedForTest(true)
-	s.AddInstance(inst)
+	addTestInstance(s, inst)
 
-	require.NoError(t, s.SetSessionPreviewSize(80, 24),
+	require.NoError(t, s.proj.SetSessionPreviewSize(80, 24),
 		"ErrSessionGone from a single instance must not propagate as a returned error")
 }
 
 func TestSidebarSelectInstance(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	inst1, _ := session.NewInstance(session.InstanceOptions{
 		Title: "first", Path: t.TempDir(), Program: "test",
@@ -232,8 +233,8 @@ func TestSidebarSelectInstance(t *testing.T) {
 	inst2, _ := session.NewInstance(session.InstanceOptions{
 		Title: "second", Path: t.TempDir(), Program: "test",
 	})
-	s.AddInstance(inst1)
-	s.AddInstance(inst2)
+	addTestInstance(s, inst1)
+	addTestInstance(s, inst2)
 
 	s.SetSelectedInstance(1)
 	selected := s.GetSelectedInstance()
@@ -251,7 +252,7 @@ func TestSidebarSelectInstance(t *testing.T) {
 // expands the section and selects the target instance (regression for #275).
 func TestSetSelectedInstanceExpandsCollapsedSection(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	inst1, _ := session.NewInstance(session.InstanceOptions{
 		Title: "first", Path: t.TempDir(), Program: "test",
@@ -259,8 +260,8 @@ func TestSetSelectedInstanceExpandsCollapsedSection(t *testing.T) {
 	inst2, _ := session.NewInstance(session.InstanceOptions{
 		Title: "second", Path: t.TempDir(), Program: "test",
 	})
-	s.AddInstance(inst1)
-	s.AddInstance(inst2)
+	addTestInstance(s, inst1)
+	addTestInstance(s, inst2)
 
 	// Sanity check: SetSelectedInstance works when expanded.
 	s.SetSelectedInstance(1)
@@ -287,27 +288,27 @@ func TestSetSelectedInstanceExpandsCollapsedSection(t *testing.T) {
 
 func TestSidebarTaskData(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	tasks := []task.Task{
 		{ID: "1", Prompt: "backup", CronExpr: "0 0 * * *", Enabled: true, CreatedAt: time.Now()},
 		{ID: "2", Prompt: "health check", CronExpr: "*/5 * * * *", Enabled: false, CreatedAt: time.Now()},
 	}
-	s.SetTasks(tasks)
+	s.proj.SetTasks(tasks)
 
-	result := s.GetTasks()
+	result := s.proj.GetTasks()
 	assert.Len(t, result, 2)
 }
 
 func TestSidebarRender(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 	s.SetSize(40, 20)
 
 	inst, _ := session.NewInstance(session.InstanceOptions{
 		Title: "my-feature", Path: t.TempDir(), Program: "test",
 	})
-	s.AddInstance(inst)
+	addTestInstance(s, inst)
 
 	rendered := s.String()
 	assert.Contains(t, rendered, "Instances (1)")
@@ -337,14 +338,14 @@ func indicatorArrows(out string) (up, down bool) {
 func newWindowingSidebar(t *testing.T, n int) *Sidebar {
 	t.Helper()
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 	dir := t.TempDir()
 	for i := 0; i < n; i++ {
 		inst, err := session.NewInstance(session.InstanceOptions{
 			Title: fmt.Sprintf("win-%02d", i), Path: dir, Program: "test",
 		})
 		require.NoError(t, err)
-		s.AddInstance(inst)
+		addTestInstance(s, inst)
 	}
 	return s
 }
@@ -684,21 +685,21 @@ func newRepoInstance(t *testing.T, title, repoName string) *session.Instance {
 // repo entry and shows a phantom multi-repo indicator (#971).
 func TestReplaceInstanceRepoTrackingStaleEntry(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	a := newRepoInstance(t, "a", "repo-A")
 	c := newRepoInstance(t, "c", "repo-C")
-	s.AddInstance(a)()
-	s.AddInstance(c)()
-	require.Equal(t, 2, s.NumRepos())
+	addTestInstance(s, a)()
+	addTestInstance(s, c)()
+	require.Equal(t, 2, s.proj.NumRepos())
 
 	// Replace the repo-A instance with one from repo-B.
 	b := newRepoInstance(t, "b", "repo-B")
-	require.True(t, s.ReplaceInstance(a, b))
+	require.True(t, s.proj.ReplaceInstance(a, b))
 
-	_, staleA := s.repos["repo-A"]
+	staleA := s.proj.HasRepo("repo-A")
 	assert.False(t, staleA, "outgoing instance's repo (repo-A) must be dropped after a cross-repo replace")
-	assert.Equal(t, 2, s.NumRepos(), "repos must be {repo-B, repo-C} after the replace")
+	assert.Equal(t, 2, s.proj.NumRepos(), "repos must be {repo-B, repo-C} after the replace")
 }
 
 // TestReplaceInstanceRepoTrackingMissingNew: replacing an instance with one from a
@@ -706,19 +707,19 @@ func TestReplaceInstanceRepoTrackingStaleEntry(t *testing.T) {
 // repo is invisible to the multi-repo indicator until the next full reload (#971).
 func TestReplaceInstanceRepoTrackingMissingNew(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false)
+	s := NewSidebar(&spin, false, store.NewProjection())
 
 	a := newRepoInstance(t, "a", "repo-A")
-	s.AddInstance(a)()
-	require.Equal(t, 1, s.NumRepos())
+	addTestInstance(s, a)()
+	require.Equal(t, 1, s.proj.NumRepos())
 
 	// Replace the only instance with one from repo-B.
 	b := newRepoInstance(t, "b", "repo-B")
-	require.True(t, s.ReplaceInstance(a, b))
+	require.True(t, s.proj.ReplaceInstance(a, b))
 
-	_, hasB := s.repos["repo-B"]
+	hasB := s.proj.HasRepo("repo-B")
 	assert.True(t, hasB, "incoming instance's repo (repo-B) must be registered after a cross-repo replace")
-	_, staleA := s.repos["repo-A"]
+	staleA := s.proj.HasRepo("repo-A")
 	assert.False(t, staleA, "outgoing repo-A must not linger")
-	assert.Equal(t, 1, s.NumRepos(), "repos must be exactly {repo-B} after the replace")
+	assert.Equal(t, 1, s.proj.NumRepos(), "repos must be exactly {repo-B} after the replace")
 }

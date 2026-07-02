@@ -22,8 +22,8 @@ type tickUpdatePRInfoMessage struct{}
 type tickRefreshExternalMessage struct{}
 
 // snapshotFetchedMsg carries the result of an off-loop daemon Snapshot fetch
-// back to the event loop, where reconcileSnapshot mutates the sidebar (sidebar
-// mutation must stay on the bubbletea loop — #682). err is non-nil on a failed
+// back to the event loop, where reconcileSnapshot mutates the projection store
+// (store mutation must stay on the bubbletea loop — #682). err is non-nil on a failed
 // fetch; the handler retries (daemon warming) or falls back to the disk refresh
 // (version-skewed daemon without the Snapshot RPC).
 type snapshotFetchedMsg struct {
@@ -99,7 +99,7 @@ var coldStartWarmupPoll = 250 * time.Millisecond
 // the daemon is wedged reporting "starting".
 var coldStartWarmupWait = 2 * time.Minute
 
-// coldStartFromSnapshot populates the sidebar from the daemon's authoritative
+// coldStartFromSnapshot populates the projection store from the daemon's authoritative
 // Snapshot at startup, replacing the legacy instances.json disk read (#960 PR 6:
 // the TUI no longer reads the store — the daemon is the source of truth). Each
 // record is materialized the same way FromInstanceData restored a disk row,
@@ -121,7 +121,7 @@ func (m *home) coldStartFromSnapshot() error {
 			log.WarningLog.Printf("skipping session %q from snapshot: %v", d.Title, err)
 			continue
 		}
-		m.sidebar.AddInstance(inst)()
+		m.store.AddInstance(inst)()
 		inst.SetAutoYes(m.autoYes)
 	}
 	return nil
@@ -216,7 +216,7 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 
 // -- Sync methods --
 
-// handleSnapshot applies a fetched daemon snapshot to the sidebar and reports
+// handleSnapshot applies a fetched daemon snapshot to the projection store and reports
 // whether anything changed (the caller repaints only on a diff). On a fetch
 // error it degrades rather than dropping the sidebar: a warming daemon (#829) is
 // retried on the next tick (callDaemon already waited out the warm-up window),
@@ -237,9 +237,9 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 	return m.reconcileSnapshot(msg.data)
 }
 
-// reconcileSnapshot mirrors the sidebar to the daemon's authoritative snapshot
-// (#960 PR 3). The daemon is the single owner of session/tab state, so the TUI
-// renders a projection of it:
+// reconcileSnapshot mirrors the projection store to the daemon's authoritative
+// snapshot (#960 PR 3). The daemon is the single owner of session/tab state, so
+// the TUI renders a projection of it:
 //   - sessions in the snapshot but missing locally are built (FromInstanceData,
 //     reconnecting tabs by tmux name) and added;
 //   - sessions gone from the snapshot are removed;
@@ -251,9 +251,10 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 //     instance so the dead corpse never shadows the live session.
 //
 // Local-only view state is preserved: existing rows keep their pointer (so the
-// TabbedWindow's active tab and the content pane's scroll/overlay are untouched),
-// and the selected instance is re-pinned by title after the reconcile so neither a
-// removal of a preceding row nor a same-title swap of the selected row can drift the
+// active tab and the content pane's scroll/overlay are untouched), and the
+// store's selected instance is re-pinned by title after the reconcile — the
+// sidebar re-derives its cursor from that selection, so neither a removal of a
+// preceding row nor a same-title swap of the selected row can drift the
 // cursor (#969). Transient TUI-owned rows
 // (Loading creation #808, Deleting kill #844) are left entirely alone: the
 // daemon may not yet know about an in-flight create, and a mid-teardown row must
@@ -278,7 +279,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	}
 
 	existing := make(map[string]*session.Instance, len(data))
-	for _, inst := range m.sidebar.GetInstances() {
+	for _, inst := range m.store.GetInstances() {
 		existing[inst.Title] = inst
 	}
 
@@ -290,6 +291,10 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	// pointer-equality re-pin would miss it and selection would drift (#969). The
 	// title survives the swap because the rebuilt instance keeps it — the same
 	// title-based re-resolution the async handlers already use (GetInstanceByTitle).
+	// The capture reads the sidebar's cursor-derived selection (nil while the
+	// cursor rests on a section header), not the store's sticky display
+	// binding: a reconcile must only re-pin the cursor when the cursor was
+	// actually on an instance row, never yank it off a header.
 	var selectedTitle string
 	if selected := m.sidebar.GetSelectedInstance(); selected != nil {
 		selectedTitle = selected.Title
@@ -326,7 +331,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	// Remove sessions the daemon no longer owns. Skip transient rows (an
 	// in-flight create the daemon doesn't list yet; a mid-teardown kill).
 	var toRemove []*session.Instance
-	for _, inst := range m.sidebar.GetInstances() {
+	for _, inst := range m.store.GetInstances() {
 		if _, ok := snapByTitle[inst.Title]; ok {
 			continue
 		}
@@ -336,17 +341,19 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		toRemove = append(toRemove, inst)
 	}
 	for _, inst := range toRemove {
-		m.sidebar.RemoveInstanceByTitle(inst.Title)
+		m.store.RemoveInstanceByTitle(inst.Title)
 		changed = true
 	}
 
-	// Re-pin the selection to the same logical instance (by title) if it survived
-	// the reconcile. Re-resolving by title correctly re-pins across a swap because
-	// the rebuilt instance keeps the same title (#969). If the selected title is
-	// gone from the snapshot, leave the sidebar's own clamp behavior as-is.
+	// Re-pin the selection to the same logical instance (by title) if it
+	// survived the reconcile. Re-resolving by title correctly re-pins across a
+	// swap because the rebuilt instance keeps the same title (#969). The store's
+	// SelectInstance records the assertion; the sidebar moves its cursor onto
+	// the asserted row on its next read. If the selected title is gone from the
+	// snapshot, leave the sidebar's own clamp behavior as-is.
 	if selectedTitle != "" {
-		if inst := m.sidebar.GetInstanceByTitle(selectedTitle); inst != nil {
-			m.sidebar.SelectInstance(inst)
+		if inst := m.store.GetInstanceByTitle(selectedTitle); inst != nil {
+			m.store.SelectInstance(inst)
 		}
 	}
 
@@ -354,22 +361,22 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 }
 
 // addInstanceFromSnapshot builds a live instance from a snapshot record and adds
-// it to the sidebar. Returns true on success (a real change). A build failure is
-// logged and skipped — a single unrestorable record must not abort the whole
-// reconcile.
+// it to the projection store. Returns true on success (a real change). A build
+// failure is logged and skipped — a single unrestorable record must not abort
+// the whole reconcile.
 func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 	inst, err := buildInstanceFromSnapshot(d)
 	if err != nil {
 		log.WarningLog.Printf("failed to build instance %q from snapshot: %v", d.Title, err)
 		return false
 	}
-	m.sidebar.AddInstance(inst)()
+	m.store.AddInstance(inst)()
 	inst.SetAutoYes(m.autoYes)
 	return true
 }
 
-// swapInstanceFromSnapshot replaces a stale same-title sidebar row with a freshly
-// built instance for the recreated session (#765), preserving the selected row.
+// swapInstanceFromSnapshot replaces a stale same-title row with a freshly
+// built instance for the recreated session (#765), preserving the selection.
 // Built BEFORE the swap so a transient build failure leaves the existing row in
 // place rather than dropping it.
 func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
@@ -378,15 +385,15 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
 		return false
 	}
-	if !m.sidebar.ReplaceInstanceByTitle(d.Title, inst) {
+	if !m.store.ReplaceInstanceByTitle(d.Title, inst) {
 		// The row vanished between read and swap; add it fresh.
-		m.sidebar.AddInstance(inst)()
+		m.store.AddInstance(inst)()
 	}
 	inst.SetAutoYes(m.autoYes)
 	return true
 }
 
-// updateInstanceFromSnapshot reconciles an existing sidebar row's tab list and
+// updateInstanceFromSnapshot reconciles an existing row's tab list and
 // PR badge to the snapshot IN PLACE (same pointer, so view state survives).
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
@@ -443,7 +450,7 @@ func prInfoDiffersFromData(inst *session.Instance, d session.PRInfoData) bool {
 	return cur.Number != d.Number || cur.Title != d.Title || cur.URL != d.URL || cur.State != d.State
 }
 
-// isTransientStatus reports whether an in-memory sidebar instance is in a
+// isTransientStatus reports whether an in-memory instance is in a
 // state owned by an in-flight TUI operation — Loading (creation, #808) or
 // Deleting (async kill, #844) — during which the snapshot reconcile must
 // neither replace nor reap it.
@@ -480,9 +487,9 @@ func (m *home) importRemoteHookSessions() int {
 		return 0
 	}
 
-	existingTitles := m.sidebar.GetInstanceTitles()
+	existingTitles := m.store.GetInstanceTitles()
 	existingHookNames := make(map[string]bool)
-	for _, inst := range m.sidebar.GetInstances() {
+	for _, inst := range m.store.GetInstances() {
 		if !inst.IsRemote() {
 			continue
 		}
@@ -502,7 +509,7 @@ func (m *home) importRemoteHookSessions() int {
 			log.WarningLog.Printf("failed to import remote hook session %q: %v", data.Title, err)
 			continue
 		}
-		m.sidebar.AddInstance(inst)()
+		m.store.AddInstance(inst)()
 		inst.SetAutoYes(m.autoYes)
 		existingTitles[data.Title] = true
 		existingHookNames[name] = true

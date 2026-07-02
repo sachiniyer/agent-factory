@@ -23,8 +23,8 @@ func instanceWithTabs(n int) *session.Instance {
 // TestTabbedWindowJumpToTab covers the number-key jump: in-range indices select
 // the tab, out-of-range indices are a no-op (#930 PR 4).
 func TestTabbedWindowJumpToTab(t *testing.T) {
-	tw := NewTabbedWindow(NewTabPane())
-	tw.SetInstance(instanceWithTabs(3))
+	tw := newTestTabbedWindow()
+	setWindowInstance(tw, instanceWithTabs(3))
 
 	require.True(t, tw.JumpToTab(2))
 	require.Equal(t, 2, tw.GetActiveTab())
@@ -42,8 +42,8 @@ func TestTabbedWindowJumpToTab(t *testing.T) {
 // TestTabbedWindowSelectLastAndNeighbor covers SelectLastTab (used after a new
 // tab is appended) and SelectTab (used to land on a neighbor after a close).
 func TestTabbedWindowSelectLastAndNeighbor(t *testing.T) {
-	tw := NewTabbedWindow(NewTabPane())
-	tw.SetInstance(instanceWithTabs(4))
+	tw := newTestTabbedWindow()
+	setWindowInstance(tw, instanceWithTabs(4))
 
 	tw.SelectLastTab()
 	require.Equal(t, 3, tw.GetActiveTab(), "SelectLastTab selects the final tab")
@@ -62,12 +62,12 @@ func TestTabbedWindowSelectLastAndNeighbor(t *testing.T) {
 // to an instance with fewer tabs must not leave activeTab pointing past the end
 // (which would make isAgentSlot() lie and capture a phantom slot).
 func TestTabbedWindowClampsActiveTabOnInstanceSwitch(t *testing.T) {
-	tw := NewTabbedWindow(NewTabPane())
-	tw.SetInstance(instanceWithTabs(4))
+	tw := newTestTabbedWindow()
+	setWindowInstance(tw, instanceWithTabs(4))
 	require.True(t, tw.JumpToTab(3))
 	require.Equal(t, 3, tw.GetActiveTab())
 
-	tw.SetInstance(instanceWithTabs(2))
+	setWindowInstance(tw, instanceWithTabs(2))
 	require.LessOrEqual(t, tw.GetActiveTab(), 1,
 		"activeTab must be clamped when switching to an instance with fewer tabs")
 	require.GreaterOrEqual(t, tw.GetActiveTab(), 0)

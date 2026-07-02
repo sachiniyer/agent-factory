@@ -27,7 +27,7 @@ func TestTabbedWindowSetSizeClampsNegativeDimensions(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewTabbedWindow(NewTabPane())
+			w := newTestTabbedWindow()
 			w.SetSize(tc.width, tc.height)
 
 			previewW, previewH := w.GetPreviewSize()
@@ -42,7 +42,7 @@ func TestTabbedWindowSetSizeClampsNegativeDimensions(t *testing.T) {
 // TestTabbedWindowSetSizeNormal sanity-checks that reasonable sizes still
 // produce positive content dimensions.
 func TestTabbedWindowSetSizeNormal(t *testing.T) {
-	w := NewTabbedWindow(NewTabPane())
+	w := newTestTabbedWindow()
 	w.SetSize(200, 100)
 
 	previewW, previewH := w.GetPreviewSize()
@@ -51,7 +51,7 @@ func TestTabbedWindowSetSizeNormal(t *testing.T) {
 }
 
 func TestTabbedWindowStringDoesNotExceedConfiguredWidth(t *testing.T) {
-	w := NewTabbedWindow(NewTabPane())
+	w := newTestTabbedWindow()
 	w.SetSize(100, 30)
 	w.tab.content = tabContentState{text: "content"}
 

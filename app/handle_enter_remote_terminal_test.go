@@ -63,7 +63,7 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 	require.True(t, inst.TmuxAlive(),
 		"precondition: instance must be attachable so handleEnter reaches the attach path")
 
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	tw := h.contentPane.TabbedWindow()

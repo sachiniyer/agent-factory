@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
+	"github.com/sachiniyer/agent-factory/ui/store"
 	"io"
 	"os"
 	"path/filepath"
@@ -94,6 +95,13 @@ type home struct {
 
 	// -- UI Components --
 
+	// store is the single read-only projection of daemon-owned state that the
+	// panes render (#1024 PR 2): the instance list + repo bookkeeping + tasks +
+	// hook count, plus the cross-pane selection (selected instance, active tab
+	// index). Written on the bubbletea event loop by reconcileSnapshot and the
+	// session-control handlers; read by the sidebar and tabbed window, which
+	// keep only their own local UI state (cursor, scroll, expansion).
+	store *store.Projection
 	// sidebar is the unified left navigation pane with collapsible sections
 	sidebar *ui.Sidebar
 	// contentPane wraps the tabbed window and other contextual panes
@@ -156,11 +164,13 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	// longer reads instances.json — the daemon owns it and answers Snapshot).
 	appState := config.LoadState()
 
-	tabbedWindow := ui.NewTabbedWindow(ui.NewTabPane())
+	proj := store.NewProjection()
+	tabbedWindow := ui.NewTabbedWindow(ui.NewTabPane(), proj)
 
 	h := &home{
 		ctx:             ctx,
 		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		store:           proj,
 		menu:            ui.NewMenu(),
 		contentPane:     ui.NewContentPane(tabbedWindow),
 		errBox:          ui.NewErrBox(),
@@ -173,9 +183,9 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		state:           stateDefault,
 		appState:        appState,
 	}
-	h.sidebar = ui.NewSidebar(&h.spinner, autoYes)
+	h.sidebar = ui.NewSidebar(&h.spinner, autoYes, proj)
 
-	// Cold-start the sidebar from the daemon's authoritative Snapshot (#960 PR 6).
+	// Cold-start the projection from the daemon's authoritative Snapshot (#960 PR 6).
 	// The TUI no longer reads instances.json — the daemon is the sole writer/owner
 	// of session state, so startup mirrors the same projection the refresh tick
 	// reconciles against. A warming daemon (#829) is waited out, not raced.
@@ -191,7 +201,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	if err != nil {
 		log.WarningLog.Printf("failed to load tasks: %v", err)
 	} else {
-		h.sidebar.SetTasks(tasks)
+		h.store.SetTasks(tasks)
 	}
 
 	// Load tasks into task pane
@@ -205,7 +215,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	if err != nil {
 		log.WarningLog.Printf("failed to resolve repo config: %v", err)
 	} else {
-		h.sidebar.SetHookCount(len(repoCfg.PostWorktreeCommands))
+		h.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
 		h.contentPane.HooksPane().SetCommands(repoCfg.PostWorktreeCommands)
 	}
 
@@ -235,7 +245,7 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 
 	tw := m.contentPane.TabbedWindow()
 	previewWidth, previewHeight := tw.GetPreviewSize()
-	if err := m.sidebar.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
+	if err := m.store.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
 		log.ErrorLog.Print(err)
 	}
 	m.menu.SetSize(msg.Width, menuHeight)
@@ -303,8 +313,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// represents this session. If the session is gone entirely, drop the
 		// stale fetch result (#862).
 		target := msg.instance
-		if !m.sidebar.ContainsInstance(target) {
-			target = m.sidebar.GetInstanceByTitle(msg.instance.Title)
+		if !m.store.ContainsInstance(target) {
+			target = m.store.GetInstanceByTitle(msg.instance.Title)
 		}
 		if target == nil {
 			return m, nil
@@ -465,7 +475,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// instances slice, which can bump selectedIdx onto a different
 			// row when the removed instance preceded the selected one.
 			priorSelection := m.sidebar.GetSelectedInstance()
-			m.sidebar.RemoveInstanceByTitle(msg.instance.Title)
+			m.store.RemoveInstanceByTitle(msg.instance.Title)
 			if priorSelection != nil && priorSelection != msg.instance {
 				m.sidebar.SelectInstance(priorSelection)
 			}
@@ -490,9 +500,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// runs here to register it now.
 		swapped := false
 		if started != msg.instance {
-			if m.sidebar.ReplaceInstance(msg.instance, started) {
+			if m.store.ReplaceInstance(msg.instance, started) {
 				swapped = true
-			} else if !m.sidebar.ContainsInstance(started) {
+			} else if !m.store.ContainsInstance(started) {
 				// The Loading placeholder may have been swapped for a
 				// disk-built copy of this same session by a background sync
 				// while the start RPC was in flight; both Replace and
@@ -500,19 +510,19 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// unconditionally would leave two sidebar rows — and two
 				// persisted records — for one session (#808), so replace any
 				// same-title row instead.
-				if m.sidebar.ReplaceInstanceByTitle(started.Title, started) {
+				if m.store.ReplaceInstanceByTitle(started.Title, started) {
 					swapped = true
 				} else {
-					m.sidebar.AddInstance(started)
+					m.store.AddInstance(started)
 				}
 			}
-		} else if !m.sidebar.ContainsInstance(started) {
-			m.sidebar.AddInstance(started)
+		} else if !m.store.ContainsInstance(started) {
+			m.store.AddInstance(started)
 		}
 
 		started.SetStatus(session.Running)
 		if !swapped && !started.IsRemote() {
-			m.sidebar.RegisterRepoForInstance(started)
+			m.store.RegisterRepoForInstance(started)
 		}
 		started.SetAutoYes(m.autoYes)
 
@@ -597,7 +607,7 @@ func (m *home) saveContentPaneState() error {
 			// the recovery note above) so the in-memory edit survives for retry.
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save hooks: %w", err))
 		} else {
-			m.sidebar.SetHookCount(len(hp.GetCommands()))
+			m.store.SetHookCount(len(hp.GetCommands()))
 		}
 	}
 
@@ -628,7 +638,7 @@ func (m *home) saveContentPaneState() error {
 	// (#934): whatever actually committed, both panes now show it.
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
-		m.sidebar.SetTasks(tasks)
+		m.store.SetTasks(tasks)
 		sp.SetTasks(tasks)
 	} else {
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
@@ -711,7 +721,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// Refresh sidebar and task pane
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
-		m.sidebar.SetTasks(tasks)
+		m.store.SetTasks(tasks)
 		sp.SetTasks(tasks)
 	}
 	return nil
@@ -749,8 +759,8 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 		return m.handleError(fmt.Errorf("failed to create instance: %w", err))
 	}
 
-	m.sidebar.AddInstance(instance)
-	m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
+	m.store.AddInstance(instance)
+	m.sidebar.SetSelectedInstance(m.store.NumInstances() - 1)
 	instance.SetStatus(session.Loading)
 	m.menu.SetState(ui.StateDefault)
 
@@ -1070,7 +1080,12 @@ func (m *home) selectionChanged() tea.Cmd {
 	case sel.Kind == ui.SectionInstances && !sel.IsHeader:
 		m.contentPane.SetMode(ui.ContentModeInstance)
 		selected := m.sidebar.GetSelectedInstance()
-		tw.SetInstance(selected)
+		// Bind the workspace panes to the cursor's instance — the store's
+		// display binding replaces the pre-#1024 TabbedWindow.instance pointer,
+		// including the nil case — then re-clamp the active tab index against
+		// the new instance's tab count.
+		m.store.SetSelectedInstance(selected)
+		tw.ClampActiveTab()
 		m.menu.SetInstance(selected)
 		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
 		if !attachedNow {
@@ -1094,7 +1109,7 @@ func (m *home) selectionChanged() tea.Cmd {
 	default:
 		// On section headers, show the instance preview if available
 		if sel.Kind == ui.SectionInstances {
-			if m.sidebar.NumInstances() > 0 {
+			if m.store.NumInstances() > 0 {
 				m.contentPane.SetMode(ui.ContentModeInstance)
 			} else {
 				m.contentPane.SetMode(ui.ContentModeEmpty)

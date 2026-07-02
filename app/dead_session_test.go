@@ -42,7 +42,7 @@ func TestHandleEnter_DeadSessionShowsError(t *testing.T) {
 	// Ready is the deceptive starting status the bug report describes — the
 	// sidebar still paints it green even though the session is gone.
 	inst := newDeadInstance(t, "dead-session", session.Ready)
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	model, cmd := h.handleEnter()

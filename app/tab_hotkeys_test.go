@@ -121,10 +121,11 @@ func startedLocalInstance(t *testing.T, title string) *session.Instance {
 // selectInstance wires the instance into the sidebar + tabbed window and puts the
 // content pane into instance mode, mirroring what selectionChanged would do.
 func selectInstance(h *home, inst *session.Instance) {
-	h.sidebar.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(h.sidebar.NumInstances() - 1)
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(h.store.NumInstances() - 1)
 	h.contentPane.SetMode(ui.ContentModeInstance)
-	h.contentPane.TabbedWindow().SetInstance(inst)
+	h.store.SetSelectedInstance(inst)
+	h.contentPane.TabbedWindow().ClampActiveTab()
 }
 
 // nextShellTabName mirrors session.uniqueShellName ("shell", "shell-2", …) so a

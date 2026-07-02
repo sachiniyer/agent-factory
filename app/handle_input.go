@@ -22,7 +22,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// background sync may have drifted the selection off the naming row, in
 		// which case selection-based Kill() silently no-ops and leaves a
 		// "Loading" zombie behind (#717). Kill before clearing the pointer.
-		if err := m.sidebar.KillInstance(m.namingInstance); err != nil {
+		if err := m.store.KillInstance(m.namingInstance); err != nil {
 			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
 		}
 		m.state = stateDefault
@@ -46,7 +46,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(instance.Title) == "" {
 			return m, m.handleError(fmt.Errorf("title cannot be empty"))
 		}
-		for _, other := range m.sidebar.GetInstances() {
+		for _, other := range m.store.GetInstances() {
 			if other == instance {
 				continue
 			}
@@ -60,8 +60,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if instance.IsRemote() {
-			existing := make([]*session.Instance, 0, m.sidebar.NumInstances())
-			for _, other := range m.sidebar.GetInstances() {
+			existing := make([]*session.Instance, 0, m.store.NumInstances())
+			for _, other := range m.store.GetInstances() {
 				if other == instance || !other.IsRemote() {
 					continue
 				}
@@ -146,7 +146,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		// Kill by the captured namingInstance pointer, not the live selection
 		// (#717) — see the ctrl+c branch above for the full rationale.
-		if err := m.sidebar.KillInstance(m.namingInstance); err != nil {
+		if err := m.store.KillInstance(m.namingInstance); err != nil {
 			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
 		}
 		m.namingInstance = nil
@@ -177,8 +177,8 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 		return m, m.handleError(err)
 	}
 	instance.SetStatus(session.Loading)
-	m.sidebar.AddInstance(instance)
-	m.sidebar.SetSelectedInstance(m.sidebar.NumInstances() - 1)
+	m.store.AddInstance(instance)
+	m.sidebar.SetSelectedInstance(m.store.NumInstances() - 1)
 	m.namingInstance = instance
 	m.state = stateNew
 	m.menu.SetState(ui.StateNewInstance)

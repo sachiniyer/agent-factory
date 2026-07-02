@@ -19,8 +19,8 @@ func TestTabbedWindowSingleTabBorderRendering(t *testing.T) {
 	defer log.Close()
 
 	inst := startedRemoteInstance(t, false)
-	w := NewTabbedWindow(NewTabPane())
-	w.SetInstance(inst)
+	w := newTestTabbedWindow()
+	setWindowInstance(w, inst)
 	require.Equal(t, []string{"Preview"}, w.tabLabels(), "remote without terminal_cmd has a single tab")
 	require.Equal(t, 0, w.GetActiveTab(), "the lone tab is active")
 

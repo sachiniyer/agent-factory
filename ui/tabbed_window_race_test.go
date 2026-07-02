@@ -20,7 +20,7 @@ import (
 // Run with `go test -race`: reports a DATA RACE on master and passes after the
 // fix.
 func TestTabbedWindowActiveTabRace(t *testing.T) {
-	tw := NewTabbedWindow(NewTabPane())
+	tw := newTestTabbedWindow()
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})

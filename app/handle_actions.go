@@ -163,7 +163,7 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	// cmd) guarantees the row is visibly deleting and kill/attach are fenced
 	// off before any other event can be processed.
 	killAction := func() tea.Msg {
-		for _, inst := range m.sidebar.GetInstances() {
+		for _, inst := range m.store.GetInstances() {
 			if inst.Title == selectedTitle {
 				inst.SetStatus(session.Deleting)
 				return startKillMsg{title: selectedTitle}
@@ -222,7 +222,7 @@ func (m *home) killInstanceCmd(title string) tea.Cmd {
 // error box.
 func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		for _, inst := range m.sidebar.GetInstances() {
+		for _, inst := range m.store.GetInstances() {
 			if inst.Title == msg.title && inst.GetStatus() == session.Deleting {
 				inst.SetStatus(session.Ready)
 				break
@@ -237,16 +237,16 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 	// deleted disk record first — both removals are no-ops then.
 	var repoName string
 	var repoErr error = fmt.Errorf("instance not found")
-	for _, inst := range m.sidebar.GetInstances() {
+	for _, inst := range m.store.GetInstances() {
 		if inst.Title == msg.title {
 			repoName, repoErr = inst.RepoName()
 			break
 		}
 	}
 	if repoErr == nil {
-		m.sidebar.RemoveInstanceByTitleWithRepo(msg.title, repoName)
+		m.store.RemoveInstanceByTitleWithRepo(msg.title, repoName)
 	} else {
-		m.sidebar.RemoveInstanceByTitle(msg.title)
+		m.store.RemoveInstanceByTitle(msg.title)
 	}
 	return m, m.selectionChanged()
 }
@@ -326,7 +326,7 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		}
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 			return attachOverlayCallbackFn(m, "handleEnter-sidebar", "", selected.IsRemote(), func() (chan struct{}, error) {
-				return m.sidebar.AttachInstance(selected)
+				return m.store.AttachInstance(selected)
 			})
 		})
 	}

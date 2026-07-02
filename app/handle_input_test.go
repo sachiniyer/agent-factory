@@ -162,7 +162,7 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 			// it (Loading rows are protected as in-flight creations).
 			preceding := newLoadingInstance(t, "preceding")
 			preceding.SetStatus(session.Running)
-			h.sidebar.AddInstance(preceding)
+			h.store.AddInstance(preceding)
 
 			// The naming instance: Loading, empty title — exactly what
 			// startNewInstance creates. It is selected (last row).
@@ -173,15 +173,15 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 			})
 			require.NoError(t, err)
 			naming.SetStatus(session.Loading)
-			h.sidebar.AddInstance(naming)
-			h.sidebar.SetSelectedInstance(h.sidebar.NumInstances() - 1)
+			h.store.AddInstance(naming)
+			h.sidebar.SetSelectedInstance(h.store.NumInstances() - 1)
 			h.namingInstance = naming
 
 			// A background mutation removes `preceding` (a daemon-owned row the
 			// snapshot no longer lists). RemoveInstanceByTitle rebuilds
 			// visibleItems without adjusting selectedIdx, drifting the selection
 			// off the naming row onto a section header.
-			h.sidebar.RemoveInstanceByTitle("preceding")
+			h.store.RemoveInstanceByTitle("preceding")
 			require.Nil(t, h.sidebar.GetSelectedInstance(),
 				"precondition: selection must have drifted off the naming row onto a header")
 
@@ -189,9 +189,9 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 
 			assert.Equal(t, stateDefault, h.state, "cancel must return to the default state")
 			assert.Nil(t, h.namingInstance, "namingInstance pointer must be cleared on cancel")
-			assert.Equal(t, 0, h.sidebar.NumInstances(),
+			assert.Equal(t, 0, h.store.NumInstances(),
 				"the naming instance must be removed on cancel, not left as a Loading zombie; remaining titles: %v",
-				collectTitles(h.sidebar.GetInstances()))
+				collectTitles(h.store.GetInstances()))
 		})
 	}
 }
@@ -207,7 +207,7 @@ func TestHandleStateNewRejectsDuplicateTitle(t *testing.T) {
 		Program: "claude",
 	})
 	require.NoError(t, err)
-	h.sidebar.AddInstance(existing)
+	h.store.AddInstance(existing)
 
 	naming, err := session.NewInstance(session.InstanceOptions{
 		Title:   "fix-bug",
@@ -283,7 +283,7 @@ func TestHandleStateNewRejectsCaseVariantTitle(t *testing.T) {
 				Program: "claude",
 			})
 			require.NoError(t, err)
-			h.sidebar.AddInstance(existing)
+			h.store.AddInstance(existing)
 
 			naming, err := session.NewInstance(session.InstanceOptions{
 				Title:   tc.naming,
@@ -324,7 +324,7 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 		ForceRemote: true,
 	})
 	require.NoError(t, err)
-	h.sidebar.AddInstance(existing)
+	h.store.AddInstance(existing)
 
 	naming, err := session.NewInstance(session.InstanceOptions{
 		Title:       "my_app",

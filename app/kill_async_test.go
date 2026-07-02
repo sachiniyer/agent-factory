@@ -72,7 +72,7 @@ func TestHandleKill_MarksDeletingWithoutBlockingEventLoop(t *testing.T) {
 
 	h := newTestHome(t)
 	inst := newKillableInstance(t, "slow-remote")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	// The synchronous part of the flow: confirm + the startKillMsg hop. Bound
@@ -109,7 +109,7 @@ func TestHandleKill_MarksDeletingWithoutBlockingEventLoop(t *testing.T) {
 		t.Fatal("kill cmd completed before the daemon RPC was released")
 	default:
 	}
-	assert.Equal(t, []string{"slow-remote"}, collectTitles(h.sidebar.GetInstances()),
+	assert.Equal(t, []string{"slow-remote"}, collectTitles(h.store.GetInstances()),
 		"row must stay in the sidebar while deletion is in flight")
 	assert.Equal(t, session.Deleting, inst.GetStatus())
 
@@ -126,7 +126,7 @@ func TestHandleKill_MarksDeletingWithoutBlockingEventLoop(t *testing.T) {
 	require.NoError(t, killed.err)
 
 	_, _ = h.Update(killed)
-	assert.Empty(t, h.sidebar.GetInstances(), "row must be removed once teardown completes")
+	assert.Empty(t, h.store.GetInstances(), "row must be removed once teardown completes")
 }
 
 // TestHandleKill_FailureRevertsToReadyAndAllowsRetry: a failed teardown must
@@ -139,7 +139,7 @@ func TestHandleKill_FailureRevertsToReadyAndAllowsRetry(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(500, 1)
 	inst := newKillableInstance(t, "doomed")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	cmd := confirmKill(t, h)
@@ -154,7 +154,7 @@ func TestHandleKill_FailureRevertsToReadyAndAllowsRetry(t *testing.T) {
 
 	_, _ = h.Update(killed)
 
-	assert.Equal(t, []string{"doomed"}, collectTitles(h.sidebar.GetInstances()),
+	assert.Equal(t, []string{"doomed"}, collectTitles(h.store.GetInstances()),
 		"failed kill must keep the row so the user can retry")
 	assert.Equal(t, session.Ready, inst.GetStatus(),
 		"failed kill must revert Deleting so kill is enabled again")
@@ -181,7 +181,7 @@ func TestHandleKill_DeletingInstanceIsNoOp(t *testing.T) {
 	h.errBox.SetSize(500, 1)
 	inst := newKillableInstance(t, "going-away")
 	inst.SetStatus(session.Deleting)
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	model, _ := h.handleKill()
@@ -198,7 +198,7 @@ func TestHandleEnter_DeletingInstanceIsNoOp(t *testing.T) {
 	h.errBox.SetSize(500, 1)
 	inst := newKillableInstance(t, "going-away")
 	inst.SetStatus(session.Deleting)
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	model, _ := h.handleEnter()
@@ -214,5 +214,5 @@ func TestHandleEnter_DeletingInstanceIsNoOp(t *testing.T) {
 func TestInstanceKilled_RowAlreadyRemoved(t *testing.T) {
 	h := newTestHome(t)
 	_, _ = h.Update(instanceKilledMsg{title: "already-gone"})
-	assert.Empty(t, h.sidebar.GetInstances())
+	assert.Empty(t, h.store.GetInstances())
 }

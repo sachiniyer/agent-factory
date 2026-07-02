@@ -36,7 +36,7 @@ func TestReconcileSnapshot_AddsAndRemovesSessions(t *testing.T) {
 	}))
 
 	keep := newSnapshotTestInstance(t, "keep")
-	h.sidebar.AddInstance(keep)
+	h.store.AddInstance(keep)
 
 	// Snapshot adds "new" alongside the existing "keep" (matched by CreatedAt).
 	added := h.reconcileSnapshot([]session.InstanceData{
@@ -67,9 +67,9 @@ func TestReconcileSnapshot_PreservesSelectionAndActiveTab(t *testing.T) {
 	a := newSnapshotTestInstance(t, "a")
 	b := newSnapshotTestInstance(t, "b")
 	c := newSnapshotTestInstance(t, "c")
-	h.sidebar.AddInstance(a)
-	h.sidebar.AddInstance(b)
-	h.sidebar.AddInstance(c)
+	h.store.AddInstance(a)
+	h.store.AddInstance(b)
+	h.store.AddInstance(c)
 	h.sidebar.SelectInstance(b)
 	require.Same(t, b, h.sidebar.GetSelectedInstance())
 
@@ -112,9 +112,9 @@ func TestReconcileSnapshot_SelectionDriftAfterSwapAndRemoval(t *testing.T) {
 	a := newSnapshotTestInstance(t, "a")
 	b := newSnapshotTestInstance(t, "b")
 	c := newSnapshotTestInstance(t, "c")
-	h.sidebar.AddInstance(a)
-	h.sidebar.AddInstance(b)
-	h.sidebar.AddInstance(c)
+	h.store.AddInstance(a)
+	h.store.AddInstance(b)
+	h.store.AddInstance(c)
 	h.sidebar.SelectInstance(b)
 	require.Same(t, b, h.sidebar.GetSelectedInstance(), "initial selection must be on b")
 
@@ -139,7 +139,7 @@ func TestReconcileSnapshot_SelectionDriftAfterSwapAndRemoval(t *testing.T) {
 func TestReconcileSnapshot_NoChangeWhenUnchanged(t *testing.T) {
 	h := newTestHome(t)
 	a := newSnapshotTestInstance(t, "a")
-	h.sidebar.AddInstance(a)
+	h.store.AddInstance(a)
 
 	changed := h.reconcileSnapshot([]session.InstanceData{a.ToInstanceData()})
 	assert.False(t, changed, "an unchanged snapshot must not report a change (no repaint/flicker)")
@@ -153,7 +153,7 @@ func TestReconcileSnapshot_SwapsKillRecreatedSameTitle(t *testing.T) {
 	h := newTestHome(t)
 
 	stale := newSnapshotTestInstance(t, "dup")
-	h.sidebar.AddInstance(stale)
+	h.store.AddInstance(stale)
 
 	recreated := newSnapshotTestInstance(t, "dup") // distinct pointer + CreatedAt
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
@@ -164,7 +164,7 @@ func TestReconcileSnapshot_SwapsKillRecreatedSameTitle(t *testing.T) {
 	assert.True(t, changed)
 
 	var matches []*session.Instance
-	for _, inst := range h.sidebar.GetInstances() {
+	for _, inst := range h.store.GetInstances() {
 		if inst.Title == "dup" {
 			matches = append(matches, inst)
 		}
@@ -207,7 +207,7 @@ func TestFetchSnapshotCmd_UsesFetcherSeam(t *testing.T) {
 func TestHandleSnapshot_WarmingDaemonLeavesSidebarIntact(t *testing.T) {
 	h := newTestHome(t)
 	a := newSnapshotTestInstance(t, "a")
-	h.sidebar.AddInstance(a)
+	h.store.AddInstance(a)
 
 	changed := h.handleSnapshot(snapshotFetchedMsg{
 		err: errors.New("agent-factory daemon is starting (restoring sessions); retry shortly"),

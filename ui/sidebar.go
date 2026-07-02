@@ -1,14 +1,12 @@
 package ui
 
 import (
-	"errors"
 	"fmt"
-	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
-	"github.com/sachiniyer/agent-factory/task"
 	"strconv"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/store"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
@@ -50,11 +48,26 @@ var sectionHeaderSelectedStyle = lipgloss.NewStyle().
 var windowIndicatorStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
-// Sidebar is the unified left navigation pane with collapsible sections.
+// Sidebar is the unified left navigation pane with collapsible sections. It is
+// a VIEW over the store.Projection (#1024 PR 2): the instance/task/hook data —
+// and the cross-pane selection — live in the store, written by the snapshot
+// reconcile and the session-control handlers. The sidebar owns only its local
+// UI state: the flattened row list, the cursor over it, section expansion, and
+// the scroll window.
 type Sidebar struct {
+	proj *store.Projection
+
 	sections     []SidebarSection
 	visibleItems []SidebarItem
 	selectedIdx  int
+
+	// seenVersion is the store version visibleItems (and the cursor re-pin)
+	// were last derived from. The store is written directly by event-loop
+	// handlers without notifying the sidebar, so every public method lazily
+	// re-derives via syncFromStore before touching the row list. seenSelSeq
+	// tracks the store's SelectInstance assertions the cursor has honored.
+	seenVersion uint64
+	seenSelSeq  uint64
 
 	// scrollOffset is the index into visibleItems of the first rendered row
 	// when the list is too tall for the allocation. It is adjusted lazily in
@@ -62,32 +75,27 @@ type Sidebar struct {
 	// minimally so the selected row stays visible.
 	scrollOffset int
 
-	// Data
-	instances []*session.Instance
-	tasks     []task.Task
-	hookCount int
-
 	// Rendering
 	renderer *InstanceRenderer
 	autoyes  bool
 	height   int
 	width    int
-	repos    map[string]int
 }
 
-// NewSidebar creates a new sidebar.
-func NewSidebar(spin *spinner.Model, autoYes bool) *Sidebar {
+// NewSidebar creates a new sidebar rendering the given projection.
+func NewSidebar(spin *spinner.Model, autoYes bool, proj *store.Projection) *Sidebar {
 	s := &Sidebar{
+		proj: proj,
 		sections: []SidebarSection{
 			{Kind: SectionInstances, Title: "Instances", Expanded: true},
 			{Kind: SectionTasks, Title: "Tasks", Expanded: false},
 			{Kind: SectionHooks, Title: "Hooks", Expanded: false},
 		},
 		renderer: &InstanceRenderer{spinner: spin},
-		repos:    make(map[string]int),
 		autoyes:  autoYes,
 	}
 	s.rebuildVisibleItems()
+	s.seenVersion = proj.Version()
 	return s
 }
 
@@ -98,46 +106,73 @@ func (s *Sidebar) SetSize(width, height int) {
 	s.renderer.setWidth(width)
 }
 
-// SetSessionPreviewSize sets the tmux session preview sizes. Instances whose
-// underlying tmux session has vanished (ErrSessionGone) are skipped silently
-// — the daemon-side latch already covers ongoing polling and the resize itself
-// has no useful work to do on a dead session (#496).
-func (s *Sidebar) SetSessionPreviewSize(width, height int) error {
-	var err error
-	for i, item := range s.instances {
-		if !item.Started() {
+// syncFromStore re-derives the flattened row list when the projection changed
+// since the last derivation, then re-pins the cursor. The cursor rules
+// preserve the pre-store mutation behavior exactly:
+//   - by default the cursor keeps its flat index, clamped by the rebuild —
+//     the same drift-then-clamp the old mutation-time rebuild applied (a
+//     removal can legitimately drift the cursor, e.g. onto a header while
+//     naming an instance — the #717 reality the cancel path defends against);
+//   - a pending SelectInstance assertion (the reconcile's #969 re-pin, the
+//     search overlay, an explicit re-select) moves the cursor onto the
+//     asserted instance's row; a dangling or nil assertion leaves the clamped
+//     cursor as-is, matching the old "selected title gone → sidebar clamp
+//     behavior" rule.
+//
+// Afterwards the cursor's row (if it rests on an instance) is pushed back
+// into the store so the display binding and the cursor can never disagree at
+// a read boundary.
+func (s *Sidebar) syncFromStore() {
+	if s.proj.Version() == s.seenVersion {
+		return
+	}
+	s.rebuildVisibleItems()
+	if s.proj.SelectionSeq() != s.seenSelSeq {
+		if inst := s.proj.GetSelectedInstance(); inst != nil {
+			s.moveCursorToInstance(inst)
+		}
+		s.seenSelSeq = s.proj.SelectionSeq()
+	}
+	s.pushSelection()
+	s.seenVersion = s.proj.Version()
+}
+
+// moveCursorToInstance places the cursor on the row of target, if it is in
+// the projection and its row is visible. No-op otherwise.
+func (s *Sidebar) moveCursorToInstance(target *session.Instance) {
+	for i, inst := range s.proj.GetInstances() {
+		if inst != target {
 			continue
 		}
-		if innerErr := item.SetPreviewSize(width, height); innerErr != nil {
-			if errors.Is(innerErr, tmux.ErrSessionGone) {
-				continue
+		for j, item := range s.visibleItems {
+			if item.Kind == SectionInstances && !item.IsHeader && item.ItemIndex == i {
+				s.selectedIdx = j
+				return
 			}
-			err = fmt.Errorf("could not set preview size for instance %d: %v", i, innerErr)
 		}
+		return
 	}
-	return err
 }
 
-// SetTasks updates the task data.
-func (s *Sidebar) SetTasks(tasks []task.Task) {
-	s.tasks = tasks
-	s.rebuildVisibleItems()
-}
-
-// SetHookCount updates the displayed hook count.
-func (s *Sidebar) SetHookCount(count int) {
-	s.hookCount = count
-	s.rebuildVisibleItems()
-}
-
-// GetHookCount returns the currently displayed hook count.
-func (s *Sidebar) GetHookCount() int {
-	return s.hookCount
-}
-
-// GetTasks returns the current tasks.
-func (s *Sidebar) GetTasks() []task.Task {
-	return s.tasks
+// pushSelection records the cursor's instance (when it rests on an instance
+// row) as the store's display binding. Header rows deliberately do NOT clear
+// the binding: the workspace panes keep displaying the last selected instance
+// while the cursor tours headers, exactly as the pre-store TabbedWindow kept
+// its instance pointer. Callers run this after a sync, so folding the
+// resulting version move into the seen markers is safe (single-threaded event
+// loop; nothing else can write between).
+func (s *Sidebar) pushSelection() {
+	sel := s.rawSelection()
+	if sel.Kind != SectionInstances || sel.IsHeader {
+		return
+	}
+	instances := s.proj.GetInstances()
+	if sel.ItemIndex < 0 || sel.ItemIndex >= len(instances) {
+		return
+	}
+	s.proj.SetSelectedInstance(instances[sel.ItemIndex])
+	s.seenVersion = s.proj.Version()
+	s.seenSelSeq = s.proj.SelectionSeq()
 }
 
 // rebuildVisibleItems rebuilds the flat list of visible items based on expand/collapse state.
@@ -148,7 +183,7 @@ func (s *Sidebar) rebuildVisibleItems() {
 		if sec.Expanded {
 			switch sec.Kind {
 			case SectionInstances:
-				for i := range s.instances {
+				for i := 0; i < s.proj.NumInstances(); i++ {
 					items = append(items, SidebarItem{Kind: SectionInstances, ItemIndex: i})
 				}
 			}
@@ -164,31 +199,44 @@ func (s *Sidebar) rebuildVisibleItems() {
 	}
 }
 
-// GetSelection returns the currently selected sidebar item.
-func (s *Sidebar) GetSelection() SidebarItem {
+// rawSelection returns the currently selected item without syncing against
+// the store — for internal use where visibleItems is already current (or
+// deliberately pre-sync, as in syncFromStore).
+func (s *Sidebar) rawSelection() SidebarItem {
 	if len(s.visibleItems) == 0 {
 		return SidebarItem{Kind: SectionInstances, IsHeader: true}
 	}
 	return s.visibleItems[s.selectedIdx]
 }
 
+// GetSelection returns the currently selected sidebar item.
+func (s *Sidebar) GetSelection() SidebarItem {
+	s.syncFromStore()
+	return s.rawSelection()
+}
+
 // Down moves the cursor down.
 func (s *Sidebar) Down() {
+	s.syncFromStore()
 	if s.selectedIdx < len(s.visibleItems)-1 {
 		s.selectedIdx++
 	}
+	s.pushSelection()
 }
 
 // Up moves the cursor up.
 func (s *Sidebar) Up() {
+	s.syncFromStore()
 	if s.selectedIdx > 0 {
 		s.selectedIdx--
 	}
+	s.pushSelection()
 }
 
 // ToggleSection expands or collapses the section of the current selection.
 func (s *Sidebar) ToggleSection() {
-	sel := s.GetSelection()
+	s.syncFromStore()
+	sel := s.rawSelection()
 	if !sel.IsHeader {
 		return
 	}
@@ -199,6 +247,7 @@ func (s *Sidebar) ToggleSection() {
 		}
 	}
 	s.rebuildVisibleItems()
+	s.pushSelection()
 }
 
 // ExpandInstancesSection ensures the Instances section is expanded.
@@ -214,7 +263,8 @@ func (s *Sidebar) ExpandInstancesSection() {
 
 // ExpandSection expands the section of the current selection.
 func (s *Sidebar) ExpandSection() {
-	sel := s.GetSelection()
+	s.syncFromStore()
+	sel := s.rawSelection()
 	if !sel.IsHeader {
 		return
 	}
@@ -225,11 +275,13 @@ func (s *Sidebar) ExpandSection() {
 		}
 	}
 	s.rebuildVisibleItems()
+	s.pushSelection()
 }
 
 // CollapseSection collapses the section of the current selection.
 func (s *Sidebar) CollapseSection() {
-	sel := s.GetSelection()
+	s.syncFromStore()
+	sel := s.rawSelection()
 	if !sel.IsHeader {
 		// If on a child, jump to parent header
 		for i, item := range s.visibleItems {
@@ -246,10 +298,12 @@ func (s *Sidebar) CollapseSection() {
 		}
 	}
 	s.rebuildVisibleItems()
+	s.pushSelection()
 }
 
 // JumpNextSection jumps to the next section header.
 func (s *Sidebar) JumpNextSection() {
+	s.syncFromStore()
 	for i := s.selectedIdx + 1; i < len(s.visibleItems); i++ {
 		if s.visibleItems[i].IsHeader {
 			s.selectedIdx = i
@@ -260,6 +314,7 @@ func (s *Sidebar) JumpNextSection() {
 
 // JumpPrevSection jumps to the previous section header.
 func (s *Sidebar) JumpPrevSection() {
+	s.syncFromStore()
 	for i := s.selectedIdx - 1; i >= 0; i-- {
 		if s.visibleItems[i].IsHeader {
 			s.selectedIdx = i
@@ -268,115 +323,29 @@ func (s *Sidebar) JumpPrevSection() {
 	}
 }
 
-// --- Instance management (delegates to underlying data) ---
-
-// NumInstances returns the number of instances.
-func (s *Sidebar) NumInstances() int {
-	return len(s.instances)
-}
-
-// NumRepos returns the number of repositories represented in the sidebar.
-func (s *Sidebar) NumRepos() int {
-	return len(s.repos)
-}
-
-// AddInstance adds a new instance. Returns a finalizer to register the repo.
-func (s *Sidebar) AddInstance(instance *session.Instance) (finalize func()) {
-	s.instances = append(s.instances, instance)
-	s.rebuildVisibleItems()
-	return func() { s.RegisterRepoForInstance(instance) }
-}
-
-// RegisterRepoForInstance records the instance's repo after the instance has
-// started and its worktree is available.
-func (s *Sidebar) RegisterRepoForInstance(instance *session.Instance) {
-	repoName, err := instance.RepoName()
-	if err != nil {
-		log.ErrorLog.Printf("could not get repo name: %v", err)
-		return
-	}
-	s.addRepo(repoName)
-}
-
-// Kill kills the currently selected instance. It returns an error if the
-// underlying kill fails, in which case the instance is NOT removed from the
-// sidebar so the user can retry. See KillInstance for the pointer-based
-// variant that deferred/cancel flows must use.
-func (s *Sidebar) Kill() error {
-	return s.KillInstance(s.GetSelectedInstance())
-}
-
-// KillInstance kills the given instance by pointer identity, independent of the
-// current selection. Deferred flows — most notably canceling a new instance
-// via Escape/ctrl+c — must use this rather than Kill(): background sync can
-// rebuild visibleItems and drift the selection off the target row between the
-// time the operation is initiated and the time it runs. Selection-based Kill()
-// would then silently no-op (selection landed on a section header) and leave
-// the naming instance behind as a "Loading" zombie (#717).
-//
-// A nil target or an instance no longer in the sidebar is a no-op, mirroring
-// Kill()'s tolerance for a stale selection.
-func (s *Sidebar) KillInstance(target *session.Instance) error {
-	if target == nil {
-		return nil
-	}
-	idx := -1
-	for i, inst := range s.instances {
-		if inst == target {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return nil
-	}
-	// Capture repo name before Kill(), because Kill() sets started=false
-	// which causes RepoName() to fail.
-	repoName, repoErr := target.RepoName()
-	if err := target.Kill(); err != nil {
-		return fmt.Errorf("could not kill instance: %w", err)
-	}
-	if repoErr != nil {
-		log.ErrorLog.Printf("could not get repo name: %v", repoErr)
-	} else {
-		s.rmRepo(repoName)
-	}
-	s.instances = append(s.instances[:idx], s.instances[idx+1:]...)
-	s.rebuildVisibleItems()
-	return nil
-}
-
-// AttachInstance attaches to the given instance by pointer identity, but only
-// if it is still present in the sidebar. Deferred attach flows — the first-time
-// attach help screen, whose onDismiss callback runs after the overlay is
-// dismissed — must capture the instance at key-press time and attach through
-// this method rather than re-reading the live selection: a background refresh
-// can drift the selection onto a different instance while the help overlay is
-// open, so Attach() would connect to the wrong session (#716).
-func (s *Sidebar) AttachInstance(target *session.Instance) (chan struct{}, error) {
-	if target == nil || !s.ContainsInstance(target) {
-		return nil, fmt.Errorf("instance no longer exists")
-	}
-	return target.Attach()
-}
-
-// GetSelectedInstance returns the currently selected instance, or nil.
+// GetSelectedInstance returns the instance under the cursor, or nil when the
+// cursor rests on a section header. Note this is the cursor-derived selection;
+// the store's GetSelectedInstance is the sticky display selection the
+// workspace panes render.
 func (s *Sidebar) GetSelectedInstance() *session.Instance {
-	sel := s.GetSelection()
+	s.syncFromStore()
+	sel := s.rawSelection()
 	if sel.Kind != SectionInstances || sel.IsHeader {
 		return nil
 	}
-	if sel.ItemIndex < 0 || sel.ItemIndex >= len(s.instances) {
+	instances := s.proj.GetInstances()
+	if sel.ItemIndex < 0 || sel.ItemIndex >= len(instances) {
 		return nil
 	}
-	return s.instances[sel.ItemIndex]
+	return instances[sel.ItemIndex]
 }
 
-// SetSelectedInstance sets the selected index to point at the given instance index.
-// If the Instances section is collapsed, it is expanded first so the target row
-// is always reachable.
+// SetSelectedInstance sets the cursor to point at the given instance index.
+// If the Instances section is collapsed, it is expanded first so the target
+// row is always reachable.
 func (s *Sidebar) SetSelectedInstance(idx int) {
-	if idx >= len(s.instances) {
+	s.syncFromStore()
+	if idx >= s.proj.NumInstances() {
 		return
 	}
 	// Ensure the Instances section is expanded so the target row is part of
@@ -386,186 +355,20 @@ func (s *Sidebar) SetSelectedInstance(idx int) {
 	for i, item := range s.visibleItems {
 		if item.Kind == SectionInstances && !item.IsHeader && item.ItemIndex == idx {
 			s.selectedIdx = i
-			return
+			break
 		}
 	}
+	s.pushSelection()
 }
 
 // SelectInstance finds and selects the given instance.
 func (s *Sidebar) SelectInstance(target *session.Instance) {
-	for i, inst := range s.instances {
+	s.syncFromStore()
+	for i, inst := range s.proj.GetInstances() {
 		if inst == target {
 			s.SetSelectedInstance(i)
 			return
 		}
-	}
-}
-
-// ContainsInstance reports whether target is currently in the sidebar.
-func (s *Sidebar) ContainsInstance(target *session.Instance) bool {
-	for _, inst := range s.instances {
-		if inst == target {
-			return true
-		}
-	}
-	return false
-}
-
-// ReplaceInstance swaps an existing sidebar instance for replacement while
-// preserving the selected row when the replaced instance was selected, and keeps
-// the repos map (which drives the multi-repo indicator) correct: the outgoing
-// instance's repo is decremented and the replacement's repo registered. A
-// kill+recreate can swap in an instance from a DIFFERENT repo (#971), so doing the
-// bookkeeping here — at the primitive — means every caller (ReplaceInstanceByTitle,
-// swapInstanceFromSnapshot, the instanceStartedMsg start path) stays correct
-// without remembering a separate RegisterRepoForInstance call. RepoName() errors
-// are skipped silently rather than logged: the outgoing row may be an unstarted
-// Loading placeholder (never registered, nothing to decrement) and either side may
-// be a remote instance with no local repo — both are normal, not failures.
-func (s *Sidebar) ReplaceInstance(target, replacement *session.Instance) bool {
-	for i, inst := range s.instances {
-		if inst != target {
-			continue
-		}
-		wasSelected := s.GetSelectedInstance() == inst
-		if repoName, err := inst.RepoName(); err == nil {
-			s.rmRepo(repoName)
-		}
-		s.instances[i] = replacement
-		if repoName, err := replacement.RepoName(); err == nil {
-			s.addRepo(repoName)
-		}
-		s.rebuildVisibleItems()
-		if wasSelected {
-			s.SetSelectedInstance(i)
-		}
-		return true
-	}
-	return false
-}
-
-// ReplaceInstanceByTitle swaps the sidebar instance carrying the given title
-// for replacement, preserving the selected row. Returns false when no
-// instance has that title. Used by the instance-start handler when its
-// pointer-based ReplaceInstance misses: a background sync may have swapped
-// the Loading placeholder for a disk-built copy of the same session while
-// the start RPC was in flight, and re-adding the started instance would
-// leave two sidebar rows — and two persisted records — with one title (#808).
-func (s *Sidebar) ReplaceInstanceByTitle(title string, replacement *session.Instance) bool {
-	for _, inst := range s.instances {
-		if inst.Title == title {
-			return s.ReplaceInstance(inst, replacement)
-		}
-	}
-	return false
-}
-
-// GetInstanceByTitle returns the sidebar instance carrying the given title, or
-// nil when none matches. Async handlers that captured an *Instance pointer
-// before awaiting a background fetch use this to re-resolve the live instance:
-// a background sync may have removed the captured instance and rebuilt a fresh
-// same-title copy via FromInstanceData while the fetch was in flight (#765),
-// orphaning the original pointer. Re-resolving by title lands the update on the
-// instance that currently represents the session (#862).
-func (s *Sidebar) GetInstanceByTitle(title string) *session.Instance {
-	for _, inst := range s.instances {
-		if inst.Title == title {
-			return inst
-		}
-	}
-	return nil
-}
-
-// GetInstances returns all instances. The returned slice shares the sidebar's
-// backing array, so callers must only read it inline on the bubbletea event
-// loop and must NOT store it beyond the immediate call — never hand it to a
-// goroutine that outlives the call, and never stash it in an overlay or struct
-// field that survives past this call. A later append/remove mutates the shared
-// backing array in place, corrupting any retained slice (#1008). Use
-// GetInstancesSnapshot for anything that keeps the slice around.
-func (s *Sidebar) GetInstances() []*session.Instance {
-	return s.instances
-}
-
-// GetInstancesSnapshot returns a copy of the instances slice for handing off
-// to a background goroutine. The metadata tick (#682) iterates the list on a
-// separate goroutine while the event loop may append/remove instances; copying
-// the slice header here (on the event loop, where mutations also happen) gives
-// the goroutine a private backing array so the two cannot race on the same
-// memory. The *session.Instance elements are shared, but each guards its own
-// fields with a mutex, so reading them across goroutines is safe.
-func (s *Sidebar) GetInstancesSnapshot() []*session.Instance {
-	out := make([]*session.Instance, len(s.instances))
-	copy(out, s.instances)
-	return out
-}
-
-// GetInstanceTitles returns a set of all instance titles for quick comparison.
-func (s *Sidebar) GetInstanceTitles() map[string]bool {
-	titles := make(map[string]bool, len(s.instances))
-	for _, inst := range s.instances {
-		titles[inst.Title] = true
-	}
-	return titles
-}
-
-// RemoveInstanceByTitle removes an instance from the sidebar by title without
-// killing it (the external process already cleaned up tmux/worktree).
-// Note: the instance may already have been killed (started=false), so we fall
-// back to looking up the repo name from the gitWorktree directly.
-func (s *Sidebar) RemoveInstanceByTitle(title string) bool {
-	for i, inst := range s.instances {
-		if inst.Title == title {
-			repoName, err := inst.RepoName()
-			if err != nil {
-				// If RepoName() fails (e.g. instance already killed/not started),
-				// try to find and remove the repo by scanning remaining instances.
-				// We cannot decrement the repo count without the name, so log and
-				// continue — the repo map will be corrected on next full rebuild.
-				log.ErrorLog.Printf("could not get repo name: %v", err)
-			} else {
-				s.rmRepo(repoName)
-			}
-			s.instances = append(s.instances[:i], s.instances[i+1:]...)
-			s.rebuildVisibleItems()
-			return true
-		}
-	}
-	return false
-}
-
-// RemoveInstanceByTitleWithRepo removes an instance from the sidebar by title
-// using the supplied repoName instead of calling RepoName() on the instance.
-// This is useful when the caller has already killed the instance (which causes
-// RepoName() to fail) but captured the repo name beforehand, ensuring the repo
-// count is still decremented correctly.
-func (s *Sidebar) RemoveInstanceByTitleWithRepo(title, repoName string) bool {
-	for i, inst := range s.instances {
-		if inst.Title == title {
-			s.rmRepo(repoName)
-			s.instances = append(s.instances[:i], s.instances[i+1:]...)
-			s.rebuildVisibleItems()
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Sidebar) addRepo(repo string) {
-	if _, ok := s.repos[repo]; !ok {
-		s.repos[repo] = 0
-	}
-	s.repos[repo]++
-}
-
-func (s *Sidebar) rmRepo(repo string) {
-	if _, ok := s.repos[repo]; !ok {
-		log.ErrorLog.Printf("repo %s not found", repo)
-		return
-	}
-	s.repos[repo]--
-	if s.repos[repo] == 0 {
-		delete(s.repos, repo)
 	}
 }
 
@@ -577,6 +380,8 @@ func (s *Sidebar) rmRepo(repo string) {
 // fold while navigating — instead the rendered slice scrolls so the selection
 // is always visible, with "▲/▼ N more" rows marking hidden items.
 func (s *Sidebar) String() string {
+	s.syncFromStore()
+
 	// Chrome above the item list: one leading blank line plus the title row.
 	const chromeLines = 2
 
@@ -758,13 +563,13 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 	var label string
 	switch kind {
 	case SectionInstances:
-		label = fmt.Sprintf("Instances (%d)", len(s.instances))
+		label = fmt.Sprintf("Instances (%d)", s.proj.NumInstances())
 	case SectionTasks:
-		label = fmt.Sprintf("Tasks (%d)", len(s.tasks))
+		label = fmt.Sprintf("Tasks (%d)", len(s.proj.GetTasks()))
 		arrow = "  " // no expand arrow for leaf sections
 	case SectionHooks:
-		if s.hookCount > 0 {
-			label = fmt.Sprintf("Hooks (%d)", s.hookCount)
+		if s.proj.GetHookCount() > 0 {
+			label = fmt.Sprintf("Hooks (%d)", s.proj.GetHookCount())
 		} else {
 			label = "Hooks"
 		}
@@ -793,12 +598,13 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 }
 
 func (s *Sidebar) renderInstance(idx int, selected bool) string {
-	if idx < 0 || idx >= len(s.instances) {
+	instances := s.proj.GetInstances()
+	if idx < 0 || idx >= len(instances) {
 		return ""
 	}
 	// Pad the index to the digit width of the largest 1-based index in the list
 	// so every row's prefix is the same width and the branch/PR lines align,
 	// without widening the common small-list case (#871, #923, #939).
-	s.renderer.indexWidth = len(strconv.Itoa(len(s.instances)))
-	return s.renderer.Render(s.instances[idx], idx+1, selected, len(s.repos) > 1)
+	s.renderer.indexWidth = len(strconv.Itoa(len(instances)))
+	return s.renderer.Render(instances[idx], idx+1, selected, s.proj.NumRepos() > 1)
 }
