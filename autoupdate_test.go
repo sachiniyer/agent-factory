@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -497,6 +500,96 @@ func TestPickLatestReleaseTag(t *testing.T) {
 		if got := pickLatestReleaseTag(c.channel, c.releases); got != c.want {
 			t.Errorf("%s: pickLatestReleaseTag = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestFetchLatestReleaseTagChannels mirrors the Greptile repro on #1078:
+// with a preview cut every 3 hours, page 1 of /releases fills up with 100
+// prereleases and the newest stable release is NOT in the list response —
+// it is only reachable via /releases/latest. The stable channel (the
+// default) must still resolve it; resolving nothing would silently stop
+// auto-update for every default-channel user. The preview channel must keep
+// resolving the newest preview from the list.
+func TestFetchLatestReleaseTagChannels(t *testing.T) {
+	previews := make([]releaseEntry, 0, 100)
+	for i := 100; i >= 1; i-- {
+		previews = append(previews, releaseEntry{
+			TagName:    fmt.Sprintf("v1.9.10-preview-%d", i),
+			Prerelease: true,
+		})
+	}
+	mux := http.NewServeMux()
+	listCalls := 0
+	mux.HandleFunc("/releases", func(w http.ResponseWriter, r *http.Request) {
+		listCalls++
+		if err := json.NewEncoder(w).Encode(previews); err != nil {
+			t.Errorf("encode releases list: %v", err)
+		}
+	})
+	latestCalls := 0
+	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		latestCalls++
+		if err := json.NewEncoder(w).Encode(releaseEntry{TagName: "v1.9.9"}); err != nil {
+			t.Errorf("encode latest release: %v", err)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	prevLatestURL := githubAPILatestReleaseURL
+	prevListURL := githubAPIReleasesURL
+	githubAPILatestReleaseURL = srv.URL + "/releases/latest"
+	githubAPIReleasesURL = srv.URL + "/releases?per_page=100"
+	t.Cleanup(func() {
+		githubAPILatestReleaseURL = prevLatestURL
+		githubAPIReleasesURL = prevListURL
+	})
+
+	tag, err := fetchLatestReleaseTag(config.UpdateChannelStable)
+	if err != nil {
+		t.Fatalf("stable channel: %v", err)
+	}
+	if tag != "v1.9.9" {
+		t.Fatalf("stable channel resolved %q, want v1.9.9", tag)
+	}
+	if listCalls != 0 {
+		t.Fatalf("stable channel hit the paginated /releases list %d times; it must use /releases/latest only", listCalls)
+	}
+
+	tag, err = fetchLatestReleaseTag(config.UpdateChannelPreview)
+	if err != nil {
+		t.Fatalf("preview channel: %v", err)
+	}
+	if tag != "v1.9.10-preview-100" {
+		t.Fatalf("preview channel resolved %q, want v1.9.10-preview-100", tag)
+	}
+	if listCalls != 1 {
+		t.Fatalf("preview channel should list /releases exactly once, got %d", listCalls)
+	}
+	if latestCalls != 1 {
+		t.Fatalf("/releases/latest should be hit exactly once (by the stable channel), got %d", latestCalls)
+	}
+}
+
+// TestFetchLatestStableTagRejectsOffSchemeTag pins the tripwire: a
+// /releases/latest response whose tag does not parse as a stable X.Y.Z must
+// error rather than become an update target.
+func TestFetchLatestStableTagRejectsOffSchemeTag(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(releaseEntry{TagName: "nightly-2026-07-02"}); err != nil {
+			t.Errorf("encode latest release: %v", err)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	prevLatestURL := githubAPILatestReleaseURL
+	githubAPILatestReleaseURL = srv.URL + "/releases/latest"
+	t.Cleanup(func() { githubAPILatestReleaseURL = prevLatestURL })
+
+	if _, err := fetchLatestReleaseTag(config.UpdateChannelStable); err == nil {
+		t.Fatalf("expected error for off-scheme releases/latest tag, got nil")
 	}
 }
 

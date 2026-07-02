@@ -56,16 +56,18 @@ channel has been testing, and subsequent previews move to `1.0.139-preview-1`.
 ## How updates flow to users
 
 - **Auto-update follows the stable channel by default.** On launch
-  (throttled to once per 24h), `af` lists GitHub releases, picks the newest
-  tag on the configured channel, and swaps the binary in place. With the
-  default `update_channel: "stable"` only stable `1.x.y` releases are
-  considered; prereleases are skipped.
+  (throttled to once per 24h), `af` resolves the newest release on the
+  configured channel and swaps the binary in place. With the default
+  `update_channel: "stable"` it asks GitHub's `releases/latest` endpoint,
+  which is pinned to the newest non-prerelease release — previews never
+  appear there, and there is no release list to page through.
 - **Preview tracking is opt-in** via the global config key
   `update_channel: "preview"` (see
-  [configuration.md](configuration.md)) — the updater then also considers
-  `1.x.y-preview-z` prereleases, which are normally the newest tag.
-  Prereleases are invisible to the `releases/latest` API/redirect, so the
-  updater addresses release assets by tag.
+  [configuration.md](configuration.md)) — the updater then lists releases
+  and picks the version-newest tag including `1.x.y-preview-z`
+  prereleases, which are normally the newest. Prereleases are invisible to
+  the `releases/latest` API/redirect, so the updater addresses release
+  assets by tag.
 - **`af upgrade`** resolves through the same configured channel, so a manual
   upgrade never downgrades a preview build back to an older stable.
 - **`install.sh` and fresh installs** use the `releases/latest/download/...`

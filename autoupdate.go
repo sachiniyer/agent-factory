@@ -19,10 +19,26 @@ import (
 const (
 	autoUpdateCheckInterval = 24 * time.Hour
 	lastCheckFile           = "last_update_check"
-	// The /releases/latest endpoint only ever reports the newest STABLE
-	// release — it never returns prereleases. Auto-update tracks the preview
-	// channel (#1041), so we list releases and pick the newest tag ourselves.
-	githubAPIReleases = "https://api.github.com/repos/sachiniyer/agent-factory/releases?per_page=100"
+)
+
+// GitHub API endpoints for release discovery, one per channel (#1041).
+// Variables so tests can point them at a local httptest server.
+var (
+	// githubAPILatestReleaseURL answers the stable channel: GitHub pins
+	// /releases/latest to the newest non-prerelease release, with no
+	// pagination to overflow. Listing /releases and filtering would break
+	// here — with a preview cut every 3 hours, page 1 fills with
+	// prereleases within days and the newest stable falls off it, so a
+	// stable-channel client would resolve nothing (Greptile review, #1078).
+	githubAPILatestReleaseURL = "https://api.github.com/repos/sachiniyer/agent-factory/releases/latest"
+	// githubAPIReleasesURL answers the preview channel: /releases/latest
+	// never returns prereleases, so previews must come from the list. One
+	// page of 100 suffices: under the release scheme versions are only ever
+	// created in increasing order (preview z/base move forward, stable
+	// releases are validated strictly greater), so the version-newest
+	// release is always among the most recently created — and the whole
+	// page is scanned for the max rather than trusting item order.
+	githubAPIReleasesURL = "https://api.github.com/repos/sachiniyer/agent-factory/releases?per_page=100"
 )
 
 // runtimeGOOS is a variable so tests can override the value reported by
@@ -165,39 +181,68 @@ type releaseEntry struct {
 	Prerelease bool   `json:"prerelease"`
 }
 
-// fetchLatestReleaseTag queries the GitHub API for the newest release tag by
-// version order on the given channel (#1041): stable-channel updates only
-// consider stable releases vX.Y.Z; preview-channel updates also consider the
-// vX.Y.Z-preview-N prereleases. The /releases/latest endpoint never returns
-// prereleases, so we list releases and pick the newest ourselves on both
-// channels.
+// fetchLatestReleaseTag queries the GitHub API for the newest release tag on
+// the given channel (#1041): the stable channel resolves directly through
+// /releases/latest, the preview channel through the release list (see the
+// endpoint docs above for why each channel needs its own endpoint).
 func fetchLatestReleaseTag(channel string) (string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("GET", githubAPIReleases, nil)
-	if err != nil {
+	if channel == config.UpdateChannelPreview {
+		return fetchLatestPreviewChannelTag()
+	}
+	return fetchLatestStableTag()
+}
+
+// fetchLatestStableTag resolves the newest stable release via
+// /releases/latest. The endpoint already excludes prereleases and drafts;
+// the shape checks below are a tripwire against a stable release published
+// with an off-scheme tag, which must fail loudly rather than become an
+// update target.
+func fetchLatestStableTag() (string, error) {
+	var release releaseEntry
+	if err := getGitHubJSON(githubAPILatestReleaseURL, &release); err != nil {
 		return "", err
+	}
+	parsed := parseSemver(strings.TrimPrefix(release.TagName, "v"))
+	if parsed == nil || parsed.preview || release.Prerelease || release.Draft {
+		return "", fmt.Errorf("releases/latest returned unusable tag %q for the stable channel", release.TagName)
+	}
+	return release.TagName, nil
+}
+
+// fetchLatestPreviewChannelTag resolves the newest release including
+// prereleases from the release list.
+func fetchLatestPreviewChannelTag() (string, error) {
+	var releases []releaseEntry
+	if err := getGitHubJSON(githubAPIReleasesURL, &releases); err != nil {
+		return "", err
+	}
+	tag := pickLatestReleaseTag(config.UpdateChannelPreview, releases)
+	if tag == "" {
+		return "", fmt.Errorf("no published release with a parseable version tag found on the preview channel")
+	}
+	return tag, nil
+}
+
+// getGitHubJSON fetches url from the GitHub API and decodes the JSON
+// response into out.
+func getGitHubJSON(url string, out any) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
 	}
-
-	var releases []releaseEntry
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		return "", err
-	}
-	tag := pickLatestReleaseTag(channel, releases)
-	if tag == "" {
-		return "", fmt.Errorf("no published release with a parseable version tag found on the %s channel", channel)
-	}
-	return tag, nil
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 // pickLatestReleaseTag returns the version-newest non-draft release tag on
