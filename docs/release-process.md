@@ -46,8 +46,10 @@ e.g. `1.1.0`. The maintainer chooses which digit to bump; the workflow
 validates the version (well-formed, untagged, strictly greater than the
 latest stable — see
 [`.github/scripts/validate-stable-version.sh`](../.github/scripts/validate-stable-version.sh)),
-runs the same preflight, commits the version bump to `main.go`, tags,
-builds, and publishes the release marked **latest**.
+runs the same preflight, and builds all four artifacts **before mutating
+anything**; only then does it commit the version bump to `main.go`, tag,
+and publish the release marked **latest**. A failed preflight or build
+therefore never leaves a dangling commit or tag on `master`.
 
 Releasing the current preview base as-is (e.g. `1.0.138` while
 `1.0.138-preview-9` exists) is supported — it "promotes" what the preview
