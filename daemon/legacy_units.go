@@ -54,10 +54,13 @@ func sweepLegacyTaskUnits() {
 }
 
 // legacySystemdUnitPrefixes are the unit-name prefixes previous versions used
-// for per-task timers: "agent-factory-task-" for every v1.0.x release, and
-// "agent-factory-sched-" for the short-lived pre-rename nightly builds
-// (Schedules became Tasks in 6ec0996).
-var legacySystemdUnitPrefixes = []string{"agent-factory-task-", "agent-factory-sched-"}
+// for per-task timers: "agent-factory-task-" for every v1.0.x release,
+// "agent-factory-sched-" for the builds between the repo rename and the
+// Schedules→Tasks rename (6ec0996), and "claude-squad-sched-" for builds
+// before the claude-squad→agent-factory repo rename (8e55df0). These are the
+// only three prefixes any released scheduler ever wrote; launchd support
+// postdates the repo rename, so "com.agent-factory.task-" below is complete.
+var legacySystemdUnitPrefixes = []string{"agent-factory-task-", "agent-factory-sched-", "claude-squad-sched-"}
 
 func sweepLegacySystemdUnits() {
 	dir, err := legacySystemdUserDir()

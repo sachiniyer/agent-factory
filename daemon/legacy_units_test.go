@@ -64,18 +64,24 @@ func TestSweepLegacyTaskUnits_RemovesOldPerTaskUnits(t *testing.T) {
 	// Pre-rename nightly builds used the "agent-factory-sched-" prefix.
 	oldPrefixTimer := filepath.Join(stub.systemdDir, "agent-factory-sched-12345678.timer")
 	oldPrefixService := filepath.Join(stub.systemdDir, "agent-factory-sched-12345678.service")
+	// Builds before the claude-squad→agent-factory repo rename used the
+	// "claude-squad-sched-" prefix (#1058).
+	preRenameTimer := filepath.Join(stub.systemdDir, "claude-squad-sched-235b8c0b.timer")
+	preRenameService := filepath.Join(stub.systemdDir, "claude-squad-sched-235b8c0b.service")
+	// An orphaned pre-rename timer without its service must also be swept.
+	preRenameOrphanTimer := filepath.Join(stub.systemdDir, "claude-squad-sched-a288118f.timer")
 	unrelatedUnit := filepath.Join(stub.systemdDir, "syncthing.service")
 	// The daemon's own autostart unit must never be swept.
 	daemonUnit := filepath.Join(stub.systemdDir, "agent-factory-daemon.service")
 	plist := filepath.Join(stub.launchAgentsDir, "com.agent-factory.task-abc12345.plist")
 	unrelatedPlist := filepath.Join(stub.launchAgentsDir, "com.example.other.plist")
-	for _, p := range []string{timer, service, orphanService, oldPrefixTimer, oldPrefixService, unrelatedUnit, daemonUnit, plist, unrelatedPlist} {
+	for _, p := range []string{timer, service, orphanService, oldPrefixTimer, oldPrefixService, preRenameTimer, preRenameService, preRenameOrphanTimer, unrelatedUnit, daemonUnit, plist, unrelatedPlist} {
 		writeTestFile(t, p)
 	}
 
 	sweepLegacyTaskUnits()
 
-	for _, p := range []string{timer, service, orphanService, oldPrefixTimer, oldPrefixService, plist} {
+	for _, p := range []string{timer, service, orphanService, oldPrefixTimer, oldPrefixService, preRenameTimer, preRenameService, preRenameOrphanTimer, plist} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("expected legacy unit %s to be removed, stat err=%v", p, err)
 		}
@@ -91,7 +97,13 @@ func TestSweepLegacyTaskUnits_RemovesOldPerTaskUnits(t *testing.T) {
 		t.Errorf("expected the legacy timer to be disabled, commands:\n%s", joined)
 	}
 	if !strings.Contains(joined, "systemctl --user disable --now agent-factory-sched-12345678.timer") {
-		t.Errorf("expected the pre-rename legacy timer to be disabled, commands:\n%s", joined)
+		t.Errorf("expected the old-prefix legacy timer to be disabled, commands:\n%s", joined)
+	}
+	if !strings.Contains(joined, "systemctl --user disable --now claude-squad-sched-235b8c0b.timer") {
+		t.Errorf("expected the pre-rename claude-squad timer to be disabled, commands:\n%s", joined)
+	}
+	if !strings.Contains(joined, "systemctl --user disable --now claude-squad-sched-a288118f.timer") {
+		t.Errorf("expected the orphaned pre-rename claude-squad timer to be disabled, commands:\n%s", joined)
 	}
 	if !strings.Contains(joined, "systemctl --user daemon-reload") {
 		t.Errorf("expected a systemd daemon-reload after removals, commands:\n%s", joined)
