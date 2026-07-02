@@ -811,6 +811,39 @@ func TestLoadConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("clamps invalid log rotation keys to defaults", func(t *testing.T) {
+		cases := []struct {
+			name            string
+			content         string
+			expectedSizeMB  int
+			expectedBackups int
+		}{
+			{"missing keys -> defaults", `{"default_program": "claude"}`, log.DefaultMaxSizeMB, log.DefaultMaxBackups},
+			{"non-positive size -> default", `{"default_program": "claude", "log_max_size_mb": 0}`, log.DefaultMaxSizeMB, log.DefaultMaxBackups},
+			{"negative backups -> default", `{"default_program": "claude", "log_max_backups": -1}`, log.DefaultMaxSizeMB, log.DefaultMaxBackups},
+			{"explicit zero backups is valid", `{"default_program": "claude", "log_max_backups": 0}`, log.DefaultMaxSizeMB, 0},
+			{"custom values -> as-is", `{"default_program": "claude", "log_max_size_mb": 10, "log_max_backups": 5}`, 10, 5},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+				configDir, err := GetConfigDir()
+				require.NoError(t, err)
+				require.NoError(t, os.MkdirAll(configDir, 0755))
+
+				configPath := filepath.Join(configDir, ConfigFileName)
+				require.NoError(t, os.WriteFile(configPath, []byte(tc.content), 0644))
+
+				cfg, err := LoadConfig()
+				require.NoError(t, err)
+				require.NotNil(t, cfg)
+				assert.Equal(t, tc.expectedSizeMB, cfg.LogMaxSizeMB)
+				assert.Equal(t, tc.expectedBackups, cfg.LogMaxBackups)
+			})
+		}
+	})
+
 	t.Run("surfaces parse error on invalid JSON instead of using defaults", func(t *testing.T) {
 		// A present-but-corrupt config must NOT be silently replaced by
 		// defaults — that hides a user's broken settings (#734).

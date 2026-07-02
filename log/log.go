@@ -1,6 +1,7 @@
 package log
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,17 @@ import (
 	"sync"
 	"testing"
 	"time"
+)
+
+// Log-rotation defaults (#1059). The log is rotated when it exceeds
+// DefaultMaxSizeMB; DefaultMaxBackups rotated files (agent-factory.log.1,
+// .log.2, ...) are kept and older ones deleted. Both are overridable in the
+// global config.json via "log_max_size_mb" and "log_max_backups"; the config
+// package reuses these constants so the two packages cannot drift (config
+// imports log, so the constants must live here).
+const (
+	DefaultMaxSizeMB  = 50
+	DefaultMaxBackups = 2
 )
 
 var (
@@ -102,11 +114,159 @@ func resolveLogPath() string {
 	return filepath.Join(dir, "agent-factory.log")
 }
 
+// rotationPolicy resolves the log-rotation cap and backup count from the
+// global config.json ("log_max_size_mb" / "log_max_backups"), falling back to
+// the package defaults. This package cannot import config (config imports
+// log) and Initialize runs before config.LoadConfig, so the two keys are read
+// here directly with a tolerant parse: a missing or unreadable file, invalid
+// JSON, or out-of-range values all silently yield the defaults —
+// config.LoadConfig is the layer that warns the user about bad values.
+//
+// The config file location mirrors config.GetConfigDir: $AGENT_FACTORY_HOME
+// when set, else ~/.agent-factory. Inside a `go test` binary with no home
+// override no file is read at all, so a developer's personal config can never
+// change test behavior (#1056/#1057 hermeticity).
+func rotationPolicy() (maxBytes int64, backups int) {
+	maxMB := DefaultMaxSizeMB
+	backups = DefaultMaxBackups
+
+	configPath := ""
+	if home := os.Getenv("AGENT_FACTORY_HOME"); home != "" {
+		if dir, ok := expandTilde(home); ok {
+			configPath = filepath.Join(dir, "config.json")
+		}
+	} else if !testing.Testing() {
+		if home, err := os.UserHomeDir(); err == nil {
+			configPath = filepath.Join(home, ".agent-factory", "config.json")
+		}
+	}
+	if configPath != "" {
+		// Pointers distinguish "key absent" from an explicit zero:
+		// log_max_backups=0 (keep no rotated files) is valid, an absent key
+		// means the default.
+		var cfg struct {
+			LogMaxSizeMB  *int `json:"log_max_size_mb"`
+			LogMaxBackups *int `json:"log_max_backups"`
+		}
+		if data, err := os.ReadFile(configPath); err == nil && json.Unmarshal(data, &cfg) == nil {
+			if cfg.LogMaxSizeMB != nil && *cfg.LogMaxSizeMB > 0 {
+				maxMB = *cfg.LogMaxSizeMB
+			}
+			if cfg.LogMaxBackups != nil && *cfg.LogMaxBackups >= 0 {
+				backups = *cfg.LogMaxBackups
+			}
+		}
+	}
+	return int64(maxMB) * 1024 * 1024, backups
+}
+
+// rotateFiles shifts the rotated-log chain one step: path.<backups-1> ->
+// path.<backups>, ..., path.1 -> path.2, path -> path.1. With backups == 0
+// the current file is simply deleted. Afterwards any contiguous run of
+// backups beyond the keep count (left over from a larger log_max_backups) is
+// pruned. Everything is best-effort: rotation must never prevent logging, so
+// rename/remove errors are ignored and the caller reopens path regardless.
+//
+// Cross-process note: rotation happens with no lock held against other af
+// processes. os.Rename is atomic on the same filesystem, so concurrent
+// writers never see a torn file; the worst race outcome is a writer holding
+// an fd appending to a file that is now path.1 (its O_APPEND writes still
+// land intact there). CLI invocations are short-lived so their fds close
+// almost immediately, and the long-lived daemon rotates its own fd via
+// rotatingWriter, so no process appends to a renamed file for long.
+func rotateFiles(path string, backups int) {
+	if backups <= 0 {
+		_ = os.Remove(path)
+	} else {
+		for i := backups - 1; i >= 1; i-- {
+			_ = os.Rename(fmt.Sprintf("%s.%d", path, i), fmt.Sprintf("%s.%d", path, i+1))
+		}
+		_ = os.Rename(path, path+".1")
+	}
+	for i := backups + 1; ; i++ {
+		if err := os.Remove(fmt.Sprintf("%s.%d", path, i)); err != nil {
+			break
+		}
+	}
+}
+
+// rotatingWriter is the io.Writer behind the exported loggers: an *os.File
+// plus a size counter that triggers an in-place rotation when a write would
+// push the file past maxBytes. Initialize's stat-and-rotate-on-open already
+// bounds every short-lived CLI invocation; this write-path check is what
+// bounds the always-on daemon, which otherwise holds one fd for weeks and —
+// worse — would keep appending to the renamed (and eventually deleted) inode
+// after another process rotated the file under it (#1059).
+//
+// The mutex serializes Write/Close because the three exported loggers share
+// one writer and *log.Logger only serializes writes through itself. size is
+// process-local: concurrent appends from another af process are not counted,
+// so a file can transiently exceed the cap until either process next rotates.
+// That slack is acceptable for a log; the cap is a bound, not an exact quota.
+type rotatingWriter struct {
+	mu       sync.Mutex
+	file     *os.File
+	path     string
+	size     int64
+	maxBytes int64
+	backups  int
+}
+
+func (w *rotatingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		// Close redirects the loggers to stderr before closing this writer,
+		// so nothing should land here; if something does (or a rotation
+		// failed to reopen the file), surface it rather than dropping it —
+		// the #642 tests pin "every Printf lands somewhere".
+		return os.Stderr.Write(p)
+	}
+	// The size > 0 guard keeps a single oversized message from rotating an
+	// empty file on every write.
+	if w.size > 0 && w.size+int64(len(p)) > w.maxBytes {
+		w.rotateLocked()
+		if w.file == nil {
+			return os.Stderr.Write(p)
+		}
+	}
+	n, err := w.file.Write(p)
+	w.size += int64(n)
+	return n, err
+}
+
+// rotateLocked closes the current file, shifts the backup chain, and reopens
+// a fresh file at path. On reopen failure w.file is left nil and Write falls
+// back to stderr; the next Initialize will recover.
+func (w *rotatingWriter) rotateLocked() {
+	_ = w.file.Close()
+	w.file = nil
+	rotateFiles(w.path, w.backups)
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not reopen log file %s after rotation: %v, logging to stderr\n", w.path, err)
+		return
+	}
+	w.file = f
+	w.size = 0
+}
+
+func (w *rotatingWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return nil
+	}
+	err := w.file.Close()
+	w.file = nil
+	return err
+}
+
 // logFileName is the path the most recent Initialize resolved and attempted
 // to open; Close uses it for the "wrote logs to" message.
 var logFileName string
 
-var globalLogFile *os.File
+var globalLogFile *rotatingWriter
 
 // Initialize should be called once at the beginning of the program to set up logging.
 // defer Close() after calling this function. It sets the go log output to the file in
@@ -139,6 +299,15 @@ func Initialize(daemon bool) {
 		globalLogFile = nil
 	}
 
+	// Rotate before opening when the existing log already exceeds the cap
+	// (#1059). This is the seam every af process passes through — the daemon,
+	// the TUI, and each CLI invocation all call Initialize — so even a log
+	// grown huge by an old binary is trimmed on the next af command.
+	maxBytes, backups := rotationPolicy()
+	if fi, err := os.Stat(logFileName); err == nil && fi.Size() > maxBytes {
+		rotateFiles(logFileName, backups)
+	}
+
 	f, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not open log file %s: %v, logging to stderr\n", logFileName, err)
@@ -155,15 +324,20 @@ func Initialize(daemon bool) {
 	// Set log format to include timestamp and file/line number
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
+	w := &rotatingWriter{file: f, path: logFileName, maxBytes: maxBytes, backups: backups}
+	if fi, err := f.Stat(); err == nil {
+		w.size = fi.Size()
+	}
+
 	fmtS := "%s"
 	if daemon {
 		fmtS = "[DAEMON] %s"
 	}
-	InfoLog = log.New(f, fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
-	WarningLog = log.New(f, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
-	ErrorLog = log.New(f, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
+	InfoLog = log.New(w, fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
+	WarningLog = log.New(w, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
+	ErrorLog = log.New(w, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
 
-	globalLogFile = f
+	globalLogFile = w
 }
 
 func Close() {

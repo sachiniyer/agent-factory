@@ -113,6 +113,17 @@ type Config struct {
 	AutoYes bool `json:"auto_yes"`
 	// DaemonPollInterval is the interval (ms) at which the daemon polls sessions for autoyes mode.
 	DaemonPollInterval int `json:"daemon_poll_interval"`
+	// LogMaxSizeMB is the size cap (MB) for agent-factory.log. When the log
+	// exceeds it, the file is rotated (renamed to .1, older backups shifted
+	// up). Must be positive; non-positive values fall back to the default.
+	// The rotation itself lives in the log package, which re-reads this key
+	// directly from config.json (log cannot import config, and logging is
+	// initialized before the config loads).
+	LogMaxSizeMB int `json:"log_max_size_mb"`
+	// LogMaxBackups is how many rotated log files (agent-factory.log.1,
+	// .log.2, ...) are kept; older ones are deleted. 0 keeps none (the log is
+	// deleted on rotation); negative values fall back to the default.
+	LogMaxBackups int `json:"log_max_backups"`
 	// BranchPrefix is the prefix used for git branches created by the application.
 	BranchPrefix string `json:"branch_prefix"`
 	// DetachKeys is the key combination used to detach from an attached session (e.g. "ctrl-w", "ctrl-q").
@@ -198,6 +209,8 @@ func DefaultConfig() *Config {
 		DefaultProgram:     defaultProgram,
 		AutoYes:            false,
 		DaemonPollInterval: defaultDaemonPollInterval,
+		LogMaxSizeMB:       log.DefaultMaxSizeMB,
+		LogMaxBackups:      log.DefaultMaxBackups,
 		BranchPrefix: func() string {
 			user, err := user.Current()
 			if err != nil || user == nil || user.Username == "" {
@@ -598,6 +611,15 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	if config.DaemonPollInterval <= 0 {
 		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)
 		config.DaemonPollInterval = defaultDaemonPollInterval
+	}
+
+	if config.LogMaxSizeMB <= 0 {
+		log.WarningLog.Printf("log_max_size_mb=%d is non-positive; using default %d MB", config.LogMaxSizeMB, log.DefaultMaxSizeMB)
+		config.LogMaxSizeMB = log.DefaultMaxSizeMB
+	}
+	if config.LogMaxBackups < 0 {
+		log.WarningLog.Printf("log_max_backups=%d is negative; using default %d", config.LogMaxBackups, log.DefaultMaxBackups)
+		config.LogMaxBackups = log.DefaultMaxBackups
 	}
 
 	return config, nil
