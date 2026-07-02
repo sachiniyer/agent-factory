@@ -78,10 +78,6 @@ func (m *Menu) Keydown(name keys.KeyName) {
 	m.keyDown = name
 }
 
-func (m *Menu) ClearKeydown() {
-	m.keyDown = -1
-}
-
 func (m *Menu) ClearKeydownIfMatch(name keys.KeyName) {
 	if m.keyDown == name {
 		m.keyDown = -1
