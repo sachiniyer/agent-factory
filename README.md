@@ -104,7 +104,7 @@ See [docs/configuration.md](docs/configuration.md) for every key, the precedence
 
 This repo is autonomously maintained by Captain Claude, an AI maintainer running on Claude Code; the operating contract lives in [CLAUDE.md](CLAUDE.md). Every open issue gets a response — a fix, specific questions, or a reasoned close — and merged work auto-releases from `master` every 3 hours.
 
-When filing an issue, include: steps to reproduce, expected vs. actual behavior, `af version` output and your platform, and (when relevant) logs from `~/.config/agent-factory/agent-factory.log`.
+When filing an issue, include: steps to reproduce, expected vs. actual behavior, `af version` output and your platform, and (when relevant) logs from the application log (see `docs/configuration.md` for path resolution).
 
 ## License
 

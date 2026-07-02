@@ -37,9 +37,9 @@ const slowDetachThreshold = 2 * time.Second
 
 // detachSlowDumpFileName is the basename of the goroutine-dump file written
 // next to agent-factory.log on a slow detach. The full path is
-// <config-dir>/detach-slow.log — on Linux that is
-// ~/.config/agent-factory/detach-slow.log, matching where agent-factory.log
-// lives so users already know where to look.
+// <config-dir>/detach-slow.log (config.GetConfigDir, which respects
+// AGENT_FACTORY_HOME), matching where agent-factory.log lives so users
+// already know where to look.
 const detachSlowDumpFileName = "detach-slow.log"
 
 // detachTrace logs a marker with the elapsed time since start. Cheap when
