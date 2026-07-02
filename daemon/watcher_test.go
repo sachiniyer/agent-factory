@@ -345,6 +345,63 @@ func TestWatcherStderrGoesToTaskLog(t *testing.T) {
 	}
 }
 
+// TestWatcherTaskLogRotates pins #1062: a watch script whose stderr output
+// crosses the configured size cap rotates the per-task log mid-run — .1 is
+// created, the active file is reset under the cap, the keep count is honored,
+// and no line is lost across the rotation. Hermetic per the #1057/#1061
+// pattern: the rotation policy is read from a sandboxed AGENT_FACTORY_HOME.
+func TestWatcherTaskLogRotates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.json"), []byte(`{"log_max_size_mb": 1, "log_max_backups": 1}`), 0644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	dir := t.TempDir()
+	// ~1.25 MB of stderr in ~1 KB numbered lines crosses the 1 MB cap mid-run.
+	script := `payload=$(printf '%01024d' 0)
+i=0
+while [ $i -lt 1200 ]; do
+  echo "RMARK $i $payload" >&2
+  i=$((i+1))
+done
+exit 0`
+	s, rec := newTestSupervisor(t, staticTasks(watchTask("cdcd0001", script, dir)))
+	logDir := t.TempDir()
+	s.logPath = func(taskID string) (string, error) {
+		return filepath.Join(logDir, "task-"+taskID+".log"), nil
+	}
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "watcher to stop", func() bool {
+		return len(rec.statusesSnapshot()) > 0
+	})
+
+	logPath := filepath.Join(logDir, "task-cdcd0001.log")
+	rotated, err := os.ReadFile(logPath + ".1")
+	if err != nil {
+		t.Fatalf("expected rotation to produce %s.1: %v", logPath, err)
+	}
+	current, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read active task log: %v", err)
+	}
+	if len(current) > 1<<20 {
+		t.Fatalf("active task log exceeds the cap after rotation: %d bytes", len(current))
+	}
+	if _, err := os.Stat(logPath + ".2"); !os.IsNotExist(err) {
+		t.Fatalf("log_max_backups=1 must keep a single rotated file; stat .2 err = %v", err)
+	}
+	combined := string(rotated) + string(current)
+	for i := 0; i < 1200; i++ {
+		if !strings.Contains(combined, fmt.Sprintf("RMARK %d ", i)) {
+			t.Fatalf("stderr line %d lost across task-log rotation", i)
+		}
+	}
+}
+
 // TestWatcherReloadReconciles drives the supervisor through config changes:
 // disabled tasks stop their watcher, removed tasks stop it, and a changed
 // watch command restarts the script with the new config while an unchanged

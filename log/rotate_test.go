@@ -185,6 +185,81 @@ func TestWritePathRotation(t *testing.T) {
 	}
 }
 
+// The NewRotatingFile tests pin the exported per-file rotation seam (#1062):
+// the daemon's per-task watch-script logs reuse the same policy keys and
+// mechanics as the main log, both at open time and on the write path.
+
+func TestNewRotatingFileRotatesOverCapOnOpen(t *testing.T) {
+	logPath := setupRotationHome(t, `{"log_max_size_mb": 1, "log_max_backups": 2}`)
+	path := filepath.Join(filepath.Dir(logPath), "task-open.log")
+	fillFile(t, path, "OLD-TASK-CONTENT", 1<<20+512) // just over the 1 MB cap
+
+	w, err := NewRotatingFile(path, 0644)
+	if err != nil {
+		t.Fatalf("NewRotatingFile: %v", err)
+	}
+	defer w.Close()
+	if _, err := w.Write([]byte("fresh-line\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	rotated, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("expected rotated file %s.1 to exist: %v", path, err)
+	}
+	if !strings.HasPrefix(string(rotated), "OLD-TASK-CONTENT") {
+		t.Fatalf("rotated file does not carry the old content; starts with %q", string(rotated[:32]))
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fresh file: %v", err)
+	}
+	if string(current) != "fresh-line\n" {
+		t.Fatalf("fresh file should hold only the post-open write; got %d bytes", len(current))
+	}
+}
+
+func TestNewRotatingFileWritePathRotation(t *testing.T) {
+	logPath := setupRotationHome(t, `{"log_max_size_mb": 1, "log_max_backups": 1}`)
+	path := filepath.Join(filepath.Dir(logPath), "task-write.log")
+
+	w, err := NewRotatingFile(path, 0644)
+	if err != nil {
+		t.Fatalf("NewRotatingFile: %v", err)
+	}
+	defer w.Close()
+
+	// Each line is ~1 KB; 1200 of them cross the 1 MB cap mid-run.
+	payload := strings.Repeat("q", 1024)
+	const writes = 1200
+	for i := 0; i < writes; i++ {
+		if _, err := fmt.Fprintf(w, "TMARK %d %s\n", i, payload); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+
+	rotated, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("expected write-path rotation to produce %s.1: %v", path, err)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read current file: %v", err)
+	}
+	if len(current) > 1<<20 {
+		t.Fatalf("current file exceeds the cap after write-path rotation: %d bytes", len(current))
+	}
+	if _, err := os.Stat(path + ".2"); !os.IsNotExist(err) {
+		t.Fatalf("log_max_backups=1 must keep a single rotated file; stat .2 err = %v", err)
+	}
+	combined := string(rotated) + string(current)
+	for i := 0; i < writes; i++ {
+		if !strings.Contains(combined, fmt.Sprintf("TMARK %d ", i)) {
+			t.Fatalf("write %d lost across rotation", i)
+		}
+	}
+}
+
 // TestRotationPolicyDefaults pins the policy resolution: defaults when no
 // config exists, overrides applied when present, invalid values ignored.
 func TestRotationPolicyDefaults(t *testing.T) {

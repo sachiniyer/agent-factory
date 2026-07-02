@@ -27,7 +27,8 @@ import (
 //
 //   - each newline-terminated stdout line = one event; lines over 64KB are
 //     truncated with a logged note
-//   - stderr appends to ~/.agent-factory/logs/task-<id>.log
+//   - stderr appends to ~/.agent-factory/logs/task-<id>.log, size-capped by
+//     the same log_max_size_mb/log_max_backups rotation as the main log (#1062)
 //   - env: AF_TASK_ID, AF_TASK_NAME, AF_PROJECT_PATH
 //   - exit 0 = intentional stop (status "stopped"; re-armed by the next
 //     reload or re-enable); non-zero = restart with exponential backoff
@@ -494,17 +495,23 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// mirroring the post-worktree hook runner (#610, #769).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// stderr appends to the per-task log. A logging failure must not take the
-	// watcher down — the failure tail below still captures stderr for this
-	// run even when the file can't be opened.
-	var stderrFile *os.File
+	// stderr appends to the per-task log, size-capped by the same rotation
+	// policy as the main log (#1062): NewRotatingFile rotates on open when the
+	// file already exceeds the cap and again on the write path, which is what
+	// bounds a continuous watch task whose log this run holds open for weeks.
+	// A logging failure must not take the watcher down — the failure tail
+	// below still captures stderr for this run even when the file can't be
+	// opened.
+	var stderrLog io.WriteCloser
+	var stderrLogPath string
 	if logPath, err := w.sup.logPath(w.taskID); err != nil {
 		log.WarningLog.Printf("watch task %s: cannot resolve stderr log path: %v", w.taskID, err)
-	} else if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err != nil {
+	} else if lw, err := log.NewRotatingFile(logPath, 0644); err != nil {
 		log.WarningLog.Printf("watch task %s: cannot open stderr log: %v", w.taskID, err)
 	} else {
-		stderrFile = f
-		defer f.Close()
+		stderrLog = lw
+		stderrLogPath = logPath
+		defer lw.Close()
 	}
 
 	// Hand the child the write end of a pipe we own instead of using
@@ -524,8 +531,22 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	var stderrR, stderrW *os.File
 	if er, ew, perr := os.Pipe(); perr != nil {
 		log.WarningLog.Printf("watch task %s: cannot create stderr pipe (stderr won't appear in failure logs): %v", w.taskID, perr)
-		if stderrFile != nil {
-			cmd.Stderr = stderrFile
+		// Degrade to the pre-#797 direct-to-file wiring. cmd.Stderr must be a
+		// real *os.File here: for any other writer os/exec inserts a copy
+		// goroutine that Wait blocks on, and a backgrounded grandchild holding
+		// stderr open would wedge Wait forever — the group SIGKILL that
+		// guarantees EOF only runs after Wait returns. Child writes bypass the
+		// rotating writer's size accounting, so on this path growth is bounded
+		// by NewRotatingFile's rotate-on-open in the next runOnce instead.
+		if stderrLog != nil {
+			_ = stderrLog.Close()
+			stderrLog = nil
+			if f, ferr := os.OpenFile(stderrLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); ferr != nil {
+				log.WarningLog.Printf("watch task %s: cannot reopen stderr log: %v", w.taskID, ferr)
+			} else {
+				cmd.Stderr = f
+				defer f.Close()
+			}
 		}
 	} else {
 		stderrR, stderrW = er, ew
@@ -558,8 +579,8 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 		close(stderrDone)
 	} else {
 		var sink io.Writer
-		if stderrFile != nil {
-			sink = stderrFile
+		if stderrLog != nil {
+			sink = stderrLog
 		}
 		go func() {
 			defer close(stderrDone)
