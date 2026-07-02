@@ -51,12 +51,6 @@ type AppState interface {
 	SetHelpScreensSeen(seen uint32) error
 }
 
-// StateManager combines instance storage and app state management
-type StateManager interface {
-	InstanceStorage
-	AppState
-}
-
 // State represents the application state that persists between sessions
 type State struct {
 	// HelpScreensSeen is a bitmask tracking which help screens have been shown
