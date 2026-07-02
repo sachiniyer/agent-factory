@@ -70,7 +70,7 @@ func autoUpdate() error {
 	goos := runtimeGOOS
 	goarch := runtime.GOARCH
 
-	latestTag, downloadURL, err := latestDownloadURL(goos, goarch)
+	latestTag, downloadURL, err := latestDownloadURL(updateChannel(), goos, goarch)
 	if err != nil {
 		return err
 	}
@@ -130,12 +130,25 @@ func autoUpdate() error {
 	return nil
 }
 
-// latestDownloadURL resolves the newest release across both channels (#1041)
+// updateChannel returns the release channel auto-update and `af upgrade`
+// follow: config.UpdateChannelStable unless the user opted into
+// config.UpdateChannelPreview via the update_channel key (#1041). A config
+// that fails to load must never block or redirect an update check, so any
+// error falls back to the stable channel.
+func updateChannel() string {
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg == nil {
+		return config.UpdateChannelStable
+	}
+	return cfg.UpdateChannel
+}
+
+// latestDownloadURL resolves the newest release on the given channel (#1041)
 // and returns its tag plus the tarball URL for goos/goarch. Previews are not
 // served by the releases/latest/download redirect (GitHub pins that to the
 // newest stable), so the download must address the tag directly.
-func latestDownloadURL(goos, goarch string) (tag, url string, err error) {
-	tag, err = fetchLatestReleaseTagFn()
+func latestDownloadURL(channel, goos, goarch string) (tag, url string, err error) {
+	tag, err = fetchLatestReleaseTagFn(channel)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to fetch latest release: %w", err)
 	}
@@ -147,17 +160,18 @@ func latestDownloadURL(goos, goarch string) (tag, url string, err error) {
 // releaseEntry is the subset of the GitHub release object needed to pick an
 // update target.
 type releaseEntry struct {
-	TagName string `json:"tag_name"`
-	Draft   bool   `json:"draft"`
+	TagName    string `json:"tag_name"`
+	Draft      bool   `json:"draft"`
+	Prerelease bool   `json:"prerelease"`
 }
 
 // fetchLatestReleaseTag queries the GitHub API for the newest release tag by
-// version order, across both channels (#1041): stable releases vX.Y.Z and
-// preview prereleases vX.Y.Z-preview-N. This makes auto-update track the
-// preview channel — previews are based on the next patch after the latest
-// stable (1.2.0 < 1.2.1-preview-1), so the newest tag is normally the newest
-// preview, and is the stable itself right after a manual stable release.
-func fetchLatestReleaseTag() (string, error) {
+// version order on the given channel (#1041): stable-channel updates only
+// consider stable releases vX.Y.Z; preview-channel updates also consider the
+// vX.Y.Z-preview-N prereleases. The /releases/latest endpoint never returns
+// prereleases, so we list releases and pick the newest ourselves on both
+// channels.
+func fetchLatestReleaseTag(channel string) (string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", githubAPIReleases, nil)
 	if err != nil {
@@ -179,23 +193,30 @@ func fetchLatestReleaseTag() (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
 		return "", err
 	}
-	tag := pickLatestReleaseTag(releases)
+	tag := pickLatestReleaseTag(channel, releases)
 	if tag == "" {
-		return "", fmt.Errorf("no published release with a parseable version tag found")
+		return "", fmt.Errorf("no published release with a parseable version tag found on the %s channel", channel)
 	}
 	return tag, nil
 }
 
-// pickLatestReleaseTag returns the version-newest non-draft release tag, or
-// "" when no release carries a parseable version tag.
-func pickLatestReleaseTag(releases []releaseEntry) string {
+// pickLatestReleaseTag returns the version-newest non-draft release tag on
+// the given channel, or "" when none qualifies. On the stable channel a
+// release is skipped when either GitHub's prerelease flag or the tag's
+// -preview-N suffix marks it as a preview; the preview channel includes
+// everything.
+func pickLatestReleaseTag(channel string, releases []releaseEntry) string {
 	best := ""
 	for _, r := range releases {
 		if r.Draft {
 			continue
 		}
 		v := strings.TrimPrefix(r.TagName, "v")
-		if parseSemver(v) == nil {
+		parsed := parseSemver(v)
+		if parsed == nil {
+			continue
+		}
+		if channel != config.UpdateChannelPreview && (r.Prerelease || parsed.preview) {
 			continue
 		}
 		if best == "" || isNewer(v, strings.TrimPrefix(best, "v")) {

@@ -22,7 +22,8 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
   "branch_prefix": "username/",
   "detach_keys": "ctrl-w",
   "log_max_size_mb": 50,
-  "log_max_backups": 2
+  "log_max_backups": 2,
+  "update_channel": "stable"
 }
 ```
 
@@ -36,6 +37,7 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
 | `detach_keys` | Key combination that detaches from an attached session (defaults to `ctrl-w`). |
 | `log_max_size_mb` | Size cap in MB for `agent-factory.log` and the per-task watch-script logs before they are rotated (defaults to 50). Must be positive. |
 | `log_max_backups` | How many rotated logs (`agent-factory.log.1`, `.2`, ...) to keep per log file; older ones are deleted (defaults to 2). `0` keeps none. |
+| `update_channel` | Release channel that auto-update and `af upgrade` follow: `stable` (default) tracks manual `1.x.y` releases only; `preview` opts into the automatic `1.x.y-preview-z` prereleases cut every 3 hours. Any other value falls back to `stable` with a warning. See [release-process.md](release-process.md). |
 
 ### Choosing the agent
 
@@ -72,7 +74,7 @@ A repository can carry its own configuration in `<repo-root>/.agent-factory/conf
 |-------|-------|
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `"post_worktree_commands": []`. |
-| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys`, `log_max_size_mb`, `log_max_backups` | Global only. Setting them in-repo is rejected with an error naming the key. |
+| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel` | Global only. Setting them in-repo is rejected with an error naming the key. |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `H` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 

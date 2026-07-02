@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
@@ -95,7 +96,7 @@ func TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable(t *testing.T) {
 	runtimeGOOS = "windows"
 	version = "1.0.0"
 	fetchCalls := 0
-	fetchLatestReleaseTagFn = func() (string, error) {
+	fetchLatestReleaseTagFn = func(string) (string, error) {
 		fetchCalls++
 		return "v1.0.1", nil
 	}
@@ -144,7 +145,7 @@ func TestAutoUpdateWindowsSkipsNetworkRegardlessOfVersion(t *testing.T) {
 
 	runtimeGOOS = "windows"
 	version = "1.0.1"
-	fetchLatestReleaseTagFn = func() (string, error) {
+	fetchLatestReleaseTagFn = func(string) (string, error) {
 		t.Fatalf("fetchLatestReleaseTagFn must not be called on Windows (#1002)")
 		return "", nil
 	}
@@ -170,7 +171,7 @@ func TestAutoUpdateRecordsCheckOnFetchFailure(t *testing.T) {
 		fetchLatestReleaseTagFn = prevFetch
 	})
 
-	fetchLatestReleaseTagFn = func() (string, error) {
+	fetchLatestReleaseTagFn = func(string) (string, error) {
 		return "", errors.New("simulated network failure")
 	}
 
@@ -206,7 +207,7 @@ func TestAutoUpdateRecordsCheckOnDownloadFailure(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.1", nil }
 	downloadBinaryFn = func(string) ([]byte, error) {
 		return nil, errors.New("simulated download failure")
 	}
@@ -258,7 +259,7 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.1", nil }
 	// Bypass the tarball extract by returning the raw binary directly.
 	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
@@ -328,7 +329,7 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.1", nil }
 	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
@@ -396,37 +397,70 @@ func TestIsNewer(t *testing.T) {
 func TestPickLatestReleaseTag(t *testing.T) {
 	cases := []struct {
 		name     string
+		channel  string
 		releases []releaseEntry
 		want     string
 	}{
 		{
-			name: "newest preview wins over older stable",
+			name:    "preview channel: newest preview wins over older stable",
+			channel: config.UpdateChannelPreview,
 			releases: []releaseEntry{
-				{TagName: "v1.0.138-preview-2"},
-				{TagName: "v1.0.138-preview-1"},
+				{TagName: "v1.0.138-preview-2", Prerelease: true},
+				{TagName: "v1.0.138-preview-1", Prerelease: true},
 				{TagName: "v1.0.137"},
 			},
 			want: "v1.0.138-preview-2",
 		},
 		{
-			name: "fresh stable wins over previews of the old base",
+			name:    "stable channel: previews are skipped entirely",
+			channel: config.UpdateChannelStable,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138-preview-2", Prerelease: true},
+				{TagName: "v1.0.138-preview-1", Prerelease: true},
+				{TagName: "v1.0.137"},
+			},
+			want: "v1.0.137",
+		},
+		{
+			name:    "stable channel: preview-shaped tag is skipped even without the prerelease flag",
+			channel: config.UpdateChannelStable,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138-preview-2"},
+				{TagName: "v1.0.137"},
+			},
+			want: "v1.0.137",
+		},
+		{
+			name:    "stable channel: stable-shaped tag flagged prerelease is skipped",
+			channel: config.UpdateChannelStable,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138", Prerelease: true},
+				{TagName: "v1.0.137"},
+			},
+			want: "v1.0.137",
+		},
+		{
+			name:    "preview channel: fresh stable wins over previews of the old base",
+			channel: config.UpdateChannelPreview,
 			releases: []releaseEntry{
 				{TagName: "v1.1.0"},
-				{TagName: "v1.0.138-preview-9"},
+				{TagName: "v1.0.138-preview-9", Prerelease: true},
 				{TagName: "v1.0.137"},
 			},
 			want: "v1.1.0",
 		},
 		{
-			name: "promoted base outranks its own previews",
+			name:    "preview channel: promoted base outranks its own previews",
+			channel: config.UpdateChannelPreview,
 			releases: []releaseEntry{
-				{TagName: "v1.0.138-preview-9"},
+				{TagName: "v1.0.138-preview-9", Prerelease: true},
 				{TagName: "v1.0.138"},
 			},
 			want: "v1.0.138",
 		},
 		{
-			name: "drafts and unparseable tags are skipped",
+			name:    "drafts and unparseable tags are skipped",
+			channel: config.UpdateChannelPreview,
 			releases: []releaseEntry{
 				{TagName: "v9.9.9", Draft: true},
 				{TagName: "nightly"},
@@ -435,24 +469,102 @@ func TestPickLatestReleaseTag(t *testing.T) {
 			want: "v1.0.137",
 		},
 		{
-			name: "API order does not matter",
+			name:    "API order does not matter",
+			channel: config.UpdateChannelPreview,
 			releases: []releaseEntry{
 				{TagName: "v1.0.137"},
-				{TagName: "v1.0.138-preview-10"},
-				{TagName: "v1.0.138-preview-9"},
+				{TagName: "v1.0.138-preview-10", Prerelease: true},
+				{TagName: "v1.0.138-preview-9", Prerelease: true},
 			},
 			want: "v1.0.138-preview-10",
 		},
 		{
 			name:     "no usable releases",
+			channel:  config.UpdateChannelPreview,
 			releases: []releaseEntry{{TagName: "junk"}, {TagName: "v1.0.0", Draft: true}},
 			want:     "",
 		},
+		{
+			name:    "stable channel: only previews published means no target",
+			channel: config.UpdateChannelStable,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138-preview-1", Prerelease: true},
+			},
+			want: "",
+		},
 	}
 	for _, c := range cases {
-		if got := pickLatestReleaseTag(c.releases); got != c.want {
+		if got := pickLatestReleaseTag(c.channel, c.releases); got != c.want {
 			t.Errorf("%s: pickLatestReleaseTag = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestAutoUpdateChannelFromConfig exercises the real config read path:
+// update_channel in the global config.json decides which channel the fetch
+// seam is asked for — stable when the key is absent (the default), preview
+// when opted in.
+func TestAutoUpdateChannelFromConfig(t *testing.T) {
+	cases := []struct {
+		name        string
+		configJSON  string // empty = no config.json (first run, materialized defaults)
+		wantChannel string
+	}{
+		{
+			name:        "no config defaults to stable",
+			wantChannel: config.UpdateChannelStable,
+		},
+		{
+			name:        "config without the key defaults to stable",
+			configJSON:  `{"default_program": "claude"}`,
+			wantChannel: config.UpdateChannelStable,
+		},
+		{
+			name:        "preview opt-in is honored",
+			configJSON:  `{"default_program": "claude", "update_channel": "preview"}`,
+			wantChannel: config.UpdateChannelPreview,
+		},
+		{
+			name:        "invalid value falls back to stable",
+			configJSON:  `{"default_program": "claude", "update_channel": "nightly"}`,
+			wantChannel: config.UpdateChannelStable,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := withTestHome(t)
+			captureLogs(t)
+			if c.configJSON != "" {
+				if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(c.configJSON), 0644); err != nil {
+					t.Fatalf("write config: %v", err)
+				}
+			}
+
+			prevGOOS := runtimeGOOS
+			prevFetch := fetchLatestReleaseTagFn
+			prevVersion := version
+			t.Cleanup(func() {
+				runtimeGOOS = prevGOOS
+				fetchLatestReleaseTagFn = prevFetch
+				version = prevVersion
+			})
+
+			runtimeGOOS = "linux"
+			version = "1.0.0"
+			gotChannel := ""
+			fetchLatestReleaseTagFn = func(channel string) (string, error) {
+				gotChannel = channel
+				// Same version as current: no download or install follows.
+				return "v1.0.0", nil
+			}
+
+			if err := autoUpdate(); err != nil {
+				t.Fatalf("autoUpdate: %v", err)
+			}
+			if gotChannel != c.wantChannel {
+				t.Fatalf("channel = %q, want %q", gotChannel, c.wantChannel)
+			}
+		})
 	}
 }
 
@@ -488,7 +600,7 @@ func TestAutoUpdateDownloadsByTag(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.137"
-	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.138-preview-2", nil }
+	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.138-preview-2", nil }
 	var gotURL string
 	downloadBinaryFn = func(url string) ([]byte, error) {
 		gotURL = url

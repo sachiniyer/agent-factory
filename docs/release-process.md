@@ -55,15 +55,20 @@ channel has been testing, and subsequent previews move to `1.0.139-preview-1`.
 
 ## How updates flow to users
 
-- **Auto-update follows the preview channel.** On launch (throttled to once
-  per 24h), `af` lists GitHub releases, picks the newest tag across both
-  channels — normally the newest preview; the stable itself right after a
-  stable release — and swaps the binary in place. Prereleases are invisible
-  to the `releases/latest` API/redirect, so the updater addresses release
-  assets by tag.
-- **`af upgrade`** resolves the same way, so a manual upgrade never
-  downgrades a preview build back to an older stable.
+- **Auto-update follows the stable channel by default.** On launch
+  (throttled to once per 24h), `af` lists GitHub releases, picks the newest
+  tag on the configured channel, and swaps the binary in place. With the
+  default `update_channel: "stable"` only stable `1.x.y` releases are
+  considered; prereleases are skipped.
+- **Preview tracking is opt-in** via the global config key
+  `update_channel: "preview"` (see
+  [configuration.md](configuration.md)) — the updater then also considers
+  `1.x.y-preview-z` prereleases, which are normally the newest tag.
+  Prereleases are invisible to the `releases/latest` API/redirect, so the
+  updater addresses release assets by tag.
+- **`af upgrade`** resolves through the same configured channel, so a manual
+  upgrade never downgrades a preview build back to an older stable.
 - **`install.sh` and fresh installs** use the `releases/latest/download/...`
-  redirect, which GitHub pins to the newest **stable** — new users start on
-  stable, then auto-update onto the preview channel. A specific version
-  (stable or preview) can be pinned with `install.sh --version <tag>`.
+  redirect, which GitHub pins to the newest **stable** — new users start
+  (and by default stay) on stable. A specific version (stable or preview)
+  can be pinned with `install.sh --version <tag>`.

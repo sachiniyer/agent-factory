@@ -100,11 +100,11 @@ var upgradeCmd = &cobra.Command{
 			return fmt.Errorf("af upgrade is not supported on Windows; download manually from %s", releaseBaseURL)
 		}
 
-		// Resolve the newest release across both channels (#1041). The
-		// releases/latest/download redirect only serves the stable channel;
-		// auto-update tracks previews, so using it here would silently
-		// downgrade a preview build back to the older stable.
-		latestTag, downloadURL, err := latestDownloadURL(goos, goarch)
+		// Resolve the newest release on the configured update channel
+		// (#1041). The releases/latest/download redirect only serves the
+		// stable channel; a preview-channel user upgraded through it would
+		// silently downgrade back to the older stable.
+		latestTag, downloadURL, err := latestDownloadURL(updateChannel(), goos, goarch)
 		if err != nil {
 			return err
 		}

@@ -14,7 +14,7 @@ Prerequisites: **tmux**, **git**, and at least one AI coding agent (e.g. [Claude
 curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh
 ```
 
-Installs the `af` binary (Linux/macOS, amd64/arm64) to `~/.local/bin` — override with `AF_INSTALL_DIR`, pin a release with `--version`. Re-run the script or `af upgrade` to update. Installed binaries also auto-update themselves along the preview channel (see [docs/release-process.md](docs/release-process.md)).
+Installs the `af` binary (Linux/macOS, amd64/arm64) to `~/.local/bin` — override with `AF_INSTALL_DIR`, pin a release with `--version`. Re-run the script or `af upgrade` to update. Installed binaries also auto-update themselves along the stable channel; set `"update_channel": "preview"` in the global config to track preview builds instead (see [docs/release-process.md](docs/release-process.md)).
 
 **Other ways:** grab a tarball from the [Releases page](https://github.com/sachiniyer/agent-factory/releases/latest), or build from source (needs **Go 1.24+**) with `git clone https://github.com/sachiniyer/agent-factory.git && cd agent-factory && ./dev-install.sh`.
 
@@ -97,7 +97,7 @@ See [docs/configuration.md](docs/configuration.md) for every key, the precedence
 - [docs/configuration.md](docs/configuration.md) — config keys, global vs. in-repo precedence, state locations
 - [docs/tasks.md](docs/tasks.md) — task triggers, the watch-script contract, daemon lifecycle
 - [docs/remote-hooks.md](docs/remote-hooks.md) — remote backend script protocol
-- [docs/release-process.md](docs/release-process.md) — release channels: manual stable `1.x.y`, auto preview `1.x.y-preview-z`, how updates reach users
+- [docs/release-process.md](docs/release-process.md) — release channels: manual stable `1.x.y` (the auto-update default), opt-in auto preview `1.x.y-preview-z`
 - [docs/release-testing-plan.md](docs/release-testing-plan.md) — release gate and smoke checks
 - [examples/](examples/) — runnable task watch-scripts and remote-hook skeletons
 
