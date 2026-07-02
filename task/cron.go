@@ -55,16 +55,29 @@ func ParseCron(expr string) (cron.Schedule, error) {
 // is itself treated as denoting Sunday so it still normalizes to an explicit
 // list. For every other shape (a bare 7, a range bound of 7, a step that merely
 // lands on 7) expansion followed by normalizeDOWValues preserves the meaning.
+//
+// A range whose *end bound* is 7 must normalize even when its expansion omits
+// 7: robfig rejects the raw text of any DOW range ending in 7 ("end of range
+// (7) above maximum (6)"), and a stepped range can skip its own end bound —
+// "0-7/2" expands to [0,2,4,6], so neither containsSeven nor the step-base
+// rewrite fires and the rejected raw form leaked through to robfig (#1064).
+// Such parts are detected syntactically (rangeEndsAtSeven) and rewritten via
+// the same expansion→explicit-list path, which keeps the semantics exact:
+// "0-7/2" → "0,2,4,6" and "5-7" → "0,5,6" (Sunday mapped to 0, not dropped).
 func normalizeDOWField(field string) string {
 	if field == "*" {
 		return field
 	}
 	listParts := strings.Split(field, ",")
 	rewroteStepBase := false
+	rangeToSeven := false
 	for i, part := range listParts {
 		if norm := normalizeDOWStepBase(part); norm != part {
 			listParts[i] = norm
 			rewroteStepBase = true
+		}
+		if rangeEndsAtSeven(part) {
+			rangeToSeven = true
 		}
 	}
 	field = strings.Join(listParts, ",")
@@ -73,12 +86,13 @@ func normalizeDOWField(field string) string {
 	if err != nil || vals == nil {
 		return field
 	}
-	// Only rewrite into an explicit 0-based list when the field actually denotes
-	// Sunday: either its expansion includes the alias 7, or a "7/N" step base was
-	// rewritten to "0/N" above (whose expansion no longer shows a 7). Otherwise
+	// Only rewrite into an explicit 0-based list when the field needs it: its
+	// expansion includes the alias 7, a "7/N" step base was rewritten to "0/N"
+	// above (whose expansion no longer shows a 7), or a range part ends at 7
+	// (whose raw text robfig rejects even when a step skips the 7). Otherwise
 	// leave "*", ranges, and steps that never reach 7 untouched so they pass to
 	// robfig in their original shape.
-	if !containsSeven(vals) && !rewroteStepBase {
+	if !containsSeven(vals) && !rewroteStepBase && !rangeToSeven {
 		return field
 	}
 	vals = normalizeDOWValues(vals)
@@ -123,6 +137,25 @@ func normalizeDOWStepBase(part string) string {
 		return "0" + part[idx:]
 	}
 	return part
+}
+
+// rangeEndsAtSeven reports whether a single comma-separated part is a range —
+// with or without a step suffix — whose end bound is the Sunday alias 7
+// ("5-7", "0-7/2", "0-07/3"). robfig rejects the raw text of such ranges (its
+// DOW max is 6) regardless of whether the stepped expansion actually reaches 7,
+// so they must always be rewritten to an explicit list (#1064). The end bound
+// is parsed numerically to match ValidateCronExpr, which accepts leading zeros
+// via strconv.Atoi (#915) — a literal "-7" suffix check would miss "0-07".
+func rangeEndsAtSeven(part string) bool {
+	if idx := strings.Index(part, "/"); idx != -1 {
+		part = part[:idx]
+	}
+	idx := strings.Index(part, "-")
+	if idx == -1 {
+		return false
+	}
+	end, err := strconv.Atoi(part[idx+1:])
+	return err == nil && end == 7
 }
 
 // normalizeDOWValues maps weekday value 7 to 0 (both mean Sunday)
