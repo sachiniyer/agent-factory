@@ -106,10 +106,6 @@ func Slugify(title string) string {
 	return s
 }
 
-// slugify is kept as an unexported alias for existing package-local call sites
-// and tests.
-func slugify(title string) string { return Slugify(title) }
-
 // RemoteHookName returns the hook-protocol name for a title and persisted
 // remote metadata. Imported remote sessions can carry their authoritative
 // list_cmd name in remote_meta.name; TUI-created sessions derive it from the
