@@ -33,12 +33,19 @@ func captureLogs(t *testing.T) (info, errLog *bytes.Buffer) {
 }
 
 func TestMain(m *testing.M) {
+	// #837: fail the package loudly if any test touches the real config.json.
+	verifyRealConfig := testguard.ConfigTripwire()
+	// #1056: default the whole package into a sandboxed AGENT_FACTORY_HOME so
+	// stray config/state/log writes land in a temp dir instead of the
+	// developer's real one. Sandbox AFTER the tripwire snapshots the real
+	// environment, BEFORE logging resolves its file path.
+	restoreHome := testguard.SandboxHome()
 	// autoUpdate() calls log.ErrorLog.Printf, which panics if logging has not
 	// been initialized. Initialize once for the whole package test binary.
 	aflog.Initialize(false)
-	// #837: fail the package loudly if any test touches the real config.json.
-	verifyRealConfig := testguard.ConfigTripwire()
 	code := m.Run()
+	aflog.Close()
+	restoreHome()
 	if err := verifyRealConfig(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1

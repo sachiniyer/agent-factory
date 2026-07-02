@@ -2,6 +2,7 @@ package testguard
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -128,5 +129,73 @@ func TestConfigTripwire_FallsBackToDotAgentFactory(t *testing.T) {
 	want := filepath.Join(fakeHome, ".agent-factory", "config.json")
 	if got := ambientConfigPath(); got != want {
 		t.Fatalf("ambientConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestSandboxHome_SetsAndRestores(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", "/pre-sandbox-value")
+
+	restore := SandboxHome()
+	dir := os.Getenv("AGENT_FACTORY_HOME")
+	if dir == "/pre-sandbox-value" || dir == "" {
+		t.Fatalf("SandboxHome did not repoint AGENT_FACTORY_HOME; got %q", dir)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("sandbox dir %q not usable: %v", dir, err)
+	}
+
+	restore()
+	if got := os.Getenv("AGENT_FACTORY_HOME"); got != "/pre-sandbox-value" {
+		t.Fatalf("restore did not put AGENT_FACTORY_HOME back; got %q", got)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("restore did not remove sandbox dir %q; stat err=%v", dir, err)
+	}
+}
+
+// TestTmuxTripwire_FiresOnLeakedSession exercises the tripwire against the
+// private server IsolateTmux provides, so the test itself is hermetic: the
+// "ambient" server the tripwire snapshots is the throwaway one.
+func TestTmuxTripwire_FiresOnLeakedSession(t *testing.T) {
+	IsolateTmux(t) // skips when tmux is unavailable
+
+	verify := TmuxTripwire()
+	if err := verify(); err != nil {
+		t.Fatalf("tripwire fired with no sessions created: %v", err)
+	}
+
+	const leak = "af_testguard_tripwire_leak"
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", leak, "sleep", "60").CombinedOutput(); err != nil {
+		t.Skipf("cannot start tmux session on private server: %v: %s", err, out)
+	}
+
+	err := verify()
+	if err == nil {
+		t.Fatal("tripwire did not fire on a leaked af_ session")
+	}
+	if !strings.Contains(err.Error(), leak) {
+		t.Fatalf("tripwire error should name the leaked session %q; got: %v", leak, err)
+	}
+
+	if err := exec.Command("tmux", "kill-session", "-t", "="+leak).Run(); err != nil {
+		t.Fatalf("kill leaked session: %v", err)
+	}
+	if err := verify(); err != nil {
+		t.Fatalf("tripwire fired after the session was cleaned up: %v", err)
+	}
+}
+
+func TestTmuxTripwire_IgnoresNonAFSessions(t *testing.T) {
+	IsolateTmux(t)
+
+	verify := TmuxTripwire()
+	const name = "my_af_project"
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sleep", "60").CombinedOutput(); err != nil {
+		t.Skipf("cannot start tmux session on private server: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name).Run() })
+
+	if err := verify(); err != nil {
+		t.Fatalf("tripwire must ignore sessions without the af_ prefix; got: %v", err)
 	}
 }

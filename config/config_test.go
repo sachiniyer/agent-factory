@@ -19,13 +19,18 @@ import (
 
 // TestMain runs before all tests to set up the test environment
 func TestMain(m *testing.M) {
-	// Initialize the logger before any tests run
-	log.Initialize(false)
-	defer log.Close()
-
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
+	// #1056: default the whole package into a sandboxed AGENT_FACTORY_HOME so
+	// stray config/state/log writes land in a temp dir instead of the
+	// developer's real one. Sandbox AFTER the tripwire snapshots the real
+	// environment, BEFORE logging resolves its file path. Tests that assert
+	// env-dependent resolution set AGENT_FACTORY_HOME themselves.
+	restoreHome := testguard.SandboxHome()
+	log.Initialize(false)
 	exitCode := m.Run()
+	log.Close()
+	restoreHome()
 	if err := verifyRealConfig(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		exitCode = 1
@@ -548,6 +553,11 @@ func TestResolveProgram(t *testing.T) {
 
 func TestGetConfigDir(t *testing.T) {
 	t.Run("returns valid config directory", func(t *testing.T) {
+		// Empty means unset for GetConfigDir; without this the assertion
+		// depends on the ambient environment (and fails under the #1056
+		// package-wide sandbox home).
+		t.Setenv("AGENT_FACTORY_HOME", "")
+
 		configDir, err := GetConfigDir()
 
 		assert.NoError(t, err)

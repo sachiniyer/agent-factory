@@ -23,12 +23,24 @@ import (
 // TestMain initializes the logger so tests that exercise paths writing to
 // InfoLog/ErrorLog (e.g. Restore's re-spawn fallback) do not nil-deref.
 func TestMain(m *testing.M) {
-	aflog.Initialize(false)
-	defer aflog.Close()
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
+	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux
+	// server, and default the whole package into a sandboxed
+	// AGENT_FACTORY_HOME so stray config/state/log writes land in a temp dir
+	// instead of the developer's real one. Sandbox AFTER the tripwires
+	// snapshot the real environment, BEFORE logging resolves its file path.
+	verifyTmux := testguard.TmuxTripwire()
+	restoreHome := testguard.SandboxHome()
+	aflog.Initialize(false)
 	code := m.Run()
+	aflog.Close()
+	restoreHome()
 	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := verifyTmux(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

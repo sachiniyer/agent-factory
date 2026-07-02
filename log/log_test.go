@@ -98,9 +98,8 @@ func TestCloseRedirectsToStderr(t *testing.T) {
 // unwritable path) logging falls back to stderr, globalLogFile stays nil, and
 // claiming a file was written points the user at a file that does not exist.
 func TestCloseClaimsFileOnlyWhenOpened(t *testing.T) {
-	origName := logFileName
 	t.Cleanup(func() {
-		logFileName = origName
+		logPathOverride = ""
 		globalLogFile = nil
 	})
 
@@ -127,7 +126,7 @@ func TestCloseClaimsFileOnlyWhenOpened(t *testing.T) {
 	t.Run("no file opened: no wrote-logs claim", func(t *testing.T) {
 		// Parent directory does not exist, so OpenFile fails and Initialize
 		// falls back to stderr without setting globalLogFile.
-		logFileName = filepath.Join(t.TempDir(), "missing-dir", "agent-factory.log")
+		logPathOverride = filepath.Join(t.TempDir(), "missing-dir", "agent-factory.log")
 		globalLogFile = nil
 		out := captureStderr(t, func() {
 			Initialize(false)
@@ -142,7 +141,7 @@ func TestCloseClaimsFileOnlyWhenOpened(t *testing.T) {
 	})
 
 	t.Run("file opened: wrote-logs claim present", func(t *testing.T) {
-		logFileName = filepath.Join(t.TempDir(), "agent-factory.log")
+		logPathOverride = filepath.Join(t.TempDir(), "agent-factory.log")
 		globalLogFile = nil
 		out := captureStderr(t, func() {
 			Initialize(false)

@@ -92,4 +92,4 @@ All data (sessions, tasks) is scoped to the current git repository — the TUI s
 | `~/.agent-factory/logs/task-<id>.log` | Per-task watch-script logs. |
 | `~/.config/agent-factory/agent-factory.log` | Application log (`os.UserConfigDir` on other platforms). |
 
-Setting the `AGENT_FACTORY_HOME` environment variable relocates the `~/.agent-factory` state directory — useful for sandboxed or test setups.
+Setting the `AGENT_FACTORY_HOME` environment variable relocates the `~/.agent-factory` state directory — useful for sandboxed or test setups. When it is set, the application log also moves into that directory (`$AGENT_FACTORY_HOME/agent-factory.log`) so a relocated home is fully self-contained.
