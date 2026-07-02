@@ -14,7 +14,7 @@ Prerequisites: **tmux**, **git**, and at least one AI coding agent (e.g. [Claude
 curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh
 ```
 
-Installs the `af` binary (Linux/macOS, amd64/arm64) to `~/.local/bin` — override with `AF_INSTALL_DIR`, pin a release with `--version`. Re-run the script or `af upgrade` to update.
+Installs the `af` binary (Linux/macOS, amd64/arm64) to `~/.local/bin` — override with `AF_INSTALL_DIR`, pin a release with `--version`. Re-run the script or `af upgrade` to update. Installed binaries also auto-update themselves along the preview channel (see [docs/release-process.md](docs/release-process.md)).
 
 **Other ways:** grab a tarball from the [Releases page](https://github.com/sachiniyer/agent-factory/releases/latest), or build from source (needs **Go 1.24+**) with `git clone https://github.com/sachiniyer/agent-factory.git && cd agent-factory && ./dev-install.sh`.
 
@@ -97,12 +97,13 @@ See [docs/configuration.md](docs/configuration.md) for every key, the precedence
 - [docs/configuration.md](docs/configuration.md) — config keys, global vs. in-repo precedence, state locations
 - [docs/tasks.md](docs/tasks.md) — task triggers, the watch-script contract, daemon lifecycle
 - [docs/remote-hooks.md](docs/remote-hooks.md) — remote backend script protocol
+- [docs/release-process.md](docs/release-process.md) — release channels: manual stable `1.x.y`, auto preview `1.x.y-preview-z`, how updates reach users
 - [docs/release-testing-plan.md](docs/release-testing-plan.md) — release gate and smoke checks
 - [examples/](examples/) — runnable task watch-scripts and remote-hook skeletons
 
 ## Maintenance
 
-This repo is autonomously maintained by Captain Claude, an AI maintainer running on Claude Code; the operating contract lives in [CLAUDE.md](CLAUDE.md). Every open issue gets a response — a fix, specific questions, or a reasoned close — and merged work auto-releases from `master` every 3 hours.
+This repo is autonomously maintained by Captain Claude, an AI maintainer running on Claude Code; the operating contract lives in [CLAUDE.md](CLAUDE.md). Every open issue gets a response — a fix, specific questions, or a reasoned close — and merged work reaches the preview channel (`1.x.y-preview-z`) from `master` every 3 hours; stable releases (`1.x.y`) are cut manually (see [docs/release-process.md](docs/release-process.md)).
 
 When filing an issue, include: steps to reproduce, expected vs. actual behavior, `af version` output and your platform, and (when relevant) logs from the application log (see `docs/configuration.md` for path resolution).
 

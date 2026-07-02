@@ -100,9 +100,16 @@ var upgradeCmd = &cobra.Command{
 			return fmt.Errorf("af upgrade is not supported on Windows; download manually from %s", releaseBaseURL)
 		}
 
-		downloadURL := fmt.Sprintf("%s/latest/download/agent-factory-%s-%s.tar.gz", releaseBaseURL, goos, goarch)
+		// Resolve the newest release across both channels (#1041). The
+		// releases/latest/download redirect only serves the stable channel;
+		// auto-update tracks previews, so using it here would silently
+		// downgrade a preview build back to the older stable.
+		latestTag, downloadURL, err := latestDownloadURL(goos, goarch)
+		if err != nil {
+			return err
+		}
 
-		fmt.Printf("Downloading latest release for %s/%s...\n", goos, goarch)
+		fmt.Printf("Downloading %s for %s/%s...\n", latestTag, goos, goarch)
 		return runUpgrade(downloadURL)
 	},
 }

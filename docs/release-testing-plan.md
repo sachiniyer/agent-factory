@@ -17,8 +17,9 @@ go build ./...
 ```
 
 The PR workflow also runs lint, dependency review, CodeQL, and a build job.
-The auto-release workflow runs the release preflight before bumping
-`main.go`, tagging, or publishing artifacts. Workflow linting with
+Both release workflows (auto preview releases and manual stable releases —
+see [release-process.md](release-process.md)) run the release preflight
+before tagging or publishing artifacts. Workflow linting with
 `actionlint` is part of the local release review because broken workflow
 syntax or retired action runtimes can block CI/release automation.
 
@@ -93,10 +94,11 @@ Expected result:
 
 ## Release Artifact Verification
 
-After the release workflow publishes:
+After the release workflow publishes (`--latest` only sees the stable
+channel; verify a preview release by its `vX.Y.Z-preview-N` tag instead):
 
 ```bash
-gh release view --repo sachiniyer/agent-factory --latest
+gh release view --repo sachiniyer/agent-factory --latest   # or: gh release view <tag>
 gh release download --repo sachiniyer/agent-factory --latest --pattern 'agent-factory-*.tar.gz' --dir /tmp/af-release
 for archive in /tmp/af-release/*.tar.gz; do
   tar tzf "$archive"
@@ -118,7 +120,8 @@ AF_INSTALL_DIR="$(mktemp -d)" sh install.sh
 Expected result:
 - `install.sh` downloads `agent-factory-<os>-<arch>.tar.gz` via the
   `releases/latest/download/...` redirect, installs `af`, and the printed
-  `af version` reports the new tag.
+  `af version` reports the newest stable tag (the redirect never serves
+  preview prereleases; pin one explicitly with `install.sh --version <tag>`).
 
 ## Go/No-Go Criteria
 
