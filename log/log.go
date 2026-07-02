@@ -210,6 +210,7 @@ type rotatingWriter struct {
 	size     int64
 	maxBytes int64
 	backups  int
+	mode     os.FileMode // permission for the fresh file each rotation creates
 }
 
 func (w *rotatingWriter) Write(p []byte) (int, error) {
@@ -242,7 +243,7 @@ func (w *rotatingWriter) rotateLocked() {
 	_ = w.file.Close()
 	w.file = nil
 	rotateFiles(w.path, w.backups)
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, w.mode)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not reopen log file %s after rotation: %v, logging to stderr\n", w.path, err)
 		return
@@ -260,6 +261,31 @@ func (w *rotatingWriter) Close() error {
 	err := w.file.Close()
 	w.file = nil
 	return err
+}
+
+// NewRotatingFile opens path for appending, wrapped in the same size-capped
+// rotation as the main agent-factory.log (#1059): a file already over the
+// configured cap is rotated before opening, and a write that would push it
+// past the cap rotates in place first — the property that bounds callers who
+// hold the returned writer long-term, like the daemon's per-task watch-script
+// logs (#1062). The cap and keep-count come from the same "log_max_size_mb" /
+// "log_max_backups" config keys as the main log, resolved once at open. perm
+// applies both to the initial open and to the fresh file each rotation
+// creates. The writer is safe for concurrent use; Close is idempotent.
+func NewRotatingFile(path string, perm os.FileMode) (io.WriteCloser, error) {
+	maxBytes, backups := rotationPolicy()
+	if fi, err := os.Stat(path); err == nil && fi.Size() > maxBytes {
+		rotateFiles(path, backups)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, perm)
+	if err != nil {
+		return nil, err
+	}
+	w := &rotatingWriter{file: f, path: path, maxBytes: maxBytes, backups: backups, mode: perm}
+	if fi, err := f.Stat(); err == nil {
+		w.size = fi.Size()
+	}
+	return w, nil
 }
 
 // logFileName is the path the most recent Initialize resolved and attempted
@@ -324,7 +350,7 @@ func Initialize(daemon bool) {
 	// Set log format to include timestamp and file/line number
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	w := &rotatingWriter{file: f, path: logFileName, maxBytes: maxBytes, backups: backups}
+	w := &rotatingWriter{file: f, path: logFileName, maxBytes: maxBytes, backups: backups, mode: 0600}
 	if fi, err := f.Stat(); err == nil {
 		w.size = fi.Size()
 	}

@@ -56,7 +56,7 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
 
 - The script is **long-lived**. The daemon runs it via `$SHELL -c <watch_cmd>` with the task's `project_path` as the working directory, and keeps it running while the task is enabled.
 - **Each newline-terminated stdout line is one event.** Lines over 64KB are truncated to the cap (the remainder is discarded with a logged note). Unterminated trailing output at exit is not an event. Silence is fine — a quiet watcher is healthy; there is no output timeout.
-- **stderr** appends to `~/.agent-factory/logs/task-<id>.log`. Use it for all logging — anything on stdout becomes an event.
+- **stderr** appends to `~/.agent-factory/logs/task-<id>.log`, size-capped by the same `log_max_size_mb`/`log_max_backups` rotation as the main log. Use it for all logging — anything on stdout becomes an event.
 - **Environment**: the script receives `AF_TASK_ID`, `AF_TASK_NAME`, and `AF_PROJECT_PATH` on top of the daemon's environment.
 - **Exit 0 = intentional stop.** The task's status becomes `stopped` and the script is not restarted until the next daemon start, task edit, or re-enable.
 - **Non-zero exit = failure.** The script is restarted with exponential backoff, 1s doubling to a 5-minute cap. A run that stays healthy for 10 minutes resets the backoff.
