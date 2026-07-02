@@ -122,7 +122,7 @@ func TestHookBackendStartCleansUpOrphanOnNoJSON(t *testing.T) {
 
 	deleted, readErr := os.ReadFile(marker)
 	require.NoError(t, readErr, "delete_cmd must have run and written the marker")
-	assert.Contains(t, string(deleted), slugify("orphan-session"),
+	assert.Contains(t, string(deleted), Slugify("orphan-session"),
 		"delete_cmd must be invoked with the slug launch_cmd received")
 }
 
@@ -143,7 +143,7 @@ func TestHookBackendStartCleansUpOrphanOnInvalidJSON(t *testing.T) {
 
 	deleted, readErr := os.ReadFile(marker)
 	require.NoError(t, readErr, "delete_cmd must have run on invalid JSON")
-	assert.Contains(t, string(deleted), slugify("orphan-session"))
+	assert.Contains(t, string(deleted), Slugify("orphan-session"))
 }
 
 // TestHookBackendStartHappyPathSkipsCleanup guards against over-eager cleanup:

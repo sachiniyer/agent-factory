@@ -288,7 +288,7 @@ func writeScript(t *testing.T, dir, name, content string) string {
 // a HookBackend configured to use them.
 func makeHooks(t *testing.T) *HookBackend {
 	t.Helper()
-	return makeHooksWithListName(t, slugify("test-session"))
+	return makeHooksWithListName(t, Slugify("test-session"))
 }
 
 // makeHooksWithListName is like makeHooks but lets the caller control
@@ -327,7 +327,7 @@ func TestHookBackendStartFirstTime(t *testing.T) {
 	err := b.Start(i, true)
 	require.NoError(t, err)
 	assert.True(t, i.Started())
-	assert.Equal(t, slugify("test-session"), i.Branch)
+	assert.Equal(t, Slugify("test-session"), i.Branch)
 	assert.NotNil(t, i.remoteMeta)
 	assert.Equal(t, "running", i.remoteMeta["status"])
 
@@ -1528,7 +1528,7 @@ func TestHookBackendIsAliveWithBadJSON(t *testing.T) {
 
 func TestHookBackendIsAliveWithStoppedSession(t *testing.T) {
 	dir := t.TempDir()
-	slug := slugify("test-session")
+	slug := Slugify("test-session")
 	listCmd := writeScript(t, dir, "list.sh",
 		`echo '[{"name": "`+slug+`", "status": "stopped"}]'`)
 	b := &HookBackend{
@@ -1541,8 +1541,8 @@ func TestHookBackendIsAliveWithStoppedSession(t *testing.T) {
 
 func TestHookBackendIsAliveWithMultipleSessions(t *testing.T) {
 	dir := t.TempDir()
-	slugA := slugify("session-a")
-	slugB := slugify("session-b")
+	slugA := Slugify("session-a")
+	slugB := Slugify("session-b")
 	listCmd := writeScript(t, dir, "list.sh",
 		`echo '[{"name": "`+slugA+`", "status": "stopped"}, {"name": "`+slugB+`", "status": "running"}]'`)
 	b := &HookBackend{
@@ -1570,20 +1570,20 @@ func TestSlugifyNoHashSuffix(t *testing.T) {
 		"some/name:thing@1": "somenamething1",
 	}
 	for title, want := range cases {
-		assert.Equal(t, want, slugify(title), "slugify(%q)", title)
+		assert.Equal(t, want, Slugify(title), "Slugify(%q)", title)
 	}
 }
 
 func TestSlugifyDeterministic(t *testing.T) {
 	title := "some-session-title"
-	assert.Equal(t, slugify(title), slugify(title))
+	assert.Equal(t, Slugify(title), Slugify(title))
 }
 
 func TestSlugifyNonEmpty(t *testing.T) {
 	// Even pathological inputs should produce a non-empty slug.
 	for _, title := range []string{"!!!", "   ", ""} {
-		s := slugify(title)
-		assert.NotEmpty(t, s, "slugify(%q) should not be empty", title)
+		s := Slugify(title)
+		assert.NotEmpty(t, s, "Slugify(%q) should not be empty", title)
 	}
 }
 
@@ -1594,7 +1594,7 @@ func TestSlugifyCollisionsReduce(t *testing.T) {
 		{"HELLO", "hello"},
 	}
 	for _, p := range collisions {
-		assert.Equal(t, slugify(p[0]), slugify(p[1]))
+		assert.Equal(t, Slugify(p[0]), Slugify(p[1]))
 	}
 }
 
@@ -1991,7 +1991,7 @@ sleep 5`)
 
 	raw, err := os.ReadFile(argsFile)
 	require.NoError(t, err, "terminal_cmd should have run and recorded its args")
-	assert.Equal(t, slugify("Terminal Cmd Test"), strings.TrimSpace(string(raw)),
+	assert.Equal(t, Slugify("Terminal Cmd Test"), strings.TrimSpace(string(raw)),
 		"terminal_cmd must receive the session slug as its positional argument")
 
 	assert.NotNil(t, b.getPTY(i.Title),

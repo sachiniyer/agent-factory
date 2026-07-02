@@ -167,7 +167,7 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	err = instance.Start(true)
 	require.NoError(t, err)
 	assert.True(t, instance.Started())
-	expectedSlug := slugify("e2e-fix-auth")
+	expectedSlug := Slugify("e2e-fix-auth")
 	assert.Equal(t, expectedSlug, instance.Branch, "Branch should be set from launch response")
 
 	// Verify the remote state file was updated
@@ -283,7 +283,7 @@ func TestE2ERemoteHooksMultipleSessions(t *testing.T) {
 	// State file should have only session-beta.
 	stateData = readStateFile(t, repoDir)
 	require.Len(t, stateData, 1)
-	assert.Equal(t, slugify("session-beta"), stateData[0]["name"])
+	assert.Equal(t, Slugify("session-beta"), stateData[0]["name"])
 
 	// session-alpha should no longer be alive, session-beta should be.
 	assert.False(t, inst1.TmuxAlive())
@@ -554,14 +554,14 @@ func TestE2ERemoteHooksRelativePaths(t *testing.T) {
 	require.True(t, instance.IsRemote())
 
 	require.NoError(t, instance.Start(true))
-	assert.Equal(t, []string{slugify("rel-hooks")}, readLineStateFile(t, stateFile), "launch_cmd must have run")
+	assert.Equal(t, []string{Slugify("rel-hooks")}, readLineStateFile(t, stateFile), "launch_cmd must have run")
 	assert.True(t, instance.TmuxAlive(), "list_cmd must report the session as running")
 
 	// Startup import goes through the same resolved config.
 	imported, err := ListRemoteHookInstanceData(repo.Root, hook.Hooks, time.Now())
 	require.NoError(t, err)
 	require.Len(t, imported, 1)
-	assert.Equal(t, slugify("rel-hooks"), imported[0].Branch)
+	assert.Equal(t, Slugify("rel-hooks"), imported[0].Branch)
 
 	require.NoError(t, instance.Kill())
 	assert.Empty(t, readLineStateFile(t, stateFile), "delete_cmd must have run")
@@ -601,7 +601,7 @@ func TestE2ERemoteHooksRelativePathsLinkedWorktree(t *testing.T) {
 	require.True(t, instance.IsRemote())
 
 	require.NoError(t, instance.Start(true))
-	assert.Equal(t, []string{slugify("wt-session")}, readLineStateFile(t, stateFile))
+	assert.Equal(t, []string{Slugify("wt-session")}, readLineStateFile(t, stateFile))
 	require.NoError(t, instance.Kill())
 	assert.Empty(t, readLineStateFile(t, stateFile))
 }
