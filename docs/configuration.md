@@ -20,7 +20,9 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
   "auto_yes": false,
   "daemon_poll_interval": 1000,
   "branch_prefix": "username/",
-  "detach_keys": "ctrl-w"
+  "detach_keys": "ctrl-w",
+  "log_max_size_mb": 50,
+  "log_max_backups": 2
 }
 ```
 
@@ -32,6 +34,8 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
 | `daemon_poll_interval` | Daemon polling interval in ms. |
 | `branch_prefix` | Prefix for worktree branches (defaults to `username/`). |
 | `detach_keys` | Key combination that detaches from an attached session (defaults to `ctrl-w`). |
+| `log_max_size_mb` | Size cap in MB for `agent-factory.log` before it is rotated (defaults to 50). Must be positive. |
+| `log_max_backups` | How many rotated logs (`agent-factory.log.1`, `.2`, ...) to keep; older ones are deleted (defaults to 2). `0` keeps none. |
 
 ### Choosing the agent
 
@@ -68,7 +72,7 @@ A repository can carry its own configuration in `<repo-root>/.agent-factory/conf
 |-------|-------|
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `"post_worktree_commands": []`. |
-| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys` | Global only. Setting them in-repo is rejected with an error naming the key. |
+| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys`, `log_max_size_mb`, `log_max_backups` | Global only. Setting them in-repo is rejected with an error naming the key. |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `H` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 
@@ -90,6 +94,6 @@ All data (sessions, tasks) is scoped to the current git repository — the TUI s
 | `~/.agent-factory/instances/<repoID>/instances.json` | Persisted sessions, per repo. |
 | `~/.agent-factory/tasks.json` | Tasks (see [tasks.md](tasks.md)). |
 | `~/.agent-factory/logs/task-<id>.log` | Per-task watch-script logs. |
-| `~/.config/agent-factory/agent-factory.log` | Application log (`os.UserConfigDir` on other platforms). |
+| `~/.config/agent-factory/agent-factory.log` | Application log (`os.UserConfigDir` on other platforms). Rotated once it exceeds `log_max_size_mb` (default 50 MB); the most recent `log_max_backups` rotations (default 2) are kept as `agent-factory.log.1`, `.2`. |
 
 Setting the `AGENT_FACTORY_HOME` environment variable relocates the `~/.agent-factory` state directory — useful for sandboxed or test setups. When it is set, the application log also moves into that directory (`$AGENT_FACTORY_HOME/agent-factory.log`) so a relocated home is fully self-contained.

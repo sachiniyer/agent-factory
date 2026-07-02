@@ -85,6 +85,8 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	"branch_prefix":        true,
 	"daemon_poll_interval": true,
 	"detach_keys":          true,
+	"log_max_backups":      true,
+	"log_max_size_mb":      true,
 	"worktree_root":        true,
 }
 
