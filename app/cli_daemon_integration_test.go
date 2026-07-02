@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
@@ -21,6 +22,11 @@ import (
 
 func TestTUIRefreshSeesCLIChangesThroughDaemon(t *testing.T) {
 	skipIfRealBackendDepsMissing(t)
+
+	// #1056: private tmux server for the exec'd af CLI, its daemon, and the
+	// in-process TmuxAlive probes (all inherit the environment), so no af_
+	// session can leak onto the developer's server.
+	testguard.IsolateTmux(t)
 
 	bin := buildIntegrationBinary(t)
 	repoDir := setupRealRepo(t)
@@ -58,6 +64,11 @@ func TestTUIRefreshSeesCLIChangesThroughDaemon(t *testing.T) {
 // recreated on-disk one.
 func TestTUIRefreshSwapsKillRecreatedSameTitle(t *testing.T) {
 	skipIfRealBackendDepsMissing(t)
+
+	// #1056: private tmux server for the exec'd af CLI, its daemon, and the
+	// in-process TmuxAlive probes (all inherit the environment), so no af_
+	// session can leak onto the developer's server.
+	testguard.IsolateTmux(t)
 
 	bin := buildIntegrationBinary(t)
 	repoDir := setupRealRepo(t)

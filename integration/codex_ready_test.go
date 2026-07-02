@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -29,6 +30,10 @@ import (
 func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 	requireTool(t, "git")
 	requireTool(t, "tmux")
+
+	// #1056: private tmux server so the exec'd af CLI and its daemon cannot
+	// leak af_ sessions onto the developer's server.
+	testguard.IsolateTmux(t)
 
 	home := t.TempDir()
 	repo := setupGitRepo(t)
@@ -112,6 +117,10 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 	requireTool(t, "git")
 	requireTool(t, "tmux")
+
+	// #1056: private tmux server so the exec'd af CLI and its daemon cannot
+	// leak af_ sessions onto the developer's server.
+	testguard.IsolateTmux(t)
 
 	home := t.TempDir()
 	repo := setupGitRepo(t)

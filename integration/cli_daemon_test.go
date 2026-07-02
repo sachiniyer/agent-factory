@@ -17,6 +17,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -288,6 +289,13 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	requireTool(t, "git")
 	requireTool(t, "tmux")
+
+	// #1056: run every tmux touch — the parent's has-session/kill-session
+	// probes, the exec'd af CLI, and the daemon it spawns (all inherit the
+	// environment) — against a private tmux server that is killed when the
+	// test ends, so no af_ session can leak onto the developer's server even
+	// when per-session cleanup below fails.
+	testguard.IsolateTmux(t)
 
 	home := t.TempDir()
 	// t.Setenv (not os.Setenv) so the variable is restored when the test

@@ -24,9 +24,8 @@ import (
 // Printfs at the moment Close races them.
 func TestRealPathActualLoss(t *testing.T) {
 	tmpDir := t.TempDir()
-	origLogFileName := logFileName
-	logFileName = filepath.Join(tmpDir, "actual.log")
-	t.Cleanup(func() { logFileName = origLogFileName })
+	logPathOverride = filepath.Join(tmpDir, "actual.log")
+	t.Cleanup(func() { logPathOverride = "" })
 
 	origStderr := os.Stderr
 	r, w, err := os.Pipe()

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
@@ -78,6 +79,9 @@ func mustRunGit(t *testing.T, dir string, args ...string) {
 // contract — not in our async plumbing.
 func TestRealLocalBackend_FullLifecycle(t *testing.T) {
 	skipIfRealBackendDepsMissing(t)
+	// #1056: private tmux server so the real LocalBackend's session dies with
+	// the test even when the Kill cleanup below fails.
+	testguard.IsolateTmux(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	repoDir := setupRealRepo(t)

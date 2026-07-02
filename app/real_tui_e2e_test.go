@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,6 +29,11 @@ import (
 // promises" contract check.
 func TestRealTUI_CreateThroughKeypresses(t *testing.T) {
 	skipIfRealBackendDepsMissing(t)
+
+	// #1056: private tmux server so the session the real backend creates dies
+	// with the test even when the Kill-through-the-tea-goroutine path below
+	// never runs (wedged model, earlier failure).
+	testguard.IsolateTmux(t)
 
 	repoDir := setupRealRepo(t)
 

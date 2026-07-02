@@ -6,7 +6,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"testing"
 	"time"
 )
 
@@ -33,7 +35,64 @@ func init() {
 // thread-safe, so we do not take this lock on the logging hot path.
 var mu sync.Mutex
 
-func getLogPath() string {
+// logPathOverride, when non-empty, wins over all environment-based
+// resolution. Only this package's tests set it, to point the log at a
+// scratch file without touching the process environment.
+var logPathOverride string
+
+// expandTilde resolves a leading "~" or "~/" in dir. ok is false for the
+// unsupported "~user" form or when the home directory cannot be resolved.
+// Mirrors config.GetConfigDir's expansion; this package cannot import config
+// (config imports log).
+func expandTilde(dir string) (string, bool) {
+	if !strings.HasPrefix(dir, "~") {
+		return dir, true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false
+	}
+	switch {
+	case dir == "~":
+		return home, true
+	case strings.HasPrefix(dir, "~/"):
+		return filepath.Join(home, dir[2:]), true
+	default:
+		return "", false
+	}
+}
+
+// resolveLogPath picks the log destination, in priority order:
+//
+//  1. logPathOverride (this package's tests);
+//  2. $AGENT_FACTORY_HOME/agent-factory.log — the same relocation override
+//     config.GetConfigDir honors, so a relocated agent-factory home keeps its
+//     log next to its config and state. This is the seam that lets sandboxed
+//     tests, and the af binaries they exec, log into a temp home instead of
+//     the developer's real log (#1056);
+//  3. inside a `go test` binary with no home override: a scratch file under
+//     os.TempDir(), never the real log — a test that forgot to sandbox its
+//     home must not pollute the production daemon's log (#1056);
+//  4. the historical default, os.UserConfigDir()/agent-factory/agent-factory.log.
+//
+// Resolved at Initialize time (not package init) so environment changes made
+// by test setup are respected.
+func resolveLogPath() string {
+	if logPathOverride != "" {
+		return logPathOverride
+	}
+	if home := os.Getenv("AGENT_FACTORY_HOME"); home != "" {
+		if dir, ok := expandTilde(home); ok {
+			if err := os.MkdirAll(dir, 0700); err == nil {
+				return filepath.Join(dir, "agent-factory.log")
+			}
+		}
+		// Unresolvable or uncreatable override: fall through to the defaults
+		// below rather than not logging at all.
+	}
+	if testing.Testing() {
+		return filepath.Join(os.TempDir(), "agent-factory-test.log")
+	}
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), "agent-factory.log")
@@ -43,7 +102,9 @@ func getLogPath() string {
 	return filepath.Join(dir, "agent-factory.log")
 }
 
-var logFileName = getLogPath()
+// logFileName is the path the most recent Initialize resolved and attempted
+// to open; Close uses it for the "wrote logs to" message.
+var logFileName string
 
 var globalLogFile *os.File
 
@@ -54,6 +115,8 @@ var globalLogFile *os.File
 func Initialize(daemon bool) {
 	mu.Lock()
 	defer mu.Unlock()
+
+	logFileName = resolveLogPath()
 
 	// Close any previously opened log file to avoid leaking file descriptors
 	// when Initialize is called multiple times (e.g. af tasks trigger -> RunTask).

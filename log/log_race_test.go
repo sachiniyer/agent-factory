@@ -22,9 +22,8 @@ import (
 // Printfs in-flight at the moment Close runs globalLogFile.Close().
 func TestCloseRaceConcurrentPrintf(t *testing.T) {
 	tmpDir := t.TempDir()
-	origLogFileName := logFileName
-	logFileName = filepath.Join(tmpDir, "race.log")
-	t.Cleanup(func() { logFileName = origLogFileName })
+	logPathOverride = filepath.Join(tmpDir, "race.log")
+	t.Cleanup(func() { logPathOverride = "" })
 
 	origStderr := os.Stderr
 	r, w, err := os.Pipe()
@@ -90,9 +89,8 @@ func TestCloseRaceConcurrentPrintf(t *testing.T) {
 // summed loss reported by TestCloseRaceConcurrentPrintf.
 func TestCloseRaceSingleBurst(t *testing.T) {
 	tmpDir := t.TempDir()
-	origLogFileName := logFileName
-	logFileName = filepath.Join(tmpDir, "burst.log")
-	t.Cleanup(func() { logFileName = origLogFileName })
+	logPathOverride = filepath.Join(tmpDir, "burst.log")
+	t.Cleanup(func() { logPathOverride = "" })
 
 	origStderr := os.Stderr
 	r, w, err := os.Pipe()
