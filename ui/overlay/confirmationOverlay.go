@@ -89,17 +89,7 @@ func (c *ConfirmationOverlay) SetWidth(width int) {
 	c.width = width
 }
 
-// SetBorderColor sets the border color of the confirmation overlay
-func (c *ConfirmationOverlay) SetBorderColor(color lipgloss.Color) {
-	c.borderColor = color
-}
-
 // SetConfirmKey sets the key used to confirm the action
 func (c *ConfirmationOverlay) SetConfirmKey(key string) {
 	c.ConfirmKey = key
-}
-
-// SetCancelKey sets the key used to cancel the action
-func (c *ConfirmationOverlay) SetCancelKey(key string) {
-	c.CancelKey = key
 }
