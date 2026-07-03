@@ -47,7 +47,15 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		requireViewSized(t, view, tc.w, tc.h)
 		assert.Contains(t, view, "Agent Factory", "%dx%d: tree title", tc.w, tc.h)
 		assert.Contains(t, view, "alpha · Preview", "%dx%d: pane header carries title · tab", tc.w, tc.h)
-		assert.Contains(t, view, "Automations", "%dx%d: automations strip", tc.w, tc.h)
+		assert.Contains(t, view, "Automations", "%dx%d: automations section", tc.w, tc.h)
+		// #1087: the automations section lives inside the left rail, under a
+		// full-rail-width horizontal rule.
+		assert.Contains(t, view, strings.Repeat("─", h.lastLayout.RailRule.W),
+			"%dx%d: rail rule spans the full rail width", tc.w, tc.h)
+		assert.Equal(t, h.lastLayout.Tree.W, h.lastLayout.Automations.W,
+			"%dx%d: automations render at rail width", tc.w, tc.h)
+		assert.Equal(t, tc.h-layout.StatusBarRows, h.lastLayout.PaneA.H,
+			"%dx%d: pane A takes the full height above the status bar", tc.w, tc.h)
 		// The hint row prioritizes under width pressure (low-value hints are
 		// dropped first), so help/quit must survive at BOTH sizes.
 		assert.Contains(t, view, "n new", "%dx%d: status-bar hints", tc.w, tc.h)

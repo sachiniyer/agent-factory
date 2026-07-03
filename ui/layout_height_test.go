@@ -192,27 +192,27 @@ func TestWorkspacePanesRenderExactlyTheirRects(t *testing.T) {
 			requireExactRect(t, paneA.View(), lay.PaneA, "paneA")
 			requireExactRect(t, statusBar.View(), lay.StatusBar, "statusBar")
 
+			// The composed workspace must be exactly the terminal size. The
+			// left rail stacks tree + rule + automations (#1087); the
+			// workspace pane runs the full height beside it (#1090).
+			rail := sidebar.View()
 			if lay.AutomationsVisible {
 				automations.SetRect(lay.Automations)
 				automations.SetCompact(lay.AutomationsCompact)
 				requireExactRect(t, automations.View(), lay.Automations, "automations")
+				rule := strings.Repeat("─", lay.RailRule.W)
+				rail = lipgloss.JoinVertical(lipgloss.Left, rail, rule, automations.View())
 			}
-
-			// The composed workspace must be exactly the terminal size.
-			top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar.View(), paneA.View())
-			rows := []string{top}
-			if lay.AutomationsVisible {
-				rows = append(rows, automations.View())
-			}
-			rows = append(rows, statusBar.View())
-			full := lipgloss.JoinVertical(lipgloss.Left, rows...)
+			top := lipgloss.JoinHorizontal(lipgloss.Top, rail, paneA.View())
+			full := lipgloss.JoinVertical(lipgloss.Left, top, statusBar.View())
 			requireExactRect(t, full, layout.Rect{W: tc.w, H: tc.h}, "composed workspace")
 		})
 	}
 }
 
-// TestWorkspaceExpandedAutomationsTilesExactly covers the focused strip: the
-// expanded (full task manager) allocation must still tile the window exactly.
+// TestWorkspaceExpandedAutomationsTilesExactly covers the focused automations
+// section: the expanded (full task manager) allocation must still tile the
+// window exactly with the section stacked inside the left rail (#1087).
 func TestWorkspaceExpandedAutomationsTilesExactly(t *testing.T) {
 	lay := layout.Grid{AutomationsExpanded: true}.Solve(100, 30)
 	require.True(t, lay.AutomationsExpanded)
@@ -229,10 +229,12 @@ func TestWorkspaceExpandedAutomationsTilesExactly(t *testing.T) {
 	statusBar.SetRect(lay.StatusBar)
 
 	requireExactRect(t, automations.View(), lay.Automations, "expanded automations")
-	require.Contains(t, automations.View(), "Tasks", "focused strip hosts the task manager")
+	require.Contains(t, automations.View(), "Tasks", "focused section hosts the task manager")
 
-	top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar.View(), paneA.View())
-	full := lipgloss.JoinVertical(lipgloss.Left, top, automations.View(), statusBar.View())
+	rule := strings.Repeat("─", lay.RailRule.W)
+	rail := lipgloss.JoinVertical(lipgloss.Left, sidebar.View(), rule, automations.View())
+	top := lipgloss.JoinHorizontal(lipgloss.Top, rail, paneA.View())
+	full := lipgloss.JoinVertical(lipgloss.Left, top, statusBar.View())
 	requireExactRect(t, full, layout.Rect{W: 100, H: 30}, "composed workspace")
 }
 

@@ -110,9 +110,10 @@ type home struct {
 
 	// -- Workspace layout (#1024 PR 4) --
 	//
-	// The window is tiled by layout.Grid into the RFC §2.1 regions: the
-	// instances+tabs tree on the left, the single content pane A in the
-	// center, the automations strip along the bottom, and the status bar
+	// The window is tiled by layout.Grid into the RFC §2.1 regions (as
+	// revised by #1087/#1090): the left rail — the instances+tabs tree over
+	// the bottom-aligned automations section, separated by a horizontal
+	// rule — the full-height content pane A beside it, and the status bar
 	// under everything. Each region is a layout.Pane that renders exactly its
 	// rect; relayout() re-solves the grid and re-rects the panes.
 
@@ -139,8 +140,8 @@ type home struct {
 	// lastPaneBCapture is when pane B's capture was last dispatched; the
 	// paneBCaptureMinInterval throttle reads it (RFC §5.2).
 	lastPaneBCapture time.Time
-	// automations is the bottom strip (compact task rows; expands to the
-	// full task manager on focus)
+	// automations is the bottom section of the left rail (#1087: compact
+	// task rows; expands to the full task manager on focus)
 	automations *ui.AutomationsPane
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
@@ -1449,17 +1450,20 @@ func (m *home) View() string {
 		return ui.TerminalTooSmall(m.termWidth, m.termHeight)
 	}
 
-	cols := []string{m.sidebar.View(), m.paneA.View()}
+	// The left rail stacks the tree over the bottom-aligned automations
+	// section, separated by a horizontal rule (#1087); the workspace panes
+	// take the full height beside it (#1090).
+	railParts := []string{m.sidebar.View()}
+	if m.lastLayout.AutomationsVisible {
+		railParts = append(railParts, m.renderRailRule(), m.automations.View())
+	}
+	rail := lipgloss.JoinVertical(lipgloss.Left, railParts...)
+	cols := []string{rail, m.paneA.View()}
 	if m.lastLayout.SplitActive {
 		cols = append(cols, m.renderDivider(), m.paneB.View())
 	}
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
-	rows := []string{top}
-	if m.lastLayout.AutomationsVisible {
-		rows = append(rows, m.automations.View())
-	}
-	rows = append(rows, m.statusBar.View())
-	mainView := lipgloss.JoinVertical(lipgloss.Left, rows...)
+	mainView := lipgloss.JoinVertical(lipgloss.Left, top, m.statusBar.View())
 
 	if m.state == stateHelp {
 		if m.textOverlay == nil {
@@ -1513,4 +1517,15 @@ func (m *home) renderDivider() string {
 	}
 	col := strings.TrimSuffix(strings.Repeat("│\n", r.H), "\n")
 	return splitDividerStyle.Render(col)
+}
+
+// renderRailRule renders the full-rail-width horizontal rule separating the
+// instances tree from the bottom-aligned automations section (#1087), in the
+// same receded style as the split divider.
+func (m *home) renderRailRule() string {
+	r := m.lastLayout.RailRule
+	if r.Empty() {
+		return ""
+	}
+	return splitDividerStyle.Render(strings.Repeat("─", r.W))
 }

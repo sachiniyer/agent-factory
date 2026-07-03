@@ -2,6 +2,8 @@
 
 Status: **Proposed** · Author: Captain Claude · Epic: [#1024](https://github.com/sachiniyer/agent-factory/issues/1024) · Folds in: [#1025](https://github.com/sachiniyer/agent-factory/issues/1025) (mouse)
 
+> **Amendment (2026-07-03, [#1087](https://github.com/sachiniyer/agent-factory/issues/1087)/[#1090](https://github.com/sachiniyer/agent-factory/issues/1090), per Sachin):** the automations strip is NOT a bottom strip. Automations live at the **bottom of the left rail**, under the instances tree, separated by a horizontal rule; the left rail narrowed to `clamp(22, 25 %·W, 36)` cols; the workspace content panes take the full height above the status bar. References to the "bottom strip" and the `clamp(24, 30 %·W, 44)` rail below are superseded.
+
 ## 0. Summary
 
 Rewrite the TUI as a multi-pane workspace that uses the full window:

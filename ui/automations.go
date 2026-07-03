@@ -30,13 +30,14 @@ var automationsDisabledStyle = lipgloss.NewStyle().
 var automationsHintStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#7F7A7A"))
 
-// AutomationsPane is the always-visible bottom strip of the workspace (RFC
-// §2.1): compact task rows — enabled glyph, name, trigger, next/last run —
+// AutomationsPane is the bottom section of the left rail (#1087 revised RFC
+// §2.1's bottom strip): compact task rows — enabled glyph, name, trigger,
+// next/last run — pinned under the instances tree behind a horizontal rule,
 // that expand IN PLACE to the full TaskPane manager (list + edit form) when
-// the strip takes focus. It replaces both the sidebar's Tasks section and the
-// content pane's Tasks mode (#1024 PR 4). The pane OWNS the TaskPane it hosts;
-// the compact rows render straight off the store projection so the strip and
-// the manager can never show different task sets after a reload.
+// the section takes focus. It replaces both the sidebar's Tasks section and
+// the content pane's Tasks mode (#1024 PR 4). The pane OWNS the TaskPane it
+// hosts; the compact rows render straight off the store projection so the
+// section and the manager can never show different task sets after a reload.
 //
 // It implements layout.Pane. Focus() forwards input focus to the hosted
 // TaskPane so the manager's own key loop (j/k/n/enter/x/D/r, esc to leave) is
