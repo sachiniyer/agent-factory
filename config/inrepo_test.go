@@ -315,6 +315,38 @@ func TestSaveInRepoPostWorktreeCommands(t *testing.T) {
 		assert.Empty(t, cfg.PostWorktreeCommands)
 	})
 
+	// Regression test for #1092: a symlinked config.json must be written
+	// through to its target, not replaced by a new regular file at the link
+	// path (which would strand the target with stale content).
+	t.Run("writes through a symlinked config file", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		target := filepath.Join(repoRoot, "shared-config.json")
+		require.NoError(t, os.WriteFile(target, []byte(`{"default_program": "codex"}`), 0644))
+		require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, InRepoConfigDirName), 0755))
+		linkPath := InRepoConfigPath(repoRoot)
+		require.NoError(t, os.Symlink(target, linkPath))
+
+		require.NoError(t, SaveInRepoPostWorktreeCommands(repoRoot, []string{"make setup"}))
+
+		info, err := os.Lstat(linkPath)
+		require.NoError(t, err)
+		assert.NotZero(t, info.Mode()&os.ModeSymlink, "config path must still be a symlink after save")
+		dest, err := os.Readlink(linkPath)
+		require.NoError(t, err)
+		assert.Equal(t, target, dest, "symlink must still point at its original target")
+
+		data, err := os.ReadFile(target)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), "make setup", "target file must receive the update")
+
+		// Read-after-write round-trips through the symlink, preserving the
+		// pre-existing field alongside the saved commands.
+		cfg, _, err := LoadInRepoConfig(repoRoot)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"make setup"}, cfg.PostWorktreeCommands)
+		assert.Equal(t, "codex", cfg.DefaultProgram)
+	})
+
 	t.Run("dir symlink that stays inside the repo still saves", func(t *testing.T) {
 		repoRoot := t.TempDir()
 		realDir := filepath.Join(repoRoot, "cfg")
