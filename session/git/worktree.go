@@ -56,13 +56,13 @@ type GitWorktree struct {
 	baseCommitSHA string
 	// externalWorktree is true if the worktree was not created by agent-factory.
 	//
-	// Legacy back-compat (#930 PR 3): this was only ever set true by the
-	// removed create-on-existing-worktree feature. No code path sets it true
-	// anymore, so every newly created worktree has it false. It is still read
-	// from storage and honored by Cleanup() (which no-ops for external
-	// worktrees) so pre-existing instances created by the old feature do not
-	// have their user-owned worktree/branch destroyed on kill. A future PR
-	// drops this field once no persisted instance carries it.
+	// Set true by two producers: instances persisted by the pre-#930-PR-3
+	// create-on-existing-worktree feature (legacy records restored via
+	// NewGitWorktreeFromStorage), and in-place sessions created with
+	// `af sessions create --here` (NewGitWorktreeInPlace), which attach to the
+	// repo's own working tree. Either way the worktree and branch are
+	// user-owned: Setup() must not create anything and Cleanup() must not
+	// remove the worktree or delete the branch.
 	externalWorktree bool
 	// branchCreatedByUs is true if this session created the underlying branch
 	// itself (via setupNewWorktree). When false, Cleanup() must NOT delete the
@@ -188,6 +188,63 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		hooksCtx:     ctx,
 		hooksCancel:  cancel,
 	}, branchName, nil
+}
+
+// NewGitWorktreeInPlace creates a GitWorktree attached to the repo's own
+// working tree at its current branch — the `af sessions create --here` path,
+// reinstating (as an explicit opt-in) the create side of the external-worktree
+// capability removed in #930 PR 3. The worktree path IS the resolved repo
+// root, no branch or worktree is created, and externalWorktree=true /
+// branchCreatedByUs=false so Setup() and Cleanup() never touch the user's
+// working tree or branch. Returns the worktree and the current branch name.
+func NewGitWorktreeInPlace(repoPath string) (*GitWorktree, string, error) {
+	absPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		log.ErrorLog.Printf("git worktree path abs error, falling back to repoPath %s: %s", repoPath, err)
+		absPath = repoPath
+	}
+
+	repoRoot, err := findGitRepoRoot(absPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("an in-place session must be created inside a git repository: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	g := &GitWorktree{
+		repoPath:          repoRoot,
+		worktreePath:      repoRoot,
+		worktreeDir:       filepath.Dir(repoRoot),
+		branchName:        "",
+		externalWorktree:  true,
+		branchCreatedByUs: false,
+		hooksCtx:          ctx,
+		hooksCancel:       cancel,
+	}
+
+	// Record the repo's current branch verbatim ("HEAD" when detached): the
+	// session runs on whatever is checked out, and since Cleanup() never
+	// deletes it the name is purely informational (sidebar, PR lookup).
+	branchName, err := g.runGitCommand(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		cancel()
+		if strings.Contains(err.Error(), "ambiguous argument 'HEAD'") ||
+			strings.Contains(err.Error(), "not a valid object name") {
+			return nil, "", fmt.Errorf("this appears to be a brand new repository: please create an initial commit before creating an in-place session")
+		}
+		return nil, "", fmt.Errorf("failed to resolve current branch for in-place session: %w", err)
+	}
+	g.branchName = strings.TrimSpace(branchName)
+
+	// The base commit is the current HEAD: diffs for an in-place session show
+	// what the agent changed on top of where the user already was.
+	head, err := g.runGitCommand(repoRoot, "rev-parse", "HEAD")
+	if err != nil {
+		cancel()
+		return nil, "", fmt.Errorf("failed to resolve HEAD for in-place session: %w", err)
+	}
+	g.baseCommitSHA = strings.TrimSpace(head)
+
+	return g, g.branchName, nil
 }
 
 // GetWorktreePath returns the path to the worktree

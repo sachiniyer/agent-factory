@@ -94,14 +94,25 @@ var (
 	createNameFlag    string
 	createPromptFlag  string
 	createProgramFlag string
+	createHereFlag    bool
+	createInPlaceFlag bool
 )
 
 var sessionsCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a new session",
+	Long: `Create a new session running an agent in its own git worktree.
+
+With --here (alias --in-place) the session instead attaches to the repo's
+existing working tree at its current branch: no worktree or branch is created,
+the agent runs in the repo root, and killing the session never removes the
+working tree or branch. Requires running inside a git repository (or --repo
+pointing at one).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		inPlace := createHereFlag || createInPlaceFlag
 
 		// resolveRepo already differentiates "--repo is required" (absent) from a
 		// provided-but-invalid path and names the offending path (#892), so
@@ -109,6 +120,9 @@ var sessionsCreateCmd = &cobra.Command{
 		// "required".
 		repo, err := resolveRepo()
 		if err != nil {
+			if inPlace {
+				return jsonError(fmt.Errorf("--here requires a git repository to attach to: %w", err))
+			}
 			return jsonError(err)
 		}
 
@@ -146,6 +160,7 @@ var sessionsCreateCmd = &cobra.Command{
 			Program:  program,
 			Prompt:   createPromptFlag,
 			AutoYes:  cfg.AutoYes,
+			InPlace:  inPlace,
 		})
 		if err != nil {
 			return jsonError(err)
