@@ -627,7 +627,7 @@ func TestTabbedWindowAttachTerminalRemote(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	tw := NewTabbedWindow(NewTabPane())
+	tw := newTestTabbedWindow()
 
 	t.Run("not configured refuses with actionable error", func(t *testing.T) {
 		inst := makeRemoteInstance(t, "remote-843-noattach", config.RemoteHooks{})
@@ -666,7 +666,7 @@ func TestTabbedWindowAttachTerminalRefusesNil(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	tw := NewTabbedWindow(NewTabPane())
+	tw := newTestTabbedWindow()
 
 	_, err := tw.AttachTerminalForInstance(nil, 1)
 	require.Error(t, err, "AttachTerminalForInstance(nil) must error, not attach")

@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
+	"github.com/sachiniyer/agent-factory/ui/store"
 	"os"
 	"testing"
 
@@ -126,8 +127,9 @@ func TestConfirmationModalStateTransitions(t *testing.T) {
 // TestConfirmationModalKeyHandling tests the actual key handling in confirmation state
 func TestConfirmationModalKeyHandling(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	sidebar := ui.NewSidebar(&spin, false)
-	tw := ui.NewTabbedWindow(ui.NewTabPane())
+	proj := store.NewProjection()
+	sidebar := ui.NewSidebar(&spin, false, proj)
+	tw := ui.NewTabbedWindow(ui.NewTabPane(), proj)
 	cp := ui.NewContentPane(tw)
 
 	// Create enough of home struct to test handleKeyPress in confirmation state
@@ -135,6 +137,7 @@ func TestConfirmationModalKeyHandling(t *testing.T) {
 		ctx:                 context.Background(),
 		state:               stateConfirm,
 		appConfig:           config.DefaultConfig(),
+		store:               proj,
 		sidebar:             sidebar,
 		contentPane:         cp,
 		menu:                ui.NewMenu(),
@@ -249,8 +252,9 @@ func TestConfirmationMessageFormatting(t *testing.T) {
 // TestConfirmationFlowSimulation tests the confirmation flow by simulating the state changes
 func TestConfirmationFlowSimulation(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	sidebar := ui.NewSidebar(&spin, false)
-	tw := ui.NewTabbedWindow(ui.NewTabPane())
+	proj := store.NewProjection()
+	sidebar := ui.NewSidebar(&spin, false, proj)
+	tw := ui.NewTabbedWindow(ui.NewTabPane(), proj)
 	cp := ui.NewContentPane(tw)
 
 	// Add test instance
@@ -261,13 +265,14 @@ func TestConfirmationFlowSimulation(t *testing.T) {
 		AutoYes: false,
 	})
 	require.NoError(t, err)
-	_ = sidebar.AddInstance(instance)
+	_ = proj.AddInstance(instance)
 	sidebar.SetSelectedInstance(0)
 
 	h := &home{
 		ctx:         context.Background(),
 		state:       stateDefault,
 		appConfig:   config.DefaultConfig(),
+		store:       proj,
 		sidebar:     sidebar,
 		contentPane: cp,
 		menu:        ui.NewMenu(),
@@ -461,14 +466,16 @@ func TestMultipleConfirmationsDontInterfere(t *testing.T) {
 // content pane after a session is killed). Regression test for #259.
 func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	sidebar := ui.NewSidebar(&spin, false)
-	tw := ui.NewTabbedWindow(ui.NewTabPane())
+	proj := store.NewProjection()
+	sidebar := ui.NewSidebar(&spin, false, proj)
+	tw := ui.NewTabbedWindow(ui.NewTabPane(), proj)
 	cp := ui.NewContentPane(tw)
 
 	h := &home{
 		ctx:         context.Background(),
 		state:       stateDefault,
 		appConfig:   config.DefaultConfig(),
+		store:       proj,
 		sidebar:     sidebar,
 		contentPane: cp,
 		menu:        ui.NewMenu(),

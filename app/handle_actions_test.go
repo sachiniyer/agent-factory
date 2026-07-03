@@ -60,8 +60,8 @@ func TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift(t *testing.T) {
 	require.NoError(t, err)
 	b.SetStatus(session.Running)
 
-	h.sidebar.AddInstance(a)
-	h.sidebar.AddInstance(b)
+	h.store.AddInstance(a)
+	h.store.AddInstance(b)
 	// User presses Enter on instance-a.
 	h.sidebar.SetSelectedInstance(0)
 

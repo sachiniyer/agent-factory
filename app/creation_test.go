@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -49,8 +50,9 @@ func newTestHome(t *testing.T) *home {
 	}))
 
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	sidebar := ui.NewSidebar(&spin, false)
-	tw := ui.NewTabbedWindow(ui.NewTabPane())
+	proj := store.NewProjection()
+	sidebar := ui.NewSidebar(&spin, false, proj)
+	tw := ui.NewTabbedWindow(ui.NewTabPane(), proj)
 	cp := ui.NewContentPane(tw)
 
 	state := config.DefaultState()
@@ -73,6 +75,7 @@ func newTestHome(t *testing.T) *home {
 		snapshotFetcher: func(string) ([]session.InstanceData, error) {
 			return nil, fmt.Errorf("snapshot fetcher not stubbed in test")
 		},
+		store:       proj,
 		sidebar:     sidebar,
 		contentPane: cp,
 		menu:        ui.NewMenu(),
@@ -125,7 +128,7 @@ func newLoadingInstance(t *testing.T, title string) *session.Instance {
 func TestInstanceStarted_Success_UserStillWatching(t *testing.T) {
 	h := newTestHome(t)
 	inst := newLoadingInstance(t, "new-session")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	_, _ = h.Update(instanceStartedMsg{instance: inst, err: nil})
@@ -143,8 +146,8 @@ func TestInstanceStarted_Success_UserMovedToAnotherInstance(t *testing.T) {
 	creating := newLoadingInstance(t, "still-creating")
 	other := newLoadingInstance(t, "other")
 	other.SetStatus(session.Running)
-	h.sidebar.AddInstance(creating)
-	h.sidebar.AddInstance(other)
+	h.store.AddInstance(creating)
+	h.store.AddInstance(other)
 	// User navigated to `other` while `creating` was still starting.
 	h.sidebar.SetSelectedInstance(1)
 
@@ -165,8 +168,8 @@ func TestInstanceStarted_Success_UserCreatingAnotherInstance(t *testing.T) {
 	h := newTestHome(t)
 	first := newLoadingInstance(t, "first")
 	second := newLoadingInstance(t, "second")
-	h.sidebar.AddInstance(first)
-	h.sidebar.AddInstance(second)
+	h.store.AddInstance(first)
+	h.store.AddInstance(second)
 	// Simulate the user having typed a name and entered stateNew for `second`.
 	h.sidebar.SetSelectedInstance(1)
 	h.namingInstance = second
@@ -189,14 +192,14 @@ func TestInstanceStarted_Failure_RemovesByTitleNotBySelection(t *testing.T) {
 	failing := newLoadingInstance(t, "failing")
 	innocent := newLoadingInstance(t, "innocent")
 	innocent.SetStatus(session.Running)
-	h.sidebar.AddInstance(failing)
-	h.sidebar.AddInstance(innocent)
+	h.store.AddInstance(failing)
+	h.store.AddInstance(innocent)
 	// User moved to `innocent` while `failing` was still starting.
 	h.sidebar.SetSelectedInstance(1)
 
 	_, _ = h.Update(instanceStartedMsg{instance: failing, err: errors.New("boom")})
 
-	titles := collectTitles(h.sidebar.GetInstances())
+	titles := collectTitles(h.store.GetInstances())
 	assert.NotContains(t, titles, "failing", "failed instance must be removed")
 	assert.Contains(t, titles, "innocent", "unrelated instance must NOT be killed")
 	assert.Same(t, innocent, h.sidebar.GetSelectedInstance(),
@@ -208,12 +211,12 @@ func TestInstanceStarted_Failure_RemovesByTitleNotBySelection(t *testing.T) {
 func TestInstanceStarted_Failure_OnFailedInstance(t *testing.T) {
 	h := newTestHome(t)
 	failing := newLoadingInstance(t, "failing")
-	h.sidebar.AddInstance(failing)
+	h.store.AddInstance(failing)
 	h.sidebar.SetSelectedInstance(0)
 
 	_, _ = h.Update(instanceStartedMsg{instance: failing, err: errors.New("boom")})
 
-	assert.Empty(t, h.sidebar.GetInstances(), "failed instance must be removed")
+	assert.Empty(t, h.store.GetInstances(), "failed instance must be removed")
 	assert.Nil(t, h.sidebar.GetSelectedInstance(), "no instance should remain selected")
 }
 
@@ -223,7 +226,7 @@ func TestInstanceStarted_Success_AutoYesApplied(t *testing.T) {
 	h := newTestHome(t)
 	h.autoYes = true
 	inst := newLoadingInstance(t, "auto-yes")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	_, _ = h.Update(instanceStartedMsg{instance: inst, err: nil})
@@ -272,13 +275,13 @@ func TestInstanceStartedRegistersRepoAfterStart(t *testing.T) {
 	inst.SetStartedForTest(true)
 	inst.SetGitWorktreeForTest(gw)
 
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
-	require.Equal(t, 0, h.sidebar.NumRepos())
+	require.Equal(t, 0, h.store.NumRepos())
 
 	_, _ = h.Update(instanceStartedMsg{instance: inst, err: nil})
 
-	assert.Equal(t, 1, h.sidebar.NumRepos())
+	assert.Equal(t, 1, h.store.NumRepos())
 }
 
 func collectTitles(instances []*session.Instance) []string {
@@ -296,7 +299,7 @@ func collectTitles(instances []*session.Instance) []string {
 func TestInstanceStarted_TimeoutError_SurfacesPaneSnippet(t *testing.T) {
 	h := newTestHome(t)
 	failing := newLoadingInstance(t, "stalled")
-	h.sidebar.AddInstance(failing)
+	h.store.AddInstance(failing)
 	h.sidebar.SetSelectedInstance(0)
 	h.errBox.SetSize(500, 1)
 
@@ -316,7 +319,7 @@ func TestInstanceStarted_TimeoutError_SurfacesPaneSnippet(t *testing.T) {
 func TestInstanceStarted_TimeoutError_EmptyContentOmitsHeader(t *testing.T) {
 	h := newTestHome(t)
 	failing := newLoadingInstance(t, "stalled-empty")
-	h.sidebar.AddInstance(failing)
+	h.store.AddInstance(failing)
 	h.sidebar.SetSelectedInstance(0)
 	h.errBox.SetSize(500, 1)
 
@@ -347,14 +350,14 @@ func TestInstanceStarted_ReplacesSwappedSameTitleRow(t *testing.T) {
 	diskCopy := newLoadingInstance(t, "scripts")
 	diskCopy.SetStartedForTest(true)
 	diskCopy.SetStatus(session.Running)
-	h.sidebar.AddInstance(diskCopy)
+	h.store.AddInstance(diskCopy)
 
 	started := newLoadingInstance(t, "scripts")
 	started.SetStartedForTest(true)
 
 	_, _ = h.Update(instanceStartedMsg{instance: placeholder, started: started})
 
-	instances := h.sidebar.GetInstances()
+	instances := h.store.GetInstances()
 	require.Len(t, instances, 1, "one logical session must occupy exactly one sidebar row (#808)")
 	assert.Same(t, started, instances[0], "the started instance must replace the disk-built copy")
 	assert.Equal(t, session.Running, started.Status)

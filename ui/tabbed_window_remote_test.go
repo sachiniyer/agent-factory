@@ -63,8 +63,8 @@ func TestTabbedWindowRemoteTabBar(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := startedRemoteInstance(t, tc.withTerm)
-			w := NewTabbedWindow(NewTabPane())
-			w.SetInstance(inst)
+			w := newTestTabbedWindow()
+			setWindowInstance(w, inst)
 			require.Equal(t, tc.wantLabels, w.tabLabels())
 
 			// Toggle wraps within the real tab count, never a phantom slot.

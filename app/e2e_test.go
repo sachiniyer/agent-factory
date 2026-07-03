@@ -50,7 +50,7 @@ type prFetchCall struct {
 
 // newE2EHarness constructs the home and installs the seams, but does NOT
 // start the tea.Program. Tests should preload any instances via
-// eh.home.sidebar.AddInstance(...) before calling eh.start() — once the
+// eh.home.store.AddInstance(...) before calling eh.start() — once the
 // Program is running, its goroutine owns the sidebar and direct mutation
 // from the test goroutine would race.
 func newE2EHarness(t *testing.T) *e2eHarness {
@@ -136,7 +136,7 @@ func (eh *e2eHarness) addStartedInstance(title string) *session.Instance {
 	}
 	inst.SetStartedForTest(true)
 	inst.SetStatus(session.Running)
-	eh.home.sidebar.AddInstance(inst)
+	eh.home.store.AddInstance(inst)
 	return inst
 }
 
@@ -240,7 +240,7 @@ func TestE2E_HarnessBoots(t *testing.T) {
 	// returns a batch of tickers).
 	time.Sleep(100 * time.Millisecond)
 	// Sidebar should be empty (no preloaded instances).
-	if got := len(eh.home.sidebar.GetInstances()); got != 0 {
+	if got := len(eh.home.store.GetInstances()); got != 0 {
 		t.Fatalf("expected empty sidebar, got %d instances", got)
 	}
 }
@@ -267,7 +267,7 @@ func (eh *e2eHarness) query(f func(h *home)) {
 func (eh *e2eHarness) findInstance(title string) *session.Instance {
 	var found *session.Instance
 	eh.query(func(h *home) {
-		for _, inst := range h.sidebar.GetInstances() {
+		for _, inst := range h.store.GetInstances() {
 			if inst.Title == title {
 				found = inst
 				return

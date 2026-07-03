@@ -143,7 +143,7 @@ func TestContentPaneRendersExactlyAllocatedHeight(t *testing.T) {
 		hooks = append(hooks, strings.Repeat("hook-cmd ", 20))
 	}
 
-	tw := NewTabbedWindow(NewTabPane())
+	tw := newTestTabbedWindow()
 	cp := NewContentPane(tw)
 	cp.SetSize(w, h)
 
@@ -195,7 +195,7 @@ func TestContentPaneInlinePanesMatchAllocatedWidth(t *testing.T) {
 		// width out of the allocation the same way.
 		want := AdjustPreviewWidth(tc.w)
 
-		tw := NewTabbedWindow(NewTabPane())
+		tw := newTestTabbedWindow()
 		cp := NewContentPane(tw)
 		cp.SetSize(tc.w, tc.h)
 

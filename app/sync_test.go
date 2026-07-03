@@ -99,7 +99,7 @@ func instanceWithFakeBackend(t *testing.T, title string) *session.Instance {
 func TestReconcileSnapshot_MirrorsStatusOntoExistingRow(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a") // starts Running, started=true
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 
 	// The daemon's snapshot reports this session is now Dead. The TUI must adopt
 	// it verbatim — it does not re-derive Ready/Dead from a local probe.
@@ -120,7 +120,7 @@ func TestReconcileSnapshot_LeavesTransientRowStatusAlone(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
 	inst.SetStatus(session.Deleting)
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 
 	data := inst.ToInstanceData()
 	data.Status = session.Ready // daemon doesn't know about the in-flight kill
@@ -178,9 +178,9 @@ func TestImportRemoteHookSessionsAddsListCmdSessions(t *testing.T) {
 
 	imported := h.importRemoteHookSessions()
 	require.Equal(t, 1, imported)
-	require.Equal(t, 1, h.sidebar.NumInstances())
+	require.Equal(t, 1, h.store.NumInstances())
 
-	inst := h.sidebar.GetInstances()[0]
+	inst := h.store.GetInstances()[0]
 	require.True(t, inst.IsRemote())
 	require.Equal(t, "remote-one", inst.Title)
 

@@ -97,7 +97,7 @@ func TestHandleCloseTab_AgentTabSkipsDaemon(t *testing.T) {
 func TestPrInfoUpdatedMsg_RoutesWriteThroughDaemon(t *testing.T) {
 	h := newTestHome(t)
 	inst := newLoadingInstance(t, "pr-target")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	var gotTitle, gotRepo string
@@ -131,7 +131,7 @@ func TestPrInfoUpdatedMsg_BranchMismatchSkipsDaemon(t *testing.T) {
 	h := newTestHome(t)
 	inst := newLoadingInstance(t, "pr-branch")
 	inst.Branch = "feature-x"
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false

@@ -35,7 +35,7 @@ func TestWatchdogCanceled_WhenLastInstanceRemovedWhileAttached(t *testing.T) {
 
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "only-instance")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	require.False(t, h.sidebar.GetSelection().IsHeader,
@@ -43,7 +43,7 @@ func TestWatchdogCanceled_WhenLastInstanceRemovedWhileAttached(t *testing.T) {
 
 	// Simulate: attached, then the only instance is removed out from under us.
 	h.attached.Store(true)
-	h.sidebar.RemoveInstanceByTitle("only-instance")
+	h.store.RemoveInstanceByTitle("only-instance")
 	require.True(t, h.sidebar.GetSelection().IsHeader,
 		"after removing the only instance, selection falls back to the header")
 
@@ -103,10 +103,10 @@ func TestWatchdog_NoSpuriousDumpAfterHeaderDetach(t *testing.T) {
 
 	// --- Regression: the header-selection detach must NOT write a dump.
 	inst := instanceWithFakeBackend(t, "only-instance")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 	h.attached.Store(true)
-	h.sidebar.RemoveInstanceByTitle("only-instance")
+	h.store.RemoveInstanceByTitle("only-instance")
 	require.True(t, h.sidebar.GetSelection().IsHeader)
 	h.attached.Store(false)
 

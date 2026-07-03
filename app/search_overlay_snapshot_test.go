@@ -35,9 +35,9 @@ func TestShowSearchOverlay_StableAcrossSnapshotRemoval(t *testing.T) {
 	xa := newSnapshotTestInstance(t, "xa")
 	xb := newSnapshotTestInstance(t, "xb")
 	xc := newSnapshotTestInstance(t, "xc")
-	h.sidebar.AddInstance(xa)
-	h.sidebar.AddInstance(xb)
-	h.sidebar.AddInstance(xc)
+	h.store.AddInstance(xa)
+	h.store.AddInstance(xb)
+	h.store.AddInstance(xc)
 
 	// Open the overlay exactly as the key handler does.
 	_, _ = h.showSearchOverlay()

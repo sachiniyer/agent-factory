@@ -104,7 +104,7 @@ func TestTUIRefreshSwapsKillRecreatedSameTitle(t *testing.T) {
 	// Exactly one "recreated" instance, and it must be the new live one — not
 	// the dead corpse we started with.
 	var matches []*session.Instance
-	for _, inst := range h.sidebar.GetInstances() {
+	for _, inst := range h.store.GetInstances() {
 		if inst.Title == "recreated" {
 			matches = append(matches, inst)
 		}
@@ -116,7 +116,7 @@ func TestTUIRefreshSwapsKillRecreatedSameTitle(t *testing.T) {
 }
 
 func findSidebarInstance(h *home, title string) *session.Instance {
-	for _, inst := range h.sidebar.GetInstances() {
+	for _, inst := range h.store.GetInstances() {
 		if inst.Title == title {
 			return inst
 		}
@@ -249,7 +249,7 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 	})
 	require.NoError(t, err)
 	placeholder.SetStatus(session.Loading)
-	h.sidebar.AddInstance(placeholder)
+	h.store.AddInstance(placeholder)
 
 	// The daemon persists the session record mid-create — emulated by a CLI
 	// create, which goes through the same daemon CreateSession path the TUI
@@ -282,7 +282,7 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 	_, _ = h.Update(instanceStartedMsg{instance: placeholder, started: started})
 
 	var matches []*session.Instance
-	for _, inst := range h.sidebar.GetInstances() {
+	for _, inst := range h.store.GetInstances() {
 		if inst.Title == "scripts" {
 			matches = append(matches, inst)
 		}

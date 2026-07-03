@@ -19,7 +19,7 @@ import (
 func TestPreviewTick_PausedWhileAttached(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	h.attached.Store(true)
@@ -47,7 +47,7 @@ func TestPreviewTick_PausedWhileAttached(t *testing.T) {
 func TestSelectionChanged_SkipsRefreshWhileAttached(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	h.attached.Store(true)
@@ -68,7 +68,7 @@ func TestSelectionChanged_SkipsRefreshWhileAttached(t *testing.T) {
 func TestTickUpdatePRInfo_PausedWhileAttached(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	// Count fetch invocations to prove fetchPRInfoCmd was NOT dispatched.

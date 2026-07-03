@@ -194,7 +194,7 @@ func TestHandleContentPaneFocus_ValidationFailureLeavesTaskPaneStale(t *testing.
 	require.Len(t, loaded, 1)
 	tp := h.contentPane.TaskPane()
 	tp.SetTasks(loaded)
-	h.sidebar.SetTasks(loaded)
+	h.store.SetTasks(loaded)
 	h.contentPane.SetMode(ui.ContentModeTasks)
 	tp.SetFocus(true)
 	h.errBox.SetSize(500, 1)
@@ -233,8 +233,8 @@ func TestHandleContentPaneFocus_ValidationFailureLeavesTaskPaneStale(t *testing.
 	require.Len(t, tp.GetTasks(), 1)
 	assert.True(t, tp.GetTasks()[0].Enabled,
 		"BUG: TaskPane must reload from disk after a failed save, not keep its stale toggle")
-	require.Len(t, h.sidebar.GetTasks(), 1)
-	assert.True(t, h.sidebar.GetTasks()[0].Enabled,
+	require.Len(t, h.store.GetTasks(), 1)
+	assert.True(t, h.store.GetTasks()[0].Enabled,
 		"sidebar must agree with the TaskPane (both reflect disk)")
 
 	// (c) State is not left silently "saved": reloading cleared dirty, but the
@@ -356,7 +356,7 @@ func TestHandleQuit_HooksSaveSuccessQuitsAndUpdatesHookCount(t *testing.T) {
 	_, isQuit := msg.(tea.QuitMsg)
 	assert.True(t, isQuit, "a successful save must proceed to tea.Quit")
 
-	assert.Equal(t, 1, h.sidebar.GetHookCount(),
+	assert.Equal(t, 1, h.store.GetHookCount(),
 		"the sidebar hook count must reflect the saved hook")
 
 	// The save actually landed on disk.

@@ -163,8 +163,8 @@ func TestTickUpdatePRInfo_DispatchesForSelectedOnly(t *testing.T) {
 
 	a := newLoadingInstance(t, "a")
 	b := newLoadingInstance(t, "b")
-	h.sidebar.AddInstance(a)
-	h.sidebar.AddInstance(b)
+	h.store.AddInstance(a)
+	h.store.AddInstance(b)
 	h.sidebar.SetSelectedInstance(1)
 
 	_, cmd := h.Update(tickUpdatePRInfoMessage{})
@@ -183,7 +183,7 @@ func TestTickUpdatePRInfo_DispatchesForSelectedOnly(t *testing.T) {
 func TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp(t *testing.T) {
 	h := newTestHome(t)
 	inst := newLoadingInstance(t, "target")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 	assert.Nil(t, inst.GetPRInfo(), "precondition: no cached PR info")
 
@@ -206,7 +206,7 @@ func TestPrInfoUpdatedMsg_Error_PreservesCacheAndDebounces(t *testing.T) {
 	inst := newLoadingInstance(t, "target")
 	cached := &git.PRInfo{Number: 7, Title: "cached", State: "OPEN"}
 	inst.SetPRInfo(cached)
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	// Simulate the prInfoLastFetched timestamp being old by clearing it via
@@ -231,7 +231,7 @@ func TestSelectionChanged_DoesNotRefetchFreshInstance(t *testing.T) {
 	h := newTestHome(t)
 	inst := newStartedInstance(t, "fresh")
 	inst.SetPRInfo(&git.PRInfo{Number: 1, Title: "fresh"}) // bumps timestamp to now
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	// selectionChanged now also dispatches an off-loop pane refresh cmd
@@ -338,14 +338,14 @@ func TestPrInfoUpdatedMsg_InstanceSwappedDuringFetch_AppliesToLiveInstance(t *te
 	h := newTestHome(t)
 
 	orphan := newStartedInstance(t, "swapped")
-	h.sidebar.AddInstance(orphan)
+	h.store.AddInstance(orphan)
 	h.sidebar.SetSelectedInstance(0)
 
 	// Simulate the #765 swap: remove the captured instance and add a fresh
 	// same-title copy (as FromInstanceData would build).
 	live := newStartedInstance(t, "swapped")
-	h.sidebar.RemoveInstanceByTitle("swapped")
-	h.sidebar.AddInstance(live)
+	h.store.RemoveInstanceByTitle("swapped")
+	h.store.AddInstance(live)
 	require.NotSame(t, orphan, live, "sanity: swap must produce a distinct pointer")
 
 	info := &git.PRInfo{Number: 42, Title: "add feature", URL: "https://x/42", State: "OPEN"}
@@ -364,9 +364,9 @@ func TestPrInfoUpdatedMsg_InstanceGoneDuringFetch_DropsUpdate(t *testing.T) {
 	h := newTestHome(t)
 
 	orphan := newStartedInstance(t, "gone")
-	h.sidebar.AddInstance(orphan)
+	h.store.AddInstance(orphan)
 	h.sidebar.SetSelectedInstance(0)
-	h.sidebar.RemoveInstanceByTitle("gone")
+	h.store.RemoveInstanceByTitle("gone")
 
 	info := &git.PRInfo{Number: 7, Title: "lost", State: "OPEN"}
 	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, info: info})
@@ -383,12 +383,12 @@ func TestPrInfoUpdatedMsg_Error_SwappedDuringFetch_MarksLiveInstance(t *testing.
 	h := newTestHome(t)
 
 	orphan := newStartedInstance(t, "swapped")
-	h.sidebar.AddInstance(orphan)
+	h.store.AddInstance(orphan)
 	h.sidebar.SetSelectedInstance(0)
 
 	live := newStartedInstance(t, "swapped")
-	h.sidebar.RemoveInstanceByTitle("swapped")
-	h.sidebar.AddInstance(live)
+	h.store.RemoveInstanceByTitle("swapped")
+	h.store.AddInstance(live)
 	require.Greater(t, live.PRInfoAge(), 365*24*time.Hour,
 		"precondition: live instance is never-fetched")
 
@@ -422,15 +422,15 @@ func TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate(t *testing.T) {
 	// The instance the fetch was kicked off for, on branch X.
 	orphan := newStartedInstance(t, "reused")
 	orphan.Branch = "feature/x"
-	h.sidebar.AddInstance(orphan)
+	h.store.AddInstance(orphan)
 	h.sidebar.SetSelectedInstance(0)
 
 	// User killed it and recreated a same-title instance on branch Y while the
 	// gh fetch was still running.
 	recreated := newStartedInstance(t, "reused")
 	recreated.Branch = "feature/y"
-	h.sidebar.RemoveInstanceByTitle("reused")
-	h.sidebar.AddInstance(recreated)
+	h.store.RemoveInstanceByTitle("reused")
+	h.store.AddInstance(recreated)
 
 	info := &git.PRInfo{Number: 42, Title: "branch X PR", State: "OPEN"}
 	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, branch: "feature/x", info: info})
@@ -450,13 +450,13 @@ func TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate(t *testing.T) {
 
 	orphan := newStartedInstance(t, "reused")
 	orphan.Branch = "feature/x"
-	h.sidebar.AddInstance(orphan)
+	h.store.AddInstance(orphan)
 	h.sidebar.SetSelectedInstance(0)
 
 	live := newStartedInstance(t, "reused")
 	live.Branch = "feature/x"
-	h.sidebar.RemoveInstanceByTitle("reused")
-	h.sidebar.AddInstance(live)
+	h.store.RemoveInstanceByTitle("reused")
+	h.store.AddInstance(live)
 	require.NotSame(t, orphan, live, "sanity: swap must produce a distinct pointer")
 
 	info := &git.PRInfo{Number: 42, Title: "branch X PR", State: "OPEN"}

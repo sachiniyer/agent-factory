@@ -21,7 +21,7 @@ import (
 func TestSelectionChanged_DispatchesPaneRefreshOffEventLoop(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	start := time.Now()
@@ -46,7 +46,7 @@ func TestSelectionChanged_DispatchesPaneRefreshOffEventLoop(t *testing.T) {
 func TestRepaintAfterDetachMsg_KicksOffRefresh(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	start := time.Now()
@@ -67,7 +67,7 @@ func TestRepaintAfterDetachMsg_KicksOffRefresh(t *testing.T) {
 func TestRefreshPanesCmd_ProducesPanesRefreshedMsg(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
-	h.sidebar.AddInstance(inst)
+	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
 	tw := h.contentPane.TabbedWindow()

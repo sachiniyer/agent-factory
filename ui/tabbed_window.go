@@ -2,10 +2,10 @@ package ui
 
 import (
 	"fmt"
-	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/store"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -43,45 +43,50 @@ var defaultTabLabels = []string{"Preview", "Terminal"}
 // take up one rune of height. The tab list is sourced from the selected
 // instance's Tabs (#930 PR 2): every tab renders through one shared TabPane by
 // capturing the selected tab's session.
+//
+// The window is a VIEW over the store.Projection (#1024 PR 2): both the
+// selected instance and the active tab index live in the store, so the window
+// no longer holds an instance pointer of its own. The active tab is an atomic
+// in the store because the background refreshPanesCmd goroutine reads it via
+// UpdateContent while the bubbletea event loop writes it via Toggle/ToggleBack
+// (#684); every other store read here happens on the event loop only.
 type TabbedWindow struct {
-	// activeTab is read from the background refreshPanesCmd goroutine
-	// (UpdateContent) while the bubbletea event loop writes it via
-	// Toggle/ToggleBack, so it is an atomic to avoid a data race (#684).
-	activeTab atomic.Int32
-	height    int
-	width     int
+	proj   *store.Projection
+	height int
+	width  int
 
-	tab      *TabPane
-	instance *session.Instance
+	tab *TabPane
 }
 
-func NewTabbedWindow(tab *TabPane) *TabbedWindow {
+func NewTabbedWindow(tab *TabPane, proj *store.Projection) *TabbedWindow {
 	return &TabbedWindow{
-		tab: tab,
+		proj: proj,
+		tab:  tab,
 	}
 }
 
-func (w *TabbedWindow) SetInstance(instance *session.Instance) {
-	w.instance = instance
-	// Tab counts vary per instance (#930 PR 4): switching to an instance with
-	// fewer tabs must not leave activeTab pointing past the end, which would make
-	// isAgentSlot() lie and the number/Toggle math operate on a phantom slot.
-	w.clampActiveTab()
+// selectedInstance returns the instance the window renders — the store's
+// (sticky) display selection. Event-loop only.
+func (w *TabbedWindow) selectedInstance() *session.Instance {
+	return w.proj.GetSelectedInstance()
 }
 
-// clampActiveTab bounds activeTab into [0, len(tabLabels())-1]. Called whenever
-// the tab set may have shrunk (instance switch, tab close) so the index never
-// dangles out of range.
-func (w *TabbedWindow) clampActiveTab() {
-	n := int32(len(w.tabLabels()))
+// ClampActiveTab bounds the active tab index into [0, len(tabLabels())-1].
+// Called whenever the tab set may have shrunk (instance switch, tab close) so
+// the index never dangles out of range: tab counts vary per instance (#930
+// PR 4), and switching to an instance with fewer tabs must not leave the
+// index pointing past the end, which would make isAgentSlot() lie and the
+// number/Toggle math operate on a phantom slot.
+func (w *TabbedWindow) ClampActiveTab() {
+	n := len(w.tabLabels())
 	if n <= 0 {
-		w.activeTab.Store(0)
+		w.proj.SetActiveTab(0)
 		return
 	}
-	if cur := w.activeTab.Load(); cur >= n {
-		w.activeTab.Store(n - 1)
+	if cur := w.proj.ActiveTab(); cur >= n {
+		w.proj.SetActiveTab(n - 1)
 	} else if cur < 0 {
-		w.activeTab.Store(0)
+		w.proj.SetActiveTab(0)
 	}
 }
 
@@ -92,15 +97,15 @@ func (w *TabbedWindow) JumpToTab(idx int) bool {
 	if idx < 0 || idx >= len(w.tabLabels()) {
 		return false
 	}
-	w.activeTab.Store(int32(idx))
+	w.proj.SetActiveTab(idx)
 	return true
 }
 
 // SelectTab sets the active tab to idx, clamped into range. Used after a tab
 // close to land on a neighbor.
 func (w *TabbedWindow) SelectTab(idx int) {
-	w.activeTab.Store(int32(idx))
-	w.clampActiveTab()
+	w.proj.SetActiveTab(idx)
+	w.ClampActiveTab()
 }
 
 // SelectLastTab selects the final tab. Used after a new tab is appended so the
@@ -109,7 +114,7 @@ func (w *TabbedWindow) SelectLastTab() {
 	w.SelectTab(len(w.tabLabels()) - 1)
 }
 
-// tabLabels returns the labels for the current instance's tabs. Agent tabs
+// tabLabels returns the labels for the selected instance's tabs. Agent tabs
 // render as "Preview", shell tabs as "Terminal"; any Process tab renders under
 // its own name.
 //
@@ -120,8 +125,9 @@ func (w *TabbedWindow) SelectLastTab() {
 // default-padded bar (always at least the two slots) so the header count never
 // dips below two mid-start, identical to the pre-#930 UX.
 func (w *TabbedWindow) tabLabels() []string {
-	if w.instance != nil && w.instance.IsRemote() {
-		if tabs := w.instance.GetTabs(); len(tabs) > 0 {
+	instance := w.selectedInstance()
+	if instance != nil && instance.IsRemote() {
+		if tabs := instance.GetTabs(); len(tabs) > 0 {
 			labels := make([]string, len(tabs))
 			for i, tab := range tabs {
 				labels[i] = labelForTab(tab)
@@ -132,10 +138,10 @@ func (w *TabbedWindow) tabLabels() []string {
 	}
 
 	labels := append([]string(nil), defaultTabLabels...)
-	if w.instance == nil {
+	if instance == nil {
 		return labels
 	}
-	for idx, tab := range w.instance.GetTabs() {
+	for idx, tab := range instance.GetTabs() {
 		label := labelForTab(tab)
 		if idx < len(labels) {
 			labels[idx] = label
@@ -163,7 +169,7 @@ func labelForTab(tab *session.Tab) string {
 // isAgentSlot reports whether the active tab index is the agent tab (index 0).
 // Index 0 is always the agent tab; every other slot is a shell/terminal tab.
 func (w *TabbedWindow) isAgentSlot() bool {
-	return int(w.activeTab.Load()) == 0
+	return w.proj.ActiveTab() == 0
 }
 
 // AdjustPreviewWidth adjusts the width of the preview pane to be 90% of the provided width.
@@ -200,41 +206,44 @@ func (w *TabbedWindow) GetPreviewSize() (width, height int) {
 }
 
 func (w *TabbedWindow) Toggle() {
-	n := int32(len(w.tabLabels()))
+	n := len(w.tabLabels())
 	if n <= 0 {
 		return
 	}
-	w.activeTab.Store((w.activeTab.Load() + 1) % n)
+	w.proj.SetActiveTab((w.proj.ActiveTab() + 1) % n)
 }
 
 func (w *TabbedWindow) ToggleBack() {
-	n := int32(len(w.tabLabels()))
+	n := len(w.tabLabels())
 	if n <= 0 {
 		return
 	}
-	w.activeTab.Store((w.activeTab.Load() - 1 + n) % n)
+	w.proj.SetActiveTab((w.proj.ActiveTab() - 1 + n) % n)
 }
 
 // UpdateContent updates the content of the active tab's pane. instance may be
-// nil. Replaces the former UpdatePreview/UpdateTerminal split now that one pane
-// renders whichever tab is selected.
+// nil. It is called from the refreshPanesCmd goroutine with the instance
+// captured on the event loop at dispatch time — deliberately a parameter, not
+// a store read, so the capture is keyed to the selection the refresh was
+// dispatched for; only the active tab index is read here, through the store's
+// atomic (#684).
 func (w *TabbedWindow) UpdateContent(instance *session.Instance) error {
-	return w.tab.UpdateContent(instance, int(w.activeTab.Load()))
+	return w.tab.UpdateContent(instance, w.proj.ActiveTab())
 }
 
 // ResetToNormalMode resets the active tab's pane to normal (non-scroll) mode.
 func (w *TabbedWindow) ResetToNormalMode(instance *session.Instance) error {
-	return w.tab.ResetToNormalMode(instance, int(w.activeTab.Load()))
+	return w.tab.ResetToNormalMode(instance, w.proj.ActiveTab())
 }
 
 func (w *TabbedWindow) ScrollUp() {
-	if err := w.tab.ScrollUp(w.instance, int(w.activeTab.Load())); err != nil {
+	if err := w.tab.ScrollUp(w.selectedInstance(), w.proj.ActiveTab()); err != nil {
 		log.InfoLog.Printf("tabbed window failed to scroll up: %v", err)
 	}
 }
 
 func (w *TabbedWindow) ScrollDown() {
-	if err := w.tab.ScrollDown(w.instance, int(w.activeTab.Load())); err != nil {
+	if err := w.tab.ScrollDown(w.selectedInstance(), w.proj.ActiveTab()); err != nil {
 		log.InfoLog.Printf("tabbed window failed to scroll down: %v", err)
 	}
 }
@@ -252,7 +261,7 @@ func (w *TabbedWindow) IsInTerminalTab() bool {
 
 // GetActiveTab returns the currently active tab index.
 func (w *TabbedWindow) GetActiveTab() int {
-	return int(w.activeTab.Load())
+	return w.proj.ActiveTab()
 }
 
 // AttachTerminalForInstance attaches to the terminal (shell) tab of the given
@@ -291,7 +300,7 @@ func (w *TabbedWindow) String() string {
 
 	var renderedTabs []string
 
-	activeTab := int(w.activeTab.Load())
+	activeTab := w.proj.ActiveTab()
 	totalTabWidth := w.width
 	tabWidth := totalTabWidth / len(labels)
 	lastTabWidth := totalTabWidth - tabWidth*(len(labels)-1)
