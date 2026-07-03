@@ -72,7 +72,18 @@ af daemon uninstall    # remove the autostart unit (the daemon still starts on d
 af version             # print the version and the release URL
 af debug               # print the resolved config and its path
 af upgrade             # self-upgrade to the latest GitHub release (Linux/macOS)
+af doctor              # diagnose leaked processes/sessions/temp homes and daemon health
+af doctor --fix        # also apply the safe remediations
 af reset               # nuclear option — see below
 ```
+
+`af doctor` is read-only by default: it reports orphaned processes left behind
+by dead sessions, processes pegging a CPU core inside live sessions, `af_` tmux
+sessions with no backing record, abandoned temp agent-factory homes, and daemon
+problems (stale socket, stale pid file, a daemon still running a replaced
+binary). With `--fix` it kills orphans whose ancestry markers prove they came
+from a dead Agent Factory session and removes stale temp homes, logging each
+action; anything it cannot verify is reported, never touched. Exits 1 when
+unresolved issues remain.
 
 `af reset` attempts to stop the daemon (and reports honestly if it couldn't — e.g. a source-built `agent-factory --daemon` that left no PID file), kills **all** Agent Factory tmux sessions, removes **every linked git worktree (and its branch)** from each repo that has stored sessions — including worktrees you created by hand — and deletes all stored session records. Use it to recover from a corrupted state, not for day-to-day cleanup — `af sessions kill <title>` (or `D` in the TUI) removes a single session cleanly.
