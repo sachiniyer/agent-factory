@@ -151,6 +151,26 @@ type home struct {
 	// lastPaneCapture is when each pane's capture was last dispatched, keyed
 	// by pane id; the paneCaptureMinInterval throttle reads it (RFC §5.2).
 	lastPaneCapture map[int]time.Time
+	// -- Live embedded terminal (#1089 PR 1, read-only proof path) --
+	//
+	// At most ONE pane holds a live termpane attachment: the focused pane
+	// (or the pane that already holds it while focus visits the rail). Its
+	// window renders the termpane grid instead of the capture, and its
+	// capture polling is skipped. Lifecycle in live_termpane.go; all four
+	// fields are event-loop only.
+
+	// liveTerm is the live attachment (a *termpane.TermPane in production,
+	// behind the seam interface); nil when every pane renders captures.
+	liveTerm liveTermAttachment
+	// livePane is the open pane liveTerm is bound to; nil iff liveTerm is.
+	livePane *store.OpenPane
+	// liveBindKey identifies the (pane, tab, session) binding last attempted,
+	// so the tick-driven sync only rebinds when the binding actually changed.
+	liveBindKey string
+	// liveBindFailedAt is when the last bind attempt failed, for the
+	// liveBindRetryInterval backoff.
+	liveBindFailedAt time.Time
+
 	// initialPaneOpened latches the one-time startup auto-open: the first
 	// instance selection opens its pane so the workspace isn't empty on
 	// launch. Never reset — once the user has hidden every pane, the
@@ -475,6 +495,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 100ms — exactly the contention that produced the 44s detach hang
 		// in #598. Keep the tick alive so the first post-detach iteration
 		// fires within ~100ms of clearing the flag, but skip the work.
+		//
+		// The live-termpane sync rides the same tick (and handles the
+		// attached case itself, by closing the attachment): renders are
+		// pulled by this existing cadence, never by a termpane-owned loop
+		// (#1089 perf guard).
+		m.syncLiveTermPane()
 		var cmd tea.Cmd
 		if !m.attached.Load() {
 			cmd = m.selectionChanged()
@@ -793,6 +819,11 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	// so the user reconnects to them on next launch (Sachin's persistence
 	// requirement). Killing an instance still tears its tabs down via
 	// LocalBackend.Kill.
+	//
+	// The live termpane attachment is the one exception: release its attach
+	// CLIENT (the session survives, exactly like a detach) so no orphaned
+	// `tmux attach-session` child outlives the TUI (#1089).
+	m.closeLiveTermPane()
 	return m, tea.Quit
 }
 
@@ -1417,6 +1448,13 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 		// The pane's tab index can dangle when its instance's tab set shrank
 		// (e.g. another view closed the tab this pane was showing).
 		w.ClampActiveTab()
+		// A pane rendering through a live termpane attachment doesn't poll
+		// capture-pane (#1089): the attach client already streams the same
+		// content, tmux-flow-limited. Capture resumes the tick after the
+		// attachment closes.
+		if w.HasLive() {
+			continue
+		}
 		if time.Since(m.lastPaneCapture[p.ID()]) < paneCaptureMinInterval {
 			continue
 		}

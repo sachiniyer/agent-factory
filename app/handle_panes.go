@@ -108,6 +108,11 @@ func (m *home) hidePane(p *store.OpenPane) {
 // tab-kill rebind, snapshot reconcile, dead-instance prune) goes through.
 // Callers relayout afterwards.
 func (m *home) closePaneWindow(p *store.OpenPane) {
+	// Release the live termpane attachment before its window goes away —
+	// its (pane, window) binding is about to dangle (#1089).
+	if p == m.livePane {
+		m.closeLiveTermPane()
+	}
 	m.store.CloseOpenPane(p)
 	delete(m.paneWindows, p.ID())
 	delete(m.lastPaneCapture, p.ID())

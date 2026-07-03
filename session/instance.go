@@ -222,6 +222,24 @@ func (i *Instance) TabCount() int {
 	return len(i.Tabs)
 }
 
+// TabTmuxName returns the sanitized tmux session name of the tab at idx, or
+// "" when the instance is not started or the tab has no local session
+// (remote tabs, out-of-range idx). The embedded terminal pane (#1089) uses it
+// to attach its own render client to the tab's session; it never creates or
+// mutates the session.
+func (i *Instance) TabTmuxName(idx int) string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if !i.started {
+		return ""
+	}
+	ts := i.tabTmuxAtLocked(idx)
+	if ts == nil {
+		return ""
+	}
+	return ts.SanitizedName()
+}
+
 // AddShellTab spawns a new Shell-kind tab running $SHELL in the instance's
 // worktree, appends it to Tabs, and returns it. Local instances only — remote
 // instances have no local worktree, so callers must reject IsRemote() before

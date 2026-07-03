@@ -140,6 +140,15 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 	switch helpType.(type) {
 	case helpTypeGeneral:
 		alwaysShow = true
+	case helpTypeInstanceAttach:
+		// A full-screen attach is about to start — immediately, or deferred
+		// until this overlay is dismissed. Release the live termpane
+		// attachment first: a second client on the same session would fight
+		// over the session size, and our render client must never sit in an
+		// interactive client's way (#598 class; #1089). The tick-driven sync
+		// won't rebind while an overlay is open, and re-establishes the
+		// attachment after the eventual detach.
+		m.closeLiveTermPane()
 	}
 
 	flag := helpType.mask()
