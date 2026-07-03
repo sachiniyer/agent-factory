@@ -130,6 +130,15 @@ type home struct {
 	sidebar *ui.Sidebar
 	// paneA is the workspace content pane: the selected tab's live view
 	paneA *ui.TabbedWindow
+	// paneB is the split view's second content pane (#1024 PR 5): a PINNED
+	// live view of the store's pane-B binding, which only the split verbs
+	// move while the tree selection drives pane A (RFC §2.3). Hidden (zero
+	// rect, out of the focus ring) whenever no split is open or the terminal
+	// is too narrow to honor one (§2.6).
+	paneB *ui.TabbedWindow
+	// lastPaneBCapture is when pane B's capture was last dispatched; the
+	// paneBCaptureMinInterval throttle reads it (RFC §5.2).
+	lastPaneBCapture time.Time
 	// automations is the bottom strip (compact task rows; expands to the
 	// full task manager on focus)
 	automations *ui.AutomationsPane
@@ -208,10 +217,11 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		menu:            menu,
 		errBox:          errBox,
 		paneA:           ui.NewTabbedWindow(ui.NewTabPane(), proj),
+		paneB:           ui.NewPinnedTabbedWindow(ui.NewTabPane(), proj),
 		automations:     ui.NewAutomationsPane(proj),
 		statusBar:       ui.NewStatusBar(menu, errBox),
 		hooksPane:       ui.NewHooksPane(),
-		ring:            layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionAutomations),
+		ring:            layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionPaneB, layout.RegionAutomations),
 		snapshotFetcher: snapshotThroughDaemon,
 		appConfig:       appConfig,
 		program:         program,
@@ -222,6 +232,10 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		appState:        appState,
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes, proj)
+	// No split is open at startup: pane B starts hidden so the focus ring is
+	// tree → pane A → automations until a split opens (relayout keeps this in
+	// sync with Layout.SplitActive thereafter).
+	h.ring.SetHidden(layout.RegionPaneB, true)
 	h.syncFocus()
 
 	// Cold-start the projection from the daemon's authoritative Snapshot (#960 PR 6).
@@ -276,6 +290,12 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 // it in place).
 func (m *home) relayout() {
 	m.grid.AutomationsExpanded = m.ring.Active() == layout.RegionAutomations
+	// The split request follows the store's pane-B binding (#1024 PR 5). The
+	// grid honors it only when the terminal is wide enough (§2.6): below the
+	// threshold SplitActive comes back false while the binding — and the
+	// Split request — persist, which is exactly the retain-and-restore-on-grow
+	// contract.
+	m.grid.Split = m.store.SplitOpen()
 	lay := m.grid.Solve(m.termWidth, m.termHeight)
 	m.lastLayout = lay
 	if lay.Fallback {
@@ -287,12 +307,21 @@ func (m *home) relayout() {
 
 	// Regions hidden by the ladder leave the focus ring; Ring.Active moves
 	// focus forward off a hidden region on its own, so re-sync pane focus
-	// flags afterwards.
+	// flags afterwards. A collapsing split is special-cased: the ring's
+	// forward skip would land focus on the automations strip, but the user
+	// was looking at a content pane — pane A, which absorbed the workspace,
+	// is where their attention lands.
+	if !lay.SplitActive && m.ring.Active() == layout.RegionPaneB {
+		m.ring.Focus(layout.RegionPaneA)
+	}
+	m.ring.SetHidden(layout.RegionPaneB, !lay.SplitActive)
 	m.ring.SetHidden(layout.RegionAutomations, !lay.AutomationsVisible)
 	m.syncFocus()
+	m.menu.SetSplitOpen(lay.SplitActive)
 
 	m.sidebar.SetRect(lay.Tree)
 	m.paneA.SetRect(lay.PaneA)
+	m.paneB.SetRect(lay.PaneB)
 	m.automations.SetRect(lay.Automations)
 	m.automations.SetCompact(lay.AutomationsCompact)
 	m.statusBar.SetRect(lay.StatusBar)
@@ -318,6 +347,7 @@ func (m *home) syncFocus() {
 	for id, pane := range map[string]layout.Pane{
 		layout.RegionTree:        m.sidebar,
 		layout.RegionPaneA:       m.paneA,
+		layout.RegionPaneB:       m.paneB,
 		layout.RegionAutomations: m.automations,
 	} {
 		if id == active {
@@ -508,14 +538,18 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
-				if m.store.GetSelectedInstance() == nil {
+				// The focused split pane scrolls its own pinned view (#1024
+				// PR 5); everywhere else the wheel drives pane A off the
+				// selection binding, as before.
+				pane, bound := m.focusedContentPane()
+				if bound == nil {
 					return m, nil
 				}
 				switch msg.Button {
 				case tea.MouseButtonWheelUp:
-					m.paneA.ScrollUp()
+					pane.ScrollUp()
 				case tea.MouseButtonWheelDown:
-					m.paneA.ScrollDown()
+					pane.ScrollDown()
 				}
 			}
 		}
@@ -1003,11 +1037,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return mod, cmd
 	}
 
-	// Exit scrolling mode when ESC is pressed
+	// Exit scrolling mode when ESC is pressed (the focused pane's scroll
+	// state — pane B keeps its own, #1024 PR 5)
 	if msg.Type == tea.KeyEsc {
-		if m.paneA.IsInScrollMode() {
-			selected := m.sidebar.GetSelectedInstance()
-			if err := m.paneA.ResetToNormalMode(selected); err != nil {
+		if pane, bound := m.focusedContentPane(); pane.IsInScrollMode() {
+			if err := pane.ResetToNormalMode(bound); err != nil {
 				return m, m.handleError(err)
 			}
 			return m, m.selectionChanged()
@@ -1228,7 +1262,58 @@ func (m *home) selectionChanged() tea.Cmd {
 		}
 	}
 
-	return tea.Batch(prFetch, refreshCmd)
+	return tea.Batch(prFetch, refreshCmd, m.paneBRefresh(attachedNow))
+}
+
+// paneBCaptureMinInterval floors the pinned split pane's capture cadence
+// (#1024 PR 5). At the previewTick period (100ms) it admits one pane-B
+// capture per tick — the at-most-one-extra-capture budget of RFC §5.2 — and
+// swallows the extra selectionChanged calls rapid tree navigation fires
+// between ticks. If tmux-server contention ever resurfaces (#598 class),
+// raising this ONE constant (e.g. to 250ms) degrades pane B's refresh without
+// touching pane A or the tick.
+const paneBCaptureMinInterval = 100 * time.Millisecond
+
+// paneBRefresh is the split half of selectionChanged (#1024 PR 5): it keeps
+// the pinned pane-B binding coherent and returns its throttled capture cmd
+// (nil when there is nothing to do). Runs on the event loop.
+func (m *home) paneBRefresh(attachedNow bool) tea.Cmd {
+	pinned := m.store.PaneBInstance()
+	if pinned == nil {
+		return nil
+	}
+	if !m.store.ContainsInstance(pinned) {
+		// The pinned instance left the projection (killed here, or removed by
+		// an external kill the snapshot reconcile mirrored). Close the split
+		// rather than keep rendering a dead session's last capture — the
+		// pinned equivalent of the sticky-selection dangle drop above.
+		m.closeSplit()
+		return nil
+	}
+	// The pinned tab index can dangle when its instance's tab set shrank
+	// (e.g. pane A closed the tab both panes were showing).
+	m.paneB.ClampActiveTab()
+	// Both panes pause while attached (#598): the attached gate above covers
+	// pane B exactly like pane A. No capture while the split is collapsed by
+	// the degradation ladder either — the pane is invisible.
+	if attachedNow || !m.lastLayout.SplitActive {
+		return nil
+	}
+	if time.Since(m.lastPaneBCapture) < paneBCaptureMinInterval {
+		return nil
+	}
+	m.lastPaneBCapture = time.Now()
+	return refreshPanesCmd(m.paneB, pinned)
+}
+
+// focusedContentPane resolves which content pane the focus ring points at —
+// the pinned pane B when it is focused and visible, pane A everywhere else —
+// along with the instance that pane is bound to (nil when unbound).
+func (m *home) focusedContentPane() (*ui.TabbedWindow, *session.Instance) {
+	if m.ring.Active() == layout.RegionPaneB && m.lastLayout.SplitActive {
+		return m.paneB, m.store.PaneBInstance()
+	}
+	return m.paneA, m.store.GetSelectedInstance()
 }
 
 // panesRefreshedMsg signals that the off-loop tab capture finished. The msg
@@ -1364,7 +1449,11 @@ func (m *home) View() string {
 		return ui.TerminalTooSmall(m.termWidth, m.termHeight)
 	}
 
-	top := lipgloss.JoinHorizontal(lipgloss.Top, m.sidebar.View(), m.paneA.View())
+	cols := []string{m.sidebar.View(), m.paneA.View()}
+	if m.lastLayout.SplitActive {
+		cols = append(cols, m.renderDivider(), m.paneB.View())
+	}
+	top := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 	rows := []string{top}
 	if m.lastLayout.AutomationsVisible {
 		rows = append(rows, m.automations.View())
@@ -1408,4 +1497,20 @@ var hooksOverlayStyle = lipgloss.NewStyle().
 
 func (m *home) renderHooksOverlay() string {
 	return hooksOverlayStyle.Render(m.hooksPane.String())
+}
+
+// splitDividerStyle recedes the 1-col divider between panes A and B so the
+// focused pane's frame stays the strongest line on screen.
+var splitDividerStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#DDDADA", Dark: "#3C3C3C"})
+
+// renderDivider renders the 1-col divider between panes A and B (§2.6:
+// "split divides it evenly with a 1-col divider").
+func (m *home) renderDivider() string {
+	r := m.lastLayout.Divider
+	if r.Empty() {
+		return ""
+	}
+	col := strings.TrimSuffix(strings.Repeat("│\n", r.H), "\n")
+	return splitDividerStyle.Render(col)
 }

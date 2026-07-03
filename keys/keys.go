@@ -29,7 +29,6 @@ const (
 	KeyShiftUp
 	KeyShiftDown
 
-	KeyTask
 	KeyTaskList
 
 	KeySearch      // Key for searching sessions
@@ -46,6 +45,16 @@ const (
 	KeyRight       // Expand section
 	KeyNextSection // Jump to next section header
 	KeyPrevSection // Jump to previous section header
+
+	// Split view (#1024 PR 5). One physical key, focus-dependent verbs: with
+	// tree focus `s` opens/retargets the selection in pane B, with pane focus
+	// it swaps A↔B. KeySwapPanes exists for menu/help display of the swap
+	// meaning only (GlobalKeyStringsMap can map "s" to a single name);
+	// dispatch always resolves "s" to KeySplit and the root model picks the
+	// verb off the focus ring.
+	KeySplit      // Split: open the tree selection in pane B / swap panes.
+	KeySwapPanes  // SwapPanes is the pane-focused display alias of KeySplit; menu/help only.
+	KeyCloseSplit // CloseSplit closes the split (pane B focused).
 )
 
 // GlobalKeyStringsMap is a global, immutable map string to keybinding.
@@ -67,19 +76,22 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"t":          KeyNewTab,
 	"w":          KeyCloseTab,
 	"?":          KeyHelp,
-	"s":          KeyTask,
-	"S":          KeyTaskList,
-	"/":          KeySearch,
-	"r":          KeyTriggerTask,
-	"p":          KeyOpenPR,
-	"P":          KeyCopyPR,
-	"H":          KeyHooks,
-	"h":          KeyLeft,
-	"left":       KeyLeft,
-	"l":          KeyRight,
-	"right":      KeyRight,
-	"]":          KeyNextSection,
-	"[":          KeyPrevSection,
+	// "s" is the split verb since #1024 PR 5 (RFC §2.3); the task-create jump
+	// it used to carry lives in the automations strip's own manager (S → n).
+	"s":     KeySplit,
+	"x":     KeyCloseSplit,
+	"S":     KeyTaskList,
+	"/":     KeySearch,
+	"r":     KeyTriggerTask,
+	"p":     KeyOpenPR,
+	"P":     KeyCopyPR,
+	"H":     KeyHooks,
+	"h":     KeyLeft,
+	"left":  KeyLeft,
+	"l":     KeyRight,
+	"right": KeyRight,
+	"]":     KeyNextSection,
+	"[":     KeyPrevSection,
 }
 
 // GlobalKeyBindings is a global, immutable map of KeyName to keybinding.
@@ -144,13 +156,21 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 		key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"),
 		key.WithHelp("1-9", "jump"),
 	),
-	KeyTask: key.NewBinding(
-		key.WithKeys("s"),
-		key.WithHelp("s", "task"),
-	),
 	KeyTaskList: key.NewBinding(
 		key.WithKeys("S"),
-		key.WithHelp("S", "list tasks"),
+		key.WithHelp("S", "tasks"),
+	),
+	KeySplit: key.NewBinding(
+		key.WithKeys("s"),
+		key.WithHelp("s", "split"),
+	),
+	KeySwapPanes: key.NewBinding(
+		key.WithKeys("s"),
+		key.WithHelp("s", "swap"),
+	),
+	KeyCloseSplit: key.NewBinding(
+		key.WithKeys("x"),
+		key.WithHelp("x", "close split"),
 	),
 	KeySearch: key.NewBinding(
 		key.WithKeys("/"),

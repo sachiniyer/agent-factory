@@ -206,7 +206,7 @@ func (a *AutomationsPane) String() string {
 		automationsHintStyle.Render(fmt.Sprintf("(%d) · S manage · H hooks", len(tasks)))
 	lines := []string{title}
 	if len(tasks) == 0 {
-		lines = append(lines, automationsDisabledStyle.Render("  no tasks — press s to create one"))
+		lines = append(lines, automationsDisabledStyle.Render("  no tasks — press S, then n to create one"))
 	}
 	for _, tsk := range tasks {
 		if len(lines) >= a.rect.H {

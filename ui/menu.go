@@ -58,11 +58,16 @@ type Menu struct {
 	activeTab     int
 
 	// focusRegion is the focus-ring region the hints are rendered for
-	// (layout.RegionTree / RegionPaneA / RegionAutomations). The status bar is
-	// context-sensitive per RFC §2.1: hints follow focus, so the automations
-	// strip advertises its manager keys while the tree/workspace show the
-	// session actions.
+	// (layout.RegionTree / RegionPaneA / RegionPaneB / RegionAutomations). The
+	// status bar is context-sensitive per RFC §2.1: hints follow focus, so the
+	// automations strip advertises its manager keys, pane B its split verbs,
+	// while the tree/pane A show the session actions.
 	focusRegion string
+
+	// splitOpen mirrors whether the split is currently honored by the layout
+	// (#1024 PR 5). It picks the split verb the hints advertise: "s split"
+	// opens pane B, "s swap" swaps an open one.
+	splitOpen bool
 
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
@@ -75,6 +80,15 @@ var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName, keys.KeyChangePr
 // has focus; the expanded TaskPane renders its own detailed key line, so the
 // bar shows only the cross-region verbs.
 var automationsMenuOptions = []keys.KeyName{keys.KeyTab, keys.KeyHooks, keys.KeyHelp, keys.KeyQuit}
+
+// paneBMenuOptions are the status-bar hints while the pinned split pane has
+// focus (#1024 PR 5): attach/scroll act on pane B's own binding, s swaps the
+// panes, x (or w) closes the split.
+var paneBMenuOptions = []keys.KeyName{
+	keys.KeyEnter, keys.KeyShiftUp, keys.KeyShiftDown,
+	keys.KeySwapPanes, keys.KeyCloseSplit,
+	keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
+}
 
 func NewMenu() *Menu {
 	m := &Menu{
@@ -132,6 +146,14 @@ func (m *Menu) SetActiveTab(tab int) {
 	m.updateOptions()
 }
 
+// SetSplitOpen records whether the split is currently honored by the layout,
+// switching the advertised split verb between open ("s split") and swap
+// ("s swap") (#1024 PR 5).
+func (m *Menu) SetSplitOpen(open bool) {
+	m.splitOpen = open
+	m.updateOptions()
+}
+
 // updateOptions updates the menu options based on current state, focus
 // region, and instance
 func (m *Menu) updateOptions() {
@@ -143,6 +165,18 @@ func (m *Menu) updateOptions() {
 		m.groups = []menuGroup{
 			{start: 0, end: 1, isAction: true},
 			{start: 1, end: len(automationsMenuOptions), isAction: false},
+		}
+		return
+	}
+	// The pinned split pane advertises its own verbs while focused (#1024
+	// PR 5): attach/scroll on its binding, swap, close split. Same naming-flow
+	// exception as the strip.
+	if m.focusRegion == layout.RegionPaneB && m.state != StateNewInstance {
+		m.options = paneBMenuOptions
+		m.groups = []menuGroup{
+			{start: 0, end: 3, isAction: true},
+			{start: 3, end: 5, isAction: false},
+			{start: 5, end: len(paneBMenuOptions), isAction: false},
 		}
 		return
 	}
@@ -208,6 +242,14 @@ func (m *Menu) addInstanceOptions() {
 		tabGroup = []keys.KeyName{keys.KeyJumpTab}
 	}
 
+	// Split group (#1024 PR 5): one physical key whose advertised verb follows
+	// the state — "s split" opens the selection in pane B; with the split open
+	// and pane focus, s swaps A↔B (KeySwapPanes is the display alias).
+	splitGroup := []keys.KeyName{keys.KeySplit}
+	if m.splitOpen && m.focusRegion == layout.RegionPaneA {
+		splitGroup = []keys.KeyName{keys.KeySwapPanes}
+	}
+
 	// System group: the focus-ring cycle plus help/quit.
 	systemGroup := []keys.KeyName{keys.KeyTab, keys.KeyHelp, keys.KeyQuit}
 
@@ -215,12 +257,14 @@ func (m *Menu) addInstanceOptions() {
 	mgmtEnd := len(mgmtGroup)
 	actionEnd := mgmtEnd + len(actionGroup)
 	tabEnd := actionEnd + len(tabGroup)
-	systemEnd := tabEnd + len(systemGroup)
+	splitEnd := tabEnd + len(splitGroup)
+	systemEnd := splitEnd + len(systemGroup)
 
 	options := make([]keys.KeyName, 0, systemEnd)
 	options = append(options, mgmtGroup...)
 	options = append(options, actionGroup...)
 	options = append(options, tabGroup...)
+	options = append(options, splitGroup...)
 	options = append(options, systemGroup...)
 
 	m.options = options
@@ -228,7 +272,8 @@ func (m *Menu) addInstanceOptions() {
 		{start: 0, end: mgmtEnd, isAction: false},
 		{start: mgmtEnd, end: actionEnd, isAction: true},
 		{start: actionEnd, end: tabEnd, isAction: false},
-		{start: tabEnd, end: systemEnd, isAction: false},
+		{start: tabEnd, end: splitEnd, isAction: false},
+		{start: splitEnd, end: systemEnd, isAction: false},
 	}
 }
 
@@ -252,9 +297,11 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyJumpTab},
 	{keys.KeyCloseTab},
 	{keys.KeyNewTab},
+	{keys.KeySplit, keys.KeySwapPanes},
 	{keys.KeySearch},
 	{keys.KeyNewRemote},
 	{keys.KeyHooks},
+	{keys.KeyCloseSplit},
 	{keys.KeyTab},
 	{keys.KeyEnter},
 	{keys.KeyKill},
