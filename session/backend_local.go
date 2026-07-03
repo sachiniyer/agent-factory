@@ -86,7 +86,19 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	i.mu.Unlock()
 
 	if firstTimeSetup {
-		gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title)
+		var (
+			gitWorktree *git.GitWorktree
+			branchName  string
+			err         error
+		)
+		if i.inPlace {
+			// --here: attach to the repo's own working tree at its current
+			// branch. The worktree is external, so Setup() below is a no-op
+			// and Cleanup()/Kill never removes the user's tree or branch.
+			gitWorktree, branchName, err = git.NewGitWorktreeInPlace(i.Path)
+		} else {
+			gitWorktree, branchName, err = git.NewGitWorktree(i.Path, i.Title)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to create git worktree: %w", err)
 		}

@@ -39,12 +39,17 @@ var ensureDaemonMu sync.Mutex
 // CreateSessionRequest is the daemon-owned session creation contract used by
 // the TUI, CLI, and scheduled task runner.
 type CreateSessionRequest struct {
-	Title       string
-	TitleBase   string
-	RepoPath    string
-	Program     string
-	Prompt      string
-	AutoYes     bool
+	Title     string
+	TitleBase string
+	RepoPath  string
+	Program   string
+	Prompt    string
+	AutoYes   bool
+	// InPlace attaches the session to the repo's existing working tree at its
+	// current branch (`af sessions create --here`) instead of creating a new
+	// git worktree+branch; kill/cleanup leaves the user's tree and branch
+	// intact. Incompatible with ForceRemote.
+	InPlace     bool
 	ForceRemote bool
 }
 
@@ -1179,14 +1184,16 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 		Path:        repo.Root,
 		Program:     req.Program,
 		AutoYes:     req.AutoYes,
+		InPlace:     req.InPlace,
 		ForceRemote: req.ForceRemote,
 	})
 	if err != nil {
 		return session.InstanceData{}, err
 	}
 
-	// Every instance now owns a fresh worktree 1:1 (#930 PR 3 removed the
-	// create-on-existing-worktree path): there is a single creation flow.
+	// Single creation flow (#930 PR 3): every instance owns its worktree 1:1.
+	// InPlace only changes WHICH worktree that is — the repo's own working
+	// tree, marked external — not the flow itself.
 	if err = task.StartAndSendPrompt(instance, req.Prompt); err != nil {
 		_ = instance.Kill()
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", err)

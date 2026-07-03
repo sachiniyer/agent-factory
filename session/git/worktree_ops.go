@@ -12,6 +12,15 @@ import (
 
 // Setup creates a new worktree for the session
 func (g *GitWorktree) Setup() error {
+	// An external worktree (an in-place `--here` session, or a legacy
+	// pre-#930-PR-3 record) IS the user's existing working tree: there is
+	// nothing to create, and post-worktree hooks are deliberately skipped —
+	// they provision fresh checkouts and must not run unasked inside the
+	// user's live tree. Mirrors the Cleanup() no-op below.
+	if g.externalWorktree {
+		return nil
+	}
+
 	// Ensure worktrees directory exists early (can be done in parallel with branch check)
 	if g.worktreeDir == "" {
 		return fmt.Errorf("failed to get worktree directory: empty worktree directory")

@@ -23,7 +23,7 @@ All subcommands accept `--repo <path>` to target a repository other than the cur
 ```bash
 af sessions list                                          # list sessions in the repo
 af sessions get <title>                                   # fetch one session
-af sessions create --name <title> [--prompt "..."] [--program <agent>]
+af sessions create --name <title> [--prompt "..."] [--program <agent>] [--here]
 af sessions send-prompt <title> "..."                     # append a prompt to a session
 af sessions send-prompt <title> "..." --create            # send-or-create
 af sessions tab-create <title> --command "<cmd>"          # spawn a process tab in the session's worktree
@@ -36,7 +36,7 @@ af sessions kill <title>                                  # kill the session, cl
 
 Flags:
 
-- `create`: `--name` (required), `--prompt` (initial prompt to send), `--program` (agent enum, defaults to the configured `default_program`).
+- `create`: `--name` (required), `--prompt` (initial prompt to send), `--program` (agent enum, defaults to the configured `default_program`). `--here` (alias `--in-place`) attaches the session to the repo's **existing working tree at its current branch** instead of cutting a new worktree+branch: the agent runs in the repo root, no branch is created, and killing the session never removes the working tree or branch. Requires a git repository (the current directory, or `--repo`); incompatible with remote sessions.
 - `send-prompt`: `--create` auto-creates the session if it doesn't exist; `--program` picks the agent when creating.
 - `tab-create`: `--command` (required) is run in the session's git worktree as a new tab; `--name` sets the tab's display name (defaults to the command's basename, auto-suffixed `-2`, `-3`, … on collision). The resolved tab name is printed as `{"name": "..."}` so scripts/agents can address it. The tab persists and reconnects across a daemon/`af` restart like every other tab. Refused once a session already holds 9 tabs. **Not available for remote sessions:** they have no local worktree and the hook protocol can't run arbitrary commands — a remote session's only terminal tab comes from `remote_hooks.terminal_cmd` (see [remote-hooks.md](remote-hooks.md)).
 - `tab-delete`: the counterpart of `tab-create` — `--name` (required) selects the tab to delete. The tab is removed from the daemon's session state and its tmux window is killed; the removal is persistent (the daemon won't respawn it, and it doesn't return on restart). The deleted tab's name is printed as `{"name": "..."}`. The agent tab can't be deleted — use `af sessions kill` to tear down the whole session. Targeting a missing tab or session is an error. Not available for remote sessions (their tabs are fixed by `remote_hooks` config).

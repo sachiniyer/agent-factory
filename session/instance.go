@@ -71,6 +71,13 @@ type Instance struct {
 	AutoYes bool
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
+	// inPlace is true when the instance was created with `--here`: on first
+	// start it attaches to the repo's existing working tree at its current
+	// branch (external worktree) instead of creating a fresh worktree+branch.
+	// Set once by NewInstance and only read by LocalBackend.Start's first-time
+	// setup; restored instances don't need it (the persisted
+	// external_worktree flag carries the semantics from then on).
+	inPlace bool
 
 	// prInfo stores the associated GitHub PR info
 	prInfo *git.PRInfo
@@ -682,15 +689,13 @@ func (i *Instance) ToInstanceData() InstanceData {
 	// Only include worktree data if gitWorktree is initialized
 	if i.gitWorktree != nil {
 		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
-		// ExternalWorktree is legacy back-compat (#930 PR 3): the create-on-
-		// existing-worktree feature that set it true was removed, so new
-		// instances always serialize false here. We still write/read whatever
-		// the worktree reports so pre-existing instances created by the old
-		// feature keep externalWorktree=true and Cleanup() keeps skipping
-		// their user-owned worktree+branch. A future PR drops the field once
-		// no persisted instance carries it. (BranchCreatedByUs is NOT legacy —
-		// it still flips false on the normal path when Setup reuses an existing
-		// branch; see git/worktree_ops.go setupFromExistingBranch.)
+		// ExternalWorktree is true for in-place sessions (`af sessions create
+		// --here`, which attach to the repo's own working tree) and for
+		// instances persisted by the pre-#930-PR-3 create-on-existing-worktree
+		// feature. Cleanup() honors it by skipping removal of the user-owned
+		// worktree+branch. (BranchCreatedByUs is independent — it also flips
+		// false on the normal path when Setup reuses an existing branch; see
+		// git/worktree_ops.go setupFromExistingBranch.)
 		data.Worktree = GitWorktreeData{
 			RepoPath:          i.gitWorktree.GetRepoPath(),
 			WorktreePath:      i.gitWorktree.GetWorktreePath(),
@@ -869,6 +874,11 @@ type InstanceOptions struct {
 	// ForceRemote forces the instance to use the remote hook backend,
 	// even if the repo config would default to local.
 	ForceRemote bool
+	// InPlace attaches the session to the repo's existing working tree at its
+	// current branch (`af sessions create --here`) instead of creating a new
+	// git worktree+branch. The worktree is marked external so kill/cleanup
+	// never removes the user's tree or branch. Local backend only.
+	InPlace bool
 }
 
 // backendFactory constructs the Backend used by a new Instance. It is a
@@ -900,6 +910,12 @@ func SetBackendFactoryForTest(f func(opts InstanceOptions, absPath string) (Back
 func NewInstance(opts InstanceOptions) (*Instance, error) {
 	t := time.Now()
 
+	// An in-place session runs in the repo's local working tree; a remote
+	// session has no local worktree at all — the two are contradictory.
+	if opts.InPlace && opts.ForceRemote {
+		return nil, fmt.Errorf("remote sessions cannot run in-place in the local repo working tree")
+	}
+
 	// Convert path to absolute
 	absPath, err := filepath.Abs(opts.Path)
 	if err != nil {
@@ -921,6 +937,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		CreatedAt: t,
 		UpdatedAt: t,
 		AutoYes:   opts.AutoYes,
+		inPlace:   opts.InPlace,
 		backend:   backend,
 	}, nil
 }
