@@ -277,3 +277,89 @@ func TestRestartAutostartUnitUnsupportedGOOS(t *testing.T) {
 		t.Fatalf("no service manager command should run on unsupported GOOS, got %v", *calls)
 	}
 }
+
+// TestInstallUninstallRoundTripHonorsXDGConfigHomeLinux drives install and
+// uninstall through the REAL directory resolver (not a stubbed one) with
+// XDG_CONFIG_HOME pointing at a temp dir, pinning the #1091 contract: both
+// operations target $XDG_CONFIG_HOME/systemd/user — the directory systemd
+// actually scans — never ~/.config. Commands and the daemon stop are stubbed,
+// so no real unit is enabled and no real daemon is signaled.
+func TestInstallUninstallRoundTripHonorsXDGConfigHomeLinux(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	prevGOOS := autostartGOOS
+	t.Cleanup(func() { autostartGOOS = prevGOOS })
+	autostartGOOS = "linux"
+	calls := stubAutostartUnitCommand(t, nil)
+	stubAutostartStopDaemon(t, true, nil)
+
+	wantPath := filepath.Join(xdg, "systemd", "user", autostartUnitName)
+
+	unitPath, err := InstallAutostart()
+	if err != nil {
+		t.Fatalf("InstallAutostart: %v", err)
+	}
+	if unitPath != wantPath {
+		t.Fatalf("install wrote %q, want XDG-resolved %q", unitPath, wantPath)
+	}
+	if _, statErr := os.Stat(unitPath); statErr != nil {
+		t.Fatalf("unit file missing after install: %v", statErr)
+	}
+
+	removedPath, err := UninstallAutostart()
+	if err != nil {
+		t.Fatalf("UninstallAutostart: %v", err)
+	}
+	if removedPath != wantPath {
+		t.Fatalf("uninstall targeted %q, want the same XDG-resolved %q install wrote", removedPath, wantPath)
+	}
+	if _, statErr := os.Stat(wantPath); !os.IsNotExist(statErr) {
+		t.Fatalf("unit file should be gone after uninstall; stat err = %v", statErr)
+	}
+	if !calledWith(*calls, "systemctl", "--user", "disable", "--now", autostartUnitName) {
+		t.Fatalf("uninstall did not disable the unit; calls = %v", *calls)
+	}
+}
+
+// TestUninstallAutostartNoUnitInstalledLinux: uninstall with nothing installed
+// is a silent no-op that runs no service-manager commands.
+func TestUninstallAutostartNoUnitInstalledLinux(t *testing.T) {
+	withAutostartTestEnv(t, "linux")
+	calls := stubAutostartUnitCommand(t, nil)
+
+	path, err := UninstallAutostart()
+	if err != nil {
+		t.Fatalf("UninstallAutostart: %v", err)
+	}
+	if path != "" {
+		t.Fatalf("removed path = %q, want empty for a no-op uninstall", path)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("no commands should run when no unit is installed, got %v", *calls)
+	}
+}
+
+// TestUninstallAutostartDarwin verifies the launchd uninstall resolves the
+// plist through the injected LaunchAgents resolver and unloads before removing.
+func TestUninstallAutostartDarwin(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	calls := stubAutostartUnitCommand(t, nil)
+	plistPath := filepath.Join(dir, autostartLaunchdLabel+".plist")
+	if err := os.WriteFile(plistPath, []byte("<plist/>\n"), 0644); err != nil {
+		t.Fatalf("seed plist: %v", err)
+	}
+
+	removedPath, err := UninstallAutostart()
+	if err != nil {
+		t.Fatalf("UninstallAutostart: %v", err)
+	}
+	if removedPath != plistPath {
+		t.Fatalf("removed path = %q, want %q", removedPath, plistPath)
+	}
+	if _, statErr := os.Stat(plistPath); !os.IsNotExist(statErr) {
+		t.Fatalf("plist should be gone after uninstall; stat err = %v", statErr)
+	}
+	if !calledWith(*calls, "launchctl", "unload", plistPath) {
+		t.Fatalf("uninstall did not unload the agent; calls = %v", *calls)
+	}
+}

@@ -25,7 +25,16 @@ var (
 	legacyUnitCommand     = runLegacyUnitCommand
 )
 
+// defaultSystemdUserDir resolves the directory the systemd user manager scans
+// for user units, matching systemd's own rule (#1091): $XDG_CONFIG_HOME/systemd/user
+// when XDG_CONFIG_HOME is set to an absolute path, else ~/.config/systemd/user.
+// systemd ignores a relative XDG_CONFIG_HOME (per the XDG base-dir spec), so a
+// relative value falls through to the home default; diverging here would make
+// af write units to a directory systemd never reads.
 func defaultSystemdUserDir() (string, error) {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) {
+		return filepath.Join(xdg, "systemd", "user"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err

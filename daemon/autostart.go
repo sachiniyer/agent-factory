@@ -322,44 +322,48 @@ func RestartAutostartUnit() error {
 // InstallAutostart. The daemon itself keeps running until it exits or is
 // stopped; it just no longer restarts at login. Returns the path of the
 // removed unit file, or "" if none was installed.
+//
+// The unit path comes from the same resolvers InstallAutostart uses, so both
+// always target the same real directory — with XDG_CONFIG_HOME set, systemd
+// units live under it, not under ~/.config (#1091).
 func UninstallAutostart() (string, error) {
-	switch runtime.GOOS {
+	switch autostartGOOS {
 	case "linux":
-		home, err := os.UserHomeDir()
+		dir, err := autostartSystemdUserDir()
 		if err != nil {
-			return "", fmt.Errorf("failed to get home directory: %w", err)
+			return "", fmt.Errorf("failed to resolve systemd user directory: %w", err)
 		}
-		unitPath := filepath.Join(home, ".config", "systemd", "user", autostartUnitName)
+		unitPath := filepath.Join(dir, autostartUnitName)
 		if _, err := os.Stat(unitPath); os.IsNotExist(err) {
 			return "", nil
 		}
-		if out, err := exec.Command("systemctl", "--user", "disable", "--now", autostartUnitName).CombinedOutput(); err != nil {
+		if out, err := autostartUnitCommand("systemctl", "--user", "disable", "--now", autostartUnitName); err != nil {
 			return "", fmt.Errorf("failed to disable daemon service: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
 		if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
 			return "", fmt.Errorf("failed to remove unit file: %w", err)
 		}
-		if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+		if out, err := autostartUnitCommand("systemctl", "--user", "daemon-reload"); err != nil {
 			return "", fmt.Errorf("failed to reload systemd user daemon: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
 		return unitPath, nil
 
 	case "darwin":
-		home, err := os.UserHomeDir()
+		dir, err := autostartLaunchAgentsDir()
 		if err != nil {
-			return "", fmt.Errorf("failed to get home directory: %w", err)
+			return "", fmt.Errorf("failed to resolve LaunchAgents directory: %w", err)
 		}
-		plistPath := filepath.Join(home, "Library", "LaunchAgents", autostartLaunchdLabel+".plist")
+		plistPath := filepath.Join(dir, autostartLaunchdLabel+".plist")
 		if _, err := os.Stat(plistPath); os.IsNotExist(err) {
 			return "", nil
 		}
-		_ = exec.Command("launchctl", "unload", plistPath).Run()
+		_, _ = autostartUnitCommand("launchctl", "unload", plistPath)
 		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
 			return "", fmt.Errorf("failed to remove plist file: %w", err)
 		}
 		return plistPath, nil
 
 	default:
-		return "", fmt.Errorf("daemon autostart is not supported on %s", runtime.GOOS)
+		return "", fmt.Errorf("daemon autostart is not supported on %s", autostartGOOS)
 	}
 }
