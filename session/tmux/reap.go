@@ -1,0 +1,112 @@
+package tmux
+
+import (
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/log"
+)
+
+// Process-tree reaping (#1104). `tmux kill-session` only SIGHUPs the pane's
+// foreground process group; anything that detached from it (a backgrounded
+// `yes`, an agent-spawned helper in its own process group) survives teardown
+// as an orphan and can burn a core forever — eight of those starved the tmux
+// server on the dev box. So every teardown path captures the pane's full
+// descendant tree BEFORE kill-session (afterwards orphans reparent to init
+// and the ancestry is unrecoverable) and, after a grace period for SIGHUP
+// handlers, SIGTERMs then SIGKILLs whatever is still alive.
+//
+// Safety properties:
+//   - Only processes captured from the session's own panes are ever
+//     signalled: a pane PID is trusted only if it is a live child of a tmux
+//     server, and the capture set is its ppid-descendants plus processes
+//     sharing its kernel session id (tmux makes each pane root a session
+//     leader, so SID membership proves pane ancestry even for processes
+//     already reparented to init).
+//   - Every signal re-verifies the (pid, starttime) identity via
+//     proctree.Signal, so a recycled PID is never signalled.
+//   - If kill-session fails and the tmux session survives, nothing is
+//     reaped — a live session's processes are not leaks.
+//
+// Best-effort by design: capture failures (no /proc, session already gone,
+// mock executors in tests) degrade to a no-op, and reap outcomes are logged,
+// never returned as errors.
+
+var (
+	// reapGraceWait is how long leaked processes get to exit on their own
+	// after kill-session (SIGHUP) before being SIGTERMed. Matches
+	// paneExitWait's reasoning: long enough for an agent to flush state,
+	// short enough to bound the sweep. var, not const, so tests can lower it.
+	reapGraceWait = 3 * time.Second
+	// reapTermWait is how long a SIGTERMed process gets before SIGKILL.
+	reapTermWait = 2 * time.Second
+)
+
+// SessionProcessTrees enumerates every live process belonging to the named
+// tmux session's panes: each pane root (verified to be a live child of a
+// tmux server), its ppid-descendants, and its kernel-session members. The
+// teardown paths call it BEFORE kill-session; `af doctor` uses it to map a
+// live session's legitimate processes. Returns nil on any failure — callers
+// treat it as strictly best-effort.
+func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.Process {
+	out, err := cmdExec.Output(exec.Command(
+		"tmux", "list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", "#{pane_pid}"))
+	if err != nil {
+		return nil
+	}
+	snap, err := proctree.Snapshot()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[int]bool)
+	var procs []proctree.Process
+	add := func(p proctree.Process) {
+		if !seen[p.PID] {
+			seen[p.PID] = true
+			procs = append(procs, p)
+		}
+	}
+	for _, field := range strings.Fields(string(out)) {
+		panePID, err := strconv.Atoi(field)
+		if err != nil || panePID <= 1 {
+			continue
+		}
+		root, ok := snap[panePID]
+		if !ok {
+			continue
+		}
+		// A real pane root is a direct child of a tmux server. Anything
+		// else (stale output, a mock executor's canned reply that happens
+		// to parse as a PID) is rejected so we can never sweep a tree that
+		// isn't ours.
+		parent, ok := snap[root.PPID]
+		if !ok || !strings.HasPrefix(parent.Comm, "tmux") {
+			continue
+		}
+		for _, p := range proctree.TreeOf(snap, panePID) {
+			add(p)
+		}
+		// tmux makes the pane root a session leader, so members of its
+		// kernel session are pane descendants even when their spawner
+		// already exited and they were reparented to init.
+		for _, p := range proctree.SessionMembers(snap, root.SID) {
+			add(p)
+		}
+	}
+	return procs
+}
+
+// reapLeakedProcesses waits for the captured processes to exit after
+// kill-session, then escalates SIGTERM → SIGKILL on survivors (identity
+// verified — see proctree.KillEscalating). Runs synchronously; teardown
+// paths that must stay snappy call it in a goroutine. Every signal is logged
+// per-process.
+func reapLeakedProcesses(sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) {
+	proctree.KillEscalating(procs, grace, termWait, func(format string, args ...any) {
+		log.WarningLog.Printf("tmux "+sanitizedName+": "+format, args...)
+	})
+}

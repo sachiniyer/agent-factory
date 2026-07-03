@@ -1,0 +1,379 @@
+package doctor
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/stretchr/testify/require"
+)
+
+// Every test here is hermetic by construction (#1104 hard rules): the AF
+// home is a temp dir (TestMain sandbox + per-test overrides), tmux runs on a
+// private server (testguard.IsolateTmux), the /proc snapshot handed to Run
+// is filtered to processes this test spawned, and every spawned process is
+// killed on cleanup. Nothing here can observe — let alone signal — the real
+// daemon, the real ~/.agent-factory, or the developer's tmux server.
+
+func TestMain(m *testing.M) {
+	verifyRealConfig := testguard.ConfigTripwire()
+	restoreHome := testguard.SandboxHome()
+	code := m.Run()
+	restoreHome()
+	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+// testOptions returns Options scoped entirely to this test: temp home, temp
+// scan root, fast kill windows, and a snapshot containing only pids.
+func testOptions(t *testing.T, fix bool, pids ...int) Options {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	return Options{
+		Fix:            fix,
+		ConfigDir:      home,
+		TempDir:        t.TempDir(),
+		Exec:           cmd.MakeExecutor(),
+		MinTempHomeAge: time.Hour,
+		killGrace:      100 * time.Millisecond,
+		killTermWait:   200 * time.Millisecond,
+		snapshot:       snapshotOf(t, pids...),
+	}
+}
+
+// snapshotOf builds a snapshot function restricted to the given pids (read
+// from the real /proc), so Run can never act outside the test's processes.
+func snapshotOf(t *testing.T, pids ...int) func() (map[int]proctree.Process, error) {
+	t.Helper()
+	return func() (map[int]proctree.Process, error) {
+		full, err := proctree.Snapshot()
+		if err != nil {
+			return nil, err
+		}
+		out := map[int]proctree.Process{}
+		for _, pid := range pids {
+			if p, ok := full[pid]; ok {
+				out[pid] = p
+			}
+		}
+		return out, nil
+	}
+}
+
+// spawnWithEnv starts a long-lived child owned by this test, with argv0 and
+// args controlling how its cmdline reads and env appended to the test's
+// environment. The child is a shell blocked on its `read` builtin against a
+// pipe this test holds open — a single process with NO descendants, so the
+// cleanup Kill can never orphan anything (a forked `sleep` here once leaked
+// the very orphans this suite hunts). Waits until the child's /proc environ
+// is readable (the fork→exec window would otherwise race the scan).
+func spawnWithEnv(t *testing.T, argv0 string, extraArgs []string, env map[string]string) proctree.Process {
+	t.Helper()
+	stdinR, stdinW, err := os.Pipe()
+	require.NoError(t, err)
+	args := append([]string{argv0, "-c", "read line"}, extraArgs...)
+	c := &exec.Cmd{Path: "/bin/sh", Args: args, Env: os.Environ(), Stdin: stdinR}
+	for k, v := range env {
+		c.Env = append(c.Env, k+"="+v)
+	}
+	require.NoError(t, c.Start())
+	_ = stdinR.Close() // child holds its own copy
+	t.Cleanup(func() {
+		_ = c.Process.Kill()
+		_ = stdinW.Close()
+		_, _ = c.Process.Wait()
+	})
+	// Reap promptly when a doctor --fix kills the child mid-test so the pid
+	// doesn't linger as a zombie in later snapshots (zombies still answer
+	// signal 0).
+	go func() { _, _ = c.Process.Wait() }()
+
+	require.Eventually(t, func() bool {
+		_, ok := proctree.EnvValue(c.Process.Pid, "PATH")
+		if len(env) > 0 {
+			for k := range env {
+				_, ok2 := proctree.EnvValue(c.Process.Pid, k)
+				return ok2
+			}
+		}
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "child environ never became readable")
+
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	p, ok := snap[c.Process.Pid]
+	require.True(t, ok, "spawned child %d missing from snapshot", c.Process.Pid)
+	require.Zero(t, len(proctree.TreeOf(snap, c.Process.Pid))-1,
+		"test child must have no descendants — cleanup would orphan them")
+	return p
+}
+
+func alive(p proctree.Process) bool { return proctree.AliveSame(p) }
+
+func findByCheck(r *Report, check string) []Finding {
+	var out []Finding
+	for _, f := range r.Findings {
+		if f.Check == check {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// TestOrphanedProcessDetectedAndFixed is the doctor half of the #1104
+// regression: a process whose AF_SESSION marker names a dead session is a
+// verified orphan — reported without --fix, killed with it.
+func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
+	testguard.IsolateTmux(t) // private server: the marked session is dead by construction
+
+	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
+		"AF_SESSION": "af_doctor-dead-session",
+		"AF_HOME":    "/tmp/some-old-home",
+	})
+
+	// Read-only pass: reported, not touched.
+	report, err := Run(testOptions(t, false, orphan.PID))
+	require.NoError(t, err)
+	findings := findByCheck(report, "orphaned-process")
+	require.Len(t, findings, 1)
+	require.Contains(t, findings[0].Detail, "af_doctor-dead-session")
+	require.NotEmpty(t, findings[0].FixAction)
+	require.False(t, findings[0].Fixed)
+	require.True(t, alive(orphan), "read-only doctor run must not signal anything")
+
+	// --fix pass: killed, with the outcome recorded.
+	report, err = Run(testOptions(t, true, orphan.PID))
+	require.NoError(t, err)
+	findings = findByCheck(report, "orphaned-process")
+	require.Len(t, findings, 1)
+	require.True(t, findings[0].Fixed, "fix outcome: %v", findings[0].FixErr)
+	require.Eventually(t, func() bool { return !alive(orphan) }, 5*time.Second, 25*time.Millisecond,
+		"verified orphan must be dead after --fix")
+	require.Zero(t, report.UnresolvedCount())
+}
+
+// TestMarkedProcessOfLiveSessionIsNeverKilled: a marker pointing at a LIVE
+// session means the process escaped its pane but the session still owns it —
+// report-only even under --fix.
+func TestMarkedProcessOfLiveSessionIsNeverKilled(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const name = "af_doctor-live-session"
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sleep 300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name+":").Run() })
+
+	escapee := spawnWithEnv(t, "sh", nil, map[string]string{"AF_SESSION": name})
+
+	report, err := Run(testOptions(t, true, escapee.PID))
+	require.NoError(t, err)
+	require.Empty(t, findByCheck(report, "orphaned-process"))
+	escaped := findByCheck(report, "escaped-process")
+	require.Len(t, escaped, 1)
+	require.Empty(t, escaped[0].FixAction, "escaped processes of live sessions are report-only")
+	require.True(t, alive(escapee), "process of a live session must never be killed")
+}
+
+// TestLeakedTmuxSessionReportedNotKilled: an af_ session with no backing
+// record is reported with a suggested command, and --fix must NOT kill it
+// (it may belong to another agent-factory home).
+func TestLeakedTmuxSessionReportedNotKilled(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const name = "af_doctor-leaked"
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sleep 300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name+":").Run() })
+
+	report, err := Run(testOptions(t, true))
+	require.NoError(t, err)
+	leaked := findByCheck(report, "leaked-tmux-session")
+	require.Len(t, leaked, 1)
+	require.Contains(t, leaked[0].Detail, name)
+	require.Empty(t, leaked[0].FixAction)
+	require.NoError(t, exec.Command("tmux", "has-session", "-t", "="+name+":").Run(),
+		"leaked session must survive --fix")
+}
+
+// TestStaleTempHomeRemovedWithFix: an abandoned AF home under the temp root
+// is detected by its structural markers and removed by --fix; a fresh or
+// referenced home is spared.
+func TestStaleTempHomeRemovedWithFix(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, true)
+
+	old := time.Now().Add(-48 * time.Hour)
+	makeHome := func(name string) string {
+		dir := filepath.Join(opts.TempDir, name)
+		require.NoError(t, os.MkdirAll(dir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte("{}"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "state.json"), []byte("{}"), 0644))
+		for _, p := range []string{filepath.Join(dir, "config.json"), filepath.Join(dir, "state.json"), dir} {
+			require.NoError(t, os.Chtimes(p, old, old))
+		}
+		return dir
+	}
+	stale := makeHome("tmp.stale-home")
+	fresh := filepath.Join(opts.TempDir, "tmp.fresh-home")
+	require.NoError(t, os.MkdirAll(fresh, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(fresh, "config.json"), []byte("{}"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(fresh, "state.json"), []byte("{}"), 0644))
+	notAHome := filepath.Join(opts.TempDir, "random-dir")
+	require.NoError(t, os.MkdirAll(notAHome, 0755))
+	require.NoError(t, os.Chtimes(notAHome, old, old))
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	findings := findByCheck(report, "stale-temp-home")
+	require.Len(t, findings, 1)
+	require.Contains(t, findings[0].Detail, stale)
+	require.True(t, findings[0].Fixed, "fix outcome: %v", findings[0].FixErr)
+
+	require.NoDirExists(t, stale, "stale home must be removed by --fix")
+	require.DirExists(t, fresh, "recently-touched home must be spared")
+	require.DirExists(t, notAHome, "a plain directory without AF markers must never be touched")
+}
+
+// TestInUseTempHomeSpared: a temp home referenced by a live process's
+// AGENT_FACTORY_HOME is in use, no matter how old it is.
+func TestInUseTempHomeSpared(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	// Spawn first so the home exists before the options' TempDir scan.
+	tempRoot := t.TempDir()
+	dir := filepath.Join(tempRoot, "tmp.in-use-home")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte("{}"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "state.json"), []byte("{}"), 0644))
+	old := time.Now().Add(-48 * time.Hour)
+	for _, p := range []string{filepath.Join(dir, "config.json"), filepath.Join(dir, "state.json"), dir} {
+		require.NoError(t, os.Chtimes(p, old, old))
+	}
+	user := spawnWithEnv(t, "sh", nil, map[string]string{"AGENT_FACTORY_HOME": dir})
+
+	opts := testOptions(t, true, user.PID)
+	opts.TempDir = tempRoot
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Empty(t, findByCheck(report, "stale-temp-home"))
+	require.DirExists(t, dir, "an in-use home must never be removed")
+}
+
+// TestForeignDaemonHandling: a daemon serving a deleted home is killable
+// with --fix; one serving an existing (but different) home is report-only.
+func TestForeignDaemonHandling(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	// argv0 "af" + a --daemon token makes the cmdline match the daemon
+	// shape while really just being our own sleeping shell.
+	deadHome := filepath.Join(t.TempDir(), "gone")
+	broken := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": deadHome})
+
+	liveHome := t.TempDir()
+	intentional := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": liveHome})
+
+	report, err := Run(testOptions(t, true, broken.PID, intentional.PID))
+	require.NoError(t, err)
+	findings := findByCheck(report, "foreign-daemon")
+	require.Len(t, findings, 2)
+
+	var fixed, reported int
+	for _, f := range findings {
+		if f.Fixed {
+			fixed++
+			require.Contains(t, f.Detail, deadHome)
+		} else {
+			reported++
+			require.Empty(t, f.FixAction)
+			require.Contains(t, f.Detail, liveHome)
+		}
+	}
+	require.Equal(t, 1, fixed, "the daemon with a deleted home must be killed")
+	require.Equal(t, 1, reported, "the daemon with an existing home must be left alone")
+	require.Eventually(t, func() bool { return !alive(broken) }, 5*time.Second, 25*time.Millisecond)
+	require.True(t, alive(intentional))
+}
+
+// TestCleanRunHasNoFindings: an empty environment yields a clean bill of
+// health and exit-0 semantics.
+func TestCleanRunHasNoFindings(t *testing.T) {
+	testguard.IsolateTmux(t)
+	report, err := Run(testOptions(t, false))
+	require.NoError(t, err)
+	require.Empty(t, report.Findings)
+	require.Zero(t, report.UnresolvedCount())
+
+	var buf bytes.Buffer
+	Render(&buf, report, false)
+	require.Contains(t, buf.String(), "No problems found")
+}
+
+// TestRenderShapes covers the three finding render states.
+func TestRenderShapes(t *testing.T) {
+	r := &Report{
+		OK: []string{"daemon: not running (starts on demand)"},
+		Findings: []Finding{
+			{Check: "orphaned-process", Detail: "pid 1234 (yes)", FixAction: "kill pid 1234"},
+			{Check: "leaked-tmux-session", Detail: "tmux session af_x has no backing record"},
+			{Check: "stale-temp-home", Detail: "abandoned home /tmp/x", FixAction: "remove /tmp/x", Fixed: true},
+		},
+	}
+	var buf bytes.Buffer
+	Render(&buf, r, false)
+	out := buf.String()
+	require.Contains(t, out, "ok: daemon: not running")
+	require.Contains(t, out, "--fix will kill pid 1234")
+	require.Contains(t, out, "issue: [leaked-tmux-session]")
+	require.Contains(t, out, "fixed: [stale-temp-home]")
+	require.Contains(t, out, "Re-run with --fix")
+}
+
+// TestTmuxServerDeadParsing pins the conservative TMUX-env heuristics.
+func TestTmuxServerDeadParsing(t *testing.T) {
+	self, err := proctree.Snapshot()
+	require.NoError(t, err)
+	ctx := &scanContext{snap: self}
+
+	require.False(t, tmuxServerDead(ctx, "garbage"), "unparseable TMUX values are never accused")
+	require.False(t, tmuxServerDead(ctx, "/tmp/sock,notanumber,0"))
+	// A PID that certainly exists but is not tmux, with no socket on disk.
+	require.True(t, tmuxServerDead(ctx, fmt.Sprintf("/nonexistent-sock-%d,%d,0", os.Getpid(), os.Getpid())))
+	// A dead PID.
+	c := exec.Command("true")
+	require.NoError(t, c.Run())
+	require.True(t, tmuxServerDead(ctx, fmt.Sprintf("/nonexistent-sock,%d,0", c.Process.Pid)))
+}
+
+// TestOrphanSignalIdentityGuard: even a fixable finding must refuse to fire
+// when the pid has been recycled (the fix closure re-verifies identity).
+func TestOrphanSignalIdentityGuard(t *testing.T) {
+	testguard.IsolateTmux(t)
+	orphan := spawnWithEnv(t, "sh", nil, map[string]string{"AF_SESSION": "af_doctor-recycle"})
+
+	opts := testOptions(t, false, orphan.PID)
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Len(t, findByCheck(report, "orphaned-process"), 1)
+
+	// Kill the orphan out from under doctor, then apply the recorded fix:
+	// the identity check must turn it into a no-op rather than a signal to
+	// whoever owns the pid next.
+	require.NoError(t, proctree.Signal(orphan, syscall.SIGKILL))
+	require.Eventually(t, func() bool { return !alive(orphan) }, 5*time.Second, 10*time.Millisecond)
+
+	f := findByCheck(report, "orphaned-process")[0]
+	require.NotNil(t, f.fix)
+	require.NoError(t, f.fix(), "a vanished process is a successfully-reaped process")
+}

@@ -166,6 +166,9 @@ func TestRestoreAttachesWhenSessionExists(t *testing.T) {
 // the worktree on disk is fine. Restore must transparently re-spawn the
 // session in workDir using the same program.
 func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
+	// Pin the exact new-session argv regardless of the box's tmux version;
+	// marker injection is covered by TestStartInjectsEnvMarkers.
+	forceNewSessionEnvMarkers(t, false)
 	ptyFactory := NewMockPtyFactory(t)
 
 	// First two has-session calls report missing (the outer Restore check, then
@@ -248,6 +251,9 @@ func TestRestoreReturnsErrorWhenSessionMissingAndNoWorkDir(t *testing.T) {
 }
 
 func TestStartTmuxSession(t *testing.T) {
+	// Pin the exact new-session argv regardless of the box's tmux version;
+	// marker injection is covered by TestStartInjectsEnvMarkers.
+	forceNewSessionEnvMarkers(t, false)
 	ptyFactory := NewMockPtyFactory(t)
 
 	created := false

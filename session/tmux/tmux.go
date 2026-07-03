@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"io"
 	"os"
@@ -229,16 +230,24 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("tmux session already exists: %s", t.sanitizedName)
 	}
 
-	// Create a new detached tmux session and start claude in it
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", t.sanitizedName, "-c", workDir, t.program)
+	// Create a new detached tmux session and start claude in it. The -e
+	// markers (when supported) let `af doctor` trace any process the pane
+	// spawns back to this session even after it is orphaned (#1104).
+	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
+	args = append(args, sessionEnvFlags(t.sanitizedName)...)
+	args = append(args, t.program)
+	cmd := exec.Command("tmux", args...)
 
 	ptmx, err := t.ptyFactory.Start(cmd)
 	if err != nil {
 		// Cleanup any partially created session if any exists.
 		if t.DoesSessionExist() {
+			leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
 			cleanupCmd := exec.Command("tmux", "kill-session", "-t", exactTarget(t.sanitizedName))
 			if cleanupErr := t.cmdExec.Run(cleanupCmd); cleanupErr != nil {
 				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+			} else if len(leaked) > 0 {
+				go reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 			}
 		}
 		return fmt.Errorf("error starting tmux session: %w", err)
@@ -908,6 +917,11 @@ func (t *TmuxSession) Close() error {
 		t.attachCh = nil
 	}
 
+	// Capture the panes' process trees before kill-session — afterwards any
+	// survivor is reparented to init and its ancestry is unrecoverable
+	// (#1104).
+	leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
+
 	cmd := exec.Command("tmux", "kill-session", "-t", exactTarget(t.sanitizedName))
 	if err := t.cmdExec.Run(cmd); err != nil {
 		// Idempotent teardown (#967): a kill-session that fails because the
@@ -918,7 +932,16 @@ func (t *TmuxSession) Close() error {
 		// `_`-ignored cleanup kill in Start (above).
 		if t.DoesSessionExist() {
 			errs = append(errs, fmt.Errorf("error killing tmux session: %w", err))
+			// The session survived — its processes are not leaks. Do not reap.
+			leaked = nil
 		}
+	}
+
+	// Async so the SIGHUP grace period never adds latency to user-driven
+	// teardown; the daemon and TUI processes are long-lived, so the sweep
+	// always gets to finish. CLI kills run daemon-side (KillSession RPC).
+	if len(leaked) > 0 {
+		go reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 	}
 
 	if len(errs) == 0 {
@@ -1188,6 +1211,18 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		matches[i] = match[:strings.Index(match, ":")]
 	}
 
+	// Capture every session's pane process trees before any kill (#1104);
+	// reap synchronously at the end because `af reset` is a short-lived CLI
+	// process — a goroutine would die with it before the sweep ran.
+	leakedBySession := make(map[string][]proctree.Process, len(matches))
+	for _, match := range matches {
+		leakedBySession[match] = SessionProcessTrees(cmdExec, match)
+	}
+
+	// Only sessions that are actually gone get their captured trees reaped —
+	// a session that survives its kill still owns its processes.
+	killed := make([]string, 0, len(matches))
+	var killErr error
 	for _, match := range matches {
 		log.InfoLog.Printf("cleaning up session: %s", match)
 		// `=` forces an exact session match so a name extracted from `tmux ls`
@@ -1197,9 +1232,27 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// `tmux ls` above and this kill (TOCTOU). A gone session is the
 			// goal of cleanup, so only a survivor is a real failure.
 			if sessionExists(cmdExec, match) {
-				return fmt.Errorf("failed to kill tmux session %s: %v", match, err)
+				killErr = fmt.Errorf("failed to kill tmux session %s: %v", match, err)
+				break
 			}
 		}
+		killed = append(killed, match)
 	}
-	return nil
+
+	// Sweep concurrently: the grace waits overlap instead of serializing,
+	// and the whole reset still blocks until every sweep finishes.
+	var wg sync.WaitGroup
+	for _, match := range killed {
+		leaked := leakedBySession[match]
+		if len(leaked) == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func(match string, leaked []proctree.Process) {
+			defer wg.Done()
+			reapLeakedProcesses(match, leaked, reapGraceWait, reapTermWait)
+		}(match, leaked)
+	}
+	wg.Wait()
+	return killErr
 }
