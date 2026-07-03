@@ -303,7 +303,7 @@ func TestValidateTitleAvailableLockedRejectsWhitespace(t *testing.T) {
 
 	for _, title := range []string{"", " ", "   ", "\t", "\n  \t"} {
 		manager.mu.Lock()
-		err := manager.validateTitleAvailableLocked("repo-id", "/tmp/repo", title, "claude", false, nil)
+		err := manager.validateTitleAvailableLocked("repo-id", "/tmp/repo", title, "claude", false, false, nil)
 		manager.mu.Unlock()
 		if err == nil {
 			t.Fatalf("expected whitespace-only title %q to be rejected", title)

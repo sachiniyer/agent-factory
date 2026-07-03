@@ -164,9 +164,19 @@ func RunDaemon(cfg *config.Config) error {
 
 			// Compute and persist each session's status (Ready/Dead/Running) and
 			// run the AutoYes prompt-tap in the same pass. The daemon is the sole
-			// owner of status now (#960 PR 5): it computes the #935 liveness here
+			// owner of status now (#935/#960 PR 5): it computes the liveness here
 			// and the TUI renders it from Snapshot instead of computing its own.
 			manager.RefreshStatuses()
+
+			// Always-ensure the root agent for repos opted in via root_agents
+			// (#1106). Runs after RefreshStatuses so a root whose tmux died is
+			// marked Dead and healed in the same tick; the loop body runs once
+			// before the first ticker wait, so the first ensure happens right
+			// after the restore. A (re-)create blocks this poll briefly while
+			// the session starts — acceptable for a rare, backoff-throttled
+			// event. root_agents is read from the daemon's startup config;
+			// changing it takes effect on the next daemon restart.
+			manager.EnsureRootAgents()
 
 			// Handle stop before ticker.
 			select {

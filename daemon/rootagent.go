@@ -1,0 +1,223 @@
+package daemon
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+// Root-agent always-ensure (#1106): for every repo opted in via the
+// root_agents config key, the daemon guarantees a reserved session titled
+// "root" attached in-place at the repo root (the `af sessions create --here`
+// shape from #1107 — worktree_path == repo_path, current branch, cleanup
+// never touches the user's tree). The poll loop calls EnsureRootAgents right
+// after RefreshStatuses, so a root whose tmux died is marked Dead and healed
+// in the same tick.
+//
+// The loop is adopt-first: an existing root instance in any state other than
+// Dead — whatever program it runs and however it was created — is left
+// completely alone. Only a Dead root (tmux vanished) or a missing one
+// triggers a (re-)create, and an explicit KillSession of the root suppresses
+// re-creation until the daemon restarts (see Manager.KillSession).
+
+// rootDangerouslySkipPermissionsFlag is ensured on the default root-agent
+// program: the root agent exists to act autonomously (issue #1106's
+// root-agent profile).
+const rootDangerouslySkipPermissionsFlag = "--dangerously-skip-permissions"
+
+// rootEnsureMaxConsecutiveFailures caps how many consecutive failed ensure
+// attempts a configured repo gets before the loop gives up on it until the
+// daemon restarts. Failures back off exponentially in between, so the cap is
+// a backstop against permanently broken configs (a deleted repo path, an
+// unparseable persisted root record), not a race against transient errors.
+const rootEnsureMaxConsecutiveFailures = 6
+
+// Backoff between failed ensure attempts for one repo: base doubles per
+// consecutive failure, capped at max. Package vars so tests can shorten them.
+var (
+	rootEnsureBackoffBase = 10 * time.Second
+	rootEnsureBackoffMax  = 5 * time.Minute
+)
+
+// rootEnsureState is the per-configured-repo retry state for the ensure
+// loop. Guarded by Manager.mu (the loop runs on the daemon poll goroutine,
+// but tests drive EnsureRootAgents directly).
+type rootEnsureState struct {
+	consecutiveFailures int
+	nextAttempt         time.Time
+	gaveUp              bool
+	// suppressLogged dedupes the "not re-creating a user-killed root" log
+	// line to once per suppression.
+	suppressLogged bool
+}
+
+// EnsureRootAgents runs one ensure pass over every repo configured in
+// root_agents. Called from the daemon poll loop after RefreshStatuses; a
+// no-op when nothing is configured or the initial restore has not finished.
+func (m *Manager) EnsureRootAgents() {
+	if len(m.cfg.RootAgents) == 0 || !m.Ready() {
+		return
+	}
+	paths := make([]string, 0, len(m.cfg.RootAgents))
+	for path := range m.cfg.RootAgents {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		m.ensureRootAgent(path, m.cfg.RootAgents[path])
+	}
+}
+
+// ensureRootAgent guarantees the root agent for one configured repo path:
+// adopt a live root untouched, heal a Dead one in place, create a missing
+// one, and respect an explicit user kill. All outcomes are logged; failures
+// back off and eventually give up (rootEnsureMaxConsecutiveFailures).
+func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
+	m.mu.Lock()
+	st := m.rootEnsureStates[path]
+	if st == nil {
+		st = &rootEnsureState{}
+		m.rootEnsureStates[path] = st
+	}
+	skip := st.gaveUp || time.Now().Before(st.nextAttempt)
+	m.mu.Unlock()
+	if skip {
+		return
+	}
+
+	repo, err := config.RepoFromPath(config.ExpandTilde(path))
+	if err != nil {
+		m.rootEnsureFailed(path, st, fmt.Errorf("root_agents entry %q does not resolve to a git repository: %w", path, err))
+		return
+	}
+
+	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
+	m.mu.Lock()
+	_, killed := m.rootKilledByUser[repo.ID]
+	inst := m.instances[key]
+	m.mu.Unlock()
+
+	if killed {
+		m.mu.Lock()
+		logSuppression := !st.suppressLogged
+		st.suppressLogged = true
+		m.mu.Unlock()
+		if logSuppression {
+			log.InfoLog.Printf("root agent for %s was explicitly killed; not re-creating until the daemon restarts", repo.Root)
+		}
+		return
+	}
+
+	if inst != nil {
+		if inst.GetStatus() != session.Dead {
+			// Adopt, never clobber: a live root — whatever program it runs
+			// and whoever created it — is the root agent. Nothing to do.
+			m.rootEnsureSucceeded(st)
+			return
+		}
+		// The root's tmux vanished (crash, tmux server death — the #1104
+		// outage class). Reap the dead record and fall through to re-create
+		// in place. Kill is best-effort teardown of already-dead tmux, and
+		// an in-place worktree's Cleanup never touches the user's tree
+		// (#1107), so this can only remove daemon-owned state.
+		log.WarningLog.Printf("root agent for %s is Dead (tmux gone); re-creating it in place", repo.Root)
+		if err := m.reapDeadRoot(repo.ID, inst); err != nil {
+			m.rootEnsureFailed(path, st, fmt.Errorf("failed to remove dead root record: %w", err))
+			return
+		}
+	}
+
+	program := rootAgentProgram(repo.Root, rc)
+	if _, err := m.CreateSession(CreateSessionRequest{
+		Title:         session.RootSessionTitle,
+		RepoPath:      repo.Root,
+		Program:       program,
+		AutoYes:       rc.AutoYesEnabled(),
+		InPlace:       true,
+		allowReserved: true,
+	}); err != nil {
+		m.rootEnsureFailed(path, st, fmt.Errorf("failed to create root session: %w", err))
+		return
+	}
+	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q, auto_yes %t)", repo.Root, program, rc.AutoYesEnabled())
+	m.rootEnsureSucceeded(st)
+}
+
+// reapDeadRoot removes a Dead root instance so ensureRootAgent can re-create
+// the title. Mirrors KillSession's teardown but deliberately does NOT mark
+// rootKilledByUser: this is the daemon healing itself, not a user decision.
+func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) error {
+	// Best-effort by design (#478): tmux is already gone and an in-place
+	// worktree's Cleanup is a no-op, so failures here only log inside Kill.
+	if err := inst.Kill(); err != nil {
+		log.WarningLog.Printf("reaping dead root for repo %s: kill reported: %v", repoID, err)
+	}
+	storage, err := session.NewStorage(config.LoadState(), repoID)
+	if err != nil {
+		return err
+	}
+	if err := storage.DeleteInstance(session.RootSessionTitle); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.instances, daemonInstanceKey(repoID, session.RootSessionTitle))
+	m.mu.Unlock()
+	return nil
+}
+
+// rootEnsureSucceeded resets a repo's retry state after a pass that left a
+// healthy root in place (freshly created or adopted).
+func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
+	m.mu.Lock()
+	st.consecutiveFailures = 0
+	st.nextAttempt = time.Time{}
+	st.suppressLogged = false
+	m.mu.Unlock()
+}
+
+// rootEnsureFailed records a failed ensure attempt: exponential backoff up to
+// rootEnsureBackoffMax, and after rootEnsureMaxConsecutiveFailures in a row
+// the repo is dropped until the daemon restarts. Every outcome is logged.
+func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st.consecutiveFailures++
+	if st.consecutiveFailures >= rootEnsureMaxConsecutiveFailures {
+		st.gaveUp = true
+		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; giving up until the daemon restarts: %v", path, st.consecutiveFailures, err)
+		return
+	}
+	backoff := rootEnsureBackoffBase << (st.consecutiveFailures - 1)
+	if backoff > rootEnsureBackoffMax {
+		backoff = rootEnsureBackoffMax
+	}
+	st.nextAttempt = time.Now().Add(backoff)
+	log.WarningLog.Printf("root agent ensure for %q failed (attempt %d/%d), retrying in %s: %v", path, st.consecutiveFailures, rootEnsureMaxConsecutiveFailures, backoff, err)
+}
+
+// rootAgentProgram resolves the command the root agent runs. An explicit
+// per-repo program wins verbatim (an agent enum name still resolves through
+// program_overrides downstream, exactly like any session program). The
+// default profile is the repo's resolved claude command with
+// --dangerously-skip-permissions ensured — the root agent's whole purpose is
+// autonomous operation (#1106).
+func rootAgentProgram(repoRoot string, rc config.RootAgentConfig) string {
+	if strings.TrimSpace(rc.Program) != "" {
+		return rc.Program
+	}
+	program := "claude"
+	if resolved, err := config.ResolveConfig(repoRoot); err == nil {
+		program = config.ResolveProgram(&resolved.Config, "claude")
+	} else {
+		log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
+	}
+	if !strings.Contains(program, rootDangerouslySkipPermissionsFlag) {
+		program += " " + rootDangerouslySkipPermissionsFlag
+	}
+	return program
+}

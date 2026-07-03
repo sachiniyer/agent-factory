@@ -38,6 +38,38 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
 | `log_max_size_mb` | Size cap in MB for `agent-factory.log` and the per-task watch-script logs before they are rotated (defaults to 50). Must be positive. |
 | `log_max_backups` | How many rotated logs (`agent-factory.log.1`, `.2`, ...) to keep per log file; older ones are deleted (defaults to 2). `0` keeps none. |
 | `update_channel` | Release channel that auto-update and `af upgrade` follow: `stable` (default) tracks manual `1.x.y` releases only; `preview` opts into the automatic `1.x.y-preview-z` prereleases cut every 3 hours. Any other value falls back to `stable` with a warning. See [release-process.md](release-process.md). |
+| `root_agents` | Opt-in map of repositories that get an always-ensured `root` agent (default: none). See [Root agents](#root-agents-always-ensured). |
+
+### Root agents (always-ensured)
+
+`root_agents` opts a repository into a **root agent**: a reserved session titled `root` that the daemon guarantees is always running. It is created **in-place** at the repo root (the `af sessions create --here` shape — no worktree or branch is created; killing it never touches your working tree or branch), and if its tmux session dies or vanishes, the daemon re-creates it automatically.
+
+```json
+{
+  "root_agents": {
+    "/home/me/myrepo": {},
+    "~/work/other": { "program": "claude --model opus", "auto_yes": false }
+  }
+}
+```
+
+Keys are repository paths (a leading `~` expands to your home directory). Per-repo profile fields:
+
+| Field | Description |
+|-------|-------------|
+| `program` | Command the root session runs. Unlike `default_program` this may be a full command string; a bare agent enum name (e.g. `claude`) still resolves through `program_overrides`. Default: the repo's resolved `claude` command with `--dangerously-skip-permissions` ensured — the root agent is meant to operate autonomously. |
+| `auto_yes` | Auto-accept the agent's prompts. Defaults to **true** for root agents (unlike the global `auto_yes`). |
+
+Behavior and guarantees:
+
+- **Strictly opt-in and global-only.** Nothing gets a root agent unless you add it here, in *your* `~/.agent-factory/config.json`. The key is rejected in in-repo configs, so cloning a repository can never opt your machine into an always-on agent.
+- **Adopt, never clobber.** If a session titled `root` already exists and is alive — however it was created — the daemon leaves it completely alone. Only a `root` whose tmux has died (status `Dead`) or that is missing entirely is (re-)created.
+- **The name `root` is reserved.** Normal session creation (TUI, `af sessions create`, the API, task spawns) rejects the title `root` (case-insensitively); auto-derived titles skip it.
+- **An explicit kill is respected.** If you kill the `root` session (TUI `D`, `af sessions kill root`), the daemon does not resurrect it until the next daemon restart, at which point the configured state is re-asserted.
+- **Failures back off and cap.** If ensuring a root repeatedly fails (e.g. the configured path is not a git repository), the daemon retries with exponential backoff and gives up for that repo after 6 consecutive failures until it restarts, logging each outcome to the application log.
+- Changes to `root_agents` are picked up on the next **daemon restart**.
+
+Because the default profile skips permission prompts and auto-accepts, only opt in repositories where you are comfortable with a fully autonomous agent running at the repo root.
 
 ### Choosing the agent
 

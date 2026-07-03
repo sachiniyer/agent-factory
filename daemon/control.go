@@ -51,6 +51,13 @@ type CreateSessionRequest struct {
 	// intact. Incompatible with ForceRemote.
 	InPlace     bool
 	ForceRemote bool
+
+	// allowReserved lets the daemon's own root-agent ensure loop (#1106)
+	// create the reserved "root" title that reserveCreate rejects for
+	// everyone else. Deliberately unexported: net/rpc's gob encoding skips
+	// unexported fields, so no RPC client (TUI, CLI, API) can ever set it —
+	// only in-process daemon code can.
+	allowReserved bool
 }
 
 type CreateSessionResponse struct {
@@ -917,6 +924,15 @@ type Manager struct {
 	// the rest in arrival order instead of racing creation and dropping the
 	// losers' prompts (#865). Lazily populated like repoStartLocks.
 	targetLocks map[string]*sync.Mutex
+	// rootEnsureStates tracks per-configured-repo retry state for the
+	// root-agent ensure loop (#1106), keyed by the root_agents config key
+	// (the repo path as written in config.json).
+	rootEnsureStates map[string]*rootEnsureState
+	// rootKilledByUser records repos (by repo ID) whose root agent was
+	// removed through an explicit KillSession. The ensure loop respects the
+	// kill and stops re-creating that root until the daemon restarts —
+	// in-memory on purpose, so a restart re-asserts the configured state.
+	rootKilledByUser map[string]struct{}
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -952,6 +968,8 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		reservedRemoteNames: make(map[string]struct{}),
 		repoStartLocks:      make(map[string]*sync.Mutex),
 		targetLocks:         make(map[string]*sync.Mutex),
+		rootEnsureStates:    make(map[string]*rootEnsureState),
+		rootKilledByUser:    make(map[string]struct{}),
 	}, nil
 }
 
@@ -1270,7 +1288,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		if err != nil {
 			return nil, "", nil, err
 		}
-	} else if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, req.ForceRemote, diskData); err != nil {
+	} else if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, req.ForceRemote, req.allowReserved, diskData); err != nil {
 		return nil, "", nil, err
 	}
 
@@ -1305,19 +1323,28 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 		if i > 1 {
 			candidate = fmt.Sprintf("%s-%d", baseTitle, i)
 		}
-		if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, diskData); err == nil {
+		if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData); err == nil {
 			return candidate, nil
 		}
 	}
 	return "", fmt.Errorf("could not find an available title for %q", baseTitle)
 }
 
-func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, remote bool, diskData []session.InstanceData) error {
+func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, remote, allowReserved bool, diskData []session.InstanceData) error {
 	// Whitespace-only titles (e.g. "   ") are non-empty and so slip past a bare
 	// == "" check, creating sessions with effectively blank names (#973). Trim
 	// before the emptiness gate; the TUI naming flow applies the same check.
 	if strings.TrimSpace(title) == "" {
 		return fmt.Errorf("session title is required")
+	}
+	// The "root" title belongs to the daemon-managed root agent (#1106).
+	// Every creation path lands here — TUI, `af sessions create`, task
+	// spawns, DeliverPrompt auto-creates — so this single gate reserves the
+	// name everywhere. Only the daemon's own ensure loop passes
+	// allowReserved; title-base derivation (nextAvailableTitleLocked) never
+	// does, so a base of "root" skips to "root-2" instead of erroring.
+	if !allowReserved && session.IsReservedTitle(title) {
+		return fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", title)
 	}
 	// Titles are sanitized into git branch names (git.SanitizeBranchName
 	// lowercases, turns spaces into dashes, strips unsafe chars, and collapses
@@ -1452,6 +1479,16 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 
 	m.mu.Lock()
 	delete(m.instances, daemonInstanceKey(repoID, req.Title))
+	if session.IsReservedTitle(req.Title) {
+		// An explicit kill of the root agent is a user decision the ensure
+		// loop must respect (#1106): suppress re-creation for this repo until
+		// the daemon restarts, rather than fighting the user by resurrecting
+		// a session they just tore down. Recorded even for repos not (or no
+		// longer) in root_agents — harmless there, and it keeps the ordering
+		// between a kill and a concurrent config change race-free.
+		m.rootKilledByUser[repoID] = struct{}{}
+		log.InfoLog.Printf("root agent for repo %s killed by user; the ensure loop will not re-create it until the daemon restarts", repoID)
+	}
 	m.mu.Unlock()
 	return nil
 }

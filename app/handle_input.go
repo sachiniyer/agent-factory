@@ -46,6 +46,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(instance.Title) == "" {
 			return m, m.handleError(fmt.Errorf("title cannot be empty"))
 		}
+		// "root" is reserved for the daemon-managed root agent (#1106). The
+		// daemon's reserveCreate is the authoritative gate; rejecting here
+		// keeps the user in the naming overlay instead of surfacing the
+		// error after submit, mirroring the #936 collision pre-check below.
+		if session.IsReservedTitle(instance.Title) {
+			return m, m.handleError(fmt.Errorf("title %q is reserved for the daemon-managed root agent; pick another name", instance.Title))
+		}
 		for _, other := range m.store.GetInstances() {
 			if other == instance {
 				continue
