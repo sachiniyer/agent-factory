@@ -55,6 +55,12 @@ const (
 	KeySplit      // Split: open the tree selection in pane B / swap panes.
 	KeySwapPanes  // SwapPanes is the pane-focused display alias of KeySplit; menu/help only.
 	KeyCloseSplit // CloseSplit closes the split (pane B focused).
+
+	// KeyManageAutomations is the automations-section display alias of Enter
+	// (menu/help only): with the in-rail section focused, Enter opens the task
+	// manager overlay. Dispatch is root-routed (handleAutomationsFocus), so
+	// this name never appears in GlobalKeyStringsMap.
+	KeyManageAutomations
 )
 
 // GlobalKeyStringsMap is a global, immutable map string to keybinding.
@@ -159,6 +165,10 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	KeyTaskList: key.NewBinding(
 		key.WithKeys("S"),
 		key.WithHelp("S", "tasks"),
+	),
+	KeyManageAutomations: key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("↵", "manage"),
 	),
 	KeySplit: key.NewBinding(
 		key.WithKeys("s"),

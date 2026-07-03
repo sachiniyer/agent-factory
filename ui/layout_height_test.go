@@ -210,12 +210,13 @@ func TestWorkspacePanesRenderExactlyTheirRects(t *testing.T) {
 	}
 }
 
-// TestWorkspaceExpandedAutomationsTilesExactly covers the focused automations
-// section: the expanded (full task manager) allocation must still tile the
-// window exactly with the section stacked inside the left rail (#1087).
-func TestWorkspaceExpandedAutomationsTilesExactly(t *testing.T) {
-	lay := layout.Grid{AutomationsExpanded: true}.Solve(100, 30)
-	require.True(t, lay.AutomationsExpanded)
+// TestWorkspaceFocusedAutomationsTilesExactly covers the focused automations
+// section: focus adds a cursor to the compact rows — the manager itself is a
+// modal overlay, never an in-rail expansion — and the composed workspace must
+// still tile the window exactly (#1087).
+func TestWorkspaceFocusedAutomationsTilesExactly(t *testing.T) {
+	lay := layout.Grid{}.Solve(100, 30)
+	require.True(t, lay.AutomationsVisible)
 	require.False(t, lay.AutomationsCompact)
 
 	sidebar, paneA, automations, statusBar := newTestWorkspace()
@@ -228,8 +229,10 @@ func TestWorkspaceExpandedAutomationsTilesExactly(t *testing.T) {
 	automations.SetCompact(lay.AutomationsCompact)
 	statusBar.SetRect(lay.StatusBar)
 
-	requireExactRect(t, automations.View(), lay.Automations, "expanded automations")
-	require.Contains(t, automations.View(), "Tasks", "focused section hosts the task manager")
+	requireExactRect(t, automations.View(), lay.Automations, "focused automations")
+	require.Contains(t, automations.View(), "▸", "the focused section carries a cursor")
+	require.NotContains(t, automations.View(), "Tasks",
+		"the manager must NOT render in-rail — it lives in the tasks overlay")
 
 	rule := strings.Repeat("─", lay.RailRule.W)
 	rail := lipgloss.JoinVertical(lipgloss.Left, sidebar.View(), rule, automations.View())

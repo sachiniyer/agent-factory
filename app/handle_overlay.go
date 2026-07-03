@@ -80,35 +80,65 @@ func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleAutomationsFocus routes key events to the focused automations strip's
-// task manager and processes its pending actions. Not-consumed keys —
-// Tab/Shift-Tab outside the edit form (focus ring) and q/ctrl+c (quit) —
-// deliberately fall through to the caller.
+// handleAutomationsFocus routes key events for the focused IN-RAIL automations
+// section — which is only the compact summary since the #1096 play-test; the
+// full manager lives in the tasks overlay. Cursor keys move the section's
+// selection, Enter opens the manager overlay on it, Esc returns focus to the
+// tree. Everything else falls through to the caller so the global bindings
+// (Tab/Shift-Tab focus ring, S manage, H hooks, ? help, q quit) keep working.
 func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.ring.Active() != layout.RegionAutomations {
 		return m, nil, false
 	}
-
-	_, consumed := m.automations.HandleKey(msg)
-	if !consumed {
-		return m, nil, false
+	if _, consumed := m.automations.HandleKey(msg); consumed {
+		return m, nil, true
 	}
-
-	// If the manager released its own focus (Esc), move the ring back to the
-	// tree and save state. A failed save reloads both views to match disk and
-	// is surfaced inline so the dropped edit isn't silent.
-	if !m.automations.TaskPane().HasFocus() {
+	switch msg.String() {
+	case "enter":
+		mod, cmd := m.showTasksOverlay()
+		return mod, cmd, true
+	case "esc":
 		m.focusRegion(layout.RegionTree)
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
+// showTasksOverlay opens the task manager (list + create/edit form) as a
+// centered modal overlay, preselecting the in-rail cursor's task. The manager
+// opens with input focus so its key loop (j/k, n new, enter edit, x toggle,
+// D delete, r run, esc close) is live immediately — the same shape as the
+// hooks overlay.
+func (m *home) showTasksOverlay() (tea.Model, tea.Cmd) {
+	sp := m.automations.TaskPane()
+	if idx := m.automations.SelectedTaskIndex(); idx >= 0 {
+		sp.SelectTask(idx)
+	}
+	sp.SetFocus(true)
+	m.state = stateTasks
+	return m, nil
+}
+
+// handleStateTasks routes key events to the task manager overlay and
+// processes its pending actions. Esc in list mode drops the manager's own
+// focus: the overlay closes and any dirty edits are saved — a failed save
+// reloads both views to match disk and is surfaced inline so the dropped
+// edit isn't silent. q and ctrl+c are not consumed by the manager and quit.
+func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	sp := m.automations.TaskPane()
+	consumed := sp.HandleKeyPress(msg)
+
+	if !sp.HasFocus() {
+		m.state = stateDefault
 		if err := m.saveContentPaneState(); err != nil {
-			return m, m.handleError(err), true
+			return m, m.handleError(err)
 		}
+		return m, nil
 	}
 
-	// Check if a new task was submitted via the inline form
-	sp := m.automations.TaskPane()
 	if sp.HasPendingCreate() {
 		// Submitting the create form sets pendingCreate without releasing
-		// focus, so the "save on focus release" branch above doesn't run.
+		// focus, so the save-on-close branch above doesn't run.
 		// handleTaskCreate writes the new task to disk and then reloads
 		// every task via SetTasks, which clears the dirty flag and any
 		// unsaved toggle/edit/delete. Flush those changes first so the
@@ -116,15 +146,26 @@ func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 		// skip the create: the pending toggle/edit didn't persist, so we
 		// don't want handleTaskCreate's reload to silently discard it (#934).
 		if err := m.saveContentPaneState(); err != nil {
-			return m, m.handleError(err), true
+			return m, m.handleError(err)
 		}
-		return m, m.handleTaskCreate(), true
+		return m, m.handleTaskCreate()
 	}
 	if sp.HasPendingTrigger() {
-		return m, m.handleTaskTrigger(), true
+		// The trigger closes the overlay (handleTaskTrigger lands focus on the
+		// spawned instance); flush dirty toggles/edits first so they aren't
+		// stranded in a closed overlay until quit.
+		if err := m.saveContentPaneState(); err != nil {
+			return m, m.handleError(err)
+		}
+		return m, m.handleTaskTrigger()
 	}
 
-	return m, nil, true
+	if !consumed {
+		if msg.String() == "ctrl+c" || msg.String() == "q" {
+			return m.handleQuit()
+		}
+	}
+	return m, nil
 }
 
 // showHooksOverlay opens the post-worktree hooks editor as a modal overlay

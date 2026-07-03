@@ -10,7 +10,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
-	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,13 +48,14 @@ func TestHandleStateSelectProgramSwitchesAgent(t *testing.T) {
 	assert.Equal(t, tmux.ProgramCodex, h.pendingProgram)
 }
 
-// TestHandleAutomationsFocus_PendingCreateFlushesDirtyTaskState is the
-// regression guard for #578.
+// TestHandleStateTasks_PendingCreateFlushesDirtyTaskState is the regression
+// guard for #578, re-homed to the tasks overlay (#1096 play-test moved the
+// manager out of the rail).
 //
 // The bug: toggling a task with 'x' marks the TaskPane dirty in memory but
 // the toggle is not yet on disk. Submitting the inline create form sets
-// pendingCreate WITHOUT releasing focus, so the "save on Esc" branch in
-// the automations focus handler does not run. handleTaskCreate then writes the new
+// pendingCreate WITHOUT releasing focus, so the "save on close" branch in
+// the overlay handler does not run. handleTaskCreate then writes the new
 // task to disk and calls LoadTasksForCurrentRepo + SetTasks, which overwrites
 // the in-memory TaskPane with stale disk state and clears `dirty` — silently
 // discarding the toggle.
@@ -69,7 +69,7 @@ func TestHandleStateSelectProgramSwitchesAgent(t *testing.T) {
 // stubbed by newTestHome, so the only side effect under test is the disk
 // write: the on-disk Enabled bit must reflect the user's toggle. Without the
 // fix it would still be `true` on disk because saveContentPaneState never ran.
-func TestHandleAutomationsFocus_PendingCreateFlushesDirtyTaskState(t *testing.T) {
+func TestHandleStateTasks_PendingCreateFlushesDirtyTaskState(t *testing.T) {
 	h := newTestHome(t)
 
 	repoDir := setupRealRepo(t)
@@ -97,11 +97,11 @@ func TestHandleAutomationsFocus_PendingCreateFlushesDirtyTaskState(t *testing.T)
 	require.Len(t, loaded, 1)
 	tp := h.automations.TaskPane()
 	tp.SetTasks(loaded)
-	h.focusRegion(layout.RegionAutomations)
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
 
 	// User presses 'x' to toggle the task off — dirty in memory, not yet on disk.
-	_, _, consumed := h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	require.True(t, consumed, "'x' must route through the focus handler")
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	require.True(t, tp.IsDirty(), "toggle must mark the pane dirty")
 	require.False(t, tp.GetTasks()[0].Enabled, "in-memory state reflects the toggle")
 
@@ -111,25 +111,25 @@ func TestHandleAutomationsFocus_PendingCreateFlushesDirtyTaskState(t *testing.T)
 		"disk must still hold the pre-toggle value until something flushes the pane")
 
 	// User opens the inline create form with 'n' and fills it in.
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 	require.True(t, tp.IsCreating(), "'n' must open the inline create form")
 
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("new-task")})
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector (cron stays selected)
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> cron value
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do other thing")})
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> path
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> program
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyTab}) // -> save button
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("new-task")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector (cron stays selected)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> cron value
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do other thing")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> path
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> program
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> save button
 
-	// Submit. This sets pendingCreate inside TaskPane and then the focus
+	// Submit. This sets pendingCreate inside TaskPane and then the overlay
 	// handler's HasPendingCreate branch runs — which is the code path the fix
 	// modifies. We only care that the toggle is on disk by the time the dust
 	// settles.
-	_, _, _ = h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
 
 	diskAfter, err := task.LoadTasks()
 	require.NoError(t, err)
@@ -146,8 +146,8 @@ func TestHandleAutomationsFocus_PendingCreateFlushesDirtyTaskState(t *testing.T)
 			"(regression for #578: handler now calls saveContentPaneState first)")
 }
 
-// TestHandleAutomationsFocus_ValidationFailureLeavesTaskPaneStale is the
-// regression guard for #934.
+// TestHandleStateTasks_ValidationFailureLeavesTaskPaneStale is the
+// regression guard for #934, re-homed to the tasks overlay.
 //
 // The bug: saveContentPaneState swallowed task.UpdateTask/RemoveTask errors
 // (log-only), cleared the TaskPane's dirty flag unconditionally via
@@ -166,7 +166,7 @@ func TestHandleAutomationsFocus_PendingCreateFlushesDirtyTaskState(t *testing.T)
 // after seeding: the file-lock/atomic-write both need to create files in that
 // dir, so the persist fails, while reads (LoadTasksForCurrentRepo) still
 // succeed and return the committed disk state.
-func TestHandleAutomationsFocus_ValidationFailureLeavesTaskPaneStale(t *testing.T) {
+func TestHandleStateTasks_ValidationFailureLeavesTaskPaneStale(t *testing.T) {
 	h := newTestHome(t)
 
 	repoDir := setupRealRepo(t)
@@ -194,12 +194,12 @@ func TestHandleAutomationsFocus_ValidationFailureLeavesTaskPaneStale(t *testing.
 	tp := h.automations.TaskPane()
 	tp.SetTasks(loaded)
 	h.store.SetTasks(loaded)
-	h.focusRegion(layout.RegionAutomations)
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
 	h.errBox.SetSize(500, 1)
 
 	// User presses 'x' to toggle the task off — dirty in memory, not yet saved.
-	_, _, consumed := h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	require.True(t, consumed, "'x' must route through the focus handler")
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	require.True(t, tp.IsDirty(), "toggle must mark the pane dirty")
 	require.False(t, tp.GetTasks()[0].Enabled, "in-memory state reflects the toggle")
 
@@ -212,10 +212,11 @@ func TestHandleAutomationsFocus_ValidationFailureLeavesTaskPaneStale(t *testing.
 	// Restore before the tempdir cleanup so RemoveAll can delete the dir.
 	t.Cleanup(func() { _ = os.Chmod(configDir, 0o700) })
 
-	// Pressing Esc releases focus, which triggers saveContentPaneState. The
-	// UpdateTask write fails; the handler surfaces it via handleError.
-	_, cmd, consumed := h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyEsc})
-	require.True(t, consumed, "Esc must route through the focus handler")
+	// Pressing Esc releases the manager's focus, which closes the overlay and
+	// triggers saveContentPaneState. The UpdateTask write fails; the handler
+	// surfaces it via handleError.
+	_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "Esc must close the tasks overlay")
 	require.NotNil(t, cmd, "a failed save must return an error-surfacing command")
 
 	// (a) The user is notified — the failure is surfaced inline, not swallowed.
@@ -393,9 +394,8 @@ func TestSaveContentPaneState_HooksAndTaskFailuresBothSurfaced(t *testing.T) {
 	require.Len(t, loaded, 1)
 	tp := h.automations.TaskPane()
 	tp.SetTasks(loaded)
-	h.focusRegion(layout.RegionAutomations)
-	_, _, consumed := h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	require.True(t, consumed)
+	_, _ = h.showTasksOverlay()
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	require.True(t, tp.IsDirty(), "toggle must mark the task pane dirty")
 
 	// Make the task persist fail too: strip write permission from the config dir.

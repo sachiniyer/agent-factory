@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,7 +48,10 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		requireViewSized(t, view, tc.w, tc.h)
 		assert.Contains(t, view, "Agent Factory", "%dx%d: tree title", tc.w, tc.h)
 		assert.Contains(t, view, "alpha · Preview", "%dx%d: pane header carries title · tab", tc.w, tc.h)
-		assert.Contains(t, view, "Automations", "%dx%d: automations section", tc.w, tc.h)
+		// The header ellipsizes at the narrowest rails, so assert the stable
+		// prefix plus the manage affordance FIX 2 guarantees is never cut.
+		assert.Contains(t, view, "Automation", "%dx%d: automations section", tc.w, tc.h)
+		assert.Contains(t, view, "S manage", "%dx%d: the manage affordance survives", tc.w, tc.h)
 		// #1087: the automations section lives inside the left rail, under a
 		// full-rail-width horizontal rule.
 		assert.Contains(t, view, strings.Repeat("─", h.lastLayout.RailRule.W),
@@ -64,10 +68,11 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 	}
 }
 
-// TestLayoutCutover_FocusRingCycles pins the PR-4 focus model: Tab cycles
+// TestLayoutCutover_FocusRingCycles pins the focus model: Tab cycles
 // tree → pane A → automations and back around; Shift-Tab reverses; the
-// automations strip expands in place while focused (grid re-solve) and its
-// task manager holds input focus; the status-bar hints follow.
+// focused in-rail automations section shows its cursor but never hosts the
+// task manager (that is the tasks overlay — #1096 play-test); the status-bar
+// hints follow.
 func TestLayoutCutover_FocusRingCycles(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 100, 30)
@@ -82,32 +87,62 @@ func TestLayoutCutover_FocusRingCycles(t *testing.T) {
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
 	assert.Equal(t, layout.RegionAutomations, h.ring.Active())
 	assert.True(t, h.automations.Focused())
-	assert.True(t, h.automations.TaskPane().HasFocus(),
-		"focusing the strip forwards input focus to the task manager")
-	assert.True(t, h.lastLayout.AutomationsExpanded,
-		"the strip expands in place while focused")
+	assert.False(t, h.automations.TaskPane().HasFocus(),
+		"focusing the section must not focus the manager — Enter/S open it as an overlay")
+	assert.Equal(t, layout.AutomationsRows, h.lastLayout.Automations.H,
+		"the focused section keeps its compact allocation — no in-rail expansion")
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
 	assert.Equal(t, layout.RegionTree, h.ring.Active(), "the ring wraps around")
-	assert.False(t, h.lastLayout.AutomationsExpanded, "the strip contracts on blur")
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyShiftTab}, keys.KeyShiftTab)
 	assert.Equal(t, layout.RegionAutomations, h.ring.Active(), "Shift-Tab cycles backwards")
 }
 
-// TestLayoutCutover_AutomationsEscReturnsFocusToTree: Esc inside the focused
-// strip releases the manager's input focus, and the root moves the ring back
-// to the tree (the pre-cutover "esc back" flow re-homed).
+// TestLayoutCutover_AutomationsEscReturnsFocusToTree: Esc on the focused
+// section moves the ring back to the tree (the pre-cutover "esc back" flow
+// re-homed).
 func TestLayoutCutover_AutomationsEscReturnsFocusToTree(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 100, 30)
 	h.focusRegion(layout.RegionAutomations)
-	require.True(t, h.automations.TaskPane().HasFocus())
+	require.True(t, h.automations.Focused())
 
 	_, _, consumed := h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyEsc})
 	require.True(t, consumed)
 	assert.Equal(t, layout.RegionTree, h.ring.Active(), "Esc returns focus to the tree")
 	assert.False(t, h.automations.Focused())
+}
+
+// TestLayoutCutover_EnterOpensTasksOverlay: Enter on the focused in-rail
+// section opens the task manager as a centered modal (#1096 play-test fix 1),
+// preselecting the section cursor's task; Esc closes it and saving runs.
+func TestLayoutCutover_EnterOpensTasksOverlay(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 100, 30)
+	tasks := []task.Task{
+		{ID: "1", Name: "alpha-task", CronExpr: "0 3 * * *", Enabled: true},
+		{ID: "2", Name: "beta-task", CronExpr: "0 4 * * *", Enabled: true},
+	}
+	h.store.SetTasks(tasks)
+	h.automations.TaskPane().SetTasks(tasks)
+
+	h.focusRegion(layout.RegionAutomations)
+	h.automations.ScrollDown() // cursor onto beta-task
+
+	_, _, consumed := h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, consumed)
+	require.Equal(t, stateTasks, h.state, "Enter opens the tasks overlay")
+	require.True(t, h.automations.TaskPane().HasFocus(), "the manager opens with input focus")
+
+	view := h.View()
+	requireViewSized(t, view, 100, 30)
+	assert.Contains(t, view, "Tasks", "the overlay hosts the manager list")
+	assert.Contains(t, view, "▸ [✓]  beta-task", "the manager preselects the section cursor's task")
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+	assert.Equal(t, stateDefault, h.state, "Esc closes the overlay")
+	assert.NotContains(t, h.View(), "n new", "the manager's key line leaves with the overlay")
 }
 
 // TestLayoutCutover_DegradationLadder drives the resize path down the §2.6
@@ -166,22 +201,20 @@ func TestLayoutCutover_HooksOverlay(t *testing.T) {
 	assert.NotContains(t, h.View(), "Post-Worktree Hooks")
 }
 
-// TestLayoutCutover_TaskKeysFocusStrip: S focuses the strip's manager, and
-// task creation lives on the manager's own `n` key — since #1024 PR 5 the
-// global `s` is the split verb, so the strip's create flow must be fully
-// reachable without it.
-func TestLayoutCutover_TaskKeysFocusStrip(t *testing.T) {
+// TestLayoutCutover_TaskKeysOpenOverlay: S opens the task manager overlay,
+// and task creation lives on the manager's own `n` key — the "S, then n"
+// muscle memory survives the overlay move (#1096 play-test fix 1).
+func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 100, 30)
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeyTaskList)
-	assert.Equal(t, layout.RegionAutomations, h.ring.Active())
+	assert.Equal(t, stateTasks, h.state, "S opens the tasks overlay")
 	assert.True(t, h.automations.TaskPane().HasFocus())
 	assert.False(t, h.automations.TaskPane().IsCreating())
 
-	_, _, consumed := h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	require.True(t, consumed)
-	assert.True(t, h.automations.TaskPane().IsCreating(), "n inside the focused strip opens the create form")
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	assert.True(t, h.automations.TaskPane().IsCreating(), "n inside the overlay opens the create form")
 }
 
 // TestE2E_LayoutCutover_FocusRingAndHooksOverlay drives the real tea.Program
@@ -208,18 +241,25 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	})
 
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
-	eh.waitUntil(e2eAsyncTimeout, "Tab moves focus to the automations strip", func() bool {
+	eh.waitUntil(e2eAsyncTimeout, "Tab moves focus to the automations section", func() bool {
 		return activeRegion() == layout.RegionAutomations
 	})
-	var expanded, managerFocused bool
-	eh.query(func(h *home) {
-		expanded = h.lastLayout.AutomationsExpanded
-		managerFocused = h.automations.TaskPane().HasFocus()
-	})
-	assert.True(t, expanded, "the strip expands in place while focused")
-	assert.True(t, managerFocused, "the task manager takes input focus")
+	var managerFocused bool
+	eh.query(func(h *home) { managerFocused = h.automations.TaskPane().HasFocus() })
+	assert.False(t, managerFocused,
+		"focusing the section must not focus the manager — it opens as an overlay")
 
-	// Esc inside the strip returns focus to the tree.
+	// Enter opens the tasks overlay; Esc closes it (manager focus released).
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	eh.waitUntil(e2eAsyncTimeout, "Enter opens the tasks overlay", func() bool {
+		return eh.homeState() == stateTasks
+	})
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	eh.waitUntil(e2eAsyncTimeout, "Esc closes the tasks overlay", func() bool {
+		return eh.homeState() == stateDefault
+	})
+
+	// Esc on the section returns focus to the tree.
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
 	eh.waitUntil(e2eAsyncTimeout, "Esc returns focus to the tree", func() bool {
 		return activeRegion() == layout.RegionTree

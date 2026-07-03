@@ -59,6 +59,11 @@ const (
 	// open (#1024 PR 4: hooks lost their persistent sidebar slot and are
 	// hosted as a modal overlay instead).
 	stateHooks
+	// stateTasks is the state when the task manager (list + create/edit form)
+	// overlay is open. The in-rail automations section shows only the compact
+	// summary (#1087 play-test): the full manager gets a centered overlay so
+	// its form is never clamped into the narrow rail.
+	stateTasks
 )
 
 type home struct {
@@ -140,8 +145,9 @@ type home struct {
 	// lastPaneBCapture is when pane B's capture was last dispatched; the
 	// paneBCaptureMinInterval throttle reads it (RFC §5.2).
 	lastPaneBCapture time.Time
-	// automations is the bottom section of the left rail (#1087: compact
-	// task rows; expands to the full task manager on focus)
+	// automations is the bottom section of the left rail (#1087): compact
+	// task rows only — S/Enter open its full task manager as the stateTasks
+	// overlay
 	automations *ui.AutomationsPane
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
@@ -287,10 +293,8 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 // relayout is the single sizing path (#1024 PR 4): layout.Grid turns the
 // terminal size into the region rects — applying the §2.6 degradation ladder
 // — and every pane is re-rected. Called on every WindowSizeMsg and whenever a
-// grid input changes without a resize (focusing the automations strip expands
-// it in place).
+// grid input changes without a resize (a split opening/closing).
 func (m *home) relayout() {
-	m.grid.AutomationsExpanded = m.ring.Active() == layout.RegionAutomations
 	// The split request follows the store's pane-B binding (#1024 PR 5). The
 	// grid honors it only when the terminal is wide enough (§2.6): below the
 	// threshold SplitActive comes back false while the binding — and the
@@ -334,6 +338,18 @@ func (m *home) relayout() {
 		m.selectionOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
 	}
 	m.hooksPane.SetSize(int(float32(m.termWidth)*0.6), int(float32(m.termHeight)*0.6))
+	// The task manager renders in the centered tasks overlay (stateTasks), so
+	// it sizes off the terminal like the hooks editor — never off the rail.
+	// Floor the width so the edit form's fields and key line stay readable at
+	// an 80-col terminal, capped under the window for the overlay frame.
+	taskPaneW := int(float32(m.termWidth) * 0.6)
+	if taskPaneW < 52 {
+		taskPaneW = 52
+	}
+	if lim := m.termWidth - 8; taskPaneW > lim {
+		taskPaneW = lim
+	}
+	m.automations.TaskPane().SetSize(taskPaneW, int(float32(m.termHeight)*0.6))
 
 	previewWidth, previewHeight := m.paneA.GetPreviewSize()
 	if err := m.store.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
@@ -360,32 +376,24 @@ func (m *home) syncFocus() {
 	m.menu.SetFocusRegion(active)
 }
 
-// focusRegion moves focus directly to the given region (the s/S jump keys)
-// and re-solves the layout, since the automations strip sizes off focus.
+// focusRegion moves focus directly to the given region and re-solves the
+// layout so ring visibility and pane rects stay coherent.
 func (m *home) focusRegion(region string) {
 	m.ring.Focus(region)
 	m.relayout()
 }
 
-// cycleFocus advances the focus ring (Tab / Shift-Tab). Leaving the
-// automations strip persists any dirty task edits, exactly like the pre-#1024
-// focus-release path: a failed save surfaces in the error box and the panes
-// reload to match disk, so the dropped edit is never silent.
+// cycleFocus advances the focus ring (Tab / Shift-Tab). Task edits are made
+// only inside the tasks overlay, which saves on close (handleStateTasks) —
+// the in-rail automations section is read-only, so no save is needed here.
 func (m *home) cycleFocus(back bool) tea.Cmd {
-	leaving := m.ring.Active()
 	if back {
 		m.ring.Prev()
 	} else {
 		m.ring.Next()
 	}
-	var cmd tea.Cmd
-	if leaving == layout.RegionAutomations && m.ring.Active() != leaving {
-		if err := m.saveContentPaneState(); err != nil {
-			cmd = m.handleError(err)
-		}
-	}
 	m.relayout()
-	return cmd
+	return nil
 }
 
 func (m *home) Init() tea.Cmd {
@@ -526,7 +534,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Action == tea.MouseActionPress {
 			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
 				// The wheel scrolls whatever the focus ring points at: the
-				// expanded automations strip scrolls its own task list
+				// focused automations section moves its own cursor
 				// independent of the sidebar selection (#524); everywhere
 				// else it scrolls the workspace pane, which needs a bound
 				// instance. Hit-tested wheel routing is #1024 PR 6.
@@ -916,8 +924,13 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 	m.sidebar.SetSelectedInstance(m.store.NumInstances() - 1)
 	instance.SetStatus(session.Loading)
 	m.menu.SetState(ui.StateDefault)
-	// The run lands as a new session: move focus to the tree so the user is
-	// looking at the spawned instance, not the strip.
+	// The run lands as a new session: close the tasks overlay (a trigger is
+	// fired from inside it) and move focus to the tree so the user is looking
+	// at the spawned instance, not the manager.
+	if m.state == stateTasks {
+		m.state = stateDefault
+		m.automations.TaskPane().SetFocus(false)
+	}
 	m.focusRegion(layout.RegionTree)
 
 	prompt := tsk.Prompt
@@ -1030,10 +1043,13 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateSelectProgram(msg)
 	case stateHooks:
 		return m.handleStateHooks(msg)
+	case stateTasks:
+		return m.handleStateTasks(msg)
 	}
 
-	// The focused automations strip owns the keyboard (its task manager);
-	// Tab/Shift-Tab and quit keys deliberately fall through.
+	// The focused in-rail automations section owns its cursor keys; Enter/Esc
+	// route here too (open the manager overlay / return to the tree), while
+	// Tab/Shift-Tab, quit, and the global overlay keys (S/H/?) fall through.
 	if mod, cmd, consumed := m.handleAutomationsFocus(msg); consumed {
 		return mod, cmd
 	}
@@ -1487,6 +1503,8 @@ func (m *home) View() string {
 		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
 	} else if m.state == stateHooks {
 		return overlay.PlaceOverlay(0, 0, m.renderHooksOverlay(), mainView, true)
+	} else if m.state == stateTasks {
+		return overlay.PlaceOverlay(0, 0, m.renderTasksOverlay(), mainView, true)
 	}
 
 	return mainView
@@ -1501,6 +1519,13 @@ var hooksOverlayStyle = lipgloss.NewStyle().
 
 func (m *home) renderHooksOverlay() string {
 	return hooksOverlayStyle.Render(m.hooksPane.String())
+}
+
+// renderTasksOverlay frames the task manager (list + create/edit form) as the
+// centered modal it lives in (#1087 play-test): the manager needs real
+// width/height for its form, which the narrow left rail cannot provide.
+func (m *home) renderTasksOverlay() string {
+	return hooksOverlayStyle.Render(m.automations.TaskPane().String())
 }
 
 // splitDividerStyle recedes the 1-col divider between panes A and B so the

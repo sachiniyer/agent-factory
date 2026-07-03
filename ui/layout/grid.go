@@ -66,15 +66,6 @@ type Grid struct {
 	// otherwise the workspace is pane A alone and the caller keeps pane B's
 	// binding for when the terminal grows back.
 	Split bool
-
-	// AutomationsExpanded requests the automations section expanded in place —
-	// focusing it swaps the compact task rows for the full task manager
-	// (§2.1). Honored whenever the section is visible (i.e. outside minimal
-	// mode): the expanded section takes half the left rail's rows (#1087 moved
-	// it into the rail), so the tree above it stays usable. Expansion
-	// overrides the compact 1-line degradation — an editor cannot run in one
-	// line.
-	AutomationsExpanded bool
 }
 
 // Layout is a solved arrangement: the named region rects plus which regions
@@ -103,12 +94,11 @@ type Layout struct {
 	// are visible).
 	SplitActive bool
 	// AutomationsVisible reports whether the automations section is shown at
-	// all; AutomationsCompact whether it is the 1-line summary;
-	// AutomationsExpanded whether the section got the expanded (full task
-	// manager) allocation.
-	AutomationsVisible  bool
-	AutomationsCompact  bool
-	AutomationsExpanded bool
+	// all; AutomationsCompact whether it is the 1-line summary. (The full
+	// task manager is a modal overlay, not a layout region — the in-rail
+	// section is always the compact summary.)
+	AutomationsVisible bool
+	AutomationsCompact bool
 }
 
 // Solve lays out a width×height terminal.
@@ -137,18 +127,6 @@ func (g Grid) Solve(width, height int) Layout {
 		rows := AutomationsRows
 		if l.AutomationsCompact {
 			rows = AutomationsCompactRows
-		}
-		if g.AutomationsExpanded {
-			// Expanded in place: half the rail's rows. Outside minimal mode
-			// rail.H >= MinimalHeight - StatusBarRows = 13, so the expanded
-			// section always gets >= 6 rows and the tree keeps at least as
-			// much minus the rule.
-			l.AutomationsExpanded = true
-			l.AutomationsCompact = false
-			rows = rail.H / 2
-			if rows < AutomationsRows {
-				rows = AutomationsRows
-			}
 		}
 		rail, l.Automations = rail.CutBottom(rows)
 		rail, l.RailRule = rail.CutBottom(RailRuleRows)

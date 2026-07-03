@@ -300,61 +300,6 @@ func TestGridVisibleRegionsMatchFlags(t *testing.T) {
 	assert.NotContains(t, regions, layout.RegionRailRule)
 }
 
-// TestGridSolveAutomationsExpandedTilesExactly sweeps the size range with the
-// automations strip expanded in place (#1024 PR 4: focusing the strip swaps
-// the compact rows for the full task manager) and asserts the regions still
-// exactly tile the terminal.
-func TestGridSolveAutomationsExpandedTilesExactly(t *testing.T) {
-	grid := layout.Grid{AutomationsExpanded: true}
-	for w := layout.HardMinWidth; w <= 220; w += 3 {
-		for h := layout.HardMinHeight; h <= 72; h++ {
-			l := grid.Solve(w, h)
-			require.False(t, l.Fallback, "unexpected fallback at %dx%d", w, h)
-
-			screen := layout.Rect{X: 0, Y: 0, W: w, H: h}
-			visible := l.VisibleRegions()
-			parts := make([]layout.Rect, 0, len(visible))
-			for id, r := range visible {
-				require.False(t, r.Empty(), "visible region %s is empty at %dx%d", id, w, h)
-				parts = append(parts, r)
-			}
-			requireTiles(t, screen, parts)
-		}
-	}
-}
-
-// TestGridSolveAutomationsExpandedAllocation pins the expanded section's
-// contract: honored whenever the section is visible, never compact (an editor
-// cannot run in one line), roughly half the rail's rows, and the tree keeps
-// at least as much minus the rule.
-func TestGridSolveAutomationsExpandedAllocation(t *testing.T) {
-	grid := layout.Grid{AutomationsExpanded: true}
-
-	l := grid.Solve(100, 30)
-	require.True(t, l.AutomationsVisible)
-	assert.True(t, l.AutomationsExpanded, "expansion honored outside minimal mode")
-	assert.False(t, l.AutomationsCompact, "expansion overrides the compact degradation")
-	railRows := 30 - layout.StatusBarRows
-	assert.Equal(t, railRows/2, l.Automations.H,
-		"expanded section takes half the rail's rows")
-	assert.GreaterOrEqual(t, l.Tree.H, l.Automations.H-layout.RailRuleRows,
-		"the tree keeps at least as many rows as the section minus the rule")
-	assert.Equal(t, railRows, l.PaneA.H,
-		"the workspace keeps the full height regardless of expansion")
-
-	// Below the compact threshold the expansion still wins (the manager needs
-	// the rows).
-	tight := grid.Solve(70, 24)
-	require.True(t, tight.AutomationsVisible)
-	assert.True(t, tight.AutomationsExpanded)
-	assert.False(t, tight.AutomationsCompact)
-
-	// Minimal mode hides the section entirely; the request is moot.
-	minimal := grid.Solve(59, 14)
-	assert.False(t, minimal.AutomationsVisible)
-	assert.False(t, minimal.AutomationsExpanded)
-}
-
 // TestGridSolveAutomationsInRail pins the #1087/#1090 geometry: the
 // automations section lives INSIDE the left rail, bottom-aligned against the
 // status bar, separated from the tree by a 1-row full-rail-width rule — and
@@ -369,7 +314,6 @@ func TestGridSolveAutomationsInRail(t *testing.T) {
 		{"wide", layout.Grid{}, 160, 48, false},
 		{"canonical-80x24", layout.Grid{}, 80, 24, false},
 		{"compact", layout.Grid{}, 79, 22, false},
-		{"expanded", layout.Grid{AutomationsExpanded: true}, 100, 30, false},
 		{"split", layout.Grid{Split: true}, 160, 48, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

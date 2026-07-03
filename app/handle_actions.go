@@ -49,11 +49,11 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.startNewInstance(false)
 
 	case keys.KeyTaskList:
-		// Focus the automations strip: it expands to the full task manager
-		// (task creation lives on its `n` key — `s` became the split verb in
-		// #1024 PR 5).
-		m.focusRegion(layout.RegionAutomations)
-		return m, nil
+		// Open the task manager overlay (task creation lives on its `n` key —
+		// `s` became the split verb in #1024 PR 5). The in-rail automations
+		// section stays a compact summary; the manager gets a centered modal
+		// so its form is never clamped into the narrow rail.
+		return m.showTasksOverlay()
 
 	// Split view (#1024 PR 5): s opens the selection in pane B / swaps the
 	// panes (focus-dependent); x closes the split from pane B.
