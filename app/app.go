@@ -943,9 +943,13 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			func() tea.Msg { return msg },
 			m.keydownCallback(name)), true
 	}
-	if m.state == stateHelp || m.state == stateConfirm ||
-		m.state == stateSearch || m.state == stateSelectProgram ||
-		m.state == stateHooks {
+	// Any other modal state (help/confirm/search/select-program/hooks): the
+	// overlay owns the keyboard, so no hint highlighting and no re-emit —
+	// this runs BEFORE handleKeyPress's state switch, so without this guard
+	// mapped keys typed into an overlay would take the highlight + re-emit
+	// detour first. A blanket non-default check (rather than enumerating
+	// states) can't silently miss a future modal state (Greptile on #1083).
+	if m.state != stateDefault {
 		return nil, false
 	}
 	// Don't highlight when the automations strip has the keyboard
@@ -1018,11 +1022,17 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// Number-key tab jump (1-9): jump directly to that tab of the selected
 	// instance (#930 PR 4). Handled here, before the GlobalKeyStringsMap
 	// lookup, because digits are dispatched manually rather than mapped to a
-	// KeyName. Digits typed into the focused automations strip were consumed
-	// above and pass through untouched.
-	if len(msg.Runes) == 1 {
-		if r := msg.Runes[0]; r >= '1' && r <= '9' {
-			return m.handleTabJump(int(r - '0'))
+	// KeyName. Gated on the focus region, not just on the strip having
+	// consumed the key above: the jump belongs to the tree/workspace, so a
+	// digit with the automations strip focused must never retarget the
+	// content pane — the pre-cutover ContentModeTasks behavior (Greptile on
+	// #1083; the strip's task list does consume digits today, but this gate
+	// must not depend on that).
+	if active := m.ring.Active(); active == layout.RegionTree || active == layout.RegionPaneA {
+		if len(msg.Runes) == 1 {
+			if r := msg.Runes[0]; r >= '1' && r <= '9' {
+				return m.handleTabJump(int(r - '0'))
+			}
 		}
 	}
 

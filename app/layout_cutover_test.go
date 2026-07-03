@@ -48,13 +48,11 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		assert.Contains(t, view, "Agent Factory", "%dx%d: tree title", tc.w, tc.h)
 		assert.Contains(t, view, "alpha · Preview", "%dx%d: pane header carries title · tab", tc.w, tc.h)
 		assert.Contains(t, view, "Automations", "%dx%d: automations strip", tc.w, tc.h)
-		// The full instance hint row is wider than 80 cols (it always was; the
-		// clamp now truncates it cleanly instead of overflowing), so assert the
-		// leading hints at both sizes and the tail only where it fits.
+		// The hint row prioritizes under width pressure (low-value hints are
+		// dropped first), so help/quit must survive at BOTH sizes.
 		assert.Contains(t, view, "n new", "%dx%d: status-bar hints", tc.w, tc.h)
-		if tc.w >= 120 {
-			assert.Contains(t, view, "q quit", "%dx%d: full hint row fits", tc.w, tc.h)
-		}
+		assert.Contains(t, view, "q quit", "%dx%d: quit hint must survive narrow widths", tc.w, tc.h)
+		assert.Contains(t, view, "? help", "%dx%d: help hint must survive narrow widths", tc.w, tc.h)
 	}
 }
 
@@ -234,4 +232,36 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	var view string
 	eh.query(func(h *home) { view = h.View() })
 	assert.Contains(t, view, "alpha · Preview")
+}
+
+// TestLayoutCutover_DigitJumpGatedByFocusRegion pins the 1-9 gate (Greptile on
+// #1083): the tab jump belongs to the tree/workspace, so a digit pressed while
+// the AUTOMATIONS strip has focus — including in plain list view, with no form
+// open — must never retarget the content pane (the pre-cutover
+// ContentModeTasks behavior). With focus back on the tree or pane A the jump
+// works as before.
+func TestLayoutCutover_DigitJumpGatedByFocusRegion(t *testing.T) {
+	h := newTestHome(t)
+	addTreeInstance(t, h, "alpha") // two default tab slots
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	resizeHome(h, 100, 30)
+	require.Equal(t, 0, h.store.ActiveTab())
+
+	// Tree focused: digit jumps.
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	require.Equal(t, 1, h.store.ActiveTab(), "digit with tree focus jumps tabs")
+
+	// Strip focused, LIST view (no form): digit must not fire a tab jump.
+	h.focusRegion(layout.RegionAutomations)
+	require.False(t, h.automations.TaskPane().IsCreating())
+	require.False(t, h.automations.TaskPane().IsEditing())
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	require.Equal(t, 1, h.store.ActiveTab(),
+		"a digit with the automations strip focused must not retarget the content pane")
+
+	// Pane A focused: digit jumps again.
+	h.focusRegion(layout.RegionPaneA)
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	require.Equal(t, 0, h.store.ActiveTab(), "digit with pane focus jumps tabs")
 }

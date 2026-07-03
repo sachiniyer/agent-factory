@@ -238,14 +238,72 @@ func (m *Menu) SetSize(width, height int) {
 	m.height = height
 }
 
+// hintDropOrder lists the options that may be dropped when the hint row is
+// wider than the status bar, least valuable first; options in the same inner
+// slice drop together (a lone "⇧↓ scroll" without its ⇧↑ twin reads like a
+// bug). The full instance row is ~108 cells, so on narrow terminals something
+// has to go — and before this priority existed the CLAMP decided, silently
+// cutting the RIGHT edge, i.e. `? help` and `q quit` first: exactly the hints
+// a lost user needs (#1083 play-test). Help and quit are deliberately absent
+// from this list — they are never dropped — as are the naming-flow options
+// (that row is short).
+var hintDropOrder = [][]keys.KeyName{
+	{keys.KeyShiftUp, keys.KeyShiftDown},
+	{keys.KeyJumpTab},
+	{keys.KeyCloseTab},
+	{keys.KeyNewTab},
+	{keys.KeySearch},
+	{keys.KeyNewRemote},
+	{keys.KeyHooks},
+	{keys.KeyTab},
+	{keys.KeyEnter},
+	{keys.KeyKill},
+	{keys.KeyNew},
+}
+
 func (m *Menu) String() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
 
-	var s strings.Builder
+	// Render the full hint row; while it exceeds the bar width, drop options
+	// in priority order and re-render. Whatever still doesn't fit after the
+	// drop list is exhausted is clamped by the status bar as before.
+	drop := make(map[keys.KeyName]bool)
+	line := m.renderHints(drop)
+	for _, ks := range hintDropOrder {
+		if lipgloss.Width(line) <= m.width {
+			break
+		}
+		for _, k := range ks {
+			drop[k] = true
+		}
+		line = m.renderHints(drop)
+	}
 
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, line)
+}
+
+// renderHints renders the option row, skipping dropped options. Separators
+// follow group membership of the options actually rendered: a bullet within a
+// group, a vertical bar between groups.
+func (m *Menu) renderHints(drop map[keys.KeyName]bool) string {
+	groupOf := func(i int) int {
+		for gi, g := range m.groups {
+			if i >= g.start && i < g.end {
+				return gi
+			}
+		}
+		return -1
+	}
+
+	var s strings.Builder
+	prevGroup := -1
+	first := true
 	for i, k := range m.options {
+		if drop[k] {
+			continue
+		}
 		binding := keys.GlobalKeyBindings[k]
 
 		var (
@@ -259,13 +317,18 @@ func (m *Menu) String() string {
 			localDescStyle = localDescStyle.Underline(true)
 		}
 
-		inActionGroup := false
-		for _, g := range m.groups {
-			if g.isAction && i >= g.start && i < g.end {
-				inActionGroup = true
-				break
+		group := groupOf(i)
+		inActionGroup := group >= 0 && m.groups[group].isAction
+
+		if !first {
+			if group != prevGroup {
+				s.WriteString(sepStyle.Render(verticalSeparator))
+			} else {
+				s.WriteString(sepStyle.Render(separator))
 			}
 		}
+		first = false
+		prevGroup = group
 
 		if inActionGroup {
 			s.WriteString(localActionStyle.Render(binding.Help().Key))
@@ -276,23 +339,7 @@ func (m *Menu) String() string {
 			s.WriteString(" ")
 			s.WriteString(localDescStyle.Render(binding.Help().Desc))
 		}
-
-		// Add appropriate separator
-		if i != len(m.options)-1 {
-			isGroupEnd := false
-			for _, g := range m.groups {
-				if i == g.end-1 {
-					s.WriteString(sepStyle.Render(verticalSeparator))
-					isGroupEnd = true
-					break
-				}
-			}
-			if !isGroupEnd {
-				s.WriteString(sepStyle.Render(separator))
-			}
-		}
 	}
 
-	centeredMenuText := menuStyle.Render(s.String())
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, centeredMenuText)
+	return menuStyle.Render(s.String())
 }
