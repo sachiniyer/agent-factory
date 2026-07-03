@@ -76,7 +76,12 @@ something to show:
 mkdir "$WORK/mock-repo" && cd "$WORK/mock-repo"
 git init -b master
 git config user.name "AF Playtest" && git config user.email "playtest@example.com"
-# seed a tiny project: e.g. a shell todo app — a script, a README, a test file
+# seed a tiny real project (a shell todo app) so there is something to commit
+printf '#!/bin/bash\n# todo: list, add <text>, done <n>\nTODO_FILE="${TODO_FILE:-todo.txt}"\ntouch "$TODO_FILE"\ncase "$1" in\n  add) shift; echo "$*" >> "$TODO_FILE";;\n  done) sed -i "${2}d" "$TODO_FILE";;\n  *) nl -ba "$TODO_FILE";;\nesac\n' > todo.sh
+chmod +x todo.sh
+printf '# todo\nA tiny shell todo app.\n\nUsage: ./todo.sh [add <text> | done <n>]\n' > README.md
+printf '#!/bin/bash\nset -e\nexport TODO_FILE=$(mktemp)\n./todo.sh add "first item"\n./todo.sh | grep -q "first item"\nrm -f "$TODO_FILE"\necho ok\n' > test.sh
+chmod +x test.sh
 git add -A && git commit -m "initial project"
 ```
 
@@ -202,17 +207,22 @@ sleep 2
 # verify: pgrep scoped to the sandbox path — must print nothing.
 # (grep -v filters this script's own shell, whose argv contains $WORK.)
 if pgrep -af "$WORK" | grep -v teardown.sh; then
-  echo "TEARDOWN INCOMPLETE — kill -9 those exact PIDs, re-verify; do not just rm"
-else
-  echo "teardown clean: no surviving processes"
+  echo "TEARDOWN INCOMPLETE — kill -9 those exact PIDs, then re-run this script"
+  echo "sandbox preserved for remediation: $WORK"
+  exit 1
 fi
+echo "teardown clean: no surviving processes"
 rm -rf "$WORK"
 EOF
 chmod +x "$WORK/teardown.sh"
 ```
 
-If `pgrep -af "$WORK"` still shows survivors, `kill -9` those exact PIDs,
-re-verify, and say so in the summary. Never widen the pgrep pattern beyond
+On survivors the script exits non-zero and PRESERVES the sandbox (pids.txt
+and logs are the remediation evidence — deleting them first would leave you
+nothing to kill by). `kill -9` those exact PIDs, then re-run the script;
+it removes the sandbox only once the pgrep check comes back clean. The run
+summary must say this happened, and must report the leftover `$WORK` path
+if the sandbox could not be removed. Never widen the pgrep pattern beyond
 `$WORK`.
 
 ## 5. Run summary
