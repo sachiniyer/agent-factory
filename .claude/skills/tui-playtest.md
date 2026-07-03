@@ -47,18 +47,58 @@ them is a failed run, regardless of what else you find.
 
 ## 1. Setup
 
-Write the teardown script FIRST (section 4) so cleanup works even if the
-run wedges, then build the sandbox:
-
 ```bash
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 WORK="/tmp/af-playtest-$RUN_ID"        # keep short: unix socket paths cap at ~104 bytes
 mkdir -p "$WORK/home" "$WORK/tmux"
+touch "$WORK/pids.txt"                  # record every PID you spawn here
 
 export AGENT_FACTORY_HOME="$WORK/home"
 export TMUX_TMPDIR="$WORK/tmux"
 export TMUX=""                          # $TMUX wins over TMUX_TMPDIR; must be cleared
 SOCK="pt-$RUN_ID"                       # private tmux socket name; use tmux -L "$SOCK" everywhere
+```
+
+**Write the teardown script NOW**, before cloning, building, or launching
+anything — a run that wedges during build must already have its cleanup on
+disk. The script must be self-contained: bake the sandbox values in
+**EXPANDED at write time** (unquoted heredoc for the header), so it works
+even when run from a fresh shell with no environment. An unexpanded/empty
+`$WORK` would make `pgrep -af "$WORK"` match EVERY process on the box and
+turn the kill step into exactly the accident these rules exist to prevent —
+so the script also fails closed if its paths look wrong:
+
+```bash
+# header: UNQUOTED heredoc — $WORK/$SOCK/$AGENT_FACTORY_HOME expand NOW
+cat > "$WORK/teardown.sh" <<EOF
+#!/bin/bash
+# scoped teardown — values baked in at write time; touches ONLY this sandbox
+WORK="$WORK"
+SOCK="$SOCK"
+AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME"
+EOF
+# body: QUOTED heredoc — runs against the baked-in values above
+cat >> "$WORK/teardown.sh" <<'EOF'
+# fail closed: refuse to kill or rm anything if the paths are empty or unexpected
+: "${WORK:?}" "${SOCK:?}" "${AGENT_FACTORY_HOME:?}"
+case "$WORK" in /tmp/af-playtest-*) ;; *) echo "refusing: WORK=$WORK"; exit 1;; esac
+case "$AGENT_FACTORY_HOME" in "$WORK"/*) ;; *) echo "refusing: AGENT_FACTORY_HOME=$AGENT_FACTORY_HOME"; exit 1;; esac
+
+tmux -L "$SOCK" kill-server 2>/dev/null            # private server only
+[ -f "$AGENT_FACTORY_HOME/daemon.pid" ] && kill "$(cat "$AGENT_FACTORY_HOME/daemon.pid")" 2>/dev/null
+while read -r pid; do kill "$pid" 2>/dev/null; done < "$WORK/pids.txt"
+sleep 2
+# verify: pgrep scoped to the sandbox path — must print nothing.
+# (grep -v filters this script's own shell, whose argv contains $WORK.)
+if pgrep -af "$WORK" | grep -v teardown.sh; then
+  echo "TEARDOWN INCOMPLETE — kill -9 those exact PIDs, then re-run this script"
+  echo "sandbox preserved for remediation: $WORK"
+  exit 1
+fi
+echo "teardown clean: no surviving processes"
+rm -rf "$WORK"
+EOF
+chmod +x "$WORK/teardown.sh"
 ```
 
 **Build current master** (fresh clone so a dirty checkout can't skew results):
@@ -175,47 +215,10 @@ gh issue list --repo sachiniyer/agent-factory --state open --search "<keywords>"
 
 ## 4. Teardown (mandatory, even on failure)
 
-Write this as `$WORK/teardown.sh` during setup and run it at the end — and
-also if the run aborts partway. The script must be self-contained: bake the
-sandbox values in **EXPANDED at write time** (unquoted heredoc for the
-header), so it works even when run from a fresh shell with no environment.
-An unexpanded/empty `$WORK` would make `pgrep -af "$WORK"` match EVERY
-process on the box and turn the kill step into exactly the accident these
-rules exist to prevent — so the script also fails closed if its paths look
-wrong:
-
-```bash
-# header: UNQUOTED heredoc — $WORK/$SOCK/$AGENT_FACTORY_HOME expand NOW
-cat > "$WORK/teardown.sh" <<EOF
-#!/bin/bash
-# scoped teardown — values baked in at write time; touches ONLY this sandbox
-WORK="$WORK"
-SOCK="$SOCK"
-AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME"
-EOF
-# body: QUOTED heredoc — runs against the baked-in values above
-cat >> "$WORK/teardown.sh" <<'EOF'
-# fail closed: refuse to kill or rm anything if the paths are empty or unexpected
-: "${WORK:?}" "${SOCK:?}" "${AGENT_FACTORY_HOME:?}"
-case "$WORK" in /tmp/af-playtest-*) ;; *) echo "refusing: WORK=$WORK"; exit 1;; esac
-case "$AGENT_FACTORY_HOME" in "$WORK"/*) ;; *) echo "refusing: AGENT_FACTORY_HOME=$AGENT_FACTORY_HOME"; exit 1;; esac
-
-tmux -L "$SOCK" kill-server 2>/dev/null            # private server only
-[ -f "$AGENT_FACTORY_HOME/daemon.pid" ] && kill "$(cat "$AGENT_FACTORY_HOME/daemon.pid")" 2>/dev/null
-while read -r pid; do kill "$pid" 2>/dev/null; done < "$WORK/pids.txt"
-sleep 2
-# verify: pgrep scoped to the sandbox path — must print nothing.
-# (grep -v filters this script's own shell, whose argv contains $WORK.)
-if pgrep -af "$WORK" | grep -v teardown.sh; then
-  echo "TEARDOWN INCOMPLETE — kill -9 those exact PIDs, then re-run this script"
-  echo "sandbox preserved for remediation: $WORK"
-  exit 1
-fi
-echo "teardown clean: no surviving processes"
-rm -rf "$WORK"
-EOF
-chmod +x "$WORK/teardown.sh"
-```
+Run `$WORK/teardown.sh` (written in section 1) at the end of the run — and
+also if the run aborts partway. It kills the private tmux server, the
+sandbox daemon, and every recorded PID, then pgrep-verifies (scoped to
+`$WORK`) that nothing survived before removing the sandbox.
 
 On survivors the script exits non-zero and PRESERVES the sandbox (pids.txt
 and logs are the remediation evidence — deleting them first would leave you
