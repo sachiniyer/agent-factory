@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -39,7 +40,14 @@ func TestMain(m *testing.M) {
 // scan root, fast kill windows, and a snapshot containing only pids.
 func testOptions(t *testing.T, fix bool, pids ...int) Options {
 	t.Helper()
-	home := t.TempDir()
+	return testOptionsWithHome(t, t.TempDir(), fix, pids...)
+}
+
+// testOptionsWithHome is testOptions with a caller-chosen home, for tests
+// whose spawned processes must carry an AF_HOME marker that matches (or
+// deliberately mismatches) the run's ConfigDir.
+func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Options {
+	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	return Options{
 		Fix:            fix,
@@ -138,13 +146,16 @@ func findByCheck(r *Report, check string) []Finding {
 func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
 	testguard.IsolateTmux(t) // private server: the marked session is dead by construction
 
+	// The orphan's AF_HOME must match the run's ConfigDir — a kill requires
+	// a proven home match, not just a dead-looking session.
+	home := t.TempDir()
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		"AF_SESSION": "af_doctor-dead-session",
-		"AF_HOME":    "/tmp/some-old-home",
+		"AF_HOME":    home,
 	})
 
 	// Read-only pass: reported, not touched.
-	report, err := Run(testOptions(t, false, orphan.PID))
+	report, err := Run(testOptionsWithHome(t, home, false, orphan.PID))
 	require.NoError(t, err)
 	findings := findByCheck(report, "orphaned-process")
 	require.Len(t, findings, 1)
@@ -154,7 +165,7 @@ func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
 	require.True(t, alive(orphan), "read-only doctor run must not signal anything")
 
 	// --fix pass: killed, with the outcome recorded.
-	report, err = Run(testOptions(t, true, orphan.PID))
+	report, err = Run(testOptionsWithHome(t, home, true, orphan.PID))
 	require.NoError(t, err)
 	findings = findByCheck(report, "orphaned-process")
 	require.Len(t, findings, 1)
@@ -162,6 +173,46 @@ func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
 	require.Eventually(t, func() bool { return !alive(orphan) }, 5*time.Second, 25*time.Millisecond,
 		"verified orphan must be dead after --fix")
 	require.Zero(t, report.UnresolvedCount())
+}
+
+// TestOrphanWithoutProvenHomeSurvivesFix pins the home-match gate: a process
+// marking a dead session is killed ONLY when its AF_HOME matches the active
+// home. A foreign home (e.g. a concurrent play-test sandbox whose sessions
+// live on a private `tmux -L` server and are invisible here) and a missing
+// home marker (pre-marker spawn, unreadable environ) are both report-only.
+func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	foreign := spawnWithEnv(t, "sh", nil, map[string]string{
+		"AF_SESSION": "af_doctor-foreign-home",
+		"AF_HOME":    t.TempDir(), // some other install's home
+	})
+	unmarked := spawnWithEnv(t, "sh", nil, map[string]string{
+		"AF_SESSION": "af_doctor-no-home",
+	})
+
+	report, err := Run(testOptions(t, true, foreign.PID, unmarked.PID))
+	require.NoError(t, err)
+	findings := findByCheck(report, "orphaned-process")
+	require.Len(t, findings, 2)
+	for _, f := range findings {
+		require.Empty(t, f.FixAction, "without a proven home match the finding must be report-only: %s", f.Detail)
+		require.False(t, f.Fixed)
+	}
+	var foreignDetail, unmarkedDetail bool
+	for _, f := range findings {
+		if strings.Contains(f.Detail, "another agent-factory home") {
+			foreignDetail = true
+		}
+		if strings.Contains(f.Detail, "no readable home marker") {
+			unmarkedDetail = true
+		}
+	}
+	require.True(t, foreignDetail, "foreign-home orphan must say whose it is")
+	require.True(t, unmarkedDetail, "unmarked orphan must say why it is not killed")
+
+	require.True(t, alive(foreign), "a foreign home's process must survive --fix")
+	require.True(t, alive(unmarked), "an unproven orphan must survive --fix")
 }
 
 // TestMarkedProcessOfLiveSessionIsNeverKilled: a marker pointing at a LIVE
@@ -360,9 +411,13 @@ func TestTmuxServerDeadParsing(t *testing.T) {
 // when the pid has been recycled (the fix closure re-verifies identity).
 func TestOrphanSignalIdentityGuard(t *testing.T) {
 	testguard.IsolateTmux(t)
-	orphan := spawnWithEnv(t, "sh", nil, map[string]string{"AF_SESSION": "af_doctor-recycle"})
+	home := t.TempDir()
+	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
+		"AF_SESSION": "af_doctor-recycle",
+		"AF_HOME":    home,
+	})
 
-	opts := testOptions(t, false, orphan.PID)
+	opts := testOptionsWithHome(t, home, false, orphan.PID)
 	report, err := Run(opts)
 	require.NoError(t, err)
 	require.Len(t, findByCheck(report, "orphaned-process"), 1)

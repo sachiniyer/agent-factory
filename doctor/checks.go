@@ -182,18 +182,39 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			}
 			continue
 		}
-		home, _ := proctree.EnvValue(procs[0].PID, tmux.EnvMarkerHome)
-		origin := name
-		if home != "" {
-			origin += " (home " + home + ")"
-		}
 		for _, p := range procs {
-			report.Findings = append(report.Findings, Finding{
-				Check:     "orphaned-process",
-				Detail:    fmt.Sprintf("%s was spawned by dead session %s", describeProc(p), origin),
-				FixAction: fmt.Sprintf("kill pid %d", p.PID),
-				fix:       killFix(ctx, p),
-			})
+			// A kill requires a PROVEN home match, not just a dead-looking
+			// session: another agent-factory home (e.g. a play-test sandbox
+			// on a private `tmux -L` server) has sessions that are invisible
+			// to this server's live list, so its perfectly healthy processes
+			// would otherwise masquerade as verified orphans here. Foreign
+			// or missing AF_HOME downgrades to report-only.
+			home, hasHome := proctree.EnvValue(p.PID, tmux.EnvMarkerHome)
+			switch {
+			case hasHome && filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir):
+				report.Findings = append(report.Findings, Finding{
+					Check: "orphaned-process",
+					Detail: fmt.Sprintf("%s was spawned by dead session %s (home %s)",
+						describeProc(p), name, home),
+					FixAction: fmt.Sprintf("kill pid %d", p.PID),
+					fix:       killFix(ctx, p),
+				})
+			case hasHome:
+				report.Findings = append(report.Findings, Finding{
+					Check: "orphaned-process",
+					Detail: fmt.Sprintf("%s marks dead session %s but belongs to another "+
+						"agent-factory home (%s) — its session may be live on that install's "+
+						"private tmux server, so it is not fixed from here; run `af doctor` "+
+						"with that home active", describeProc(p), name, home),
+				})
+			default:
+				report.Findings = append(report.Findings, Finding{
+					Check: "orphaned-process",
+					Detail: fmt.Sprintf("%s marks dead session %s but carries no readable "+
+						"home marker — cannot prove which install owns it, so it is "+
+						"reported, not killed", describeProc(p), name),
+				})
+			}
 		}
 	}
 
