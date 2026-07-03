@@ -87,6 +87,7 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	"detach_keys":          true,
 	"log_max_backups":      true,
 	"log_max_size_mb":      true,
+	"update_channel":       true,
 	"worktree_root":        true,
 }
 

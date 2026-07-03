@@ -1,0 +1,162 @@
+name: Stable Release
+
+# Manually cuts a stable release vX.Y.Z off master. The maintainer picks the
+# version (which digit to bump); previews then automatically rebase onto it
+# as vX.Y.(Z+1)-preview-N. See docs/release-process.md (#1041).
+#
+# Job order is deliberate: validate and build are read-only, and every
+# mutation (main.go bump commit, tag push, release publish) happens in the
+# final job only after all four artifacts exist — a failed preflight or
+# build must never leave a dangling commit or tag on master. All jobs pin
+# github.sha so a master push racing the workflow cannot desync what was
+# validated, what was built, and what gets tagged. The artifacts are built
+# from github.sha while the tag points at the bump commit one ahead; the
+# binaries are identical in behavior because their version comes from
+# -ldflags, and the bump commit only rewrites the main.go fallback string.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Stable version to release, no leading v (e.g. 1.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate version and preflight
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.24'
+        cache: true
+
+    - name: Validate requested version
+      env:
+        NEW_VERSION: ${{ inputs.version }}
+      run: git tag | .github/scripts/validate-stable-version.sh "$NEW_VERSION"
+
+    - name: Release preflight
+      run: |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "::error::Unformatted files found:"
+          echo "$unformatted"
+          gofmt -d .
+          exit 1
+        fi
+        go vet ./...
+        go test -v -race -count=1 ./...
+        go build ./...
+
+  build:
+    name: Build
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.sha }}
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.24'
+        cache: true
+
+    - name: Build
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
+        mkdir -p dist
+        go build -v -ldflags "-X main.version=${VERSION}" -o dist/agent-factory
+        cd dist
+        tar czf ../${ARCHIVE_NAME}.tar.gz agent-factory
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+        if-no-files-found: error
+        retention-days: 1
+
+  publish:
+    name: Tag and publish
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+        ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+
+    # Fetch the artifacts before touching git so a failed download cannot
+    # leave a pushed commit or tag with no release behind it.
+    - name: Download build artifacts
+      uses: actions/download-artifact@v7
+      with:
+        path: dist
+        merge-multiple: true
+
+    - name: Bump version, commit, and tag
+      env:
+        NEW_VERSION: ${{ inputs.version }}
+      run: |
+        CURRENT=$(grep -oP 'version\s+=\s+"\K[^"]+' main.go)
+        echo "Current main.go version: $CURRENT, releasing: $NEW_VERSION"
+        sed -i "s/version     = \"${CURRENT}\"/version     = \"${NEW_VERSION}\"/" main.go
+
+        # Fail loudly if the substitution missed (e.g. formatting drift in
+        # main.go) instead of tagging a release with a stale embedded version.
+        if ! grep -q "version     = \"${NEW_VERSION}\"" main.go; then
+          echo "::error::Failed to update version in main.go"
+          exit 1
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add main.go
+        # No-op when main.go already carries the version (e.g. re-running
+        # after a failure that landed the bump commit but not the tag).
+        if ! git diff --cached --quiet; then
+          git commit -m "chore: release v${NEW_VERSION}"
+        fi
+        git tag "v${NEW_VERSION}"
+        git push origin HEAD:master
+        git push origin "v${NEW_VERSION}"
+
+    # Immutable releases require all assets to be attached before the release
+    # is published: create as draft, upload assets into the draft, then publish.
+    # Stable releases are marked --latest so the releases/latest redirect
+    # (install.sh, fresh installs, the stable update channel) serves them.
+    - name: Publish release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ inputs.version }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        gh release create "v${VERSION}" \
+          --title "v${VERSION}" \
+          --generate-notes \
+          --draft \
+          dist/*.tar.gz
+        gh release edit "v${VERSION}" --draft=false --latest

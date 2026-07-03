@@ -2,13 +2,18 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
@@ -94,7 +99,7 @@ func TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable(t *testing.T) {
 	runtimeGOOS = "windows"
 	version = "1.0.0"
 	fetchCalls := 0
-	fetchLatestReleaseTagFn = func() (string, error) {
+	fetchLatestReleaseTagFn = func(string) (string, error) {
 		fetchCalls++
 		return "v1.0.1", nil
 	}
@@ -143,7 +148,7 @@ func TestAutoUpdateWindowsSkipsNetworkRegardlessOfVersion(t *testing.T) {
 
 	runtimeGOOS = "windows"
 	version = "1.0.1"
-	fetchLatestReleaseTagFn = func() (string, error) {
+	fetchLatestReleaseTagFn = func(string) (string, error) {
 		t.Fatalf("fetchLatestReleaseTagFn must not be called on Windows (#1002)")
 		return "", nil
 	}
@@ -169,7 +174,7 @@ func TestAutoUpdateRecordsCheckOnFetchFailure(t *testing.T) {
 		fetchLatestReleaseTagFn = prevFetch
 	})
 
-	fetchLatestReleaseTagFn = func() (string, error) {
+	fetchLatestReleaseTagFn = func(string) (string, error) {
 		return "", errors.New("simulated network failure")
 	}
 
@@ -205,7 +210,7 @@ func TestAutoUpdateRecordsCheckOnDownloadFailure(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.1", nil }
 	downloadBinaryFn = func(string) ([]byte, error) {
 		return nil, errors.New("simulated download failure")
 	}
@@ -257,7 +262,7 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.1", nil }
 	// Bypass the tarball extract by returning the raw binary directly.
 	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
@@ -327,7 +332,7 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func() (string, error) { return "v1.0.1", nil }
+	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.1", nil }
 	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
@@ -353,10 +358,360 @@ func TestIsNewer(t *testing.T) {
 		{"1.0.0", "1.0.0", false},
 		{"1.0.0", "1.0.1", false},
 		{"bogus", "1.0.0", false},
+
+		// Numeric, not lexical, comparison of the base.
+		{"1.0.10", "1.0.9", true},
+
+		// Preview channel ordering (#1041): z is monotonic within a base.
+		{"1.2.0-preview-3", "1.2.0-preview-2", true},
+		{"1.2.0-preview-2", "1.2.0-preview-3", false},
+		{"1.2.0-preview-10", "1.2.0-preview-9", true},
+		{"1.2.0-preview-2", "1.2.0-preview-2", false},
+
+		// Stable outranks its own previews (standard semver precedence),
+		// never the other way around.
+		{"1.2.0", "1.2.0-preview-9", true},
+		{"1.2.0-preview-1", "1.2.0", false},
+
+		// A preview off a newer base outranks an older stable, and any
+		// newer stable outranks old previews.
+		{"1.2.1-preview-1", "1.2.0", true},
+		{"1.3.0", "1.2.1-preview-9", true},
+		{"1.2.0", "1.2.1-preview-1", false},
+
+		// Migration from the pre-#1041 scheme: the first preview off the
+		// last auto-bumped stable must be seen as an update.
+		{"1.0.138-preview-1", "1.0.137", true},
+
+		// Unknown or malformed prerelease suffixes are never update targets.
+		{"1.2.0-rc-1", "1.0.0", false},
+		{"1.2.0-preview-", "1.0.0", false},
+		{"1.2.0-preview-x", "1.0.0", false},
+		{"1.2.0-preview--3", "1.0.0", false},
+		{"1.2.0.4", "1.0.0", false},
 	}
 	for _, c := range cases {
 		if got := isNewer(c.latest, c.current); got != c.want {
 			t.Errorf("isNewer(%q, %q) = %v, want %v", c.latest, c.current, got, c.want)
 		}
+	}
+}
+
+func TestPickLatestReleaseTag(t *testing.T) {
+	cases := []struct {
+		name     string
+		channel  string
+		releases []releaseEntry
+		want     string
+	}{
+		{
+			name:    "preview channel: newest preview wins over older stable",
+			channel: config.UpdateChannelPreview,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138-preview-2", Prerelease: true},
+				{TagName: "v1.0.138-preview-1", Prerelease: true},
+				{TagName: "v1.0.137"},
+			},
+			want: "v1.0.138-preview-2",
+		},
+		{
+			name:    "stable channel: previews are skipped entirely",
+			channel: config.UpdateChannelStable,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138-preview-2", Prerelease: true},
+				{TagName: "v1.0.138-preview-1", Prerelease: true},
+				{TagName: "v1.0.137"},
+			},
+			want: "v1.0.137",
+		},
+		{
+			name:    "stable channel: preview-shaped tag is skipped even without the prerelease flag",
+			channel: config.UpdateChannelStable,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138-preview-2"},
+				{TagName: "v1.0.137"},
+			},
+			want: "v1.0.137",
+		},
+		{
+			name:    "stable channel: stable-shaped tag flagged prerelease is skipped",
+			channel: config.UpdateChannelStable,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138", Prerelease: true},
+				{TagName: "v1.0.137"},
+			},
+			want: "v1.0.137",
+		},
+		{
+			name:    "preview channel: fresh stable wins over previews of the old base",
+			channel: config.UpdateChannelPreview,
+			releases: []releaseEntry{
+				{TagName: "v1.1.0"},
+				{TagName: "v1.0.138-preview-9", Prerelease: true},
+				{TagName: "v1.0.137"},
+			},
+			want: "v1.1.0",
+		},
+		{
+			name:    "preview channel: promoted base outranks its own previews",
+			channel: config.UpdateChannelPreview,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138-preview-9", Prerelease: true},
+				{TagName: "v1.0.138"},
+			},
+			want: "v1.0.138",
+		},
+		{
+			name:    "drafts and unparseable tags are skipped",
+			channel: config.UpdateChannelPreview,
+			releases: []releaseEntry{
+				{TagName: "v9.9.9", Draft: true},
+				{TagName: "nightly"},
+				{TagName: "v1.0.137"},
+			},
+			want: "v1.0.137",
+		},
+		{
+			name:    "API order does not matter",
+			channel: config.UpdateChannelPreview,
+			releases: []releaseEntry{
+				{TagName: "v1.0.137"},
+				{TagName: "v1.0.138-preview-10", Prerelease: true},
+				{TagName: "v1.0.138-preview-9", Prerelease: true},
+			},
+			want: "v1.0.138-preview-10",
+		},
+		{
+			name:     "no usable releases",
+			channel:  config.UpdateChannelPreview,
+			releases: []releaseEntry{{TagName: "junk"}, {TagName: "v1.0.0", Draft: true}},
+			want:     "",
+		},
+		{
+			name:    "stable channel: only previews published means no target",
+			channel: config.UpdateChannelStable,
+			releases: []releaseEntry{
+				{TagName: "v1.0.138-preview-1", Prerelease: true},
+			},
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		if got := pickLatestReleaseTag(c.channel, c.releases); got != c.want {
+			t.Errorf("%s: pickLatestReleaseTag = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestFetchLatestReleaseTagChannels mirrors the Greptile repro on #1078:
+// with a preview cut every 3 hours, page 1 of /releases fills up with 100
+// prereleases and the newest stable release is NOT in the list response —
+// it is only reachable via /releases/latest. The stable channel (the
+// default) must still resolve it; resolving nothing would silently stop
+// auto-update for every default-channel user. The preview channel must keep
+// resolving the newest preview from the list.
+func TestFetchLatestReleaseTagChannels(t *testing.T) {
+	previews := make([]releaseEntry, 0, 100)
+	for i := 100; i >= 1; i-- {
+		previews = append(previews, releaseEntry{
+			TagName:    fmt.Sprintf("v1.9.10-preview-%d", i),
+			Prerelease: true,
+		})
+	}
+	mux := http.NewServeMux()
+	listCalls := 0
+	mux.HandleFunc("/releases", func(w http.ResponseWriter, r *http.Request) {
+		listCalls++
+		if err := json.NewEncoder(w).Encode(previews); err != nil {
+			t.Errorf("encode releases list: %v", err)
+		}
+	})
+	latestCalls := 0
+	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		latestCalls++
+		if err := json.NewEncoder(w).Encode(releaseEntry{TagName: "v1.9.9"}); err != nil {
+			t.Errorf("encode latest release: %v", err)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	prevLatestURL := githubAPILatestReleaseURL
+	prevListURL := githubAPIReleasesURL
+	githubAPILatestReleaseURL = srv.URL + "/releases/latest"
+	githubAPIReleasesURL = srv.URL + "/releases?per_page=100"
+	t.Cleanup(func() {
+		githubAPILatestReleaseURL = prevLatestURL
+		githubAPIReleasesURL = prevListURL
+	})
+
+	tag, err := fetchLatestReleaseTag(config.UpdateChannelStable)
+	if err != nil {
+		t.Fatalf("stable channel: %v", err)
+	}
+	if tag != "v1.9.9" {
+		t.Fatalf("stable channel resolved %q, want v1.9.9", tag)
+	}
+	if listCalls != 0 {
+		t.Fatalf("stable channel hit the paginated /releases list %d times; it must use /releases/latest only", listCalls)
+	}
+
+	tag, err = fetchLatestReleaseTag(config.UpdateChannelPreview)
+	if err != nil {
+		t.Fatalf("preview channel: %v", err)
+	}
+	if tag != "v1.9.10-preview-100" {
+		t.Fatalf("preview channel resolved %q, want v1.9.10-preview-100", tag)
+	}
+	if listCalls != 1 {
+		t.Fatalf("preview channel should list /releases exactly once, got %d", listCalls)
+	}
+	if latestCalls != 1 {
+		t.Fatalf("/releases/latest should be hit exactly once (by the stable channel), got %d", latestCalls)
+	}
+}
+
+// TestFetchLatestStableTagRejectsOffSchemeTag pins the tripwire: a
+// /releases/latest response whose tag does not parse as a stable X.Y.Z must
+// error rather than become an update target.
+func TestFetchLatestStableTagRejectsOffSchemeTag(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(releaseEntry{TagName: "nightly-2026-07-02"}); err != nil {
+			t.Errorf("encode latest release: %v", err)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	prevLatestURL := githubAPILatestReleaseURL
+	githubAPILatestReleaseURL = srv.URL + "/releases/latest"
+	t.Cleanup(func() { githubAPILatestReleaseURL = prevLatestURL })
+
+	if _, err := fetchLatestReleaseTag(config.UpdateChannelStable); err == nil {
+		t.Fatalf("expected error for off-scheme releases/latest tag, got nil")
+	}
+}
+
+// TestAutoUpdateChannelFromConfig exercises the real config read path:
+// update_channel in the global config.json decides which channel the fetch
+// seam is asked for — stable when the key is absent (the default), preview
+// when opted in.
+func TestAutoUpdateChannelFromConfig(t *testing.T) {
+	cases := []struct {
+		name        string
+		configJSON  string // empty = no config.json (first run, materialized defaults)
+		wantChannel string
+	}{
+		{
+			name:        "no config defaults to stable",
+			wantChannel: config.UpdateChannelStable,
+		},
+		{
+			name:        "config without the key defaults to stable",
+			configJSON:  `{"default_program": "claude"}`,
+			wantChannel: config.UpdateChannelStable,
+		},
+		{
+			name:        "preview opt-in is honored",
+			configJSON:  `{"default_program": "claude", "update_channel": "preview"}`,
+			wantChannel: config.UpdateChannelPreview,
+		},
+		{
+			name:        "invalid value falls back to stable",
+			configJSON:  `{"default_program": "claude", "update_channel": "nightly"}`,
+			wantChannel: config.UpdateChannelStable,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := withTestHome(t)
+			captureLogs(t)
+			if c.configJSON != "" {
+				if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(c.configJSON), 0644); err != nil {
+					t.Fatalf("write config: %v", err)
+				}
+			}
+
+			prevGOOS := runtimeGOOS
+			prevFetch := fetchLatestReleaseTagFn
+			prevVersion := version
+			t.Cleanup(func() {
+				runtimeGOOS = prevGOOS
+				fetchLatestReleaseTagFn = prevFetch
+				version = prevVersion
+			})
+
+			runtimeGOOS = "linux"
+			version = "1.0.0"
+			gotChannel := ""
+			fetchLatestReleaseTagFn = func(channel string) (string, error) {
+				gotChannel = channel
+				// Same version as current: no download or install follows.
+				return "v1.0.0", nil
+			}
+
+			if err := autoUpdate(); err != nil {
+				t.Fatalf("autoUpdate: %v", err)
+			}
+			if gotChannel != c.wantChannel {
+				t.Fatalf("channel = %q, want %q", gotChannel, c.wantChannel)
+			}
+		})
+	}
+}
+
+// TestAutoUpdateDownloadsByTag verifies that the update tarball is fetched by
+// tag rather than through the releases/latest/download redirect: that
+// redirect never serves prereleases, so the preview channel (#1041) would be
+// unreachable through it.
+func TestAutoUpdateDownloadsByTag(t *testing.T) {
+	withTestHome(t)
+	captureLogs(t)
+
+	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+
+	prevGOOS := runtimeGOOS
+	prevFetch := fetchLatestReleaseTagFn
+	prevDownload := downloadBinaryFn
+	prevVersion := version
+	prevExe := osExecutableFn
+	prevShutdown := requestDaemonShutdownFn
+	prevRespawn := respawnDaemonFn
+	t.Cleanup(func() {
+		runtimeGOOS = prevGOOS
+		fetchLatestReleaseTagFn = prevFetch
+		downloadBinaryFn = prevDownload
+		version = prevVersion
+		osExecutableFn = prevExe
+		requestDaemonShutdownFn = prevShutdown
+		respawnDaemonFn = prevRespawn
+	})
+
+	runtimeGOOS = "linux"
+	version = "1.0.137"
+	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.138-preview-2", nil }
+	var gotURL string
+	downloadBinaryFn = func(url string) ([]byte, error) {
+		gotURL = url
+		return []byte("new-binary"), nil
+	}
+	osExecutableFn = func() (string, error) { return tempBin, nil }
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+		return daemon.ShutdownNoDaemon, nil
+	}
+	respawnDaemonFn = func() {}
+
+	if err := autoUpdate(); err != nil {
+		t.Fatalf("autoUpdate: %v", err)
+	}
+	wantURL := fmt.Sprintf(
+		"https://github.com/sachiniyer/agent-factory/releases/download/v1.0.138-preview-2/agent-factory-linux-%s.tar.gz",
+		runtime.GOARCH)
+	if gotURL != wantURL {
+		t.Fatalf("download URL = %q, want %q", gotURL, wantURL)
 	}
 }

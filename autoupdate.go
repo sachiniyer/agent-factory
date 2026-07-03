@@ -19,7 +19,26 @@ import (
 const (
 	autoUpdateCheckInterval = 24 * time.Hour
 	lastCheckFile           = "last_update_check"
-	githubAPILatestRelease  = "https://api.github.com/repos/sachiniyer/agent-factory/releases/latest"
+)
+
+// GitHub API endpoints for release discovery, one per channel (#1041).
+// Variables so tests can point them at a local httptest server.
+var (
+	// githubAPILatestReleaseURL answers the stable channel: GitHub pins
+	// /releases/latest to the newest non-prerelease release, with no
+	// pagination to overflow. Listing /releases and filtering would break
+	// here — with a preview cut every 3 hours, page 1 fills with
+	// prereleases within days and the newest stable falls off it, so a
+	// stable-channel client would resolve nothing (Greptile review, #1078).
+	githubAPILatestReleaseURL = "https://api.github.com/repos/sachiniyer/agent-factory/releases/latest"
+	// githubAPIReleasesURL answers the preview channel: /releases/latest
+	// never returns prereleases, so previews must come from the list. One
+	// page of 100 suffices: under the release scheme versions are only ever
+	// created in increasing order (preview z/base move forward, stable
+	// releases are validated strictly greater), so the version-newest
+	// release is always among the most recently created — and the whole
+	// page is scanned for the max rather than trusting item order.
+	githubAPIReleasesURL = "https://api.github.com/repos/sachiniyer/agent-factory/releases?per_page=100"
 )
 
 // runtimeGOOS is a variable so tests can override the value reported by
@@ -63,9 +82,13 @@ func autoUpdate() error {
 	// retry on every launch and flood GitHub's rate limit. See issue #459.
 	recordCheck()
 
-	latestTag, err := fetchLatestReleaseTagFn()
+	// Windows already returned above, before any network call (#1002).
+	goos := runtimeGOOS
+	goarch := runtime.GOARCH
+
+	latestTag, downloadURL, err := latestDownloadURL(updateChannel(), goos, goarch)
 	if err != nil {
-		return fmt.Errorf("failed to fetch latest release: %w", err)
+		return err
 	}
 
 	// Strip leading "v" from tags for comparison
@@ -75,14 +98,7 @@ func autoUpdate() error {
 		return nil
 	}
 
-	// Windows already returned above, before any network call (#1002).
-	goos := runtimeGOOS
-	goarch := runtime.GOARCH
-
 	log.InfoLog.Printf("auto-update: updating from %s to %s", version, latestVersion)
-
-	downloadURL := fmt.Sprintf("%s/latest/download/agent-factory-%s-%s.tar.gz",
-		releaseBaseURL, goos, goarch)
 
 	binary, err := downloadBinaryFn(downloadURL)
 	if err != nil {
@@ -130,67 +146,195 @@ func autoUpdate() error {
 	return nil
 }
 
-// fetchLatestReleaseTag queries the GitHub API for the latest release tag name.
-func fetchLatestReleaseTag() (string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("GET", githubAPILatestRelease, nil)
+// updateChannel returns the release channel auto-update and `af upgrade`
+// follow: config.UpdateChannelStable unless the user opted into
+// config.UpdateChannelPreview via the update_channel key (#1041). A config
+// that fails to load must never block or redirect an update check, so any
+// error falls back to the stable channel.
+func updateChannel() string {
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg == nil {
+		return config.UpdateChannelStable
+	}
+	return cfg.UpdateChannel
+}
+
+// latestDownloadURL resolves the newest release on the given channel (#1041)
+// and returns its tag plus the tarball URL for goos/goarch. Previews are not
+// served by the releases/latest/download redirect (GitHub pins that to the
+// newest stable), so the download must address the tag directly.
+func latestDownloadURL(channel, goos, goarch string) (tag, url string, err error) {
+	tag, err = fetchLatestReleaseTagFn(channel)
 	if err != nil {
+		return "", "", fmt.Errorf("failed to fetch latest release: %w", err)
+	}
+	url = fmt.Sprintf("%s/download/%s/agent-factory-%s-%s.tar.gz",
+		releaseBaseURL, tag, goos, goarch)
+	return tag, url, nil
+}
+
+// releaseEntry is the subset of the GitHub release object needed to pick an
+// update target.
+type releaseEntry struct {
+	TagName    string `json:"tag_name"`
+	Draft      bool   `json:"draft"`
+	Prerelease bool   `json:"prerelease"`
+}
+
+// fetchLatestReleaseTag queries the GitHub API for the newest release tag on
+// the given channel (#1041): the stable channel resolves directly through
+// /releases/latest, the preview channel through the release list (see the
+// endpoint docs above for why each channel needs its own endpoint).
+func fetchLatestReleaseTag(channel string) (string, error) {
+	if channel == config.UpdateChannelPreview {
+		return fetchLatestPreviewChannelTag()
+	}
+	return fetchLatestStableTag()
+}
+
+// fetchLatestStableTag resolves the newest stable release via
+// /releases/latest. The endpoint already excludes prereleases and drafts;
+// the shape checks below are a tripwire against a stable release published
+// with an off-scheme tag, which must fail loudly rather than become an
+// update target.
+func fetchLatestStableTag() (string, error) {
+	var release releaseEntry
+	if err := getGitHubJSON(githubAPILatestReleaseURL, &release); err != nil {
 		return "", err
+	}
+	parsed := parseSemver(strings.TrimPrefix(release.TagName, "v"))
+	if parsed == nil || parsed.preview || release.Prerelease || release.Draft {
+		return "", fmt.Errorf("releases/latest returned unusable tag %q for the stable channel", release.TagName)
+	}
+	return release.TagName, nil
+}
+
+// fetchLatestPreviewChannelTag resolves the newest release including
+// prereleases from the release list.
+func fetchLatestPreviewChannelTag() (string, error) {
+	var releases []releaseEntry
+	if err := getGitHubJSON(githubAPIReleasesURL, &releases); err != nil {
+		return "", err
+	}
+	tag := pickLatestReleaseTag(config.UpdateChannelPreview, releases)
+	if tag == "" {
+		return "", fmt.Errorf("no published release with a parseable version tag found on the preview channel")
+	}
+	return tag, nil
+}
+
+// getGitHubJSON fetches url from the GitHub API and decodes the JSON
+// response into out.
+func getGitHubJSON(url string, out any) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
 	}
-
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", err
-	}
-	return release.TagName, nil
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// isNewer returns true if latestVersion is newer than currentVersion.
-// Both should be semver strings like "1.0.16".
+// pickLatestReleaseTag returns the version-newest non-draft release tag on
+// the given channel, or "" when none qualifies. On the stable channel a
+// release is skipped when either GitHub's prerelease flag or the tag's
+// -preview-N suffix marks it as a preview; the preview channel includes
+// everything.
+func pickLatestReleaseTag(channel string, releases []releaseEntry) string {
+	best := ""
+	for _, r := range releases {
+		if r.Draft {
+			continue
+		}
+		v := strings.TrimPrefix(r.TagName, "v")
+		parsed := parseSemver(v)
+		if parsed == nil {
+			continue
+		}
+		if channel != config.UpdateChannelPreview && (r.Prerelease || parsed.preview) {
+			continue
+		}
+		if best == "" || isNewer(v, strings.TrimPrefix(best, "v")) {
+			best = r.TagName
+		}
+	}
+	return best
+}
+
+// semver is a parsed version under the two-channel scheme (#1041):
+// MAJOR.MINOR.PATCH with an optional "-preview-N" prerelease suffix.
+type semver struct {
+	nums    [3]int
+	preview bool
+	z       int
+}
+
+// isNewer returns true if latest is strictly newer than current under the
+// two-channel scheme (#1041). MAJOR.MINOR.PATCH compare numerically; on a
+// tie a stable release is newer than any of its previews (standard semver
+// precedence), and previews order by their preview number:
+// 1.2.0 < 1.2.1-preview-1 < 1.2.1-preview-2 < 1.2.1.
 func isNewer(latest, current string) bool {
-	lParts := parseSemver(latest)
-	cParts := parseSemver(current)
-	if lParts == nil || cParts == nil {
+	l := parseSemver(latest)
+	c := parseSemver(current)
+	if l == nil || c == nil {
 		return false
 	}
 	for i := 0; i < 3; i++ {
-		if lParts[i] > cParts[i] {
-			return true
-		}
-		if lParts[i] < cParts[i] {
-			return false
+		if l.nums[i] != c.nums[i] {
+			return l.nums[i] > c.nums[i]
 		}
 	}
-	return false
+	if l.preview != c.preview {
+		// Equal base: the stable release outranks its previews.
+		return c.preview
+	}
+	return l.preview && l.z > c.z
 }
 
-func parseSemver(v string) []int {
-	parts := strings.SplitN(v, ".", 3)
+// parseSemver parses "X.Y.Z" or "X.Y.Z-preview-N". Any other shape —
+// including unknown prerelease suffixes — returns nil so that unrecognized
+// tags are never treated as update targets.
+func parseSemver(v string) *semver {
+	core := v
+	var preview bool
+	var z int
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		core = v[:i]
+		numStr, ok := strings.CutPrefix(v[i+1:], "preview-")
+		if !ok {
+			return nil
+		}
+		n, err := strconv.Atoi(numStr)
+		if err != nil || n < 0 {
+			return nil
+		}
+		preview = true
+		z = n
+	}
+	parts := strings.Split(core, ".")
 	if len(parts) != 3 {
 		return nil
 	}
-	nums := make([]int, 3)
+	out := &semver{preview: preview, z: z}
 	for i, p := range parts {
 		n, err := strconv.Atoi(p)
-		if err != nil {
+		if err != nil || n < 0 {
 			return nil
 		}
-		nums[i] = n
+		out.nums[i] = n
 	}
-	return nums
+	return out
 }
 
 func lastCheckPath() string {

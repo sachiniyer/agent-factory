@@ -25,6 +25,15 @@ const (
 	defaultDaemonPollInterval = 1000
 )
 
+// Release channels selectable via the update_channel config key (#1041).
+const (
+	// UpdateChannelStable tracks manual stable releases (1.x.y) only.
+	UpdateChannelStable = "stable"
+	// UpdateChannelPreview additionally tracks the automatic
+	// 1.x.y-preview-z prereleases cut every 3 hours.
+	UpdateChannelPreview = "preview"
+)
+
 // aliasOutputRegex extracts the command value from a shell alias-probe line.
 // Each alternative is anchored to a real alias shape so that interactive rc
 // files printing unrelated text cannot poison first-run config (#1003):
@@ -128,6 +137,12 @@ type Config struct {
 	BranchPrefix string `json:"branch_prefix"`
 	// DetachKeys is the key combination used to detach from an attached session (e.g. "ctrl-w", "ctrl-q").
 	DetachKeys string `json:"detach_keys"`
+	// UpdateChannel selects which release channel auto-update and
+	// `af upgrade` follow (#1041): UpdateChannelStable (the default)
+	// tracks manual stable releases (1.x.y) only; UpdateChannelPreview
+	// additionally tracks the automatic 1.x.y-preview-z prereleases.
+	// Any other value falls back to stable with a warning.
+	UpdateChannel string `json:"update_channel"`
 }
 
 // ValidateProgramEnum returns nil when name is one of tmux.SupportedPrograms.
@@ -211,6 +226,7 @@ func DefaultConfig() *Config {
 		DaemonPollInterval: defaultDaemonPollInterval,
 		LogMaxSizeMB:       log.DefaultMaxSizeMB,
 		LogMaxBackups:      log.DefaultMaxBackups,
+		UpdateChannel:      UpdateChannelStable,
 		BranchPrefix: func() string {
 			user, err := user.Current()
 			if err != nil || user == nil || user.Username == "" {
@@ -620,6 +636,12 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	if config.LogMaxBackups < 0 {
 		log.WarningLog.Printf("log_max_backups=%d is negative; using default %d", config.LogMaxBackups, log.DefaultMaxBackups)
 		config.LogMaxBackups = log.DefaultMaxBackups
+	}
+
+	if config.UpdateChannel != UpdateChannelStable && config.UpdateChannel != UpdateChannelPreview {
+		log.WarningLog.Printf("update_channel=%q is not one of [%s, %s]; using default %q",
+			config.UpdateChannel, UpdateChannelStable, UpdateChannelPreview, UpdateChannelStable)
+		config.UpdateChannel = UpdateChannelStable
 	}
 
 	return config, nil

@@ -1,4 +1,8 @@
-name: Auto Release
+name: Auto Preview Release
+
+# Cuts a preview release (vX.Y.Z-preview-N, GitHub prerelease) off master
+# every 3 hours when there are new commits. Stable releases are cut manually
+# via stable-release.yml. See docs/release-process.md (#1041).
 
 on:
   schedule:
@@ -9,12 +13,12 @@ permissions:
   contents: write
 
 jobs:
-  check-and-bump:
-    name: Check for changes and bump version
+  check-and-tag:
+    name: Check for changes and tag preview
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
-      new_version: ${{ steps.bump.outputs.new_version }}
+      new_version: ${{ steps.compute.outputs.new_version }}
     steps:
     - uses: actions/checkout@v6
       with:
@@ -59,37 +63,26 @@ jobs:
         go test -v -race -count=1 ./...
         go build ./...
 
-    - name: Bump version
-      id: bump
+    - name: Compute preview version and tag
+      id: compute
       if: steps.check.outputs.should_release == 'true'
       run: |
-        # Extract current version from main.go
-        CURRENT=$(grep -oP 'version\s+=\s+"\K[^"]+' main.go)
-        echo "Current version: $CURRENT"
-
-        # Split and bump patch
-        IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-        NEW_PATCH=$((PATCH + 1))
-        NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
-        echo "New version: $NEW_VERSION"
+        NEW_VERSION=$(git tag | .github/scripts/next-preview-version.sh)
+        echo "New preview version: $NEW_VERSION"
         echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
-        # Update main.go
-        sed -i "s/version     = \"${CURRENT}\"/version     = \"${NEW_VERSION}\"/" main.go
-
-        # Commit and tag
+        # Previews never touch main.go or master history (#1041): the release
+        # binaries get their version stamped at build time via -ldflags. Just
+        # tag the current master commit.
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add main.go
-        git commit -m "chore: bump version to ${NEW_VERSION}"
         git tag "v${NEW_VERSION}"
-        git push origin HEAD:master
         git push origin "v${NEW_VERSION}"
 
   build:
     name: Build
-    needs: check-and-bump
-    if: needs.check-and-bump.outputs.should_release == 'true'
+    needs: check-and-tag
+    if: needs.check-and-tag.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -98,7 +91,7 @@ jobs:
     steps:
     - uses: actions/checkout@v6
       with:
-        ref: v${{ needs.check-and-bump.outputs.new_version }}
+        ref: v${{ needs.check-and-tag.outputs.new_version }}
 
     - name: Set up Go
       uses: actions/setup-go@v6
@@ -111,7 +104,7 @@ jobs:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
       run: |
-        VERSION="${{ needs.check-and-bump.outputs.new_version }}"
+        VERSION="${{ needs.check-and-tag.outputs.new_version }}"
         ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
         mkdir -p dist
         go build -v -ldflags "-X main.version=${VERSION}" -o dist/agent-factory
@@ -128,7 +121,7 @@ jobs:
 
   release:
     name: Release
-    needs: [check-and-bump, build]
+    needs: [check-and-tag, build]
     runs-on: ubuntu-latest
     steps:
     - name: Download build artifacts
@@ -139,15 +132,19 @@ jobs:
 
     # Immutable releases require all assets to be attached before the release
     # is published: create as draft, upload assets into the draft, then publish.
+    # Previews are prereleases and must NOT be marked --latest: the
+    # releases/latest redirect (install.sh, fresh installs) stays pinned to
+    # the newest stable release; auto-update resolves previews via the API.
     - name: Publish release
       env:
         GH_TOKEN: ${{ github.token }}
-        VERSION: ${{ needs.check-and-bump.outputs.new_version }}
+        VERSION: ${{ needs.check-and-tag.outputs.new_version }}
         GH_REPO: ${{ github.repository }}
       run: |
         gh release create "v${VERSION}" \
           --title "v${VERSION}" \
           --generate-notes \
+          --prerelease \
           --draft \
           dist/*.tar.gz
-        gh release edit "v${VERSION}" --draft=false --latest
+        gh release edit "v${VERSION}" --draft=false

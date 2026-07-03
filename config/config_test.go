@@ -338,6 +338,7 @@ func TestDefaultConfig(t *testing.T) {
 		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
 		assert.False(t, cfg.AutoYes)
 		assert.Equal(t, 1000, cfg.DaemonPollInterval)
+		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
 		assert.NotEmpty(t, cfg.BranchPrefix)
 		assert.True(t, strings.HasSuffix(cfg.BranchPrefix, "/"))
 
@@ -842,6 +843,52 @@ func TestLoadConfig(t *testing.T) {
 				assert.Equal(t, tc.expectedBackups, cfg.LogMaxBackups)
 			})
 		}
+	})
+
+	t.Run("validates update_channel and falls back to stable", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			content  string
+			expected string
+		}{
+			{"missing key -> stable", `{"default_program": "claude"}`, UpdateChannelStable},
+			{"stable -> as-is", `{"default_program": "claude", "update_channel": "stable"}`, UpdateChannelStable},
+			{"preview opt-in -> as-is", `{"default_program": "claude", "update_channel": "preview"}`, UpdateChannelPreview},
+			{"unknown value -> stable", `{"default_program": "claude", "update_channel": "nightly"}`, UpdateChannelStable},
+			{"empty string -> stable", `{"default_program": "claude", "update_channel": ""}`, UpdateChannelStable},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+				configDir, err := GetConfigDir()
+				require.NoError(t, err)
+				require.NoError(t, os.MkdirAll(configDir, 0755))
+
+				configPath := filepath.Join(configDir, ConfigFileName)
+				require.NoError(t, os.WriteFile(configPath, []byte(tc.content), 0644))
+
+				cfg, err := LoadConfig()
+				require.NoError(t, err)
+				require.NotNil(t, cfg)
+				assert.Equal(t, tc.expected, cfg.UpdateChannel)
+			})
+		}
+	})
+
+	t.Run("materializes update_channel into a first-run config.json", func(t *testing.T) {
+		// The key must be visible in the generated file so users discover it
+		// without reading docs, like the other global keys.
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+
+		_, err = LoadConfig()
+		require.NoError(t, err)
+
+		data, err := os.ReadFile(filepath.Join(configDir, ConfigFileName))
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"update_channel": "stable"`)
 	})
 
 	t.Run("surfaces parse error on invalid JSON instead of using defaults", func(t *testing.T) {
