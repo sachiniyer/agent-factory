@@ -107,8 +107,6 @@ func TestColdStartFromSnapshot_LaunchSelectionParity(t *testing.T) {
 	require.Nil(t, h.store.GetSelectedInstance(),
 		"no instance bound to the workspace panes at launch (TabbedWindow.instance started nil pre-store)")
 	require.Equal(t, 0, h.store.ActiveTab(), "active tab starts on the agent tab")
-	require.Equal(t, ui.ContentModeInstance, h.contentPane.GetMode(),
-		"instances exist, so the content pane is in instance mode showing the default empty pane")
 
 	// First keypress: Down moves onto the first restored instance and binds it.
 	h.sidebar.Down()
@@ -138,7 +136,6 @@ func TestColdStartFromSnapshot_EmptySnapshotNoSelection(t *testing.T) {
 	require.Nil(t, h.sidebar.GetSelectedInstance())
 	require.Nil(t, h.store.GetSelectedInstance())
 	require.Equal(t, 0, h.store.ActiveTab())
-	require.Equal(t, ui.ContentModeEmpty, h.contentPane.GetMode())
 }
 
 // TestColdStartFromSnapshot_HardErrorAborts proves a non-warming daemon failure

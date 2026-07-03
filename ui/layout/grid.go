@@ -59,6 +59,15 @@ type Grid struct {
 	// otherwise the workspace is pane A alone and the caller keeps pane B's
 	// binding for when the terminal grows back.
 	Split bool
+
+	// AutomationsExpanded requests the automations strip expanded in place —
+	// focusing the strip swaps the compact task rows for the full task
+	// manager (§2.1). Honored whenever the strip is visible (i.e. outside
+	// minimal mode): the expanded strip takes half the rows above the status
+	// bar, so the tree and workspace stay usable behind it. Expansion
+	// overrides the compact 1-line degradation — an editor cannot run in one
+	// line.
+	AutomationsExpanded bool
 }
 
 // Layout is a solved arrangement: the named region rects plus which regions
@@ -83,9 +92,12 @@ type Layout struct {
 	// are visible).
 	SplitActive bool
 	// AutomationsVisible reports whether the automations strip is shown at
-	// all; AutomationsCompact whether it is the 1-line summary.
-	AutomationsVisible bool
-	AutomationsCompact bool
+	// all; AutomationsCompact whether it is the 1-line summary;
+	// AutomationsExpanded whether the strip got the expanded (full task
+	// manager) allocation.
+	AutomationsVisible  bool
+	AutomationsCompact  bool
+	AutomationsExpanded bool
 }
 
 // Solve lays out a width×height terminal.
@@ -107,6 +119,18 @@ func (g Grid) Solve(width, height int) Layout {
 		rows := AutomationsRows
 		if l.AutomationsCompact {
 			rows = AutomationsCompactRows
+		}
+		if g.AutomationsExpanded {
+			// Expanded in place: half the rows above the status bar. Outside
+			// minimal mode rem.H >= MinimalHeight - StatusBarRows = 13, so the
+			// expanded strip always gets >= 6 rows and the tree/workspace
+			// keeps at least as much.
+			l.AutomationsExpanded = true
+			l.AutomationsCompact = false
+			rows = rem.H / 2
+			if rows < AutomationsRows {
+				rows = AutomationsRows
+			}
 		}
 		rem, l.Automations = rem.CutBottom(rows)
 	}

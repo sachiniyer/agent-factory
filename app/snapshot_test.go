@@ -73,7 +73,7 @@ func TestReconcileSnapshot_PreservesSelectionAndActiveTab(t *testing.T) {
 	h.sidebar.SelectInstance(b)
 	require.Same(t, b, h.sidebar.GetSelectedInstance())
 
-	tw := h.contentPane.TabbedWindow()
+	tw := h.paneA
 	require.True(t, tw.JumpToTab(1), "set a non-zero active tab")
 	require.Equal(t, 1, tw.GetActiveTab())
 

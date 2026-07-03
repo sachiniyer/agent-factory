@@ -2,27 +2,27 @@ package app
 
 import (
 	"fmt"
-	"github.com/sachiniyer/agent-factory/keys"
-	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/ui"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 // handleDefaultKeyPress handles key events in stateDefault (main interaction state).
 func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Model, tea.Cmd) {
-	tw := m.contentPane.TabbedWindow()
-
 	switch name {
 	case keys.KeyHelp:
 		return m.showHelpScreen(helpTypeGeneral{}, nil)
 
-	// Sidebar navigation
+	// Tree navigation
 	case keys.KeyUp:
 		m.sidebar.Up()
 		return m, m.selectionChanged()
@@ -47,52 +47,29 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.startNewInstance(true)
 
 	case keys.KeyNew:
-		// Context-aware: if on Tasks section, create a task instead
-		if m.sidebar.GetSelection().Kind == ui.SectionTasks {
-			cwd, err := os.Getwd()
-			if err != nil {
-				cwd = "."
-			}
-			m.contentPane.TaskPane().EnterCreateMode(cwd)
-			m.contentPane.SetMode(ui.ContentModeTasks)
-			return m, m.selectionChanged()
-		}
 		return m.startNewInstance(false)
 
 	case keys.KeyTask:
+		// Jump to the automations strip and open the create form directly.
 		cwd, err := os.Getwd()
 		if err != nil {
 			cwd = "."
 		}
-		m.contentPane.TaskPane().EnterCreateMode(cwd)
-		m.navigateToSection(ui.SectionTasks)
-		m.contentPane.SetMode(ui.ContentModeTasks)
-		return m, m.selectionChanged()
+		m.focusRegion(layout.RegionAutomations)
+		m.automations.TaskPane().EnterCreateMode(cwd)
+		return m, nil
 
 	case keys.KeyTaskList:
-		m.navigateToSection(ui.SectionTasks)
-		return m, m.selectionChanged()
-
-	case keys.KeyTriggerTask:
-		if m.sidebar.GetSelection().Kind != ui.SectionTasks {
-			return m, nil
-		}
-		sp := m.contentPane.TaskPane()
-		if len(sp.GetTasks()) == 0 {
-			return m, m.handleError(fmt.Errorf("no tasks to trigger"))
-		}
-		m.contentPane.SetMode(ui.ContentModeTasks)
-		sp.SetFocus(true)
-		sp.SetPendingTrigger()
-		return m, m.handleTaskTrigger()
+		// Focus the automations strip: it expands to the full task manager.
+		m.focusRegion(layout.RegionAutomations)
+		return m, nil
 
 	case keys.KeySearch:
 		return m.showSearchOverlay()
 
-	// Hooks configuration
+	// Hooks configuration (#1024 PR 4: an overlay, not a sidebar slot)
 	case keys.KeyHooks:
-		m.navigateToSection(ui.SectionHooks)
-		return m, m.selectionChanged()
+		return m.showHooksOverlay()
 
 	// PR actions
 	case keys.KeyOpenPR:
@@ -100,33 +77,22 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyCopyPR:
 		return m.handleCopyPR()
 
-	// Scrolling
+	// Scrolling (workspace pane)
 	case keys.KeyShiftUp:
-		m.contentPane.ScrollUp()
+		m.paneA.ScrollUp()
 		return m, m.selectionChanged()
 	case keys.KeyShiftDown:
-		m.contentPane.ScrollDown()
+		m.paneA.ScrollDown()
 		return m, m.selectionChanged()
 
-	// Tab cycling (instance mode only)
+	// Focus ring (#1024 PR 4): Tab cycles tree → pane A → automations. Tabs
+	// themselves are reached via the tree and the 1-9 jump keys.
 	case keys.KeyTab:
-		if m.contentPane.GetMode() == ui.ContentModeInstance {
-			tw.Toggle()
-			m.menu.SetActiveTab(tw.GetActiveTab())
-			m.sidebar.SyncCursorToActiveTab()
-			return m, m.selectionChanged()
-		}
-		return m, nil
+		return m, m.cycleFocus(false)
 	case keys.KeyShiftTab:
-		if m.contentPane.GetMode() == ui.ContentModeInstance {
-			tw.ToggleBack()
-			m.menu.SetActiveTab(tw.GetActiveTab())
-			m.sidebar.SyncCursorToActiveTab()
-			return m, m.selectionChanged()
-		}
-		return m, nil
+		return m, m.cycleFocus(true)
 
-	// Tab lifecycle (instance mode only)
+	// Tab lifecycle
 	case keys.KeyNewTab:
 		return m.handleNewTab()
 	case keys.KeyCloseTab:
@@ -275,7 +241,7 @@ func killConfirmationWarning(wt string) string {
 // handleEnter handles the enter/open key action.
 func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	sel := m.sidebar.GetSelection()
-	tw := m.contentPane.TabbedWindow()
+	tw := m.paneA
 
 	// Toggle expandable section headers (only Instances has children)
 	if sel.IsHeader && sel.Kind == ui.SectionInstances {
@@ -349,9 +315,6 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 // the snapshot reconcile (PR 3) keeps it mirrored thereafter. The daemon's soft
 // cap (max tabs) error is surfaced verbatim.
 func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
-	if m.contentPane.GetMode() != ui.ContentModeInstance {
-		return m, nil
-	}
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil {
 		return m, nil
@@ -374,7 +337,7 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 		return m, m.handleError(attachErr)
 	}
 
-	tw := m.contentPane.TabbedWindow()
+	tw := m.paneA
 	tw.SelectLastTab()
 	m.menu.SetActiveTab(tw.GetActiveTab())
 	m.sidebar.SyncCursorToActiveTab()
@@ -395,14 +358,11 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 // tab locally via DropClosedTab — a no-kill removal, since the daemon already
 // tore the tmux session down.
 func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
-	if m.contentPane.GetMode() != ui.ContentModeInstance {
-		return m, nil
-	}
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil {
 		return m, nil
 	}
-	tw := m.contentPane.TabbedWindow()
+	tw := m.paneA
 	idx := tw.GetActiveTab()
 	if idx <= 0 {
 		return m, m.handleError(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
@@ -440,7 +400,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 // tree and the tab bar can't disagree; with the cursor on the instance row the
 // pre-tree behavior is preserved exactly (only the tree's "*" marker moves).
 func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
-	tw := m.contentPane.TabbedWindow()
+	tw := m.paneA
 	if !tw.JumpToTab(oneBased - 1) {
 		return m, nil
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
@@ -291,26 +292,34 @@ func (p *TabPane) updateShellLocked(instance *session.Instance, activeTab int) e
 	return nil
 }
 
-// String renders the pane content.
+// String renders the pane content, exactly width×height cells. Every branch
+// funnels through a final layout.ClampToRect so no capture, viewport, or
+// fallback content can ever exceed the allocation: wide capture-pane lines —
+// a process tab whose program emits lines wider than the pane (#1082) — are
+// truncated per line rather than wrapped (the pre-cutover Style.Width wrap
+// re-flowed them onto extra rows, overflowing the pane and pushing chrome off
+// screen).
 func (p *TabPane) String() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.width <= 0 || p.height <= 0 {
 		return ""
 	}
+	rect := layout.Rect{W: p.width, H: p.height}
 
 	// In scroll/copy mode always use the viewport.
 	if p.isScrolling {
-		return p.viewport.View()
+		return layout.ClampToRect(p.viewport.View(), rect)
 	}
 
 	if p.content.fallback {
-		// TabbedWindow.SetSize already subtracts borders/margins/padding from
+		// TabbedWindow.SetRect already subtracts borders/margins/padding from
 		// p.height, so use it directly to match normal mode. Subtracting again
 		// would double-count chrome and leave a trailing blank line (#616/#703).
 		// renderCenteredFallback centers using the wrapped line count so narrow
 		// panes don't miscenter (#699).
-		return renderCenteredFallback(tabPaneStyle, p.content.text, p.width, p.height)
+		return layout.ClampToRect(
+			renderCenteredFallback(tabPaneStyle, p.content.text, p.width, p.height), rect)
 	}
 
 	lines := strings.Split(p.content.text, "\n")
@@ -322,16 +331,14 @@ func (p *TabPane) String() string {
 		lines = lines[:len(lines)-1]
 	}
 
-	if p.height > 0 {
-		if len(lines) > p.height {
-			// Show the newest output, not the oldest (#649).
-			lines = lines[len(lines)-p.height:]
-		} else {
-			lines = append(lines, make([]string, p.height-len(lines))...)
-		}
+	if len(lines) > p.height {
+		// Show the newest output, not the oldest (#649). Height is trimmed
+		// here — before the clamp — because ClampToRect keeps the FIRST
+		// height lines, and a capture must keep the newest.
+		lines = lines[len(lines)-p.height:]
 	}
 
-	return tabPaneStyle.Width(p.width).Render(strings.Join(lines, "\n"))
+	return layout.ClampToRect(tabPaneStyle.Render(strings.Join(lines, "\n")), rect)
 }
 
 // ScrollUp enters scroll mode (if not already) and scrolls up.

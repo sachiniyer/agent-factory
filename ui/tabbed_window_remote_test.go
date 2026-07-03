@@ -46,9 +46,10 @@ func startedRemoteInstance(t *testing.T, withTerminal bool) *session.Instance {
 	return inst
 }
 
-// TestTabbedWindowRemoteTabBar verifies a remote instance is tab-driven: the bar
-// shows the agent (Preview) tab plus a Terminal tab only when terminal_cmd is
-// configured — never the local two-tab default when terminal_cmd is absent.
+// TestTabbedWindowRemoteTabBar verifies a remote instance is tab-driven: its
+// tab set is the agent (Preview) tab plus a Terminal tab only when
+// terminal_cmd is configured — never the local two-tab default when
+// terminal_cmd is absent.
 func TestTabbedWindowRemoteTabBar(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
@@ -67,12 +68,14 @@ func TestTabbedWindowRemoteTabBar(t *testing.T) {
 			setWindowInstance(w, inst)
 			require.Equal(t, tc.wantLabels, w.tabLabels())
 
-			// Toggle wraps within the real tab count, never a phantom slot.
-			w.Toggle()
+			// The jump keys operate within the real tab count, never a
+			// phantom slot.
 			if tc.withTerm {
-				require.Equal(t, 1, w.GetActiveTab(), "Toggle advances onto the terminal tab")
+				require.True(t, w.JumpToTab(1), "jump lands on the terminal tab")
+				require.Equal(t, 1, w.GetActiveTab())
 			} else {
-				require.Equal(t, 0, w.GetActiveTab(), "single-tab remote: Toggle stays on the agent tab")
+				require.False(t, w.JumpToTab(1), "single-tab remote: no second slot to jump to")
+				require.Equal(t, 0, w.GetActiveTab())
 			}
 		})
 	}

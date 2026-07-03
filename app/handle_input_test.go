@@ -165,7 +165,7 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 			h.store.AddInstance(preceding)
 
 			// The naming instance: Loading, empty title — exactly what
-			// startNewInstance creates. It is selected (last row).
+			// startNewInstance creates. It is selected.
 			naming, err := session.NewInstance(session.InstanceOptions{
 				Title:   "",
 				Path:    t.TempDir(),
@@ -177,21 +177,30 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 			h.sidebar.SetSelectedInstance(h.store.NumInstances() - 1)
 			h.namingInstance = naming
 
+			// A trailing instance gives the drift somewhere to land now that
+			// the rail has no trailing Tasks/Hooks headers (#1024 PR 4).
+			trailing := newLoadingInstance(t, "trailing")
+			trailing.SetStatus(session.Running)
+			h.store.AddInstance(trailing)
+
 			// A background mutation removes `preceding` (a daemon-owned row the
 			// snapshot no longer lists). RemoveInstanceByTitle rebuilds
 			// visibleItems without adjusting selectedIdx, drifting the selection
-			// off the naming row onto a section header.
+			// off the naming row — here onto the trailing instance, which a
+			// selection-based cancel would wrongly target.
 			h.store.RemoveInstanceByTitle("preceding")
-			require.Nil(t, h.sidebar.GetSelectedInstance(),
-				"precondition: selection must have drifted off the naming row onto a header")
+			require.NotSame(t, naming, h.sidebar.GetSelectedInstance(),
+				"precondition: selection must have drifted off the naming row")
 
 			_, _ = h.handleStateNew(tc.key)
 
 			assert.Equal(t, stateDefault, h.state, "cancel must return to the default state")
 			assert.Nil(t, h.namingInstance, "namingInstance pointer must be cleared on cancel")
-			assert.Equal(t, 0, h.store.NumInstances(),
+			assert.Equal(t, 1, h.store.NumInstances(),
 				"the naming instance must be removed on cancel, not left as a Loading zombie; remaining titles: %v",
 				collectTitles(h.store.GetInstances()))
+			assert.Equal(t, "trailing", h.store.GetInstances()[0].Title,
+				"cancel must kill the captured naming instance, never the drifted selection")
 		})
 	}
 }

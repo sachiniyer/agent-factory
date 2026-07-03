@@ -14,8 +14,8 @@ const (
 	KeyKill
 	KeyQuit
 
-	KeyTab        // Tab is a special keybinding for switching between panes.
-	KeyShiftTab   // ShiftTab cycles panes in reverse.
+	KeyTab        // Tab cycles the workspace focus ring (tree → pane → automations).
+	KeyShiftTab   // ShiftTab cycles the focus ring in reverse.
 	KeySubmitName // SubmitName is a special keybinding for submitting the name of a new instance.
 
 	KeyNewTab   // NewTab spawns a new shell tab in the selected instance (#930 PR 4).
@@ -94,11 +94,11 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	),
 	KeyShiftUp: key.NewBinding(
 		key.WithKeys("shift+up"),
-		key.WithHelp("shift+↑", "scroll"),
+		key.WithHelp("⇧↑", "scroll"),
 	),
 	KeyShiftDown: key.NewBinding(
 		key.WithKeys("shift+down"),
-		key.WithHelp("shift+↓", "scroll"),
+		key.WithHelp("⇧↓", "scroll"),
 	),
 	KeyEnter: key.NewBinding(
 		key.WithKeys("enter", "o"),
@@ -126,23 +126,23 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	),
 	KeyTab: key.NewBinding(
 		key.WithKeys("tab"),
-		key.WithHelp("tab", "switch tab"),
+		key.WithHelp("tab", "focus"),
 	),
 	KeyShiftTab: key.NewBinding(
 		key.WithKeys("shift+tab"),
-		key.WithHelp("shift+tab", "prev tab"),
+		key.WithHelp("shift+tab", "focus prev"),
 	),
 	KeyNewTab: key.NewBinding(
 		key.WithKeys("t"),
-		key.WithHelp("t", "new tab"),
+		key.WithHelp("t", "tab"),
 	),
 	KeyCloseTab: key.NewBinding(
 		key.WithKeys("w"),
-		key.WithHelp("w", "close tab"),
+		key.WithHelp("w", "close"),
 	),
 	KeyJumpTab: key.NewBinding(
 		key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"),
-		key.WithHelp("1-9", "jump tab"),
+		key.WithHelp("1-9", "jump"),
 	),
 	KeyTask: key.NewBinding(
 		key.WithKeys("s"),

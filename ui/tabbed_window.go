@@ -5,50 +5,60 @@ import (
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-func tabBorderWithBottom(left, middle, right string) lipgloss.Border {
-	border := lipgloss.RoundedBorder()
-	border.BottomLeft = left
-	border.Bottom = middle
-	border.BottomRight = right
-	return border
-}
+var windowStyle = lipgloss.NewStyle().
+	BorderForeground(AccentColor).
+	Border(lipgloss.RoundedBorder())
 
-var (
-	inactiveTabBorder = tabBorderWithBottom("┴", "─", "┴")
-	activeTabBorder   = tabBorderWithBottom("┘", " ", "└")
-	inactiveTabStyle  = lipgloss.NewStyle().
-				Border(inactiveTabBorder, true).
-				BorderForeground(AccentColor).
-				AlignHorizontal(lipgloss.Center)
-	activeTabStyle = inactiveTabStyle.
-			Border(activeTabBorder, true).
-			AlignHorizontal(lipgloss.Center)
-	windowStyle = lipgloss.NewStyle().
-			BorderForeground(AccentColor).
-			Border(lipgloss.NormalBorder(), false, true, true, true)
-)
+// blurredWindowStyle recedes the pane frame when focus is elsewhere in the
+// workspace, so the focus ring is legible at a glance.
+var blurredWindowStyle = windowStyle.
+	BorderForeground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#555555"})
 
-// TabbedWindow has tabs at the top of a pane which can be selected. The tabs
-// take up one rune of height. The tab list is sourced from the selected
-// instance's Tabs (#930 PR 2): every tab renders through one shared TabPane by
-// capturing the selected tab's session.
+var paneHeaderStyle = lipgloss.NewStyle().
+	Bold(true).
+	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
+
+var paneHeaderFocusedStyle = lipgloss.NewStyle().
+	Bold(true).
+	Background(lipgloss.Color("#dde4f0")).
+	Foreground(lipgloss.Color("#1a1a1a"))
+
+var paneHeaderDimStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+
+// paneHeaderRows is the height of the `title · tab` header line rendered
+// inside the pane frame. With the tab bar gone (#1024 PR 4) the header is
+// where the active tab is named; the full tab set lives in the left-rail tree.
+const paneHeaderRows = 1
+
+// TabbedWindow is the workspace content pane (pane A of RFC §2.1): a live
+// capture-pane view of the selected instance's active tab, framed with a
+// `title · tab` header. The tab BAR is gone as of the layout cutover (#1024
+// PR 4) — tabs live in the left-rail tree and the 1-9 jump keys, and the
+// header names the one being shown. Every tab renders through one shared
+// TabPane by capturing the selected tab's session (#930 PR 2).
 //
 // The window is a VIEW over the store.Projection (#1024 PR 2): both the
 // selected instance and the active tab index live in the store, so the window
 // no longer holds an instance pointer of its own. The active tab is an atomic
 // in the store because the background refreshPanesCmd goroutine reads it via
-// UpdateContent while the bubbletea event loop writes it via Toggle/ToggleBack
-// (#684); every other store read here happens on the event loop only.
+// UpdateContent while the bubbletea event loop writes it via the tab-jump
+// handlers (#684); every other store read here happens on the event loop only.
+//
+// It implements layout.Pane: SetRect sizes the inner TabPane, and View()
+// returns exactly Rect-sized output via layout.ClampToRect.
 type TabbedWindow struct {
-	proj   *store.Projection
-	height int
-	width  int
+	proj    *store.Projection
+	rect    layout.Rect
+	focused bool
 
 	tab *TabPane
 }
@@ -71,7 +81,7 @@ func (w *TabbedWindow) selectedInstance() *session.Instance {
 // the index never dangles out of range: tab counts vary per instance (#930
 // PR 4), and switching to an instance with fewer tabs must not leave the
 // index pointing past the end, which would make isAgentSlot() lie and the
-// number/Toggle math operate on a phantom slot.
+// number-jump math operate on a phantom slot.
 func (w *TabbedWindow) ClampActiveTab() {
 	n := len(w.tabLabels())
 	if n <= 0 {
@@ -111,8 +121,8 @@ func (w *TabbedWindow) SelectLastTab() {
 
 // tabLabels returns the labels for the selected instance's tabs. The label
 // derivation lives in tree.TabLabels (#1024 PR 3) — the single source of truth
-// shared with the sidebar tree, so the bar, the tree's child rows, and the 1-9
-// jump keys always agree on slot numbering. Never empty.
+// shared with the sidebar tree, so the pane header, the tree's child rows, and
+// the 1-9 jump keys always agree on slot numbering. Never empty.
 func (w *TabbedWindow) tabLabels() []string {
 	return tree.TabLabels(w.selectedInstance())
 }
@@ -123,54 +133,55 @@ func (w *TabbedWindow) isAgentSlot() bool {
 	return w.proj.ActiveTab() == 0
 }
 
-// AdjustPreviewWidth adjusts the width of the preview pane to be 90% of the provided width.
-func AdjustPreviewWidth(width int) int {
-	return int(float64(width) * 0.9)
+// SetRect implements layout.Pane: the pane renders exactly r. The inner
+// TabPane gets the area inside the frame minus the header line; that inner
+// size is also what the instances' tmux sessions are resized to (see
+// GetPreviewSize), so the capture matches the visible area exactly — the full
+// workspace width, with no AdjustPreviewWidth-style right buffer (#1024 PR 4).
+func (w *TabbedWindow) SetRect(r layout.Rect) {
+	w.rect = r
+	iw, ih := w.innerSize()
+	w.tab.SetSize(iw, ih)
 }
 
-func (w *TabbedWindow) SetSize(width, height int) {
-	w.width = AdjustPreviewWidth(width)
-	w.height = height
-
-	// Calculate the content height by subtracting:
-	// 1. Tab height (including border and padding)
-	// 2. Window style vertical frame size
-	// 3. Additional padding/spacing (2 for the newline and spacing)
-	tabHeight := activeTabStyle.GetVerticalFrameSize() + 1
-	contentHeight := height - tabHeight - windowStyle.GetVerticalFrameSize() - 2
-	contentWidth := w.width - windowStyle.GetHorizontalFrameSize()
-
+// innerSize is the TabPane content area: the rect minus the frame and header.
+func (w *TabbedWindow) innerSize() (width, height int) {
+	width = w.rect.W - windowStyle.GetHorizontalFrameSize()
+	height = w.rect.H - windowStyle.GetVerticalFrameSize() - paneHeaderRows
 	// Clamp to zero so tiny terminals don't produce negative dimensions, which
 	// would otherwise overflow when later cast to uint16 (e.g. by pty.Setsize).
-	if contentHeight < 0 {
-		contentHeight = 0
+	if width < 0 {
+		width = 0
 	}
-	if contentWidth < 0 {
-		contentWidth = 0
+	if height < 0 {
+		height = 0
 	}
-
-	w.tab.SetSize(contentWidth, contentHeight)
+	return width, height
 }
 
+// GetPreviewSize returns the size tmux sessions should render at — the
+// TabPane's content area.
 func (w *TabbedWindow) GetPreviewSize() (width, height int) {
 	return w.tab.width, w.tab.height
 }
 
-func (w *TabbedWindow) Toggle() {
-	n := len(w.tabLabels())
-	if n <= 0 {
-		return
-	}
-	w.proj.SetActiveTab((w.proj.ActiveTab() + 1) % n)
-}
+// Focused implements layout.Pane.
+func (w *TabbedWindow) Focused() bool { return w.focused }
 
-func (w *TabbedWindow) ToggleBack() {
-	n := len(w.tabLabels())
-	if n <= 0 {
-		return
-	}
-	w.proj.SetActiveTab((w.proj.ActiveTab() - 1 + n) % n)
-}
+// Focus implements layout.Pane.
+func (w *TabbedWindow) Focus() { w.focused = true }
+
+// Blur implements layout.Pane.
+func (w *TabbedWindow) Blur() { w.focused = false }
+
+// HandleKey implements layout.Pane. The root model routes all workspace keys
+// globally in the single-pane layout (scroll, attach, tab jumps), so the pane
+// itself consumes nothing yet; per-pane key handling arrives with the split
+// (#1024 PR 5).
+func (w *TabbedWindow) HandleKey(tea.KeyMsg) (tea.Cmd, bool) { return nil, false }
+
+// HandleMouse implements layout.Pane. Mouse support is #1024 PR 6.
+func (w *TabbedWindow) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
 
 // UpdateContent updates the content of the active tab's pane. instance may be
 // nil. It is called from the refreshPanesCmd goroutine with the instance
@@ -239,64 +250,49 @@ func (w *TabbedWindow) IsInScrollMode() bool {
 	return w.tab.IsScrolling()
 }
 
+// renderHeader renders the one-line `title · tab` header. The header is the
+// only place the active tab is named inside the pane (the tab bar is gone);
+// the highlight doubles as the pane's focus indicator.
+func (w *TabbedWindow) renderHeader(width int) string {
+	var text string
+	if inst := w.selectedInstance(); inst != nil {
+		labels := w.tabLabels()
+		idx := w.proj.ActiveTab()
+		label := ""
+		if idx >= 0 && idx < len(labels) {
+			label = labels[idx]
+		}
+		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
+	} else {
+		text = " no session selected "
+	}
+	style := paneHeaderStyle
+	switch {
+	case w.focused:
+		style = paneHeaderFocusedStyle
+	case w.selectedInstance() == nil:
+		style = paneHeaderDimStyle
+	}
+	header := style.Render(text)
+	return layout.ClampToRect(header, layout.Rect{W: width, H: paneHeaderRows})
+}
+
+// View implements layout.Pane: exactly rect-sized output — the framed header +
+// live capture view.
+func (w *TabbedWindow) View() string { return w.String() }
+
 func (w *TabbedWindow) String() string {
-	if w.width == 0 || w.height == 0 {
+	if w.rect.Empty() {
 		return ""
 	}
-
-	labels := w.tabLabels()
-
-	var renderedTabs []string
-
-	activeTab := w.proj.ActiveTab()
-	totalTabWidth := w.width
-	tabWidth := totalTabWidth / len(labels)
-	lastTabWidth := totalTabWidth - tabWidth*(len(labels)-1)
-	tabHeight := activeTabStyle.GetVerticalFrameSize() + 1 // padding/border/margin + 1 for char height
-
-	for i, t := range labels {
-		width := tabWidth
-		if i == len(labels)-1 {
-			width = lastTabWidth
-		}
-
-		var style lipgloss.Style
-		isFirst, isLast, isActive := i == 0, i == len(labels)-1, i == activeTab
-		if isActive {
-			style = activeTabStyle
-		} else {
-			style = inactiveTabStyle
-		}
-		// A single tab is both first and last, so the bottom-left and
-		// bottom-right corners must be decided independently — a mutually
-		// exclusive if/else-if chain would set only BottomLeft and leave
-		// BottomRight at its wrong default (#972).
-		border, _, _, _, _ := style.GetBorder()
-		if isFirst && isActive {
-			border.BottomLeft = "│"
-		} else if isFirst {
-			border.BottomLeft = "├"
-		}
-		if isLast && isActive {
-			border.BottomRight = "│"
-		} else if isLast {
-			border.BottomRight = "┤"
-		}
-		style = style.Border(border)
-		style = style.Width(width - style.GetHorizontalFrameSize())
-		renderedTabs = append(renderedTabs, style.Render(t))
+	iw, ih := w.innerSize()
+	inner := lipgloss.JoinVertical(lipgloss.Left,
+		w.renderHeader(iw),
+		layout.ClampToRect(w.tab.String(), layout.Rect{W: iw, H: ih}),
+	)
+	frame := windowStyle
+	if !w.focused {
+		frame = blurredWindowStyle
 	}
-
-	row := lipgloss.JoinHorizontal(lipgloss.Top, renderedTabs...)
-	content := w.tab.String()
-	contentWidth := w.width - windowStyle.GetHorizontalFrameSize()
-	if contentWidth < 0 {
-		contentWidth = 0
-	}
-	window := windowStyle.Render(
-		lipgloss.Place(
-			contentWidth, w.height-2-windowStyle.GetVerticalFrameSize()-tabHeight,
-			lipgloss.Left, lipgloss.Top, content))
-
-	return lipgloss.JoinVertical(lipgloss.Left, "\n", row, window)
+	return layout.ClampToRect(frame.Render(inner), w.rect)
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,14 +52,11 @@ func newTestHome(t *testing.T) *home {
 
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
-	sidebar := ui.NewSidebar(&spin, false, proj)
-	tw := ui.NewTabbedWindow(ui.NewTabPane(), proj)
-	cp := ui.NewContentPane(tw)
 
 	state := config.DefaultState()
 	repoID := "test-repo-" + filepath.Base(tmp)
 
-	return &home{
+	h := &home{
 		ctx:       context.Background(),
 		state:     stateDefault,
 		appConfig: config.DefaultConfig(),
@@ -75,14 +73,30 @@ func newTestHome(t *testing.T) *home {
 		snapshotFetcher: func(string) ([]session.InstanceData, error) {
 			return nil, fmt.Errorf("snapshot fetcher not stubbed in test")
 		},
-		store:       proj,
-		sidebar:     sidebar,
-		contentPane: cp,
-		menu:        ui.NewMenu(),
-		errBox:      ui.NewErrBox(),
-		spinner:     spin,
-		repoID:      repoID,
+		store:   proj,
+		spinner: spin,
+		repoID:  repoID,
 	}
+	h.sidebar = ui.NewSidebar(&h.spinner, false, proj)
+	wireTestPanes(h, proj)
+	return h
+}
+
+// wireTestPanes installs the workspace panes + focus ring on a hand-built
+// test home, mirroring newHome's wiring (#1024 PR 4).
+func wireTestPanes(h *home, proj *store.Projection) {
+	if h.menu == nil {
+		h.menu = ui.NewMenu()
+	}
+	if h.errBox == nil {
+		h.errBox = ui.NewErrBox()
+	}
+	h.paneA = ui.NewTabbedWindow(ui.NewTabPane(), proj)
+	h.automations = ui.NewAutomationsPane(proj)
+	h.statusBar = ui.NewStatusBar(h.menu, h.errBox)
+	h.hooksPane = ui.NewHooksPane()
+	h.ring = layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionAutomations)
+	h.syncFocus()
 }
 
 // requireTUIInstancesEmpty asserts the TUI's repo instances file holds no
@@ -244,7 +258,7 @@ func TestSaveContentPaneStateDoesNotOverwriteUnreadableRepoConfig(t *testing.T) 
 	corruptConfig := []byte(`{"remote_hooks":{"launch_cmd":"/bin/launch"`)
 	require.NoError(t, os.WriteFile(repoConfigPath, corruptConfig, 0644))
 
-	hooks := h.contentPane.HooksPane()
+	hooks := h.hooksPane
 	hooks.SetFocus(true)
 	require.True(t, hooks.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")}))
 	require.True(t, hooks.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")}))

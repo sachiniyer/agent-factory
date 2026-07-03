@@ -129,8 +129,6 @@ func TestConfirmationModalKeyHandling(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
 	sidebar := ui.NewSidebar(&spin, false, proj)
-	tw := ui.NewTabbedWindow(ui.NewTabPane(), proj)
-	cp := ui.NewContentPane(tw)
 
 	// Create enough of home struct to test handleKeyPress in confirmation state
 	h := &home{
@@ -139,10 +137,9 @@ func TestConfirmationModalKeyHandling(t *testing.T) {
 		appConfig:           config.DefaultConfig(),
 		store:               proj,
 		sidebar:             sidebar,
-		contentPane:         cp,
-		menu:                ui.NewMenu(),
 		confirmationOverlay: overlay.NewConfirmationOverlay("Kill session?"),
 	}
+	wireTestPanes(h, proj)
 
 	testCases := []struct {
 		name              string
@@ -254,8 +251,6 @@ func TestConfirmationFlowSimulation(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
 	sidebar := ui.NewSidebar(&spin, false, proj)
-	tw := ui.NewTabbedWindow(ui.NewTabPane(), proj)
-	cp := ui.NewContentPane(tw)
 
 	// Add test instance
 	instance, err := session.NewInstance(session.InstanceOptions{
@@ -269,14 +264,13 @@ func TestConfirmationFlowSimulation(t *testing.T) {
 	sidebar.SetSelectedInstance(0)
 
 	h := &home{
-		ctx:         context.Background(),
-		state:       stateDefault,
-		appConfig:   config.DefaultConfig(),
-		store:       proj,
-		sidebar:     sidebar,
-		contentPane: cp,
-		menu:        ui.NewMenu(),
+		ctx:       context.Background(),
+		state:     stateDefault,
+		appConfig: config.DefaultConfig(),
+		store:     proj,
+		sidebar:   sidebar,
 	}
+	wireTestPanes(h, proj)
 
 	// Simulate what happens when D is pressed
 	selected := h.sidebar.GetSelectedInstance()
@@ -468,19 +462,15 @@ func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
 	sidebar := ui.NewSidebar(&spin, false, proj)
-	tw := ui.NewTabbedWindow(ui.NewTabPane(), proj)
-	cp := ui.NewContentPane(tw)
 
 	h := &home{
-		ctx:         context.Background(),
-		state:       stateDefault,
-		appConfig:   config.DefaultConfig(),
-		store:       proj,
-		sidebar:     sidebar,
-		contentPane: cp,
-		menu:        ui.NewMenu(),
-		errBox:      ui.NewErrBox(),
+		ctx:       context.Background(),
+		state:     stateDefault,
+		appConfig: config.DefaultConfig(),
+		store:     proj,
+		sidebar:   sidebar,
 	}
+	wireTestPanes(h, proj)
 
 	// Build an action mirroring killAction: returns instanceChangedMsg{} on success.
 	actionCalled := false

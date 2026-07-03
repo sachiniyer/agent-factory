@@ -1,11 +1,16 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,7 +25,9 @@ func renderedLineCount(s string) int {
 // the output. renderCenteredFallback pads with literally-empty lines, while
 // rendered content lines (including the ASCII art's own blank rows) are
 // space-padded to the pane width — so literal "" lines are exactly the
-// vertical-centering padding.
+// vertical-centering padding. (TabPane.String space-pads everything to the
+// exact rect since #1024 PR 4, so this helper inspects renderCenteredFallback
+// output directly.)
 func blankRuns(s string) (top, bottom int) {
 	lines := strings.Split(s, "\n")
 	for _, l := range lines {
@@ -71,10 +78,12 @@ func TestPreviewFallbackCentersWrappedLineCount(t *testing.T) {
 		p := NewTabPane()
 		p.SetSize(tc.w, tc.h)
 		p.setFallbackState("msg")
-		out := p.String()
-
-		require.Contains(t, out, "msg",
+		require.Contains(t, p.String(), "msg",
 			"%dx%d: message must be visible when the box is tall enough", tc.w, tc.h)
+
+		// Inspect the centering math pre-clamp: the final exact-rect clamp
+		// space-pads every line, which would hide which lines are padding.
+		out := renderCenteredFallback(tabPaneStyle, p.content.text, tc.w, tc.h)
 		top, bottom := blankRuns(out)
 		require.Greater(t, top, 0,
 			"%dx%d: content shorter than the box must be padded down from the top", tc.w, tc.h)
@@ -122,106 +131,146 @@ func TestTerminalFallbackWrappedArtMatchesAllocatedHeight(t *testing.T) {
 	}
 }
 
-// TestContentPaneRendersExactlyAllocatedHeight is the regression test for
-// #700. lipgloss.Place and Style.Height are minimums — they pad short content
-// but never truncate tall content — so an over-tall task/hooks list made
-// ContentPane.String() exceed its SetSize allocation and pushed the menu and
-// error box below the fold at common terminal sizes. Every mode must render
-// exactly the allocated height regardless of content volume.
-func TestContentPaneRendersExactlyAllocatedHeight(t *testing.T) {
-	// 80x24 terminal: contentWidth = 80 - int(80*0.3) = 56,
-	// contentHeight = int(24*0.9) = 21 (see app.updateHandleWindowSizeEvent).
-	const w, h = 56, 21
+// requireExactRect asserts a pane's output honors the layout.Pane contract
+// (#1024 PR 4): exactly r.H lines, every line exactly r.W cells. This is the
+// shared enforcement the RFC (§5.5) asks every pane to pass — the successor
+// of the per-pane #700/#821 allocation regressions.
+func requireExactRect(t *testing.T, out string, r layout.Rect, name string) {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	require.Equalf(t, r.H, len(lines), "%s: must render exactly rect.H lines", name)
+	for i, line := range lines {
+		require.Equalf(t, r.W, lipgloss.Width(line), "%s: line %d must be exactly rect.W cells", name, i)
+	}
+}
 
+// newTestWorkspace builds one of each workspace pane over a fresh projection.
+func newTestWorkspace() (*Sidebar, *TabbedWindow, *AutomationsPane, *StatusBar) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	proj := store.NewProjection()
+	sidebar := NewSidebar(&spin, false, proj)
+	paneA := NewTabbedWindow(NewTabPane(), proj)
+	automations := NewAutomationsPane(proj)
+	statusBar := NewStatusBar(NewMenu(), NewErrBox())
+	return sidebar, paneA, automations, statusBar
+}
+
+// TestWorkspacePanesRenderExactlyTheirRects drives every pane through
+// layout.Grid at the RFC's key sizes — including 80×24 and the degradation
+// thresholds — with over-tall and over-wide content loaded, and asserts each
+// visible region renders exactly its rect. Composed row-by-row, the regions
+// therefore tile the full window: the property the pre-cutover layout had to
+// re-earn per-pane (#700, #786, #821 class).
+func TestWorkspacePanesRenderExactlyTheirRects(t *testing.T) {
 	longName := strings.Repeat("long-task-name-", 8)
 	var tasks []task.Task
 	for i := 0; i < 40; i++ {
-		tasks = append(tasks, task.Task{ID: "t", Name: longName, Prompt: "p"})
-	}
-	var hooks []string
-	for i := 0; i < 40; i++ {
-		hooks = append(hooks, strings.Repeat("hook-cmd ", 20))
+		tasks = append(tasks, task.Task{ID: "t", Name: longName, Prompt: "p", CronExpr: "0 3 * * *"})
 	}
 
-	tw := newTestTabbedWindow()
-	cp := NewContentPane(tw)
-	cp.SetSize(w, h)
-
-	cp.SetMode(ContentModeEmpty)
-	require.Equal(t, h, renderedLineCount(cp.String()), "empty mode")
-
-	cp.SetMode(ContentModeTasks)
-	require.Equal(t, h, renderedLineCount(cp.String()), "tasks mode, no tasks")
-
-	cp.TaskPane().SetTasks(tasks)
-	require.Equal(t, h, renderedLineCount(cp.String()),
-		"tasks mode with an over-tall task list must not overflow the allocation")
-
-	cp.HooksPane().SetCommands(hooks)
-	cp.SetMode(ContentModeHooks)
-	require.Equal(t, h, renderedLineCount(cp.String()),
-		"hooks mode with an over-tall hooks list must not overflow the allocation")
-
-	// Inline panes must keep the same total height as the tabbed window so
-	// the layout does not jump when switching sidebar selections.
-	cp.SetMode(ContentModeInstance)
-	require.Equal(t, h, renderedLineCount(tw.String()), "tabbed window")
-}
-
-// renderedWidth returns the widest line of a component's output, measured in
-// terminal cells (lipgloss.Width is ANSI- and wide-rune-aware).
-func renderedWidth(s string) int {
-	widest := 0
-	for _, line := range strings.Split(s, "\n") {
-		if lw := lipgloss.Width(line); lw > widest {
-			widest = lw
-		}
-	}
-	return widest
-}
-
-// TestContentPaneInlinePanesMatchAllocatedWidth is the regression test for
-// #821, the width counterpart of the #786 height fix above. windowStyle is
-// bordered, and lipgloss Style.Width sets the *inner* content width — so
-// renderInlinePane's .Width(w) call rendered w+frame total columns, making
-// the tasks/hooks/empty panes 2 columns wider than the tabbed window and
-// shifting the layout when switching between sidebar selections.
-func TestContentPaneInlinePanesMatchAllocatedWidth(t *testing.T) {
 	for _, tc := range []struct{ w, h int }{
-		{56, 21}, // 80x24 terminal (see TestContentPaneRendersExactlyAllocatedHeight)
-		{84, 27}, // 120x30 terminal
+		{120, 40}, // roomy
+		{80, 24},  // the RFC's canonical small terminal
+		{79, 24},  // below AutomationsFullMinWidth: 1-line strip
+		{60, 15},  // exactly the minimal-mode threshold
+		{59, 15},  // minimal mode: no automations strip
+		{40, 10},  // exactly the hard minimum
 	} {
-		// Both the inline panes and the tabbed window carve their window
-		// width out of the allocation the same way.
-		want := AdjustPreviewWidth(tc.w)
+		t.Run(fmt.Sprintf("%dx%d", tc.w, tc.h), func(t *testing.T) {
+			lay := layout.Grid{}.Solve(tc.w, tc.h)
+			require.False(t, lay.Fallback)
 
-		tw := newTestTabbedWindow()
-		cp := NewContentPane(tw)
-		cp.SetSize(tc.w, tc.h)
+			sidebar, paneA, automations, statusBar := newTestWorkspace()
+			automations.proj.SetTasks(tasks)
+			paneA.tab.content = tabContentState{text: strings.Repeat(strings.Repeat("wide ", 100)+"\n", 100)}
 
-		cp.SetMode(ContentModeEmpty)
-		require.Equal(t, want, renderedWidth(cp.String()),
-			"%dx%d: empty mode", tc.w, tc.h)
+			sidebar.SetRect(lay.Tree)
+			paneA.SetRect(lay.PaneA)
+			statusBar.SetRect(lay.StatusBar)
 
-		cp.SetMode(ContentModeTasks)
-		require.Equal(t, want, renderedWidth(cp.String()),
-			"%dx%d: tasks mode, no tasks", tc.w, tc.h)
+			requireExactRect(t, sidebar.View(), lay.Tree, "tree")
+			requireExactRect(t, paneA.View(), lay.PaneA, "paneA")
+			requireExactRect(t, statusBar.View(), lay.StatusBar, "statusBar")
 
-		cp.TaskPane().SetTasks([]task.Task{
-			{ID: "t", Name: strings.Repeat("long-task-name-", 8), Prompt: "p"},
+			if lay.AutomationsVisible {
+				automations.SetRect(lay.Automations)
+				automations.SetCompact(lay.AutomationsCompact)
+				requireExactRect(t, automations.View(), lay.Automations, "automations")
+			}
+
+			// The composed workspace must be exactly the terminal size.
+			top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar.View(), paneA.View())
+			rows := []string{top}
+			if lay.AutomationsVisible {
+				rows = append(rows, automations.View())
+			}
+			rows = append(rows, statusBar.View())
+			full := lipgloss.JoinVertical(lipgloss.Left, rows...)
+			requireExactRect(t, full, layout.Rect{W: tc.w, H: tc.h}, "composed workspace")
 		})
-		require.Equal(t, want, renderedWidth(cp.String()),
-			"%dx%d: tasks mode with over-wide content", tc.w, tc.h)
+	}
+}
 
-		cp.HooksPane().SetCommands([]string{strings.Repeat("hook-cmd ", 20)})
-		cp.SetMode(ContentModeHooks)
-		require.Equal(t, want, renderedWidth(cp.String()),
-			"%dx%d: hooks mode with over-wide content", tc.w, tc.h)
+// TestWorkspaceExpandedAutomationsTilesExactly covers the focused strip: the
+// expanded (full task manager) allocation must still tile the window exactly.
+func TestWorkspaceExpandedAutomationsTilesExactly(t *testing.T) {
+	lay := layout.Grid{AutomationsExpanded: true}.Solve(100, 30)
+	require.True(t, lay.AutomationsExpanded)
+	require.False(t, lay.AutomationsCompact)
 
-		// Inline panes must render exactly as wide as the tabbed window so
-		// the border column does not move when switching sidebar selections.
-		cp.SetMode(ContentModeInstance)
-		require.Equal(t, want, renderedWidth(tw.String()),
-			"%dx%d: tabbed window", tc.w, tc.h)
+	sidebar, paneA, automations, statusBar := newTestWorkspace()
+	automations.proj.SetTasks([]task.Task{{ID: "t", Name: "nightly", Prompt: "p", CronExpr: "0 3 * * *"}})
+	automations.Focus()
+
+	sidebar.SetRect(lay.Tree)
+	paneA.SetRect(lay.PaneA)
+	automations.SetRect(lay.Automations)
+	automations.SetCompact(lay.AutomationsCompact)
+	statusBar.SetRect(lay.StatusBar)
+
+	requireExactRect(t, automations.View(), lay.Automations, "expanded automations")
+	require.Contains(t, automations.View(), "Tasks", "focused strip hosts the task manager")
+
+	top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar.View(), paneA.View())
+	full := lipgloss.JoinVertical(lipgloss.Left, top, automations.View(), statusBar.View())
+	requireExactRect(t, full, layout.Rect{W: 100, H: 30}, "composed workspace")
+}
+
+// TestTerminalTooSmallBannerIsExactlyTerminalSized covers the below-hard-
+// minimum fallback: the banner alone fills the window.
+func TestTerminalTooSmallBannerIsExactlyTerminalSized(t *testing.T) {
+	for _, tc := range []struct{ w, h int }{
+		{39, 10}, // below hard min width
+		{40, 9},  // below hard min height
+		{20, 5},
+	} {
+		lay := layout.Grid{}.Solve(tc.w, tc.h)
+		require.True(t, lay.Fallback, "%dx%d must be fallback", tc.w, tc.h)
+		out := TerminalTooSmall(tc.w, tc.h)
+		requireExactRect(t, out, layout.Rect{W: tc.w, H: tc.h}, "banner")
+		require.Contains(t, out, "Terminal too small")
+	}
+}
+
+// TestWorkspacePanesImplementPaneContract drives every workspace pane through
+// the layout.Pane interface itself: rect, focus flags, key/mouse stubs, and
+// the exact-rect View. This is the shared §5.5 contract check run against
+// every pane.
+func TestWorkspacePanesImplementPaneContract(t *testing.T) {
+	sidebar, paneA, automations, statusBar := newTestWorkspace()
+	r := layout.Rect{X: 0, Y: 0, W: 50, H: 12}
+	for name, p := range map[string]layout.Pane{
+		"tree":        sidebar,
+		"paneA":       paneA,
+		"automations": automations,
+		"statusBar":   statusBar,
+	} {
+		p.SetRect(r)
+		p.Focus()
+		p.Blur()
+		require.False(t, p.Focused(), "%s: blurred after Blur", name)
+		_, _ = p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+		_ = p.HandleMouse(tea.MouseMsg{}, layout.Point{})
+		requireExactRect(t, p.View(), r, name)
 	}
 }

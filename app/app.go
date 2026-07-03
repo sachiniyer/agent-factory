@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"io"
@@ -54,6 +55,10 @@ const (
 	stateSearch
 	// stateSelectProgram is the state when the user is selecting a program during naming.
 	stateSelectProgram
+	// stateHooks is the state when the post-worktree hooks editor overlay is
+	// open (#1024 PR 4: hooks lost their persistent sidebar slot and are
+	// hosted as a modal overlay instead).
+	stateHooks
 )
 
 type home struct {
@@ -99,16 +104,44 @@ type home struct {
 	// panes render (#1024 PR 2): the instance list + repo bookkeeping + tasks +
 	// hook count, plus the cross-pane selection (selected instance, active tab
 	// index). Written on the bubbletea event loop by reconcileSnapshot and the
-	// session-control handlers; read by the sidebar and tabbed window, which
-	// keep only their own local UI state (cursor, scroll, expansion).
+	// session-control handlers; read by the panes, which keep only their own
+	// local UI state (cursor, scroll, expansion).
 	store *store.Projection
-	// sidebar is the unified left navigation pane with collapsible sections
+
+	// -- Workspace layout (#1024 PR 4) --
+	//
+	// The window is tiled by layout.Grid into the RFC §2.1 regions: the
+	// instances+tabs tree on the left, the single content pane A in the
+	// center, the automations strip along the bottom, and the status bar
+	// under everything. Each region is a layout.Pane that renders exactly its
+	// rect; relayout() re-solves the grid and re-rects the panes.
+
+	// grid is the single sizing authority; termWidth/termHeight the last
+	// tea.WindowSizeMsg, so focus changes (which resize the automations
+	// strip) can re-solve without waiting for a resize event.
+	grid                  layout.Grid
+	lastLayout            layout.Layout
+	termWidth, termHeight int
+	// ring is the focus ring: tree → pane A → automations. Tab/Shift-Tab
+	// cycle it; regions hidden by the degradation ladder are skipped.
+	ring *layout.Ring
+
+	// sidebar is the left-rail instances+tabs tree
 	sidebar *ui.Sidebar
-	// contentPane wraps the tabbed window and other contextual panes
-	contentPane *ui.ContentPane
-	// menu displays the bottom menu
+	// paneA is the workspace content pane: the selected tab's live view
+	paneA *ui.TabbedWindow
+	// automations is the bottom strip (compact task rows; expands to the
+	// full task manager on focus)
+	automations *ui.AutomationsPane
+	// statusBar merges the menu hints and the error line
+	statusBar *ui.StatusBar
+	// hooksPane is the post-worktree hooks editor, hosted as an overlay
+	// (stateHooks)
+	hooksPane *ui.HooksPane
+	// menu displays the key hints inside the status bar (shared handle for
+	// SetState/keydown callers)
 	menu *ui.Menu
-	// errBox displays error messages
+	// errBox displays error messages inside the status bar (shared handle)
 	errBox *ui.ErrBox
 	// global spinner instance. we plumb this down to where it's needed
 	spinner spinner.Model
@@ -165,15 +198,20 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	appState := config.LoadState()
 
 	proj := store.NewProjection()
-	tabbedWindow := ui.NewTabbedWindow(ui.NewTabPane(), proj)
+	menu := ui.NewMenu()
+	errBox := ui.NewErrBox()
 
 	h := &home{
 		ctx:             ctx,
 		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		store:           proj,
-		menu:            ui.NewMenu(),
-		contentPane:     ui.NewContentPane(tabbedWindow),
-		errBox:          ui.NewErrBox(),
+		menu:            menu,
+		errBox:          errBox,
+		paneA:           ui.NewTabbedWindow(ui.NewTabPane(), proj),
+		automations:     ui.NewAutomationsPane(proj),
+		statusBar:       ui.NewStatusBar(menu, errBox),
+		hooksPane:       ui.NewHooksPane(),
+		ring:            layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionAutomations),
 		snapshotFetcher: snapshotThroughDaemon,
 		appConfig:       appConfig,
 		program:         program,
@@ -184,6 +222,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		appState:        appState,
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes, proj)
+	h.syncFocus()
 
 	// Cold-start the projection from the daemon's authoritative Snapshot (#960 PR 6).
 	// The TUI no longer reads instances.json — the daemon is the sole writer/owner
@@ -204,51 +243,118 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		h.store.SetTasks(tasks)
 	}
 
-	// Load tasks into task pane
+	// Load tasks into the automations strip's task manager
 	if len(tasks) > 0 {
-		h.contentPane.TaskPane().SetTasks(tasks)
+		h.automations.TaskPane().SetTasks(tasks)
 	}
 
-	// Load hooks for sidebar display and hooks pane. ResolveConfig applies
-	// the in-repo .agent-factory/config.json over the legacy per-repo file.
+	// Load hooks for the hooks overlay. ResolveConfig applies the in-repo
+	// .agent-factory/config.json over the legacy per-repo file.
 	repoCfg, err := config.ResolveConfig(repo.Root)
 	if err != nil {
 		log.WarningLog.Printf("failed to resolve repo config: %v", err)
 	} else {
 		h.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
-		h.contentPane.HooksPane().SetCommands(repoCfg.PostWorktreeCommands)
+		h.hooksPane.SetCommands(repoCfg.PostWorktreeCommands)
 	}
 
 	return h
 }
 
-// updateHandleWindowSizeEvent sets the sizes of the components.
+// updateHandleWindowSizeEvent records the terminal size and re-solves the
+// layout.
 func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
-	// Sidebar takes 30% of width, content takes 70%
-	sidebarWidth := int(float32(msg.Width) * 0.3)
-	contentWidth := msg.Width - sidebarWidth
+	m.termWidth = msg.Width
+	m.termHeight = msg.Height
+	m.relayout()
+}
 
-	// Menu takes 10% of height, sidebar and content take 90%
-	contentHeight := int(float32(msg.Height) * 0.9)
-	menuHeight := msg.Height - contentHeight - 2
-	m.errBox.SetSize(int(float32(msg.Width)*0.9), 1)
+// relayout is the single sizing path (#1024 PR 4): layout.Grid turns the
+// terminal size into the region rects — applying the §2.6 degradation ladder
+// — and every pane is re-rected. Called on every WindowSizeMsg and whenever a
+// grid input changes without a resize (focusing the automations strip expands
+// it in place).
+func (m *home) relayout() {
+	m.grid.AutomationsExpanded = m.ring.Active() == layout.RegionAutomations
+	lay := m.grid.Solve(m.termWidth, m.termHeight)
+	m.lastLayout = lay
+	if lay.Fallback {
+		// No rects to hand out, but keep the focus flags + hints coherent so
+		// key routing stays correct while the terminal is too small.
+		m.syncFocus()
+		return
+	}
 
-	m.contentPane.SetSize(contentWidth, contentHeight)
-	m.sidebar.SetSize(sidebarWidth, contentHeight)
+	// Regions hidden by the ladder leave the focus ring; Ring.Active moves
+	// focus forward off a hidden region on its own, so re-sync pane focus
+	// flags afterwards.
+	m.ring.SetHidden(layout.RegionAutomations, !lay.AutomationsVisible)
+	m.syncFocus()
+
+	m.sidebar.SetRect(lay.Tree)
+	m.paneA.SetRect(lay.PaneA)
+	m.automations.SetRect(lay.Automations)
+	m.automations.SetCompact(lay.AutomationsCompact)
+	m.statusBar.SetRect(lay.StatusBar)
 
 	if m.textOverlay != nil {
-		m.textOverlay.SetWidth(int(float32(msg.Width) * 0.6))
+		m.textOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
 	}
 	if m.selectionOverlay != nil {
-		m.selectionOverlay.SetWidth(int(float32(msg.Width) * 0.6))
+		m.selectionOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
 	}
+	m.hooksPane.SetSize(int(float32(m.termWidth)*0.6), int(float32(m.termHeight)*0.6))
 
-	tw := m.contentPane.TabbedWindow()
-	previewWidth, previewHeight := tw.GetPreviewSize()
+	previewWidth, previewHeight := m.paneA.GetPreviewSize()
 	if err := m.store.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
 		log.ErrorLog.Print(err)
 	}
-	m.menu.SetSize(msg.Width, menuHeight)
+}
+
+// syncFocus applies the focus ring's active region to the panes and the
+// status-bar hints.
+func (m *home) syncFocus() {
+	active := m.ring.Active()
+	for id, pane := range map[string]layout.Pane{
+		layout.RegionTree:        m.sidebar,
+		layout.RegionPaneA:       m.paneA,
+		layout.RegionAutomations: m.automations,
+	} {
+		if id == active {
+			pane.Focus()
+		} else {
+			pane.Blur()
+		}
+	}
+	m.menu.SetFocusRegion(active)
+}
+
+// focusRegion moves focus directly to the given region (the s/S jump keys)
+// and re-solves the layout, since the automations strip sizes off focus.
+func (m *home) focusRegion(region string) {
+	m.ring.Focus(region)
+	m.relayout()
+}
+
+// cycleFocus advances the focus ring (Tab / Shift-Tab). Leaving the
+// automations strip persists any dirty task edits, exactly like the pre-#1024
+// focus-release path: a failed save surfaces in the error box and the panes
+// reload to match disk, so the dropped edit is never silent.
+func (m *home) cycleFocus(back bool) tea.Cmd {
+	leaving := m.ring.Active()
+	if back {
+		m.ring.Prev()
+	} else {
+		m.ring.Next()
+	}
+	var cmd tea.Cmd
+	if leaving == layout.RegionAutomations && m.ring.Active() != leaving {
+		if err := m.saveContentPaneState(); err != nil {
+			cmd = m.handleError(err)
+		}
+	}
+	m.relayout()
+	return cmd
 }
 
 func (m *home) Init() tea.Cmd {
@@ -388,16 +494,28 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress {
 			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
-				// Instance mode needs a selected instance to scroll preview/terminal;
-				// Tasks/Hooks modes scroll their own list independent of sidebar selection (#524).
-				if m.contentPane.GetMode() == ui.ContentModeInstance && m.sidebar.GetSelectedInstance() == nil {
+				// The wheel scrolls whatever the focus ring points at: the
+				// expanded automations strip scrolls its own task list
+				// independent of the sidebar selection (#524); everywhere
+				// else it scrolls the workspace pane, which needs a bound
+				// instance. Hit-tested wheel routing is #1024 PR 6.
+				if m.ring.Active() == layout.RegionAutomations {
+					switch msg.Button {
+					case tea.MouseButtonWheelUp:
+						m.automations.ScrollUp()
+					case tea.MouseButtonWheelDown:
+						m.automations.ScrollDown()
+					}
+					return m, nil
+				}
+				if m.store.GetSelectedInstance() == nil {
 					return m, nil
 				}
 				switch msg.Button {
 				case tea.MouseButtonWheelUp:
-					m.contentPane.ScrollUp()
+					m.paneA.ScrollUp()
 				case tea.MouseButtonWheelDown:
-					m.contentPane.ScrollDown()
+					m.paneA.ScrollDown()
 				}
 			}
 		}
@@ -592,7 +710,7 @@ func (m *home) saveContentPaneState() error {
 	// can never clobber one another (#1001).
 	var saveErr error
 
-	hp := m.contentPane.HooksPane()
+	hp := m.hooksPane
 	if hp.IsDirty() {
 		// Hook edits are written to the in-repo .agent-factory/config.json —
 		// the canonical location for post_worktree_commands since #800. The
@@ -611,7 +729,7 @@ func (m *home) saveContentPaneState() error {
 		}
 	}
 
-	sp := m.contentPane.TaskPane()
+	sp := m.automations.TaskPane()
 	if !sp.IsDirty() {
 		return saveErr
 	}
@@ -666,7 +784,7 @@ func reloadDaemonTaskSchedules() {
 
 // handleTaskCreate processes a pending task creation from the inline form.
 func (m *home) handleTaskCreate() tea.Cmd {
-	sp := m.contentPane.TaskPane()
+	sp := m.automations.TaskPane()
 	name, prompt, cronExpr, watchCmd, targetSession, projectPath, program := sp.ConsumePendingCreate()
 
 	if name == "" {
@@ -729,7 +847,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 
 // handleTaskTrigger immediately spawns an instance for the selected task.
 func (m *home) handleTaskTrigger() tea.Cmd {
-	sp := m.contentPane.TaskPane()
+	sp := m.automations.TaskPane()
 	tsk := sp.ConsumePendingTrigger()
 	if tsk == nil {
 		return m.handleError(fmt.Errorf("no task selected"))
@@ -763,6 +881,9 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 	m.sidebar.SetSelectedInstance(m.store.NumInstances() - 1)
 	instance.SetStatus(session.Loading)
 	m.menu.SetState(ui.StateDefault)
+	// The run lands as a new session: move focus to the tree so the user is
+	// looking at the spawned instance, not the strip.
+	m.focusRegion(layout.RegionTree)
 
 	prompt := tsk.Prompt
 	taskID := tsk.ID
@@ -822,12 +943,17 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			func() tea.Msg { return msg },
 			m.keydownCallback(name)), true
 	}
-	if m.state == stateHelp || m.state == stateConfirm ||
-		m.state == stateSearch || m.state == stateSelectProgram {
+	// Any other modal state (help/confirm/search/select-program/hooks): the
+	// overlay owns the keyboard, so no hint highlighting and no re-emit —
+	// this runs BEFORE handleKeyPress's state switch, so without this guard
+	// mapped keys typed into an overlay would take the highlight + re-emit
+	// detour first. A blanket non-default check (rather than enumerating
+	// states) can't silently miss a future modal state (Greptile on #1083).
+	if m.state != stateDefault {
 		return nil, false
 	}
-	// Don't highlight when content pane has focus
-	if m.contentPane.HasFocus() {
+	// Don't highlight when the automations strip has the keyboard
+	if m.ring.Active() == layout.RegionAutomations {
 		return nil, false
 	}
 	name, ok := keys.GlobalKeyStringsMap[msg.String()]
@@ -867,24 +993,24 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateSearch(msg)
 	case stateSelectProgram:
 		return m.handleStateSelectProgram(msg)
+	case stateHooks:
+		return m.handleStateHooks(msg)
 	}
 
-	// Route keys to content pane if it has focus (e.g., editing tasks/hooks)
-	if mod, cmd, consumed := m.handleContentPaneFocus(msg); consumed {
+	// The focused automations strip owns the keyboard (its task manager);
+	// Tab/Shift-Tab and quit keys deliberately fall through.
+	if mod, cmd, consumed := m.handleAutomationsFocus(msg); consumed {
 		return mod, cmd
 	}
 
 	// Exit scrolling mode when ESC is pressed
 	if msg.Type == tea.KeyEsc {
-		if m.contentPane.GetMode() == ui.ContentModeInstance {
-			tw := m.contentPane.TabbedWindow()
-			if tw.IsInScrollMode() {
-				selected := m.sidebar.GetSelectedInstance()
-				if err := tw.ResetToNormalMode(selected); err != nil {
-					return m, m.handleError(err)
-				}
-				return m, m.selectionChanged()
+		if m.paneA.IsInScrollMode() {
+			selected := m.sidebar.GetSelectedInstance()
+			if err := m.paneA.ResetToNormalMode(selected); err != nil {
+				return m, m.handleError(err)
 			}
+			return m, m.selectionChanged()
 		}
 	}
 
@@ -893,25 +1019,26 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleQuit()
 	}
 
-	// Number-key tab jump (1-9): jump directly to that tab in the instance
-	// tabbed window (#930 PR 4). Handled here, before the GlobalKeyStringsMap
+	// Number-key tab jump (1-9): jump directly to that tab of the selected
+	// instance (#930 PR 4). Handled here, before the GlobalKeyStringsMap
 	// lookup, because digits are dispatched manually rather than mapped to a
-	// KeyName. Gated to the instance view so digits typed into a focused
-	// task/hooks pane (handled above) or elsewhere pass through untouched.
-	if m.contentPane.GetMode() == ui.ContentModeInstance && len(msg.Runes) == 1 {
-		if r := msg.Runes[0]; r >= '1' && r <= '9' {
-			return m.handleTabJump(int(r - '0'))
+	// KeyName. Gated on the focus region, not just on the strip having
+	// consumed the key above: the jump belongs to the tree/workspace, so a
+	// digit with the automations strip focused must never retarget the
+	// content pane — the pre-cutover ContentModeTasks behavior (Greptile on
+	// #1083; the strip's task list does consume digits today, but this gate
+	// must not depend on that).
+	if active := m.ring.Active(); active == layout.RegionTree || active == layout.RegionPaneA {
+		if len(msg.Runes) == 1 {
+			if r := msg.Runes[0]; r >= '1' && r <= '9' {
+				return m.handleTabJump(int(r - '0'))
+			}
 		}
 	}
 
 	name, ok := keys.GlobalKeyStringsMap[msg.String()]
 	if !ok {
 		return m, nil
-	}
-
-	// Handle content pane Enter for focusing (tasks/hooks)
-	if mod, cmd, consumed := m.handleContentPaneEnter(msg, name); consumed {
-		return mod, cmd
 	}
 
 	return m.handleDefaultKeyPress(msg, name)
@@ -1025,75 +1152,46 @@ func (m *home) attachOverlayCallback(label, traceSuffix string, remote bool, att
 	return repaintCmd
 }
 
-// navigateToSection moves the sidebar selection to the header of the given section.
-func (m *home) navigateToSection(kind ui.SidebarSectionKind) {
-	sel := m.sidebar.GetSelection()
-	// Already on the right section? Do nothing extra.
-	if sel.Kind == kind && sel.IsHeader {
-		return
-	}
-	// Jump through sections until we land on the right header
-	for i := 0; i < 10; i++ { // safety limit
-		m.sidebar.JumpNextSection()
-		sel = m.sidebar.GetSelection()
-		if sel.Kind == kind && sel.IsHeader {
-			return
-		}
-	}
-	// If we didn't find it going forward, try backward
-	for i := 0; i < 10; i++ {
-		m.sidebar.JumpPrevSection()
-		sel = m.sidebar.GetSelection()
-		if sel.Kind == kind && sel.IsHeader {
-			return
-		}
-	}
-}
-
-// selectionChanged updates the content pane and menu based on the sidebar
-// selection. The preview/terminal tmux captures are dispatched via a tea.Cmd
-// (goroutine) rather than run synchronously: each call shells out to
+// selectionChanged updates the workspace pane binding and menu based on the
+// sidebar selection. The preview/terminal tmux captures are dispatched via a
+// tea.Cmd (goroutine) rather than run synchronously: each call shells out to
 // `tmux capture-pane` (~3–5ms locally), and on the bubbletea Update goroutine
 // that cost compounded — every previewTickMsg (100ms) blocked the event loop,
 // and the first paint after detach paid the full cost on top of waiting up
-// to a full tick cycle for the next msg (#579, #559 sibling). The
-// PreviewPane/TerminalPane each guard their captured state with a mutex so
-// the goroutine can mutate it while View() reads it. Synchronous fields
-// touched here (mode, menu state, scroll-reset) stay on the event loop.
+// to a full tick cycle for the next msg (#579, #559 sibling). The TabPane
+// guards its captured state with a mutex so the goroutine can mutate it while
+// View() reads it. Synchronous fields touched here (selection binding, menu
+// state) stay on the event loop.
 func (m *home) selectionChanged() tea.Cmd {
 	selectionStart := time.Now()
 	detachTraceMark("selectionChanged-entry")
 	sel := m.sidebar.GetSelection()
-	tw := m.contentPane.TabbedWindow()
 
-	// While attached, the sidebar is hidden behind the tmux client and the
-	// preview/terminal panes will be repainted by repaintAfterDetachMsg as
-	// soon as the user detaches. Skip the refresh + PR fetch dispatches so
-	// they don't queue capture-pane / gh pr view work behind the user's
-	// detach key (#598). The synchronous mutations (mode, menu state) still
-	// run so sidebar nav that happens between attach failures is consistent.
+	// While attached, the workspace is hidden behind the tmux client and the
+	// panes will be repainted by repaintAfterDetachMsg as soon as the user
+	// detaches. Skip the refresh + PR fetch dispatches so they don't queue
+	// capture-pane / gh pr view work behind the user's detach key (#598). The
+	// synchronous mutations (binding, menu state) still run so sidebar nav
+	// that happens between attach failures is consistent.
 	attachedNow := m.attached.Load()
 
 	var prFetch tea.Cmd
 	var refreshCmd tea.Cmd
-	switch {
-	case sel.Kind == ui.SectionInstances && !sel.IsHeader:
-		m.contentPane.SetMode(ui.ContentModeInstance)
+	if sel.Kind == ui.SectionInstances && !sel.IsHeader {
 		selected := m.sidebar.GetSelectedInstance()
-		// Bind the workspace panes to the cursor's instance — the store's
+		// Bind the workspace pane to the cursor's instance — the store's
 		// display binding replaces the pre-#1024 TabbedWindow.instance pointer,
 		// including the nil case — then re-clamp the active tab index against
 		// the new instance's tab count.
 		m.store.SetSelectedInstance(selected)
-		tw.ClampActiveTab()
+		m.paneA.ClampActiveTab()
 		m.menu.SetInstance(selected)
 		// The tree cursor drives the active tab too (landing on a tab row
 		// selects that tab — #1024 PR 3), so mirror it into the menu here, not
 		// just in the explicit tab-jump handlers.
-		m.menu.SetActiveTab(tw.GetActiveTab())
-		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
+		m.menu.SetActiveTab(m.paneA.GetActiveTab())
 		if !attachedNow {
-			refreshCmd = refreshPanesCmd(tw, selected)
+			refreshCmd = refreshPanesCmd(m.paneA, selected)
 		}
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
 		// Lazily refresh PR info when the user lands on an instance that
@@ -1102,27 +1200,32 @@ func (m *home) selectionChanged() tea.Cmd {
 		if !attachedNow && selected != nil && selected.Started() {
 			prFetch = fetchPRInfoCmd(selected, false)
 		}
-	case sel.Kind == ui.SectionTasks:
-		m.contentPane.SetMode(ui.ContentModeTasks)
+	} else {
+		// Header row: the workspace keeps rendering the sticky display
+		// selection while it is still live, and the menu drops the
+		// instance-specific hints.
 		m.menu.SetInstance(nil)
-		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
-	case sel.Kind == ui.SectionHooks:
-		m.contentPane.SetMode(ui.ContentModeHooks)
-		m.menu.SetInstance(nil)
-		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
-	default:
-		// On section headers, show the instance preview if available
-		if sel.Kind == ui.SectionInstances {
-			if m.store.NumInstances() > 0 {
-				m.contentPane.SetMode(ui.ContentModeInstance)
-			} else {
-				m.contentPane.SetMode(ui.ContentModeEmpty)
-			}
-		} else {
-			m.contentPane.SetMode(ui.ContentModeEmpty)
+		selected := m.store.GetSelectedInstance()
+		if selected != nil && !m.store.ContainsInstance(selected) {
+			// The sticky binding dangles — its instance was removed (e.g. the
+			// last instance killed while attached). Drop it so the pane can't
+			// keep showing a dead session's capture.
+			m.store.SetSelectedInstance(nil)
+			selected = nil
 		}
-		m.menu.SetInstance(nil)
-		m.menu.SetSidebarContext(sel.Kind, sel.IsHeader)
+		if selected == nil {
+			// Reset the pane to the nil-instance fallback synchronously:
+			// UpdateContent(nil) is a mutex-guarded string write, no tmux
+			// shell-out, so it is safe on the event loop — and deliberately
+			// NOT a refresh cmd, preserving the #683 contract that a header
+			// selection with nothing to refresh returns a nil cmd (the
+			// repaint handler ends the detach watchdog off that nil).
+			if err := m.paneA.UpdateContent(nil); err != nil {
+				log.WarningLog.Printf("UpdateContent(nil) failed: %v", err)
+			}
+		} else if !attachedNow {
+			refreshCmd = refreshPanesCmd(m.paneA, selected)
+		}
 	}
 
 	return tea.Batch(prFetch, refreshCmd)
@@ -1252,17 +1355,22 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 	return nil
 }
 
+// View composes the workspace from the solved layout (#1024 PR 4): every pane
+// renders exactly its rect, so the regions tile the full window with no
+// padding math. Modal overlays composite on top exactly as before.
 func (m *home) View() string {
-	sidebarWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.sidebar.String())
-	contentWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.contentPane.String())
-	sidebarAndContent := lipgloss.JoinHorizontal(lipgloss.Top, sidebarWithPadding, contentWithPadding)
+	// Below the hard minimum no layout exists; render the banner alone.
+	if m.lastLayout.Fallback {
+		return ui.TerminalTooSmall(m.termWidth, m.termHeight)
+	}
 
-	mainView := lipgloss.JoinVertical(
-		lipgloss.Center,
-		sidebarAndContent,
-		m.menu.String(),
-		m.errBox.String(),
-	)
+	top := lipgloss.JoinHorizontal(lipgloss.Top, m.sidebar.View(), m.paneA.View())
+	rows := []string{top}
+	if m.lastLayout.AutomationsVisible {
+		rows = append(rows, m.automations.View())
+	}
+	rows = append(rows, m.statusBar.View())
+	mainView := lipgloss.JoinVertical(lipgloss.Left, rows...)
 
 	if m.state == stateHelp {
 		if m.textOverlay == nil {
@@ -1284,7 +1392,20 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
+	} else if m.state == stateHooks {
+		return overlay.PlaceOverlay(0, 0, m.renderHooksOverlay(), mainView, true)
 	}
 
 	return mainView
+}
+
+// hooksOverlayStyle frames the hooks editor when it is hosted as an overlay
+// (#1024 PR 4: hooks lost their persistent sidebar slot).
+var hooksOverlayStyle = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(ui.AccentColor).
+	Padding(1, 2)
+
+func (m *home) renderHooksOverlay() string {
+	return hooksOverlayStyle.Render(m.hooksPane.String())
 }
