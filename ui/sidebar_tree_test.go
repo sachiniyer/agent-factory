@@ -14,9 +14,10 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
-// newTreeSidebar builds a sidebar over a fresh projection with n unstarted
-// instances titled t-00..t-NN. Unstarted local instances carry the default two
-// tab slots (Preview/Terminal), which is exactly what the tree shows for them.
+// newTreeSidebar builds a sidebar over a fresh projection with n instances
+// titled t-00..t-NN, each carrying a real agent + shell tab pair (the shape of
+// a started instance after `t`) so the tree shows two tab slots per instance.
+// Since #1100 the slot list mirrors the real tabs — there is no padding.
 func newTreeSidebar(t *testing.T, n int) *Sidebar {
 	t.Helper()
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
@@ -27,6 +28,7 @@ func newTreeSidebar(t *testing.T, n int) *Sidebar {
 			Title: fmt.Sprintf("t-%02d", i), Path: dir, Program: "test",
 		})
 		require.NoError(t, err)
+		addAgentShellTabs(inst)
 		addTestInstance(s, inst)
 	}
 	return s
@@ -70,6 +72,33 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 	out = s.String()
 	assert.Contains(t, out, "└ 2 Terminal *")
 	assert.NotContains(t, out, "├ 1 Preview *")
+}
+
+// TestSidebarTreeFreshInstanceSingleTabRow pins the #1100 tree rendering: a
+// fresh instance holds only its agent tab, so its expanded subtree is exactly
+// one child row — no phantom "Terminal" row for a tab that doesn't exist —
+// and the on-demand shell tab (`t`) grows it to two.
+func TestSidebarTreeFreshInstanceSingleTabRow(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false, store.NewProjection())
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "fresh", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	inst.AddTabForTest("agent", session.TabKindAgent)
+	addTestInstance(s, inst)
+	s.SetSize(40, 24)
+	s.SetSelectedInstance(0)
+
+	require.Equal(t, 1, tabRowCount(s), "fresh instance: exactly one tab row")
+	out := s.String()
+	assert.Contains(t, out, "└ 1 Preview *", "the agent tab is the only — and last — child row")
+	assert.NotContains(t, out, "Terminal", "no phantom Terminal row before t is pressed")
+
+	// `t` materializes the shell tab; the tree grows a real second row.
+	inst.AddTabForTest("shell", session.TabKindShell)
+	assert.Equal(t, 2, tabRowCount(s), "after t: the on-demand terminal is the second row")
+	assert.Contains(t, s.String(), "└ 2 Terminal")
 }
 
 // TestSidebarTreeSelectionMoveCollapsesPrevious pins the collapse-by-default
@@ -179,8 +208,6 @@ func TestSidebarTreeSyncCursorSurvivesStructureRebuild(t *testing.T) {
 	// Simulate handleNewTab: the instance grows a third slot in place (no
 	// store version bump) and the handler selects the fresh tab.
 	inst := s.proj.GetInstances()[0]
-	inst.AddTabForTest("agent", session.TabKindAgent)
-	inst.AddTabForTest("shell", session.TabKindShell)
 	inst.AddTabForTest("proc", session.TabKindProcess)
 	s.proj.SetActiveTab(2)
 	s.SyncCursorToActiveTab()
@@ -241,6 +268,7 @@ func TestSidebarTreeSwapPreservesTabSelection(t *testing.T) {
 		Title: "t-00", Path: t.TempDir(), Program: "test",
 	})
 	require.NoError(t, err)
+	addAgentShellTabs(rebuilt)
 	require.True(t, s.proj.ReplaceInstanceByTitle("t-00", rebuilt))
 	s.proj.SelectInstance(rebuilt)
 
@@ -285,8 +313,6 @@ func TestSidebarTreeOutOfBandTabAppears(t *testing.T) {
 	require.Equal(t, 2, tabRowCount(s))
 
 	inst := s.proj.GetInstances()[0]
-	inst.AddTabForTest("agent", session.TabKindAgent)
-	inst.AddTabForTest("shell", session.TabKindShell)
 	inst.AddTabForTest("btop", session.TabKindProcess)
 
 	assert.Equal(t, 3, tabRowCount(s), "in-place tab growth must surface without a store bump")

@@ -20,14 +20,18 @@ func pressNav(t *testing.T, h *home, key string) {
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}, name)
 }
 
-// addTreeInstance adds an unstarted instance (default two tab slots) to the
-// home's projection.
+// addTreeInstance adds an instance carrying a real agent + shell tab pair
+// (the shape of a started instance after `t`) to the home's projection, so
+// tree walks and tab jumps have two real slots to land on (#1100: fresh
+// instances hold only the agent tab and no slot is padded).
 func addTreeInstance(t *testing.T, h *home, title string) *session.Instance {
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: title, Path: t.TempDir(), Program: "test",
 	})
 	require.NoError(t, err)
+	inst.AddTabForTest("agent", session.TabKindAgent)
+	inst.AddTabForTest("shell", session.TabKindShell)
 	h.store.AddInstance(inst)
 	return inst
 }

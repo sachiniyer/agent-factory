@@ -350,21 +350,32 @@ func TestFlatten(t *testing.T) {
 	assert.True(t, rows[2].IsTab())
 }
 
-// TestTabLabelsDefaultsAndOverlay pins TabLabels: a nil or tab-less local
-// instance keeps the default two-slot bar; real tabs overlay it and extend it.
-func TestTabLabelsDefaultsAndOverlay(t *testing.T) {
-	assert.Equal(t, []string{"Preview", "Terminal"}, TabLabels(nil))
+// TestTabLabelsMirrorRealTabs pins TabLabels since #1100: once tabs have
+// materialized the labels mirror the real tab list exactly — a fresh local
+// instance has only its agent tab, so it renders exactly one slot; `t`
+// (AddShellTab) grows it to two. Before tabs materialize (nil instance or
+// mid-start) the placeholder is the single guaranteed slot, never a padded
+// two-slot bar that would advertise a phantom Terminal target.
+func TestTabLabelsMirrorRealTabs(t *testing.T) {
+	assert.Equal(t, []string{"Preview"}, TabLabels(nil),
+		"nil instance: single-slot placeholder, no phantom Terminal")
 
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "labeled", Path: t.TempDir(), Program: "test",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"Preview", "Terminal"}, TabLabels(inst),
-		"tab-less local instance keeps the default-padded slots")
+	assert.Equal(t, []string{"Preview"}, TabLabels(inst),
+		"mid-start (no tabs yet): single-slot placeholder")
 
 	inst.AddTabForTest("agent", session.TabKindAgent)
+	assert.Equal(t, []string{"Preview"}, TabLabels(inst),
+		"fresh instance (#1100): exactly one real slot, no padding to two")
+
 	inst.AddTabForTest("shell", session.TabKindShell)
+	assert.Equal(t, []string{"Preview", "Terminal"}, TabLabels(inst),
+		"after t: the on-demand terminal is the second slot")
+
 	inst.AddTabForTest("btop", session.TabKindProcess)
 	assert.Equal(t, []string{"Preview", "Terminal", "btop"}, TabLabels(inst),
-		"real tabs overlay the default slots and extend past them")
+		"process tabs extend the list under their own names")
 }

@@ -39,13 +39,16 @@ func TestSidebarNavigation(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false, store.NewProjection())
 
-	// Add some instances
+	// Add some instances, each with a real agent + shell tab pair so the tree
+	// walk below has two child rows per instance (#1100: no padded slots).
 	inst1, _ := session.NewInstance(session.InstanceOptions{
 		Title: "inst1", Path: t.TempDir(), Program: "test",
 	})
 	inst2, _ := session.NewInstance(session.InstanceOptions{
 		Title: "inst2", Path: t.TempDir(), Program: "test",
 	})
+	addAgentShellTabs(inst1)
+	addAgentShellTabs(inst2)
 	addTestInstance(s, inst1)
 	addTestInstance(s, inst2)
 
@@ -363,7 +366,8 @@ func indicatorArrows(out string) (up, down bool) {
 }
 
 // newWindowingSidebar builds a sidebar with n instances titled win-00..win-NN
-// for the #787 windowing tests.
+// for the #787 windowing tests. Each carries a real agent + shell tab pair so
+// the selected instance contributes two tab child rows (#1100: no padded slots).
 func newWindowingSidebar(t *testing.T, n int) *Sidebar {
 	t.Helper()
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
@@ -374,6 +378,7 @@ func newWindowingSidebar(t *testing.T, n int) *Sidebar {
 			Title: fmt.Sprintf("win-%02d", i), Path: dir, Program: "test",
 		})
 		require.NoError(t, err)
+		addAgentShellTabs(inst)
 		addTestInstance(s, inst)
 	}
 	return s
