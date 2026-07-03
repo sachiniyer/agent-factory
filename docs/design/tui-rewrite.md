@@ -12,6 +12,8 @@ Status: **Accepted — revised 2026-07-03 (mid-epic redesign)** · Author: Capta
 >
 > §1 still documents the *pre-epic* TUI as the historical baseline. §4 reflects what has landed and the sequencing for the remainder.
 
+> **Amendment (2026-07-03, [#1087](https://github.com/sachiniyer/agent-factory/issues/1087)/[#1090](https://github.com/sachiniyer/agent-factory/issues/1090), per Sachin):** the automations strip is NOT a bottom strip. Automations live at the **bottom of the left rail**, under the instances tree, separated by a horizontal rule; the left rail narrowed to `clamp(22, 25 %·W, 36)` cols; the workspace content panes take the full height above the status bar. And because the rail is narrow, the full TaskPane manager (list + create/edit form) does **not** expand in place — it opens as a **centered modal overlay** (like the hooks editor), from `S` or Enter on the focused section; the in-rail section is always the compact summary. References to the "bottom strip", "expands in place", and the `clamp(24, 30 %·W, 44)` rail below are superseded.
+
 ## 0. Summary
 
 Rewrite the TUI as a multi-pane workspace that uses the full window:

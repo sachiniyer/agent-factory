@@ -76,10 +76,13 @@ type Menu struct {
 var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
 var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName, keys.KeyChangeProgram}
 
-// automationsMenuOptions are the status-bar hints while the automations strip
-// has focus; the expanded TaskPane renders its own detailed key line, so the
-// bar shows only the cross-region verbs.
-var automationsMenuOptions = []keys.KeyName{keys.KeyTab, keys.KeyHooks, keys.KeyHelp, keys.KeyQuit}
+// automationsMenuOptions are the status-bar hints while the in-rail
+// automations section has focus: Enter opens the task manager overlay (which
+// renders its own detailed key line), so the bar shows the manage verb plus
+// the cross-region ones.
+var automationsMenuOptions = []keys.KeyName{
+	keys.KeyManageAutomations, keys.KeyTab, keys.KeyHooks, keys.KeyHelp, keys.KeyQuit,
+}
 
 // paneBMenuOptions are the status-bar hints while the pinned split pane has
 // focus (#1024 PR 5): attach/scroll act on pane B's own binding, s swaps the

@@ -21,6 +21,12 @@ import (
 // string (the daemon then falls back to the user's configured default_program).
 const programDefaultLabel = "(use config default)"
 
+// taskPlaceholderStyle renders form placeholders faint so an example (the
+// cron "e.g. 0 9 * * 1-5") can never be mistaken for a typed value.
+var taskPlaceholderStyle = lipgloss.NewStyle().
+	Faint(true).
+	Foreground(lipgloss.AdaptiveColor{Light: "#B5B0B0", Dark: "#5C5757"})
+
 // Edit-form focus stops, in tab order. The form is grouped: Essentials
 // (name, trigger, prompt) then Delivery (target session, path, program).
 // The trigger is a two-step stop: a cron|watch type selector followed by the
@@ -108,6 +114,20 @@ func (s *TaskPane) GetTasks() []task.Task {
 	return s.tasks
 }
 
+// SelectTask moves the list selection to idx (clamped). The tasks overlay
+// uses it to open the manager on the task the in-rail cursor was resting on.
+func (s *TaskPane) SelectTask(idx int) {
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(s.tasks) {
+		idx = len(s.tasks) - 1
+	}
+	if idx >= 0 {
+		s.selectedIdx = idx
+	}
+}
+
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's
 // dirty state so a subsequent save can't reprocess already-deleted tasks. The
 // deletion loop in saveContentPaneState removes task records as a side
@@ -155,6 +175,7 @@ func (s *TaskPane) IsCreating() bool {
 func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	name := textinput.New()
 	name.Placeholder = "Task name"
+	name.PlaceholderStyle = taskPlaceholderStyle
 	name.CharLimit = 64
 	name.Focus()
 
@@ -163,25 +184,34 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	prompt.Prompt = ""
 	prompt.Blur()
 	prompt.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	prompt.FocusedStyle.Placeholder = taskPlaceholderStyle
+	prompt.BlurredStyle.Placeholder = taskPlaceholderStyle
 	prompt.CharLimit = 0
 	prompt.MaxHeight = 0
 
+	// The cron placeholder is an EXAMPLE, not a prefilled value: the "e.g."
+	// prefix plus the faint placeholder style keep it visually distinct from
+	// typed input, so an untouched field reads as empty (play-test on #1096).
 	cron := textinput.New()
-	cron.Placeholder = "0 9 * * 1-5"
+	cron.Placeholder = "e.g. 0 9 * * 1-5"
+	cron.PlaceholderStyle = taskPlaceholderStyle
 	cron.CharLimit = 64
 	cron.Blur()
 
 	watch := textinput.New()
 	watch.Placeholder = "long-running cmd; 1 stdout line = 1 event"
+	watch.PlaceholderStyle = taskPlaceholderStyle
 	watch.CharLimit = 256
 	watch.Blur()
 
 	target := textinput.New()
 	target.Placeholder = "(new session per run)"
+	target.PlaceholderStyle = taskPlaceholderStyle
 	target.CharLimit = 64
 	target.Blur()
 
 	path := textinput.New()
+	path.PlaceholderStyle = taskPlaceholderStyle
 	path.CharLimit = 256
 	path.Blur()
 
@@ -667,7 +697,9 @@ func (s *TaskPane) renderListMode() string {
 			style = disabledStyle
 		}
 
-		// One line per task: status, name, trigger, delivery.
+		// One line per task: status, name, trigger, delivery — ellipsized to
+		// the pane width so a long name/cron column marks its cut instead of
+		// being hard-clamped.
 		parts := []string{status}
 		if tsk.Name != "" {
 			parts = append(parts, tsk.Name)
@@ -677,9 +709,9 @@ func (s *TaskPane) renderListMode() string {
 
 		isSelected := i == s.selectedIdx
 		if isSelected && s.hasFocus {
-			b.WriteString(selectedStyle.Render("▸ " + header))
+			b.WriteString(selectedStyle.Render(fitLine("▸ "+header, s.width)))
 		} else {
-			b.WriteString(style.Render("  " + header))
+			b.WriteString(style.Render(fitLine("  "+header, s.width)))
 		}
 		b.WriteString("\n")
 
@@ -721,9 +753,10 @@ func (s *TaskPane) renderListMode() string {
 
 	b.WriteString("\n")
 	if s.hasFocus {
-		b.WriteString(hintStyle.Render("↑/↓ select • n new • enter edit • r run now • x toggle • D delete • esc back"))
+		b.WriteString(hintStyle.Render(fitLine(
+			"↑/↓ select • n new • enter edit • r run now • x toggle • D delete • esc back", s.width)))
 	} else {
-		b.WriteString(hintStyle.Render("enter to focus and edit tasks"))
+		b.WriteString(hintStyle.Render(fitLine("enter to focus and edit tasks", s.width)))
 	}
 
 	return b.String()
@@ -771,10 +804,12 @@ func (s *TaskPane) renderEditMode() string {
 		return labelStyle.Render(fmt.Sprintf("%-9s", text))
 	}
 	// fieldErr renders the inline validation message directly under the
-	// field it belongs to, instead of a global error footer.
+	// field it belongs to, instead of a global error footer — ellipsized to
+	// the pane width so a long message (e.g. a full path in "not a git
+	// repository") marks its cut.
 	fieldErr := func(field int) string {
 		if s.editError != "" && s.editErrorField == field {
-			return errorStyle.Render("  ! "+s.editError) + "\n"
+			return errorStyle.Render(fitLine("  ! "+s.editError, s.width)) + "\n"
 		}
 		return ""
 	}
@@ -839,7 +874,7 @@ func (s *TaskPane) renderEditMode() string {
 		b.WriteString(buttonStyle.Render(submitLabel))
 	}
 	b.WriteString("\n\n")
-	b.WriteString(hintStyle.Render("tab next • shift+tab prev • enter save • esc cancel"))
+	b.WriteString(hintStyle.Render(fitLine("tab next • shift+tab prev • enter save • esc cancel", s.width)))
 
 	return b.String()
 }

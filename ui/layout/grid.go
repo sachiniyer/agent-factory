@@ -7,6 +7,7 @@ const (
 	RegionPaneA       = "paneA"
 	RegionPaneB       = "paneB"
 	RegionDivider     = "divider"
+	RegionRailRule    = "railRule"
 	RegionAutomations = "automations"
 	RegionStatusBar   = "status"
 )
@@ -15,16 +16,22 @@ const (
 // named by a *Min* threshold is available at sizes >= the threshold and
 // degrades below it.
 const (
-	// TreeMinWidth / TreeMaxWidth clamp the left rail: clamp(24, 30%·W, 44).
-	TreeMinWidth = 24
-	TreeMaxWidth = 44
+	// TreeMinWidth / TreeMaxWidth clamp the left rail: clamp(22, 25%·W, 36).
+	// Narrowed from clamp(24, 30%·W, 44) by #1090 to give the content panes
+	// more columns.
+	TreeMinWidth = 22
+	TreeMaxWidth = 36
 
 	// StatusBarRows is the fixed status-bar height.
 	StatusBarRows = 2
 
-	// AutomationsRows is the full automations-strip height;
-	// AutomationsCompactRows is its 1-line-summary height when the terminal
-	// is tight.
+	// RailRuleRows is the horizontal rule separating the instances tree from
+	// the automations section inside the left rail (#1087).
+	RailRuleRows = 1
+
+	// AutomationsRows is the full automations-section height (bottom of the
+	// left rail, #1087); AutomationsCompactRows is its 1-line-summary height
+	// when the terminal is tight.
 	AutomationsRows        = 3
 	AutomationsCompactRows = 1
 
@@ -33,13 +40,13 @@ const (
 	SplitMinWidth = 110
 
 	// AutomationsFullMinWidth / AutomationsFullMinHeight: below either the
-	// automations strip collapses to the 1-line summary.
+	// automations section collapses to the 1-line summary.
 	AutomationsFullMinWidth  = 80
 	AutomationsFullMinHeight = 20
 
 	// MinimalWidth / MinimalHeight: below either the layout drops to
 	// minimal mode — tree + single pane + status bar only (no automations
-	// strip, split never honored).
+	// section, split never honored).
 	MinimalWidth  = 60
 	MinimalHeight = 15
 
@@ -59,15 +66,6 @@ type Grid struct {
 	// otherwise the workspace is pane A alone and the caller keeps pane B's
 	// binding for when the terminal grows back.
 	Split bool
-
-	// AutomationsExpanded requests the automations strip expanded in place —
-	// focusing the strip swaps the compact task rows for the full task
-	// manager (§2.1). Honored whenever the strip is visible (i.e. outside
-	// minimal mode): the expanded strip takes half the rows above the status
-	// bar, so the tree and workspace stay usable behind it. Expansion
-	// overrides the compact 1-line degradation — an editor cannot run in one
-	// line.
-	AutomationsExpanded bool
 }
 
 // Layout is a solved arrangement: the named region rects plus which regions
@@ -81,23 +79,26 @@ type Layout struct {
 	// out and the caller should render the fallback banner instead.
 	Fallback bool
 
-	Tree        Rect
-	PaneA       Rect
-	Divider     Rect
-	PaneB       Rect
+	Tree    Rect
+	PaneA   Rect
+	Divider Rect
+	PaneB   Rect
+	// RailRule is the 1-row horizontal rule inside the left rail separating
+	// the tree from the bottom-aligned automations section (#1087). Visible
+	// exactly when Automations is.
+	RailRule    Rect
 	Automations Rect
 	StatusBar   Rect
 
 	// SplitActive reports whether the split was honored (PaneB and Divider
 	// are visible).
 	SplitActive bool
-	// AutomationsVisible reports whether the automations strip is shown at
-	// all; AutomationsCompact whether it is the 1-line summary;
-	// AutomationsExpanded whether the strip got the expanded (full task
-	// manager) allocation.
-	AutomationsVisible  bool
-	AutomationsCompact  bool
-	AutomationsExpanded bool
+	// AutomationsVisible reports whether the automations section is shown at
+	// all; AutomationsCompact whether it is the 1-line summary. (The full
+	// task manager is a modal overlay, not a layout region — the in-rail
+	// section is always the compact summary.)
+	AutomationsVisible bool
+	AutomationsCompact bool
 }
 
 // Solve lays out a width×height terminal.
@@ -113,6 +114,13 @@ func (g Grid) Solve(width, height int) Layout {
 	rem, statusBar := Rect{X: 0, Y: 0, W: width, H: height}.CutBottom(StatusBarRows)
 	l.StatusBar = statusBar
 
+	// The left rail and the workspace both run the full height above the
+	// status bar (#1090): the rail hosts the tree plus — outside minimal
+	// mode — the bottom-aligned automations section under a horizontal rule
+	// (#1087), and the workspace is purely content panes.
+	treeWidth := clampInt(width*25/100, TreeMinWidth, TreeMaxWidth)
+	rail, workspace := rem.CutLeft(treeWidth)
+
 	if !minimal {
 		l.AutomationsVisible = true
 		l.AutomationsCompact = width < AutomationsFullMinWidth || height < AutomationsFullMinHeight
@@ -120,24 +128,10 @@ func (g Grid) Solve(width, height int) Layout {
 		if l.AutomationsCompact {
 			rows = AutomationsCompactRows
 		}
-		if g.AutomationsExpanded {
-			// Expanded in place: half the rows above the status bar. Outside
-			// minimal mode rem.H >= MinimalHeight - StatusBarRows = 13, so the
-			// expanded strip always gets >= 6 rows and the tree/workspace
-			// keeps at least as much.
-			l.AutomationsExpanded = true
-			l.AutomationsCompact = false
-			rows = rem.H / 2
-			if rows < AutomationsRows {
-				rows = AutomationsRows
-			}
-		}
-		rem, l.Automations = rem.CutBottom(rows)
+		rail, l.Automations = rail.CutBottom(rows)
+		rail, l.RailRule = rail.CutBottom(RailRuleRows)
 	}
-
-	treeWidth := clampInt(width*30/100, TreeMinWidth, TreeMaxWidth)
-	tree, workspace := rem.CutLeft(treeWidth)
-	l.Tree = tree
+	l.Tree = rail
 
 	if g.Split && !minimal && width >= SplitMinWidth {
 		l.SplitActive = true
@@ -165,6 +159,7 @@ func (l Layout) VisibleRegions() map[string]Rect {
 		regions[RegionPaneB] = l.PaneB
 	}
 	if l.AutomationsVisible {
+		regions[RegionRailRule] = l.RailRule
 		regions[RegionAutomations] = l.Automations
 	}
 	return regions

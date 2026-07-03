@@ -145,12 +145,13 @@ func TestGridSolveTreeWidthClamp(t *testing.T) {
 		w    int
 		want int
 	}{
-		{60, layout.TreeMinWidth},  // 30% = 18 → clamped up to 24
-		{80, layout.TreeMinWidth},  // 30% = 24 → exactly the minimum
-		{100, 30},                  // 30% in range
-		{120, 36},                  // 30% in range
-		{146, 43},                  // 30% = 43.8, integer math
-		{150, layout.TreeMaxWidth}, // 30% = 45 → clamped down to 44
+		{60, layout.TreeMinWidth},  // 25% = 15 → clamped up to 22
+		{88, layout.TreeMinWidth},  // 25% = 22 → exactly the minimum
+		{100, 25},                  // 25% in range
+		{120, 30},                  // 25% in range
+		{135, 33},                  // 25% = 33.75, integer math
+		{144, layout.TreeMaxWidth}, // 25% = 36 → exactly the maximum
+		{150, layout.TreeMaxWidth}, // 25% = 37.5 → clamped down to 36
 		{220, layout.TreeMaxWidth},
 	}
 	for _, tt := range tests {
@@ -277,17 +278,18 @@ func TestGridVisibleRegionsMatchFlags(t *testing.T) {
 	require.True(t, l.SplitActive)
 	require.True(t, l.AutomationsVisible)
 	regions := l.VisibleRegions()
-	assert.Len(t, regions, 6)
+	assert.Len(t, regions, 7)
 	assert.Equal(t, l.Tree, regions[layout.RegionTree])
 	assert.Equal(t, l.PaneA, regions[layout.RegionPaneA])
 	assert.Equal(t, l.PaneB, regions[layout.RegionPaneB])
 	assert.Equal(t, l.Divider, regions[layout.RegionDivider])
+	assert.Equal(t, l.RailRule, regions[layout.RegionRailRule])
 	assert.Equal(t, l.Automations, regions[layout.RegionAutomations])
 	assert.Equal(t, l.StatusBar, regions[layout.RegionStatusBar])
 
 	single := layout.Grid{}.Solve(160, 48)
 	regions = single.VisibleRegions()
-	assert.Len(t, regions, 4)
+	assert.Len(t, regions, 5)
 	assert.NotContains(t, regions, layout.RegionPaneB)
 	assert.NotContains(t, regions, layout.RegionDivider)
 
@@ -295,56 +297,48 @@ func TestGridVisibleRegionsMatchFlags(t *testing.T) {
 	regions = minimal.VisibleRegions()
 	assert.Len(t, regions, 3)
 	assert.NotContains(t, regions, layout.RegionAutomations)
+	assert.NotContains(t, regions, layout.RegionRailRule)
 }
 
-// TestGridSolveAutomationsExpandedTilesExactly sweeps the size range with the
-// automations strip expanded in place (#1024 PR 4: focusing the strip swaps
-// the compact rows for the full task manager) and asserts the regions still
-// exactly tile the terminal.
-func TestGridSolveAutomationsExpandedTilesExactly(t *testing.T) {
-	grid := layout.Grid{AutomationsExpanded: true}
-	for w := layout.HardMinWidth; w <= 220; w += 3 {
-		for h := layout.HardMinHeight; h <= 72; h++ {
-			l := grid.Solve(w, h)
-			require.False(t, l.Fallback, "unexpected fallback at %dx%d", w, h)
+// TestGridSolveAutomationsInRail pins the #1087/#1090 geometry: the
+// automations section lives INSIDE the left rail, bottom-aligned against the
+// status bar, separated from the tree by a 1-row full-rail-width rule — and
+// the workspace panes run the full height above the status bar.
+func TestGridSolveAutomationsInRail(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		grid  layout.Grid
+		w, h  int
+		split bool
+	}{
+		{"wide", layout.Grid{}, 160, 48, false},
+		{"canonical-80x24", layout.Grid{}, 80, 24, false},
+		{"compact", layout.Grid{}, 79, 22, false},
+		{"split", layout.Grid{Split: true}, 160, 48, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := tc.grid.Solve(tc.w, tc.h)
+			require.True(t, l.AutomationsVisible)
+			require.Equal(t, tc.split, l.SplitActive)
 
-			screen := layout.Rect{X: 0, Y: 0, W: w, H: h}
-			visible := l.VisibleRegions()
-			parts := make([]layout.Rect, 0, len(visible))
-			for id, r := range visible {
-				require.False(t, r.Empty(), "visible region %s is empty at %dx%d", id, w, h)
-				parts = append(parts, r)
+			// Rail column: tree, rule, automations share X and W and stack
+			// exactly, with automations pinned to the status bar.
+			assert.Equal(t, l.Tree.X, l.RailRule.X)
+			assert.Equal(t, l.Tree.X, l.Automations.X)
+			assert.Equal(t, l.Tree.W, l.RailRule.W, "the rule spans the full rail width")
+			assert.Equal(t, l.Tree.W, l.Automations.W, "automations span the full rail width")
+			assert.Equal(t, layout.RailRuleRows, l.RailRule.H)
+			assert.Equal(t, l.Tree.Bottom(), l.RailRule.Y, "the rule sits directly under the tree")
+			assert.Equal(t, l.RailRule.Bottom(), l.Automations.Y, "automations sit directly under the rule")
+			assert.Equal(t, l.StatusBar.Y, l.Automations.Bottom(), "automations are bottom-aligned in the rail")
+
+			// Workspace: full height above the status bar (#1090).
+			assert.Equal(t, tc.h-layout.StatusBarRows, l.PaneA.H)
+			assert.Equal(t, l.StatusBar.Y, l.PaneA.Bottom())
+			if tc.split {
+				assert.Equal(t, l.PaneA.H, l.Divider.H)
+				assert.Equal(t, l.PaneA.H, l.PaneB.H)
 			}
-			requireTiles(t, screen, parts)
-		}
+		})
 	}
-}
-
-// TestGridSolveAutomationsExpandedAllocation pins the expanded strip's
-// contract: honored whenever the strip is visible, never compact (an editor
-// cannot run in one line), roughly half the rows above the status bar, and
-// the workspace keeps at least as much as the strip.
-func TestGridSolveAutomationsExpandedAllocation(t *testing.T) {
-	grid := layout.Grid{AutomationsExpanded: true}
-
-	l := grid.Solve(100, 30)
-	require.True(t, l.AutomationsVisible)
-	assert.True(t, l.AutomationsExpanded, "expansion honored outside minimal mode")
-	assert.False(t, l.AutomationsCompact, "expansion overrides the compact degradation")
-	assert.Equal(t, (30-layout.StatusBarRows)/2, l.Automations.H,
-		"expanded strip takes half the rows above the status bar")
-	assert.GreaterOrEqual(t, l.PaneA.H, l.Automations.H,
-		"the workspace keeps at least as many rows as the strip")
-
-	// Below the compact threshold the expansion still wins (the manager needs
-	// the rows).
-	tight := grid.Solve(70, 24)
-	require.True(t, tight.AutomationsVisible)
-	assert.True(t, tight.AutomationsExpanded)
-	assert.False(t, tight.AutomationsCompact)
-
-	// Minimal mode hides the strip entirely; the request is moot.
-	minimal := grid.Solve(59, 14)
-	assert.False(t, minimal.AutomationsVisible)
-	assert.False(t, minimal.AutomationsExpanded)
 }

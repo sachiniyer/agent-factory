@@ -59,47 +59,120 @@ func TestAutomationsStripOneLineSummary(t *testing.T) {
 	assert.Contains(t, out, "Automations: 2 (1 on)")
 }
 
-// TestAutomationsStripFocusExpandsToManager: focusing the strip swaps the
-// compact rows for the full TaskPane manager, with input focus live.
-func TestAutomationsStripFocusExpandsToManager(t *testing.T) {
+// TestAutomationsFocusShowsCursorNotManager: focusing the section adds a
+// cursor to the compact rows — the full TaskPane manager must NOT render
+// in-rail (it opens as a modal overlay, #1096 play-test); the section stays
+// exactly rect-sized.
+func TestAutomationsFocusShowsCursorNotManager(t *testing.T) {
 	a := newTestAutomations(stripTasks())
-	a.taskPane.SetTasks(stripTasks())
-	a.SetRect(layout.Rect{W: 100, H: 14})
+	a.SetRect(layout.Rect{W: 100, H: 3})
 
 	a.Focus()
 	require.True(t, a.Focused())
-	require.True(t, a.taskPane.HasFocus(), "focusing the strip forwards input focus to the manager")
+	require.False(t, a.taskPane.HasFocus(),
+		"focusing the section must not focus the manager — the overlay open does that")
 
 	out := a.View()
-	requireExactRect(t, out, layout.Rect{W: 100, H: 14}, "focused strip")
-	assert.Contains(t, out, "Tasks", "the manager's own view renders in place")
-	assert.Contains(t, out, "n new", "the manager's key hints are live")
+	requireExactRect(t, out, layout.Rect{W: 100, H: 3}, "focused section")
+	assert.Contains(t, out, "▸[✓]", "the cursor marks the selected row")
+	assert.NotContains(t, out, "Tasks", "the manager must not render in-rail")
+
+	a.ScrollDown()
+	assert.Contains(t, a.View(), "▸[✗]", "the cursor follows ScrollDown")
+	assert.Equal(t, 1, a.SelectedTaskIndex())
 
 	a.Blur()
-	assert.False(t, a.taskPane.HasFocus())
-	assert.Contains(t, a.View(), "Automations", "blurred strip returns to compact rows")
+	assert.NotContains(t, a.View(), "▸", "the cursor leaves with focus")
 }
 
-// TestAutomationsStripKeyRouting: the focused strip consumes manager keys but
-// bubbles Tab/Shift-Tab (the focus ring) outside a form, and q (quit) always.
+// TestAutomationsStripKeyRouting: the focused section consumes only its
+// cursor keys; everything else — Enter (overlay open), Esc (focus ring), Tab,
+// q — bubbles to the root.
 func TestAutomationsStripKeyRouting(t *testing.T) {
 	a := newTestAutomations(stripTasks())
-	a.taskPane.SetTasks(stripTasks())
 	a.Focus()
 
 	_, consumed := a.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
-	assert.True(t, consumed, "list navigation is consumed")
+	assert.True(t, consumed, "cursor navigation is consumed")
+	assert.Equal(t, 1, a.SelectedTaskIndex())
+	_, consumed = a.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	assert.True(t, consumed)
+	assert.Equal(t, 0, a.SelectedTaskIndex())
 
+	_, consumed = a.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.False(t, consumed, "Enter bubbles so the root can open the manager overlay")
 	_, consumed = a.HandleKey(tea.KeyMsg{Type: tea.KeyTab})
-	assert.False(t, consumed, "Tab bubbles to the focus ring outside a form")
-
+	assert.False(t, consumed, "Tab bubbles to the focus ring")
 	_, consumed = a.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	assert.False(t, consumed, "q bubbles so the root can quit")
+}
 
-	// Inside the edit form Tab moves fields and must be consumed.
-	a.taskPane.EnterCreateMode(t.TempDir())
-	_, consumed = a.HandleKey(tea.KeyMsg{Type: tea.KeyTab})
-	assert.True(t, consumed, "Tab inside the create form moves between fields")
+// TestAutomationsTitleWidthAware pins the #1096 play-test fix: the header's
+// hint segments drop right-to-left ("H hooks" first) and the name shrinks
+// with an ellipsis so the "S manage" affordance survives even the 22-col
+// rail minimum — never a bare hard clamp.
+func TestAutomationsTitleWidthAware(t *testing.T) {
+	tasks := stripTasks()
+
+	wide := newTestAutomations(tasks)
+	wide.SetRect(layout.Rect{W: 60, H: 3})
+	out := wide.View()
+	assert.Contains(t, out, "S manage", "wide rail shows the manage hint")
+	assert.Contains(t, out, "H hooks", "wide rail shows the hooks hint")
+
+	mid := newTestAutomations(tasks)
+	mid.SetRect(layout.Rect{W: 36, H: 3})
+	out = mid.View()
+	assert.Contains(t, out, "S manage", "36-col rail keeps the manage hint")
+	assert.NotContains(t, out, "H hooks", "the hooks hint drops first under width pressure")
+
+	narrow := newTestAutomations(tasks)
+	narrow.SetRect(layout.Rect{W: 22, H: 3})
+	out = narrow.View()
+	requireExactRect(t, out, layout.Rect{W: 22, H: 3}, "22-col section")
+	assert.Contains(t, out, "S manage", "22-col rail still shows the manage affordance")
+	assert.Contains(t, out, "…", "the shrunk name marks its cut with an ellipsis")
+
+	// The 1-line degraded summary applies the same policy.
+	compact := newTestAutomations(tasks)
+	compact.SetRect(layout.Rect{W: 22, H: 1})
+	compact.SetCompact(true)
+	out = compact.View()
+	requireExactRect(t, out, layout.Rect{W: 22, H: 1}, "22-col compact summary")
+	assert.Contains(t, out, "S manage", "the compact summary keeps the manage affordance")
+}
+
+// TestAutomationsEmptyStateEllipsized: the no-tasks hint ellipsizes instead
+// of hard-clamping mid-word.
+func TestAutomationsEmptyStateEllipsized(t *testing.T) {
+	a := newTestAutomations(nil)
+	a.SetRect(layout.Rect{W: 22, H: 3})
+	out := a.View()
+	requireExactRect(t, out, layout.Rect{W: 22, H: 3}, "empty section")
+	assert.Contains(t, out, "no tasks")
+	assert.Contains(t, out, "…", "the truncated hint marks its cut")
+}
+
+// TestAutomationsCursorScrollsIntoView: with more tasks than rows, moving the
+// cursor below the fold scrolls the window so the selection stays visible.
+func TestAutomationsCursorScrollsIntoView(t *testing.T) {
+	var tasks []task.Task
+	for i := 0; i < 6; i++ {
+		tasks = append(tasks, task.Task{
+			ID: string(rune('a' + i)), Name: "task-" + string(rune('a'+i)),
+			CronExpr: "0 3 * * *", Enabled: true,
+		})
+	}
+	a := newTestAutomations(tasks)
+	a.SetRect(layout.Rect{W: 40, H: 3})
+	a.Focus()
+
+	for i := 0; i < 5; i++ {
+		a.ScrollDown()
+	}
+	out := a.View()
+	requireExactRect(t, out, layout.Rect{W: 40, H: 3}, "scrolled section")
+	assert.Contains(t, out, "▸[✓]  task-f", "the cursor's row scrolled into view")
 }
 
 // TestAutomationsStripExactRectWithOverflow: more tasks than rows must
