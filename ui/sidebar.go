@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
@@ -608,23 +609,48 @@ func (s *Sidebar) SelectInstance(target *session.Instance) {
 // but only when the cursor was already resting on one of its tab rows, so
 // tab-key muscle memory with the cursor on the instance row behaves exactly as
 // before the tree (the cursor stays put; the tree's "*" marker moves).
+//
+// The intended target MUST be captured before syncFromStore runs: when the
+// tab-slot count changed (t create / w close), the sync's structure rebuild
+// fires and pushSelection re-asserts the CURSOR row's tab index into the
+// store, clobbering the active tab the caller just set. Reading ActiveTab()
+// after the sync returned that clobbered value, so the method saw
+// cursor==active and no-oped — t didn't select the new tab and a following w
+// silently closed the wrong tab (PR #1081 play-test). Bare tab jumps/cycles
+// don't change the structure signature, so they never hit the rebuild; both
+// paths now go through the same capture-first flow.
 func (s *Sidebar) SyncCursorToActiveTab() {
-	s.syncFromStore()
-	sel := s.rawSelection()
-	if sel.Kind != SectionInstances || sel.IsHeader || !sel.IsTab {
-		return
-	}
 	want := s.proj.ActiveTab()
-	if sel.TabIndex == want {
+	pre := s.rawSelection()
+	if pre.Kind != SectionInstances || pre.IsHeader || !pre.IsTab {
 		return
 	}
+	instances := s.proj.GetInstances()
+	if pre.ItemIndex < 0 || pre.ItemIndex >= len(instances) {
+		return
+	}
+	// Key the parent instance by title: the sync below rebuilds the row list
+	// and flat/instance indices are only stable across it by identity.
+	title := instances[pre.ItemIndex].Title
+	s.syncFromStore()
+	instances = s.proj.GetInstances()
+	found := false
 	for j, item := range s.visibleItems {
 		if item.Kind == SectionInstances && !item.IsHeader && item.IsTab &&
-			item.ItemIndex == sel.ItemIndex && item.TabIndex == want {
+			item.ItemIndex >= 0 && item.ItemIndex < len(instances) &&
+			instances[item.ItemIndex].Title == title && item.TabIndex == want {
 			s.selectedIdx = j
+			found = true
 			break
 		}
 	}
+	if found {
+		// Re-assert the captured target: the sync's pushSelection may have
+		// overwritten it with the pre-move cursor row's index.
+		s.proj.SetActiveTab(want)
+	}
+	// When the wanted row is gone (e.g. a concurrent reconcile shrank the tab
+	// set), the cursor keeps the sync's clamped position and its row wins.
 	s.afterCursorMove()
 }
 
@@ -681,16 +707,26 @@ func (s *Sidebar) String() string {
 	var b strings.Builder
 	b.WriteString("\n")
 
-	// Title bar
+	// Title bar. Clamp the chip width to the allocation and truncate the text
+	// to the chip: lipgloss.Place pads but never clips, so at ultra-narrow
+	// widths the 15-cell " Agent Factory " (or the padded chip itself) would
+	// otherwise push the row past s.width — the same #646 overflow class the
+	// section headers hit.
 	titleWidth := AdjustPreviewWidth(s.width) + 2
+	if s.width > 0 && titleWidth > s.width {
+		titleWidth = s.width
+	}
 	if !s.autoyes {
 		b.WriteString(lipgloss.Place(
-			titleWidth, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(" Agent Factory ")))
+			titleWidth, 1, lipgloss.Left, lipgloss.Bottom,
+			mainTitle.Render(fitTitleText(" Agent Factory ", titleWidth))))
 	} else {
 		title := lipgloss.Place(
-			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(" Agent Factory "))
+			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom,
+			mainTitle.Render(fitTitleText(" Agent Factory ", titleWidth/2)))
 		autoYes := lipgloss.Place(
-			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom, autoYesStyle.Render(" auto-yes "))
+			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom,
+			autoYesStyle.Render(fitTitleText(" auto-yes ", titleWidth-(titleWidth/2))))
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, title, autoYes))
 	}
 
@@ -708,10 +744,15 @@ func (s *Sidebar) String() string {
 	}
 
 	out := lipgloss.Place(s.width, s.height, lipgloss.Left, lipgloss.Top, b.String())
-	// Safety clamp: fitWindow force-includes the first windowed row even when
-	// it alone exceeds the budget (e.g. a tall PR row at a tiny height), and
-	// lipgloss.Place will not truncate the overflow.
-	if s.height > 0 {
+	// Safety clamp to the exact allocation via PR 1's shared helper:
+	// lipgloss.Place pads but never truncates in either dimension, fitWindow
+	// force-includes the first windowed row even when it alone exceeds the
+	// height budget (e.g. a tall PR row at a tiny height), and rare row shapes
+	// (double-digit index prefixes at ultra-narrow widths) can still exceed
+	// the width after the per-row truncation (#646/#700 class).
+	if s.width > 0 && s.height > 0 {
+		out = layout.ClampToRect(out, layout.Rect{W: s.width, H: s.height})
+	} else if s.height > 0 {
 		if lines := strings.Split(out, "\n"); len(lines) > s.height {
 			out = strings.Join(lines[:s.height], "\n")
 		}
@@ -802,8 +843,31 @@ func (s *Sidebar) renderWindowIndicator(arrow string, hidden int) string {
 		}
 		text = runewidth.Truncate(text, w, tail)
 	}
-	return windowIndicatorStyle.Padding(0, 1).Render(
+	return windowIndicatorStyle.Padding(0, narrowAwarePad(w)).Render(
 		lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))
+}
+
+// narrowAwarePad returns the horizontal padding for a one-line sidebar row
+// rendered at effective content width w. The 2-cell Padding(0,1) sits OUTSIDE
+// the width the row text is truncated to, so at ultra-narrow allocations the
+// padded row overflows the sidebar (the #646 overflow class; reproduced by
+// T-Rex at SetSize(9,18) on the section header). Drop the padding at the same
+// w <= 9 threshold the instance and tab rows already use.
+func narrowAwarePad(w int) int {
+	if w <= 9 {
+		return 0
+	}
+	return 1
+}
+
+// fitTitleText truncates a title-bar chip's text to w cells so lipgloss.Place
+// (which pads but never clips) can't push the row past the sidebar allocation
+// at ultra-narrow widths.
+func fitTitleText(text string, w int) string {
+	if w > 0 && runewidth.StringWidth(text) > w {
+		return runewidth.Truncate(text, w, "")
+	}
+	return text
 }
 
 func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
@@ -853,7 +917,7 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 		}
 		text = runewidth.Truncate(text, w, tail)
 	}
-	return style.Padding(0, 1).Render(
+	return style.Padding(0, narrowAwarePad(w)).Render(
 		lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))
 }
 

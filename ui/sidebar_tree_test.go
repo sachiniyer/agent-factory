@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -162,6 +163,44 @@ func TestSidebarTreeSyncCursorToActiveTab(t *testing.T) {
 	assert.Equal(t, 1, sel.TabIndex, "cursor followed the tab jump")
 }
 
+// TestSidebarTreeSyncCursorSurvivesStructureRebuild pins the PR #1081
+// play-test fix at the sidebar level: an active-tab change made TOGETHER with
+// a tab-slot change (what t/w do) must survive SyncCursorToActiveTab. The
+// slot change trips the structure rebuild inside syncFromStore, whose
+// pushSelection re-asserts the cursor row's old tab index — the method must
+// capture and re-apply the intended target rather than read it post-sync.
+func TestSidebarTreeSyncCursorSurvivesStructureRebuild(t *testing.T) {
+	s := newTreeSidebar(t, 1)
+	s.SetSelectedInstance(0)
+	s.Down() // tab row 0
+	s.Down() // tab row 1
+	require.Equal(t, 1, s.proj.ActiveTab())
+
+	// Simulate handleNewTab: the instance grows a third slot in place (no
+	// store version bump) and the handler selects the fresh tab.
+	inst := s.proj.GetInstances()[0]
+	inst.AddTabForTest("agent", session.TabKindAgent)
+	inst.AddTabForTest("shell", session.TabKindShell)
+	inst.AddTabForTest("proc", session.TabKindProcess)
+	s.proj.SetActiveTab(2)
+	s.SyncCursorToActiveTab()
+
+	assert.Equal(t, 2, s.proj.ActiveTab(),
+		"the intended active tab must survive the structure rebuild")
+	sel := s.GetSelection()
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 2, sel.TabIndex, "cursor must land on the intended tab row")
+
+	// And the shrink direction (what w does): drop back to slot 1.
+	require.NoError(t, inst.DropClosedTab(2))
+	s.proj.SetActiveTab(1)
+	s.SyncCursorToActiveTab()
+	assert.Equal(t, 1, s.proj.ActiveTab())
+	sel = s.GetSelection()
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 1, sel.TabIndex)
+}
+
 // TestSidebarTreeRepinPreservesTabSelection is the tree extension of the #969
 // re-pin: a reconcile that removes a preceding instance re-pins the selection
 // by title, and the cursor must return to the SAME TAB ROW it was on, not just
@@ -273,6 +312,38 @@ func TestSidebarTreeWindowingWithTabRows(t *testing.T) {
 		"sidebar must render exactly the allocated height with tab rows present")
 	assert.Contains(t, out, "t-12", "selected instance must be inside the window")
 	assert.Contains(t, out, "└ 2 Terminal", "selected tab row must be inside the window")
+}
+
+// TestSidebarUltraNarrowNoOverflow pins the #646 no-overflow guarantee for
+// EVERY sidebar row kind at ultra-narrow allocations — section headers, the
+// title bar (both auto-yes chips), instance rows, tab rows, and the ▲/▼
+// window indicators. Greptile/T-Rex reproduced a section-header overflow at
+// SetSize(9,18): the header text was truncated to the effective content width
+// and then wrapped in Padding(0,1), rendering 10 cells into a 9-cell
+// allocation. Every rendered line must fit the allocated width.
+func TestSidebarUltraNarrowNoOverflow(t *testing.T) {
+	for _, autoyes := range []bool{false, true} {
+		for _, w := range []int{8, 9, 10, 11, 12} {
+			spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+			s := NewSidebar(&spin, autoyes, store.NewProjection())
+			dir := t.TempDir()
+			for i := 0; i < 12; i++ {
+				inst, err := session.NewInstance(session.InstanceOptions{
+					Title: fmt.Sprintf("narrow-instance-%02d", i), Path: dir, Program: "test",
+				})
+				require.NoError(t, err)
+				addTestInstance(s, inst)
+			}
+			s.SetSize(w, 18)
+			// Select a middle instance so tab rows and both ▲/▼ indicators are
+			// inside the rendered window.
+			s.SetSelectedInstance(5)
+			for i, line := range strings.Split(s.String(), "\n") {
+				require.LessOrEqualf(t, lipgloss.Width(line), w,
+					"autoyes=%v width=%d: line %d overflows: %q", autoyes, w, i, line)
+			}
+		}
+	}
 }
 
 // BenchmarkSidebarTreeRender is the #1024 PR 3 synthetic-store benchmark from

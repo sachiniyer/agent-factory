@@ -115,3 +115,53 @@ func TestTreeNav_NumberJumpMovesCursorOnTabRows(t *testing.T) {
 	assert.Equal(t, 1, h.store.ActiveTab())
 	assert.Equal(t, 1, h.sidebar.GetSelection().TabIndex)
 }
+
+// TestTreeNav_TabCreateCloseFromTabRow is the regression test for the PR
+// #1081 play-test bug: with the cursor parked ON A TAB ROW, `t` must create
+// AND select the new tab, and a following `w` must close exactly the cursor's
+// tab — not a stale clamped index (the silent wrong-tab close) — and land on
+// the left neighbor. The clobber came from SyncCursorToActiveTab reading
+// ActiveTab() only after syncFromStore: the tab-slot change trips the
+// structure rebuild, whose pushSelection re-asserts the cursor row's tab index
+// over the one the handler just set.
+func TestTreeNav_TabCreateCloseFromTabRow(t *testing.T) {
+	h := newTestHome(t)
+	inst := startedLocalInstance(t, "tw-tab-row")
+	selectInstance(h, inst)
+
+	var closedNames []string
+	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
+		return nextShellTabName(inst.GetTabs()), nil
+	}))
+	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
+		closedNames = append(closedNames, tabName)
+		return nil
+	}))
+
+	// Park the cursor on tab row 1 (the shell tab).
+	pressNav(t, h, "j")
+	pressNav(t, h, "j")
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab)
+	require.Equal(t, 1, sel.TabIndex)
+	require.Equal(t, 1, h.store.ActiveTab())
+
+	// t: the new tab (index 2) must be created AND selected, cursor following.
+	_, _ = h.handleNewTab()
+	require.Equal(t, 3, inst.TabCount())
+	assert.Equal(t, 2, h.store.ActiveTab(), "t from a tab row must select the new tab")
+	sel = h.sidebar.GetSelection()
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 2, sel.TabIndex, "cursor must follow onto the new tab's row")
+
+	// w: must close exactly the cursor's tab — the fresh one — and land left.
+	newTabName := inst.GetTabs()[2].Name
+	_, _ = h.handleCloseTab()
+	require.Equal(t, []string{newTabName}, closedNames,
+		"w from a tab row must close the cursor's tab, never a stale index")
+	require.Equal(t, 2, inst.TabCount())
+	assert.Equal(t, 1, h.store.ActiveTab(), "w must land on the left neighbor")
+	sel = h.sidebar.GetSelection()
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 1, sel.TabIndex, "cursor must land on the left neighbor's row")
+}
