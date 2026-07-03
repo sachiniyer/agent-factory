@@ -1321,7 +1321,12 @@ func (m *home) selectionChanged() tea.Cmd {
 	} else {
 		// Header row: the menu drops the instance-specific hints; the open
 		// panes are untouched (they are explicit bindings, not
-		// selection-driven).
+		// selection-driven). The startup auto-open still gets its chance —
+		// launch rests the cursor on the Instances header (launch selection
+		// parity, #1024 PR 2), so with only the instance-branch call above a
+		// cold start with restored sessions landed on the empty workspace
+		// until the first cursor move (#1099 play-test).
+		m.maybeAutoOpenInitialPane(nil)
 		m.menu.SetInstance(nil)
 		if selected := m.store.GetSelectedInstance(); selected != nil && !m.store.ContainsInstance(selected) {
 			// The sticky binding dangles — its instance was removed (e.g. the
@@ -1351,9 +1356,24 @@ func (m *home) clampSelectionTab() {
 // (#1088). Focus is NOT moved — the user is on the tree at startup. Once the
 // latch is set the workspace is entirely verb-driven: hiding every pane
 // leaves it empty until `s` opens one.
+//
+// A nil selected falls back to the first sidebar instance: launch never
+// auto-selects a row (the cursor rests on the Instances header — launch
+// selection parity, #1024 PR 2), so a cold start with restored sessions has
+// no selection to auto-open from. The fallback opens the first instance's
+// pane without touching the selection, and because selectionChanged re-enters
+// on every preview tick, it also re-fires once a restored instance leaves a
+// transient status (#1099 play-test).
 func (m *home) maybeAutoOpenInitialPane(selected *session.Instance) {
-	if m.initialPaneOpened || selected == nil || m.store.NumOpenPanes() > 0 {
+	if m.initialPaneOpened || m.store.NumOpenPanes() > 0 {
 		return
+	}
+	if selected == nil {
+		instances := m.store.GetInstances()
+		if len(instances) == 0 {
+			return
+		}
+		selected = instances[0]
 	}
 	if status := selected.GetStatus(); status == session.Loading || status == session.Deleting {
 		return

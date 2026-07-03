@@ -120,6 +120,73 @@ func TestColdStartFromSnapshot_LaunchSelectionParity(t *testing.T) {
 	require.Equal(t, 0, h.store.ActiveTab())
 }
 
+// TestColdStartFromSnapshot_AutoOpensFirstInstancePane pins the startup
+// auto-open on a cold start with restored sessions (#1088, #1099 play-test):
+// the launch cursor rests on the Instances header (selection parity above), so
+// the auto-open must fire from the header branch of selectionChanged — falling
+// back to the first restored instance — not wait for the first cursor move.
+// The selection itself stays untouched: the pane opens, the cursor stays on
+// the header, nothing is bound to the pane verbs.
+func TestColdStartFromSnapshot_AutoOpensFirstInstancePane(t *testing.T) {
+	h := newTestHome(t)
+	h.initialPaneOpened = false // newTestHome latches it off; this test IS the auto-open
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	h.snapshotFetcher = func(string) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "first"}, {Title: "second"}}, nil
+	}
+
+	require.NoError(t, h.coldStartFromSnapshot())
+	// The launch paint / preview tick runs selectionChanged with the cursor on
+	// the Instances header.
+	_ = h.selectionChanged()
+
+	require.Equal(t, 1, h.store.NumOpenPanes(), "cold start with restored sessions must auto-open a pane")
+	p := h.store.OpenPanes()[0]
+	require.Equal(t, "first", p.Instance().Title, "the first restored instance's pane opens")
+	require.Equal(t, 0, p.Tab(), "the agent tab opens")
+	require.True(t, h.initialPaneOpened, "the once-per-run latch must be set")
+
+	// Launch selection parity is preserved: the pane opened WITHOUT selecting.
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsHeader, "the cursor stays on the Instances header")
+	require.Nil(t, h.store.GetSelectedInstance(), "no instance is bound to the pane verbs")
+
+	// Re-entering (the 100ms preview tick) must not open more panes.
+	_ = h.selectionChanged()
+	require.Equal(t, 1, h.store.NumOpenPanes())
+}
+
+// TestColdStartFromSnapshot_AutoOpenWaitsOutTransientStatus pins the re-fire
+// half of the cold-start auto-open: a restored instance still in a transient
+// status is not opened, and the auto-open fires — without any cursor move —
+// on a later selectionChanged (the preview tick re-enters every 100ms) once
+// the instance leaves it.
+func TestColdStartFromSnapshot_AutoOpenWaitsOutTransientStatus(t *testing.T) {
+	h := newTestHome(t)
+	h.initialPaneOpened = false
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		inst := newSnapshotTestInstance(t, d.Title)
+		inst.SetStatus(session.Loading)
+		return inst, nil
+	}))
+	h.snapshotFetcher = func(string) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "restoring"}}, nil
+	}
+
+	require.NoError(t, h.coldStartFromSnapshot())
+	_ = h.selectionChanged()
+	require.Equal(t, 0, h.store.NumOpenPanes(), "a Loading instance must not auto-open")
+	require.False(t, h.initialPaneOpened, "the latch must stay unset so the auto-open can re-fire")
+
+	// The instance finishes restoring; the next tick's selectionChanged opens it.
+	h.store.GetInstances()[0].SetStatus(session.Running)
+	_ = h.selectionChanged()
+	require.Equal(t, 1, h.store.NumOpenPanes(), "the pane must auto-open once the instance leaves Loading")
+	require.Equal(t, "restoring", h.store.OpenPanes()[0].Instance().Title)
+}
+
 // TestColdStartFromSnapshot_EmptySnapshotNoSelection pins the empty cold
 // start: no instances → no selection anywhere and the empty content mode,
 // with the launch paint path running clean — matching the pre-store TUI.
