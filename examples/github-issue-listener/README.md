@@ -36,7 +36,7 @@ If you'd rather not have the daemon supervise it, the snippets below run the scr
 
 ### Linux — systemd user unit
 
-`~/.config/systemd/user/af-issue-listener.service`:
+`$XDG_CONFIG_HOME/systemd/user/af-issue-listener.service` (or `~/.config/systemd/user/…` when `XDG_CONFIG_HOME` is unset):
 
 ```ini
 [Unit]
