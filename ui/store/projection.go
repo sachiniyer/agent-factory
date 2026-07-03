@@ -61,6 +61,23 @@ type Projection struct {
 	// atomic to avoid a data race (#684).
 	activeTab atomic.Int32
 
+	// paneB is the split view's PINNED binding (#1024 PR 5): the (instance,
+	// tab) pane B renders. Unlike selected — which the tree cursor retargets
+	// live — this binding only changes on explicit split verbs (open, swap,
+	// retarget, close), which is what makes pane B a stable second view while
+	// the tree drives pane A (RFC §2.3). nil means no split is open. The
+	// binding survives the terminal shrinking below the split threshold (the
+	// grid stops honoring the split but the binding is retained and restored
+	// on grow, RFC §2.6) and survives attach/detach trivially — nothing in the
+	// attach path touches it.
+	paneB *session.Instance
+
+	// paneBTab is pane B's pinned 0-based tab index. An atomic for the same
+	// reason as activeTab: the background capture goroutine for pane B reads
+	// it via UpdateContent while the event loop writes it on split verbs and
+	// clamps (#684 class).
+	paneBTab atomic.Int32
+
 	// version counts mutations. Views cache structures derived from the
 	// projection (the sidebar's flattened row list) keyed on this value and
 	// lazily rebuild when it moves.
@@ -269,6 +286,12 @@ func (p *Projection) ReplaceInstance(target, replacement *session.Instance) bool
 			// wasSelected behavior.
 			p.selected = replacement
 		}
+		if p.paneB == target {
+			// Pane B's pinned binding follows a #765 same-title swap the same
+			// way, so an open split keeps showing the live session instead of
+			// an orphaned pointer's last capture (#1024 PR 5).
+			p.paneB = replacement
+		}
 		p.bump()
 		return true
 	}
@@ -447,6 +470,60 @@ func (p *Projection) SelectInstance(instance *session.Instance) {
 // SelectionSeq returns the SelectInstance assertion counter. See selectionSeq.
 func (p *Projection) SelectionSeq() uint64 {
 	return p.selectionSeq
+}
+
+// -- Pane B (split view, #1024 PR 5) --
+
+// SplitOpen reports whether a split is requested: pane B holds a pinned
+// binding. Whether the split is currently HONORED (the terminal is wide
+// enough) is the layout's call — the binding outlives narrow spells so the
+// split restores on grow (RFC §2.6).
+func (p *Projection) SplitOpen() bool {
+	return p.paneB != nil
+}
+
+// PaneBInstance returns the instance pane B is pinned to, or nil when no
+// split is open. Like selected, the pointer may briefly dangle after its
+// instance is removed from the projection; the root model closes the split on
+// its next tick when ContainsInstance fails.
+func (p *Projection) PaneBInstance() *session.Instance {
+	return p.paneB
+}
+
+// SetPaneB pins pane B to the given (instance, tab) — opening the split, or
+// retargeting/swapping an open one. instance must be non-nil (closing goes
+// through ClearPaneB).
+func (p *Projection) SetPaneB(instance *session.Instance, tab int) {
+	if instance == nil {
+		return
+	}
+	p.paneB = instance
+	p.paneBTab.Store(int32(tab))
+	p.bump()
+}
+
+// ClearPaneB drops pane B's binding, closing the split.
+func (p *Projection) ClearPaneB() {
+	if p.paneB == nil {
+		return
+	}
+	p.paneB = nil
+	p.paneBTab.Store(0)
+	p.bump()
+}
+
+// PaneBTab returns pane B's pinned 0-based tab index. Backed by an atomic:
+// pane B's background capture goroutine reads it while the event loop writes
+// it (#684 class).
+func (p *Projection) PaneBTab() int {
+	return int(p.paneBTab.Load())
+}
+
+// SetPaneBTab stores pane B's pinned tab index. Range clamping against the
+// pinned instance's tab count stays with the TabbedWindow, mirroring
+// SetActiveTab.
+func (p *Projection) SetPaneBTab(idx int) {
+	p.paneBTab.Store(int32(idx))
 }
 
 // -- Active tab --

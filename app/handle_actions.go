@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -49,20 +48,19 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyNew:
 		return m.startNewInstance(false)
 
-	case keys.KeyTask:
-		// Jump to the automations strip and open the create form directly.
-		cwd, err := os.Getwd()
-		if err != nil {
-			cwd = "."
-		}
+	case keys.KeyTaskList:
+		// Focus the automations strip: it expands to the full task manager
+		// (task creation lives on its `n` key — `s` became the split verb in
+		// #1024 PR 5).
 		m.focusRegion(layout.RegionAutomations)
-		m.automations.TaskPane().EnterCreateMode(cwd)
 		return m, nil
 
-	case keys.KeyTaskList:
-		// Focus the automations strip: it expands to the full task manager.
-		m.focusRegion(layout.RegionAutomations)
-		return m, nil
+	// Split view (#1024 PR 5): s opens the selection in pane B / swaps the
+	// panes (focus-dependent); x closes the split from pane B.
+	case keys.KeySplit:
+		return m.handleSplit()
+	case keys.KeyCloseSplit:
+		return m.handleCloseSplit()
 
 	case keys.KeySearch:
 		return m.showSearchOverlay()
@@ -77,12 +75,15 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyCopyPR:
 		return m.handleCopyPR()
 
-	// Scrolling (workspace pane)
+	// Scrolling (the focused workspace pane — pane B scrolls its own pinned
+	// view, #1024 PR 5)
 	case keys.KeyShiftUp:
-		m.paneA.ScrollUp()
+		pane, _ := m.focusedContentPane()
+		pane.ScrollUp()
 		return m, m.selectionChanged()
 	case keys.KeyShiftDown:
-		m.paneA.ScrollDown()
+		pane, _ := m.focusedContentPane()
+		pane.ScrollDown()
 		return m, m.selectionChanged()
 
 	// Focus ring (#1024 PR 4): Tab cycles tree → pane A → automations. Tabs
@@ -92,10 +93,16 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyShiftTab:
 		return m, m.cycleFocus(true)
 
-	// Tab lifecycle
+	// Tab lifecycle. `w` doubles as the split-close verb while the pinned
+	// pane has focus (RFC §2.3: "x/w on pane B closes the split") — there it
+	// must never fall through to closing a tab of the tree selection.
 	case keys.KeyNewTab:
 		return m.handleNewTab()
 	case keys.KeyCloseTab:
+		if m.ring.Active() == layout.RegionPaneB {
+			m.closeSplit()
+			return m, m.selectionChanged()
+		}
 		return m.handleCloseTab()
 
 	// Instance actions
@@ -238,8 +245,15 @@ func killConfirmationWarning(wt string) string {
 	return ""
 }
 
-// handleEnter handles the enter/open key action.
+// handleEnter handles the enter/open key action. Enter attaches the FOCUSED
+// pane's (instance, tab) full-screen (#1024 PR 5): with the pinned split pane
+// focused it attaches pane B's binding; everywhere else the tree selection —
+// pane A's binding — as before. The attach path itself is untouched: the same
+// attachOverlayCallbackFn seam, `attached` gate, and SIGKILL-bounded detach.
 func (m *home) handleEnter() (tea.Model, tea.Cmd) {
+	if m.ring.Active() == layout.RegionPaneB && m.lastLayout.SplitActive {
+		return m.handleEnterPaneB()
+	}
 	sel := m.sidebar.GetSelection()
 	tw := m.paneA
 

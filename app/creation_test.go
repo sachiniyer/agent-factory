@@ -92,10 +92,12 @@ func wireTestPanes(h *home, proj *store.Projection) {
 		h.errBox = ui.NewErrBox()
 	}
 	h.paneA = ui.NewTabbedWindow(ui.NewTabPane(), proj)
+	h.paneB = ui.NewPinnedTabbedWindow(ui.NewTabPane(), proj)
 	h.automations = ui.NewAutomationsPane(proj)
 	h.statusBar = ui.NewStatusBar(h.menu, h.errBox)
 	h.hooksPane = ui.NewHooksPane()
-	h.ring = layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionAutomations)
+	h.ring = layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionPaneB, layout.RegionAutomations)
+	h.ring.SetHidden(layout.RegionPaneB, true)
 	h.syncFocus()
 }
 

@@ -5,6 +5,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // TestMenuTerminalTabShowsBothScrollKeys verifies that when the terminal tab
@@ -112,5 +113,44 @@ func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
 	}
 	if localNewTab != 1 || localCloseTab != 1 {
 		t.Errorf("local menu should surface t/w tab keys; got newTab=%d closeTab=%d", localNewTab, localCloseTab)
+	}
+}
+
+// TestMenuSplitHintsFollowFocusAndSplitState pins the #1024 PR 5 hint model:
+// tree focus (or pane A with no split) advertises "s split"; pane A over an
+// open split advertises the swap meaning; the focused pane B gets its own
+// option set with swap + close-split.
+func TestMenuSplitHintsFollowFocusAndSplitState(t *testing.T) {
+	local := &session.Instance{Status: session.Ready}
+	m := NewMenu()
+	m.SetInstance(local)
+
+	has := func(want keys.KeyName) bool {
+		for _, k := range m.options {
+			if k == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	m.SetFocusRegion(layout.RegionTree)
+	if !has(keys.KeySplit) || has(keys.KeySwapPanes) {
+		t.Errorf("tree focus must advertise the split verb, not swap; options=%v", m.options)
+	}
+
+	m.SetFocusRegion(layout.RegionPaneA)
+	m.SetSplitOpen(false)
+	if !has(keys.KeySplit) || has(keys.KeySwapPanes) {
+		t.Errorf("pane A with no split must advertise split; options=%v", m.options)
+	}
+	m.SetSplitOpen(true)
+	if !has(keys.KeySwapPanes) || has(keys.KeySplit) {
+		t.Errorf("pane A over an open split must advertise swap; options=%v", m.options)
+	}
+
+	m.SetFocusRegion(layout.RegionPaneB)
+	if !has(keys.KeySwapPanes) || !has(keys.KeyCloseSplit) || !has(keys.KeyEnter) {
+		t.Errorf("focused pane B must advertise swap + close split + attach; options=%v", m.options)
 	}
 }

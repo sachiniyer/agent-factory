@@ -55,14 +55,23 @@ const paneHeaderRows = 1
 //
 // It implements layout.Pane: SetRect sizes the inner TabPane, and View()
 // returns exactly Rect-sized output via layout.ClampToRect.
+//
+// The split view (#1024 PR 5) adds a second window, pane B, distinguished by
+// the pinned flag: pane A renders the store's selection-driven binding
+// (selected instance + active tab), pane B the store's PINNED pane-B binding,
+// which only split verbs move. Everything else — frame, header, capture,
+// scroll, clamp discipline — is one implementation, so the two panes can
+// never drift apart in behavior.
 type TabbedWindow struct {
 	proj    *store.Projection
 	rect    layout.Rect
 	focused bool
+	pinned  bool
 
 	tab *TabPane
 }
 
+// NewTabbedWindow creates the selection-driven workspace window (pane A).
 func NewTabbedWindow(tab *TabPane, proj *store.Projection) *TabbedWindow {
 	return &TabbedWindow{
 		proj: proj,
@@ -70,10 +79,43 @@ func NewTabbedWindow(tab *TabPane, proj *store.Projection) *TabbedWindow {
 	}
 }
 
-// selectedInstance returns the instance the window renders — the store's
-// (sticky) display selection. Event-loop only.
-func (w *TabbedWindow) selectedInstance() *session.Instance {
+// NewPinnedTabbedWindow creates the pinned split window (pane B): it renders
+// the store's pane-B binding instead of the live tree selection (#1024 PR 5).
+func NewPinnedTabbedWindow(tab *TabPane, proj *store.Projection) *TabbedWindow {
+	return &TabbedWindow{
+		proj:   proj,
+		tab:    tab,
+		pinned: true,
+	}
+}
+
+// boundInstance returns the instance the window renders: the store's (sticky)
+// display selection for pane A, the pinned pane-B binding for pane B.
+// Event-loop only.
+func (w *TabbedWindow) boundInstance() *session.Instance {
+	if w.pinned {
+		return w.proj.PaneBInstance()
+	}
 	return w.proj.GetSelectedInstance()
+}
+
+// activeTab returns the window's 0-based tab index through the store's
+// role-matching atomic (#684): pane A follows the shared active tab, pane B
+// its pinned tab. Safe from the background capture goroutine.
+func (w *TabbedWindow) activeTab() int {
+	if w.pinned {
+		return w.proj.PaneBTab()
+	}
+	return w.proj.ActiveTab()
+}
+
+// setActiveTab writes the window's tab index to the role-matching store slot.
+func (w *TabbedWindow) setActiveTab(idx int) {
+	if w.pinned {
+		w.proj.SetPaneBTab(idx)
+		return
+	}
+	w.proj.SetActiveTab(idx)
 }
 
 // ClampActiveTab bounds the active tab index into [0, len(tabLabels())-1].
@@ -85,13 +127,13 @@ func (w *TabbedWindow) selectedInstance() *session.Instance {
 func (w *TabbedWindow) ClampActiveTab() {
 	n := len(w.tabLabels())
 	if n <= 0 {
-		w.proj.SetActiveTab(0)
+		w.setActiveTab(0)
 		return
 	}
-	if cur := w.proj.ActiveTab(); cur >= n {
-		w.proj.SetActiveTab(n - 1)
+	if cur := w.activeTab(); cur >= n {
+		w.setActiveTab(n - 1)
 	} else if cur < 0 {
-		w.proj.SetActiveTab(0)
+		w.setActiveTab(0)
 	}
 }
 
@@ -102,14 +144,14 @@ func (w *TabbedWindow) JumpToTab(idx int) bool {
 	if idx < 0 || idx >= len(w.tabLabels()) {
 		return false
 	}
-	w.proj.SetActiveTab(idx)
+	w.setActiveTab(idx)
 	return true
 }
 
 // SelectTab sets the active tab to idx, clamped into range. Used after a tab
 // close to land on a neighbor.
 func (w *TabbedWindow) SelectTab(idx int) {
-	w.proj.SetActiveTab(idx)
+	w.setActiveTab(idx)
 	w.ClampActiveTab()
 }
 
@@ -124,13 +166,13 @@ func (w *TabbedWindow) SelectLastTab() {
 // shared with the sidebar tree, so the pane header, the tree's child rows, and
 // the 1-9 jump keys always agree on slot numbering. Never empty.
 func (w *TabbedWindow) tabLabels() []string {
-	return tree.TabLabels(w.selectedInstance())
+	return tree.TabLabels(w.boundInstance())
 }
 
 // isAgentSlot reports whether the active tab index is the agent tab (index 0).
 // Index 0 is always the agent tab; every other slot is a shell/terminal tab.
 func (w *TabbedWindow) isAgentSlot() bool {
-	return w.proj.ActiveTab() == 0
+	return w.activeTab() == 0
 }
 
 // SetRect implements layout.Pane: the pane renders exactly r. The inner
@@ -190,22 +232,22 @@ func (w *TabbedWindow) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return 
 // dispatched for; only the active tab index is read here, through the store's
 // atomic (#684).
 func (w *TabbedWindow) UpdateContent(instance *session.Instance) error {
-	return w.tab.UpdateContent(instance, w.proj.ActiveTab())
+	return w.tab.UpdateContent(instance, w.activeTab())
 }
 
 // ResetToNormalMode resets the active tab's pane to normal (non-scroll) mode.
 func (w *TabbedWindow) ResetToNormalMode(instance *session.Instance) error {
-	return w.tab.ResetToNormalMode(instance, w.proj.ActiveTab())
+	return w.tab.ResetToNormalMode(instance, w.activeTab())
 }
 
 func (w *TabbedWindow) ScrollUp() {
-	if err := w.tab.ScrollUp(w.selectedInstance(), w.proj.ActiveTab()); err != nil {
+	if err := w.tab.ScrollUp(w.boundInstance(), w.activeTab()); err != nil {
 		log.InfoLog.Printf("tabbed window failed to scroll up: %v", err)
 	}
 }
 
 func (w *TabbedWindow) ScrollDown() {
-	if err := w.tab.ScrollDown(w.selectedInstance(), w.proj.ActiveTab()); err != nil {
+	if err := w.tab.ScrollDown(w.boundInstance(), w.activeTab()); err != nil {
 		log.InfoLog.Printf("tabbed window failed to scroll down: %v", err)
 	}
 }
@@ -223,7 +265,7 @@ func (w *TabbedWindow) IsInTerminalTab() bool {
 
 // GetActiveTab returns the currently active tab index.
 func (w *TabbedWindow) GetActiveTab() int {
-	return w.proj.ActiveTab()
+	return w.activeTab()
 }
 
 // AttachTerminalForInstance attaches to the terminal (shell) tab of the given
@@ -255,9 +297,9 @@ func (w *TabbedWindow) IsInScrollMode() bool {
 // the highlight doubles as the pane's focus indicator.
 func (w *TabbedWindow) renderHeader(width int) string {
 	var text string
-	if inst := w.selectedInstance(); inst != nil {
+	if inst := w.boundInstance(); inst != nil {
 		labels := w.tabLabels()
-		idx := w.proj.ActiveTab()
+		idx := w.activeTab()
 		label := ""
 		if idx >= 0 && idx < len(labels) {
 			label = labels[idx]
@@ -270,7 +312,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	switch {
 	case w.focused:
 		style = paneHeaderFocusedStyle
-	case w.selectedInstance() == nil:
+	case w.boundInstance() == nil:
 		style = paneHeaderDimStyle
 	}
 	header := style.Render(text)

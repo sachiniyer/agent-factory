@@ -158,10 +158,11 @@ func TestLayoutCutover_HooksOverlay(t *testing.T) {
 	assert.NotContains(t, h.View(), "Post-Worktree Hooks")
 }
 
-// TestLayoutCutover_TaskJumpKeysFocusStrip: s focuses the strip AND opens the
-// create form; S focuses the strip's manager — the re-homed Tasks-section
-// flows.
-func TestLayoutCutover_TaskJumpKeysFocusStrip(t *testing.T) {
+// TestLayoutCutover_TaskKeysFocusStrip: S focuses the strip's manager, and
+// task creation lives on the manager's own `n` key — since #1024 PR 5 the
+// global `s` is the split verb, so the strip's create flow must be fully
+// reachable without it.
+func TestLayoutCutover_TaskKeysFocusStrip(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 100, 30)
 
@@ -170,11 +171,9 @@ func TestLayoutCutover_TaskJumpKeysFocusStrip(t *testing.T) {
 	assert.True(t, h.automations.TaskPane().HasFocus())
 	assert.False(t, h.automations.TaskPane().IsCreating())
 
-	h2 := newTestHome(t)
-	resizeHome(h2, 100, 30)
-	_, _ = h2.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")}, keys.KeyTask)
-	assert.Equal(t, layout.RegionAutomations, h2.ring.Active())
-	assert.True(t, h2.automations.TaskPane().IsCreating(), "s opens the create form directly")
+	_, _, consumed := h.handleAutomationsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	require.True(t, consumed)
+	assert.True(t, h.automations.TaskPane().IsCreating(), "n inside the focused strip opens the create form")
 }
 
 // TestE2E_LayoutCutover_FocusRingAndHooksOverlay drives the real tea.Program
