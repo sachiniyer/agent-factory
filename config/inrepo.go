@@ -284,6 +284,9 @@ func resolveSymlinksForCompare(path string) string {
 // verbatim. The key is always written, even for an empty list, because a
 // present-but-empty key is how an in-repo file overrides (disables) commands
 // still lingering in the legacy ~/.agent-factory/repos/<id>/config.json.
+// When the config file is a symlink (to elsewhere inside the repo), the
+// update is written to the resolved target and the symlink is preserved,
+// matching the read path's resolution.
 func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 	if repoRoot == "" {
 		return fmt.Errorf("repo root is required to save in-repo config")
@@ -337,5 +340,17 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create %s: %w", dir, err)
 	}
-	return AtomicWriteFile(InRepoConfigPath(repoRoot), out, 0644)
+	// Write through a symlinked config file to its resolved target (#1092):
+	// renaming the temp file onto the link path would replace the symlink with
+	// a new regular file and strand the old target with stale content, while
+	// the read path (readInRepoConfigFile) resolves the link before reading.
+	// Using resolvedPath keeps the temp+rename inside the target's own
+	// directory, so the link survives and readers still go through it; the
+	// containment guard above already proved the target lives inside the repo.
+	// A path that is not a symlink — the normal case — is written in place.
+	writePath := path
+	if info, lstatErr := os.Lstat(path); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		writePath = resolvedPath
+	}
+	return AtomicWriteFile(writePath, out, 0644)
 }
