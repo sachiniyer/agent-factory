@@ -126,3 +126,39 @@ func TestSweepLegacyTaskUnits_NoopWhenNothingInstalled(t *testing.T) {
 		t.Errorf("expected no external commands on a clean host, got: %v", stub.commands)
 	}
 }
+
+// TestDefaultSystemdUserDirHonorsXDGConfigHome pins the #1091 resolution rule:
+// systemd scans $XDG_CONFIG_HOME/systemd/user when XDG_CONFIG_HOME is set to
+// an absolute path, and ignores empty or relative values in favor of
+// ~/.config/systemd/user. af must match exactly, or it installs units into a
+// directory systemd never reads.
+func TestDefaultSystemdUserDirHonorsXDGConfigHome(t *testing.T) {
+	home := t.TempDir()
+	xdg := t.TempDir()
+	homeDefault := filepath.Join(home, ".config", "systemd", "user")
+
+	tests := []struct {
+		name string
+		xdg  string
+		want string
+	}{
+		{name: "unset falls back to home config", xdg: "", want: homeDefault},
+		{name: "absolute path is honored", xdg: xdg, want: filepath.Join(xdg, "systemd", "user")},
+		{name: "relative path is ignored like systemd does", xdg: "relative/config", want: homeDefault},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			// t.Setenv cannot unset; empty counts as unset per the XDG spec,
+			// which is also how systemd treats it.
+			t.Setenv("XDG_CONFIG_HOME", tc.xdg)
+			got, err := defaultSystemdUserDir()
+			if err != nil {
+				t.Fatalf("defaultSystemdUserDir: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("defaultSystemdUserDir() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
