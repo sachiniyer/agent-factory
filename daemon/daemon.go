@@ -177,23 +177,103 @@ func RunDaemon(cfg *config.Config) error {
 		}
 	}()
 
-	// Block until a signal or a Shutdown RPC ends the daemon (sigChan and
-	// shutdownCh were armed before the restore above).
+	// Watch our own AF home directory (the dir holding tasks.json, the
+	// control socket, and state). If it is deleted out from under us — an
+	// abandoned temp/test home, or a user rm -rf'ing the install — nothing
+	// can reach this daemon via the control plane anymore, yet it would keep
+	// firing cron schedules forever (#1093: a leaked debug daemon spawned a
+	// session nightly for 23 days). Self-terminating is the only safe move.
+	homeGoneCh := make(chan struct{})
+	if homeDir, homeErr := config.GetConfigDir(); homeErr != nil {
+		// Without a resolvable home there is nothing to watch; the daemon
+		// could not have started its manager against one either, so this is
+		// effectively unreachable — log and run without the self-check.
+		log.WarningLog.Printf("cannot resolve agent-factory home for the abandoned-daemon self-check: %v", homeErr)
+	} else {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			watchDaemonHome(homeDir, stopCh, homeGoneCh)
+		}()
+	}
+
+	// Block until a signal, a Shutdown RPC, or the home-deleted self-check
+	// ends the daemon (sigChan and shutdownCh were armed before the restore
+	// above).
+	homeGone := false
 	select {
 	case sig := <-sigChan:
 		log.InfoLog.Printf("received signal %s", sig.String())
 	case <-shutdownCh:
 		log.InfoLog.Printf("received shutdown request via control socket")
+	case <-homeGoneCh:
+		homeGone = true
 	}
 
-	// Stop the goroutine so we don't race.
+	// Stop the goroutines so we don't race.
 	close(stopCh)
 	wg.Wait()
+
+	if homeGone {
+		// Skip the final save: the home directory was deleted out from under
+		// us, so there is no installation left to persist into — saving would
+		// recreate a skeleton of the deleted home and resurrect the abandoned
+		// state the deletion was meant to remove.
+		return nil
+	}
 
 	if err := manager.SaveInstances(); err != nil {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
 	return nil
+}
+
+// homeCheckInterval is how often watchDaemonHome verifies the daemon's own AF
+// home directory still exists. A package var so tests can shorten it.
+var homeCheckInterval = 60 * time.Second
+
+// homeMissingChecksToExit is how many consecutive missing observations
+// watchDaemonHome requires before declaring the home deleted. Requiring two
+// keeps a single transient stat blip from taking down a healthy daemon.
+const homeMissingChecksToExit = 2
+
+// watchDaemonHome periodically stats homeDir and closes homeGone once the
+// directory has been missing for homeMissingChecksToExit consecutive checks,
+// signaling RunDaemon to shut down (#1093). Only a definite ENOENT counts as
+// missing: any other stat error (EACCES, EIO) leaves the directory's fate
+// unknown, and a false-positive shutdown of a healthy daemon is worse than
+// letting an abandoned one linger until the next check. The daemon's binary
+// path is deliberately NOT checked — upgrades replace the binary while the
+// daemon legitimately keeps running.
+func watchDaemonHome(homeDir string, stopCh <-chan struct{}, homeGone chan<- struct{}) {
+	ticker := time.NewTicker(homeCheckInterval)
+	defer ticker.Stop()
+	misses := 0
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+		}
+		var exit bool
+		if misses, exit = applyHomeCheck(homeDir, misses); exit {
+			log.WarningLog.Printf("agent-factory home %s no longer exists; shutting down abandoned daemon", homeDir)
+			close(homeGone)
+			return
+		}
+	}
+}
+
+// applyHomeCheck folds one stat of homeDir into the running consecutive-miss
+// counter and reports whether the exit threshold was reached. A present home
+// (or an indeterminate stat error) resets the counter — only an unbroken run
+// of definite ENOENTs counts as a deletion.
+func applyHomeCheck(homeDir string, misses int) (int, bool) {
+	if _, err := os.Stat(homeDir); err == nil || !os.IsNotExist(err) {
+		return 0, false
+	}
+	misses++
+	return misses, misses >= homeMissingChecksToExit
 }
 
 // fromInstanceDataForRefresh is the entry point refreshDaemonInstances uses
