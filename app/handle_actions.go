@@ -113,6 +113,7 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		if m.contentPane.GetMode() == ui.ContentModeInstance {
 			tw.Toggle()
 			m.menu.SetActiveTab(tw.GetActiveTab())
+			m.sidebar.SyncCursorToActiveTab()
 			return m, m.selectionChanged()
 		}
 		return m, nil
@@ -120,6 +121,7 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		if m.contentPane.GetMode() == ui.ContentModeInstance {
 			tw.ToggleBack()
 			m.menu.SetActiveTab(tw.GetActiveTab())
+			m.sidebar.SyncCursorToActiveTab()
 			return m, m.selectionChanged()
 		}
 		return m, nil
@@ -375,6 +377,7 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 	tw := m.contentPane.TabbedWindow()
 	tw.SelectLastTab()
 	m.menu.SetActiveTab(tw.GetActiveTab())
+	m.sidebar.SyncCursorToActiveTab()
 	return m, m.selectionChanged()
 }
 
@@ -427,17 +430,22 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	// range (idx >= 1, so idx-1 >= 0).
 	tw.SelectTab(idx - 1)
 	m.menu.SetActiveTab(tw.GetActiveTab())
+	m.sidebar.SyncCursorToActiveTab()
 	return m, m.selectionChanged()
 }
 
 // handleTabJump jumps the tabbed window to a 1-based tab number (the 1-9 number
-// keys). Out-of-range numbers are a no-op (#930 PR 4).
+// keys). Out-of-range numbers are a no-op (#930 PR 4). When the sidebar cursor
+// rests on one of the selected instance's tab rows, it follows the jump so the
+// tree and the tab bar can't disagree; with the cursor on the instance row the
+// pre-tree behavior is preserved exactly (only the tree's "*" marker moves).
 func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 	tw := m.contentPane.TabbedWindow()
 	if !tw.JumpToTab(oneBased - 1) {
 		return m, nil
 	}
 	m.menu.SetActiveTab(tw.GetActiveTab())
+	m.sidebar.SyncCursorToActiveTab()
 	return m, m.selectionChanged()
 }
 

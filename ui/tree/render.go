@@ -1,4 +1,4 @@
-package ui
+package tree
 
 import (
 	"fmt"
@@ -19,6 +19,15 @@ const readyIcon = "● "
 // a healthy Ready one by shape as well as color — the distinction survives low
 // contrast and color-blindness (#935).
 const deadIcon = "○ "
+
+// expandedArrow/collapsedArrow mark an instance row whose tab children are
+// shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
+// Expandable) aligned with their siblings.
+const (
+	expandedArrow      = "▾"
+	collapsedArrow     = "▸"
+	nonExpandableArrow = " "
+)
 
 var readyStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#51bd73", Dark: "#51bd73"})
@@ -47,23 +56,35 @@ var selectedDescStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
-var mainTitle = lipgloss.NewStyle().
-	Background(AccentColor).
-	Foreground(lipgloss.Color("230"))
+// tabRowStyle renders an inactive tab child row in the same recede gray as the
+// branch line, so the tree's children read as secondary to the instance rows.
+var tabRowStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
-var autoYesStyle = lipgloss.NewStyle().
+// tabRowActiveStyle brightens the tab the content pane is showing (plus its
+// tmux-style "*" marker) so the active tab is findable without the tab bar.
+var tabRowActiveStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
+
+// tabRowSelectedStyle highlights the tab row under the tree cursor with the
+// same background the selected instance row uses.
+var tabRowSelectedStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#dde4f0")).
-	Foreground(lipgloss.Color("#1a1a1a"))
+	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
 // deletingTitleColor dims a mid-deletion row — title and branch/PR lines —
 // to the description gray so it visually recedes while its teardown runs in
 // the background (#844, #853).
 var deletingTitleColor = lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"}
 
-// InstanceRenderer handles rendering of session.Instance objects
+// InstanceRenderer renders the tree's rows: session.Instance rows (absorbed
+// from ui/list.go) and their tab child rows.
 type InstanceRenderer struct {
 	spinner *spinner.Model
-	width   int
+	// width is the effective content width — the caller passes the sidebar's
+	// usable column (post AdjustPreviewWidth), keeping the 0.9 layout math in
+	// one place outside this package.
+	width int
 	// indexWidth is the number of digits to left-pad the 1-based row index to,
 	// so every row in a list shares one prefix width and the branch/PR lines
 	// stay aligned across power-of-10 boundaries (9→10, 99→100, …). The caller
@@ -74,16 +95,31 @@ type InstanceRenderer struct {
 	indexWidth int
 }
 
-func (r *InstanceRenderer) setWidth(width int) {
-	r.width = AdjustPreviewWidth(width)
+// NewInstanceRenderer creates a renderer sharing the app-wide spinner.
+func NewInstanceRenderer(spin *spinner.Model) *InstanceRenderer {
+	return &InstanceRenderer{spinner: spin}
+}
+
+// SetWidth sets the effective content width rows render into.
+func (r *InstanceRenderer) SetWidth(width int) {
+	r.width = width
+}
+
+// SetIndexWidth sets the digit width of the largest 1-based instance index in
+// the rendered list. See the indexWidth field.
+func (r *InstanceRenderer) SetIndexWidth(digits int) {
+	r.indexWidth = digits
 }
 
 // ɹ and ɻ are other options.
 const branchIcon = "Ꮧ"
 
-func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, hasMultipleRepos bool) string {
+// Render renders an instance row. expanded selects the ▾/▸ tree arrow; a
+// non-expandable instance (see Expandable) renders a blank arrow cell so its
+// title stays aligned with its siblings.
+func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, hasMultipleRepos bool, expanded bool) string {
 	// Each extra digit grows the prefix by one cell, which shifts the
-	// len(prefix)-derived branch/PR indentation and misaligns adjacent visible
+	// prefix-width-derived branch/PR indentation and misaligns adjacent visible
 	// rows at every power-of-10 boundary (9→10, 99→100, 999→1000, …). Left-pad
 	// the NUMBER (right-justified) to a width derived from the largest index in
 	// the list so every row's prefix is the same width while the dot and full
@@ -97,7 +133,25 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	if d := len(strconv.Itoa(idx)); d > digits {
 		digits = d
 	}
-	prefix := fmt.Sprintf(" %*d. ", digits, idx)
+	arrow := nonExpandableArrow
+	if Expandable(i) {
+		if expanded {
+			arrow = expandedArrow
+		} else {
+			arrow = collapsedArrow
+		}
+	}
+	prefix := fmt.Sprintf(" %s %*d. ", arrow, digits, idx)
+	if r.width <= 9 {
+		// At ultra-narrow widths the 2-cell arrow prefix overflows the sidebar
+		// container (the #646 overflow class the padding drop below also
+		// handles) and there is no room to render children anyway; fall back
+		// to the pre-tree prefix.
+		prefix = fmt.Sprintf(" %*d. ", digits, idx)
+	}
+	// The arrow is multibyte, so alignment math below must use the prefix's
+	// CELL width, never len(prefix).
+	prefixWidth := runewidth.StringWidth(prefix)
 	titleS := selectedTitleStyle
 	descS := selectedDescStyle
 	if !selected {
@@ -133,7 +187,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		// secondary lines stand out more than the dimmed title (#853).
 		descS = descS.Foreground(deletingTitleColor)
 	}
-	widthAvail := r.width - 3 - runewidth.StringWidth(prefix) - 1
+	widthAvail := r.width - 3 - prefixWidth - 1
 	if widthAvail <= 0 {
 		// No room for any title text at this width; render just the prefix.
 		// lipgloss.Place doesn't clip oversize content, so leaving titleText
@@ -170,7 +224,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	))
 
 	remainingWidth := r.width
-	remainingWidth -= runewidth.StringWidth(prefix)
+	remainingWidth -= prefixWidth
 	remainingWidth -= runewidth.StringWidth(branchIcon)
 	remainingWidth -= 2 // for the literal " " and "-" in the branchLine format string
 
@@ -206,13 +260,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		spaces = strings.Repeat(" ", remainingWidth)
 	}
 
-	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", len(prefix)), branchIcon, branch, spaces)
+	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, branch, spaces)
 
 	// Build PR info line if available
 	var prLine string
 	if prInfo := i.GetPRInfo(); prInfo != nil {
 		prText := fmt.Sprintf("PR #%d: %s", prInfo.Number, prInfo.Title)
-		prMaxWidth := r.width - len(prefix) - 2
+		prMaxWidth := r.width - prefixWidth - 2
 		if prMaxWidth > 0 && runewidth.StringWidth(prText) > prMaxWidth {
 			tail := "..."
 			if prMaxWidth < runewidth.StringWidth(tail) {
@@ -220,7 +274,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 			}
 			prText = runewidth.Truncate(prText, prMaxWidth, tail)
 		}
-		prLine = fmt.Sprintf("%s %s", strings.Repeat(" ", len(prefix)), prText)
+		prLine = fmt.Sprintf("%s %s", strings.Repeat(" ", prefixWidth), prText)
 	}
 
 	// join title and subtitle
@@ -231,4 +285,52 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	text := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return text
+}
+
+// RenderTab renders one tab child row of an expanded instance: an indented
+// ├/└ connector, the 1-based slot number (matching the 1-9 jump keys), the
+// tab's label, and a tmux-style " *" marker on the tab the content pane is
+// showing. selected highlights the row under the tree cursor.
+func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selected, active bool) string {
+	connector := "├"
+	if isLast {
+		connector = "└"
+	}
+	marker := ""
+	if active {
+		marker = " *"
+	}
+	// Indent the connector to the instance title's start column: the instance
+	// prefix " ▸ <idx>. " is digits+5 cells wide (see Render), so children read
+	// as nested under their parent regardless of list size.
+	digits := r.indexWidth
+	if digits < 1 {
+		digits = 1
+	}
+	text := fmt.Sprintf("%s%s %d %s%s", strings.Repeat(" ", digits+5), connector, oneBased, label, marker)
+	if r.width > 0 && runewidth.StringWidth(text) > r.width {
+		// Same narrow-width handling as the instance rows: drop the "..." tail
+		// when it would itself overflow, since lipgloss.Place won't clip
+		// oversize content.
+		tail := "..."
+		if r.width < runewidth.StringWidth(tail) {
+			tail = ""
+		}
+		text = runewidth.Truncate(text, r.width, tail)
+	}
+	style := tabRowStyle
+	if active {
+		style = tabRowActiveStyle
+	}
+	if selected {
+		style = tabRowSelectedStyle
+	}
+	pad := 1
+	if r.width <= 9 {
+		// Match the instance rows' narrow-width padding drop (#646) so the row
+		// stays inside the sidebar container.
+		pad = 0
+	}
+	return style.Padding(0, pad).Render(
+		lipgloss.Place(r.width, 1, lipgloss.Left, lipgloss.Center, text))
 }

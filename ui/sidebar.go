@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
@@ -22,11 +24,18 @@ const (
 	SectionHooks
 )
 
-// SidebarItem represents one visible row in the sidebar.
+// SidebarItem represents one visible row in the sidebar. Within the Instances
+// section a non-header row is either an instance row or — the tree dimension
+// added by #1024 PR 3 — one of the instance's tab children (IsTab set,
+// TabIndex the 0-based tab slot). For tab rows ItemIndex still identifies the
+// parent instance, so "which instance is selected" reads uniformly off any
+// non-header row.
 type SidebarItem struct {
 	Kind      SidebarSectionKind
 	IsHeader  bool
 	ItemIndex int // index within the section's children (instances/tasks)
+	IsTab     bool
+	TabIndex  int // 0-based tab slot; meaningful only when IsTab
 }
 
 // SidebarSection holds state for one collapsible section.
@@ -48,12 +57,29 @@ var sectionHeaderSelectedStyle = lipgloss.NewStyle().
 var windowIndicatorStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
+var mainTitle = lipgloss.NewStyle().
+	Background(AccentColor).
+	Foreground(lipgloss.Color("230"))
+
+var autoYesStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("#dde4f0")).
+	Foreground(lipgloss.Color("#1a1a1a"))
+
 // Sidebar is the unified left navigation pane with collapsible sections. It is
 // a VIEW over the store.Projection (#1024 PR 2): the instance/task/hook data —
 // and the cross-pane selection — live in the store, written by the snapshot
 // reconcile and the session-control handlers. The sidebar owns only its local
-// UI state: the flattened row list, the cursor over it, section expansion, and
+// UI state: the flattened row list, the cursor over it, expansion state, and
 // the scroll window.
+//
+// Since #1024 PR 3 the Instances section is a TREE: each instance row carries
+// its tabs as expandable children (the same slots the tab bar shows, via
+// tree.TabLabels), and the cursor can rest on an instance row OR a tab row.
+// Expansion policy: the display-selected instance auto-expands and every other
+// instance collapses, keeping the row count ≈ instances + selected-instance
+// tabs; h/← collapses the selected instance explicitly (treeCollapsed) until
+// l/→ re-expands it or the selection moves on. Landing the cursor on a tab row
+// drives the store's active tab, which is what retargets the content pane.
 type Sidebar struct {
 	proj *store.Projection
 
@@ -61,13 +87,33 @@ type Sidebar struct {
 	visibleItems []SidebarItem
 	selectedIdx  int
 
-	// seenVersion is the store version visibleItems (and the cursor re-pin)
-	// were last derived from. The store is written directly by event-loop
-	// handlers without notifying the sidebar, so every public method lazily
-	// re-derives via syncFromStore before touching the row list. seenSelSeq
-	// tracks the store's SelectInstance assertions the cursor has honored.
-	seenVersion uint64
-	seenSelSeq  uint64
+	// seenSig is the structure signature (structureSig) visibleItems was last
+	// derived from. The store is written directly by event-loop handlers
+	// without notifying the sidebar, so every public method lazily re-derives
+	// via syncFromStore before touching the row list. A plain store version is
+	// no longer enough (pre-PR 3 seenVersion): the tree's row STRUCTURE also
+	// depends on per-instance state mutated in place without a version bump —
+	// the selected instance's tab slots (an out-of-band tab create/close
+	// reconciles tabs onto the same pointer) and its transient-ness (a kill
+	// flips it to Deleting, force-collapsing it) — so those inputs are folded
+	// into the signature. seenSelSeq tracks the store's SelectInstance
+	// assertions the cursor has honored.
+	seenSig    string
+	seenSelSeq uint64
+
+	// treeCollapsed is the title of the display-selected instance whose tab
+	// children the user explicitly collapsed (h/←). Cleared when the selection
+	// moves to a different instance, so every newly selected instance starts
+	// auto-expanded (collapse-by-default applies to non-selected instances).
+	treeCollapsed string
+
+	// lastCursorTitle/lastCursorTab remember the identity of the last
+	// instance-section row the cursor rested on (tab -1 = the instance row
+	// itself). The reconcile's #969 re-pin asserts only the instance; this memo
+	// restores the tab SUB-selection too, so a snapshot arriving while the
+	// cursor sits on a tab row doesn't yank it up to the instance row.
+	lastCursorTitle string
+	lastCursorTab   int
 
 	// scrollOffset is the index into visibleItems of the first rendered row
 	// when the list is too tall for the allocation. It is adjusted lazily in
@@ -76,7 +122,7 @@ type Sidebar struct {
 	scrollOffset int
 
 	// Rendering
-	renderer *InstanceRenderer
+	renderer *tree.InstanceRenderer
 	autoyes  bool
 	height   int
 	width    int
@@ -91,11 +137,12 @@ func NewSidebar(spin *spinner.Model, autoYes bool, proj *store.Projection) *Side
 			{Kind: SectionTasks, Title: "Tasks", Expanded: false},
 			{Kind: SectionHooks, Title: "Hooks", Expanded: false},
 		},
-		renderer: &InstanceRenderer{spinner: spin},
-		autoyes:  autoYes,
+		renderer:      tree.NewInstanceRenderer(spin),
+		autoyes:       autoYes,
+		lastCursorTab: -1,
 	}
 	s.rebuildVisibleItems()
-	s.seenVersion = proj.Version()
+	s.seenSig = s.structureSig()
 	return s
 }
 
@@ -103,27 +150,60 @@ func NewSidebar(spin *spinner.Model, autoYes bool, proj *store.Projection) *Side
 func (s *Sidebar) SetSize(width, height int) {
 	s.width = width
 	s.height = height
-	s.renderer.setWidth(width)
+	s.renderer.SetWidth(AdjustPreviewWidth(width))
 }
 
-// syncFromStore re-derives the flattened row list when the projection changed
-// since the last derivation, then re-pins the cursor. The cursor rules
-// preserve the pre-store mutation behavior exactly:
+// structureSig fingerprints every input the flattened row list is derived
+// from: the store version (instance list, tasks, selection binding) plus the
+// tree-structural per-instance state that mutates in place without a version
+// bump — the selected instance's identity, tab-slot count, and expandability —
+// and the explicit collapse override. See the seenSig field.
+func (s *Sidebar) structureSig() string {
+	selTitle := ""
+	slots := 0
+	expandable := false
+	if inst := s.proj.GetSelectedInstance(); inst != nil {
+		selTitle = inst.Title
+		slots = len(tree.TabLabels(inst))
+		expandable = tree.Expandable(inst)
+	}
+	return fmt.Sprintf("%d|%s|%d|%t|%s",
+		s.proj.Version(), selTitle, slots, expandable, s.treeCollapsed)
+}
+
+// instanceExpanded reports whether inst's tab children are currently shown:
+// the display-selected instance auto-expands (matched by title so a #765
+// same-title swap keeps the subtree open) unless it is transient or the user
+// explicitly collapsed it. Everything else is collapsed — the keep-row-count-
+// manageable default for non-selected instances.
+func (s *Sidebar) instanceExpanded(inst *session.Instance) bool {
+	sel := s.proj.GetSelectedInstance()
+	if sel == nil || inst == nil || sel.Title != inst.Title {
+		return false
+	}
+	return tree.Expandable(inst) && s.treeCollapsed != inst.Title
+}
+
+// syncFromStore re-derives the flattened row list when the projection (or the
+// tree-structural inputs, see structureSig) changed since the last derivation,
+// then re-pins the cursor. The cursor rules preserve the pre-store mutation
+// behavior exactly:
 //   - by default the cursor keeps its flat index, clamped by the rebuild —
 //     the same drift-then-clamp the old mutation-time rebuild applied (a
 //     removal can legitimately drift the cursor, e.g. onto a header while
 //     naming an instance — the #717 reality the cancel path defends against);
 //   - a pending SelectInstance assertion (the reconcile's #969 re-pin, the
 //     search overlay, an explicit re-select) moves the cursor onto the
-//     asserted instance's row; a dangling or nil assertion leaves the clamped
-//     cursor as-is, matching the old "selected title gone → sidebar clamp
-//     behavior" rule.
+//     asserted instance's row — restoring the tab sub-selection when the
+//     cursor was on one of its tab rows (lastCursorTab); a dangling or nil
+//     assertion leaves the clamped cursor as-is, matching the old "selected
+//     title gone → sidebar clamp behavior" rule.
 //
-// Afterwards the cursor's row (if it rests on an instance) is pushed back
-// into the store so the display binding and the cursor can never disagree at
-// a read boundary.
+// Afterwards the cursor's row (if it rests on an instance or tab row) is
+// pushed back into the store so the display binding, the active tab, and the
+// cursor can never disagree at a read boundary.
 func (s *Sidebar) syncFromStore() {
-	if s.proj.Version() == s.seenVersion {
+	if s.structureSig() == s.seenSig && s.proj.SelectionSeq() == s.seenSelSeq {
 		return
 	}
 	s.rebuildVisibleItems()
@@ -131,36 +211,70 @@ func (s *Sidebar) syncFromStore() {
 		if inst := s.proj.GetSelectedInstance(); inst != nil {
 			s.moveCursorToInstance(inst)
 		}
-		s.seenSelSeq = s.proj.SelectionSeq()
 	}
+	s.afterCursorMove()
+}
+
+// afterCursorMove pushes the cursor's selection into the store and folds the
+// resulting signature/selection movement into the seen markers (safe on the
+// single-threaded event loop; nothing else can write between).
+func (s *Sidebar) afterCursorMove() {
 	s.pushSelection()
-	s.seenVersion = s.proj.Version()
+	s.seenSig = s.structureSig()
+	s.seenSelSeq = s.proj.SelectionSeq()
 }
 
 // moveCursorToInstance places the cursor on the row of target, if it is in
-// the projection and its row is visible. No-op otherwise.
+// the projection and its row is visible. When the cursor last rested on one of
+// target's tab rows (lastCursorTab), the same tab row is preferred so the #969
+// re-pin keeps the tab dimension; a vanished tab slot falls back to the
+// instance row. No-op otherwise.
 func (s *Sidebar) moveCursorToInstance(target *session.Instance) {
+	instIdx := -1
 	for i, inst := range s.proj.GetInstances() {
-		if inst != target {
+		if inst == target {
+			instIdx = i
+			break
+		}
+	}
+	if instIdx < 0 {
+		return
+	}
+	wantTab := -1
+	if s.lastCursorTitle == target.Title {
+		wantTab = s.lastCursorTab
+	}
+	instRow := -1
+	for j, item := range s.visibleItems {
+		if item.Kind != SectionInstances || item.IsHeader || item.ItemIndex != instIdx {
 			continue
 		}
-		for j, item := range s.visibleItems {
-			if item.Kind == SectionInstances && !item.IsHeader && item.ItemIndex == i {
+		if item.IsTab {
+			if item.TabIndex == wantTab {
 				s.selectedIdx = j
 				return
 			}
+			continue
 		}
-		return
+		instRow = j
+	}
+	if instRow >= 0 {
+		s.selectedIdx = instRow
 	}
 }
 
-// pushSelection records the cursor's instance (when it rests on an instance
-// row) as the store's display binding. Header rows deliberately do NOT clear
-// the binding: the workspace panes keep displaying the last selected instance
-// while the cursor tours headers, exactly as the pre-store TabbedWindow kept
-// its instance pointer. Callers run this after a sync, so folding the
-// resulting version move into the seen markers is safe (single-threaded event
-// loop; nothing else can write between).
+// pushSelection records the cursor's instance (when it rests on an instance or
+// tab row) as the store's display binding, and — the tab dimension — a tab
+// row's slot as the store's active tab, which is what makes tree tab selection
+// drive the content pane's tabbed window. Header rows deliberately do NOT
+// clear the binding: the workspace panes keep displaying the last selected
+// instance while the cursor tours headers, exactly as the pre-store
+// TabbedWindow kept its instance pointer.
+//
+// When the binding moves to a DIFFERENT instance the explicit collapse
+// override resets and the row list is re-derived in place (the new selection
+// auto-expands, the old one folds), preserving the cursor by row identity —
+// the fold can shift flat indices, but never which row the user is on.
 func (s *Sidebar) pushSelection() {
 	sel := s.rawSelection()
 	if sel.Kind != SectionInstances || sel.IsHeader {
@@ -170,21 +284,94 @@ func (s *Sidebar) pushSelection() {
 	if sel.ItemIndex < 0 || sel.ItemIndex >= len(instances) {
 		return
 	}
-	s.proj.SetSelectedInstance(instances[sel.ItemIndex])
-	s.seenVersion = s.proj.Version()
-	s.seenSelSeq = s.proj.SelectionSeq()
+	inst := instances[sel.ItemIndex]
+	prev := s.proj.GetSelectedInstance()
+	s.proj.SetSelectedInstance(inst)
+	if sel.IsTab {
+		s.proj.SetActiveTab(sel.TabIndex)
+		s.lastCursorTab = sel.TabIndex
+	} else {
+		s.lastCursorTab = -1
+	}
+	s.lastCursorTitle = inst.Title
+	if prev != inst {
+		s.treeCollapsed = ""
+		s.rebuildPreservingCursor()
+	}
 }
 
-// rebuildVisibleItems rebuilds the flat list of visible items based on expand/collapse state.
+// rowIdentity is the rebuild-stable identity of a visible row: instances are
+// keyed by title (stable across index shifts and #765 same-title swaps), tab
+// rows by title + slot.
+type rowIdentity struct {
+	kind   SidebarSectionKind
+	header bool
+	title  string
+	isTab  bool
+	tab    int
+}
+
+func (s *Sidebar) rowIdentityAt(item SidebarItem) rowIdentity {
+	id := rowIdentity{kind: item.Kind, header: item.IsHeader, isTab: item.IsTab, tab: item.TabIndex}
+	if item.Kind == SectionInstances && !item.IsHeader {
+		instances := s.proj.GetInstances()
+		if item.ItemIndex >= 0 && item.ItemIndex < len(instances) {
+			id.title = instances[item.ItemIndex].Title
+		}
+	}
+	return id
+}
+
+// rebuildPreservingCursor re-derives the row list and keeps the cursor on the
+// same logical row (by rowIdentity) when it still exists; otherwise the
+// rebuild's index clamp applies.
+func (s *Sidebar) rebuildPreservingCursor() {
+	id := s.rowIdentityAt(s.rawSelection())
+	s.rebuildVisibleItems()
+	instances := s.proj.GetInstances()
+	for j, item := range s.visibleItems {
+		if item.Kind != id.kind || item.IsHeader != id.header || item.IsTab != id.isTab {
+			continue
+		}
+		if item.IsHeader {
+			s.selectedIdx = j
+			return
+		}
+		if item.Kind == SectionInstances {
+			if item.ItemIndex < 0 || item.ItemIndex >= len(instances) ||
+				instances[item.ItemIndex].Title != id.title {
+				continue
+			}
+			if item.IsTab && item.TabIndex != id.tab {
+				continue
+			}
+		}
+		s.selectedIdx = j
+		return
+	}
+}
+
+// rebuildVisibleItems rebuilds the flat list of visible items based on
+// expand/collapse state: section headers, then — for the expanded Instances
+// section — the tree rows (instances with tab children for expanded ones).
 func (s *Sidebar) rebuildVisibleItems() {
+	instances := s.proj.GetInstances()
 	var items []SidebarItem
 	for _, sec := range s.sections {
 		items = append(items, SidebarItem{Kind: sec.Kind, IsHeader: true})
 		if sec.Expanded {
 			switch sec.Kind {
 			case SectionInstances:
-				for i := 0; i < s.proj.NumInstances(); i++ {
-					items = append(items, SidebarItem{Kind: SectionInstances, ItemIndex: i})
+				rows := tree.Flatten(len(instances),
+					func(i int) bool { return s.instanceExpanded(instances[i]) },
+					func(i int) int { return len(tree.TabLabels(instances[i])) })
+				for _, r := range rows {
+					item := SidebarItem{Kind: SectionInstances, ItemIndex: r.InstanceIndex}
+					if r.IsTab() {
+						item.IsTab = true
+						item.TabIndex = r.TabIndex
+					}
+					items = append(items, item)
 				}
 			}
 		}
@@ -215,22 +402,22 @@ func (s *Sidebar) GetSelection() SidebarItem {
 	return s.rawSelection()
 }
 
-// Down moves the cursor down.
+// Down moves the cursor down, walking through expanded tab children.
 func (s *Sidebar) Down() {
 	s.syncFromStore()
 	if s.selectedIdx < len(s.visibleItems)-1 {
 		s.selectedIdx++
 	}
-	s.pushSelection()
+	s.afterCursorMove()
 }
 
-// Up moves the cursor up.
+// Up moves the cursor up, walking through expanded tab children.
 func (s *Sidebar) Up() {
 	s.syncFromStore()
 	if s.selectedIdx > 0 {
 		s.selectedIdx--
 	}
-	s.pushSelection()
+	s.afterCursorMove()
 }
 
 // ToggleSection expands or collapses the section of the current selection.
@@ -247,7 +434,7 @@ func (s *Sidebar) ToggleSection() {
 		}
 	}
 	s.rebuildVisibleItems()
-	s.pushSelection()
+	s.afterCursorMove()
 }
 
 // ExpandInstancesSection ensures the Instances section is expanded.
@@ -261,10 +448,21 @@ func (s *Sidebar) ExpandInstancesSection() {
 	s.rebuildVisibleItems()
 }
 
-// ExpandSection expands the section of the current selection.
+// ExpandSection expands the tree node under the cursor: on a section header
+// the whole section; on an instance row the instance's tab children (clearing
+// an explicit h/← collapse). Tab rows are already inside an expanded node, so
+// they no-op.
 func (s *Sidebar) ExpandSection() {
 	s.syncFromStore()
 	sel := s.rawSelection()
+	if sel.Kind == SectionInstances && !sel.IsHeader && !sel.IsTab {
+		if s.treeCollapsed != "" {
+			s.treeCollapsed = ""
+			s.rebuildPreservingCursor()
+		}
+		s.afterCursorMove()
+		return
+	}
 	if !sel.IsHeader {
 		return
 	}
@@ -275,13 +473,35 @@ func (s *Sidebar) ExpandSection() {
 		}
 	}
 	s.rebuildVisibleItems()
-	s.pushSelection()
+	s.afterCursorMove()
 }
 
-// CollapseSection collapses the section of the current selection.
+// CollapseSection collapses the tree node under the cursor: a tab row folds
+// its parent instance (cursor moves up onto it); an expanded instance row
+// folds its tab children in place; an already-collapsed instance row falls
+// back to the pre-tree behavior — jump to the section header and collapse the
+// whole section. Headers collapse their section as before.
 func (s *Sidebar) CollapseSection() {
 	s.syncFromStore()
 	sel := s.rawSelection()
+	if sel.Kind == SectionInstances && !sel.IsHeader {
+		instances := s.proj.GetInstances()
+		if sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) {
+			inst := instances[sel.ItemIndex]
+			if s.instanceExpanded(inst) {
+				s.treeCollapsed = inst.Title
+				if sel.IsTab {
+					// Fold to the parent: the cursor lands on the instance row.
+					s.rebuildVisibleItems()
+					s.moveCursorToInstanceRow(sel.ItemIndex)
+				} else {
+					s.rebuildPreservingCursor()
+				}
+				s.afterCursorMove()
+				return
+			}
+		}
+	}
 	if !sel.IsHeader {
 		// If on a child, jump to parent header
 		for i, item := range s.visibleItems {
@@ -298,7 +518,18 @@ func (s *Sidebar) CollapseSection() {
 		}
 	}
 	s.rebuildVisibleItems()
-	s.pushSelection()
+	s.afterCursorMove()
+}
+
+// moveCursorToInstanceRow places the cursor on the instance row (not a tab
+// child) of the instance at instIdx, if visible.
+func (s *Sidebar) moveCursorToInstanceRow(instIdx int) {
+	for j, item := range s.visibleItems {
+		if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab && item.ItemIndex == instIdx {
+			s.selectedIdx = j
+			return
+		}
+	}
 }
 
 // JumpNextSection jumps to the next section header.
@@ -323,10 +554,11 @@ func (s *Sidebar) JumpPrevSection() {
 	}
 }
 
-// GetSelectedInstance returns the instance under the cursor, or nil when the
-// cursor rests on a section header. Note this is the cursor-derived selection;
-// the store's GetSelectedInstance is the sticky display selection the
-// workspace panes render.
+// GetSelectedInstance returns the instance under the cursor — including when
+// the cursor rests on one of its tab rows — or nil when the cursor rests on a
+// section header. Note this is the cursor-derived selection; the store's
+// GetSelectedInstance is the sticky display selection the workspace panes
+// render.
 func (s *Sidebar) GetSelectedInstance() *session.Instance {
 	s.syncFromStore()
 	sel := s.rawSelection()
@@ -353,12 +585,12 @@ func (s *Sidebar) SetSelectedInstance(idx int) {
 	s.ExpandInstancesSection()
 	// Find the visible item that corresponds to this instance
 	for i, item := range s.visibleItems {
-		if item.Kind == SectionInstances && !item.IsHeader && item.ItemIndex == idx {
+		if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab && item.ItemIndex == idx {
 			s.selectedIdx = i
 			break
 		}
 	}
-	s.pushSelection()
+	s.afterCursorMove()
 }
 
 // SelectInstance finds and selects the given instance.
@@ -370,6 +602,56 @@ func (s *Sidebar) SelectInstance(target *session.Instance) {
 			return
 		}
 	}
+}
+
+// SyncCursorToActiveTab moves the cursor onto the selected instance's
+// active-tab row after a tab jump/cycle/create/close changed the active tab —
+// but only when the cursor was already resting on one of its tab rows, so
+// tab-key muscle memory with the cursor on the instance row behaves exactly as
+// before the tree (the cursor stays put; the tree's "*" marker moves).
+//
+// The intended target MUST be captured before syncFromStore runs: when the
+// tab-slot count changed (t create / w close), the sync's structure rebuild
+// fires and pushSelection re-asserts the CURSOR row's tab index into the
+// store, clobbering the active tab the caller just set. Reading ActiveTab()
+// after the sync returned that clobbered value, so the method saw
+// cursor==active and no-oped — t didn't select the new tab and a following w
+// silently closed the wrong tab (PR #1081 play-test). Bare tab jumps/cycles
+// don't change the structure signature, so they never hit the rebuild; both
+// paths now go through the same capture-first flow.
+func (s *Sidebar) SyncCursorToActiveTab() {
+	want := s.proj.ActiveTab()
+	pre := s.rawSelection()
+	if pre.Kind != SectionInstances || pre.IsHeader || !pre.IsTab {
+		return
+	}
+	instances := s.proj.GetInstances()
+	if pre.ItemIndex < 0 || pre.ItemIndex >= len(instances) {
+		return
+	}
+	// Key the parent instance by title: the sync below rebuilds the row list
+	// and flat/instance indices are only stable across it by identity.
+	title := instances[pre.ItemIndex].Title
+	s.syncFromStore()
+	instances = s.proj.GetInstances()
+	found := false
+	for j, item := range s.visibleItems {
+		if item.Kind == SectionInstances && !item.IsHeader && item.IsTab &&
+			item.ItemIndex >= 0 && item.ItemIndex < len(instances) &&
+			instances[item.ItemIndex].Title == title && item.TabIndex == want {
+			s.selectedIdx = j
+			found = true
+			break
+		}
+	}
+	if found {
+		// Re-assert the captured target: the sync's pushSelection may have
+		// overwritten it with the pre-move cursor row's index.
+		s.proj.SetActiveTab(want)
+	}
+	// When the wanted row is gone (e.g. a concurrent reconcile shrank the tab
+	// set), the cursor keeps the sync's clamped position and its row wins.
+	s.afterCursorMove()
 }
 
 // String renders the sidebar. The item list is windowed around the selection
@@ -386,8 +668,8 @@ func (s *Sidebar) String() string {
 	const chromeLines = 2
 
 	// Render every visible row up front and measure real heights: instance
-	// rows are multi-line (title + branch, plus an optional PR line), so the
-	// window math cannot assume one line per item.
+	// rows are multi-line (title + branch, plus an optional PR line) while tab
+	// rows are single-line, so the window math cannot assume one line per item.
 	rows := make([]string, len(s.visibleItems))
 	heights := make([]int, len(s.visibleItems))
 	totalLines := 0
@@ -398,7 +680,11 @@ func (s *Sidebar) String() string {
 		} else {
 			switch item.Kind {
 			case SectionInstances:
-				rows[i] = s.renderInstance(item.ItemIndex, isSelected)
+				if item.IsTab {
+					rows[i] = s.renderTabRow(item, isSelected)
+				} else {
+					rows[i] = s.renderInstance(item.ItemIndex, isSelected)
+				}
 			}
 		}
 		heights[i] = lipgloss.Height(rows[i])
@@ -421,16 +707,26 @@ func (s *Sidebar) String() string {
 	var b strings.Builder
 	b.WriteString("\n")
 
-	// Title bar
+	// Title bar. Clamp the chip width to the allocation and truncate the text
+	// to the chip: lipgloss.Place pads but never clips, so at ultra-narrow
+	// widths the 15-cell " Agent Factory " (or the padded chip itself) would
+	// otherwise push the row past s.width — the same #646 overflow class the
+	// section headers hit.
 	titleWidth := AdjustPreviewWidth(s.width) + 2
+	if s.width > 0 && titleWidth > s.width {
+		titleWidth = s.width
+	}
 	if !s.autoyes {
 		b.WriteString(lipgloss.Place(
-			titleWidth, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(" Agent Factory ")))
+			titleWidth, 1, lipgloss.Left, lipgloss.Bottom,
+			mainTitle.Render(fitTitleText(" Agent Factory ", titleWidth))))
 	} else {
 		title := lipgloss.Place(
-			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(" Agent Factory "))
+			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom,
+			mainTitle.Render(fitTitleText(" Agent Factory ", titleWidth/2)))
 		autoYes := lipgloss.Place(
-			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom, autoYesStyle.Render(" auto-yes "))
+			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom,
+			autoYesStyle.Render(fitTitleText(" auto-yes ", titleWidth-(titleWidth/2))))
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, title, autoYes))
 	}
 
@@ -448,10 +744,15 @@ func (s *Sidebar) String() string {
 	}
 
 	out := lipgloss.Place(s.width, s.height, lipgloss.Left, lipgloss.Top, b.String())
-	// Safety clamp: fitWindow force-includes the first windowed row even when
-	// it alone exceeds the budget (e.g. a tall PR row at a tiny height), and
-	// lipgloss.Place will not truncate the overflow.
-	if s.height > 0 {
+	// Safety clamp to the exact allocation via PR 1's shared helper:
+	// lipgloss.Place pads but never truncates in either dimension, fitWindow
+	// force-includes the first windowed row even when it alone exceeds the
+	// height budget (e.g. a tall PR row at a tiny height), and rare row shapes
+	// (double-digit index prefixes at ultra-narrow widths) can still exceed
+	// the width after the per-row truncation (#646/#700 class).
+	if s.width > 0 && s.height > 0 {
+		out = layout.ClampToRect(out, layout.Rect{W: s.width, H: s.height})
+	} else if s.height > 0 {
 		if lines := strings.Split(out, "\n"); len(lines) > s.height {
 			out = strings.Join(lines[:s.height], "\n")
 		}
@@ -542,8 +843,31 @@ func (s *Sidebar) renderWindowIndicator(arrow string, hidden int) string {
 		}
 		text = runewidth.Truncate(text, w, tail)
 	}
-	return windowIndicatorStyle.Padding(0, 1).Render(
+	return windowIndicatorStyle.Padding(0, narrowAwarePad(w)).Render(
 		lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))
+}
+
+// narrowAwarePad returns the horizontal padding for a one-line sidebar row
+// rendered at effective content width w. The 2-cell Padding(0,1) sits OUTSIDE
+// the width the row text is truncated to, so at ultra-narrow allocations the
+// padded row overflows the sidebar (the #646 overflow class; reproduced by
+// T-Rex at SetSize(9,18) on the section header). Drop the padding at the same
+// w <= 9 threshold the instance and tab rows already use.
+func narrowAwarePad(w int) int {
+	if w <= 9 {
+		return 0
+	}
+	return 1
+}
+
+// fitTitleText truncates a title-bar chip's text to w cells so lipgloss.Place
+// (which pads but never clips) can't push the row past the sidebar allocation
+// at ultra-narrow widths.
+func fitTitleText(text string, w int) string {
+	if w > 0 && runewidth.StringWidth(text) > w {
+		return runewidth.Truncate(text, w, "")
+	}
+	return text
 }
 
 func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
@@ -593,7 +917,7 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 		}
 		text = runewidth.Truncate(text, w, tail)
 	}
-	return style.Padding(0, 1).Render(
+	return style.Padding(0, narrowAwarePad(w)).Render(
 		lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))
 }
 
@@ -602,9 +926,27 @@ func (s *Sidebar) renderInstance(idx int, selected bool) string {
 	if idx < 0 || idx >= len(instances) {
 		return ""
 	}
+	inst := instances[idx]
 	// Pad the index to the digit width of the largest 1-based index in the list
 	// so every row's prefix is the same width and the branch/PR lines align,
 	// without widening the common small-list case (#871, #923, #939).
-	s.renderer.indexWidth = len(strconv.Itoa(len(instances)))
-	return s.renderer.Render(instances[idx], idx+1, selected, s.proj.NumRepos() > 1)
+	s.renderer.SetIndexWidth(len(strconv.Itoa(len(instances))))
+	return s.renderer.Render(inst, idx+1, selected, s.proj.NumRepos() > 1, s.instanceExpanded(inst))
+}
+
+// renderTabRow renders one tab child row of an expanded instance. The label
+// set comes from tree.TabLabels — the same slots the tab bar shows — and the
+// row whose slot matches the store's active tab carries the "*" marker.
+func (s *Sidebar) renderTabRow(item SidebarItem, selected bool) string {
+	instances := s.proj.GetInstances()
+	if item.ItemIndex < 0 || item.ItemIndex >= len(instances) {
+		return ""
+	}
+	labels := tree.TabLabels(instances[item.ItemIndex])
+	if item.TabIndex < 0 || item.TabIndex >= len(labels) {
+		return ""
+	}
+	s.renderer.SetIndexWidth(len(strconv.Itoa(len(instances))))
+	return s.renderer.RenderTab(labels[item.TabIndex], item.TabIndex+1,
+		item.TabIndex == len(labels)-1, selected, s.proj.ActiveTab() == item.TabIndex)
 }
