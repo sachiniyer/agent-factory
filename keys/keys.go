@@ -31,8 +31,7 @@ const (
 
 	KeyTaskList
 
-	KeySearch      // Key for searching sessions
-	KeyTriggerTask // Key for triggering a task immediately
+	KeySearch // Key for searching sessions
 
 	KeyOpenPR // Key for opening PR in browser
 	KeyCopyPR // Key for copying PR URL to clipboard
@@ -88,7 +87,6 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"x":     KeyCloseSplit,
 	"S":     KeyTaskList,
 	"/":     KeySearch,
-	"r":     KeyTriggerTask,
 	"p":     KeyOpenPR,
 	"P":     KeyCopyPR,
 	"H":     KeyHooks,
@@ -185,10 +183,6 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 	KeySearch: key.NewBinding(
 		key.WithKeys("/"),
 		key.WithHelp("/", "search"),
-	),
-	KeyTriggerTask: key.NewBinding(
-		key.WithKeys("r"),
-		key.WithHelp("r", "run now"),
 	),
 	KeyOpenPR: key.NewBinding(
 		key.WithKeys("p"),
