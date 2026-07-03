@@ -130,6 +130,13 @@ pointing at one).`,
 			return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
 		}
 
+		// Fail fast on the reserved root-agent title (#1106) before any
+		// daemon round trip. The authoritative gate lives in the daemon's
+		// reserveCreate; this mirrors its message for a snappier CLI error.
+		if session.IsReservedTitle(createNameFlag) {
+			return jsonError(fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", createNameFlag))
+		}
+
 		// Best-effort per-repo pre-check to fail fast on duplicate titles
 		// before we spend time creating a tmux session and git worktree we'd
 		// just have to tear down. The authoritative race-safe check still

@@ -143,6 +143,41 @@ type Config struct {
 	// additionally tracks the automatic 1.x.y-preview-z prereleases.
 	// Any other value falls back to stable with a warning.
 	UpdateChannel string `json:"update_channel"`
+	// RootAgents opts specific repositories into an always-ensured "root"
+	// session (#1106): for each entry the daemon creates a reserved session
+	// titled "root" in-place at the repo root (the `af sessions create
+	// --here` shape — no worktree or branch is created, and killing it never
+	// touches the working tree) and re-creates it if its tmux vanishes.
+	// Keys are repository paths (a leading ~ is expanded); values configure
+	// the agent profile. Deliberately GLOBAL-ONLY and default-empty: an
+	// in-repo config must never be able to opt a machine into an always-on
+	// agent just by being cloned.
+	RootAgents map[string]RootAgentConfig `json:"root_agents,omitempty"`
+}
+
+// RootAgentConfig is the per-repo agent profile for an always-ensured root
+// session (#1106).
+type RootAgentConfig struct {
+	// Program is the command the root session runs. Unlike default_program
+	// it may be a full command string; a bare agent enum name (e.g.
+	// "claude") still resolves through program_overrides like any session
+	// program. Empty selects the default root profile: the repo's resolved
+	// "claude" command with --dangerously-skip-permissions ensured.
+	Program string `json:"program,omitempty"`
+	// AutoYes controls prompt auto-acceptance for the root session.
+	// Defaults to TRUE when unset — the root agent exists to act
+	// autonomously — which is why this is a pointer, unlike the global
+	// auto_yes flag whose zero value is the default.
+	AutoYes *bool `json:"auto_yes,omitempty"`
+}
+
+// AutoYesEnabled resolves the root-agent auto_yes profile flag: unset means
+// enabled.
+func (c RootAgentConfig) AutoYesEnabled() bool {
+	if c.AutoYes == nil {
+		return true
+	}
+	return *c.AutoYes
 }
 
 // ValidateProgramEnum returns nil when name is one of tmux.SupportedPrograms.
