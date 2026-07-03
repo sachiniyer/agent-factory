@@ -89,7 +89,7 @@ gofmt -l .   # should produce no output
 deadcode -test ./...   # should produce no output
 ```
 
-Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@latest`; CI installs the same binary on every run.
+Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.36.0`; CI pins the same version (`@latest` requires Go 1.25+, above this project's Go floor — see #637).
 
 ## Project Structure
 
