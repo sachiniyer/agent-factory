@@ -50,20 +50,20 @@ func TestTreeNav_JKWalksTabChildren(t *testing.T) {
 	sel := h.sidebar.GetSelection()
 	assert.True(t, sel.IsTab)
 	assert.Equal(t, 0, h.store.ActiveTab())
-	assert.True(t, h.paneA.IsInPreviewTab())
+	assert.Equal(t, 0, h.store.ActiveTab(), "the agent (Preview) slot is active")
 
 	pressNav(t, h, "j")
 	sel = h.sidebar.GetSelection()
 	assert.True(t, sel.IsTab)
 	assert.Equal(t, 1, sel.TabIndex)
 	assert.Equal(t, 1, h.store.ActiveTab())
-	assert.True(t, h.paneA.IsInTerminalTab(),
+	assert.Equal(t, 1, h.store.ActiveTab(),
 		"Enter on this row would attach the terminal tab — the tab dimension routes attach")
 
 	// j past the last child lands on beta; alpha folds (collapse-by-default).
 	pressNav(t, h, "j")
 	require.Same(t, b, h.sidebar.GetSelectedInstance())
-	assert.Same(t, b, h.store.GetSelectedInstance(), "tree selection retargets the content pane binding")
+	assert.Same(t, b, h.store.GetSelectedInstance(), "tree selection retargets the store selection")
 
 	// k back up: beta's row was preceded by alpha's (now folded) row.
 	pressNav(t, h, "k")

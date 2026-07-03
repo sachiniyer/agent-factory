@@ -145,11 +145,13 @@ func requireExactRect(t *testing.T, out string, r layout.Rect, name string) {
 }
 
 // newTestWorkspace builds one of each workspace pane over a fresh projection.
+// The content window is unbound (nil pane): the rect/clamp contract under test
+// is binding-independent.
 func newTestWorkspace() (*Sidebar, *TabbedWindow, *AutomationsPane, *StatusBar) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
 	sidebar := NewSidebar(&spin, false, proj)
-	paneA := NewTabbedWindow(NewTabPane(), proj)
+	paneA := NewTabbedWindow(NewTabPane(), nil)
 	automations := NewAutomationsPane(proj)
 	statusBar := NewStatusBar(NewMenu(), NewErrBox())
 	return sidebar, paneA, automations, statusBar
@@ -177,7 +179,7 @@ func TestWorkspacePanesRenderExactlyTheirRects(t *testing.T) {
 		{40, 10},  // exactly the hard minimum
 	} {
 		t.Run(fmt.Sprintf("%dx%d", tc.w, tc.h), func(t *testing.T) {
-			lay := layout.Grid{}.Solve(tc.w, tc.h)
+			lay := layout.Grid{Panes: 1}.Solve(tc.w, tc.h)
 			require.False(t, lay.Fallback)
 
 			sidebar, paneA, automations, statusBar := newTestWorkspace()
@@ -185,11 +187,11 @@ func TestWorkspacePanesRenderExactlyTheirRects(t *testing.T) {
 			paneA.tab.content = tabContentState{text: strings.Repeat(strings.Repeat("wide ", 100)+"\n", 100)}
 
 			sidebar.SetRect(lay.Tree)
-			paneA.SetRect(lay.PaneA)
+			paneA.SetRect(lay.Panes[0])
 			statusBar.SetRect(lay.StatusBar)
 
 			requireExactRect(t, sidebar.View(), lay.Tree, "tree")
-			requireExactRect(t, paneA.View(), lay.PaneA, "paneA")
+			requireExactRect(t, paneA.View(), lay.Panes[0], "paneA")
 			requireExactRect(t, statusBar.View(), lay.StatusBar, "statusBar")
 
 			// The composed workspace must be exactly the terminal size. The
@@ -215,7 +217,7 @@ func TestWorkspacePanesRenderExactlyTheirRects(t *testing.T) {
 // modal overlay, never an in-rail expansion — and the composed workspace must
 // still tile the window exactly (#1087).
 func TestWorkspaceFocusedAutomationsTilesExactly(t *testing.T) {
-	lay := layout.Grid{}.Solve(100, 30)
+	lay := layout.Grid{Panes: 1}.Solve(100, 30)
 	require.True(t, lay.AutomationsVisible)
 	require.False(t, lay.AutomationsCompact)
 
@@ -224,7 +226,7 @@ func TestWorkspaceFocusedAutomationsTilesExactly(t *testing.T) {
 	automations.Focus()
 
 	sidebar.SetRect(lay.Tree)
-	paneA.SetRect(lay.PaneA)
+	paneA.SetRect(lay.Panes[0])
 	automations.SetRect(lay.Automations)
 	automations.SetCompact(lay.AutomationsCompact)
 	statusBar.SetRect(lay.StatusBar)

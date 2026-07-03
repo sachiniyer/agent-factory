@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -83,7 +84,9 @@ func newTestHome(t *testing.T) *home {
 }
 
 // wireTestPanes installs the workspace panes + focus ring on a hand-built
-// test home, mirroring newHome's wiring (#1024 PR 4).
+// test home, mirroring newHome's wiring (#1024 PR 4). The workspace starts
+// with no open panes (#1088); tests open them via the pane verbs or
+// openTestPane.
 func wireTestPanes(h *home, proj *store.Projection) {
 	if h.menu == nil {
 		h.menu = ui.NewMenu()
@@ -91,14 +94,33 @@ func wireTestPanes(h *home, proj *store.Projection) {
 	if h.errBox == nil {
 		h.errBox = ui.NewErrBox()
 	}
-	h.paneA = ui.NewTabbedWindow(ui.NewTabPane(), proj)
-	h.paneB = ui.NewPinnedTabbedWindow(ui.NewTabPane(), proj)
+	h.paneWindows = make(map[int]*ui.TabbedWindow)
+	h.lastPaneCapture = make(map[int]time.Time)
+	// The startup auto-open is production-launch sugar; tests drive the pane
+	// verbs explicitly, so latch it off for determinism.
+	h.initialPaneOpened = true
 	h.automations = ui.NewAutomationsPane(proj)
 	h.statusBar = ui.NewStatusBar(h.menu, h.errBox)
 	h.hooksPane = ui.NewHooksPane()
-	h.ring = layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionPaneB, layout.RegionAutomations)
-	h.ring.SetHidden(layout.RegionPaneB, true)
+	h.ring = layout.NewRing(layout.RegionTree, layout.RegionAutomations)
 	h.syncFocus()
+}
+
+// openTestPane opens (instance, tab) as a pane the way the `s` verb does —
+// store binding + window + relayout + focus — and returns the pane.
+func openTestPane(t *testing.T, h *home, inst *session.Instance, tab int) *store.OpenPane {
+	t.Helper()
+	if p := h.store.FindOpenPane(inst, tab); p != nil {
+		h.store.TouchOpenPane(p)
+		h.relayout()
+		h.focusRegion(layout.PaneRegion(p.ID()))
+		return p
+	}
+	p := h.openPaneWindow(inst, tab)
+	require.NotNil(t, p)
+	h.relayout()
+	h.focusRegion(layout.PaneRegion(p.ID()))
+	return p
 }
 
 // requireTUIInstancesEmpty asserts the TUI's repo instances file holds no

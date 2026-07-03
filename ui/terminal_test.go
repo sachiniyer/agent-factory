@@ -620,18 +620,16 @@ func TestTabPaneRemoteFallbackStates(t *testing.T) {
 }
 
 // TestTabbedWindowAttachTerminalRemote verifies the shell-tab attach path for
-// remote instances (#843) via TabbedWindow.AttachTerminalForInstance: with
+// remote instances (#843) via AttachTerminalTab: with
 // terminal_cmd configured it runs the hook (with the session slug); without it
 // the attach is refused with an error naming terminal_cmd.
 func TestTabbedWindowAttachTerminalRemote(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	tw := newTestTabbedWindow()
-
 	t.Run("not configured refuses with actionable error", func(t *testing.T) {
 		inst := makeRemoteInstance(t, "remote-843-noattach", config.RemoteHooks{})
-		_, err := tw.AttachTerminalForInstance(inst, 1)
+		_, err := AttachTerminalTab(inst, 1)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "terminal_cmd")
 	})
@@ -644,7 +642,7 @@ func TestTabbedWindowAttachTerminalRemote(t *testing.T) {
 			[]byte("#!/bin/sh\necho \"$1\" > \""+argsFile+"\"\n"), 0755))
 
 		inst := makeRemoteInstance(t, "remote-843-attach", config.RemoteHooks{TerminalCmd: script})
-		done, err := tw.AttachTerminalForInstance(inst, 1)
+		done, err := AttachTerminalTab(inst, 1)
 		require.NoError(t, err)
 		select {
 		case <-done:
@@ -660,16 +658,14 @@ func TestTabbedWindowAttachTerminalRemote(t *testing.T) {
 }
 
 // TestTabbedWindowAttachTerminalRefusesNil guards the #716 captured-instance
-// contract: AttachTerminalForInstance(nil) must error, and an instance with no
+// contract: AttachTerminalTab(nil) must error, and an instance with no
 // live shell tab must refuse to attach rather than attaching the wrong session.
 func TestTabbedWindowAttachTerminalRefusesNil(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	tw := newTestTabbedWindow()
-
-	_, err := tw.AttachTerminalForInstance(nil, 1)
-	require.Error(t, err, "AttachTerminalForInstance(nil) must error, not attach")
+	_, err := AttachTerminalTab(nil, 1)
+	require.Error(t, err, "AttachTerminalTab(nil) must error, not attach")
 
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "unstarted", Path: t.TempDir(), Program: "claude",
@@ -677,6 +673,6 @@ func TestTabbedWindowAttachTerminalRefusesNil(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, inst.Started(), "precondition: instance must not be started")
 
-	_, err = tw.AttachTerminalForInstance(inst, 1)
+	_, err = AttachTerminalTab(inst, 1)
 	require.Error(t, err, "an instance with no live shell tab must refuse to attach")
 }

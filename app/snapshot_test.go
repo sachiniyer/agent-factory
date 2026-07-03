@@ -73,9 +73,8 @@ func TestReconcileSnapshot_PreservesSelectionAndActiveTab(t *testing.T) {
 	h.sidebar.SelectInstance(b)
 	require.Same(t, b, h.sidebar.GetSelectedInstance())
 
-	tw := h.paneA
-	require.True(t, tw.JumpToTab(1), "set a non-zero active tab")
-	require.Equal(t, 1, tw.GetActiveTab())
+	h.store.SetActiveTab(1)
+	require.Equal(t, 1, h.store.ActiveTab(), "set a non-zero active tab")
 
 	// Drop "a" (precedes the selection, so its removal shifts indices) and add
 	// "d"; keep "b" and "c".
@@ -88,8 +87,8 @@ func TestReconcileSnapshot_PreservesSelectionAndActiveTab(t *testing.T) {
 
 	require.Same(t, b, h.sidebar.GetSelectedInstance(),
 		"selection must stay pinned to b even though removing a preceding row shifted indices")
-	assert.Equal(t, 1, tw.GetActiveTab(),
-		"the active tab index must be preserved across a reconcile (reconcileSnapshot never touches the tabbed window)")
+	assert.Equal(t, 1, h.store.ActiveTab(),
+		"the active tab index must be preserved across a reconcile (reconcileSnapshot never touches it)")
 	assert.Nil(t, findSidebarInstance(h, "a"))
 	require.NotNil(t, findSidebarInstance(h, "d"))
 }

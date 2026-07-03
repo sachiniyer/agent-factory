@@ -23,6 +23,33 @@ func NewRing(ids ...string) *Ring {
 // visible again. Hiding the active id makes the next visible id active.
 func (r *Ring) SetHidden(id string, hidden bool) { r.hidden[id] = hidden }
 
+// SetIDs replaces the ring's id set in cycling order — the N-pane ring
+// changes shape as panes open, close, and auto-hide (#1088). The active id
+// is preserved when it survives the change; otherwise the first visible id
+// becomes active. Hidden flags carry over for ids present in both sets;
+// flags for dropped ids are discarded so a re-added id starts visible.
+func (r *Ring) SetIDs(ids ...string) {
+	activeID := ""
+	if r.normalize() {
+		activeID = r.ids[r.active]
+	}
+	hidden := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if r.hidden[id] {
+			hidden[id] = true
+		}
+	}
+	r.ids = append([]string(nil), ids...)
+	r.hidden = hidden
+	r.active = 0
+	for i, id := range r.ids {
+		if id == activeID {
+			r.active = i
+			break
+		}
+	}
+}
+
 // Active returns the currently focused id, or "" when every id is hidden.
 // If the active id has been hidden, focus moves forward to the next visible
 // id.

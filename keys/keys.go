@@ -46,15 +46,12 @@ const (
 	KeyNextSection // Jump to next section header
 	KeyPrevSection // Jump to previous section header
 
-	// Split view (#1024 PR 5). One physical key, focus-dependent verbs: with
-	// tree focus `s` opens/retargets the selection in pane B, with pane focus
-	// it swaps A↔B. KeySwapPanes exists for menu/help display of the swap
-	// meaning only (GlobalKeyStringsMap can map "s" to a single name);
-	// dispatch always resolves "s" to KeySplit and the root model picks the
-	// verb off the focus ring.
-	KeySplit      // Split: open the tree selection in pane B / swap panes.
-	KeySwapPanes  // SwapPanes is the pane-focused display alias of KeySplit; menu/help only.
-	KeyCloseSplit // CloseSplit closes the split (pane B focused).
+	// N-pane workspace verbs (#1088, replaces the PR-5 A/B split): `s` opens
+	// the selected tab as a new vertical-split pane (or focuses its pane when
+	// already open); `x` hides the focused pane back to the background — the
+	// tab keeps running, nothing is killed.
+	KeyOpenPane // OpenPane: open the selected tab as a pane / focus its pane.
+	KeyHidePane // HidePane hides the focused pane back to the background.
 
 	// KeyManageAutomations is the automations-section display alias of Enter
 	// (menu/help only): with the in-rail section focused, Enter opens the task
@@ -82,10 +79,10 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"t":          KeyNewTab,
 	"w":          KeyCloseTab,
 	"?":          KeyHelp,
-	// "s" is the split verb since #1024 PR 5 (RFC §2.3); the task-create jump
-	// it used to carry lives in the automations strip's own manager (S → n).
-	"s":     KeySplit,
-	"x":     KeyCloseSplit,
+	// "s" is the open-pane verb since #1024 PR 5/#1088 (RFC §2.3); the
+	// task-create jump it used to carry lives in the task manager (S → n).
+	"s":     KeyOpenPane,
+	"x":     KeyHidePane,
 	"S":     KeyTaskList,
 	"/":     KeySearch,
 	"r":     KeyTriggerTask,
@@ -170,17 +167,13 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 		key.WithKeys("enter"),
 		key.WithHelp("↵", "manage"),
 	),
-	KeySplit: key.NewBinding(
+	KeyOpenPane: key.NewBinding(
 		key.WithKeys("s"),
-		key.WithHelp("s", "split"),
+		key.WithHelp("s", "open pane"),
 	),
-	KeySwapPanes: key.NewBinding(
-		key.WithKeys("s"),
-		key.WithHelp("s", "swap"),
-	),
-	KeyCloseSplit: key.NewBinding(
+	KeyHidePane: key.NewBinding(
 		key.WithKeys("x"),
-		key.WithHelp("x", "close split"),
+		key.WithHelp("x", "hide pane"),
 	),
 	KeySearch: key.NewBinding(
 		key.WithKeys("/"),

@@ -39,14 +39,11 @@ func TestTabbedWindowJumpToTab(t *testing.T) {
 	require.Equal(t, 0, tw.GetActiveTab())
 }
 
-// TestTabbedWindowSelectLastAndNeighbor covers SelectLastTab (used after a new
-// tab is appended) and SelectTab (used to land on a neighbor after a close).
-func TestTabbedWindowSelectLastAndNeighbor(t *testing.T) {
+// TestTabbedWindowSelectNeighbor covers SelectTab (used to land on a neighbor
+// after a close), including its clamping.
+func TestTabbedWindowSelectNeighbor(t *testing.T) {
 	tw := newTestTabbedWindow()
 	setWindowInstance(tw, instanceWithTabs(4))
-
-	tw.SelectLastTab()
-	require.Equal(t, 3, tw.GetActiveTab(), "SelectLastTab selects the final tab")
 
 	tw.SelectTab(2)
 	require.Equal(t, 2, tw.GetActiveTab())

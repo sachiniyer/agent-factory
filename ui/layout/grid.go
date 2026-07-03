@@ -1,16 +1,32 @@
 package layout
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Region identifiers for the named layout regions. These double as focus
-// ring ids (§2.3) and as the pane component of zone ids (§2.5).
+// ring ids (§2.3) and as the pane component of zone ids (§2.5). Workspace
+// panes get dynamic ids from PaneRegion — the N-pane model (#1088) has no
+// fixed pane regions.
 const (
 	RegionTree        = "tree"
-	RegionPaneA       = "paneA"
-	RegionPaneB       = "paneB"
-	RegionDivider     = "divider"
+	RegionWorkspace   = "workspace"
 	RegionRailRule    = "railRule"
 	RegionAutomations = "automations"
 	RegionStatusBar   = "status"
 )
+
+// PaneRegion returns the region/focus-ring id for a workspace pane. The app
+// keys ring entries on the store's stable pane ids (so the ring survives
+// panes opening and closing); layout keys VisibleRegions on position.
+func PaneRegion(id int) string { return fmt.Sprintf("pane:%d", id) }
+
+// DividerRegion returns the region id for the 1-col divider right of pane i.
+func DividerRegion(i int) string { return fmt.Sprintf("divider:%d", i) }
+
+// IsPaneRegion reports whether a region/focus-ring id names a workspace pane.
+func IsPaneRegion(id string) bool { return strings.HasPrefix(id, "pane:") }
 
 // Sizing constants and degradation-ladder thresholds (RFC §2.6). A feature
 // named by a *Min* threshold is available at sizes >= the threshold and
@@ -35,9 +51,17 @@ const (
 	AutomationsRows        = 3
 	AutomationsCompactRows = 1
 
-	// SplitMinWidth: below this a requested split collapses to pane A (the
-	// caller retains pane B's binding and restores it on grow).
-	SplitMinWidth = 110
+	// PaneMinWidth is the minimum usable width of one workspace pane (#1088,
+	// §2.6). The pane-count fitting divides the workspace evenly with 1-col
+	// dividers; MaxPanes is how many panes of at least this width fit. A
+	// single pane is exempt — it takes whatever the workspace has, exactly
+	// as the pre-split pane A did.
+	PaneMinWidth = 40
+
+	// MultiPaneMinWidth: below this total width the workspace collapses
+	// toward a single pane regardless of PaneMinWidth math (§2.6 ladder). The
+	// caller retains the hidden panes' bindings and restores them on grow.
+	MultiPaneMinWidth = 110
 
 	// AutomationsFullMinWidth / AutomationsFullMinHeight: below either the
 	// automations section collapses to the 1-line summary.
@@ -46,7 +70,7 @@ const (
 
 	// MinimalWidth / MinimalHeight: below either the layout drops to
 	// minimal mode — tree + single pane + status bar only (no automations
-	// section, split never honored).
+	// section, never more than one pane).
 	MinimalWidth  = 60
 	MinimalHeight = 15
 
@@ -61,11 +85,11 @@ const (
 // turns a terminal size into the set of region rects, applying the
 // degradation ladder as the terminal shrinks.
 type Grid struct {
-	// Split requests a two-pane workspace. It is honored only when the
-	// terminal is wide enough (>= SplitMinWidth) and not in minimal mode;
-	// otherwise the workspace is pane A alone and the caller keeps pane B's
-	// binding for when the terminal grows back.
-	Split bool
+	// Panes is the number of open workspace panes requested (#1088). The
+	// grid honors at most MaxPanes of them — the caller picks WHICH panes
+	// stay visible (least-recently-focused hide first) and keeps the rest
+	// bound for when the terminal grows back.
+	Panes int
 }
 
 // Layout is a solved arrangement: the named region rects plus which regions
@@ -79,10 +103,17 @@ type Layout struct {
 	// out and the caller should render the fallback banner instead.
 	Fallback bool
 
-	Tree    Rect
-	PaneA   Rect
-	Divider Rect
-	PaneB   Rect
+	Tree Rect
+	// Workspace is the full content area right of the rail (#1088): the
+	// panes and dividers exactly tile it. It is what the caller renders
+	// into when no panes are open.
+	Workspace Rect
+	// Panes are the visible workspace pane rects, left to right —
+	// min(Grid.Panes, MaxPanes) of them, dividing Workspace evenly.
+	Panes []Rect
+	// Dividers are the 1-col rects between adjacent panes: Dividers[i] sits
+	// between Panes[i] and Panes[i+1] (len = max(0, len(Panes)-1)).
+	Dividers []Rect
 	// RailRule is the 1-row horizontal rule inside the left rail separating
 	// the tree from the bottom-aligned automations section (#1087). Visible
 	// exactly when Automations is.
@@ -90,9 +121,10 @@ type Layout struct {
 	Automations Rect
 	StatusBar   Rect
 
-	// SplitActive reports whether the split was honored (PaneB and Divider
-	// are visible).
-	SplitActive bool
+	// MaxPanes is how many panes fit at this size (§2.6 pane-count fitting):
+	// always at least 1 outside fallback. The caller auto-hides
+	// least-recently-focused panes beyond it and restores them on grow.
+	MaxPanes int
 	// AutomationsVisible reports whether the automations section is shown at
 	// all; AutomationsCompact whether it is the 1-line summary. (The full
 	// task manager is a modal overlay, not a layout region — the in-rail
@@ -100,6 +132,9 @@ type Layout struct {
 	AutomationsVisible bool
 	AutomationsCompact bool
 }
+
+// PaneCount returns how many panes this layout shows.
+func (l Layout) PaneCount() int { return len(l.Panes) }
 
 // Solve lays out a width×height terminal.
 func (g Grid) Solve(width, height int) Layout {
@@ -132,31 +167,64 @@ func (g Grid) Solve(width, height int) Layout {
 		rail, l.RailRule = rail.CutBottom(RailRuleRows)
 	}
 	l.Tree = rail
+	l.Workspace = workspace
 
-	if g.Split && !minimal && width >= SplitMinWidth {
-		l.SplitActive = true
-		paneA, rest := workspace.CutLeft((workspace.W - 1) / 2)
-		l.PaneA = paneA
-		l.Divider, l.PaneB = rest.CutLeft(1)
-	} else {
-		l.PaneA = workspace
+	// Pane-count fitting (#1088, §2.6): N panes need N·PaneMinWidth plus the
+	// N-1 divider columns. One pane always fits (it takes the workspace as
+	// is); more panes only above the multi-pane threshold.
+	l.MaxPanes = 1
+	if !minimal && width >= MultiPaneMinWidth {
+		if fit := (workspace.W + 1) / (PaneMinWidth + 1); fit > 1 {
+			l.MaxPanes = fit
+		}
+	}
+
+	n := g.Panes
+	if n > l.MaxPanes {
+		n = l.MaxPanes
+	}
+	if n > 0 {
+		// Divide the workspace evenly: the leftmost panes absorb the
+		// remainder columns so panes plus dividers tile it exactly.
+		content := workspace.W - (n - 1)
+		base, extra := content/n, content%n
+		rest := workspace
+		for i := 0; i < n; i++ {
+			w := base
+			if i < extra {
+				w++
+			}
+			var pane Rect
+			pane, rest = rest.CutLeft(w)
+			l.Panes = append(l.Panes, pane)
+			if i < n-1 {
+				var div Rect
+				div, rest = rest.CutLeft(1)
+				l.Dividers = append(l.Dividers, div)
+			}
+		}
 	}
 	return l
 }
 
 // VisibleRegions returns the regions visible at this size, keyed by region
-// id. Fallback layouts have none.
+// id — panes and dividers positionally (PaneRegion(i)/DividerRegion(i)), the
+// bare workspace when no panes are open. Fallback layouts have none.
 func (l Layout) VisibleRegions() map[string]Rect {
 	regions := make(map[string]Rect)
 	if l.Fallback {
 		return regions
 	}
 	regions[RegionTree] = l.Tree
-	regions[RegionPaneA] = l.PaneA
 	regions[RegionStatusBar] = l.StatusBar
-	if l.SplitActive {
-		regions[RegionDivider] = l.Divider
-		regions[RegionPaneB] = l.PaneB
+	if len(l.Panes) == 0 {
+		regions[RegionWorkspace] = l.Workspace
+	}
+	for i, r := range l.Panes {
+		regions[PaneRegion(i)] = r
+	}
+	for i, r := range l.Dividers {
+		regions[DividerRegion(i)] = r
 	}
 	if l.AutomationsVisible {
 		regions[RegionRailRule] = l.RailRule

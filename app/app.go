@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 	"io"
 	"os"
 	"path/filepath"
@@ -128,23 +129,33 @@ type home struct {
 	grid                  layout.Grid
 	lastLayout            layout.Layout
 	termWidth, termHeight int
-	// ring is the focus ring: tree → pane A → automations. Tab/Shift-Tab
-	// cycle it; regions hidden by the degradation ladder are skipped.
+	// ring is the focus ring: tree → open panes (in workspace order) →
+	// automations (#1088). Tab/Shift-Tab cycle it; its pane entries are
+	// rebuilt by relayout as panes open, close, and auto-hide, and regions
+	// hidden by the degradation ladder are skipped.
 	ring *layout.Ring
 
 	// sidebar is the left-rail instances+tabs tree
 	sidebar *ui.Sidebar
-	// paneA is the workspace content pane: the selected tab's live view
-	paneA *ui.TabbedWindow
-	// paneB is the split view's second content pane (#1024 PR 5): a PINNED
-	// live view of the store's pane-B binding, which only the split verbs
-	// move while the tree selection drives pane A (RFC §2.3). Hidden (zero
-	// rect, out of the focus ring) whenever no split is open or the terminal
-	// is too narrow to honor one (§2.6).
-	paneB *ui.TabbedWindow
-	// lastPaneBCapture is when pane B's capture was last dispatched; the
-	// paneBCaptureMinInterval throttle reads it (RFC §5.2).
-	lastPaneBCapture time.Time
+	// paneWindows hosts one content window per open pane, keyed by the
+	// store's stable pane id (#1088). The window owns per-pane view state
+	// (capture content, scroll mode); the (instance, tab) binding it renders
+	// lives in the store's open-pane list. Windows are created when a pane
+	// opens and dropped when it closes; auto-hidden panes keep their window
+	// (zero-rected) so their capture and scroll state survive narrow spells.
+	paneWindows map[int]*ui.TabbedWindow
+	// visiblePanes is the laid-out subset of the store's open panes, in
+	// left-to-right order — rebuilt by relayout (§2.6 pane-count fitting:
+	// the least-recently-focused panes beyond Layout.MaxPanes are hidden).
+	visiblePanes []*store.OpenPane
+	// lastPaneCapture is when each pane's capture was last dispatched, keyed
+	// by pane id; the paneCaptureMinInterval throttle reads it (RFC §5.2).
+	lastPaneCapture map[int]time.Time
+	// initialPaneOpened latches the one-time startup auto-open: the first
+	// instance selection opens its pane so the workspace isn't empty on
+	// launch. Never reset — once the user has hidden every pane, the
+	// workspace stays empty until they open one (`s`).
+	initialPaneOpened bool
 	// automations is the bottom section of the left rail (#1087): compact
 	// task rows only — S/Enter open its full task manager as the stateTasks
 	// overlay
@@ -223,12 +234,12 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		store:           proj,
 		menu:            menu,
 		errBox:          errBox,
-		paneA:           ui.NewTabbedWindow(ui.NewTabPane(), proj),
-		paneB:           ui.NewPinnedTabbedWindow(ui.NewTabPane(), proj),
+		paneWindows:     make(map[int]*ui.TabbedWindow),
+		lastPaneCapture: make(map[int]time.Time),
 		automations:     ui.NewAutomationsPane(proj),
 		statusBar:       ui.NewStatusBar(menu, errBox),
 		hooksPane:       ui.NewHooksPane(),
-		ring:            layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionPaneB, layout.RegionAutomations),
+		ring:            layout.NewRing(layout.RegionTree, layout.RegionAutomations),
 		snapshotFetcher: snapshotThroughDaemon,
 		appConfig:       appConfig,
 		program:         program,
@@ -239,10 +250,9 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		appState:        appState,
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes, proj)
-	// No split is open at startup: pane B starts hidden so the focus ring is
-	// tree → pane A → automations until a split opens (relayout keeps this in
-	// sync with Layout.SplitActive thereafter).
-	h.ring.SetHidden(layout.RegionPaneB, true)
+	// No panes are open at startup: the focus ring is tree → automations
+	// until the first pane opens (relayout rebuilds the ring's pane entries
+	// thereafter; the first instance selection auto-opens its pane).
 	h.syncFocus()
 
 	// Cold-start the projection from the daemon's authoritative Snapshot (#960 PR 6).
@@ -292,41 +302,56 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 
 // relayout is the single sizing path (#1024 PR 4): layout.Grid turns the
 // terminal size into the region rects — applying the §2.6 degradation ladder
-// — and every pane is re-rected. Called on every WindowSizeMsg and whenever a
-// grid input changes without a resize (a split opening/closing).
+// and the #1088 pane-count fitting — and every pane is re-rected. Called on
+// every WindowSizeMsg and whenever a grid input changes without a resize (a
+// pane opening or closing).
 func (m *home) relayout() {
-	// The split request follows the store's pane-B binding (#1024 PR 5). The
-	// grid honors it only when the terminal is wide enough (§2.6): below the
-	// threshold SplitActive comes back false while the binding — and the
-	// Split request — persist, which is exactly the retain-and-restore-on-grow
-	// contract.
-	m.grid.Split = m.store.SplitOpen()
+	// The grid is asked for every open pane; it honors at most MaxPanes of
+	// them (§2.6). The store then picks WHICH panes stay visible — the
+	// most-recently-focused ones, in workspace order — while the hidden
+	// panes' bindings persist and restore on grow, which is exactly the
+	// retain-and-restore contract the A/B split had.
+	m.grid.Panes = m.store.NumOpenPanes()
 	lay := m.grid.Solve(m.termWidth, m.termHeight)
 	m.lastLayout = lay
 	if lay.Fallback {
 		// No rects to hand out, but keep the focus flags + hints coherent so
 		// key routing stays correct while the terminal is too small.
+		m.visiblePanes = nil
 		m.syncFocus()
 		return
 	}
 
-	// Regions hidden by the ladder leave the focus ring; Ring.Active moves
-	// focus forward off a hidden region on its own, so re-sync pane focus
-	// flags afterwards. A collapsing split is special-cased: the ring's
-	// forward skip would land focus on the automations strip, but the user
-	// was looking at a content pane — pane A, which absorbed the workspace,
-	// is where their attention lands.
-	if !lay.SplitActive && m.ring.Active() == layout.RegionPaneB {
-		m.ring.Focus(layout.RegionPaneA)
+	m.visiblePanes = m.store.VisibleOpenPanes(lay.PaneCount())
+
+	// Rebuild the ring's pane entries to the visible set (auto-hidden panes
+	// leave the ring; the focused pane is most-recently-focused, so it is
+	// never the one auto-hidden). SetIDs keeps the active id when it
+	// survives; a vanished active falls back to the tree.
+	ids := make([]string, 0, len(m.visiblePanes)+2)
+	ids = append(ids, layout.RegionTree)
+	for _, p := range m.visiblePanes {
+		ids = append(ids, layout.PaneRegion(p.ID()))
 	}
-	m.ring.SetHidden(layout.RegionPaneB, !lay.SplitActive)
+	ids = append(ids, layout.RegionAutomations)
+	m.ring.SetIDs(ids...)
 	m.ring.SetHidden(layout.RegionAutomations, !lay.AutomationsVisible)
 	m.syncFocus()
-	m.menu.SetSplitOpen(lay.SplitActive)
 
 	m.sidebar.SetRect(lay.Tree)
-	m.paneA.SetRect(lay.PaneA)
-	m.paneB.SetRect(lay.PaneB)
+	visible := make(map[int]bool, len(m.visiblePanes))
+	for i, p := range m.visiblePanes {
+		visible[p.ID()] = true
+		if w := m.paneWindows[p.ID()]; w != nil {
+			w.SetRect(lay.Panes[i])
+		}
+	}
+	// Auto-hidden panes render nothing while retaining their window state.
+	for id, w := range m.paneWindows {
+		if !visible[id] {
+			w.SetRect(layout.Rect{})
+		}
+	}
 	m.automations.SetRect(lay.Automations)
 	m.automations.SetCompact(lay.AutomationsCompact)
 	m.statusBar.SetRect(lay.StatusBar)
@@ -351,29 +376,59 @@ func (m *home) relayout() {
 	}
 	m.automations.TaskPane().SetSize(taskPaneW, int(float32(m.termHeight)*0.6))
 
-	previewWidth, previewHeight := m.paneA.GetPreviewSize()
-	if err := m.store.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
-		log.ErrorLog.Print(err)
+	// tmux sessions render at the pane content size. Panes divide the
+	// workspace evenly, so the first visible pane's inner size stands for all
+	// of them; with no panes open the last size is kept (nothing renders).
+	if len(m.visiblePanes) > 0 {
+		if w := m.paneWindows[m.visiblePanes[0].ID()]; w != nil {
+			previewWidth, previewHeight := w.GetPreviewSize()
+			if err := m.store.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
+				log.ErrorLog.Print(err)
+			}
+		}
 	}
 }
 
 // syncFocus applies the focus ring's active region to the panes and the
-// status-bar hints.
+// status-bar hints, and stamps a focused pane most recently focused so the
+// §2.6 auto-hide order tracks real attention.
 func (m *home) syncFocus() {
 	active := m.ring.Active()
-	for id, pane := range map[string]layout.Pane{
+	panes := map[string]layout.Pane{
 		layout.RegionTree:        m.sidebar,
-		layout.RegionPaneA:       m.paneA,
-		layout.RegionPaneB:       m.paneB,
 		layout.RegionAutomations: m.automations,
-	} {
+	}
+	for _, p := range m.visiblePanes {
+		if w := m.paneWindows[p.ID()]; w != nil {
+			panes[layout.PaneRegion(p.ID())] = w
+		}
+	}
+	for id, pane := range panes {
 		if id == active {
 			pane.Focus()
 		} else {
 			pane.Blur()
 		}
 	}
+	if p := m.focusedOpenPane(); p != nil {
+		m.store.TouchOpenPane(p)
+	}
 	m.menu.SetFocusRegion(active)
+}
+
+// focusedOpenPane returns the open pane the focus ring points at, or nil when
+// focus is on the tree/automations (or the pane vanished).
+func (m *home) focusedOpenPane() *store.OpenPane {
+	active := m.ring.Active()
+	if !layout.IsPaneRegion(active) {
+		return nil
+	}
+	for _, p := range m.visiblePanes {
+		if layout.PaneRegion(p.ID()) == active {
+			return p
+		}
+	}
+	return nil
 }
 
 // focusRegion moves focus directly to the given region and re-solves the
@@ -547,11 +602,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
-				// The focused split pane scrolls its own pinned view (#1024
-				// PR 5); everywhere else the wheel drives pane A off the
-				// selection binding, as before.
+				// The wheel scrolls the focused pane's own view (#1088); with
+				// the tree focused it drives the selection's open pane, when
+				// one is visible.
 				pane, bound := m.focusedContentPane()
-				if bound == nil {
+				if pane == nil || bound == nil {
 					return m, nil
 				}
 				switch msg.Button {
@@ -592,19 +647,24 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// milliseconds. selectionChanged() also dispatches the captures
 		// off the event loop, so this handler returns instantly.
 		detachTraceMark("repaintAfterDetachMsg-handler-entry")
+		// The post-detach repaint must be immediate: reset the per-pane
+		// capture throttle so every visible pane's capture dispatches now
+		// instead of waiting out paneCaptureMinInterval (#1088 — the
+		// single-pane path was unthrottled and repainted instantly).
+		m.lastPaneCapture = make(map[int]time.Time)
 		cmd := m.selectionChanged()
 		detachTraceMark("repaintAfterDetachMsg-handler-exit")
 		// The watchdog armed in attachOverlayCallback is ended when the
 		// post-detach paint completes (panesRefreshedMsg). That msg is only
 		// emitted by refreshPanesCmd, which selectionChanged dispatches only
-		// when an instance row is selected. When the selection has fallen back
-		// to a section header — e.g. the only instance was removed while the
-		// user was attached — selectionChanged returns nil, no
+		// for visible open panes. With no pane to refresh — an empty
+		// workspace, or every pane pruned while the user was attached — no
 		// panesRefreshedMsg ever arrives, and the watchdog would fire a
 		// spurious goroutine dump after slowDetachThreshold even though there
-		// were no panes to refresh. Cancel it here: a nil cmd means the detach
-		// already completed everything it was going to do (#683).
-		if cmd == nil {
+		// was nothing to paint. Cancel it here: a nil cmd, or a cmd carrying
+		// only non-capture work (the PR-info fetch), means the detach already
+		// completed everything it was going to paint (#683 class).
+		if cmd == nil || len(m.visiblePanes) == 0 {
 			endDetachWatchdog()
 		}
 		return m, cmd
@@ -695,6 +755,16 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.menu.SetState(ui.StateDefault)
+		// A fresh session with an empty workspace opens its agent pane
+		// (#1088): the pre-N-pane TUI showed the new session immediately, and
+		// an empty workspace after `n` would read as a failed create. A
+		// workspace that already has panes is left alone — the new session is
+		// one `s` away.
+		if m.store.NumOpenPanes() == 0 {
+			m.initialPaneOpened = true
+			m.openPaneWindow(started, 0)
+			m.relayout()
+		}
 		m.showHelpScreen(helpStart(started), nil)
 
 		return m, tea.Batch(tea.WindowSize(), m.selectionChanged())
@@ -1054,10 +1124,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return mod, cmd
 	}
 
-	// Exit scrolling mode when ESC is pressed (the focused pane's scroll
-	// state — pane B keeps its own, #1024 PR 5)
+	// Exit scrolling mode when ESC is pressed (each pane keeps its own
+	// scroll state, #1088)
 	if msg.Type == tea.KeyEsc {
-		if pane, bound := m.focusedContentPane(); pane.IsInScrollMode() {
+		if pane, bound := m.focusedContentPane(); pane != nil && pane.IsInScrollMode() {
 			if err := pane.ResetToNormalMode(bound); err != nil {
 				return m, m.handleError(err)
 			}
@@ -1076,10 +1146,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// KeyName. Gated on the focus region, not just on the strip having
 	// consumed the key above: the jump belongs to the tree/workspace, so a
 	// digit with the automations strip focused must never retarget the
-	// content pane — the pre-cutover ContentModeTasks behavior (Greptile on
+	// selection — the pre-cutover ContentModeTasks behavior (Greptile on
 	// #1083; the strip's task list does consume digits today, but this gate
 	// must not depend on that).
-	if active := m.ring.Active(); active == layout.RegionTree || active == layout.RegionPaneA {
+	if active := m.ring.Active(); active == layout.RegionTree || layout.IsPaneRegion(active) {
 		if len(msg.Runes) == 1 {
 			if r := msg.Runes[0]; r >= '1' && r <= '9' {
 				return m.handleTabJump(int(r - '0'))
@@ -1203,16 +1273,17 @@ func (m *home) attachOverlayCallback(label, traceSuffix string, remote bool, att
 	return repaintCmd
 }
 
-// selectionChanged updates the workspace pane binding and menu based on the
-// sidebar selection. The preview/terminal tmux captures are dispatched via a
-// tea.Cmd (goroutine) rather than run synchronously: each call shells out to
-// `tmux capture-pane` (~3–5ms locally), and on the bubbletea Update goroutine
-// that cost compounded — every previewTickMsg (100ms) blocked the event loop,
-// and the first paint after detach paid the full cost on top of waiting up
-// to a full tick cycle for the next msg (#579, #559 sibling). The TabPane
-// guards its captured state with a mutex so the goroutine can mutate it while
-// View() reads it. Synchronous fields touched here (selection binding, menu
-// state) stay on the event loop.
+// selectionChanged updates the selection binding and menu based on the
+// sidebar selection, and drives the open panes' capture refresh. The
+// preview/terminal tmux captures are dispatched via a tea.Cmd (goroutine)
+// rather than run synchronously: each call shells out to `tmux capture-pane`
+// (~3–5ms locally), and on the bubbletea Update goroutine that cost
+// compounded — every previewTickMsg (100ms) blocked the event loop, and the
+// first paint after detach paid the full cost on top of waiting up to a full
+// tick cycle for the next msg (#579, #559 sibling). The TabPane guards its
+// captured state with a mutex so the goroutine can mutate it while View()
+// reads it. Synchronous fields touched here (selection binding, menu state)
+// stay on the event loop.
 func (m *home) selectionChanged() tea.Cmd {
 	selectionStart := time.Now()
 	detachTraceMark("selectionChanged-entry")
@@ -1227,23 +1298,19 @@ func (m *home) selectionChanged() tea.Cmd {
 	attachedNow := m.attached.Load()
 
 	var prFetch tea.Cmd
-	var refreshCmd tea.Cmd
 	if sel.Kind == ui.SectionInstances && !sel.IsHeader {
 		selected := m.sidebar.GetSelectedInstance()
-		// Bind the workspace pane to the cursor's instance — the store's
-		// display binding replaces the pre-#1024 TabbedWindow.instance pointer,
-		// including the nil case — then re-clamp the active tab index against
-		// the new instance's tab count.
+		// Track the cursor's instance in the store's display selection — what
+		// the pane verbs (`s`, Enter-from-tree, 1-9) act on — then re-clamp
+		// the active tab index against the new instance's tab count.
 		m.store.SetSelectedInstance(selected)
-		m.paneA.ClampActiveTab()
+		m.clampSelectionTab()
 		m.menu.SetInstance(selected)
 		// The tree cursor drives the active tab too (landing on a tab row
 		// selects that tab — #1024 PR 3), so mirror it into the menu here, not
 		// just in the explicit tab-jump handlers.
-		m.menu.SetActiveTab(m.paneA.GetActiveTab())
-		if !attachedNow {
-			refreshCmd = refreshPanesCmd(m.paneA, selected)
-		}
+		m.menu.SetActiveTab(m.store.ActiveTab())
+		m.maybeAutoOpenInitialPane(selected)
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
 		// Lazily refresh PR info when the user lands on an instance that
 		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
@@ -1252,85 +1319,123 @@ func (m *home) selectionChanged() tea.Cmd {
 			prFetch = fetchPRInfoCmd(selected, false)
 		}
 	} else {
-		// Header row: the workspace keeps rendering the sticky display
-		// selection while it is still live, and the menu drops the
-		// instance-specific hints.
+		// Header row: the menu drops the instance-specific hints; the open
+		// panes are untouched (they are explicit bindings, not
+		// selection-driven).
 		m.menu.SetInstance(nil)
-		selected := m.store.GetSelectedInstance()
-		if selected != nil && !m.store.ContainsInstance(selected) {
+		if selected := m.store.GetSelectedInstance(); selected != nil && !m.store.ContainsInstance(selected) {
 			// The sticky binding dangles — its instance was removed (e.g. the
-			// last instance killed while attached). Drop it so the pane can't
-			// keep showing a dead session's capture.
+			// last instance killed while attached). Drop it so the pane verbs
+			// can't target a dead session.
 			m.store.SetSelectedInstance(nil)
-			selected = nil
-		}
-		if selected == nil {
-			// Reset the pane to the nil-instance fallback synchronously:
-			// UpdateContent(nil) is a mutex-guarded string write, no tmux
-			// shell-out, so it is safe on the event loop — and deliberately
-			// NOT a refresh cmd, preserving the #683 contract that a header
-			// selection with nothing to refresh returns a nil cmd (the
-			// repaint handler ends the detach watchdog off that nil).
-			if err := m.paneA.UpdateContent(nil); err != nil {
-				log.WarningLog.Printf("UpdateContent(nil) failed: %v", err)
-			}
-		} else if !attachedNow {
-			refreshCmd = refreshPanesCmd(m.paneA, selected)
 		}
 	}
 
-	return tea.Batch(prFetch, refreshCmd, m.paneBRefresh(attachedNow))
+	return tea.Batch(prFetch, m.panesRefresh(attachedNow))
 }
 
-// paneBCaptureMinInterval floors the pinned split pane's capture cadence
-// (#1024 PR 5). At the previewTick period (100ms) it admits one pane-B
-// capture per tick — the at-most-one-extra-capture budget of RFC §5.2 — and
-// swallows the extra selectionChanged calls rapid tree navigation fires
-// between ticks. If tmux-server contention ever resurfaces (#598 class),
-// raising this ONE constant (e.g. to 250ms) degrades pane B's refresh without
-// touching pane A or the tick.
-const paneBCaptureMinInterval = 100 * time.Millisecond
-
-// paneBRefresh is the split half of selectionChanged (#1024 PR 5): it keeps
-// the pinned pane-B binding coherent and returns its throttled capture cmd
-// (nil when there is nothing to do). Runs on the event loop.
-func (m *home) paneBRefresh(attachedNow bool) tea.Cmd {
-	pinned := m.store.PaneBInstance()
-	if pinned == nil {
-		return nil
+// clampSelectionTab bounds the selection's active tab index against the
+// selected instance's tab count — the tree-selection half of the clamping the
+// per-pane windows do for their own bindings (#930 PR 4 class).
+func (m *home) clampSelectionTab() {
+	n := len(tree.TabLabels(m.store.GetSelectedInstance()))
+	if cur := m.store.ActiveTab(); cur >= n && n > 0 {
+		m.store.SetActiveTab(n - 1)
+	} else if cur < 0 {
+		m.store.SetActiveTab(0)
 	}
-	if !m.store.ContainsInstance(pinned) {
-		// The pinned instance left the projection (killed here, or removed by
-		// an external kill the snapshot reconcile mirrored). Close the split
-		// rather than keep rendering a dead session's last capture — the
-		// pinned equivalent of the sticky-selection dangle drop above.
-		m.closeSplit()
-		return nil
-	}
-	// The pinned tab index can dangle when its instance's tab set shrank
-	// (e.g. pane A closed the tab both panes were showing).
-	m.paneB.ClampActiveTab()
-	// Both panes pause while attached (#598): the attached gate above covers
-	// pane B exactly like pane A. No capture while the split is collapsed by
-	// the degradation ladder either — the pane is invisible.
-	if attachedNow || !m.lastLayout.SplitActive {
-		return nil
-	}
-	if time.Since(m.lastPaneBCapture) < paneBCaptureMinInterval {
-		return nil
-	}
-	m.lastPaneBCapture = time.Now()
-	return refreshPanesCmd(m.paneB, pinned)
 }
 
-// focusedContentPane resolves which content pane the focus ring points at —
-// the pinned pane B when it is focused and visible, pane A everywhere else —
-// along with the instance that pane is bound to (nil when unbound).
+// maybeAutoOpenInitialPane opens the first selected instance's tab as the
+// first pane, once per TUI run, so launch doesn't land on an empty workspace
+// (#1088). Focus is NOT moved — the user is on the tree at startup. Once the
+// latch is set the workspace is entirely verb-driven: hiding every pane
+// leaves it empty until `s` opens one.
+func (m *home) maybeAutoOpenInitialPane(selected *session.Instance) {
+	if m.initialPaneOpened || selected == nil || m.store.NumOpenPanes() > 0 {
+		return
+	}
+	if status := selected.GetStatus(); status == session.Loading || status == session.Deleting {
+		return
+	}
+	m.initialPaneOpened = true
+	m.openPaneWindow(selected, m.store.ActiveTab())
+	m.relayout()
+}
+
+// paneCaptureMinInterval floors each open pane's capture cadence. At the
+// previewTick period (100ms) it admits one capture per pane per tick — the
+// one-capture-per-pane budget of RFC §5.2 — and swallows the extra
+// selectionChanged calls rapid tree navigation fires between ticks. If
+// tmux-server contention ever resurfaces (#598 class), raising this ONE
+// constant (e.g. to 250ms) degrades every pane's refresh without touching
+// the tick.
+const paneCaptureMinInterval = 100 * time.Millisecond
+
+// panesRefresh keeps the open-pane list coherent and returns the visible
+// panes' throttled capture cmds (nil when there is nothing to do). Runs on
+// the event loop (#1088, generalizing the PR-5 paneBRefresh).
+func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
+	// Prune panes whose instance left the projection (killed here, or
+	// removed by an external kill the snapshot reconcile mirrored) rather
+	// than keep rendering a dead session's last capture.
+	pruned := false
+	for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
+		if !m.store.ContainsInstance(p.Instance()) {
+			m.store.CloseOpenPane(p)
+			delete(m.paneWindows, p.ID())
+			delete(m.lastPaneCapture, p.ID())
+			pruned = true
+		}
+	}
+	if pruned {
+		m.relayout()
+	}
+	// All panes pause while attached (#598): no capture work may queue
+	// behind the user's detach key. Auto-hidden panes don't capture either —
+	// they are invisible.
+	if attachedNow {
+		return nil
+	}
+	var cmds []tea.Cmd
+	for _, p := range m.visiblePanes {
+		w := m.paneWindows[p.ID()]
+		if w == nil {
+			continue
+		}
+		// The pane's tab index can dangle when its instance's tab set shrank
+		// (e.g. another view closed the tab this pane was showing).
+		w.ClampActiveTab()
+		if time.Since(m.lastPaneCapture[p.ID()]) < paneCaptureMinInterval {
+			continue
+		}
+		m.lastPaneCapture[p.ID()] = time.Now()
+		cmds = append(cmds, refreshPanesCmd(w, p.Instance()))
+	}
+	return tea.Batch(cmds...)
+}
+
+// focusedContentPane resolves which content pane scroll/attach keys act on:
+// the focused pane when the focus ring points at one; with the tree or
+// automations focused, the pane showing the selection's (instance, active
+// tab) if that tab is open and visible. Returns (nil, nil) when no pane
+// applies — the workspace may be empty (#1088).
 func (m *home) focusedContentPane() (*ui.TabbedWindow, *session.Instance) {
-	if m.ring.Active() == layout.RegionPaneB && m.lastLayout.SplitActive {
-		return m.paneB, m.store.PaneBInstance()
+	if p := m.focusedOpenPane(); p != nil {
+		return m.paneWindows[p.ID()], p.Instance()
 	}
-	return m.paneA, m.store.GetSelectedInstance()
+	selected := m.store.GetSelectedInstance()
+	if selected == nil {
+		return nil, nil
+	}
+	if p := m.store.FindOpenPane(selected, m.store.ActiveTab()); p != nil {
+		for _, vis := range m.visiblePanes {
+			if vis == p {
+				return m.paneWindows[p.ID()], p.Instance()
+			}
+		}
+	}
+	return nil, nil
 }
 
 // panesRefreshedMsg signals that the off-loop tab capture finished. The msg
@@ -1468,15 +1573,25 @@ func (m *home) View() string {
 
 	// The left rail stacks the tree over the bottom-aligned automations
 	// section, separated by a horizontal rule (#1087); the workspace panes
-	// take the full height beside it (#1090).
+	// take the full height beside it (#1090), divided evenly with 1-col
+	// dividers (#1088). With no panes open the workspace renders the
+	// open-pane affordance.
 	railParts := []string{m.sidebar.View()}
 	if m.lastLayout.AutomationsVisible {
 		railParts = append(railParts, m.renderRailRule(), m.automations.View())
 	}
 	rail := lipgloss.JoinVertical(lipgloss.Left, railParts...)
-	cols := []string{rail, m.paneA.View()}
-	if m.lastLayout.SplitActive {
-		cols = append(cols, m.renderDivider(), m.paneB.View())
+	cols := []string{rail}
+	if len(m.visiblePanes) == 0 {
+		cols = append(cols, ui.EmptyWorkspace(m.lastLayout.Workspace))
+	}
+	for i, p := range m.visiblePanes {
+		if i > 0 {
+			cols = append(cols, m.renderDivider(i-1))
+		}
+		if w := m.paneWindows[p.ID()]; w != nil {
+			cols = append(cols, w.View())
+		}
 	}
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 	mainView := lipgloss.JoinVertical(lipgloss.Left, top, m.statusBar.View())
@@ -1528,15 +1643,18 @@ func (m *home) renderTasksOverlay() string {
 	return hooksOverlayStyle.Render(m.automations.TaskPane().String())
 }
 
-// splitDividerStyle recedes the 1-col divider between panes A and B so the
-// focused pane's frame stays the strongest line on screen.
+// splitDividerStyle recedes the 1-col dividers between panes so the focused
+// pane's frame stays the strongest line on screen.
 var splitDividerStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#DDDADA", Dark: "#3C3C3C"})
 
-// renderDivider renders the 1-col divider between panes A and B (§2.6:
-// "split divides it evenly with a 1-col divider").
-func (m *home) renderDivider() string {
-	r := m.lastLayout.Divider
+// renderDivider renders the 1-col divider right of pane i (§2.6: "N panes
+// divide the workspace width evenly with 1-col dividers").
+func (m *home) renderDivider(i int) string {
+	if i < 0 || i >= len(m.lastLayout.Dividers) {
+		return ""
+	}
+	r := m.lastLayout.Dividers[i]
 	if r.Empty() {
 		return ""
 	}

@@ -11,7 +11,7 @@ import (
 )
 
 // ladderLevel orders the degradation ladder for monotonicity checks: higher
-// means more degraded. Levels follow RFC §2.6: full → split collapsed →
+// means more degraded. Levels follow RFC §2.6: full → panes collapsed →
 // compact automations → minimal → fallback.
 func ladderLevel(l layout.Layout) int {
 	switch {
@@ -21,20 +21,20 @@ func ladderLevel(l layout.Layout) int {
 		return 3
 	case l.AutomationsCompact:
 		return 2
-	case !l.SplitActive:
+	case l.MaxPanes < 2:
 		return 1
 	default:
 		return 0
 	}
 }
 
-// TestGridSolveTilesExactly sweeps the full supported size range, with and
-// without a split requested, and asserts the visible regions exactly tile
-// the terminal: no overlap, no gaps, no negative dimensions, nothing
-// outside the screen.
+// TestGridSolveTilesExactly sweeps the full supported size range for several
+// requested pane counts and asserts the visible regions exactly tile the
+// terminal: no overlap, no gaps, no negative dimensions, nothing outside the
+// screen.
 func TestGridSolveTilesExactly(t *testing.T) {
-	for _, split := range []bool{false, true} {
-		grid := layout.Grid{Split: split}
+	for _, panes := range []int{0, 1, 2, 3} {
+		grid := layout.Grid{Panes: panes}
 		for w := layout.HardMinWidth; w <= 220; w++ {
 			for h := layout.HardMinHeight; h <= 72; h++ {
 				l := grid.Solve(w, h)
@@ -44,7 +44,7 @@ func TestGridSolveTilesExactly(t *testing.T) {
 				visible := l.VisibleRegions()
 				parts := make([]layout.Rect, 0, len(visible))
 				for id, r := range visible {
-					require.False(t, r.Empty(), "visible region %s is empty at %dx%d split=%v", id, w, h, split)
+					require.False(t, r.Empty(), "visible region %s is empty at %dx%d panes=%d", id, w, h, panes)
 					parts = append(parts, r)
 				}
 				requireTiles(t, screen, parts)
@@ -67,35 +67,75 @@ func TestGridSolveFallbackBelowHardMinimum(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%dx%d", tt.w, tt.h), func(t *testing.T) {
-			l := layout.Grid{Split: true}.Solve(tt.w, tt.h)
+			l := layout.Grid{Panes: 2}.Solve(tt.w, tt.h)
 			assert.Equal(t, tt.fallback, l.Fallback)
 			if tt.fallback {
 				assert.Empty(t, l.VisibleRegions(), "fallback layout must expose no regions")
-				assert.False(t, l.SplitActive)
+				assert.Zero(t, l.PaneCount())
 				assert.False(t, l.AutomationsVisible)
 			}
 		})
 	}
 }
 
-func TestGridSolveSplitThreshold(t *testing.T) {
-	at := layout.Grid{Split: true}.Solve(layout.SplitMinWidth, 40)
-	require.True(t, at.SplitActive, "split honored at %d cols", layout.SplitMinWidth)
-	assert.False(t, at.PaneB.Empty())
-	assert.Equal(t, 1, at.Divider.W, "divider is exactly one column")
-	assert.InDelta(t, at.PaneA.W, at.PaneB.W, 1, "split divides the workspace evenly")
-	assert.Equal(t, at.Width-at.Tree.W, at.PaneA.W+at.Divider.W+at.PaneB.W,
+// TestGridSolveMultiPaneThreshold pins the §2.6 multi-pane gate: at
+// MultiPaneMinWidth two panes are honored, dividing the workspace evenly
+// around a 1-col divider; one column below, the workspace collapses to a
+// single pane (the caller retains the hidden panes' bindings).
+func TestGridSolveMultiPaneThreshold(t *testing.T) {
+	at := layout.Grid{Panes: 2}.Solve(layout.MultiPaneMinWidth, 40)
+	require.Equal(t, 2, at.PaneCount(), "two panes honored at %d cols", layout.MultiPaneMinWidth)
+	require.Len(t, at.Dividers, 1)
+	assert.Equal(t, 1, at.Dividers[0].W, "divider is exactly one column")
+	assert.InDelta(t, at.Panes[0].W, at.Panes[1].W, 1, "panes divide the workspace evenly")
+	assert.Equal(t, at.Width-at.Tree.W, at.Panes[0].W+at.Dividers[0].W+at.Panes[1].W,
 		"panes plus divider fill the workspace")
 
-	below := layout.Grid{Split: true}.Solve(layout.SplitMinWidth-1, 40)
-	require.False(t, below.SplitActive, "split collapses below %d cols", layout.SplitMinWidth)
-	assert.True(t, below.PaneB.Empty())
-	assert.True(t, below.Divider.Empty())
-	assert.Equal(t, below.Width-below.Tree.W, below.PaneA.W, "pane A takes the whole workspace")
+	below := layout.Grid{Panes: 2}.Solve(layout.MultiPaneMinWidth-1, 40)
+	require.Equal(t, 1, below.PaneCount(), "panes collapse to one below %d cols", layout.MultiPaneMinWidth)
+	assert.Equal(t, 1, below.MaxPanes)
+	assert.Empty(t, below.Dividers)
+	assert.Equal(t, below.Width-below.Tree.W, below.Panes[0].W, "the pane takes the whole workspace")
 
-	unrequested := layout.Grid{}.Solve(200, 40)
-	assert.False(t, unrequested.SplitActive, "no split unless requested")
-	assert.True(t, unrequested.PaneB.Empty())
+	single := layout.Grid{Panes: 1}.Solve(200, 40)
+	assert.Equal(t, 1, single.PaneCount(), "no extra panes unless requested")
+
+	none := layout.Grid{}.Solve(200, 40)
+	assert.Zero(t, none.PaneCount(), "no panes requested → bare workspace")
+	assert.False(t, none.Workspace.Empty(), "the workspace rect survives for the empty state")
+}
+
+// TestGridSolveMaxPanesFitting pins the pane-count fitting math (#1088):
+// every laid-out pane is at least PaneMinWidth wide whenever more than one
+// is shown, MaxPanes grows with the workspace, and requests beyond MaxPanes
+// are clamped rather than squeezed.
+func TestGridSolveMaxPanesFitting(t *testing.T) {
+	for w := layout.MultiPaneMinWidth; w <= 400; w += 7 {
+		for _, req := range []int{1, 2, 3, 5, 9} {
+			l := layout.Grid{Panes: req}.Solve(w, 40)
+			require.False(t, l.Fallback)
+			require.GreaterOrEqual(t, l.MaxPanes, 1)
+			want := req
+			if want > l.MaxPanes {
+				want = l.MaxPanes
+			}
+			require.Equal(t, want, l.PaneCount(), "w=%d req=%d", w, req)
+			if l.PaneCount() > 1 {
+				for i, r := range l.Panes {
+					require.GreaterOrEqual(t, r.W, layout.PaneMinWidth,
+						"pane %d narrower than the minimum at w=%d req=%d", i, w, req)
+				}
+			}
+		}
+	}
+
+	// Growing the terminal never shrinks capacity.
+	prev := 0
+	for w := layout.HardMinWidth; w <= 400; w++ {
+		l := layout.Grid{Panes: 9}.Solve(w, 40)
+		require.GreaterOrEqual(t, l.MaxPanes, prev, "MaxPanes shrank growing to %d cols", w)
+		prev = l.MaxPanes
+	}
 }
 
 func TestGridSolveAutomationsThresholds(t *testing.T) {
@@ -124,13 +164,14 @@ func TestGridSolveMinimalMode(t *testing.T) {
 		{"short", 200, layout.MinimalHeight - 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			l := layout.Grid{Split: true}.Solve(tt.w, tt.h)
+			l := layout.Grid{Panes: 2}.Solve(tt.w, tt.h)
 			require.False(t, l.Fallback)
 			assert.False(t, l.AutomationsVisible, "minimal mode hides the automations strip")
 			assert.True(t, l.Automations.Empty())
-			assert.False(t, l.SplitActive, "minimal mode never honors a split")
+			assert.Equal(t, 1, l.MaxPanes, "minimal mode never honors more than one pane")
+			assert.Equal(t, 1, l.PaneCount())
 			assert.False(t, l.Tree.Empty(), "tree survives minimal mode")
-			assert.False(t, l.PaneA.Empty(), "pane A survives minimal mode")
+			assert.False(t, l.Panes[0].Empty(), "one pane survives minimal mode")
 			assert.False(t, l.StatusBar.Empty(), "status bar survives minimal mode")
 		})
 	}
@@ -164,7 +205,7 @@ func TestGridSolveTreeWidthClamp(t *testing.T) {
 
 func TestGridSolveStatusBarFixedHeight(t *testing.T) {
 	for _, size := range [][2]int{{40, 10}, {59, 14}, {80, 24}, {200, 60}} {
-		l := layout.Grid{Split: true}.Solve(size[0], size[1])
+		l := layout.Grid{Panes: 2}.Solve(size[0], size[1])
 		require.False(t, l.Fallback)
 		assert.Equal(t, layout.StatusBarRows, l.StatusBar.H, "at %v", size)
 		assert.Equal(t, size[0], l.StatusBar.W, "status bar spans the full width at %v", size)
@@ -176,7 +217,7 @@ func TestGridSolveStatusBarFixedHeight(t *testing.T) {
 // asserts the degradation level never decreases: shrinking can never
 // re-enable a richer mode.
 func TestGridSolveLadderMonotonic(t *testing.T) {
-	grid := layout.Grid{Split: true}
+	grid := layout.Grid{Panes: 2}
 
 	prev := -1
 	for w := 220; w >= 1; w-- {
@@ -197,10 +238,10 @@ func TestGridSolveLadderMonotonic(t *testing.T) {
 // contract of the ladder: chrome (tree width, automations height, status
 // height) only ever gives way as the terminal shrinks — it never grows.
 // (Content panes CAN grow across ladder transitions: that is the point of
-// degradation — pane A absorbs pane B below SplitMinWidth, the workspace
-// reclaims the automations rows when the strip compacts.)
+// degradation — the surviving panes absorb a hidden one's width, the
+// workspace reclaims the automations rows when the strip compacts.)
 func TestGridSolveChromeNeverGrowsOnShrink(t *testing.T) {
-	grid := layout.Grid{Split: true}
+	grid := layout.Grid{Panes: 2}
 
 	check := func(t *testing.T, cur, prev layout.Layout) {
 		t.Helper()
@@ -230,14 +271,14 @@ func TestGridSolveChromeNeverGrowsOnShrink(t *testing.T) {
 // TestGridSolveRegionsMonotonicWithinLevel asserts that between two
 // adjacent sizes in the same degradation state, shrinking never grows any
 // region dimension. (Across ladder transitions content legitimately grows —
-// pane A absorbs pane B, the workspace reclaims automations rows — see
-// TestGridSolveChromeNeverGrowsOnShrink for the global invariant.)
+// surviving panes absorb a hidden one, the workspace reclaims automations
+// rows — see TestGridSolveChromeNeverGrowsOnShrink for the global invariant.)
 func TestGridSolveRegionsMonotonicWithinLevel(t *testing.T) {
-	grid := layout.Grid{Split: true}
+	grid := layout.Grid{Panes: 2}
 
 	sameState := func(a, b layout.Layout) bool {
 		return a.Fallback == b.Fallback &&
-			a.SplitActive == b.SplitActive &&
+			a.PaneCount() == b.PaneCount() &&
 			a.AutomationsVisible == b.AutomationsVisible &&
 			a.AutomationsCompact == b.AutomationsCompact
 	}
@@ -273,25 +314,32 @@ func TestGridSolveRegionsMonotonicWithinLevel(t *testing.T) {
 	}
 }
 
-func TestGridVisibleRegionsMatchFlags(t *testing.T) {
-	l := layout.Grid{Split: true}.Solve(160, 48)
-	require.True(t, l.SplitActive)
+func TestGridVisibleRegionsMatchLayout(t *testing.T) {
+	l := layout.Grid{Panes: 2}.Solve(160, 48)
+	require.Equal(t, 2, l.PaneCount())
 	require.True(t, l.AutomationsVisible)
 	regions := l.VisibleRegions()
 	assert.Len(t, regions, 7)
 	assert.Equal(t, l.Tree, regions[layout.RegionTree])
-	assert.Equal(t, l.PaneA, regions[layout.RegionPaneA])
-	assert.Equal(t, l.PaneB, regions[layout.RegionPaneB])
-	assert.Equal(t, l.Divider, regions[layout.RegionDivider])
+	assert.Equal(t, l.Panes[0], regions[layout.PaneRegion(0)])
+	assert.Equal(t, l.Panes[1], regions[layout.PaneRegion(1)])
+	assert.Equal(t, l.Dividers[0], regions[layout.DividerRegion(0)])
 	assert.Equal(t, l.RailRule, regions[layout.RegionRailRule])
 	assert.Equal(t, l.Automations, regions[layout.RegionAutomations])
 	assert.Equal(t, l.StatusBar, regions[layout.RegionStatusBar])
+	assert.NotContains(t, regions, layout.RegionWorkspace,
+		"the bare workspace region only exists with no panes open")
 
-	single := layout.Grid{}.Solve(160, 48)
+	single := layout.Grid{Panes: 1}.Solve(160, 48)
 	regions = single.VisibleRegions()
 	assert.Len(t, regions, 5)
-	assert.NotContains(t, regions, layout.RegionPaneB)
-	assert.NotContains(t, regions, layout.RegionDivider)
+	assert.NotContains(t, regions, layout.PaneRegion(1))
+	assert.NotContains(t, regions, layout.DividerRegion(0))
+
+	empty := layout.Grid{}.Solve(160, 48)
+	regions = empty.VisibleRegions()
+	assert.Equal(t, empty.Workspace, regions[layout.RegionWorkspace],
+		"no panes open → the workspace itself is the region")
 
 	minimal := layout.Grid{}.Solve(50, 12)
 	regions = minimal.VisibleRegions()
@@ -309,17 +357,18 @@ func TestGridSolveAutomationsInRail(t *testing.T) {
 		name  string
 		grid  layout.Grid
 		w, h  int
-		split bool
+		panes int
 	}{
-		{"wide", layout.Grid{}, 160, 48, false},
-		{"canonical-80x24", layout.Grid{}, 80, 24, false},
-		{"compact", layout.Grid{}, 79, 22, false},
-		{"split", layout.Grid{Split: true}, 160, 48, true},
+		{"wide", layout.Grid{Panes: 1}, 160, 48, 1},
+		{"canonical-80x24", layout.Grid{Panes: 1}, 80, 24, 1},
+		{"compact", layout.Grid{Panes: 1}, 79, 22, 1},
+		{"two-pane", layout.Grid{Panes: 2}, 160, 48, 2},
+		{"three-pane", layout.Grid{Panes: 3}, 220, 48, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := tc.grid.Solve(tc.w, tc.h)
 			require.True(t, l.AutomationsVisible)
-			require.Equal(t, tc.split, l.SplitActive)
+			require.Equal(t, tc.panes, l.PaneCount())
 
 			// Rail column: tree, rule, automations share X and W and stack
 			// exactly, with automations pinned to the status bar.
@@ -332,12 +381,15 @@ func TestGridSolveAutomationsInRail(t *testing.T) {
 			assert.Equal(t, l.RailRule.Bottom(), l.Automations.Y, "automations sit directly under the rule")
 			assert.Equal(t, l.StatusBar.Y, l.Automations.Bottom(), "automations are bottom-aligned in the rail")
 
-			// Workspace: full height above the status bar (#1090).
-			assert.Equal(t, tc.h-layout.StatusBarRows, l.PaneA.H)
-			assert.Equal(t, l.StatusBar.Y, l.PaneA.Bottom())
-			if tc.split {
-				assert.Equal(t, l.PaneA.H, l.Divider.H)
-				assert.Equal(t, l.PaneA.H, l.PaneB.H)
+			// Workspace: full height above the status bar (#1090), every
+			// pane and divider full-height too.
+			assert.Equal(t, tc.h-layout.StatusBarRows, l.Workspace.H)
+			for i, r := range l.Panes {
+				assert.Equal(t, l.Workspace.H, r.H, "pane %d takes the full workspace height", i)
+				assert.Equal(t, l.StatusBar.Y, r.Bottom())
+			}
+			for i, r := range l.Dividers {
+				assert.Equal(t, l.Workspace.H, r.H, "divider %d takes the full workspace height", i)
 			}
 		})
 	}

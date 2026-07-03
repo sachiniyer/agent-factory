@@ -82,7 +82,7 @@ func TestPaneViewIsExactlyRectSized(t *testing.T) {
 		strings.Repeat("many\nlines\n", 30),
 	}
 
-	l := layout.Grid{Split: true}.Solve(132, 43)
+	l := layout.Grid{Panes: 2}.Solve(132, 43)
 	require.False(t, l.Fallback)
 	for _, r := range l.VisibleRegions() {
 		for _, content := range contents {
@@ -97,7 +97,7 @@ func TestPaneViewIsExactlyRectSized(t *testing.T) {
 // routing: hit-test the click through a zone registry, then hand the pane
 // the zone-local point.
 func TestPaneMouseDispatchViaZones(t *testing.T) {
-	l := layout.Grid{}.Solve(120, 40)
+	l := layout.Grid{Panes: 1}.Solve(120, 40)
 	require.False(t, l.Fallback)
 
 	panes := map[string]*stubPane{}
@@ -109,10 +109,10 @@ func TestPaneMouseDispatchViaZones(t *testing.T) {
 		reg.Register(id, r)
 	}
 
-	click := tea.MouseMsg{X: l.PaneA.X + 7, Y: l.PaneA.Y + 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+	click := tea.MouseMsg{X: l.Panes[0].X + 7, Y: l.Panes[0].Y + 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
 	id, local, ok := reg.Resolve(click.X, click.Y)
 	require.True(t, ok)
-	require.Equal(t, layout.RegionPaneA, id)
+	require.Equal(t, layout.PaneRegion(0), id)
 
 	var target layout.Pane = panes[id]
 	assert.Nil(t, target.HandleMouse(click, local))

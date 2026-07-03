@@ -5,17 +5,27 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
-// newTestTabbedWindow builds a TabbedWindow over a fresh projection. The
-// projection is reachable via tw.proj for tests that need to seed data.
+// newTestTabbedWindow builds an unbound TabbedWindow; tests bind an instance
+// via setWindowInstance.
 func newTestTabbedWindow() *TabbedWindow {
-	return NewTabbedWindow(NewTabPane(), store.NewProjection())
+	return NewTabbedWindow(NewTabPane(), nil)
 }
 
-// setWindowInstance is the test wiring for the pre-store TabbedWindow.SetInstance:
-// bind the projection's display selection to inst and re-clamp the active tab,
-// exactly what selectionChanged does in production.
+// setWindowInstance is the test wiring for binding a window: give it an open
+// pane bound to inst (preserving any current tab index) and re-clamp, exactly
+// what opening a pane does in production. A nil inst unbinds the window.
 func setWindowInstance(tw *TabbedWindow, inst *session.Instance) {
-	tw.proj.SetSelectedInstance(inst)
+	if inst == nil {
+		tw.pane = nil
+		return
+	}
+	tab := 0
+	if tw.pane != nil {
+		tab = tw.pane.Tab()
+	}
+	proj := store.NewProjection()
+	proj.AddInstance(inst)
+	tw.pane = proj.AddOpenPane(inst, tab)
 	tw.ClampActiveTab()
 }
 
