@@ -6,6 +6,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -32,12 +33,6 @@ var (
 			BorderForeground(AccentColor).
 			Border(lipgloss.NormalBorder(), false, true, true, true)
 )
-
-// defaultTabLabels are the labels shown before an instance is selected, or for
-// one whose tabs haven't materialized yet. They preserve the exact pre-#930
-// two-tab bar so the UX is identical: slot 0 is the agent ("Preview") tab, slot
-// 1 the terminal tab.
-var defaultTabLabels = []string{"Preview", "Terminal"}
 
 // TabbedWindow has tabs at the top of a pane which can be selected. The tabs
 // take up one rune of height. The tab list is sourced from the selected
@@ -114,56 +109,12 @@ func (w *TabbedWindow) SelectLastTab() {
 	w.SelectTab(len(w.tabLabels()) - 1)
 }
 
-// tabLabels returns the labels for the selected instance's tabs. Agent tabs
-// render as "Preview", shell tabs as "Terminal"; any Process tab renders under
-// its own name.
-//
-// Remote instances are tab-driven too (#930 PR 6): their real tab set is the
-// agent tab plus a terminal tab only when terminal_cmd is configured, so the
-// bar reflects exactly those tabs — a terminal_cmd-less remote shows a single
-// tab rather than the local two-tab default. Local instances keep the
-// default-padded bar (always at least the two slots) so the header count never
-// dips below two mid-start, identical to the pre-#930 UX.
+// tabLabels returns the labels for the selected instance's tabs. The label
+// derivation lives in tree.TabLabels (#1024 PR 3) — the single source of truth
+// shared with the sidebar tree, so the bar, the tree's child rows, and the 1-9
+// jump keys always agree on slot numbering. Never empty.
 func (w *TabbedWindow) tabLabels() []string {
-	instance := w.selectedInstance()
-	if instance != nil && instance.IsRemote() {
-		if tabs := instance.GetTabs(); len(tabs) > 0 {
-			labels := make([]string, len(tabs))
-			for i, tab := range tabs {
-				labels[i] = labelForTab(tab)
-			}
-			return labels
-		}
-		// Pre-start remote (no tabs yet): fall through to the default bar.
-	}
-
-	labels := append([]string(nil), defaultTabLabels...)
-	if instance == nil {
-		return labels
-	}
-	for idx, tab := range instance.GetTabs() {
-		label := labelForTab(tab)
-		if idx < len(labels) {
-			labels[idx] = label
-		} else {
-			labels = append(labels, label)
-		}
-	}
-	return labels
-}
-
-func labelForTab(tab *session.Tab) string {
-	switch tab.Kind {
-	case session.TabKindAgent:
-		return "Preview"
-	case session.TabKindShell:
-		return "Terminal"
-	default:
-		if tab.Name != "" {
-			return tab.Name
-		}
-		return "Tab"
-	}
+	return tree.TabLabels(w.selectedInstance())
 }
 
 // isAgentSlot reports whether the active tab index is the agent tab (index 0).
@@ -294,9 +245,6 @@ func (w *TabbedWindow) String() string {
 	}
 
 	labels := w.tabLabels()
-	if len(labels) == 0 {
-		labels = defaultTabLabels
-	}
 
 	var renderedTabs []string
 

@@ -1194,6 +1194,15 @@ func (i *Instance) SetGitWorktreeForTest(gw *git.GitWorktree) {
 	i.gitWorktree = gw
 }
 
+// AddTabForTest appends a tmux-less tab record. Test-only: UI tests (the
+// sidebar tree, tab labels) need instances with a populated tab LIST without
+// spinning up real tmux sessions; the tab is never attachable or previewable.
+func (i *Instance) AddTabForTest(name string, kind TabKind) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Tabs = append(i.Tabs, &Tab{Name: name, Kind: kind})
+}
+
 // SendKeys sends keys to the underlying session. For remote backends this
 // returns an explicit error since raw key injection is not supported.
 func (i *Instance) SendKeys(keys string) error {

@@ -516,7 +516,12 @@ func TestE2E_311_LazyDebounce_OnSelectionChange(t *testing.T) {
 	require.Equal(t, []string{"branch-a"}, eh.prFetchBranches(),
 		"first fetch must target the selected instance's branch")
 
-	// Navigate down to B — triggers a second selectionChanged and fetch.
+	// Navigate down to B — through A's two expanded tab rows first (#1024
+	// PR 3: the selected instance auto-expands and j walks into its children;
+	// tab rows keep the selection on A, so they must not dispatch a fetch) —
+	// which triggers a second selectionChanged and fetch on landing.
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	eh.waitUntil(e2eAsyncTimeout, "second fetch (for 'fig') dispatches", func() bool {
 		return eh.prFetchCount() >= 2

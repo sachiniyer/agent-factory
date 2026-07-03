@@ -13,8 +13,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -56,24 +54,47 @@ func TestSidebarNavigation(t *testing.T) {
 	assert.True(t, sel.IsHeader)
 	assert.Equal(t, SectionInstances, sel.Kind)
 
-	// Move down into instances
+	// Move down onto the first instance row: it becomes the selected instance
+	// and auto-expands its tab children (#1024 PR 3).
 	s.Down()
 	sel = s.GetSelection()
 	assert.False(t, sel.IsHeader)
 	assert.Equal(t, SectionInstances, sel.Kind)
 	assert.Equal(t, 0, sel.ItemIndex)
+	assert.False(t, sel.IsTab)
+
+	// j walks INTO the expanded tab children; landing on a tab row drives the
+	// store's active tab.
+	s.Down()
+	sel = s.GetSelection()
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 0, sel.ItemIndex)
+	assert.Equal(t, 0, sel.TabIndex)
+	assert.Equal(t, 0, s.proj.ActiveTab())
 
 	s.Down()
 	sel = s.GetSelection()
-	assert.Equal(t, 1, sel.ItemIndex)
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 1, sel.TabIndex)
+	assert.Equal(t, 1, s.proj.ActiveTab())
 
-	// Move down to Tasks header
+	// Past the last child: the second instance. Selecting it collapses inst1
+	// (collapse-by-default for non-selected) and expands inst2.
+	s.Down()
+	sel = s.GetSelection()
+	assert.False(t, sel.IsTab)
+	assert.Equal(t, 1, sel.ItemIndex)
+	require.NotNil(t, s.GetSelectedInstance())
+	assert.Equal(t, "inst2", s.GetSelectedInstance().Title)
+
+	// Through inst2's children, then out to the Tasks and Hooks headers.
+	s.Down()
+	s.Down()
 	s.Down()
 	sel = s.GetSelection()
 	assert.True(t, sel.IsHeader)
 	assert.Equal(t, SectionTasks, sel.Kind)
 
-	// Move down to Hooks header
 	s.Down()
 	sel = s.GetSelection()
 	assert.True(t, sel.IsHeader)
@@ -160,13 +181,21 @@ func TestSidebarCollapseFromChild(t *testing.T) {
 	})
 	addTestInstance(s, inst)
 
-	// Navigate to instance child
+	// Navigate to instance child (auto-expanded: it is now selected)
 	s.Down()
 	sel := s.GetSelection()
 	assert.False(t, sel.IsHeader)
 	assert.Equal(t, SectionInstances, sel.Kind)
 
-	// Collapse from child should jump to parent header
+	// First collapse folds the instance's own tab children in place (#1024
+	// PR 3); the cursor stays on the instance row.
+	s.CollapseSection()
+	sel = s.GetSelection()
+	assert.False(t, sel.IsHeader)
+	assert.Equal(t, SectionInstances, sel.Kind)
+
+	// Second collapse falls back to the pre-tree behavior: jump to the parent
+	// section header and collapse the section.
 	s.CollapseSection()
 	sel = s.GetSelection()
 	assert.True(t, sel.IsHeader)
@@ -270,6 +299,9 @@ func TestSetSelectedInstanceExpandsCollapsedSection(t *testing.T) {
 	assert.Equal(t, "second", selected.Title)
 
 	// Collapse the Instances section; selection lands on the Instances header.
+	// The first collapse folds the selected instance's own tab children (#1024
+	// PR 3); the second falls back to collapsing the whole section.
+	s.CollapseSection()
 	s.CollapseSection()
 	sel := s.GetSelection()
 	require.True(t, sel.IsHeader)
@@ -407,11 +439,19 @@ func TestSidebarWindowScrollsWithSelection(t *testing.T) {
 		}
 	}
 
-	// Walk down through every row (1 header + 25 instances + 2 headers).
+	// Walk down through every row (headers, instances, and the selected
+	// instance's tab children). The row list reshapes as the selection moves —
+	// each newly selected instance expands and the previous one folds (#1024
+	// PR 3) — so walk until the cursor reaches the last row (the Hooks header)
+	// rather than a fixed count.
 	check("initial")
-	for i := 0; i < len(s.visibleItems)-1; i++ {
+	for i := 0; ; i++ {
+		require.Less(t, i, 500, "down-walk must terminate")
 		s.Down()
 		check(fmt.Sprintf("down %d", i))
+		if sel := s.GetSelection(); sel.IsHeader && sel.Kind == SectionHooks {
+			break
+		}
 	}
 	// At the very bottom nothing is hidden below, so only ▲ may show.
 	up, down := indicatorArrows(s.String())
@@ -419,9 +459,13 @@ func TestSidebarWindowScrollsWithSelection(t *testing.T) {
 	assert.False(t, down, "nothing is hidden below at the bottom")
 
 	// Walk back up to the top.
-	for i := 0; i < len(s.visibleItems)-1; i++ {
+	for i := 0; ; i++ {
+		require.Less(t, i, 500, "up-walk must terminate")
 		s.Up()
 		check(fmt.Sprintf("up %d", i))
+		if sel := s.GetSelection(); sel.IsHeader && sel.Kind == SectionInstances {
+			break
+		}
 	}
 	top := s.String()
 	assert.Contains(t, top, "win-00", "first instance must be visible at the top")
@@ -446,211 +490,9 @@ func TestSidebarShortListRendersUnwindowed(t *testing.T) {
 	assert.NotContains(t, out, "more", "short lists must not show scroll indicators")
 }
 
-// renderForTerminal renders an instance at the sidebar width app.go derives
-// from the given terminal width, and returns the rendered title and PR lines.
-// The renderer wraps each section in lipgloss padding, so the visible title
-// content sits on line 1 (after the top-padding line) and the PR content
-// sits on line 4 (title content + branch + branch-pad + pr content).
-func renderForTerminal(t *testing.T, terminalW int, inst *session.Instance, spin *spinner.Model) (titleLine string, prLine string, sidebarW int) {
-	t.Helper()
-	sidebarW = int(float32(terminalW) * 0.3)
-	r := &InstanceRenderer{spinner: spin}
-	r.setWidth(sidebarW)
-	out := r.Render(inst, 1, false, false)
-	lines := strings.Split(out, "\n")
-	require.GreaterOrEqual(t, len(lines), 2, "renderer should emit at least a title row")
-	titleLine = lines[1]
-	if len(lines) >= 5 {
-		prLine = lines[4]
-	}
-	return titleLine, prLine, sidebarW
-}
-
-// TestInstanceRendererNarrowTerminalNoOverflow guards against the regression
-// reported in #466: at 40-43 column terminal widths the sidebar's instance
-// row ended with a "..." artifact that pushed the rendered line one cell past
-// the sidebar container width.
-func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	inst, err := session.NewInstance(session.InstanceOptions{
-		Title:   "long-feature",
-		Path:    t.TempDir(),
-		Program: "test",
-	})
-	require.NoError(t, err)
-
-	cases := []struct {
-		name              string
-		terminalW         int
-		expectFullTitle   bool
-		expectEllipsis    bool
-		expectNoOverflow  bool
-		expectNoTitleTail bool
-	}{
-		// Plenty of room — full title, no truncation.
-		{name: "width80", terminalW: 80, expectFullTitle: true, expectNoOverflow: true},
-		// Some truncation, room for the ellipsis.
-		{name: "width50", terminalW: 50, expectEllipsis: true, expectNoOverflow: true},
-		// Bug range: widthAvail is positive but less than the 3-cell ellipsis.
-		// The fix must drop the tail rather than render a "..." artifact.
-		{name: "width43", terminalW: 43, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width42", terminalW: 42, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width41", terminalW: 41, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width40", terminalW: 40, expectNoOverflow: true, expectNoTitleTail: true},
-		// Bug range from #646: widthAvail goes non-positive so the
-		// truncation block used to be skipped entirely and the rendered
-		// row spilled past sidebarW. Sweep 30..39 inclusive — every row
-		// must fit within the sidebar container width and must not leave
-		// a stray "..." artifact.
-		{name: "width39", terminalW: 39, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width38", terminalW: 38, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width37", terminalW: 37, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width36", terminalW: 36, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width35", terminalW: 35, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width34", terminalW: 34, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width33", terminalW: 33, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width32", terminalW: 32, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width31", terminalW: 31, expectNoOverflow: true, expectNoTitleTail: true},
-		{name: "width30", terminalW: 30, expectNoOverflow: true, expectNoTitleTail: true},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			titleLine, _, sidebarW := renderForTerminal(t, tc.terminalW, inst, &spin)
-			w := lipgloss.Width(titleLine)
-
-			if tc.expectFullTitle {
-				assert.Contains(t, titleLine, inst.Title, "wide terminal should render the full title")
-				assert.NotContains(t, titleLine, "...", "wide terminal should not truncate")
-			}
-			if tc.expectEllipsis {
-				assert.Contains(t, titleLine, "...", "title should be truncated with ellipsis when there is room for it")
-			}
-			if tc.expectNoOverflow {
-				assert.LessOrEqualf(t, w, sidebarW,
-					"title line width (%d) must fit within sidebar container width (%d) at terminal=%d",
-					w, sidebarW, tc.terminalW)
-			}
-			if tc.expectNoTitleTail {
-				// Strip trailing padding, then the visible title text must
-				// not end with a stray ellipsis from a negative-width
-				// runewidth.Truncate call.
-				trimmed := strings.TrimRight(titleLine, " ")
-				assert.Falsef(t, strings.HasSuffix(trimmed, "..."),
-					"narrow terminal must not produce a '...' artifact; got %q", titleLine)
-			}
-		})
-	}
-}
-
-// TestInstanceRendererNarrowTerminalPRNoTail exercises the parallel
-// truncation site for PR text: when prMaxWidth drops below the 3-cell
-// ellipsis the row must drop the tail rather than render a "..." that
-// overflows the sidebar.
-func TestInstanceRendererNarrowTerminalPRNoTail(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	inst, err := session.NewInstance(session.InstanceOptions{
-		Title:   "feat",
-		Path:    t.TempDir(),
-		Program: "test",
-	})
-	require.NoError(t, err)
-	inst.SetPRInfo(&git.PRInfo{
-		Number: 1234,
-		Title:  "long pull request title needing truncation",
-		State:  "OPEN",
-	})
-
-	// terminalW=28..32 produces prMaxWidth in {1, 2}, which is the bug
-	// range where the pre-fix code passed a negative width to
-	// runewidth.Truncate and got back "..." (wider than prMaxWidth).
-	for _, terminalW := range []int{28, 30, 32} {
-		_, prLine, _ := renderForTerminal(t, terminalW, inst, &spin)
-		trimmed := strings.TrimRight(prLine, " ")
-		assert.Falsef(t, strings.HasSuffix(trimmed, "..."),
-			"PR line must not produce a '...' artifact at terminal=%d; got %q",
-			terminalW, prLine)
-	}
-}
-
-// TestInstanceRendererDeletingMarker pins the #844 sidebar treatment: a row
-// whose teardown is running in the background must carry an explicit
-// "[deleting]" marker (the spinner alone reads as "busy working").
-func TestInstanceRendererDeletingMarker(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	inst, err := session.NewInstance(session.InstanceOptions{
-		Title:   "going-away",
-		Path:    t.TempDir(),
-		Program: "test",
-	})
-	require.NoError(t, err)
-
-	inst.SetStatus(session.Ready)
-	before, _, _ := renderForTerminal(t, 120, inst, &spin)
-	assert.NotContains(t, before, "[deleting]")
-
-	inst.SetStatus(session.Deleting)
-	after, _, _ := renderForTerminal(t, 120, inst, &spin)
-	assert.Contains(t, after, "[deleting]", "deleting rows must be explicitly marked")
-	assert.Contains(t, after, "going-away", "the title must remain visible while deleting")
-}
-
-// TestInstanceRendererDeletingDimsSelectedRow pins the #853 fix: a SELECTED
-// deleting row must dim its branch and PR lines along with the title. Before
-// the fix only titleS picked up deletingTitleColor, so the high-contrast
-// selectedDescStyle left the secondary lines brighter than the dimmed title.
-// (Unselected rows never showed the bug: listDescStyle is already the same
-// gray as deletingTitleColor.)
-func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
-	// Force a real color profile and a fixed background so lipgloss emits the
-	// foreground escapes the assertions match on; the Ascii profile used by
-	// default in non-TTY test runs strips all styling.
-	prevProfile := lipgloss.ColorProfile()
-	prevDark := lipgloss.HasDarkBackground()
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	lipgloss.SetHasDarkBackground(true)
-	t.Cleanup(func() {
-		lipgloss.SetColorProfile(prevProfile)
-		lipgloss.SetHasDarkBackground(prevDark)
-	})
-
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	inst, err := session.NewInstance(session.InstanceOptions{
-		Title:   "going-away",
-		Path:    t.TempDir(),
-		Program: "test",
-	})
-	require.NoError(t, err)
-	inst.SetPRInfo(&git.PRInfo{Number: 7, Title: "teardown", State: "OPEN"})
-
-	// SGR foreground params of the dark-background deleting gray, e.g.
-	// "38;2;119;119;119" under TrueColor.
-	dimFG := termenv.RGBColor(deletingTitleColor.Dark).Sequence(false)
-
-	r := &InstanceRenderer{spinner: &spin}
-	r.setWidth(36)
-
-	renderLines := func() []string {
-		out := r.Render(inst, 1, true, false)
-		lines := strings.Split(out, "\n")
-		// [0] title top padding, [1] title, [2] branch line, [3] branch
-		// bottom padding, [4] PR line, [5] PR bottom padding.
-		require.GreaterOrEqual(t, len(lines), 5, "expected title, branch, and PR rows")
-		return lines
-	}
-
-	inst.SetStatus(session.Ready)
-	before := renderLines()
-	require.NotContains(t, before[1], dimFG, "selected title must not be dimmed before deletion")
-	require.NotContains(t, before[2], dimFG, "selected branch line must not be dimmed before deletion")
-	require.NotContains(t, before[4], dimFG, "selected PR line must not be dimmed before deletion")
-
-	inst.SetStatus(session.Deleting)
-	after := renderLines()
-	assert.Contains(t, after[1], dimFG, "selected deleting title must be dimmed")
-	assert.Contains(t, after[2], dimFG, "selected deleting branch line must be dimmed")
-	assert.Contains(t, after[4], dimFG, "selected deleting PR line must be dimmed")
-}
+// The InstanceRenderer unit tests (narrow-terminal overflow #466/#646,
+// deleting marker #844/#853, prefix alignment #871/#923) moved to
+// ui/tree/render_test.go with the renderer itself (#1024 PR 3).
 
 // newRepoInstance builds a started sidebar instance whose RepoName() resolves to
 // repoName, so the sidebar's repo bookkeeping (which drives the multi-repo
