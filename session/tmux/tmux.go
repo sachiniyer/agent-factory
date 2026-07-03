@@ -784,50 +784,6 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 	return t.attachCh, nil
 }
 
-// DetachSafely disconnects from the current tmux session without panicking
-func (t *TmuxSession) DetachSafely() error {
-	// Only detach if we're actually attached
-	if t.attachCh == nil {
-		return nil // Already detached
-	}
-
-	var errs []error
-
-	// Cancel context FIRST so the io.Copy goroutine in Attach() sees a normal
-	// detach rather than an abnormal termination (same race fix as Detach).
-	if t.cancel != nil {
-		t.cancel()
-		t.cancel = nil
-	}
-
-	// Close the attached pty session.
-	if t.ptmx != nil {
-		if err := t.ptmx.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("error closing attach pty session: %w", err))
-		}
-		t.ptmx = nil
-	}
-
-	// Clean up attach state
-	if t.attachCh != nil {
-		close(t.attachCh)
-		t.attachCh = nil
-	}
-
-	// Same bounded wait as Detach (#598 follow-up) — share the SIGKILL
-	// fallback so the safety variant can't hang either.
-	_ = t.waitForAttachDrain()
-	t.wg = nil
-
-	t.ctx = nil
-	t.killAttach = nil
-
-	if len(errs) > 0 {
-		return fmt.Errorf("errors during detach: %v", errs)
-	}
-	return nil
-}
-
 // Detach disconnects from the current tmux session. Logs errors instead of panicking
 // so the application can attempt graceful recovery.
 func (t *TmuxSession) Detach() {
