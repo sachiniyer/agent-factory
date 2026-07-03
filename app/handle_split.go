@@ -48,17 +48,21 @@ func (m *home) openSplitFromSelection() (tea.Model, tea.Cmd) {
 	if status := selected.GetStatus(); status == session.Loading || status == session.Deleting {
 		return m, nil
 	}
-	m.store.SetPaneB(selected, m.store.ActiveTab())
-	m.relayout()
-	if !m.lastLayout.SplitActive {
-		// The grid refused the split (terminal below the §2.6 threshold).
-		// Retain-on-narrow is for splits that were open when the terminal
-		// shrank; a fresh open that cannot show anything is refused loudly
-		// instead of arming an invisible pane.
-		m.store.ClearPaneB()
-		m.relayout()
+	// Refuse a too-narrow `s` BEFORE touching the pane-B binding, on a trial
+	// solve (§2.6: a fresh open that cannot show anything must not arm an
+	// invisible pane). Deciding up front — rather than arming the binding and
+	// rolling it back — is load-bearing when a collapsed-but-retained split
+	// already exists: the rollback path cleared the RETAINED binding, so a
+	// narrow `s` silently destroyed the split that should have restored on
+	// grow (Greptile on #1085). An existing binding is left exactly as it is;
+	// only the retarget/open is refused.
+	trial := m.grid
+	trial.Split = true
+	if !trial.Solve(m.termWidth, m.termHeight).SplitActive {
 		return m, m.handleError(fmt.Errorf("terminal too narrow for a split view (needs %d+ columns)", layout.SplitMinWidth))
 	}
+	m.store.SetPaneB(selected, m.store.ActiveTab())
+	m.relayout()
 	return m, m.selectionChanged()
 }
 

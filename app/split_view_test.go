@@ -187,6 +187,45 @@ func TestSplit_OpenRefusedWhenTooNarrow(t *testing.T) {
 	assert.False(t, h.lastLayout.SplitActive)
 }
 
+// TestSplit_NarrowSKeepsRetainedBinding is the Greptile repro on #1085: a
+// COLLAPSED-but-retained split (shrunk below SplitMinWidth with pane B's
+// binding kept for restore-on-grow) must survive `s` being pressed while
+// still narrow. The old refuse-fresh-open path armed the binding and rolled
+// it back with ClearPaneB, which clobbered the RETAINED binding — so growing
+// back never restored the split. A narrow `s` may be refused, but it must
+// never destroy an existing retained binding.
+func TestSplit_NarrowSKeepsRetainedBinding(t *testing.T) {
+	h := splitTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+
+	// Open a wide split pinned to alpha, then shrink below the threshold:
+	// collapsed, binding retained.
+	pressKey(t, h, "s")
+	require.True(t, h.lastLayout.SplitActive)
+	require.Same(t, alpha, h.store.PaneBInstance())
+	resizeHome(h, layout.SplitMinWidth-1, 40)
+	require.False(t, h.lastLayout.SplitActive)
+	require.Same(t, alpha, h.store.PaneBInstance(), "collapse retains the binding")
+
+	// The exact repro: focus pane A and press s while still narrow.
+	h.focusRegion(layout.RegionPaneA)
+	pressKey(t, h, "s")
+	assert.Same(t, alpha, h.store.PaneBInstance(),
+		"a narrow s must NOT clear the retained pane-B binding")
+	assert.True(t, h.store.SplitOpen())
+
+	// Same from tree focus (the other openSplitFromSelection route).
+	h.focusRegion(layout.RegionTree)
+	pressKey(t, h, "s")
+	assert.Same(t, alpha, h.store.PaneBInstance(),
+		"a narrow s from the tree must NOT clear the retained binding either")
+
+	// Growing back restores the split with pane B intact.
+	resizeHome(h, 140, 40)
+	assert.True(t, h.lastLayout.SplitActive, "grow must restore the collapsed split")
+	assert.Same(t, alpha, h.store.PaneBInstance(), "with the same pinned binding")
+}
+
 // TestSplit_BothPanesPausedWhileAttached extends the #598 gate to the second
 // capture slot: with a split open and the user attached, selectionChanged
 // must dispatch NO capture work — not for pane A, not for pane B.
