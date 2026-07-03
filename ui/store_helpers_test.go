@@ -37,3 +37,12 @@ func addTestInstance(s *Sidebar, inst *session.Instance) func() {
 	s.syncFromStore()
 	return finalize
 }
+
+// addAgentShellTabs stamps a tmux-less agent + shell tab pair on inst — the
+// shape of a started instance after `t`. Since #1100 fresh instances carry
+// only the agent tab and TabLabels mirrors the real tab list, so fixtures
+// that exercise two tab slots must hold two real tabs.
+func addAgentShellTabs(inst *session.Instance) {
+	inst.AddTabForTest("agent", session.TabKindAgent)
+	inst.AddTabForTest("shell", session.TabKindShell)
+}

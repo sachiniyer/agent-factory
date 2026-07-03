@@ -21,13 +21,18 @@ import (
 // ----------------------------------------------------------------------------
 
 // paneTestHome is a home with three started instances at a three-pane-capable
-// size, with the selection on "alpha".
+// size, with the selection on "alpha". Each instance carries a real agent +
+// shell tab pair so tab-row walks and second-slot pane opens have two real
+// slots (#1100: fresh instances hold only the agent tab and no slot is padded).
 func paneTestHome(t *testing.T) *home {
 	t.Helper()
 	h := newTestHome(t)
-	h.store.AddInstance(instanceWithFakeBackend(t, "alpha"))
-	h.store.AddInstance(instanceWithFakeBackend(t, "beta"))
-	h.store.AddInstance(instanceWithFakeBackend(t, "gamma"))
+	for _, title := range []string{"alpha", "beta", "gamma"} {
+		inst := instanceWithFakeBackend(t, title)
+		inst.AddTabForTest("agent", session.TabKindAgent)
+		inst.AddTabForTest("shell", session.TabKindShell)
+		h.store.AddInstance(inst)
+	}
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
 	resizeHome(h, 200, 40)

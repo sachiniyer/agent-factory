@@ -236,9 +236,11 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 // live. On restore it reconnects every persisted tab (shell and any later
 // process tabs) to its exact tmux session by name so they survive an af/daemon
 // restart, re-spawning in the worktree only if the tmux server died across a
-// reboot (Restore handles both). On a fresh start — or a legacy restore that
-// predates persisted tabs — when no live shell tab exists it creates the default
-// $SHELL tab as a sibling of the agent session.
+// reboot (Restore handles both). A fresh instance comes up with only the agent
+// tab (#1100) — terminal tabs are created on demand ('t' / `af sessions
+// tab-create`), never automatically. The fresh-$SHELL fallback below only fires
+// when a PERSISTED shell tab restored dead (#991), replacing it so the user
+// lands on a working terminal instead of a corpse.
 func (b *LocalBackend) setupTabs(i *Instance) {
 	i.mu.RLock()
 	agentTmux := i.tmuxLocked()
@@ -255,11 +257,19 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 	}
 
 	// Reconnect every persisted non-agent tab that carries a session (Tabs[0] is
-	// the agent tab, already restored by Start). Track whether at least one live
-	// shell tab exists so we don't also create a duplicate default below.
+	// the agent tab, already restored by Start). Track whether a persisted shell
+	// tab exists at all, and whether at least one is live, to decide if the
+	// dead-shell replacement below applies.
+	hasShellTab := false
 	hasLiveShell := false
 	for idx, tab := range tabs {
-		if idx == 0 || tab.tmux == nil {
+		if idx == 0 {
+			continue
+		}
+		if tab.Kind == TabKindShell {
+			hasShellTab = true
+		}
+		if tab.tmux == nil {
 			continue
 		}
 		if err := tab.tmux.Restore(worktreePath); err != nil {
@@ -275,15 +285,18 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 			hasLiveShell = true
 		}
 	}
-	if hasLiveShell {
+	// No persisted shell tab means a fresh instance (or one whose user closed
+	// every shell tab): come up with just the agent tab — a terminal tab is
+	// never auto-created (#1100). With a live shell there is nothing to replace.
+	if !hasShellTab || hasLiveShell {
 		return
 	}
 
-	// Create a fresh shell session as a sibling of the agent session so it
-	// inherits the agent's PTY factory / executor — real in production, mock in
-	// tests — keeping the create path hermetic. The name extends the agent
-	// session's name deterministically so it is collision-free and restorable
-	// by exact name.
+	// A persisted shell tab restored dead (#991): create a fresh shell session
+	// as a sibling of the agent session so it inherits the agent's PTY factory /
+	// executor — real in production, mock in tests — keeping the create path
+	// hermetic. The name extends the agent session's name deterministically so
+	// it is collision-free and restorable by exact name.
 	shellTmux := agentTmux.NewSiblingSession(agentTmux.SanitizedName()+shellTmuxSuffix, defaultShell())
 	if err := shellTmux.Start(worktreePath); err != nil {
 		log.WarningLog.Printf("start shell tab for %q failed: %v", i.Title, err)

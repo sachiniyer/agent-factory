@@ -5,8 +5,8 @@ import "github.com/sachiniyer/agent-factory/session/tmux"
 // agentTabName is the display label of the default Agent tab.
 const agentTabName = "agent"
 
-// shellTabName is the display label of the default Shell tab — the per-instance
-// terminal session promoted to a first-class tab in PR 2 of #930.
+// shellTabName is the display label of the first Shell tab — the on-demand
+// per-instance terminal session ('t' / `af sessions tab-create`).
 const shellTabName = "shell"
 
 // shellTmuxSuffix extends an instance's agent tmux session name to derive its
@@ -67,9 +67,10 @@ func newAgentTab(ts *tmux.TmuxSession) *Tab {
 }
 
 // newShellTab returns a Shell-kind tab named "shell" wrapping the given tmux
-// session (a $SHELL process in the worktree). PR 2 of #930 creates exactly one
-// of these per local instance, at Tabs[1], promoting the old lazily-cached UI
-// terminal session into a first-class persisted tab.
+// session (a $SHELL process in the worktree). Shell tabs are created on demand
+// ('t' / `af sessions tab-create`) — a fresh instance holds only its agent tab
+// (#1100); the only automatic use is setupTabs replacing a persisted shell tab
+// that restored dead (#991).
 func newShellTab(ts *tmux.TmuxSession) *Tab {
 	return &Tab{Name: shellTabName, Kind: TabKindShell, tmux: ts}
 }

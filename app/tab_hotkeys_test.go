@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 )
 
 // tabHotkeysPty is a minimal tmux.PtyFactory backed by a real temp file so the
@@ -97,10 +98,10 @@ func setupGitRepoForTabs(t *testing.T, workdir string) {
 	}
 }
 
-// startedLocalInstance returns a started local instance with a live mock-backed
-// agent session and (via LocalBackend.Start) a default shell tab, so handleNewTab
-// / handleCloseTab exercise the real tab-lifecycle path hermetically.
-func startedLocalInstance(t *testing.T, title string) *session.Instance {
+// freshLocalInstance returns a started local instance with a live mock-backed
+// agent session and nothing else — the exact shape a user's new instance has
+// since #1100: one agent tab, no shell tab until 't'.
+func freshLocalInstance(t *testing.T, title string) *session.Instance {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	workdir := t.TempDir()
@@ -114,6 +115,18 @@ func startedLocalInstance(t *testing.T, title string) *session.Instance {
 	require.NoError(t, err)
 	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
 	require.NoError(t, inst.Start(true))
+	require.Equal(t, 1, inst.TabCount(), "a fresh start must yield only the agent tab (#1100)")
+	return inst
+}
+
+// startedLocalInstance is freshLocalInstance plus one on-demand shell tab
+// (added via AddShellTab — the 't' path), so handleNewTab / handleCloseTab
+// exercise the real tab-lifecycle path hermetically.
+func startedLocalInstance(t *testing.T, title string) *session.Instance {
+	t.Helper()
+	inst := freshLocalInstance(t, title)
+	_, err := inst.AddShellTab()
+	require.NoError(t, err)
 	return inst
 }
 
@@ -175,7 +188,7 @@ func TestHandleNewTabAppendsAndSelects(t *testing.T) {
 	inst := startedLocalInstance(t, "new")
 	selectInstance(h, inst)
 	created, _ := stubTabDaemonSeams(t, inst)
-	require.Equal(t, 2, inst.TabCount(), "start gives an agent + default shell tab")
+	require.Equal(t, 2, inst.TabCount(), "helper gives an agent tab + one on-demand shell tab")
 
 	_, _ = h.handleNewTab()
 
@@ -270,4 +283,42 @@ func TestNumberKeyRoutesToTabJump(t *testing.T) {
 	h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 	require.Equal(t, 1, h.store.ActiveTab(),
 		"pressing '2' must jump to tab index 1")
+}
+
+// TestFreshInstanceSingleTabSlotUI pins the #1100 headline at the UI layer,
+// through the real start path: a fresh instance exposes exactly one tab slot
+// everywhere tree.TabLabels feeds (tree rows, pane targets, 1-9 jump range),
+// so no phantom "Terminal" slot exists to jump to, attach, or close. `t` then
+// grows the list to two real slots and the jump reaches the terminal.
+func TestFreshInstanceSingleTabSlotUI(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "fresh-ui")
+	selectInstance(h, inst)
+
+	require.Equal(t, []string{"Preview"}, tree.TabLabels(inst),
+		"a fresh instance renders exactly one tab slot — the agent tab")
+
+	_, _ = h.handleTabJump(2)
+	require.Equal(t, 0, h.store.ActiveTab(),
+		"2 on a fresh instance must be a no-op — there is no second slot")
+
+	// w can only mean the agent tab now, so the user gets the actionable
+	// message — never the phantom slot's misleading "tab cannot be closed".
+	_, _ = h.handleCloseTab()
+	require.Equal(t, 1, inst.TabCount())
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, h.errBox.String(), "agent tab can't be closed")
+
+	// t materializes the on-demand terminal as a real second slot.
+	stubTabDaemonSeams(t, inst)
+	_, _ = h.handleNewTab()
+	require.Equal(t, 2, inst.TabCount())
+	require.Equal(t, []string{"Preview", "Terminal"}, tree.TabLabels(inst),
+		"after t the terminal is a real second slot")
+	require.Equal(t, 1, h.store.ActiveTab(), "t selects the fresh terminal")
+
+	_, _ = h.handleTabJump(1)
+	require.Equal(t, 0, h.store.ActiveTab())
+	_, _ = h.handleTabJump(2)
+	require.Equal(t, 1, h.store.ActiveTab(), "2 now lands on the real terminal")
 }

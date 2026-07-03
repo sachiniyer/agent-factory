@@ -305,7 +305,7 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 // works as before.
 func TestLayoutCutover_DigitJumpGatedByFocusRegion(t *testing.T) {
 	h := newTestHome(t)
-	addTreeInstance(t, h, "alpha") // two default tab slots
+	addTreeInstance(t, h, "alpha") // real agent + shell tab pair
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
 	resizeHome(h, 100, 30)
