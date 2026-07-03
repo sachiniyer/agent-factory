@@ -1,34 +1,44 @@
 # RFC: Multi-pane TUI rewrite (#1024)
 
-Status: **Proposed** · Author: Captain Claude · Epic: [#1024](https://github.com/sachiniyer/agent-factory/issues/1024) · Folds in: [#1025](https://github.com/sachiniyer/agent-factory/issues/1025) (mouse)
+Status: **Accepted — revised 2026-07-03 (mid-epic redesign)** · Author: Captain Claude · Epic: [#1024](https://github.com/sachiniyer/agent-factory/issues/1024) · Folds in: [#1025](https://github.com/sachiniyer/agent-factory/issues/1025) (mouse) · Redesign issues: [#1087](https://github.com/sachiniyer/agent-factory/issues/1087), [#1088](https://github.com/sachiniyer/agent-factory/issues/1088), [#1089](https://github.com/sachiniyer/agent-factory/issues/1089), [#1090](https://github.com/sachiniyer/agent-factory/issues/1090)
+
+> **Revision 2026-07-03.** Epic PRs 1–5 ([#1079](https://github.com/sachiniyer/agent-factory/pull/1079), [#1080](https://github.com/sachiniyer/agent-factory/pull/1080), [#1081](https://github.com/sachiniyer/agent-factory/pull/1081), [#1083](https://github.com/sachiniyer/agent-factory/pull/1083), [#1085](https://github.com/sachiniyer/agent-factory/pull/1085)) are merged: the layout engine, projection store, tree rail, workspace cutover, and two-pane split are live on `master`. Mid-epic, Sachin confirmed a redesign of the end state, and a spike reversed this RFC's biggest architectural call. This revision supersedes the original in five ways:
+>
+> 1. **Interaction model reversed** — panes are **embedded interactive terminals**, proven by the #1089 spike; the original "read-only panes + full-screen attach" decision (old Open Question 1) is superseded (§2.4).
+> 2. **Two interaction modes** — nav mode vs interactive mode; while interactive, everything (including `Tab`) forwards to the agent and only `Ctrl-]` is host-reserved (§2.3).
+> 3. **N-pane model** — open/close/hide any tab as a vertical-split pane; replaces the fixed pane-A/pane-B split (§2.3, #1088).
+> 4. **Automations move into the left rail**, bottom-aligned below a rule — the bottom strip is gone (§2.1, #1087).
+> 5. **Narrower rail, full-height content** (§2.1, §2.6, #1090).
+>
+> §1 still documents the *pre-epic* TUI as the historical baseline. §4 reflects what has landed and the sequencing for the remainder.
 
 ## 0. Summary
 
 Rewrite the TUI as a multi-pane workspace that uses the full window:
 
-- **Left rail** — instances **and their tabs** always visible as a tree; fast navigation between them.
-- **Main workspace** — one or **two** focusable content panes (split view), each showing a live view of any instance tab.
-- **Bottom strip** — automations (tasks) always visible.
-- **Mouse support** — click to select, focus, attach, and act (#1025).
+- **Left rail** (narrow) — instances **and their tabs** always visible as a tree; automations bottom-aligned in the same rail, below a horizontal rule.
+- **Main workspace** — full-height, 1–**N** focusable content panes (vertical splits), each an **embedded interactive terminal** bound to an instance tab: type into an agent in place, no full-screen takeover, rail always visible.
+- **Mouse support** — click to select, focus, interact, and act (#1025).
 
 The rewrite is a new *rendering client* over the exact same daemon RPC surface established by #960: the daemon remains the sole owner/writer of session+tab state; the TUI renders a read-only projection of the `Snapshot` RPC and mutates only via daemon RPCs. Nothing in this RFC touches the daemon, `session/`, or `session/tmux/` attach machinery except where explicitly called out.
 
-**Migration constraint (Sachin, explicit in #1024):** migrate all at once — no old/new TUI side-by-side, no toggle. This RFC stages the work as in-place refactors across ~8 PRs; every PR keeps `master` green and ships exactly one TUI, which morphs into the target layout. There is never a user-facing choice between two TUIs.
+**Migration constraint (Sachin, explicit in #1024):** migrate all at once — no old/new TUI side-by-side, no toggle. The work is staged as in-place refactors (5 PRs landed, remainder in §4); every PR keeps `master` green and ships exactly one TUI, which morphs into the target layout. There is never a user-facing choice between two TUIs.
 
 ### Goals
 
-1. Full-window, multi-pane layout: instances+tabs tree left, automations bottom, 1–2 content panes center.
-2. Focus model: focus any single tab/instance, or two at once; navigate between everything with a handful of keys.
-3. First-class mouse: click/scroll everywhere a key works today (#1025).
-4. Preserve the #960 architecture: pure Snapshot projection + RPC mutations, zero TUI disk writes for session state.
-5. Preserve the hardened attach/detach path (#598 → #601/#602 SIGKILL-bounded detach) — do not re-litigate it.
+1. Full-window, multi-pane layout: instances+tabs tree and automations in a narrow left rail, N full-height content panes right.
+2. Focus model: open any set of tabs as panes, focus any one of them, hide panes back to the background; navigate between everything with a handful of keys.
+3. **Embedded interaction**: type into the focused pane's agent/shell directly — no full-screen attach takeover; the instances rail stays visible at all times (#1089).
+4. First-class mouse: click/scroll everywhere a key works today (#1025).
+5. Preserve the #960 architecture: pure Snapshot projection + RPC mutations, zero TUI disk writes for session state.
+6. Preserve the hardened attach/detach machinery (#598 → #601/#602 SIGKILL-bounded detach) — reused by the embedded panes, not re-litigated.
 
 ### Non-goals
 
-- Embedded interactive terminal emulation inside panes (a real terminal multiplexer). Attach stays full-screen; panes show live read-only views. See §3.4 and Open Question 1.
+- tmux control mode (`tmux -CC`) as the embedding architecture — evaluated and rejected by the #1089 spike (§2.4).
 - Daemon/RPC surface changes, except an optional tasks RPC (Open Question 2).
 - Configurable keymaps (#1026) and hotkey ergonomics (#1027) — the new focus model should not *block* them (all bindings keep going through `keys/keys.go`), but they are separate issues.
-- bubbletea v2 migration (§4.3).
+- bubbletea v2 migration (§3.3) — though the #1089 input long tail is a new data point in its favor.
 
 ---
 
@@ -92,52 +102,53 @@ Wheel scroll only: `tea.MouseMsg` handling routes WheelUp/WheelDown to the conte
 ### 2.1 Layout regions
 
 ```
-┌──────────────────┬──────────────────────────┬──────────────────────────┐
-│ INSTANCES        │ pane A (focused)         │ pane B (optional split)  │
-│ ▾ ● api-fix      │ ┌ api-fix · agent ─────┐ │ ┌ docs-pass · shell ───┐ │
-│   ├ agent      ⬤ │ │ live capture-pane    │ │ │ live capture-pane    │ │
-│   ├ shell        │ │ view of the tab      │ │ │ view of the tab      │ │
-│   └ btop         │ │ (read-only; Enter    │ │ │                      │ │
-│ ▸ ○ docs-pass    │ │  attaches full-      │ │ │                      │ │
-│ ▸ ● big-refactor │ │  screen)             │ │ │                      │ │
-│                  │ └──────────────────────┘ │ └──────────────────────┘ │
-├──────────────────┴──────────────────────────┴──────────────────────────┤
-│ AUTOMATIONS  [✓] nightly-sweep cron 0 3 * * * · next 03:00   [✗] watch…│
-├─────────────────────────────────────────────────────────────────────────┤
-│ n new · N remote · t tab · Enter attach · s split · Tab focus │ q quit │
-└─────────────────────────────────────────────────────────────────────────┘
+┌───────────────┬─────────────────────────────┬─────────────────────────────┐
+│ INSTANCES     │ pane 1 (focused)            │ pane 2                      │
+│ ▾ ● api-fix   │ ┌ api-fix · agent ────────┐ │ ┌ docs-pass · shell ──────┐ │
+│   ├ agent   ⬤ │ │ embedded interactive    │ │ │ embedded interactive    │ │
+│   ├ shell     │ │ terminal — Enter to     │ │ │ terminal                │ │
+│   └ btop      │ │ type into it, Ctrl-]    │ │ │                         │ │
+│ ▸ ○ docs-pass │ │ back to nav; rail       │ │ │                         │ │
+│ ▸ ● big-refac │ │ never disappears        │ │ │                         │ │
+│               │ │                         │ │ │                         │ │
+│───────────────│ │                         │ │ │                         │ │
+│ AUTOMATIONS   │ │                         │ │ │                         │ │
+│ [✓] nightly…  │ │                         │ │ │                         │ │
+│ [✗] watch…    │ └─────────────────────────┘ │ └─────────────────────────┘ │
+├───────────────┴─────────────────────────────┴─────────────────────────────┤
+│ n new · t tab · Enter interact · s open pane · x hide · Tab focus │ q quit│
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Four regions, all always visible (subject to §2.6 minimums):
+Three regions, all always visible (subject to §2.6 minimums):
 
 | Region | Content | Replaces |
 |---|---|---|
-| **Left rail** | Tree: instance rows with their tabs as expandable children. Status glyphs as today (`ui/list.go:109-119`). | Sidebar instance section (`ui/sidebar.go`) |
-| **Workspace** | 1 or 2 content panes. Each pane is bound to one (instance, tab) and renders its live capture-pane view; header shows `title · tab`. | ContentPane + TabbedWindow (`ui/content_pane.go`, `ui/tabbed_window.go`) |
-| **Automations strip** | Compact task rows: enabled glyph, name, trigger (cron/watch), next/last run. Focusing it expands to the full TaskPane manager (list + edit form) in place. | Sidebar Tasks/Hooks headers + ContentPane task/hooks modes |
-| **Status bar** | Context-sensitive key hints (driven by focus) + error line. 1–2 rows. | Menu (`ui/menu.go`) + ErrBox (`ui/err.go`) |
+| **Left rail** (narrower, #1090) | Top: tree — instance rows with their tabs as expandable children, status glyphs as today (`ui/list.go:109-119`). Bottom-aligned, separated by a horizontal rule (#1087): compact automation rows — enabled glyph, name, trigger (cron/watch), next/last run. Focusing an automation row and pressing Enter opens the full TaskPane manager (list + edit form) as an overlay. | Sidebar instance section (`ui/sidebar.go`) + the PR-4 bottom automations strip |
+| **Workspace** (full height, #1090) | 1–N content panes, vertical splits (#1088). Each pane is bound to one (instance, tab) and hosts an embedded interactive terminal (§2.4); header shows `title · tab`. Tabs not open as a pane keep running in the background. | ContentPane + TabbedWindow (`ui/content_pane.go`, `ui/tabbed_window.go`); the PR-5 pane-A/pane-B split |
+| **Status bar** | Context-sensitive key hints (driven by focus and mode) + error line. 1–2 rows. | Menu (`ui/menu.go`) + ErrBox (`ui/err.go`) |
 
 The tab bar disappears: tabs live in the tree (and in the pane header), so `TabbedWindow`'s even-split tab row (`ui/tabbed_window.go:282-345`) is no longer needed. Number keys 1-9 keep jumping tabs of the selected instance (preserving the #930 muscle memory); `t`/`w` keep creating/closing tabs.
 
-Hooks lose their persistent sidebar slot and move behind a key/click from the automations strip (they are set-and-forget; a persistent row is not warranted). The full `HooksPane` editor is kept, shown as an overlay.
+Hooks lose their persistent sidebar slot and move behind a key/click from the rail's automations section (they are set-and-forget; a persistent row is not warranted). The full `HooksPane` editor is kept, shown as an overlay.
 
 ### 2.2 Component tree
 
 ```
 workspace (root model, app/)
-├── layout.Grid          — pure region solver: W×H → []Rect          (new, ui/layout)
-├── focus.Ring           — ordered focusables + active index          (new, ui/layout)
-├── zones.Registry       — Rect → zoneID hit-test map, rebuilt per View  (new, ui/layout)
-├── store.Projection     — THE data model (read-only projection)      (new, app/ or ui/store)
+├── layout.Grid          — pure region solver: W×H → []Rect          (landed, PR 1)
+├── focus.Ring           — ordered focusables + active index          (landed, PR 1)
+├── zones.Registry       — Rect → zoneID hit-test map, rebuilt per View  (landed, PR 1)
+├── store.Projection     — THE data model (read-only projection)      (landed, PR 2)
 │     instances []*session.Instance   ← reconcileSnapshot (moved from Sidebar)
 │     tasks []task.Task               ← tasks.json load (as today)
-│     selection {instanceTitle, tabIdx}, split state, focus state
+│     selection {instanceTitle, tabIdx}, open panes [{instanceTitle, tabIdx}],
+│     focus state, interaction mode (nav | interactive)
 ├── panes:
-│   ├── tree.Pane        — left rail (renders store; owns nothing)
-│   ├── content.Pane ×2  — capture-pane view (adapted TabPane)
-│   ├── automations.Pane — strip + expanded TaskPane
+│   ├── rail.Pane        — left rail: tree (top) + automations rows (bottom-aligned)
+│   ├── termpane.Pane ×N — embedded interactive terminal (new, ui/termpane, #1089)
 │   └── statusbar.Pane   — hints + errors (adapted Menu/ErrBox)
-└── overlays (unchanged): text, confirm, selection, search, hooks
+└── overlays (unchanged): text, confirm, selection, search, hooks, task manager
 ```
 
 Every pane implements one interface (new, `ui/layout`):
@@ -154,26 +165,50 @@ type Pane interface {
 
 The root model shrinks to: dispatch messages → store, route input → focused pane (or hit-tested pane for mouse), ask `layout.Grid` for rects on resize, join pane views. The 6-state overlay enum survives unchanged — overlays are modal and orthogonal to pane focus, exactly as today.
 
-**Data-ownership fix**: today `Sidebar` owns `[]*session.Instance` (`ui/sidebar.go:66`) and `TabbedWindow`/`TabPane` hold instance pointers. The rewrite moves ownership into a single `store.Projection` that `reconcileSnapshot` (`app/sync.go:282`) writes and every pane reads. Panes become stateless views + local UI state (scroll offset, expansion). The sync loop, cold start, and mutation seams (`app/sync.go`, `app/session_control.go`) carry over **unchanged** — this rewrite deliberately does not touch the #960 data path.
+**Data-ownership fix** (landed, PR 2 #1080): `Sidebar` used to own `[]*session.Instance` (`ui/sidebar.go:66`) and `TabbedWindow`/`TabPane` held instance pointers. Ownership now lives in a single `store.Projection` that `reconcileSnapshot` (`app/sync.go:282`) writes and every pane reads. Panes are stateless views + local UI state (scroll offset, expansion; for termpanes, the PTY/emulator pair, §2.4). The sync loop, cold start, and mutation seams (`app/sync.go`, `app/session_control.go`) carried over **unchanged** — this rewrite deliberately does not touch the #960 data path.
 
-### 2.3 Focus model
+### 2.3 Interaction and focus model
 
-- A **focus ring**: `tree → pane A → pane B (if split) → automations`. `Tab`/`Shift-Tab` cycles; direct jumps via `ctrl+h/l` (tree/workspace) — final defaults deferred to #1026/#1027. The status bar re-renders per focus (the existing menu already does per-state hints, `ui/menu.go:226-283`).
-- **Selection vs focus**: tree selection (which instance/tab is highlighted) is separate from pane focus (which region gets keys). Moving the tree selection retargets **pane A** live — this is what makes "navigating between instances fast": j/k in the tree flips pane A's view instantly, since capture-pane refresh is already selection-driven (`app/app.go:1053-1110`).
-- **Split**: `s` on a tree row (or pane header click) opens it in **pane B**; `s` with focus in a pane swaps A↔B; `x`/`w` on pane B closes the split. Pane B is **pinned** — it keeps its (instance, tab) binding while the tree drives pane A. Split is vertical (side-by-side) only; horizontal split is cut for scope (Open Question 4).
-- **Enter** on a tree row or focused pane attaches (full-screen, §2.4). On detach, focus returns exactly where it was.
-- All existing stateDefault actions (`app/handle_actions.go:18-142`) keep working and become selection-relative: kill, PR open/copy, new/close tab, scroll.
+**Two modes** (Sachin-confirmed, 2026-07-03):
 
-### 2.4 Attach / PTY in a multi-pane world
+- **Nav mode (default).** The host owns the keyboard. `Tab`/`Shift-Tab` cycles the focus ring `tree → pane 1 → … → pane N → automations`; `1-9` jumps tabs of the selected instance; j/k moves the tree; all existing stateDefault actions (`app/handle_actions.go:18-142`) work and are selection-relative: kill, PR open/copy, new/close tab, scroll.
+- **Interactive mode.** `Enter` on a focused pane (or on a tree row, opening the pane first if needed) enters the pane. From then on **all keystrokes — including `Tab` — forward down the pane's PTY** to the agent/shell. There is **no full-screen takeover**: the pane keeps its rect and the instances rail stays visible the whole time. `Ctrl-]` pops back to nav mode.
 
-**Decision: attach stays full-screen takeover.** Embedding a live interactive tmux client *inside* a pane requires a client-side terminal-state machine (cursor, scroll regions, SGR, alternate screen) — i.e. a vt100 emulator — plus key forwarding and per-pane tmux resize. bubbletea v1 has no such widget; the candidates (`hinshun/vt10x`, `charmbracelet/x/vt` — experimental) add a heavy dependency to render what tmux already renders better, and every keystroke would round-trip through the contended tmux server that caused the #598 saga. The repo norm is dependency-lean; the payoff does not justify the risk. Instead:
+**Why `Tab` cannot be a global host key**: shells, vim, and every agent CLI need `Tab` (completion). That is exactly why focus-switching lives in nav mode only and interactive mode forwards `Tab` to the agent. The **only** host-reserved key while interactive is `Ctrl-]` (already the attach detach-key default, `DetachKeyByte`), plus at most one prefix chord — final call in #1026/#1027.
 
-- Panes show **live read-only views** at the existing 100 ms cadence — a two-pane split is two live terminals side by side, which covers the "watch two agents at once" use case.
-- **Enter attaches full-screen**, exactly as today: same `TmuxSession.Attach()` PTY passthrough, same Update-loop block on `<-ch` (`app/app.go:992`), same `attached` pause of all background capture work, same SIGKILL-bounded detach (`session/tmux/tmux.go:400-461`) and slow-detach watchdog. **Zero changes to `session/tmux/`.** This path survived three rounds of production hardening (#598 → #601/#602, #683, #845, #975, #1065); the rewrite treats it as a black box behind one narrow seam (`attachOverlayCallbackFn`, `app/app.go:952`).
-- On detach the workspace repaints via the existing `repaintAfterDetachMsg` flow, restoring the pre-attach focus/split state (stored in `store.Projection`, so it survives trivially).
-- The remote-session terminal reassert (`app/app.go:934-938`) carries over verbatim.
+**N-pane open/close/hide** (#1088, replaces the PR-5 A/B split):
 
-If Sachin wants true embedded interaction later, it slots in as a *new pane kind* behind the same `Pane` interface without disturbing this design (Open Question 1).
+- `s` on a tree row (or in a pane) opens the selected tab as a **new vertical-split pane** to the right of the existing panes. Splits are vertical (side-by-side) only for now.
+- `x` on a focused pane **hides it back to the background**: the pane disappears from the workspace, the remaining panes re-divide the width, and the tab keeps running in its tmux session — reopen it any time from the tree. Nothing is killed; closing a pane and hiding a pane are the same operation (killing tabs stays `w`, an instance action).
+- Focus moves across the N open panes via the nav-mode `Tab` focus ring; there is no pinned/primary pane distinction.
+
+**Selection vs focus**: tree selection (which instance/tab is highlighted) is separate from pane focus (which region gets keys). If the selected tab is already open as a pane, the pane header highlights; `Enter` jumps focus there and enters interactive mode. If it is not open, `Enter`/`s` opens it. On leaving interactive mode, focus stays on that pane in nav mode.
+
+The status bar re-renders per focus **and per mode** (the existing menu already does per-state hints, `ui/menu.go:226-283`); while interactive it shows only the escape hatch (`Ctrl-] nav`).
+
+### 2.4 Embedded interactive panes (decision REVERSED, #1089)
+
+**Decision: panes are embedded interactive terminals — full-screen attach takeover is retired as the primary interaction.** The original RFC decided the opposite (read-only panes + full-screen attach, old Open Question 1) on the theory that a client-side vt emulator was a heavy dependency with risky rendering fidelity. A spike disproved that: branch `spike/1089-embedded-terminal`, report `tmp_docs/spike-1089-embedded-terminal.md` on that branch (~430-LOC standalone demo, validated 2026-07-02). Sachin confirmed the reversal 2026-07-03.
+
+**Architecture A (proven — this is the design).** Per visible pane:
+
+1. Open a PTY and run `tmux attach-session -t <sess>` on it — the exact machinery `TmuxSession.Attach()` already uses (creack/pty, `session/tmux/tmux.go:336-372`), via a new attach mode that hands the ptmx to the termpane instead of the stdin/stdout copy + terminal takeover (~50–100 LOC at the existing `ptyFactory` attach seam, `session/tmux/tmux.go:350`).
+2. Feed PTY output through `github.com/charmbracelet/x/vt` into a cell grid; copy the emulator's read side back to the PTY (terminal-query replies + encoded keystrokes).
+3. Render the grid to an ANSI block each frame and place it in a fixed lipgloss rect in the pane's `View()`, cursor overlaid; repaints coalesced at a ~60 fps cap.
+4. While interactive (§2.3), translate focused `tea.KeyMsg`s via the emulator's mode-aware key encoder (application cursor keys, bracketed paste — no hand-written escape sequences) and forward down the PTY.
+5. Resize: pane rect change → `pty.Setsize` → tmux reflows on SIGWINCH; emulator grid resized in step.
+
+**Spike results.** vim (alt-screen, CJK/emoji), less on a 50k-line file, htop, and 10 s of `yes` fast-streaming all render and interact correctly; Ctrl-C, F-keys, and bracketed paste forward; Ctrl-] detaches cleanly, the tmux session survives, re-attach repaints. Sustained streaming costs **~0.6 % of one core at the ~62 fps cap** — and tmux is a natural flow-limiter: the attach client receives screen *redraws*, not the raw output firehose, so architecture A inherits tmux's own throttling for free.
+
+**Architecture B (`tmux -CC` control mode) — evaluated and REJECTED.** Control mode is built for clients that replace the entire tmux UI (iTerm2): you still need a vt emulator per pane *plus* a reimplementation of layout/attach semantics. Strictly more work than A for no fidelity gain at this scale. Revisit only if "many simultaneously-live panes without N attach clients" ever becomes a real need; at 0.6 % CPU per attachment there is no pressure.
+
+**Gotchas to carry into production** (from the spike report):
+
+- `x/vt` is **untagged** (pseudo-version) and forces bumps of `x/ansi`, `x/cellbuf`, and `go-runewidth` (+ `ultraviolet` as a new indirect dep). **Pin `go-runewidth`** — it moves seven minor versions with East Asian width-table changes; eyeball wide-char-adjacent UI tests. Build + tests already green with the bumps on the spike branch.
+- **Input fidelity has a long tail**: modified arrows (e.g. Ctrl-Up) were swallowed in the spike harness and mouse forwarding is unimplemented; both need real-terminal QA across the actual agent CLIs (Claude Code and Aider are themselves TUIs). bubbletea v1's key model is lossy for some modifier combos — a data point for §3.3, not a blocker.
+- **Attach policy**: only visible panes hold live attachments; background tabs keep their tmux sessions with no client. tmux sizes a session to its smallest attached client, so an external `tmux attach` to the same session shrinks the pane — the same behavior full-screen attach has today.
+
+**What carries over from the hardened attach path**: pane teardown reuses the SIGKILL-bounded detach drain verbatim (`session/tmux/tmux.go:400-461`, #601/#602); the detach watchdog and remote-session terminal reassert remain armed. The Update-loop block on `<-ch` (`app/app.go:992`) and the `attached` pause exist only to serve full-screen takeover; they are deleted with it in the final cleanup PR (§4).
 
 ### 2.5 Mouse model (#1025)
 
@@ -183,25 +218,26 @@ Interactions:
 
 | Gesture | Effect |
 |---|---|
-| Click tree instance/tab row | Select (retargets pane A) |
-| Double-click tree row / click focused pane body | Attach |
+| Click tree instance/tab row | Select |
+| Double-click tree row / click focused pane body | Enter interactive mode on that pane (opening it first if needed) |
 | Click `▸`/`▾` glyph | Expand/collapse instance's tabs |
-| Click pane header | Focus that pane; click swap/close glyphs in header for split ops |
-| Click task row | Focus automations, select task; double-click opens editor |
+| Click pane header | Focus that pane (nav mode); click the header's hide glyph to return it to the background |
+| Click automation row (rail) | Focus automations, select task; double-click opens the task-manager overlay |
 | Click status-bar hint | Runs that action (menu already knows its bindings, `ui/menu.go:234`) |
 | Wheel | Scrolls the region under the cursor (today it scrolls the content pane regardless of position, `app/app.go:378-394`) |
 | Click overlay buttons (y/n, list rows) | Equivalent key |
 
-Terminal-level mouse reporting inside an *attached* session is unaffected: while attached, bubbletea is blocked and tmux owns stdin, so tmux's own `mouse on` (`session/tmux/tmux.go:289`) applies — same as today.
+Mouse *inside an interactive pane* is part of the #1089 input long tail (§2.4): the emulator has `SendMouse` and wiring `tea.MouseMsg` through is straightforward, but the ownership question — does the wheel scroll the inner app or host scrollback — is a design decision made during #1089 QA. Outside the interactive pane's rect, host gestures always apply.
 
 ### 2.6 Resize handling
 
 `layout.Grid` becomes the single sizing authority (replacing the scattered 0.3/0.9/`AdjustPreviewWidth` math, `app/app.go:216-242`, `ui/tabbed_window.go:170-172`):
 
-- Left rail: `clamp(24, 30 %·W, 44)` cols. Automations strip: 3 rows (1 when W or H is tight). Status bar: 2 rows. Workspace: remainder; split divides it evenly with a 1-col divider.
-- Every pane hard-clamps its own output to its Rect (the existing per-pane clamp discipline, §1.2, becomes a tested contract of the `Pane` interface — a shared `layout.ClampToRect` helper replaces the five ad-hoc implementations).
-- **Degradation ladder** as the terminal shrinks: < ~110 cols → split collapses to pane A (B's binding retained, restored on grow); < ~80 cols → automations strip collapses to a 1-line summary; < ~60×15 → single-pane + tree only; below hard minimum → the existing fallback banner (`ui/fallback.go:25`).
-- Attach resize is already handled by the SIGWINCH watcher in `session/tmux` (§1.6) — untouched.
+- Left rail: **narrower** (#1090) — `clamp(20, 24 %·W, 36)` cols, full height. Inside the rail, the automations section is bottom-aligned: rule + up to ~5 compact rows, ceded to the tree as height tightens (1-line summary minimum). Status bar: 2 rows. Workspace: the entire remainder, **full vertical height** (#1090 — no bottom strip); N panes divide the width evenly with 1-col dividers.
+- Every pane hard-clamps its own output to its Rect (the existing per-pane clamp discipline, §1.2, is a tested contract of the `Pane` interface — the shared `layout.ClampToRect` helper replaced the five ad-hoc implementations in PR 1).
+- **Pane-count fitting** (#1088): each open pane needs a minimum usable width (~40 cols). `layout.Grid` computes how many panes fit; opening one more than fits (or shrinking the terminal) auto-hides the least-recently-focused pane to the background — its binding is retained and it is restored on grow, in order.
+- **Degradation ladder** as the terminal shrinks: < ~110 cols → workspace collapses toward a single pane (hidden panes' bindings retained, restored on grow); < ~80 cols → the rail's automations section collapses to a 1-line summary; < ~60×15 → single pane + tree only; below hard minimum → the existing fallback banner (`ui/fallback.go:25`).
+- Pane resize propagates PTY winsize → tmux reflow (§2.4); the full-screen SIGWINCH watcher in `session/tmux` (§1.6) is untouched while it still exists.
 
 ---
 
@@ -211,11 +247,11 @@ Terminal-level mouse reporting inside an *attached* session is unaffected: while
 
 Stay with **one `tea.Program`, one root model**. What changes is internal decomposition: the `home` god-model (1271-line `app.go`, layout + key routing + attach + selection + overlay plumbing) becomes the thin root described in §2.2. No compositor framework is needed — `lipgloss.JoinHorizontal/JoinVertical` composition (as `View()` does today, `app/app.go:1236-1271`) is sufficient when every pane emits an exactly-Rect-sized block. The custom `overlay.PlaceOverlay` compositor (`ui/overlay/overlay.go:162`) is kept as-is for modals.
 
-The blocking-attach trick (§1.6) *requires* everything to live in one Update loop we can deliberately block — a strong reason not to adopt multi-program or goroutine-per-pane architectures.
+The original argument for one Update loop — the blocking-attach trick (§1.6) needs a loop it can deliberately block — retires with full-screen attach (§2.4). The single-model conclusion stands anyway: each termpane's PTY read pump delivers coalesced repaint signals into the one Update loop as messages, and the nav/interactive mode routing (§2.3) wants a single keyboard authority. Multi-program or goroutine-per-pane architectures still buy nothing here.
 
 ### 3.2 Dependencies
 
-**No new dependencies.** bubbletea v1.3.5, lipgloss v1.1.0, bubbles v0.20.0 (spinner, viewport, textinput, textarea, key — all already in use) cover everything. Hit-testing, layout grid, and the tree are hand-rolled (~500 lines total, all pure and unit-testable). Explicitly rejected: `bubblezone` (ANSI-marker scanning per frame; our Rect registry is simpler), `bubbles/list` (the windowed tree with multi-line rows and section headers doesn't fit its model — same conclusion the current sidebar reached), vt10x/x-vt (§2.4).
+**One new dependency family (revised 2026-07-03).** The original "no new dependencies" stance held through PRs 1–5. #1089 adds `github.com/charmbracelet/x/vt` (+ `ultraviolet` as an indirect) and forces the ecosystem bumps described in §2.4 (`x/ansi`, `x/cellbuf`, `go-runewidth` — **pin** the x/vt pseudo-version and go-runewidth). Build and tests were validated green with these bumps on the spike branch. Everything else stays as before: bubbletea v1.3.5, lipgloss v1.1.0, bubbles v0.20.0; hit-testing, layout grid, and the tree are hand-rolled (landed). Still rejected: `bubblezone` (ANSI-marker scanning per frame; our Rect registry is simpler), `bubbles/list` (the windowed tree with multi-line rows and section headers doesn't fit its model), `hinshun/vt10x` (x/vt won the spike evaluation).
 
 ### 3.3 bubbletea v2 — considered, rejected for this rewrite
 
@@ -225,24 +261,34 @@ v2 improves the mouse/keyboard API but is a breaking migration across every Upda
 
 ## 4. Phased PR plan
 
-Strategy: **in-place morph**. `master` always contains exactly one TUI, always usable, always green (`go build`, `go test`, lint, deadcode). Early PRs land pure, unit-tested infrastructure and data-ownership refactors with no visual change; the middle PRs each change one visible region; one PR is the layout cutover; the last deletes the leftovers. This satisfies "migrate all at once" (no dual TUI, no toggle — users just see the TUI evolve over ~3 releases) while keeping each PR reviewable.
+Strategy: **in-place morph**. `master` always contains exactly one TUI, always usable, always green (`go build`, `go test`, lint, deadcode). Early PRs land pure, unit-tested infrastructure and data-ownership refactors with no visual change; the middle PRs each change one visible region; the tail converts panes to the embedded-interactive model and deletes the leftovers. This satisfies "migrate all at once" (no dual TUI, no toggle — users just see the TUI evolve across releases) while keeping each PR reviewable.
+
+### 4.1 Landed (original PRs 1–5)
+
+| # | PR | Delivered | Merged as |
+|---|---|---|---|
+| 1 | `tui: layout engine, Pane interface, focus ring, zone registry` | `ui/layout`: `Rect`, `Grid` solver + degradation ladder, `Pane` interface, `focus.Ring`, `zones.Registry`, `ClampToRect`. | [#1079](https://github.com/sachiniyer/agent-factory/pull/1079) |
+| 2 | `tui: extract snapshot projection store; panes become views` | `store.Projection` owns instances/tasks/selection; panes read it. #960 reconcile path preserved. | [#1080](https://github.com/sachiniyer/agent-factory/pull/1080) |
+| 3 | `tui: left rail becomes an instances+tabs tree` | `ui/tree`: tabs as children, expand/collapse, tab-level selection. | [#1081](https://github.com/sachiniyer/agent-factory/pull/1081) |
+| 4 | `tui: workspace layout cutover` | `layout.Grid` + `Pane` composition, tab bar removed, statusbar pane, bottom automations strip (now superseded by #1087), hooks behind overlay. | [#1083](https://github.com/sachiniyer/agent-factory/pull/1083) |
+| 5 | `tui: two-pane split + focus-ring navigation` | Pane A/B split + focus ring (now superseded by the #1088 N-pane model). | [#1085](https://github.com/sachiniyer/agent-factory/pull/1085) |
+
+### 4.2 Remaining (Captain sequencing, revised 2026-07-03)
 
 Sizes are rough production-code deltas excluding tests.
 
 | # | PR | Scope & delivery | Files touched | Risk |
 |---|---|---|---|---|
-| 1 | `tui: layout engine, Pane interface, focus ring, zone registry` | New `ui/layout` package: `Rect`, `Grid` solver + degradation ladder, `Pane` interface, `focus.Ring`, `zones.Registry`, `ClampToRect`. Pure logic + exhaustive unit tests (property-style: no overlap, exact cover, min sizes). **Not yet wired** — kept alive by its own tests (`deadcode -test` treats tests as roots). ~600 lines. | New: `ui/layout/*` | **Low** — no behavior change. |
-| 2 | `tui: extract snapshot projection store; panes become views` | New `store.Projection` owning instances/tasks/selection; `reconcileSnapshot` (`app/sync.go:282-427`) writes the store; `Sidebar`, `TabbedWindow`, `TabPane`, `ContentPane` read it instead of owning `[]*session.Instance` / instance pointers. Visuals identical. | `app/sync.go`, `app/app.go`, `ui/sidebar.go`, `ui/content_pane.go`, `ui/tabbed_window.go`, `ui/tab_pane.go` + their tests | **Medium-high** — touches the #960 reconcile path and the `TabPane.mu` concurrency contract (`ui/tab_pane.go:59`); mitigated by the existing dense test suite (`app/sync_test.go`, `app/snapshot_test.go`, `ui/preview_test.go`) which must pass unmodified in assertion content. |
-| 3 | `tui: left rail becomes an instances+tabs tree` | Rewrite sidebar instance section as the tree (tabs as children from `TabData`, expand/collapse, selection can rest on a tab). Selecting a tab in the tree drives the existing tabbed window's active tab. Still the old 30/70 layout. First visible change; useful on its own. ~New `ui/tree/` (adapting `ui/list.go` row rendering + `ui/sidebar.go` windowing); `app/handle_actions.go` nav keys. | New `ui/tree/*`; `ui/sidebar.go`, `ui/list.go`, `app/handle_actions.go` | **Medium** — selection semantics (re-pin by title, `app/sync.go:355-359`) gain a tab dimension; transient-status rows (#765 swap) need tree equivalents. |
-| 4 | `tui: workspace layout cutover — full real estate, automations strip, status bar` | The big one, kept as small as possible because 1–3 pre-staged everything: root model swaps `updateHandleWindowSizeEvent` + `View()` for `layout.Grid` + `Pane` composition; tab bar removed (tree/header carry tabs); menu+errbox become `statusbar.Pane`; automations strip (compact rows; focus expands to existing `TaskPane`); hooks move behind an overlay. Single pane A only (no split yet). Attach seam untouched. | `app/app.go`, `app/handle_actions.go`, `app/handle_overlay.go`, `ui/content_pane.go` (→ `ui/pane/`), `ui/menu.go`, `ui/err.go`, `ui/task_pane.go`, `ui/hooks_pane.go`, `ui/layout_height_test.go` | **High** — the user-facing cutover. Mitigations: teatest e2e (`app/e2e_test.go`, `app/real_tui_e2e_test.go`) updated in the same PR; manual verification of the full flow matrix (§5.4) before merge; degradation ladder tested at 80×24. |
-| 5 | `tui: two-pane split + focus ring navigation` | Pane B: open/swap/close, pinned binding, focus ring `tree→A→B→automations`, per-focus status-bar hints, split-aware degradation. Second capture-pane refresh slot (both panes refresh off-loop per tick; both paused while attached). | `app/app.go` (root routing), `ui/layout`, `ui/pane/*`, `keys/keys.go` | **Medium** — doubles capture traffic (bounded, §5.2); focus/selection interplay needs careful teatest coverage. |
-| 6 | `tui: mouse — click selection, focus, attach, actions (#1025)` | Zone registration in every pane's `View()`; root `MouseMsg` router (replacing `app/app.go:378-394`); the §2.5 gesture table; wheel routed by hit test. Closes #1025. | `app/app.go`, all `ui/pane`/`tree`/`statusbar` views, `ui/overlay/*` (clickable buttons) | **Medium** — pure additive input path; keyboard remains fully sufficient. Risk is coordinate drift vs rendered output, caught by zone-vs-render unit tests. |
-| 7 | `tui: attach polish + focus restore + first-run help refresh` | Attach from either pane / tree tab rows; detach restores focus+split; help overlay (`app/help.go`) and README/docs screenshots rewritten for the new layout; remote-session paths re-verified (`app/remote_detach_reset_test.go`). | `app/handle_actions.go`, `app/help.go`, `app/app.go`, `docs/`, `README.md` | **Low-medium**. |
-| 8 | `tui: delete dead old-TUI code + final sweep` | Remove `ui/tabbed_window.go` (tab bar + `AdjustPreviewWidth`), `ui/menu.go`, `ui/err.go`, `ui/sidebar.go`, `ui/content_pane.go` remnants and their superseded tests; `deadcode -test ./...` clean; CLAUDE.md project-structure section updated. Epic #1024 closes here. | Deletions across `ui/`; `CLAUDE.md` | **Low** — pure deletion once 4–7 are stable. |
+| R0 | `docs: RFC update — embedded-interactive panes + N-pane model + automations-in-rail` | This revision. | `docs/design/tui-rewrite.md` | — |
+| R1 | `tui: rail layout — automations into the rail, narrower rail, full-height workspace (#1087, #1090)` | Automations move from the PR-4 bottom strip into the left rail, bottom-aligned below a horizontal rule; task-manager expansion becomes an overlay. Rail width clamp narrows; workspace and panes take the full vertical height (§2.6). | `ui/layout` (grid regions), rail pane, `ui/task_pane.go` hosting, `app/app.go` | **Low-medium** — layout-only; degradation ladder re-verified at 80×24. |
+| R2 | `tui: N-pane open/close/hide + Tab focus ring (#1088)` | Replace the A/B split with the open-pane list in `store.Projection`: `s` opens the selected tab as a vertical-split pane, `x` hides a pane back to the background (binding retained), focus ring spans tree → N panes → automations, pane-count fitting + auto-hide on shrink (§2.6). | `app/app.go` (routing), `ui/layout`, `ui/pane/*`, `keys/keys.go` | **Medium** — focus/selection/hide interplay needs teatest coverage; capture traffic scales with open panes until R3 replaces polling. |
+| R3 | `tui: embedded interactive terminal panes (#1089)` | New `ui/termpane/` package (attachment lifecycle, tea→emulator key translation, grid→ANSI render with cursor overlay, bubbletea glue — ~500–700 LOC + tests); a new attach mode in `session/tmux/tmux.go` handing the ptmx to the termpane at the existing `ptyFactory` attach seam (~:350, ~50–100 LOC — the session-lifecycle machinery is untouched); `app/` wiring for nav/interactive modes (Enter / Ctrl-], §2.3); capture-pane polling retired for open panes. Dependency bumps per §3.2. **~1–1.5k LOC over 2–4 PRs, TUI-side only — daemon #960 ownership untouched.** | New `ui/termpane/*`; `session/tmux/tmux.go` (narrow), `app/app.go`, `app/handle_actions.go`, `keys/keys.go`, `go.mod` | **High** — the risky unknown is input-edge-case QA across real agent CLIs and terminal diversity (§2.4 gotchas), not rendering (proven). Real-tmux flow matrix (§5.4) before each merge. |
+| R4 | `tui: mouse — click selection, focus, interact, actions (#1025)` | Zone registration in every pane's `View()`; root `MouseMsg` router (replacing `app/app.go:378-394`); the §2.5 gesture table; wheel routed by hit test; in-pane mouse forwarding decision (§2.5). Closes #1025. | `app/app.go`, rail/pane/statusbar views, `ui/overlay/*` | **Medium** — additive input path; keyboard remains fully sufficient. Zone-vs-render unit tests catch coordinate drift. |
+| R5 | `tui: delete old-TUI + full-screen-attach leftovers, final sweep` | Remove the full-screen attach takeover (Update-loop block, `attached` pause, `attachOverlayCallbackFn`), `ui/tabbed_window.go` remnants, superseded tests; help overlay + README/docs screenshots rewritten for the final layout; `deadcode -test ./...` clean; CLAUDE.md project-structure updated. Redesign issues close here. | Deletions across `ui/`, `app/`; `app/help.go`, `docs/`, `README.md`, `CLAUDE.md` | **Low** — deletion + docs once R1–R4 are stable. |
 
-Deleted at the end: `ui/sidebar.go`, `ui/menu.go`, `ui/err.go`, `ui/content_pane.go`, `ui/tabbed_window.go` (their logic reborn in `ui/tree`, `ui/pane`, `ui/statusbar`, `ui/layout`), plus the 0.3/0.9 layout math in `app/app.go`. Surviving mostly untouched: `app/sync.go`, `app/session_control.go`, `app/detach_trace.go`, all of `session/`, `session/tmux/`, `daemon/`, `ui/overlay/`, `ui/task_pane.go` (re-hosted), `keys/keys.go` (extended).
+Deleted at the end: the remaining old-TUI files (`ui/tabbed_window.go`, `ui/tab_pane.go`'s capture view — superseded by `ui/termpane`) and the full-screen attach plumbing in `app/`. Surviving mostly untouched: `app/sync.go`, `app/session_control.go`, all of `session/` and `daemon/` (except the narrow R3 attach-mode hook in `session/tmux/tmux.go`), `ui/overlay/`, `ui/task_pane.go` (re-hosted), `keys/keys.go` (extended).
 
-Sequencing notes: 1→2→3→4→5 is a strict chain; 6 and 7 can land in either order after 5; 8 is last. If PR 4 review reveals it is still too big, the automations strip can split out as 4b — the strip degrades to today's sidebar Tasks header until then.
+Sequencing notes: R1→R2→R3 is the intended chain (R1 is pure layout, R2 gives the pane model R3 fills with live terminals); R4 can land any time after R2, with the in-pane forwarding piece after R3; R5 is last. R3 ships as 2–4 stacked PRs (termpane package first, kept alive by its own tests; then the tmux hook + app wiring; then input-QA hardening).
 
 ---
 
@@ -250,11 +296,11 @@ Sequencing notes: 1→2→3→4→5 is a strict chain; 6 and 7 can land in eithe
 
 ### 5.1 Attach/PTY regressions — the top risk
 
-The attach/detach path is the most production-hardened code in the repo (#598, #601/#602, #683, #716, #845, #975, #1006, #1065). Mitigations: (a) `session/tmux/` is out of scope — zero diffs; (b) the app-side seam stays the narrow `attachOverlayCallbackFn` + `<-ch` block + `attached` gate, moved but not redesigned; (c) `app/attached_pause_test.go`, `app/detach_paint_test.go`, `app/remote_detach_reset_test.go`, `app/detach_watchdog_test.go` must pass with assertions intact at every phase; (d) real-tmux verification (attach → interact → detach ×10 with 5+ instances) before merging PRs 4–7.
+The attach/detach path is the most production-hardened code in the repo (#598, #601/#602, #683, #716, #845, #975, #1006, #1065). The original "zero diffs to `session/tmux/`" guarantee is relaxed exactly once, for R3: an **additive** attach mode that hands the ptmx to the termpane at the existing `ptyFactory` seam (`session/tmux/tmux.go:350`) — the spawn, detach-drain, and kill machinery (`waitForAttachDrain`, `killAttach`) is reused, not modified. Mitigations: (a) the R3 tmux diff stays ~50–100 LOC and additive; (b) the full-screen path remains intact and passing until R5 deletes it; (c) `app/attached_pause_test.go`, `app/detach_paint_test.go`, `app/remote_detach_reset_test.go`, `app/detach_watchdog_test.go` must pass with assertions intact while their subject exists, and termpane teardown gets equivalent drain-bound tests; (d) real-tmux verification (enter interactive → type → Ctrl-] ×10 with 5+ instances and multiple open panes) before merging each R3 PR.
 
-### 5.2 tmux-server contention with two live panes
+### 5.2 tmux-server load with N live panes
 
-#598's root cause was capture-pane traffic contending with the interactive client. The split adds at most **one** extra capture per 100 ms tick (pane B), only while a split is open and not attached; the `attached` pause covers both panes. This is far below the pre-#598 load (which captured 2× per instance per 500 ms across *all* instances). Watchdog (`detach-slow.log`) stays armed; if contention resurfaces, pane B's cadence degrades to 250 ms — a one-constant change.
+#598's root cause was capture-pane traffic contending with the interactive client. The end state *improves* this profile: an embedded pane is one long-lived attach client receiving tmux-throttled screen redraws — the spike measured ~0.6 % of one core per pane under sustained streaming, and tmux ships only what the visible pane looks like, not the raw output (§2.4). Capture-pane polling retires for open panes in R3; it remains only wherever a non-attached preview is still rendered. Interim (R2, before R3): each extra open pane adds one capture per 100 ms tick — still far below the pre-#598 load (2× per instance per 500 ms across *all* instances). The detach watchdog (`detach-slow.log`) stays armed throughout; if contention resurfaces, pane cadence degrades to 250 ms — a one-constant change.
 
 ### 5.3 Performance with many instances
 
@@ -262,7 +308,7 @@ The tree renders more rows (instances × tabs) than the flat list. Mitigation: t
 
 ### 5.4 Keeping the TUI usable through the cutover
 
-Every phase ships a complete, keyboard-operable TUI. The flow matrix verified manually (dev-install on the dev box) before merging each visible-change PR: create (local+remote), name-collision, attach/detach (agent tab, shell tab, remote), tab create/close/jump, kill, search, task create/edit/run-now, hooks edit, PR open/copy, daemon restart mid-session, cold start with daemon warm-up, 80×24 terminal. This matrix becomes a checklist in each PR description.
+Every phase ships a complete, keyboard-operable TUI. The flow matrix verified manually (dev-install on the dev box) before merging each visible-change PR: create (local+remote), name-collision, enter/exit interactive mode (agent tab, shell tab, remote; `Ctrl-]` returns to nav), **Tab-completion forwards inside an interactive pane**, a full-screen program (vim or htop) driven inside a pane, open/hide/close panes across the N-pane ring, tab create/close/jump, kill, search, task create/edit/run-now from the rail, hooks edit, PR open/copy, daemon restart mid-session, cold start with daemon warm-up, external `tmux attach` to a pane's session (shrink behavior), 80×24 terminal. This matrix becomes a checklist in each PR description.
 
 ### 5.5 Terminal-size edge cases
 
@@ -270,29 +316,36 @@ Historically a bug farm (`ui/layout_height_test.go`, hard clamps everywhere). Mi
 
 ### 5.6 Test strategy
 
-- **Unit (hermetic)**: `ui/layout`, `ui/tree`, zone registry — pure-function tests, no tmux. Existing `ui/` string-assertion style carries over; the per-pane Rect-contract helper is new shared infrastructure. Race verification per dev-box constraints (`-p=1 -parallel 2`).
+- **Unit (hermetic)**: `ui/layout`, `ui/tree`, zone registry — pure-function tests, no tmux. `ui/termpane` is largely hermetic too: the emulator is a byte-in/grid-out state machine, so render and key-encoding tests feed bytes and assert cells without a terminal or tmux. Existing `ui/` string-assertion style carries over; the per-pane Rect-contract helper is shared infrastructure. Race verification per dev-box constraints (`-p=1 -parallel 2`).
 - **Model-level**: `app/` tests keep driving `home.Update` with synthetic messages; mouse tests inject `tea.MouseMsg` with coordinates derived from the zone registry (not hardcoded), so layout changes can't silently break them.
-- **e2e**: teatest flows (`app/e2e_test.go`) updated per phase; `integration/` black-box daemon+tmux tests are layout-agnostic and must stay green untouched. A new teatest scenario per feature: split open/close, focus ring cycle, click-to-attach.
-- **Mouse caveat**: real-terminal mouse reporting can't be exercised by teatest; hit-testing is covered hermetically (zone registry unit tests + injected MouseMsg), and click-to-attach is on the manual matrix.
+- **e2e**: teatest flows (`app/e2e_test.go`) updated per phase; `integration/` black-box daemon+tmux tests are layout-agnostic and must stay green untouched. A new teatest scenario per feature: pane open/hide across the ring, focus-ring cycle, enter/exit interactive mode, click-to-interact. Real-tmux termpane coverage (attach → drive vim/less → detach) follows the isolated-server pattern the spike used (`tmux -L`, private socket).
+- **Mouse caveat**: real-terminal mouse reporting can't be exercised by teatest; hit-testing is covered hermetically (zone registry unit tests + injected MouseMsg), and click-to-interact plus in-pane forwarding are on the manual matrix.
 
 ### 5.7 Release blast radius
 
-Users `af upgrade` into the new layout with no warning. Mitigations: PRs 4 and 5 update README + `docs/` in the same release; the first-run help overlay (seen-bitmask already exists, `app/help.go:137-169`) gets a one-time "the TUI changed" screen at the PR-4 release; keep every existing default keybinding working (additions only until #1026/#1027).
+Users `af upgrade` into the new layout with no warning. The PR-4 release already shipped the one-time "the TUI changed" screen (seen-bitmask, `app/help.go:137-169`); R1–R3 each refresh it plus README + `docs/` in the same release. The interaction change in R3 is the sharpest edge — Enter now types into the pane instead of taking over the screen — so its release note and help screen lead with `Ctrl-]`. Keep every existing default keybinding working (additions only until #1026/#1027).
 
 ---
 
 ## 6. Open questions for Sachin
 
-1. **Embedded interactive panes** — the RFC's end state is *live read-only* split panes with full-screen attach on Enter (§2.4). A true in-pane interactive terminal (type into two agents side-by-side without attaching) is a large follow-on (vt emulator dependency, key routing, per-pane tmux resize). Is read-only + fast attach acceptable as the #1024 end state, with embedded interaction as a possible later issue?
-2. **Tasks over RPC** — automations stay disk-read (`tasks.json` + `ReloadTasks` poke) in this rewrite, matching today. Moving them behind daemon RPCs (`ListTasks`/`AddTask`/…) would complete the #960 single-writer story and fits #1029 ("daemon is the core; everything else a client"). Do that as part of this epic (one extra PR between 3 and 4), or as a separate #1029 work item? RFC recommends: separate, to keep this epic presentation-only.
-3. **Automations strip scope** — current-repo tasks only (matches today's `LoadTasksForCurrentRepo`), or all repos with a repo column? RFC assumes current-repo.
-4. **Split orientation** — side-by-side only (RFC), or also stacked (horizontal split)? Stacked halves the already-scarce pane height; recommend side-by-side only.
-5. **Hooks placement** — RFC demotes hooks from a persistent sidebar section to an overlay reachable from the automations strip + hotkey. Any objection?
-6. **Default keys for the new verbs** (`s` split, `Tab` focus ring, `ctrl+h/l` region jumps) — fine to ship as proposed and revisit wholesale in #1026/#1027?
+Resolved 2026-07-03:
+
+1. ~~**Embedded interactive panes**~~ — **RESOLVED, reversed.** Sachin confirmed embedded interaction as the end state; the #1089 spike proved architecture A. §2.4 is now the decision of record. (Original recommendation — read-only + full-screen attach — superseded.)
+2. ~~**Split orientation**~~ (was Q4) — **RESOLVED**: vertical splits only, generalized from a fixed A/B pair to the N-pane model (#1088). Stacked splits stay out of scope.
+3. ~~**New-verb default keys**~~ (was Q6) — **RESOLVED in shape**: `Tab` = nav-mode focus ring, `s` open pane, `x` hide pane, `Enter` interactive, `Ctrl-]` back to nav (the only host-reserved key while interactive). Exact bindings still revisitable wholesale in #1026/#1027.
+
+Still open:
+
+4. **Tasks over RPC** — automations stay disk-read (`tasks.json` + `ReloadTasks` poke) in this rewrite, matching today. Moving them behind daemon RPCs (`ListTasks`/`AddTask`/…) would complete the #960 single-writer story and fits #1029 ("daemon is the core; everything else a client"). RFC recommends: separate #1029 work item, to keep this epic presentation-only.
+5. **Automations rail-section scope** — current-repo tasks only (matches today's `LoadTasksForCurrentRepo`), or all repos with a repo column? RFC assumes current-repo.
+6. **Hooks placement** — RFC demotes hooks from a persistent sidebar section to an overlay reachable from the automations section + hotkey. Any objection?
 
 ---
 
-## Appendix A — current file inventory (production code)
+## Appendix A — file inventory as of the original RFC (pre-epic, production code)
+
+Snapshot from before PR 1; kept as the baseline the fates refer to. Post-PR-5 additions not listed: `ui/layout/`, `ui/tree/`, `ui/pane/`, `ui/statusbar/`, the projection store. R3 adds `ui/termpane/` (§4.2). Fates citing the original numbering map to the revised plan as: PR 6 → R4 (mouse), PR 7 → folded into R3/R5 (help + docs refresh), PR 8 → R5 (final delete).
 
 | File | Lines | Fate |
 |---|---|---|
@@ -310,8 +363,8 @@ Users `af upgrade` into the new layout with no warning. Mitigations: PRs 4 and 5
 | `ui/err.go` | 77 | Absorbed into `ui/statusbar` (PR 4) |
 | `ui/content_pane.go` | 215 | Replaced by workspace panes (PR 4), deleted (PR 8) |
 | `ui/tabbed_window.go` | 345 | Tab bar deleted; active-tab logic moves to store (PRs 4, 8) |
-| `ui/tab_pane.go` | 468 | Adapted into `ui/pane` content view (PR 4) |
-| `ui/task_pane.go` | 905 | Kept; re-hosted in automations strip (PR 4) |
+| `ui/tab_pane.go` | 468 | Adapted into `ui/pane` content view (PR 4); capture view superseded by `ui/termpane` (R3), deleted (R5) |
+| `ui/task_pane.go` | 905 | Kept; re-hosted in automations strip (PR 4), moves behind an overlay off the rail (R1) |
 | `ui/hooks_pane.go` | 221 | Kept; shown as overlay (PR 4) |
 | `ui/overlay/*` | 849 | Kept verbatim (+ clickable zones, PR 6) |
 | `keys/keys.go` | 202 | Extended (split/focus verbs) |
