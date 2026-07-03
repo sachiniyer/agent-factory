@@ -54,7 +54,7 @@ Remote sessions are tab-driven too, with one limitation: the hook protocol can't
 
 ### Tasks
 
-Tasks deliver a prompt to an agent automatically — on a cron schedule, or every time a long-running watch script emits a stdout line (e.g. a script polling for new GitHub issues). Each fire either creates a fresh session or sends the prompt into an existing one. In the TUI: `s` creates a task, `S` lists them, `r` runs a cron task now.
+Tasks deliver a prompt to an agent automatically — on a cron schedule, or every time a long-running watch script emits a stdout line (e.g. a script polling for new GitHub issues). Each fire either creates a fresh session or sends the prompt into an existing one. In the TUI: `S` opens the task manager, `n` creates a task, `r` runs a cron task now.
 
 Tasks are hosted by a background daemon that starts on demand; run `af daemon install` once to keep them firing across reboots. See [docs/tasks.md](docs/tasks.md) for the full trigger × delivery matrix and the watch-script contract.
 
