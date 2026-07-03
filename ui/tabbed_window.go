@@ -6,6 +6,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
@@ -67,6 +68,10 @@ type TabbedWindow struct {
 	rect    layout.Rect
 	focused bool
 	pinned  bool
+
+	// zones is the shared mouse hit-test registry (#1024 PR 6); String()
+	// registers the pane's body + header rects every frame. Nil skips.
+	zones *zones.Registry
 
 	tab *TabPane
 }
@@ -222,7 +227,10 @@ func (w *TabbedWindow) Blur() { w.focused = false }
 // (#1024 PR 5).
 func (w *TabbedWindow) HandleKey(tea.KeyMsg) (tea.Cmd, bool) { return nil, false }
 
-// HandleMouse implements layout.Pane. Mouse support is #1024 PR 6.
+// HandleMouse implements layout.Pane. Mouse dispatch is zone-id-based at the
+// root (#1024 PR 6): the body/header zones registered by String() resolve to
+// focus/attach/scroll actions there, so the pane-local fallback consumes
+// nothing.
 func (w *TabbedWindow) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
 
 // UpdateContent updates the content of the active tab's pane. instance may be
@@ -323,10 +331,43 @@ func (w *TabbedWindow) renderHeader(width int) string {
 // live capture view.
 func (w *TabbedWindow) View() string { return w.String() }
 
+// SetZoneRegistry wires the shared mouse hit-test registry (#1024 PR 6).
+func (w *TabbedWindow) SetZoneRegistry(reg *zones.Registry) {
+	w.zones = reg
+}
+
+// Region returns the layout region id this window renders as: pane B when
+// pinned, pane A otherwise. Doubles as the pane component of its zone ids.
+func (w *TabbedWindow) Region() string {
+	if w.pinned {
+		return layout.RegionPaneB
+	}
+	return layout.RegionPaneA
+}
+
+// registerZones records this frame's hit-test rects: the whole pane as the
+// body (click focuses; click focused attaches; wheel scrolls), with the
+// one-line `title · tab` header registered on top of it (click focuses the
+// pane). The header sits inside the frame border, so it needs at least a
+// 3×3 rect to exist.
+func (w *TabbedWindow) registerZones() {
+	if w.zones == nil || w.rect.Empty() {
+		return
+	}
+	region := w.Region()
+	w.zones.Register(zones.PaneBody(region), w.rect)
+	if w.rect.W > 2 && w.rect.H > 2 {
+		w.zones.Register(zones.PaneHeader(region), layout.Rect{
+			X: w.rect.X + 1, Y: w.rect.Y + 1, W: w.rect.W - 2, H: paneHeaderRows,
+		})
+	}
+}
+
 func (w *TabbedWindow) String() string {
 	if w.rect.Empty() {
 		return ""
 	}
+	w.registerZones()
 	iw, ih := w.innerSize()
 	inner := lipgloss.JoinVertical(lipgloss.Left,
 		w.renderHeader(iw),

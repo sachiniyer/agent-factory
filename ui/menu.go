@@ -1,11 +1,13 @@
 package ui
 
 import (
+	"math"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -71,6 +73,13 @@ type Menu struct {
 
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
+
+	// zones is the shared mouse hit-test registry (#1024 PR 6); String()
+	// registers a clickable rect per rendered hint every frame. origin is the
+	// menu's top-left on screen (the status-bar rect, via SetOrigin), since
+	// the registry works in absolute cells.
+	zones  *zones.Registry
+	origin layout.Point
 }
 
 var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
@@ -283,6 +292,27 @@ func (m *Menu) SetSize(width, height int) {
 	m.height = height
 }
 
+// SetZoneRegistry wires the shared mouse hit-test registry (#1024 PR 6).
+func (m *Menu) SetZoneRegistry(reg *zones.Registry) {
+	m.zones = reg
+}
+
+// SetOrigin records the menu's top-left screen cell for zone registration.
+func (m *Menu) SetOrigin(p layout.Point) {
+	m.origin = p
+}
+
+// centerStart is where centered content of the given size starts inside a
+// box: lipgloss.Place(…, Center, …) computes left = gap - round(gap·0.5), and
+// the hint zones must land on exactly the cells Place put the hints on.
+func centerStart(box, content int) int {
+	gap := box - content
+	if gap <= 0 {
+		return 0
+	}
+	return gap - int(math.Round(float64(gap)*0.5))
+}
+
 // hintDropOrder lists the options that may be dropped when the hint row is
 // wider than the status bar, least valuable first; options in the same inner
 // slice drop together (a lone "⇧↓ scroll" without its ⇧↑ twin reads like a
@@ -317,7 +347,7 @@ func (m *Menu) String() string {
 	// in priority order and re-render. Whatever still doesn't fit after the
 	// drop list is exhausted is clamped by the status bar as before.
 	drop := make(map[keys.KeyName]bool)
-	line := m.renderHints(drop)
+	line, spans := m.renderHints(drop)
 	for _, ks := range hintDropOrder {
 		if lipgloss.Width(line) <= m.width {
 			break
@@ -325,16 +355,37 @@ func (m *Menu) String() string {
 		for _, k := range ks {
 			drop[k] = true
 		}
-		line = m.renderHints(drop)
+		line, spans = m.renderHints(drop)
+	}
+
+	// Register a click zone per surviving hint (#1024 PR 6), on the exact
+	// cells lipgloss.Place is about to center the row onto.
+	if m.zones != nil {
+		x0 := m.origin.X + centerStart(m.width, lipgloss.Width(line))
+		y := m.origin.Y + centerStart(m.height, 1)
+		for _, span := range spans {
+			m.zones.Register(zones.StatusHint(span.key),
+				layout.Rect{X: x0 + span.x, Y: y, W: span.w, H: 1})
+		}
 	}
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, line)
 }
 
-// renderHints renders the option row, skipping dropped options. Separators
-// follow group membership of the options actually rendered: a bullet within a
-// group, a vertical bar between groups.
-func (m *Menu) renderHints(drop map[keys.KeyName]bool) string {
+// hintSpan is one rendered hint's horizontal extent within the (un-centered)
+// hint row: x is the printable-cell offset where its key text starts, w spans
+// through the end of its description. key is the binding's primary key
+// string — the StatusHint zone id payload, i.e. what a click "presses".
+type hintSpan struct {
+	key  string
+	x, w int
+}
+
+// renderHints renders the option row, skipping dropped options, and reports
+// each rendered hint's cell extent for the click zones. Separators follow
+// group membership of the options actually rendered: a bullet within a group,
+// a vertical bar between groups.
+func (m *Menu) renderHints(drop map[keys.KeyName]bool) (string, []hintSpan) {
 	groupOf := func(i int) int {
 		for gi, g := range m.groups {
 			if i >= g.start && i < g.end {
@@ -345,6 +396,12 @@ func (m *Menu) renderHints(drop map[keys.KeyName]bool) string {
 	}
 
 	var s strings.Builder
+	var spans []hintSpan
+	col := 0
+	write := func(chunk string) {
+		s.WriteString(chunk)
+		col += lipgloss.Width(chunk)
+	}
 	prevGroup := -1
 	first := true
 	for i, k := range m.options {
@@ -369,24 +426,32 @@ func (m *Menu) renderHints(drop map[keys.KeyName]bool) string {
 
 		if !first {
 			if group != prevGroup {
-				s.WriteString(sepStyle.Render(verticalSeparator))
+				write(sepStyle.Render(verticalSeparator))
 			} else {
-				s.WriteString(sepStyle.Render(separator))
+				write(sepStyle.Render(separator))
 			}
 		}
 		first = false
 		prevGroup = group
 
+		start := col
 		if inActionGroup {
-			s.WriteString(localActionStyle.Render(binding.Help().Key))
-			s.WriteString(" ")
-			s.WriteString(localActionStyle.Render(binding.Help().Desc))
+			write(localActionStyle.Render(binding.Help().Key))
+			write(" ")
+			write(localActionStyle.Render(binding.Help().Desc))
 		} else {
-			s.WriteString(localKeyStyle.Render(binding.Help().Key))
-			s.WriteString(" ")
-			s.WriteString(localDescStyle.Render(binding.Help().Desc))
+			write(localKeyStyle.Render(binding.Help().Key))
+			write(" ")
+			write(localDescStyle.Render(binding.Help().Desc))
+		}
+		// KeyJumpTab's "1-9" chip names nine keys, not one action — it gets
+		// no click zone. Everything else is clickable by its primary key.
+		if k != keys.KeyJumpTab {
+			if bkeys := binding.Keys(); len(bkeys) > 0 {
+				spans = append(spans, hintSpan{key: bkeys[0], x: start, w: col - start})
+			}
 		}
 	}
 
-	return menuStyle.Render(s.String())
+	return menuStyle.Render(s.String()), spans
 }

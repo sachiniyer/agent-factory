@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,6 +16,7 @@ import (
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,6 +100,9 @@ func wireTestPanes(h *home, proj *store.Projection) {
 	h.hooksPane = ui.NewHooksPane()
 	h.ring = layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionPaneB, layout.RegionAutomations)
 	h.ring.SetHidden(layout.RegionPaneB, true)
+	h.zones = zones.NewRegistry()
+	h.mouseClock = time.Now
+	h.wireZoneRegistry()
 	h.syncFocus()
 }
 

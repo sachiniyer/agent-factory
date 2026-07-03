@@ -114,6 +114,21 @@ func (r *InstanceRenderer) SetIndexWidth(digits int) {
 // ɹ and ɻ are other options.
 const branchIcon = "Ꮧ"
 
+// ArrowCell returns the (x, y) cell of the ▾/▸ expand/collapse arrow within
+// an instance row block rendered at content width w, for mouse hit-testing
+// (#1024 PR 6): block line 0 is the title style's top-padding line, so the
+// arrow sits on line 1, one cell after the row's left padding + the prefix's
+// leading space. ok is false at ultra-narrow widths, where Render drops the
+// arrow from the prefix entirely (the #646 fallback). Kept next to Render so
+// the prefix layout and the hit target can't drift apart; the render test
+// pins them together against actual output.
+func ArrowCell(w int) (x, y int, ok bool) {
+	if w <= 9 {
+		return 0, 0, false
+	}
+	return 2, 1, true
+}
+
 // Render renders an instance row. expanded selects the ▾/▸ tree arrow; a
 // non-expandable instance (see Expandable) renders a blank arrow cell so its
 // title stays aligned with its siblings.

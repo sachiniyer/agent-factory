@@ -77,6 +77,21 @@ type TaskPane struct {
 	dirty         bool
 	deleted       []task.Task
 	hasFocus      bool
+
+	// rowSpans records where each task's row block landed in the last
+	// renderListMode output, so the hosting automations strip can register
+	// mouse zones over the real rendered rows (#1024 PR 6). Nil while the
+	// edit/create form is showing (no task rows on screen).
+	rowSpans []TaskRowSpan
+}
+
+// TaskRowSpan is one task's row block in the rendered list: the 0-based
+// start line within the pane's output and how many lines the block spans
+// (the selected row expands with detail lines).
+type TaskRowSpan struct {
+	ID    string
+	Line  int
+	Lines int
 }
 
 // NewTaskPane creates a new task pane.
@@ -332,6 +347,46 @@ func (s *TaskPane) ScrollDown() {
 	if s.selectedIdx < len(s.tasks)-1 {
 		s.selectedIdx++
 	}
+}
+
+// ListRowSpans returns where each task row landed in the last rendered list,
+// for mouse zone registration (#1024 PR 6). Empty while the edit/create form
+// is showing.
+func (s *TaskPane) ListRowSpans() []TaskRowSpan {
+	return s.rowSpans
+}
+
+// SelectTaskByID moves the selection onto the task with the given id — the
+// click action for a task row. Reports whether the task was found; ignored
+// while the edit form owns the pane (matching ScrollUp/Down).
+func (s *TaskPane) SelectTaskByID(id string) bool {
+	if s.editing || s.creating {
+		return false
+	}
+	for i, tsk := range s.tasks {
+		if tsk.ID == id {
+			s.selectedIdx = i
+			return true
+		}
+	}
+	return false
+}
+
+// SelectedTask returns the task the selection rests on, if any.
+func (s *TaskPane) SelectedTask() (task.Task, bool) {
+	if s.selectedIdx < 0 || s.selectedIdx >= len(s.tasks) {
+		return task.Task{}, false
+	}
+	return s.tasks[s.selectedIdx], true
+}
+
+// StartEditSelected opens the edit form for the current selection — the
+// double-click equivalent of enter on a task row.
+func (s *TaskPane) StartEditSelected() {
+	if s.editing || s.creating || len(s.tasks) == 0 {
+		return
+	}
+	s.enterEditMode()
 }
 
 // HandleKeyPress processes a key press. Returns true if consumed.
@@ -647,10 +702,15 @@ func (s *TaskPane) renderListMode() string {
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Tasks"))
 	b.WriteString("\n\n")
+	// line tracks the 0-based output line about to be written, feeding the
+	// rowSpans the automations strip registers mouse zones from (#1024 PR 6).
+	line := 2
+	s.rowSpans = s.rowSpans[:0]
 
 	if len(s.tasks) == 0 {
 		b.WriteString(disabledStyle.Render("  No tasks. Press n to create one."))
 		b.WriteString("\n")
+		line++
 	}
 
 	// Width available to the indented detail lines under the selected row.
@@ -660,6 +720,7 @@ func (s *TaskPane) renderListMode() string {
 	}
 
 	for i, tsk := range s.tasks {
+		rowStart := line
 		status := "[✓]"
 		style := enabledStyle
 		if !tsk.Enabled {
@@ -682,12 +743,14 @@ func (s *TaskPane) renderListMode() string {
 			b.WriteString(style.Render("  " + header))
 		}
 		b.WriteString("\n")
+		line++
 
 		// A crash-looped watcher gets its full #797 failure summary on a
 		// detail line — the only always-on detail, and only when errored.
 		if tsk.IsWatch() && strings.HasPrefix(tsk.LastRunStatus, "errored:") {
 			b.WriteString(erroredStyle.Render("      " + tsk.LastRunStatus))
 			b.WriteString("\n")
+			line++
 		}
 
 		// The selected row expands with prompt + agent + last-run detail.
@@ -695,6 +758,7 @@ func (s *TaskPane) renderListMode() string {
 			if snippet := promptSnippet(tsk.Prompt, detailWidth); snippet != "" {
 				b.WriteString(detailStyle.Render("      " + snippet))
 				b.WriteString("\n")
+				line++
 			}
 			lastRun := "never"
 			if tsk.LastRunAt != nil {
@@ -716,7 +780,9 @@ func (s *TaskPane) renderListMode() string {
 			}
 			b.WriteString(detailStyle.Render(detail))
 			b.WriteString("\n")
+			line++
 		}
+		s.rowSpans = append(s.rowSpans, TaskRowSpan{ID: tsk.ID, Line: rowStart, Lines: line - rowStart})
 	}
 
 	b.WriteString("\n")
@@ -730,6 +796,8 @@ func (s *TaskPane) renderListMode() string {
 }
 
 func (s *TaskPane) renderEditMode() string {
+	// No task rows on screen: stale spans must not register phantom zones.
+	s.rowSpans = nil
 	editTitleStyle := lipgloss.NewStyle().
 		Foreground(AccentColor).
 		Bold(true).

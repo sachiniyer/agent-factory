@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -49,6 +50,10 @@ type AutomationsPane struct {
 	rect    layout.Rect
 	compact bool
 	focused bool
+
+	// zones is the shared mouse hit-test registry (#1024 PR 6); String()
+	// registers the strip plus its task rows every frame. Nil skips.
+	zones *zones.Registry
 
 	// now returns the current time for next-run derivation; a fixed value in
 	// tests so rendered "next" columns are deterministic.
@@ -120,7 +125,10 @@ func (a *AutomationsPane) HandleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	return nil, a.taskPane.HandleKeyPress(msg)
 }
 
-// HandleMouse implements layout.Pane. Mouse support is #1024 PR 6.
+// HandleMouse implements layout.Pane. Mouse dispatch is zone-id-based at the
+// root (#1024 PR 6): the strip/task-row zones registered by String() resolve
+// to focus/select/edit actions there, so the pane-local fallback consumes
+// nothing.
 func (a *AutomationsPane) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
 
 // ScrollUp moves the task selection up (wheel/shift-scroll routing).
@@ -184,14 +192,44 @@ func (a *AutomationsPane) enabledCount() int {
 // View implements layout.Pane: exactly rect-sized.
 func (a *AutomationsPane) View() string { return a.String() }
 
+// SetZoneRegistry wires the shared mouse hit-test registry (#1024 PR 6).
+func (a *AutomationsPane) SetZoneRegistry(reg *zones.Registry) {
+	a.zones = reg
+}
+
+// registerTaskZone records one task row's hit rect, clipped to the strip.
+func (a *AutomationsPane) registerTaskZone(id string, line, lines int) {
+	if a.zones == nil {
+		return
+	}
+	r := layout.Rect{X: a.rect.X, Y: a.rect.Y + line, W: a.rect.W, H: lines}
+	if r.Bottom() > a.rect.Bottom() {
+		r.H = a.rect.Bottom() - r.Y
+	}
+	if !r.Empty() {
+		a.zones.Register(zones.AutoTask(id), r)
+	}
+}
+
 func (a *AutomationsPane) String() string {
 	if a.rect.Empty() {
 		return ""
 	}
+	// The strip's base zone: any click inside it that lands on no task row
+	// focuses the automations region. Task rows register on top (later wins).
+	if a.zones != nil {
+		a.zones.Register(zones.AutoStrip, a.rect)
+	}
 
-	// Focused: the strip IS the task manager, expanded in place.
+	// Focused: the strip IS the task manager, expanded in place. The hosted
+	// TaskPane records where its list rows landed (nothing while the edit
+	// form is showing), and those spans become the click/double-click zones.
 	if a.focused {
-		return layout.ClampToRect(a.taskPane.String(), a.rect)
+		out := layout.ClampToRect(a.taskPane.String(), a.rect)
+		for _, span := range a.taskPane.ListRowSpans() {
+			a.registerTaskZone(span.ID, span.Line, span.Lines)
+		}
+		return out
 	}
 
 	tasks := a.proj.GetTasks()
@@ -212,6 +250,7 @@ func (a *AutomationsPane) String() string {
 		if len(lines) >= a.rect.H {
 			break
 		}
+		a.registerTaskZone(tsk.ID, len(lines), 1)
 		lines = append(lines, a.compactRow(tsk))
 	}
 	return layout.ClampToRect(strings.Join(lines, "\n"), a.rect)

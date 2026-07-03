@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"io"
@@ -125,6 +126,17 @@ type home struct {
 	// ring is the focus ring: tree → pane A → automations. Tab/Shift-Tab
 	// cycle it; regions hidden by the degradation ladder are skipped.
 	ring *layout.Ring
+	// zones is the mouse hit-test registry (#1024 PR 6, RFC §2.5): View()
+	// resets it every frame and each pane re-registers its interactive rects
+	// while rendering, so the registry always mirrors what is actually on
+	// screen. handleMouse resolves every tea.MouseMsg through it.
+	zones *zones.Registry
+	// lastClickZone/lastClickAt implement double-click detection: a second
+	// press on the same zone within doubleClickInterval reads as a double
+	// click. mouseClock is time.Now, swapped by tests for determinism.
+	lastClickZone string
+	lastClickAt   time.Time
+	mouseClock    func() time.Time
 
 	// sidebar is the left-rail instances+tabs tree
 	sidebar *ui.Sidebar
@@ -222,6 +234,8 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		statusBar:       ui.NewStatusBar(menu, errBox),
 		hooksPane:       ui.NewHooksPane(),
 		ring:            layout.NewRing(layout.RegionTree, layout.RegionPaneA, layout.RegionPaneB, layout.RegionAutomations),
+		zones:           zones.NewRegistry(),
+		mouseClock:      time.Now,
 		snapshotFetcher: snapshotThroughDaemon,
 		appConfig:       appConfig,
 		program:         program,
@@ -232,6 +246,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		appState:        appState,
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes, proj)
+	h.wireZoneRegistry()
 	// No split is open at startup: pane B starts hidden so the focus ring is
 	// tree → pane A → automations until a split opens (relayout keeps this in
 	// sync with Layout.SplitActive thereafter).
@@ -522,38 +537,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress {
-			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
-				// The wheel scrolls whatever the focus ring points at: the
-				// expanded automations strip scrolls its own task list
-				// independent of the sidebar selection (#524); everywhere
-				// else it scrolls the workspace pane, which needs a bound
-				// instance. Hit-tested wheel routing is #1024 PR 6.
-				if m.ring.Active() == layout.RegionAutomations {
-					switch msg.Button {
-					case tea.MouseButtonWheelUp:
-						m.automations.ScrollUp()
-					case tea.MouseButtonWheelDown:
-						m.automations.ScrollDown()
-					}
-					return m, nil
-				}
-				// The focused split pane scrolls its own pinned view (#1024
-				// PR 5); everywhere else the wheel drives pane A off the
-				// selection binding, as before.
-				pane, bound := m.focusedContentPane()
-				if bound == nil {
-					return m, nil
-				}
-				switch msg.Button {
-				case tea.MouseButtonWheelUp:
-					pane.ScrollUp()
-				case tea.MouseButtonWheelDown:
-					pane.ScrollDown()
-				}
-			}
-		}
-		return m, nil
+		// First-class mouse (#1024 PR 6, closes #1025): every press is
+		// resolved through the zone registry the last View() rebuilt and
+		// dispatched to the region actually under the cursor — clicks select/
+		// focus/attach/act, the wheel scrolls the hovered region. Purely
+		// additive: the keyboard remains fully sufficient.
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 	case tea.WindowSizeMsg:
@@ -1443,8 +1432,16 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 // View composes the workspace from the solved layout (#1024 PR 4): every pane
 // renders exactly its rect, so the regions tile the full window with no
 // padding math. Modal overlays composite on top exactly as before.
+//
+// The mouse zone registry is rebuilt here every frame (#1024 PR 6): Reset at
+// the top, then each pane registers its interactive rects while rendering and
+// the active overlay registers its buttons on top. The registry therefore
+// always mirrors exactly what this frame put on screen.
 func (m *home) View() string {
-	// Below the hard minimum no layout exists; render the banner alone.
+	m.zones.Reset()
+
+	// Below the hard minimum no layout exists; render the banner alone (and
+	// register nothing — there is nothing to click).
 	if m.lastLayout.Fallback {
 		return ui.TerminalTooSmall(m.termWidth, m.termHeight)
 	}
@@ -1470,17 +1467,23 @@ func (m *home) View() string {
 		if m.confirmationOverlay == nil {
 			log.ErrorLog.Printf("confirmation overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true)
+		fg := m.confirmationOverlay.Render()
+		m.confirmationOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
+		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
 	} else if m.state == stateSearch {
 		if m.searchOverlay == nil {
 			log.ErrorLog.Printf("search overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.searchOverlay.Render(), mainView, true)
+		fg := m.searchOverlay.Render()
+		m.searchOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
+		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
 	} else if m.state == stateSelectProgram {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
+		fg := m.selectionOverlay.Render()
+		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
+		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
 	} else if m.state == stateHooks {
 		return overlay.PlaceOverlay(0, 0, m.renderHooksOverlay(), mainView, true)
 	}

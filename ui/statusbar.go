@@ -37,6 +37,9 @@ func (s *StatusBar) SetRect(r layout.Rect) {
 		menuRows = 0
 	}
 	s.menu.SetSize(r.W, menuRows)
+	// The menu registers per-hint click zones during render (#1024 PR 6); it
+	// sits at the top of the status-bar rect, so that is its zone origin.
+	s.menu.SetOrigin(layout.Point{X: r.X, Y: r.Y})
 	s.errBox.SetSize(r.W, 1)
 }
 
@@ -52,7 +55,10 @@ func (s *StatusBar) Blur() {}
 // HandleKey implements layout.Pane (never consumes).
 func (s *StatusBar) HandleKey(tea.KeyMsg) (tea.Cmd, bool) { return nil, false }
 
-// HandleMouse implements layout.Pane. Clickable hints are #1024 PR 6.
+// HandleMouse implements layout.Pane. Hint clicks are zone-id-based at the
+// root (#1024 PR 6): the menu registers a StatusHint zone per rendered hint
+// and the root synthesizes that key, so the pane-local fallback consumes
+// nothing.
 func (s *StatusBar) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
 
 // View implements layout.Pane: exactly rect-sized.
