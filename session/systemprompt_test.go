@@ -184,6 +184,27 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	}
 }
 
+// Guard for #1043: the consolidated skill is minimal but must keep covering
+// the entire af feature surface — future trimming must not drop capabilities.
+func TestAfUsageReference_CoversFullSurface(t *testing.T) {
+	required := []string{
+		"af sessions whoami", "af sessions list", "af sessions get",
+		"af sessions create", "af sessions send-prompt", "af sessions preview",
+		"af sessions attach", "af sessions kill",
+		"af sessions tab-create", "af sessions tab-delete",
+		"af tasks list", "af tasks get", "af tasks add", "af tasks update",
+		"af tasks trigger", "af tasks remove",
+		"--cron", "--watch-cmd", "{{line}}", "--target-session",
+		"af daemon install", "--repo",
+		"af version", "af debug", "af upgrade", "af reset",
+	}
+	for _, want := range required {
+		if !strings.Contains(afUsageReference, want) {
+			t.Errorf("afUsageReference must document %q", want)
+		}
+	}
+}
+
 func TestEnsurePluginDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
@@ -205,7 +226,7 @@ func TestEnsurePluginDir(t *testing.T) {
 	}
 
 	commandsDir := filepath.Join(pluginDir, "commands")
-	expectedFiles := []string{"af-sessions.md", "af-kill.md", "af-send.md", "af-preview.md", "af-whoami.md", "af-create.md"}
+	expectedFiles := []string{"af.md"}
 	for _, name := range expectedFiles {
 		path := filepath.Join(commandsDir, name)
 		if _, err := os.Stat(path); os.IsNotExist(err) {

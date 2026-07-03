@@ -48,12 +48,14 @@ Working style:
 - Default-delegate. Any code change, multi-file edit, docs update beyond ~5
   lines, investigation that touches >1 file, content drafting (PR
   descriptions, README sections, comments), bug reproduction, or test
-  authoring goes to an af session via `agent-factory:af-create`. Stay inline
+  authoring goes to an af session (the `agent-factory:af` skill / `af sessions
+  create`). Stay inline
   only for: opening/closing issues, triage comments, managing PRs/sessions
   (merge, kill, dispatch), single git/gh commands, memory edits, and the
   hourly self-review.
-- Use `af-preview` to spot-check, `af-send` to refine, `af-kill` to tear down
-  immediately on completion or abandonment. Don't let sessions accumulate.
+- Use `af sessions preview` to spot-check, `af sessions send-prompt` to
+  refine, `af sessions kill` to tear down immediately on completion or
+  abandonment. Don't let sessions accumulate.
 - Run `golangci-lint run --timeout=3m --fast`, `gofmt -l .`, `go build ./...`,
   and the full test suite before opening a PR — CI blocks on all four. On a
   shared dev box run the suite as `make test-container` (never bare
