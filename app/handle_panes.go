@@ -90,9 +90,7 @@ func (m *home) hidePane(p *store.OpenPane) {
 			break
 		}
 	}
-	m.store.CloseOpenPane(p)
-	delete(m.paneWindows, p.ID())
-	delete(m.lastPaneCapture, p.ID())
+	m.closePaneWindow(p)
 	m.relayout()
 	if pos >= 0 && len(m.visiblePanes) > 0 {
 		if pos >= len(m.visiblePanes) {
@@ -103,6 +101,84 @@ func (m *home) hidePane(p *store.OpenPane) {
 		m.ring.Focus(layout.RegionTree)
 	}
 	m.syncFocus()
+}
+
+// closePaneWindow removes a pane from the open list and drops its window and
+// throttle state — the one primitive every pane-closing path (hide verb,
+// tab-kill rebind, snapshot reconcile, dead-instance prune) goes through.
+// Callers relayout afterwards.
+func (m *home) closePaneWindow(p *store.OpenPane) {
+	m.store.CloseOpenPane(p)
+	delete(m.paneWindows, p.ID())
+	delete(m.lastPaneCapture, p.ID())
+}
+
+// pruneDeadPanes closes panes whose instance left the projection (killed
+// here, or removed by an external kill the snapshot reconcile mirrored)
+// rather than keep rendering a dead session's last capture. Reports whether
+// anything closed; callers relayout on true.
+func (m *home) pruneDeadPanes() bool {
+	pruned := false
+	for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
+		if !m.store.ContainsInstance(p.Instance()) {
+			m.closePaneWindow(p)
+			pruned = true
+		}
+	}
+	return pruned
+}
+
+// paneTabNames captures an instance's tab-slot names before a tab-set change,
+// for reconcilePanesForTabs. Within an instance the tab NAME is the tab's
+// identity — the daemon's own tab reconcile (ReconcileTabsFromData) keys on
+// it, and names are unique per instance.
+func paneTabNames(instance *session.Instance) []string {
+	tabs := instance.GetTabs()
+	names := make([]string, len(tabs))
+	for i, tab := range tabs {
+		names[i] = tab.Name
+	}
+	return names
+}
+
+// reconcilePanesForTabs re-binds the instance's open panes after its tab set
+// changed — the SHARED close/rebind semantics of the TUI `w` kill and the
+// daemon snapshot reconcile (#960: tabs can change with no local action, so
+// both paths must apply the same rules). oldNames is the slot→name list
+// captured BEFORE the change. A pane whose tab vanished is closed — its
+// session is gone, exactly like the TUI-kill case; a pane whose tab moved
+// slots re-binds to the tab's new index so it keeps showing the SAME tab
+// rather than a shifted neighbor. Slots beyond the old real-tab list (the
+// default-padded label slots of a young instance) are left alone —
+// ClampActiveTab keeps them in range. Reports whether any pane closed or
+// re-bound; callers relayout on true so the focus ring and the §2.6
+// pane-count fitting stay consistent.
+func (m *home) reconcilePanesForTabs(instance *session.Instance, oldNames []string) bool {
+	tabs := instance.GetTabs()
+	newIdx := make(map[string]int, len(tabs))
+	for i, tab := range tabs {
+		newIdx[tab.Name] = i
+	}
+	changed := false
+	for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
+		if p.Instance() != instance {
+			continue
+		}
+		slot := p.Tab()
+		if slot < 0 || slot >= len(oldNames) {
+			continue
+		}
+		idx, ok := newIdx[oldNames[slot]]
+		switch {
+		case !ok:
+			m.closePaneWindow(p)
+			changed = true
+		case idx != slot:
+			p.SetTab(idx)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // handleEnterPane attaches the focused pane's (instance, tab) full-screen:

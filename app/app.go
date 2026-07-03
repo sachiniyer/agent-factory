@@ -1379,16 +1379,7 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 	// Prune panes whose instance left the projection (killed here, or
 	// removed by an external kill the snapshot reconcile mirrored) rather
 	// than keep rendering a dead session's last capture.
-	pruned := false
-	for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
-		if !m.store.ContainsInstance(p.Instance()) {
-			m.store.CloseOpenPane(p)
-			delete(m.paneWindows, p.ID())
-			delete(m.lastPaneCapture, p.ID())
-			pruned = true
-		}
-	}
-	if pruned {
+	if m.pruneDeadPanes() {
 		m.relayout()
 	}
 	// All panes pause while attached (#598): no capture work may queue

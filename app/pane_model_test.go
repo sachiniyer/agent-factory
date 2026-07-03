@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/stretchr/testify/assert"
@@ -352,6 +353,113 @@ func TestPane_CloseTabRebindsPanes(t *testing.T) {
 	require.Equal(t, 2, inst.TabCount())
 	require.Equal(t, 1, h.store.NumOpenPanes(), "the killed tab's pane leaves the workspace")
 	assert.Equal(t, 1, h.store.OpenPanes()[0].Tab(), "the surviving pane re-binds to the shifted slot")
+}
+
+// TestPane_SnapshotTabRemovalRebindsPanes is the daemon-driven twin of
+// TestPane_CloseTabRebindsPanes (Greptile on PR #1099): a tab that disappears
+// from the SNAPSHOT out-of-band — another client, `af sessions tab-delete`,
+// a daemon-side removal — must apply the SAME pane close/rebind semantics as
+// the TUI `w` kill (shared reconcilePanesForTabs): the vanished tab's pane
+// closes, higher-slot panes re-bind to their shifted slot, and the focus
+// ring + layout are consistent the moment the reconcile returns. This is the
+// #960 contract: the daemon is the source of truth, tabs change with no
+// local action.
+func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
+	h := newTestHome(t)
+	inst := startedLocalInstance(t, "snaprebind")
+	inst.SetStatus(session.Running)
+	selectInstance(h, inst)
+	resizeHome(h, 200, 40)
+
+	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
+		return nextShellTabName(inst.GetTabs()), nil
+	})
+	defer restore()
+	_, _ = h.handleNewTab() // agent + shell + shell-2; opens the slot-2 pane
+	require.Equal(t, 3, inst.TabCount())
+	_, _ = h.openOrFocusPane(inst, 1) // and the slot-1 ("shell") pane, focused
+	require.Equal(t, 2, h.store.NumOpenPanes())
+
+	// The daemon reports "shell" gone: the snapshot carries agent + shell-2.
+	data := inst.ToInstanceData()
+	require.Equal(t, "shell", data.Tabs[1].Name)
+	data.Tabs = append(data.Tabs[:1], data.Tabs[2:]...)
+
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{data}))
+
+	require.Equal(t, 2, inst.TabCount(), "the snapshot's tab set is mirrored")
+	require.Equal(t, 1, h.store.NumOpenPanes(), "the vanished tab's pane closes")
+	p := h.store.OpenPanes()[0]
+	assert.Equal(t, 1, p.Tab(), "the shell-2 pane re-binds to its shifted slot")
+	assert.Equal(t, "shell-2", inst.GetTabs()[p.Tab()].Name,
+		"no pane may be left showing a shifted/stale tab")
+	assert.Equal(t, 1, h.lastLayout.PaneCount(), "the layout re-solves in the same reconcile")
+	assert.Equal(t, layout.RegionTree, h.ring.Active(),
+		"focus falls back cleanly off the closed (focused) pane")
+}
+
+// TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding: removing a HIGHER
+// slot out-of-band closes only that pane — a pane on a lower slot keeps its
+// binding untouched (no spurious rebind).
+func TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding(t *testing.T) {
+	h := newTestHome(t)
+	inst := startedLocalInstance(t, "snapkeep")
+	inst.SetStatus(session.Running)
+	selectInstance(h, inst)
+	resizeHome(h, 200, 40)
+
+	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
+		return nextShellTabName(inst.GetTabs()), nil
+	})
+	defer restore()
+	_, _ = h.handleNewTab() // agent + shell + shell-2; opens the slot-2 pane
+	require.Equal(t, 3, inst.TabCount())
+	_, _ = h.openOrFocusPane(inst, 1)
+	require.Equal(t, 2, h.store.NumOpenPanes())
+
+	// The daemon reports "shell-2" (the last slot) gone.
+	data := inst.ToInstanceData()
+	require.Equal(t, "shell-2", data.Tabs[2].Name)
+	data.Tabs = data.Tabs[:2]
+
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{data}))
+
+	require.Equal(t, 1, h.store.NumOpenPanes(), "only the vanished tab's pane closes")
+	p := h.store.OpenPanes()[0]
+	assert.Equal(t, 1, p.Tab(), "the unaffected pane keeps its slot")
+	assert.Equal(t, "shell", inst.GetTabs()[p.Tab()].Name)
+}
+
+// TestPane_SnapshotInstanceRemovalPrunesPanes is the whole-instance variant:
+// an instance that disappears from the snapshot (killed out-of-band) takes
+// its open panes with it in the SAME reconcile — ring reshaped, surviving
+// panes re-fit — rather than waiting for a later tick.
+func TestPane_SnapshotInstanceRemovalPrunesPanes(t *testing.T) {
+	h := paneTestHome(t)
+	beta := h.store.GetInstanceByTitle("beta")
+	gamma := h.store.GetInstanceByTitle("gamma")
+
+	pressKey(t, h, "s") // alpha pane
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s") // beta pane
+	require.Equal(t, 2, h.store.NumOpenPanes())
+	// Focus alpha's pane so the prune also exercises the focused-pane case.
+	h.focusRegion(layout.PaneRegion(h.store.OpenPanes()[0].ID()))
+
+	// The daemon reports alpha gone.
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{
+		beta.ToInstanceData(), gamma.ToInstanceData(),
+	}))
+
+	assert.Nil(t, h.store.GetInstanceByTitle("alpha"))
+	require.Equal(t, 1, h.store.NumOpenPanes(),
+		"the removed instance's pane is pruned in the same reconcile")
+	assert.Equal(t, []string{"beta"}, visibleTitles(h))
+	assert.Same(t, beta, h.store.OpenPanes()[0].Instance())
+	assert.Equal(t, 1, h.lastLayout.PaneCount(), "the survivor re-fits the workspace")
+	assert.Equal(t, layout.RegionTree, h.ring.Active(),
+		"focus falls back cleanly off the pruned pane")
 }
 
 // TestPane_AllPanesPausedWhileAttached extends the #598 gate to N capture

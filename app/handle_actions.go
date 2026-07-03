@@ -10,7 +10,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
-	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -389,6 +388,9 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("tab cannot be closed"))
 	}
 	tabName := tabs[idx].Name
+	// Capture the slot→name list before the drop: reconcilePanesForTabs maps
+	// the open panes' bindings across the change by tab name (#1088).
+	oldNames := paneTabNames(selected)
 
 	if err := closeTabThroughDaemon(selected.Title, m.repoID, tabName); err != nil {
 		return m, m.handleError(err)
@@ -400,11 +402,14 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		return m, m.handleError(dropErr)
 	}
 
-	// The kill shifts every higher tab index down by one, so the open panes
+	// The kill shifts every higher tab slot down by one, so the open panes
 	// bound to this instance must follow (#1088): the killed tab's pane
-	// leaves the workspace, higher-index panes re-bind to their shifted
-	// slot so they keep showing the same tab.
-	m.adjustPanesForClosedTab(selected, idx)
+	// leaves the workspace, higher-slot panes re-bind so they keep showing
+	// the same tab. Shared with the daemon-snapshot reconcile, which applies
+	// the identical semantics when a tab disappears out-of-band.
+	if m.reconcilePanesForTabs(selected, oldNames) {
+		m.relayout()
+	}
 
 	// Prefer the left/previous neighbor (idx >= 1, so idx-1 >= 0).
 	m.store.SetActiveTab(idx - 1)
@@ -412,30 +417,6 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	m.menu.SetActiveTab(m.store.ActiveTab())
 	m.sidebar.SyncCursorToActiveTab()
 	return m, m.selectionChanged()
-}
-
-// adjustPanesForClosedTab re-binds the instance's open panes after its tab at
-// idx was killed: the pane showing that tab is hidden (its session is gone),
-// panes on higher slots shift down one to keep tracking the same tab.
-func (m *home) adjustPanesForClosedTab(instance *session.Instance, idx int) {
-	changed := false
-	for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
-		if p.Instance() != instance {
-			continue
-		}
-		switch tab := p.Tab(); {
-		case tab == idx:
-			m.store.CloseOpenPane(p)
-			delete(m.paneWindows, p.ID())
-			delete(m.lastPaneCapture, p.ID())
-			changed = true
-		case tab > idx:
-			p.SetTab(tab - 1)
-		}
-	}
-	if changed {
-		m.relayout()
-	}
 }
 
 // handleTabJump jumps the selection's active tab to a 1-based tab number (the
