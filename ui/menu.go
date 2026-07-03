@@ -1,10 +1,11 @@
 package ui
 
 import (
-	"github.com/sachiniyer/agent-factory/keys"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -56,12 +57,24 @@ type Menu struct {
 	instance      *session.Instance
 	activeTab     int
 
+	// focusRegion is the focus-ring region the hints are rendered for
+	// (layout.RegionTree / RegionPaneA / RegionAutomations). The status bar is
+	// context-sensitive per RFC §2.1: hints follow focus, so the automations
+	// strip advertises its manager keys while the tree/workspace show the
+	// session actions.
+	focusRegion string
+
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
 }
 
 var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
 var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName, keys.KeyChangeProgram}
+
+// automationsMenuOptions are the status-bar hints while the automations strip
+// has focus; the expanded TaskPane renders its own detailed key line, so the
+// bar shows only the cross-region verbs.
+var automationsMenuOptions = []keys.KeyName{keys.KeyTab, keys.KeyHooks, keys.KeyHelp, keys.KeyQuit}
 
 func NewMenu() *Menu {
 	m := &Menu{
@@ -104,19 +117,12 @@ func (m *Menu) SetInstance(instance *session.Instance) {
 	m.updateOptions()
 }
 
-// SetSidebarContext updates menu options based on sidebar selection context.
-func (m *Menu) SetSidebarContext(sectionKind SidebarSectionKind, isHeader bool) {
-	if m.state == StateNewInstance {
-		return
-	}
-	// For instance items, use the normal instance-based menu
-	if sectionKind == SectionInstances && !isHeader && m.instance != nil {
-		m.state = StateDefault
-		m.updateOptions()
-		return
-	}
-	// For non-instance selections, show the empty/default menu
-	m.state = StateEmpty
+// SetFocusRegion switches the hints to the given focus-ring region (a
+// layout.Region* id). The status bar is context-sensitive per focus (#1024
+// PR 4): the automations strip gets its own option set; the tree and
+// workspace share the instance/default sets driven by SetInstance.
+func (m *Menu) SetFocusRegion(region string) {
+	m.focusRegion = region
 	m.updateOptions()
 }
 
@@ -126,8 +132,20 @@ func (m *Menu) SetActiveTab(tab int) {
 	m.updateOptions()
 }
 
-// updateOptions updates the menu options based on current state and instance
+// updateOptions updates the menu options based on current state, focus
+// region, and instance
 func (m *Menu) updateOptions() {
+	// The automations strip owns the hints while focused, regardless of the
+	// selected instance — except during naming, whose submit/change-program
+	// hints must always win (the form has the keyboard).
+	if m.focusRegion == layout.RegionAutomations && m.state != StateNewInstance {
+		m.options = automationsMenuOptions
+		m.groups = []menuGroup{
+			{start: 0, end: 1, isAction: true},
+			{start: 1, end: len(automationsMenuOptions), isAction: false},
+		}
+		return
+	}
 	switch m.state {
 	case StateEmpty:
 		m.options = defaultMenuOptions
@@ -180,17 +198,18 @@ func (m *Menu) addInstanceOptions() {
 	actionGroup = append(actionGroup, keys.KeyShiftUp)
 	actionGroup = append(actionGroup, keys.KeyShiftDown)
 
-	// Tab group: cycle, create, close, and number-jump (#930 PR 4). Remote
-	// instances block `t` (new tab) and `w` (close tab) — those handlers reject
-	// IsRemote() with an error — so only advertise the tab keys that actually
-	// work: cycle and number-jump (#988).
-	tabGroup := []keys.KeyName{keys.KeyTab, keys.KeyNewTab, keys.KeyCloseTab, keys.KeyJumpTab}
+	// Tab group: create, close, and number-jump (#930 PR 4). The tab CYCLE key
+	// is gone — Tab now cycles the focus ring (#1024 PR 4); tabs are reached
+	// via the tree and the 1-9 jump keys. Remote instances block `t` (new tab)
+	// and `w` (close tab) — those handlers reject IsRemote() with an error — so
+	// only advertise the tab keys that actually work: number-jump (#988).
+	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab, keys.KeyJumpTab}
 	if m.instance != nil && m.instance.IsRemote() {
-		tabGroup = []keys.KeyName{keys.KeyTab, keys.KeyJumpTab}
+		tabGroup = []keys.KeyName{keys.KeyJumpTab}
 	}
 
-	// System group
-	systemGroup := []keys.KeyName{keys.KeyHelp, keys.KeyQuit}
+	// System group: the focus-ring cycle plus help/quit.
+	systemGroup := []keys.KeyName{keys.KeyTab, keys.KeyHelp, keys.KeyQuit}
 
 	// Combine all groups and compute boundaries
 	mgmtEnd := len(mgmtGroup)

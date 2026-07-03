@@ -25,8 +25,8 @@ func TestAccentSitesUseConstant(t *testing.T) {
 		got  lipgloss.TerminalColor
 	}{
 		{"sidebar title banner background", mainTitle.GetBackground()},
-		{"active tab border", activeTabStyle.GetBorderTopForeground()},
-		{"window border", windowStyle.GetBorderBottomForeground()},
+		{"focused window border", windowStyle.GetBorderBottomForeground()},
+		{"automations strip title", automationsTitleStyle.GetForeground()},
 		{"menu action group", actionGroupStyle.GetForeground()},
 	}
 	for _, c := range cases {

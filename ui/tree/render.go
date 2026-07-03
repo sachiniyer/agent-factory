@@ -82,7 +82,7 @@ var deletingTitleColor = lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777
 type InstanceRenderer struct {
 	spinner *spinner.Model
 	// width is the effective content width — the caller passes the sidebar's
-	// usable column (post AdjustPreviewWidth), keeping the 0.9 layout math in
+	// usable column (its rect minus row padding), keeping the layout math in
 	// one place outside this package.
 	width int
 	// indexWidth is the number of digits to left-pad the 1-based row index to,
@@ -206,8 +206,8 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	// At very narrow widths (sidebarW ≤ 11, r.width ≤ 9) the row would still
 	// overflow sidebarW even with the bot's titleText="" fix above:
 	// titleStyle.Padding(1,1,0,1) and descStyle's matching horizontal padding
-	// each add 2 cells beyond r.width, exceeding the 10% buffer that
-	// AdjustPreviewWidth carves out below sidebarW. JoinVertical then pads the
+	// each add 2 cells beyond r.width, exceeding the buffer the sidebar
+	// carves out below sidebarW. JoinVertical then pads the
 	// shorter title row up to the wider branchLine row, so the row spills past
 	// the sidebar container. Drop horizontal padding on both styles at narrow
 	// widths so the rendered row stays inside sidebarW (#646). Keep the top

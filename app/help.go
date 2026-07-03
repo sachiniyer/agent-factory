@@ -49,22 +49,21 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("↵/o")+descStyle.Render("       - Attach to the selected session"),
 		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("    - Detach from session"),
 		"",
-		headerStyle.Render("Sidebar:"),
-		keyStyle.Render("↑/k, ↓/j")+descStyle.Render("  - Navigate sidebar items"),
-		keyStyle.Render("h/←")+descStyle.Render("       - Collapse section or jump to header"),
-		keyStyle.Render("l/→")+descStyle.Render("       - Expand section"),
-		keyStyle.Render("[, ]")+descStyle.Render("      - Jump between section headers"),
+		headerStyle.Render("Workspace:"),
+		keyStyle.Render("tab")+descStyle.Render("       - Cycle focus: tree → pane → automations"),
+		keyStyle.Render("shift+tab")+descStyle.Render(" - Cycle focus backwards"),
+		keyStyle.Render("↑/k, ↓/j")+descStyle.Render("  - Navigate the tree (instances and their tabs)"),
+		keyStyle.Render("h/←")+descStyle.Render("       - Collapse the selected instance's tabs"),
+		keyStyle.Render("l/→")+descStyle.Render("       - Expand the selected instance's tabs"),
 		"",
 		headerStyle.Render("Configuration:"),
-		keyStyle.Render("H")+descStyle.Render("         - Navigate to worktree hooks"),
+		keyStyle.Render("H")+descStyle.Render("         - Open the worktree hooks editor"),
 		"",
 		headerStyle.Render("GitHub PR:"),
 		keyStyle.Render("p")+descStyle.Render("         - Open PR in browser"),
 		keyStyle.Render("P")+descStyle.Render("         - Copy PR URL to clipboard"),
 		"",
 		headerStyle.Render("Tabs:"),
-		keyStyle.Render("tab")+descStyle.Render("       - Switch to the next tab"),
-		keyStyle.Render("shift+tab")+descStyle.Render(" - Switch to the previous tab"),
 		keyStyle.Render("1-9")+descStyle.Render("       - Jump directly to a tab by number"),
 		keyStyle.Render("t")+descStyle.Render("         - Open a new terminal tab"),
 		keyStyle.Render("w")+descStyle.Render("         - Close the current tab (the agent tab can't be closed)"),
@@ -80,11 +79,11 @@ func (h helpTypeInstanceStart) toContent() string {
 	// Remote instances block `t` (new tab) and `w` (close tab) — those actions
 	// surface a "not available for remote" error (see handleNewTab /
 	// handleCloseTab in app/handle_actions.go) — so only advertise the tab keys
-	// that actually work for the instance type. Tab cycling and 1-9 jump work
-	// for both (#988).
-	tabHelp := keyStyle.Render("tab") + descStyle.Render("   - Switch between tabs (t new tab, w close, 1-9 jump)")
+	// that actually work for the instance type. 1-9 jump works for both (#988);
+	// tabs also live in the left-rail tree since the layout cutover (#1024 PR 4).
+	tabHelp := keyStyle.Render("1-9 jump") + descStyle.Render(" - Switch between tabs (t new tab, w close; tabs live in the tree)")
 	if h.instance.IsRemote() {
-		tabHelp = keyStyle.Render("tab") + descStyle.Render("   - Switch between tabs (1-9 jump)")
+		tabHelp = keyStyle.Render("1-9 jump") + descStyle.Render(" - Switch between tabs (tabs live in the tree)")
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Instance Created"),

@@ -70,7 +70,7 @@ func TestRefreshPanesCmd_ProducesPanesRefreshedMsg(t *testing.T) {
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	tw := h.contentPane.TabbedWindow()
+	tw := h.paneA
 	cmd := refreshPanesCmd(tw, inst)
 	require.NotNil(t, cmd)
 

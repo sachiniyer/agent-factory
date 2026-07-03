@@ -1,10 +1,24 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/ui/layout"
 
 	"github.com/charmbracelet/lipgloss"
 )
+
+// TerminalTooSmall is the banner shown when the terminal is below the layout
+// engine's hard minimum (RFC §2.6): no regions are laid out, so the whole
+// window renders this centered notice instead. Exactly width×height cells.
+func TerminalTooSmall(width, height int) string {
+	msg := fmt.Sprintf("Terminal too small\nneed at least %d×%d",
+		layout.HardMinWidth, layout.HardMinHeight)
+	return layout.ClampToRect(
+		renderCenteredFallback(lipgloss.NewStyle(), msg, width, height),
+		layout.Rect{W: width, H: height})
+}
 
 // renderCenteredFallback renders fallback text horizontally and vertically
 // centered within a width×height content box, returning exactly height lines.

@@ -4,16 +4,23 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/muesli/ansi"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
 )
 
-// TestTabbedWindowSetSizeClampsNegativeDimensions verifies that SetSize never
-// propagates negative content dimensions down to the preview/terminal panes.
-// Without clamping, tiny terminal windows (height <= 5) produce negative ints
-// that later overflow to huge uint16 values inside pty.Setsize, corrupting the
-// tmux PTY size. See issue #276.
-func TestTabbedWindowSetSizeClampsNegativeDimensions(t *testing.T) {
+// setWindowSize rects the pane at origin, the test shorthand for the layout
+// engine's SetRect call.
+func setWindowSize(w *TabbedWindow, width, height int) {
+	w.SetRect(layout.Rect{W: width, H: height})
+}
+
+// TestTabbedWindowSetRectClampsNegativeDimensions verifies that SetRect never
+// propagates negative content dimensions down to the tab pane. Without
+// clamping, tiny terminal windows produce negative ints that later overflow
+// to huge uint16 values inside pty.Setsize, corrupting the tmux PTY size. See
+// issue #276.
+func TestTabbedWindowSetRectClampsNegativeDimensions(t *testing.T) {
 	cases := []struct {
 		name   string
 		width  int
@@ -28,40 +35,41 @@ func TestTabbedWindowSetSizeClampsNegativeDimensions(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newTestTabbedWindow()
-			w.SetSize(tc.width, tc.height)
+			setWindowSize(w, tc.width, tc.height)
 
 			previewW, previewH := w.GetPreviewSize()
 			assert.GreaterOrEqual(t, previewW, 0, "preview width should be clamped to >= 0")
 			assert.GreaterOrEqual(t, previewH, 0, "preview height should be clamped to >= 0")
-			assert.GreaterOrEqual(t, w.tab.width, 0, "terminal width should be clamped to >= 0")
-			assert.GreaterOrEqual(t, w.tab.height, 0, "terminal height should be clamped to >= 0")
+			assert.GreaterOrEqual(t, w.tab.width, 0, "tab width should be clamped to >= 0")
+			assert.GreaterOrEqual(t, w.tab.height, 0, "tab height should be clamped to >= 0")
 		})
 	}
 }
 
-// TestTabbedWindowSetSizeNormal sanity-checks that reasonable sizes still
+// TestTabbedWindowSetRectNormal sanity-checks that reasonable sizes still
 // produce positive content dimensions.
-func TestTabbedWindowSetSizeNormal(t *testing.T) {
+func TestTabbedWindowSetRectNormal(t *testing.T) {
 	w := newTestTabbedWindow()
-	w.SetSize(200, 100)
+	setWindowSize(w, 200, 100)
 
 	previewW, previewH := w.GetPreviewSize()
 	assert.Greater(t, previewW, 0)
 	assert.Greater(t, previewH, 0)
 }
 
-func TestTabbedWindowStringDoesNotExceedConfiguredWidth(t *testing.T) {
+// TestTabbedWindowViewIsExactlyRectSized enforces the layout.Pane contract
+// (#1024 PR 4): View() is exactly Rect-sized — every line exactly rect.W
+// printable cells, exactly rect.H lines — so the root model can tile the
+// regions with no clipping math.
+func TestTabbedWindowViewIsExactlyRectSized(t *testing.T) {
 	w := newTestTabbedWindow()
-	w.SetSize(100, 30)
+	setWindowSize(w, 100, 30)
 	w.tab.content = tabContentState{text: "content"}
 
-	rendered := w.String()
-	maxWidth := 0
-	for _, line := range strings.Split(rendered, "\n") {
-		if width := ansi.PrintableRuneWidth(line); width > maxWidth {
-			maxWidth = width
-		}
+	rendered := w.View()
+	lines := strings.Split(rendered, "\n")
+	assert.Len(t, lines, 30, "View must render exactly rect.H lines")
+	for i, line := range lines {
+		assert.Equalf(t, 100, lipgloss.Width(line), "line %d must be exactly rect.W cells", i)
 	}
-
-	assert.LessOrEqual(t, maxWidth, w.width)
 }

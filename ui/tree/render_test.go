@@ -17,10 +17,11 @@ import (
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-// effectiveWidth mirrors ui.AdjustPreviewWidth (the 0.9 sidebar buffer) so the
-// renderer tests exercise the same effective content width the sidebar passes
-// to SetWidth in production. Inlined rather than imported: these tests live in
-// package tree, and importing ui (which imports tree) would cycle.
+// effectiveWidth models a sidebar-style content buffer (narrower than the
+// allocation) so the renderer tests exercise an effective content width the
+// way the sidebar passes one to SetWidth in production. Inlined rather than
+// imported: these tests live in package tree, and importing ui (which imports
+// tree) would cycle.
 func effectiveWidth(width int) int {
 	return int(float64(width) * 0.9)
 }

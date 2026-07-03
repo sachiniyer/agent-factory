@@ -11,17 +11,20 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
 
-// SidebarSectionKind identifies the type of sidebar section.
+// SidebarSectionKind identifies the type of sidebar section. Since the layout
+// cutover (#1024 PR 4) the left rail is the instances tree only — tasks moved
+// to the automations strip and hooks behind an overlay — so Instances is the
+// sole section; the kind survives on SidebarItem so selection reads stay
+// structured.
 type SidebarSectionKind int
 
 const (
 	SectionInstances SidebarSectionKind = iota
-	SectionTasks
-	SectionHooks
 )
 
 // SidebarItem represents one visible row in the sidebar. Within the Instances
@@ -59,6 +62,12 @@ var windowIndicatorStyle = lipgloss.NewStyle().
 
 var mainTitle = lipgloss.NewStyle().
 	Background(AccentColor).
+	Foreground(lipgloss.Color("230"))
+
+// blurredTitle is the title chip with tree focus elsewhere (#1024 PR 4 focus
+// ring): same shape, receded color.
+var blurredTitle = lipgloss.NewStyle().
+	Background(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#555555"}).
 	Foreground(lipgloss.Color("230"))
 
 var autoYesStyle = lipgloss.NewStyle().
@@ -126,6 +135,7 @@ type Sidebar struct {
 	autoyes  bool
 	height   int
 	width    int
+	focused  bool
 }
 
 // NewSidebar creates a new sidebar rendering the given projection.
@@ -134,8 +144,6 @@ func NewSidebar(spin *spinner.Model, autoYes bool, proj *store.Projection) *Side
 		proj: proj,
 		sections: []SidebarSection{
 			{Kind: SectionInstances, Title: "Instances", Expanded: true},
-			{Kind: SectionTasks, Title: "Tasks", Expanded: false},
-			{Kind: SectionHooks, Title: "Hooks", Expanded: false},
 		},
 		renderer:      tree.NewInstanceRenderer(spin),
 		autoyes:       autoYes,
@@ -150,8 +158,45 @@ func NewSidebar(spin *spinner.Model, autoYes bool, proj *store.Projection) *Side
 func (s *Sidebar) SetSize(width, height int) {
 	s.width = width
 	s.height = height
-	s.renderer.SetWidth(AdjustPreviewWidth(width))
+	s.renderer.SetWidth(s.contentWidth())
 }
+
+// contentWidth is the effective row width inside the sidebar allocation: the
+// full width minus the 2-cell row padding the row styles add. This replaces
+// the pre-cutover AdjustPreviewWidth 0.9 buffer (#1024 PR 4) — the tree gets
+// its whole rect.
+func (s *Sidebar) contentWidth() int {
+	w := s.width - 2
+	if w < 0 {
+		w = 0
+	}
+	return w
+}
+
+// SetRect implements layout.Pane.
+func (s *Sidebar) SetRect(r layout.Rect) {
+	s.SetSize(r.W, r.H)
+}
+
+// Focused implements layout.Pane.
+func (s *Sidebar) Focused() bool { return s.focused }
+
+// Focus implements layout.Pane.
+func (s *Sidebar) Focus() { s.focused = true }
+
+// Blur implements layout.Pane.
+func (s *Sidebar) Blur() { s.focused = false }
+
+// HandleKey implements layout.Pane. Tree navigation stays routed through the
+// root model's global bindings in PR 4 (the keys also work when the workspace
+// pane has focus); per-pane routing arrives with the split (#1024 PR 5).
+func (s *Sidebar) HandleKey(tea.KeyMsg) (tea.Cmd, bool) { return nil, false }
+
+// HandleMouse implements layout.Pane. Mouse support is #1024 PR 6.
+func (s *Sidebar) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
+
+// View implements layout.Pane.
+func (s *Sidebar) View() string { return s.String() }
 
 // structureSig fingerprints every input the flattened row list is derived
 // from: the store version (instance list, tasks, selection binding) plus the
@@ -711,19 +756,24 @@ func (s *Sidebar) String() string {
 	// to the chip: lipgloss.Place pads but never clips, so at ultra-narrow
 	// widths the 15-cell " Agent Factory " (or the padded chip itself) would
 	// otherwise push the row past s.width — the same #646 overflow class the
-	// section headers hit.
-	titleWidth := AdjustPreviewWidth(s.width) + 2
+	// section headers hit. The chip doubles as the tree's focus-ring indicator:
+	// the accent background recedes to gray when focus is elsewhere.
+	titleWidth := s.contentWidth() + 2
 	if s.width > 0 && titleWidth > s.width {
 		titleWidth = s.width
+	}
+	titleChip := mainTitle
+	if !s.focused {
+		titleChip = blurredTitle
 	}
 	if !s.autoyes {
 		b.WriteString(lipgloss.Place(
 			titleWidth, 1, lipgloss.Left, lipgloss.Bottom,
-			mainTitle.Render(fitTitleText(" Agent Factory ", titleWidth))))
+			titleChip.Render(fitTitleText(" Agent Factory ", titleWidth))))
 	} else {
 		title := lipgloss.Place(
 			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom,
-			mainTitle.Render(fitTitleText(" Agent Factory ", titleWidth/2)))
+			titleChip.Render(fitTitleText(" Agent Factory ", titleWidth/2)))
 		autoYes := lipgloss.Place(
 			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom,
 			autoYesStyle.Render(fitTitleText(" auto-yes ", titleWidth-(titleWidth/2))))
@@ -831,7 +881,7 @@ func fitWindow(heights []int, offset, avail int) (end int, topInd, botInd bool) 
 // renderWindowIndicator renders the one-line "▲ N more" / "▼ N more" marker
 // shown in place of rows scrolled out of the window.
 func (s *Sidebar) renderWindowIndicator(arrow string, hidden int) string {
-	w := AdjustPreviewWidth(s.width)
+	w := s.contentWidth()
 	text := fmt.Sprintf("%s %d more", arrow, hidden)
 	if w > 0 && runewidth.StringWidth(text) > w {
 		// Same narrow-width handling as renderHeader: drop the "..." tail when
@@ -888,16 +938,6 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 	switch kind {
 	case SectionInstances:
 		label = fmt.Sprintf("Instances (%d)", s.proj.NumInstances())
-	case SectionTasks:
-		label = fmt.Sprintf("Tasks (%d)", len(s.proj.GetTasks()))
-		arrow = "  " // no expand arrow for leaf sections
-	case SectionHooks:
-		if s.proj.GetHookCount() > 0 {
-			label = fmt.Sprintf("Hooks (%d)", s.proj.GetHookCount())
-		} else {
-			label = "Hooks"
-		}
-		arrow = "  " // no expand arrow for leaf sections
 	}
 
 	style := sectionHeaderStyle
@@ -905,7 +945,7 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 		style = sectionHeaderSelectedStyle
 	}
 
-	w := AdjustPreviewWidth(s.width)
+	w := s.contentWidth()
 	text := arrow + label
 	if w > 0 && runewidth.StringWidth(text) > w {
 		// Drop the "..." tail when the container is too narrow to fit it,

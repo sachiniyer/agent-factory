@@ -3,9 +3,9 @@ package app
 import (
 	"fmt"
 
-	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -80,27 +80,32 @@ func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleContentPaneFocus routes key events to focused content pane and processes pending actions.
-func (m *home) handleContentPaneFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
-	if !m.contentPane.HasFocus() {
+// handleAutomationsFocus routes key events to the focused automations strip's
+// task manager and processes its pending actions. Not-consumed keys —
+// Tab/Shift-Tab outside the edit form (focus ring) and q/ctrl+c (quit) —
+// deliberately fall through to the caller.
+func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	if m.ring.Active() != layout.RegionAutomations {
 		return m, nil, false
 	}
 
-	consumed := m.contentPane.HandleKeyPress(msg)
+	_, consumed := m.automations.HandleKey(msg)
 	if !consumed {
 		return m, nil, false
 	}
 
-	// If focus was released (Esc), save state. A failed save reloads both panes
-	// to match disk and is surfaced inline so the dropped edit isn't silent.
-	if !m.contentPane.HasFocus() {
+	// If the manager released its own focus (Esc), move the ring back to the
+	// tree and save state. A failed save reloads both views to match disk and
+	// is surfaced inline so the dropped edit isn't silent.
+	if !m.automations.TaskPane().HasFocus() {
+		m.focusRegion(layout.RegionTree)
 		if err := m.saveContentPaneState(); err != nil {
 			return m, m.handleError(err), true
 		}
 	}
 
 	// Check if a new task was submitted via the inline form
-	sp := m.contentPane.TaskPane()
+	sp := m.automations.TaskPane()
 	if sp.HasPendingCreate() {
 		// Submitting the create form sets pendingCreate without releasing
 		// focus, so the "save on focus release" branch above doesn't run.
@@ -122,17 +127,35 @@ func (m *home) handleContentPaneFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 	return m, nil, true
 }
 
-// handleContentPaneEnter handles Enter/o key for focusing content panes (tasks/hooks).
-func (m *home) handleContentPaneEnter(msg tea.KeyMsg, name keys.KeyName) (tea.Model, tea.Cmd, bool) {
-	if name == keys.KeyEnter {
-		mode := m.contentPane.GetMode()
-		if mode == ui.ContentModeTasks || mode == ui.ContentModeHooks {
-			consumed := m.contentPane.HandleKeyPress(msg)
-			if consumed {
-				return m, nil, true
-			}
+// showHooksOverlay opens the post-worktree hooks editor as a modal overlay
+// (#1024 PR 4: hooks lost their persistent sidebar slot). The editor opens
+// with input focus so its key loop (n add, enter edit, D delete, esc close)
+// is live immediately.
+func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
+	m.hooksPane.SetFocus(true)
+	m.state = stateHooks
+	return m, nil
+}
+
+// handleStateHooks routes key events to the hooks editor overlay. Esc closes
+// the overlay (the pane drops its own focus) and persists any edits; q and
+// ctrl+c are not consumed by the pane and quit, exactly as they did when the
+// editor was hosted in the content pane.
+func (m *home) handleStateHooks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	consumed := m.hooksPane.HandleKeyPress(msg)
+	if !m.hooksPane.HasFocus() {
+		// The pane released focus (Esc): close the overlay and save. A failed
+		// save keeps the pane dirty (#1001) and surfaces the error.
+		m.state = stateDefault
+		if err := m.saveContentPaneState(); err != nil {
+			return m, m.handleError(err)
+		}
+		return m, nil
+	}
+	if !consumed {
+		if msg.String() == "ctrl+c" || msg.String() == "q" {
+			return m.handleQuit()
 		}
 	}
-
-	return m, nil, false
+	return m, nil
 }

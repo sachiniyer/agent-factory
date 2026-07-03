@@ -7,10 +7,9 @@ import (
 
 // TestTabbedWindowActiveTabRace is the race-detector regression for issue #684.
 //
-// Toggle()/ToggleBack() write activeTab from the bubbletea event loop while the
-// refreshPanesCmd goroutine reads it via UpdatePreview()/UpdateTerminal(). With
-// activeTab as a plain int this is a data race; the fix makes it an
-// atomic.Int32.
+// The tab-jump handlers write activeTab from the bubbletea event loop while
+// the refreshPanesCmd goroutine reads it via UpdateContent. With activeTab as
+// a plain int this is a data race; the fix makes it an atomic.Int32.
 //
 // The background goroutine here mirrors refreshPanesCmd. Passing a nil instance
 // keeps UpdateContent a cheap fallback-state write under each pane's own mutex
@@ -39,7 +38,7 @@ func TestTabbedWindowActiveTabRace(t *testing.T) {
 	}()
 
 	for i := 0; i < 100000; i++ {
-		tw.Toggle()
+		tw.JumpToTab(i % 2)
 	}
 	close(stop)
 	wg.Wait()

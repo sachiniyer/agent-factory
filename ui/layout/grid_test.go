@@ -296,3 +296,55 @@ func TestGridVisibleRegionsMatchFlags(t *testing.T) {
 	assert.Len(t, regions, 3)
 	assert.NotContains(t, regions, layout.RegionAutomations)
 }
+
+// TestGridSolveAutomationsExpandedTilesExactly sweeps the size range with the
+// automations strip expanded in place (#1024 PR 4: focusing the strip swaps
+// the compact rows for the full task manager) and asserts the regions still
+// exactly tile the terminal.
+func TestGridSolveAutomationsExpandedTilesExactly(t *testing.T) {
+	grid := layout.Grid{AutomationsExpanded: true}
+	for w := layout.HardMinWidth; w <= 220; w += 3 {
+		for h := layout.HardMinHeight; h <= 72; h++ {
+			l := grid.Solve(w, h)
+			require.False(t, l.Fallback, "unexpected fallback at %dx%d", w, h)
+
+			screen := layout.Rect{X: 0, Y: 0, W: w, H: h}
+			visible := l.VisibleRegions()
+			parts := make([]layout.Rect, 0, len(visible))
+			for id, r := range visible {
+				require.False(t, r.Empty(), "visible region %s is empty at %dx%d", id, w, h)
+				parts = append(parts, r)
+			}
+			requireTiles(t, screen, parts)
+		}
+	}
+}
+
+// TestGridSolveAutomationsExpandedAllocation pins the expanded strip's
+// contract: honored whenever the strip is visible, never compact (an editor
+// cannot run in one line), roughly half the rows above the status bar, and
+// the workspace keeps at least as much as the strip.
+func TestGridSolveAutomationsExpandedAllocation(t *testing.T) {
+	grid := layout.Grid{AutomationsExpanded: true}
+
+	l := grid.Solve(100, 30)
+	require.True(t, l.AutomationsVisible)
+	assert.True(t, l.AutomationsExpanded, "expansion honored outside minimal mode")
+	assert.False(t, l.AutomationsCompact, "expansion overrides the compact degradation")
+	assert.Equal(t, (30-layout.StatusBarRows)/2, l.Automations.H,
+		"expanded strip takes half the rows above the status bar")
+	assert.GreaterOrEqual(t, l.PaneA.H, l.Automations.H,
+		"the workspace keeps at least as many rows as the strip")
+
+	// Below the compact threshold the expansion still wins (the manager needs
+	// the rows).
+	tight := grid.Solve(70, 24)
+	require.True(t, tight.AutomationsVisible)
+	assert.True(t, tight.AutomationsExpanded)
+	assert.False(t, tight.AutomationsCompact)
+
+	// Minimal mode hides the strip entirely; the request is moot.
+	minimal := grid.Solve(59, 14)
+	assert.False(t, minimal.AutomationsVisible)
+	assert.False(t, minimal.AutomationsExpanded)
+}

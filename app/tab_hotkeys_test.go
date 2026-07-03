@@ -15,7 +15,6 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
-	"github.com/sachiniyer/agent-factory/ui"
 )
 
 // tabHotkeysPty is a minimal tmux.PtyFactory backed by a real temp file so the
@@ -118,14 +117,13 @@ func startedLocalInstance(t *testing.T, title string) *session.Instance {
 	return inst
 }
 
-// selectInstance wires the instance into the sidebar + tabbed window and puts the
-// content pane into instance mode, mirroring what selectionChanged would do.
+// selectInstance wires the instance into the sidebar + workspace pane,
+// mirroring what selectionChanged would do.
 func selectInstance(h *home, inst *session.Instance) {
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(h.store.NumInstances() - 1)
-	h.contentPane.SetMode(ui.ContentModeInstance)
 	h.store.SetSelectedInstance(inst)
-	h.contentPane.TabbedWindow().ClampActiveTab()
+	h.paneA.ClampActiveTab()
 }
 
 // nextShellTabName mirrors session.uniqueShellName ("shell", "shell-2", …) so a
@@ -183,7 +181,7 @@ func TestHandleNewTabAppendsAndSelects(t *testing.T) {
 
 	require.Equal(t, 1, *created, "new-tab must route through the daemon CreateTab RPC")
 	require.Equal(t, 3, inst.TabCount(), "new-tab must append a shell tab")
-	require.Equal(t, 2, h.contentPane.TabbedWindow().GetActiveTab(),
+	require.Equal(t, 2, h.paneA.GetActiveTab(),
 		"the freshly created tab must be selected")
 }
 
@@ -196,13 +194,13 @@ func TestHandleCloseTabSelectsNeighbor(t *testing.T) {
 	_, closed := stubTabDaemonSeams(t, inst)
 	_, _ = h.handleNewTab() // now agent + shell + shell-2, active = 2
 	require.Equal(t, 3, inst.TabCount())
-	require.Equal(t, 2, h.contentPane.TabbedWindow().GetActiveTab())
+	require.Equal(t, 2, h.paneA.GetActiveTab())
 
 	_, _ = h.handleCloseTab()
 
 	require.Equal(t, 1, *closed, "close must route through the daemon CloseTab RPC")
 	require.Equal(t, 2, inst.TabCount(), "close must remove the active tab")
-	require.Equal(t, 1, h.contentPane.TabbedWindow().GetActiveTab(),
+	require.Equal(t, 1, h.paneA.GetActiveTab(),
 		"close must select the left neighbor")
 }
 
@@ -212,7 +210,7 @@ func TestHandleCloseTabAgentTabNoOp(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "agentnoop")
 	selectInstance(h, inst)
-	h.contentPane.TabbedWindow().JumpToTab(0)
+	h.paneA.JumpToTab(0)
 	require.Equal(t, 2, inst.TabCount())
 
 	_, _ = h.handleCloseTab()
@@ -250,13 +248,13 @@ func TestHandleTabJump(t *testing.T) {
 	require.Equal(t, 3, inst.TabCount())
 
 	_, _ = h.handleTabJump(1)
-	require.Equal(t, 0, h.contentPane.TabbedWindow().GetActiveTab(), "1 jumps to tab index 0")
+	require.Equal(t, 0, h.paneA.GetActiveTab(), "1 jumps to tab index 0")
 
 	_, _ = h.handleTabJump(3)
-	require.Equal(t, 2, h.contentPane.TabbedWindow().GetActiveTab(), "3 jumps to tab index 2")
+	require.Equal(t, 2, h.paneA.GetActiveTab(), "3 jumps to tab index 2")
 
 	_, _ = h.handleTabJump(9)
-	require.Equal(t, 2, h.contentPane.TabbedWindow().GetActiveTab(),
+	require.Equal(t, 2, h.paneA.GetActiveTab(),
 		"an out-of-range number must be a no-op")
 }
 
@@ -270,6 +268,6 @@ func TestNumberKeyRoutesToTabJump(t *testing.T) {
 	_, _ = h.handleNewTab() // 3 tabs
 
 	h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
-	require.Equal(t, 1, h.contentPane.TabbedWindow().GetActiveTab(),
+	require.Equal(t, 1, h.paneA.GetActiveTab(),
 		"pressing '2' must jump to tab index 1")
 }

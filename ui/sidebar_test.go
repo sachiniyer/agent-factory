@@ -21,13 +21,13 @@ func TestSidebarInitialState(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false, store.NewProjection())
 
-	// Should have 3 sections
-	assert.Equal(t, 3, len(s.sections))
+	// The left rail is the instances tree only since the layout cutover
+	// (#1024 PR 4): tasks live in the automations strip, hooks behind an
+	// overlay.
+	assert.Equal(t, 1, len(s.sections))
 
-	// Only Instances section is expanded by default
+	// The Instances section is expanded by default
 	assert.True(t, s.sections[0].Expanded)
-	assert.False(t, s.sections[1].Expanded)
-	assert.False(t, s.sections[2].Expanded)
 
 	// Initial selection should be on Instances header
 	sel := s.GetSelection()
@@ -87,23 +87,23 @@ func TestSidebarNavigation(t *testing.T) {
 	require.NotNil(t, s.GetSelectedInstance())
 	assert.Equal(t, "inst2", s.GetSelectedInstance().Title)
 
-	// Through inst2's children, then out to the Tasks and Hooks headers.
-	s.Down()
+	// Through inst2's children to the last row; the rail ends there (no more
+	// Tasks/Hooks headers since #1024 PR 4), so further Down is a no-op.
 	s.Down()
 	s.Down()
 	sel = s.GetSelection()
-	assert.True(t, sel.IsHeader)
-	assert.Equal(t, SectionTasks, sel.Kind)
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 1, sel.ItemIndex)
+	assert.Equal(t, 1, sel.TabIndex)
 
 	s.Down()
-	sel = s.GetSelection()
-	assert.True(t, sel.IsHeader)
-	assert.Equal(t, SectionHooks, sel.Kind)
+	assert.Equal(t, sel, s.GetSelection(), "Down past the last row is a no-op")
 
-	// Move back up
+	// Move back up onto inst2's first tab row
 	s.Up()
 	sel = s.GetSelection()
-	assert.Equal(t, SectionTasks, sel.Kind)
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 0, sel.TabIndex)
 }
 
 func TestSidebarExpandCollapse(t *testing.T) {
@@ -157,19 +157,16 @@ func TestSidebarJumpSections(t *testing.T) {
 	sel := s.GetSelection()
 	assert.Equal(t, SectionInstances, sel.Kind)
 
-	// Jump to next section
+	// With Instances the only section (#1024 PR 4), the section-jump keys
+	// no-op forward and return the cursor to the header from a child row.
 	s.JumpNextSection()
-	sel = s.GetSelection()
-	assert.Equal(t, SectionTasks, sel.Kind)
+	assert.Equal(t, sel, s.GetSelection(), "no next section to jump to")
 
-	s.JumpNextSection()
-	sel = s.GetSelection()
-	assert.Equal(t, SectionHooks, sel.Kind)
-
-	// Jump back
+	s.Down() // onto the instance row
 	s.JumpPrevSection()
 	sel = s.GetSelection()
-	assert.Equal(t, SectionTasks, sel.Kind)
+	assert.True(t, sel.IsHeader)
+	assert.Equal(t, SectionInstances, sel.Kind)
 }
 
 func TestSidebarCollapseFromChild(t *testing.T) {
@@ -399,11 +396,11 @@ func TestSidebarWindowsLongInstanceListToAllocation(t *testing.T) {
 		{"top (Instances header)", func(s *Sidebar) {}, "Instances (25)"},
 		{"middle instance", func(s *Sidebar) { s.SetSelectedInstance(12) }, "win-12"},
 		{"bottom instance", func(s *Sidebar) { s.SetSelectedInstance(24) }, "win-24"},
-		{"trailing Hooks header", func(s *Sidebar) {
+		{"trailing tab row", func(s *Sidebar) {
 			s.SetSelectedInstance(24)
-			s.Down() // Tasks header
-			s.Down() // Hooks header
-		}, "Hooks"},
+			s.Down() // first tab child of win-24
+			s.Down() // last tab child — the final row of the rail
+		}, "win-24"},
 	}
 
 	for _, tc := range cases {
@@ -439,17 +436,18 @@ func TestSidebarWindowScrollsWithSelection(t *testing.T) {
 		}
 	}
 
-	// Walk down through every row (headers, instances, and the selected
+	// Walk down through every row (the header, instances, and the selected
 	// instance's tab children). The row list reshapes as the selection moves —
 	// each newly selected instance expands and the previous one folds (#1024
-	// PR 3) — so walk until the cursor reaches the last row (the Hooks header)
+	// PR 3) — so walk until the cursor stops moving (the rail's last row)
 	// rather than a fixed count.
 	check("initial")
 	for i := 0; ; i++ {
 		require.Less(t, i, 500, "down-walk must terminate")
+		before := s.selectedIdx
 		s.Down()
 		check(fmt.Sprintf("down %d", i))
-		if sel := s.GetSelection(); sel.IsHeader && sel.Kind == SectionHooks {
+		if s.selectedIdx == before {
 			break
 		}
 	}

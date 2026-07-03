@@ -66,9 +66,9 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	tw := h.contentPane.TabbedWindow()
+	tw := h.paneA
 	if terminalTab {
-		tw.Toggle() // PreviewTab -> TerminalTab
+		require.True(t, tw.JumpToTab(1), "PreviewTab -> TerminalTab")
 		require.True(t, tw.IsInTerminalTab(), "precondition: Terminal tab must be active")
 	} else {
 		require.False(t, tw.IsInTerminalTab(), "precondition: sidebar (Preview) tab must be active")

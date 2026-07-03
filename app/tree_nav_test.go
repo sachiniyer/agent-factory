@@ -9,7 +9,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/ui"
 )
 
 // pressNav drives handleDefaultKeyPress with a mapped nav key, the way
@@ -45,21 +44,20 @@ func TestTreeNav_JKWalksTabChildren(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
 	require.Same(t, a, h.sidebar.GetSelectedInstance())
-	require.Equal(t, ui.ContentModeInstance, h.contentPane.GetMode())
 
 	// j → alpha's agent tab row; j → terminal tab row. The active tab follows.
 	pressNav(t, h, "j")
 	sel := h.sidebar.GetSelection()
 	assert.True(t, sel.IsTab)
 	assert.Equal(t, 0, h.store.ActiveTab())
-	assert.True(t, h.contentPane.TabbedWindow().IsInPreviewTab())
+	assert.True(t, h.paneA.IsInPreviewTab())
 
 	pressNav(t, h, "j")
 	sel = h.sidebar.GetSelection()
 	assert.True(t, sel.IsTab)
 	assert.Equal(t, 1, sel.TabIndex)
 	assert.Equal(t, 1, h.store.ActiveTab())
-	assert.True(t, h.contentPane.TabbedWindow().IsInTerminalTab(),
+	assert.True(t, h.paneA.IsInTerminalTab(),
 		"Enter on this row would attach the terminal tab — the tab dimension routes attach")
 
 	// j past the last child lands on beta; alpha folds (collapse-by-default).
