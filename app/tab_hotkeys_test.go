@@ -98,8 +98,10 @@ func setupGitRepoForTabs(t *testing.T, workdir string) {
 }
 
 // startedLocalInstance returns a started local instance with a live mock-backed
-// agent session and (via LocalBackend.Start) a default shell tab, so handleNewTab
-// / handleCloseTab exercise the real tab-lifecycle path hermetically.
+// agent session plus one on-demand shell tab (a fresh start yields only the
+// agent tab since #1100, so the shell tab is added via AddShellTab — the 't'
+// path), so handleNewTab / handleCloseTab exercise the real tab-lifecycle path
+// hermetically.
 func startedLocalInstance(t *testing.T, title string) *session.Instance {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -114,6 +116,9 @@ func startedLocalInstance(t *testing.T, title string) *session.Instance {
 	require.NoError(t, err)
 	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
 	require.NoError(t, inst.Start(true))
+	require.Equal(t, 1, inst.TabCount(), "a fresh start must yield only the agent tab (#1100)")
+	_, err = inst.AddShellTab()
+	require.NoError(t, err)
 	return inst
 }
 
@@ -175,7 +180,7 @@ func TestHandleNewTabAppendsAndSelects(t *testing.T) {
 	inst := startedLocalInstance(t, "new")
 	selectInstance(h, inst)
 	created, _ := stubTabDaemonSeams(t, inst)
-	require.Equal(t, 2, inst.TabCount(), "start gives an agent + default shell tab")
+	require.Equal(t, 2, inst.TabCount(), "helper gives an agent tab + one on-demand shell tab")
 
 	_, _ = h.handleNewTab()
 

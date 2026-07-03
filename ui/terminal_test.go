@@ -80,9 +80,9 @@ func shellMockExec(captureContent string) cmd_test.MockCmdExec {
 }
 
 // makeShellInstance creates a started local instance with a live agent + shell
-// tab pair. The shell tab is created by LocalBackend.Start as a sibling of the
-// injected mock agent session, so its capture returns captureContent and stays
-// hermetic.
+// tab pair. The shell tab is created on demand via AddShellTab (instances no
+// longer auto-create one, #1100) as a sibling of the injected mock agent
+// session, so its capture returns captureContent and stays hermetic.
 func makeShellInstance(t *testing.T, title, captureContent string) *session.Instance {
 	t.Helper()
 	// Isolate config reads from the developer's real ~/.agent-factory (#658).
@@ -103,6 +103,8 @@ func makeShellInstance(t *testing.T, title, captureContent string) *session.Inst
 	pty := &MockPtyFactory{t: t, cmdExec: cmdExec}
 	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
 	require.NoError(t, inst.Start(true))
+	_, err = inst.AddShellTab()
+	require.NoError(t, err)
 	return inst
 }
 
@@ -382,6 +384,8 @@ func TestTabPaneShellSessionGoneFallback(t *testing.T) {
 	pty := &MockPtyFactory{t: t, cmdExec: cmdExec}
 	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
 	require.NoError(t, inst.Start(true))
+	_, err = inst.AddShellTab()
+	require.NoError(t, err)
 	defer func() { _ = inst.Kill() }()
 
 	p := NewTabPane()
@@ -464,6 +468,8 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 	pty := &MockPtyFactory{t: t, cmdExec: cmdExec}
 	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
 	require.NoError(t, inst.Start(true))
+	_, err = inst.AddShellTab()
+	require.NoError(t, err)
 	defer func() { _ = inst.Kill() }()
 
 	p := NewTabPane()
@@ -551,6 +557,8 @@ func TestTabPaneShellScrollModeAlreadyDead(t *testing.T) {
 	pty := &MockPtyFactory{t: t, cmdExec: cmdExec}
 	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
 	require.NoError(t, inst.Start(true))
+	_, err = inst.AddShellTab()
+	require.NoError(t, err)
 	defer func() { _ = inst.Kill() }()
 
 	p := NewTabPane()

@@ -805,8 +805,8 @@ var restoreTmuxSession = tmux.NewTmuxSessionFromSanitizedName
 //     LocalBackend.Start can reconnect it across a restart.
 //   - Legacy format (no data.Tabs, written before #930 PR 2): synthesize the
 //     single Agent tab from the legacy TmuxName/Program — keeping the EXACT
-//     legacy tmux name so an existing live agent session survives the upgrade —
-//     and leave the shell tab for LocalBackend.Start to create fresh.
+//     legacy tmux name so an existing live agent session survives the upgrade.
+//     No shell tab is synthesized: terminal tabs are on-demand only (#1100).
 func restoreLocalTabs(instance *Instance, data InstanceData) {
 	if len(data.Tabs) > 0 {
 		for _, td := range data.Tabs {

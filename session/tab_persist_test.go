@@ -177,9 +177,10 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 }
 
 // TestRestartSurvival_BackCompatSynthesizesTabs covers the upgrade path: an OLD
-// instances.json (written before #930 PR 2, no Tabs field) must load into
-// [agent, shell]. The agent tab keeps the EXACT legacy tmux name (so an existing
-// live agent session survives the upgrade); the shell tab is created fresh.
+// instances.json (written before #930 PR 2, no Tabs field) must load into just
+// [agent]. The agent tab keeps the EXACT legacy tmux name (so an existing live
+// agent session survives the upgrade); no shell tab is synthesized — terminal
+// tabs are on-demand only (#1100).
 func TestRestartSurvival_BackCompatSynthesizesTabs(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
@@ -190,9 +191,8 @@ func TestRestartSurvival_BackCompatSynthesizesTabs(t *testing.T) {
 
 	const repoPath = "/tmp/backcompat-repo"
 	const legacyName = "af_legacy_agent" // no repo hash form, exact legacy name
-	shellName := legacyName + shellTmuxSuffix
 
-	// Legacy record: agent reconnects (alive), shell is fresh-created (absent).
+	// Legacy record: the agent session reconnects (alive); nothing else exists.
 	restoreExec := nameKeyedExec(map[string]bool{legacyName: true})
 	restorePty := persistPtyFactory{t: t, cmdExec: restoreExec}
 	prev := restoreTmuxSession
@@ -220,12 +220,8 @@ func TestRestartSurvival_BackCompatSynthesizesTabs(t *testing.T) {
 	require.NoError(t, err)
 
 	tabs := restored.GetTabs()
-	require.Len(t, tabs, 2, "legacy record must synthesize [agent, shell]")
+	require.Len(t, tabs, 1, "legacy record must synthesize only the agent tab (#1100)")
 	assert.Equal(t, TabKindAgent, tabs[0].Kind)
 	assert.Equal(t, legacyName, tabs[0].tmux.SanitizedName(),
 		"agent tab must keep the EXACT legacy tmux name so a live agent session survives the upgrade")
-	assert.Equal(t, TabKindShell, tabs[1].Kind)
-	assert.Equal(t, shellName, tabs[1].tmux.SanitizedName(),
-		"shell tab must be created fresh with the derived __shell name")
-	assert.True(t, restored.TabAlive(1), "the synthesized shell tab must be live")
 }

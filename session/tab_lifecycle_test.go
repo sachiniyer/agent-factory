@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -47,6 +48,52 @@ func startedMockInstance(t *testing.T, agentName string, extraAlive ...string) *
 		gitWorktree: gw,
 		Tabs:        []*Tab{newAgentTab(agentTs)},
 	}
+}
+
+// TestFreshStart_OnlyAgentTab is the #1100 headline test, through the
+// production path (NewInstance -> Start(true) -> setupTabs): creating a new
+// instance must bring up ONLY the agent tab — no terminal (shell) tab is
+// auto-created and no __shell tmux session is spawned. The terminal tab stays
+// available on demand via AddShellTab (the 't' hotkey / `af sessions
+// tab-create` path).
+func TestFreshStart_OnlyAgentTab(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	workdir := t.TempDir()
+	runGit(t, workdir, "init")
+	runGit(t, workdir, "config", "--local", "user.email", "test@example.com")
+	runGit(t, workdir, "config", "--local", "user.name", "Test User")
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "f.txt"), []byte("x"), 0644))
+	runGit(t, workdir, "add", ".")
+	runGit(t, workdir, "commit", "-m", "init")
+
+	const agentName = "af_1100_fresh"
+	cmdExec := nameKeyedExec(map[string]bool{})
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+
+	inst, err := NewInstance(InstanceOptions{Title: "fresh-1100", Path: workdir, Program: "bash"})
+	require.NoError(t, err)
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "bash", pty, cmdExec))
+	require.NoError(t, inst.Start(true))
+	defer func() { _ = inst.Kill() }()
+
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 1, "a fresh instance must come up with only the agent tab (#1100)")
+	assert.Equal(t, TabKindAgent, tabs[0].Kind)
+
+	shellTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		agentName+shellTmuxSuffix, defaultShell(), pty, cmdExec)
+	assert.False(t, shellTs.DoesSessionExist(),
+		"no __shell tmux session may be spawned on a fresh start (#1100)")
+
+	// The terminal tab is still available on demand.
+	tab, err := inst.AddShellTab()
+	require.NoError(t, err)
+	assert.Equal(t, TabKindShell, tab.Kind)
+	assert.Equal(t, 2, inst.TabCount())
+	assert.True(t, inst.TabAlive(1), "the on-demand shell tab must be live")
 }
 
 // TestAddShellTab_AppendsAndNamesUniquely verifies a human-created shell tab is
