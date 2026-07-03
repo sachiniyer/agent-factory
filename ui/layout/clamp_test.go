@@ -104,7 +104,7 @@ func TestClampToRectEmptyRect(t *testing.T) {
 // contract together: content clamped to a solved region renders exactly
 // that region's size.
 func TestClampToRectMatchesGridRegions(t *testing.T) {
-	l := layout.Grid{Split: true}.Solve(140, 40)
+	l := layout.Grid{Panes: 2}.Solve(140, 40)
 	require.False(t, l.Fallback)
 	for id, r := range l.VisibleRegions() {
 		out := layout.ClampToRect("some\ncontent\nfor "+id, r)

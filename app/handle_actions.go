@@ -10,7 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
-	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -55,12 +55,12 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		// so its form is never clamped into the narrow rail.
 		return m.showTasksOverlay()
 
-	// Split view (#1024 PR 5): s opens the selection in pane B / swaps the
-	// panes (focus-dependent); x closes the split from pane B.
-	case keys.KeySplit:
-		return m.handleSplit()
-	case keys.KeyCloseSplit:
-		return m.handleCloseSplit()
+	// N-pane verbs (#1088): s opens the selected tab as a pane (or focuses
+	// its pane); x hides the focused pane back to the background.
+	case keys.KeyOpenPane:
+		return m.handleOpenPane()
+	case keys.KeyHidePane:
+		return m.handleHidePane()
 
 	case keys.KeySearch:
 		return m.showSearchOverlay()
@@ -75,34 +75,32 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyCopyPR:
 		return m.handleCopyPR()
 
-	// Scrolling (the focused workspace pane — pane B scrolls its own pinned
-	// view, #1024 PR 5)
+	// Scrolling (each pane scrolls its own view, #1088)
 	case keys.KeyShiftUp:
-		pane, _ := m.focusedContentPane()
-		pane.ScrollUp()
+		if pane, _ := m.focusedContentPane(); pane != nil {
+			pane.ScrollUp()
+		}
 		return m, m.selectionChanged()
 	case keys.KeyShiftDown:
-		pane, _ := m.focusedContentPane()
-		pane.ScrollDown()
+		if pane, _ := m.focusedContentPane(); pane != nil {
+			pane.ScrollDown()
+		}
 		return m, m.selectionChanged()
 
-	// Focus ring (#1024 PR 4): Tab cycles tree → pane A → automations. Tabs
-	// themselves are reached via the tree and the 1-9 jump keys.
+	// Focus ring (#1088): Tab cycles tree → open panes (in order) →
+	// automations. Tabs themselves are reached via the tree and the 1-9
+	// jump keys.
 	case keys.KeyTab:
 		return m, m.cycleFocus(false)
 	case keys.KeyShiftTab:
 		return m, m.cycleFocus(true)
 
-	// Tab lifecycle. `w` doubles as the split-close verb while the pinned
-	// pane has focus (RFC §2.3: "x/w on pane B closes the split") — there it
-	// must never fall through to closing a tab of the tree selection.
+	// Tab lifecycle (#930 PR 4): `t` creates, `w` kills the selection's
+	// active tab. Hiding a PANE is `x` — `w` keeps its kill meaning
+	// everywhere (§2.3).
 	case keys.KeyNewTab:
 		return m.handleNewTab()
 	case keys.KeyCloseTab:
-		if m.ring.Active() == layout.RegionPaneB {
-			m.closeSplit()
-			return m, m.selectionChanged()
-		}
 		return m.handleCloseTab()
 
 	// Instance actions
@@ -246,16 +244,15 @@ func killConfirmationWarning(wt string) string {
 }
 
 // handleEnter handles the enter/open key action. Enter attaches the FOCUSED
-// pane's (instance, tab) full-screen (#1024 PR 5): with the pinned split pane
-// focused it attaches pane B's binding; everywhere else the tree selection —
-// pane A's binding — as before. The attach path itself is untouched: the same
+// pane's (instance, tab) full-screen (#1088): with a workspace pane focused
+// it attaches that pane's binding; everywhere else the tree selection, as
+// before. The attach path itself is untouched: the same
 // attachOverlayCallbackFn seam, `attached` gate, and SIGKILL-bounded detach.
 func (m *home) handleEnter() (tea.Model, tea.Cmd) {
-	if m.ring.Active() == layout.RegionPaneB && m.lastLayout.SplitActive {
-		return m.handleEnterPaneB()
+	if p := m.focusedOpenPane(); p != nil {
+		return m.handleEnterPane(p)
 	}
 	sel := m.sidebar.GetSelection()
-	tw := m.paneA
 
 	// Toggle expandable section headers (only Instances has children)
 	if sel.IsHeader && sel.Kind == ui.SectionInstances {
@@ -285,7 +282,7 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		// can drift the selection onto a different instance in the meantime; the
 		// callbacks must attach to this captured instance, not re-read the live
 		// selection (#716).
-		if tw.IsInTerminalTab() {
+		if activeTab := m.store.ActiveTab(); activeTab != 0 {
 			// The terminal tab attaches a local tmux session for local
 			// instances, but a remote instance's terminal_cmd PTY for remote
 			// ones (#843) — and that remote PTY hands the terminal back via
@@ -299,10 +296,9 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 			// instance (#716): a background refresh could otherwise drift the
 			// selection — or the user could change tabs while the help overlay is
 			// open — before the deferred attach callback runs.
-			activeTab := tw.GetActiveTab()
 			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 				return attachOverlayCallbackFn(m, "handleEnter-terminal", "", selected.IsRemote(), func() (chan struct{}, error) {
-					return tw.AttachTerminalForInstance(selected, activeTab)
+					return ui.AttachTerminalTab(selected, activeTab)
 				})
 			})
 		}
@@ -351,11 +347,15 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 		return m, m.handleError(attachErr)
 	}
 
-	tw := m.paneA
-	tw.SelectLastTab()
-	m.menu.SetActiveTab(tw.GetActiveTab())
+	// Select the fresh tab in the tree and open it as a pane (#1088): the
+	// pre-N-pane behavior showed the new tab in the workspace immediately,
+	// and the issue's canonical flow — agent pane + terminal pane side by
+	// side for one instance — is exactly `s` then `t`.
+	newIdx := len(tree.TabLabels(selected)) - 1
+	m.store.SetActiveTab(newIdx)
+	m.menu.SetActiveTab(newIdx)
 	m.sidebar.SyncCursorToActiveTab()
-	return m, m.selectionChanged()
+	return m.openOrFocusPane(selected, newIdx)
 }
 
 // handleCloseTab closes the active tab of the selected instance and selects the
@@ -376,8 +376,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
 	}
-	tw := m.paneA
-	idx := tw.GetActiveTab()
+	idx := m.store.ActiveTab()
 	if idx <= 0 {
 		return m, m.handleError(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
 	}
@@ -389,6 +388,9 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("tab cannot be closed"))
 	}
 	tabName := tabs[idx].Name
+	// Capture the slot→name list before the drop: reconcilePanesForTabs maps
+	// the open panes' bindings across the change by tab name (#1088).
+	oldNames := paneTabNames(selected)
 
 	if err := closeTabThroughDaemon(selected.Title, m.repoID, tabName); err != nil {
 		return m, m.handleError(err)
@@ -400,25 +402,36 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		return m, m.handleError(dropErr)
 	}
 
-	// Prefer the left/previous neighbor; SelectTab clamps so this is always in
-	// range (idx >= 1, so idx-1 >= 0).
-	tw.SelectTab(idx - 1)
-	m.menu.SetActiveTab(tw.GetActiveTab())
+	// The kill shifts every higher tab slot down by one, so the open panes
+	// bound to this instance must follow (#1088): the killed tab's pane
+	// leaves the workspace, higher-slot panes re-bind so they keep showing
+	// the same tab. Shared with the daemon-snapshot reconcile, which applies
+	// the identical semantics when a tab disappears out-of-band.
+	if m.reconcilePanesForTabs(selected, oldNames) {
+		m.relayout()
+	}
+
+	// Prefer the left/previous neighbor (idx >= 1, so idx-1 >= 0).
+	m.store.SetActiveTab(idx - 1)
+	m.clampSelectionTab()
+	m.menu.SetActiveTab(m.store.ActiveTab())
 	m.sidebar.SyncCursorToActiveTab()
 	return m, m.selectionChanged()
 }
 
-// handleTabJump jumps the tabbed window to a 1-based tab number (the 1-9 number
-// keys). Out-of-range numbers are a no-op (#930 PR 4). When the sidebar cursor
-// rests on one of the selected instance's tab rows, it follows the jump so the
-// tree and the tab bar can't disagree; with the cursor on the instance row the
-// pre-tree behavior is preserved exactly (only the tree's "*" marker moves).
+// handleTabJump jumps the selection's active tab to a 1-based tab number (the
+// 1-9 number keys). Out-of-range numbers are a no-op (#930 PR 4). When the
+// sidebar cursor rests on one of the selected instance's tab rows, it follows
+// the jump so the tree can't disagree; the jumped-to tab is what `s` opens
+// and Enter attaches (#1088 — panes are explicit bindings, so the jump moves
+// the selection, not any open pane).
 func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
-	tw := m.paneA
-	if !tw.JumpToTab(oneBased - 1) {
+	idx := oneBased - 1
+	if idx < 0 || idx >= len(tree.TabLabels(m.store.GetSelectedInstance())) {
 		return m, nil
 	}
-	m.menu.SetActiveTab(tw.GetActiveTab())
+	m.store.SetActiveTab(idx)
+	m.menu.SetActiveTab(idx)
 	m.sidebar.SyncCursorToActiveTab()
 	return m, m.selectionChanged()
 }

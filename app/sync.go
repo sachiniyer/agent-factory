@@ -344,6 +344,12 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		m.store.RemoveInstanceByTitle(inst.Title)
 		changed = true
 	}
+	// A removed instance takes its open panes with it (#1088): prune them
+	// here — not just on the next selectionChanged tick — so the focus ring
+	// and pane layout are consistent the moment the reconcile returns.
+	if len(toRemove) > 0 && m.pruneDeadPanes() {
+		m.relayout()
+	}
 
 	// Re-pin the selection to the same logical instance (by title) if it
 	// survived the reconcile. Re-resolving by title correctly re-pins across a
@@ -385,11 +391,23 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
 		return false
 	}
+	// ReplaceInstance re-points any open panes at the rebuilt instance, but
+	// the recreated session's tab SET may differ from the corpse's — capture
+	// the outgoing slot→name list so the shared pane reconcile can close
+	// panes whose tab didn't come back and re-bind ones whose slot moved
+	// (#1088).
+	var oldNames []string
+	if old := m.store.GetInstanceByTitle(d.Title); old != nil {
+		oldNames = paneTabNames(old)
+	}
 	if !m.store.ReplaceInstanceByTitle(d.Title, inst) {
 		// The row vanished between read and swap; add it fresh.
 		m.store.AddInstance(inst)()
 	}
 	inst.SetAutoYes(m.autoYes)
+	if m.reconcilePanesForTabs(inst, oldNames) {
+		m.relayout()
+	}
 	return true
 }
 
@@ -410,11 +428,21 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// Remote instances' tabs come from hook config (terminal_cmd), not the
 	// snapshot, so the backend owns them — skip the tab reconcile.
 	if !inst.IsRemote() {
-		if tabsChanged, err := inst.ReconcileTabsFromData(d.Tabs); err != nil {
+		// Capture the slot→name list before the tab reconcile mutates it: an
+		// out-of-band tab removal (another client, `af sessions tab-delete`,
+		// daemon-side) must apply the SAME pane close/rebind semantics as the
+		// TUI `w` kill, or an open pane is left showing a shifted/stale tab
+		// (#1088 + #960 — the daemon is the source of truth for tabs).
+		oldNames := paneTabNames(inst)
+		tabsChanged, err := inst.ReconcileTabsFromData(d.Tabs)
+		if err != nil {
 			log.WarningLog.Printf("failed to reconcile tabs for %q from snapshot: %v", d.Title, err)
-			changed = changed || tabsChanged
-		} else if tabsChanged {
+		}
+		if tabsChanged {
 			changed = true
+			if m.reconcilePanesForTabs(inst, oldNames) {
+				m.relayout()
+			}
 		}
 	}
 	// PR info mirrors the daemon's recorded value. This runs on the event loop,

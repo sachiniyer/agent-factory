@@ -116,11 +116,11 @@ func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
 	}
 }
 
-// TestMenuSplitHintsFollowFocusAndSplitState pins the #1024 PR 5 hint model:
-// tree focus (or pane A with no split) advertises "s split"; pane A over an
-// open split advertises the swap meaning; the focused pane B gets its own
-// option set with swap + close-split.
-func TestMenuSplitHintsFollowFocusAndSplitState(t *testing.T) {
+// TestMenuPaneHintsFollowFocus pins the #1088 hint model: tree focus
+// advertises the open-pane verb with the instance actions; a focused
+// workspace pane gets its own option set — attach/scroll on its binding,
+// open-pane, hide-pane.
+func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	local := &session.Instance{Status: session.Ready}
 	m := NewMenu()
 	m.SetInstance(local)
@@ -135,22 +135,18 @@ func TestMenuSplitHintsFollowFocusAndSplitState(t *testing.T) {
 	}
 
 	m.SetFocusRegion(layout.RegionTree)
-	if !has(keys.KeySplit) || has(keys.KeySwapPanes) {
-		t.Errorf("tree focus must advertise the split verb, not swap; options=%v", m.options)
+	if !has(keys.KeyOpenPane) || has(keys.KeyHidePane) {
+		t.Errorf("tree focus must advertise open-pane, not hide; options=%v", m.options)
+	}
+	if !has(keys.KeyNewTab) || !has(keys.KeyKill) {
+		t.Errorf("tree focus keeps the instance actions; options=%v", m.options)
 	}
 
-	m.SetFocusRegion(layout.RegionPaneA)
-	m.SetSplitOpen(false)
-	if !has(keys.KeySplit) || has(keys.KeySwapPanes) {
-		t.Errorf("pane A with no split must advertise split; options=%v", m.options)
+	m.SetFocusRegion(layout.PaneRegion(7))
+	if !has(keys.KeyOpenPane) || !has(keys.KeyHidePane) || !has(keys.KeyEnter) {
+		t.Errorf("a focused pane must advertise open-pane + hide-pane + attach; options=%v", m.options)
 	}
-	m.SetSplitOpen(true)
-	if !has(keys.KeySwapPanes) || has(keys.KeySplit) {
-		t.Errorf("pane A over an open split must advertise swap; options=%v", m.options)
-	}
-
-	m.SetFocusRegion(layout.RegionPaneB)
-	if !has(keys.KeySwapPanes) || !has(keys.KeyCloseSplit) || !has(keys.KeyEnter) {
-		t.Errorf("focused pane B must advertise swap + close split + attach; options=%v", m.options)
+	if has(keys.KeyNewTab) {
+		t.Errorf("pane focus swaps to the pane option set; options=%v", m.options)
 	}
 }

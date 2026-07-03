@@ -23,6 +23,8 @@ func TestSelectionChanged_DispatchesPaneRefreshOffEventLoop(t *testing.T) {
 	inst := instanceWithFakeBackend(t, "a")
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
+	resizeHome(h, 120, 40)
+	openTestPane(t, h, inst, 0)
 
 	start := time.Now()
 	cmd := h.selectionChanged()
@@ -48,6 +50,8 @@ func TestRepaintAfterDetachMsg_KicksOffRefresh(t *testing.T) {
 	inst := instanceWithFakeBackend(t, "a")
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
+	resizeHome(h, 120, 40)
+	openTestPane(t, h, inst, 0)
 
 	start := time.Now()
 	_, cmd := h.Update(repaintAfterDetachMsg{})
@@ -70,7 +74,9 @@ func TestRefreshPanesCmd_ProducesPanesRefreshedMsg(t *testing.T) {
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	tw := h.paneA
+	resizeHome(h, 120, 40)
+	p := openTestPane(t, h, inst, 0)
+	tw := h.paneWindows[p.ID()]
 	cmd := refreshPanesCmd(tw, inst)
 	require.NotNil(t, cmd)
 

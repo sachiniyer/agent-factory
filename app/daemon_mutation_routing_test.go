@@ -76,7 +76,7 @@ func TestHandleCloseTab_AgentTabSkipsDaemon(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "agentskip")
 	selectInstance(h, inst)
-	h.paneA.JumpToTab(0)
+	h.store.SetActiveTab(0)
 
 	called := false
 	restore := SetTabCloserForTest(func(title, repoID, tabName string) error {

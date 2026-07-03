@@ -39,10 +39,14 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		{80, 24},
 	} {
 		h := newTestHome(t)
-		addTreeInstance(t, h, "alpha")
+		alpha := addTreeInstance(t, h, "alpha")
 		h.sidebar.SetSelectedInstance(0)
 		_ = h.selectionChanged()
 		resizeHome(h, tc.w, tc.h)
+		openTestPane(t, h, alpha, 0)
+		// The hint assertions below are the tree/instance set; opening the
+		// pane moved focus to it, so hand focus back to the tree.
+		h.focusRegion(layout.RegionTree)
 
 		view := h.View()
 		requireViewSized(t, view, tc.w, tc.h)
@@ -58,8 +62,8 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 			"%dx%d: rail rule spans the full rail width", tc.w, tc.h)
 		assert.Equal(t, h.lastLayout.Tree.W, h.lastLayout.Automations.W,
 			"%dx%d: automations render at rail width", tc.w, tc.h)
-		assert.Equal(t, tc.h-layout.StatusBarRows, h.lastLayout.PaneA.H,
-			"%dx%d: pane A takes the full height above the status bar", tc.w, tc.h)
+		assert.Equal(t, tc.h-layout.StatusBarRows, h.lastLayout.Panes[0].H,
+			"%dx%d: the pane takes the full height above the status bar", tc.w, tc.h)
 		// The hint row prioritizes under width pressure (low-value hints are
 		// dropped first), so help/quit must survive at BOTH sizes.
 		assert.Contains(t, view, "n new", "%dx%d: status-bar hints", tc.w, tc.h)
@@ -75,13 +79,18 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 // hints follow.
 func TestLayoutCutover_FocusRingCycles(t *testing.T) {
 	h := newTestHome(t)
+	alpha := addTreeInstance(t, h, "alpha")
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
 	resizeHome(h, 100, 30)
+	p := openTestPane(t, h, alpha, 0)
+	h.focusRegion(layout.RegionTree)
 	require.Equal(t, layout.RegionTree, h.ring.Active(), "focus starts on the tree")
 	require.True(t, h.sidebar.Focused())
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
-	assert.Equal(t, layout.RegionPaneA, h.ring.Active())
-	assert.True(t, h.paneA.Focused())
+	assert.Equal(t, layout.PaneRegion(p.ID()), h.ring.Active())
+	assert.True(t, h.paneWindows[p.ID()].Focused())
 	assert.False(t, h.sidebar.Focused())
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
@@ -150,6 +159,12 @@ func TestLayoutCutover_EnterOpensTasksOverlay(t *testing.T) {
 // and the ring skips it; below 40×10 the whole window is the fallback banner.
 func TestLayoutCutover_DegradationLadder(t *testing.T) {
 	h := newTestHome(t)
+	alpha := addTreeInstance(t, h, "alpha")
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	resizeHome(h, 100, 30)
+	p := openTestPane(t, h, alpha, 0)
+	h.focusRegion(layout.RegionTree)
 
 	resizeHome(h, 79, 24)
 	require.True(t, h.lastLayout.AutomationsVisible)
@@ -159,9 +174,9 @@ func TestLayoutCutover_DegradationLadder(t *testing.T) {
 	resizeHome(h, 59, 14)
 	assert.False(t, h.lastLayout.AutomationsVisible, "minimal mode drops the strip")
 	requireViewSized(t, h.View(), 59, 14)
-	// The ring must skip the hidden strip: tree → paneA → tree.
+	// The ring must skip the hidden strip: tree → pane → tree.
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
-	assert.Equal(t, layout.RegionPaneA, h.ring.Active())
+	assert.Equal(t, layout.PaneRegion(p.ID()), h.ring.Active())
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
 	assert.Equal(t, layout.RegionTree, h.ring.Active(),
 		"the hidden automations strip is skipped by the focus ring")
@@ -235,9 +250,10 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 
 	require.Equal(t, layout.RegionTree, activeRegion(), "focus starts on the tree")
 
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
-	eh.waitUntil(e2eAsyncTimeout, "Tab moves focus to pane A", func() bool {
-		return activeRegion() == layout.RegionPaneA
+	// s opens the selection as a pane and focuses it.
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	eh.waitUntil(e2eAsyncTimeout, "s opens a focused pane", func() bool {
+		return layout.IsPaneRegion(activeRegion())
 	})
 
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
@@ -305,10 +321,12 @@ func TestLayoutCutover_DigitJumpGatedByFocusRegion(t *testing.T) {
 	require.False(t, h.automations.TaskPane().IsEditing())
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
 	require.Equal(t, 1, h.store.ActiveTab(),
-		"a digit with the automations strip focused must not retarget the content pane")
+		"a digit with the automations strip focused must not retarget the selection")
 
-	// Pane A focused: digit jumps again.
-	h.focusRegion(layout.RegionPaneA)
+	// A workspace pane focused: digit jumps again.
+	alpha := h.store.GetSelectedInstance()
+	openTestPane(t, h, alpha, 0)
+	require.True(t, layout.IsPaneRegion(h.ring.Active()))
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
 	require.Equal(t, 0, h.store.ActiveTab(), "digit with pane focus jumps tabs")
 }

@@ -49,10 +49,10 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("    - Detach from session"),
 		"",
 		headerStyle.Render("Workspace:"),
-		keyStyle.Render("tab")+descStyle.Render("       - Cycle focus: tree → pane A → pane B → automations"),
+		keyStyle.Render("tab")+descStyle.Render("       - Cycle focus: tree → open panes → automations"),
 		keyStyle.Render("shift+tab")+descStyle.Render(" - Cycle focus backwards"),
-		keyStyle.Render("s")+descStyle.Render("         - Split: open the selection in pane B / swap the panes"),
-		keyStyle.Render("x")+descStyle.Render("         - Close the split (with pane B focused; w works too)"),
+		keyStyle.Render("s")+descStyle.Render("         - Open the selected tab as a pane (or focus its pane)"),
+		keyStyle.Render("x")+descStyle.Render("         - Hide the focused pane (the tab keeps running)"),
 		keyStyle.Render("↑/k, ↓/j")+descStyle.Render("  - Navigate the tree (instances and their tabs)"),
 		keyStyle.Render("h/←")+descStyle.Render("       - Collapse the selected instance's tabs"),
 		keyStyle.Render("l/→")+descStyle.Render("       - Expand the selected instance's tabs"),
@@ -65,7 +65,7 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("P")+descStyle.Render("         - Copy PR URL to clipboard"),
 		"",
 		headerStyle.Render("Tabs:"),
-		keyStyle.Render("1-9")+descStyle.Render("       - Jump directly to a tab by number"),
+		keyStyle.Render("1-9")+descStyle.Render("       - Select a tab by number (s opens it, enter attaches)"),
 		keyStyle.Render("t")+descStyle.Render("         - Open a new terminal tab"),
 		keyStyle.Render("w")+descStyle.Render("         - Close the current tab (the agent tab can't be closed)"),
 		keyStyle.Render("shift-↓/↑")+descStyle.Render(" - Scroll in the current tab"),
@@ -82,9 +82,9 @@ func (h helpTypeInstanceStart) toContent() string {
 	// handleCloseTab in app/handle_actions.go) — so only advertise the tab keys
 	// that actually work for the instance type. 1-9 jump works for both (#988);
 	// tabs also live in the left-rail tree since the layout cutover (#1024 PR 4).
-	tabHelp := keyStyle.Render("1-9 jump") + descStyle.Render(" - Switch between tabs (t new tab, w close; tabs live in the tree)")
+	tabHelp := keyStyle.Render("1-9 jump") + descStyle.Render(" - Select a tab (s opens it; t new tab, w close; tabs live in the tree)")
 	if h.instance.IsRemote() {
-		tabHelp = keyStyle.Render("1-9 jump") + descStyle.Render(" - Switch between tabs (tabs live in the tree)")
+		tabHelp = keyStyle.Render("1-9 jump") + descStyle.Render(" - Select a tab (s opens it; tabs live in the tree)")
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Instance Created"),

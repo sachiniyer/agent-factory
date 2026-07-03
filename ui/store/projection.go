@@ -61,22 +61,19 @@ type Projection struct {
 	// atomic to avoid a data race (#684).
 	activeTab atomic.Int32
 
-	// paneB is the split view's PINNED binding (#1024 PR 5): the (instance,
-	// tab) pane B renders. Unlike selected — which the tree cursor retargets
-	// live — this binding only changes on explicit split verbs (open, swap,
-	// retarget, close), which is what makes pane B a stable second view while
-	// the tree drives pane A (RFC §2.3). nil means no split is open. The
-	// binding survives the terminal shrinking below the split threshold (the
-	// grid stops honoring the split but the binding is retained and restored
-	// on grow, RFC §2.6) and survives attach/detach trivially — nothing in the
-	// attach path touches it.
-	paneB *session.Instance
+	// openPanes is the ordered list of open workspace panes (#1088, RFC
+	// §2.3): each pane is bound to one (instance, tab) and the list order is
+	// the left-to-right workspace order. Panes only change on explicit pane
+	// verbs (open, hide) — the tree cursor never retargets them — and the
+	// bindings survive the terminal shrinking below what fits (the layout
+	// shows only the most-recently-focused panes; the rest stay in this list
+	// and restore on grow, §2.6) and survive attach/detach trivially.
+	openPanes []*OpenPane
 
-	// paneBTab is pane B's pinned 0-based tab index. An atomic for the same
-	// reason as activeTab: the background capture goroutine for pane B reads
-	// it via UpdateContent while the event loop writes it on split verbs and
-	// clamps (#684 class).
-	paneBTab atomic.Int32
+	// paneIDSeq allocates stable OpenPane ids; paneFocusSeq stamps focus
+	// recency for the least-recently-focused auto-hide ordering.
+	paneIDSeq    int
+	paneFocusSeq uint64
 
 	// version counts mutations. Views cache structures derived from the
 	// projection (the sidebar's flattened row list) keyed on this value and
@@ -286,11 +283,13 @@ func (p *Projection) ReplaceInstance(target, replacement *session.Instance) bool
 			// wasSelected behavior.
 			p.selected = replacement
 		}
-		if p.paneB == target {
-			// Pane B's pinned binding follows a #765 same-title swap the same
-			// way, so an open split keeps showing the live session instead of
-			// an orphaned pointer's last capture (#1024 PR 5).
-			p.paneB = replacement
+		for _, pane := range p.openPanes {
+			if pane.instance == target {
+				// Open-pane bindings follow a #765 same-title swap the same
+				// way, so open panes keep showing the live session instead of
+				// an orphaned pointer's last capture (#1024 PR 5/#1088).
+				pane.instance = replacement
+			}
 		}
 		p.bump()
 		return true
@@ -472,58 +471,141 @@ func (p *Projection) SelectionSeq() uint64 {
 	return p.selectionSeq
 }
 
-// -- Pane B (split view, #1024 PR 5) --
+// -- Open panes (#1088, replaces the PR-5 pane B) --
 
-// SplitOpen reports whether a split is requested: pane B holds a pinned
-// binding. Whether the split is currently HONORED (the terminal is wide
-// enough) is the layout's call — the binding outlives narrow spells so the
-// split restores on grow (RFC §2.6).
-func (p *Projection) SplitOpen() bool {
-	return p.paneB != nil
+// OpenPane is one open workspace pane: a stable id plus the (instance, tab)
+// binding the pane renders. All fields are event-loop owned except tab,
+// which the pane's background capture goroutine reads via the window's
+// UpdateContent while the event loop writes it (#684 class).
+type OpenPane struct {
+	id       int
+	instance *session.Instance
+	tab      atomic.Int32
+	// lastFocus is the focus-recency stamp: higher means focused more
+	// recently. The pane-count fitting hides the LOWEST-stamped panes first
+	// when fewer panes fit than are open (§2.6).
+	lastFocus uint64
 }
 
-// PaneBInstance returns the instance pane B is pinned to, or nil when no
-// split is open. Like selected, the pointer may briefly dangle after its
-// instance is removed from the projection; the root model closes the split on
-// its next tick when ContainsInstance fails.
-func (p *Projection) PaneBInstance() *session.Instance {
-	return p.paneB
+// ID returns the pane's stable id, used as its focus-ring region id.
+func (o *OpenPane) ID() int { return o.id }
+
+// Instance returns the instance the pane is bound to. Like the display
+// selection, the pointer may briefly dangle after its instance is removed
+// from the projection; the root model closes such panes on its next tick
+// when ContainsInstance fails.
+func (o *OpenPane) Instance() *session.Instance { return o.instance }
+
+// Tab returns the pane's 0-based tab index. Safe from the background
+// capture goroutine (atomic).
+func (o *OpenPane) Tab() int { return int(o.tab.Load()) }
+
+// SetTab stores the pane's tab index. Range clamping against the bound
+// instance's tab count stays with the TabbedWindow, mirroring SetActiveTab.
+func (o *OpenPane) SetTab(idx int) { o.tab.Store(int32(idx)) }
+
+// OpenPanes returns the open panes in workspace (left-to-right) order. The
+// returned slice shares the projection's backing array — read it inline on
+// the event loop only, exactly like GetInstances.
+func (p *Projection) OpenPanes() []*OpenPane {
+	return p.openPanes
 }
 
-// SetPaneB pins pane B to the given (instance, tab) — opening the split, or
-// retargeting/swapping an open one. instance must be non-nil (closing goes
-// through ClearPaneB).
-func (p *Projection) SetPaneB(instance *session.Instance, tab int) {
+// NumOpenPanes returns how many panes are open.
+func (p *Projection) NumOpenPanes() int {
+	return len(p.openPanes)
+}
+
+// FindOpenPane returns the open pane bound to (instance, tab), or nil. This
+// is what makes `s` on an already-open tab a focus move instead of a
+// duplicate pane (§2.3).
+func (p *Projection) FindOpenPane(instance *session.Instance, tab int) *OpenPane {
+	for _, pane := range p.openPanes {
+		if pane.instance == instance && pane.Tab() == tab {
+			return pane
+		}
+	}
+	return nil
+}
+
+// AddOpenPane opens a new pane bound to (instance, tab), appended to the
+// right of the existing panes (§2.3), and stamps it most recently focused.
+// instance must be non-nil; callers dedupe via FindOpenPane first.
+func (p *Projection) AddOpenPane(instance *session.Instance, tab int) *OpenPane {
 	if instance == nil {
+		return nil
+	}
+	p.paneIDSeq++
+	pane := &OpenPane{id: p.paneIDSeq, instance: instance}
+	pane.tab.Store(int32(tab))
+	p.openPanes = append(p.openPanes, pane)
+	p.TouchOpenPane(pane)
+	p.bump()
+	return pane
+}
+
+// CloseOpenPane removes a pane from the open list — the hide verb (`x`) and
+// the dead-instance prune both land here. The pane's tab keeps running in
+// its tmux session; nothing is killed (§2.3). Reports whether the pane was
+// present.
+func (p *Projection) CloseOpenPane(pane *OpenPane) bool {
+	for i, cur := range p.openPanes {
+		if cur == pane {
+			p.openPanes = append(p.openPanes[:i], p.openPanes[i+1:]...)
+			p.bump()
+			return true
+		}
+	}
+	return false
+}
+
+// TouchOpenPane stamps the pane most recently focused. Focus moves onto a
+// pane call this so the least-recently-focused auto-hide (§2.6) tracks real
+// attention. No version bump: recency feeds only the relayout's visibility
+// pick, never a cached view structure.
+func (p *Projection) TouchOpenPane(pane *OpenPane) {
+	if pane == nil {
 		return
 	}
-	p.paneB = instance
-	p.paneBTab.Store(int32(tab))
-	p.bump()
-}
-
-// ClearPaneB drops pane B's binding, closing the split.
-func (p *Projection) ClearPaneB() {
-	if p.paneB == nil {
+	// Already the most recently focused pane (a nonzero stamp equal to the
+	// counter): nothing to record.
+	if pane.lastFocus != 0 && pane.lastFocus == p.paneFocusSeq {
 		return
 	}
-	p.paneB = nil
-	p.paneBTab.Store(0)
-	p.bump()
+	p.paneFocusSeq++
+	pane.lastFocus = p.paneFocusSeq
 }
 
-// PaneBTab returns pane B's pinned 0-based tab index. Backed by an atomic:
-// pane B's background capture goroutine reads it while the event loop writes
-// it (#684 class).
-func (p *Projection) PaneBTab() int {
-	return int(p.paneBTab.Load())
-}
-
-// SetPaneBTab stores pane B's pinned tab index. Range clamping against the
-// pinned instance's tab count stays with the TabbedWindow, mirroring
-// SetActiveTab.
-func (p *Projection) SetPaneBTab(idx int) {
-	p.paneBTab.Store(int32(idx))
+// VisibleOpenPanes returns the panes the workspace should show when at most
+// max fit (§2.6 pane-count fitting): the max most-recently-focused panes, in
+// workspace order. With max >= the open count that is simply every pane —
+// which is also how auto-hidden panes restore on grow, in order.
+func (p *Projection) VisibleOpenPanes(limit int) []*OpenPane {
+	if limit <= 0 {
+		return nil
+	}
+	if len(p.openPanes) <= limit {
+		return append([]*OpenPane(nil), p.openPanes...)
+	}
+	// Rank by focus recency to pick the survivors, then return them in
+	// workspace order so pane positions stay stable as others hide.
+	ranked := append([]*OpenPane(nil), p.openPanes...)
+	for i := 1; i < len(ranked); i++ {
+		for j := i; j > 0 && ranked[j].lastFocus > ranked[j-1].lastFocus; j-- {
+			ranked[j], ranked[j-1] = ranked[j-1], ranked[j]
+		}
+	}
+	keep := make(map[*OpenPane]bool, limit)
+	for _, pane := range ranked[:limit] {
+		keep[pane] = true
+	}
+	visible := make([]*OpenPane, 0, limit)
+	for _, pane := range p.openPanes {
+		if keep[pane] {
+			visible = append(visible, pane)
+		}
+	}
+	return visible
 }
 
 // -- Active tab --

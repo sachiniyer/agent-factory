@@ -112,7 +112,7 @@ func TestRegistryReset(t *testing.T) {
 // register every visible region of a solved layout and verify any screen
 // cell resolves to exactly the region that contains it.
 func TestRegistryFromGridRegions(t *testing.T) {
-	l := layout.Grid{Split: true}.Solve(140, 40)
+	l := layout.Grid{Panes: 2}.Solve(140, 40)
 	require.False(t, l.Fallback)
 
 	reg := zones.NewRegistry()
