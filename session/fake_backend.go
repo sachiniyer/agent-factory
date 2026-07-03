@@ -44,13 +44,6 @@ func (b *FakeBackend) StartCalled() <-chan struct{} {
 	return b.startCalled
 }
 
-// StartCount returns the number of times Start has been invoked so far.
-func (b *FakeBackend) StartCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.startCount
-}
-
 // CompleteStart releases a blocked Start with no error.
 func (b *FakeBackend) CompleteStart() {
 	b.mu.Lock()
