@@ -1011,13 +1011,6 @@ func (i *Instance) GetStatus() Status {
 	return i.Status
 }
 
-// GetTitle returns the instance title under the Instance's mutex.
-func (i *Instance) GetTitle() string {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.Title
-}
-
 // firstTimeSetup is true if this is a new instance. Otherwise, it's one loaded from storage.
 func (i *Instance) Start(firstTimeSetup bool) error {
 	return i.backend.Start(i, firstTimeSetup)
