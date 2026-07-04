@@ -158,17 +158,15 @@ git add -A && git commit -m "initial project"
 **Cheap instances** — write `$AGENT_FACTORY_HOME/config.json` before first
 launch so instances run a shell instead of a real agent
 (`default_program` must be a supported agent name; the override supplies
-the actual command). The override must be a flag-swallowing wrapper, NOT
-bare `bash`: af appends claude flags (`--plugin-dir …`) to whatever the
-claude program resolves to, bash dies on the unknown option, and every
-instance create fails with "timed out waiting for tmux session":
+the actual command). A bare `bash` override works: since #1116/#1131, af
+keys agent-specific flag injection and readiness detection off the program
+the override actually runs, so a non-agent command gets no claude flags
+appended and is considered ready as soon as the pane shows output — no
+flag-swallowing wrapper needed:
 
 ```bash
-mkdir -p "$WORK/bin"
-printf '#!/bin/bash\n# swallow the flags af appends (--plugin-dir ...) and run a shell\nexec bash\n' > "$WORK/bin/fake-agent"
-chmod +x "$WORK/bin/fake-agent"
 cat > "$AGENT_FACTORY_HOME/config.json" <<EOF
-{ "default_program": "claude", "program_overrides": { "claude": "$WORK/bin/fake-agent" } }
+{ "default_program": "claude", "program_overrides": { "claude": "bash" } }
 EOF
 ```
 

@@ -1,7 +1,6 @@
 package session
 
 import (
-	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -29,50 +28,24 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// DetectAgentFromProgram maps a possibly-legacy Program value to its canonical
-// agent enum name (one of tmux.SupportedPrograms). Sessions persisted by
-// pre-#659 binaries may hold free-form Program strings — an absolute path
-// and/or trailing flags, e.g. "/home/foo/bin/claude --plugin-dir x" — rather
-// than the bare enum that current binaries write. On restore those legacy
-// values flow into the flag-injection layer, where strict enum equality
-// (added in #659) no longer recognizes them, silently dropping --plugin-dir,
-// bypassPermissions, and Codex developer_instructions (#677).
-//
-// The match is deliberately DEFENSIVE, not permissive: it returns a canonical
-// name only when filepath.Base of the first whitespace-split token equals a
-// tmux.SupportedPrograms entry verbatim. For anything else — unknown tools,
-// empty input, the bare enum (which maps to itself) — it returns the input
-// unchanged, so we never inject Claude flags into a non-Claude session. This
-// is scoped purely to flag injection on restore; it is NOT a general-purpose
-// command parser and must not be reused as one.
-func DetectAgentFromProgram(program string) string {
-	fields := strings.Fields(program)
-	if len(fields) == 0 {
-		return program
-	}
-	base := filepath.Base(fields[0])
-	for _, supported := range tmux.SupportedPrograms {
-		if base == supported {
-			return supported
-		}
-	}
-	return program
-}
-
 // injectSystemPrompt injects Agent Factory instructions into the session.
 //
-// agent is the Instance.Program value (normally the canonical enum, but
-// possibly a legacy free-form string on restored sessions) and resolved is
-// the actual command string to be passed to tmux (the agent name or the
-// configured program_overrides entry). agent is normalized via
-// DetectAgentFromProgram so legacy paths still match; flags are appended to
-// resolved.
+// resolved is the actual command string to be passed to tmux — the agent
+// name, the configured program_overrides entry, or a legacy free-form
+// persisted Program value ("/home/foo/bin/claude --plugin-dir x", #677).
+// Which flags to inject, if any, is decided by the agent detected IN that
+// resolved command (tmux.DetectAgentFromCommand), never by the config-name
+// enum the instance was created with: an override may point "claude" at a
+// different agent or at a non-agent binary, and injecting claude flags there
+// makes the program exit on the unknown option, so the spawn dies as an
+// opaque timeout (#1116, #1131).
 //
 // Strategy per tool:
 //   - Claude Code: --plugin-dir flag only (slash commands + /af-whoami for self-identification)
 //   - Codex: -c developer_instructions="..." flag (text-based, no plugin support)
-func injectSystemPrompt(agent, resolved, sessionTitle, worktreePath string) string {
-	agent = DetectAgentFromProgram(agent)
+//   - aider, gemini, and commands running no known agent: no injection.
+func injectSystemPrompt(resolved string) string {
+	agent := tmux.DetectAgentFromCommand(resolved)
 	if agent == tmux.ProgramClaude {
 		pluginDir, err := ensurePluginDir()
 		if err != nil {

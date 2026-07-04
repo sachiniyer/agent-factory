@@ -30,7 +30,7 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
 | Field | Description |
 |-------|-------------|
 | `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`. |
-| `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`. |
+| `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`. Agent-specific launch flags (claude's `--plugin-dir`, codex's `developer_instructions`) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
 | `auto_yes` | Auto-accept agent prompts (experimental). |
 | `daemon_poll_interval` | Daemon polling interval in ms. |
 | `branch_prefix` | Prefix for worktree branches (defaults to `username/`). |

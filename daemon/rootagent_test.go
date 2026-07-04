@@ -102,6 +102,45 @@ func TestEnsureRootAgentsHonorsProfileOverrides(t *testing.T) {
 	}
 }
 
+// TestRootAgentProgramOverrideMatrix pins the #1116-class fix in the root
+// profile: the claude-only --dangerously-skip-permissions flag is ensured
+// only when the RESOLVED command actually runs claude. A program_overrides
+// entry pointing "claude" at a non-claude program (e.g. the play-test
+// sandbox's "bash") must launch verbatim — the appended flag would make it
+// exit instantly and the root agent would flap forever.
+func TestRootAgentProgramOverrideMatrix(t *testing.T) {
+	tests := []struct {
+		name     string
+		override string // program_overrides["claude"]
+		want     string
+	}{
+		{"bare enum appends flag", "claude", "claude --dangerously-skip-permissions"},
+		{"claude path override appends flag", "/opt/claude-next/bin/claude --model opus",
+			"/opt/claude-next/bin/claude --model opus --dangerously-skip-permissions"},
+		{"flag already present not duplicated", "claude --dangerously-skip-permissions",
+			"claude --dangerously-skip-permissions"},
+		{"non-agent override left verbatim (#1116)", "bash", "bash"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := setupControlRepo(t)
+			// Every row pins an explicit override entry: with none present,
+			// config loading auto-detects a machine-local claude path into
+			// ProgramOverrides, which would make the row nondeterministic.
+			cfg := config.DefaultConfig()
+			cfg.ProgramOverrides = map[string]string{"claude": tt.override}
+			if err := config.SaveConfig(cfg); err != nil {
+				t.Fatalf("SaveConfig: %v", err)
+			}
+			got := rootAgentProgram(repoPath, config.RootAgentConfig{})
+			if got != tt.want {
+				t.Fatalf("rootAgentProgram = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestEnsureRootAgentsAdoptsLiveRoot: with a live root already present —
 // whatever created it — ensure is a strict no-op. Never kill/recreate a live
 // root (#1106 adopt-never-clobber rule).

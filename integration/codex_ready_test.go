@@ -40,8 +40,16 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 
 	// printf interprets the \n (backslash-n) into a newline; the "›" is the
 	// literal U+203A glyph. The wrapper ignores any injected flags
-	// (-c developer_instructions=…) exactly like the claude fixture.
-	wrapper := filepath.Join(home, "fake-codex.sh")
+	// (-c developer_instructions=…) exactly like the claude fixture. Its
+	// basename must be "codex": since #1116/#1131 the readiness heuristic is
+	// selected by the agent detected in the RESOLVED command (token-basename
+	// match), so an arbitrarily-named wrapper would get the generic
+	// any-output readiness instead of codex's "›" check.
+	wrapperDir := filepath.Join(home, "fakebin")
+	if err := os.MkdirAll(wrapperDir, 0755); err != nil {
+		t.Fatalf("mkdir wrapper dir: %v", err)
+	}
+	wrapper := filepath.Join(wrapperDir, "codex")
 	writeFile(t, wrapper, "#!/bin/sh\nprintf 'OpenAI Codex (vX)\\npermissions: YOLO mode\\n› '\nexec cat\n", 0755)
 
 	cfg := testConfig()
@@ -130,8 +138,15 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 	// alone must not satisfy waitForReady; only the trailing "›" does. The
 	// hold is set well above session-startup overhead (daemon launch + git
 	// worktree, observed ~6s) so the timing assertion below is unambiguous.
+	// The wrapper's basename must be "codex" so the resolved-command agent
+	// detection (#1116/#1131) selects codex's readiness heuristic — see the
+	// fixture comment in TestCLICreateCodexSessionBecomesReady.
 	const trustHold = 12 * time.Second
-	wrapper := filepath.Join(home, "fake-codex-trust.sh")
+	wrapperDir := filepath.Join(home, "fakebin")
+	if err := os.MkdirAll(wrapperDir, 0755); err != nil {
+		t.Fatalf("mkdir wrapper dir: %v", err)
+	}
+	wrapper := filepath.Join(wrapperDir, "codex")
 	writeFile(t, wrapper,
 		"#!/bin/sh\n"+
 			"printf 'OpenAI Codex (vX)\\nDo you trust this folder?\\n> 1. Yes\\n'\n"+

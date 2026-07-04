@@ -56,7 +56,7 @@ func TestIsReadyContent(t *testing.T) {
 		content string
 		want    bool
 	}{
-		// claude (and the default/legacy fallback)
+		// claude
 		{"empty", "claude", "", false},
 		{"claude input prompt", "claude", "some output\n\n❯ ", true},
 		{"claude trust prompt", "claude", "Do you trust the files in this folder?\n1. Yes\n2. No", true},
@@ -69,9 +69,16 @@ func TestIsReadyContent(t *testing.T) {
 			want: true,
 		},
 		{"claude not ready", "claude", "installing dependencies...\nready soon", false},
-		// An unknown / legacy program falls through to the claude signals.
-		{"unknown program uses claude signals", "/usr/bin/some-tool", "some output\n❯ ", true},
-		{"unknown program not ready", "/usr/bin/some-tool", "compiling…", false},
+
+		// No known agent in the resolved command (ResolvedAgent returned "",
+		// e.g. program_overrides pointing "claude" at bash, #1131): there is
+		// no prompt glyph to wait for, so any non-blank pane output counts as
+		// ready. Before #1131 this fell through to the claude signals and a
+		// bare shell spun out the full 60s timeout.
+		{"non-agent ready on shell prompt (#1131)", "", "sandbox$ ", true},
+		{"non-agent ready on any output", "", "hello from some tool", true},
+		{"non-agent empty pane not ready", "", "", false},
+		{"non-agent blank pane not ready", "", "\n   \n\n", false},
 
 		// codex — regression case from #714.
 		{"codex YOLO banner with prompt (#714)", "codex", codexYOLOBanner, true},
@@ -315,15 +322,48 @@ func (b *fakePreviewBackend) Preview(*session.Instance) (string, error) {
 // previewFn, backed by a FakeBackend so no tmux/git resources are touched.
 func newPreviewInstance(t *testing.T, previewFn func() (string, error)) *session.Instance {
 	t.Helper()
+	return newPreviewInstanceWithProgram(t, "claude", previewFn)
+}
+
+// newPreviewInstanceWithProgram is newPreviewInstance with an explicit
+// program, so tests can drive the non-agent readiness path (#1131).
+func newPreviewInstanceWithProgram(t *testing.T, program string, previewFn func() (string, error)) *session.Instance {
+	t.Helper()
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
 		return &fakePreviewBackend{FakeBackend: session.NewFakeBackend(), previewFn: previewFn}, nil
 	})
 	defer restore()
-	inst, err := session.NewInstance(session.InstanceOptions{Title: "wait-ready", Path: t.TempDir(), Program: "claude"})
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "wait-ready", Path: t.TempDir(), Program: program})
 	if err != nil {
 		t.Fatalf("NewInstance: %v", err)
 	}
 	return inst
+}
+
+// TestWaitForReadyNonAgentBecomesReadyOnAnyOutput pins the #1131 fix at the
+// WaitForReady level: an instance whose program runs no known agent (e.g. the
+// play-test sandbox's "claude"→"bash" override) must become ready as soon as
+// the pane shows any non-blank content — not spin the full timeout waiting
+// for a claude prompt glyph. The 2s watchdog (well under the 10s timeout)
+// fails the test on the pre-fix behavior.
+func TestWaitForReadyNonAgentBecomesReadyOnAnyOutput(t *testing.T) {
+	defer setWaitForReadyTimingForTest(10*time.Second, time.Millisecond)()
+
+	inst := newPreviewInstanceWithProgram(t, "bash", func() (string, error) {
+		return "sandbox$ ", nil
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(inst) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected non-agent pane with output to be ready, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady still polling a non-agent pane that already has output (#1131 pre-fix behavior)")
+	}
 }
 
 // setWaitForReadyTimingForTest shrinks the poll/timeout knobs so the polling

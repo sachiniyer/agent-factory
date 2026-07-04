@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // Root-agent always-ensure (#1106): for every repo opted in via the
@@ -230,7 +231,12 @@ func rootAgentProgram(repoRoot string, rc config.RootAgentConfig) string {
 	} else {
 		log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
 	}
-	if !strings.Contains(program, rootDangerouslySkipPermissionsFlag) {
+	// Only ensure the claude-only flag when the resolved command actually
+	// runs claude: a program_overrides entry may point "claude" at another
+	// program that exits on the unknown flag (#1116 defect class — e.g. the
+	// play-test sandbox's "claude": "bash" override).
+	if tmux.DetectAgentFromCommand(program) == tmux.ProgramClaude &&
+		!strings.Contains(program, rootDangerouslySkipPermissionsFlag) {
 		program += " " + rootDangerouslySkipPermissionsFlag
 	}
 	return program
