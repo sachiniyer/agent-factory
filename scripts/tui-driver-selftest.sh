@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# tui-driver-selftest.sh — the acceptance proof for the #1161 TUI driver.
+#
+# Runs the exact scenario that failed in #1156 — and it is now a handful of
+# self-synchronizing lines instead of a hand-rolled tmux harness:
+#
+#   boot → create TWO instances → select each (assert selection) →
+#   open a pane → enter interactive → type into the pane → exit →
+#   attach full-screen → detach → assert selection preserved →
+#   assert no orphan attach clients.
+#
+# It is BOTH the acceptance proof and the bitrot guard. Run it in the
+# container sandbox:
+#
+#   make tui-driver-selftest
+#   # or directly:
+#   docker exec af-playtest bash /src/scripts/tui-driver-selftest.sh
+#
+# Exit status: 0 = every step green; non-zero = the first failed step (with
+# the offending screen dumped to stderr by the driver).
+
+set -uo pipefail
+
+# Resolve the driver next to this script (works from /src in the container).
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/tui-driver.sh
+source "$SELF_DIR/tui-driver.sh"
+
+PASS=0
+FAIL=0
+
+# step <description> <command...> — run a driver step, tally, and abort the
+# whole run on the first failure (a broken premise makes later steps noise).
+step() {
+    local desc="$1"; shift
+    printf '\n>>> %s\n' "$desc"
+    if "$@"; then
+        printf '    ✓ %s\n' "$desc"
+        PASS=$((PASS + 1))
+    else
+        printf '    ✗ FAILED: %s\n' "$desc"
+        FAIL=$((FAIL + 1))
+        printf '\n=== SELF-TEST FAILED at: %s ===\n' "$desc"
+        printf 'passed %d step(s) before the failure.\n' "$PASS"
+        exit 1
+    fi
+}
+
+printf '=== tui-driver self-test (#1161) ===\n'
+printf 'session=%s size=%sx%s home=%s\n' \
+    "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
+
+# Start from a clean slate so the run is deterministic even in a reused
+# container (scoped to the sandbox; fails closed on a non-sandbox home).
+step "reset sandbox to a clean state"                       af_reset_sandbox
+step "boot af at ${AF_DRIVER_COLS}x${AF_DRIVER_ROWS}"        af_boot
+step "create instance 'alpha'"                              af_new_instance alpha
+step "create instance 'beta'"                               af_new_instance beta
+
+# The #1156 failure, now two lines each.
+step "select alpha"                                         af_select alpha
+step "assert alpha is selected"                             af_expect_selected alpha
+step "select beta"                                          af_select beta
+step "assert beta is selected"                              af_expect_selected beta
+
+step "open beta's tab as a pane"                            af_open_pane
+step "enter interactive mode"                               af_enter_interactive
+step "type a command into the pane"                         af_send_to_pane 'echo DRIVER_SELFTEST_OK'
+step "assert the pane ran it"                               af_wait_for 'DRIVER_SELFTEST_OK' 10 'pane output'
+step "exit interactive mode"                                af_exit_interactive
+
+step "attach full-screen"                                   af_attach
+step "detach (and prove the attach client was reaped)"      af_detach
+
+step "assert selection survived attach/detach"              af_expect_selected beta
+step "assert no orphan tmux attach clients"                 af_assert_no_orphan_clients
+
+printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"
+printf 'the #1156 mis-drive is now a deterministic scenario.\n'
+
+# Leave the sandbox as we found it (best-effort; container teardown is the
+# real cleanup).
+af_quit >/dev/null 2>&1 || true
+exit 0

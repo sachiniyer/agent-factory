@@ -7,6 +7,8 @@
 #   scripts/testbox.sh test [go-test-args...]  full suite (default ./...)
 #   scripts/testbox.sh playtest                interactive sandbox shell
 #   scripts/testbox.sh playtest -d             detached; drive via `docker exec`
+#   scripts/testbox.sh selftest                run the TUI driver self-test (#1161)
+#   scripts/testbox.sh drive                   boot af via the driver + attach
 #   scripts/testbox.sh build                   (re)build the image only
 #
 # The container gets: its own tmux server, a throwaway AF home, pids/memory
@@ -77,6 +79,30 @@ fix_cache_perms() {
         "$IMAGE" chown -R dev:dev /cache >/dev/null
 }
 
+# start_playtest_detached — run the play-test sandbox container detached, so a
+# driver can work it over `docker exec`. Shared by `playtest -d`, `selftest`,
+# and `drive`.
+start_playtest_detached() {
+    "$ENGINE" run -d \
+        "${RUN_FLAGS[@]}" \
+        --name "$PLAYTEST_NAME" \
+        -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
+        "$IMAGE" bash /src/scripts/container/playtest-entry.sh hold >/dev/null
+}
+
+# ensure_playtest_up — start the detached sandbox if it is not already
+# running, then block until af has finished building inside it.
+ensure_playtest_up() {
+    if ! "$ENGINE" inspect -f '{{.State.Running}}' "$PLAYTEST_NAME" 2>/dev/null | grep -q true; then
+        "$ENGINE" rm -f "$PLAYTEST_NAME" >/dev/null 2>&1 || true
+        build_image
+        fix_cache_perms
+        echo "testbox: starting sandbox '$PLAYTEST_NAME' (af builds on boot)..." >&2
+        start_playtest_detached
+    fi
+    "$ENGINE" exec "$PLAYTEST_NAME" sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'
+}
+
 cmd="${1:-test}"
 [ $# -gt 0 ] && shift
 
@@ -94,15 +120,8 @@ test)
 playtest)
     build_image
     fix_cache_perms
-    RUN_FLAGS+=(
-        --name "$PLAYTEST_NAME"
-        # docker exec inherits env set at create time, so the sandbox home
-        # is visible to every exec'd command, not just the entry script.
-        -e AGENT_FACTORY_HOME=/home/dev/sandbox/home
-    )
     if [ "${1:-}" = "-d" ]; then
-        "$ENGINE" run -d "${RUN_FLAGS[@]}" "$IMAGE" \
-            bash /src/scripts/container/playtest-entry.sh hold >/dev/null
+        start_playtest_detached
         echo "playtest sandbox '$PLAYTEST_NAME' is starting (af builds on boot)."
         echo "  wait for it:  $ENGINE exec $PLAYTEST_NAME sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'"
         echo "  drive it:     $ENGINE exec $PLAYTEST_NAME tmux new-session -d -s drive -x 80 -y 24"
@@ -110,12 +129,36 @@ playtest)
         echo "                $ENGINE exec $PLAYTEST_NAME tmux capture-pane -p -t drive"
         echo "  tear down:    $ENGINE rm -f $PLAYTEST_NAME"
     else
-        exec "$ENGINE" run -it "${RUN_FLAGS[@]}" "$IMAGE" \
-            bash /src/scripts/container/playtest-entry.sh
+        exec "$ENGINE" run -it \
+            "${RUN_FLAGS[@]}" \
+            --name "$PLAYTEST_NAME" \
+            -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
+            "$IMAGE" bash /src/scripts/container/playtest-entry.sh
     fi
     ;;
+selftest)
+    # Bring up (or reuse) a DEDICATED sandbox and run the TUI driver
+    # self-test inside it (#1161). Its own container name means running the
+    # gate never disturbs a `drive`/`playtest` sandbox you have open. The
+    # self-test resets sandbox state at its start, so a reused container is
+    # still deterministic.
+    PLAYTEST_NAME="${AF_SELFTEST_NAME:-af-driver-selftest}"
+    ensure_playtest_up
+    exec "$ENGINE" exec "$PLAYTEST_NAME" bash /src/scripts/tui-driver-selftest.sh
+    ;;
+drive)
+    # Bring up (or reuse) the detached sandbox, boot af through the driver,
+    # then attach you interactively to the live driver session so you can
+    # watch/drive it by hand. Detach with your tmux prefix + d; tear the
+    # sandbox down with: $ENGINE rm -f $PLAYTEST_NAME
+    ensure_playtest_up
+    "$ENGINE" exec "$PLAYTEST_NAME" bash -lc \
+        'source /src/scripts/tui-driver.sh && af_boot' >&2
+    echo "testbox: af is up in session 'drive'; attaching (detach with prefix+d)..." >&2
+    exec "$ENGINE" exec -it "$PLAYTEST_NAME" tmux attach -t drive
+    ;;
 *)
-    echo "testbox: unknown command '$cmd' (want: test | playtest | build)" >&2
+    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | build)" >&2
     exit 1
     ;;
 esac

@@ -4,7 +4,8 @@
 # real ~/.agent-factory, or this repo's worktrees.
 # See docs/container-testing.md.
 
-.PHONY: test-container playtest-container playtest-container-detached testbox-image
+.PHONY: test-container playtest-container playtest-container-detached \
+	tui-driver tui-driver-selftest testbox-image
 
 # Full `go test ./...` inside the container — the one sanctioned way to run
 # the bare full suite on a shared box. Narrow or extend the run with
@@ -22,6 +23,18 @@ playtest-container:
 # the tui-playtest skill). Tear down with: docker rm -f af-playtest
 playtest-container-detached:
 	scripts/testbox.sh playtest -d
+
+# Deterministic, scriptable TUI driver (#1161). tui-driver boots af through
+# the driver in the container sandbox and attaches you to the live session to
+# drive it by hand; tui-driver-selftest runs the acceptance scenario (boot →
+# 2 instances → select → pane → interactive → type → attach/detach → assert
+# selection + no orphan clients). Both auto-start the sandbox if needed.
+# See docs/tui-manual-testing.md. Tear down with: docker rm -f af-playtest
+tui-driver:
+	scripts/testbox.sh drive
+
+tui-driver-selftest:
+	scripts/testbox.sh selftest
 
 # (Re)build the toolchain image only.
 testbox-image:

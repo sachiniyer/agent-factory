@@ -66,6 +66,13 @@ docker exec af-playtest tmux capture-pane -p -t drive
 docker rm -f af-playtest        # teardown: one command reaps everything
 ```
 
+Rather than hand-rolling `send-keys`/`capture-pane`/`sleep`, drive the TUI
+through the **deterministic driver** (`scripts/tui-driver.sh`): every action
+waits on a screen marker instead of a blind sleep, and it ships real
+assertions. `make tui-driver-selftest` is the acceptance gate; `make
+tui-driver` drops you into a live driven session. See
+[tui-manual-testing.md](tui-manual-testing.md).
+
 ## Known limitations
 
 - **No systemd inside** — autostart-unit flows (`af daemon install`) still

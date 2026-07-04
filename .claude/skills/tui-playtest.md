@@ -45,6 +45,38 @@ contained failure, not a non-event. Sections 1 and 4 below are the
 **fallback for boxes without docker/podman**; the rules underneath apply
 to every run, containerized or not.
 
+### Drive with the TUI driver, not raw send-keys (#1161)
+
+Don't hand-roll `send-keys`/`capture-pane`/`sleep N` — that is exactly what
+mis-drove the TUI in #1156 (keys landing in a live pane as text) and died on
+a `$TMUX` collision in #1155. Source
+[`scripts/tui-driver.sh`](../../scripts/tui-driver.sh): every action is
+self-synchronizing (waits on a screen marker, never a blind sleep),
+`af_ensure_nav` forces a known focus state, and `af_expect_selected` /
+`af_assert_no_orphan_clients` give real assertions. See
+[docs/tui-manual-testing.md](../../docs/tui-manual-testing.md) for the
+interaction model and a gate-recipe library.
+
+```bash
+# smoke-check the driver itself (and the TUI) first:
+make -C "$WORK/src" tui-driver-selftest
+
+# then drive the play-test through the driver instead of raw send-keys:
+docker exec af-playtest bash -lc '
+  source /src/scripts/tui-driver.sh
+  af_boot
+  af_new_instance alpha
+  af_select alpha && af_expect_selected alpha
+  af_open_pane && af_enter_interactive
+  af_send_to_pane "echo hello"
+  af_exit_interactive
+  af_assert_no_orphan_clients
+'
+```
+
+The raw `send-keys` recipe below still works and is fine for one-off pokes,
+but prefer the driver for anything you want to be repeatable or gate on.
+
 ## Hard isolation rules (non-negotiable)
 
 These rules exist because a previous play-test took down the whole dev box
