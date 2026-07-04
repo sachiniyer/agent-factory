@@ -1,16 +1,13 @@
 package task
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -180,79 +177,4 @@ func TaskRunBaseTitle(t Task) string {
 		return t.Name
 	}
 	return fmt.Sprintf("task-%s", t.ID)
-}
-
-// NextTaskRunTitle chooses a repo-scoped title for a task run that will not
-// collide with persisted sessions or an already-live tmux session. Recurring
-// tasks can fire while a previous run is still around, so task sessions cannot
-// use the static task name blindly.
-func NextTaskRunTitle(repoID, repoPath, baseTitle, program string) (string, error) {
-	path, err := config.RepoInstancesPath(repoID)
-	if err != nil {
-		return "", err
-	}
-
-	var title string
-	if err := config.WithFileLock(path, func() error {
-		raw, err := config.LoadRepoInstances(repoID)
-		if err != nil {
-			return err
-		}
-
-		var existing []session.InstanceData
-		if err := json.Unmarshal(raw, &existing); err != nil {
-			return fmt.Errorf("failed to parse existing instances: %w", err)
-		}
-
-		usedTitles := make([]string, 0, len(existing))
-		for _, data := range existing {
-			usedTitles = append(usedTitles, data.Title)
-		}
-
-		// Mirror the daemon's title-conflict validation so we never hand back a
-		// candidate the daemon would reject, which would turn every
-		// TUI-triggered run into a round-trip error. The daemon rejects titles
-		// that collide either case-insensitively or after branch sanitization
-		// (see daemon.titlesCollide / git.SanitizeBranchName). A candidate like
-		// "nightly" collides with an existing "Nightly" (#721); "my-task"
-		// collides with "My Task" once both sanitize to the same branch (#741).
-		// LoadConfig supplies the same BranchPrefix the worktree layer uses;
-		// fall back to case-insensitive-only if it is unavailable.
-		branchPrefix := ""
-		if cfg, cfgErr := config.LoadConfig(); cfgErr == nil {
-			branchPrefix = cfg.BranchPrefix
-		}
-		titleTaken := func(candidate string) bool {
-			candidateBranch := git.SanitizeBranchName(branchPrefix + candidate)
-			for _, used := range usedTitles {
-				if strings.EqualFold(used, candidate) {
-					return true
-				}
-				if git.SanitizeBranchName(branchPrefix+used) == candidateBranch {
-					return true
-				}
-			}
-			return false
-		}
-
-		for i := 1; i <= 10000; i++ {
-			candidate := baseTitle
-			if i > 1 {
-				candidate = fmt.Sprintf("%s-%d", baseTitle, i)
-			}
-			if titleTaken(candidate) {
-				continue
-			}
-			if tmux.NewTmuxSessionForRepo(candidate, repoPath, program).DoesSessionExist() {
-				continue
-			}
-			title = candidate
-			return nil
-		}
-		return fmt.Errorf("could not find an available title for %q", baseTitle)
-	}); err != nil {
-		return "", err
-	}
-
-	return title, nil
 }

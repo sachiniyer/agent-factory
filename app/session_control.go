@@ -35,6 +35,16 @@ var killSessionThroughDaemon = func(title, repoID string) error {
 	return daemon.KillSession(daemon.KillSessionRequest{Title: title, RepoID: repoID})
 }
 
+// triggerTaskThroughDaemon runs a task by ID through the daemon's single shared
+// trigger path (daemon.RunTask) — the SAME entrypoint `af tasks trigger` and the
+// cron scheduler use. Routing the TUI's `r` (run now) here makes it honor a
+// task's target_session (deliver into it, auto-create when missing) and only
+// spawn a fresh per-run session when target_session is empty, instead of the old
+// divergent path that unconditionally spawned a new session and orphaned the
+// target (#1169). It is a package var so the app test suite can stub the trigger
+// without dialing a real daemon.
+var triggerTaskThroughDaemon = daemon.RunTask
+
 // pauseStatusPollThroughDaemon / resumeStatusPollThroughDaemon route the TUI's
 // attach-time poll-pause coordination to the daemon (#1160, Fix A follow-up to
 // #1157). While a TUI is attached full-screen to an instance it owns the shared
@@ -107,6 +117,14 @@ func SetSessionStarterForTest(f func(*session.Instance, sessionStartRequest) (*s
 	prev := startSessionThroughDaemon
 	startSessionThroughDaemon = f
 	return func() { startSessionThroughDaemon = prev }
+}
+
+// SetTaskTriggerForTest swaps the task-trigger seam (#1169) so a test can assert
+// which task ID the TUI "run now" routes to the daemon, without a real daemon.
+func SetTaskTriggerForTest(f func(taskID string) error) func() {
+	prev := triggerTaskThroughDaemon
+	triggerTaskThroughDaemon = f
+	return func() { triggerTaskThroughDaemon = prev }
 }
 
 func SetRemoteImporterForTest(f func(repoPath string) ([]session.InstanceData, error)) func() {
