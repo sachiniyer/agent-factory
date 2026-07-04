@@ -188,6 +188,28 @@ the configured detach key (default `Ctrl-b d`). **Interactive — emits no JSON.
 
 Kill the session and clean up its worktree. Emits `{"ok": true}`.
 
+### `af sessions archive <title>`
+
+Archive a session: tear down its tmux and move its git worktree out to the global
+archive directory (`<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/`), preserving
+the branch and any uncommitted changes. The session is not deleted — it becomes a
+quiescent **archived** row that survives restarts and is never auto-restored.
+Emits `{"ok": true, "title": "<title>", "archived_path": "..."}`.
+
+Not available for remote or in-place (`--here`) sessions (they don't own a
+relocatable worktree).
+
+### `af sessions restore <title>`
+
+Restore a previously archived session: move its git worktree back next to the
+repository, re-register it, re-spawn **only the agent** (shell/process tabs are
+not restored), and mark the session running. Emits `{"ok": true, "title":
+"<title>", "worktree_path": "..."}`.
+
+Fails if the session is not archived, or if its origin repository is gone (the
+archived worktree is left intact for manual recovery). Honors `--repo` like
+`kill`.
+
 ### `af sessions whoami`
 
 Report the session the current shell is inside, by matching the tmux session

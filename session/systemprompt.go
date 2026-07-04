@@ -12,7 +12,7 @@ import (
 // (see plugin.go) and the developer_instructions text for Codex, so the two
 // surfaces cannot drift (#1043). Keep it complete but terse: every user-facing
 // command group (sessions, tabs, tasks, daemon, maintenance), no boilerplate.
-const afUsageReference = `You are running inside Agent Factory (af), a terminal multiplexer that runs each AI coding agent in an isolated git worktree. Manage sessions, tasks, and the daemon with the "af" CLI. Commands print JSON on stdout; run "af <command> --help" for full flag lists. To target another repository, pass --repo <path>: honored by sessions create/list/send-prompt/kill/attach/tab-create/tab-delete and tasks list/add. Two commands accept --repo but SILENTLY IGNORE it — "sessions get" and "sessions preview" always resolve the title across ALL repos, so with the same title in two repos you may get the wrong one regardless of --repo; disambiguate by using unique titles. tasks get/update/trigger/remove take a globally unique id (no --repo needed).
+const afUsageReference = `You are running inside Agent Factory (af), a terminal multiplexer that runs each AI coding agent in an isolated git worktree. Manage sessions, tasks, and the daemon with the "af" CLI. Commands print JSON on stdout; run "af <command> --help" for full flag lists. To target another repository, pass --repo <path>: honored by sessions create/list/send-prompt/kill/attach/tab-create/tab-delete/archive/restore and tasks list/add. Two commands accept --repo but SILENTLY IGNORE it — "sessions get" and "sessions preview" always resolve the title across ALL repos, so with the same title in two repos you may get the wrong one regardless of --repo; disambiguate by using unique titles. tasks get/update/trigger/remove take a globally unique id (no --repo needed).
 
 Sessions (one agent per isolated worktree):
   af sessions whoami                                   Identify your own session
@@ -23,6 +23,8 @@ Sessions (one agent per isolated worktree):
   af sessions preview <title>                          Snapshot another session's terminal output
   af sessions attach <title>                           Attach interactively (foreground)
   af sessions kill <title>                             Kill a session and clean up its worktree
+  af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
+  af sessions restore <title>                          Bring an archived session back
 
 Tabs (extra processes in a session's worktree; max 9 per session; not available for remote sessions):
   af sessions tab-create <title> --command <cmd> [--name <tab>]   Prints the resolved tab name; tabs persist across restarts
