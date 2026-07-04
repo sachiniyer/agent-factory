@@ -276,8 +276,10 @@ func TestSaveInRepoRefusesSymlinkDirOutsideRepo(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "outside the repository")
 
-	_, statErr := os.Stat(filepath.Join(outsideDir, ConfigFileName))
-	assert.True(t, os.IsNotExist(statErr), "nothing must be written outside the repo")
+	for _, name := range []string{ConfigFileName, TomlConfigFileName} {
+		_, statErr := os.Stat(filepath.Join(outsideDir, name))
+		assert.True(t, os.IsNotExist(statErr), "nothing must be written outside the repo (%s)", name)
+	}
 }
 
 func TestSaveInRepoPostWorktreeCommands(t *testing.T) {

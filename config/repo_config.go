@@ -14,16 +14,16 @@ const RepoConfigFileName = "config.json"
 // sessions. When present in a repo config, sessions for that repo use the
 // remote hook backend instead of local tmux+git worktrees.
 type RemoteHooks struct {
-	LaunchCmd string `json:"launch_cmd"`
-	ListCmd   string `json:"list_cmd"`
-	AttachCmd string `json:"attach_cmd"`
-	DeleteCmd string `json:"delete_cmd"`
+	LaunchCmd string `json:"launch_cmd" toml:"launch_cmd"`
+	ListCmd   string `json:"list_cmd" toml:"list_cmd"`
+	AttachCmd string `json:"attach_cmd" toml:"attach_cmd"`
+	DeleteCmd string `json:"delete_cmd" toml:"delete_cmd"`
 	// TerminalCmd, when set, powers the Terminal tab for remote sessions: it
 	// is invoked with the session's hook name and should open an interactive
 	// shell in the remote workspace (vs attach_cmd, which attaches to the
 	// agent's own tmux session). Optional — empty means the Terminal tab
 	// keeps its "not available" fallback for remote sessions (#843).
-	TerminalCmd string `json:"terminal_cmd,omitempty"`
+	TerminalCmd string `json:"terminal_cmd,omitempty" toml:"terminal_cmd,omitempty"`
 }
 
 // Validate checks that the command strings required to operate a remote hook
