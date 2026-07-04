@@ -82,6 +82,40 @@ func TestMoveWorktree_FallbackRepairsRegistration(t *testing.T) {
 	assertLiveWorktreeAt(t, gw, dest)
 }
 
+// TestMoveWorktree_RepairFailureStillCommitsLocation (#1028 Greptile P1): in the
+// cross-filesystem fallback, when the byte-move succeeds but `git worktree
+// repair` fails, the worktree object must already point at dest — where the
+// bytes now live — never at the removed src. Otherwise the caller (the archive
+// move-failure path, which marks the instance Lost) would be stranded pointing
+// at an empty path while the files sit safely at dest.
+func TestMoveWorktree_RepairFailureStillCommitsLocation(t *testing.T) {
+	prevMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return errors.New("forced fast-path failure (simulating EXDEV)")
+	}
+	t.Cleanup(func() { worktreeMoveFast = prevMove })
+	prevRepair := worktreeRepair
+	worktreeRepair = func(*GitWorktree, string) error {
+		return errors.New("forced repair failure")
+	}
+	t.Cleanup(func() { worktreeRepair = prevRepair })
+
+	gw, _, srcPath := archiveTestWorktree(t)
+	dest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+
+	err := gw.MoveWorktree(dest)
+	require.Error(t, err, "a repair failure must surface to the caller")
+
+	assert.Equal(t, dest, gw.GetWorktreePath(),
+		"even on repair failure, worktreePath must point at dest (where the bytes are), never the removed src")
+	assert.True(t, pathExists(dest), "the bytes must be recoverable at dest")
+	assert.False(t, pathExists(srcPath), "the src must have been moved away")
+
+	dirty, rerr := os.ReadFile(filepath.Join(dest, "dirty.txt"))
+	require.NoError(t, rerr, "uncommitted work must survive the byte move")
+	assert.Equal(t, "uncommitted work", string(dirty))
+}
+
 // TestRestoreWorktreeTo_RoundTripPreservesUncommitted archives then restores a
 // worktree and asserts the uncommitted tree survives BOTH moves and the final
 // location is a valid, registered worktree.

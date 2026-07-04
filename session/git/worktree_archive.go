@@ -28,6 +28,16 @@ var worktreeMoveFast = func(g *GitWorktree, src, dest string) error {
 	return err
 }
 
+// worktreeRepair re-links a manually moved worktree's two-way registration
+// (`git worktree repair`). A package var for the same test-seam reason as
+// worktreeMoveFast: it lets a test force a repair failure AFTER a successful
+// byte-move to prove the location is still committed. Production never
+// reassigns it.
+var worktreeRepair = func(g *GitWorktree, dest string) error {
+	_, err := g.runGitCommand(g.repoPath, "worktree", "repair", dest)
+	return err
+}
+
 // MoveWorktree relocates this worktree's directory to dest and keeps git's
 // two-way worktree link consistent (the worktree's `.git` file and the repo's
 // `.git/worktrees/<name>/gitdir`). It is the archive-side primitive (#1028):
@@ -94,14 +104,30 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 				return fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr)
 			}
 		}
-		if _, rErr := g.runGitCommand(g.repoPath, "worktree", "repair", dest); rErr != nil {
+		// The bytes are now at dest. Commit the new location to the worktree
+		// object IMMEDIATELY — before the repair below — so g.worktreePath always
+		// points at where the files actually are. If repair then fails, the
+		// registration is stale but the location is not: returning here with
+		// worktreePath still at the now-removed src would strand the caller
+		// pointing at an empty path while the bytes live at dest, and the
+		// archive move-failure path (#1028 PR 3) marks the instance Lost and
+		// relies on a consistent worktree location.
+		g.setWorktreeLocation(dest)
+		if rErr := worktreeRepair(g, dest); rErr != nil {
 			return fmt.Errorf("moved worktree to %s but failed to repair its git registration: %w", dest, rErr)
 		}
+		return nil
 	}
 
+	// Fast path succeeded: git moved the bytes and updated the registration.
+	g.setWorktreeLocation(dest)
+	return nil
+}
+
+// setWorktreeLocation records dest as the worktree's current on-disk location.
+func (g *GitWorktree) setWorktreeLocation(dest string) {
 	g.worktreePath = dest
 	g.worktreeDir = filepath.Dir(dest)
-	return nil
 }
 
 // ensureRepoPresent reports ErrRepoGone when the origin repo is missing or no
