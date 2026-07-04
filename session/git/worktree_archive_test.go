@@ -82,6 +82,32 @@ func TestMoveWorktree_FallbackRepairsRegistration(t *testing.T) {
 	assertLiveWorktreeAt(t, gw, dest)
 }
 
+// TestSiblingWorktreePath_DefaultCollisionAndSanitize: the restore-side path
+// computation returns {repoParent}/{repoName}-{safeTitle}, appends a numeric
+// suffix when that path is occupied, and sanitizes the title into a single safe
+// segment — mirroring NewGitWorktree's layout so restore lands the worktree
+// where a fresh session's would live (#1028).
+func TestSiblingWorktreePath_DefaultCollisionAndSanitize(t *testing.T) {
+	sandboxHome(t)
+	repoRoot := createGitRepo(t) // {tmp}/repo
+	parent := filepath.Dir(repoRoot)
+
+	p, err := SiblingWorktreePath(repoRoot, "feature-x")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(parent, "repo-feature-x"), p)
+
+	// Collision: occupy the default path, expect the "-2" suffix.
+	require.NoError(t, os.MkdirAll(p, 0755))
+	p2, err := SiblingWorktreePath(repoRoot, "feature-x")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(parent, "repo-feature-x-2"), p2)
+
+	// Sanitize: "/" -> "-", ".." stripped.
+	ps, err := SiblingWorktreePath(repoRoot, "a/b..c")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(parent, "repo-a-bc"), ps)
+}
+
 // TestMoveWorktree_RepairFailureStillCommitsLocation (#1028 Greptile P1): in the
 // cross-filesystem fallback, when the byte-move succeeds but `git worktree
 // repair` fails, the worktree object must already point at dest — where the

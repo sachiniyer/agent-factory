@@ -1227,6 +1227,36 @@ func (i *Instance) SetArchived() {
 	i.Status = Archived
 }
 
+// RestoreArchivedWorktree moves this instance's archived worktree back to dest
+// and re-registers it against the origin repo (#1028). Surfaces git.ErrRepoGone
+// when the repo has been deleted so the caller can leave the archive intact.
+func (i *Instance) RestoreArchivedWorktree(dest string) error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
+	}
+	return gw.RestoreWorktreeTo(dest)
+}
+
+// RestoreFromArchive re-spawns an archived instance's agent after its worktree
+// has been moved back into place (#1028), flipping it live. It marks the
+// instance started + Lost so the Recover re-spawn path is eligible (the same
+// re-spawn the #1108 Lost-restore loop drives), then Recover brings the agent
+// session up and sets Running. On a Recover failure the instance is left
+// started + Lost, so the daemon's Lost-restore loop keeps retrying — the
+// worktree is already back in place, so the session self-heals rather than
+// stranding as Archived with no tmux. Only the agent tab is restored (shell/
+// process tabs were dropped at archive time, per #1028).
+func (i *Instance) RestoreFromArchive() error {
+	i.mu.Lock()
+	i.started = true
+	i.Status = Lost
+	i.mu.Unlock()
+	return i.backend.Recover(i)
+}
+
 // CloseAttachOnly releases the resources this instance opened to view or drive
 // its session (a tmux attach PTY, a remote preview process) without destroying
 // the session, worktree, or remote record. Use it — never Kill — to discard a

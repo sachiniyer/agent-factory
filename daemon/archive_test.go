@@ -183,6 +183,104 @@ func TestArchiveSession_RejectsExternalWorktree(t *testing.T) {
 	assert.True(t, exists(repoPath), "the user's in-place worktree must be untouched")
 }
 
+// TestRestoreArchived_MovesWorktreeBackAndRespawns: the happy path — an archived
+// session's worktree is moved back to the standard sibling location, re-
+// registered, the agent re-spawned (Recover flips Running), started=true, and
+// the record persisted as Running at the restored path.
+func TestRestoreArchived_MovesWorktreeBackAndRespawns(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst.SetBackend(backend)
+
+	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+	require.Equal(t, session.Archived, inst.GetStatus())
+	archivedPath := inst.GetWorktreePath()
+
+	// Compute the expected sibling path BEFORE restore, while it is still free
+	// (afterwards the restored worktree occupies it, and SiblingWorktreePath
+	// would return the "-2" suffix).
+	expected, perr := sessiongit.SiblingWorktreePath(repoPath, "worker")
+	require.NoError(t, perr)
+
+	worktreePath, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+
+	assert.Equal(t, expected, worktreePath, "restore must land the worktree at the standard sibling location")
+	assert.False(t, exists(archivedPath), "the archive directory must be gone after restore")
+	assert.True(t, exists(worktreePath), "the worktree must exist at the restored path")
+
+	dirty, rerr := os.ReadFile(filepath.Join(worktreePath, "dirty.txt"))
+	require.NoError(t, rerr, "the uncommitted tree must survive the round trip")
+	assert.Equal(t, "uncommitted", string(dirty))
+
+	assert.Equal(t, 1, backend.recoverCalls(), "restore re-spawns the agent exactly once")
+	assert.Equal(t, session.Running, inst.GetStatus(), "a restored session is Running")
+	assert.True(t, inst.Started(), "a restored session is started")
+	assert.Equal(t, session.Running, persistedStatus(t, repoID, "worker"))
+	rec := recordFor(t, repoID, "worker")
+	require.NotNil(t, rec)
+	assert.Equal(t, worktreePath, rec.Worktree.WorktreePath)
+
+	list, lerr := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain").CombinedOutput()
+	require.NoError(t, lerr, string(list))
+	assert.Contains(t, string(list), worktreePath, "git must register the worktree at the restored path")
+}
+
+// TestRestoreArchived_RejectsNonArchived: restoring a live (non-archived) session
+// is an error.
+func TestRestoreArchived_RejectsNonArchived(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "worker") // status Ready
+
+	_, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not archived")
+}
+
+// TestRestoreArchived_RepoGoneLeavesArchiveIntact: when the origin repo has been
+// deleted, restore fails with an actionable message and leaves the archived
+// worktree and the Archived status untouched.
+func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+
+	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+
+	require.NoError(t, os.RemoveAll(repoPath), "simulate the origin repo being deleted")
+
+	_, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gone")
+	assert.True(t, exists(archivedPath), "the archived worktree must be left intact when the repo is gone")
+	assert.Equal(t, session.Archived, inst.GetStatus(), "a failed restore must leave the session Archived")
+}
+
+// TestRestoreArchived_CollisionSuffixesPath: when the standard sibling location
+// is occupied at restore time, the worktree is restored to a suffixed path.
+func TestRestoreArchived_CollisionSuffixesPath(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+
+	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+
+	// Occupy the default sibling location so restore must suffix.
+	base, perr := sessiongit.SiblingWorktreePath(repoPath, "worker")
+	require.NoError(t, perr)
+	require.NoError(t, os.MkdirAll(base, 0755))
+
+	worktreePath, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+	assert.Equal(t, base+"-2", worktreePath, "restore must avoid clobbering an occupied sibling path")
+	assert.True(t, exists(filepath.Join(worktreePath, "dirty.txt")))
+}
+
 type fakeRemoteBackend struct {
 	*session.FakeBackend
 }

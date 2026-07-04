@@ -102,6 +102,20 @@ type ArchiveSessionResponse struct {
 	ArchivedPath string
 }
 
+// RestoreArchivedRequest asks the daemon to restore an archived session (#1028):
+// move its worktree back next to the repo, re-spawn the agent, and mark it
+// Running.
+type RestoreArchivedRequest struct {
+	Title  string
+	RepoID string
+}
+
+type RestoreArchivedResponse struct {
+	OK bool
+	// WorktreePath is the on-disk location the worktree was restored to.
+	WorktreePath string
+}
+
 type SendPromptRequest struct {
 	Title  string
 	RepoID string
@@ -859,6 +873,22 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
+	return nil
+}
+
+func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *RestoreArchivedResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	worktreePath, err := s.manager.RestoreArchived(req)
+	if err != nil {
+		return err
+	}
+	resp.OK = true
+	resp.WorktreePath = worktreePath
 	return nil
 }
 
