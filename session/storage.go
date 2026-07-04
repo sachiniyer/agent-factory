@@ -10,6 +10,12 @@ import (
 
 // InstanceData represents the serializable data of an Instance
 type InstanceData struct {
+	// ID is the instance's stable identity (#1195), minted at NewInstance and
+	// used as the reconcile identity key. omitempty + additive: records written
+	// before #1195 simply have no id, and the reconcile falls back to
+	// title+CreatedAt for them (rollforward, mirroring the BranchCreatedByUs
+	// precedent).
+	ID        string    `json:"id,omitempty"`
 	Title     string    `json:"title"`
 	Path      string    `json:"path"`
 	Branch    string    `json:"branch"`
