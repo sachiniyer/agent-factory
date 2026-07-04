@@ -256,6 +256,60 @@ func instanceTitleExistsInScope(repoID, title string) (bool, error) {
 	return false, err
 }
 
+// scopedInstance is a persisted session paired with the repo ID it belongs to,
+// which the broadcast delivery path needs to address the daemon SendPrompt RPC.
+type scopedInstance struct {
+	RepoID string
+	Title  string
+	Status session.Status
+}
+
+// scopedInstancesForRepo lists one repo's persisted sessions with their repo ID
+// attached. Used by the broadcast path (send-prompt --all) to enumerate the
+// current/--repo scope's targets. Mirrors repoHasInstanceTitle's load+parse but
+// returns every entry rather than a single existence bit.
+func scopedInstancesForRepo(repoID string) ([]scopedInstance, error) {
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load instances for repo %s: %w", repoID, err)
+	}
+	var instances []session.InstanceData
+	if err := json.Unmarshal(raw, &instances); err != nil {
+		return nil, fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+	}
+	out := make([]scopedInstance, 0, len(instances))
+	for i := range instances {
+		out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+	}
+	return out, nil
+}
+
+// allScopedInstances lists every repo's persisted sessions, preserving the repo
+// ID association each broadcast delivery needs (loadAllInstancesAggregate drops
+// it). Corrupted repos are logged (naming the repo) and returned via the second
+// value so the caller fails loudly instead of broadcasting to a truncated set
+// (#730) — the same contract as loadAllInstancesAggregate.
+func allScopedInstances() ([]scopedInstance, []string, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return nil, nil, err
+	}
+	var out []scopedInstance
+	var corrupted []string
+	for repoID, raw := range allInstances {
+		var instances []session.InstanceData
+		if err := json.Unmarshal(raw, &instances); err != nil {
+			log.WarningLog.Printf("skipping repo %s: corrupted instances.json: %v", repoID, err)
+			corrupted = append(corrupted, repoID)
+			continue
+		}
+		for i := range instances {
+			out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+		}
+	}
+	return out, corrupted, nil
+}
+
 // jsonOut marshals v to JSON and writes to stdout.
 func jsonOut(v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
@@ -288,6 +342,9 @@ func init() {
 
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptCreateFlag, "create", false, "Auto-create the session if it doesn't exist")
 	sessionsSendPromptCmd.Flags().StringVar(&sendPromptProgramFlag, "program", "", "Program to run when creating a new session (defaults to config default)")
+	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllFlag, "all", false, "Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session)")
+	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllReposFlag, "all-repos", false, "With --all, broadcast across every repo instead of only the current/--repo one")
+	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptIncludeRootFlag, "include-root", false, "With --all, also deliver to the reserved root session (excluded by default)")
 
 	sessionsTabCreateCmd.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in the new tab (required)")
 	sessionsTabCreateCmd.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name (defaults to the command basename; auto-suffixed on collision)")

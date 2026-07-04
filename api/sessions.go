@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 
 	"os/exec"
 	"strings"
@@ -178,21 +180,62 @@ pointing at one).`,
 }
 
 var (
-	sendPromptCreateFlag  bool
-	sendPromptProgramFlag string
+	sendPromptCreateFlag      bool
+	sendPromptProgramFlag     string
+	sendPromptAllFlag         bool
+	sendPromptAllReposFlag    bool
+	sendPromptIncludeRootFlag bool
 )
 
 var sessionsSendPromptCmd = &cobra.Command{
 	Use:   "send-prompt <title> <prompt>",
-	Short: "Send a prompt to a session",
+	Short: "Send a prompt to a session (or broadcast to all with --all)",
 	Long: `Send a prompt to an existing session. The session must already exist unless --create is used.
 
 If the session does not exist, use --create to automatically create it first,
-or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
-	Args: cobra.ExactArgs(2),
+or use 'af sessions create --name <title> --prompt <prompt>' instead.
+
+With --all, broadcast a single prompt to every live session in scope:
+
+    af sessions send-prompt --all "<prompt>"
+
+Broadcast scope defaults to the current repo (honoring --repo). Pass --all-repos
+to broadcast across every repo. The reserved root session is excluded unless
+--include-root is given. Delivery is best-effort per session: unreachable (Lost)
+sessions are reported, and one failure never aborts the rest. The command prints
+a JSON summary (delivered / failed / skipped) and exits 0 even when some
+sessions fail, so scripts can inspect per-session results.`,
+	// Validate flag combinations before arity (cobra runs Args before RunE):
+	// a broadcast-implying flag without --all must surface its actionable
+	// message here, not cobra's generic "accepts 2 arg(s)" (#658/#734: public
+	// CLI = actionable errors). Arity is then mode-aware — with --all the single
+	// positional is the prompt; otherwise it's <title> <prompt>. Flags are
+	// parsed before Args runs, so the mode flags are already set here.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if err := validateSendPromptFlags(); err != nil {
+			return jsonError(err)
+		}
+		if sendPromptAllFlag {
+			if len(args) != 1 {
+				return jsonError(fmt.Errorf("--all broadcast takes exactly one argument (the prompt to broadcast); got %d", len(args)))
+			}
+			return nil
+		}
+		return cobra.ExactArgs(2)(cmd, args)
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		// Re-check here too: unit tests drive RunE directly (bypassing Args),
+		// and it is cheap defense-in-depth against a future caller that skips
+		// arg validation. In the real CLI Args already caught these.
+		if err := validateSendPromptFlags(); err != nil {
+			return jsonError(err)
+		}
+		if sendPromptAllFlag {
+			return runBroadcast(args[0])
+		}
 
 		title := args[0]
 		prompt := args[1]
@@ -264,6 +307,162 @@ or use 'af sessions create --name <title> --prompt <prompt>' instead.`,
 		}
 		return jsonOut(map[string]bool{"ok": true})
 	},
+}
+
+// broadcastResult is the JSON summary `send-prompt --all` prints: aggregate
+// counts plus a per-session breakdown so scripts can tell exactly which
+// sessions received the prompt and why any did not.
+type broadcastResult struct {
+	Prompt    string            `json:"prompt"`
+	Scope     string            `json:"scope"`
+	Delivered int               `json:"delivered"`
+	Failed    int               `json:"failed"`
+	Skipped   int               `json:"skipped"`
+	Results   []broadcastTarget `json:"results"`
+}
+
+// broadcastTarget is one session's outcome in a broadcast. Status is one of
+// "delivered", "failed", or "skipped"; Error carries the daemon's reason on a
+// failure and Reason explains an intentional skip (root excluded, session lost).
+type broadcastTarget struct {
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// validateSendPromptFlags rejects nonsensical send-prompt flag combinations
+// with an actionable message (public CLI standard, #658/#734). It runs from both
+// Args — so it fires before cobra's arity check, which would otherwise mask a
+// broadcast flag used without --all behind a generic "accepts 2 arg(s)" error —
+// and RunE, so unit tests that drive RunE directly still get the same guard.
+func validateSendPromptFlags() error {
+	if !sendPromptAllFlag {
+		// The broadcast-only flags are meaningless without --all. Name whichever
+		// were passed and point the user at the flag that unlocks them.
+		var needsAll []string
+		if sendPromptAllReposFlag {
+			needsAll = append(needsAll, "--all-repos")
+		}
+		if sendPromptIncludeRootFlag {
+			needsAll = append(needsAll, "--include-root")
+		}
+		if len(needsAll) > 0 {
+			return fmt.Errorf("%s can only be used with --all (broadcast mode); add --all to broadcast the prompt to every session in scope", strings.Join(needsAll, " and "))
+		}
+		return nil
+	}
+	if sendPromptCreateFlag {
+		return errors.New("--all cannot be combined with --create: broadcast only delivers to existing sessions")
+	}
+	if sendPromptAllReposFlag && repoFlag != "" {
+		return errors.New("--all-repos and --repo are mutually exclusive: --all-repos already spans every repo")
+	}
+	return nil
+}
+
+// runBroadcast implements `af sessions send-prompt --all`: deliver one prompt to
+// every live session in scope via the same daemon SendPrompt RPC the single-
+// target path uses. Scope defaults to the current repo (honoring --repo) so a
+// broadcast can never blast another repo's sessions (#761 data-loss class);
+// --all-repos opts into spanning every repo. The reserved root session is
+// excluded unless --include-root. Delivery is best-effort: a Lost/unreachable
+// target is reported and skipped, a per-session send error is recorded, and
+// neither aborts the rest. The command exits 0 with a JSON summary regardless of
+// individual failures so callers inspect the per-session results.
+func runBroadcast(prompt string) error {
+	var (
+		targets    []scopedInstance
+		scopeLabel string
+	)
+	if sendPromptAllReposFlag {
+		all, corrupted, err := allScopedInstances()
+		if err != nil {
+			return jsonError(err)
+		}
+		// Fail loudly on a corrupted repo rather than silently broadcasting to
+		// a truncated set — the same loud-fail contract as `sessions list`
+		// (#730). A hidden session that never receives the prompt is worse than
+		// an error the user can act on.
+		if len(corrupted) > 0 {
+			return jsonError(corruptedReposError(corrupted))
+		}
+		targets = all
+		scopeLabel = "all-repos"
+	} else {
+		repoID, err := resolveRepoID()
+		if err != nil {
+			return jsonError(err)
+		}
+		if repoID == "" {
+			// Refuse to guess the scope: silently broadcasting to every repo
+			// here is exactly the #761 wrong-repo hazard the --repo scoping
+			// exists to prevent.
+			return jsonError(errors.New("broadcast needs a target repo: run inside a git repository, pass --repo <path>, or use --all-repos to broadcast to every repo"))
+		}
+		scoped, err := scopedInstancesForRepo(repoID)
+		if err != nil {
+			return jsonError(err)
+		}
+		targets = scoped
+		scopeLabel = "repo:" + repoID
+	}
+
+	// Deterministic order (repo, then title) so output is stable across runs
+	// and the all-repos map iteration order does not leak into the summary.
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].RepoID != targets[j].RepoID {
+			return targets[i].RepoID < targets[j].RepoID
+		}
+		return targets[i].Title < targets[j].Title
+	})
+
+	result := broadcastResult{Prompt: prompt, Scope: scopeLabel, Results: []broadcastTarget{}}
+	for _, t := range targets {
+		// The reserved root session belongs to the maintainer agent (#1106):
+		// don't broadcast into it unless explicitly asked.
+		if session.IsReservedTitle(t.Title) && !sendPromptIncludeRootFlag {
+			result.Skipped++
+			result.Results = append(result.Results, broadcastTarget{
+				Title:  t.Title,
+				RepoID: t.RepoID,
+				Status: "skipped",
+				Reason: "reserved root session excluded; pass --include-root to broadcast to it",
+			})
+			continue
+		}
+		// Lost/Dead sessions have no live backing session to deliver into
+		// (#1108). Report them as skipped-unreachable instead of attempting a
+		// send that would only fail — the broadcast tolerates them cleanly.
+		if t.Status == session.Lost || t.Status == session.Dead {
+			result.Skipped++
+			result.Results = append(result.Results, broadcastTarget{
+				Title:  t.Title,
+				RepoID: t.RepoID,
+				Status: "skipped",
+				Reason: "session is lost/unreachable; recover it before broadcasting",
+			})
+			continue
+		}
+		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: t.Title, RepoID: t.RepoID, Prompt: prompt}); err != nil {
+			result.Failed++
+			result.Results = append(result.Results, broadcastTarget{
+				Title:  t.Title,
+				RepoID: t.RepoID,
+				Status: "failed",
+				Error:  err.Error(),
+			})
+			continue
+		}
+		result.Delivered++
+		result.Results = append(result.Results, broadcastTarget{
+			Title:  t.Title,
+			RepoID: t.RepoID,
+			Status: "delivered",
+		})
+	}
+	return jsonOut(result)
 }
 
 var (
