@@ -36,8 +36,12 @@ func (p tabHotkeysPty) Start(cmd *exec.Cmd) (*os.File, error) {
 func (p tabHotkeysPty) Close() {}
 
 // nameKeyedTmuxExec tracks tmux session existence per name so an instance's
-// agent session and any shell siblings are independent.
-func nameKeyedTmuxExec() cmd_test.MockCmdExec {
+// agent session and any shell siblings are independent. It also returns a spawn
+// hook that marks a session alive WITHOUT a new-session, modeling the real
+// daemon spawning a tab's tmux session server-side before the TUI attaches:
+// since #1152 AttachShellTab is attach-only and no longer resurrects a missing
+// session, so the session must already exist when the TUI reflects the tab.
+func nameKeyedTmuxExec() (cmd_test.MockCmdExec, func(sessionName string)) {
 	existing := map[string]bool{}
 	nameOf := func(cmd *exec.Cmd) string {
 		for i, a := range cmd.Args {
@@ -54,7 +58,7 @@ func nameKeyedTmuxExec() cmd_test.MockCmdExec {
 		}
 		return ""
 	}
-	return cmd_test.MockCmdExec{
+	exec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			n := nameOf(cmd)
@@ -77,6 +81,8 @@ func nameKeyedTmuxExec() cmd_test.MockCmdExec {
 			return []byte("content"), nil
 		},
 	}
+	spawn := func(sessionName string) { existing[sessionName] = true }
+	return exec, spawn
 }
 
 func setupGitRepoForTabs(t *testing.T, workdir string) {
@@ -108,7 +114,7 @@ func freshLocalInstance(t *testing.T, title string) *session.Instance {
 	setupGitRepoForTabs(t, workdir)
 
 	name := fmt.Sprintf("af-tabs-%s-%d", title, time.Now().UnixNano())
-	cmdExec := nameKeyedTmuxExec()
+	cmdExec, spawn := nameKeyedTmuxExec()
 	pty := tabHotkeysPty{t: t, cmdExec: cmdExec}
 
 	inst, err := session.NewInstance(session.InstanceOptions{Title: name, Path: workdir, Program: "bash"})
@@ -116,7 +122,33 @@ func freshLocalInstance(t *testing.T, title string) *session.Instance {
 	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps(name, "bash", pty, cmdExec))
 	require.NoError(t, inst.Start(true))
 	require.Equal(t, 1, inst.TabCount(), "a fresh start must yield only the agent tab (#1100)")
+	registerDaemonSpawn(t, inst, spawn)
 	return inst
+}
+
+// daemonSpawnHooks maps a test instance to the closure that marks a tmux session
+// alive in its mock exec. A stubbed daemon CreateTab uses it to model the real
+// daemon spawning a tab's session server-side BEFORE the TUI attaches — required
+// since #1152 made AttachShellTab attach-only (it no longer resurrects a missing
+// session, so the session must already exist when the TUI reflects the tab).
+// Package-level rather than threaded through the many builder call sites; these
+// tests use t.Setenv so none run in parallel, making the shared map race-free.
+var daemonSpawnHooks = map[*session.Instance]func(string){}
+
+func registerDaemonSpawn(t *testing.T, inst *session.Instance, spawn func(string)) {
+	daemonSpawnHooks[inst] = spawn
+	t.Cleanup(func() { delete(daemonSpawnHooks, inst) })
+}
+
+// spawnDaemonTab is the shared body of every stubbed daemon CreateTab: derive
+// the next shell tab name, mark that sibling session alive in the mock (the
+// daemon's server-side spawn), and return the name for the TUI to attach to.
+func spawnDaemonTab(inst *session.Instance) string {
+	name := nextShellTabName(inst.GetTabs())
+	if spawn := daemonSpawnHooks[inst]; spawn != nil {
+		spawn(inst.TabTmuxName(0) + "__" + name)
+	}
+	return name
 }
 
 // startedLocalInstance is freshLocalInstance plus one on-demand shell tab
@@ -172,7 +204,7 @@ func stubTabDaemonSeams(t *testing.T, inst *session.Instance) (created, closed *
 	var c, d int
 	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
 		c++
-		return nextShellTabName(inst.GetTabs()), nil
+		return spawnDaemonTab(inst), nil
 	}))
 	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
 		d++

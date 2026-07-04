@@ -461,21 +461,42 @@ func (i *Instance) AttachShellTab(name string) (*Tab, error) {
 		return nil, fmt.Errorf("cannot attach a tab without a worktree")
 	}
 
-	// Bind to the exact session name the daemon derived and reconnect to it. The
-	// sibling inherits the agent session's PTY factory / executor (real in
-	// production, mock in tests). Restore re-spawns only if the session is
-	// genuinely missing (its workDir is non-empty), matching setupTabs.
+	// Bind to the exact session name the daemon derived and ATTACH-ONLY to it —
+	// never spawn. Pass empty workDir so a session that is missing surfaces as an
+	// error instead of re-spawning (#1152). The daemon is the single writer that
+	// owns every tmux spawn (#960); this is a pure TUI-side projection of a tab
+	// the daemon already created. If the daemon killed the instance in the window
+	// since our RLock, the session is gone, and re-spawning it here would create a
+	// tmux session that escapes the daemon's Kill teardown and orphans over the
+	// about-to-be-deleted worktree — the same #990 leak AddShellTab guards. Fail
+	// cleanly and let the daemon's next Snapshot reconcile the tab away.
 	tmuxName := agentTmux.SanitizedName() + "__" + name
 	shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
-	if err := shellTmux.Restore(worktreePath); err != nil {
+	if err := shellTmux.Restore(""); err != nil {
 		return nil, fmt.Errorf("failed to reconnect shell tab: %w", err)
 	}
 
 	tab := newShellTab(shellTmux)
 	tab.Name = name
 	i.mu.Lock()
-	i.Tabs = append(i.Tabs, tab)
+	// Re-check started under the write lock before appending, mirroring
+	// AddShellTab: Kill is not serialized against attach and can have flipped
+	// started=false (snapshotting Tabs for teardown) in the window since our
+	// RLock. Nothing was spawned above (attach-only), so a lost race only needs to
+	// release the local attach client we opened and drop the projection; the next
+	// reconcile re-adds the tab if it still exists server-side.
+	killed := !i.started
+	title := i.Title
+	if !killed {
+		i.Tabs = append(i.Tabs, tab)
+	}
 	i.mu.Unlock()
+	if killed {
+		if cerr := shellTmux.CloseAttachOnly(); cerr != nil {
+			log.WarningLog.Printf("attach shell tab to %q: releasing attach client after kill race: %v", title, cerr)
+		}
+		return nil, fmt.Errorf("session was killed during tab attach")
+	}
 	return tab, nil
 }
 
@@ -561,10 +582,14 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		kind := tabKindForData(td.Kind)
 		// The sibling inherits the agent session's PTY factory / executor (real
 		// in production, mock in tests), binding to the EXACT persisted name.
-		// Restore reconnects (re-spawning only if the session is genuinely gone),
-		// mirroring restoreLocalTabs + LocalBackend.setupTabs.
+		// ATTACH-ONLY: pass empty workDir so a missing session errors instead of
+		// re-spawning (#1152). Like AttachShellTab, this is a pure TUI-side
+		// projection of daemon-owned tabs; the daemon is the single writer that
+		// owns every spawn (#960). If the daemon killed the session in the race
+		// window, re-spawning here would orphan a tmux session over the deleted
+		// worktree. Skip the tab on failure and let the next snapshot reconcile it.
 		ts := agentTmux.NewSiblingSession(td.TmuxName, tabProgram(kind, td.Command, program))
-		if err := ts.Restore(worktreePath); err != nil {
+		if err := ts.Restore(""); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("failed to reconnect tab %q: %w", td.Name, err)
 			}

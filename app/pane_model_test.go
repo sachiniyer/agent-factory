@@ -337,7 +337,7 @@ func TestPane_CloseTabRebindsPanes(t *testing.T) {
 	resizeHome(h, 200, 40)
 
 	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return nextShellTabName(inst.GetTabs()), nil
+		return spawnDaemonTab(inst), nil
 	})
 	defer restore()
 	_, _ = h.handleNewTab() // agent + shell + shell-2
@@ -377,7 +377,7 @@ func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
 	resizeHome(h, 200, 40)
 
 	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return nextShellTabName(inst.GetTabs()), nil
+		return spawnDaemonTab(inst), nil
 	})
 	defer restore()
 	_, _ = h.handleNewTab() // agent + shell + shell-2; opens the slot-2 pane
@@ -414,7 +414,7 @@ func TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding(t *testing.T) {
 	resizeHome(h, 200, 40)
 
 	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return nextShellTabName(inst.GetTabs()), nil
+		return spawnDaemonTab(inst), nil
 	})
 	defer restore()
 	_, _ = h.handleNewTab() // agent + shell + shell-2; opens the slot-2 pane
