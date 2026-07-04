@@ -32,6 +32,7 @@ func TestDefaultMapsMatchLegacyTable(t *testing.T) {
 		"o":          KeyAttach,
 		"n":          KeyNew,
 		"D":          KeyKill,
+		"A":          KeyArchive,
 		"q":          KeyQuit,
 		"tab":        KeyTab,
 		"shift+tab":  KeyShiftTab,

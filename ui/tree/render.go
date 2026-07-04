@@ -26,6 +26,11 @@ const deadIcon = "○ "
 // differently from "dead" by shape as well as color.
 const lostIcon = "◌ "
 
+// archivedIcon marks an archived session (#1028): a filed-away box glyph, muted.
+// Deliberately distinct in shape from the running/ready/lost dots so an archived
+// row reads as "put away, restartable" rather than any live/vanished state.
+const archivedIcon = "▧ "
+
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
 // shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
 // Expandable) aligned with their siblings.
@@ -49,6 +54,12 @@ var deadStyle = lipgloss.NewStyle().
 // healthy green either.
 var lostStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#C18401", Dark: "#E5C07B"})
+
+// archivedStyle paints an archived session's dot + dims its title (#1028): the
+// same muted gray as a deleting/dead recede, so a filed-away session never reads
+// as live. Reused for the title/desc foreground below.
+var archivedStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
 // InstanceTitleColor is the foreground of an unselected instance title — the
 // adaptive near-black (light) / near-white (dark) that reads as primary text
@@ -207,6 +218,8 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		join = deadStyle.Render(deadIcon)
 	case session.Lost:
 		join = lostStyle.Render(lostIcon)
+	case session.Archived:
+		join = archivedStyle.Render(archivedIcon)
 	default:
 	}
 
@@ -230,6 +243,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		// Dim the branch/PR lines too: on a selected row descS is the
 		// high-contrast selectedDescStyle, and leaving it bright makes the
 		// secondary lines stand out more than the dimmed title (#853).
+		descS = descS.Foreground(deletingTitleColor)
+	}
+	// An archived row (#1028) is explicitly marked and dimmed so it reads as
+	// "filed away, restartable" — restore with A — rather than a live session.
+	if status == session.Archived {
+		titleText = "[archived] " + titleText
+		titleS = titleS.Foreground(deletingTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
 	}
 	widthAvail := r.width - 3 - prefixWidth - 1

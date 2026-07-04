@@ -127,14 +127,22 @@ func (m *home) closePaneWindow(p *store.OpenPane) {
 	delete(m.lastPaneCapture, p.ID())
 }
 
-// pruneDeadPanes closes panes whose instance left the projection (killed
-// here, or removed by an external kill the snapshot reconcile mirrored)
-// rather than keep rendering a dead session's last capture. Reports whether
-// anything closed; callers relayout on true.
+// pruneDeadPanes closes panes whose backing session can no longer render: the
+// instance left the projection (killed here, or removed by an external kill the
+// snapshot reconcile mirrored), OR the instance was archived (#1028). An
+// archived session's tmux and worktree are torn down, so an open pane bound to
+// it dangles on a dead session — the archived-row "no live panes" contract. The
+// instance stays PRESENT in the projection when archived (it moves to the
+// Archived folder), so the containment check alone would skip it; the status
+// check closes it. Keying on status here (not just the finalize handler) covers
+// EVERY archive path — the TUI `A` verb and a CLI `af sessions archive` mirrored
+// by the reconcile — since panesRefresh runs this on selection changes and
+// reconciles. Reports whether anything closed; callers relayout on true.
 func (m *home) pruneDeadPanes() bool {
 	pruned := false
 	for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
-		if !m.store.ContainsInstance(p.Instance()) {
+		inst := p.Instance()
+		if !m.store.ContainsInstance(inst) || (inst != nil && inst.GetStatus() == session.Archived) {
 			m.closePaneWindow(p)
 			pruned = true
 		}

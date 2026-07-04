@@ -35,6 +35,17 @@ var killSessionThroughDaemon = func(title, repoID string) error {
 	return daemon.KillSession(daemon.KillSessionRequest{Title: title, RepoID: repoID})
 }
 
+// archiveSessionThroughDaemon / restoreArchivedThroughDaemon route the #1028
+// archive/restore verbs through the daemon (the single writer). Package vars so
+// the app test suite can stub them without dialing a real daemon.
+var archiveSessionThroughDaemon = func(title, repoID string) (string, error) {
+	return daemon.ArchiveSession(daemon.ArchiveSessionRequest{Title: title, RepoID: repoID})
+}
+
+var restoreArchivedThroughDaemon = func(title, repoID string) (string, error) {
+	return daemon.RestoreArchived(daemon.RestoreArchivedRequest{Title: title, RepoID: repoID})
+}
+
 // triggerTaskThroughDaemon runs a task by ID through the daemon's single shared
 // trigger path — the SAME entrypoint `af tasks trigger` and the cron scheduler
 // use. It routes through the TriggerTask RPC (#1029 PR 3) so the firing runs

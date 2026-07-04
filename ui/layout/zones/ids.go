@@ -18,6 +18,10 @@ const (
 	// TreeHeader is the Instances section header row (click toggles the
 	// section, like Enter on it).
 	TreeHeader = "tree:header"
+	// TreeHeaderArchived is the Archived folder header row (#1028) — a DISTINCT
+	// zone from TreeHeader so clicking each toggles its own section instead of
+	// colliding on one id.
+	TreeHeaderArchived = "tree:header:archived"
 	// TreeBG is the tree pane's background: any click inside the rail's tree
 	// region that lands on no finer zone (focuses the tree).
 	TreeBG = "tree:bg"

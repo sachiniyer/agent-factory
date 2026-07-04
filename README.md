@@ -69,12 +69,15 @@ Each session is one agent running in its own git worktree on its own branch — 
 | `o` | Attach to the selected session's active tab full-screen |
 | `Ctrl-w` | Detach from a full-screen attach (configurable via `detach_keys`) |
 | `D` | Kill the session and clean up its worktree |
+| `A` | Archive the session (tmux down, worktree moved out, restartable) — on an archived row, restore it |
 | `Tab` / `Shift-Tab` | Cycle focus forward / back: tree → open panes → automations |
 | `1`–`9` | Jump straight to a tab by number |
 | `t` | Open a new shell tab in the session's worktree |
 | `w` | Close the active tab (the agent tab can't be closed) |
 
 When a session's branch has an open pull request, `p` opens it in the browser and `P` copies its URL.
+
+Press `A` to **archive** a session you're done with for now: its tmux is torn down and its worktree is moved out to a global archive directory (branch and uncommitted changes preserved), and the row drops into a collapsed **Archived** folder at the bottom of the rail. Archived sessions survive restarts and are never auto-restored — press `A` again on an archived row (or run `af sessions restore <title>`) to move its worktree back and bring the agent up. Not available for remote or `--here` sessions, which don't own a relocatable worktree.
 
 #### Tabs
 

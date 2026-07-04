@@ -710,6 +710,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.killInstanceCmd(msg.title)
 	case instanceKilledMsg:
 		return m.handleInstanceKilled(msg)
+	case startArchiveMsg:
+		// Archive confirmed; run the daemon teardown+move off the event loop
+		// (#1028), mirroring the kill dispatch.
+		return m, m.archiveInstanceCmd(msg.title)
+	case instanceArchivedMsg:
+		return m.handleInstanceArchived(msg)
+	case instanceRestoredMsg:
+		return m.handleInstanceRestored(msg)
 	case repaintAfterDetachMsg:
 		// Trigger an immediate repaint with whatever content is already
 		// cached on the panes (rendered when bubbletea's main loop calls
@@ -1675,6 +1683,27 @@ type startKillMsg struct {
 // daemon tore the session down and deleted its record; a non-nil err means
 // the session is still alive and the row must become retryable again.
 type instanceKilledMsg struct {
+	title string
+	err   error
+}
+
+// startArchiveMsg is emitted by the archive confirmation (#1028); its handler
+// dispatches archiveInstanceCmd to run the daemon teardown+move off the event
+// loop, mirroring startKillMsg → killInstanceCmd.
+type startArchiveMsg struct {
+	title string
+}
+
+// instanceArchivedMsg / instanceRestoredMsg report completion of an async
+// archive / restore (#1028). On success the row's new status arrives via the
+// next daemon Snapshot reconcile (which re-partitions it into / out of the
+// Archived folder); a non-nil err is surfaced in the error box.
+type instanceArchivedMsg struct {
+	title string
+	err   error
+}
+
+type instanceRestoredMsg struct {
 	title string
 	err   error
 }

@@ -21,13 +21,22 @@ func TestSidebarInitialState(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false, store.NewProjection())
 
-	// The left rail is the instances tree only since the layout cutover
-	// (#1024 PR 4): tasks live in the automations strip, hooks behind an
-	// overlay.
-	assert.Equal(t, 1, len(s.sections))
+	// The rail holds the Instances tree plus the Archived folder (#1028). The
+	// Archived section always exists so its collapse state persists, but it is
+	// rendered only when it holds archived sessions (see the assertion below).
+	assert.Equal(t, 2, len(s.sections))
+	assert.Equal(t, SectionInstances, s.sections[0].Kind)
+	assert.Equal(t, SectionArchived, s.sections[1].Kind)
 
-	// The Instances section is expanded by default
+	// Instances is expanded by default; the Archived folder is collapsed.
 	assert.True(t, s.sections[0].Expanded)
+	assert.False(t, s.sections[1].Expanded, "the Archived folder starts collapsed")
+
+	// With nothing archived, no Archived header is rendered — only the
+	// Instances header is visible.
+	for _, it := range s.visibleItems {
+		assert.NotEqual(t, SectionArchived, it.Kind, "the empty Archived folder must not render")
+	}
 
 	// Initial selection should be on Instances header
 	sel := s.GetSelection()

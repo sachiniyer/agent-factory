@@ -155,8 +155,14 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	switch id {
 	case zones.TreeHeader:
-		// Click the section header: toggle it, like Enter on the row.
+		// Click the Instances header: toggle it, like Enter on the row.
 		m.sidebar.ClickHeader()
+		m.focusRegionClick(layout.RegionTree)
+		return m, m.selectionChanged()
+	case zones.TreeHeaderArchived:
+		// Click the Archived folder header (#1028): toggle the Archived folder
+		// specifically, not the Instances section.
+		m.sidebar.ClickHeaderKind(ui.SectionArchived)
 		m.focusRegionClick(layout.RegionTree)
 		return m, m.selectionChanged()
 	case zones.TreeBG:
