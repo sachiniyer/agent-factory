@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/sachiniyer/agent-factory/api"
 	"github.com/sachiniyer/agent-factory/app"
@@ -217,6 +218,44 @@ var (
 			fmt.Printf("https://github.com/sachiniyer/agent-factory/releases/tag/v%s\n", version)
 		},
 	}
+
+	keysCmd = &cobra.Command{
+		Use:   "keys",
+		Short: "Show the effective TUI key bindings (defaults plus [keys] rebinds)",
+		Long: "Show every TUI action with its effective key binding: the built-in default,\n" +
+			"or the rebind from the [keys] table in config.toml (#1026). Fixed bindings —\n" +
+			"structural keys config cannot touch — are listed last.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			log.Initialize(false)
+			defer log.Close()
+
+			// The keymap is a global-only setting, so LoadConfig (not
+			// ResolveConfig) is deliberate: the output is identical inside
+			// and outside a repository.
+			cfg, err := config.LoadConfig()
+			if err != nil {
+				return err
+			}
+			infos, err := keys.EffectiveBindings(cfg.KeymapOverrides())
+			if err != nil {
+				return err
+			}
+
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 0, 3, ' ', 0)
+			fmt.Fprintln(w, "ACTION\tKEYS\tDESCRIPTION\tSOURCE")
+			for _, info := range infos {
+				action, source := info.Action, "default"
+				switch {
+				case info.Action == "":
+					action, source = "-", "fixed"
+				case info.Rebound:
+					source = fmt.Sprintf("rebound (default: %s)", strings.Join(info.Default, ", "))
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", action, strings.Join(info.Keys, ", "), info.Desc, source)
+			}
+			return w.Flush()
+		},
+	}
 )
 
 func init() {
@@ -237,6 +276,7 @@ func init() {
 	}
 
 	rootCmd.AddCommand(debugCmd)
+	rootCmd.AddCommand(keysCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(upgradeCmd)

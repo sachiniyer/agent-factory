@@ -71,6 +71,7 @@ af daemon uninstall    # remove the autostart unit (the daemon still starts on d
 ```bash
 af version             # print the version and the release URL
 af debug               # print the resolved config and its path
+af keys                # print the effective TUI key bindings (defaults + [keys] rebinds)
 af upgrade             # self-upgrade to the latest GitHub release (Linux/macOS)
 af doctor              # diagnose leaked processes/sessions/temp homes and daemon health
 af doctor --fix        # also apply the safe remediations

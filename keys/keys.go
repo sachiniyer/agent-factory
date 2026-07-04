@@ -231,6 +231,48 @@ func ApplyOverrides(overrides map[string][]string) error {
 	return nil
 }
 
+// BindingInfo describes one action's effective binding for introspection
+// (`af keys`, #1026).
+type BindingInfo struct {
+	// Action is the [keys] table name; "" for fixed bindings config cannot
+	// touch.
+	Action string
+	// Desc is the help-column description.
+	Desc string
+	// Keys are the effective key strings (defaults or the override).
+	Keys []string
+	// Default are the built-in key strings.
+	Default []string
+	// Rebound reports whether an override replaced the default.
+	Rebound bool
+}
+
+// EffectiveBindings returns every action's effective binding with the given
+// [keys] overrides applied, in the canonical display order (rebindable
+// actions sorted by name, then the fixed bindings in table order). The
+// overrides are validated first, so a broken table reports the same error
+// the TUI would refuse to start with.
+func EffectiveBindings(overrides map[string][]string) ([]BindingInfo, error) {
+	if err := ValidateOverrides(overrides); err != nil {
+		return nil, err
+	}
+	var rebindable, fixed []BindingInfo
+	for _, sp := range specs {
+		info := BindingInfo{Action: sp.configKey, Desc: sp.desc, Keys: sp.keys, Default: sp.keys}
+		if sp.configKey != "" {
+			if o, ok := overrides[sp.configKey]; ok {
+				info.Keys = o
+				info.Rebound = true
+			}
+			rebindable = append(rebindable, info)
+			continue
+		}
+		fixed = append(fixed, info)
+	}
+	sort.Slice(rebindable, func(i, j int) bool { return rebindable[i].Action < rebindable[j].Action })
+	return append(rebindable, fixed...), nil
+}
+
 // RebindableActions returns the sorted [keys] table names of every action
 // config may rebind, for validation error messages.
 func RebindableActions() []string {
