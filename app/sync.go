@@ -361,48 +361,43 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 			}
 			continue
 		}
-		// In-flight TUI operations own their row: leave Loading/Deleting alone —
-		// EXCEPT a locally-Deleting row when the daemon (the single writer, #960)
-		// now reports a TERMINAL status (Archived/Lost/Dead). A settled terminal
-		// truth must win over a stale local transient: the archive flow fences
-		// its teardown+move window with the daemon's Deleting and then flips to
-		// the terminal Archived (#1028), so a 750ms snapshot poll landing inside
-		// that window mirrors the row to Deleting — and without this override
-		// isTransientStatus would skip it on every later reconcile, stranding it
-		// on "Tearing down session…" forever, never partitioning into the
-		// Archived folder. The optimistic Deleting-during-kill UX is preserved:
-		// a user kill leaves the daemon reporting a non-terminal status (or
-		// deletes the record) until it completes, so it never trips this
-		// override — only a daemon-confirmed terminal state does. Loading rows
-		// (a create the daemon may not list yet) are never overridden.
-		if isTransientStatus(inst.GetStatus()) {
-			overrideDeleting := inst.GetStatus() == session.Deleting && isTerminalStatus(d.Status)
-			if !overrideDeleting {
-				continue
-			}
-		}
 		if !sameSession(inst, d) {
 			// Same title, different session — a kill+recreate reused the title
 			// (#765). Swap the stale row for the live one rather than mutating the
-			// corpse in place.
+			// corpse in place. EXCEPT: a row with a local op in flight (a create
+			// placeholder, an optimistic kill) owns its identity transition via its
+			// own completion handler (instanceStartedMsg/instanceKilledMsg, which
+			// use pointer identity); swapping it here would orphan that handshake
+			// and leave two same-title rows (#808). Leave it and let the op resolve.
+			if inst.GetInFlightOp() != session.OpNone {
+				continue
+			}
 			if m.swapInstanceFromSnapshot(d) {
 				changed = true
 			}
 			continue
 		}
+		// Same session: apply the daemon's liveness UNCONDITIONALLY and clear a
+		// local op once the liveness confirms its outcome. This is the #1195
+		// structural fix for #1187: because liveness is never skipped, a
+		// locally-archiving row can no longer be stranded on "Tearing down…" — the
+		// terminal Archived always lands, and the op clears. The old
+		// isTransientStatus/overrideDeleting apparatus is gone.
 		if m.updateInstanceFromSnapshot(inst, d) {
 			changed = true
 		}
 	}
 
-	// Remove sessions the daemon no longer owns. Skip transient rows (an
-	// in-flight create the daemon doesn't list yet; a mid-teardown kill).
+	// Remove sessions the daemon no longer owns. Skip rows with a local op in
+	// flight (a create the daemon doesn't list yet; a mid-teardown kill whose
+	// record the daemon just deleted) — their completion handler owns the
+	// removal, not the reconcile (#808/#844).
 	var toRemove []*session.Instance
 	for _, inst := range m.store.GetInstances() {
 		if _, ok := snapByTitle[inst.Title]; ok {
 			continue
 		}
-		if isTransientStatus(inst.GetStatus()) {
+		if inst.GetInFlightOp() != session.OpNone {
 			continue
 		}
 		toRemove = append(toRemove, inst)
@@ -503,13 +498,23 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
-	// Mirror the daemon's authoritative status onto the row (#960 PR 5). The
-	// daemon poll loop computes Ready/Dead/Running (the #935 liveness) and the
-	// TUI renders it — it no longer computes status itself. The reconcile loop
-	// already skipped transient TUI-owned rows (Loading/Deleting) before calling
-	// here, so this never clobbers an in-flight create or a mid-teardown kill.
-	if inst.GetStatus() != d.Status {
-		inst.SetStatus(d.Status)
+	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
+	// the daemon poll computes Running/Ready/Lost/Archived (the #935 liveness) and
+	// the TUI renders it. Applied UNCONDITIONALLY — daemon liveness always wins —
+	// which is what makes #1187 structurally impossible: a locally-archiving row
+	// still receives the terminal Archived instead of being stranded. The local
+	// in-flight op is a separate axis the daemon snapshot never carries, so this
+	// can never clobber an optimistic kill/archive marker.
+	lv := snapshotLiveness(d)
+	if inst.GetLiveness() != lv {
+		inst.SetLiveness(lv)
+		changed = true
+	}
+	// Clear a local optimistic op once the daemon liveness confirms its outcome.
+	// An archive settles at Archived; a kill's op is cleared by row removal, not
+	// here, so it survives liveness updates until the daemon drops the record.
+	if inst.GetInFlightOp() == session.OpArchiving && lv == session.LiveArchived {
+		inst.SetInFlightOp(session.OpNone)
 		changed = true
 	}
 	// Remote instances' tabs come from hook config (terminal_cmd), not the
@@ -565,23 +570,15 @@ func prInfoDiffersFromData(inst *session.Instance, d session.PRInfoData) bool {
 	return cur.Number != d.Number || cur.Title != d.Title || cur.URL != d.URL || cur.State != d.State
 }
 
-// isTransientStatus reports whether an in-memory instance is in a
-// state owned by an in-flight TUI operation — Loading (creation, #808) or
-// Deleting (async kill, #844) — during which the snapshot reconcile must
-// neither replace nor reap it.
-func isTransientStatus(status session.Status) bool {
-	return status == session.Loading || status == session.Deleting
-}
-
-// isTerminalStatus reports whether a daemon-reported status is a settled,
-// persisted outcome rather than a transient in-flight one (#1028). A terminal
-// status from the single-writer daemon overrides a stale local transient
-// (Deleting) row in reconcileSnapshot — it is a truth that has already been
-// committed to disk, so the TUI must reflect it even if a poll caught the row
-// mid-teardown. Archived (deliberate), Lost, and Dead are the persisted
-// terminal states (Running/Ready are live, Loading/Deleting are transient).
-func isTerminalStatus(status session.Status) bool {
-	return status == session.Archived || status == session.Lost || status == session.Dead
+// snapshotLiveness resolves the daemon-owned liveness a snapshot record carries
+// (#1195). It prefers the explicit `liveness` field; a record from a daemon that
+// predates the field (LivenessUnset) falls back to deriving it from the legacy
+// `status` int, so a mixed-version snapshot still reconciles correctly.
+func snapshotLiveness(d session.InstanceData) session.Liveness {
+	if d.Liveness != session.LivenessUnset {
+		return d.Liveness
+	}
+	return session.LivenessForStatus(d.Status)
 }
 
 func (m *home) importRemoteHookSessions() int {

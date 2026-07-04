@@ -45,9 +45,9 @@ func TestArchive_ReconcileClosesOpenPanes(t *testing.T) {
 	_, _ = h.openOrFocusPane(inst, 0)
 	require.Equal(t, 1, h.store.NumOpenPanes())
 
-	// The daemon reports the session archived (same session — matching CreatedAt).
+	// The daemon reports the session archived (same session — matching id).
 	data := inst.ToInstanceData()
-	data.Status = session.Archived
+	data.Liveness = session.LiveArchived
 	h.reconcileSnapshot([]session.InstanceData{data})
 
 	require.Equal(t, session.Archived, inst.GetStatus())
@@ -77,7 +77,7 @@ func TestRestore_LeavesNoStalePaneBinding(t *testing.T) {
 
 	// Restore flips it back to Running via the reconcile.
 	data := inst.ToInstanceData()
-	data.Status = session.Running
+	data.Liveness = session.LiveRunning
 	h.reconcileSnapshot([]session.InstanceData{data})
 	require.Equal(t, session.Running, inst.GetStatus())
 

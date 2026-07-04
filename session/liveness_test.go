@@ -81,6 +81,6 @@ func TestLivenessPersistenceRollforward(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(`{"title":"old","status":5}`), &legacy))
 	assert.Equal(t, LivenessUnset, legacy.Liveness, "a pre-#1195 record has no liveness key")
 	assert.Equal(t, Lost, legacy.Status, "the legacy status int is still readable")
-	assert.Equal(t, LiveLost, livenessForStatus(legacy.Status),
+	assert.Equal(t, LiveLost, LivenessForStatus(legacy.Status),
 		"the fallback maps the legacy status onto the liveness axis")
 }

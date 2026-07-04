@@ -101,32 +101,36 @@ func TestReconcileSnapshot_MirrorsStatusOntoExistingRow(t *testing.T) {
 	inst := instanceWithFakeBackend(t, "a") // starts Running, started=true
 	h.store.AddInstance(inst)
 
-	// The daemon's snapshot reports this session is now Dead. The TUI must adopt
-	// it verbatim — it does not re-derive Ready/Dead from a local probe.
+	// The daemon's snapshot reports this session is now Lost. The TUI must adopt
+	// the daemon's liveness verbatim — it does not re-derive it from a local probe.
 	data := inst.ToInstanceData()
-	data.Status = session.Dead
+	data.Liveness = session.LiveLost
 
 	changed := h.reconcileSnapshot([]session.InstanceData{data})
 
-	assert.True(t, changed, "mirroring a new status must report a change so the sidebar repaints")
-	assert.Equal(t, session.Dead, inst.GetStatus(),
-		"the TUI must render the daemon's snapshot status, not compute its own")
+	assert.True(t, changed, "mirroring a new liveness must report a change so the sidebar repaints")
+	assert.Equal(t, session.Lost, inst.GetStatus(),
+		"the TUI must render the daemon's snapshot liveness, not compute its own")
 }
 
-// TestReconcileSnapshot_LeavesTransientRowStatusAlone guards that a row the TUI
-// owns mid-operation (Loading creation #808, Deleting kill #844) is not
-// clobbered by the status mirror: the reconcile skips transient rows entirely.
-func TestReconcileSnapshot_LeavesTransientRowStatusAlone(t *testing.T) {
+// TestReconcileSnapshot_LeavesTransientOpAlone guards the #1195 structural
+// property: a row the TUI owns mid-kill (local OpKilling) keeps its op through a
+// reconcile even though the daemon liveness is applied. The daemon snapshot never
+// carries the op, and a liveness write can't touch the separate op axis, so the
+// composed status stays Deleting — replacing the old isTransientStatus skip.
+func TestReconcileSnapshot_LeavesTransientOpAlone(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
-	inst.SetStatus(session.Deleting)
+	inst.SetInFlightOp(session.OpKilling)
 	h.store.AddInstance(inst)
 
 	data := inst.ToInstanceData()
-	data.Status = session.Ready // daemon doesn't know about the in-flight kill
+	data.Liveness = session.LiveReady // daemon doesn't know about the in-flight kill
 
 	h.reconcileSnapshot([]session.InstanceData{data})
 
+	assert.Equal(t, session.OpKilling, inst.GetInFlightOp(),
+		"a reconcile liveness write must not touch the local kill op")
 	assert.Equal(t, session.Deleting, inst.GetStatus(),
 		"a mid-teardown row must keep its Deleting marker through a reconcile")
 }
