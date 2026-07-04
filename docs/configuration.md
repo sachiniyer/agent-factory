@@ -66,7 +66,7 @@ Behavior and guarantees:
 - **Adopt, never clobber.** If a session titled `root` already exists and is alive — however it was created — the daemon leaves it completely alone. Only a `root` whose tmux has died (status `Dead`) or that is missing entirely is (re-)created.
 - **The name `root` is reserved.** Normal session creation (TUI, `af sessions create`, the API, task spawns) rejects the title `root` (case-insensitively); auto-derived titles skip it.
 - **An explicit kill is respected.** If you kill the `root` session (TUI `D`, `af sessions kill root`), the daemon does not resurrect it until the next daemon restart, at which point the configured state is re-asserted.
-- **Failures back off and cap.** If ensuring a root repeatedly fails (e.g. the configured path is not a git repository), the daemon retries with exponential backoff and gives up for that repo after 6 consecutive failures until it restarts, logging each outcome to the application log.
+- **Failures back off but never give up.** If ensuring a root repeatedly fails (e.g. the configured path is not a git repository, or the tmux server is temporarily unusable), the daemon retries with exponential backoff that settles at one attempt every 5 minutes, logging each outcome to the application log (with an escalation to ERROR after 6 consecutive failures). The first attempt after the cause clears heals the root — no daemon restart needed.
 - Changes to `root_agents` are picked up on the next **daemon restart**.
 
 Because the default profile skips permission prompts and auto-accepts, only opt in repositories where you are comfortable with a fully autonomous agent running at the repo root.

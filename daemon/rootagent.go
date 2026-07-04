@@ -30,12 +30,16 @@ import (
 // root-agent profile).
 const rootDangerouslySkipPermissionsFlag = "--dangerously-skip-permissions"
 
-// rootEnsureMaxConsecutiveFailures caps how many consecutive failed ensure
-// attempts a configured repo gets before the loop gives up on it until the
-// daemon restarts. Failures back off exponentially in between, so the cap is
-// a backstop against permanently broken configs (a deleted repo path, an
-// unparseable persisted root record), not a race against transient errors.
-const rootEnsureMaxConsecutiveFailures = 6
+// rootEnsureEscalationThreshold is the consecutive-failure count at which the
+// ensure loop escalates to a one-time ERROR log: the cause now looks
+// persistent (a deleted repo path, an unparseable persisted root record), not
+// transient. The loop never stops retrying — it settles at the
+// rootEnsureBackoffMax cadence instead. A permanent give-up here is what kept
+// root agents down for hours after the 2026-07-03 tmux-server outage: the
+// outage outlasted the six fast attempts, and recovery then depended on a
+// daemon restart. Any outage that ends must heal on the next retry, whatever
+// the failure looked like while it lasted (#1122).
+const rootEnsureEscalationThreshold = 6
 
 // Backoff between failed ensure attempts for one repo: base doubles per
 // consecutive failure, capped at max. Package vars so tests can shorten them.
@@ -50,7 +54,6 @@ var (
 type rootEnsureState struct {
 	consecutiveFailures int
 	nextAttempt         time.Time
-	gaveUp              bool
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
@@ -76,7 +79,8 @@ func (m *Manager) EnsureRootAgents() {
 // ensureRootAgent guarantees the root agent for one configured repo path:
 // adopt a live root untouched, heal a Dead one in place, create a missing
 // one, and respect an explicit user kill. All outcomes are logged; failures
-// back off and eventually give up (rootEnsureMaxConsecutiveFailures).
+// back off exponentially and settle at the rootEnsureBackoffMax cadence, so
+// the loop always heals eventually once the cause clears.
 func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 	m.mu.Lock()
 	st := m.rootEnsureStates[path]
@@ -84,7 +88,7 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 		st = &rootEnsureState{}
 		m.rootEnsureStates[path] = st
 	}
-	skip := st.gaveUp || time.Now().Before(st.nextAttempt)
+	skip := time.Now().Before(st.nextAttempt)
 	m.mu.Unlock()
 	if skip {
 		return
@@ -181,23 +185,33 @@ func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
 }
 
 // rootEnsureFailed records a failed ensure attempt: exponential backoff up to
-// rootEnsureBackoffMax, and after rootEnsureMaxConsecutiveFailures in a row
-// the repo is dropped until the daemon restarts. Every outcome is logged.
+// rootEnsureBackoffMax, where the retry cadence stays for as long as the
+// failures do. Retrying forever (instead of giving up until restart) is what
+// guarantees a root heals after a tmux-server outage of any length — an
+// outage is indistinguishable from a broken config while it lasts, and only
+// a later retry can tell the difference (#1122). The cost for a genuinely
+// broken config is one cheap failed attempt per cadence interval, each
+// logged. Crossing rootEnsureEscalationThreshold logs one ERROR so a
+// persistent cause is visible without waiting for a user to notice the
+// missing root.
 func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st.consecutiveFailures++
-	if st.consecutiveFailures >= rootEnsureMaxConsecutiveFailures {
-		st.gaveUp = true
-		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; giving up until the daemon restarts: %v", path, st.consecutiveFailures, err)
-		return
-	}
-	backoff := rootEnsureBackoffBase << (st.consecutiveFailures - 1)
-	if backoff > rootEnsureBackoffMax {
-		backoff = rootEnsureBackoffMax
+	backoff := rootEnsureBackoffMax
+	// Guard the shift: past ~16 doublings the exponential form has no
+	// meaning and would overflow.
+	if shift := st.consecutiveFailures - 1; shift < 16 {
+		if b := rootEnsureBackoffBase << shift; b < backoff {
+			backoff = b
+		}
 	}
 	st.nextAttempt = time.Now().Add(backoff)
-	log.WarningLog.Printf("root agent ensure for %q failed (attempt %d/%d), retrying in %s: %v", path, st.consecutiveFailures, rootEnsureMaxConsecutiveFailures, backoff, err)
+	if st.consecutiveFailures == rootEnsureEscalationThreshold {
+		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; the cause looks persistent — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureBackoffMax, err)
+		return
+	}
+	log.WarningLog.Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
 }
 
 // rootAgentProgram resolves the command the root agent runs. An explicit

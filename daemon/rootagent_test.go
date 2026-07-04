@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -234,10 +237,12 @@ func TestEnsureRootAgentsRespectsUserKill(t *testing.T) {
 	}
 }
 
-// TestEnsureRootAgentsBackoffAndGiveUp: a permanently failing entry (path
-// that is not a git repo) is retried with backoff and dropped after the cap,
-// never spinning forever.
-func TestEnsureRootAgentsBackoffAndGiveUp(t *testing.T) {
+// TestEnsureRootAgentsKeepsRetryingAndHeals is the #1122 outage regression
+// test: a failing entry must keep being retried PAST the escalation threshold
+// (never permanently dropped — that is what left roots down for hours after
+// the 2026-07-03 tmux-server outage), and the first attempt after the cause
+// clears must heal the root with no daemon restart.
+func TestEnsureRootAgentsKeepsRetryingAndHeals(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	installInstantBackend(t)
 
@@ -246,13 +251,17 @@ func TestEnsureRootAgentsBackoffAndGiveUp(t *testing.T) {
 	rootEnsureBackoffBase = 0
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 
-	badPath := t.TempDir() // a directory, but not a git repo
+	badPath := filepath.Join(t.TempDir(), "repo") // does not exist yet
+	if err := os.MkdirAll(badPath, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 	manager, err := NewManager(rootTestConfig(badPath, config.RootAgentConfig{}))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	for i := 0; i < rootEnsureMaxConsecutiveFailures+3; i++ {
+	attempts := rootEnsureEscalationThreshold + 3
+	for i := 0; i < attempts; i++ {
 		manager.EnsureRootAgents()
 	}
 
@@ -262,11 +271,32 @@ func TestEnsureRootAgentsBackoffAndGiveUp(t *testing.T) {
 	if st == nil {
 		t.Fatalf("expected ensure state for %q", badPath)
 	}
-	if !st.gaveUp {
-		t.Fatalf("expected ensure to give up after %d consecutive failures", rootEnsureMaxConsecutiveFailures)
+	if st.consecutiveFailures != attempts {
+		t.Fatalf("ensure must keep attempting past the escalation threshold: want %d failures, got %d", attempts, st.consecutiveFailures)
 	}
-	if st.consecutiveFailures != rootEnsureMaxConsecutiveFailures {
-		t.Fatalf("attempts must stop at the cap: want %d, got %d", rootEnsureMaxConsecutiveFailures, st.consecutiveFailures)
+
+	// The cause clears: the directory becomes a real git repo (stands in for
+	// "the tmux server outage ended"). The very next pass must heal.
+	for _, args := range [][]string{
+		{"init", badPath},
+		{"-C", badPath, "config", "user.email", "test@example.com"},
+		{"-C", badPath, "config", "user.name", "Test User"},
+		{"-C", badPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	manager.EnsureRootAgents()
+
+	if findRootInstance(t, manager, badPath) == nil {
+		t.Fatalf("first ensure pass after the cause cleared must create the root without a daemon restart")
+	}
+	manager.mu.Lock()
+	failures := st.consecutiveFailures
+	manager.mu.Unlock()
+	if failures != 0 {
+		t.Fatalf("healing must reset the failure counter, got %d", failures)
 	}
 }
 
