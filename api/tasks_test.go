@@ -9,41 +9,89 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// daemonCalls tracks stubbed invocations of the daemon RPC helpers so tests
-// can assert that task CRUD pokes the daemon to reload its schedule set
-// (#782) without dialing — or spawning — a real daemon.
+// daemonCalls tracks stubbed invocations of the daemon task RPCs so tests can
+// assert that task CRUD dispatches to the daemon (#1029 PR 3) without dialing —
+// or spawning — a real daemon. Task writes are now daemon-owned: the CLI sends
+// the write to the daemon, which persists tasks.json and reloads its own
+// scheduler/watchers in-process, so `writes` counts successful add/update/remove
+// RPC dispatches (each of which subsumes the old separate reload poke).
 type daemonCalls struct {
-	reloads   int
-	reloadErr error
+	writes    int
+	addErr    error
+	updateErr error
+	removeErr error
 	triggered []string
 	runErr    error
 }
 
-// stubDaemon swaps the daemon RPC indirections for in-memory stubs and
-// restores them on test cleanup.
+// stubDaemon swaps the daemon task-RPC indirections for in-memory stubs and
+// restores them on test cleanup. The write stubs perform the REAL disk write
+// (task.AddTask/UpdateTask/RemoveTask) so the tests' on-disk assertions
+// (task.LoadTasks/GetTask) still hold exactly as they did when the CLI wrote
+// disk directly — the behavior under test is only that the write now dispatches
+// through the daemon RPC. Injecting an *Err short-circuits before the write to
+// model an RPC failure. The read stub defaults to ErrDaemonUnavailable so
+// list/get fall back to the disk the tests seed; read-path tests override it.
 func stubDaemon(t *testing.T) *daemonCalls {
 	t.Helper()
 	calls := &daemonCalls{}
 
-	origReload := reloadDaemonTasks
-	origRun := runTask
-	reloadDaemonTasks = func() error {
-		calls.reloads++
-		return calls.reloadErr
+	origAdd := daemonAddTask
+	origUpdate := daemonUpdateTask
+	origRemove := daemonRemoveTask
+	origTrigger := daemonTriggerTask
+	origList := daemonListTasksNoSpawn
+
+	daemonAddTask = func(tk task.Task) error {
+		if calls.addErr != nil {
+			return calls.addErr
+		}
+		if err := task.AddTask(tk); err != nil {
+			return err
+		}
+		calls.writes++
+		return nil
 	}
-	runTask = func(id string) error {
+	daemonUpdateTask = func(tk task.Task) error {
+		if calls.updateErr != nil {
+			return calls.updateErr
+		}
+		if err := task.UpdateTask(tk); err != nil {
+			return err
+		}
+		calls.writes++
+		return nil
+	}
+	daemonRemoveTask = func(id string) error {
+		if calls.removeErr != nil {
+			return calls.removeErr
+		}
+		if err := task.RemoveTask(id); err != nil {
+			return err
+		}
+		calls.writes++
+		return nil
+	}
+	daemonTriggerTask = func(id string) error {
 		calls.triggered = append(calls.triggered, id)
 		return calls.runErr
 	}
+	daemonListTasksNoSpawn = func() ([]task.Task, error) {
+		return nil, daemon.ErrDaemonUnavailable
+	}
 	t.Cleanup(func() {
-		reloadDaemonTasks = origReload
-		runTask = origRun
+		daemonAddTask = origAdd
+		daemonUpdateTask = origUpdate
+		daemonRemoveTask = origRemove
+		daemonTriggerTask = origTrigger
+		daemonListTasksNoSpawn = origList
 	})
 	return calls
 }
@@ -129,7 +177,7 @@ func setupAddRepo(t *testing.T) string {
 	return repo
 }
 
-func TestTasksAdd_PersistsTaskAndPokesDaemon(t *testing.T) {
+func TestTasksAdd_PersistsTaskViaDaemon(t *testing.T) {
 	useTempConfig(t)
 	resetAddFlags(t)
 	calls := stubDaemon(t)
@@ -154,31 +202,30 @@ func TestTasksAdd_PersistsTaskAndPokesDaemon(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, resolvedRepo, resolvedProject)
 
-	assert.Equal(t, 1, calls.reloads, "add must poke the daemon to reload schedules")
+	assert.Equal(t, 1, calls.writes, "add must dispatch the write to the daemon")
 }
 
-// TestTasksAdd_DaemonPokeFailureDoesNotFailAdd pins the eventual-consistency
-// contract that replaced the old install/rollback dance (#324/#457/#458):
-// the task record is the source of truth; a failed reload poke is logged and
-// the daemon picks the task up at its next start.
-func TestTasksAdd_DaemonPokeFailureDoesNotFailAdd(t *testing.T) {
+// TestTasksAdd_DaemonWriteFailureFailsAdd pins the daemon-owned-write contract
+// (#1029 PR 3): the daemon is now the sole task writer, so a failed AddTask RPC
+// fails the CLI command — there is no client-side disk write to fall back to.
+// This replaces the old eventual-consistency "failed reload poke is fine" test,
+// which no longer applies now that the write itself goes through the daemon.
+func TestTasksAdd_DaemonWriteFailureFailsAdd(t *testing.T) {
 	useTempConfig(t)
 	resetAddFlags(t)
 	calls := stubDaemon(t)
-	calls.reloadErr = errors.New("simulated daemon-start failure")
+	calls.addErr = errors.New("simulated daemon RPC failure")
 	setupAddRepo(t)
 
-	taskAddNameFlag = "poke-fail"
+	taskAddNameFlag = "rpc-fail"
 	taskAddPromptFlag = "p"
 	taskAddCronFlag = "0 9 * * *"
 	taskAddProgramFlag = "claude"
 
 	err := tasksAddCmd.RunE(tasksAddCmd, nil)
-	require.NoError(t, err, "a failed daemon poke must not fail the add")
-
-	tasks, err := task.LoadTasks()
-	require.NoError(t, err)
-	require.Len(t, tasks, 1, "task record must persist even when the poke fails")
+	require.Error(t, err, "a failed daemon write RPC must fail the add")
+	assert.Contains(t, err.Error(), "failed to add task")
+	assert.Zero(t, calls.writes, "no successful write is recorded when the RPC fails")
 }
 
 // TestTasksAdd_RejectsEmptyPrompt is the regression guard for #517: Cobra's
@@ -202,7 +249,7 @@ func TestTasksAdd_RejectsEmptyPrompt(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "prompt must be non-empty")
 
-			assert.Zero(t, calls.reloads, "no daemon poke when validation fails")
+			assert.Zero(t, calls.writes, "no daemon write is dispatched when validation fails")
 
 			tasks, err := task.LoadTasks()
 			require.NoError(t, err)
@@ -225,7 +272,7 @@ func TestTasksAdd_RejectsInvalidCron(t *testing.T) {
 	err := tasksAddCmd.RunE(tasksAddCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid cron expression")
-	assert.Zero(t, calls.reloads)
+	assert.Zero(t, calls.writes)
 }
 
 // TestTasksAdd_InvalidRepoNamesPathNotRequired is half of the #892 regression:
@@ -252,7 +299,7 @@ func TestTasksAdd_InvalidRepoNamesPathNotRequired(t *testing.T) {
 	assert.Contains(t, err.Error(), notARepo, "error must name the invalid --repo path")
 	assert.Contains(t, err.Error(), "not a valid git repository")
 	assert.NotContains(t, err.Error(), "--repo is required", "must not claim --repo is missing when it was provided")
-	assert.Zero(t, calls.reloads, "no daemon poke when repo resolution fails")
+	assert.Zero(t, calls.writes, "no daemon write is dispatched when repo resolution fails")
 }
 
 // TestTasksAdd_AbsentRepoInNonRepoCwdSaysRequired is the other half of #892:
@@ -276,7 +323,7 @@ func TestTasksAdd_AbsentRepoInNonRepoCwdSaysRequired(t *testing.T) {
 	assert.Contains(t, err.Error(), "--repo is required")
 }
 
-func TestTasksUpdate_DisablePersistsAndPokesDaemon(t *testing.T) {
+func TestTasksUpdate_DisablePersistsViaDaemon(t *testing.T) {
 	useTempConfig(t)
 	resetUpdateFlags(t)
 	calls := stubDaemon(t)
@@ -290,10 +337,10 @@ func TestTasksUpdate_DisablePersistsAndPokesDaemon(t *testing.T) {
 	got, err := task.GetTask("t1")
 	require.NoError(t, err)
 	assert.False(t, got.Enabled)
-	assert.Equal(t, 1, calls.reloads, "update must poke the daemon to reload schedules")
+	assert.Equal(t, 1, calls.writes, "update must dispatch the write to the daemon")
 }
 
-func TestTasksUpdate_CronChangePersistsAndPokesDaemon(t *testing.T) {
+func TestTasksUpdate_CronChangePersistsViaDaemon(t *testing.T) {
 	useTempConfig(t)
 	resetUpdateFlags(t)
 	calls := stubDaemon(t)
@@ -307,7 +354,7 @@ func TestTasksUpdate_CronChangePersistsAndPokesDaemon(t *testing.T) {
 	got, err := task.GetTask("t2")
 	require.NoError(t, err)
 	assert.Equal(t, "30 6 * * 1", got.CronExpr)
-	assert.Equal(t, 1, calls.reloads)
+	assert.Equal(t, 1, calls.writes)
 }
 
 func TestTasksUpdate_RejectsInvalidCron(t *testing.T) {
@@ -325,7 +372,7 @@ func TestTasksUpdate_RejectsInvalidCron(t *testing.T) {
 	got, err := task.GetTask("t3")
 	require.NoError(t, err)
 	assert.Equal(t, "0 9 * * *", got.CronExpr, "cron must remain unchanged on validation failure")
-	assert.Zero(t, calls.reloads)
+	assert.Zero(t, calls.writes)
 }
 
 func TestTasksUpdate_RejectsEmptyPrompt(t *testing.T) {
@@ -352,7 +399,7 @@ func TestTasksUpdate_RejectsEmptyPrompt(t *testing.T) {
 			got, err := task.GetTask("t-whitespace")
 			require.NoError(t, err)
 			assert.Equal(t, "valid prompt", got.Prompt, "prompt should remain unchanged")
-			assert.Zero(t, calls.reloads)
+			assert.Zero(t, calls.writes)
 		})
 	}
 }
@@ -387,7 +434,7 @@ func TestTasksUpdate_RejectsBlankWatchCmd(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, "0 3 * * *", got.CronExpr, "existing trigger must survive a rejected update")
 				assert.Empty(t, got.WatchCmd)
-				assert.Zero(t, calls.reloads)
+				assert.Zero(t, calls.writes)
 			})
 		}
 	}
@@ -418,7 +465,7 @@ func TestTasksUpdate_RejectsBlankCron(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, "tail -f errors.log", got.WatchCmd, "existing trigger must survive a rejected update")
 				assert.Empty(t, got.CronExpr)
-				assert.Zero(t, calls.reloads)
+				assert.Zero(t, calls.writes)
 			})
 		}
 	}
@@ -457,10 +504,10 @@ func TestTasksUpdate_RejectsBadEnabledValue(t *testing.T) {
 	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"t4"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--enabled must be 'true' or 'false'")
-	assert.Zero(t, calls.reloads)
+	assert.Zero(t, calls.writes)
 }
 
-func TestTasksRemove_RemovesTaskAndPokesDaemon(t *testing.T) {
+func TestTasksRemove_RemovesTaskViaDaemon(t *testing.T) {
 	useTempConfig(t)
 	calls := stubDaemon(t)
 
@@ -472,7 +519,7 @@ func TestTasksRemove_RemovesTaskAndPokesDaemon(t *testing.T) {
 	tasks, err := task.LoadTasks()
 	require.NoError(t, err)
 	assert.Empty(t, tasks)
-	assert.Equal(t, 1, calls.reloads, "remove must poke the daemon to reload schedules")
+	assert.Equal(t, 1, calls.writes, "remove must dispatch the write to the daemon")
 }
 
 func TestTasksRemove_MissingTaskErrors(t *testing.T) {
@@ -482,7 +529,7 @@ func TestTasksRemove_MissingTaskErrors(t *testing.T) {
 	err := tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"nope1234"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
-	assert.Zero(t, calls.reloads, "no daemon poke when nothing changed")
+	assert.Zero(t, calls.writes, "no daemon write is dispatched when nothing changed")
 }
 
 func TestTasksTrigger_RunsThroughDaemon(t *testing.T) {
@@ -529,7 +576,7 @@ func TestTasksAdd_ExactlyOneTrigger(t *testing.T) {
 			err := tasksAddCmd.RunE(tasksAddCmd, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "exactly one of --cron or --watch-cmd")
-			assert.Zero(t, calls.reloads)
+			assert.Zero(t, calls.writes)
 
 			tasks, err := task.LoadTasks()
 			require.NoError(t, err)
@@ -563,7 +610,7 @@ func TestTasksAdd_WatchTaskAllowsEmptyPrompt(t *testing.T) {
 	assert.Empty(t, tasks[0].CronExpr)
 	assert.Empty(t, tasks[0].Prompt)
 	assert.True(t, tasks[0].Enabled)
-	assert.Equal(t, 1, calls.reloads, "add must poke the daemon so the watcher starts")
+	assert.Equal(t, 1, calls.writes, "add must dispatch the write to the daemon so the watcher starts")
 }
 
 // TestTasksUpdate_SwitchingTriggersClearsTheOther verifies that setting one
@@ -682,7 +729,7 @@ func TestTasksUpdate_ProgramChange(t *testing.T) {
 	got, err := task.GetTask("pr1")
 	require.NoError(t, err)
 	assert.Equal(t, "codex", got.Program, "program must persist through update")
-	assert.Equal(t, 1, calls.reloads, "update must poke the daemon to reload schedules")
+	assert.Equal(t, 1, calls.writes, "update must dispatch the write to the daemon")
 	assert.Contains(t, out, `"program": "codex"`, "JSON output must reflect the new program")
 }
 
@@ -704,7 +751,7 @@ func TestTasksUpdate_RejectsInvalidProgram(t *testing.T) {
 	got, err := task.GetTask("pr2")
 	require.NoError(t, err)
 	assert.Equal(t, "claude", got.Program, "program must remain unchanged on validation failure")
-	assert.Zero(t, calls.reloads, "no daemon poke when validation fails")
+	assert.Zero(t, calls.writes, "no daemon write is dispatched when validation fails")
 }
 
 // TestTasksUpdate_OmittingProgramLeavesUnchanged pins the partial-update
@@ -723,4 +770,79 @@ func TestTasksUpdate_OmittingProgramLeavesUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "renamed", got.Name)
 	assert.Equal(t, "aider", got.Program, "absent --program must not change the program")
+}
+
+// --- Read path: list/get non-spawn + disk fallback (#1029 PR 3) ---
+
+// TestTasksList_FallsBackToDiskWhenNoDaemon pins that `tasks list` reads the
+// disk when no daemon is reachable — the stub returns ErrDaemonUnavailable by
+// default — so the command keeps working in scripts/CI with no daemon running
+// and never spawns one.
+func TestTasksList_FallsBackToDiskWhenNoDaemon(t *testing.T) {
+	useTempConfig(t)
+	stubDaemon(t) // daemonListTasksNoSpawn defaults to ErrDaemonUnavailable
+	seedTask(t, task.Task{ID: "d1", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
+
+	tasks, err := listTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1, "list must fall back to the on-disk task")
+	assert.Equal(t, "d1", tasks[0].ID)
+}
+
+// TestTasksList_PrefersDaemonSnapshot pins that when a daemon IS reachable the
+// live snapshot is authoritative — even when it diverges from disk — so the CLI
+// mirrors the daemon's view rather than a stale disk read.
+func TestTasksList_PrefersDaemonSnapshot(t *testing.T) {
+	useTempConfig(t)
+	stubDaemon(t)
+	// Disk holds one task; the daemon reports a DIFFERENT one.
+	seedTask(t, task.Task{ID: "ondisk", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
+	daemonListTasksNoSpawn = func() ([]task.Task, error) {
+		return []task.Task{{ID: "live", Prompt: "p", CronExpr: "0 1 * * *", Enabled: true}}, nil
+	}
+
+	tasks, err := listTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "live", tasks[0].ID, "a reachable daemon's snapshot is authoritative")
+}
+
+// TestTasksGet_FallsBackToDiskWhenNoDaemon pins the get read path's disk
+// fallback and its not-found behavior against the seeded disk state.
+func TestTasksGet_FallsBackToDiskWhenNoDaemon(t *testing.T) {
+	useTempConfig(t)
+	stubDaemon(t)
+	seedTask(t, task.Task{ID: "g1", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
+
+	got, err := getTaskByID("g1")
+	require.NoError(t, err)
+	assert.Equal(t, "g1", got.ID)
+
+	_, err = getTaskByID("missing1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestTasksGet_PrefersDaemonSnapshot pins that a reachable daemon is
+// authoritative for get: a match comes from the live snapshot, and a miss
+// returns not-found WITHOUT re-reading disk (even though disk holds the id).
+func TestTasksGet_PrefersDaemonSnapshot(t *testing.T) {
+	useTempConfig(t)
+	stubDaemon(t)
+	// Disk holds "shadow"; the daemon does NOT report it.
+	seedTask(t, task.Task{ID: "shadow", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
+	daemonListTasksNoSpawn = func() ([]task.Task, error) {
+		return []task.Task{{ID: "live", Prompt: "p", CronExpr: "0 1 * * *", Enabled: true}}, nil
+	}
+
+	got, err := getTaskByID("live")
+	require.NoError(t, err)
+	assert.Equal(t, "live", got.ID)
+
+	// A daemon miss is authoritative — no disk fallback even though "shadow"
+	// exists on disk.
+	_, err = getTaskByID("shadow")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found",
+		"a reachable daemon's miss is authoritative; get must not re-read disk")
 }

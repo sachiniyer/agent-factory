@@ -36,14 +36,16 @@ var killSessionThroughDaemon = func(title, repoID string) error {
 }
 
 // triggerTaskThroughDaemon runs a task by ID through the daemon's single shared
-// trigger path (daemon.RunTask) — the SAME entrypoint `af tasks trigger` and the
-// cron scheduler use. Routing the TUI's `r` (run now) here makes it honor a
-// task's target_session (deliver into it, auto-create when missing) and only
-// spawn a fresh per-run session when target_session is empty, instead of the old
-// divergent path that unconditionally spawned a new session and orphaned the
-// target (#1169). It is a package var so the app test suite can stub the trigger
-// without dialing a real daemon.
-var triggerTaskThroughDaemon = daemon.RunTask
+// trigger path — the SAME entrypoint `af tasks trigger` and the cron scheduler
+// use. It routes through the TriggerTask RPC (#1029 PR 3) so the firing runs
+// IN the daemon process, not in the TUI: the daemon is the sole task-execution
+// host, and RunTask there honors a task's target_session (deliver into it,
+// auto-create when missing) and only spawns a fresh per-run session when
+// target_session is empty, instead of the old divergent path that
+// unconditionally spawned a new session and orphaned the target (#1169). It is a
+// package var so the app test suite can stub the trigger without dialing a real
+// daemon.
+var triggerTaskThroughDaemon = daemon.TriggerTask
 
 // pauseStatusPollThroughDaemon / resumeStatusPollThroughDaemon route the TUI's
 // attach-time poll-pause coordination to the daemon (#1160, Fix A follow-up to
