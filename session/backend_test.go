@@ -826,7 +826,7 @@ func TestHookBackendIsAliveFailedCmd(t *testing.T) {
 func TestHookBackendHasUpdated(t *testing.T) {
 	b := &HookBackend{Hooks: config.RemoteHooks{}}
 	i := &Instance{backend: b}
-	updated, hasPrompt := b.HasUpdated(i)
+	updated, hasPrompt, _ := b.HasUpdated(i)
 	assert.False(t, updated)
 	assert.False(t, hasPrompt)
 }
@@ -878,7 +878,7 @@ func TestLocalBackendHasUpdatedNilTmuxSession(t *testing.T) {
 		backend: b,
 		started: true, // tmuxSession intentionally left nil
 	}
-	updated, hasPrompt := b.HasUpdated(i)
+	updated, hasPrompt, _ := b.HasUpdated(i)
 	assert.False(t, updated)
 	assert.False(t, hasPrompt)
 }

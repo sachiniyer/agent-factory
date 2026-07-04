@@ -113,6 +113,33 @@ func resolveLimitMatchers(overrides map[string]string) map[string]agentLimitMatc
 	return matchers
 }
 
+// LimitDetector is the exported entry point the daemon uses to check captured
+// pane content for a usage-limit banner (#1146 PR2). It wraps the resolved
+// per-agent matcher set (built-ins with config overrides applied) so the daemon
+// never touches the internal matcher map type. Build it ONCE from
+// cfg.LimitPatterns (NewLimitDetector compiles the override regexes) and reuse
+// the value across poll ticks — it is immutable and safe for concurrent reads.
+type LimitDetector struct {
+	matchers map[string]agentLimitMatcher
+}
+
+// NewLimitDetector builds a detector from per-agent detect-pattern overrides
+// (config.LimitPatterns; nil/empty yields the built-in matchers). An override
+// for an agent with no built-in matcher, or an uncompilable pattern, is logged
+// and dropped, so the built-in default always stands (see resolveLimitMatchers).
+func NewLimitDetector(overrides map[string]string) LimitDetector {
+	return LimitDetector{matchers: resolveLimitMatchers(overrides)}
+}
+
+// Check reports whether content shows a usage-limit banner for agent and, when
+// present, the absolute UTC reset time — the return contract of isLimitContent.
+// now is the injected clock used to resolve time-of-day-only and relative reset
+// phrases into an absolute instant; the daemon passes time.Now(), tests a fixed
+// clock. Only claude/codex have matchers, so any other agent returns hit=false.
+func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, resetAt time.Time, hasResetTime bool) {
+	return isLimitContent(content, agent, d.matchers, now)
+}
+
 // isLimitContent reports whether the captured pane content shows a usage-limit
 // banner for the given agent and, when present, the absolute UTC time the
 // limit resets. It is the usage-limit sibling of isReadyContent: callers

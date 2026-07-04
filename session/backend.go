@@ -32,8 +32,11 @@ type Backend interface {
 	Attach(instance *Instance) (chan struct{}, error)
 
 	// HasUpdated reports whether the session output changed since the last
-	// check and whether the program is showing a prompt.
-	HasUpdated(instance *Instance) (updated bool, hasPrompt bool)
+	// check and whether the program is showing a prompt, and returns the raw
+	// captured pane content so the daemon's usage-limit detector (#1146) can
+	// inspect it without a second capture. content is "" for backends with no
+	// live pane (remote/hook) or when the capture is unavailable.
+	HasUpdated(instance *Instance) (updated bool, hasPrompt bool, content string)
 
 	// SendPrompt sends a prompt string via PTY writes.
 	SendPrompt(instance *Instance, prompt string) error

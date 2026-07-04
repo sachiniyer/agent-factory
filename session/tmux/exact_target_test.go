@@ -148,7 +148,7 @@ func TestDeadAgentWithLiveShellSiblingIsNotPrefixMatched(t *testing.T) {
 
 	// HasUpdated must not report the agent as updated/alive off the shell's
 	// content; it must latch the monitor dead.
-	updated, hasPrompt := session.HasUpdated()
+	updated, hasPrompt, _ := session.HasUpdated()
 	require.False(t, updated, "a dead agent must not be marked updated via its shell sibling (#1006)")
 	require.False(t, hasPrompt)
 	require.True(t, session.monitor.dead, "monitor must latch dead once the agent session is confirmed gone")

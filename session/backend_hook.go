@@ -507,8 +507,8 @@ func (b *HookBackend) AttachTerminal(i *Instance) (chan struct{}, error) {
 	return done, nil
 }
 
-func (b *HookBackend) HasUpdated(_ *Instance) (updated bool, hasPrompt bool) {
-	return false, false
+func (b *HookBackend) HasUpdated(_ *Instance) (updated bool, hasPrompt bool, content string) {
+	return false, false, ""
 }
 
 func (b *HookBackend) SendPrompt(_ *Instance, _ string) error {

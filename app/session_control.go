@@ -47,6 +47,15 @@ var restoreArchivedThroughDaemon = func(title, repoID string) (string, error) {
 	return daemon.RestoreArchived(daemon.RestoreArchivedRequest{Title: title, RepoID: repoID})
 }
 
+// resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)
+// verb (#1146) through the daemon — the single writer (#960) — which re-spawns
+// the agent if it exited, re-delivers the pending prompt, and clears the limit
+// state. A package var so the app test suite can stub it without dialing a real
+// daemon.
+var resumeFromLimitThroughDaemon = func(title, repoID string) error {
+	return daemon.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID})
+}
+
 // triggerTaskThroughDaemon runs a task by ID through the daemon's single shared
 // trigger path — the SAME entrypoint `af tasks trigger` and the cron scheduler
 // use. It routes through the TriggerTask RPC (#1029 PR 3) so the firing runs
@@ -187,6 +196,14 @@ func SetTaskRemoverForTest(f func(id string) error) func() {
 	prev := removeTaskThroughDaemon
 	removeTaskThroughDaemon = f
 	return func() { removeTaskThroughDaemon = prev }
+}
+
+// SetLimitResumerForTest swaps the usage-limit resume seam (#1146) so a test can
+// assert the TUI routes `c` through the daemon — without dialing a real one.
+func SetLimitResumerForTest(f func(title, repoID string) error) func() {
+	prev := resumeFromLimitThroughDaemon
+	resumeFromLimitThroughDaemon = f
+	return func() { resumeFromLimitThroughDaemon = prev }
 }
 
 func SetRemoteImporterForTest(f func(repoPath string) ([]session.InstanceData, error)) func() {

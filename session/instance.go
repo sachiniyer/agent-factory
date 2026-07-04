@@ -105,6 +105,14 @@ type Instance struct {
 	// GetStatus/SetStatus shim in liveness.go. Both are mutex-protected.
 	liveness   Liveness
 	inFlightOp InFlightOp
+	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
+	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit
+	// banner carrying a parseable reset time (zero when it carried none). Read
+	// only while limit-blocked (LimitResetAt/ToInstanceData gate on the liveness),
+	// so a lingering value on a recovered session never surfaces. Persisted and
+	// carried in the daemon snapshot so the badge survives a restart; PR3's
+	// auto-resume scheduler reads it. Mutex-protected.
+	limitResetAt time.Time
 	// Program is the program to run in the instance.
 	Program string
 	// Height is the height of the instance.
@@ -638,6 +646,14 @@ func (i *Instance) ToInstanceData() InstanceData {
 		data.RemoteMeta = i.remoteMeta
 	}
 
+	// Persist the usage-limit reset time only while the session is actually
+	// limit-blocked (#1146). Gating on the liveness keeps a recovered session
+	// from carrying a stale reset time to disk or into the snapshot — the
+	// in-memory field lingers after ClearLimitReached but is never serialized.
+	if i.liveness == LiveLimitReached {
+		data.LimitResetAt = i.limitResetAt
+	}
+
 	// Persist each tab so the full agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
 	// each local tab's tmux session by its exact persisted name, reconnecting
@@ -697,42 +713,34 @@ func (i *Instance) ToInstanceData() InstanceData {
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
-	// Resolve the liveness axis: prefer the new `liveness` field; a record
-	// written before #1195 has LivenessUnset and falls back to the legacy
-	// `status` int (rollforward, no dual-read).
-	liveness := data.Liveness
-	if liveness == LivenessUnset {
-		liveness = LivenessForStatus(data.Status)
-	}
-	if liveness == LiveDead {
-		// Rollforward (#1108): Dead was only ever written by observed-death
-		// paths (a user kill deletes the record instead), so it loads as Lost —
-		// recovery-eligible. This is what makes sessions stranded by an outage
-		// under an old build restorable after an upgrade. A tombstoned record
-		// keeps its (Lost) status; the daemon finishes its teardown rather than
-		// restoring it.
-		liveness = LiveLost
-	}
+	// Resolve the liveness axis via the shared rollforward (#1108/#1195): prefer
+	// the new `liveness` field, fall back to the legacy `status` int for records
+	// written before #1195, and load a persisted Dead as Lost — recovery-
+	// eligible, which is what makes sessions stranded by an outage under an old
+	// build restorable after an upgrade. A tombstoned record keeps its (Lost)
+	// status; the daemon finishes its teardown rather than restoring it.
+	liveness := livenessFromData(data)
 	// Resolve the in-flight-op axis from the legacy status. A persisted record
 	// is always settled (SaveInstances skips transients), but a SNAPSHOT of a
 	// transient instance carries Loading/Deleting, which buildInstanceFromSnapshot
 	// must reconstruct so the rebuilt row composes to the identical Status.
 	inFlightOp := opForStatus(data.Status)
 	instance := &Instance{
-		ID:         data.ID,
-		Title:      data.Title,
-		Path:       data.Path,
-		Branch:     data.Branch,
-		liveness:   liveness,
-		inFlightOp: inFlightOp,
-		Height:     data.Height,
-		Width:      data.Width,
-		CreatedAt:  data.CreatedAt,
-		UpdatedAt:  data.UpdatedAt,
-		Program:    data.Program,
-		AutoYes:    data.AutoYes,
-		userKilled: data.UserKilled,
-		remoteMeta: data.RemoteMeta,
+		ID:           data.ID,
+		Title:        data.Title,
+		Path:         data.Path,
+		Branch:       data.Branch,
+		liveness:     liveness,
+		inFlightOp:   inFlightOp,
+		limitResetAt: data.LimitResetAt,
+		Height:       data.Height,
+		Width:        data.Width,
+		CreatedAt:    data.CreatedAt,
+		UpdatedAt:    data.UpdatedAt,
+		Program:      data.Program,
+		AutoYes:      data.AutoYes,
+		userKilled:   data.UserKilled,
+		remoteMeta:   data.RemoteMeta,
 	}
 
 	// Pick backend based on persisted BackendType.
@@ -1180,7 +1188,7 @@ func (i *Instance) Preview() (string, error) {
 	return i.backend.Preview(i)
 }
 
-func (i *Instance) HasUpdated() (updated bool, hasPrompt bool) {
+func (i *Instance) HasUpdated() (updated bool, hasPrompt bool, content string) {
 	return i.backend.HasUpdated(i)
 }
 

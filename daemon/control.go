@@ -1283,6 +1283,11 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 type Manager struct {
 	cfg *config.Config
 
+	// limitDetector is the resolved usage-limit matcher set (#1146), built once
+	// from cfg.LimitPatterns at construction (it compiles the override regexes)
+	// and reused across poll ticks. Immutable; read lock-free by the poll loop.
+	limitDetector task.LimitDetector
+
 	// ready is closed once the initial instance restore has completed. Until
 	// then the daemon is "warming up": the control socket is already bound
 	// (#829) but state-dependent RPCs return errDaemonStarting.
@@ -1370,6 +1375,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 	}
 	return &Manager{
 		cfg:                 cfg,
+		limitDetector:       task.NewLimitDetector(cfg.LimitPatterns),
 		ready:               make(chan struct{}),
 		storage:             storage,
 		instances:           make(map[string]*session.Instance),
@@ -1556,7 +1562,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 
 	instance.CheckAndHandleTrustPrompt()
 	before := instance.GetLiveness()
-	updated, hasPrompt := instance.HasUpdated()
+	// HasUpdated hands back the captured pane content so the idle branch can run
+	// the usage-limit detector (#1146) without a second capture-pane.
+	updated, hasPrompt, content := instance.HasUpdated()
 	if hasPrompt {
 		// Tap enter whenever a prompt is waiting (TapEnter is a no-op unless
 		// AutoYes is on), independent of `updated` — exactly as the pre-#965
@@ -1585,13 +1593,19 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// corpse the user wanted gone.
 		instance.SetLiveness(session.LiveLost)
 	default:
-		instance.SetLiveness(session.LiveReady)
+		// Idle output: settle to Ready, or LimitReached when the pane shows a
+		// usage-limit banner for a claude/codex session (#1146). content is
+		// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
+		m.resolveIdleLiveness(instance, content)
 	}
 
 	after := instance.GetLiveness()
 	if after == before || instance.GetInFlightOp() != session.OpNone {
 		// No real transition, or an op raced in after our top-of-function check —
 		// its executor owns the durable state. Only real transitions touch disk.
+		// The liveness IS the compared axis (#1195), so a Ready→LimitReached idle
+		// transition (#1146) — invisible to the old composed-Status compare, since
+		// LimitReached composes to Ready — is caught here as a genuine change.
 		return
 	}
 

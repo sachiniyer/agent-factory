@@ -40,8 +40,8 @@ func (b *startBackend) Attach(*session.Instance) (chan struct{}, error) {
 	return ch, nil
 }
 
-func (b *startBackend) HasUpdated(*session.Instance) (bool, bool)  { return false, false }
-func (b *startBackend) SendPrompt(*session.Instance, string) error { return nil }
+func (b *startBackend) HasUpdated(*session.Instance) (bool, bool, string) { return false, false, "" }
+func (b *startBackend) SendPrompt(*session.Instance, string) error        { return nil }
 func (b *startBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
 	b.sentPrompt = prompt
 	return nil

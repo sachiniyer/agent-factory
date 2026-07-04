@@ -201,6 +201,9 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 	statusRunning := lipgloss.NewStyle().Foreground(lipgloss.Color("#51bd73"))
 	statusReady := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC00"))
 	statusLoading := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+	// statusLimit marks a usage-limit-blocked result (#1146) with a distinct
+	// warning red + diamond glyph so it never reads as a live Running/Ready dot.
+	statusLimit := lipgloss.NewStyle().Foreground(lipgloss.Color("#E06C75"))
 
 	content := titleStyle.Render("Search Sessions") + "\n\n"
 	content += "/ " + queryStyle.Render(s.query+"_") + "\n\n"
@@ -225,8 +228,9 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 
 		// Status indicator. Two axes (#1195): a create in flight reads as loading;
 		// otherwise a total switch over the liveness — every value explicit (incl.
-		// LimitReached, #1146), no silent default. Running/Ready get the filled dot;
-		// every other liveness gets the hollow ○.
+		// LimitReached, #1146, which gets its own red diamond so it never reads as a
+		// live dot), no silent default. Running/Ready get the filled dot; every
+		// other liveness gets the hollow ○.
 		var statusStr string
 		switch {
 		case r.Instance.GetInFlightOp() == session.OpCreating:
@@ -240,8 +244,12 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 				statusStr = statusRunning.Render("●")
 			case session.LiveReady:
 				statusStr = statusReady.Render("●")
+			case session.LiveLimitReached:
+				// A usage-limit-blocked session (#1146) gets a distinct red diamond
+				// so "blocked on limit" never reads as a live/gone dot.
+				statusStr = statusLimit.Render("◆")
 			case session.LiveLost, session.LiveDead, session.LiveArchived,
-				session.LiveLimitReached, session.LivenessUnset:
+				session.LivenessUnset:
 				statusStr = normalStyle.Render("○")
 			}
 		}

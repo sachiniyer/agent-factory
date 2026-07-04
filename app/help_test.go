@@ -16,7 +16,7 @@ import (
 func TestHelpReflectsKeymapRebinds(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(map[string][]string{
 		"quit": {"Q"},
-		"new":  {"c"},
+		"new":  {"g"},
 		"up":   {"u", "ctrl+p"},
 	}))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
@@ -24,7 +24,7 @@ func TestHelpReflectsKeymapRebinds(t *testing.T) {
 	content := helpTypeGeneral{}.toContent()
 
 	// Rebound keys must appear...
-	for _, want := range []string{"Q", "c", "u/ctrl+p"} {
+	for _, want := range []string{"Q", "g", "u/ctrl+p"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("help must show rebound key %q; got:\n%s", want, content)
 		}

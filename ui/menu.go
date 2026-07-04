@@ -257,6 +257,14 @@ func (m *Menu) addInstanceOptions() {
 	actionGroup = append(actionGroup, keys.KeyShiftUp)
 	actionGroup = append(actionGroup, keys.KeyShiftDown)
 
+	// Usage-limit retry (#1146): advertised only when the selected session is
+	// actually blocked at a limit wall — c re-spawns (if the agent exited) and
+	// resumes it. Kept off the bar for every normal session so it never clutters
+	// the hints.
+	if m.instance != nil && m.instance.LimitReached() {
+		actionGroup = append(actionGroup, keys.KeyLimitRetry)
+	}
+
 	// Tab group: create, close, and number-jump (#930 PR 4). The tab CYCLE key
 	// is gone — Tab now cycles the focus ring (#1024 PR 4); tabs are reached
 	// via the tree and the 1-9 jump keys. Remote instances block `t` (new tab)

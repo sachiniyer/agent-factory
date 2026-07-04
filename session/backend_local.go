@@ -521,14 +521,14 @@ func (b *LocalBackend) Attach(i *Instance) (chan struct{}, error) {
 	return ts.Attach()
 }
 
-func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool) {
+func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
 	i.mu.RLock()
 	s := i.started
 	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s || ts == nil {
-		return false, false
+		return false, false, ""
 	}
 	return ts.HasUpdated()
 }
