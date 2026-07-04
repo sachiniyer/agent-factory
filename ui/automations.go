@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -29,9 +30,18 @@ var automationsEnabledStyle = lipgloss.NewStyle().
 var automationsDisabledStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#9C9494"))
 
-var automationsSelectedStyle = lipgloss.NewStyle().
-	Bold(true).
-	Foreground(lipgloss.Color("#FFCC00"))
+// automationItemTitleStyle paints an automation's title in the SAME adaptive
+// color the instances tree uses for instance titles (tree.InstanceTitleColor),
+// so the automations rail and the instance list above it read as one stacked
+// list rather than two differently-colored ones (#1126).
+var automationItemTitleStyle = lipgloss.NewStyle().
+	Foreground(tree.InstanceTitleColor)
+
+// automationDetailStyle renders an expanded row's cron/watch/status detail
+// line — the recede gray the tree uses for its branch/description lines, so the
+// detail reads as secondary to the title it hangs under (#1126).
+var automationDetailStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
 var automationsHintStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#7F7A7A"))
@@ -54,16 +64,19 @@ func fitLine(s string, w int) string {
 }
 
 // AutomationsPane is the bottom section of the left rail (#1087 revised RFC
-// §2.1's bottom strip): compact task rows — enabled glyph, name, trigger,
-// next/last run — pinned under the instances tree behind a horizontal rule.
-// The full TaskPane manager (list + edit/create form) is NOT hosted in the
-// rail: it opens as a centered modal overlay (like the hooks editor), so its
-// form is never clamped into the narrow rail. The pane OWNS the TaskPane the
-// overlay hosts; the compact rows render straight off the store projection so
-// the section and the manager can never show different task sets after a
-// reload.
+// §2.1's bottom strip): one row per task — the enabled glyph and the task
+// title in the instances-list title color — pinned under the instances tree
+// behind a horizontal rule. Rows are collapsed by default (title only, #1126
+// dropped the always-on trailing cron/next/last text); the focused cursor's
+// row expands to reveal its trigger and next/last-run detail on a dim indented
+// line beneath the title. The full TaskPane manager (list + edit/create form)
+// is NOT hosted in the rail: it opens as a centered modal overlay (like the
+// hooks editor), so its form is never clamped into the narrow rail. The pane
+// OWNS the TaskPane the overlay hosts; the rows render straight off the store
+// projection so the section and the manager can never show different task sets
+// after a reload.
 //
-// It implements layout.Pane. While focused the compact rows carry a cursor
+// It implements layout.Pane. While focused the rows carry a cursor
 // (up/down/j/k via HandleKey); the root opens the manager overlay on Enter/S
 // and moves the focus ring on Esc.
 type AutomationsPane struct {
@@ -212,23 +225,45 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	return strings.Join(parts, " · ")
 }
 
-// compactRow renders one section row: enabled glyph, name, trigger,
-// next/last — ellipsized to the rail width, with the focused cursor's row
-// marked "▸".
-func (a *AutomationsPane) compactRow(tsk task.Task, selected bool) string {
-	glyph, style := "[✓]", automationsEnabledStyle
+// itemPrefixWidth is the fixed lead of a collapsed row — marker (1) + the
+// enabled glyph "[✓]" (3) + a 2-cell gap — that the title starts after and the
+// expanded detail line indents to, so a row's detail aligns under its title.
+const itemPrefixWidth = 6
+
+// titleRow renders one collapsed automation row: the enabled/disabled glyph and
+// the task title in the instance-title color — and nothing else (#1126: no
+// always-on trailing cron/next/last text). The focused, expanded row is marked
+// "▾" and its title bolded; every other row leads with a blank marker.
+func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
+	glyph, glyphStyle := "[✓]", automationsEnabledStyle
 	if !tsk.Enabled {
-		glyph, style = "[✗]", automationsDisabledStyle
+		glyph, glyphStyle = "[✗]", automationsDisabledStyle
 	}
 	marker := " "
-	if selected {
-		marker = "▸"
-		style = automationsSelectedStyle
+	nameStyle := automationItemTitleStyle
+	if expanded {
+		marker = "▾"
+		nameStyle = nameStyle.Bold(true)
 	}
-	parts := []string{glyph}
-	if tsk.Name != "" {
-		parts = append(parts, tsk.Name)
+	name := tsk.Name
+	if name == "" {
+		name = "(unnamed)"
 	}
+	w := a.rect.W
+	if w <= itemPrefixWidth {
+		// Too narrow to split the styled segments cleanly: fall back to one
+		// fitted plain line so the row never overflows the rail.
+		return automationItemTitleStyle.Render(fitLine(marker+glyph+"  "+name, w))
+	}
+	return marker + glyphStyle.Render(glyph) + "  " +
+		nameStyle.Render(fitLine(name, w-itemPrefixWidth))
+}
+
+// rowDetail is the text an expanded row reveals: the trigger (cron expression
+// or watch command) and the next/last-run or supervision summary — the details
+// that used to trail every collapsed row (#1126). Empty when a task has neither.
+func (a *AutomationsPane) rowDetail(tsk task.Task) string {
+	var parts []string
 	trigger := tsk.CronExpr
 	if tsk.IsWatch() {
 		trigger = "watch: " + tsk.WatchCmd
@@ -239,7 +274,18 @@ func (a *AutomationsPane) compactRow(tsk task.Task, selected bool) string {
 	if next := a.nextRunSummary(tsk); next != "" {
 		parts = append(parts, next)
 	}
-	return style.Render(fitLine(marker+strings.Join(parts, "  "), a.rect.W))
+	return strings.Join(parts, " · ")
+}
+
+// detailRow renders the expanded row's detail as a dim line indented under the
+// title, ellipsized to the rail width. Returns "" when the task has no detail.
+func (a *AutomationsPane) detailRow(tsk task.Task) string {
+	detail := a.rowDetail(tsk)
+	if detail == "" {
+		return ""
+	}
+	indent := strings.Repeat(" ", itemPrefixWidth)
+	return automationDetailStyle.Render(fitLine(indent+detail, a.rect.W))
 }
 
 // enabledCount returns how many of the projection's tasks are enabled.
@@ -323,16 +369,23 @@ func (a *AutomationsPane) String() string {
 	}
 
 	// Window the rows around the cursor so a focused selection below the fold
-	// scrolls into view instead of moving invisibly.
+	// scrolls into view instead of moving invisibly. The focused selection
+	// expands to a 2-line row (title + detail), so reserve a line for the
+	// detail when scrolling the selection to the bottom keeps it fully visible
+	// rather than clipping its detail off the fold.
 	visible := a.rect.H - 1
 	if visible < 0 {
 		visible = 0
 	}
+	effVisible := visible
+	if a.focused && effVisible > 1 {
+		effVisible--
+	}
 	if a.offset > a.selected {
 		a.offset = a.selected
 	}
-	if visible > 0 && a.selected >= a.offset+visible {
-		a.offset = a.selected - visible + 1
+	if effVisible > 0 && a.selected >= a.offset+effVisible {
+		a.offset = a.selected - effVisible + 1
 	}
 	if max := len(tasks) - visible; a.offset > max {
 		a.offset = max
@@ -344,12 +397,19 @@ func (a *AutomationsPane) String() string {
 		if len(lines) >= a.rect.H {
 			break
 		}
+		expanded := a.focused && i == a.selected
+		rowStart := len(lines)
+		lines = append(lines, a.titleRow(tasks[i], expanded))
+		if expanded && len(lines) < a.rect.H {
+			if detail := a.detailRow(tasks[i]); detail != "" {
+				lines = append(lines, detail)
+			}
+		}
 		if a.zones != nil {
 			a.zones.Register(zones.AutoTask(tasks[i].ID), layout.Rect{
-				X: a.rect.X, Y: a.rect.Y + len(lines), W: a.rect.W, H: 1,
+				X: a.rect.X, Y: a.rect.Y + rowStart, W: a.rect.W, H: len(lines) - rowStart,
 			})
 		}
-		lines = append(lines, a.compactRow(tasks[i], a.focused && i == a.selected))
 	}
 	return layout.ClampToRect(strings.Join(lines, "\n"), a.rect)
 }

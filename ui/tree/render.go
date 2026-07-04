@@ -50,9 +50,17 @@ var deadStyle = lipgloss.NewStyle().
 var lostStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#C18401", Dark: "#E5C07B"})
 
+// InstanceTitleColor is the foreground of an unselected instance title — the
+// adaptive near-black (light) / near-white (dark) that reads as primary text
+// in the tree. It is exported as the single source of truth so surfaces
+// stacked below the tree — the automations rail (#1126) — can paint their own
+// titles in the exact same color and the two lists can never drift apart, the
+// same single-definition discipline AccentColor uses for the accent.
+var InstanceTitleColor = lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"}
+
 var titleStyle = lipgloss.NewStyle().
 	Padding(1, 1, 0, 1).
-	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
+	Foreground(InstanceTitleColor)
 
 var listDescStyle = lipgloss.NewStyle().
 	Padding(0, 1, 1, 1).

@@ -213,9 +213,9 @@ func TestWorkspacePanesRenderExactlyTheirRects(t *testing.T) {
 }
 
 // TestWorkspaceFocusedAutomationsTilesExactly covers the focused automations
-// section: focus adds a cursor to the compact rows — the manager itself is a
-// modal overlay, never an in-rail expansion — and the composed workspace must
-// still tile the window exactly (#1087).
+// section: focus adds a cursor that expands its row's detail inline (#1126) —
+// the manager itself stays a modal overlay, never rendered in-rail — and the
+// composed workspace must still tile the window exactly (#1087).
 func TestWorkspaceFocusedAutomationsTilesExactly(t *testing.T) {
 	lay := layout.Grid{Panes: 1}.Solve(100, 30)
 	require.True(t, lay.AutomationsVisible)
@@ -232,7 +232,7 @@ func TestWorkspaceFocusedAutomationsTilesExactly(t *testing.T) {
 	statusBar.SetRect(lay.StatusBar)
 
 	requireExactRect(t, automations.View(), lay.Automations, "focused automations")
-	require.Contains(t, automations.View(), "▸", "the focused section carries a cursor")
+	require.Contains(t, automations.View(), "▾", "the focused section carries an expanded cursor")
 	require.NotContains(t, automations.View(), "Tasks",
 		"the manager must NOT render in-rail — it lives in the tasks overlay")
 

@@ -368,6 +368,10 @@ func (m *home) relayout() {
 	// panes' bindings persist and restore on grow, which is exactly the
 	// retain-and-restore contract the A/B split had.
 	m.grid.Panes = m.store.NumOpenPanes()
+	// Size the automations section to its content: the grid grows it to show
+	// every automation when the rail has the room, collapsing only when the
+	// tree + automations can't both fit (#1126).
+	m.grid.Automations = m.store.NumTasks()
 	lay := m.grid.Solve(m.termWidth, m.termHeight)
 	m.lastLayout = lay
 	if lay.Fallback {
@@ -918,6 +922,9 @@ func (m *home) saveContentPaneState() error {
 	if err == nil {
 		m.store.SetTasks(tasks)
 		sp.SetTasks(tasks)
+		// The task count feeds the rail's automations-section height (#1126);
+		// reflow so an add/delete grows or shrinks the section immediately.
+		m.relayout()
 	} else {
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
 	}
@@ -1001,6 +1008,8 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if err == nil {
 		m.store.SetTasks(tasks)
 		sp.SetTasks(tasks)
+		// Reflow so the new automation grows the rail's section (#1126).
+		m.relayout()
 	}
 	return nil
 }
