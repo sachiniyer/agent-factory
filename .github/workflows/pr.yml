@@ -26,7 +26,7 @@ jobs:
 
       - name: golangci-lint
         env:
-          GOTOOLCHAIN: go1.24.1
+          GOTOOLCHAIN: go1.24.2
         run: go run github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8 run --timeout=3m --out-format=line-number --fast --max-issues-per-linter=0 --max-same-issues=0
 
       - name: Check formatting
