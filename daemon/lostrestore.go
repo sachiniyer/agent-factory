@@ -92,6 +92,11 @@ func (m *Manager) RestoreLostSessions() {
 // side only TryLocks: the poll goroutine must never stall behind a slow
 // teardown, and the next tick retries.
 func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance) {
+	// Only a Lost session is recovery-eligible. This gate is also what fences
+	// out an Archived session (#1028): Archived != Lost, and an archived
+	// instance additionally loads with started=false, so the !Started() check
+	// short-circuits first — the restore loop never moves its worktree back or
+	// re-spawns its tmux. Restoring an archive is an explicit user action only.
 	if inst == nil || !inst.Started() || inst.GetStatus() != session.Lost {
 		return
 	}

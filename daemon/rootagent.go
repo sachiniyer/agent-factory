@@ -119,12 +119,18 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 	}
 
 	if inst != nil {
-		if status := inst.GetStatus(); status != session.Dead && status != session.Lost {
+		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
 			// Adopt, never clobber: a live root — whatever program it runs
 			// and whoever created it — is the root agent. Nothing to do.
 			m.rootEnsureSucceeded(st)
 			return
 		}
+		// An Archived root (#1028) is inert — no tmux — so it must NOT be
+		// adopted as live; fall through to reap-and-recreate like Dead/Lost so
+		// the always-ensured root comes back. In practice ArchiveSession
+		// rejects archiving the reserved root title, so this is defensive; the
+		// in-place root worktree is external, so reapDeadRoot's Cleanup is a
+		// no-op that only removes daemon-owned state.
 		// The root's tmux vanished (crash, tmux server death — the #1104
 		// outage class; recorded as Lost since #1108, Dead by older builds).
 		// Reap the dead record and fall through to re-create in place — the

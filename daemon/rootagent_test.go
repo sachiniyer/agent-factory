@@ -265,6 +265,44 @@ func TestEnsureRootAgentsHealsLostRoot(t *testing.T) {
 	}
 }
 
+// TestEnsureRootAgentsDoesNotAdoptArchivedRoot (#1028): an Archived root is
+// inert (no tmux), so the ensure loop must NOT adopt it as live — it must reap
+// and re-create in place, exactly like Dead/Lost. Archiving the reserved root
+// is rejected upstream by ArchiveSession, so this is the defensive backstop for
+// the adopt-never-clobber condition.
+func TestEnsureRootAgentsDoesNotAdoptArchivedRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.EnsureRootAgents()
+	first := findRootInstance(t, manager, repoPath)
+	if first == nil {
+		t.Fatalf("root instance missing after first ensure")
+	}
+
+	first.SetStatus(session.Archived)
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 2 {
+		t.Fatalf("expected a re-create after the root went Archived (never adopted), got %d creates", len(*seen))
+	}
+	healed := findRootInstance(t, manager, repoPath)
+	if healed == nil {
+		t.Fatalf("root instance missing after heal")
+	}
+	if healed == first {
+		t.Fatalf("an archived root must be reaped and replaced, not adopted in place")
+	}
+	if got := healed.GetStatus(); got == session.Archived {
+		t.Fatalf("healed root must be live, got %v", got)
+	}
+}
+
 // TestEnsureRootAgentsRespectsUserKill: an explicit KillSession of the root
 // suppresses re-creation for the rest of the daemon's life; a fresh manager
 // (daemon restart) re-asserts the configured root. This is the conservative

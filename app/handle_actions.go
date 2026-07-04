@@ -323,6 +323,14 @@ func interactiveGuard(inst *session.Instance) error {
 		// (#935). Checked before TmuxAlive so the specific message wins.
 		return fmt.Errorf("session '%s' was lost — its tmux session is gone", inst.Title)
 	}
+	if inst.GetStatus() == session.Archived {
+		// Archived (#1028): the user tore the session down and its worktree was
+		// moved to the global archive dir; there is no tmux to enter or attach.
+		// Point at the off-ramp (restore) rather than a bare "not running" —
+		// same explicit-feedback contract as Lost/Deleting. Checked before
+		// TmuxAlive so the specific message wins.
+		return fmt.Errorf("session '%s' is archived — restore it first (af sessions restore %s)", inst.Title, inst.Title)
+	}
 	if !inst.TmuxAlive() {
 		return fmt.Errorf("session '%s' is no longer running", inst.Title)
 	}

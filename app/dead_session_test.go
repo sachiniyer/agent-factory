@@ -89,3 +89,32 @@ func TestHandleEnter_LostSessionShowsError(t *testing.T) {
 	require.Contains(t, h.errBox.String(), "lost-session",
 		"the error must name the offending session")
 }
+
+// TestHandleEnter_ArchivedSessionShowsError (#1028): Enter on an archived
+// session must take the explicit archived-error path — not interactive mode,
+// not the generic dead-tmux message — and must point the user at `restore` as
+// the off-ramp. Archived is checked before TmuxAlive in interactiveGuard so the
+// specific wording wins.
+func TestHandleEnter_ArchivedSessionShowsError(t *testing.T) {
+	h := newTestHome(t)
+
+	inst := newDeadInstance(t, "archived-session", session.Archived)
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	model, cmd := h.handleEnter()
+	h = model.(*home)
+
+	require.Equal(t, stateDefault, h.state, "an archived session must not open any overlay")
+	require.Nil(t, h.textOverlay, "no help overlay should be installed for an archived session")
+	require.False(t, h.interactive, "Enter on an archived session must not enter interactive mode")
+
+	require.NotNil(t, cmd, "handleEnter must return the error-hide command, not a silent nil")
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, h.errBox.String(), "is archived",
+		"the error must say the session is archived, not the generic dead message")
+	require.Contains(t, h.errBox.String(), "restore",
+		"the error must point at restore as the off-ramp")
+	require.Contains(t, h.errBox.String(), "archived-session",
+		"the error must name the offending session")
+}

@@ -172,7 +172,12 @@ func TestRestoreLostSessions_SkipsIneligible(t *testing.T) {
 	})
 
 	t.Run("non-lost statuses", func(t *testing.T) {
-		for _, status := range []session.Status{session.Running, session.Ready, session.Loading, session.Deleting} {
+		// Archived (#1028) is included: an archived session is deliberately
+		// quiescent and must NEVER be auto-restored — only an explicit
+		// RestoreArchived brings it back. (In production it also loads
+		// started=false, but registering it started here proves the ==Lost gate
+		// alone already fences it out.)
+		for _, status := range []session.Status{session.Running, session.Ready, session.Loading, session.Deleting, session.Archived} {
 			manager, repoID, repoPath := newStatusTestManager(t)
 			backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 			registerStarted(t, manager, repoID, repoPath, "healthy", backend, true, status)
