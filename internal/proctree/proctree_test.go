@@ -1,8 +1,10 @@
 package proctree
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -141,6 +143,80 @@ func TestSignalVerifiesIdentity(t *testing.T) {
 	_, _ = child.Process.Wait()
 	if AliveSame(p) {
 		t.Errorf("child still alive after SIGKILL")
+	}
+}
+
+// TestSignalReapedInTOCTOUWindow simulates the process being reaped in the
+// unavoidable window between the identity check and the delivery of the
+// signal: AliveSame passes (the child is genuinely alive) but the kernel
+// returns ESRCH for the kill. Signal must map that to ErrIdentityChanged so
+// callers treat "already gone" as success, not a warnable failure (#1151).
+func TestSignalReapedInTOCTOUWindow(t *testing.T) {
+	child := startSleeper(t)
+	snap, err := Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	p := snap[child.Process.Pid]
+	if !AliveSame(p) {
+		t.Fatalf("child not alive at snapshot time")
+	}
+
+	orig := kill
+	t.Cleanup(func() { kill = orig })
+	kill = func(pid int, sig syscall.Signal) error { return syscall.ESRCH }
+
+	if err := Signal(p, syscall.SIGTERM); err != ErrIdentityChanged {
+		t.Errorf("Signal(reaped-in-window) = %v, want ErrIdentityChanged", err)
+	}
+}
+
+// TestSignalPropagatesNonESRCHErrors makes sure the ESRCH coercion does not
+// swallow genuine signal failures (e.g. EPERM): those must still surface.
+func TestSignalPropagatesNonESRCHErrors(t *testing.T) {
+	child := startSleeper(t)
+	snap, err := Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	p := snap[child.Process.Pid]
+
+	orig := kill
+	t.Cleanup(func() { kill = orig })
+	kill = func(pid int, sig syscall.Signal) error { return syscall.EPERM }
+
+	if err := Signal(p, syscall.SIGTERM); err != syscall.EPERM {
+		t.Errorf("Signal(EPERM) = %v, want EPERM", err)
+	}
+}
+
+// TestKillEscalatingNoWarnOnTOCTOUExit is the end-to-end contract: when a
+// survivor is reaped in the TOCTOU window, KillEscalating must not log a
+// "failed to" warning for it (#1151).
+func TestKillEscalatingNoWarnOnTOCTOUExit(t *testing.T) {
+	child := startSleeper(t)
+	snap, err := Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	p := snap[child.Process.Pid]
+
+	orig := kill
+	t.Cleanup(func() { kill = orig })
+	kill = func(pid int, sig syscall.Signal) error { return syscall.ESRCH }
+
+	var logged []string
+	logf := func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	// Zero grace so the alive child is treated as a survivor immediately,
+	// then its kill races-out to ESRCH.
+	KillEscalating([]Process{p}, 0, 10*time.Millisecond, logf)
+
+	for _, line := range logged {
+		if strings.Contains(line, "failed to") {
+			t.Errorf("KillEscalating logged a failure for a process gone in the TOCTOU window: %q", line)
+		}
 	}
 }
 

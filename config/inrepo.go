@@ -303,6 +303,14 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		if err := json.Unmarshal(data, &rawKeys); err != nil {
 			return nil, nil, fmt.Errorf("failed to parse in-repo config %s: %w", prettyPath, err)
 		}
+		// A bare JSON `null` unmarshals into a map as a no-op that leaves it
+		// nil — the one non-object top-level value encoding/json accepts
+		// (strings, numbers, arrays, and booleans already error above). Reject
+		// it explicitly so malformed input fails loudly instead of being
+		// silently treated as an empty config (#1153).
+		if rawKeys == nil {
+			return nil, nil, fmt.Errorf("in-repo config %s must be a JSON object, not null", prettyPath)
+		}
 		for key := range rawKeys {
 			presentKeys[key] = true
 		}
@@ -465,6 +473,12 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 		if len(data) > 0 {
 			if err := json.Unmarshal(data, &rawKeys); err != nil {
 				return fmt.Errorf("failed to parse in-repo config %s: %w", prettyHomePath(path), err)
+			}
+			// A bare JSON `null` nils out the map above; without this guard the
+			// key assignment below panics on a nil-map write. Reject it with the
+			// same actionable error the read path uses (#1153).
+			if rawKeys == nil {
+				return fmt.Errorf("in-repo config %s must be a JSON object, not null", prettyHomePath(path))
 			}
 		}
 		encoded, err := json.Marshal(commands)

@@ -177,11 +177,18 @@ func AliveSame(p Process) bool {
 // snapshotted process instance (it exited, or the PID was recycled).
 var ErrIdentityChanged = errors.New("process exited or pid was recycled")
 
+// kill is the syscall used to deliver signals. It is a package variable only
+// so tests can simulate the TOCTOU window (a process reaped between the
+// identity check and the signal, making the kernel return ESRCH).
+var kill = syscall.Kill
+
 // Signal delivers sig to p only if the PID still names the same process
 // instance. The verify-then-kill pair has an unavoidable microsecond TOCTOU
 // window; PID recycling within it would require the kernel to cycle through
 // the entire PID space between the two syscalls, which does not happen in
-// practice.
+// practice. If the process is reaped inside that window, syscall.Kill returns
+// ESRCH — indistinguishable from the AliveSame failure path, so it is coerced
+// to ErrIdentityChanged and callers treat "already gone" as success.
 func Signal(p Process, sig syscall.Signal) error {
 	if p.PID <= 1 || p.PID == os.Getpid() {
 		return fmt.Errorf("refusing to signal pid %d", p.PID)
@@ -189,7 +196,13 @@ func Signal(p Process, sig syscall.Signal) error {
 	if !AliveSame(p) {
 		return ErrIdentityChanged
 	}
-	return syscall.Kill(p.PID, sig)
+	if err := kill(p.PID, sig); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return ErrIdentityChanged
+		}
+		return err
+	}
+	return nil
 }
 
 // WaitForExits polls until every process in procs is gone (or its PID was
