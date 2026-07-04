@@ -90,11 +90,14 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	"branch_prefix":        true,
 	"daemon_poll_interval": true,
 	"detach_keys":          true,
-	"log_max_backups":      true,
-	"log_max_size_mb":      true,
-	"root_agents":          true,
-	"update_channel":       true,
-	"worktree_root":        true,
+	// The [keys] keymap is a user/host preference: a cloned repo must never
+	// be able to rebind someone's terminal (#1026).
+	"keys":            true,
+	"log_max_backups": true,
+	"log_max_size_mb": true,
+	"root_agents":     true,
+	"update_channel":  true,
+	"worktree_root":   true,
 }
 
 // isPathStrictlyInside reports whether absBase is a strict descendant of

@@ -1,6 +1,11 @@
 package keys
 
 import (
+	"fmt"
+	"sort"
+	"strings"
+	"unicode/utf8"
+
 	"github.com/charmbracelet/bubbles/key"
 )
 
@@ -70,171 +75,284 @@ const (
 	KeyExitInteractive
 )
 
-// GlobalKeyStringsMap is a global, immutable map string to keybinding.
-var GlobalKeyStringsMap = map[string]KeyName{
-	"up":         KeyUp,
-	"k":          KeyUp,
-	"down":       KeyDown,
-	"j":          KeyDown,
-	"shift+up":   KeyShiftUp,
-	"shift+down": KeyShiftDown,
-	"N":          KeyNewRemote,
-	"enter":      KeyEnter,
-	// "o" was an Enter alias until #1089 PR 2 split the verbs: Enter enters
-	// the pane (interactive), o keeps the old full-screen attach.
-	"o":         KeyAttach,
-	"n":         KeyNew,
-	"D":         KeyKill,
-	"q":         KeyQuit,
-	"tab":       KeyTab,
-	"shift+tab": KeyShiftTab,
-	"t":         KeyNewTab,
-	"w":         KeyCloseTab,
-	"?":         KeyHelp,
-	// "s" is the open-pane verb since #1024 PR 5/#1088 (RFC §2.3); the
-	// task-create jump it used to carry lives in the task manager (S → n).
-	"s":     KeyOpenPane,
-	"x":     KeyHidePane,
-	"S":     KeyTaskList,
-	"/":     KeySearch,
-	"p":     KeyOpenPR,
-	"P":     KeyCopyPR,
-	"H":     KeyHooks,
-	"h":     KeyLeft,
-	"left":  KeyLeft,
-	"l":     KeyRight,
-	"right": KeyRight,
-	"]":     KeyNextSection,
-	"[":     KeyPrevSection,
+// spec is one action's canonical binding definition: its default keys, help
+// rendering, and — when configKey is non-empty — the name under which the
+// `[keys]` table in config.toml may rebind it (#1030/#1026).
+type spec struct {
+	name KeyName
+	// configKey is the action's name in the [keys] config table; "" marks a
+	// fixed binding that config cannot touch (structural keys like enter/tab
+	// and root-routed keys like ctrl+]).
+	configKey string
+	// keys are the default key strings (bubbletea tea.KeyMsg.String() forms).
+	keys []string
+	// helpLabel, when non-empty, pins the help-column text for the DEFAULT
+	// binding where the generic rendering would differ (e.g. "1-9").
+	// Overridden bindings always derive their label from the actual keys.
+	helpLabel string
+	// desc is the help-column description.
+	desc string
+	// dispatch marks actions routed through GlobalKeyStringsMap. Display-only
+	// entries (KeyJumpTab, KeySubmitName, ...) never enter the strings map —
+	// their dispatch is root-routed or overlay-local.
+	dispatch bool
 }
 
-// GlobalKeyBindings is a global, immutable map of KeyName to keybinding.
-var GlobalKeyBindings = map[KeyName]key.Binding{
-	KeyUp: key.NewBinding(
-		key.WithKeys("up", "k"),
-		key.WithHelp("↑/k", "up"),
-	),
-	KeyDown: key.NewBinding(
-		key.WithKeys("down", "j"),
-		key.WithHelp("↓/j", "down"),
-	),
-	KeyShiftUp: key.NewBinding(
-		key.WithKeys("shift+up"),
-		key.WithHelp("⇧↑", "scroll"),
-	),
-	KeyShiftDown: key.NewBinding(
-		key.WithKeys("shift+down"),
-		key.WithHelp("⇧↓", "scroll"),
-	),
-	KeyEnter: key.NewBinding(
-		key.WithKeys("enter"),
-		key.WithHelp("↵", "interact"),
-	),
-	KeyAttach: key.NewBinding(
-		key.WithKeys("o"),
-		key.WithHelp("o", "attach"),
-	),
-	KeyExitInteractive: key.NewBinding(
-		key.WithKeys("ctrl+]"),
-		key.WithHelp("ctrl+]", "nav mode"),
-	),
-	KeyNew: key.NewBinding(
-		key.WithKeys("n"),
-		key.WithHelp("n", "new"),
-	),
-	KeyKill: key.NewBinding(
-		key.WithKeys("D"),
-		key.WithHelp("D", "kill"),
-	),
-	KeyHelp: key.NewBinding(
-		key.WithKeys("?"),
-		key.WithHelp("?", "help"),
-	),
-	KeyQuit: key.NewBinding(
-		key.WithKeys("q"),
-		key.WithHelp("q", "quit"),
-	),
-	KeyNewRemote: key.NewBinding(
-		key.WithKeys("N"),
-		key.WithHelp("N", "new remote"),
-	),
-	KeyTab: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "focus"),
-	),
-	KeyShiftTab: key.NewBinding(
-		key.WithKeys("shift+tab"),
-		key.WithHelp("shift+tab", "focus prev"),
-	),
-	KeyNewTab: key.NewBinding(
-		key.WithKeys("t"),
-		key.WithHelp("t", "tab"),
-	),
-	KeyCloseTab: key.NewBinding(
-		key.WithKeys("w"),
-		key.WithHelp("w", "close"),
-	),
-	KeyJumpTab: key.NewBinding(
-		key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"),
-		key.WithHelp("1-9", "jump"),
-	),
-	KeyTaskList: key.NewBinding(
-		key.WithKeys("S"),
-		key.WithHelp("S", "tasks"),
-	),
-	KeyManageAutomations: key.NewBinding(
-		key.WithKeys("enter"),
-		key.WithHelp("↵", "manage"),
-	),
-	KeyOpenPane: key.NewBinding(
-		key.WithKeys("s"),
-		key.WithHelp("s", "open pane"),
-	),
-	KeyHidePane: key.NewBinding(
-		key.WithKeys("x"),
-		key.WithHelp("x", "hide pane"),
-	),
-	KeySearch: key.NewBinding(
-		key.WithKeys("/"),
-		key.WithHelp("/", "search"),
-	),
-	KeyOpenPR: key.NewBinding(
-		key.WithKeys("p"),
-		key.WithHelp("p", "open PR"),
-	),
-	KeyCopyPR: key.NewBinding(
-		key.WithKeys("P"),
-		key.WithHelp("P", "copy PR URL"),
-	),
-	KeyHooks: key.NewBinding(
-		key.WithKeys("H"),
-		key.WithHelp("H", "worktree hooks"),
-	),
-	KeyLeft: key.NewBinding(
-		key.WithKeys("h", "left"),
-		key.WithHelp("h/←", "collapse"),
-	),
-	KeyRight: key.NewBinding(
-		key.WithKeys("l", "right"),
-		key.WithHelp("l/→", "expand"),
-	),
-	KeyNextSection: key.NewBinding(
-		key.WithKeys("]"),
-		key.WithHelp("]", "next section"),
-	),
-	KeyPrevSection: key.NewBinding(
-		key.WithKeys("["),
-		key.WithHelp("[", "prev section"),
-	),
+// specs is the canonical binding table. Order is stable but carries no
+// meaning; lookups go through the generated maps.
+var specs = []spec{
+	{name: KeyUp, configKey: "up", keys: []string{"up", "k"}, desc: "up", dispatch: true},
+	{name: KeyDown, configKey: "down", keys: []string{"down", "j"}, desc: "down", dispatch: true},
+	{name: KeyShiftUp, configKey: "scroll_up", keys: []string{"shift+up"}, desc: "scroll", dispatch: true},
+	{name: KeyShiftDown, configKey: "scroll_down", keys: []string{"shift+down"}, desc: "scroll", dispatch: true},
+	{name: KeyEnter, keys: []string{"enter"}, desc: "interact", dispatch: true},
+	// "o" was an Enter alias until #1089 PR 2 split the verbs: Enter enters
+	// the pane (interactive), o keeps the old full-screen attach.
+	{name: KeyAttach, configKey: "attach", keys: []string{"o"}, desc: "attach", dispatch: true},
+	{name: KeyExitInteractive, keys: []string{"ctrl+]"}, desc: "nav mode"},
+	{name: KeyNew, configKey: "new", keys: []string{"n"}, desc: "new", dispatch: true},
+	{name: KeyKill, configKey: "kill", keys: []string{"D"}, desc: "kill", dispatch: true},
+	{name: KeyHelp, configKey: "help", keys: []string{"?"}, desc: "help", dispatch: true},
+	{name: KeyQuit, configKey: "quit", keys: []string{"q"}, desc: "quit", dispatch: true},
+	{name: KeyNewRemote, configKey: "new_remote", keys: []string{"N"}, desc: "new remote", dispatch: true},
+	{name: KeyTab, keys: []string{"tab"}, desc: "focus", dispatch: true},
+	{name: KeyShiftTab, keys: []string{"shift+tab"}, desc: "focus prev", dispatch: true},
+	{name: KeyNewTab, configKey: "new_tab", keys: []string{"t"}, desc: "tab", dispatch: true},
+	{name: KeyCloseTab, configKey: "close_tab", keys: []string{"w"}, desc: "close", dispatch: true},
+	{name: KeyJumpTab, keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}, helpLabel: "1-9", desc: "jump"},
+	{name: KeyTaskList, configKey: "tasks", keys: []string{"S"}, desc: "tasks", dispatch: true},
+	{name: KeyManageAutomations, keys: []string{"enter"}, desc: "manage"},
+	{name: KeyOpenPane, configKey: "open_pane", keys: []string{"s"}, desc: "open pane", dispatch: true},
+	{name: KeyHidePane, configKey: "hide_pane", keys: []string{"x"}, desc: "hide pane", dispatch: true},
+	{name: KeySearch, configKey: "search", keys: []string{"/"}, desc: "search", dispatch: true},
+	{name: KeyOpenPR, configKey: "open_pr", keys: []string{"p"}, desc: "open PR", dispatch: true},
+	{name: KeyCopyPR, configKey: "copy_pr", keys: []string{"P"}, desc: "copy PR URL", dispatch: true},
+	{name: KeyHooks, configKey: "hooks", keys: []string{"H"}, desc: "worktree hooks", dispatch: true},
+	{name: KeyLeft, configKey: "collapse", keys: []string{"h", "left"}, desc: "collapse", dispatch: true},
+	{name: KeyRight, configKey: "expand", keys: []string{"l", "right"}, desc: "expand", dispatch: true},
+	{name: KeyNextSection, configKey: "next_section", keys: []string{"]"}, desc: "next section", dispatch: true},
+	{name: KeyPrevSection, configKey: "prev_section", keys: []string{"["}, desc: "prev section", dispatch: true},
 
 	// -- Special keybindings --
+	{name: KeySubmitName, keys: []string{"enter"}, helpLabel: "enter", desc: "submit name"},
+	{name: KeyChangeProgram, keys: []string{"tab"}, desc: "change program"},
+}
 
-	KeySubmitName: key.NewBinding(
-		key.WithKeys("enter"),
-		key.WithHelp("enter", "submit name"),
-	),
-	KeyChangeProgram: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "change program"),
-	),
+// reservedKeys are key strings the config may never bind an action to: they
+// are either structural (enter/tab/shift+tab drive interaction and the focus
+// ring, esc is the root-routed overlay-cancel key), root-routed before any
+// key map (ctrl+], the one host-reserved key in interactive mode — rebinding
+// it could lock a user inside a forwarded pane), or dispatched manually (the
+// 1-9 tab jump).
+var reservedKeys = map[string]string{
+	"enter":     "it is the interact/submit key",
+	"tab":       "it cycles the focus ring",
+	"shift+tab": "it cycles the focus ring",
+	"esc":       "it cancels overlays",
+	"ctrl+]":    "it is the reserved exit from interactive mode",
+	"1":         "1-9 jump to tabs",
+	"2":         "1-9 jump to tabs",
+	"3":         "1-9 jump to tabs",
+	"4":         "1-9 jump to tabs",
+	"5":         "1-9 jump to tabs",
+	"6":         "1-9 jump to tabs",
+	"7":         "1-9 jump to tabs",
+	"8":         "1-9 jump to tabs",
+	"9":         "1-9 jump to tabs",
+}
+
+// keyDisplayNames maps key strings to their compact help-column glyphs.
+// Anything absent renders as itself.
+var keyDisplayNames = map[string]string{
+	"up":         "↑",
+	"down":       "↓",
+	"left":       "←",
+	"right":      "→",
+	"enter":      "↵",
+	"shift+up":   "⇧↑",
+	"shift+down": "⇧↓",
+}
+
+// namedKeys are the non-rune key names bubbletea produces (tea.KeyMsg.String()
+// forms) that a [keys] value may use, optionally behind ctrl+/alt+/shift+
+// modifiers.
+var namedKeys = map[string]bool{
+	"up": true, "down": true, "left": true, "right": true,
+	"home": true, "end": true, "pgup": true, "pgdown": true,
+	"space": true, "backspace": true, "delete": true, "insert": true,
+	// enter/tab/esc are valid key NAMES (so modifier combos parse) even
+	// though their bare forms sit in reservedKeys.
+	"enter": true, "tab": true, "esc": true,
+	"f1": true, "f2": true, "f3": true, "f4": true, "f5": true, "f6": true,
+	"f7": true, "f8": true, "f9": true, "f10": true, "f11": true, "f12": true,
+}
+
+// GlobalKeyStringsMap is a global map from key string to action, generated
+// from specs (plus any [keys] overrides applied at startup). Read-only after
+// ApplyOverrides; the TUI treats it as immutable.
+var GlobalKeyStringsMap map[string]KeyName
+
+// GlobalKeyBindings is a global map of KeyName to keybinding, generated from
+// specs (plus any [keys] overrides applied at startup). Read-only after
+// ApplyOverrides; the TUI treats it as immutable.
+var GlobalKeyBindings map[KeyName]key.Binding
+
+func init() {
+	// Defaults must always build; a panic here means the specs table itself
+	// is inconsistent, which no config can cause.
+	strings, bindings, err := buildMaps(nil)
+	if err != nil {
+		panic(fmt.Sprintf("keys: default binding table is invalid: %v", err))
+	}
+	GlobalKeyStringsMap, GlobalKeyBindings = strings, bindings
+}
+
+// ValidateOverrides checks a [keys] override table (action name → key list)
+// without applying it: unknown actions, empty or malformed key strings,
+// reserved keys, and key conflicts between actions are all hard errors, so a
+// bad keymap fails at config load with the file named — never as a dead key
+// at runtime.
+func ValidateOverrides(overrides map[string][]string) error {
+	_, _, err := buildMaps(overrides)
+	return err
+}
+
+// ApplyOverrides rebuilds the global binding maps with the given [keys]
+// overrides layered over the defaults. Call once at TUI startup, before the
+// bubbletea program runs — the maps are read concurrently afterwards. Help
+// and menu labels are regenerated from the effective keys, so rebinds are
+// reflected everywhere the binding is displayed.
+func ApplyOverrides(overrides map[string][]string) error {
+	stringsMap, bindings, err := buildMaps(overrides)
+	if err != nil {
+		return err
+	}
+	GlobalKeyStringsMap, GlobalKeyBindings = stringsMap, bindings
+	return nil
+}
+
+// RebindableActions returns the sorted [keys] table names of every action
+// config may rebind, for validation error messages.
+func RebindableActions() []string {
+	var names []string
+	for _, sp := range specs {
+		if sp.configKey != "" {
+			names = append(names, sp.configKey)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// buildMaps generates the strings and bindings maps from specs with
+// overrides applied, validating as it goes.
+func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]key.Binding, error) {
+	byConfigKey := map[string]spec{}
+	for _, sp := range specs {
+		if sp.configKey != "" {
+			byConfigKey[sp.configKey] = sp
+		}
+	}
+	for action, keyList := range overrides {
+		if _, ok := byConfigKey[action]; !ok {
+			return nil, nil, fmt.Errorf("keys: unknown action %q (rebindable actions: %s)", action, strings.Join(RebindableActions(), ", "))
+		}
+		if len(keyList) == 0 {
+			return nil, nil, fmt.Errorf("keys: action %q has no keys; give it a key string or a list of key strings", action)
+		}
+		for _, k := range keyList {
+			if !validKeySpec(k) {
+				return nil, nil, fmt.Errorf("keys: action %q: %q is not a valid key (use a single character, a named key like \"up\" or \"f5\", or a ctrl+/alt+/shift+ combination)", action, k)
+			}
+			if reason, reserved := reservedKeys[k]; reserved {
+				return nil, nil, fmt.Errorf("keys: action %q: %q is reserved — %s", action, k, reason)
+			}
+		}
+	}
+
+	stringsMap := make(map[string]KeyName, 64)
+	bindings := make(map[KeyName]key.Binding, len(specs))
+	// boundBy tracks which action owns each dispatch key, to name both sides
+	// of a conflict. Fixed dispatch specs (enter/tab/shift+tab) participate,
+	// so an override cannot silently shadow them either (they are also in
+	// reservedKeys, which reports the clearer error first).
+	boundBy := map[string]string{}
+	for _, sp := range specs {
+		effective := sp.keys
+		overridden := false
+		if sp.configKey != "" {
+			if o, ok := overrides[sp.configKey]; ok {
+				effective = o
+				overridden = true
+			}
+		}
+
+		if sp.dispatch {
+			for _, k := range effective {
+				owner := sp.configKey
+				if owner == "" {
+					owner = sp.desc
+				}
+				if prev, taken := boundBy[k]; taken {
+					return nil, nil, fmt.Errorf("keys: %q is bound to both %q and %q; each key can trigger only one action", k, prev, owner)
+				}
+				boundBy[k] = owner
+				stringsMap[k] = sp.name
+			}
+		}
+
+		label := sp.helpLabel
+		if label == "" || overridden {
+			label = helpLabelFor(effective)
+		}
+		bindings[sp.name] = key.NewBinding(
+			key.WithKeys(effective...),
+			key.WithHelp(label, sp.desc),
+		)
+	}
+	return stringsMap, bindings, nil
+}
+
+// helpLabelFor renders a key list for the help/menu column: each key mapped
+// through keyDisplayNames and joined with "/" (e.g. ["up","k"] → "↑/k").
+func helpLabelFor(keyList []string) string {
+	parts := make([]string, len(keyList))
+	for i, k := range keyList {
+		if display, ok := keyDisplayNames[k]; ok {
+			parts[i] = display
+		} else {
+			parts[i] = k
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+// validKeySpec reports whether s is a key string bubbletea can produce:
+// an optional run of ctrl+/alt+/shift+ modifiers followed by a named key or
+// a single character. Whitespace never matches a tea.KeyMsg.String(), so it
+// is rejected outright (the classic mistake is "space", which IS the named
+// form bubbletea uses, vs " ").
+func validKeySpec(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t\n") {
+		return false
+	}
+	rest := s
+	for {
+		switch {
+		case strings.HasPrefix(rest, "ctrl+"):
+			rest = rest[len("ctrl+"):]
+		case strings.HasPrefix(rest, "alt+"):
+			rest = rest[len("alt+"):]
+		case strings.HasPrefix(rest, "shift+"):
+			rest = rest[len("shift+"):]
+		default:
+			if namedKeys[rest] {
+				return true
+			}
+			return utf8.RuneCountInString(rest) == 1
+		}
+		if rest == "" {
+			return false
+		}
+	}
 }

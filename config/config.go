@@ -18,6 +18,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -165,6 +166,30 @@ type Config struct {
 	// in-repo config must never be able to opt a machine into an always-on
 	// agent just by being cloned.
 	RootAgents map[string]RootAgentConfig `json:"root_agents,omitempty" toml:"root_agents,omitempty"`
+	// Keys is the raw [keys] rebinding table (#1026): action name → a key
+	// string or list of key strings, replacing that action's default binding
+	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —
+	// the first config surface that exists only in config.toml — hence
+	// json:"-"; parseConfig warns when a config.json carries the key.
+	// Values decode shapelessly (string or array) and are normalized and
+	// validated by validateConfig into keyOverrides; consumers use
+	// KeymapOverrides, never this field.
+	Keys map[string]any `json:"-" toml:"keys,omitempty"`
+
+	// keyOverrides is the normalized, validated form of Keys, set by
+	// validateConfig. Global-only and TUI-only: the daemon never reads it.
+	keyOverrides map[string][]string
+}
+
+// KeymapOverrides returns the validated [keys] rebinding table: action name →
+// key strings. Nil when the config carries no rebinds. Only configs that came
+// through LoadConfig/validateConfig have this populated; a hand-constructed
+// Config returns nil (defaults).
+func (c *Config) KeymapOverrides() map[string][]string {
+	if c == nil {
+		return nil
+	}
+	return c.keyOverrides
 }
 
 // RootAgentConfig is the per-repo agent profile for an always-ensured root
@@ -673,6 +698,17 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
 	}
 
+	// The [keys] keymap is TOML-only (#1026) — the struct field is json:"-",
+	// so a "keys" object in config.json would be silently dead. Silently dead
+	// config is how users lose an afternoon, so name it and point at the
+	// TOML file.
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(data, &topLevel); err == nil {
+		if _, hasKeys := topLevel["keys"]; hasKeys {
+			log.WarningLog.Printf("config %s: \"keys\" is ignored in config.json — the keymap is TOML-only; move it to a [keys] table in %s", prettyConfigPath, TomlConfigFileName)
+		}
+	}
+
 	return validateConfig(config, prettyConfigPath)
 }
 
@@ -792,7 +828,50 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 		config.UpdateChannel = UpdateChannelStable
 	}
 
+	// The [keys] keymap hard-errors on any problem (unknown action, bad key
+	// string, reserved key, conflict) rather than warn-and-default: a keymap
+	// that silently falls back to defaults is indistinguishable from a dead
+	// keyboard binding at runtime, which is far harder to debug than a load
+	// error naming the file and action (#1026).
+	overrides, err := normalizeKeyOverrides(config.Keys, prettyConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := keys.ValidateOverrides(overrides); err != nil {
+		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
+	}
+	config.keyOverrides = overrides
+
 	return config, nil
+}
+
+// normalizeKeyOverrides converts the shapeless [keys] table into action →
+// key-list form: each value must be a single string or an array of strings.
+// Returns nil for an absent table so “no rebinds” stays a nil map.
+func normalizeKeyOverrides(raw map[string]any, prettyConfigPath string) (map[string][]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	overrides := make(map[string][]string, len(raw))
+	for action, value := range raw {
+		switch v := value.(type) {
+		case string:
+			overrides[action] = []string{v}
+		case []any:
+			list := make([]string, 0, len(v))
+			for _, item := range v {
+				s, ok := item.(string)
+				if !ok {
+					return nil, fmt.Errorf("Config issue in %s: keys.%s: expected a key string or a list of key strings, got a list containing %T", prettyConfigPath, action, item)
+				}
+				list = append(list, s)
+			}
+			overrides[action] = list
+		default:
+			return nil, fmt.Errorf("Config issue in %s: keys.%s: expected a key string or a list of key strings, got %T", prettyConfigPath, action, value)
+		}
+	}
+	return overrides, nil
 }
 
 // saveConfig saves the configuration to disk
