@@ -128,6 +128,45 @@ af_ensure_nav() {
     sleep "$AF_DRIVER_POLL"
 }
 
+# af_resize <cols> <rows> — force the driver session to an exact geometry and
+# MAKE IT STICK. A DETACHED tmux session defaults to `window-size latest`,
+# which snaps the window back to the last-attached client (80x23) and IGNORES
+# the `new-session -x/-y` request — so tiny-size gates (60x15, 40x10) silently
+# ran at 80x23 (#1174 item 2). Pinning `window-size manual` + an explicit
+# `resize-window` makes the geometry deterministic.
+#
+# FAILS LOUDLY (non-zero + message) if tmux rejects the resize (invalid dims,
+# missing session) OR the window's actual size doesn't match what was
+# requested — a testing helper that lied about a resize would let a tiny-size
+# gate keep running at the wrong size while believing it resized (Greptile,
+# #1201). AF_DRIVER_COLS/ROWS are updated ONLY after the size is confirmed, so
+# they never advertise a geometry that isn't live.
+af_resize() {
+    local cols="$1" rows="$2"
+    if [ -z "$cols" ] || [ -z "$rows" ]; then
+        _af_fail "af_resize: <cols> <rows> required"; return 1
+    fi
+    # window-size is a session option in modern tmux; -w covers older builds.
+    tmux set-option -t "$AF_DRIVER_SESSION" window-size manual >/dev/null 2>&1 \
+        || tmux set-option -w -t "$AF_DRIVER_SESSION" window-size manual >/dev/null 2>&1 \
+        || true
+    if ! tmux resize-window -t "$AF_DRIVER_SESSION" -x "$cols" -y "$rows" 2>/dev/null; then
+        _af_fail "af_resize: tmux rejected resize to ${cols}x${rows} (invalid size, or missing session '$AF_DRIVER_SESSION')"
+        return 1
+    fi
+    # Let tmux apply the resize and the TUI observe SIGWINCH / repaint, then
+    # verify the window actually took the requested geometry.
+    sleep "$AF_DRIVER_POLL"
+    local actual
+    actual="$(tmux display-message -p -t "$AF_DRIVER_SESSION" '#{window_width}x#{window_height}' 2>/dev/null)"
+    if [ "$actual" != "${cols}x${rows}" ]; then
+        _af_fail "af_resize: requested ${cols}x${rows} but window is ${actual:-unknown} — resize did not stick"
+        return 1
+    fi
+    AF_DRIVER_COLS="$cols"
+    AF_DRIVER_ROWS="$rows"
+}
+
 # af_focus_tree — put ring focus on the instances tree (the state whose menu
 # advertises `n new`). Checks BEFORE pressing, so it never Tabs off the tree
 # when already there. Assumes nav mode (call af_ensure_nav first).
@@ -216,6 +255,11 @@ af_boot() {
     # server (the container hosts the daemon's sessions too).
     tmux kill-session -t "$AF_DRIVER_SESSION" 2>/dev/null || true
     tmux new-session -d -s "$AF_DRIVER_SESSION" -x "$AF_DRIVER_COLS" -y "$AF_DRIVER_ROWS"
+    # A detached session ignores -x/-y under `window-size latest`; pin it so the
+    # TUI reads the requested geometry on startup (#1174 item 2). Honors any
+    # AF_DRIVER_COLS/ROWS override set before af_boot, including tiny sizes.
+    # af_resize verifies the geometry took, so a bad size fails the boot loudly.
+    af_resize "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" || return 1
 
     af_send_literal "cd $AF_DRIVER_REPO && $bin"
     af_send Enter
@@ -239,9 +283,22 @@ af_new_instance() {
     af_wait_for "${name}.*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
 }
 
-# af_select <name> — make <name> the display-selected instance. Robust to any
-# starting cursor position: anchor at the top (k is idempotent there), then
-# step down until <name>'s row carries the ▾ selected/expanded arrow.
+# af_select <name> — put the tree cursor ON <name>'s row (so it is the *real*
+# GetSelectedInstance(), not merely display-selected). Robust to any starting
+# cursor position: anchor at the top (k is idempotent there), then step down
+# until BOTH conditions hold — <name>'s row carries the ▾ selected/expanded
+# arrow AND the menu advertises a row-scoped verb (`D kill`).
+#
+# The two-part success condition is the #1174-item-1 / #1199 fix. The sticky
+# ▾ is a DISPLAY-selection: a SINGLE auto-selected instance renders ▾ while the
+# tree cursor still sits on the `Instances` section header, so GetSelected-
+# Instance() is nil and every cursor-driven verb (o attach, D kill, and
+# af_attach/af_open_pane which run after af_select) silently no-ops. A ▾-only
+# check returns on iteration 0 in that case — a false positive that can make a
+# play-test wrongly "pass" a nav action that never fired. `D kill` appears in
+# the menu ONLY when an instance is actually under the cursor (non-nil
+# GetSelectedInstance()), so requiring it forces `j` past the header until the
+# cursor truly lands on the row.
 af_select() {
     local name="$1" _ screen
     [ -n "$name" ] || { _af_fail "af_select: name required"; return 1; }
@@ -251,13 +308,14 @@ af_select() {
     sleep "$AF_DRIVER_POLL"
     for _ in $(seq 1 40); do
         screen="$(af_capture)"
-        if printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+[0-9]+\.[[:space:]]+${name}([[:space:]]|\$)"; then
+        if printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+[0-9]+\.[[:space:]]+${name}([[:space:]]|\$)" \
+           && printf '%s\n' "$screen" | grep -qE -- 'D kill'; then
             return 0
         fi
         af_send j
         sleep "$AF_DRIVER_POLL"
     done
-    _af_log "could not select '${name}'"
+    _af_log "could not select '${name}' (need ▾ on its row AND cursor-on-row, i.e. 'D kill' in the menu)"
     printf '%s\n' "$screen" >&2
     return 1
 }

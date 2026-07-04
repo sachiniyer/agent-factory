@@ -69,7 +69,18 @@ On a cold boot the cursor sits on the **section header** (no instance selected
 — menu shows the plain `n new • N new remote` set); the first `j` moves the
 cursor down onto the first instance. `af_select` is robust to any starting
 position: it anchors at the top (`k` is idempotent there), then steps down
-with `j` until the target row shows `▾`.
+with `j` until the target row shows `▾` **and** the tree cursor is actually on
+it.
+
+> **Display-selected ≠ cursor-on-row (#1174 / #1199).** The sticky `▾` is only
+> a *display* signal. A **single** auto-selected instance renders `▾` while the
+> cursor still sits on the section header — there `GetSelectedInstance()` is
+> `nil`, so `o`/`D`/attach silently no-op even though the row *looks* selected
+> (a false pass waiting to happen). `af_select` therefore also requires the
+> menu to advertise a **row-scoped verb (`D kill`)** — present only when a real
+> instance is under the cursor — and keeps pressing `j` past the header until
+> it appears. `af_attach`/`af_open_pane` inherit the fix because scenarios call
+> `af_select` first.
 
 ### Which key goes where (defaults, from `keys/keys.go`)
 
@@ -146,6 +157,7 @@ compose across `docker exec` invocations.
 | `af_click <x> <y>` / `af_click_instance <name>` | SGR mouse | injects a left click at a cell / on an instance row |
 | `af_scroll <up\|down> [x] [y]` | SGR wheel | injects a wheel event |
 | `af_set_config <toml>` + `af_relaunch` | — | rewrites `config.toml` (canonical since #1030) and reboots the TUI |
+| `af_resize <cols> <rows>` | — | pins the session to an exact geometry that STICKS (`window-size manual` + `resize-window`), for tiny-size gates |
 | `af_quit` | `q` | back to a shell prompt |
 
 ### Assertions & introspection
@@ -164,6 +176,10 @@ compose across `docker exec` invocations.
 `AF_DRIVER_REPO` (`$HOME/sandbox/mock-repo`), `AGENT_FACTORY_HOME`,
 `AF_DRIVER_TIMEOUT` (`25`s), `AF_DRIVER_POLL` (`0.25`s),
 `AF_DRIVER_DETACH_KEY` (`C-w`), `AF_DRIVER_BIN` (auto-resolved).
+
+Set `AF_DRIVER_COLS`/`ROWS` **before** `af_boot` to launch at a non-default
+size — `af_boot` pins it so it sticks (see the tiny-size gate below). Change
+the size mid-run with `af_resize <cols> <rows>`.
 
 ---
 
@@ -300,9 +316,53 @@ af_click_instance b; af_expect_selected b
 af_scroll down; af_scroll up
 ```
 
+### Tiny geometry / responsive-layout changes (the #1174-item-2 class)
+
+A **detached** tmux session defaults to `window-size latest`, which snaps the
+window back to the last-attached client (80x23) and *ignores* `new-session
+-x/-y`. So a naive small-size boot silently ran at 80x23 and never exercised
+the tiny layout. Boot with the size preset (`af_boot` pins it), or resize
+mid-run with `af_resize`:
+
+```bash
+AF_DRIVER_COLS=60 AF_DRIVER_ROWS=15 af_boot   # boots pinned at 60x15
+af_new_instance a
+af_select a; af_expect_selected a             # selection still works when narrow
+
+af_resize 40 10                               # squeeze to 40x10 mid-run
+af_assert_screen 'Instances'                  # header must survive the squeeze
+```
+
 ---
 
-## 6. Isolation & box safety (inherited from the container)
+## 6. Gating a branch cut BEFORE #1166 (the driver isn't in the tree yet)
+
+`scripts/tui-driver.sh` landed in **#1166**. A branch cut before that commit has
+no driver to source, so `source /src/scripts/tui-driver.sh` fails with *No such
+file*. Two ways to gate such a branch — pick one **before** you boot:
+
+- **Rebase the branch onto `master`** (preferred when the branch is yours and
+  rebasing is clean) — this pulls the driver + self-test into the tree
+  naturally, and you gate exactly what will merge.
+- **Copy the driver in from `master`** when a rebase is noisy or the branch is
+  an external PR you don't want to rewrite. Inside the running sandbox
+  container:
+
+  ```bash
+  # From the host, into the sandbox container (name is unique per run, #1171):
+  docker cp scripts/tui-driver.sh          "$AF_PLAYTEST_NAME":/src/scripts/
+  docker cp scripts/tui-driver-selftest.sh "$AF_PLAYTEST_NAME":/src/scripts/
+  # then drive as usual — the driver is pure harness, so master's copy gates
+  # any older product tree without changing what you're testing.
+  ```
+
+Because the driver only sends keys and reads the screen — it carries no product
+code — master's copy is safe to run against an older `af` build; it asserts on
+the same on-screen markers regardless of the branch under test.
+
+---
+
+## 7. Isolation & box safety (inherited from the container)
 
 Every rule from the [tui-playtest skill](../.claude/skills/tui-playtest.md)
 is satisfied *structurally* by running inside the container: private tmux
