@@ -804,8 +804,7 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 				// Closest point to "user pressed detach" we can observe —
 				// the elapsed in this trace is whatever Detach() itself
 				// took, which matches what blocks the app-side <-ch.
-				log.WarningLog.Printf("[detach-trace] tmux-stdin-reader-saw-detach-key name=%s",
-					t.sanitizedName)
+				detachTracef("tmux-stdin-reader-saw-detach-key name=%s", t.sanitizedName)
 				// Detach from the session
 				t.Detach()
 				return
@@ -820,14 +819,37 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 	return t.attachCh, nil
 }
 
+// detachTraceEnabled reports whether the opt-in [detach-trace] step markers
+// on the Detach hot path should be emitted. Off by default so a routine
+// detach produces ZERO WARN lines; set AF_DETACH_TRACE=1 to restore the
+// step-level breakdown that localized the #598 stall to the wg.Wait step.
+// This completes the #788/#790 gating, which moved the app-layer sibling
+// markers (app/detach_trace.go) behind the same env var but left this
+// tmux-layer set — added by #599 to catch the #598 hang — logging
+// unconditionally at WARNING, where it grew to 93% of all WARN volume (#1157).
+func detachTraceEnabled() bool {
+	return os.Getenv("AF_DETACH_TRACE") == "1"
+}
+
+// detachTracef emits a [detach-trace] step marker, and only when
+// AF_DETACH_TRACE=1. It logs at INFO rather than WARNING so that even the
+// opt-in traces stay out of the WARN stream that log triage and af
+// bug-report (#1048) rely on — the only detach event worth a WARN is the
+// SIGKILL backstop actually firing (see waitForAttachDrain).
+func detachTracef(format string, args ...any) {
+	if !detachTraceEnabled() {
+		return
+	}
+	log.InfoLog.Printf("[detach-trace] "+format, args...)
+}
+
 // Detach disconnects from the current tmux session. Logs errors instead of panicking
 // so the application can attempt graceful recovery.
 func (t *TmuxSession) Detach() {
 	detachStart := time.Now()
-	log.WarningLog.Printf("[detach-trace] tmux.Detach-entry name=%s", t.sanitizedName)
+	detachTracef("tmux.Detach-entry name=%s", t.sanitizedName)
 	defer func() {
-		log.WarningLog.Printf("[detach-trace] tmux.Detach-exit name=%s total=%v",
-			t.sanitizedName, time.Since(detachStart))
+		detachTracef("tmux.Detach-exit name=%s total=%v", t.sanitizedName, time.Since(detachStart))
 		close(t.attachCh)
 		t.attachCh = nil
 		t.cancel = nil
@@ -850,14 +872,12 @@ func (t *TmuxSession) Detach() {
 	// "Session terminated without detaching" warning.
 	stepStart := time.Now()
 	t.cancel()
-	log.WarningLog.Printf("[detach-trace] tmux.Detach-cancel-done name=%s elapsed=%v",
-		t.sanitizedName, time.Since(stepStart))
+	detachTracef("tmux.Detach-cancel-done name=%s elapsed=%v", t.sanitizedName, time.Since(stepStart))
 
 	// Close the attached pty session so the io.Copy goroutine returns.
 	stepStart = time.Now()
 	closeErr := t.ptmx.Close()
-	log.WarningLog.Printf("[detach-trace] tmux.Detach-ptmx.Close-done name=%s elapsed=%v",
-		t.sanitizedName, time.Since(stepStart))
+	detachTracef("tmux.Detach-ptmx.Close-done name=%s elapsed=%v", t.sanitizedName, time.Since(stepStart))
 
 	// Wait for the attach goroutines (io.Copy + monitorWindowSize x2) to
 	// finish before mutating t.ptmx. monitorWindowSize reads t.ptmx via
@@ -866,8 +886,7 @@ func (t *TmuxSession) Detach() {
 	// the attach-session child if wg.Wait exceeds wgWaitSigkillDeadline —
 	// see #598 follow-up for the diagnosis.
 	waitElapsed := t.waitForAttachDrain()
-	log.WarningLog.Printf("[detach-trace] tmux.Detach-wg.Wait-done name=%s elapsed=%v",
-		t.sanitizedName, waitElapsed)
+	detachTracef("tmux.Detach-wg.Wait-done name=%s elapsed=%v", t.sanitizedName, waitElapsed)
 	// Defense-in-depth: if wg.Wait still exceeded the slow threshold after
 	// the SIGKILL fallback ran, that means killAttach didn't unstick the
 	// goroutine — a deeper bug than what this fix targets. Keep the loud
@@ -902,8 +921,7 @@ func (t *TmuxSession) Detach() {
 	if err := t.Restore(""); err != nil {
 		log.ErrorLog.Printf("error restoring pty after detach: %v", err)
 	}
-	log.WarningLog.Printf("[detach-trace] tmux.Detach-Restore-done name=%s elapsed=%v",
-		t.sanitizedName, time.Since(stepStart))
+	detachTracef("tmux.Detach-Restore-done name=%s elapsed=%v", t.sanitizedName, time.Since(stepStart))
 }
 
 // Close terminates the tmux session and cleans up resources
