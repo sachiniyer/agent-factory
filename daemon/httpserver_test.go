@@ -141,6 +141,59 @@ func TestHTTP_MalformedJSON_400(t *testing.T) {
 	assert.Contains(t, env.Error.Message, "malformed JSON")
 }
 
+// TestHTTP_OversizeBody_413_NotDispatched covers the body-over-limit → 413
+// mapping AND proves the oversize request is REJECTED, never
+// truncated-then-dispatched: with a well-formed AddTask body that exceeds the
+// (shrunk) cap, nothing is persisted and the scheduler is untouched — the
+// manager was never reached.
+func TestHTTP_OversizeBody_413_NotDispatched(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	orig := maxHTTPBodyBytes
+	maxHTTPBodyBytes = 64
+	t.Cleanup(func() { maxHTTPBodyBytes = orig })
+
+	cs := &controlServer{scheduler: newTaskScheduler()}
+	body, err := json.Marshal(AddTaskRequest{Task: enabledCronTask("ffff1001", "")})
+	require.NoError(t, err)
+	require.Greater(t, int64(len(body)), maxHTTPBodyBytes,
+		"body must exceed the cap for this test to exercise 413")
+
+	rec := doHTTP(cs, http.MethodPost, "/v1/AddTask", string(body))
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+
+	env := decodeEnvelope(t, rec)
+	require.Nil(t, env.Data)
+	require.NotNil(t, env.Error)
+
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Empty(t, tasks, "oversize request must be rejected before the manager write")
+	require.Empty(t, cs.scheduler.scheduledTaskIDs(),
+		"oversize request must not re-arm the scheduler")
+}
+
+// TestHTTP_BodyUnderLimit_Succeeds covers the boundary from the other side: a
+// body that fits under the cap still decodes and dispatches normally.
+func TestHTTP_BodyUnderLimit_Succeeds(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	cs := &controlServer{scheduler: newTaskScheduler()}
+	body, err := json.Marshal(AddTaskRequest{Task: enabledCronTask("ffff2001", "")})
+	require.NoError(t, err)
+
+	orig := maxHTTPBodyBytes
+	maxHTTPBodyBytes = int64(len(body)) + 16 // comfortably above the body
+	t.Cleanup(func() { maxHTTPBodyBytes = orig })
+
+	rec := doHTTP(cs, http.MethodPost, "/v1/AddTask", string(body))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Nil(t, decodeEnvelope(t, rec).Error)
+
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "ffff2001", tasks[0].ID)
+}
+
 // TestHTTP_UnknownRoute_404 covers the unknown-route → 404 mapping via the mux
 // catch-all, still returning the envelope body.
 func TestHTTP_UnknownRoute_404(t *testing.T) {

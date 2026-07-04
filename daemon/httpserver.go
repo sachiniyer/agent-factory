@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,8 +38,10 @@ import (
 // token (#1029 locked decisions).
 
 // maxHTTPBodyBytes caps a request body so a client cannot exhaust daemon memory.
-// 16 MiB comfortably fits any realistic prompt or task payload.
-const maxHTTPBodyBytes = 16 << 20
+// 16 MiB comfortably fits any realistic prompt or task payload. It is enforced
+// via http.MaxBytesReader, which REJECTS an oversize body (→ 413) rather than
+// silently truncating it. var, not const, so tests can shrink it.
+var maxHTTPBodyBytes int64 = 16 << 20
 
 // httpReadHeaderTimeout bounds how long the server waits for request headers,
 // closing the Slowloris hold-open window (gosec G112). The socket is local and
@@ -152,9 +155,12 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 //	200 — success: {"data": <resp>, "error": null}
 //	400 — malformed / unreadable JSON request body
 //	405 — wrong HTTP verb (not POST)
+//	413 — request body exceeds maxHTTPBodyBytes
 //	500 — the handler (validation or execution) returned an error
 //
-// 404 for unknown routes is handled by the mux's catch-all, not here.
+// 404 for unknown routes is handled by the mux's catch-all, not here. A rejected
+// body (400 or 413) short-circuits before the manager call, so an oversize or
+// malformed request is never dispatched.
 func rpcHandler[Req any, Resp any](call func(Req, *Resp) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -163,8 +169,15 @@ func rpcHandler[Req any, Resp any](call func(Req, *Resp) error) http.HandlerFunc
 			return
 		}
 		var req Req
-		if err := decodeHTTPRequest(r, &req); err != nil {
-			writeHTTPError(w, http.StatusBadRequest, err)
+		if err := decodeHTTPRequest(w, r, &req); err != nil {
+			// An oversize body (MaxBytesReader tripped) is a distinct 413;
+			// everything else is ordinary malformed input → 400.
+			status := http.StatusBadRequest
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			writeHTTPError(w, status, err)
 			return
 		}
 		var resp Resp
@@ -191,12 +204,21 @@ func healthHandler(cs *controlServer) http.HandlerFunc {
 	}
 }
 
-// decodeHTTPRequest reads the (size-capped) body and unmarshals it into dst. An
+// decodeHTTPRequest reads the size-capped body and unmarshals it into dst. An
 // empty body is treated as a zero-value request so no-argument RPCs (ListTasks,
 // an all-repo Snapshot, health) work with `curl -d ”` or no body at all.
-func decodeHTTPRequest(r *http.Request, dst any) error {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxHTTPBodyBytes))
+//
+// The cap is enforced with http.MaxBytesReader (NOT io.LimitReader): once the
+// body exceeds maxHTTPBodyBytes the read fails with an *http.MaxBytesError, so an
+// oversize request is REJECTED, never truncated-then-accepted. The error is
+// returned wrapped (chain preserved) so the caller can errors.As it to a 413.
+func decodeHTTPRequest(w http.ResponseWriter, r *http.Request, dst any) error {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return fmt.Errorf("request body exceeds %d-byte limit: %w", maxHTTPBodyBytes, err)
+		}
 		return fmt.Errorf("failed to read request body: %w", err)
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
