@@ -110,6 +110,8 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.handleEnter()
 	case keys.KeyAttach:
 		return m.handleAttach()
+	case keys.KeyQuit:
+		return m.handleQuit()
 
 	default:
 		return m, nil

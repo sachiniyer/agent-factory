@@ -79,8 +79,14 @@ func TestLoadInRepoConfigRejectsGlobalOnlyKeys(t *testing.T) {
 			assert.Contains(t, err.Error(), "global setting")
 			// The message must name the real global config file under the
 			// active config dir, not a hardcoded ~/.agent-factory path that
-			// AGENT_FACTORY_HOME has relocated (#890).
-			assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)))
+			// AGENT_FACTORY_HOME has relocated (#890). TOML-only keys (the
+			// keymap) point at config.toml; every other key at config.json
+			// (#1141 play-test minor 4).
+			wantFile := ConfigFileName
+			if tomlOnlyGlobalKeys[key] {
+				wantFile = TomlConfigFileName
+			}
+			assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, wantFile)))
 			assert.NotContains(t, err.Error(), "~/.agent-factory/config.json")
 		})
 	}

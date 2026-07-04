@@ -100,6 +100,13 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	"worktree_root":   true,
 }
 
+// tomlOnlyGlobalKeys is the subset of inRepoGlobalOnlyKeys that exists only in
+// config.toml (#1026/#1030), so their in-repo rejection message must direct
+// the user to config.toml rather than the resolved global config file.
+var tomlOnlyGlobalKeys = map[string]bool{
+	"keys": true,
+}
+
 // isPathStrictlyInside reports whether absBase is a strict descendant of
 // absDir (absBase != absDir and absBase is not outside absDir). Both
 // arguments must be absolute, cleaned paths. Built on filepath.Rel rather
@@ -262,8 +269,10 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	// relocates the config dir (same class of bug as #890). Fall back to a
 	// generic phrase if the config dir cannot be resolved.
 	globalConfigLocation := "the global config file"
+	tomlGlobalConfigLocation := globalConfigLocation
 	if configDir, dirErr := GetConfigDir(); dirErr == nil {
 		globalConfigLocation = prettyHomePath(filepath.Join(configDir, ConfigFileName))
+		tomlGlobalConfigLocation = prettyHomePath(filepath.Join(configDir, TomlConfigFileName))
 	}
 	if len(data) == 0 || (isToml && isEffectivelyEmptyToml(data)) {
 		// A contentless config.toml (zero bytes, whitespace, or a bare BOM)
@@ -300,7 +309,16 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	}
 	for key := range presentKeys {
 		if inRepoGlobalOnlyKeys[key] {
-			return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, globalConfigLocation)
+			// TOML-only global keys (the [keys] keymap, #1026) must point at
+			// config.toml — a config.json carrying "keys" is ignored-with-
+			// warning, so directing the user there would land them in the
+			// dead path. Every other global-only key still lives in the
+			// resolved global config file.
+			dest := globalConfigLocation
+			if tomlOnlyGlobalKeys[key] {
+				dest = tomlGlobalConfigLocation
+			}
+			return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, dest)
 		}
 		allowed := false
 		for _, k := range inRepoAllowedKeys {

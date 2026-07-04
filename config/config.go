@@ -833,6 +833,15 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	// that silently falls back to defaults is indistinguishable from a dead
 	// keyboard binding at runtime, which is far harder to debug than a load
 	// error naming the file and action (#1026).
+	//
+	// This runs in every LoadConfig, so the error surfaces on the TUI and on
+	// `af keys` (which load the config). CLI subcommands that never load the
+	// config — e.g. `af sessions list`, which talks only to the daemon — do
+	// not validate the keymap, and that is intentional: the keymap is a
+	// TUI-only preference, and blocking an unrelated CLI command because of a
+	// keybinding typo would keep a user from running the very commands they'd
+	// use to debug it. The binding is validated wherever it is actually
+	// consumed.
 	overrides, err := normalizeKeyOverrides(config.Keys, prettyConfigPath)
 	if err != nil {
 		return nil, err

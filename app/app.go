@@ -1207,8 +1207,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 	}
 
-	// Handle quit commands
-	if msg.String() == "ctrl+c" || msg.String() == "q" {
+	// Ctrl+C is an always-on hard exit — never rebindable, so it stays a
+	// hardcoded check ahead of the keymap. The quit VERB (default q, or
+	// whatever [keys].quit rebinds it to) dispatches through the generated
+	// table like every other rebindable action, via keys.KeyQuit in
+	// handleDefaultKeyPress (#1026).
+	if msg.String() == "ctrl+c" {
 		return m.handleQuit()
 	}
 
