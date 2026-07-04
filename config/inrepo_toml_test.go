@@ -173,6 +173,42 @@ func TestLoadInRepoConfigTOMLMalformed(t *testing.T) {
 	})
 }
 
+// TestLoadInRepoConfigTOMLRejectsNonObject is the TOML counterpart to the
+// #1153 JSON null hole. TOML has no `null` literal and a document must be a
+// table (key = value) at the top level, so a bare null / string / number is a
+// syntax error the decoder already rejects — this pins that guarantee so the
+// TOML path can never silently accept a non-object the way JSON did.
+func TestLoadInRepoConfigTOMLRejectsNonObject(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	for name, content := range map[string]string{
+		"null":        "null\n",
+		"bare string": `"hello"` + "\n",
+		"bare number": "123\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			writeInRepoTomlConfig(t, repoRoot, content)
+			_, _, err := LoadInRepoConfig(repoRoot)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), TomlConfigFileName)
+		})
+	}
+}
+
+// TestSaveInRepoPostWorktreeCommandsTOMLNonObject confirms the TOML save path
+// has no nil-map panic analog to the JSON one (#1153): a non-object existing
+// config.toml is a parse error the save surfaces cleanly rather than crashing.
+func TestSaveInRepoPostWorktreeCommandsTOMLNonObject(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	writeInRepoTomlConfig(t, repoRoot, "123\n")
+
+	err := SaveInRepoPostWorktreeCommands(repoRoot, []string{"make setup"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), TomlConfigFileName)
+}
+
 func TestLoadInRepoConfigTOMLTraversalSafety(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 

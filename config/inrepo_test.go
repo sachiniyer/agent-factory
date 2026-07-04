@@ -143,6 +143,79 @@ func TestLoadInRepoConfigMalformed(t *testing.T) {
 	})
 }
 
+// TestLoadInRepoConfigRejectsNonObject covers #1153: a bare JSON `null`
+// unmarshals into a map as nil without error and was silently accepted as an
+// empty config; other non-object top-level values (string, number, array) were
+// already rejected by the decoder. All must fail loudly with the file named.
+func TestLoadInRepoConfigRejectsNonObject(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	t.Run("null", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		path := writeInRepoConfig(t, repoRoot, "null")
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be a JSON object")
+		assert.Contains(t, err.Error(), prettyHomePath(path))
+	})
+
+	t.Run("bare string", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		writeInRepoConfig(t, repoRoot, `"hello"`)
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parse")
+	})
+
+	t.Run("bare number", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		writeInRepoConfig(t, repoRoot, "123")
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parse")
+	})
+
+	t.Run("bare array", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		writeInRepoConfig(t, repoRoot, "[]")
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parse")
+	})
+}
+
+// TestLoadInRepoConfigEmptyObject confirms `{}` — a structurally valid object
+// with no keys — is accepted (distinct from `null`): a non-nil config with no
+// keys marked set.
+func TestLoadInRepoConfigEmptyObject(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	writeInRepoConfig(t, repoRoot, "{}")
+
+	cfg, raw, err := LoadInRepoConfig(repoRoot)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.NotEmpty(t, raw)
+	for _, key := range inRepoAllowedKeys {
+		assert.False(t, cfg.IsSet(key), "no key should be marked set for {}")
+	}
+}
+
+// TestSaveInRepoPostWorktreeCommandsNull is the regression test for the #1153
+// panic: SaveInRepoPostWorktreeCommands read a `null` config file, unmarshaled
+// it into a nil map, and panicked writing the key. It must now return an
+// actionable error naming the file instead of crashing.
+func TestSaveInRepoPostWorktreeCommandsNull(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	path := writeInRepoConfig(t, repoRoot, "null")
+
+	err := SaveInRepoPostWorktreeCommands(repoRoot, []string{"make setup"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a JSON object")
+	assert.Contains(t, err.Error(), prettyHomePath(path))
+}
+
 // TestIsPathStrictlyInside is the regression test for #852: the previous
 // strings.HasPrefix(path, root+Separator) check built the prefix "//" for a
 // repo rooted at the filesystem root (real in containers with WORKDIR /),
