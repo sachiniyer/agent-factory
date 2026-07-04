@@ -67,6 +67,36 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 	assert.NotContains(t, warnBuf.String(), "both", "a clean conversion leaves no duplicate-config warning")
 }
 
+func TestConversion_PreservesExistingBackup(t *testing.T) {
+	// Greptile on #1148: a second conversion must never clobber the backup
+	// from the first. Scenario — the user converted once (real settings →
+	// config.json.bak), later a downgrade regenerated a defaults config.json,
+	// and now a new af converts again. The ORIGINAL backup must survive; the
+	// new (defaults) backup lands beside it under a non-colliding name.
+	configDir := seedJSONHome(t, `{"default_program": "codex"}`)
+	original := []byte(`{"default_program": "aider", "auto_yes": true}`)
+	bakPath := filepath.Join(configDir, ConfigFileName+".bak")
+	require.NoError(t, os.WriteFile(bakPath, original, 0644))
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "codex", cfg.DefaultProgram)
+
+	// The original .bak is byte-for-byte intact.
+	got, err := os.ReadFile(bakPath)
+	require.NoError(t, err)
+	assert.Equal(t, original, got, "the original backup must never be overwritten")
+
+	// The just-converted config.json landed beside it as config.json.bak.1.
+	bak1, err := os.ReadFile(bakPath + ".1")
+	require.NoError(t, err)
+	assert.Contains(t, string(bak1), `"default_program": "codex"`)
+
+	// config.toml is canonical; the live config.json is gone.
+	assert.FileExists(t, filepath.Join(configDir, TomlConfigFileName))
+	assert.NoFileExists(t, filepath.Join(configDir, ConfigFileName))
+}
+
 func TestConversion_InvalidJSONIsNotConvertedOrRenamed(t *testing.T) {
 	// A config.json that fails to parse must NOT be converted and NOT renamed:
 	// the user needs to fix it in place, and clobbering it would lose data.
@@ -126,7 +156,7 @@ func TestConversion_CrashAfterWriteBeforeRenameLeavesTOMLCanonical(t *testing.T)
 	// config.toml written; config.json still present (rename "failed").
 	assert.FileExists(t, filepath.Join(configDir, TomlConfigFileName))
 	assert.FileExists(t, filepath.Join(configDir, ConfigFileName))
-	assert.Contains(t, warnBuf.String(), "could not move the original aside")
+	assert.Contains(t, warnBuf.String(), "could not move the original")
 
 	// Next load: config.toml wins, config.json flagged as ignored.
 	warn2 := captureLog(t, &aflog.WarningLog)

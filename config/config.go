@@ -615,6 +615,25 @@ func fileExists(path string) bool {
 	return err == nil || !os.IsNotExist(err)
 }
 
+// availableBackupPath returns the first backup path that does not yet exist:
+// base, then base.1, base.2, … so an existing backup is never overwritten.
+// The original backup (base) is left untouched, preserving the oldest — and
+// most likely real-settings — copy across repeated conversions. Returns an
+// error only if an absurd number of backups already exist, in which case the
+// caller leaves config.json in place with a warning rather than clobbering.
+func availableBackupPath(base string) (string, error) {
+	if !fileExists(base) {
+		return base, nil
+	}
+	for i := 1; i < 1000; i++ {
+		candidate := fmt.Sprintf("%s.%d", base, i)
+		if !fileExists(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("%s and %s.1..999 all exist; refusing to overwrite any backup", base, base)
+}
+
 // GlobalConfigPath returns the path of the global config file that LoadConfig
 // reads: config.toml when it exists, otherwise the legacy config.json when
 // that exists, otherwise the config.toml path (the file first run creates).
@@ -651,11 +670,12 @@ var convertRaceHookForTest func()
 
 // convertJSONToTOML performs the one-time json→toml migration (#1030): it
 // parses and validates the legacy config.json with the frozen JSON reader,
-// writes an equivalent config.toml atomically, then renames config.json to
-// config.json.bak so config.toml becomes the single canonical file. The whole
-// sequence runs under the config file lock so a CLI and the daemon racing the
-// first post-upgrade load produce exactly one conversion; the lock body
-// re-checks for a config.toml the winner already wrote and simply loads it.
+// writes an equivalent config.toml atomically, then moves config.json aside to
+// config.json.bak (or the first free config.json.bak.N — an existing backup is
+// never overwritten) so config.toml becomes the single canonical file. The
+// whole sequence runs under the config file lock so a CLI and the daemon
+// racing the first post-upgrade load produce exactly one conversion; the lock
+// body re-checks for a config.toml the winner already wrote and simply loads it.
 //
 // A config.json that fails to parse or validate is NOT converted and NOT
 // renamed: the error is returned so the user can fix the file in place.
@@ -717,18 +737,28 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			return fmt.Errorf("failed to write %s during conversion: %w", prettyTomlPath, err)
 		}
 
-		bakPath := configPath + ".bak"
-		renameErr := func() error {
-			if convertRenameFailForTest != nil {
-				return convertRenameFailForTest()
-			}
-			return os.Rename(configPath, bakPath)
-		}()
+		// Never overwrite an existing backup: a downgrade can regenerate a
+		// defaults config.json that a *second* conversion would otherwise
+		// rename onto config.json.bak, clobbering the user's ORIGINAL
+		// real-settings backup from the first conversion (Greptile on #1148).
+		// Pick the first free config.json.bak / .bak.1 / .bak.2 … so the
+		// oldest backup — the one most likely to hold real settings — is
+		// preserved and each later conversion lands beside it.
+		bakPath, bakErr := availableBackupPath(configPath + ".bak")
+		renameErr := bakErr
+		if renameErr == nil {
+			renameErr = func() error {
+				if convertRenameFailForTest != nil {
+					return convertRenameFailForTest()
+				}
+				return os.Rename(configPath, bakPath)
+			}()
+		}
 		if renameErr != nil {
 			// config.toml is already written and will be canonical next load;
 			// leaving config.json in place only costs a "both files" warning.
-			log.WarningLog.Printf("migrated config to %s, but could not move the original aside to %s: %v — %s is now canonical; delete %s yourself to silence the duplicate-config warning",
-				prettyTomlPath, prettyHomePath(bakPath), renameErr, prettyTomlPath, prettyConfigPath)
+			log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; delete %s yourself to silence the duplicate-config warning",
+				prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, prettyConfigPath)
 		} else {
 			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
 				prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
