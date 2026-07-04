@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -510,28 +511,33 @@ func parseCommandProbeOutput(output string) string {
 // LoadConfig reads the user's config file, validates it, and returns the
 // resulting Config.
 //
-// Format resolution (#1030): config.toml, when it exists, is the canonical
-// config and config.json is ignored outright (with a warning naming the
-// ignored file) — the two are never merged, so there is never ambiguity
-// about which file a setting must be edited in. Only when config.toml does
-// not exist does the legacy config.json path below run, unchanged.
+// Format resolution (#1030): config.toml is the canonical global config.
+// When it exists it is authoritative and config.json is ignored (with a
+// warning naming the shadowed file) — the two are never merged. When only a
+// legacy config.json exists it is converted to config.toml once, on this
+// load (convertJSONToTOML); from then on config.toml is the file to edit.
+// First run, with neither file present, materializes config.toml directly.
 //
 // Error handling distinguishes "no config yet" from "config present but
 // unusable" so a user whose settings are being ignored gets told why instead
 // of silently inheriting defaults (#734):
-//   - File does not exist, or exists but is zero-byte → DefaultConfig() is
-//     materialized and saved, with no error. This is the first-run path and
-//     must keep working. An empty file is never a valid config; it is the
-//     fingerprint of a failed/partial first-run write (#864, a regression of
-//     #838), so the stub is removed and defaults regenerated rather than
-//     wedging every future startup.
-//   - File exists but cannot be read (permission denied, disk error), or is
+//   - Neither file exists → DefaultConfig() is materialized as config.toml,
+//     with no error. This is the first-run path and must keep working.
+//   - A contentless config file (zero-byte or, for TOML, whitespace/BOM-only)
+//     with no other config present is the fingerprint of a failed/partial
+//     first-run write (#864, a regression of #838): the stub is removed and
+//     defaults regenerated rather than wedging every future startup. A
+//     contentless config.toml sitting beside a real config.json is instead a
+//     hand-made shadow and stays a loud error, so re-materializing can never
+//     silently discard the config.json's settings.
+//   - A file exists but cannot be read (permission denied, disk error), or is
 //     non-empty yet fails to parse → an error naming the file and the
 //     underlying cause is returned. Defaults are NOT substituted, since doing
-//     so would hide the user's broken config behind a working-looking app.
-//   - File parses but fails enum validation → an actionable migration error is
-//     returned (there is no implicit migration from legacy "path with flags"
-//     values; the user must rewrite their config).
+//     so would hide the user's broken config behind a working-looking app; a
+//     config.json that fails to parse is also NOT converted (nothing is
+//     renamed), so the user can fix it in place.
+//   - A file parses but fails enum validation → an actionable migration error
+//     is returned.
 //
 // This mirrors the error-propagation contract already adopted by
 // LoadRepoConfig, where only os.IsNotExist yields defaults.
@@ -543,12 +549,31 @@ func LoadConfig() (*Config, error) {
 
 	configPath := filepath.Join(configDir, ConfigFileName)
 	prettyConfigPath := prettyHomePath(configPath)
-
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyTomlPath := prettyHomePath(tomlPath)
+
+	// 1. config.toml is canonical whenever it exists.
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
-		if _, statErr := os.Stat(configPath); statErr == nil {
+		jsonExists := fileExists(configPath)
+		if isEffectivelyEmptyToml(tomlData) {
+			// A contentless config.toml is ambiguous now that first run
+			// materializes TOML: it is either a failed first-run write (#864)
+			// or a hand-made stub. Disambiguate by config.json — with a real
+			// config.json beside it, re-materializing would silently discard
+			// those settings, so keep the loud shadow error; with no
+			// config.json it is a failed first-run stub, so drop it and
+			// re-materialize, exactly as the JSON path does for an empty
+			// config.json.
+			if jsonExists {
+				return parseConfigTOML(tomlData, prettyTomlPath)
+			}
+			if rmErr := os.Remove(tomlPath); rmErr != nil && !os.IsNotExist(rmErr) {
+				return nil, fmt.Errorf("failed to remove empty config file %s: %w", prettyTomlPath, rmErr)
+			}
+			return materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
+		}
+		if jsonExists {
 			log.WarningLog.Printf("both %s and %s exist; %s is canonical and %s is ignored — delete or rename %s to silence this warning",
 				prettyTomlPath, prettyConfigPath, prettyTomlPath, prettyConfigPath, prettyConfigPath)
 		}
@@ -558,64 +583,198 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, tomlErr)
 	}
 
+	// 2. No config.toml. Read the legacy config.json.
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return materializeDefaultConfig(configDir, configPath, prettyConfigPath)
+			// Neither file exists → first run: materialize config.toml.
+			return materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
 		}
-
 		return nil, fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
 	}
 
-	// A zero-byte config.json is never something a user wrote on purpose: it is
-	// the fingerprint of a config write that created the file (O_EXCL) but died
-	// before its JSON body landed (#864, a regression of #838). Treat it like a
-	// missing file — drop the stub and re-materialize defaults — instead of
-	// wedging every future startup on the #758 "config is empty" hard error.
-	// Non-empty-but-corrupt files still fall through to parseConfig's loud
-	// error, since those may carry a user's salvageable settings (#734/#758).
+	// A zero-byte config.json with no config.toml is a failed first-run write
+	// from a pre-TOML af (#864). Drop the stub and materialize fresh defaults
+	// as config.toml rather than wedging on the #758 "config is empty" error.
 	if len(data) == 0 {
 		if rmErr := os.Remove(configPath); rmErr != nil && !os.IsNotExist(rmErr) {
 			return nil, fmt.Errorf("failed to remove empty config file %s: %w", prettyConfigPath, rmErr)
 		}
-		return materializeDefaultConfig(configDir, configPath, prettyConfigPath)
+		return materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
 	}
 
-	return parseConfig(data, prettyConfigPath)
+	// 3. A real config.json with no config.toml → one-time conversion.
+	return convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath)
+}
+
+// fileExists reports whether path exists (any stat error other than
+// not-exist — e.g. permission denied — counts as "exists" so a shadowed
+// config.json is still flagged rather than silently assumed gone).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || !os.IsNotExist(err)
+}
+
+// GlobalConfigPath returns the path of the global config file that LoadConfig
+// reads: config.toml when it exists, otherwise the legacy config.json when
+// that exists, otherwise the config.toml path (the file first run creates).
+// For display in `af debug` and diagnostics, so they name the real file
+// rather than a hardcoded one (#1030).
+func GlobalConfigPath() (string, error) {
+	configDir, err := GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+	if fileExists(tomlPath) {
+		return tomlPath, nil
+	}
+	jsonPath := filepath.Join(configDir, ConfigFileName)
+	if fileExists(jsonPath) {
+		return jsonPath, nil
+	}
+	return tomlPath, nil
+}
+
+// convertRenameFailForTest, when non-nil, replaces the config.json → .bak
+// rename in convertJSONToTOML with the returned error. Tests use it to
+// simulate a crash after the config.toml write but before the rename, and to
+// assert the next load treats config.toml as canonical (both files present).
+var convertRenameFailForTest func() error
+
+// convertRaceHookForTest, when non-nil, runs at the top of the conversion
+// file-lock body — the point at which a concurrent process that won the lock
+// first would already have written config.toml (and renamed config.json).
+// Tests use it to materialize that winner state and pin the lost-race
+// behavior: this process must adopt the winner's config.toml, not re-convert.
+var convertRaceHookForTest func()
+
+// convertJSONToTOML performs the one-time json→toml migration (#1030): it
+// parses and validates the legacy config.json with the frozen JSON reader,
+// writes an equivalent config.toml atomically, then renames config.json to
+// config.json.bak so config.toml becomes the single canonical file. The whole
+// sequence runs under the config file lock so a CLI and the daemon racing the
+// first post-upgrade load produce exactly one conversion; the lock body
+// re-checks for a config.toml the winner already wrote and simply loads it.
+//
+// A config.json that fails to parse or validate is NOT converted and NOT
+// renamed: the error is returned so the user can fix the file in place.
+//
+// The write-then-rename order makes a crash mid-conversion safe: a crash
+// before the toml write changes nothing (config.json is still canonical next
+// run); a crash after it leaves both files, and LoadConfig's canonical-toml
+// rule resolves that to config.toml with a warning. The rename is therefore
+// best-effort — a failure is logged, not fatal.
+func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
+	var result *Config
+	lockErr := WithFileLock(tomlPath, func() error {
+		if convertRaceHookForTest != nil {
+			convertRaceHookForTest()
+		}
+		// The winner of a concurrent conversion already wrote config.toml.
+		// (Our writes are atomic, so a non-empty config.toml here is complete.)
+		if td, err := os.ReadFile(tomlPath); err == nil {
+			if !isEffectivelyEmptyToml(td) {
+				cfg, perr := parseConfigTOML(td, prettyTomlPath)
+				if perr != nil {
+					return perr
+				}
+				result = cfg
+				return nil
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, err)
+		}
+
+		// Re-read config.json under the lock: a racer may have renamed it to
+		// .bak, or it may have changed since our pre-lock read.
+		data, err := os.ReadFile(configPath)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
+		}
+		if os.IsNotExist(err) || len(data) == 0 {
+			// The racer renamed config.json to .bak (and its config.toml is
+			// gone/incomplete), or the file is an empty first-run stub — either
+			// way there is nothing to convert, so materialize fresh defaults.
+			cfg, mErr := materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
+			if mErr != nil {
+				return mErr
+			}
+			result = cfg
+			return nil
+		}
+
+		cfg, err := parseConfig(data, prettyConfigPath)
+		if err != nil {
+			return err // invalid config.json: do not convert or rename it.
+		}
+
+		tomlBytes, err := toml.Marshal(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
+		}
+		if err := AtomicWriteFile(tomlPath, tomlBytes, 0644); err != nil {
+			return fmt.Errorf("failed to write %s during conversion: %w", prettyTomlPath, err)
+		}
+
+		bakPath := configPath + ".bak"
+		renameErr := func() error {
+			if convertRenameFailForTest != nil {
+				return convertRenameFailForTest()
+			}
+			return os.Rename(configPath, bakPath)
+		}()
+		if renameErr != nil {
+			// config.toml is already written and will be canonical next load;
+			// leaving config.json in place only costs a "both files" warning.
+			log.WarningLog.Printf("migrated config to %s, but could not move the original aside to %s: %v — %s is now canonical; delete %s yourself to silence the duplicate-config warning",
+				prettyTomlPath, prettyHomePath(bakPath), renameErr, prettyTomlPath, prettyConfigPath)
+		} else {
+			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
+				prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
+		}
+		result = cfg
+		return nil
+	})
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	return result, nil
 }
 
 // materializeRaceHookForTest, when non-nil, runs between LoadConfig observing
-// a missing config.json and the exclusive create below. Tests use it to
-// recreate the file in that window and pin the lost-race behavior.
+// no config file and the exclusive create below. Tests use it to recreate the
+// file in that window and pin the lost-race behavior.
 var materializeRaceHookForTest func()
 
-// materializeDefaultConfig handles the missing-config.json branch of
-// LoadConfig. A missing file is only expected on first run; when the config
-// dir visibly already carries state, the user's settings file was deleted out
-// from under us, and regenerating defaults silently would disguise the loss
-// as normal operation (#837) — so that case logs at ERROR level before
-// materializing (the app still needs a config to run). The write itself is
-// create-exclusive: if another process recreates config.json between our read
-// and our create, that file wins and is returned instead of being clobbered.
-func materializeDefaultConfig(configDir, configPath, prettyConfigPath string) (*Config, error) {
+// materializeDefaultConfig handles the no-config-file branch of LoadConfig,
+// writing DefaultConfig() to config.toml (#1030). A missing config is only
+// expected on first run; when the config dir visibly already carries state,
+// the user's settings file was deleted out from under us, and regenerating
+// defaults silently would disguise the loss as normal operation (#837) — so
+// that case logs at ERROR level before materializing (the app still needs a
+// config to run). The write itself is create-exclusive: if another process
+// writes config.toml between our read and our create, that file wins and is
+// returned instead of being clobbered.
+func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Config, error) {
 	if configDirInitialized(configDir) {
-		log.ErrorLog.Printf("config.json missing from an initialized config dir (%s) — materializing defaults; previous settings are lost", prettyHomePath(configDir))
+		log.ErrorLog.Printf("no config file (config.toml/config.json) in an initialized config dir (%s) — materializing defaults; previous settings are lost", prettyHomePath(configDir))
 	}
 	if materializeRaceHookForTest != nil {
 		materializeRaceHookForTest()
 	}
 
 	defaultCfg := DefaultConfig()
-	created, saveErr := writeConfigIfMissing(configPath, defaultCfg)
+	created, saveErr := writeConfigIfMissing(tomlPath, defaultCfg)
 	if saveErr != nil {
 		log.WarningLog.Printf("failed to save default config: %v", saveErr)
 		return defaultCfg, nil
 	}
 	if !created {
-		// Lost the create race: a concurrent process wrote config.json after
+		// Lost the create race: a concurrent process wrote config.toml after
 		// our read. Treat its file as authoritative.
-		if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
-			return parseConfig(data, prettyConfigPath)
+		if data, err := os.ReadFile(tomlPath); err == nil && !isEffectivelyEmptyToml(data) {
+			return parseConfigTOML(data, prettyTomlPath)
 		}
 		// The concurrent file vanished or is empty; fall back to in-memory
 		// defaults without another write attempt.
@@ -625,7 +784,7 @@ func materializeDefaultConfig(configDir, configPath, prettyConfigPath string) (*
 
 // configDirInitialized reports whether configDir already carries application
 // state — an instances/ or repos/ subdirectory, or a daemon.pid — meaning a
-// missing config.json there is a settings loss, not a first run.
+// missing config file there is a settings loss, not a first run.
 func configDirInitialized(configDir string) bool {
 	for _, marker := range []string{"instances", "repos"} {
 		if fi, err := os.Stat(filepath.Join(configDir, marker)); err == nil && fi.IsDir() {
@@ -643,14 +802,15 @@ func configDirInitialized(configDir string) bool {
 // induced to produce deterministically.
 var writeConfigForceFailForTest func() error
 
-// writeConfigIfMissing persists config to configPath with O_CREATE|O_EXCL
-// semantics. Returns created=false (and no error) when the file already
-// exists, so a concurrently recreated config is never overwritten.
+// writeConfigIfMissing persists config to configPath (a config.toml path,
+// #1030) with O_CREATE|O_EXCL semantics. Returns created=false (and no error)
+// when the file already exists, so a concurrently written config is never
+// overwritten.
 func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return false, fmt.Errorf("failed to create config directory: %w", err)
 	}
-	data, err := json.MarshalIndent(config, "", "  ")
+	data, err := toml.Marshal(config)
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal config: %w", err)
 	}
@@ -672,7 +832,7 @@ func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
 	if writeErr != nil {
 		_ = f.Close()
 		// Remove the freshly created stub so a failed write never leaves a
-		// zero-byte (or partial) config.json behind to wedge the next startup
+		// zero-byte (or partial) config.toml behind to wedge the next startup
 		// (#864). Only the write path cleans up: a Close error means the bytes
 		// already reached the file, so it may be a complete config worth
 		// keeping rather than discarding.
@@ -686,8 +846,13 @@ func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
 }
 
 // parseConfig validates and unmarshals raw config.json bytes on top of the
-// defaults. Split from LoadConfig so the materialize lost-race path can run
-// the identical validation on a concurrently written file.
+// defaults. This is the FROZEN legacy JSON reader (#1030): it stays at the
+// schema as of the TOML swap so an arbitrarily old install still converts,
+// but every key added after the swap (starting with [keys]) lives only in the
+// TOML decoder. Any key this reader does not recognize is warned about rather
+// than silently dropped, so "I added the new option to my old config.json"
+// fails loud. Reachable only from convertJSONToTOML now that first-run and
+// lost-race materialization write TOML.
 func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
@@ -698,18 +863,39 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
 	}
 
-	// The [keys] keymap is TOML-only (#1026) — the struct field is json:"-",
-	// so a "keys" object in config.json would be silently dead. Silently dead
-	// config is how users lose an afternoon, so name it and point at the
-	// TOML file.
+	// Warn about keys the frozen reader ignores so they are not silently lost
+	// on conversion. The [keys] keymap gets a specific message (it is a real,
+	// TOML-only setting, #1026); anything else is an unknown/newer key.
 	var topLevel map[string]json.RawMessage
 	if err := json.Unmarshal(data, &topLevel); err == nil {
-		if _, hasKeys := topLevel["keys"]; hasKeys {
-			log.WarningLog.Printf("config %s: \"keys\" is ignored in config.json — the keymap is TOML-only; move it to a [keys] table in %s", prettyConfigPath, TomlConfigFileName)
+		known := knownJSONConfigKeys()
+		for key := range topLevel {
+			switch {
+			case key == "keys":
+				log.WarningLog.Printf("config %s: \"keys\" is ignored in config.json — the keymap is TOML-only; move it to a [keys] table in %s", prettyConfigPath, TomlConfigFileName)
+			case !known[key]:
+				log.WarningLog.Printf("config %s: unknown key %q is not recognized by this version of af and will be dropped on conversion to %s", prettyConfigPath, key, TomlConfigFileName)
+			}
 		}
 	}
 
 	return validateConfig(config, prettyConfigPath)
+}
+
+// knownJSONConfigKeys returns the set of top-level JSON keys the frozen
+// Config schema recognizes, derived from the struct's json tags so it cannot
+// drift from the fields. Fields tagged json:"-" (e.g. the TOML-only keymap)
+// are deliberately excluded — they are not valid config.json keys.
+func knownJSONConfigKeys() map[string]bool {
+	out := map[string]bool{}
+	t := reflect.TypeOf(Config{})
+	for i := 0; i < t.NumField(); i++ {
+		name := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 // parseConfigTOML validates and unmarshals raw config.toml bytes on top of
@@ -883,7 +1069,10 @@ func normalizeKeyOverrides(raw map[string]any, prettyConfigPath string) (map[str
 	return overrides, nil
 }
 
-// saveConfig saves the configuration to disk
+// saveConfig saves the configuration to disk as config.toml — the canonical
+// global config since #1030. It writes only the TOML file: writing config.json
+// would resurrect the "both files exist" shadow state that conversion exists
+// to retire.
 func saveConfig(config *Config) error {
 	configDir, err := GetConfigDir()
 	if err != nil {
@@ -894,13 +1083,13 @@ func saveConfig(config *Config) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	configPath := filepath.Join(configDir, ConfigFileName)
-	data, err := json.MarshalIndent(config, "", "  ")
+	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+	data, err := toml.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	return AtomicWriteFile(configPath, data, 0644)
+	return AtomicWriteFile(tomlPath, data, 0644)
 }
 
 // SaveConfig exports the saveConfig function for use by other packages
