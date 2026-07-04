@@ -238,6 +238,115 @@ func TestEventQueue_DropsOldestOverEventCap(t *testing.T) {
 	}
 }
 
+// TestEventQueue_CompactsDeliveredPrefix (#1129 PR 4): once the delivered
+// prefix outgrows watcherQueueCompactBytes, advance rewrites the file down to
+// its pending suffix — offset back to 0, remaining events intact and in
+// order, and the state survives a reopen (the crash-recovery path).
+func TestEventQueue_CompactsDeliveredPrefix(t *testing.T) {
+	prev := watcherQueueCompactBytes
+	watcherQueueCompactBytes = 128
+	t.Cleanup(func() { watcherQueueCompactBytes = prev })
+
+	dir := t.TempDir()
+	q := newEventQueue(dir, "ab120007")
+	for i := 0; i < 10; i++ {
+		if err := q.enqueue(fmt.Sprintf("event-%d", i)); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+	sizeBefore := q.size
+
+	// Consume until the delivered prefix crosses the threshold; compaction
+	// must kick in and reset the offset while events remain pending.
+	for i := 0; i < 5; i++ {
+		_, n, ok, err := q.peek()
+		if err != nil || !ok {
+			t.Fatalf("peek %d: ok=%v err=%v", i, ok, err)
+		}
+		if err := q.advance(n); err != nil {
+			t.Fatalf("advance %d: %v", i, err)
+		}
+	}
+
+	q.mu.Lock()
+	offset, size, pending := q.offset, q.size, q.pending
+	q.mu.Unlock()
+	if pending != 5 {
+		t.Fatalf("pending = %d, want 5", pending)
+	}
+	// Compaction fires whenever the delivered prefix crosses the threshold,
+	// so the surviving prefix is always bounded by it (advances after the
+	// last compaction may legitimately re-accumulate up to the threshold).
+	if offset > watcherQueueCompactBytes {
+		t.Fatalf("offset = %d, want <= %d (compaction must bound the delivered prefix)", offset, watcherQueueCompactBytes)
+	}
+	if size >= sizeBefore {
+		t.Fatalf("file did not shrink: %d -> %d bytes", sizeBefore, size)
+	}
+
+	// The compacted queue must survive a reopen and drain the survivors in
+	// order.
+	reopened := newEventQueue(dir, "ab120007")
+	if got := reopened.pendingCount(); got != 5 {
+		t.Fatalf("reopened pending = %d, want 5", got)
+	}
+	for i := 5; i < 10; i++ {
+		ev, n, ok, err := reopened.peek()
+		if err != nil || !ok {
+			t.Fatalf("reopened peek %d: ok=%v err=%v", i, ok, err)
+		}
+		if want := fmt.Sprintf("event-%d", i); ev.Line != want {
+			t.Fatalf("compaction reordered/corrupted: got %q, want %q", ev.Line, want)
+		}
+		if err := reopened.advance(n); err != nil {
+			t.Fatalf("reopened advance: %v", err)
+		}
+	}
+}
+
+// TestWatcherDrainExpiresAgedEvents (#1129 PR 4): queued events older than
+// the retention bound are expired at drain time — never delivered — and a
+// fresh event still replays. Expiry empties the queue files like a normal
+// drain.
+func TestWatcherDrainExpiresAgedEvents(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab130005", `sleep 60`, dir)))
+	fd := &flakyDeliver{}
+	fd.healed.Store(true)
+	s.deliver = fd.deliver
+	s.queueMaxAge = 150 * time.Millisecond
+	queueDir, _ := s.queueDir()
+
+	// Two events queued before the watcher exists; both age past the bound.
+	seed := newEventQueue(queueDir, "ab130005")
+	for _, line := range []string{"stale-1", "stale-2"} {
+		if err := seed.enqueue(line); err != nil {
+			t.Fatalf("seed enqueue: %v", err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	// A fresh third event right at reload time must still be delivered.
+	if err := seed.enqueue("fresh"); err != nil {
+		t.Fatalf("seed enqueue fresh: %v", err)
+	}
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	waitUntil(t, 10*time.Second, "the fresh event to replay and stale ones to expire", func() bool {
+		got := fd.delivered()
+		return len(got) == 1 && got[0] == "fresh"
+	})
+	waitUntil(t, 10*time.Second, "the expired queue files to be removed", func() bool {
+		_, err := os.Stat(filepath.Join(queueDir, "ab130005.jsonl"))
+		return os.IsNotExist(err)
+	})
+	if got := fd.delivered(); len(got) != 1 {
+		t.Fatalf("stale events must never be delivered, got %v", got)
+	}
+}
+
 // flakyDeliver fails every delivery until healed, then records successes. It
 // drives the outage→recovery shape end to end through a real watcher.
 type flakyDeliver struct {

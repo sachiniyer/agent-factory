@@ -61,11 +61,14 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
 - **Exit 0 = intentional stop.** The task's status becomes `stopped` and the script is not restarted until the next daemon start, task edit, or re-enable.
 - **Non-zero exit = failure.** The script is restarted with exponential backoff, 1s doubling to a 5-minute cap. A run that stays healthy for 10 minutes resets the backoff.
 - **Crash-loop breaker**: 5 or more non-zero exits within 10 minutes set the status to `errored` and stop restarts. Re-arm by editing the task, toggling it, or restarting the daemon.
-- **Rate limit**: at most 10 events per minute per task. Excess events are dropped — never silently: a warning is logged with a running drop counter.
+- **Rate limit**: at most 10 events per minute per task. Excess events are dropped — never silently: a warning is logged with a running drop counter. Rate-dropped events are not queued for replay (the limit is protective policy, not an outage signal).
 - **Prompt rendering**: an empty `prompt` delivers the raw line; otherwise `{{line}}` is substituted. An event whose rendered prompt is empty is dropped with an error log.
-- **Ordering**: deliveries are serialized per task in emission order. A slow delivery backpressures the script's stdout rather than reordering events.
+- **Ordering**: deliveries are serialized per task in emission order. A slow delivery backpressures the script's stdout rather than reordering events, and replayed events (below) land before newer live ones.
 - **Process tree**: each script runs in its own process group. On stop the group gets SIGTERM, then SIGKILL after 5 seconds — backgrounded children do not outlive the watcher. Scripts should treat SIGTERM as "clean up and exit".
-- **No replay**: events are not persisted across daemon restarts. Scripts that poll should track their own cursor (see `examples/tasks/gh-issue-poll.sh`).
+- **Delivery failures are queued and replayed**: an event whose delivery fails — the target session unreachable, e.g. during a tmux outage — is appended to a durable per-task queue under `~/.agent-factory/events/` instead of dropped, and replayed **in emission order, before newer live events**, once deliveries succeed again (rate-limited by the same 10/min window). The backlog survives daemon restarts and reloads. Semantics and bounds:
+  - **At-least-once**: a daemon crash mid-replay redelivers at most one event. Prompts should tolerate a rare duplicate.
+  - **Bounds**: at most 500 events / 256KB queued per task — overflow drops the *oldest* with a logged count; events older than **72h** are expired at replay time, also logged. Sources worth watching re-emit on their next poll, so scripts that poll should still track their own cursor (see `examples/tasks/gh-issue-poll.sh`).
+  - **Disabled vs deleted**: a disabled task keeps its backlog and replays it on re-enable; a deleted task's queue is removed.
 
 Edits to delivery fields (`prompt`, `target_session`, `program`) apply from the next event without restarting the script; edits to `watch_cmd`, `project_path`, or `name` restart it.
 
