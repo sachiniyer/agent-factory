@@ -58,6 +58,15 @@ type Backend interface {
 	// TapEnter sends an Enter keystroke (used with AutoYes).
 	TapEnter(instance *Instance)
 
+	// Recover re-establishes a Lost session's backing resources — the tmux
+	// session vanished out from under a live record with no kill on record
+	// (#1108) — re-spawning the program in the instance's worktree. It is
+	// invoked ONLY by the daemon's explicit restore loop, never as a load-time
+	// side effect (the #970 guard in Start stays authoritative for loads).
+	// Remote backends return ErrRecoverUnsupported in v1: a Lost remote
+	// session is flagged but reconnect semantics are their own design.
+	Recover(instance *Instance) error
+
 	// Type returns the backend type identifier ("local" or "remote").
 	Type() string
 }

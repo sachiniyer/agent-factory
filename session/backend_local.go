@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -233,6 +234,69 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	// tmux deps).
 	b.setupTabs(i)
 
+	return nil
+}
+
+// ErrRecoverUnsupported marks a backend without Lost-session recovery (#1108):
+// remote sessions are flagged Lost but not auto-reconnected in v1.
+var ErrRecoverUnsupported = fmt.Errorf("backend does not support recovery")
+
+// Recover re-establishes a Lost instance's tmux sessions (#1108): re-spawn the
+// agent program in its worktree with the same resolved-program flag injection
+// as a first-time launch (#1132 choke-point — never hand-rolled flag logic),
+// then bring the other tabs back through the same setupTabs path a restore
+// uses. Invoked ONLY by the daemon's restore loop; the #970 guard in Start
+// keeps loads side-effect free.
+//
+// Idempotence across retries: the injected program is recomputed from the
+// clean persisted i.Program on every attempt (SetProgram replaces, never
+// appends), so repeated failures never accumulate duplicate flags. On failure
+// only the agent tab's attach resources are released (the #1065 rule: no other
+// tab has opened a PTY yet on this path) and the tmux refs are kept, so the
+// next tick's retry reconnects each tab by its exact persisted name; the
+// instance stays a killable Lost row throughout.
+func (b *LocalBackend) Recover(i *Instance) error {
+	if status := i.GetStatus(); status != Lost {
+		return fmt.Errorf("recover: session %q is %v, not Lost", i.Title, status)
+	}
+	if i.UserKilled() {
+		return fmt.Errorf("recover: session %q carries a kill tombstone", i.Title)
+	}
+
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if ts == nil {
+		return fmt.Errorf("recover: session %q has no tmux binding", i.Title)
+	}
+	var workDir string
+	if gw != nil {
+		workDir = gw.GetWorktreePath()
+	}
+	if workDir == "" {
+		return fmt.Errorf("recover: session %q has no worktree to re-spawn into", i.Title)
+	}
+	if _, err := os.Stat(workDir); err != nil {
+		// Surface the real cause instead of a generic tmux new-session error:
+		// a deleted worktree is the expected permanent-failure shape, and the
+		// restore loop's escalation log should say so.
+		return fmt.Errorf("recover: session %q worktree unavailable: %w", i.Title, err)
+	}
+
+	ts.SetProgram(injectSystemPrompt(resolveProgramForInstance(i)))
+	if err := ts.Restore(workDir); err != nil {
+		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
+			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+		}
+		return fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err)
+	}
+	b.setupTabs(i)
+
+	// The program was just re-spawned and is booting: Running, exactly like a
+	// fresh create. The daemon poll re-derives Ready/Running from the live
+	// session from here on and persists the transition.
+	i.SetStatusIfNotDeleting(Running)
 	return nil
 }
 

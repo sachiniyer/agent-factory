@@ -1090,6 +1090,12 @@ func (i *Instance) Kill() error {
 	return i.backend.Kill(i)
 }
 
+// Recover re-establishes a Lost instance's backing session (#1108). Only the
+// daemon's restore loop calls this; loads stay side-effect free (#970).
+func (i *Instance) Recover() error {
+	return i.backend.Recover(i)
+}
+
 // CloseAttachOnly releases the resources this instance opened to view or drive
 // its session (a tmux attach PTY, a remote preview process) without destroying
 // the session, worktree, or remote record. Use it — never Kill — to discard a
