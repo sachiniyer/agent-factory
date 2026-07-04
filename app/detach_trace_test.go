@@ -59,7 +59,6 @@ func TestDetachTraceMarkers_SilentWhenDisabled(t *testing.T) {
 
 	start := time.Now()
 	detachTrace(start, "marker-a")
-	detachTraceFields(start, "marker-b", "title=x")
 	detachTraceMark("marker-c")
 
 	require.Empty(t, buf.String(),
@@ -74,15 +73,12 @@ func TestDetachTraceMarkers_EmitWhenEnabled(t *testing.T) {
 
 	start := time.Now()
 	detachTrace(start, "marker-a")
-	detachTraceFields(start, "marker-b", "title=x")
 	detachTraceMark("marker-c")
 
 	out := buf.String()
-	require.Equal(t, 3, strings.Count(out, "[detach-trace]"),
+	require.Equal(t, 2, strings.Count(out, "[detach-trace]"),
 		"each marker helper must emit exactly one [detach-trace] line:\n%s", out)
 	require.Contains(t, out, "marker-a")
-	require.Contains(t, out, "marker-b")
-	require.Contains(t, out, "title=x")
 	require.Contains(t, out, "marker-c")
 }
 
