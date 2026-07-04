@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -879,4 +880,112 @@ func TestTaskPaneListPromptOnlyOnSelectedRow(t *testing.T) {
 		"the selected row must show its prompt snippet")
 	assert.NotContains(t, out, "unselected prompt body",
 		"unselected rows must stay one line — no prompt body")
+}
+
+// TestTaskPaneCreateModeEnterSubmitsFromAnyField pins #1098 finding 3: the
+// footer promises a blanket "enter save", but Enter used to be a dead key on
+// every field except the Create/Save button. Submitting from the Name field
+// must work.
+func TestTaskPaneCreateModeEnterSubmitsFromAnyField(t *testing.T) {
+	repo := newGitRepo(t)
+	tp := NewTaskPane()
+	tp.SetSize(80, 24)
+	tp.EnterCreateMode(repo)
+	fillCreateForm(t, tp, "enter-on-name")
+
+	// fillCreateForm leaves focus on Name (index 0).
+	assert.Equal(t, taskFocusName, tp.focusIndex)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.True(t, tp.pendingCreate, "enter on the Name field must submit a valid form")
+	assert.False(t, tp.creating)
+}
+
+// TestTaskPaneCreateModeEnterMovesFocusToInvalidField: submitting an invalid
+// form from any field surfaces the inline error AND moves focus to the
+// offending field, so the error is in view even when the clamped form has it
+// scrolled off-screen (#1098).
+func TestTaskPaneCreateModeEnterMovesFocusToInvalidField(t *testing.T) {
+	repo := newGitRepo(t)
+	tp := NewTaskPane()
+	tp.SetSize(80, 24)
+	tp.EnterCreateMode(repo)
+	// Name typed, cron left empty.
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("half-filled")})
+
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.True(t, tp.creating, "invalid form must not submit")
+	assert.False(t, tp.pendingCreate)
+	assert.Equal(t, "cron expression is required", tp.editError)
+	assert.Equal(t, taskFocusTriggerValue, tp.editErrorField)
+	assert.Equal(t, taskFocusTriggerValue, tp.focusIndex,
+		"focus must land on the offending field")
+}
+
+// TestTaskPaneCreateModeEnterInPromptInsertsNewline: the prompt textarea keeps
+// Enter for newlines — the any-field submit (#1098) must not swallow it.
+func TestTaskPaneCreateModeEnterInPromptInsertsNewline(t *testing.T) {
+	repo := newGitRepo(t)
+	tp := NewTaskPane()
+	tp.SetSize(80, 24)
+	tp.EnterCreateMode(repo)
+	fillCreateForm(t, tp, "prompt-newline")
+
+	tabTo(tp, taskFocusPrompt)
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line2")})
+	assert.True(t, tp.creating, "enter in the prompt must not submit")
+	assert.Contains(t, tp.editPrompt.Value(), "\n",
+		"enter in the prompt must insert a newline")
+}
+
+// TestTaskPaneEditFormClampsToHeightWithFocusInView pins #1098 finding 1: at
+// a 60x15 terminal the edit form is taller than the tasks overlay and used to
+// clip off the TOP — Name/Trigger invisible while Name silently held focus.
+// The form must window to the pane height, keep the focused field in view,
+// pin the key-hint footer, and flag hidden fields.
+func TestTaskPaneEditFormClampsToHeightWithFocusInView(t *testing.T) {
+	repo := newGitRepo(t)
+	tp := NewTaskPane()
+	// The task pane's share of a 60x15 terminal (app sizing: 52 wide, 0.6*15 tall).
+	tp.SetSize(52, 9)
+	tp.EnterCreateMode(repo)
+
+	out := tp.String()
+	lines := strings.Split(out, "\n")
+	assert.LessOrEqual(t, len(lines), 9, "form must clamp to the pane height")
+	assert.Contains(t, out, "Name:", "the focused first field must be visible")
+	assert.Contains(t, lines[len(lines)-1], "esc cancel", "key hints stay pinned")
+	assert.Contains(t, out, "↓ more", "hidden fields below are flagged")
+
+	// Walk to the Create button: it must scroll into view, pushing Name out.
+	tabTo(tp, taskFocusSave)
+	out = tp.String()
+	lines = strings.Split(out, "\n")
+	assert.LessOrEqual(t, len(lines), 9, "clamp holds while scrolled")
+	assert.Contains(t, out, "Create", "the focused Save button scrolled into view")
+	assert.NotContains(t, out, "Name:", "top fields scrolled out of the window")
+	assert.Contains(t, out, "↑ more", "hidden fields above are flagged")
+	assert.Contains(t, lines[len(lines)-1], "esc cancel", "key hints stay pinned")
+
+	// Walking back re-scrolls the top fields into view.
+	for i := 0; i < taskFocusSave; i++ {
+		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyShiftTab})
+	}
+	out = tp.String()
+	assert.Contains(t, out, "Name:", "shift+tab back scrolls Name into view")
+}
+
+// TestTaskPaneEditFormUnclampedWhenItFits: at normal sizes the form renders
+// unchanged — no window, no more-markers.
+func TestTaskPaneEditFormUnclampedWhenItFits(t *testing.T) {
+	repo := newGitRepo(t)
+	tp := NewTaskPane()
+	tp.SetSize(80, 24)
+	tp.EnterCreateMode(repo)
+
+	out := tp.String()
+	assert.Contains(t, out, "Name:")
+	assert.Contains(t, out, "Create")
+	assert.NotContains(t, out, "↑ more")
+	assert.NotContains(t, out, "↓ more")
 }
