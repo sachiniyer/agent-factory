@@ -182,6 +182,57 @@ func TestValidKeySpec(t *testing.T) {
 	}
 }
 
+func TestEffectiveBindings(t *testing.T) {
+	infos, err := EffectiveBindings(map[string][]string{"quit": {"Q"}})
+	if err != nil {
+		t.Fatalf("EffectiveBindings: %v", err)
+	}
+	if len(infos) != len(specs) {
+		t.Fatalf("got %d infos, want one per spec (%d)", len(infos), len(specs))
+	}
+	// Rebindable actions come first, sorted; fixed bindings trail.
+	seenFixed := false
+	byAction := map[string]BindingInfo{}
+	var prev string
+	for _, info := range infos {
+		if info.Action == "" {
+			seenFixed = true
+			continue
+		}
+		if seenFixed {
+			t.Fatalf("rebindable action %q listed after a fixed binding", info.Action)
+		}
+		if prev != "" && info.Action <= prev {
+			t.Fatalf("rebindable actions not sorted: %q after %q", info.Action, prev)
+		}
+		prev = info.Action
+		byAction[info.Action] = info
+	}
+	if !seenFixed {
+		t.Fatal("fixed bindings missing from the output")
+	}
+
+	quit := byAction["quit"]
+	if !quit.Rebound || len(quit.Keys) != 1 || quit.Keys[0] != "Q" || len(quit.Default) != 1 || quit.Default[0] != "q" {
+		t.Fatalf("quit info = %+v, want rebound Q with default q", quit)
+	}
+	up := byAction["up"]
+	if up.Rebound || len(up.Keys) != 2 || up.Keys[0] != "up" || up.Keys[1] != "k" {
+		t.Fatalf("up info = %+v, want default up/k not rebound", up)
+	}
+
+	// A broken table reports the same error the TUI would refuse to start
+	// with, instead of printing a keymap that is not in effect.
+	if _, err := EffectiveBindings(map[string][]string{"kill": {"q"}}); err == nil {
+		t.Fatal("EffectiveBindings must reject a conflicting table")
+	}
+
+	// The global maps are untouched by introspection.
+	if got := GlobalKeyStringsMap["q"]; got != KeyQuit {
+		t.Fatalf("EffectiveBindings must not mutate the global maps")
+	}
+}
+
 func TestRebindableActionsSortedAndComplete(t *testing.T) {
 	actions := RebindableActions()
 	if len(actions) == 0 {
