@@ -90,6 +90,13 @@ type Grid struct {
 	// stay visible (least-recently-focused hide first) and keeps the rest
 	// bound for when the terminal grows back.
 	Panes int
+
+	// Automations is the number of automations (tasks) the rail's bottom
+	// section holds. The section grows to show one row per automation (plus
+	// its title) when the rail has the vertical room, and only collapses into
+	// a scrollable strip when the tree + automations together can't fit
+	// (#1126); zero keeps the section at its AutomationsRows floor.
+	Automations int
 }
 
 // Layout is a solved arrangement: the named region rects plus which regions
@@ -162,6 +169,21 @@ func (g Grid) Solve(width, height int) Layout {
 		rows := AutomationsRows
 		if l.AutomationsCompact {
 			rows = AutomationsCompactRows
+		} else {
+			// Grow the section to show every automation when the rail has the
+			// room: the title line, one row per automation, plus one line held
+			// for the focused row's expansion detail so expanding never has to
+			// scroll (#1126). The AutomationsRows floor keeps a recognizable
+			// strip when there are few automations; the half-rail cap keeps the
+			// instances tree the priority — automations only collapse into a
+			// scrollable strip once the tree + automations together can't fit,
+			// at which point the tree keeps at least half the rail.
+			if want := 2 + g.Automations; want > rows {
+				rows = want
+			}
+			if half := (rail.H - RailRuleRows) / 2; half >= AutomationsRows && rows > half {
+				rows = half
+			}
 		}
 		rail, l.Automations = rail.CutBottom(rows)
 		rail, l.RailRule = rail.CutBottom(RailRuleRows)

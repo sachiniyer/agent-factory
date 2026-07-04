@@ -155,6 +155,69 @@ func TestGridSolveAutomationsThresholds(t *testing.T) {
 	assert.Equal(t, layout.AutomationsCompactRows, shortCompact.Automations.H)
 }
 
+// TestGridSolveAutomationsGrowsToContent pins #1126: with vertical room the
+// automations section grows to show every automation (title + one row each +
+// one reserved expansion line) instead of the old fixed 3-row cap, and only
+// collapses once the tree + automations can't both fit — at which point the
+// half-rail cap keeps the tree the priority. The rail still tiles exactly.
+func TestGridSolveAutomationsGrowsToContent(t *testing.T) {
+	// Zero automations keeps the AutomationsRows floor (a recognizable strip).
+	none := layout.Grid{Automations: 0}.Solve(120, 60)
+	assert.Equal(t, layout.AutomationsRows, none.Automations.H, "no automations keeps the floor")
+
+	// A handful of automations on a tall rail: the section is exactly title +
+	// one row per automation + the reserved expansion line, and the tree gets
+	// the rest of the rail (not the reverse).
+	tall := layout.Grid{Automations: 4}.Solve(120, 60)
+	require.False(t, tall.AutomationsCompact, "a tall rail is not compact")
+	assert.Equal(t, 2+4, tall.Automations.H, "the section grows to fit all automations")
+	assert.Greater(t, tall.Tree.H, tall.Automations.H, "the tree keeps the larger share")
+
+	// More automations than half the rail: the section collapses to (at most)
+	// half so the tree keeps at least the other half, and the pane scrolls the
+	// overflow. The section never exceeds half the rail-minus-rule.
+	many := layout.Grid{Automations: 40}.Solve(100, 30)
+	require.False(t, many.AutomationsCompact)
+	railH := many.Tree.H + many.RailRule.H + many.Automations.H
+	assert.LessOrEqual(t, many.Automations.H, railH/2,
+		"crowded automations never take more than half the rail")
+	assert.GreaterOrEqual(t, many.Tree.H, many.Automations.H, "the tree keeps at least half")
+
+	// Growth must still tile the screen exactly at every size and count.
+	for _, count := range []int{0, 1, 3, 8, 50} {
+		grid := layout.Grid{Panes: 1, Automations: count}
+		for w := layout.HardMinWidth; w <= 200; w += 7 {
+			for h := layout.HardMinHeight; h <= 70; h += 3 {
+				l := grid.Solve(w, h)
+				require.False(t, l.Fallback)
+				screen := layout.Rect{X: 0, Y: 0, W: w, H: h}
+				visible := l.VisibleRegions()
+				parts := make([]layout.Rect, 0, len(visible))
+				for id, r := range visible {
+					require.False(t, r.Empty(),
+						"region %s empty at %dx%d automations=%d", id, w, h, count)
+					parts = append(parts, r)
+				}
+				requireTiles(t, screen, parts)
+			}
+		}
+	}
+}
+
+// TestGridSolveChromeMonotonicWithAutomations re-runs the chrome-shrink
+// monotonicity contract with a populated automations section, so the #1126
+// dynamic sizing can't regress the "chrome only gives way on shrink" invariant.
+func TestGridSolveChromeMonotonicWithAutomations(t *testing.T) {
+	grid := layout.Grid{Panes: 2, Automations: 10}
+	prev := grid.Solve(200, 72)
+	for h := 71; h >= 1; h-- {
+		cur := grid.Solve(200, h)
+		require.LessOrEqual(t, cur.Automations.H, prev.Automations.H,
+			"automations grew shrinking height to %d", h)
+		prev = cur
+	}
+}
+
 func TestGridSolveMinimalMode(t *testing.T) {
 	for _, tt := range []struct {
 		name string

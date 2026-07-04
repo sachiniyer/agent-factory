@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/sachiniyer/agent-factory/ui/tree"
 )
 
 // TestAccentColorValue pins the shared accent to the teal introduced in #932.
@@ -33,5 +35,16 @@ func TestAccentSitesUseConstant(t *testing.T) {
 		if c.got != lipgloss.TerminalColor(AccentColor) {
 			t.Errorf("%s = %v, want AccentColor (%s)", c.name, c.got, AccentColor)
 		}
+	}
+}
+
+// TestAutomationTitleMatchesInstanceTitle pins #1126: an automation's title
+// renders in the exact color the instances tree uses for instance titles, so
+// the two stacked lists read as one. Both must resolve to the shared
+// tree.InstanceTitleColor — a future literal can't silently drift them apart.
+func TestAutomationTitleMatchesInstanceTitle(t *testing.T) {
+	if got := automationItemTitleStyle.GetForeground(); got != lipgloss.TerminalColor(tree.InstanceTitleColor) {
+		t.Errorf("automation title foreground = %v, want tree.InstanceTitleColor (%v)",
+			got, tree.InstanceTitleColor)
 	}
 }

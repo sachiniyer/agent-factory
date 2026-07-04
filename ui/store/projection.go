@@ -447,6 +447,12 @@ func (p *Projection) GetTasks() []task.Task {
 	return p.tasks
 }
 
+// NumTasks returns how many tasks (automations) the projection holds — the
+// grid reads it to size the automations rail to its content (#1126).
+func (p *Projection) NumTasks() int {
+	return len(p.tasks)
+}
+
 // SetHookCount updates the displayed hook count.
 func (p *Projection) SetHookCount(count int) {
 	p.hookCount = count

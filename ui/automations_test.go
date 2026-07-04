@@ -33,18 +33,43 @@ func stripTasks() []task.Task {
 	}
 }
 
-// TestAutomationsStripCompactRows pins the RFC §2.1 strip row shape: enabled
-// glyph, name, trigger, next/last run.
-func TestAutomationsStripCompactRows(t *testing.T) {
+// TestAutomationsCollapsedRowsAreTitleOnly pins the #1126 collapsed shape:
+// every row is just the enabled glyph and the task title — no always-on
+// trailing cron/next/last text.
+func TestAutomationsCollapsedRowsAreTitleOnly(t *testing.T) {
 	a := newTestAutomations(stripTasks())
 	a.SetRect(layout.Rect{W: 100, H: 3})
 
 	out := a.View()
 	require.Contains(t, out, "Automations")
-	assert.Contains(t, out, "[✓]  nightly-sweep  0 3 * * *  next Jul 02 03:00 · last Jul 01 03:00",
-		"an enabled cron task shows glyph, name, trigger, next fire, and last run")
-	assert.Contains(t, out, "[✗]  ci-watch  watch: tail -f ci.log  stopped",
-		"a disabled watch task shows glyph, name, command, and supervision state")
+	assert.Contains(t, out, "[✓]  nightly-sweep", "an enabled task shows its glyph and title")
+	assert.Contains(t, out, "[✗]  ci-watch", "a disabled task shows its glyph and title")
+	assert.NotContains(t, out, "0 3 * * *", "the collapsed row hides the cron trigger")
+	assert.NotContains(t, out, "next Jul 02 03:00", "the collapsed row hides the next-run detail")
+	assert.NotContains(t, out, "watch: tail -f ci.log", "the collapsed row hides the watch command")
+}
+
+// TestAutomationsExpandedRowRevealsDetail pins the #1126 expansion: the focused
+// cursor's row reveals its trigger and next/last-run detail on a line beneath
+// the title, and no other row does.
+func TestAutomationsExpandedRowRevealsDetail(t *testing.T) {
+	a := newTestAutomations(stripTasks())
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "▾[✓]  nightly-sweep", "the focused row is marked expanded")
+	assert.Contains(t, out, "0 3 * * *", "the expanded row reveals its cron trigger")
+	assert.Contains(t, out, "next Jul 02 03:00 · last Jul 01 03:00",
+		"the expanded row reveals its next/last-run detail")
+	assert.NotContains(t, out, "watch: tail -f ci.log",
+		"a collapsed (unselected) row keeps its detail hidden")
+
+	a.ScrollDown()
+	out = a.View()
+	assert.Contains(t, out, "▾[✗]  ci-watch", "expansion follows the cursor")
+	assert.Contains(t, out, "watch: tail -f ci.log", "the newly expanded row reveals its command")
+	assert.NotContains(t, out, "0 3 * * *", "the previously expanded row re-collapses")
 }
 
 // TestAutomationsStripOneLineSummary covers the <80-col degradation (RFC
@@ -74,15 +99,15 @@ func TestAutomationsFocusShowsCursorNotManager(t *testing.T) {
 
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 100, H: 3}, "focused section")
-	assert.Contains(t, out, "▸[✓]", "the cursor marks the selected row")
+	assert.Contains(t, out, "▾[✓]", "the cursor marks (and expands) the selected row")
 	assert.NotContains(t, out, "Tasks", "the manager must not render in-rail")
 
 	a.ScrollDown()
-	assert.Contains(t, a.View(), "▸[✗]", "the cursor follows ScrollDown")
+	assert.Contains(t, a.View(), "▾[✗]", "the cursor follows ScrollDown")
 	assert.Equal(t, 1, a.SelectedTaskIndex())
 
 	a.Blur()
-	assert.NotContains(t, a.View(), "▸", "the cursor leaves with focus")
+	assert.NotContains(t, a.View(), "▾", "the cursor (and expansion) leaves with focus")
 }
 
 // TestAutomationsStripKeyRouting: the focused section consumes only its
@@ -172,7 +197,7 @@ func TestAutomationsCursorScrollsIntoView(t *testing.T) {
 	}
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 40, H: 3}, "scrolled section")
-	assert.Contains(t, out, "▸[✓]  task-f", "the cursor's row scrolled into view")
+	assert.Contains(t, out, "▾[✓]  task-f", "the cursor's row scrolled into view")
 }
 
 // TestAutomationsStripExactRectWithOverflow: more tasks than rows must
