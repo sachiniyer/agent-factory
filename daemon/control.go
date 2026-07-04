@@ -607,16 +607,6 @@ func DeliverPrompt(req DeliverPromptRequest) (string, error) {
 	return resp.Status, nil
 }
 
-// ReloadTasks asks the daemon to re-read tasks.json and rebuild its cron
-// schedule set. Task CRUD paths (CLI, API, TUI) call this after writing the
-// file so schedule changes take effect without a daemon restart. Like every
-// callDaemon path it ensures the daemon is running first, so adding a task
-// also brings the scheduler up.
-func ReloadTasks() error {
-	var resp ReloadTasksResponse
-	return callDaemon("ReloadTasks", ReloadTasksRequest{}, &resp)
-}
-
 // ListTasksNoSpawn returns the daemon's authoritative task list WITHOUT
 // starting a daemon (#1029 PR 3). Like SnapshotNoSpawn it dials the existing
 // control socket only if it is already serving and returns ErrDaemonUnavailable

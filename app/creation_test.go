@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
@@ -30,11 +31,14 @@ func newTestHome(t *testing.T) *home {
 	tmp := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
-	// Task save paths poke the daemon to reload schedules (#782); stub the
-	// poke so tests never dial — or spawn — a real daemon.
-	origReload := reloadDaemonTaskSchedulesFn
-	reloadDaemonTaskSchedulesFn = func() error { return nil }
-	t.Cleanup(func() { reloadDaemonTaskSchedulesFn = origReload })
+	// TUI task CRUD routes through the daemon (#1029 PR 6). Point the write
+	// seams at the direct task writers so tests never dial — or spawn — a real
+	// daemon, while the existing disk-assertion tests (which read tasks.json
+	// after driving the handlers) keep exercising the save orchestration
+	// unchanged. Tests asserting the daemon-dispatch itself swap in a recorder.
+	t.Cleanup(SetTaskAdderForTest(task.AddTask))
+	t.Cleanup(SetTaskUpdaterForTest(task.UpdateTask))
+	t.Cleanup(SetTaskRemoverForTest(task.RemoveTask))
 
 	// The tab + PR-info mutations now route through daemon RPCs (#960 PR 2).
 	// Stub the seams with safe defaults so tests that incidentally trigger them

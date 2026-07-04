@@ -243,6 +243,140 @@ func TestHandleStateTasks_ValidationFailureLeavesTaskPaneStale(t *testing.T) {
 		"reloading from disk clears dirty; the dropped edit is communicated via the error, not a dangling dirty flag")
 }
 
+// TestHandleTaskCreate_RoutesThroughDaemonRPC is the #1029 PR 6 guard for the
+// create path: the TUI inline create form must persist the new task through the
+// daemon RPC — the sole writer of tasks.json among clients (#960) — not by
+// writing the file directly. We swap the add seam for a recorder and assert (a)
+// it received the composed task and (b) nothing touched tasks.json on disk, so
+// the TUI no longer originates a task write.
+func TestHandleTaskCreate_RoutesThroughDaemonRPC(t *testing.T) {
+	h := newTestHome(t)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	var got *task.Task
+	calls := 0
+	// Overrides newTestHome's default (direct disk writer) with a recorder.
+	t.Cleanup(SetTaskAdderForTest(func(tk task.Task) error {
+		calls++
+		got = &tk
+		return nil
+	}))
+
+	tp := h.automations.TaskPane()
+	tp.SetTasks(nil)
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+
+	// Fill and submit the inline create form (the same key path a user drives).
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	require.True(t, tp.IsCreating(), "'n' must open the inline create form")
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("new-task")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector (cron stays selected)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> cron value
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do a thing")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> path
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> program
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> save button
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// (a) The create was dispatched through the daemon seam exactly once, with
+	// the task the user composed.
+	require.Equal(t, 1, calls, "create must route through the daemon RPC, not a direct disk write")
+	require.NotNil(t, got)
+	assert.Equal(t, "new-task", got.Name)
+	assert.Equal(t, "* * * * *", got.CronExpr)
+
+	// (b) The TUI wrote nothing to disk: with the daemon stubbed out, the only
+	// writer, tasks.json holds no task.
+	disk, err := task.LoadTasks()
+	require.NoError(t, err)
+	assert.Empty(t, disk, "TUI must not write tasks.json directly (#960 sole writer)")
+}
+
+// TestSaveContentPaneState_RoutesThroughDaemonRPC is the #1029 PR 6 guard for
+// the edit/delete path: closing the task manager with dirty edits must persist
+// them through the daemon RPCs (update + remove), not by writing tasks.json
+// directly. We seed two tasks, toggle one and delete the other, swap the update
+// and remove seams for recorders, and assert both were dispatched with the right
+// payloads and disk was left untouched.
+func TestSaveContentPaneState_RoutesThroughDaemonRPC(t *testing.T) {
+	h := newTestHome(t)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	keep := task.Task{
+		ID: "keep-1029", Name: "keep", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	gone := task.Task{
+		ID: "gone-1029", Name: "gone", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(keep))
+	require.NoError(t, task.AddTask(gone))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+
+	// Swap the write seams for recorders AFTER seeding (the seed used the direct
+	// writer); the save-on-close must now dispatch through these instead of disk.
+	var updated []task.Task
+	var removed []string
+	t.Cleanup(SetTaskUpdaterForTest(func(tk task.Task) error { updated = append(updated, tk); return nil }))
+	t.Cleanup(SetTaskRemoverForTest(func(id string) error { removed = append(removed, id); return nil }))
+
+	// Toggle the first task (keep) off — dirty, not yet persisted.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	// Move to the second task (gone) and delete it.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	require.True(t, tp.IsDirty(), "toggle + delete must mark the pane dirty")
+
+	// Esc releases focus → the overlay closes and saveContentPaneState runs.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state)
+
+	// The remaining task's update and the deleted task's remove both routed
+	// through the daemon seams.
+	require.Len(t, removed, 1, "delete must route through the remove RPC")
+	assert.Equal(t, "gone-1029", removed[0])
+	var sawToggledKeep bool
+	for _, tk := range updated {
+		if tk.ID == "keep-1029" {
+			sawToggledKeep = true
+			assert.False(t, tk.Enabled, "the toggled state must be dispatched to the update RPC")
+		}
+	}
+	assert.True(t, sawToggledKeep, "the surviving task must route through the update RPC")
+
+	// The TUI wrote nothing to disk: with the daemon stubbed out, tasks.json
+	// still holds both seeded tasks, both enabled.
+	disk, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, disk, 2, "TUI must not write tasks.json directly (#960 sole writer)")
+	for _, tk := range disk {
+		assert.True(t, tk.Enabled, "the TUI is no longer a tasks.json writer, so disk stays untouched")
+	}
+}
+
 // dirtyHooksHome returns a home wired to a real repo with a single dirty,
 // unsaved hook edit ("echo test") in the HooksPane. The hooks-save seam is
 // left at the caller's discretion (default real save, or a stub).
