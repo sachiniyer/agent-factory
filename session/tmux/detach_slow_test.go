@@ -402,6 +402,169 @@ func TestDetach_BoundsWaitWhenKillAttachNilAndWgHangs(t *testing.T) {
 	}
 }
 
+// TestDetach_ProactiveSIGTERMUnblocksWithoutSIGKILL is the primary #1157
+// regression guard: when the attach child exits on a SIGTERM (the healthy
+// case — a well-behaved tmux client detaches and closes the slave PTY), the
+// detach must complete off the back of that proactive signal WITHOUT ever
+// falling to the 1s SIGKILL race that used to hang ~32% of detaches. We keep
+// wgWaitSigkillDeadline deliberately high (2s): if the proactive path
+// regressed and we fell through to the SIGKILL backstop, the elapsed
+// assertion below would blow past its ceiling and fail. The stub termAttach
+// stands in for "SIGTERM → client exits → slave closes → io.Copy returns" by
+// releasing the simulated io.Copy goroutine.
+func TestDetach_ProactiveSIGTERMUnblocksWithoutSIGKILL(t *testing.T) {
+	prevDeadline := wgWaitSigkillDeadline
+	wgWaitSigkillDeadline = 2 * time.Second
+	t.Cleanup(func() { wgWaitSigkillDeadline = prevDeadline })
+
+	session := newDrainableSession(t, "proactive-sigterm")
+
+	var termCalls, killCalls atomic.Int32
+	released := make(chan struct{})
+	session.termAttach = func() (int, error) {
+		termCalls.Add(1)
+		close(released) // SIGTERM lands → child exits → io.Copy returns
+		return 4321, nil
+	}
+	session.killAttach = func() (int, error) {
+		killCalls.Add(1)
+		return 0, nil
+	}
+
+	session.wg.Add(1)
+	go func() {
+		defer session.wg.Done()
+		<-released
+	}()
+
+	start := time.Now()
+	session.Detach()
+	elapsed := time.Since(start)
+
+	if got := termCalls.Load(); got != 1 {
+		t.Fatalf("expected the proactive SIGTERM to be sent exactly once; got %d", got)
+	}
+	if got := killCalls.Load(); got != 0 {
+		t.Fatalf("SIGKILL backstop must NOT fire when SIGTERM unblocks io.Copy; got %d kill calls", got)
+	}
+	// The whole point of the fix: no 1s race. A generous 500ms ceiling — far
+	// under the 2s wgWaitSigkillDeadline — proves the detach rode the SIGTERM,
+	// not the SIGKILL fallback.
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("proactive-SIGTERM detach took %v; expected sub-grace — io.Copy should unblock on SIGTERM, not the ~1s SIGKILL race", elapsed)
+	}
+}
+
+// TestDetach_FallsBackToSIGKILLWhenSIGTERMIgnored is the paired backstop
+// guard required for the most regression-prone file in the repo: the
+// proactive SIGTERM is an OPTIMISTIC first step, never a replacement for the
+// #601 SIGKILL fallback. Here the stub termAttach reports success but the
+// simulated client ignores the signal (never releases the io.Copy goroutine);
+// only SIGKILL unsticks it. The detach must still bound itself, escalate to
+// SIGKILL after the grace + deadline, and emit the SIGKILL WARN unchanged.
+func TestDetach_FallsBackToSIGKILLWhenSIGTERMIgnored(t *testing.T) {
+	prevGrace := proactiveGraceDeadline
+	proactiveGraceDeadline = 30 * time.Millisecond
+	t.Cleanup(func() { proactiveGraceDeadline = prevGrace })
+
+	prevDeadline := wgWaitSigkillDeadline
+	wgWaitSigkillDeadline = 50 * time.Millisecond
+	t.Cleanup(func() { wgWaitSigkillDeadline = prevDeadline })
+
+	prevWarn := aflog.WarningLog
+	var warnBuf bytes.Buffer
+	aflog.WarningLog = log.New(&warnBuf, "WARN: ", 0)
+	t.Cleanup(func() { aflog.WarningLog = prevWarn })
+
+	session := newDrainableSession(t, "sigterm-ignored")
+
+	var termCalls, killCalls atomic.Int32
+	killed := make(chan struct{})
+	session.termAttach = func() (int, error) {
+		termCalls.Add(1)
+		return 4321, nil // SIGTERM sent, but the client ignores it — no release
+	}
+	session.killAttach = func() (int, error) {
+		killCalls.Add(1)
+		close(killed) // only SIGKILL unsticks the io.Copy goroutine
+		return 4321, nil
+	}
+
+	session.wg.Add(1)
+	go func() {
+		defer session.wg.Done()
+		select {
+		case <-killed:
+		case <-time.After(2 * time.Second):
+		}
+	}()
+
+	detachDone := make(chan struct{})
+	go func() {
+		session.Detach()
+		close(detachDone)
+	}()
+
+	select {
+	case <-detachDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Detach did not return — the SIGKILL backstop did not fire after SIGTERM was ignored")
+	}
+
+	if got := termCalls.Load(); got != 1 {
+		t.Fatalf("expected the proactive SIGTERM to be attempted once; got %d", got)
+	}
+	if got := killCalls.Load(); got != 1 {
+		t.Fatalf("expected the SIGKILL backstop to fire exactly once when SIGTERM is ignored; got %d", got)
+	}
+	if !strings.Contains(warnBuf.String(), "SIGKILLing tmux attach-session pid=4321") {
+		t.Fatalf("expected the #601 SIGKILL backstop WARN to still fire; got %q", warnBuf.String())
+	}
+}
+
+// TestDetach_TermAttachSurvivesNextDetach is the #602 pairing guard extended
+// to the new closure: just as killAttach must survive a Detach so the next
+// attach lifecycle inherits a working escape hatch, termAttach — set in the
+// same Restore and cleared at the same inline site — must be non-nil after
+// Detach returns. If a future refactor moved either clear back into the defer
+// (which runs AFTER Restore installs the fresh closures), this fails, exactly
+// as the 2026-05-20 51s-hang incident would have.
+func TestDetach_TermAttachSurvivesNextDetach(t *testing.T) {
+	prevSigkill := wgWaitSigkillDeadline
+	wgWaitSigkillDeadline = 500 * time.Millisecond
+	t.Cleanup(func() { wgWaitSigkillDeadline = prevSigkill })
+
+	ptyFactory := NewMockPtyFactory(t)
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc:    func(cmd *exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return nil, nil },
+	}
+
+	session := newTmuxSession(toTmuxName("termattach-survives", ""), "claude", ptyFactory, cmdExec)
+	if err := session.Restore(""); err != nil {
+		t.Fatalf("initial Restore: %v", err)
+	}
+	if session.termAttach == nil {
+		t.Fatal("Restore should have set termAttach")
+	}
+	if session.killAttach == nil {
+		t.Fatal("Restore should have set killAttach")
+	}
+
+	session.attachCh = make(chan struct{})
+	session.wg = &sync.WaitGroup{}
+	session.ctx, session.cancel = context.WithCancel(context.Background())
+
+	session.Detach()
+
+	if session.termAttach == nil {
+		t.Fatal("Detach's post-Restore state should leave termAttach non-nil — #602 pairing regression")
+	}
+	if session.killAttach == nil {
+		t.Fatal("Detach's post-Restore state should leave killAttach non-nil")
+	}
+}
+
 // TestKillTmuxAttachByName_KillsMatchingPids verifies the pgrep fallback
 // actually invokes the kill hook for every pid pgrep returns. This is the
 // "what happens after we find a stuck attach client" half of the safety

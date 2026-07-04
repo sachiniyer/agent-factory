@@ -72,6 +72,15 @@ type TmuxSession struct {
 	// "why" — this is the defensive escape hatch for #598 when the tmux
 	// server is too contended to let the client exit on its own.
 	killAttach func() (int, error)
+
+	// termAttach SIGTERMs that same attach-session child. Detach() signals it
+	// proactively (SIGTERM → short grace → SIGKILL backstop) so io.Copy
+	// unblocks without a tmux-server round-trip, instead of racing the 1s
+	// SIGKILL deadline against the daemon's capture-pane poll — the #1157
+	// fix for the ~32% of detaches that used to stall the full second. Set
+	// and cleared in lockstep with killAttach (same pairing invariant that
+	// the #602 regression broke — see Detach's inline clear).
+	termAttach func() (int, error)
 }
 
 const TmuxPrefix = "af_"
@@ -104,6 +113,16 @@ var wgWaitSigkillDeadline = 1 * time.Second
 // fallback was missing. Set to 2× wgWaitSigkillDeadline so the total
 // worst-case detach is ~3s. var, not const, so tests can lower it.
 var wgWaitAbandonDeadline = 2 * time.Second
+
+// proactiveGraceDeadline bounds how long Detach() waits for the attach
+// goroutines to drain after a proactive SIGTERM (termAttach) before falling
+// through to waitForAttachDrain's SIGKILL backstop. Signalling the child
+// directly bypasses the tmux server, so a healthy client's io.Copy unblocks
+// within a scheduler tick or two; 150ms is generous headroom over that while
+// keeping a wedged detach an order of magnitude faster than the old 1s
+// wgWaitSigkillDeadline race against the daemon's capture-pane poll (#1157).
+// var, not const, so tests can lower it.
+var proactiveGraceDeadline = 150 * time.Millisecond
 
 // ErrSessionGone is returned by PTY/tmux operations when the underlying tmux
 // session no longer exists. Non-daemon callers (preview pane, sidebar resize,
@@ -400,6 +419,17 @@ func (t *TmuxSession) Restore(workDir string) error {
 		}
 		return attachCmd.Process.Pid, attachCmd.Process.Kill()
 	}
+	// termAttach is the gentle sibling Detach() reaches for first: a SIGTERM
+	// lets a well-behaved tmux client detach and exit cleanly, closing the
+	// slave PTY so io.Copy returns — all without touching the (possibly
+	// contended) tmux server. Paired with killAttach and the same ptmx so the
+	// #602 invariant holds: both are set here and cleared together.
+	t.termAttach = func() (int, error) {
+		if attachCmd.Process == nil {
+			return 0, errors.New("attach process not started")
+		}
+		return attachCmd.Process.Pid, attachCmd.Process.Signal(syscall.SIGTERM)
+	}
 	return nil
 }
 
@@ -430,6 +460,57 @@ func (t *TmuxSession) Restore(workDir string) error {
 // wg.Wait (Detach) can do so without re-measuring. On the abandon path
 // returns wgWaitAbandonDeadline (not the literal elapsed) so the caller's
 // slowDetachWgWaitThreshold check still fires cleanly.
+// proactiveDetachDrain SIGTERMs the attach-session child and waits up to
+// proactiveGraceDeadline for the attach goroutines (io.Copy + monitorWindowSize)
+// to drain. It returns the elapsed wait and whether the drain completed within
+// the grace.
+//
+// This is the #1157 fix. The old detach path closed the PTY master and then
+// waited for the child to notice and exit on its own — an exit that round-trips
+// through the shared tmux server. When the daemon's 1s capture-pane poll had
+// that server busy (~32% of the time), the round-trip lost the race and wg.Wait
+// ran the full wgWaitSigkillDeadline until the SIGKILL fallback fired. SIGTERM
+// goes straight to the child process, no server round-trip, so a well-behaved
+// client detaches and exits within a scheduler tick regardless of server load —
+// and, unlike an immediate SIGKILL, lets the client tear its terminal state
+// down cleanly first. The session survives a client death (Detach re-attaches
+// via Restore), so this is always safe.
+//
+// drained=false (SIGTERM ignored, child never started, or already gone) falls
+// through to waitForAttachDrain's unchanged SIGKILL → pgrep → abandon backstop,
+// so every existing #598/#601/#602 escape hatch stays behind this proactive
+// signal exactly as before.
+func (t *TmuxSession) proactiveDetachDrain() (time.Duration, bool) {
+	wg := t.wg
+	if wg == nil {
+		// Nothing was attached; there's nothing to drain.
+		return 0, true
+	}
+	start := time.Now()
+	if t.termAttach == nil {
+		// No recorded child to signal — let the backstop handle it.
+		return 0, false
+	}
+	if _, err := t.termAttach(); err != nil {
+		// Child never started or already exited; nothing to unblock.
+		return 0, false
+	}
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+		return time.Since(start), true
+	case <-time.After(proactiveGraceDeadline):
+		// SIGTERM didn't unblock io.Copy in time. The wg.Wait goroutine
+		// above stays parked until the SIGKILL backstop drains wg — a
+		// transient, self-completing goroutine, not the abandon-path leak.
+		return time.Since(start), false
+	}
+}
+
 func (t *TmuxSession) waitForAttachDrain() time.Duration {
 	// Capture the WaitGroup pointer locally so the helper goroutine below
 	// doesn't race against the Detach/Close defer that nils t.wg after
@@ -885,7 +966,15 @@ func (t *TmuxSession) Detach() {
 	// those reads (#512). waitForAttachDrain bounds the wait by SIGKILLing
 	// the attach-session child if wg.Wait exceeds wgWaitSigkillDeadline —
 	// see #598 follow-up for the diagnosis.
-	waitElapsed := t.waitForAttachDrain()
+	// Proactively SIGTERM the attach child so io.Copy unblocks without a
+	// tmux-server round-trip (#1157). On a healthy client this drains within
+	// the grace and we never touch the SIGKILL path; a client that ignores
+	// SIGTERM falls through to waitForAttachDrain's unchanged
+	// SIGKILL → pgrep → abandon backstop.
+	waitElapsed, drained := t.proactiveDetachDrain()
+	if !drained {
+		waitElapsed = t.waitForAttachDrain()
+	}
 	detachTracef("tmux.Detach-wg.Wait-done name=%s elapsed=%v", t.sanitizedName, waitElapsed)
 	// Defense-in-depth: if wg.Wait still exceeded the slow threshold after
 	// the SIGKILL fallback ran, that means killAttach didn't unstick the
@@ -901,13 +990,16 @@ func (t *TmuxSession) Detach() {
 	// means a Restore failure (or a Close failure) can't leave the closed
 	// handle dangling on the struct — a subsequent Attach would otherwise
 	// silently bind goroutines to a closed file and hang (#464).
-	// Pair the clear with t.killAttach: the closure references the dying
-	// attachCmd whose process is being torn down, so it must not survive
-	// past this point. Restore() below will assign both fields together
-	// for the next attach lifecycle; this is the invariant the #598
-	// follow-up regression broke.
+	// Pair the clear with t.killAttach AND t.termAttach: both closures
+	// reference the dying attachCmd whose process is being torn down, so
+	// neither must survive past this point. Restore() below reassigns all
+	// three fields together for the next attach lifecycle; this is the
+	// invariant the #598 follow-up regression broke — clearing here (before
+	// Restore), never in the defer (which runs after Restore), is what keeps
+	// the fresh closures alive (#602).
 	t.ptmx = nil
 	t.killAttach = nil
+	t.termAttach = nil
 
 	if closeErr != nil {
 		log.ErrorLog.Printf("error closing attach pty session: %v", closeErr)
@@ -956,6 +1048,7 @@ func (t *TmuxSession) Close() error {
 	t.ptmx = nil
 	t.ctx = nil
 	t.killAttach = nil
+	t.termAttach = nil
 
 	if t.attachCh != nil {
 		close(t.attachCh)
@@ -1049,6 +1142,7 @@ func (t *TmuxSession) CloseAttachOnly() error {
 	t.ptmx = nil
 	t.ctx = nil
 	t.killAttach = nil
+	t.termAttach = nil
 
 	if t.attachCh != nil {
 		close(t.attachCh)
