@@ -1136,3 +1136,56 @@ func TestSessionsSendPrompt_BroadcastAllReposSpansRepos(t *testing.T) {
 		t.Fatalf("expected --all-repos/--repo mutual-exclusion error, got: %v", err)
 	}
 }
+
+// TestSessionsSendPrompt_BroadcastFlagWithoutAll pins the Greptile P2 fix:
+// cobra runs the Args (arity) check before RunE, so a broadcast-implying flag
+// used without --all must surface its actionable "requires --all" message from
+// Args rather than being masked by cobra's generic "accepts 2 arg(s)" arity
+// error. The cases cover one and two positionals (arity would trip differently
+// for each) and a combination of both broadcast flags.
+func TestSessionsSendPrompt_BroadcastFlagWithoutAll(t *testing.T) {
+	cases := []struct {
+		name       string
+		allRepos   bool
+		includeRT  bool
+		args       []string
+		wantSubstr []string
+	}{
+		{"all-repos, one arg", true, false, []string{"prompt"}, []string{"--all-repos", "--all"}},
+		{"all-repos, two args", true, false, []string{"title", "prompt"}, []string{"--all-repos", "--all"}},
+		{"include-root, one arg", false, true, []string{"prompt"}, []string{"--include-root", "--all"}},
+		{"both flags", true, true, []string{"prompt"}, []string{"--all-repos and --include-root", "--all"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetBroadcastFlags(t)
+			sendPromptAllReposFlag = tc.allRepos
+			sendPromptIncludeRootFlag = tc.includeRT
+
+			// Exercise the command's Args validator directly — this is the hook
+			// cobra runs before RunE, and where the generic arity error would
+			// otherwise win. Silence the JSON error write to stderr.
+			origStderr := os.Stderr
+			devnull, _ := os.Open(os.DevNull)
+			os.Stderr = devnull
+			err := sessionsSendPromptCmd.Args(sessionsSendPromptCmd, tc.args)
+			os.Stderr = origStderr
+			if devnull != nil {
+				devnull.Close()
+			}
+
+			if err == nil {
+				t.Fatalf("expected an actionable error for a broadcast flag without --all, got nil")
+			}
+			for _, want := range tc.wantSubstr {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q should mention %q", err.Error(), want)
+				}
+			}
+			// The generic cobra arity error must not be what the user sees.
+			if strings.Contains(err.Error(), "accepts") && strings.Contains(err.Error(), "arg(s)") {
+				t.Fatalf("got cobra's generic arity error, want the actionable --all message: %v", err)
+			}
+		})
+	}
+}

@@ -205,13 +205,19 @@ to broadcast across every repo. The reserved root session is excluded unless
 sessions are reported, and one failure never aborts the rest. The command prints
 a JSON summary (delivered / failed / skipped) and exits 0 even when some
 sessions fail, so scripts can inspect per-session results.`,
-	// With --all the single positional is the prompt; otherwise it's
-	// <title> <prompt>. Flags are parsed before Args runs, so the mode flag is
-	// already set here.
+	// Validate flag combinations before arity (cobra runs Args before RunE):
+	// a broadcast-implying flag without --all must surface its actionable
+	// message here, not cobra's generic "accepts 2 arg(s)" (#658/#734: public
+	// CLI = actionable errors). Arity is then mode-aware — with --all the single
+	// positional is the prompt; otherwise it's <title> <prompt>. Flags are
+	// parsed before Args runs, so the mode flags are already set here.
 	Args: func(cmd *cobra.Command, args []string) error {
+		if err := validateSendPromptFlags(); err != nil {
+			return jsonError(err)
+		}
 		if sendPromptAllFlag {
 			if len(args) != 1 {
-				return fmt.Errorf("--all takes exactly one argument (the prompt to broadcast); got %d", len(args))
+				return jsonError(fmt.Errorf("--all broadcast takes exactly one argument (the prompt to broadcast); got %d", len(args)))
 			}
 			return nil
 		}
@@ -221,21 +227,13 @@ sessions fail, so scripts can inspect per-session results.`,
 		log.Initialize(false)
 		defer log.Close()
 
-		// Reject nonsensical flag combinations up front with an actionable
-		// message (public CLI) rather than silently ignoring a flag.
-		if sendPromptAllReposFlag && !sendPromptAllFlag {
-			return jsonError(errors.New("--all-repos only applies to a broadcast; add --all"))
-		}
-		if sendPromptIncludeRootFlag && !sendPromptAllFlag {
-			return jsonError(errors.New("--include-root only applies to a broadcast; add --all"))
+		// Re-check here too: unit tests drive RunE directly (bypassing Args),
+		// and it is cheap defense-in-depth against a future caller that skips
+		// arg validation. In the real CLI Args already caught these.
+		if err := validateSendPromptFlags(); err != nil {
+			return jsonError(err)
 		}
 		if sendPromptAllFlag {
-			if sendPromptCreateFlag {
-				return jsonError(errors.New("--all cannot be combined with --create: broadcast only delivers to existing sessions"))
-			}
-			if sendPromptAllReposFlag && repoFlag != "" {
-				return jsonError(errors.New("--all-repos and --repo are mutually exclusive: --all-repos already spans every repo"))
-			}
 			return runBroadcast(args[0])
 		}
 
@@ -332,6 +330,36 @@ type broadcastTarget struct {
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
 	Reason string `json:"reason,omitempty"`
+}
+
+// validateSendPromptFlags rejects nonsensical send-prompt flag combinations
+// with an actionable message (public CLI standard, #658/#734). It runs from both
+// Args — so it fires before cobra's arity check, which would otherwise mask a
+// broadcast flag used without --all behind a generic "accepts 2 arg(s)" error —
+// and RunE, so unit tests that drive RunE directly still get the same guard.
+func validateSendPromptFlags() error {
+	if !sendPromptAllFlag {
+		// The broadcast-only flags are meaningless without --all. Name whichever
+		// were passed and point the user at the flag that unlocks them.
+		var needsAll []string
+		if sendPromptAllReposFlag {
+			needsAll = append(needsAll, "--all-repos")
+		}
+		if sendPromptIncludeRootFlag {
+			needsAll = append(needsAll, "--include-root")
+		}
+		if len(needsAll) > 0 {
+			return fmt.Errorf("%s can only be used with --all (broadcast mode); add --all to broadcast the prompt to every session in scope", strings.Join(needsAll, " and "))
+		}
+		return nil
+	}
+	if sendPromptCreateFlag {
+		return errors.New("--all cannot be combined with --create: broadcast only delivers to existing sessions")
+	}
+	if sendPromptAllReposFlag && repoFlag != "" {
+		return errors.New("--all-repos and --repo are mutually exclusive: --all-repos already spans every repo")
+	}
+	return nil
 }
 
 // runBroadcast implements `af sessions send-prompt --all`: deliver one prompt to
