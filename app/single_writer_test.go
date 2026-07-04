@@ -30,7 +30,7 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 
 	// new shell tab: routed through the daemon (stubbed), reflected locally only.
 	createRestore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return nextShellTabName(inst.GetTabs()), nil
+		return spawnDaemonTab(inst), nil
 	})
 	defer createRestore()
 	_, _ = h.handleNewTab()

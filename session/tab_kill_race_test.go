@@ -160,6 +160,112 @@ func TestAddProcessTab_KillRaceDoesNotLeakSession(t *testing.T) {
 	assert.False(t, isAlive(orphan), "the spawned tmux session must be torn down (no orphan)")
 }
 
+// TestAttachShellTab_KilledSessionDoesNotSpawn is the #1152 regression: the
+// daemon spawned the shell session out-of-band and then killed the instance
+// before the TUI reflects the tab. AttachShellTab is a pure TUI-side projection
+// of daemon-owned state and must ATTACH ONLY — it must NOT re-spawn the missing
+// session. Re-spawning would create a tmux session in the TUI process that
+// escapes the daemon's Kill teardown and orphans over the about-to-be-deleted
+// worktree, violating the single-writer model (#960) — the same #990 leak class
+// AddShellTab guards. It must fail cleanly, spawn nothing, and append nothing.
+func TestAttachShellTab_KilledSessionDoesNotSpawn(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const agentName = "af_attach_killed"
+	// Seed only the agent session alive: the shell session the daemon created
+	// was already killed, so has-session for it reports missing. onNewSession
+	// fires iff a tmux new-session is ever issued — the bug's fingerprint.
+	spawned := false
+	inst, isAlive := raceMockInstance(t, agentName, func() { spawned = true })
+
+	tab, err := inst.AttachShellTab(shellTabName)
+	require.Error(t, err, "attaching to a killed session must fail, not resurrect it")
+	assert.Contains(t, err.Error(), "failed to reconnect shell tab")
+	assert.Nil(t, tab)
+	assert.False(t, spawned, "AttachShellTab must never issue tmux new-session (#1152)")
+	assert.False(t, isAlive(agentName+"__"+shellTabName),
+		"no orphan shell session may exist after a failed attach")
+	assert.Equal(t, 1, inst.TabCount(), "the un-attachable tab must not be appended")
+}
+
+// TestAttachShellTab_KillRaceDropsProjection covers the append guard: the shell
+// session is live when the attach begins (so Restore reconnects), but a
+// concurrent Kill flips started=false in the window between AttachShellTab
+// releasing its read lock and re-locking to append — exactly the #990 window.
+// AttachShellTab must then drop the projection (append nothing) and return an
+// error, releasing only the local attach client it opened (never killing the
+// session — the daemon owns that).
+func TestAttachShellTab_KillRaceDropsProjection(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_attach_race"
+	shellName := agentName + "__" + shellTabName
+
+	var inst *Instance
+	spawned := false
+	flipped := false
+	killedSession := false
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "new-session"):
+				spawned = true
+				return nil
+			case strings.Contains(s, "kill-session"):
+				if strings.Contains(s, shellName) {
+					killedSession = true
+				}
+				return nil
+			case strings.Contains(s, "has-session"):
+				// The shell session is live when the attach begins. On its first
+				// existence probe (inside Restore, after AttachShellTab released
+				// its RLock) simulate a concurrent Kill landing: flip started=false
+				// so the write-lock recheck observes the teardown.
+				if strings.Contains(s, shellName) && !flipped {
+					flipped = true
+					inst.mu.Lock()
+					inst.started = false
+					inst.mu.Unlock()
+				}
+				return nil // agent + shell both report alive
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("content"), nil },
+	}
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+
+	repoPath := "/tmp/tab-attach-race-" + agentName
+	gw, err := git.NewGitWorktreeFromStorage(
+		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		agentName+"-branch", "", false, true)
+	require.NoError(t, err)
+
+	agentTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, exec)
+	inst = &Instance{
+		Title:       agentName,
+		Path:        repoPath,
+		Program:     "claude",
+		backend:     &LocalBackend{},
+		started:     true,
+		gitWorktree: gw,
+		Tabs:        []*Tab{newAgentTab(agentTs)},
+	}
+
+	tab, err := inst.AttachShellTab(shellTabName)
+	require.Error(t, err, "a tab attached during teardown must be refused")
+	assert.Contains(t, err.Error(), "session was killed during tab attach")
+	assert.Nil(t, tab)
+	assert.False(t, spawned, "the attach path must never spawn a session (#1152)")
+	assert.False(t, killedSession,
+		"the projection must not kill the daemon-owned session; only release its own attach client")
+	assert.Equal(t, 1, inst.TabCount(), "the raced tab must not be appended")
+}
+
 // TestAddTab_NoKillRaceStillAppends verifies the fix does not regress the happy
 // path: with no concurrent kill, both AddShellTab and AddProcessTab still spawn,
 // append, and return a live tab.

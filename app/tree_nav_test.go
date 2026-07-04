@@ -133,7 +133,7 @@ func TestTreeNav_TabCreateCloseFromTabRow(t *testing.T) {
 
 	var closedNames []string
 	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return nextShellTabName(inst.GetTabs()), nil
+		return spawnDaemonTab(inst), nil
 	}))
 	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
 		closedNames = append(closedNames, tabName)
