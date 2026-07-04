@@ -6,8 +6,10 @@
 // user discovering days later that their settings were silently replaced
 // (#837). TmuxTripwire does the same for real tmux sessions leaked onto the
 // developer's tmux server, SandboxHome defaults a whole package into a
-// throwaway AGENT_FACTORY_HOME, and IsolateTmux gives a test a private tmux
-// server so nothing it creates can outlive it (#1056).
+// throwaway AGENT_FACTORY_HOME, SandboxTmux defaults a whole package onto a
+// private tmux server so no test can even see the developer's real one
+// (#1122), and IsolateTmux gives a single test a private server of its own so
+// nothing it creates can outlive it (#1056).
 //
 // This package deliberately has no dependency on the config package — config
 // imports session/tmux, and the tripwire must be usable from that package's
@@ -171,6 +173,14 @@ func TmuxTripwire() func() error {
 // instead of the production daemon log — #1056). Individual tests that
 // t.Setenv their own home still win for their duration; this is the default
 // for tests that never set one.
+//
+// It also scrubs the AF_SESSION/AF_HOME ancestry markers (#1120,
+// session/tmux/envmarker.go — string literals here because testguard stays
+// dependency-free). A test run launched from inside a production af pane
+// inherits the pane's markers, so every child a test spawns would otherwise
+// carry the production install's identity — which breaks any test asserting
+// on marker absence (e.g. doctor's home-match gate) and misattributes test
+// children to the real install.
 func SandboxHome() func() {
 	dir, err := os.MkdirTemp("", "af-test-home-")
 	if err != nil {
@@ -180,13 +190,77 @@ func SandboxHome() func() {
 	if err := os.Setenv("AGENT_FACTORY_HOME", dir); err != nil {
 		panic("testguard: cannot set sandbox AGENT_FACTORY_HOME: " + err.Error())
 	}
+	prevSession, hadSession := os.LookupEnv("AF_SESSION")
+	prevAFHome, hadAFHome := os.LookupEnv("AF_HOME")
+	_ = os.Unsetenv("AF_SESSION")
+	_ = os.Unsetenv("AF_HOME")
 	return func() {
 		if had {
 			_ = os.Setenv("AGENT_FACTORY_HOME", prev)
 		} else {
 			_ = os.Unsetenv("AGENT_FACTORY_HOME")
 		}
+		if hadSession {
+			_ = os.Setenv("AF_SESSION", prevSession)
+		}
+		if hadAFHome {
+			_ = os.Setenv("AF_HOME", prevAFHome)
+		}
 		_ = os.RemoveAll(dir)
+	}
+}
+
+// SandboxTmux points the WHOLE package run at a private tmux server, exactly
+// like SandboxHome does for AGENT_FACTORY_HOME: a fresh TMUX_TMPDIR socket dir
+// with $TMUX cleared, set before any test runs. It is the structural backstop
+// for #1122: a test that forgets IsolateTmux now runs against the package's
+// private server instead of the developer's real one, so an escaped create or
+// a CleanupSessions-style sweep cannot touch production af_ sessions. Tests
+// that need a server of their own still call IsolateTmux; its t.Setenv wins
+// for the test's duration and nests another level down, never back up to the
+// ambient server.
+//
+// Call it from TestMain AFTER TmuxTripwire (which must snapshot the ambient
+// server) and call the returned restore BEFORE the tripwire's verify (so the
+// verify probes the ambient server again). The restore kills the package's
+// private server, so anything a test leaked onto it dies there.
+//
+// No-op (returns a no-op restore) when tmux is not installed — there is no
+// server to fence off, and resolving a socket dir would only mask that.
+func SandboxTmux() func() {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return func() {}
+	}
+	dir, err := os.MkdirTemp("", "af-tmux-pkg-")
+	if err != nil {
+		panic("testguard: cannot create package tmux socket dir: " + err.Error())
+	}
+	prevTmpdir, hadTmpdir := os.LookupEnv("TMUX_TMPDIR")
+	prevTmux, hadTmux := os.LookupEnv("TMUX")
+	if err := os.Setenv("TMUX_TMPDIR", dir); err != nil {
+		panic("testguard: cannot set package TMUX_TMPDIR: " + err.Error())
+	}
+	// Empty counts as unset for tmux's "am I inside tmux" check; keeping the
+	// real value would make tmux ignore TMUX_TMPDIR entirely ($TMUX wins in
+	// socket resolution).
+	if err := os.Setenv("TMUX", ""); err != nil {
+		panic("testguard: cannot clear TMUX: " + err.Error())
+	}
+	return func() {
+		// Kill the package server BEFORE restoring the env so the kill
+		// targets the private socket dir, then drop it.
+		_ = exec.Command("tmux", "kill-server").Run()
+		_ = os.RemoveAll(dir)
+		if hadTmpdir {
+			_ = os.Setenv("TMUX_TMPDIR", prevTmpdir)
+		} else {
+			_ = os.Unsetenv("TMUX_TMPDIR")
+		}
+		if hadTmux {
+			_ = os.Setenv("TMUX", prevTmux)
+		} else {
+			_ = os.Unsetenv("TMUX")
+		}
 	}
 }
 

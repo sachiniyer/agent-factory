@@ -20,7 +20,12 @@ func TestMain(m *testing.M) {
 	// in-process config/state/log access outside a per-test home stays out
 	// of the developer's real one.
 	restoreHome := testguard.SandboxHome()
+	// #1122: default the whole package onto a private tmux server so a test
+	// that forgets IsolateTmux can never create or sweep sessions on the
+	// developer's real server.
+	restoreTmux := testguard.SandboxTmux()
 	code := m.Run()
+	restoreTmux()
 	restoreHome()
 	if err := verifyRealConfig(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

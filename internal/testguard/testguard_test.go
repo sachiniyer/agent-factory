@@ -153,6 +153,47 @@ func TestSandboxHome_SetsAndRestores(t *testing.T) {
 	}
 }
 
+// TestSandboxTmux_SetsAndRestores pins the #1122 backstop: SandboxTmux must
+// repoint TMUX_TMPDIR at a fresh socket dir, clear TMUX, and put both back on
+// restore — so a whole package runs against a private tmux server and a test
+// that forgets IsolateTmux still cannot reach the developer's real one.
+func TestSandboxTmux_SetsAndRestores(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skipf("tmux not available: %v", err)
+	}
+	t.Setenv("TMUX_TMPDIR", "/pre-sandbox-tmpdir")
+	t.Setenv("TMUX", "/pre-sandbox-socket,123,0")
+
+	restore := SandboxTmux()
+	dir := os.Getenv("TMUX_TMPDIR")
+	if dir == "/pre-sandbox-tmpdir" || dir == "" {
+		t.Fatalf("SandboxTmux did not repoint TMUX_TMPDIR; got %q", dir)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("sandbox socket dir %q not usable: %v", dir, err)
+	}
+	if got := os.Getenv("TMUX"); got != "" {
+		t.Fatalf("SandboxTmux must clear TMUX (it wins over TMUX_TMPDIR in socket resolution); got %q", got)
+	}
+
+	// A session created inside the sandbox must die with it on restore.
+	const name = "af_sandboxtmux_test"
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sleep", "60").CombinedOutput(); err != nil {
+		t.Skipf("cannot start tmux session on sandbox server: %v: %s", err, out)
+	}
+
+	restore()
+	if got := os.Getenv("TMUX_TMPDIR"); got != "/pre-sandbox-tmpdir" {
+		t.Fatalf("restore did not put TMUX_TMPDIR back; got %q", got)
+	}
+	if got := os.Getenv("TMUX"); got != "/pre-sandbox-socket,123,0" {
+		t.Fatalf("restore did not put TMUX back; got %q", got)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("restore did not remove sandbox socket dir %q; stat err=%v", dir, err)
+	}
+}
+
 // TestTmuxTripwire_FiresOnLeakedSession exercises the tripwire against the
 // private server IsolateTmux provides, so the test itself is hermetic: the
 // "ambient" server the tripwire snapshots is the throwaway one.

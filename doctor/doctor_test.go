@@ -26,10 +26,22 @@ import (
 
 func TestMain(m *testing.M) {
 	verifyRealConfig := testguard.ConfigTripwire()
+	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux
+	// server (doctor tests drive real tmux via IsolateTmux).
+	verifyTmux := testguard.TmuxTripwire()
 	restoreHome := testguard.SandboxHome()
+	// #1122: default the whole package onto a private tmux server so a test
+	// that forgets IsolateTmux can never create or sweep sessions on the
+	// developer's real server.
+	restoreTmux := testguard.SandboxTmux()
 	code := m.Run()
+	restoreTmux()
 	restoreHome()
 	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := verifyTmux(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}
