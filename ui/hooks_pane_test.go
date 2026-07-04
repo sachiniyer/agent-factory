@@ -25,8 +25,8 @@ func TestHooksPaneSetCommandsEmptySliceBug(t *testing.T) {
 	h := NewHooksPane()
 	h.SetCommands([]string{"cmd1", "cmd2", "cmd3"})
 	h.SetFocus(true)
-	h.ScrollDown() // selectedIdx: 0 -> 1
-	h.ScrollDown() // selectedIdx: 1 -> 2
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}) // selectedIdx: 0 -> 1
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}) // selectedIdx: 1 -> 2
 
 	h.SetCommands([]string{})         // selectedIdx = -1
 	h.SetCommands([]string{"newcmd"}) // selectedIdx stays -1
@@ -47,8 +47,8 @@ func TestHooksPaneSetCommandsRoundtripKeepsSelectedIdxValid(t *testing.T) {
 	h := NewHooksPane()
 	h.SetCommands([]string{"cmd1", "cmd2", "cmd3"})
 	h.SetFocus(true)
-	h.ScrollDown()
-	h.ScrollDown()
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	assert.Equal(t, 2, h.selectedIdx)
 
 	h.SetCommands([]string{})

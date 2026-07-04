@@ -61,28 +61,6 @@ func (h *HooksPane) SetFocus(focus bool) {
 	}
 }
 
-// ScrollUp moves the selection up one row. Used by shift+up and mouse wheel
-// regardless of focus. No-op while a hook is being edited or added so the
-// background selection doesn't drift out from under the edit buffer.
-func (h *HooksPane) ScrollUp() {
-	if h.editing || h.adding {
-		return
-	}
-	if h.selectedIdx > 0 {
-		h.selectedIdx--
-	}
-}
-
-// ScrollDown moves the selection down one row. See ScrollUp.
-func (h *HooksPane) ScrollDown() {
-	if h.editing || h.adding {
-		return
-	}
-	if h.selectedIdx < len(h.commands)-1 {
-		h.selectedIdx++
-	}
-}
-
 // HandleKeyPress processes a key press. Returns true if the key was consumed.
 func (h *HooksPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	if !h.hasFocus {
