@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -202,6 +203,34 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
 	m.persistInstance(repoID, instance)
 	log.InfoLog.Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
 	return worktreePath, nil
+}
+
+// archiveExclusiveTabLock serializes a tab spawn against an archive/kill/restore
+// teardown for the session keyed by key (#1195). Those ops hold the per-session
+// op-lock across their whole tmux teardown + worktree move, and — unlike Kill,
+// which flips started=false — an archive keeps started=true throughout (so the
+// #1108 rollback can self-heal a failed move to Lost), which means the
+// instance-level #990 started guard never fires during archive. Without this, a
+// CreateTab racing an ArchiveSession could spawn a tmux session into the worktree
+// being moved out from under it, orphaning it.
+//
+// It takes the op-lock BEFORE any per-repo start lock the caller holds, matching
+// the opLock→repoStartLock ordering the kill/archive paths use (persistInstance
+// et al), so no ABBA deadlock is introduced. On success it returns the LOCKED
+// op-lock — the caller must Unlock it. On rejection it releases the lock and
+// returns an error: an archive/kill that beat us to the op-lock has fully
+// completed by the time we acquire it (it held the lock across its entire
+// teardown+move), so a mid-archive Deleting is never observed — only the terminal
+// Archived. A completed kill leaves the stale instance started=false, which
+// AddShellTab/AddProcessTab reject downstream.
+func (m *Manager) archiveExclusiveTabLock(key string, instance *session.Instance) (*sync.Mutex, error) {
+	opLock := m.opLockFor(key)
+	opLock.Lock()
+	if err := session.TabSpawnStatusErr(instance.GetStatus()); err != nil {
+		opLock.Unlock()
+		return nil, err
+	}
+	return opLock, nil
 }
 
 // persistInstance writes one instance's authoritative data through the targeted
