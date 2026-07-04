@@ -207,6 +207,31 @@ func (i *Instance) GetInFlightOp() InFlightOp {
 	return i.inFlightOp
 }
 
+// IsCreating reports whether a create is in flight (the render/gate replacement
+// for the old GetStatus()==Loading check).
+func (i *Instance) IsCreating() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.inFlightOp == OpCreating
+}
+
+// IsTearingDown reports whether a kill or archive teardown is in flight (the
+// render/gate replacement for the old GetStatus()==Deleting check — both owners
+// now live on distinct ops, but both read as "going away").
+func (i *Instance) IsTearingDown() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.inFlightOp == OpKilling || i.inFlightOp == OpArchiving
+}
+
+// HasInFlightOp reports whether any client op is in flight (the render/gate
+// replacement for the old Loading||Deleting "is this row transient" check).
+func (i *Instance) HasInFlightOp() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.inFlightOp != OpNone
+}
+
 // SetInFlightOp writes the op axis under the instance mutex, leaving the liveness
 // untouched. The daemon archive executor uses it to raise OpArchiving as a fence
 // over its teardown+move window (and to clear it back to OpNone on a rollback).

@@ -49,6 +49,8 @@ func Expandable(inst *session.Instance) bool {
 	if inst == nil {
 		return false
 	}
-	status := inst.GetStatus()
-	return status != session.Loading && status != session.Deleting
+	// A row with an in-flight op (create/kill/archive) is never expandable — the
+	// op owns it and its tabs aren't meaningfully attachable (#1195, was the
+	// Loading/Deleting check).
+	return !inst.HasInFlightOp()
 }

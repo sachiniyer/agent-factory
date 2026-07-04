@@ -236,8 +236,8 @@ func (m *Menu) updateOptions() {
 }
 
 func (m *Menu) addInstanceOptions() {
-	// Loading instances only get minimal options
-	if m.instance != nil && m.instance.GetStatus() == session.Loading {
+	// Creating (Loading) instances only get minimal options
+	if m.instance != nil && m.instance.IsCreating() {
 		m.options = []keys.KeyName{keys.KeyNew, keys.KeyHelp, keys.KeyQuit}
 		m.groups = []menuGroup{
 			{start: 0, end: 3, isAction: false},

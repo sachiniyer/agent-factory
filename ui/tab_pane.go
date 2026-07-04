@@ -168,28 +168,31 @@ func (p *TabPane) updateAgentLocked(instance *session.Instance) error {
 	case instance == nil:
 		p.setFallbackState("No agents running yet. Spin up a new instance with 'n' to get started!")
 		return nil
-	case instance.GetStatus() == session.Loading:
+	case instance.IsCreating():
 		p.setFallbackState("Setting up workspace...")
 		return nil
-	case instance.GetStatus() == session.Deleting:
-		// Mirror the Loading case for the other transient status (#920): during
+	case instance.IsTearingDown():
+		// Mirror the creating case for a teardown op (#920/#1195): during
 		// teardown Preview() returns ("", nil) and Started()==false, so without
 		// this the generic name fallback below would claim throughout the delete.
 		p.setFallbackState("Tearing down session...")
 		return nil
-	case instance.GetStatus() == session.Dead:
-		// The metadata tick marks a session Dead once its backing session is
-		// gone (#935); keying off the status makes the fallback synchronous with
+	case instance.GetLiveness() == session.LiveDead:
+		// The daemon poll marks a session Dead once its backing session is
+		// gone (#935); keying off the liveness makes the fallback synchronous with
 		// the sidebar's dead-dot so the panes never disagree.
 		p.setFallbackState("Session no longer running.")
 		return nil
-	case instance.GetStatus() == session.Lost:
+	case instance.GetLiveness() == session.LiveLost:
 		// Lost (#1108): the tmux session vanished with no kill on record —
 		// same synchronous-with-the-sidebar treatment as Dead, but the message
 		// says what happened rather than implying a plain corpse.
 		p.setFallbackState("Session lost — its tmux session is gone.")
 		return nil
 	}
+	// A LimitReached agent (#1146) is deliberately NOT a fallback: its tmux is
+	// alive and its screen shows the limit message, so it falls through to the
+	// live Preview() below.
 
 	// If in scroll mode but the viewport hasn't been filled yet, capture the
 	// full scrollback now (the agent slot fills lazily here; see ScrollUp).
@@ -239,10 +242,10 @@ func (p *TabPane) updateShellLocked(instance *session.Instance, activeTab int) e
 		p.setFallbackState("Select an instance to open a terminal")
 		return nil
 	}
-	// A Deleting instance reports Started()==false during teardown, so without
+	// A tearing-down instance reports Started()==false during teardown, so without
 	// this it would fall through to the "not started yet" fallback — misleading
-	// while the session is going away (#920).
-	if instance.GetStatus() == session.Deleting {
+	// while the session is going away (#920/#1195).
+	if instance.IsTearingDown() {
 		p.setFallbackState("Tearing down session...")
 		return nil
 	}
@@ -453,20 +456,22 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	// Agent slot: immediately restore content instead of waiting for the next
 	// UpdateContent, but keep transient/dead fallbacks rather than blanking the
 	// pane on an empty/erroring Preview() (#823/#920/#935).
-	switch instance.GetStatus() {
-	case session.Loading:
+	switch {
+	case instance.IsCreating():
 		p.setFallbackState("Setting up workspace...")
 		return nil
-	case session.Deleting:
+	case instance.IsTearingDown():
 		p.setFallbackState("Tearing down session...")
 		return nil
-	case session.Dead:
+	case instance.GetLiveness() == session.LiveDead:
 		p.setFallbackState("Session no longer running.")
 		return nil
-	case session.Lost:
+	case instance.GetLiveness() == session.LiveLost:
 		p.setFallbackState("Session lost — its tmux session is gone.")
 		return nil
 	}
+	// LimitReached (#1146) falls through to the live Preview() — its screen shows
+	// the limit message, more useful than a fallback.
 	content, err := instance.Preview()
 	if err != nil {
 		if errors.Is(err, tmux.ErrSessionGone) {

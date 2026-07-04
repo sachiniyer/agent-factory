@@ -230,8 +230,15 @@ func liveSessionName(inst *session.Instance, tab int) string {
 	if inst == nil || inst.IsRemote() || !inst.Started() {
 		return ""
 	}
-	switch inst.GetStatus() {
-	case session.Loading, session.Deleting, session.Dead, session.Lost:
+	// No live session name for a row with an in-flight op (create/kill/archive)
+	// or a vanished session (Dead/Lost) (#1195, was the Loading/Deleting/Dead/Lost
+	// status check). A LimitReached agent is still alive (throttled), so it keeps
+	// its name and stays attachable.
+	if inst.HasInFlightOp() {
+		return ""
+	}
+	switch inst.GetLiveness() {
+	case session.LiveDead, session.LiveLost:
 		return ""
 	}
 	return inst.TabTmuxName(tab)

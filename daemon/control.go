@@ -2411,7 +2411,7 @@ func (m *Manager) targetSessionState(repoID, title string) (exists, deleting boo
 	inst := m.instances[daemonInstanceKey(repoID, title)]
 	m.mu.Unlock()
 	if inst != nil {
-		return true, inst.GetStatus() == session.Deleting, nil
+		return true, inst.IsTearingDown(), nil
 	}
 
 	exists, err = repoHasSessionTitle(repoID, title)

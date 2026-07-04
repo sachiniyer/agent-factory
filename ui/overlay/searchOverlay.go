@@ -223,17 +223,27 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 	for i := startIdx; i < endIdx; i++ {
 		r := s.results[i]
 
-		// Status indicator
+		// Status indicator. Two axes (#1195): a create in flight reads as loading;
+		// otherwise a total switch over the liveness — every value explicit (incl.
+		// LimitReached, #1146), no silent default. Running/Ready get the filled dot;
+		// every other liveness gets the hollow ○.
 		var statusStr string
-		switch r.Instance.GetStatus() {
-		case session.Running:
-			statusStr = statusRunning.Render("●")
-		case session.Ready:
-			statusStr = statusReady.Render("●")
-		case session.Loading:
+		switch {
+		case r.Instance.GetInFlightOp() == session.OpCreating:
 			statusStr = statusLoading.Render("○")
-		default:
+		case r.Instance.GetInFlightOp() != session.OpNone:
+			// A kill/archive teardown in flight — going away.
 			statusStr = normalStyle.Render("○")
+		default:
+			switch r.Instance.GetLiveness() {
+			case session.LiveRunning:
+				statusStr = statusRunning.Render("●")
+			case session.LiveReady:
+				statusStr = statusReady.Render("●")
+			case session.LiveLost, session.LiveDead, session.LiveArchived,
+				session.LiveLimitReached, session.LivenessUnset:
+				statusStr = normalStyle.Render("○")
+			}
 		}
 
 		label := r.Instance.Title
