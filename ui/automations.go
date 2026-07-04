@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -82,6 +83,10 @@ type AutomationsPane struct {
 	// now returns the current time for next-run derivation; a fixed value in
 	// tests so rendered "next" columns are deterministic.
 	now func() time.Time
+
+	// zones is the shared mouse hit-test registry (#1024 R4); String()
+	// registers the section plus its task rows every frame. Nil skips.
+	zones *zones.Registry
 }
 
 // NewAutomationsPane creates the section over the given projection.
@@ -153,8 +158,27 @@ func (a *AutomationsPane) HandleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
-// HandleMouse implements layout.Pane. Mouse support is #1024 PR 6.
+// HandleMouse implements layout.Pane. Mouse dispatch is zone-id-based at the
+// root (#1024 R4): the section/task-row zones registered by String() resolve
+// to focus/select actions there, so the pane-local fallback consumes nothing.
 func (a *AutomationsPane) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
+
+// SetZoneRegistry wires the shared mouse hit-test registry (#1024 R4).
+func (a *AutomationsPane) SetZoneRegistry(reg *zones.Registry) {
+	a.zones = reg
+}
+
+// SelectTaskByID moves the section cursor onto the task with the given id —
+// the click action for a task row. Reports whether the task was found.
+func (a *AutomationsPane) SelectTaskByID(id string) bool {
+	for i, tsk := range a.proj.GetTasks() {
+		if tsk.ID == id {
+			a.selected = i
+			return true
+		}
+	}
+	return false
+}
 
 // ScrollUp moves the section cursor up (wheel/key routing).
 func (a *AutomationsPane) ScrollUp() {
@@ -263,6 +287,11 @@ func (a *AutomationsPane) String() string {
 	if a.rect.Empty() {
 		return ""
 	}
+	// The section's base zone: any click inside it that lands on no task row
+	// focuses the automations region. Task rows register on top (later wins).
+	if a.zones != nil {
+		a.zones.Register(zones.AutoBG, a.rect)
+	}
 
 	tasks := a.proj.GetTasks()
 	if a.selected >= len(tasks) {
@@ -314,6 +343,11 @@ func (a *AutomationsPane) String() string {
 	for i := a.offset; i < len(tasks); i++ {
 		if len(lines) >= a.rect.H {
 			break
+		}
+		if a.zones != nil {
+			a.zones.Register(zones.AutoTask(tasks[i].ID), layout.Rect{
+				X: a.rect.X, Y: a.rect.Y + len(lines), W: a.rect.W, H: 1,
+			})
 		}
 		lines = append(lines, a.compactRow(tasks[i], a.focused && i == a.selected))
 	}

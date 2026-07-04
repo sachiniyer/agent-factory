@@ -52,6 +52,11 @@ type liveTermAttachment interface {
 	// SendKey forwards one keystroke down the attachment's PTY, reporting
 	// false when the key has no safe encoding (ignored, never guessed).
 	SendKey(msg tea.KeyMsg) bool
+	// SendMouse forwards one mouse event at grid cell (x, y) — the
+	// interactive-mode in-pane mouse path (#1024 R4, RFC §2.5). The
+	// emulator is mode-aware: the event reaches the inner app only if it
+	// enabled mouse tracking, and is dropped otherwise.
+	SendMouse(msg tea.MouseMsg, x, y int) bool
 }
 
 // newLiveTermPaneFn is the termpane creation seam. Production points it at

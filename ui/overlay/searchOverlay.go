@@ -175,6 +175,22 @@ func runeEqualFold(a, b rune) bool {
 	return false
 }
 
+// visibleWindow returns the [start, end) result window Render shows: at most
+// maxVisible rows, slid so the selected item is always included. Shared with
+// the mouse zone registration (zones.go) so the rows registered are exactly
+// the rows rendered.
+func (s *SearchOverlay) visibleWindow() (startIdx, endIdx int) {
+	const maxVisible = 10
+	if s.selectedIdx >= maxVisible {
+		startIdx = s.selectedIdx - maxVisible + 1
+	}
+	endIdx = startIdx + maxVisible
+	if endIdx > len(s.results) {
+		endIdx = len(s.results)
+	}
+	return startIdx, endIdx
+}
+
 // Render renders the search overlay.
 func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ui.AccentColor)
@@ -197,17 +213,7 @@ func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
 		}
 	}
 
-	maxVisible := 10
-
-	// Compute the visible window so it always includes the selected item.
-	startIdx := 0
-	if s.selectedIdx >= maxVisible {
-		startIdx = s.selectedIdx - maxVisible + 1
-	}
-	endIdx := startIdx + maxVisible
-	if endIdx > len(s.results) {
-		endIdx = len(s.results)
-	}
+	startIdx, endIdx := s.visibleWindow()
 
 	if startIdx > 0 {
 		content += normalStyle.Render(

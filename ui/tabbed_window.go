@@ -6,6 +6,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
@@ -82,6 +83,14 @@ type TabbedWindow struct {
 	interactive bool
 
 	tab *TabPane
+
+	// region is the pane's layout/focus-ring region id
+	// (layout.PaneRegion(paneID)), doubling as the pane component of its
+	// mouse zone ids; zones is the shared hit-test registry (#1024 R4).
+	// String() registers the body/header (and, while the live view renders,
+	// the terminal grid) every frame. Either unset skips registration.
+	region string
+	zones  *zones.Registry
 
 	// live is the pane's embedded-terminal render source (#1089 PR 1), set
 	// by the root model while a termpane attachment is bound to this pane's
@@ -271,8 +280,49 @@ func (w *TabbedWindow) Interactive() bool { return w.interactive }
 // consumes nothing; interactive-mode key forwarding is #1089.
 func (w *TabbedWindow) HandleKey(tea.KeyMsg) (tea.Cmd, bool) { return nil, false }
 
-// HandleMouse implements layout.Pane. Mouse support is #1024 PR 6.
+// HandleMouse implements layout.Pane. Mouse dispatch is zone-id-based at the
+// root (#1024 R4): the body/header/term zones registered by String() resolve
+// to focus/interact/scroll/forward actions there, so the pane-local fallback
+// consumes nothing.
 func (w *TabbedWindow) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
+
+// SetZoneRegistry wires the shared mouse hit-test registry (#1024 R4).
+func (w *TabbedWindow) SetZoneRegistry(reg *zones.Registry) {
+	w.zones = reg
+}
+
+// SetRegion records the pane's layout region id (layout.PaneRegion(paneID))
+// for zone registration. The root model sets it when the pane window is
+// created; the pane id — and therefore the region — is stable for the
+// window's whole life.
+func (w *TabbedWindow) SetRegion(region string) {
+	w.region = region
+}
+
+// registerZones records this frame's hit-test rects: the whole pane as the
+// body (click focuses; click focused interacts; wheel scrolls), the one-line
+// `title · tab` header inside the frame on top of it, and — exactly while the
+// live embedded terminal is what renders — the terminal content grid, whose
+// zone-local coordinates ARE emulator grid cells (the interactive-mode
+// forwarding target, RFC §2.5). liveShowing must equal the render branch
+// String() takes so a scroll-mode pane never advertises a term zone.
+func (w *TabbedWindow) registerZones(liveShowing bool) {
+	if w.zones == nil || w.region == "" || w.rect.Empty() {
+		return
+	}
+	w.zones.Register(zones.PaneBody(w.region), w.rect)
+	if w.rect.W > 2 && w.rect.H > 2 {
+		w.zones.Register(zones.PaneHeader(w.region), layout.Rect{
+			X: w.rect.X + 1, Y: w.rect.Y + 1, W: w.rect.W - 2, H: paneHeaderRows,
+		})
+		if liveShowing {
+			iw, ih := w.innerSize()
+			w.zones.Register(zones.PaneTerm(w.region), layout.Rect{
+				X: w.rect.X + 1, Y: w.rect.Y + 1 + paneHeaderRows, W: iw, H: ih,
+			})
+		}
+	}
+}
 
 // UpdateContent updates the content of the pane's tab view. instance may be
 // nil. It is called from the refreshPanesCmd goroutine with the instance
@@ -381,12 +431,14 @@ func (w *TabbedWindow) String() string {
 		return ""
 	}
 	iw, ih := w.innerSize()
+	liveShowing := w.live != nil && !w.tab.IsScrolling()
+	w.registerZones(liveShowing)
 	// The live embedded terminal renders instead of the capture when bound
 	// (#1089 PR 1). Scroll mode still renders the TabPane's viewport: the
 	// host-side scrollback UX stays capture-based until the interactive-mode
 	// PR decides who owns scrolling (RFC §2.4).
 	content := ""
-	if w.live != nil && !w.tab.IsScrolling() {
+	if liveShowing {
 		// The cursor overlays only while this pane's terminal owns the
 		// keyboard — the interactive typing cue (#1089 PR 2).
 		content = w.live.Render(iw, ih, w.interactive)

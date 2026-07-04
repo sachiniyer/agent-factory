@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
@@ -136,6 +137,14 @@ type Sidebar struct {
 	height   int
 	width    int
 	focused  bool
+
+	// rect is the pane's screen rect (SetRect); zone registration needs the
+	// absolute origin, not just the size.
+	rect layout.Rect
+	// zones is the shared mouse hit-test registry (#1024 R4). String()
+	// registers a rect per interactive row every frame; nil (ui unit tests
+	// that never wire a registry) skips registration.
+	zones *zones.Registry
 }
 
 // NewSidebar creates a new sidebar rendering the given projection.
@@ -175,7 +184,13 @@ func (s *Sidebar) contentWidth() int {
 
 // SetRect implements layout.Pane.
 func (s *Sidebar) SetRect(r layout.Rect) {
+	s.rect = r
 	s.SetSize(r.W, r.H)
+}
+
+// SetZoneRegistry wires the shared mouse hit-test registry (#1024 R4).
+func (s *Sidebar) SetZoneRegistry(reg *zones.Registry) {
+	s.zones = reg
 }
 
 // Focused implements layout.Pane.
@@ -192,7 +207,10 @@ func (s *Sidebar) Blur() { s.focused = false }
 // pane has focus); per-pane routing arrives with the split (#1024 PR 5).
 func (s *Sidebar) HandleKey(tea.KeyMsg) (tea.Cmd, bool) { return nil, false }
 
-// HandleMouse implements layout.Pane. Mouse support is #1024 PR 6.
+// HandleMouse implements layout.Pane. Mouse dispatch is zone-id-based at the
+// root (#1024 R4): String() registers per-row zones and the root router
+// calls the click primitives (SelectTabRow, ToggleInstanceTree, …) directly,
+// so the pane-local fallback consumes nothing.
 func (s *Sidebar) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
 
 // View implements layout.Pane.
@@ -706,11 +724,13 @@ func (s *Sidebar) SyncCursorToActiveTab() {
 // content pane) would be wrong here because the selected row can sit below the
 // fold while navigating — instead the rendered slice scrolls so the selection
 // is always visible, with "▲/▼ N more" rows marking hidden items.
+// chromeLines is the fixed chrome above the sidebar's item list: one leading
+// blank line plus the title row. Shared by String()'s window budget and the
+// zone registration's y origin so the two can't drift.
+const chromeLines = 2
+
 func (s *Sidebar) String() string {
 	s.syncFromStore()
-
-	// Chrome above the item list: one leading blank line plus the title row.
-	const chromeLines = 2
 
 	// Render every visible row up front and measure real heights: instance
 	// rows are multi-line (title + branch, plus an optional PR line) while tab
@@ -748,6 +768,8 @@ func (s *Sidebar) String() string {
 	} else {
 		s.scrollOffset = 0
 	}
+
+	s.registerZones(heights, start, end, hiddenAbove > 0)
 
 	var b strings.Builder
 	b.WriteString("\n")
@@ -808,6 +830,120 @@ func (s *Sidebar) String() string {
 		}
 	}
 	return out
+}
+
+// registerZones records the mouse hit-test rects for this frame (#1024 R4):
+// the pane background, the section header, and — for every row inside the
+// rendered window — the instance/tab row plus the instance's ▸/▾ arrow cell.
+// Coordinates mirror String()'s exact line budget (the leading blank + title
+// chrome, then the "▲ N more" indicator when the window is scrolled), and
+// every zone is clipped to the pane rect since the final ClampToRect clips
+// any partially fitting last row the same way.
+func (s *Sidebar) registerZones(heights []int, start, end int, topIndicator bool) {
+	if s.zones == nil || s.rect.Empty() {
+		return
+	}
+	s.zones.Register(zones.TreeBG, s.rect)
+
+	instances := s.proj.GetInstances()
+	y := s.rect.Y + chromeLines
+	if topIndicator {
+		y++
+	}
+	bottom := s.rect.Bottom()
+	for i := start; i < end && y < bottom; i++ {
+		item := s.visibleItems[i]
+		h := heights[i]
+		if y+h > bottom {
+			h = bottom - y
+		}
+		row := layout.Rect{X: s.rect.X, Y: y, W: s.rect.W, H: h}
+		switch {
+		case item.IsHeader:
+			s.zones.Register(zones.TreeHeader, row)
+		case item.Kind == SectionInstances && item.ItemIndex >= 0 && item.ItemIndex < len(instances):
+			inst := instances[item.ItemIndex]
+			if item.IsTab {
+				s.zones.Register(zones.TreeTab(inst.Title, item.TabIndex), row)
+			} else {
+				s.zones.Register(zones.TreeInstance(inst.Title), row)
+				// The arrow cell registers ON TOP of the row (later wins) so
+				// clicking it expands/collapses instead of selecting.
+				if ax, ay, ok := tree.ArrowCell(s.contentWidth()); ok && tree.Expandable(inst) && ay < h {
+					s.zones.Register(zones.TreeArrow(inst.Title),
+						layout.Rect{X: s.rect.X + ax, Y: y + ay, W: 1, H: 1})
+				}
+			}
+		}
+		y += heights[i]
+	}
+}
+
+// ClickHeader moves the cursor onto the Instances section header and toggles
+// its expansion — the click equivalent of Enter on the header row.
+func (s *Sidebar) ClickHeader() {
+	s.syncFromStore()
+	for i, item := range s.visibleItems {
+		if item.IsHeader {
+			s.selectedIdx = i
+			break
+		}
+	}
+	s.ToggleSection()
+}
+
+// SelectTabRow moves the cursor onto tab slot idx of the instance titled
+// title — the click action for a tree tab row, which (via pushSelection)
+// retargets the workspace onto that tab. Tab rows only render for the
+// expanded instance, so a click that races a structure change and finds no
+// such row no-ops rather than guessing.
+func (s *Sidebar) SelectTabRow(title string, idx int) {
+	s.syncFromStore()
+	instances := s.proj.GetInstances()
+	for j, item := range s.visibleItems {
+		if item.Kind == SectionInstances && !item.IsHeader && item.IsTab &&
+			item.ItemIndex >= 0 && item.ItemIndex < len(instances) &&
+			instances[item.ItemIndex].Title == title && item.TabIndex == idx {
+			s.selectedIdx = j
+			s.afterCursorMove()
+			return
+		}
+	}
+}
+
+// ToggleInstanceTree is the click action for an instance row's ▸/▾ arrow: the
+// cursor lands on the clicked row (a click always selects), and the arrow
+// meaning follows the tree's expansion policy — selecting a different
+// instance auto-expands it (that IS the ▸ action), while the already-selected
+// instance toggles its explicit h/← collapse override.
+func (s *Sidebar) ToggleInstanceTree(title string) {
+	s.syncFromStore()
+	instances := s.proj.GetInstances()
+	instIdx := -1
+	for i, inst := range instances {
+		if inst.Title == title {
+			instIdx = i
+			break
+		}
+	}
+	if instIdx < 0 {
+		return
+	}
+	sel := s.proj.GetSelectedInstance()
+	wasSelected := sel != nil && sel.Title == title
+	wasExpanded := s.instanceExpanded(instances[instIdx])
+	s.SetSelectedInstance(instIdx)
+	if !wasSelected {
+		return
+	}
+	if wasExpanded {
+		s.treeCollapsed = title
+	} else {
+		s.treeCollapsed = ""
+	}
+	s.rebuildVisibleItems()
+	s.moveCursorToInstanceRow(instIdx)
+	s.afterCursorMove()
 }
 
 // scrollToSelection clamps scrollOffset and moves it minimally so the selected

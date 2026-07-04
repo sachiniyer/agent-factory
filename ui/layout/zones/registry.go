@@ -50,3 +50,24 @@ func (r *Registry) Resolve(x, y int) (id string, local layout.Point, ok bool) {
 
 // Reset clears all registrations for a new frame, retaining capacity.
 func (r *Registry) Reset() { r.zones = r.zones[:0] }
+
+// Find returns the most recently registered rect for id. Tests use it to
+// derive click coordinates FROM the registry (never hardcoded), so layout
+// changes cannot silently break mouse tests (RFC §5.6).
+func (r *Registry) Find(id string) (layout.Rect, bool) {
+	for i := len(r.zones) - 1; i >= 0; i-- {
+		if r.zones[i].id == id {
+			return r.zones[i].rect, true
+		}
+	}
+	return layout.Rect{}, false
+}
+
+// IDs returns the registered zone ids in registration (paint) order.
+func (r *Registry) IDs() []string {
+	out := make([]string, len(r.zones))
+	for i, z := range r.zones {
+		out[i] = z.id
+	}
+	return out
+}

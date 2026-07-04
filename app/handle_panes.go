@@ -27,7 +27,13 @@ func (m *home) openPaneWindow(instance *session.Instance, tab int) *store.OpenPa
 	if p == nil {
 		return nil
 	}
-	m.paneWindows[p.ID()] = ui.NewTabbedWindow(ui.NewTabPane(), p)
+	w := ui.NewTabbedWindow(ui.NewTabPane(), p)
+	// Wire the pane's mouse identity (#1024 R4): its zone ids are keyed by
+	// the same region id the focus ring and layout use, stable for the
+	// window's life.
+	w.SetRegion(layout.PaneRegion(p.ID()))
+	w.SetZoneRegistry(m.zones)
+	m.paneWindows[p.ID()] = w
 	return p
 }
 

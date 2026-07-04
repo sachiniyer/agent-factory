@@ -21,6 +21,15 @@ type fakeLiveTerm struct {
 	// keys records every message forwarded through SendKey, as
 	// tea.KeyMsg.String() values.
 	keys []string
+	// mice records every event forwarded through SendMouse with its
+	// grid-local coordinates (#1024 R4 interactive forwarding).
+	mice []forwardedMouse
+}
+
+// forwardedMouse is one SendMouse call as the fake recorded it.
+type forwardedMouse struct {
+	msg  tea.MouseMsg
+	x, y int
 }
 
 func newFakeLiveTerm() *fakeLiveTerm {
@@ -33,6 +42,11 @@ func (f *fakeLiveTerm) Close() error                                     { f.clo
 func (f *fakeLiveTerm) Done() <-chan struct{}                            { return f.done }
 func (f *fakeLiveTerm) SendKey(msg tea.KeyMsg) bool {
 	f.keys = append(f.keys, msg.String())
+	return true
+}
+
+func (f *fakeLiveTerm) SendMouse(msg tea.MouseMsg, x, y int) bool {
+	f.mice = append(f.mice, forwardedMouse{msg: msg, x: x, y: y})
 	return true
 }
 

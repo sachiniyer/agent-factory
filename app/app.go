@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
@@ -134,6 +135,17 @@ type home struct {
 	// rebuilt by relayout as panes open, close, and auto-hide, and regions
 	// hidden by the degradation ladder are skipped.
 	ring *layout.Ring
+	// zones is the mouse hit-test registry (#1024 R4, RFC §2.5): View()
+	// resets it every frame and each pane re-registers its interactive rects
+	// while rendering, so the registry always mirrors what is actually on
+	// screen. handleMouse resolves every tea.MouseMsg through it.
+	zones *zones.Registry
+	// lastClickZone/lastClickAt implement double-click detection: a second
+	// press on the same zone within doubleClickInterval reads as a double
+	// click. mouseClock is time.Now, swapped by tests for determinism.
+	lastClickZone string
+	lastClickAt   time.Time
+	mouseClock    func() time.Time
 
 	// sidebar is the left-rail instances+tabs tree
 	sidebar *ui.Sidebar
@@ -281,6 +293,8 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		statusBar:       ui.NewStatusBar(menu, errBox),
 		hooksPane:       ui.NewHooksPane(),
 		ring:            layout.NewRing(layout.RegionTree, layout.RegionAutomations),
+		zones:           zones.NewRegistry(),
+		mouseClock:      time.Now,
 		snapshotFetcher: snapshotThroughDaemon,
 		appConfig:       appConfig,
 		program:         program,
@@ -291,6 +305,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		appState:        appState,
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes, proj)
+	h.wireZoneRegistry()
 	// No panes are open at startup: the focus ring is tree → automations
 	// until the first pane opens (relayout rebuilds the ring's pane entries
 	// thereafter; the first instance selection auto-opens its pane).
@@ -633,45 +648,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	case tea.MouseMsg:
-		// Mouse forwarding into an interactive pane is out of scope for this
-		// PR (RFC §2.5 leaves in-pane wheel ownership to the mouse PR) — and
-		// host wheel-scroll would flip the live pane into capture scroll mode
-		// mid-typing, so the wheel is inert while interactive.
-		if m.interactive {
-			return m, nil
-		}
-		if msg.Action == tea.MouseActionPress {
-			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
-				// The wheel scrolls whatever the focus ring points at: the
-				// focused automations section moves its own cursor
-				// independent of the sidebar selection (#524); everywhere
-				// else it scrolls the workspace pane, which needs a bound
-				// instance. Hit-tested wheel routing is #1024 PR 6.
-				if m.ring.Active() == layout.RegionAutomations {
-					switch msg.Button {
-					case tea.MouseButtonWheelUp:
-						m.automations.ScrollUp()
-					case tea.MouseButtonWheelDown:
-						m.automations.ScrollDown()
-					}
-					return m, nil
-				}
-				// The wheel scrolls the focused pane's own view (#1088); with
-				// the tree focused it drives the selection's open pane, when
-				// one is visible.
-				pane, bound := m.focusedContentPane()
-				if pane == nil || bound == nil {
-					return m, nil
-				}
-				switch msg.Button {
-				case tea.MouseButtonWheelUp:
-					pane.ScrollUp()
-				case tea.MouseButtonWheelDown:
-					pane.ScrollDown()
-				}
-			}
-		}
-		return m, nil
+		// First-class mouse (#1024 R4, closes #1025): every event is
+		// resolved through the zone registry the last View() rebuilt and
+		// dispatched to the region actually under the cursor — clicks
+		// select/focus/interact/act, the wheel scrolls the hovered region,
+		// and while interactive, events over the live pane's grid forward
+		// to the embedded terminal. Purely additive: the keyboard remains
+		// fully sufficient.
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 	case tea.WindowSizeMsg:
@@ -1655,8 +1639,16 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 // View composes the workspace from the solved layout (#1024 PR 4): every pane
 // renders exactly its rect, so the regions tile the full window with no
 // padding math. Modal overlays composite on top exactly as before.
+// View composes the workspace from the solved layout. The mouse zone
+// registry is rebuilt here every frame (#1024 R4): Reset at the top, then
+// each pane registers its interactive rects while rendering and the active
+// overlay registers its buttons on top. The registry therefore always
+// mirrors exactly what this frame put on screen.
 func (m *home) View() string {
-	// Below the hard minimum no layout exists; render the banner alone.
+	m.zones.Reset()
+
+	// Below the hard minimum no layout exists; render the banner alone (and
+	// register nothing — there is nothing to click).
 	if m.lastLayout.Fallback {
 		return ui.TerminalTooSmall(m.termWidth, m.termHeight)
 	}
@@ -1695,17 +1687,23 @@ func (m *home) View() string {
 		if m.confirmationOverlay == nil {
 			log.ErrorLog.Printf("confirmation overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true)
+		fg := m.confirmationOverlay.Render()
+		m.confirmationOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
+		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
 	} else if m.state == stateSearch {
 		if m.searchOverlay == nil {
 			log.ErrorLog.Printf("search overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.searchOverlay.Render(), mainView, true)
+		fg := m.searchOverlay.Render()
+		m.searchOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
+		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
 	} else if m.state == stateSelectProgram {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.selectionOverlay.Render(), mainView, true)
+		fg := m.selectionOverlay.Render()
+		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
+		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
 	} else if m.state == stateHooks {
 		return overlay.PlaceOverlay(0, 0, m.renderHooksOverlay(), mainView, true)
 	} else if m.state == stateTasks {
