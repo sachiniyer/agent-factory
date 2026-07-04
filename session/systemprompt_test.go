@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -31,7 +29,7 @@ func TestInjectSystemPrompt_Claude(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt(tmux.ProgramClaude, "claude", "test-session", dir)
+	result := injectSystemPrompt("claude")
 
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir flag, got %q", result)
@@ -50,7 +48,7 @@ func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 
 	// The resolved form (from program_overrides) carries the path-and-flags;
 	// injectSystemPrompt appends --plugin-dir to it.
-	result := injectSystemPrompt(tmux.ProgramClaude, "/usr/local/bin/claude --model opus", "my-session", dir)
+	result := injectSystemPrompt("/usr/local/bin/claude --model opus")
 
 	if !strings.HasPrefix(result, "/usr/local/bin/claude --model opus") {
 		t.Errorf("expected resolved form preserved, got %q", result)
@@ -62,7 +60,7 @@ func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 
 func TestInjectSystemPrompt_Codex(t *testing.T) {
 	dir := t.TempDir()
-	result := injectSystemPrompt(tmux.ProgramCodex, "codex", "test-session", dir)
+	result := injectSystemPrompt("codex")
 
 	if !strings.Contains(result, "-c") {
 		t.Errorf("expected -c flag for codex, got %q", result)
@@ -85,8 +83,7 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 }
 
 func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
-	dir := t.TempDir()
-	result := injectSystemPrompt(tmux.ProgramCodex, "codex --full-auto", "my-session", dir)
+	result := injectSystemPrompt("codex --full-auto")
 
 	if !strings.HasPrefix(result, "codex --full-auto") {
 		t.Errorf("expected resolved form preserved, got %q", result)
@@ -100,9 +97,8 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 // their program_overrides must keep their value — codex's -c is last-wins per
 // key, so appending ours would clobber it.
 func TestInjectSystemPrompt_CodexExistingDeveloperInstructions(t *testing.T) {
-	dir := t.TempDir()
 	resolved := `codex -c 'developer_instructions=my custom prompt'`
-	result := injectSystemPrompt(tmux.ProgramCodex, resolved, "my-session", dir)
+	result := injectSystemPrompt(resolved)
 
 	if result != resolved {
 		t.Errorf("expected resolved form unchanged, got %q", result)
@@ -113,8 +109,7 @@ func TestInjectSystemPrompt_CodexExistingDeveloperInstructions(t *testing.T) {
 }
 
 func TestInjectSystemPrompt_Aider(t *testing.T) {
-	dir := t.TempDir()
-	result := injectSystemPrompt(tmux.ProgramAider, "aider", "test-session", dir)
+	result := injectSystemPrompt("aider")
 
 	if result != "aider" {
 		t.Errorf("expected aider unchanged (no system-prompt flag), got %q", result)
@@ -122,11 +117,70 @@ func TestInjectSystemPrompt_Aider(t *testing.T) {
 }
 
 func TestInjectSystemPrompt_Gemini(t *testing.T) {
-	dir := t.TempDir()
-	result := injectSystemPrompt(tmux.ProgramGemini, "gemini", "test-session", dir)
+	result := injectSystemPrompt("gemini")
 
 	if result != "gemini" {
 		t.Errorf("expected gemini unchanged (no system-prompt flag), got %q", result)
+	}
+}
+
+// TestInjectSystemPrompt_ResolvedCommandMatrix pins #1116/#1131: which flags
+// get injected is decided by the agent the RESOLVED command actually runs —
+// through every override shape (bare name, absolute path, path+flags,
+// redirect to a different agent, redirect to a non-agent binary) — never by
+// the config-name key the command was resolved from. The non-agent rows are
+// the class fix: injecting claude's --plugin-dir into e.g. bash makes it exit
+// instantly and the spawn dies as an opaque timeout.
+func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	tests := []struct {
+		name     string
+		resolved string
+		want     string // "" = resolved must come back unchanged
+	}{
+		// name→name (no override) for all four agents.
+		{"claude bare", "claude", "--plugin-dir"},
+		{"codex bare", "codex", "developer_instructions="},
+		{"aider bare", "aider", ""},
+		{"gemini bare", "gemini", ""},
+
+		// name→path and name→path+flags overrides.
+		{"claude override path", "/opt/claude-next/bin/claude", "--plugin-dir"},
+		{"claude override path with flags", "/opt/claude-next/bin/claude --model opus", "--plugin-dir"},
+		{"codex override path with flags", "/usr/local/bin/codex --full-auto", "developer_instructions="},
+		{"aider override path", "/usr/local/bin/aider --no-auto-commits", ""},
+		{"gemini override path", "/usr/local/bin/gemini", ""},
+
+		// name→other-agent: the RESOLVED agent's flags, not the key's.
+		{"claude key resolved to codex gets codex flags", "codex --full-auto", "developer_instructions="},
+		{"codex key resolved to claude gets claude flags", "/usr/bin/claude", "--plugin-dir"},
+
+		// name→non-agent binary: no injection at all (#1116, #1131).
+		{"claude key resolved to bash (#1131)", "bash", ""},
+		{"claude key resolved to unknown tool (#1116)", "/usr/bin/some-other-tool --foo", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := injectSystemPrompt(tt.resolved)
+			if tt.want == "" {
+				if got != tt.resolved {
+					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
+				}
+				return
+			}
+			if !strings.HasPrefix(got, tt.resolved) {
+				t.Errorf("expected resolved form preserved as prefix, got %q", got)
+			}
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("expected %q injected into %q, got %q", tt.want, tt.resolved, got)
+			}
+			// Exactly one agent's flags: claude's and codex's must never
+			// both appear.
+			if strings.Contains(got, "--plugin-dir") && strings.Contains(got, "developer_instructions=") {
+				t.Errorf("both agents' flags injected: %q", got)
+			}
+		})
 	}
 }
 

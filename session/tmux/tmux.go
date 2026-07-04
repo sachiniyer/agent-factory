@@ -211,6 +211,14 @@ func (t *TmuxSession) SetProgram(program string) {
 	t.program = program
 }
 
+// Program returns the command this session's pane runs — after SetProgram,
+// the override-resolved, flag-injected string. This is the ground truth for
+// agent detection (DetectAgentFromCommand): what actually runs in the pane,
+// as opposed to the config-name enum the instance was created with (#1116).
+func (t *TmuxSession) Program() string {
+	return t.program
+}
+
 // NewSiblingSession builds a second TmuxSession in the same worktree that
 // shares this session's PTY factory and command executor. Used for the #930
 // per-tab sessions (e.g. an instance's shell tab alongside its agent tab):
@@ -261,7 +269,11 @@ func (t *TmuxSession) Start(workDir string) error {
 		select {
 		case <-timeout:
 			ptmx.Close()
-			timeoutErr := fmt.Errorf("timed out waiting for tmux session %s", t.sanitizedName)
+			// The pane program exiting instantly (bad path, rejected flag)
+			// takes the whole tmux session down before this existence poll
+			// ever sees it — name the likely cause and the exact command so
+			// the user isn't left with a bare timeout (#1116, #1131).
+			timeoutErr := fmt.Errorf("timed out waiting for tmux session %s; the pane program may have exited immediately after launch — check that it runs and accepts its flags (program: %q)", t.sanitizedName, t.program)
 			if cleanupErr := t.Close(); cleanupErr != nil {
 				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
 			}
@@ -292,8 +304,16 @@ func (t *TmuxSession) Start(workDir string) error {
 	// session here surfaces as an error rather than recursively re-spawning.
 	err = t.Restore("")
 	if err != nil {
+		// Probe BEFORE Close (which kills the session): the existence poll
+		// above saw the session, so if it is gone again by attach time the
+		// pane program exited within milliseconds of launch. Say so instead
+		// of the misleading "session does not exist" (#1116, #1131).
+		vanished := !t.DoesSessionExist()
 		if cleanupErr := t.Close(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+		}
+		if vanished {
+			return fmt.Errorf("tmux session %s vanished before attach; the pane program likely exited immediately after launch — check that it runs and accepts its flags (program: %q): %w", t.sanitizedName, t.program, err)
 		}
 		return fmt.Errorf("error restoring tmux session: %w", err)
 	}
@@ -309,7 +329,10 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		return false
 	}
 
-	if strings.Contains(t.program, ProgramClaude) {
+	// Key off the agent actually running in the pane, token-matched — a loose
+	// substring check would route e.g. /opt/claude-wrapper/run through the
+	// claude branch (#1116 defect class).
+	if DetectAgentFromCommand(t.program) == ProgramClaude {
 		if strings.Contains(content, "Do you trust the files in this folder?") ||
 			strings.Contains(content, "new MCP server") {
 			if err := t.TapEnter(); err != nil {
@@ -678,12 +701,15 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 		return false, false
 	}
 
-	// Only set hasPrompt for claude and aider. Use these strings to check for a prompt.
-	if strings.Contains(t.program, ProgramClaude) {
+	// Only set hasPrompt for agents with a known confirmation dialog, keyed
+	// off the agent actually running in the pane (a non-agent override or a
+	// substring-matching path must not get an agent's prompt heuristic).
+	switch DetectAgentFromCommand(t.program) {
+	case ProgramClaude:
 		hasPrompt = strings.Contains(content, "No, and tell Claude what to do differently")
-	} else if strings.Contains(t.program, ProgramAider) {
+	case ProgramAider:
 		hasPrompt = strings.Contains(content, "(Y)es/(N)o/(D)on't ask again")
-	} else if strings.Contains(t.program, ProgramGemini) {
+	case ProgramGemini:
 		hasPrompt = strings.Contains(content, "Yes, allow once")
 	}
 

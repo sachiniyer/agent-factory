@@ -4,50 +4,23 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-// DetectAgentFromProgram is the normalization seam that lets restored sessions
-// with legacy free-form Program values keep their agent-specific flags (#677).
-// It must recover the canonical agent for paths and path-plus-flags, leave the
-// bare enum untouched, and — critically — return unknown programs unchanged so
-// no agent flags leak into a non-agent session.
-func TestDetectAgentFromProgram(t *testing.T) {
-	tests := []struct {
-		name    string
-		program string
-		want    string
-	}{
-		{"bare claude enum", "claude", tmux.ProgramClaude},
-		{"bare codex enum", "codex", tmux.ProgramCodex},
-		{"bare aider enum", "aider", tmux.ProgramAider},
-		{"bare gemini enum", "gemini", tmux.ProgramGemini},
-		{"legacy claude path", "/home/foo/bin/claude", tmux.ProgramClaude},
-		{"legacy claude path with flags", "/home/foo/bin/claude --plugin-dir x", tmux.ProgramClaude},
-		{"legacy codex path", "/usr/local/bin/codex", tmux.ProgramCodex},
-		{"unknown tool path unchanged", "/usr/bin/some-other-tool", "/usr/bin/some-other-tool"},
-		{"unknown tool with flags unchanged", "/usr/bin/some-other-tool --foo", "/usr/bin/some-other-tool --foo"},
-		{"empty unchanged", "", ""},
-		{"substring-but-not-base unchanged", "/opt/claude-wrapper/run", "/opt/claude-wrapper/run"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := DetectAgentFromProgram(tt.program); got != tt.want {
-				t.Errorf("DetectAgentFromProgram(%q) = %q, want %q", tt.program, got, tt.want)
-			}
-		})
-	}
-}
+// Legacy free-form Program values (persisted by pre-#659 binaries: absolute
+// paths, optionally with flags) must keep their agent-specific flags on
+// restore (#677). With no program_overrides entry for them, the free-form
+// value resolves to itself, so the resolved-command detection (#1116) must
+// recover the agent from those shapes too.
 
 // Regression for #677: a restored Claude session whose persisted Program is a
 // legacy absolute path must still receive --plugin-dir, or /af-* slash commands
 // silently vanish after upgrade.
 func TestInjectSystemPrompt_LegacyClaudePath(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", dir)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	legacyPath := "/home/foo/bin/claude"
-	result := injectSystemPrompt(legacyPath, legacyPath, "legacy-session", dir)
+	result := injectSystemPrompt("/home/foo/bin/claude")
 
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir for legacy claude path, got %q", result)
@@ -57,9 +30,7 @@ func TestInjectSystemPrompt_LegacyClaudePath(t *testing.T) {
 // Companion to the Claude case: legacy Codex paths must still receive the
 // developer_instructions flag.
 func TestInjectSystemPrompt_LegacyCodexPath(t *testing.T) {
-	dir := t.TempDir()
-	legacyPath := "/usr/local/bin/codex"
-	result := injectSystemPrompt(legacyPath, legacyPath, "legacy-codex", dir)
+	result := injectSystemPrompt("/usr/local/bin/codex")
 
 	if !strings.Contains(result, "developer_instructions=") {
 		t.Errorf("expected developer_instructions for legacy codex path, got %q", result)
@@ -70,11 +41,10 @@ func TestInjectSystemPrompt_LegacyCodexPath(t *testing.T) {
 // injection — we must never append Claude/Codex flags to a session we don't
 // recognize.
 func TestInjectSystemPrompt_UnknownProgramNoInjection(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", dir)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	program := "/usr/bin/some-other-tool"
-	result := injectSystemPrompt(program, program, "mystery-session", dir)
+	result := injectSystemPrompt(program)
 
 	if result != program {
 		t.Errorf("expected unknown program left unchanged, got %q", result)
@@ -84,10 +54,9 @@ func TestInjectSystemPrompt_UnknownProgramNoInjection(t *testing.T) {
 // Regression guard: the bare enum value (what current binaries persist) must
 // keep working exactly as before the normalization seam was added.
 func TestInjectSystemPrompt_BareEnumStillInjects(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", dir)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	result := injectSystemPrompt(tmux.ProgramClaude, "claude", "enum-session", dir)
+	result := injectSystemPrompt("claude")
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir for bare claude enum, got %q", result)
 	}
@@ -153,5 +122,59 @@ func TestResolveProgramForInstance_UnknownAutoYesNoFlag(t *testing.T) {
 	result := resolveProgramForInstance(i)
 	if strings.Contains(result, "bypassPermissions") {
 		t.Errorf("expected no bypassPermissions for unknown program, got %q", result)
+	}
+}
+
+// saveOverrideConfig writes a global config whose program_overrides redirect
+// the claude enum to the given command, so resolveProgramForInstance exercises
+// the real override-resolution path (instance path outside any git repo →
+// global config applies).
+func saveOverrideConfig(t *testing.T, claudeOverride string) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: claudeOverride}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+}
+
+// Regression for #1116/#1131: an AutoYes instance whose claude enum is
+// overridden to a NON-claude command must not get the claude-only
+// --permission-mode flag — the resolved program would exit on the unknown
+// option and the spawn would die as an opaque timeout.
+func TestResolveProgramForInstance_OverrideToNonAgentNoAutoYesFlag(t *testing.T) {
+	saveOverrideConfig(t, "bash")
+
+	i := &Instance{
+		Title:   "cheap-instance",
+		Program: tmux.ProgramClaude,
+		Path:    t.TempDir(),
+		AutoYes: true,
+	}
+	result := resolveProgramForInstance(i)
+	if result != "bash" {
+		t.Errorf("expected override resolved to bare %q with no injected flags, got %q", "bash", result)
+	}
+}
+
+// Companion: an override that still runs claude (custom path + flags) must
+// keep the AutoYes flag — keying off the resolved command must not LOSE
+// flags for claude-compatible overrides.
+func TestResolveProgramForInstance_OverrideToClaudePathKeepsAutoYesFlag(t *testing.T) {
+	saveOverrideConfig(t, "/opt/claude-next/bin/claude --model opus")
+
+	i := &Instance{
+		Title:   "custom-claude",
+		Program: tmux.ProgramClaude,
+		Path:    t.TempDir(),
+		AutoYes: true,
+	}
+	result := resolveProgramForInstance(i)
+	if !strings.HasPrefix(result, "/opt/claude-next/bin/claude --model opus") {
+		t.Errorf("expected override preserved as prefix, got %q", result)
+	}
+	if !strings.Contains(result, "--permission-mode bypassPermissions") {
+		t.Errorf("expected AutoYes flag for claude-running override, got %q", result)
 	}
 }

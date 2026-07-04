@@ -17,11 +17,11 @@ import (
 // bare agent name. The overrides come from the repo-resolved config (global
 // program_overrides merged with the repo's .agent-factory/config.json) when
 // the instance path belongs to a git repo; outside a repo, or when repo
-// resolution fails, the global config alone applies. When AutoYes is set on a
-// claude instance, the --permission-mode bypassPermissions flag is appended
-// to the resolved command — claude needs the flag at exec time, and
-// Instance.Program now holds only the bare enum so the append can no longer
-// happen in main.go. A nil cfg (e.g. tests that don't materialize a config)
+// resolution fails, the global config alone applies. When AutoYes is set and
+// the RESOLVED command actually runs claude, the --permission-mode
+// bypassPermissions flag is appended to it — claude needs the flag at exec
+// time, and Instance.Program now holds only the bare enum so the append can
+// no longer happen in main.go. A nil cfg (e.g. tests that don't materialize a config)
 // falls back to the raw Program string so legacy free-form values still
 // reach tmux verbatim.
 func resolveProgramForInstance(i *Instance) string {
@@ -42,7 +42,10 @@ func resolveProgramForInstance(i *Instance) string {
 		cfg = loaded
 	}
 	resolved := config.ResolveProgram(cfg, i.Program)
-	if i.AutoYes && DetectAgentFromProgram(i.Program) == tmux.ProgramClaude &&
+	// Key the claude-only flag off the agent the RESOLVED command actually
+	// runs, not the config-name enum: an override may point "claude" at a
+	// different program, which would exit on the unknown flag (#1116).
+	if i.AutoYes && tmux.DetectAgentFromCommand(resolved) == tmux.ProgramClaude &&
 		// Sessions persisted by pre-#659 binaries got the flag appended at
 		// create-time in main.go (19c0dd9), so legacy Instance.Program values
 		// can already carry it; appending again duplicates the flag on every
@@ -189,7 +192,7 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		// Setting the program on the existing attach path is harmless:
 		// attach-session does not re-exec the program.
 		if workDir != "" {
-			tmuxSession.SetProgram(injectSystemPrompt(i.Program, resolveProgramForInstance(i), i.Title, workDir))
+			tmuxSession.SetProgram(injectSystemPrompt(resolveProgramForInstance(i)))
 		}
 		if err := tmuxSession.Restore(workDir); err != nil {
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
@@ -207,9 +210,7 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		}
 
 		// Inject Agent Factory instructions into the session.
-		tmuxSession.SetProgram(
-			injectSystemPrompt(i.Program, resolveProgramForInstance(i), i.Title, gw.GetWorktreePath()),
-		)
+		tmuxSession.SetProgram(injectSystemPrompt(resolveProgramForInstance(i)))
 
 		// Create new session
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {
@@ -549,12 +550,15 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	if !s || ts == nil {
 		return false
 	}
-	// Normalize so restored sessions with legacy free-form Program values
-	// (e.g. "/home/foo/bin/claude") still get trust-prompt auto-handling —
-	// same persisted-state class of regression as #677. Codex was added in
-	// #729: it was previously excluded here, so a codex trust/confirmation
-	// dialog was never dismissed even though isReadyContent could surface it.
-	switch DetectAgentFromProgram(i.Program) {
+	// Dispatch on the agent the pane actually runs (ResolvedAgent) so a
+	// program_overrides entry pointing an agent name at a non-agent binary
+	// never gets an agent's trust-prompt handling (#1116/#1131 defect class),
+	// while restored sessions with legacy free-form Program values (e.g.
+	// "/home/foo/bin/claude") still get it — same persisted-state class of
+	// regression as #677. Codex was added in #729: it was previously excluded
+	// here, so a codex trust/confirmation dialog was never dismissed even
+	// though isReadyContent could surface it.
+	switch i.ResolvedAgent() {
 	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini:
 		return ts.CheckAndHandleTrustPrompt()
 	}

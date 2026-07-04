@@ -24,12 +24,17 @@ var (
 // that downstream handlers know how to dismiss.
 //
 // The ready signals differ per agent, so callers resolve the canonical agent
-// name (session.DetectAgentFromProgram, which handles legacy free-form Program
-// paths) and pass it here. An empty or non-canonical agent falls through to
-// the Claude signals — the historical behavior before this became agent-aware
-// (#714). This is the single copy: the daemon reaches it via
-// task.StartAndSendPrompt (daemon imports task since #782 inverted the old
-// task→daemon dependency).
+// the pane actually runs (session.Instance.ResolvedAgent, which handles
+// program_overrides and legacy free-form Program values) and pass it here. An
+// empty agent means the resolved command runs no known agent — a
+// program_overrides entry pointing at a plain shell or arbitrary tool
+// (#1131) — so no agent's prompt glyph will ever appear; the generic signal
+// is any non-blank pane output (the process launched and rendered something;
+// WaitForReady separately fails fast if the session dies). This replaces the
+// pre-#1131 behavior of falling through to the Claude signals, which spun the
+// full 60s timeout for anything that never prints "❯". This is the single
+// copy: the daemon reaches it via task.StartAndSendPrompt (daemon imports
+// task since #782 inverted the old task→daemon dependency).
 func isReadyContent(content, agent string) bool {
 	switch agent {
 	case tmux.ProgramCodex:
@@ -53,14 +58,17 @@ func isReadyContent(content, agent string) bool {
 		// TODO(#714): replace with a confirmed gemini-specific ready string.
 		return strings.Contains(content, "╰") ||
 			isDocTrustPrompt(content)
-	default:
-		// claude and any unknown / legacy program (historical default).
+	case tmux.ProgramClaude:
 		if strings.Contains(content, "❯") ||
 			strings.Contains(content, "Do you trust") ||
 			strings.Contains(content, "new MCP server") {
 			return true
 		}
 		return isDocTrustPrompt(content)
+	default:
+		// No known agent in the resolved command (#1131): generic readiness —
+		// the pane rendered any non-blank output.
+		return strings.TrimSpace(content) != ""
 	}
 }
 
@@ -76,9 +84,12 @@ func isDocTrustPrompt(content string) bool {
 // input prompt or trust prompt, or times out after 60 seconds.
 func WaitForReady(instance *session.Instance) error {
 	// Resolve the canonical agent once so isReadyContent matches the right
-	// per-agent prompt signals; legacy free-form Program values normalize via
-	// DetectAgentFromProgram and unknown values fall through to claude (#714).
-	agent := session.DetectAgentFromProgram(instance.Program)
+	// per-agent prompt signals (#714). ResolvedAgent detects the agent from
+	// the command the pane actually runs — not the config-name enum — so a
+	// program_overrides entry pointing at a different program gets that
+	// program's readiness heuristic, and a non-agent override gets the
+	// generic one instead of waiting 60s for a claude glyph (#1116, #1131).
+	agent := instance.ResolvedAgent()
 	timeout := time.After(waitForReadyTimeout)
 	ticker := time.NewTicker(waitForReadyPollInterval)
 	defer ticker.Stop()

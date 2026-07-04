@@ -1117,6 +1117,31 @@ func (i *Instance) TmuxAlive() bool {
 	return i.backend.IsAlive(i)
 }
 
+// ResolvedAgent returns the canonical agent (one of tmux.SupportedPrograms)
+// this instance's pane will actually run, or "" when the resolved command
+// runs no known agent — e.g. a program_overrides entry pointing an agent name
+// at a plain shell (#1131). Agent-specific behavior (readiness heuristics,
+// trust-prompt handling, flag injection) must key off this, never off
+// Instance.Program: Program is the config-name enum the instance was created
+// with, and an override may point it at a different program entirely (#1116).
+//
+// Once the tmux session exists, its program string (override-resolved and
+// flag-injected by Start) is the ground truth. Before Start — or in tests
+// that never attach a tmux session — detection falls back to the raw Program
+// value, which also covers legacy free-form persisted values like
+// "/home/foo/bin/claude --plugin-dir x" (#677).
+func (i *Instance) ResolvedAgent() string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts != nil {
+		if p := ts.Program(); strings.TrimSpace(p) != "" {
+			return tmux.DetectAgentFromCommand(p)
+		}
+	}
+	return tmux.DetectAgentFromCommand(i.Program)
+}
+
 // GetPRInfo returns the associated GitHub PR info, or nil if none.
 func (i *Instance) GetPRInfo() *git.PRInfo {
 	i.mu.RLock()

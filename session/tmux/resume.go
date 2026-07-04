@@ -36,25 +36,7 @@ import (
 // exists in cwd, so the rewrite is safe to apply unconditionally.
 func resumeProgram(program string) string {
 	tokens, ends := splitShellTokens(program)
-	if len(tokens) == 0 {
-		return program
-	}
-
-	agentIdx := -1
-	var agent string
-	for i, tok := range tokens {
-		base := strings.ToLower(filepath.Base(tok))
-		for _, supported := range SupportedPrograms {
-			if base == supported {
-				agentIdx = i
-				agent = supported
-				break
-			}
-		}
-		if agentIdx >= 0 {
-			break
-		}
-	}
+	agentIdx, agent := findAgentToken(tokens)
 	if agentIdx < 0 {
 		return program
 	}
@@ -117,6 +99,42 @@ func resumeProgram(program string) string {
 		return program + " --resume latest"
 	}
 	return program
+}
+
+// DetectAgentFromCommand returns the canonical agent name (one of
+// SupportedPrograms) that a resolved command string will actually run, or ""
+// when no agent token is present — e.g. a program_overrides entry that points
+// an agent name at a plain shell or an arbitrary tool (#1116, #1131).
+//
+// Every agent-specific spawn/restore behavior (flag injection, readiness
+// heuristics, trust-prompt handling) must key off THIS — what will actually
+// run — never off the config-name enum an instance was created with: the two
+// diverge exactly when program_overrides redirects an agent name, and keying
+// off the name injects flags the real program rejects (it exits instantly and
+// the spawn surfaces as an opaque timeout).
+//
+// The scan mirrors resumeProgram's: every shell token is checked, so wrapper
+// prefixes like `ionice -c 3 claude` still match (#742), and a token counts
+// only when filepath.Base equals a SupportedPrograms entry verbatim — a path
+// like /opt/claude-wrapper/run never matches on substring.
+func DetectAgentFromCommand(command string) string {
+	tokens, _ := splitShellTokens(command)
+	_, agent := findAgentToken(tokens)
+	return agent
+}
+
+// findAgentToken returns the index and canonical name of the first token whose
+// filepath.Base equals a SupportedPrograms entry, or (-1, "") when none does.
+func findAgentToken(tokens []string) (int, string) {
+	for i, tok := range tokens {
+		base := strings.ToLower(filepath.Base(tok))
+		for _, supported := range SupportedPrograms {
+			if base == supported {
+				return i, supported
+			}
+		}
+	}
+	return -1, ""
 }
 
 // isShortResumeWithAttachedValue reports whether tok is the POSIX

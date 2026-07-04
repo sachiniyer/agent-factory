@@ -17,19 +17,12 @@ mkdir -p "$AGENT_FACTORY_HOME" "$HOME/bin"
 echo ">>> building af from /src ..."
 (cd /src && go build -o "$HOME/bin/af" .)
 
-# Cheap instances: run a plain shell instead of a real agent. The override
-# must be a wrapper, not bare "bash": af appends claude-specific flags
-# (--plugin-dir ...) to whatever the claude program resolves to, and bash
-# exits instantly on the unknown option — the session then dies before the
-# existence poll sees it ("timed out waiting for tmux session").
-cat >"$HOME/bin/fake-agent" <<'EOF'
-#!/bin/bash
-# Swallow the agent flags af appends (--plugin-dir ...) and run a shell.
-exec bash
-EOF
-chmod +x "$HOME/bin/fake-agent"
+# Cheap instances: run a plain shell instead of a real agent. Since
+# #1116/#1131 af keys flag injection and readiness off the program the
+# override actually runs, so bare "bash" gets no claude flags appended and
+# counts as ready once the pane shows output — no wrapper needed.
 cat >"$AGENT_FACTORY_HOME/config.json" <<EOF
-{ "default_program": "claude", "program_overrides": { "claude": "$HOME/bin/fake-agent" } }
+{ "default_program": "claude", "program_overrides": { "claude": "bash" } }
 EOF
 
 # Mock project repo — small but real, so worktrees/diffs have something to
