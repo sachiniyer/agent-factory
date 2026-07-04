@@ -35,6 +35,11 @@ import (
 //   - ≥5 non-zero exits within 10 minutes = crash loop (status "errored",
 //     restarts stop until the next reload)
 //   - events above 10/min per task are dropped with a logged warning
+//   - a failed delivery queues the event durably and a stop-aware drainer
+//     replays the backlog in order — before newer live events — once
+//     deliveries succeed again, rate-limited by the same 10/min window;
+//     the backlog is bounded (oldest dropped past 500 events / 256KB, with
+//     a logged count) and survives daemon restarts (#1129)
 //   - each run buffers its recent output (last 10 lines / 2KB: stdout lines
 //     that did not become delivered events, plus stderr). Non-zero exits log
 //     that tail, and the crash-loop breaker persists "errored: <exit>:
@@ -67,6 +72,14 @@ const (
 	// breaker persists into the task's last_run_status, so tasks.json and
 	// the TUI detail row stay readable.
 	watcherStatusSummaryMax = 256
+
+	// watcherDrainBaseBackoff/watcherDrainMaxBackoff pace the event-queue
+	// drainer's retries after a failed replay delivery (#1129): 10s doubling
+	// to 5m, then settling at the 5m cadence for as long as the failure
+	// persists — the #1128 never-give-up discipline, because an outage is
+	// indistinguishable from a broken target while it lasts.
+	watcherDrainBaseBackoff = 10 * time.Second
+	watcherDrainMaxBackoff  = 5 * time.Minute
 )
 
 // truncateRunes returns s limited to at most maxBytes bytes, cut on a UTF-8
@@ -96,36 +109,43 @@ type watcherSupervisor struct {
 	watchers map[string]*taskWatcher // task ID → supervised watcher
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
-	// deliver observes events without spawning sessions, and setStatus
-	// observes lifecycle statuses without a task store.
+	// deliver observes events without spawning sessions, setStatus observes
+	// lifecycle statuses without a task store, and queueDir redirects the
+	// durable event queues to a scratch directory.
 	loadTasks func() ([]task.Task, error)
 	deliver   func(taskID, line string) error
 	setStatus func(taskID, status string)
 	logPath   func(taskID string) (string, error)
+	queueDir  func() (string, error)
 
-	shell           string
-	baseBackoff     time.Duration
-	maxBackoff      time.Duration
-	crashWindow     time.Duration
-	crashMaxExits   int
-	eventsPerMinute int
-	stopGrace       time.Duration
+	shell            string
+	baseBackoff      time.Duration
+	maxBackoff       time.Duration
+	crashWindow      time.Duration
+	crashMaxExits    int
+	eventsPerMinute  int
+	stopGrace        time.Duration
+	drainBaseBackoff time.Duration
+	drainMaxBackoff  time.Duration
 }
 
 func newWatcherSupervisor() *watcherSupervisor {
 	return &watcherSupervisor{
-		watchers:        make(map[string]*taskWatcher),
-		loadTasks:       task.LoadTasks,
-		deliver:         deliverWatchEvent,
-		setStatus:       persistWatcherStatus,
-		logPath:         watcherLogPath,
-		shell:           watcherShell(),
-		baseBackoff:     watcherBaseBackoff,
-		maxBackoff:      watcherMaxBackoff,
-		crashWindow:     watcherCrashWindow,
-		crashMaxExits:   watcherCrashMaxExits,
-		eventsPerMinute: watcherEventsPerMinute,
-		stopGrace:       watcherStopGrace,
+		watchers:         make(map[string]*taskWatcher),
+		loadTasks:        task.LoadTasks,
+		deliver:          deliverWatchEvent,
+		setStatus:        persistWatcherStatus,
+		logPath:          watcherLogPath,
+		queueDir:         eventQueueDir,
+		shell:            watcherShell(),
+		baseBackoff:      watcherBaseBackoff,
+		maxBackoff:       watcherMaxBackoff,
+		crashWindow:      watcherCrashWindow,
+		crashMaxExits:    watcherCrashMaxExits,
+		eventsPerMinute:  watcherEventsPerMinute,
+		stopGrace:        watcherStopGrace,
+		drainBaseBackoff: watcherDrainBaseBackoff,
+		drainMaxBackoff:  watcherDrainMaxBackoff,
 	}
 }
 
@@ -182,7 +202,43 @@ func (s *watcherSupervisor) Reload() error {
 		s.watchers[id] = w
 		go w.run()
 	}
+
+	// Queue files for tasks that no longer exist at all are removed — a
+	// deleted task's backlog must not replay into a recreated namesake. A
+	// merely-disabled task keeps its backlog for re-enable (#1129). Runs after
+	// stopWatchers so no stale drainer is mid-replay on a file being removed.
+	s.cleanOrphanQueues(tasks)
 	return nil
+}
+
+// cleanOrphanQueues removes event-queue files whose task ID is absent from
+// tasks.json entirely.
+func (s *watcherSupervisor) cleanOrphanQueues(tasks []task.Task) {
+	dir, err := s.queueDir()
+	if err != nil {
+		return
+	}
+	known := make(map[string]struct{}, len(tasks))
+	for _, t := range tasks {
+		known[t.ID] = struct{}{}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		id := strings.TrimSuffix(strings.TrimSuffix(name, ".jsonl"), ".cursor")
+		if id == name { // neither suffix matched
+			continue
+		}
+		if _, ok := known[id]; ok {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+			log.WarningLog.Printf("failed to remove orphan event-queue file %s: %v", name, err)
+		}
+	}
 }
 
 // Stop terminates every watcher: SIGTERM to each process group, group SIGKILL
@@ -227,7 +283,7 @@ func (s *watcherSupervisor) droppedEvents(taskID string) int {
 }
 
 func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
-	return &taskWatcher{
+	w := &taskWatcher{
 		taskID: t.ID,
 		name:   t.Name,
 		cmdStr: t.WatchCmd,
@@ -237,6 +293,15 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
 	}
+	// Recover any backlog a previous watcher/daemon left behind (#1129); the
+	// run loop starts the drainer if the queue is non-empty. A queue-dir
+	// failure disables durability, never the watcher itself.
+	if dir, err := s.queueDir(); err != nil {
+		log.WarningLog.Printf("watch task %s: event queue unavailable (failed deliveries will be dropped): %v", t.ID, err)
+	} else {
+		w.queue = newEventQueue(dir, t.ID)
+	}
+	return w
 }
 
 // watcherSignature captures the fields that define the watch process itself;
@@ -341,20 +406,35 @@ type taskWatcher struct {
 
 	sup *watcherSupervisor
 
+	// queue is the task's durable event backlog (#1129); nil when the queue
+	// directory is unavailable, in which case failed deliveries fall back to
+	// the pre-queue drop-with-log behavior.
+	queue *eventQueue
+
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	doneCh   chan struct{}
+	// wg counts the drainer goroutine so stop() can join it; drainers spawn
+	// lazily via ensureDrainer.
+	wg sync.WaitGroup
 
 	mu          sync.Mutex
 	dropped     int
 	eventTimes  []time.Time
 	lastDropLog time.Time
+	// draining marks a live drainLoop goroutine, so at most one drains the
+	// queue at a time and replay order is preserved.
+	draining bool
 }
 
-// stop requests termination and blocks until the run goroutine returns.
+// stop requests termination and blocks until the run goroutine returns. The
+// drainer is joined too: Reload starts a replacement watcher for the same task
+// only after stop returns, so two drainers can never interleave one task's
+// replay.
 func (w *taskWatcher) stop() {
 	w.stopOnce.Do(func() { close(w.stopCh) })
 	<-w.doneCh
+	w.wg.Wait()
 }
 
 func (w *taskWatcher) finished() bool {
@@ -380,6 +460,13 @@ func (w *taskWatcher) stopRequested() bool {
 // crash loop ("errored").
 func (w *taskWatcher) run() {
 	defer close(w.doneCh)
+
+	// A backlog recovered from disk (daemon restart, reload, or a prior
+	// crash-looped run) starts replaying immediately, independent of the
+	// script's own lifecycle (#1129).
+	if w.queue != nil && w.queue.pendingCount() > 0 {
+		w.ensureDrainer()
+	}
 
 	backoff := w.sup.baseBackoff
 	var failures []time.Time
@@ -693,19 +780,26 @@ func (w *taskWatcher) consumeStderr(r io.Reader, logFile io.Writer, tail *tailBu
 	}
 }
 
-// handleEvent applies the per-task rate limit and delivers the event. Called
-// from the single reader goroutine, so deliveries stay serialized in order.
-// Lines that do not become a delivered event — rate-dropped or failed
-// deliveries — go to the failure tail instead (#797).
+// handleEvent routes one stdout line: with a backlog pending it is queued
+// behind it (delivering directly would reorder the stream, #1129); otherwise
+// it is rate-limited and delivered synchronously exactly as before, with a
+// failed delivery queued for replay instead of dropped. Called from the single
+// reader goroutine, so direct deliveries stay serialized in order. Lines that
+// do not become a delivered event this run — rate-dropped, failed, or queued —
+// go to the failure tail (#797).
 func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
-	now := time.Now()
-	w.mu.Lock()
-	cut := 0
-	for cut < len(w.eventTimes) && now.Sub(w.eventTimes[cut]) >= time.Minute {
-		cut++
+	// FIFO gating: once a backlog exists, every newer event goes through the
+	// queue until it drains. Backlogged enqueues bypass the rate limiter —
+	// the limiter gates deliveries to the target (the drainer reserves a slot
+	// per replayed event); the queue's own count/byte caps bound the backlog.
+	if w.queue != nil && w.queue.pendingCount() > 0 {
+		w.enqueueEvent(line, tail)
+		return
 	}
-	w.eventTimes = w.eventTimes[cut:]
-	if len(w.eventTimes) >= w.sup.eventsPerMinute {
+
+	if !w.tryReserveEventSlot() {
+		now := time.Now()
+		w.mu.Lock()
 		w.dropped++
 		dropped := w.dropped
 		logIt := now.Sub(w.lastDropLog) >= time.Minute
@@ -715,18 +809,157 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		w.mu.Unlock()
 		// One warning per window, not per drop — a flooding script must not
 		// also flood the daemon log. The counter keeps the exact total.
+		// Rate-dropped events are deliberately NOT queued: the limiter is
+		// protective policy against a chatty script, not an outage signal.
 		if logIt {
 			log.WarningLog.Printf("watch task %s: event rate exceeded %d/min; dropping excess events (%d dropped so far)", w.taskID, w.sup.eventsPerMinute, dropped)
 		}
 		tail.add(line)
 		return
 	}
-	w.eventTimes = append(w.eventTimes, now)
-	w.mu.Unlock()
 
 	if err := w.sup.deliver(w.taskID, line); err != nil {
 		log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
-		tail.add(line)
+		w.enqueueEvent(line, tail)
+	}
+}
+
+// tryReserveEventSlot applies the per-task delivery rate limit: prune the
+// sliding window, then reserve one slot if the window has room. Live
+// deliveries and the drainer's replays reserve through the same window, so
+// combined delivery pressure on the target session never exceeds
+// eventsPerMinute — a burst replay after an outage trickles in.
+func (w *taskWatcher) tryReserveEventSlot() bool {
+	now := time.Now()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cut := 0
+	for cut < len(w.eventTimes) && now.Sub(w.eventTimes[cut]) >= time.Minute {
+		cut++
+	}
+	w.eventTimes = w.eventTimes[cut:]
+	if len(w.eventTimes) >= w.sup.eventsPerMinute {
+		return false
+	}
+	w.eventTimes = append(w.eventTimes, now)
+	return true
+}
+
+// enqueueEvent appends the line to the durable backlog and wakes the drainer.
+// The line also lands in the run's failure tail — it did not become a
+// delivered event this run (#797). When the queue is unavailable or the append
+// fails, this degrades to the pre-#1129 behavior: logged and dropped.
+func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer) {
+	tail.add(line)
+	if w.queue == nil {
+		return
+	}
+	if err := w.queue.enqueue(line); err != nil {
+		log.ErrorLog.Printf("watch task %s: failed to queue event for replay; dropping it: %v", w.taskID, err)
+		return
+	}
+	w.ensureDrainer()
+}
+
+// ensureDrainer starts the drain goroutine unless one is live or a stop is in
+// flight. Callers: enqueueEvent (an event just queued) and run (a backlog
+// recovered from disk).
+func (w *taskWatcher) ensureDrainer() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.draining || w.stopRequested() {
+		return
+	}
+	w.draining = true
+	w.wg.Add(1)
+	go w.drainLoop()
+}
+
+// stopDraining clears the draining flag so a later enqueue can start a fresh
+// drainer.
+func (w *taskWatcher) stopDraining() {
+	w.mu.Lock()
+	w.draining = false
+	w.mu.Unlock()
+}
+
+// sleepStopAware waits d, or returns false immediately when a stop arrives —
+// the drainer must never be the thing a stop/reload waits on (the same
+// stop-awareness discipline as the run loop's backoff waits).
+func (w *taskWatcher) sleepStopAware(d time.Duration) bool {
+	select {
+	case <-w.stopCh:
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// drainLoop replays the backlog oldest-first through the same deliver hook as
+// live events. Strictly FIFO: live events enqueue behind the backlog (see
+// handleEvent), so emission order survives an outage. Every wait is
+// stop-aware; a failed replay backs off drainBaseBackoff→drainMaxBackoff and
+// then holds that cadence for as long as the failure persists — never a
+// permanent give-up (#1128 discipline), because an outage is indistinguishable
+// from a broken target while it lasts. A corrupt queue parks the replay with
+// an ERROR rather than guessing at record boundaries.
+func (w *taskWatcher) drainLoop() {
+	defer w.wg.Done()
+	backoff := w.sup.drainBaseBackoff
+	replayed := 0
+	for {
+		if w.stopRequested() {
+			w.stopDraining()
+			return
+		}
+		ev, n, ok, err := w.queue.peek()
+		if err != nil {
+			log.ErrorLog.Printf("watch task %s: cannot read queued event; replay parked until the next reload: %v", w.taskID, err)
+			w.stopDraining()
+			return
+		}
+		if !ok {
+			if replayed > 0 {
+				log.InfoLog.Printf("watch task %s: replayed %d queued event(s)", w.taskID, replayed)
+			}
+			w.stopDraining()
+			// Close the wake-up race: an event enqueued after the empty peek
+			// but before draining cleared would otherwise strand until the
+			// next enqueue. Our wg slot is still held, so the re-spawn's Add
+			// can never race a stop's Wait.
+			if w.queue.pendingCount() > 0 {
+				w.ensureDrainer()
+			}
+			return
+		}
+		if !w.tryReserveEventSlot() {
+			// The shared rate window is full (live deliveries count too);
+			// wait for it to roll, stop-aware.
+			if !w.sleepStopAware(w.sup.drainBaseBackoff) {
+				w.stopDraining()
+				return
+			}
+			continue
+		}
+		if err := w.sup.deliver(w.taskID, ev.Line); err != nil {
+			log.WarningLog.Printf("watch task %s: replay delivery failed (%d event(s) pending); retrying in %s: %v", w.taskID, w.queue.pendingCount(), backoff, err)
+			if !w.sleepStopAware(backoff) {
+				w.stopDraining()
+				return
+			}
+			backoff *= 2
+			if backoff > w.sup.drainMaxBackoff {
+				backoff = w.sup.drainMaxBackoff
+			}
+			continue
+		}
+		if err := w.queue.advance(n); err != nil {
+			log.ErrorLog.Printf("watch task %s: failed to advance the event queue; replay parked until the next reload: %v", w.taskID, err)
+			w.stopDraining()
+			return
+		}
+		replayed++
+		backoff = w.sup.drainBaseBackoff
 	}
 }
 

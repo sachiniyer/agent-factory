@@ -65,6 +65,12 @@ func newTestSupervisor(t *testing.T, tasks func() ([]task.Task, error)) (*watche
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
 	}
+	// Every test gets a private queue directory (#1129): the default resolves
+	// under the real AF home, and drain retries must be test-fast.
+	queueDir := t.TempDir()
+	s.queueDir = func() (string, error) { return queueDir, nil }
+	s.drainBaseBackoff = 20 * time.Millisecond
+	s.drainMaxBackoff = 200 * time.Millisecond
 	s.shell = "sh"
 	s.baseBackoff = 40 * time.Millisecond
 	s.maxBackoff = time.Second
