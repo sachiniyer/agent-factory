@@ -202,6 +202,19 @@ Manage tasks that deliver a prompt to an agent automatically — on a cron
 schedule or whenever a watch script emits a stdout line. Full semantics live in
 [tasks.md](tasks.md). All subcommands accept `--repo <path>` and `--json`.
 
+Task operations are **daemon-owned**: the daemon is the single writer that hosts
+task scheduling, so the write commands (**`add`**, **`update`**, **`remove`**,
+**`trigger`**) go through it. `add` / `update` / `remove` persist the change and
+re-arm the daemon's schedules atomically — starting a daemon if none is running,
+since a task is not schedulable without one. `trigger` fires through the same
+in-daemon path the cron scheduler uses. The on-disk `tasks.json` format is
+unchanged.
+
+The read commands **`list`** and **`get`** reflect the daemon's authoritative
+task view when one is already running, and **never start a daemon**: with none
+running (a script, CI, or a fresh shell) they fall back to reading `tasks.json`
+off disk. Both sources return the same shape.
+
 ### `af tasks list`
 
 List tasks (filtered to `--repo` when given). Emits a JSON array of task objects
@@ -264,7 +277,9 @@ Setting one trigger clears the other so the exactly-one rule holds.
 
 ### `af tasks trigger <id>`
 
-Run a cron task immediately (cron tasks only). Emits `{"ok": true}`.
+Run a cron task immediately (cron tasks only) through the daemon's shared firing
+path — the same entrypoint the cron scheduler uses. Watch tasks and disabled
+tasks are refused. Emits `{"ok": true}`.
 
 ### `af tasks remove <id>`
 

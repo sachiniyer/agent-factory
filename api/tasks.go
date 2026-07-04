@@ -20,23 +20,49 @@ var TasksCmd = &cobra.Command{
 	Short: "Manage tasks",
 }
 
-// Indirected so tests can stub the daemon RPCs (reload poke, task run)
-// without dialing — or spawning — a real daemon.
+// Task operations are daemon-owned (#1029 PR 3): the daemon is the sole task
+// writer among clients and reloads its own scheduler/watchers in-process, so
+// there is no separate ReloadTasks poke. Writes (add/update/remove/trigger)
+// take the SPAWNING path (callDaemon/EnsureDaemon) — a task is not schedulable
+// without a running daemon. Reads (list/get) take the NON-SPAWNING path with a
+// disk fallback so a read-only command never launches a daemon (scripts, CI).
+// Held in vars so tests can inject the RPC client without dialing — or
+// spawning — a real daemon.
 var (
-	reloadDaemonTasks = daemon.ReloadTasks
-	runTask           = daemon.RunTask
+	daemonListTasksNoSpawn = daemon.ListTasksNoSpawn
+	daemonAddTask          = daemon.AddTask
+	daemonUpdateTask       = daemon.UpdateTask
+	daemonRemoveTask       = daemon.RemoveTask
+	daemonTriggerTask      = daemon.TriggerTask
 )
 
-// pokeDaemonTasksReload asks the daemon to re-read tasks.json so a CRUD
-// change takes effect immediately. Best-effort by design: the daemon reloads
-// the full task list at every start, so even if this poke fails the saved
-// change is picked up the next time the daemon comes up. That eventual
-// consistency is what removed the install/rollback complexity of the old
-// per-task timer model (#324, #457, #458, #762).
-func pokeDaemonTasksReload() {
-	if err := reloadDaemonTasks(); err != nil {
-		log.WarningLog.Printf("task change saved, but the daemon schedule reload failed (the change applies at next daemon start): %v", err)
+// listTasks returns the full task list, preferring the daemon's authoritative
+// snapshot and falling back to a disk read when no daemon is reachable (#1029
+// PR 3). It never spawns a daemon, so `af tasks list` keeps working with none
+// running. Both paths return the same shape (a JSON array of task.Task) so the
+// output is byte-identical regardless of source.
+func listTasks() ([]task.Task, error) {
+	if tasks, err := daemonListTasksNoSpawn(); err == nil {
+		return tasks, nil
 	}
+	return task.LoadTasks()
+}
+
+// getTaskByID returns the single task matching id, preferring the daemon's
+// authoritative snapshot and falling back to a disk read when no daemon is
+// reachable (#1029 PR 3). When a live snapshot is available the daemon is
+// authoritative: a miss returns not-found without re-reading disk. The
+// not-found message mirrors task.GetTask so output is unchanged.
+func getTaskByID(id string) (*task.Task, error) {
+	if tasks, err := daemonListTasksNoSpawn(); err == nil {
+		for i := range tasks {
+			if tasks[i].ID == id {
+				return &tasks[i], nil
+			}
+		}
+		return nil, fmt.Errorf("task with id %q not found", id)
+	}
+	return task.GetTask(id)
 }
 
 var tasksListCmd = &cobra.Command{
@@ -46,7 +72,7 @@ var tasksListCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
-		tasks, err := task.LoadTasks()
+		tasks, err := listTasks()
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to load tasks: %w", err))
 		}
@@ -149,11 +175,12 @@ var tasksAddCmd = &cobra.Command{
 			CreatedAt:     time.Now(),
 		}
 
-		if err := task.AddTask(s); err != nil {
+		// Route the write through the daemon: it owns scheduling and reloads its
+		// own scheduler/watchers in-process, so no separate reload poke is needed
+		// (#1029 PR 3). The on-disk tasks.json format is unchanged.
+		if err := daemonAddTask(s); err != nil {
 			return jsonError(fmt.Errorf("failed to add task: %w", err))
 		}
-
-		pokeDaemonTasksReload()
 
 		return jsonOut(map[string]any{"id": id})
 	},
@@ -171,11 +198,9 @@ var tasksRemoveCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		if err := task.RemoveTask(args[0]); err != nil {
+		if err := daemonRemoveTask(args[0]); err != nil {
 			return jsonError(fmt.Errorf("failed to remove task: %w", err))
 		}
-
-		pokeDaemonTasksReload()
 
 		return jsonOut(map[string]bool{"ok": true})
 	},
@@ -193,7 +218,7 @@ var tasksGetCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		s, err := task.GetTask(args[0])
+		s, err := getTaskByID(args[0])
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to get task: %w", err))
 		}
@@ -214,7 +239,10 @@ var tasksRunCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		if err := runTask(args[0]); err != nil {
+		// Fire through the daemon's shared RunTask firing path — the same
+		// entrypoint the cron scheduler uses — instead of the old in-process
+		// daemon.RunTask CLI call (#1029 PR 3 / #1169-class fix).
+		if err := daemonTriggerTask(args[0]); err != nil {
 			return jsonError(fmt.Errorf("failed to trigger task: %w", err))
 		}
 
@@ -329,11 +357,9 @@ var tasksUpdateCmd = &cobra.Command{
 			s.Program = taskUpdateProgramFlag
 		}
 
-		if err := task.UpdateTask(*s); err != nil {
+		if err := daemonUpdateTask(*s); err != nil {
 			return jsonError(fmt.Errorf("failed to update task: %w", err))
 		}
-
-		pokeDaemonTasksReload()
 
 		return jsonOut(s)
 	},

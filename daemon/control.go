@@ -270,6 +270,62 @@ type ReloadTasksResponse struct {
 	OK bool
 }
 
+// Task CRUD RPCs (#1029 PR 3). They promote task writes to the daemon so it is
+// the sole task writer among clients — exactly the model sessions already
+// follow — and the write and the scheduler/watcher refresh happen atomically
+// in-process (no separate ReloadTasks poke). The on-disk tasks.json format is
+// unchanged; the daemon reuses the same task.AddTask/UpdateTask/RemoveTask
+// (config.WithFileLock + saveTasks) that clients used to call directly.
+
+// ListTasksRequest asks the daemon for the full task list. There is
+// deliberately no repo filter: the daemon returns every repo's tasks and the
+// CLI applies its --repo filter, matching the disk-read fallback
+// (task.LoadTasks). It is the read side of the task single-writer model, mirror
+// of Snapshot for sessions.
+type ListTasksRequest struct{}
+type ListTasksResponse struct {
+	Tasks []task.Task
+}
+
+// AddTaskRequest carries a fully-populated task.Task to append. The CLI/TUI
+// still build and validate the struct (flag parsing, ID generation, program
+// resolution); the daemon re-validates via task.AddTask and owns the write.
+type AddTaskRequest struct {
+	Task task.Task
+}
+type AddTaskResponse struct {
+	OK bool
+}
+
+// UpdateTaskRequest carries the edited task.Task to persist. task.UpdateTask
+// preserves the scheduler-owned fields (LastRunAt/LastRunStatus/CreatedAt) from
+// the freshly-loaded record under the file lock, so a stale client copy never
+// clobbers them.
+type UpdateTaskRequest struct {
+	Task task.Task
+}
+type UpdateTaskResponse struct {
+	OK bool
+}
+
+type RemoveTaskRequest struct {
+	ID string
+}
+type RemoveTaskResponse struct {
+	OK bool
+}
+
+// TriggerTaskRequest asks the daemon to fire a task NOW through the same
+// RunTask firing path the in-daemon scheduler uses (#1029 PR 3 / #1169-class
+// fix). The handler preserves RunTask's guards: watch tasks and disabled tasks
+// are refused.
+type TriggerTaskRequest struct {
+	ID string
+}
+type TriggerTaskResponse struct {
+	OK bool
+}
+
 type ShutdownRequest struct{}
 type ShutdownResponse struct {
 	OK bool
@@ -552,6 +608,51 @@ func ReloadTasks() error {
 	return callDaemon("ReloadTasks", ReloadTasksRequest{}, &resp)
 }
 
+// ListTasksNoSpawn returns the daemon's authoritative task list WITHOUT
+// starting a daemon (#1029 PR 3). Like SnapshotNoSpawn it dials the existing
+// control socket only if it is already serving and returns ErrDaemonUnavailable
+// otherwise, so a read-only CLI command (tasks list/get) falls back to reading
+// tasks.json off disk rather than ever launching a daemon. Task reads do not
+// depend on the instance restore, so there is no warm-up starting-error window
+// to wait out here.
+func ListTasksNoSpawn() ([]task.Task, error) {
+	var resp ListTasksResponse
+	if err := callDaemonNoEnsure("ListTasks", ListTasksRequest{}, &resp); err != nil {
+		return nil, ErrDaemonUnavailable
+	}
+	return resp.Tasks, nil
+}
+
+// AddTask asks the daemon to append a task and re-arm its schedule set. Like
+// every callDaemon path it ensures the daemon is running first, so adding a task
+// also brings the scheduler up — a task is not schedulable without a running
+// daemon.
+func AddTask(t task.Task) error {
+	var resp AddTaskResponse
+	return callDaemon("AddTask", AddTaskRequest{Task: t}, &resp)
+}
+
+// UpdateTask asks the daemon to persist an edited task and re-arm its schedule.
+func UpdateTask(t task.Task) error {
+	var resp UpdateTaskResponse
+	return callDaemon("UpdateTask", UpdateTaskRequest{Task: t}, &resp)
+}
+
+// RemoveTask asks the daemon to delete a task and re-arm its schedule.
+func RemoveTask(id string) error {
+	var resp RemoveTaskResponse
+	return callDaemon("RemoveTask", RemoveTaskRequest{ID: id}, &resp)
+}
+
+// TriggerTask asks the daemon to fire a task now through the shared RunTask
+// firing path (the same entrypoint the in-daemon scheduler uses). Replaces the
+// old in-process daemon.RunTask CLI call so CLI, TUI, and scheduler triggers all
+// converge on one daemon-owned firing path (#1169-class fix).
+func TriggerTask(id string) error {
+	var resp TriggerTaskResponse
+	return callDaemon("TriggerTask", TriggerTaskRequest{ID: id}, &resp)
+}
+
 // ImportRemoteHookSessions asks the daemon to reconcile remote sessions
 // reported by list_cmd into persisted storage.
 func ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest) ([]session.InstanceData, error) {
@@ -768,17 +869,21 @@ func (s *controlServer) ResumeStatusPoll(req ResumeStatusPollRequest, resp *Resu
 	return nil
 }
 
-func (s *controlServer) ReloadTasks(_ ReloadTasksRequest, resp *ReloadTasksResponse) error {
+// reloadTaskSchedules re-arms the daemon's cron scheduler and watcher
+// supervisor from tasks.json. It is the shared refresh the ReloadTasks poke and
+// the task CRUD RPCs (Add/Update/RemoveTask) both invoke after a write, so the
+// write and its schedule refresh happen atomically in-daemon and no separate
+// ReloadTasks poke is needed for CRUD.
+//
+// During warm-up (#829) the scheduler and watcher supervisor have not started
+// yet; RunDaemon reloads both from tasks.json right after the restore completes,
+// so a change just written is picked up then. It returns nil (nothing to
+// reload) instead of erroring — the write is already durable.
+func (s *controlServer) reloadTaskSchedules() error {
 	if s.scheduler == nil {
 		return fmt.Errorf("this daemon does not host a task scheduler")
 	}
-	// During warm-up (#829) the scheduler and watcher supervisor have not
-	// started yet; RunDaemon reloads both from tasks.json right after the
-	// restore completes, so a change the caller just wrote is picked up then.
-	// Ack instead of erroring — the write is already durable and there is
-	// nothing running to reload.
 	if s.manager != nil && !s.manager.Ready() {
-		resp.OK = true
 		return nil
 	}
 	if err := s.scheduler.Reload(); err != nil {
@@ -791,6 +896,78 @@ func (s *controlServer) ReloadTasks(_ ReloadTasksRequest, resp *ReloadTasksRespo
 		if err := s.watchers.Reload(); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (s *controlServer) ReloadTasks(_ ReloadTasksRequest, resp *ReloadTasksResponse) error {
+	if err := s.reloadTaskSchedules(); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}
+
+// ListTasks returns the full task list read from tasks.json (#1029 PR 3).
+// Deliberately NOT gated on requireManagerReady: task state lives on disk,
+// independent of the instance restore, so a read is always safe and always
+// current even while the daemon is warming up.
+func (s *controlServer) ListTasks(_ ListTasksRequest, resp *ListTasksResponse) error {
+	tasks, err := task.LoadTasks()
+	if err != nil {
+		return err
+	}
+	resp.Tasks = tasks
+	return nil
+}
+
+// AddTask persists a new task and re-arms the schedule set (#1029 PR 3). The
+// write goes through task.AddTask (config.WithFileLock + saveTasks) — the same
+// path clients used to call directly — so the on-disk format is unchanged; the
+// difference is the daemon now owns it and refreshes its own scheduler/watchers
+// in the same call.
+func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error {
+	if err := task.AddTask(req.Task); err != nil {
+		return err
+	}
+	if err := s.reloadTaskSchedules(); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}
+
+func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskResponse) error {
+	if err := task.UpdateTask(req.Task); err != nil {
+		return err
+	}
+	if err := s.reloadTaskSchedules(); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}
+
+func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
+	if err := task.RemoveTask(req.ID); err != nil {
+		return err
+	}
+	if err := s.reloadTaskSchedules(); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}
+
+// TriggerTask fires a task NOW through the shared RunTask firing path — the same
+// entrypoint the in-daemon scheduler uses (#1029 PR 3). This unifies the CLI
+// `af tasks trigger`, the TUI run-now, and the cron scheduler on one
+// daemon-owned firing path, replacing the old in-process daemon.RunTask CLI call
+// (#1169-class fix). RunTask preserves the guards: watch tasks and disabled
+// tasks are refused.
+func (s *controlServer) TriggerTask(req TriggerTaskRequest, resp *TriggerTaskResponse) error {
+	if err := RunTask(req.ID); err != nil {
+		return err
 	}
 	resp.OK = true
 	return nil
