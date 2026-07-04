@@ -631,6 +631,11 @@ func (b *HookBackend) CheckAndHandleTrustPrompt(_ *Instance) bool {
 
 func (b *HookBackend) TapEnter(_ *Instance) {}
 
+// Recover is unsupported for remote sessions in v1 (#1108): a vanished remote
+// session is flagged Lost so it is visible, but reconnect semantics are a
+// design of their own — the restore loop skips remote instances.
+func (b *HookBackend) Recover(_ *Instance) error { return ErrRecoverUnsupported }
+
 // ListRemoteHookInstanceData converts running sessions reported by list_cmd
 // into persistable remote InstanceData records for the current repo.
 func ListRemoteHookInstanceData(repoPath string, hooks config.RemoteHooks, now time.Time) ([]InstanceData, error) {

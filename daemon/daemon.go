@@ -178,6 +178,13 @@ func RunDaemon(cfg *config.Config) error {
 			// changing it takes effect on the next daemon restart.
 			manager.EnsureRootAgents()
 
+			// Best-effort restore of Lost sessions (#1108): the general form
+			// of the root self-heal, for every session whose tmux vanished
+			// with no kill on record. Runs after RefreshStatuses (which marks
+			// them Lost) and after EnsureRootAgents (which owns the reserved
+			// root title). Backoff-throttled per session, like root-ensure.
+			manager.RestoreLostSessions()
+
 			// Handle stop before ticker.
 			select {
 			case <-stopCh:

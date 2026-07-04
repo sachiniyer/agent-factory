@@ -107,4 +107,5 @@ func (b *FakeBackend) SetPreviewSize(*Instance, int, int) error  { return nil }
 func (b *FakeBackend) IsAlive(*Instance) bool                    { return true }
 func (b *FakeBackend) CheckAndHandleTrustPrompt(*Instance) bool  { return false }
 func (b *FakeBackend) TapEnter(*Instance)                        {}
+func (b *FakeBackend) Recover(*Instance) error                   { return nil }
 func (b *FakeBackend) Type() string                              { return "local" }

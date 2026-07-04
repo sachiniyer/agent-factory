@@ -939,6 +939,10 @@ type Manager struct {
 	// the same session, and a duplicate KillSession RPC is rejected instead of
 	// double-killing.
 	killsInFlight map[string]struct{}
+	// lostRestoreStates tracks per-session retry state for the Lost-session
+	// restore loop (#1108 PR 2), keyed by daemon instance key — the general
+	// sibling of rootEnsureStates.
+	lostRestoreStates map[string]*lostRestoreState
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -977,6 +981,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		rootEnsureStates:    make(map[string]*rootEnsureState),
 		rootKilledByUser:    make(map[string]struct{}),
 		killsInFlight:       make(map[string]struct{}),
+		lostRestoreStates:   make(map[string]*lostRestoreState),
 	}, nil
 }
 
