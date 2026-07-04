@@ -700,12 +700,7 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 
 	config := DefaultConfig()
 	if err := toml.Unmarshal(data, config); err != nil {
-		var decodeErr *toml.DecodeError
-		if errors.As(err, &decodeErr) {
-			row, col := decodeErr.Position()
-			return nil, fmt.Errorf("failed to parse config file %s (line %d, column %d):\n%s", prettyConfigPath, row, col, decodeErr.String())
-		}
-		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
+		return nil, tomlParseError("config file "+prettyConfigPath, err)
 	}
 	warnUnknownTomlKeys(data, prettyConfigPath)
 
@@ -720,6 +715,19 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 func isEffectivelyEmptyToml(data []byte) bool {
 	trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 	return len(bytes.TrimSpace(trimmed)) == 0
+}
+
+// tomlParseError renders a TOML decode failure for the file described by
+// what (e.g. "config file ~/.agent-factory/config.toml"), surfacing
+// pelletier's line/column and caret-annotated source snippet when available —
+// the error quality a hand-edited format owes its editors.
+func tomlParseError(what string, err error) error {
+	var decodeErr *toml.DecodeError
+	if errors.As(err, &decodeErr) {
+		row, col := decodeErr.Position()
+		return fmt.Errorf("failed to parse %s (line %d, column %d):\n%s", what, row, col, decodeErr.String())
+	}
+	return fmt.Errorf("failed to parse %s: %w", what, err)
 }
 
 // warnUnknownTomlKeys logs one warning per key in data that the Config
