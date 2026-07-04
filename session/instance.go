@@ -1305,6 +1305,18 @@ func (i *Instance) Started() bool {
 	return i.started
 }
 
+// IsExternalWorktree reports whether the instance's worktree is external/in-place
+// (`af sessions create --here`, or a legacy external record) — the same flag
+// MoveWorktree checks. Such a worktree is the user's own working tree and must
+// never be relocated, so the daemon rejects archiving it (#1028). Returns false
+// when the instance has no worktree yet.
+func (i *Instance) IsExternalWorktree() bool {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	return gw != nil && gw.IsExternalWorktree()
+}
+
 // SetTitle sets the title of the instance. Returns an error if the instance has started.
 // We cant change the title once it's been used for a tmux session etc.
 func (i *Instance) SetTitle(title string) error {

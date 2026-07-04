@@ -150,6 +150,39 @@ func TestArchiveSession_RejectsWhenOperationInFlight(t *testing.T) {
 	assert.Contains(t, err.Error(), "in progress")
 }
 
+// TestArchiveSession_RejectsExternalWorktree (#1028 Greptile P1): an
+// in-place/external worktree (an `--here` session, or root) cannot be archived —
+// archive relocates the worktree, which MoveWorktree refuses for external
+// worktrees. The rejection must happen UP FRONT so nothing is torn down: the
+// session is left completely untouched (status unchanged, still started, its
+// worktree in place), never a broken half-archive that rolls back to Lost.
+func TestArchiveSession_RejectsExternalWorktree(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	// An in-place/external worktree: the worktree IS the repo root, external=true.
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, repoPath, "inplace", "master", "", true, false)
+	require.NoError(t, err)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "inplace", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetGitWorktreeForTest(gw)
+	inst.SetStartedForTest(true)
+	inst.SetStatus(session.Ready)
+	seedDiskInstance(t, repoID, "inplace", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "inplace")] = inst
+	manager.mu.Unlock()
+
+	_, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "inplace", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "in-place")
+
+	// Untouched: rejected before any teardown.
+	assert.Equal(t, session.Ready, inst.GetStatus(), "an unarchivable session must not be torn down or flipped Lost")
+	assert.True(t, inst.Started(), "an unarchivable session must stay started")
+	assert.True(t, exists(repoPath), "the user's in-place worktree must be untouched")
+}
+
 type fakeRemoteBackend struct {
 	*session.FakeBackend
 }

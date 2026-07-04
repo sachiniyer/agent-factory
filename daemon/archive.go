@@ -37,6 +37,16 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	if instance.IsRemote() {
 		return "", fmt.Errorf("cannot archive remote session %q: it has no local worktree to relocate", req.Title)
 	}
+	if instance.IsExternalWorktree() {
+		// An in-place/external worktree (`af sessions create --here`, #1107 — also
+		// how root is set up) IS the user's own working tree; archive relocates
+		// the worktree, which MoveWorktree refuses for external worktrees. Reject
+		// it HERE, in the upfront guard, so nothing is torn down for a session
+		// that can never be archived — otherwise the rejection would only surface
+		// in the move step, after tmux is already down, leaving a broken
+		// half-archive that rolls back to Lost.
+		return "", fmt.Errorf("cannot archive an in-place/external worktree session %q — archive relocates the worktree, which isn't supported for in-place sessions", req.Title)
+	}
 	switch instance.GetStatus() {
 	case session.Archived:
 		return "", fmt.Errorf("session %q is already archived", req.Title)
