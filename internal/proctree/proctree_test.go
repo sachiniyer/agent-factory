@@ -73,19 +73,21 @@ func TestTreeOfFindsGrandchild(t *testing.T) {
 		}
 		tree := TreeOf(snap, cmd.Process.Pid)
 		if len(tree) >= 2 {
-			if tree[0].PID != cmd.Process.Pid {
-				t.Errorf("tree root = %d, want %d", tree[0].PID, cmd.Process.Pid)
-			}
 			foundSleep := false
 			for _, p := range tree[1:] {
 				if p.Comm == "sleep" {
 					foundSleep = true
 				}
 			}
-			if !foundSleep {
-				t.Errorf("tree %v missing the sleep grandchild", tree)
+			// The grandchild sleep may not have exec'd yet even though the
+			// shell's children are already visible; keep polling until the
+			// deadline instead of failing on the first incomplete scan.
+			if foundSleep {
+				if tree[0].PID != cmd.Process.Pid {
+					t.Errorf("tree root = %d, want %d", tree[0].PID, cmd.Process.Pid)
+				}
+				return
 			}
-			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("sleep grandchild never appeared under pid %d", cmd.Process.Pid)
