@@ -17,6 +17,11 @@ import (
 // Shared flags
 var (
 	repoFlag string
+	// envelopeOutput is set by the opt-in --json flag on the sessions/tasks
+	// command groups. It defaults OFF so every existing invocation is
+	// byte-identical to today (bare payload / {"error":"<msg>"}); when ON,
+	// jsonOut/jsonError wrap output in the shared {data,error} Envelope (#1029).
+	envelopeOutput bool
 )
 
 // repoFromFlag resolves the --repo flag to a RepoContext. Its errors name the
@@ -310,9 +315,14 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 	return out, corrupted, nil
 }
 
-// jsonOut marshals v to JSON and writes to stdout.
+// jsonOut marshals v to JSON and writes to stdout. By default it prints the
+// bare payload (byte-identical to before #1029). With the opt-in --json flag it
+// wraps the payload in the shared success Envelope via writeEnvelope.
 func jsonOut(v any) error {
-	data, err := json.MarshalIndent(v, "", "  ")
+	if envelopeOutput {
+		return writeEnvelope(os.Stdout, successEnvelope(v))
+	}
+	data, err := marshalIndented(v)
 	if err != nil {
 		return err
 	}
@@ -320,8 +330,15 @@ func jsonOut(v any) error {
 	return nil
 }
 
-// jsonError writes a JSON error to stderr and returns the error.
+// jsonError writes a JSON error to stderr and returns the error. By default it
+// prints the bare {"error":"<msg>"} form (byte-identical to before #1029). With
+// the opt-in --json flag it emits the shared failure Envelope instead. The
+// original error is always returned so exit codes are unchanged.
 func jsonError(err error) error {
+	if envelopeOutput {
+		_ = writeEnvelope(os.Stderr, errorEnvelope(err.Error()))
+		return err
+	}
 	msg, _ := json.Marshal(map[string]string{"error": err.Error()})
 	fmt.Fprintln(os.Stderr, string(msg))
 	return err
@@ -331,6 +348,14 @@ func init() {
 	// --repo flag on each top-level subcommand
 	SessionsCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to git repository")
 	TasksCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to git repository")
+
+	// Opt-in envelope output. Defaults OFF so existing scripts keep parsing the
+	// bare payload; --json wraps stdout/stderr in the {data,error} Envelope that
+	// the CLI and the later HTTP server share (#1029). Bound to both groups'
+	// PersistentFlags (like --repo) so it works on every subcommand.
+	const jsonFlagUsage = "Wrap output in the {data,error} JSON envelope (default: bare payload)"
+	SessionsCmd.PersistentFlags().BoolVar(&envelopeOutput, "json", false, jsonFlagUsage)
+	TasksCmd.PersistentFlags().BoolVar(&envelopeOutput, "json", false, jsonFlagUsage)
 
 	// Sessions
 	sessionsCreateCmd.Flags().StringVar(&createNameFlag, "name", "", "Session name (required)")
