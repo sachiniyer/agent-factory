@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -735,5 +736,403 @@ func TestSessionsTabDelete_SurfacesDaemonError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ghost") {
 		t.Fatalf("expected error naming the missing tab, got: %v", err)
+	}
+}
+
+// resetBroadcastFlags clears the send-prompt broadcast flags before a test and
+// restores their prior values on cleanup, so package-level flag state never
+// leaks between tests.
+func resetBroadcastFlags(t *testing.T) {
+	t.Helper()
+	prevAll := sendPromptAllFlag
+	prevAllRepos := sendPromptAllReposFlag
+	prevRoot := sendPromptIncludeRootFlag
+	prevCreate := sendPromptCreateFlag
+	prevRepo := repoFlag
+	t.Cleanup(func() {
+		sendPromptAllFlag = prevAll
+		sendPromptAllReposFlag = prevAllRepos
+		sendPromptIncludeRootFlag = prevRoot
+		sendPromptCreateFlag = prevCreate
+		repoFlag = prevRepo
+	})
+	sendPromptAllFlag = false
+	sendPromptAllReposFlag = false
+	sendPromptIncludeRootFlag = false
+	sendPromptCreateFlag = false
+}
+
+// runBroadcastCmd invokes the send-prompt command's RunE with the given args,
+// capturing the JSON summary it prints so tests can assert on per-session
+// outcomes. It returns the parsed summary and the RunE error.
+func runBroadcastCmd(t *testing.T, args []string) (broadcastResult, error) {
+	t.Helper()
+	sendPromptAllFlag = true
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = sessionsSendPromptCmd.RunE(sessionsSendPromptCmd, args)
+	})
+	var res broadcastResult
+	if runErr == nil && strings.TrimSpace(out) != "" {
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("failed to parse broadcast summary %q: %v", out, err)
+		}
+	}
+	return res, runErr
+}
+
+// TestSessionsSendPrompt_BroadcastHonorsRepoScoping is the #761 data-loss-class
+// regression guard for the broadcast path: `send-prompt --all --repo <repoA>`
+// must deliver only to repo A's sessions and never touch a session in another
+// repo. A broadcast that ignored --repo would blast every repo's sessions — the
+// exact wrong-repo hazard the send-prompt scoping was built to prevent.
+func TestSessionsSendPrompt_BroadcastHonorsRepoScoping(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	resetBroadcastFlags(t)
+
+	repoARoot := filepath.Join(tmp, "repo-a")
+	if err := os.MkdirAll(repoARoot, 0755); err != nil {
+		t.Fatalf("mkdir repo A: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoARoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init repo A: %v (%s)", err, out)
+	}
+	repoA, err := config.RepoFromPath(repoARoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath repo A: %v", err)
+	}
+	repoBID := "repo-b-synthetic"
+	if repoBID == repoA.ID {
+		t.Fatalf("test setup: synthetic repo B ID collided with repo A")
+	}
+
+	rawA, err := json.Marshal([]session.InstanceData{
+		{Title: "a1", Status: session.Running},
+		{Title: "a2", Status: session.Ready},
+	})
+	if err != nil {
+		t.Fatalf("marshal repo A: %v", err)
+	}
+	rawB, err := json.Marshal([]session.InstanceData{{Title: "b1", Status: session.Running}})
+	if err != nil {
+		t.Fatalf("marshal repo B: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoA.ID, rawA); err != nil {
+		t.Fatalf("save repo A: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoBID, rawB); err != nil {
+		t.Fatalf("save repo B: %v", err)
+	}
+
+	repoFlag = repoARoot
+
+	var gotRepoIDs, gotTitles []string
+	prevSend := sendPromptViaDaemon
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+		gotRepoIDs = append(gotRepoIDs, req.RepoID)
+		gotTitles = append(gotTitles, req.Title)
+		return nil
+	}
+	defer func() { sendPromptViaDaemon = prevSend }()
+
+	res, err := runBroadcastCmd(t, []string{"ship it"})
+	if err != nil {
+		t.Fatalf("broadcast returned error: %v", err)
+	}
+	if res.Delivered != 2 || res.Failed != 0 || res.Skipped != 0 {
+		t.Fatalf("counts = delivered %d / failed %d / skipped %d, want 2/0/0", res.Delivered, res.Failed, res.Skipped)
+	}
+	for _, id := range gotRepoIDs {
+		if id != repoA.ID {
+			t.Fatalf("broadcast delivered to repo %q, want only repo A %q (repo B leaked)", id, repoA.ID)
+		}
+	}
+	for _, title := range gotTitles {
+		if title == "b1" {
+			t.Fatalf("broadcast delivered to repo B's session b1 despite --repo repo A")
+		}
+	}
+	if res.Scope != "repo:"+repoA.ID {
+		t.Fatalf("scope = %q, want %q", res.Scope, "repo:"+repoA.ID)
+	}
+}
+
+// TestSessionsSendPrompt_BroadcastExcludesRoot verifies the broadcast excludes
+// the reserved root session by default (#1106) and includes it only when
+// --include-root is passed.
+func TestSessionsSendPrompt_BroadcastExcludesRoot(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+
+	repoRoot := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	repo, err := config.RepoFromPath(repoRoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	raw, err := json.Marshal([]session.InstanceData{
+		{Title: "alpha", Status: session.Ready},
+		{Title: session.RootSessionTitle, Status: session.Ready},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := config.SaveRepoInstances(repo.ID, raw); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Default: root excluded.
+	t.Run("excluded by default", func(t *testing.T) {
+		resetBroadcastFlags(t)
+		repoFlag = repoRoot
+		var got []string
+		prevSend := sendPromptViaDaemon
+		sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+			got = append(got, req.Title)
+			return nil
+		}
+		defer func() { sendPromptViaDaemon = prevSend }()
+
+		res, err := runBroadcastCmd(t, []string{"hello"})
+		if err != nil {
+			t.Fatalf("broadcast returned error: %v", err)
+		}
+		if len(got) != 1 || got[0] != "alpha" {
+			t.Fatalf("delivered to %v, want only [alpha]", got)
+		}
+		if res.Delivered != 1 || res.Skipped != 1 {
+			t.Fatalf("counts = delivered %d / skipped %d, want 1/1", res.Delivered, res.Skipped)
+		}
+		var rootSkipped bool
+		for _, r := range res.Results {
+			if r.Title == session.RootSessionTitle {
+				if r.Status != "skipped" {
+					t.Fatalf("root status = %q, want skipped", r.Status)
+				}
+				rootSkipped = true
+			}
+		}
+		if !rootSkipped {
+			t.Fatalf("root session missing from results: %+v", res.Results)
+		}
+	})
+
+	// --include-root: root also gets the prompt.
+	t.Run("included with flag", func(t *testing.T) {
+		resetBroadcastFlags(t)
+		repoFlag = repoRoot
+		sendPromptIncludeRootFlag = true
+		var got []string
+		prevSend := sendPromptViaDaemon
+		sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+			got = append(got, req.Title)
+			return nil
+		}
+		defer func() { sendPromptViaDaemon = prevSend }()
+
+		res, err := runBroadcastCmd(t, []string{"hello"})
+		if err != nil {
+			t.Fatalf("broadcast returned error: %v", err)
+		}
+		if res.Delivered != 2 {
+			t.Fatalf("delivered = %d, want 2 (alpha + root)", res.Delivered)
+		}
+		var sawRoot bool
+		for _, title := range got {
+			if title == session.RootSessionTitle {
+				sawRoot = true
+			}
+		}
+		if !sawRoot {
+			t.Fatalf("--include-root did not deliver to root; delivered to %v", got)
+		}
+	})
+}
+
+// TestSessionsSendPrompt_BroadcastToleratesLost verifies best-effort delivery:
+// a Lost/unreachable session is reported and skipped (not attempted), a per-
+// session send failure is recorded, and neither aborts the rest of the
+// broadcast — the command still exits 0 with a full per-session summary.
+func TestSessionsSendPrompt_BroadcastToleratesLost(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	resetBroadcastFlags(t)
+
+	repoRoot := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	repo, err := config.RepoFromPath(repoRoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	raw, err := json.Marshal([]session.InstanceData{
+		{Title: "alive", Status: session.Running},
+		{Title: "boom", Status: session.Running},
+		{Title: "gone", Status: session.Lost},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := config.SaveRepoInstances(repo.ID, raw); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	repoFlag = repoRoot
+
+	var attempted []string
+	prevSend := sendPromptViaDaemon
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+		attempted = append(attempted, req.Title)
+		if req.Title == "boom" {
+			return errors.New("daemon: session not reachable")
+		}
+		return nil
+	}
+	defer func() { sendPromptViaDaemon = prevSend }()
+
+	res, err := runBroadcastCmd(t, []string{"status?"})
+	if err != nil {
+		t.Fatalf("broadcast must not fail the whole command on a per-session error, got: %v", err)
+	}
+	if res.Delivered != 1 || res.Failed != 1 || res.Skipped != 1 {
+		t.Fatalf("counts = delivered %d / failed %d / skipped %d, want 1/1/1 (%+v)", res.Delivered, res.Failed, res.Skipped, res.Results)
+	}
+	// The Lost session must never be attempted — it is known-unreachable.
+	for _, title := range attempted {
+		if title == "gone" {
+			t.Fatalf("broadcast attempted delivery to Lost session %q; it should be skipped", title)
+		}
+	}
+	byTitle := map[string]broadcastTarget{}
+	for _, r := range res.Results {
+		byTitle[r.Title] = r
+	}
+	if byTitle["alive"].Status != "delivered" {
+		t.Fatalf("alive status = %q, want delivered", byTitle["alive"].Status)
+	}
+	if byTitle["boom"].Status != "failed" || byTitle["boom"].Error == "" {
+		t.Fatalf("boom result = %+v, want failed with an error reason", byTitle["boom"])
+	}
+	if byTitle["gone"].Status != "skipped" || byTitle["gone"].Reason == "" {
+		t.Fatalf("gone result = %+v, want skipped with a reason", byTitle["gone"])
+	}
+}
+
+// TestSessionsSendPrompt_BroadcastRequiresScope verifies the broadcast refuses
+// to guess its scope: with no current repo, no --repo, and no --all-repos it
+// errors instead of silently blasting every repo (the #761 hazard).
+func TestSessionsSendPrompt_BroadcastRequiresScope(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	resetBroadcastFlags(t)
+
+	// A non-repo cwd so config.CurrentRepo() fails and resolveRepoID() returns
+	// "" (all-repo mode) — which the broadcast must reject rather than honor.
+	nonRepo := filepath.Join(tmp, "not-a-repo")
+	if err := os.MkdirAll(nonRepo, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	prevWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(nonRepo); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(prevWd) }()
+
+	prevSend := sendPromptViaDaemon
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+		t.Fatalf("broadcast must not deliver without a resolved scope; got %+v", req)
+		return nil
+	}
+	defer func() { sendPromptViaDaemon = prevSend }()
+
+	sendPromptAllFlag = true
+	origStderr := os.Stderr
+	devnull, _ := os.Open(os.DevNull)
+	os.Stderr = devnull
+	err = sessionsSendPromptCmd.RunE(sessionsSendPromptCmd, []string{"hello"})
+	os.Stderr = origStderr
+	if devnull != nil {
+		devnull.Close()
+	}
+	if err == nil {
+		t.Fatal("expected an error when broadcast scope cannot be resolved, got nil")
+	}
+	if !strings.Contains(err.Error(), "--all-repos") || !strings.Contains(err.Error(), "--repo") {
+		t.Fatalf("scope error should point to --repo/--all-repos, got: %v", err)
+	}
+}
+
+// TestSessionsSendPrompt_BroadcastAllReposSpansRepos verifies --all-repos
+// delivers to every repo's sessions, and that --all-repos with --repo is a
+// clean mutual-exclusion error.
+func TestSessionsSendPrompt_BroadcastAllReposSpansRepos(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	resetBroadcastFlags(t)
+
+	rawA, err := json.Marshal([]session.InstanceData{{Title: "a1", Status: session.Running}})
+	if err != nil {
+		t.Fatalf("marshal repo A: %v", err)
+	}
+	rawB, err := json.Marshal([]session.InstanceData{{Title: "b1", Status: session.Ready}})
+	if err != nil {
+		t.Fatalf("marshal repo B: %v", err)
+	}
+	if err := config.SaveRepoInstances("repo-a", rawA); err != nil {
+		t.Fatalf("save repo A: %v", err)
+	}
+	if err := config.SaveRepoInstances("repo-b", rawB); err != nil {
+		t.Fatalf("save repo B: %v", err)
+	}
+
+	var got []string
+	prevSend := sendPromptViaDaemon
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+		got = append(got, req.RepoID+"/"+req.Title)
+		return nil
+	}
+	defer func() { sendPromptViaDaemon = prevSend }()
+
+	sendPromptAllReposFlag = true
+	res, err := runBroadcastCmd(t, []string{"all hands"})
+	if err != nil {
+		t.Fatalf("--all-repos broadcast returned error: %v", err)
+	}
+	if res.Delivered != 2 {
+		t.Fatalf("delivered = %d, want 2 (one per repo)", res.Delivered)
+	}
+	if res.Scope != "all-repos" {
+		t.Fatalf("scope = %q, want all-repos", res.Scope)
+	}
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != "repo-a/a1" || got[1] != "repo-b/b1" {
+		t.Fatalf("delivered to %v, want [repo-a/a1 repo-b/b1]", got)
+	}
+
+	// --all-repos + --repo must be a clean mutual-exclusion error.
+	repoFlag = "/some/path"
+	origStderr := os.Stderr
+	devnull, _ := os.Open(os.DevNull)
+	os.Stderr = devnull
+	err = sessionsSendPromptCmd.RunE(sessionsSendPromptCmd, []string{"x"})
+	os.Stderr = origStderr
+	if devnull != nil {
+		devnull.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected --all-repos/--repo mutual-exclusion error, got: %v", err)
 	}
 }
