@@ -29,11 +29,22 @@ import (
 	"testing"
 )
 
-// ambientConfigPath resolves the config.json the test process would touch
-// with its ambient (pre-test) environment: $AGENT_FACTORY_HOME when set,
-// otherwise ~/.agent-factory. Returns "" when the path cannot be resolved
-// (no HOME — e.g. some CI sandboxes), in which case the tripwire is a no-op.
-func ambientConfigPath() string {
+// ambientConfigPaths resolves the config files the test process could touch
+// with its ambient (pre-test) environment — config.json and config.toml
+// (#1030) in $AGENT_FACTORY_HOME when set, otherwise ~/.agent-factory.
+// Returns nil when the directory cannot be resolved (no HOME — e.g. some CI
+// sandboxes), in which case the tripwire is a no-op.
+func ambientConfigPaths() []string {
+	dir := ambientConfigDir()
+	if dir == "" {
+		return nil
+	}
+	return []string{filepath.Join(dir, "config.json"), filepath.Join(dir, "config.toml")}
+}
+
+// ambientConfigDir resolves the config directory for ambientConfigPaths,
+// mirroring config.GetConfigDir. Returns "" when unresolvable.
+func ambientConfigDir() string {
 	dir := os.Getenv("AGENT_FACTORY_HOME")
 	if strings.HasPrefix(dir, "~") {
 		home, err := os.UserHomeDir()
@@ -58,7 +69,7 @@ func ambientConfigPath() string {
 		}
 		dir = filepath.Join(home, ".agent-factory")
 	}
-	return filepath.Join(dir, "config.json")
+	return dir
 }
 
 func hashFile(path string) ([]byte, bool, error) {
@@ -73,10 +84,11 @@ func hashFile(path string) ([]byte, bool, error) {
 	return sum[:], true, nil
 }
 
-// ConfigTripwire snapshots the real config.json and returns a verify func
-// for TestMain to call after m.Run(). Verify returns a non-nil error when:
-//   - the file existed at snapshot time and was modified or deleted, or
-//   - the file did not exist and a test materialized one.
+// ConfigTripwire snapshots the real config files (config.json and
+// config.toml, #1030) and returns a verify func for TestMain to call after
+// m.Run(). Verify returns a non-nil error when:
+//   - a file existed at snapshot time and was modified or deleted, or
+//   - a file did not exist and a test materialized one.
 //
 // On boxes without a resolvable home (or with AF_DISABLE_CONFIG_TRIPWIRE=1)
 // both snapshot and verify are no-ops, so CI runs are unaffected.
@@ -84,27 +96,35 @@ func ConfigTripwire() func() error {
 	if os.Getenv("AF_DISABLE_CONFIG_TRIPWIRE") == "1" {
 		return func() error { return nil }
 	}
-	path := ambientConfigPath()
-	if path == "" {
-		return func() error { return nil }
+	type snapshot struct {
+		path    string
+		before  []byte
+		existed bool
 	}
-	before, existed, err := hashFile(path)
-	if err != nil {
-		// Unreadable real config (permissions?) — nothing we can guard.
-		return func() error { return nil }
+	var snaps []snapshot
+	for _, path := range ambientConfigPaths() {
+		before, existed, err := hashFile(path)
+		if err != nil {
+			// Unreadable real config (permissions?) — nothing we can guard
+			// for this file.
+			continue
+		}
+		snaps = append(snaps, snapshot{path: path, before: before, existed: existed})
 	}
 	return func() error {
-		after, exists, err := hashFile(path)
-		if err != nil {
-			return fmt.Errorf("config tripwire: cannot re-read %s after the test run: %w", path, err)
-		}
-		switch {
-		case existed && !exists:
-			return fmt.Errorf("config tripwire: %s was DELETED during this package's test run — a test escaped its AGENT_FACTORY_HOME sandbox (#837)", path)
-		case existed && !bytes.Equal(before, after):
-			return fmt.Errorf("config tripwire: %s was MODIFIED during this package's test run — a test escaped its AGENT_FACTORY_HOME sandbox (#837)", path)
-		case !existed && exists:
-			return fmt.Errorf("config tripwire: %s was CREATED during this package's test run — a test materialized config into the real config dir (#837)", path)
+		for _, snap := range snaps {
+			after, exists, err := hashFile(snap.path)
+			if err != nil {
+				return fmt.Errorf("config tripwire: cannot re-read %s after the test run: %w", snap.path, err)
+			}
+			switch {
+			case snap.existed && !exists:
+				return fmt.Errorf("config tripwire: %s was DELETED during this package's test run — a test escaped its AGENT_FACTORY_HOME sandbox (#837)", snap.path)
+			case snap.existed && !bytes.Equal(snap.before, after):
+				return fmt.Errorf("config tripwire: %s was MODIFIED during this package's test run — a test escaped its AGENT_FACTORY_HOME sandbox (#837)", snap.path)
+			case !snap.existed && exists:
+				return fmt.Errorf("config tripwire: %s was CREATED during this package's test run — a test materialized config into the real config dir (#837)", snap.path)
+			}
 		}
 		return nil
 	}

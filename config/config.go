@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,12 +16,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pelletier/go-toml/v2"
+
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 const (
-	ConfigFileName            = "config.json"
+	ConfigFileName = "config.json"
+	// TomlConfigFileName is the TOML global config file (#1030). Whenever it
+	// exists it is the canonical config: config.json is ignored (with a
+	// warning) rather than merged, so there is never ambiguity about which
+	// file is live. Nothing writes this file yet — TOML materialization and
+	// the json→toml conversion land separately.
+	TomlConfigFileName        = "config.toml"
 	defaultProgram            = tmux.ProgramClaude
 	defaultDaemonPollInterval = 1000
 )
@@ -107,42 +116,45 @@ func GetConfigDir() (string, error) {
 	return filepath.Join(homeDir, ".agent-factory"), nil
 }
 
-// Config represents the application configuration
+// Config represents the application configuration. Every field carries both
+// a json and a toml tag with the same key name: the global config is read
+// from config.toml when present and config.json otherwise (#1030), and the
+// two decoders must agree on key names.
 type Config struct {
 	// DefaultProgram is the default agent program name. Must be one of
 	// tmux.SupportedPrograms (e.g. "claude", "codex", "aider", "gemini").
-	DefaultProgram string `json:"default_program"`
+	DefaultProgram string `json:"default_program" toml:"default_program"`
 	// ProgramOverrides maps an agent name (key) to the full command string
 	// (value) used when invoking that agent under tmux. Keys must be in
 	// tmux.SupportedPrograms; values are arbitrary shell command strings
 	// (typically a full path with flags). When unset for an agent, the
 	// bare agent name is used and resolved via $PATH.
-	ProgramOverrides map[string]string `json:"program_overrides,omitempty"`
+	ProgramOverrides map[string]string `json:"program_overrides,omitempty" toml:"program_overrides,omitempty"`
 	// AutoYes is a flag to automatically accept all prompts.
-	AutoYes bool `json:"auto_yes"`
+	AutoYes bool `json:"auto_yes" toml:"auto_yes"`
 	// DaemonPollInterval is the interval (ms) at which the daemon polls sessions for autoyes mode.
-	DaemonPollInterval int `json:"daemon_poll_interval"`
+	DaemonPollInterval int `json:"daemon_poll_interval" toml:"daemon_poll_interval"`
 	// LogMaxSizeMB is the size cap (MB) for agent-factory.log. When the log
 	// exceeds it, the file is rotated (renamed to .1, older backups shifted
 	// up). Must be positive; non-positive values fall back to the default.
 	// The rotation itself lives in the log package, which re-reads this key
-	// directly from config.json (log cannot import config, and logging is
+	// directly from the config file (log cannot import config, and logging is
 	// initialized before the config loads).
-	LogMaxSizeMB int `json:"log_max_size_mb"`
+	LogMaxSizeMB int `json:"log_max_size_mb" toml:"log_max_size_mb"`
 	// LogMaxBackups is how many rotated log files (agent-factory.log.1,
 	// .log.2, ...) are kept; older ones are deleted. 0 keeps none (the log is
 	// deleted on rotation); negative values fall back to the default.
-	LogMaxBackups int `json:"log_max_backups"`
+	LogMaxBackups int `json:"log_max_backups" toml:"log_max_backups"`
 	// BranchPrefix is the prefix used for git branches created by the application.
-	BranchPrefix string `json:"branch_prefix"`
+	BranchPrefix string `json:"branch_prefix" toml:"branch_prefix"`
 	// DetachKeys is the key combination used to detach from an attached session (e.g. "ctrl-w", "ctrl-q").
-	DetachKeys string `json:"detach_keys"`
+	DetachKeys string `json:"detach_keys" toml:"detach_keys"`
 	// UpdateChannel selects which release channel auto-update and
 	// `af upgrade` follow (#1041): UpdateChannelStable (the default)
 	// tracks manual stable releases (1.x.y) only; UpdateChannelPreview
 	// additionally tracks the automatic 1.x.y-preview-z prereleases.
 	// Any other value falls back to stable with a warning.
-	UpdateChannel string `json:"update_channel"`
+	UpdateChannel string `json:"update_channel" toml:"update_channel"`
 	// RootAgents opts specific repositories into an always-ensured "root"
 	// session (#1106): for each entry the daemon creates a reserved session
 	// titled "root" in-place at the repo root (the `af sessions create
@@ -152,7 +164,7 @@ type Config struct {
 	// the agent profile. Deliberately GLOBAL-ONLY and default-empty: an
 	// in-repo config must never be able to opt a machine into an always-on
 	// agent just by being cloned.
-	RootAgents map[string]RootAgentConfig `json:"root_agents,omitempty"`
+	RootAgents map[string]RootAgentConfig `json:"root_agents,omitempty" toml:"root_agents,omitempty"`
 }
 
 // RootAgentConfig is the per-repo agent profile for an always-ensured root
@@ -163,12 +175,12 @@ type RootAgentConfig struct {
 	// "claude") still resolves through program_overrides like any session
 	// program. Empty selects the default root profile: the repo's resolved
 	// "claude" command with --dangerously-skip-permissions ensured.
-	Program string `json:"program,omitempty"`
+	Program string `json:"program,omitempty" toml:"program,omitempty"`
 	// AutoYes controls prompt auto-acceptance for the root session.
 	// Defaults to TRUE when unset — the root agent exists to act
 	// autonomously — which is why this is a pointer, unlike the global
 	// auto_yes flag whose zero value is the default.
-	AutoYes *bool `json:"auto_yes,omitempty"`
+	AutoYes *bool `json:"auto_yes,omitempty" toml:"auto_yes,omitempty"`
 }
 
 // AutoYesEnabled resolves the root-agent auto_yes profile flag: unset means
@@ -470,8 +482,14 @@ func parseCommandProbeOutput(output string) string {
 	return ""
 }
 
-// LoadConfig reads the user's config.json, validates it, and returns the
+// LoadConfig reads the user's config file, validates it, and returns the
 // resulting Config.
+//
+// Format resolution (#1030): config.toml, when it exists, is the canonical
+// config and config.json is ignored outright (with a warning naming the
+// ignored file) — the two are never merged, so there is never ambiguity
+// about which file a setting must be edited in. Only when config.toml does
+// not exist does the legacy config.json path below run, unchanged.
 //
 // Error handling distinguishes "no config yet" from "config present but
 // unusable" so a user whose settings are being ignored gets told why instead
@@ -500,6 +518,21 @@ func LoadConfig() (*Config, error) {
 
 	configPath := filepath.Join(configDir, ConfigFileName)
 	prettyConfigPath := prettyHomePath(configPath)
+
+	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+	prettyTomlPath := prettyHomePath(tomlPath)
+	tomlData, tomlErr := os.ReadFile(tomlPath)
+	if tomlErr == nil {
+		if _, statErr := os.Stat(configPath); statErr == nil {
+			log.WarningLog.Printf("both %s and %s exist; %s is canonical and %s is ignored — delete or rename %s to silence this warning",
+				prettyTomlPath, prettyConfigPath, prettyTomlPath, prettyConfigPath, prettyConfigPath)
+		}
+		return parseConfigTOML(tomlData, prettyTomlPath)
+	}
+	if !os.IsNotExist(tomlErr) {
+		return nil, fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, tomlErr)
+	}
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -640,6 +673,78 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
 	}
 
+	return validateConfig(config, prettyConfigPath)
+}
+
+// parseConfigTOML validates and unmarshals raw config.toml bytes on top of
+// the defaults — the TOML twin of parseConfig, sharing validateConfig so the
+// two formats can never drift on semantics (#1030).
+//
+// A config.toml with no content — zero bytes, only whitespace, or only a BOM
+// — is technically valid TOML (an empty document), but nothing materializes
+// this file, so such a stub is always hand-made (e.g. `touch config.toml`) —
+// and because its mere existence shadows config.json, silently treating it
+// as "all defaults" would disguise the shadowing as a settings loss. Per the
+// #734/#758 posture it is a loud error instead (the TOML analogue of the
+// #864 empty-stub handling; unlike json there is no materializer whose
+// partial write we could be cleaning up, so the file is never auto-deleted).
+//
+// Unknown top-level keys warn rather than error: a config.toml written by a
+// newer af must keep loading on an older binary (rollback within the TOML
+// era), but a silently ignored key is how typos eat settings, so each one is
+// named in the log.
+func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
+	if isEffectivelyEmptyToml(data) {
+		return nil, fmt.Errorf("config file %s is empty; add valid TOML, or delete it to fall back to config.json or defaults", prettyConfigPath)
+	}
+
+	config := DefaultConfig()
+	if err := toml.Unmarshal(data, config); err != nil {
+		var decodeErr *toml.DecodeError
+		if errors.As(err, &decodeErr) {
+			row, col := decodeErr.Position()
+			return nil, fmt.Errorf("failed to parse config file %s (line %d, column %d):\n%s", prettyConfigPath, row, col, decodeErr.String())
+		}
+		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
+	}
+	warnUnknownTomlKeys(data, prettyConfigPath)
+
+	return validateConfig(config, prettyConfigPath)
+}
+
+// isEffectivelyEmptyToml reports whether data carries no TOML content at all:
+// zero bytes, only whitespace, or only a UTF-8 BOM (with or without trailing
+// whitespace). Every such file decodes as a valid empty document, so without
+// this check a `touch`ed or whitespace-only config.toml would silently become
+// an all-defaults canonical config while shadowing a real config.json.
+func isEffectivelyEmptyToml(data []byte) bool {
+	trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	return len(bytes.TrimSpace(trimmed)) == 0
+}
+
+// warnUnknownTomlKeys logs one warning per key in data that the Config
+// schema does not know. Best-effort by design: it re-decodes in strict mode
+// purely to harvest the unknown-key list, and any error other than the
+// strict-mode report is ignored here because parseConfigTOML has already
+// decoded the same bytes successfully.
+func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
+	decoder := toml.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var probe Config
+	err := decoder.Decode(&probe)
+	var strictErr *toml.StrictMissingError
+	if !errors.As(err, &strictErr) {
+		return
+	}
+	for _, keyErr := range strictErr.Errors {
+		log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, strings.Join(keyErr.Key(), "."))
+	}
+}
+
+// validateConfig applies the format-independent semantic checks shared by
+// parseConfig and parseConfigTOML: enum validation hard-errors, range checks
+// warn and fall back to defaults.
+func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	if err := ValidateProgramEnum(
 		fmt.Sprintf("Config issue in %s: default_program", prettyConfigPath),
 		"default_program",
