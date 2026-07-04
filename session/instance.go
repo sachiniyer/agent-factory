@@ -55,6 +55,21 @@ const (
 	// daemon restores it best-effort (#1108). Persisted, like Dead; excluded
 	// from isTransientStatus for the same reason.
 	Lost
+	// Archived is the deliberate counterpart of Lost (#1028): the user ran
+	// `af sessions archive`, so the daemon tore down every tmux session (agent
+	// + shell/process tabs) and MOVED the worktree out to the global archive
+	// dir (<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/). Where Lost is a
+	// wanted, actively-self-healing state (tmux vanished under a live record;
+	// the restore loop re-spawns it every poll), Archived is a wanted,
+	// QUIESCENT state: it is never probed, never marked Lost, and never
+	// auto-restored — only an explicit `af sessions restore` moves the worktree
+	// back and re-spawns the agent. It therefore loads INERT (FromInstanceData
+	// skips Start: no tmux binding, started=false), which is what keeps the
+	// status poll (skips !Started), the Lost-restore loop (gates on ==Lost),
+	// and the root ensure loop from touching it. Persisted, like Dead/Lost;
+	// appended, never renumbered (Status serializes as an int), so old records
+	// stay readable — the same rollforward discipline #658/#1108 rely on.
+	Archived
 )
 
 // Instance is a running instance of claude code.
@@ -863,6 +878,22 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			URL:    data.PRInfo.URL,
 			State:  data.PRInfo.State,
 		}
+	}
+
+	// An archived session (#1028) loads INERT: its tmux was torn down and its
+	// worktree moved to the global archive dir at archive time, so there is
+	// nothing to re-spawn or reconnect. Skipping Start leaves started=false and
+	// no tmux binding, which is exactly what makes the status poll (skips
+	// !Started), the Lost-restore loop (gates on ==Lost), and EnsureRootAgents
+	// pass it by — the session sits quiescent until an explicit RestoreArchived.
+	// This is also #970-consistent: a load must never itself un-archive a
+	// session (no worktree move, no spawn) as a side effect. gitWorktree is
+	// already bound above to the persisted (archived) path so restore knows
+	// where the worktree currently lives; the Tabs list restored above is
+	// tmux-less for the same reason (its TmuxName entries reference sessions
+	// that no longer exist, and restoreLocalTabs only binds names, never spawns).
+	if status == Archived {
+		return instance, nil
 	}
 
 	if err := instance.Start(false); err != nil {

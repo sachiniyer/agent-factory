@@ -143,6 +143,43 @@ func TestDaemonSaveRemovesKilledInstances(t *testing.T) {
 	assert.False(t, titles["instance-B"], "killed instance should not be preserved")
 }
 
+// TestSavePreservesArchivedRecordAcrossCoRepoSave is the #1028 Greptile-P1
+// regression: an Archived instance loads inert (started=false), but its record
+// is the ONLY pointer to its relocated worktree. The wholesale per-repo
+// checkpoint save — triggered whenever a DIFFERENT started instance in the same
+// repo is saved — must preserve the archived record, not drop it and orphan the
+// worktree. Before the fix the `!Started()` skip silently removed it.
+func TestSavePreservesArchivedRecordAcrossCoRepoSave(t *testing.T) {
+	const repoPath = "/tmp/test-archive-repo"
+	ms := newMockStorage()
+
+	// Disk starts with both a live session and an archived one in the same repo.
+	seedDisk(t, ms, repoPath, []InstanceData{
+		{Title: "live-sess", Path: repoPath},
+		{Title: "archived-sess", Path: repoPath, Status: Archived},
+	})
+
+	live := makeInstance("live-sess", repoPath, true)          // started
+	archived := makeInstance("archived-sess", repoPath, false) // inert, started=false
+	archived.Status = Archived
+
+	storage, err := NewStorage(ms, "") // daemon mode
+	require.NoError(t, err)
+
+	// Saving the started instance re-marshals and overwrites the whole per-repo
+	// file — the exact operation that used to drop the inert archived record.
+	require.NoError(t, storage.SaveInstances([]*Instance{live, archived}))
+
+	byTitle := make(map[string]InstanceData)
+	for _, d := range readDisk(t, ms, repoPath) {
+		byTitle[d.Title] = d
+	}
+	require.Contains(t, byTitle, "archived-sess",
+		"an archived record must survive a co-repo checkpoint save, or its relocated worktree is orphaned")
+	assert.Equal(t, Archived, byTitle["archived-sess"].Status, "the record must reload as Archived")
+	assert.Contains(t, byTitle, "live-sess", "the started instance is still saved as before")
+}
+
 func TestDaemonSaveDoesNotTouchUnknownRepos(t *testing.T) {
 	const repoPath1 = "/tmp/repo1"
 	const repoPath2 = "/tmp/repo2"

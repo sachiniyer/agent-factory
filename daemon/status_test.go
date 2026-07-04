@@ -212,6 +212,11 @@ func TestRefreshStatuses_SkipsTransientAndUnstarted(t *testing.T) {
 		{"loading", true, session.Loading},
 		{"deleting", true, session.Deleting},
 		{"unstarted", false, session.Running},
+		// Archived (#1028) with started=true proves the explicit Archived guard
+		// fires BEFORE the liveness probe: without it, a started instance over a
+		// dead backend would be flipped to Lost. It must stay Archived — never
+		// probed, never marked Lost, never repainted Ready.
+		{"archived", true, session.Archived},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

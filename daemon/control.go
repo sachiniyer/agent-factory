@@ -1248,6 +1248,15 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	if status := instance.GetStatus(); status == session.Loading || status == session.Deleting {
 		return
 	}
+	if instance.GetStatus() == session.Archived {
+		// An archived session (#1028) has no tmux to probe — its worktree was
+		// moved to the global archive dir and every tab torn down. It loads
+		// inert (started=false), so the !Started guard above already skips it;
+		// this explicit check is belt-and-suspenders so a future change that
+		// leaves an Archived instance started can never have the poll probe it,
+		// mark it Lost, or repaint it Ready. It stays put until RestoreArchived.
+		return
+	}
 	if m.isPollPaused(repoID, instance.Title) {
 		// A TUI is attached full-screen to this instance (#1160). It owns the
 		// shared tmux server for the attach duration; the daemon's capture-pane
