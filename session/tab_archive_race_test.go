@@ -16,7 +16,7 @@ import (
 // (#1195).
 func flipStatus(i *Instance, s Status) {
 	i.mu.Lock()
-	i.Status = s
+	i.setStatusLocked(s)
 	i.mu.Unlock()
 }
 

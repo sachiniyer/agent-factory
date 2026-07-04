@@ -197,7 +197,7 @@ func TestInstanceStarted_Success_UserStillWatching(t *testing.T) {
 
 	_, _ = h.Update(instanceStartedMsg{instance: inst, err: nil})
 
-	assert.Equal(t, session.Running, inst.Status, "status must flip to Running")
+	assert.Equal(t, session.Running, inst.GetStatus(), "status must flip to Running")
 	assert.Equal(t, stateHelp, h.state, "user on the new instance should see the attach-help modal")
 	require.NotNil(t, h.textOverlay, "help modal overlay should be installed")
 }
@@ -217,7 +217,7 @@ func TestInstanceStarted_Success_UserMovedToAnotherInstance(t *testing.T) {
 
 	_, _ = h.Update(instanceStartedMsg{instance: creating, err: nil})
 
-	assert.Equal(t, session.Running, creating.Status, "status must flip to Running")
+	assert.Equal(t, session.Running, creating.GetStatus(), "status must flip to Running")
 	assert.Equal(t, stateDefault, h.state, "user state must not flip to stateHelp")
 	assert.Nil(t, h.textOverlay, "no help overlay should be shown")
 	assert.Same(t, other, h.sidebar.GetSelectedInstance(),
@@ -241,7 +241,7 @@ func TestInstanceStarted_Success_UserCreatingAnotherInstance(t *testing.T) {
 
 	_, _ = h.Update(instanceStartedMsg{instance: first, err: nil})
 
-	assert.Equal(t, session.Running, first.Status, "first instance should flip to Running")
+	assert.Equal(t, session.Running, first.GetStatus(), "first instance should flip to Running")
 	assert.Equal(t, stateNew, h.state, "naming state must be preserved")
 	assert.Same(t, second, h.namingInstance, "namingInstance pointer must not be clobbered")
 	assert.Nil(t, h.textOverlay, "no help overlay should be shown over the naming flow")
@@ -424,5 +424,5 @@ func TestInstanceStarted_ReplacesSwappedSameTitleRow(t *testing.T) {
 	instances := h.store.GetInstances()
 	require.Len(t, instances, 1, "one logical session must occupy exactly one sidebar row (#808)")
 	assert.Same(t, started, instances[0], "the started instance must replace the disk-built copy")
-	assert.Equal(t, session.Running, started.Status)
+	assert.Equal(t, session.Running, started.GetStatus())
 }

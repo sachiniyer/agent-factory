@@ -15,11 +15,19 @@ type InstanceData struct {
 	// before #1195 simply have no id, and the reconcile falls back to
 	// title+CreatedAt for them (rollforward, mirroring the BranchCreatedByUs
 	// precedent).
-	ID        string    `json:"id,omitempty"`
-	Title     string    `json:"title"`
-	Path      string    `json:"path"`
-	Branch    string    `json:"branch"`
-	Status    Status    `json:"status"`
+	ID     string `json:"id,omitempty"`
+	Title  string `json:"title"`
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+	// Status is the legacy single-axis status int (#1195). Still written for one
+	// release for rollback safety and read as the fallback source for records
+	// that predate the `liveness` field. New code should read Liveness.
+	Status Status `json:"status"`
+	// Liveness is the daemon-owned health axis (#1195), the new canonical
+	// persisted state. omitempty + additive: records written before #1195 have
+	// no `liveness` key and decode to LivenessUnset, signaling FromInstanceData
+	// to fall back to the legacy `status` int (rollforward).
+	Liveness  Liveness  `json:"liveness,omitempty"`
 	Height    int       `json:"height"`
 	Width     int       `json:"width"`
 	CreatedAt time.Time `json:"created_at"`

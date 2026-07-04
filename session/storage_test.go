@@ -95,7 +95,7 @@ func makeInstance(title, repoPath string, started bool) *Instance {
 	i := &Instance{
 		Title:     title,
 		Path:      repoPath,
-		Status:    Running,
+		liveness:  LiveRunning,
 		CreatedAt: time.Now(),
 		backend:   &LocalBackend{},
 		started:   started,
@@ -161,7 +161,7 @@ func TestSavePreservesArchivedRecordAcrossCoRepoSave(t *testing.T) {
 
 	live := makeInstance("live-sess", repoPath, true)          // started
 	archived := makeInstance("archived-sess", repoPath, false) // inert, started=false
-	archived.Status = Archived
+	archived.SetStatus(Archived)
 
 	storage, err := NewStorage(ms, "") // daemon mode
 	require.NoError(t, err)
@@ -302,7 +302,7 @@ func TestRepoSaveDropsLoadingFromMemory(t *testing.T) {
 	ms := newMockStorage()
 
 	loading := makeInstance("in-flight", repoPath, false)
-	loading.Status = Loading
+	loading.SetStatus(Loading)
 	storage, err := NewStorage(ms, repoID)
 	require.NoError(t, err)
 
@@ -327,7 +327,7 @@ func TestRepoSaveDropsDeletingFromMemory(t *testing.T) {
 	// Alive backend + started + empty disk: exactly the shape #819 preserves —
 	// unless the instance is Deleting.
 	deleting := makeAliveInstance("mid-teardown", repoPath)
-	deleting.Status = Deleting
+	deleting.SetStatus(Deleting)
 
 	storage, err := NewStorage(ms, repoID)
 	require.NoError(t, err)
