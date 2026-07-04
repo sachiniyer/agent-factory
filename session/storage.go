@@ -145,10 +145,19 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Worktree.RepoPath is empty. This mirrors CollectRepoRoots (#667).
 	grouped := make(map[string][]InstanceData)
 	for _, inst := range instances {
-		if status := inst.GetStatus(); status == Loading || status == Deleting {
+		status := inst.GetStatus()
+		if status == Loading || status == Deleting {
 			continue
 		}
-		if !inst.Started() {
+		// The !Started() skip drops transient never-started junk (a create that
+		// hasn't run Start, a discarded duplicate). It must NOT drop an Archived
+		// instance (#1028): archived sessions load deliberately inert
+		// (started=false — tmux torn down, worktree relocated), yet the record is
+		// the ONLY pointer to the relocated worktree. Dropping it on a wholesale
+		// per-repo checkpoint save — triggered whenever ANY started instance in
+		// the same repo is saved — would silently orphan the archived worktree.
+		// (Lost is unaffected: it loads started=true, so it already survives.)
+		if !inst.Started() && status != Archived {
 			continue
 		}
 		root := inst.GetRepoPath()
