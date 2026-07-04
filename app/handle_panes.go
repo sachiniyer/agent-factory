@@ -112,6 +112,9 @@ func (m *home) closePaneWindow(p *store.OpenPane) {
 	// its (pane, window) binding is about to dangle (#1089).
 	if p == m.livePane {
 		m.closeLiveTermPane()
+		// If the user was typing INTO that pane, the mode's premise just
+		// left with it: drop to nav now rather than a tick later.
+		m.enforceInteractiveInvariant()
 	}
 	m.store.CloseOpenPane(p)
 	delete(m.paneWindows, p.ID())

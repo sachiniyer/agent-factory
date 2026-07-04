@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/store"
@@ -37,15 +39,19 @@ const liveBindRetryInterval = 5 * time.Second
 // without a warning every 5s retry.
 const liveDeathLogInterval = time.Minute
 
-// liveTermAttachment is what the sync needs from a termpane: ui.LiveView
-// (render + resize) plus the lifecycle half (close, death signal). It exists
-// so tests can drive the bind/unbind state machine with a fake instead of
-// spawning real `tmux attach-session` clients.
+// liveTermAttachment is what the app needs from a termpane: ui.LiveView
+// (render + resize) plus the lifecycle half (close, death signal) and the
+// interactive-mode key sink (#1089 PR 2). It exists so tests can drive the
+// bind/unbind/forward state machine with a fake instead of spawning real
+// `tmux attach-session` clients.
 type liveTermAttachment interface {
-	Render(width, height int) string
+	Render(width, height int, showCursor bool) string
 	Resize(width, height int)
 	Close() error
 	Done() <-chan struct{}
+	// SendKey forwards one keystroke down the attachment's PTY, reporting
+	// false when the key has no safe encoding (ignored, never guessed).
+	SendKey(msg tea.KeyMsg) bool
 }
 
 // newLiveTermPaneFn is the termpane creation seam. Production points it at
@@ -55,9 +61,16 @@ var newLiveTermPaneFn = func(sessionName string, width, height int) (liveTermAtt
 }
 
 // syncLiveTermPane reconciles the live attachment with the current focus,
-// pane visibility, and instance health. Called from the 100ms preview tick;
-// steady-state cost is pointer compares plus one non-blocking channel read.
+// pane visibility, and instance health, then re-checks the interactive-mode
+// invariant against the outcome (#1089 PR 2: the mode cannot outlive its
+// attachment). Called from the 100ms preview tick; steady-state cost is
+// pointer compares plus one non-blocking channel read.
 func (m *home) syncLiveTermPane() {
+	m.reconcileLiveTermPane()
+	m.enforceInteractiveInvariant()
+}
+
+func (m *home) reconcileLiveTermPane() {
 	// While the user is inside a full-screen attach our render client must
 	// not hold the same session (size fight) or generate tmux traffic
 	// (#598). The attach dispatch path already closed it; this covers any
@@ -156,6 +169,33 @@ func (m *home) syncLiveTermPane() {
 	w.SetLive(tp)
 }
 
+// enforceInteractiveInvariant drops back to nav mode whenever interactive
+// mode's premise breaks: the mode means "keystrokes forward into the FOCUSED
+// pane's live attachment", so a dead client, a closed/hidden pane, or focus
+// moved by a relayout (auto-hide on shrink) each end it. Every keystroke and
+// every sync tick funnels through this, so the stale-mode window is at most
+// one 100ms tick. Idempotent.
+func (m *home) enforceInteractiveInvariant() {
+	if !m.interactive {
+		return
+	}
+	if m.liveTerm == nil || m.livePane == nil || m.livePane != m.focusedOpenPane() {
+		m.setInteractive(false)
+	}
+}
+
+// setInteractive flips interactive mode (#1089, RFC §2.3) and keeps every
+// dependent surface coherent: the status bar collapses to (or restores from)
+// the Ctrl-] escape hatch, and the pane windows' green interactive cue
+// follows the live pane. Idempotent; event-loop only.
+func (m *home) setInteractive(on bool) {
+	m.interactive = on
+	m.menu.SetInteractive(on)
+	for id, w := range m.paneWindows {
+		w.SetInteractive(on && m.livePane != nil && id == m.livePane.ID())
+	}
+}
+
 // liveBindCandidate resolves the pane to a bind key + tmux session name, or
 // ("", "") when the pane is not eligible for a live attachment: remote
 // instances (no local session), not-started/transitional/dead instances, and
@@ -166,20 +206,30 @@ func (m *home) liveBindCandidate(target *store.OpenPane) (key, sessionName strin
 	if target == nil {
 		return "", ""
 	}
-	inst := target.Instance()
-	if inst == nil || inst.IsRemote() || !inst.Started() {
-		return "", ""
-	}
-	switch inst.GetStatus() {
-	case session.Loading, session.Deleting, session.Dead, session.Lost:
-		return "", ""
-	}
 	tab := target.Tab()
-	name := inst.TabTmuxName(tab)
+	name := liveSessionName(target.Instance(), tab)
 	if name == "" {
 		return "", ""
 	}
 	return fmt.Sprintf("%d/%d/%s", target.ID(), tab, name), name
+}
+
+// liveSessionName resolves an (instance, tab) to the tmux session a live
+// attachment would target, or "" when embedding is not possible: remote
+// instances (no local session), not-started/transitional/dead/lost instances,
+// and tabs with no session. Of the "" cases, remote is the one where Enter
+// falls back to the full-screen attach path (#1089 PR 2);
+// dead/lost/transitional instances are fenced off earlier by
+// interactiveGuard's explicit errors.
+func liveSessionName(inst *session.Instance, tab int) string {
+	if inst == nil || inst.IsRemote() || !inst.Started() {
+		return ""
+	}
+	switch inst.GetStatus() {
+	case session.Loading, session.Deleting, session.Dead, session.Lost:
+		return ""
+	}
+	return inst.TabTmuxName(tab)
 }
 
 // closeLiveTermPane releases the live attachment: unbind the window's render

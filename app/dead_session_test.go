@@ -62,3 +62,30 @@ func TestHandleEnter_DeadSessionShowsError(t *testing.T) {
 	require.Contains(t, h.errBox.String(), "dead-session",
 		"the error must name the offending session")
 }
+
+// TestHandleEnter_LostSessionShowsError pins the #1108 × #1089-PR-2
+// interaction: Enter on a Lost session must take the explicit lost-error path
+// — never enter interactive mode on a dead binding, and never the generic
+// dead-tmux message (Lost is checked before TmuxAlive in interactiveGuard so
+// the specific "expected back" wording wins).
+func TestHandleEnter_LostSessionShowsError(t *testing.T) {
+	h := newTestHome(t)
+
+	inst := newDeadInstance(t, "lost-session", session.Lost)
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	model, cmd := h.handleEnter()
+	h = model.(*home)
+
+	require.Equal(t, stateDefault, h.state, "a lost session must not open any overlay")
+	require.Nil(t, h.textOverlay, "no help overlay should be installed for a lost session")
+	require.False(t, h.interactive, "Enter on a lost session must not enter interactive mode")
+
+	require.NotNil(t, cmd, "handleEnter must return the error-hide command, not a silent nil")
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, h.errBox.String(), "was lost",
+		"the error must say the session was lost, not the generic dead message")
+	require.Contains(t, h.errBox.String(), "lost-session",
+		"the error must name the offending session")
+}

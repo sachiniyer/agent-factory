@@ -180,6 +180,18 @@ type home struct {
 	liveDeathLogKey string
 	liveDeathLogAt  time.Time
 
+	// interactive is the two-mode keyboard switch (#1089 PR 2, RFC §2.3).
+	// Nav mode (false): the host owns the keyboard — focus ring, verbs,
+	// overlays, exactly as before. Interactive mode (true): EVERY keystroke
+	// (including Tab) forwards down the focused pane's live attachment; the
+	// only host-reserved key is Ctrl-], which returns to nav. The mode is
+	// only ever true while liveTerm is bound to the focused pane —
+	// enforceInteractiveInvariant drops it the moment that premise breaks.
+	// Orthogonal to `state`: overlays opened by async events still own the
+	// keyboard (handleKeyPress checks state alongside this flag). Event-loop
+	// only; the pane's green frame and the status bar mirror it.
+	interactive bool
+
 	// initialPaneOpened latches the one-time startup auto-open: the first
 	// instance selection opens its pane so the workspace isn't empty on
 	// launch. Never reset — once the user has hidden every pane, the
@@ -621,6 +633,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	case tea.MouseMsg:
+		// Mouse forwarding into an interactive pane is out of scope for this
+		// PR (RFC §2.5 leaves in-pane wheel ownership to the mouse PR) — and
+		// host wheel-scroll would flip the live pane into capture scroll mode
+		// mid-typing, so the wheel is inert while interactive.
+		if m.interactive {
+			return m, nil
+		}
 		if msg.Action == tea.MouseActionPress {
 			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
 				// The wheel scrolls whatever the focus ring points at: the
@@ -668,6 +687,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case instanceChangedMsg:
 		return m, m.selectionChanged()
+	case enterInteractiveMsg:
+		// Deferred by the first-time interactive help screen's dismiss cmd
+		// (#1089 PR 2); the pane pointer is re-validated inside.
+		return m, m.activateInteractive(msg.pane)
 	case startKillMsg:
 		// The row was already flipped to Deleting synchronously by the kill
 		// confirmation; dispatch the slow teardown off the event loop (#844).
@@ -1134,6 +1157,15 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 }
 
 func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
+	// Interactive mode owns the keyboard before anything else — menu
+	// highlighting, quit keys, the global key map (#1089 PR 2, RFC §2.3).
+	// The state gate matters: an overlay opened by an async event (e.g. the
+	// instance-started help screen) is modal and keeps the keyboard until
+	// dismissed, exactly as in nav mode.
+	if m.interactive && m.state == stateDefault {
+		return m.handleInteractiveKey(msg)
+	}
+
 	cmd, returnEarly := m.handleMenuHighlighting(msg)
 	if returnEarly {
 		return m, cmd

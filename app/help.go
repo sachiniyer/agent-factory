@@ -28,6 +28,11 @@ type helpTypeInstanceStart struct {
 
 type helpTypeInstanceAttach struct{}
 
+// helpTypeInteractive is shown once, the first time the user enters a pane
+// (#1089 PR 2): the sharpest edge of the interaction change is that every
+// key now types into the agent, so the escape hatch leads (RFC §5.7).
+type helpTypeInteractive struct{}
+
 func helpStart(instance *session.Instance) helpText {
 	return helpTypeInstanceStart{instance: instance}
 }
@@ -45,8 +50,10 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("r")+descStyle.Render("         - Run selected task now"),
 		keyStyle.Render("D")+descStyle.Render("         - Kill (delete) the selected session"),
 		keyStyle.Render("↑/k, ↓/j")+descStyle.Render("  - Navigate between sessions"),
-		keyStyle.Render("↵/o")+descStyle.Render("       - Attach to the selected session"),
-		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("    - Detach from session"),
+		keyStyle.Render("↵")+descStyle.Render("         - Interact with the session in its pane (all keys go to it)"),
+		keyStyle.Render("ctrl+]")+descStyle.Render("    - Leave interactive mode (back to navigation)"),
+		keyStyle.Render("o")+descStyle.Render("         - Attach to the selected session full-screen"),
+		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("    - Detach from a full-screen session"),
 		"",
 		headerStyle.Render("Workspace:"),
 		keyStyle.Render("tab")+descStyle.Render("       - Cycle focus: tree → open panes → automations"),
@@ -96,7 +103,8 @@ func (h helpTypeInstanceStart) toContent() string {
 			lipgloss.NewStyle().Bold(true).Render(h.instance.Program))),
 		"",
 		headerStyle.Render("Managing:"),
-		keyStyle.Render("↵/o")+descStyle.Render("   - Attach to the session to interact with it directly"),
+		keyStyle.Render("↵")+descStyle.Render("     - Interact with the session in its pane (ctrl+] returns to nav)"),
+		keyStyle.Render("o")+descStyle.Render("     - Attach to the session full-screen"),
 		tabHelp,
 		keyStyle.Render("D")+descStyle.Render("     - Kill (delete) the selected session"),
 	)
@@ -112,6 +120,20 @@ func (h helpTypeInstanceAttach) toContent() string {
 	return content
 }
 
+func (h helpTypeInteractive) toContent() string {
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		titleStyle.Render("Interactive Pane"),
+		"",
+		descStyle.Render("You are typing INTO this pane's terminal: every key — including tab —"),
+		descStyle.Render("goes to the agent/shell. The pane's frame turns green while it has the"),
+		descStyle.Render("keyboard, and the instances rail stays visible."),
+		"",
+		descStyle.Render("Press ")+keyStyle.Render("ctrl+]")+descStyle.Render(" to return to navigation."),
+		descStyle.Render("Full-screen attach is still available on ")+keyStyle.Render("o")+descStyle.Render(" (from nav mode)."),
+	)
+	return content
+}
+
 func (h helpTypeGeneral) mask() uint32 {
 	return 1
 }
@@ -121,6 +143,10 @@ func (h helpTypeInstanceStart) mask() uint32 {
 }
 func (h helpTypeInstanceAttach) mask() uint32 {
 	return 1 << 2
+}
+
+func (h helpTypeInteractive) mask() uint32 {
+	return 1 << 3
 }
 
 var (
@@ -147,8 +173,10 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 		// over the session size, and our render client must never sit in an
 		// interactive client's way (#598 class; #1089). The tick-driven sync
 		// won't rebind while an overlay is open, and re-establishes the
-		// attachment after the eventual detach.
+		// attachment after the eventual detach. Interactive mode (if a stray
+		// path ever got here in it) cannot survive its attachment.
 		m.closeLiveTermPane()
+		m.enforceInteractiveInvariant()
 	}
 
 	flag := helpType.mask()

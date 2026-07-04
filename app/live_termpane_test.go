@@ -7,24 +7,34 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// fakeLiveTerm drives the live-termpane state machine (#1089 PR 1) without
-// spawning tmux attach clients.
+// fakeLiveTerm drives the live-termpane state machine (#1089 PR 1) and the
+// interactive-mode key forwarding (#1089 PR 2) without spawning tmux attach
+// clients.
 type fakeLiveTerm struct {
 	closed bool
 	done   chan struct{}
+	// keys records every message forwarded through SendKey, as
+	// tea.KeyMsg.String() values.
+	keys []string
 }
 
 func newFakeLiveTerm() *fakeLiveTerm {
 	return &fakeLiveTerm{done: make(chan struct{})}
 }
 
-func (f *fakeLiveTerm) Render(width, height int) string { return "FAKE-LIVE-GRID" }
-func (f *fakeLiveTerm) Resize(width, height int)        {}
-func (f *fakeLiveTerm) Close() error                    { f.closed = true; return nil }
-func (f *fakeLiveTerm) Done() <-chan struct{}           { return f.done }
+func (f *fakeLiveTerm) Render(width, height int, showCursor bool) string { return "FAKE-LIVE-GRID" }
+func (f *fakeLiveTerm) Resize(width, height int)                         {}
+func (f *fakeLiveTerm) Close() error                                     { f.closed = true; return nil }
+func (f *fakeLiveTerm) Done() <-chan struct{}                            { return f.done }
+func (f *fakeLiveTerm) SendKey(msg tea.KeyMsg) bool {
+	f.keys = append(f.keys, msg.String())
+	return true
+}
 
 // stubLiveTermFactory points the bind seam at fake attachments and returns
 // the created fakes + attempted session names.

@@ -108,6 +108,8 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.handleKill()
 	case keys.KeyEnter:
 		return m.handleEnter()
+	case keys.KeyAttach:
+		return m.handleAttach()
 
 	default:
 		return m, nil
@@ -243,14 +245,27 @@ func killConfirmationWarning(wt string) string {
 	return ""
 }
 
-// handleEnter handles the enter/open key action. Enter attaches the FOCUSED
-// pane's (instance, tab) full-screen (#1088): with a workspace pane focused
-// it attaches that pane's binding; everywhere else the tree selection, as
-// before. The attach path itself is untouched: the same
-// attachOverlayCallbackFn seam, `attached` gate, and SIGKILL-bounded detach.
+// handleEnter is the Enter verb (#1089 PR 2, RFC §2.3): enter INTERACTIVE
+// mode on the pane — every keystroke forwards to the agent/shell in place,
+// no full-screen takeover, Ctrl-] returns to nav. With a workspace pane
+// focused it enters that pane; on a tree instance/tab row it opens (or
+// focuses) the selection's pane first, exactly like `s`, then enters it.
+// Bindings that cannot embed — remote instances, whose only local terminal
+// is the full-screen hook PTY — fall back to the full-screen attach Enter
+// used to do; dead/transitional sessions keep their guard errors.
 func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	if p := m.focusedOpenPane(); p != nil {
-		return m.handleEnterPane(p)
+		if instErr := interactiveGuard(p.Instance()); instErr != nil {
+			return m, m.handleError(instErr)
+		}
+		if p.Instance() == nil || p.Instance().GetStatus() == session.Loading {
+			return m, nil
+		}
+		if liveSessionName(p.Instance(), p.Tab()) == "" {
+			// Not embeddable (remote): the old full-screen behavior.
+			return m.handleEnterPane(p)
+		}
+		return m.requestInteractive(p)
 	}
 	sel := m.sidebar.GetSelection()
 
@@ -265,56 +280,110 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		if selected == nil || selected.GetStatus() == session.Loading {
 			return m, nil
 		}
-		if selected.GetStatus() == session.Deleting {
-			return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
+		if err := interactiveGuard(selected); err != nil {
+			return m, m.handleError(err)
 		}
-		if selected.GetStatus() == session.Lost {
-			// Lost (#1108): the backing tmux session vanished with no kill on
-			// record. Attach is impossible right now; say what happened —
-			// same explicit-feedback contract as the Deleting path (#935).
-			return m, m.handleError(fmt.Errorf("session '%s' was lost — its tmux session is gone", selected.Title))
+		if liveSessionName(selected, m.store.ActiveTab()) == "" {
+			// Not embeddable (remote): the old full-screen attach flow.
+			return m.attachSelected(selected)
 		}
-		if !selected.TmuxAlive() {
-			// The backing session has vanished, so attaching is impossible.
-			// Surface an actionable error instead of swallowing Enter, mirroring
-			// the Deleting path above — a silent return left the user unsure
-			// whether the keypress registered while the sidebar still showed a
-			// green Ready dot (#935).
-			return m, m.handleError(fmt.Errorf("session '%s' is no longer running", selected.Title))
+		// Open (or focus) the selection's pane — the `s` semantics — then
+		// enter it. The pane pointer is captured here, at Enter-press time
+		// (#716), for the deferred activation.
+		_, cmd := m.openOrFocusPane(selected, m.store.ActiveTab())
+		p := m.store.FindOpenPane(selected, m.store.ActiveTab())
+		if p == nil {
+			return m, cmd
 		}
-		// Capture the instance at Enter-press time — the synchronous moment the
-		// selection is provably current. For first-time attachers the attach is
-		// deferred until the help overlay is dismissed, and a background refresh
-		// can drift the selection onto a different instance in the meantime; the
-		// callbacks must attach to this captured instance, not re-read the live
-		// selection (#716).
-		if activeTab := m.store.ActiveTab(); activeTab != 0 {
-			// The terminal tab attaches a local tmux session for local
-			// instances, but a remote instance's terminal_cmd PTY for remote
-			// ones (#843) — and that remote PTY hands the terminal back via
-			// session.hookAttachTerminalRestore (main screen, modes off), the
-			// same neutral state the sidebar remote attach leaves. So the
-			// post-detach handling must key off the instance's real
-			// remote-ness, exactly like the sidebar path below: a remote
-			// terminal_cmd detach needs the #845/#848 full reset + reassert,
-			// or the TUI keeps rendering on the main screen (#889).
-			// Capture the active tab index at Enter-press time alongside the
-			// instance (#716): a background refresh could otherwise drift the
-			// selection — or the user could change tabs while the help overlay is
-			// open — before the deferred attach callback runs.
-			return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-				return attachOverlayCallbackFn(m, "handleEnter-terminal", "", selected.IsRemote(), func() (chan struct{}, error) {
-					return ui.AttachTerminalTab(selected, activeTab)
-				})
-			})
-		}
+		mod, interactCmd := m.requestInteractive(p)
+		return mod, tea.Batch(cmd, interactCmd)
+	}
+	return m, nil
+}
+
+// interactiveGuard returns the user-facing error that fences Enter off a
+// session in a state it cannot be entered or attached in — shared by the
+// interactive and full-screen paths (the #935 dead-tmux error, the Deleting
+// fence, the #1108 Lost fence). A nil error does NOT mean embeddable (see
+// liveSessionName); nil instance and Loading are the caller's silent no-op
+// cases.
+func interactiveGuard(inst *session.Instance) error {
+	if inst == nil || inst.GetStatus() == session.Loading {
+		return nil
+	}
+	if inst.GetStatus() == session.Deleting {
+		return fmt.Errorf("session '%s' is being deleted", inst.Title)
+	}
+	if inst.GetStatus() == session.Lost {
+		// Lost (#1108): the backing tmux session vanished with no kill on
+		// record. Entering or attaching is impossible right now; say what
+		// happened — same explicit-feedback contract as the Deleting path
+		// (#935). Checked before TmuxAlive so the specific message wins.
+		return fmt.Errorf("session '%s' was lost — its tmux session is gone", inst.Title)
+	}
+	if !inst.TmuxAlive() {
+		return fmt.Errorf("session '%s' is no longer running", inst.Title)
+	}
+	return nil
+}
+
+// handleAttach is the full-screen attach verb (`o`; the pre-#1089-PR-2
+// Enter): attach the FOCUSED pane's (instance, tab) full-screen (#1088), or
+// the tree selection's. The attach path itself is untouched: the same
+// attachOverlayCallbackFn seam, `attached` gate, and SIGKILL-bounded detach.
+func (m *home) handleAttach() (tea.Model, tea.Cmd) {
+	if p := m.focusedOpenPane(); p != nil {
+		return m.handleEnterPane(p)
+	}
+	sel := m.sidebar.GetSelection()
+	if sel.IsHeader || sel.Kind != ui.SectionInstances {
+		return m, nil
+	}
+	selected := m.sidebar.GetSelectedInstance()
+	if selected == nil || selected.GetStatus() == session.Loading {
+		return m, nil
+	}
+	if err := interactiveGuard(selected); err != nil {
+		return m, m.handleError(err)
+	}
+	return m.attachSelected(selected)
+}
+
+// attachSelected runs the tree-selection full-screen attach flow for a
+// guarded (non-nil, non-Loading, non-Deleting, tmux-alive) instance.
+//
+// The instance is captured at keypress time — the synchronous moment the
+// selection is provably current. For first-time attachers the attach is
+// deferred until the help overlay is dismissed, and a background refresh can
+// drift the selection onto a different instance in the meantime; the
+// callbacks must attach to this captured instance, not re-read the live
+// selection (#716).
+func (m *home) attachSelected(selected *session.Instance) (tea.Model, tea.Cmd) {
+	if activeTab := m.store.ActiveTab(); activeTab != 0 {
+		// The terminal tab attaches a local tmux session for local
+		// instances, but a remote instance's terminal_cmd PTY for remote
+		// ones (#843) — and that remote PTY hands the terminal back via
+		// session.hookAttachTerminalRestore (main screen, modes off), the
+		// same neutral state the sidebar remote attach leaves. So the
+		// post-detach handling must key off the instance's real
+		// remote-ness, exactly like the sidebar path below: a remote
+		// terminal_cmd detach needs the #845/#848 full reset + reassert,
+		// or the TUI keeps rendering on the main screen (#889).
+		// Capture the active tab index at keypress time alongside the
+		// instance (#716): a background refresh could otherwise drift the
+		// selection — or the user could change tabs while the help overlay is
+		// open — before the deferred attach callback runs.
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return attachOverlayCallbackFn(m, "handleEnter-sidebar", "", selected.IsRemote(), func() (chan struct{}, error) {
-				return m.store.AttachInstance(selected)
+			return attachOverlayCallbackFn(m, "handleEnter-terminal", "", selected.IsRemote(), func() (chan struct{}, error) {
+				return ui.AttachTerminalTab(selected, activeTab)
 			})
 		})
 	}
-	return m, nil
+	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
+		return attachOverlayCallbackFn(m, "handleEnter-sidebar", "", selected.IsRemote(), func() (chan struct{}, error) {
+			return m.store.AttachInstance(selected)
+		})
+	})
 }
 
 // handleNewTab spawns a new shell tab in the selected instance and selects it
