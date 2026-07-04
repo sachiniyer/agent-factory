@@ -26,6 +26,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -173,8 +174,29 @@ func (p *Projection) ContainsInstance(target *session.Instance) bool {
 // AddInstance adds a new instance. Returns a finalizer to register the repo.
 func (p *Projection) AddInstance(instance *session.Instance) (finalize func()) {
 	p.instances = append(p.instances, instance)
+	p.sortInstances() // keep root-first + CreatedAt order (#1144)
 	p.bump()
 	return func() { p.RegisterRepoForInstance(instance) }
+}
+
+// sortInstances re-establishes the deterministic sidebar/tree order on the
+// instance list: root-first by reserved identity, then oldest-first by
+// CreatedAt (see LessInstanceOrder, #1144). Keeping GetInstances() sorted at
+// the projection — the single slice every view indexes into — makes the
+// display order stable across daemon poll ticks, independent of the daemon
+// Snapshot's alphabetical-by-key order and of the reconcile's mutation history
+// (existing rows keep their pointer, new rows append). Removal preserves
+// relative order, so only additions (AddInstance) and #765 same-title swaps
+// (ReplaceInstance, which can carry a new CreatedAt) need to re-sort.
+//
+// sort.SliceStable keeps equal-key rows in their prior relative order so
+// nothing jitters when timestamps collide. Runs on the bubbletea event loop
+// like every other projection mutation, so sorting the shared backing array in
+// place is safe — background readers use GetInstancesSnapshot, which copies.
+func (p *Projection) sortInstances() {
+	sort.SliceStable(p.instances, func(i, j int) bool {
+		return LessInstanceOrder(p.instances[i], p.instances[j])
+	})
 }
 
 // RegisterRepoForInstance records the instance's repo after the instance has
@@ -291,6 +313,11 @@ func (p *Projection) ReplaceInstance(target, replacement *session.Instance) bool
 				pane.instance = replacement
 			}
 		}
+		// A #765 same-title swap can carry a new CreatedAt (and, on a root
+		// re-ensure, keep the root pin) — re-sort so the order invariant holds
+		// (#1144). The swap happens in place, so this only moves the row when the
+		// identity's key actually changed.
+		p.sortInstances()
 		p.bump()
 		return true
 	}
