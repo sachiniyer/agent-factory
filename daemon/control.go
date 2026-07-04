@@ -26,8 +26,12 @@ import (
 const (
 	controlServiceName   = "Control"
 	daemonSocketFileName = "daemon.sock"
-	daemonReadyTimeout   = 5 * time.Second
-	daemonDialTimeout    = 250 * time.Millisecond
+	// daemonHTTPSocketFileName is the Unix socket the daemon-hosted HTTP/JSON
+	// server (#1029 PR 4) listens on, alongside — never multiplexed onto — the
+	// gob net/rpc control socket above. One listener, one protocol.
+	daemonHTTPSocketFileName = "daemon-http.sock"
+	daemonReadyTimeout       = 5 * time.Second
+	daemonDialTimeout        = 250 * time.Millisecond
 	// shutdownAckGrace delays the daemon main-loop teardown after a Shutdown
 	// RPC handler returns so the response can flush back to the caller before
 	// the listener closes.
@@ -53,19 +57,24 @@ var nowFunc = time.Now
 
 // CreateSessionRequest is the daemon-owned session creation contract used by
 // the TUI, CLI, and scheduled task runner.
+//
+// The json tags on this and the other RPC request/response structs are for the
+// daemon-hosted HTTP server (#1029 PR 4): they define the HTTP JSON body shape.
+// The existing net/rpc control socket is unaffected — gob encoding ignores json
+// tags entirely and keys off the Go field names.
 type CreateSessionRequest struct {
-	Title     string
-	TitleBase string
-	RepoPath  string
-	Program   string
-	Prompt    string
-	AutoYes   bool
+	Title     string `json:"title"`
+	TitleBase string `json:"title_base"`
+	RepoPath  string `json:"repo_path"`
+	Program   string `json:"program"`
+	Prompt    string `json:"prompt"`
+	AutoYes   bool   `json:"auto_yes"`
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch; kill/cleanup leaves the user's tree and branch
 	// intact. Incompatible with ForceRemote.
-	InPlace     bool
-	ForceRemote bool
+	InPlace     bool `json:"in_place"`
+	ForceRemote bool `json:"force_remote"`
 
 	// allowReserved lets the daemon's own root-agent ensure loop (#1106)
 	// create the reserved "root" title that reserveCreate rejects for
@@ -76,54 +85,54 @@ type CreateSessionRequest struct {
 }
 
 type CreateSessionResponse struct {
-	Instance session.InstanceData
+	Instance session.InstanceData `json:"instance"`
 }
 
 type KillSessionRequest struct {
-	Title  string
-	RepoID string
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
 }
 
 type KillSessionResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 // ArchiveSessionRequest asks the daemon to archive a session (#1028): tear down
 // its tmux, relocate its worktree to the global archive dir, and mark it
 // Archived while preserving the record.
 type ArchiveSessionRequest struct {
-	Title  string
-	RepoID string
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
 }
 
 type ArchiveSessionResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 	// ArchivedPath is the new on-disk location of the relocated worktree.
-	ArchivedPath string
+	ArchivedPath string `json:"archived_path"`
 }
 
 // RestoreArchivedRequest asks the daemon to restore an archived session (#1028):
 // move its worktree back next to the repo, re-spawn the agent, and mark it
 // Running.
 type RestoreArchivedRequest struct {
-	Title  string
-	RepoID string
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
 }
 
 type RestoreArchivedResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 	// WorktreePath is the on-disk location the worktree was restored to.
-	WorktreePath string
+	WorktreePath string `json:"worktree_path"`
 }
 
 type SendPromptRequest struct {
-	Title  string
-	RepoID string
-	Prompt string
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
+	Prompt string `json:"prompt"`
 }
 
 type SendPromptResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 // DeliverPromptRequest asks the daemon to deliver a prompt to a target session,
@@ -133,11 +142,11 @@ type SendPromptResponse struct {
 // target ran concurrently (#865). RepoPath (not RepoID) is required because a
 // create needs the worktree root; the repo ID is resolved from it.
 type DeliverPromptRequest struct {
-	Title    string
-	RepoPath string
-	Program  string
-	Prompt   string
-	AutoYes  bool
+	Title    string `json:"title"`
+	RepoPath string `json:"repo_path"`
+	Program  string `json:"program"`
+	Prompt   string `json:"prompt"`
+	AutoYes  bool   `json:"auto_yes"`
 }
 
 // DeliverPromptResponse reports how the prompt was delivered. Status is
@@ -145,7 +154,7 @@ type DeliverPromptRequest struct {
 // initial prompt) and "sent" when it was sent into a session that already
 // existed — the same status vocabulary deliverTaskPrompt records on a task.
 type DeliverPromptResponse struct {
-	Status string
+	Status string `json:"status"`
 }
 
 // CreateTabRequest asks the daemon to spawn a tab in the target session's
@@ -163,15 +172,15 @@ type DeliverPromptResponse struct {
 //
 // Either way the resolved, collision-suffixed name is returned.
 type CreateTabRequest struct {
-	Title   string
-	RepoID  string
-	Command string
-	Name    string
-	Shell   bool
+	Title   string `json:"title"`
+	RepoID  string `json:"repo_id"`
+	Command string `json:"command"`
+	Name    string `json:"name"`
+	Shell   bool   `json:"shell"`
 }
 
 type CreateTabResponse struct {
-	Name string
+	Name string `json:"name"`
 }
 
 // CloseTabRequest asks the daemon to close a non-agent tab of a session and
@@ -183,14 +192,14 @@ type CreateTabResponse struct {
 // are fixed by their hook config, so closing them is refused. This mirrors the
 // TUI's `w` rule (handleCloseTab) and #930 PR 4/PR 6 semantics.
 type CloseTabRequest struct {
-	Title    string
-	RepoID   string
-	TabName  string
-	TabIndex int
+	Title    string `json:"title"`
+	RepoID   string `json:"repo_id"`
+	TabName  string `json:"tab_name"`
+	TabIndex int    `json:"tab_index"`
 }
 
 type CloseTabResponse struct {
-	Name string
+	Name string `json:"name"`
 }
 
 // SetPRInfoRequest records (or clears) the GitHub PR info for a session and
@@ -201,13 +210,13 @@ type CloseTabResponse struct {
 // today via prInfoUpdatedMsg + a full-list save (#921); PR 1 only adds the
 // mutation — the TUI is not switched to it until PR 2.
 type SetPRInfoRequest struct {
-	Title  string
-	RepoID string
-	PRInfo session.PRInfoData
+	Title  string             `json:"title"`
+	RepoID string             `json:"repo_id"`
+	PRInfo session.PRInfoData `json:"pr_info"`
 }
 
 type SetPRInfoResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 // PauseStatusPollRequest asks the daemon to pause its per-instance capture-pane
@@ -219,24 +228,24 @@ type SetPRInfoResponse struct {
 // instance for an unbounded time. The TUI renews the lease with a heartbeat
 // while attached and clears it with ResumeStatusPoll on detach.
 type PauseStatusPollRequest struct {
-	Title  string
-	RepoID string
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
 }
 
 type PauseStatusPollResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 // ResumeStatusPollRequest clears a pause set by PauseStatusPoll so the daemon's
 // poll resumes immediately on a clean detach rather than waiting out the lease
 // (#1160).
 type ResumeStatusPollRequest struct {
-	Title  string
-	RepoID string
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
 }
 
 type ResumeStatusPollResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 // SnapshotRequest asks the daemon for the authoritative session list of a repo
@@ -245,29 +254,29 @@ type ResumeStatusPollResponse struct {
 // in-memory instance map is the source of truth, so the TUI mirrors this
 // projection instead of re-reading instances.json off disk.
 type SnapshotRequest struct {
-	RepoID string
+	RepoID string `json:"repo_id"`
 }
 
 type SnapshotResponse struct {
-	Instances []session.InstanceData
+	Instances []session.InstanceData `json:"instances"`
 }
 
 type ImportRemoteHookSessionsRequest struct {
-	RepoPath string
+	RepoPath string `json:"repo_path"`
 }
 
 type ImportRemoteHookSessionsResponse struct {
-	Instances []session.InstanceData
+	Instances []session.InstanceData `json:"instances"`
 }
 
 type PingRequest struct{}
 type PingResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 type ReloadTasksRequest struct{}
 type ReloadTasksResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 // Task CRUD RPCs (#1029 PR 3). They promote task writes to the daemon so it is
@@ -284,17 +293,17 @@ type ReloadTasksResponse struct {
 // of Snapshot for sessions.
 type ListTasksRequest struct{}
 type ListTasksResponse struct {
-	Tasks []task.Task
+	Tasks []task.Task `json:"tasks"`
 }
 
 // AddTaskRequest carries a fully-populated task.Task to append. The CLI/TUI
 // still build and validate the struct (flag parsing, ID generation, program
 // resolution); the daemon re-validates via task.AddTask and owns the write.
 type AddTaskRequest struct {
-	Task task.Task
+	Task task.Task `json:"task"`
 }
 type AddTaskResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 // UpdateTaskRequest carries the edited task.Task to persist. task.UpdateTask
@@ -302,17 +311,17 @@ type AddTaskResponse struct {
 // the freshly-loaded record under the file lock, so a stale client copy never
 // clobbers them.
 type UpdateTaskRequest struct {
-	Task task.Task
+	Task task.Task `json:"task"`
 }
 type UpdateTaskResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 type RemoveTaskRequest struct {
-	ID string
+	ID string `json:"id"`
 }
 type RemoveTaskResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 // TriggerTaskRequest asks the daemon to fire a task NOW through the same
@@ -320,15 +329,15 @@ type RemoveTaskResponse struct {
 // fix). The handler preserves RunTask's guards: watch tasks and disabled tasks
 // are refused.
 type TriggerTaskRequest struct {
-	ID string
+	ID string `json:"id"`
 }
 type TriggerTaskResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 type ShutdownRequest struct{}
 type ShutdownResponse struct {
-	OK bool
+	OK bool `json:"ok"`
 }
 
 // daemonStartingErrText is the wire-visible text of the warm-up error. net/rpc
