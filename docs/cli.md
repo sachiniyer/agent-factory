@@ -32,6 +32,8 @@ af sessions preview <title>                               # snapshot the session
 af sessions attach <title>                                # attach interactively (foreground)
 af sessions whoami                                        # report the session this shell is inside
 af sessions kill <title>                                  # kill the session, clean up its worktree
+af sessions archive <title>                               # tmux down + worktree moved out; restartable
+af sessions restore <title>                               # bring an archived session back
 ```
 
 Flags:
@@ -40,6 +42,8 @@ Flags:
 - `send-prompt`: `--create` auto-creates the session if it doesn't exist; `--program` picks the agent when creating.
 - `tab-create`: `--command` (required) is run in the session's git worktree as a new tab; `--name` sets the tab's display name (defaults to the command's basename, auto-suffixed `-2`, `-3`, … on collision). The resolved tab name is printed as `{"name": "..."}` so scripts/agents can address it. The tab persists and reconnects across a daemon/`af` restart like every other tab. Refused once a session already holds 9 tabs. **Not available for remote sessions:** they have no local worktree and the hook protocol can't run arbitrary commands — a remote session's only terminal tab comes from `remote_hooks.terminal_cmd` (see [remote-hooks.md](remote-hooks.md)).
 - `tab-delete`: the counterpart of `tab-create` — `--name` (required) selects the tab to delete. The tab is removed from the daemon's session state and its tmux window is killed; the removal is persistent (the daemon won't respawn it, and it doesn't return on restart). The deleted tab's name is printed as `{"name": "..."}`. The agent tab can't be deleted — use `af sessions kill` to tear down the whole session. Targeting a missing tab or session is an error. Not available for remote sessions (their tabs are fixed by `remote_hooks` config).
+- `archive`: tears down the session's tmux and **moves its git worktree** out to the global archive directory (`<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/`), preserving the branch and any uncommitted changes. The session is not deleted — it becomes a quiescent **archived** row that survives restarts and is never auto-restored. Prints `{"ok": true, "title": "...", "archived_path": "..."}`. Not available for remote or in-place (`--here`) sessions (they don't own a relocatable worktree). Bring it back with `restore`.
+- `restore`: the counterpart of `archive` — moves the worktree back next to the repo, re-registers it, re-spawns **only the agent** (shell/process tabs are not restored), and marks the session running. Prints `{"ok": true, "title": "...", "worktree_path": "..."}`. Fails if the session isn't archived, or if its origin repo is gone (the archived worktree is left intact for manual recovery). Honors `--repo` like `kill`.
 
 ## `af tasks`
 

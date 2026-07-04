@@ -25,12 +25,14 @@ var SessionsCmd = &cobra.Command{
 }
 
 var (
-	createSessionViaDaemon = daemon.CreateSession
-	killSessionViaDaemon   = daemon.KillSession
-	sendPromptViaDaemon    = daemon.SendPrompt
-	deliverPromptViaDaemon = daemon.DeliverPrompt
-	createTabViaDaemon     = daemon.CreateTab
-	closeTabViaDaemon      = daemon.CloseTab
+	createSessionViaDaemon   = daemon.CreateSession
+	killSessionViaDaemon     = daemon.KillSession
+	archiveSessionViaDaemon  = daemon.ArchiveSession
+	restoreArchivedViaDaemon = daemon.RestoreArchived
+	sendPromptViaDaemon      = daemon.SendPrompt
+	deliverPromptViaDaemon   = daemon.DeliverPrompt
+	createTabViaDaemon       = daemon.CreateTab
+	closeTabViaDaemon        = daemon.CloseTab
 )
 
 var sessionsListCmd = &cobra.Command{
@@ -606,6 +608,69 @@ var sessionsKillCmd = &cobra.Command{
 		}
 
 		return jsonOut(map[string]bool{"ok": true})
+	},
+}
+
+var sessionsArchiveCmd = &cobra.Command{
+	Use:   "archive <title>",
+	Short: "Archive a session (tmux down, worktree relocated, restartable)",
+	Long: `Archive a session: tear down its tmux and move its git worktree out to the
+global archive directory (<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/),
+preserving the branch and any uncommitted changes. The session is not deleted —
+it becomes a quiescent "archived" row that survives restarts and can be brought
+back later with 'af sessions restore <title>'.
+
+Not available for remote or in-place (--here) sessions: archive relocates the
+worktree, which those don't own. The relocated worktree path is printed on
+success.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		// Honor --repo scoping (#761 class), mirroring kill: an empty repoID
+		// preserves the all-repo search; a non-empty one confines the archive to
+		// that repo so a same-titled session in another repo is never touched.
+		repoID, err := resolveRepoID()
+		if err != nil {
+			return jsonError(err)
+		}
+
+		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{Title: args[0], RepoID: repoID})
+		if err != nil {
+			return jsonError(err)
+		}
+
+		return jsonOut(map[string]any{"ok": true, "title": args[0], "archived_path": archivedPath})
+	},
+}
+
+var sessionsRestoreCmd = &cobra.Command{
+	Use:   "restore <title>",
+	Short: "Restore an archived session (worktree back in place, agent re-spawned)",
+	Long: `Restore a previously archived session: move its git worktree back next to the
+repository, re-register it, re-spawn the agent, and mark it running. Only the
+agent session is brought back — shell/process tabs are not restored.
+
+Fails if the session is not archived, or if its origin repository is gone (the
+archived worktree is left intact for manual recovery). The restored worktree
+path is printed on success.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		repoID, err := resolveRepoID()
+		if err != nil {
+			return jsonError(err)
+		}
+
+		worktreePath, err := restoreArchivedViaDaemon(daemon.RestoreArchivedRequest{Title: args[0], RepoID: repoID})
+		if err != nil {
+			return jsonError(err)
+		}
+
+		return jsonOut(map[string]any{"ok": true, "title": args[0], "worktree_path": worktreePath})
 	},
 }
 

@@ -386,6 +386,8 @@ func init() {
 	SessionsCmd.AddCommand(sessionsTabDeleteCmd)
 	SessionsCmd.AddCommand(sessionsPreviewCmd)
 	SessionsCmd.AddCommand(sessionsKillCmd)
+	SessionsCmd.AddCommand(sessionsArchiveCmd)
+	SessionsCmd.AddCommand(sessionsRestoreCmd)
 	SessionsCmd.AddCommand(sessionsAttachCmd)
 	SessionsCmd.AddCommand(sessionsWhoamiCmd)
 
