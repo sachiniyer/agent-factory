@@ -361,9 +361,25 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 			}
 			continue
 		}
-		// In-flight TUI operations own their row: leave Loading/Deleting alone.
+		// In-flight TUI operations own their row: leave Loading/Deleting alone —
+		// EXCEPT a locally-Deleting row when the daemon (the single writer, #960)
+		// now reports a TERMINAL status (Archived/Lost/Dead). A settled terminal
+		// truth must win over a stale local transient: the archive flow fences
+		// its teardown+move window with the daemon's Deleting and then flips to
+		// the terminal Archived (#1028), so a 750ms snapshot poll landing inside
+		// that window mirrors the row to Deleting — and without this override
+		// isTransientStatus would skip it on every later reconcile, stranding it
+		// on "Tearing down session…" forever, never partitioning into the
+		// Archived folder. The optimistic Deleting-during-kill UX is preserved:
+		// a user kill leaves the daemon reporting a non-terminal status (or
+		// deletes the record) until it completes, so it never trips this
+		// override — only a daemon-confirmed terminal state does. Loading rows
+		// (a create the daemon may not list yet) are never overridden.
 		if isTransientStatus(inst.GetStatus()) {
-			continue
+			overrideDeleting := inst.GetStatus() == session.Deleting && isTerminalStatus(d.Status)
+			if !overrideDeleting {
+				continue
+			}
 		}
 		if !inst.CreatedAt.Equal(d.CreatedAt) {
 			// Same title, different session — a kill+recreate reused the title
@@ -535,6 +551,17 @@ func prInfoDiffersFromData(inst *session.Instance, d session.PRInfoData) bool {
 // neither replace nor reap it.
 func isTransientStatus(status session.Status) bool {
 	return status == session.Loading || status == session.Deleting
+}
+
+// isTerminalStatus reports whether a daemon-reported status is a settled,
+// persisted outcome rather than a transient in-flight one (#1028). A terminal
+// status from the single-writer daemon overrides a stale local transient
+// (Deleting) row in reconcileSnapshot — it is a truth that has already been
+// committed to disk, so the TUI must reflect it even if a poll caught the row
+// mid-teardown. Archived (deliberate), Lost, and Dead are the persisted
+// terminal states (Running/Ready are live, Loading/Deleting are transient).
+func isTerminalStatus(status session.Status) bool {
+	return status == session.Archived || status == session.Lost || status == session.Dead
 }
 
 func (m *home) importRemoteHookSessions() int {

@@ -294,13 +294,23 @@ func (m *home) restoreInstanceCmd(title string) tea.Cmd {
 	}
 }
 
-// handleInstanceArchived finalizes an async archive. On success the row's new
-// Archived status arrives via the next daemon Snapshot reconcile, which
-// re-partitions it into the collapsed Archived folder — nothing to do here but
-// refresh selection; on failure the error lands in the error box.
+// handleInstanceArchived finalizes an async archive. On success the RPC has
+// already returned, so the daemon has committed the session to Archived; mark
+// the local row Archived IMMEDIATELY (mirroring how handleInstanceKilled
+// finalizes the row) so it partitions into the Archived folder without waiting
+// for — or depending on — the next snapshot poll. This is belt-and-suspenders
+// alongside the reconcile override (#1028): together they guarantee the row can
+// never strand on "Tearing down session…" even if a poll caught it mid-fence.
+// On failure the error lands in the error box.
 func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		return m, m.handleError(fmt.Errorf("failed to archive session '%s': %w", msg.title, msg.err))
+	}
+	for _, inst := range m.store.GetInstances() {
+		if inst.Title == msg.title {
+			inst.SetStatus(session.Archived)
+			break
+		}
 	}
 	return m, m.selectionChanged()
 }
