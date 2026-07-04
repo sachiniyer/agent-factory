@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/sachiniyer/agent-factory/cmd"
 )
 
 // Ancestry env markers (#1104). Every process spawned inside an af tmux pane
@@ -47,6 +49,21 @@ func sessionEnvFlags(sanitizedName string) []string {
 		flags = append(flags, "-e", EnvMarkerHome+"="+home)
 	}
 	return flags
+}
+
+// sessionHomeMarker reads the AF_HOME ancestry marker from a tmux session's
+// environment (stamped via `new-session -e` at creation). Returns ("", false)
+// when the session carries no marker — created by a pre-marker build or by a
+// tmux older than 3.2, which cannot set session environment at creation.
+func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (string, bool) {
+	out, err := cmdExec.Output(exec.Command("tmux", "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerHome))
+	if err != nil {
+		// show-environment exits non-zero when the variable is unset.
+		return "", false
+	}
+	// One line of the form AF_HOME=/path; a leading '-' (variable marked for
+	// removal) or any other shape counts as no marker.
+	return strings.CutPrefix(strings.TrimSpace(string(out)), EnvMarkerHome+"=")
 }
 
 var (
