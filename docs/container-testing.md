@@ -55,16 +55,27 @@ down everything: the daemon, the tmux server, and every process the
 play-test spawned. Teardown is container exit, not a checklist.
 
 For scripted/agent-driven play-tests (the `tui-playtest` skill), park the
-sandbox in the background and drive it with `docker exec`:
+sandbox in the background and drive it with `docker exec`. The container name
+defaults to a **unique per-run value** (#1171) so concurrent runs can't
+`docker rm -f` each other — pin it with `AF_PLAYTEST_NAME` so every
+`docker exec`/`rm` targets this run's container:
 
 ```bash
+export AF_PLAYTEST_NAME="af-playtest-$$"
 make playtest-container-detached
-docker exec af-playtest sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'
-docker exec af-playtest tmux new-session -d -s drive -x 80 -y 24
-docker exec af-playtest tmux send-keys -t drive 'cd ~/sandbox/mock-repo && af' Enter
-docker exec af-playtest tmux capture-pane -p -t drive
-docker rm -f af-playtest        # teardown: one command reaps everything
+docker exec "$AF_PLAYTEST_NAME" sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'
+docker exec "$AF_PLAYTEST_NAME" tmux new-session -d -s drive -x 80 -y 24
+docker exec "$AF_PLAYTEST_NAME" tmux send-keys -t drive 'cd ~/sandbox/mock-repo && af' Enter
+docker exec "$AF_PLAYTEST_NAME" tmux capture-pane -p -t drive
+docker rm -f "$AF_PLAYTEST_NAME"   # teardown: one command reaps everything
 ```
+
+Rather than hand-rolling `send-keys`/`capture-pane`/`sleep`, drive the TUI
+through the **deterministic driver** (`scripts/tui-driver.sh`): every action
+waits on a screen marker instead of a blind sleep, and it ships real
+assertions. `make tui-driver-selftest` is the acceptance gate; `make
+tui-driver` drops you into a live driven session. See
+[tui-manual-testing.md](tui-manual-testing.md).
 
 ## Known limitations
 

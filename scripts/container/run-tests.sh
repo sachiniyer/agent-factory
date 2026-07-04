@@ -5,6 +5,12 @@
 # server and a throwaway home, so nothing can leak onto the host.
 set -euo pipefail
 
+# /src is a read-only mount owned by the host user; mark it safe so any git
+# invocation the toolchain makes does not refuse it as "dubious ownership"
+# (#1167). Run from a non-repo cwd (WORKDIR is /src). Kept in step with
+# playtest-entry.sh.
+(cd / && git config --global --add safe.directory /src) 2>/dev/null || true
+
 # Copy without .git: dev checkouts are often linked worktrees whose .git is
 # a pointer to a host path that does not exist in the container.
 mkdir -p /work
@@ -14,4 +20,6 @@ cd /work
 if [ $# -eq 0 ]; then
     set -- ./...
 fi
-exec go test -count=1 "$@"
+# -buildvcs=false: /work has no .git, but disabling the VCS stamp keeps the
+# build off git entirely and consistent with the play-test build (#1167).
+exec go test -count=1 -buildvcs=false "$@"

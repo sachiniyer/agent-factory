@@ -15,7 +15,18 @@ export AGENT_FACTORY_HOME="${AGENT_FACTORY_HOME:-$SANDBOX/home}"
 mkdir -p "$AGENT_FACTORY_HOME" "$HOME/bin"
 
 echo ">>> building af from /src ..."
-(cd /src && go build -o "$HOME/bin/af" .)
+# /src is a read-only bind mount owned by the HOST user, so its uid rarely
+# matches the container's `dev` user. Two guards keep the build from aborting
+# on that ownership mismatch (#1167):
+#   * safe.directory tells git not to refuse the "dubious ownership" repo, and
+#   * -buildvcs=false stops the toolchain reading .git for a VCS stamp at all
+#     ("error obtaining VCS status: exit status 128"). run-tests.sh strips
+#     .git by copying; here we build in place, so we disable buildvcs instead.
+# Keep both entry scripts consistent on this.
+# Run the config from a NON-repo cwd (the image WORKDIR is /src, and git would
+# otherwise try to resolve /src's foreign/broken .git and refuse to write).
+(cd / && git config --global --add safe.directory /src) 2>/dev/null || true
+(cd /src && go build -buildvcs=false -o "$HOME/bin/af" .)
 
 # Cheap instances: run a plain shell instead of a real agent. Since
 # #1116/#1131 af keys flag injection and readiness off the program the
@@ -32,9 +43,13 @@ if [ ! -d "$MOCK" ]; then
     mkdir -p "$MOCK"
     cd "$MOCK"
     git init -q -b master
+    # printf writes literal shell into the mock repo — the $VARs are meant to
+    # stay unexpanded, so single quotes are correct here.
+    # shellcheck disable=SC2016
     printf '#!/bin/bash\n# todo: list, add <text>, done <n>\nTODO_FILE="${TODO_FILE:-todo.txt}"\ntouch "$TODO_FILE"\ncase "$1" in\n  add) shift; echo "$*" >> "$TODO_FILE";;\n  done) sed -i "${2}d" "$TODO_FILE";;\n  *) nl -ba "$TODO_FILE";;\nesac\n' >todo.sh
     chmod +x todo.sh
     printf '# todo\nA tiny shell todo app.\n\nUsage: ./todo.sh [add <text> | done <n>]\n' >README.md
+    # shellcheck disable=SC2016
     printf '#!/bin/bash\nset -e\nexport TODO_FILE=$(mktemp)\n./todo.sh add "first item"\n./todo.sh | grep -q "first item"\nrm -f "$TODO_FILE"\necho ok\n' >test.sh
     chmod +x test.sh
     git add -A && git commit -qm "initial project"

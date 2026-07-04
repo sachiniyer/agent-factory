@@ -25,18 +25,22 @@ mock repo, pids/memory caps, and teardown is one `docker rm -f`). See
 
 ```bash
 WORK="/tmp/af-playtest-$(date +%Y%m%d-%H%M%S)" && mkdir -p "$WORK"
+# PIN a per-run container name. The default is now UNIQUE per run (#1171) so
+# concurrent play-tests can't `docker rm -f` each other; pin it here so every
+# docker exec/rm below targets THIS run's container, never a hardcoded name.
+export AF_PLAYTEST_NAME="af-playtest-$$"
 git clone --depth 1 https://github.com/sachiniyer/agent-factory "$WORK/src"   # play-test master, not a dirty checkout
-make -C "$WORK/src" playtest-container-detached                               # container name: af-playtest
-docker exec af-playtest sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'   # af builds on boot
+make -C "$WORK/src" playtest-container-detached                               # container name: $AF_PLAYTEST_NAME
+docker exec "$AF_PLAYTEST_NAME" sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'   # af builds on boot
 
 # Drive the TUI exactly as in section 2, but through docker exec — no -L
 # socket needed; the container's default tmux server IS the private server:
-docker exec af-playtest tmux new-session -d -s drive -x 80 -y 24
-docker exec af-playtest tmux send-keys -t drive 'cd ~/sandbox/mock-repo && af' Enter
-docker exec af-playtest tmux capture-pane -p -t drive
+docker exec "$AF_PLAYTEST_NAME" tmux new-session -d -s drive -x 80 -y 24
+docker exec "$AF_PLAYTEST_NAME" tmux send-keys -t drive 'cd ~/sandbox/mock-repo && af' Enter
+docker exec "$AF_PLAYTEST_NAME" tmux capture-pane -p -t drive
 
 # Teardown (replaces section 4's script — one command reaps everything):
-docker rm -f af-playtest && rm -rf "$WORK"
+docker rm -f "$AF_PLAYTEST_NAME" && rm -rf "$WORK"
 ```
 
 `gh` issue filing (section 3) still happens on the host. Stress
@@ -44,6 +48,39 @@ generators must still be BOUNDED — the caps turn a runaway into a
 contained failure, not a non-event. Sections 1 and 4 below are the
 **fallback for boxes without docker/podman**; the rules underneath apply
 to every run, containerized or not.
+
+### Drive with the TUI driver, not raw send-keys (#1161)
+
+Don't hand-roll `send-keys`/`capture-pane`/`sleep N` — that is exactly what
+mis-drove the TUI in #1156 (keys landing in a live pane as text) and died on
+a `$TMUX` collision in #1155. Source
+[`scripts/tui-driver.sh`](../../scripts/tui-driver.sh): every action is
+self-synchronizing (waits on a screen marker, never a blind sleep),
+`af_ensure_nav` forces a known focus state, and `af_expect_selected` /
+`af_assert_no_orphan_clients` give real assertions. See
+[docs/tui-manual-testing.md](../../docs/tui-manual-testing.md) for the
+interaction model and a gate-recipe library.
+
+```bash
+# smoke-check the driver itself (and the TUI) first:
+make -C "$WORK/src" tui-driver-selftest
+
+# then drive the play-test through the driver instead of raw send-keys
+# ("$AF_PLAYTEST_NAME" was pinned above):
+docker exec "$AF_PLAYTEST_NAME" bash -lc '
+  source /src/scripts/tui-driver.sh
+  af_boot
+  af_new_instance alpha
+  af_select alpha && af_expect_selected alpha
+  af_open_pane && af_enter_interactive
+  af_send_to_pane "echo hello"
+  af_exit_interactive
+  af_assert_no_orphan_clients
+'
+```
+
+The raw `send-keys` recipe below still works and is fine for one-off pokes,
+but prefer the driver for anything you want to be repeatable or gate on.
 
 ## Hard isolation rules (non-negotiable)
 
