@@ -7,20 +7,40 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-// codexSystemPrompt is the system prompt for Codex sessions, which don't support plugins.
-const codexSystemPrompt = `You are running inside Agent Factory (af), a terminal multiplexer for AI coding agents.
+// afUsageReference is the single source of truth for teaching an agent the af
+// CLI. It is the body of the consolidated "af" plugin skill for Claude Code
+// (see plugin.go) and the developer_instructions text for Codex, so the two
+// surfaces cannot drift (#1043). Keep it complete but terse: every user-facing
+// command group (sessions, tabs, tasks, daemon, maintenance), no boilerplate.
+const afUsageReference = `You are running inside Agent Factory (af), a terminal multiplexer that runs each AI coding agent in an isolated git worktree. Manage sessions, tasks, and the daemon with the "af" CLI. Commands print JSON on stdout; run "af <command> --help" for full flag lists. To target another repository, pass --repo <path>: honored by sessions create/list/send-prompt/kill/attach/tab-create/tab-delete and tasks list/add. Two commands accept --repo but SILENTLY IGNORE it — "sessions get" and "sessions preview" always resolve the title across ALL repos, so with the same title in two repos you may get the wrong one regardless of --repo; disambiguate by using unique titles. tasks get/update/trigger/remove take a globally unique id (no --repo needed).
 
-You can manage sessions using the "af" CLI:
+Sessions (one agent per isolated worktree):
+  af sessions whoami                                   Identify your own session
+  af sessions list                                     List sessions
+  af sessions get <title>                              Fetch one session
+  af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini]
+  af sessions send-prompt <title> <prompt> [--create]  Send a prompt (--create makes the session first if missing)
+  af sessions preview <title>                          Snapshot another session's terminal output
+  af sessions attach <title>                           Attach interactively (foreground)
+  af sessions kill <title>                             Kill a session and clean up its worktree
 
-Session commands:
-  af sessions create --name <title> [--prompt <prompt>]  Create a new session
-  af sessions whoami                        Identify your current session
-  af sessions list                          List all sessions
-  af sessions kill <title>                  Delete/kill a session
-  af sessions send-prompt <title> <prompt>  Send a prompt to another session
-  af sessions preview <title>               View another session's terminal output
-  af sessions tab-create <title> --command <cmd>  Spawn a process tab in the worktree
-  af sessions tab-delete <title> --name <tab>     Delete a single tab`
+Tabs (extra processes in a session's worktree; max 9 per session; not available for remote sessions):
+  af sessions tab-create <title> --command <cmd> [--name <tab>]   Prints the resolved tab name; tabs persist across restarts
+  af sessions tab-delete <title> --name <tab>                     The agent tab itself can't be deleted; kill the session instead
+
+Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch script prints a stdout line; exactly one of --cron/--watch-cmd per task):
+  af tasks list                                        List tasks
+  af tasks get <id>                                    Fetch one task
+  af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
+  af tasks add --name <n> --watch-cmd <cmd> [--prompt "... {{line}} ..."] [--target-session <title>] [--program <agent>]
+  af tasks update <id> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--program ...] [--enabled true|false]
+  af tasks trigger <id>                                Run a cron task immediately
+  af tasks remove <id>
+Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, and --target-session "" reverts to session-per-run. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
+
+Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
+
+Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes ALL linked worktrees and their branches across repos.`
 
 // shellQuote wraps a string in single quotes, escaping any embedded single quotes
 // using the standard shell idiom: replace ' with '\"
@@ -41,8 +61,9 @@ func shellQuote(s string) string {
 // opaque timeout (#1116, #1131).
 //
 // Strategy per tool:
-//   - Claude Code: --plugin-dir flag only (slash commands + /af-whoami for self-identification)
-//   - Codex: -c developer_instructions="..." flag (text-based, no plugin support)
+//   - Claude Code: --plugin-dir flag only (a single "af" skill carrying afUsageReference)
+//   - Codex: -c developer_instructions="..." flag carrying the same afUsageReference
+//     (no custom-skills-folder mechanism exists in the Codex CLI; see #1043)
 //   - aider, gemini, and commands running no known agent: no injection.
 func injectSystemPrompt(resolved string) string {
 	agent := tmux.DetectAgentFromCommand(resolved)
@@ -67,7 +88,7 @@ func injectSystemPrompt(resolved string) string {
 		if strings.Contains(resolved, "developer_instructions=") {
 			return resolved
 		}
-		return resolved + " -c " + shellQuote("developer_instructions="+codexSystemPrompt)
+		return resolved + " -c " + shellQuote("developer_instructions="+afUsageReference)
 	}
 	return resolved
 }

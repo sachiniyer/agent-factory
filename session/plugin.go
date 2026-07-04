@@ -10,102 +10,32 @@ import (
 // pluginManifest is the .claude-plugin/plugin.json content required by Claude Code.
 const pluginManifest = `{
   "name": "agent-factory",
-  "description": "Agent Factory (af) session management commands",
+  "description": "Agent Factory (af) CLI usage: sessions, tabs, tasks, daemon",
   "author": {
     "name": "Agent Factory"
   }
 }
 `
 
-// pluginCommands defines the slash command files to write into the plugin directory.
+// pluginCommands defines the command files to write into the plugin directory.
 // ensurePluginDir writes this map to disk on every session launch and prunes any
 // .md file that isn't listed here, so adding/removing/editing a skill is as simple
-// as changing this map.
+// as changing this map (the pre-#1043 per-command af-*.md files are pruned this
+// way on existing installs).
+//
+// Since #1043 there is exactly one entry: the "af" skill, whose body is
+// afUsageReference (systemprompt.go) — the same text Codex sessions receive via
+// developer_instructions — so the two agents' af knowledge cannot drift.
 var pluginCommands = map[string]string{
-	"af-sessions.md": "---\n" +
-		"allowed-tools: Bash(af sessions list:*)\n" +
-		"description: List all Agent Factory sessions\n" +
+	"af.md": "---\n" +
+		"allowed-tools: Bash(af:*)\n" +
+		"description: Manage Agent Factory (af) sessions, tabs, scheduled tasks, and the daemon via the af CLI\n" +
+		"argument-hint: [request]\n" +
 		"---\n" +
 		"\n" +
-		"List all running Agent Factory sessions.\n" +
+		afUsageReference + "\n" +
 		"\n" +
-		"## Context\n" +
-		"\n" +
-		"- Current sessions: !`af sessions list`\n",
-
-	"af-create.md": "---\n" +
-		"allowed-tools: Bash(af sessions create:*)\n" +
-		"description: Create a new Agent Factory session\n" +
-		"argument-hint: <session-name> [initial-prompt]\n" +
-		"---\n" +
-		"\n" +
-		"Create a new Agent Factory session (a new agent instance in an isolated git worktree).\n" +
-		"\n" +
-		"The user provided: $ARGUMENTS\n" +
-		"\n" +
-		"Parse the session name (first argument) and optional initial prompt (remaining arguments), " +
-		"then run `af sessions create --name <name> --prompt <prompt>`. " +
-		"If no prompt is given, omit the --prompt flag. " +
-		"The name should be a short kebab-case identifier the user will recognize in the session list.\n" +
-		"\n" +
-		"## Output contract\n" +
-		"\n" +
-		"The initial prompt is the entire contract — the spawned session inherits no context from this conversation. " +
-		"State everything it needs, including the expected output mode. Common shapes:\n" +
-		"\n" +
-		"- \"Open a PR titled X, link it back here, do not merge — the parent will verify and merge.\"\n" +
-		"- \"Produce a report in tmp_docs/<name>.md and exit. Do NOT write code or open a PR.\"\n" +
-		"- \"Diagnose only — stop after the audit summary, no implementation.\"\n" +
-		"\n" +
-		"If the user's instruction is short or ambiguous (e.g. \"spawn an agent to audit X\"), confirm the desired output shape with them before spawning — a wrong guess surfaces later as a \"did you do it or did the af session?\" round-trip.\n",
-
-	"af-kill.md": "---\n" +
-		"allowed-tools: Bash(af sessions kill:*)\n" +
-		"description: Kill an Agent Factory session by title\n" +
-		"argument-hint: <session-title>\n" +
-		"---\n" +
-		"\n" +
-		"Kill the specified Agent Factory session.\n" +
-		"\n" +
-		"The user wants to kill the session: $ARGUMENTS\n" +
-		"\n" +
-		"Run `af sessions kill $ARGUMENTS` to kill it.\n",
-
-	"af-send.md": "---\n" +
-		"allowed-tools: Bash(af sessions send-prompt:*)\n" +
-		"description: Send a prompt to another Agent Factory session\n" +
-		"argument-hint: <session-title> <prompt>\n" +
-		"---\n" +
-		"\n" +
-		"Send a prompt to another running Agent Factory session.\n" +
-		"\n" +
-		"The user provided: $ARGUMENTS\n" +
-		"\n" +
-		"Parse the session title (first argument) and prompt (remaining arguments), " +
-		"then run `af sessions send-prompt <title> <prompt>`.\n",
-
-	"af-preview.md": "---\n" +
-		"allowed-tools: Bash(af sessions preview:*)\n" +
-		"description: Preview another Agent Factory session's terminal output\n" +
-		"argument-hint: <session-title>\n" +
-		"---\n" +
-		"\n" +
-		"View the terminal output of another running Agent Factory session.\n" +
-		"\n" +
-		"The user wants to preview the session: $ARGUMENTS\n" +
-		"\n" +
-		"Run `af sessions preview $ARGUMENTS` to view it.\n",
-
-	"af-whoami.md": "---\n" +
-		"allowed-tools: Bash(af sessions whoami:*)\n" +
-		"description: Identify the current Agent Factory session\n" +
-		"---\n" +
-		"\n" +
-		"Identify which Agent Factory session you are running in.\n" +
-		"\n" +
-		"## Context\n" +
-		"\n" +
-		"- Current session: !`af sessions whoami`\n",
+		"User request (may be empty): $ARGUMENTS\n",
 }
 
 // ensurePluginDir creates the plugin directory with manifest and slash command
