@@ -287,6 +287,34 @@ Remove a task. Emits `{"ok": true}`.
 
 ---
 
+## `af api`
+
+Print the catalog of the daemon-hosted HTTP/JSON API — the localhost-only Unix
+socket that mirrors the `af sessions` / `af tasks` operations for tools and
+agents that call the daemon directly. **Read-only and local:** it resolves the
+socket path and reads the in-process route catalog but never dials the socket or
+starts the daemon, so it works with no daemon running.
+
+```bash
+af api          # human-readable: resolved socket path, auth model, every endpoint + a curl example
+af api --json   # the same catalog as JSON, wrapped in the {data,error} envelope
+```
+
+The default output prints the resolved socket path
+(`$AGENT_FACTORY_HOME/daemon-http.sock`, falling back to
+`~/.agent-factory/daemon-http.sock`), the auth model (owner-only `0600` Unix
+socket; no TCP port, no token), and a table of every endpoint —
+`GET /v1/health` plus a `POST /v1/<Method>` for each mirrored RPC — with a
+ready-to-run `curl --unix-socket …` example per endpoint. `--json` emits a
+machine-readable catalog (`{socket_path, auth, endpoints: [{method, path,
+description, request_fields?}]}`) in the shared envelope.
+
+The catalog is derived from the daemon's actual route table, so it never drifts
+from what the server serves. Full request/response reference:
+[http-api.md](http-api.md).
+
+---
+
 ## `af daemon`
 
 Manage the background daemon that hosts task cron schedules, watch-task scripts,

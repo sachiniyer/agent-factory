@@ -286,6 +286,7 @@ func init() {
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(api.SessionsCmd)
 	rootCmd.AddCommand(api.TasksCmd)
+	rootCmd.AddCommand(api.APICmd)
 }
 
 func main() {
