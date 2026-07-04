@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -86,6 +87,75 @@ func TestReconcile_OptimisticKillPreservedForNonTerminal(t *testing.T) {
 				"a non-terminal daemon liveness must NOT clear an optimistic kill op (kill UX)")
 		})
 	}
+}
+
+// TestReconcile_ArchivedToLiveRebuildsStarted is the #1195 restore-regression
+// gate (root's #1203 play-test caught this): a row that went inert on archive
+// (SetArchived → started=false) MUST come back started when the daemon reports it
+// live again — restored in-session or out-of-band via the CLI, both surface as a
+// snapshot liveness flip through this one reconcile path. An in-place liveness
+// write would leave it "live but not started" — unattachable (attach/send-keys/
+// Enter/preview all fail the !started guard). The reconcile REBUILDS it (re-Start
+// in place), so started + the agent-tmux binding return without a TUI relaunch.
+func TestReconcile_ArchivedToLiveRebuildsStarted(t *testing.T) {
+	h := newTestHome(t)
+
+	archived, err := session.NewInstance(session.InstanceOptions{Title: "worker", Path: t.TempDir(), Program: "test"})
+	require.NoError(t, err)
+	archived.SetBackend(session.NewFakeBackend())
+	archived.SetArchived() // the inert shape: started=false, liveness=Archived
+	require.False(t, archived.Started())
+	h.store.AddInstance(archived)
+
+	built := 0
+	restore := SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		built++
+		ri, err := session.NewInstance(session.InstanceOptions{Title: d.Title, Path: t.TempDir(), Program: "test"})
+		require.NoError(t, err)
+		ri.SetBackend(session.NewFakeBackend())
+		ri.SetStartedForTest(true)
+		ri.SetStatus(session.Running)
+		ri.ID = d.ID
+		return ri, nil
+	})
+	defer restore()
+
+	// The daemon reports the session restored (worktree back, agent re-spawned).
+	data := archived.ToInstanceData()
+	data.Liveness = session.LiveRunning
+	h.reconcileSnapshot([]session.InstanceData{data})
+
+	require.Equal(t, 1, built, "an archived→live transition must rebuild (re-Start), not update in place")
+	got := h.store.GetInstanceByTitle("worker")
+	require.NotNil(t, got)
+	require.NotSame(t, archived, got, "the inert corpse is replaced by the started rebuild")
+	require.True(t, got.Started(), "the restored row must be started — attachable in-place")
+	require.Equal(t, session.Running, got.GetStatus())
+}
+
+// TestReconcile_LostToLiveStaysInPlace documents the audit-adjacent coverage
+// (#1203): a Lost row is started=true (FromInstanceData Starts every non-archived
+// liveness), so a lost→recover transition is a plain in-place liveness update —
+// no rebuild, the pointer + started persist and the by-name tmux binding
+// reconnects. Only Archived→live needs the rebuild.
+func TestReconcile_LostToLiveStaysInPlace(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "worker") // started=true
+	inst.SetStatus(session.Lost)
+	h.store.AddInstance(inst)
+
+	restore := SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return nil, fmt.Errorf("lost→live recover must not rebuild")
+	})
+	defer restore()
+
+	data := inst.ToInstanceData()
+	data.Liveness = session.LiveRunning
+	h.reconcileSnapshot([]session.InstanceData{data})
+
+	require.Same(t, inst, h.store.GetInstanceByTitle("worker"), "same pointer preserved (in-place update)")
+	require.True(t, inst.Started())
+	require.Equal(t, session.Running, inst.GetStatus())
 }
 
 // TestHandleInstanceArchived_FinalizesRowImmediately: on a successful archive the

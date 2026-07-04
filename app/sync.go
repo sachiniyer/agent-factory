@@ -377,6 +377,24 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 			}
 			continue
 		}
+		// A same-session row transitioning OUT of Archived back to a live liveness
+		// (the restore case) must be REBUILT, not updated in place.
+		// handleInstanceArchived/SetArchived flipped the projection inert
+		// (started=false); an in-place SetLiveness(live) would leave it "live but not
+		// started", so attach/send-keys/Enter/preview all fail their !started guard
+		// and the agent-tmux binding is never re-established (ReconcileTabsFromData
+		// no-ops on a not-started row) until a TUI relaunch.
+		// buildInstanceFromSnapshot (=FromInstanceData) re-runs Start() for a live
+		// liveness, restoring started + the binding IN-PLACE — symmetric to
+		// SetArchived flipping it inert (#1195 restore regression). Keyed on the
+		// Archived→live transition specifically (not merely !Started), so it fires
+		// on real restores without disturbing live in-place updates.
+		if inst.GetLiveness() == session.LiveArchived && snapshotLiveness(d) != session.LiveArchived {
+			if m.swapInstanceFromSnapshot(d) {
+				changed = true
+			}
+			continue
+		}
 		// Same session: apply the daemon's liveness UNCONDITIONALLY and clear a
 		// local op once the liveness confirms its outcome. This is the #1195
 		// structural fix for #1187: because liveness is never skipped, a
