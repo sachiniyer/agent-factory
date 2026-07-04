@@ -107,10 +107,10 @@ func composeStatus(lv Liveness, op InFlightOp) Status {
 	return Running
 }
 
-// livenessForStatus maps a settled (non-transient) legacy Status to its Liveness
+// LivenessForStatus maps a settled (non-transient) legacy Status to its Liveness
 // axis. Transient values (Loading/Deleting) are handled by setStatusLocked, which
 // sets the op and leaves liveness untouched, so they never reach here.
-func livenessForStatus(s Status) Liveness {
+func LivenessForStatus(s Status) Liveness {
 	switch s {
 	case Running:
 		return LiveRunning
@@ -160,7 +160,7 @@ func (i *Instance) setStatusLocked(s Status) {
 		i.inFlightOp = OpKilling
 	default:
 		i.inFlightOp = OpNone
-		i.liveness = livenessForStatus(s)
+		i.liveness = LivenessForStatus(s)
 	}
 }
 

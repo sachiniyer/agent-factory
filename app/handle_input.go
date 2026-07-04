@@ -84,7 +84,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		// Apply the program selected during naming
 		instance.Program = m.pendingProgram
-		instance.SetStatus(session.Loading)
+		instance.SetInFlightOp(session.OpCreating)
 		m.namingInstance = nil
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
@@ -183,7 +183,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	if err != nil {
 		return m, m.handleError(err)
 	}
-	instance.SetStatus(session.Loading)
+	instance.SetInFlightOp(session.OpCreating)
 	m.store.AddInstance(instance)
 	m.sidebar.SetSelectedInstance(m.store.NumInstances() - 1)
 	m.namingInstance = instance

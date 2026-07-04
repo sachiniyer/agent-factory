@@ -702,7 +702,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// `status` int (rollforward, no dual-read).
 	liveness := data.Liveness
 	if liveness == LivenessUnset {
-		liveness = livenessForStatus(data.Status)
+		liveness = LivenessForStatus(data.Status)
 	}
 	if liveness == LiveDead {
 		// Rollforward (#1108): Dead was only ever written by observed-death

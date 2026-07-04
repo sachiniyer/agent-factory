@@ -138,13 +138,15 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	selectedTitle := selected.Title
 
 	// Runs synchronously in the confirmation overlay's OnConfirm, on the
-	// event loop — keep it fast. Marking Deleting here (not in the background
-	// cmd) guarantees the row is visibly deleting and kill/attach are fenced
-	// off before any other event can be processed.
+	// event loop — keep it fast. Raising the optimistic OpKilling op here (not in
+	// the background cmd) guarantees the row is visibly deleting and kill/attach
+	// are fenced off before any other event can be processed. The op is a local
+	// overlay the daemon snapshot never carries (#1195), so it composes to
+	// Deleting for rendering and can never be clobbered by a reconcile.
 	killAction := func() tea.Msg {
 		for _, inst := range m.store.GetInstances() {
 			if inst.Title == selectedTitle {
-				inst.SetStatus(session.Deleting)
+				inst.SetInFlightOp(session.OpKilling)
 				return startKillMsg{title: selectedTitle}
 			}
 		}
@@ -202,8 +204,10 @@ func (m *home) killInstanceCmd(title string) tea.Cmd {
 func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		for _, inst := range m.store.GetInstances() {
-			if inst.Title == msg.title && inst.GetStatus() == session.Deleting {
-				inst.SetStatus(session.Ready)
+			if inst.Title == msg.title && inst.GetInFlightOp() == session.OpKilling {
+				// Clear the optimistic kill op: the row reverts to its underlying
+				// daemon liveness so the user can retry the kill.
+				inst.SetInFlightOp(session.OpNone)
 				break
 			}
 		}
@@ -262,7 +266,19 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	}
 
 	message := fmt.Sprintf("[!] Archive session '%s'?\n\nIts tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with A.", title)
-	return m, m.confirmAction(message, func() tea.Msg { return startArchiveMsg{title: title} })
+	return m, m.confirmAction(message, func() tea.Msg {
+		// Raise the optimistic OpArchiving op so the row visibly shows archiving
+		// while the RPC runs (#1195). It composes to Deleting for rendering; the
+		// reconcile clears it once the daemon liveness settles on Archived, and the
+		// completion handler finalizes it — so the row can never strand (#1187).
+		for _, inst := range m.store.GetInstances() {
+			if inst.Title == title {
+				inst.SetInFlightOp(session.OpArchiving)
+				break
+			}
+		}
+		return startArchiveMsg{title: title}
+	})
 }
 
 // archiveInstanceCmd runs the daemon archive (tmux teardown + worktree move) off
@@ -304,11 +320,21 @@ func (m *home) restoreInstanceCmd(title string) tea.Cmd {
 // On failure the error lands in the error box.
 func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
+		// Archive failed: clear the optimistic op so the row reverts to its
+		// underlying daemon liveness rather than stranding as archiving.
+		for _, inst := range m.store.GetInstances() {
+			if inst.Title == msg.title && inst.GetInFlightOp() == session.OpArchiving {
+				inst.SetInFlightOp(session.OpNone)
+				break
+			}
+		}
 		return m, m.handleError(fmt.Errorf("failed to archive session '%s': %w", msg.title, msg.err))
 	}
 	for _, inst := range m.store.GetInstances() {
 		if inst.Title == msg.title {
-			inst.SetStatus(session.Archived)
+			// SetArchived flips the row inert (started=false, liveness=Archived,
+			// op cleared) — matching the daemon's committed state.
+			inst.SetArchived()
 			break
 		}
 	}

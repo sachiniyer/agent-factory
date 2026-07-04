@@ -45,9 +45,9 @@ func TestArchive_ReconcileClosesOpenPanes(t *testing.T) {
 	_, _ = h.openOrFocusPane(inst, 0)
 	require.Equal(t, 1, h.store.NumOpenPanes())
 
-	// The daemon reports the session archived (same session — matching CreatedAt).
+	// The daemon reports the session archived (same session — matching id).
 	data := inst.ToInstanceData()
-	data.Status = session.Archived
+	data.Liveness = session.LiveArchived
 	h.reconcileSnapshot([]session.InstanceData{data})
 
 	require.Equal(t, session.Archived, inst.GetStatus())
@@ -75,11 +75,31 @@ func TestRestore_LeavesNoStalePaneBinding(t *testing.T) {
 	require.Equal(t, 0, h.store.NumOpenPanes(),
 		"archive closes the session's panes — no live pane on an archived row")
 
-	// Restore flips it back to Running via the reconcile.
+	// Restore flips it back to Running via the reconcile, which REBUILDS the row
+	// (re-Start in place) rather than updating the inert corpse — stub the builder
+	// to return a started, fake-backed restored instance (the #1195 restore fix).
+	restore := SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		ri, err := session.NewInstance(session.InstanceOptions{Title: d.Title, Path: t.TempDir(), Program: "test"})
+		require.NoError(t, err)
+		ri.SetBackend(session.NewFakeBackend())
+		ri.SetStartedForTest(true)
+		ri.SetStatus(session.Running)
+		ri.ID = d.ID
+		return ri, nil
+	})
+	defer restore()
+
+	title := inst.Title
 	data := inst.ToInstanceData()
-	data.Status = session.Running
+	data.Liveness = session.LiveRunning
 	h.reconcileSnapshot([]session.InstanceData{data})
-	require.Equal(t, session.Running, inst.GetStatus())
+
+	// The restore rebuilt the row: re-resolve by title (the pointer changed) and
+	// confirm it is started + live — attachable again in-place (#1195 regression).
+	got := h.store.GetInstanceByTitle(title)
+	require.NotNil(t, got)
+	require.True(t, got.Started(), "a restored row must be started so it is attachable in-place")
+	require.Equal(t, session.Running, got.GetStatus())
 
 	// Whatever panes exist now must bind ONLY to the live restored instance —
 	// never a stale/archived binding.
