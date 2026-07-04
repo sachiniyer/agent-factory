@@ -3,6 +3,7 @@ package app
 import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 type sessionStartRequest struct {
@@ -57,6 +58,32 @@ var restoreArchivedThroughDaemon = func(title, repoID string) (string, error) {
 // package var so the app test suite can stub the trigger without dialing a real
 // daemon.
 var triggerTaskThroughDaemon = daemon.TriggerTask
+
+// addTaskThroughDaemon / updateTaskThroughDaemon / removeTaskThroughDaemon route
+// the TUI's own task CRUD (create in the inline form, edit/toggle/delete in the
+// task manager) through the daemon (#1029 PR 6), completing the #960 sole-writer
+// invariant for tasks: the daemon is the ONLY process that writes tasks.json
+// among clients. Previously these paths wrote the file directly via
+// task.AddTask/UpdateTask/RemoveTask and then poked ReloadTasks; now they go
+// through the SAME spawning RPC wrappers the CLI uses (api/tasks.go's
+// daemonAddTask/…), and because the daemon's CRUD handlers re-arm the scheduler
+// and watchers in-process (#1029 PR 3), the separate ReloadTasks poke is gone —
+// the write and its schedule refresh are one atomic daemon call. Like the tab
+// create/close RPCs (handleNewTab/handleCloseTab), these are quick daemon writes
+// dispatched synchronously on the event loop — not the tens-of-seconds ssh
+// teardowns that motivate the async kill/archive cmds — so saveContentPaneState
+// keeps its synchronous error-return contract and its callers still gate on it.
+//
+// Package vars so the app test suite can point them at the direct task writers
+// (the existing disk-assertion tests) or at a recorder (the dispatch tests)
+// without dialing — or spawning — a real daemon. Read only on the event loop, so
+// package globals are race-safe here (no off-loop goroutine reads them, unlike
+// the snapshot fetcher / poll-pause seams).
+var (
+	addTaskThroughDaemon    = daemon.AddTask
+	updateTaskThroughDaemon = daemon.UpdateTask
+	removeTaskThroughDaemon = daemon.RemoveTask
+)
 
 // pauseStatusPollThroughDaemon / resumeStatusPollThroughDaemon route the TUI's
 // attach-time poll-pause coordination to the daemon (#1160, Fix A follow-up to
@@ -138,6 +165,28 @@ func SetTaskTriggerForTest(f func(taskID string) error) func() {
 	prev := triggerTaskThroughDaemon
 	triggerTaskThroughDaemon = f
 	return func() { triggerTaskThroughDaemon = prev }
+}
+
+// SetTaskAdderForTest / SetTaskUpdaterForTest / SetTaskRemoverForTest swap the
+// task-write seams (#1029 PR 6) so tests can assert the TUI routes create/edit/
+// remove through the daemon — or point them at the direct task writers — without
+// dialing a real daemon.
+func SetTaskAdderForTest(f func(task.Task) error) func() {
+	prev := addTaskThroughDaemon
+	addTaskThroughDaemon = f
+	return func() { addTaskThroughDaemon = prev }
+}
+
+func SetTaskUpdaterForTest(f func(task.Task) error) func() {
+	prev := updateTaskThroughDaemon
+	updateTaskThroughDaemon = f
+	return func() { updateTaskThroughDaemon = prev }
+}
+
+func SetTaskRemoverForTest(f func(id string) error) func() {
+	prev := removeTaskThroughDaemon
+	removeTaskThroughDaemon = f
+	return func() { removeTaskThroughDaemon = prev }
 }
 
 func SetRemoteImporterForTest(f func(repoPath string) ([]session.InstanceData, error)) func() {

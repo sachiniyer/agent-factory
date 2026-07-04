@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -934,21 +933,26 @@ func (m *home) saveContentPaneState() error {
 	// Collect every persist failure instead of swallowing them: a partial
 	// failure must still surface so the user knows their edit didn't fully
 	// land (matches api/tasks.go, which propagates these errors).
+	//
+	// The writes route through the daemon (#1029 PR 6): the daemon is the sole
+	// writer of tasks.json among clients (#960), so a TUI edit/delete goes
+	// through the same RPC wrappers the CLI uses instead of touching the file
+	// directly. Each CRUD RPC re-arms the daemon's scheduler + watchers
+	// in-process, so there is no separate ReloadTasks poke here — the write and
+	// its schedule refresh are one atomic daemon call (removing the old
+	// double-reload).
 	for _, tsk := range sp.GetTasks() {
-		if err := task.UpdateTask(tsk); err != nil {
+		if err := updateTaskThroughDaemon(tsk); err != nil {
 			log.ErrorLog.Printf("failed to update task: %v", err)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save task %q: %w", tsk.Name, err))
 		}
 	}
 	for _, tsk := range sp.ConsumeDeleted() {
-		if err := task.RemoveTask(tsk.ID); err != nil {
+		if err := removeTaskThroughDaemon(tsk.ID); err != nil {
 			log.ErrorLog.Printf("failed to remove task: %v", err)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
 		}
 	}
-	// Schedules live in the daemon (#782): a single reload poke after
-	// the batched writes brings its cron entries in sync.
-	reloadDaemonTaskSchedules()
 	// Reload BOTH panes from disk so the TaskPane and sidebar can never diverge
 	// (#934): whatever actually committed, both panes now show it.
 	tasks, err := task.LoadTasksForCurrentRepo()
@@ -964,23 +968,10 @@ func (m *home) saveContentPaneState() error {
 	return saveErr
 }
 
-// reloadDaemonTaskSchedulesFn is indirected so TUI tests can observe the poke
-// without dialing (or spawning) a real daemon.
-var reloadDaemonTaskSchedulesFn = daemon.ReloadTasks
-
 // saveInRepoPostWorktreeCommandsFn is indirected so TUI tests can force a
 // hooks-save failure deterministically — without relying on filesystem
 // permission tricks that a root test runner would bypass (#1001).
 var saveInRepoPostWorktreeCommandsFn = config.SaveInRepoPostWorktreeCommands
-
-// reloadDaemonTaskSchedules asks the daemon to re-read tasks.json after a
-// TUI-side task edit. Best-effort: the daemon reloads all tasks at every
-// start, so a failed poke only delays the change until then.
-func reloadDaemonTaskSchedules() {
-	if err := reloadDaemonTaskSchedulesFn(); err != nil {
-		log.WarningLog.Printf("task change saved, but the daemon schedule reload failed (the change applies at next daemon start): %v", err)
-	}
-}
 
 // handleTaskCreate processes a pending task creation from the inline form.
 func (m *home) handleTaskCreate() tea.Cmd {
@@ -1032,10 +1023,13 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		Enabled:       true,
 		CreatedAt:     time.Now(),
 	}
-	if err := task.AddTask(t); err != nil {
+	// Route the create through the daemon (#1029 PR 6): it is the sole writer of
+	// tasks.json among clients (#960) and re-arms its own scheduler/watchers in
+	// the same RPC, so there is no separate ReloadTasks poke — the write and its
+	// schedule refresh are one atomic daemon call.
+	if err := addTaskThroughDaemon(t); err != nil {
 		return m.handleError(fmt.Errorf("failed to save task: %v", err))
 	}
-	reloadDaemonTaskSchedules()
 	// Refresh sidebar and task pane
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
