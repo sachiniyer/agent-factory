@@ -57,6 +57,17 @@ const (
 	// manager overlay. Dispatch is root-routed (handleAutomationsFocus), so
 	// this name never appears in GlobalKeyStringsMap.
 	KeyManageAutomations
+
+	// Interactive mode (#1089, RFC §2.3): Enter on a live pane enters it —
+	// every subsequent keystroke (including Tab) forwards to the agent/shell
+	// in-pane, no full-screen takeover. KeyAttach keeps the full-screen tmux
+	// attach reachable on its own key (`o`, previously an Enter alias).
+	KeyAttach
+	// KeyExitInteractive is the ONLY host-reserved key while interactive
+	// (menu/help display only): Ctrl-] returns to nav mode. Dispatch is
+	// root-routed before any key map (handleInteractiveKey), so this name
+	// never appears in GlobalKeyStringsMap.
+	KeyExitInteractive
 )
 
 // GlobalKeyStringsMap is a global, immutable map string to keybinding.
@@ -69,15 +80,17 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"shift+down": KeyShiftDown,
 	"N":          KeyNewRemote,
 	"enter":      KeyEnter,
-	"o":          KeyEnter,
-	"n":          KeyNew,
-	"D":          KeyKill,
-	"q":          KeyQuit,
-	"tab":        KeyTab,
-	"shift+tab":  KeyShiftTab,
-	"t":          KeyNewTab,
-	"w":          KeyCloseTab,
-	"?":          KeyHelp,
+	// "o" was an Enter alias until #1089 PR 2 split the verbs: Enter enters
+	// the pane (interactive), o keeps the old full-screen attach.
+	"o":         KeyAttach,
+	"n":         KeyNew,
+	"D":         KeyKill,
+	"q":         KeyQuit,
+	"tab":       KeyTab,
+	"shift+tab": KeyShiftTab,
+	"t":         KeyNewTab,
+	"w":         KeyCloseTab,
+	"?":         KeyHelp,
 	// "s" is the open-pane verb since #1024 PR 5/#1088 (RFC §2.3); the
 	// task-create jump it used to carry lives in the task manager (S → n).
 	"s":     KeyOpenPane,
@@ -114,8 +127,16 @@ var GlobalKeyBindings = map[KeyName]key.Binding{
 		key.WithHelp("⇧↓", "scroll"),
 	),
 	KeyEnter: key.NewBinding(
-		key.WithKeys("enter", "o"),
-		key.WithHelp("↵/o", "open"),
+		key.WithKeys("enter"),
+		key.WithHelp("↵", "interact"),
+	),
+	KeyAttach: key.NewBinding(
+		key.WithKeys("o"),
+		key.WithHelp("o", "attach"),
+	),
+	KeyExitInteractive: key.NewBinding(
+		key.WithKeys("ctrl+]"),
+		key.WithHelp("ctrl+]", "nav mode"),
 	),
 	KeyNew: key.NewBinding(
 		key.WithKeys("n"),

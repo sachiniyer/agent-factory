@@ -22,6 +22,14 @@ var windowStyle = lipgloss.NewStyle().
 var blurredWindowStyle = windowStyle.
 	BorderForeground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#555555"})
 
+// interactiveWindowStyle marks the pane that owns the keyboard in
+// interactive mode (#1089, RFC §2.3): a green DOUBLE border — unmistakably
+// distinct from the teal rounded nav-focus ring, and still distinct with
+// colors unavailable — signals "keystrokes go INTO this terminal".
+var interactiveWindowStyle = windowStyle.
+	Border(lipgloss.DoubleBorder()).
+	BorderForeground(lipgloss.AdaptiveColor{Light: "#1A7F37", Dark: "#3FB950"})
+
 var paneHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
@@ -33,6 +41,13 @@ var paneHeaderFocusedStyle = lipgloss.NewStyle().
 
 var paneHeaderDimStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+
+// paneHeaderInteractiveStyle matches the interactive frame: green header bar
+// on the pane whose terminal owns the keyboard.
+var paneHeaderInteractiveStyle = lipgloss.NewStyle().
+	Bold(true).
+	Background(lipgloss.AdaptiveColor{Light: "#D2F3DC", Dark: "#1A7F37"}).
+	Foreground(lipgloss.AdaptiveColor{Light: "#0A3D1E", Dark: "#EAFBEF"})
 
 // paneHeaderRows is the height of the `title · tab` header line rendered
 // inside the pane frame. With the tab bar gone (#1024 PR 4) the header is
@@ -61,6 +76,10 @@ type TabbedWindow struct {
 	pane    *store.OpenPane
 	rect    layout.Rect
 	focused bool
+	// interactive marks this pane as the one whose embedded terminal owns
+	// the keyboard (#1089, RFC §2.3). Set by the root model alongside the
+	// mode flag; drives the green frame/header cue and the cursor overlay.
+	interactive bool
 
 	tab *TabPane
 
@@ -78,8 +97,9 @@ type TabbedWindow struct {
 // without a PTY. Both methods are event-loop only.
 type LiveView interface {
 	// Render returns the live grid as exactly height ANSI lines of exactly
-	// width cells.
-	Render(width, height int) string
+	// width cells. showCursor overlays the terminal cursor — the
+	// interactive-mode typing cue; nav-mode renders pass false.
+	Render(width, height int, showCursor bool) string
 	// Resize propagates a pane-geometry change to the underlying PTY and
 	// emulator grid.
 	Resize(width, height int)
@@ -238,6 +258,14 @@ func (w *TabbedWindow) Focus() { w.focused = true }
 // Blur implements layout.Pane.
 func (w *TabbedWindow) Blur() { w.focused = false }
 
+// SetInteractive flags this pane's terminal as the keyboard owner
+// (interactive mode, #1089). The root model keeps it true on at most one
+// window at a time.
+func (w *TabbedWindow) SetInteractive(on bool) { w.interactive = on }
+
+// Interactive reports the interactive-mode flag.
+func (w *TabbedWindow) Interactive() bool { return w.interactive }
+
 // HandleKey implements layout.Pane. The root model routes all workspace keys
 // globally in nav mode (scroll, attach, pane verbs), so the pane itself
 // consumes nothing; interactive-mode key forwarding is #1089.
@@ -331,6 +359,8 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	}
 	style := paneHeaderStyle
 	switch {
+	case w.interactive:
+		style = paneHeaderInteractiveStyle
 	case w.focused:
 		style = paneHeaderFocusedStyle
 	case w.boundInstance() == nil:
@@ -357,7 +387,9 @@ func (w *TabbedWindow) String() string {
 	// PR decides who owns scrolling (RFC §2.4).
 	content := ""
 	if w.live != nil && !w.tab.IsScrolling() {
-		content = w.live.Render(iw, ih)
+		// The cursor overlays only while this pane's terminal owns the
+		// keyboard — the interactive typing cue (#1089 PR 2).
+		content = w.live.Render(iw, ih, w.interactive)
 	} else {
 		content = w.tab.String()
 	}
@@ -366,7 +398,10 @@ func (w *TabbedWindow) String() string {
 		layout.ClampToRect(content, layout.Rect{W: iw, H: ih}),
 	)
 	frame := windowStyle
-	if !w.focused {
+	switch {
+	case w.interactive:
+		frame = interactiveWindowStyle
+	case !w.focused:
 		frame = blurredWindowStyle
 	}
 	return layout.ClampToRect(frame.Render(inner), w.rect)

@@ -18,10 +18,12 @@
 // one core (spike §2). Rendering is pulled by the TUI's existing tick/update
 // cycle — this package runs no repaint loop of its own.
 //
-// PR 1 (#1089) is render-only: keystroke forwarding into the PTY is the next
-// PR. The emulator's read side is already pumped back down the PTY, though,
-// so replies to terminal queries (DA, DSR, ...) reach tmux and the attach
-// handshake completes.
+// Interactive mode (#1089 PR 2) forwards focused keystrokes down the same
+// PTY: SendKey translates each bubbletea key message (keymap.go) and hands it
+// to the emulator's mode-aware encoder — or, for the modifier+navigation
+// family the pinned x/vt cannot encode, writes the pre-encoded xterm sequence
+// to the same input pipe — so keystrokes and terminal-query replies (DA, DSR,
+// ...) reach tmux in order through one channel.
 package termpane
 
 import (
@@ -33,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 
@@ -66,6 +69,11 @@ type TermPane struct {
 
 	gridMu sync.RWMutex
 	emu    *vt.Emulator
+	// cursorVisible mirrors the terminal's DECTCM state, maintained by the
+	// emulator's CursorVisibility callback — which fires inside emu.Write,
+	// i.e. under gridMu's write lock; Render reads it under the read lock.
+	// Starts true (terminals boot with the cursor shown).
+	cursorVisible bool
 
 	width, height int
 
@@ -123,13 +131,19 @@ func NewWithCommand(cmd *exec.Cmd, width, height int) (*TermPane, error) {
 	}
 
 	t := &TermPane{
-		cmd:    cmd,
-		ptmx:   ptmx,
-		emu:    vt.NewEmulator(width, height),
-		width:  width,
-		height: height,
-		done:   make(chan struct{}),
+		cmd:           cmd,
+		ptmx:          ptmx,
+		emu:           vt.NewEmulator(width, height),
+		cursorVisible: true,
+		width:         width,
+		height:        height,
+		done:          make(chan struct{}),
 	}
+	// The callback fires from emu.Write — always under gridMu's write lock —
+	// so the field write is ordered against Render's locked reads.
+	t.emu.SetCallbacks(vt.Callbacks{
+		CursorVisibility: func(visible bool) { t.cursorVisible = visible },
+	})
 
 	// Reap the client when it exits so it never lingers as a zombie. The
 	// pump goroutines detect exit through the PTY, not through Wait.
@@ -153,12 +167,70 @@ func NewWithCommand(cmd *exec.Cmd, width, height int) (*TermPane, error) {
 		}
 	}()
 
-	// Emulator → PTY: replies to terminal queries from tmux (DA, DSR, ...).
-	// PR 2 sends encoded keystrokes down this same path. Exits when Close
-	// closes the emulator's response pipe (Read then returns EOF).
-	go func() { _, _ = io.Copy(ptmx, t.emu) }()
+	// Emulator → PTY: replies to terminal queries from tmux (DA, DSR, ...)
+	// and the encoded keystrokes SendKey injects. This pump must keep
+	// DRAINING the emulator's pipe even after the PTY write side dies (the
+	// attach client exiting makes the next ptmx.Write fail): the pipe is
+	// unbuffered and synchronous, so a pump that exited on write error would
+	// leave the next SendKey — called on the bubbletea event loop — blocked
+	// on it forever. Discard-once-dead instead; the pump exits when Close
+	// closes the pipe (Read returns an error).
+	go func() {
+		buf := make([]byte, 4096)
+		ptyAlive := true
+		for {
+			n, rerr := t.emu.Read(buf)
+			if n > 0 && ptyAlive {
+				if _, werr := ptmx.Write(buf[:n]); werr != nil {
+					ptyAlive = false
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
 
 	return t, nil
+}
+
+// SendKey forwards one focused keystroke to the embedded terminal (#1089
+// PR 2, interactive mode): pastes go through the emulator's bracketed-paste-
+// aware Paste, everything else through the keymap.go translation. It reports
+// whether the key was forwarded — false means the key has no safe encoding
+// and was IGNORED (never a guessed byte sequence). Event-loop only; the
+// enclosed pipe write is synchronous but the pump above always drains it.
+//
+// The lock is required even though this only WRITES input: the emulator's
+// encoder reads terminal modes (DECCKM, bracketed paste) that the PTY reader
+// pump mutates through emu.Write.
+func (t *TermPane) SendKey(msg tea.KeyMsg) bool {
+	t.gridMu.RLock()
+	defer t.gridMu.RUnlock()
+	return forwardKey(t.emu, msg)
+}
+
+// forwardKey is SendKey without the pane: translate one key message and emit
+// its bytes into the emulator's input pipe. Factored out so the translation
+// table can be pinned against a bare emulator in tests. The caller holds the
+// lock that guards the emulator's mode state.
+func forwardKey(emu *vt.Emulator, msg tea.KeyMsg) bool {
+	if msg.Paste {
+		emu.Paste(string(msg.Runes))
+		return true
+	}
+	tr, ok := translateKey(msg)
+	if !ok {
+		return false
+	}
+	if tr.raw != "" {
+		_, _ = io.WriteString(emu.InputPipe(), tr.raw)
+		return true
+	}
+	for _, ev := range tr.events {
+		emu.SendKey(ev)
+	}
+	return true
 }
 
 // Resize propagates a new pane geometry: PTY winsize first (tmux reflows on
@@ -182,10 +254,19 @@ func (t *TermPane) Resize(width, height int) {
 // cadence; the TUI's existing tick drives it (no repaint loop here). After
 // the attach client dies the last grid keeps rendering, so a pane shows its
 // final frame until the owner notices Done and swaps render sources.
-func (t *TermPane) Render(width, height int) string {
+//
+// showCursor overlays the terminal cursor (reverse-video on its cell) when
+// the inner application has it visible — the interactive-mode typing cue
+// (#1089 PR 2). Nav-mode panes render without it, exactly like PR 1.
+func (t *TermPane) Render(width, height int, showCursor bool) string {
 	t.gridMu.RLock()
 	defer t.gridMu.RUnlock()
-	return renderGrid(t.emu, width, height)
+	cursor := cursorNone
+	if showCursor && t.cursorVisible {
+		pos := t.emu.CursorPosition()
+		cursor = cursorAt{x: pos.X, y: pos.Y, show: true}
+	}
+	return renderGrid(t.emu, width, height, cursor)
 }
 
 // Done reports attach-client death: the channel is closed once the PTY

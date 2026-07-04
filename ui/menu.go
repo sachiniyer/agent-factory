@@ -64,6 +64,10 @@ type Menu struct {
 	// verbs, while the tree shows the session actions.
 	focusRegion string
 
+	// interactive: every keystroke is forwarding into the focused pane's
+	// terminal (#1089, RFC §2.3), so the bar shows only the escape hatch.
+	interactive bool
+
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
 }
@@ -80,13 +84,19 @@ var automationsMenuOptions = []keys.KeyName{
 }
 
 // paneMenuOptions are the status-bar hints while a workspace pane has focus
-// (#1088): attach/scroll act on the pane's own binding, s opens the selected
-// tab as another pane, x hides this pane back to the background.
+// (#1088): enter interacts in-pane / o attaches full-screen (#1089), scroll
+// acts on the pane's own binding, s opens the selected tab as another pane,
+// x hides this pane back to the background.
 var paneMenuOptions = []keys.KeyName{
-	keys.KeyEnter, keys.KeyShiftUp, keys.KeyShiftDown,
+	keys.KeyEnter, keys.KeyAttach, keys.KeyShiftUp, keys.KeyShiftDown,
 	keys.KeyOpenPane, keys.KeyHidePane,
 	keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
 }
+
+// interactiveMenuOptions is the whole bar while interactive (#1089, RFC
+// §2.3): every other key — including these hints' own letters — forwards to
+// the pane's terminal, so advertising anything else would be a lie.
+var interactiveMenuOptions = []keys.KeyName{keys.KeyExitInteractive}
 
 func NewMenu() *Menu {
 	m := &Menu{
@@ -144,9 +154,25 @@ func (m *Menu) SetActiveTab(tab int) {
 	m.updateOptions()
 }
 
+// SetInteractive switches the hints to (or back from) interactive mode: only
+// the Ctrl-] escape hatch shows while keystrokes forward to the pane (#1089).
+func (m *Menu) SetInteractive(on bool) {
+	m.interactive = on
+	m.updateOptions()
+}
+
 // updateOptions updates the menu options based on current state, focus
 // region, and instance
 func (m *Menu) updateOptions() {
+	// Interactive mode outranks everything: the terminal owns the keyboard,
+	// the bar owns nothing but the way out.
+	if m.interactive {
+		m.options = interactiveMenuOptions
+		m.groups = []menuGroup{
+			{start: 0, end: len(interactiveMenuOptions), isAction: true},
+		}
+		return
+	}
 	// The automations strip owns the hints while focused, regardless of the
 	// selected instance — except during naming, whose submit/change-program
 	// hints must always win (the form has the keyboard).
@@ -164,9 +190,9 @@ func (m *Menu) updateOptions() {
 	if layout.IsPaneRegion(m.focusRegion) && m.state != StateNewInstance {
 		m.options = paneMenuOptions
 		m.groups = []menuGroup{
-			{start: 0, end: 3, isAction: true},
-			{start: 3, end: 5, isAction: false},
-			{start: 5, end: len(paneMenuOptions), isAction: false},
+			{start: 0, end: 4, isAction: true},
+			{start: 4, end: 6, isAction: false},
+			{start: 6, end: len(paneMenuOptions), isAction: false},
 		}
 		return
 	}
@@ -213,8 +239,8 @@ func (m *Menu) addInstanceOptions() {
 	// Instance management group
 	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyKill}
 
-	// Action group
-	actionGroup := []keys.KeyName{keys.KeyEnter}
+	// Action group: enter interacts in-pane, o attaches full-screen (#1089).
+	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach}
 
 	// Navigation group: every tab is a captured tmux session and supports
 	// scroll mode (#930 PR 2 — the agent "Preview" tab and the terminal tab

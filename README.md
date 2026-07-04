@@ -64,10 +64,12 @@ Each session is one agent running in its own git worktree on its own branch — 
 | Key | Action |
 |-----|--------|
 | `n` | Create a new session |
-| `Enter` / `o` | Attach to the selected session's active tab |
-| `Ctrl-w` | Detach (configurable via `detach_keys`) |
+| `Enter` | Interact with the session in its pane — every key (including `Tab`) goes to the agent; the sessions rail stays visible |
+| `Ctrl-]` | Leave interactive mode, back to navigation |
+| `o` | Attach to the selected session's active tab full-screen |
+| `Ctrl-w` | Detach from a full-screen attach (configurable via `detach_keys`) |
 | `D` | Kill the session and clean up its worktree |
-| `Tab` / `Shift-Tab` | Cycle forward / back through the session's tabs |
+| `Tab` / `Shift-Tab` | Cycle focus forward / back: tree → open panes → automations |
 | `1`–`9` | Jump straight to a tab by number |
 | `t` | Open a new shell tab in the session's worktree |
 | `w` | Close the active tab (the agent tab can't be closed) |
@@ -76,7 +78,7 @@ When a session's branch has an open pull request, `p` opens it in the browser an
 
 #### Tabs
 
-Every session opens with a single **agent** tab (the AI agent, shown as *Preview*). Press `t` to spawn **shell** tabs (*Terminal*) running `$SHELL` in the worktree (up to nine tabs per session), `w` to close the active one, and `Tab` / `1`–`9` to move between them. Attaching (`Enter`) drops you into whichever tab is active. Tabs are ephemeral but persisted: they survive an `af`/daemon restart, reconnecting to their live processes. You can also spawn a tab running an arbitrary command from the CLI with `af sessions tab-create`, and delete a single tab with `af sessions tab-delete` (see below).
+Every session opens with a single **agent** tab (the AI agent, shown as *Preview*). Press `t` to spawn **shell** tabs (*Terminal*) running `$SHELL` in the worktree (up to nine tabs per session), `w` to close the active one, and `1`–`9` to jump between them. `Enter` types into whichever tab is active, in place (`o` for a full-screen attach). Tabs are ephemeral but persisted: they survive an `af`/daemon restart, reconnecting to their live processes. You can also spawn a tab running an arbitrary command from the CLI with `af sessions tab-create`, and delete a single tab with `af sessions tab-delete` (see below).
 
 Remote sessions are tab-driven too, with one limitation: the hook protocol can't run arbitrary commands on the remote host, so a remote session has an agent tab always and a single terminal tab **only when** its repo configures `remote_hooks.terminal_cmd` (`t`, `tab-create`, and `tab-delete` are rejected for remote sessions). See [docs/remote-hooks.md](docs/remote-hooks.md).
 

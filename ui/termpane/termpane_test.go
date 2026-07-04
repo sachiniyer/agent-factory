@@ -30,7 +30,7 @@ func startScript(t *testing.T, script string, width, height int) *TermPane {
 
 // plainRender is Render with the styling stripped, for content assertions.
 func plainRender(tp *TermPane, width, height int) string {
-	return ansi.Strip(tp.Render(width, height))
+	return ansi.Strip(tp.Render(width, height, false))
 }
 
 func waitForRender(t *testing.T, tp *TermPane, width, height int, want string) {
@@ -91,7 +91,7 @@ func TestScriptedPTYRendersIntoGrid(t *testing.T) {
 	waitForRender(t, tp, 40, 6, "MARKER-1089-preview")
 
 	// The width x height contract holds on live output too.
-	lines := strings.Split(tp.Render(40, 6), "\n")
+	lines := strings.Split(tp.Render(40, 6, false), "\n")
 	require.Len(t, lines, 6)
 	for i, line := range lines {
 		require.Equalf(t, 40, ansi.StringWidth(line), "line %d width", i)
