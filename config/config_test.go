@@ -1031,19 +1031,38 @@ codex = "/opt/codex/bin/codex --quiet"
 		assert.Contains(t, err.Error(), "line 2")
 	})
 
-	t.Run("errors on an empty config.toml instead of shadowing silently", func(t *testing.T) {
-		// Nothing materializes config.toml, so an empty one is a hand-made
-		// stub — and its existence alone shadows config.json. Silence here
-		// would read as a settings loss (#734/#758 posture).
-		configDir := writeToml(t, "")
-		jsonContent := `{"default_program": "gemini"}`
-		require.NoError(t, os.WriteFile(filepath.Join(configDir, ConfigFileName), []byte(jsonContent), 0644))
+	t.Run("errors on a contentless config.toml instead of shadowing silently", func(t *testing.T) {
+		// Nothing materializes config.toml, so a contentless one is a
+		// hand-made stub — and its existence alone shadows config.json. Every
+		// such variant decodes as a VALID empty TOML document, so without the
+		// explicit guard it would silently become an all-defaults canonical
+		// config while a real config.json sits ignored next to it (#1139
+		// review). Silence here would read as a settings loss (#734/#758).
+		cases := []struct {
+			name    string
+			content string
+		}{
+			{"zero-byte", ""},
+			{"whitespace-only", " \n\t\n  \n"},
+			{"BOM-only", "\xef\xbb\xbf"},
+			{"BOM-and-whitespace", "\xef\xbb\xbf \n\t"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				configDir := writeToml(t, tc.content)
+				// A real config.json with real settings sits alongside; the
+				// stub must produce a loud error, never a silent all-defaults
+				// config that shadows it.
+				jsonContent := `{"default_program": "gemini"}`
+				require.NoError(t, os.WriteFile(filepath.Join(configDir, ConfigFileName), []byte(jsonContent), 0644))
 
-		cfg, err := LoadConfig()
-		require.Error(t, err)
-		assert.Nil(t, cfg)
-		assert.Contains(t, err.Error(), TomlConfigFileName)
-		assert.Contains(t, err.Error(), "empty")
+				cfg, err := LoadConfig()
+				require.Error(t, err)
+				assert.Nil(t, cfg, "a contentless config.toml must never load as an all-defaults config")
+				assert.Contains(t, err.Error(), TomlConfigFileName)
+				assert.Contains(t, err.Error(), "empty")
+			})
+		}
 	})
 
 	t.Run("unknown keys warn but do not fail the load", func(t *testing.T) {

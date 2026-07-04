@@ -680,19 +680,21 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 // the defaults — the TOML twin of parseConfig, sharing validateConfig so the
 // two formats can never drift on semantics (#1030).
 //
-// A zero-byte config.toml is technically valid TOML (an empty document), but
-// nothing materializes this file, so an empty one is always a hand-made stub
-// (e.g. `touch config.toml`) — and because its mere existence shadows
-// config.json, silently treating it as "all defaults" would disguise the
-// shadowing as a settings loss. Per the #734/#758 posture it is a loud error
-// instead.
+// A config.toml with no content — zero bytes, only whitespace, or only a BOM
+// — is technically valid TOML (an empty document), but nothing materializes
+// this file, so such a stub is always hand-made (e.g. `touch config.toml`) —
+// and because its mere existence shadows config.json, silently treating it
+// as "all defaults" would disguise the shadowing as a settings loss. Per the
+// #734/#758 posture it is a loud error instead (the TOML analogue of the
+// #864 empty-stub handling; unlike json there is no materializer whose
+// partial write we could be cleaning up, so the file is never auto-deleted).
 //
 // Unknown top-level keys warn rather than error: a config.toml written by a
 // newer af must keep loading on an older binary (rollback within the TOML
 // era), but a silently ignored key is how typos eat settings, so each one is
 // named in the log.
 func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
-	if len(data) == 0 {
+	if isEffectivelyEmptyToml(data) {
 		return nil, fmt.Errorf("config file %s is empty; add valid TOML, or delete it to fall back to config.json or defaults", prettyConfigPath)
 	}
 
@@ -708,6 +710,16 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	warnUnknownTomlKeys(data, prettyConfigPath)
 
 	return validateConfig(config, prettyConfigPath)
+}
+
+// isEffectivelyEmptyToml reports whether data carries no TOML content at all:
+// zero bytes, only whitespace, or only a UTF-8 BOM (with or without trailing
+// whitespace). Every such file decodes as a valid empty document, so without
+// this check a `touch`ed or whitespace-only config.toml would silently become
+// an all-defaults canonical config while shadowing a real config.json.
+func isEffectivelyEmptyToml(data []byte) bool {
+	trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	return len(bytes.TrimSpace(trimmed)) == 0
 }
 
 // warnUnknownTomlKeys logs one warning per key in data that the Config
