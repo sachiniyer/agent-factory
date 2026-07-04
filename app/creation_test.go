@@ -51,6 +51,17 @@ func newTestHome(t *testing.T) *home {
 		return nil
 	}))
 
+	// The live-termpane bind spawns a real `tmux attach-session` client
+	// (#1089). Default the factory to an error so a test that incidentally
+	// reaches a bind (mock-backed instances answer has-session) fails the
+	// bind quietly and falls back to capture instead of exec-ing tmux.
+	// Tests exercising the live path swap in a fake.
+	origLiveTerm := newLiveTermPaneFn
+	newLiveTermPaneFn = func(string, int, int) (liveTermAttachment, error) {
+		return nil, fmt.Errorf("newLiveTermPaneFn not stubbed in test")
+	}
+	t.Cleanup(func() { newLiveTermPaneFn = origLiveTerm })
+
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
 

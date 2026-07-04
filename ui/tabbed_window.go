@@ -63,6 +63,26 @@ type TabbedWindow struct {
 	focused bool
 
 	tab *TabPane
+
+	// live is the pane's embedded-terminal render source (#1089 PR 1), set
+	// by the root model while a termpane attachment is bound to this pane's
+	// (instance, tab) and nil otherwise. While set (and the user is not in
+	// scroll mode), String() renders the live grid instead of the TabPane's
+	// capture — the capture polling for this pane is skipped by the root
+	// model for the same duration. Event-loop only.
+	live LiveView
+}
+
+// LiveView is a live embedded-terminal render source (#1089): the termpane
+// behind an open pane. It is an interface so ui tests can substitute a fake
+// without a PTY. Both methods are event-loop only.
+type LiveView interface {
+	// Render returns the live grid as exactly height ANSI lines of exactly
+	// width cells.
+	Render(width, height int) string
+	// Resize propagates a pane-geometry change to the underlying PTY and
+	// emulator grid.
+	Resize(width, height int)
 }
 
 // NewTabbedWindow creates a workspace window over the given open pane's
@@ -159,6 +179,13 @@ func (w *TabbedWindow) SetRect(r layout.Rect) {
 	w.rect = r
 	iw, ih := w.innerSize()
 	w.tab.SetSize(iw, ih)
+	// A zero rect means the pane is auto-hidden (§2.6): don't push a
+	// degenerate winsize at the live attachment — the root model closes it
+	// on its next sync, and shrinking the tmux session to ~1x1 in the
+	// meantime would visibly disrupt the session for no reason.
+	if w.live != nil && iw > 0 && ih > 0 {
+		w.live.Resize(iw, ih)
+	}
 }
 
 // innerSize is the TabPane content area: the rect minus the frame and header.
@@ -181,6 +208,26 @@ func (w *TabbedWindow) innerSize() (width, height int) {
 func (w *TabbedWindow) GetPreviewSize() (width, height int) {
 	return w.tab.width, w.tab.height
 }
+
+// SetLive binds (or, with nil, unbinds) the pane's embedded-terminal render
+// source and sizes it to the current content area. The root model owns the
+// termpane's lifecycle; the window only renders through it.
+func (w *TabbedWindow) SetLive(v LiveView) {
+	if w.live == v {
+		return
+	}
+	w.live = v
+	if v == nil {
+		return
+	}
+	if iw, ih := w.innerSize(); iw > 0 && ih > 0 {
+		v.Resize(iw, ih)
+	}
+}
+
+// HasLive reports whether an embedded-terminal render source is bound. The
+// root model skips capture-pane polling for the pane while true.
+func (w *TabbedWindow) HasLive() bool { return w.live != nil }
 
 // Focused implements layout.Pane.
 func (w *TabbedWindow) Focused() bool { return w.focused }
@@ -302,9 +349,19 @@ func (w *TabbedWindow) String() string {
 		return ""
 	}
 	iw, ih := w.innerSize()
+	// The live embedded terminal renders instead of the capture when bound
+	// (#1089 PR 1). Scroll mode still renders the TabPane's viewport: the
+	// host-side scrollback UX stays capture-based until the interactive-mode
+	// PR decides who owns scrolling (RFC §2.4).
+	content := ""
+	if w.live != nil && !w.tab.IsScrolling() {
+		content = w.live.Render(iw, ih)
+	} else {
+		content = w.tab.String()
+	}
 	inner := lipgloss.JoinVertical(lipgloss.Left,
 		w.renderHeader(iw),
-		layout.ClampToRect(w.tab.String(), layout.Rect{W: iw, H: ih}),
+		layout.ClampToRect(content, layout.Rect{W: iw, H: ih}),
 	)
 	frame := windowStyle
 	if !w.focused {
