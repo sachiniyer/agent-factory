@@ -1,6 +1,6 @@
 # CLI reference
 
-Everything the TUI does is also scriptable. The `af sessions` and `af tasks` command groups output JSON to stdout and errors to stderr, so they compose with `jq` and shell scripts. The TUI and the CLI share the same state — you can mix them freely.
+Everything the TUI does is also scriptable. The `af sessions` and `af tasks` command groups output JSON to stdout and errors to stderr, so they compose with `jq` and shell scripts. Pass `--json` to wrap output in a `{data, error}` envelope for structured error handling. The TUI and the CLI share the same state — you can mix them freely.
 
 Run `af <command> --help` for the authoritative flag list of any command.
 
@@ -18,7 +18,7 @@ af                 # launch the TUI
 
 ## `af sessions`
 
-All subcommands accept `--repo <path>` to target a repository other than the current directory.
+All subcommands accept `--repo <path>` to target a repository other than the current directory, and `--json` to wrap output in the shared envelope.
 
 ```bash
 af sessions list                                          # list sessions in the repo
@@ -47,7 +47,7 @@ Flags:
 
 ## `af tasks`
 
-Tasks deliver a prompt to an agent automatically — on a cron schedule or whenever a long-running watch script emits a stdout line. Full semantics (trigger × delivery matrix, watch-script contract, status model) live in [tasks.md](tasks.md). All subcommands accept `--repo <path>`.
+Tasks deliver a prompt to an agent automatically — on a cron schedule or whenever a long-running watch script emits a stdout line. Full semantics (trigger × delivery matrix, watch-script contract, status model) live in [tasks.md](tasks.md). All subcommands accept `--repo <path>` and `--json`.
 
 ```bash
 af tasks list
