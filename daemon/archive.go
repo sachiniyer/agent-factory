@@ -51,10 +51,10 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 		// half-archive that rolls back to Lost.
 		return "", fmt.Errorf("cannot archive an in-place/external worktree session %q — archive relocates the worktree, which isn't supported for in-place sessions", req.Title)
 	}
-	switch instance.GetStatus() {
-	case session.Archived:
+	if instance.GetLiveness() == session.LiveArchived {
 		return "", fmt.Errorf("session %q is already archived", req.Title)
-	case session.Loading, session.Deleting:
+	}
+	if instance.GetInFlightOp() != session.OpNone {
 		return "", fmt.Errorf("session %q is busy (%v); try again in a moment", req.Title, instance.GetStatus())
 	}
 
@@ -90,11 +90,13 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 		return "", err
 	}
 
-	// Fence the operation window with Deleting: the status poll skips a Deleting
-	// instance (and the checkpoint save skips persisting it) while tmux is down
-	// and the worktree is mid-move, so it is never misread as Lost. started is
-	// left true throughout so a move failure self-heals via the Lost loop.
-	instance.SetStatus(session.Deleting)
+	// Fence the operation window with OpArchiving: the status poll skips an
+	// instance with an in-flight op (and the checkpoint save skips persisting a
+	// mid-op row) while tmux is down and the worktree is mid-move, so it is never
+	// misread as Lost. started is left true throughout so a move failure
+	// self-heals via the Lost loop. OpArchiving is a DISTINCT op from a kill, so
+	// the fence can never be confused with a TUI optimistic kill (#1187).
+	instance.SetInFlightOp(session.OpArchiving)
 
 	instance.ArchiveTeardown()
 
@@ -102,9 +104,10 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 		// The worktree is still at a valid location (the git layer guarantees
 		// worktreePath points at the actual bytes even on a repair failure).
 		// Mark Lost — started is still true and the agent tmux binding was kept —
-		// so the Lost-restore loop re-spawns the agent in place. Persist the
-		// recovery-eligible state and surface the failure.
-		instance.SetStatus(session.Lost)
+		// so the Lost-restore loop re-spawns the agent in place. Clear the archive
+		// fence and persist the recovery-eligible state, then surface the failure.
+		instance.SetLiveness(session.LiveLost)
+		instance.SetInFlightOp(session.OpNone)
 		m.persistInstance(repoID, instance)
 		return "", fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w", req.Title, err)
 	}
@@ -136,7 +139,7 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
 	if instance == nil {
 		return "", fmt.Errorf("cannot restore session %q: no such session", req.Title)
 	}
-	if instance.GetStatus() != session.Archived {
+	if instance.GetLiveness() != session.LiveArchived {
 		return "", fmt.Errorf("session %q is not archived", req.Title)
 	}
 
@@ -162,7 +165,7 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
 	m.mu.Lock()
 	current := m.instances[key]
 	m.mu.Unlock()
-	if current != instance || instance.GetStatus() != session.Archived {
+	if current != instance || instance.GetLiveness() != session.LiveArchived {
 		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
 	}
 
@@ -226,7 +229,7 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
 func (m *Manager) archiveExclusiveTabLock(key string, instance *session.Instance) (*sync.Mutex, error) {
 	opLock := m.opLockFor(key)
 	opLock.Lock()
-	if err := session.TabSpawnStatusErr(instance.GetStatus()); err != nil {
+	if err := instance.TabSpawnBlocked(); err != nil {
 		opLock.Unlock()
 		return nil, err
 	}

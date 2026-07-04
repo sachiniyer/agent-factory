@@ -1,5 +1,7 @@
 package session
 
+import "fmt"
+
 // Two-axis session state (#1195 Phase 1b).
 //
 // The legacy Status enum jammed two orthogonal axes into one int: what the
@@ -170,22 +172,6 @@ func (i *Instance) SetStatus(status Status) {
 	i.setStatusLocked(status)
 }
 
-// SetStatusIfNotDeleting sets the status under the instance mutex unless the
-// instance is mid-deletion. The metadata tick runs off the event loop and races
-// the async kill flow (#844): between its own status check and its store, the
-// user can confirm a kill, and an unconditional Running/Ready write would clobber
-// the Deleting marker — re-enabling kill/attach on a session whose teardown is
-// already in flight. Only the kill completion handler may move an instance out of
-// Deleting, via SetStatus. (Legacy shim; the guard now reads the composed value.)
-func (i *Instance) SetStatusIfNotDeleting(status Status) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.statusLocked() == Deleting {
-		return
-	}
-	i.setStatusLocked(status)
-}
-
 // GetStatus returns the current status under the Instance's mutex, so
 // cross-goroutine readers don't race with SetStatus (legacy shim — composes the
 // value from the two axes).
@@ -193,4 +179,81 @@ func (i *Instance) GetStatus() Status {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.statusLocked()
+}
+
+// GetLiveness returns the daemon-owned health axis under the instance mutex.
+func (i *Instance) GetLiveness() Liveness {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.liveness
+}
+
+// SetLiveness writes the health axis under the instance mutex, leaving the
+// in-flight op untouched. This is what the daemon poll uses instead of the old
+// SetStatusIfNotDeleting: writing liveness can never clobber an in-flight op
+// because the op is a separate field, so no "if not deleting" guard is needed —
+// a concurrent kill/archive op survives the write and still composes to the
+// transient status (#1195).
+func (i *Instance) SetLiveness(lv Liveness) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.liveness = lv
+}
+
+// GetInFlightOp returns the client/executor op axis under the instance mutex.
+func (i *Instance) GetInFlightOp() InFlightOp {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.inFlightOp
+}
+
+// SetInFlightOp writes the op axis under the instance mutex, leaving the liveness
+// untouched. The daemon archive executor uses it to raise OpArchiving as a fence
+// over its teardown+move window (and to clear it back to OpNone on a rollback).
+func (i *Instance) SetInFlightOp(op InFlightOp) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.inFlightOp = op
+}
+
+// MarkLive flips the instance to Running and clears a completing create/restore
+// op — the two-axis translation of the old SetStatusIfNotDeleting(Running) that
+// backend Start/Recover used. It preserves a teardown fence (OpKilling/
+// OpArchiving): a Start/Recover completing must never resurrect a session that a
+// kill or archive is tearing down; that owner writes the terminal liveness. It
+// does clear OpCreating/OpRestoring, which is exactly the op this completion
+// resolves.
+func (i *Instance) MarkLive() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp == OpKilling || i.inFlightOp == OpArchiving {
+		return
+	}
+	i.liveness = LiveRunning
+	i.inFlightOp = OpNone
+}
+
+// tabSpawnBlockedLocked reports the error, if any, forbidding a new tab spawn.
+// Caller holds i.mu. It reads the two axes directly (the #1195 structural fold of
+// the #1196 archive-orphan guard): a tab may not spawn into an archived session
+// (its worktree was moved away) or one with a teardown op in flight — an archive
+// (OpArchiving) or kill (OpKilling). The archive case is the load-bearing one:
+// ArchiveTeardown keeps started=true, so the #990 started-flag guard never fires
+// during archive; OpArchiving is the fence that started=true cannot provide.
+func (i *Instance) tabSpawnBlockedLocked() error {
+	if i.liveness == LiveArchived {
+		return fmt.Errorf("cannot add a tab to an archived session; restore it first (af sessions restore)")
+	}
+	if i.inFlightOp == OpArchiving || i.inFlightOp == OpKilling {
+		return fmt.Errorf("cannot add a tab to a session that is being archived or removed; try again in a moment")
+	}
+	return nil
+}
+
+// TabSpawnBlocked is the locking form of tabSpawnBlockedLocked, for callers that
+// don't already hold i.mu (the daemon's archive-exclusive tab lock).
+func (i *Instance) TabSpawnBlocked() error {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.tabSpawnBlockedLocked()
 }

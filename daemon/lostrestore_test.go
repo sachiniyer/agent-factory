@@ -28,7 +28,7 @@ func (b *recoverFakeBackend) Recover(inst *session.Instance) error {
 	if b.failWith != nil {
 		return b.failWith
 	}
-	inst.SetStatusIfNotDeleting(session.Running)
+	inst.SetStatus(session.Running)
 	return nil
 }
 
@@ -224,7 +224,7 @@ func (b *raceBackend) Recover(inst *session.Instance) error {
 	if b.recoverBlock != nil {
 		<-b.recoverBlock
 	}
-	inst.SetStatusIfNotDeleting(session.Running)
+	inst.SetStatus(session.Running)
 	return nil
 }
 
