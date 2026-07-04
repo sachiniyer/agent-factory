@@ -8,7 +8,7 @@ Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo sc
 
 ## Install
 
-Prerequisites: **tmux**, **git**, and at least one AI coding agent (e.g. [Claude Code](https://docs.anthropic.com/en/docs/claude-code)). No Go required.
+Prerequisites: **tmux**, **git**, and at least one AI coding agent (e.g. [Claude Code](https://docs.anthropic.com/en/docs/claude-code)). No Go required. Runs on Linux and macOS; on Windows, run it inside WSL — see [Platform support](#platform-support).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh
@@ -16,7 +16,17 @@ curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/ins
 
 Installs the `af` binary (Linux/macOS, amd64/arm64) to `~/.local/bin` — override with `AF_INSTALL_DIR`, pin a release with `--version`. Re-run the script or `af upgrade` to update. Installed binaries also auto-update themselves along the stable channel; set `"update_channel": "preview"` in the global config to track preview builds instead (see [docs/release-process.md](docs/release-process.md)).
 
-**Other ways:** grab a tarball from the [Releases page](https://github.com/sachiniyer/agent-factory/releases/latest), or build from source (needs **Go 1.24+**) with `git clone https://github.com/sachiniyer/agent-factory.git && cd agent-factory && ./dev-install.sh`.
+**Other ways:** grab a tarball from the [Releases page](https://github.com/sachiniyer/agent-factory/releases/latest), or build from source.
+
+### Building from source
+
+Needs **Go 1.24+**; installs to `~/.local/bin/af`:
+
+```bash
+git clone https://github.com/sachiniyer/agent-factory.git
+cd agent-factory
+./dev-install.sh
+```
 
 ### Launch
 
@@ -24,6 +34,24 @@ Installs the `af` binary (Linux/macOS, amd64/arm64) to `~/.local/bin` — overri
 cd your-project    # must be a git repo
 af                 # launch the TUI
 ```
+
+## Platform support
+
+| Platform | TUI & sessions | Daemon autostart (`af daemon install`) | Install |
+|----------|----------------|----------------------------------------|---------|
+| Linux | ✅ Supported — where development and CI testing happen | ✅ systemd user service | `install.sh`, tarball, or source |
+| macOS | ✅ Supported — expected to work; CI tests run on Linux only | ✅ launchd agent | `install.sh`, tarball, or source |
+| Windows (WSL2) | ✅ Runs as Linux inside WSL | ⚠️ Requires systemd enabled in the distro | `install.sh` inside WSL |
+| Windows (native) | ❌ Unsupported — does not build or run | ❌ | ❌ No binaries published |
+
+Caveats:
+
+- **tmux is load-bearing.** Every session, tab, and preview is a tmux session under the hood; `af` does not work without `tmux` on `PATH`, on any platform.
+- **Native Windows is not a target.** The code depends on tmux and Unix-only syscalls (process-group kills, `SIGWINCH`, `flock`) and does not compile for `GOOS=windows`; no Windows binaries are published, and `af upgrade`/auto-update refuse to run there. Use WSL.
+- **WSL:** `af daemon install` writes a systemd user unit, so your distro must have systemd enabled (the default on current WSL2; otherwise set `systemd=true` under `[boot]` in `/etc/wsl.conf`). Without it the daemon still starts on demand whenever `af` runs, but scheduled tasks stop firing once the WSL VM shuts down. Keep repos on the Linux filesystem (not `/mnt/c`) for git and worktree performance.
+- **macOS is cross-compiled.** Release binaries are published for macOS (amd64/arm64) and the macOS-specific code paths (launchd, `open`, `pbcopy`) are unit-tested, but CI does not run on real macOS hardware.
+- **Clipboard and browser keys** shell out per platform: `open`/`pbcopy` on macOS, `xdg-open` plus `wl-copy` or `xclip` on Linux and WSL. Copying a PR URL (`P`) needs one of those clipboard tools installed.
+- **Prebuilt binaries are amd64/arm64 only.** On other architectures, build from source.
 
 ## Core features
 
