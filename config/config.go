@@ -167,6 +167,11 @@ type Config struct {
 	// in-repo config must never be able to opt a machine into an always-on
 	// agent just by being cloned.
 	RootAgents map[string]RootAgentConfig `json:"root_agents,omitempty" toml:"root_agents,omitempty"`
+	// LimitPatterns optionally overrides, per agent, the built-in usage-limit
+	// banner-detection regex (#1146) so drifting vendor banners can be patched
+	// without a release. Empty keeps every built-in default. See
+	// sanitizeLimitPatterns in limit_patterns.go for validation and semantics.
+	LimitPatterns map[string]string `json:"limit_patterns,omitempty" toml:"limit_patterns,omitempty"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
 	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —
@@ -254,24 +259,6 @@ func ValidateProgramEnum(lead, referent, name, exampleValue string) error {
 	)
 }
 
-// prettyHomePath returns absPath with the user's home directory prefix
-// collapsed to "~". Used to render config-file paths in user-facing errors
-// without leaking the absolute filesystem layout. Returns absPath unchanged
-// when the home directory cannot be determined or is not a prefix.
-func prettyHomePath(absPath string) string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil || homeDir == "" {
-		return absPath
-	}
-	if absPath == homeDir {
-		return "~"
-	}
-	if strings.HasPrefix(absPath, homeDir+string(filepath.Separator)) {
-		return "~" + absPath[len(homeDir):]
-	}
-	return absPath
-}
-
 // ResolveProgram returns the actual tmux invocation for an agent. When
 // cfg.ProgramOverrides has a non-empty entry for the agent, that value is
 // returned verbatim; otherwise the bare agent name is returned (relying on
@@ -328,20 +315,6 @@ func DefaultConfig() *Config {
 	}
 
 	return cfg
-}
-
-// shellQuotePath wraps a path that contains shell-special characters
-// (spaces, apostrophes) in single quotes, escaping any embedded apostrophes
-// with the standard POSIX '\” idiom. Paths free of those characters are
-// returned unchanged. Used by DefaultConfig when persisting auto-detected
-// claude paths into ProgramOverrides — the value is passed to `sh -c` by
-// tmux, so paths with spaces (e.g. macOS App Bundles, #569) would otherwise
-// be split into separate tokens.
-func shellQuotePath(path string) string {
-	if path == "" || !strings.ContainsAny(path, " '") {
-		return path
-	}
-	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
 // claudeProbeResult caches a single (path, err) outcome of the claude shell
@@ -1023,6 +996,8 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 			return nil, err
 		}
 	}
+
+	sanitizeLimitPatterns(config)
 
 	if config.DaemonPollInterval <= 0 {
 		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)

@@ -1092,6 +1092,31 @@ codex = "/opt/codex/bin/codex --quiet"
 		}
 	})
 
+	t.Run("limit_patterns keeps valid overrides and drops invalid ones", func(t *testing.T) {
+		// A valid override is retained; an uncompilable regex and an
+		// unknown-agent key are warn-and-dropped so the built-in default
+		// stands and the load never fails over an optional detection tweak
+		// (#1146).
+		writeToml(t, `
+default_program = "claude"
+
+[limit_patterns]
+claude = "Custom limit banner"
+codex = "(unclosed"
+notanagent = "whatever"
+`)
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "Custom limit banner", cfg.LimitPatterns[tmux.ProgramClaude],
+			"a valid override must be retained")
+		_, hasCodex := cfg.LimitPatterns[tmux.ProgramCodex]
+		assert.False(t, hasCodex, "an uncompilable regex must be dropped")
+		_, hasUnknown := cfg.LimitPatterns["notanagent"]
+		assert.False(t, hasUnknown, "an unknown-agent key must be dropped")
+	})
+
 	t.Run("unknown keys warn but do not fail the load", func(t *testing.T) {
 		// Rollback tolerance within the TOML era: a newer af's config.toml
 		// (e.g. carrying a future [keys] table) must keep loading here.
