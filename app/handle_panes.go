@@ -218,13 +218,13 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	tabIdx := p.Tab()
 	if tabIdx != 0 {
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return attachOverlayCallbackFn(m, "handleEnter-pane-terminal", "", instance.IsRemote(), func() (chan struct{}, error) {
+			return attachOverlayCallbackFn(m, instance.Title, "handleEnter-pane-terminal", "", instance.IsRemote(), func() (chan struct{}, error) {
 				return ui.AttachTerminalTab(instance, tabIdx)
 			})
 		})
 	}
 	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-		return attachOverlayCallbackFn(m, "handleEnter-pane", "", instance.IsRemote(), func() (chan struct{}, error) {
+		return attachOverlayCallbackFn(m, instance.Title, "handleEnter-pane", "", instance.IsRemote(), func() (chan struct{}, error) {
 			return m.store.AttachInstance(instance)
 		})
 	})

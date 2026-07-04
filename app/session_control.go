@@ -35,6 +35,21 @@ var killSessionThroughDaemon = func(title, repoID string) error {
 	return daemon.KillSession(daemon.KillSessionRequest{Title: title, RepoID: repoID})
 }
 
+// pauseStatusPollThroughDaemon / resumeStatusPollThroughDaemon route the TUI's
+// attach-time poll-pause coordination to the daemon (#1160, Fix A follow-up to
+// #1157). While a TUI is attached full-screen to an instance it owns the shared
+// tmux server, so having the daemon pause its capture-pane liveness probe for
+// that ONE instance removes needless contention with the live attach. Package
+// vars so tests can swap them (the killSessionThroughDaemon seam pattern) — and
+// so app tests never reach the real callDaemon → EnsureDaemon spawn.
+var pauseStatusPollThroughDaemon = func(title, repoID string) error {
+	return daemon.PauseStatusPoll(daemon.PauseStatusPollRequest{Title: title, RepoID: repoID})
+}
+
+var resumeStatusPollThroughDaemon = func(title, repoID string) error {
+	return daemon.ResumeStatusPoll(daemon.ResumeStatusPollRequest{Title: title, RepoID: repoID})
+}
+
 var importRemoteSessionsThroughDaemon = func(repoPath string) ([]session.InstanceData, error) {
 	return daemon.ImportRemoteHookSessions(daemon.ImportRemoteHookSessionsRequest{RepoPath: repoPath})
 }
@@ -111,6 +126,20 @@ func SetPRInfoSetterForTest(f func(title, repoID string, info session.PRInfoData
 	prev := setPRInfoThroughDaemon
 	setPRInfoThroughDaemon = f
 	return func() { setPRInfoThroughDaemon = prev }
+}
+
+// SetPauseResumeStatusPollForTest swaps the #1160 daemon pause/resume seams so
+// a test can record the calls attachOverlayCallback's heartbeat makes — and,
+// critically, so exercising the attach path never reaches the real callDaemon →
+// EnsureDaemon (which would spawn a daemon).
+func SetPauseResumeStatusPollForTest(pause, resume func(title, repoID string) error) func() {
+	prevPause, prevResume := pauseStatusPollThroughDaemon, resumeStatusPollThroughDaemon
+	pauseStatusPollThroughDaemon = pause
+	resumeStatusPollThroughDaemon = resume
+	return func() {
+		pauseStatusPollThroughDaemon = prevPause
+		resumeStatusPollThroughDaemon = prevResume
+	}
 }
 
 func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {

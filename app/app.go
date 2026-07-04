@@ -1294,13 +1294,22 @@ var attachOverlayCallbackFn = (*home).attachOverlayCallback
 // terminal-tab) all funnel through one place — and so the pause-while-attached
 // gating + the flag-clears-on-error path are testable without spinning up
 // real tmux.
-func (m *home) attachOverlayCallback(label, traceSuffix string, remote bool, attach func() (chan struct{}, error)) tea.Cmd {
+func (m *home) attachOverlayCallback(title, label, traceSuffix string, remote bool, attach func() (chan struct{}, error)) tea.Cmd {
 	detachTraceMark(label + "-onDismiss-entry" + traceSuffix)
 	ch, err := attach()
 	if err != nil {
 		log.ErrorLog.Printf("failed to attach (%s): %v", label+traceSuffix, err)
 		return nil
 	}
+
+	// While we hold the shared tmux server full-screen, ask the daemon to pause
+	// its per-instance capture-pane liveness poll for THIS instance so it stops
+	// contending with the live attach (#1160, Fix A follow-up to #1157). A
+	// heartbeat renews the daemon's lease-bounded pause until detach; the pause
+	// is best-effort so a down/slow daemon never disturbs the attach.
+	pauseDone := make(chan struct{})
+	go m.runStatusPollPauseHeartbeat(title, pauseDone)
+
 	m.attached.Store(true)
 	defer m.attached.Store(false)
 	// <-ch blocks for as long as the user is attached. Mark the boundary so
@@ -1308,6 +1317,12 @@ func (m *home) attachOverlayCallback(label, traceSuffix string, remote bool, att
 	// actually returned to the UI, not from when the attach started.
 	detachTraceMark(label + "-blocking-on-<-ch" + traceSuffix)
 	<-ch
+	// Stop the heartbeat and resume the daemon's poll immediately on this clean
+	// detach — don't wait out the lease. Fire-and-forget: the detach hot path
+	// must never block on an RPC (attach/detach responsiveness is the whole
+	// point of #1160).
+	close(pauseDone)
+	m.resumeStatusPoll(title)
 	detachStart := time.Now()
 	detachTraceMark(label + "-<-ch-unblocked" + traceSuffix)
 	m.state = stateDefault
@@ -1331,6 +1346,50 @@ func (m *home) attachOverlayCallback(label, traceSuffix string, remote bool, att
 		return tea.Sequence(tea.ClearScreen, repaintCmd)
 	}
 	return repaintCmd
+}
+
+// statusPollRenewInterval is how often an attached TUI re-sends PauseStatusPoll
+// to renew the daemon's lease-bounded pause (#1160). It MUST stay below the
+// daemon's statusPollLease (3s) so a live attach never lets the lease lapse and
+// let the daemon's capture-pane poll resume mid-attach; 1s against a 3s lease
+// leaves two missed renews of slack for a hiccuping daemon.
+const statusPollRenewInterval = 1 * time.Second
+
+// runStatusPollPauseHeartbeat pauses the daemon's capture-pane poll for the
+// attached instance and renews that lease every statusPollRenewInterval until
+// done closes (detach). It runs on its own goroutine so a slow Pause RPC never
+// blocks the attach/detach hot path, and every RPC is best-effort — a down or
+// slow daemon logs and continues, never disturbing the attach (the worst case
+// is the daemon keeps polling, exactly the pre-#1160 behavior).
+func (m *home) runStatusPollPauseHeartbeat(title string, done <-chan struct{}) {
+	pause := func() {
+		if err := pauseStatusPollThroughDaemon(title, m.repoID); err != nil {
+			log.ErrorLog.Printf("failed to pause daemon status poll for %q: %v", title, err)
+		}
+	}
+	pause() // pause immediately on attach, before the first renew tick
+	ticker := time.NewTicker(statusPollRenewInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			pause()
+		}
+	}
+}
+
+// resumeStatusPoll clears the daemon's pause for the detached instance so its
+// capture-pane poll resumes immediately rather than after the lease expires
+// (#1160). Fire-and-forget on its own goroutine and best-effort: the detach hot
+// path must never block on this RPC.
+func (m *home) resumeStatusPoll(title string) {
+	go func() {
+		if err := resumeStatusPollThroughDaemon(title, m.repoID); err != nil {
+			log.ErrorLog.Printf("failed to resume daemon status poll for %q: %v", title, err)
+		}
+	}()
 }
 
 // selectionChanged updates the selection binding and menu based on the

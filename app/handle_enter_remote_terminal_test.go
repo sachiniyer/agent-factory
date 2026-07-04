@@ -27,7 +27,7 @@ func (remoteFakeBackend) Type() string { return "remote" }
 // that detaches immediately (a pre-closed channel), so the real post-detach
 // lifecycle runs synchronously without a tmux client or a remote terminal_cmd
 // PTY.
-func swapAttachOverlayCallbackFn(t *testing.T, fn func(*home, string, string, bool, func() (chan struct{}, error)) tea.Cmd) {
+func swapAttachOverlayCallbackFn(t *testing.T, fn func(*home, string, string, string, bool, func() (chan struct{}, error)) tea.Cmd) {
 	t.Helper()
 	prev := attachOverlayCallbackFn
 	attachOverlayCallbackFn = fn
@@ -75,8 +75,9 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
-	swapAttachOverlayCallbackFn(t, func(m *home, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
-		return m.attachOverlayCallback(label, traceSuffix, rem, func() (chan struct{}, error) {
+	stubStatusPollPause(t)
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
+		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
 			ch := make(chan struct{})
 			close(ch) // detach immediately, synchronously, no real PTY
 			return ch, nil

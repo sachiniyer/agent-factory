@@ -36,6 +36,21 @@ const (
 
 var ensureDaemonMu sync.Mutex
 
+// statusPollLease bounds how long a single PauseStatusPoll silences an
+// instance's daemon capture-pane liveness poll (#1160). The attached TUI
+// renews it with a heartbeat every statusPollRenewInterval (< this lease) and
+// clears it on clean detach, but this fixed SERVER-SIDE lease — never a
+// client-supplied duration — is the leak-safety guarantee: a crashed TUI that
+// never renews or resumes auto-resumes within one lease, so real tmux death is
+// still detected on the next tick and the daemon can never be permanently
+// blinded. var, not const, so tests can shrink it.
+var statusPollLease = 3 * time.Second
+
+// nowFunc is the clock used by the pause-poll lease logic (#1160), injectable
+// so lease-expiry tests advance time deterministically instead of racing real
+// sleeps.
+var nowFunc = time.Now
+
 // CreateSessionRequest is the daemon-owned session creation contract used by
 // the TUI, CLI, and scheduled task runner.
 type CreateSessionRequest struct {
@@ -164,6 +179,35 @@ type SetPRInfoRequest struct {
 }
 
 type SetPRInfoResponse struct {
+	OK bool
+}
+
+// PauseStatusPollRequest asks the daemon to pause its per-instance capture-pane
+// liveness poll for ONE session while a TUI is attached full-screen to it
+// (#1160, Fix A follow-up to #1157). Title selects the session; RepoID scopes
+// the lookup like the other sessions verbs. There is deliberately NO
+// client-supplied duration: the daemon always applies its own fixed
+// statusPollLease, so a misbehaving or crashed client can never silence an
+// instance for an unbounded time. The TUI renews the lease with a heartbeat
+// while attached and clears it with ResumeStatusPoll on detach.
+type PauseStatusPollRequest struct {
+	Title  string
+	RepoID string
+}
+
+type PauseStatusPollResponse struct {
+	OK bool
+}
+
+// ResumeStatusPollRequest clears a pause set by PauseStatusPoll so the daemon's
+// poll resumes immediately on a clean detach rather than waiting out the lease
+// (#1160).
+type ResumeStatusPollRequest struct {
+	Title  string
+	RepoID string
+}
+
+type ResumeStatusPollResponse struct {
 	OK bool
 }
 
@@ -372,6 +416,30 @@ func Snapshot(req SnapshotRequest) ([]session.InstanceData, error) {
 func KillSession(req KillSessionRequest) error {
 	var resp KillSessionResponse
 	if err := callDaemon("KillSession", req, &resp); err != nil {
+		return err
+	}
+	return nil
+}
+
+// PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
+// one attached session (#1160). Best-effort from the caller's side: the pause
+// is lease-bounded server-side, so the worst case of a failed call is the
+// daemon keeps polling — exactly the pre-#1160 behavior — never a broken
+// attach or a permanently-blinded daemon.
+func PauseStatusPoll(req PauseStatusPollRequest) error {
+	var resp PauseStatusPollResponse
+	if err := callDaemon("PauseStatusPoll", req, &resp); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ResumeStatusPoll asks the daemon to resume polling a session on a clean
+// detach so its status refreshes on the next tick instead of after the lease
+// expires (#1160).
+func ResumeStatusPoll(req ResumeStatusPollRequest) error {
+	var resp ResumeStatusPollResponse
+	if err := callDaemon("ResumeStatusPoll", req, &resp); err != nil {
 		return err
 	}
 	return nil
@@ -596,6 +664,31 @@ type controlServer struct {
 }
 
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.OK = true
+	return nil
+}
+
+// PauseStatusPoll pauses the daemon's capture-pane liveness poll for one
+// attached session (#1160). Deliberately NOT gated on requireManagerReady:
+// it is a lightweight, lease-bounded map write on the dedicated pausedMu (not
+// m.mu), independent of the instance restore — a pause that lands during
+// warm-up is honored once the instance is restored, and it can never corrupt
+// state the way a create/kill racing the restore could. A nil manager (some
+// test control servers) is a no-op ack.
+func (s *controlServer) PauseStatusPoll(req PauseStatusPollRequest, resp *PauseStatusPollResponse) error {
+	if s.manager != nil {
+		s.manager.PauseStatusPoll(req.RepoID, req.Title)
+	}
+	resp.OK = true
+	return nil
+}
+
+// ResumeStatusPoll clears a pause set by PauseStatusPoll (#1160). Same
+// lightweight, ungated conventions as PauseStatusPoll.
+func (s *controlServer) ResumeStatusPoll(req ResumeStatusPollRequest, resp *ResumeStatusPollResponse) error {
+	if s.manager != nil {
+		s.manager.ResumeStatusPoll(req.RepoID, req.Title)
+	}
 	resp.OK = true
 	return nil
 }
@@ -953,6 +1046,19 @@ type Manager struct {
 	// repoStartLocks; entries are never removed (a few bytes per session ever
 	// touched).
 	instanceOpLocks map[string]*sync.Mutex
+
+	// pausedPolls records sessions whose daemon capture-pane liveness poll is
+	// paused while a TUI is attached full-screen to them (#1160), keyed by
+	// daemon instance key → lease expiry. Guarded by pausedMu, a DEDICATED
+	// mutex (NOT m.mu): refreshInstanceStatus deliberately snapshots under m.mu
+	// and then runs each slow tmux probe with m.mu RELEASED so a hung probe
+	// can't block unrelated RPCs — the pause check runs inside that lock-free
+	// window, so reusing m.mu would reintroduce exactly the contention the
+	// release avoids. Each entry is lease-bounded (statusPollLease): a crashed
+	// TUI that never sends Resume auto-resumes within one lease, so the pause
+	// can never permanently blind the daemon.
+	pausedMu    sync.Mutex
+	pausedPolls map[string]time.Time
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -993,6 +1099,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		killsInFlight:       make(map[string]struct{}),
 		lostRestoreStates:   make(map[string]*lostRestoreState),
 		instanceOpLocks:     make(map[string]*sync.Mutex),
+		pausedPolls:         make(map[string]time.Time),
 	}, nil
 }
 
@@ -1047,6 +1154,46 @@ func (m *Manager) InstancesSnapshot() []*session.Instance {
 // The instance list is snapshotted under m.mu, then each instance's (possibly
 // slow) tmux probes run with the lock released so a hung capture-pane can't
 // block unrelated manager RPCs.
+// PauseStatusPoll pauses the daemon's capture-pane liveness poll for one
+// attached session for statusPollLease from now (#1160). Renewing (the TUI's
+// heartbeat) just pushes the expiry out; the pause is per-instance, so every
+// other session keeps refreshing during the attach.
+func (m *Manager) PauseStatusPoll(repoID, title string) {
+	key := daemonInstanceKey(repoID, title)
+	m.pausedMu.Lock()
+	m.pausedPolls[key] = nowFunc().Add(statusPollLease)
+	m.pausedMu.Unlock()
+}
+
+// ResumeStatusPoll clears a pause immediately on a clean detach so the poll
+// resumes on the next tick rather than waiting out the lease (#1160).
+func (m *Manager) ResumeStatusPoll(repoID, title string) {
+	key := daemonInstanceKey(repoID, title)
+	m.pausedMu.Lock()
+	delete(m.pausedPolls, key)
+	m.pausedMu.Unlock()
+}
+
+// isPollPaused reports whether an instance's poll is currently paused (#1160).
+// A present-but-expired lease is lazily deleted and reported unpaused, so a
+// crashed TUI that never sent Resume auto-resumes within one lease — the
+// crash-safety property that keeps a pause from ever permanently blinding the
+// daemon.
+func (m *Manager) isPollPaused(repoID, title string) bool {
+	key := daemonInstanceKey(repoID, title)
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	expiry, ok := m.pausedPolls[key]
+	if !ok {
+		return false
+	}
+	if nowFunc().Before(expiry) {
+		return true
+	}
+	delete(m.pausedPolls, key) // lease lapsed — lazy GC, then poll as normal
+	return false
+}
+
 func (m *Manager) RefreshStatuses() {
 	type entry struct {
 		repoID   string
@@ -1099,6 +1246,18 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		return
 	}
 	if status := instance.GetStatus(); status == session.Loading || status == session.Deleting {
+		return
+	}
+	if m.isPollPaused(repoID, instance.Title) {
+		// A TUI is attached full-screen to this instance (#1160). It owns the
+		// shared tmux server for the attach duration; the daemon's capture-pane
+		// liveness probe here would needlessly contend with the live attach and
+		// hurt input responsiveness (Fix A follow-up to #1157). Skip the probe.
+		// The status is left UNCHANGED — a paused instance is known-attached-and-
+		// alive, never marked Lost (#1108): it has not vanished. Leak-safe: the
+		// pause is lease-bounded (statusPollLease), so a crashed TUI that never
+		// sends Resume auto-resumes within one lease and real death is detected
+		// on the next tick — the pause can never permanently blind the daemon.
 		return
 	}
 

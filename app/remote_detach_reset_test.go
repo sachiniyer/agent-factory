@@ -26,10 +26,11 @@ func swapRemoteDetachResetWriter(t *testing.T, w io.Writer) {
 // post-detach cmd.
 func runAttachOverlayCallback(t *testing.T, h *home, remote bool) tea.Cmd {
 	t.Helper()
+	stubStatusPollPause(t)
 	ch := make(chan struct{})
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("test-attach", "", remote, func() (chan struct{}, error) {
+		done <- h.attachOverlayCallback("t1", "test-attach", "", remote, func() (chan struct{}, error) {
 			return ch, nil
 		})
 	}()
@@ -139,7 +140,7 @@ func TestAttachOverlayCallback_NoResetWhenRemoteAttachErrors(t *testing.T) {
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
 
-	cmd := h.attachOverlayCallback("test-attach", "", true, func() (chan struct{}, error) {
+	cmd := h.attachOverlayCallback("t1", "test-attach", "", true, func() (chan struct{}, error) {
 		return nil, assert.AnError
 	})
 
