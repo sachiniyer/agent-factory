@@ -202,9 +202,13 @@ func SandboxHome() func() {
 		}
 		if hadSession {
 			_ = os.Setenv("AF_SESSION", prevSession)
+		} else {
+			_ = os.Unsetenv("AF_SESSION")
 		}
 		if hadAFHome {
 			_ = os.Setenv("AF_HOME", prevAFHome)
+		} else {
+			_ = os.Unsetenv("AF_HOME")
 		}
 		_ = os.RemoveAll(dir)
 	}
