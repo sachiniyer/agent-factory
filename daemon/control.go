@@ -933,6 +933,12 @@ type Manager struct {
 	// kill and stops re-creating that root until the daemon restarts —
 	// in-memory on purpose, so a restart re-asserts the configured state.
 	rootKilledByUser map[string]struct{}
+	// killsInFlight marks sessions (by daemon instance key) whose KillSession
+	// teardown is currently running, so the status poll's finish-kill pass for
+	// tombstoned records (#1108) never runs a second concurrent teardown of
+	// the same session, and a duplicate KillSession RPC is rejected instead of
+	// double-killing.
+	killsInFlight map[string]struct{}
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -970,6 +976,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		targetLocks:         make(map[string]*sync.Mutex),
 		rootEnsureStates:    make(map[string]*rootEnsureState),
 		rootKilledByUser:    make(map[string]struct{}),
+		killsInFlight:       make(map[string]struct{}),
 	}, nil
 }
 
@@ -1050,9 +1057,12 @@ func (m *Manager) RefreshStatuses() {
 //     the TUI so it works whether or not a TUI is attached;
 //   - HasUpdated → Running; a waiting prompt → TapEnter (the AutoYes path, which
 //     this poll already owned — unchanged by #960);
-//   - otherwise probe liveness: a vanished tmux/remote session → Dead (never
-//     repainted Ready, the #935 invariant the hollow dead-dot rendering relies
-//     on), a live idle one → Ready.
+//   - otherwise probe liveness: a vanished tmux/remote session → Lost (never
+//     repainted Ready, the #935 invariant the hollow status-dot rendering
+//     relies on; Lost rather than Dead since #1108 — no kill intent on record
+//     means the session is recovery-eligible), a live idle one → Ready;
+//   - a session carrying the kill-intent tombstone (#1108) short-circuits all
+//     of the above: its interrupted teardown is finished instead.
 //
 // Status writes go through SetStatusIfNotDeleting so a concurrent kill's Deleting
 // marker is never clobbered. Only a real transition is persisted, and it persists
@@ -1062,6 +1072,14 @@ func (m *Manager) RefreshStatuses() {
 // instances.json.
 func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instance) {
 	if instance == nil || !instance.Started() {
+		return
+	}
+	if instance.UserKilled() {
+		// A surviving kill-intent tombstone (#1108) means a previous
+		// KillSession was interrupted after committing to the kill. The only
+		// valid future for this session is finishing that teardown — never
+		// probing it, never marking it Lost, never restoring it.
+		m.finishUserKill(repoID, instance)
 		return
 	}
 	if status := instance.GetStatus(); status == session.Loading || status == session.Deleting {
@@ -1091,10 +1109,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	case !instance.TmuxAlive():
 		// HasUpdated returned (false,false), which a healthy idle session and a
 		// dead one both produce — indistinguishable on their own. Probe liveness
-		// only on this idle branch so a vanished session is marked Dead and
+		// only on this idle branch so a vanished session is marked Lost and
 		// rendered distinctly rather than repainted as a green Ready dot it can
-		// no longer back (#935).
-		instance.SetStatusIfNotDeleting(session.Dead)
+		// no longer back (#935). Lost, not Dead (#1108): there is no kill
+		// intent on record, so the session vanished out from under a live
+		// record — an outage/reboot casualty that is recovery-eligible, not a
+		// corpse the user wanted gone.
+		instance.SetStatusIfNotDeleting(session.Lost)
 	default:
 		instance.SetStatusIfNotDeleting(session.Ready)
 	}
@@ -1460,6 +1481,28 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 		return err
 	}
 
+	key := daemonInstanceKey(repoID, req.Title)
+	m.mu.Lock()
+	if _, busy := m.killsInFlight[key]; busy {
+		m.mu.Unlock()
+		return fmt.Errorf("kill already in progress for session %q", req.Title)
+	}
+	m.killsInFlight[key] = struct{}{}
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.killsInFlight, key)
+		m.mu.Unlock()
+	}()
+
+	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the
+	// daemon dies or the teardown errors between here and DeleteInstance, the
+	// surviving record is provably a user kill — the status poll finishes the
+	// teardown instead of classifying the vanished session Lost and restoring
+	// it. Best-effort: a failed tombstone write degrades to today's crash
+	// window, which must not block the kill itself.
+	m.persistKillTombstone(repoID, instance, data)
+
 	if instance != nil {
 		if err := instance.Kill(); err != nil {
 			return fmt.Errorf("failed to kill instance: %w", err)
@@ -1478,7 +1521,7 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	}
 
 	m.mu.Lock()
-	delete(m.instances, daemonInstanceKey(repoID, req.Title))
+	delete(m.instances, key)
 	if session.IsReservedTitle(req.Title) {
 		// An explicit kill of the root agent is a user decision the ensure
 		// loop must respect (#1106): suppress re-creation for this repo until
@@ -1491,6 +1534,72 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+// persistKillTombstone writes the kill-intent tombstone (#1108) for the session
+// KillSession is about to tear down, so a record surviving a crash or teardown
+// failure mid-kill is never classified Lost and restored. Best-effort by
+// design: a failed write only degrades to the pre-tombstone crash window.
+func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance, data *session.InstanceData) {
+	var d session.InstanceData
+	switch {
+	case instance != nil:
+		instance.MarkUserKilled()
+		d = instance.ToInstanceData()
+	case data != nil:
+		d = *data
+		d.UserKilled = true
+	default:
+		return
+	}
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	err := persistInstanceData(repoID, d)
+	repoStartLock.Unlock()
+	if err != nil {
+		log.WarningLog.Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
+	}
+}
+
+// finishUserKill completes the teardown of a session whose record carries the
+// kill-intent tombstone (#1108): the previous KillSession was interrupted by a
+// daemon crash or a teardown error after the tombstone write. Mirrors the tail
+// of KillSession — best-effort Kill, targeted record delete, map removal — and
+// retries on the next poll if the record delete fails. Skips while an explicit
+// KillSession for the same session is still in flight.
+func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
+	key := daemonInstanceKey(repoID, instance.Title)
+	m.mu.Lock()
+	if _, busy := m.killsInFlight[key]; busy {
+		m.mu.Unlock()
+		return
+	}
+	m.killsInFlight[key] = struct{}{}
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.killsInFlight, key)
+		m.mu.Unlock()
+	}()
+
+	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
+	// Best-effort: the backing tmux session is typically already gone; Kill
+	// failures here only mean there is less left to tear down.
+	if err := instance.Kill(); err != nil {
+		log.WarningLog.Printf("finishing kill of %q: teardown reported: %v", instance.Title, err)
+	}
+	storage, err := session.NewStorage(config.LoadState(), repoID)
+	if err != nil {
+		log.WarningLog.Printf("finishing kill of %q: %v", instance.Title, err)
+		return
+	}
+	if err := storage.DeleteInstance(instance.Title); err != nil {
+		log.WarningLog.Printf("finishing kill of %q: failed to delete record (will retry next poll): %v", instance.Title, err)
+		return
+	}
+	m.mu.Lock()
+	delete(m.instances, key)
+	m.mu.Unlock()
 }
 
 func (m *Manager) SendPrompt(req SendPromptRequest) error {

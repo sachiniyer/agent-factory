@@ -78,7 +78,7 @@ func (m *Manager) EnsureRootAgents() {
 }
 
 // ensureRootAgent guarantees the root agent for one configured repo path:
-// adopt a live root untouched, heal a Dead one in place, create a missing
+// adopt a live root untouched, heal a Dead/Lost one in place, create a missing
 // one, and respect an explicit user kill. All outcomes are logged; failures
 // back off exponentially and settle at the rootEnsureBackoffMax cadence, so
 // the loop always heals eventually once the cause clears.
@@ -119,18 +119,20 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 	}
 
 	if inst != nil {
-		if inst.GetStatus() != session.Dead {
+		if status := inst.GetStatus(); status != session.Dead && status != session.Lost {
 			// Adopt, never clobber: a live root — whatever program it runs
 			// and whoever created it — is the root agent. Nothing to do.
 			m.rootEnsureSucceeded(st)
 			return
 		}
 		// The root's tmux vanished (crash, tmux server death — the #1104
-		// outage class). Reap the dead record and fall through to re-create
-		// in place. Kill is best-effort teardown of already-dead tmux, and
-		// an in-place worktree's Cleanup never touches the user's tree
-		// (#1107), so this can only remove daemon-owned state.
-		log.WarningLog.Printf("root agent for %s is Dead (tmux gone); re-creating it in place", repo.Root)
+		// outage class; recorded as Lost since #1108, Dead by older builds).
+		// Reap the dead record and fall through to re-create in place — the
+		// root keeps its stronger always-ensure semantics rather than waiting
+		// for the general Lost-restore loop. Kill is best-effort teardown of
+		// already-dead tmux, and an in-place worktree's Cleanup never touches
+		// the user's tree (#1107), so this can only remove daemon-owned state.
+		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); re-creating it in place", repo.Root)
 		if err := m.reapDeadRoot(repo.ID, inst); err != nil {
 			m.rootEnsureFailed(path, st, fmt.Errorf("failed to remove dead root record: %w", err))
 			return

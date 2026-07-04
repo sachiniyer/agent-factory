@@ -20,6 +20,12 @@ const readyIcon = "● "
 // contrast and color-blindness (#935).
 const deadIcon = "○ "
 
+// lostIcon marks a session whose tmux vanished with no kill on record (#1108)
+// — recovery-eligible, unlike a corpse. Hollow like deadIcon (it cannot be
+// attached right now, #935) but dotted + amber so "lost, coming back" reads
+// differently from "dead" by shape as well as color.
+const lostIcon = "◌ "
+
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
 // shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
 // Expandable) aligned with their siblings.
@@ -37,6 +43,12 @@ var readyStyle = lipgloss.NewStyle().
 // for a deleting row — keeps a corpse from reading as a healthy green session.
 var deadStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+
+// lostStyle paints the status dot of a Lost session (#1108): amber, not the
+// corpse gray — the session is expected to come back, but must not read as a
+// healthy green either.
+var lostStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#C18401", Dark: "#E5C07B"})
 
 var titleStyle = lipgloss.NewStyle().
 	Padding(1, 1, 0, 1).
@@ -169,6 +181,8 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		join = readyStyle.Render(readyIcon)
 	case session.Dead:
 		join = deadStyle.Render(deadIcon)
+	case session.Lost:
+		join = lostStyle.Render(lostIcon)
 	default:
 	}
 
@@ -179,6 +193,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	}
 	// A deleting row keeps spinning but is explicitly marked and dimmed so it
 	// reads as "going away", not "busy working" (#844).
+	// A lost row is explicitly marked so "tmux vanished under it, no kill on
+	// record" (#1108) is readable without decoding the amber dot; the title
+	// keeps full contrast — unlike deleting/dead treatments, the session is
+	// expected back.
+	if status == session.Lost {
+		titleText = "[lost] " + titleText
+	}
 	if status == session.Deleting {
 		titleText = "[deleting] " + titleText
 		titleS = titleS.Foreground(deletingTitleColor)

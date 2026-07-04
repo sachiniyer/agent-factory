@@ -268,6 +268,12 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		if selected.GetStatus() == session.Deleting {
 			return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
 		}
+		if selected.GetStatus() == session.Lost {
+			// Lost (#1108): the backing tmux session vanished with no kill on
+			// record. Attach is impossible right now; say what happened —
+			// same explicit-feedback contract as the Deleting path (#935).
+			return m, m.handleError(fmt.Errorf("session '%s' was lost — its tmux session is gone", selected.Title))
+		}
 		if !selected.TmuxAlive() {
 			// The backing session has vanished, so attaching is impossible.
 			// Surface an actionable error instead of swallowing Enter, mirroring

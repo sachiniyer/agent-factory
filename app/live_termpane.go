@@ -171,7 +171,7 @@ func (m *home) liveBindCandidate(target *store.OpenPane) (key, sessionName strin
 		return "", ""
 	}
 	switch inst.GetStatus() {
-	case session.Loading, session.Deleting, session.Dead:
+	case session.Loading, session.Deleting, session.Dead, session.Lost:
 		return "", ""
 	}
 	tab := target.Tab()

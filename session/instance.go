@@ -38,7 +38,23 @@ const (
 	// masquerade as healthy (#935). Unlike Loading/Deleting this is NOT
 	// in-flight TUI state: it is persisted and background syncs may still reap
 	// or replace the row, so it is deliberately excluded from isTransientStatus.
+	//
+	// As of #1108 Dead is write-never: observed disappearance is recorded as
+	// Lost instead, and FromInstanceData rewrites persisted Dead to Lost on
+	// load (rollforward — the only writers of persisted Dead were
+	// observed-death paths; user kills delete the record). The value stays in
+	// the enum because Status serializes as an int: appending, never
+	// renumbering, is what keeps old records readable.
 	Dead
+	// Lost is when the underlying tmux/remote session vanished out from under
+	// a live session with no user kill on record — the tmux server was killed,
+	// an outage/OOM starved it (#1104), or the box rebooted while the daemon
+	// had already observed the death. Unlike a user-killed session (whose
+	// record is deleted, with a UserKilled tombstone covering the teardown
+	// crash window), a Lost session is wanted: it is recovery-eligible and the
+	// daemon restores it best-effort (#1108). Persisted, like Dead; excluded
+	// from isTransientStatus for the same reason.
+	Lost
 )
 
 // Instance is a running instance of claude code.
@@ -78,6 +94,14 @@ type Instance struct {
 	// setup; restored instances don't need it (the persisted
 	// external_worktree flag carries the semantics from then on).
 	inPlace bool
+
+	// userKilled is the kill-intent tombstone (#1108): set (and persisted)
+	// before an explicit kill's teardown begins, so a record that survives a
+	// daemon crash or teardown failure mid-kill is provably a corpse the user
+	// wanted dead — never classified Lost, never restored. The happy kill path
+	// deletes the record entirely, so the tombstone is normally invisible; the
+	// daemon poll finishes a tombstoned record's teardown instead of probing it.
+	userKilled bool
 
 	// prInfo stores the associated GitHub PR info
 	prInfo *git.PRInfo
@@ -662,16 +686,17 @@ func (i *Instance) ToInstanceData() InstanceData {
 	defer i.mu.RUnlock()
 
 	data := InstanceData{
-		Title:     i.Title,
-		Path:      i.Path,
-		Branch:    i.Branch,
-		Status:    i.Status,
-		Height:    i.Height,
-		Width:     i.Width,
-		CreatedAt: i.CreatedAt,
-		UpdatedAt: time.Now(),
-		Program:   i.Program,
-		AutoYes:   i.AutoYes,
+		Title:      i.Title,
+		Path:       i.Path,
+		Branch:     i.Branch,
+		Status:     i.Status,
+		Height:     i.Height,
+		Width:      i.Width,
+		CreatedAt:  i.CreatedAt,
+		UpdatedAt:  time.Now(),
+		Program:    i.Program,
+		AutoYes:    i.AutoYes,
+		UserKilled: i.userKilled,
 	}
 
 	if i.backend != nil {
@@ -740,17 +765,28 @@ func (i *Instance) ToInstanceData() InstanceData {
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	status := data.Status
+	if status == Dead {
+		// Rollforward (#1108): records persisted as Dead by pre-Lost builds
+		// were all written by observed-death paths (a user kill deletes the
+		// record instead), so they load as Lost — recovery-eligible. This is
+		// what makes sessions stranded by an outage under an old build
+		// restorable after an upgrade. A tombstoned record keeps its status;
+		// the daemon finishes its teardown rather than restoring it.
+		status = Lost
+	}
 	instance := &Instance{
 		Title:      data.Title,
 		Path:       data.Path,
 		Branch:     data.Branch,
-		Status:     data.Status,
+		Status:     status,
 		Height:     data.Height,
 		Width:      data.Width,
 		CreatedAt:  data.CreatedAt,
 		UpdatedAt:  data.UpdatedAt,
 		Program:    data.Program,
 		AutoYes:    data.AutoYes,
+		userKilled: data.UserKilled,
 		remoteMeta: data.RemoteMeta,
 	}
 
@@ -1027,6 +1063,21 @@ func (i *Instance) GetStatus() Status {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.Status
+}
+
+// MarkUserKilled records kill intent on the instance (#1108). Callers persist
+// the instance afterwards so the tombstone survives a daemon crash mid-kill.
+func (i *Instance) MarkUserKilled() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.userKilled = true
+}
+
+// UserKilled reports whether an explicit kill was recorded for this instance.
+func (i *Instance) UserKilled() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.userKilled
 }
 
 // firstTimeSetup is true if this is a new instance. Otherwise, it's one loaded from storage.

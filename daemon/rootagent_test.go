@@ -228,6 +228,43 @@ func TestEnsureRootAgentsHealsDeadRoot(t *testing.T) {
 	}
 }
 
+// TestEnsureRootAgentsHealsLostRoot mirrors the Dead heal for the Lost status
+// (#1108): the liveness probe records an outage-vanished root as Lost now, and
+// the ensure loop must treat it exactly like Dead — reap and re-create in
+// place — or the #1128 root self-heal would silently regress.
+func TestEnsureRootAgentsHealsLostRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.EnsureRootAgents()
+	first := findRootInstance(t, manager, repoPath)
+	if first == nil {
+		t.Fatalf("root instance missing after first ensure")
+	}
+
+	first.SetStatus(session.Lost)
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 2 {
+		t.Fatalf("expected a re-create after the root went Lost, got %d creates", len(*seen))
+	}
+	healed := findRootInstance(t, manager, repoPath)
+	if healed == nil {
+		t.Fatalf("root instance missing after heal")
+	}
+	if healed == first {
+		t.Fatalf("heal must replace the lost instance, not resurrect the same object")
+	}
+	if got := healed.GetStatus(); got == session.Lost || got == session.Dead {
+		t.Fatalf("healed root must be live, got %v", got)
+	}
+}
+
 // TestEnsureRootAgentsRespectsUserKill: an explicit KillSession of the root
 // suppresses re-creation for the rest of the daemon's life; a fresh manager
 // (daemon restart) re-asserts the configured root. This is the conservative

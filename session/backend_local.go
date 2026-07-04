@@ -158,18 +158,21 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	}()
 
 	if !firstTimeSetup {
-		// A persisted Dead instance's tmux session was killed out from under it
-		// and the daemon explicitly recorded Dead status (#935). Loading it must
-		// NOT silently re-spawn that session: TmuxSession.Restore re-spawns a
-		// missing session when workDir is non-empty (the #386 reboot-recovery
-		// path) and setupTabs would likewise re-spawn the shell tab — together
-		// resurrecting a corpse the user killed, contradicting its persisted
-		// state (#970). Return before both. The deferred handler still flips
-		// started=true, so the corpse keeps rendering Dead, survives the next
-		// SaveInstances checkpoint (which skips !Started instances), and stays
-		// killable; the daemon liveness poll re-confirms Dead because the bound
-		// session does not exist server-side.
-		if i.GetStatus() == Dead {
+		// A persisted Dead/Lost instance's tmux session was killed out from
+		// under it and the daemon explicitly recorded that (#935/#1108).
+		// Loading it must NOT silently re-spawn that session: TmuxSession.Restore
+		// re-spawns a missing session when workDir is non-empty (the #386
+		// reboot-recovery path) and setupTabs would likewise re-spawn the shell
+		// tab — together resurrecting a session behind the daemon's back,
+		// contradicting its persisted state (#970). Return before both. The
+		// deferred handler still flips started=true, so the row keeps rendering
+		// its status, survives the next SaveInstances checkpoint (which skips
+		// !Started instances), and stays killable; the daemon liveness poll
+		// re-confirms the state because the bound session does not exist
+		// server-side. A Lost session's recovery is the daemon's explicit
+		// restore loop (#1108 PR 2), never a load-time side effect; a
+		// tombstoned record's only future is having its kill finished.
+		if status := i.GetStatus(); status == Dead || status == Lost || i.UserKilled() {
 			return nil
 		}
 
