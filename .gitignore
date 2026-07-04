@@ -23,6 +23,8 @@ Thumbs.db
 
 # Test
 *.test
+# *.test is for compiled Go test binaries — keep the container image recipe
+!Dockerfile.test
 *.out
 coverage.txt
 

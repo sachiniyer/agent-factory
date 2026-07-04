@@ -15,6 +15,36 @@ You are driving a live TUI. Interact with it through a private tmux server
 using `send-keys` / `capture-pane`; read the screen after every action and
 judge what a human would think of it.
 
+## Sandbox: container first (#1123)
+
+**On a dev box with docker (or podman), run the play-test inside the
+container sandbox** — it satisfies every isolation rule below structurally
+(the container has its own tmux server, a throwaway AF home, a pre-built
+mock repo, pids/memory caps, and teardown is one `docker rm -f`). See
+[docs/container-testing.md](../../docs/container-testing.md).
+
+```bash
+WORK="/tmp/af-playtest-$(date +%Y%m%d-%H%M%S)" && mkdir -p "$WORK"
+git clone --depth 1 https://github.com/sachiniyer/agent-factory "$WORK/src"   # play-test master, not a dirty checkout
+make -C "$WORK/src" playtest-container-detached                               # container name: af-playtest
+docker exec af-playtest sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'   # af builds on boot
+
+# Drive the TUI exactly as in section 2, but through docker exec — no -L
+# socket needed; the container's default tmux server IS the private server:
+docker exec af-playtest tmux new-session -d -s drive -x 80 -y 24
+docker exec af-playtest tmux send-keys -t drive 'cd ~/sandbox/mock-repo && af' Enter
+docker exec af-playtest tmux capture-pane -p -t drive
+
+# Teardown (replaces section 4's script — one command reaps everything):
+docker rm -f af-playtest && rm -rf "$WORK"
+```
+
+`gh` issue filing (section 3) still happens on the host. Stress
+generators must still be BOUNDED — the caps turn a runaway into a
+contained failure, not a non-event. Sections 1 and 4 below are the
+**fallback for boxes without docker/podman**; the rules underneath apply
+to every run, containerized or not.
+
 ## Hard isolation rules (non-negotiable)
 
 These rules exist because a previous play-test took down the whole dev box
@@ -126,12 +156,20 @@ git add -A && git commit -m "initial project"
 ```
 
 **Cheap instances** — write `$AGENT_FACTORY_HOME/config.json` before first
-launch so instances run bash instead of a real agent
+launch so instances run a shell instead of a real agent
 (`default_program` must be a supported agent name; the override supplies
-the actual command):
+the actual command). The override must be a flag-swallowing wrapper, NOT
+bare `bash`: af appends claude flags (`--plugin-dir …`) to whatever the
+claude program resolves to, bash dies on the unknown option, and every
+instance create fails with "timed out waiting for tmux session":
 
-```json
-{ "default_program": "claude", "program_overrides": { "claude": "bash" } }
+```bash
+mkdir -p "$WORK/bin"
+printf '#!/bin/bash\n# swallow the flags af appends (--plugin-dir ...) and run a shell\nexec bash\n' > "$WORK/bin/fake-agent"
+chmod +x "$WORK/bin/fake-agent"
+cat > "$AGENT_FACTORY_HOME/config.json" <<EOF
+{ "default_program": "claude", "program_overrides": { "claude": "$WORK/bin/fake-agent" } }
+EOF
 ```
 
 **Verify isolation before launching anything**: `"$AF" debug` must print
