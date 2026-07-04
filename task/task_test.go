@@ -70,7 +70,7 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 		CreatedAt:   time.Now().Truncate(time.Second),
 	}
 
-	err := SaveTasks([]Task{s})
+	err := AddTask(s)
 	require.NoError(t, err)
 
 	loaded, err := LoadTasks()
