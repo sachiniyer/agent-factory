@@ -158,6 +158,95 @@ func loadAllInstancesAggregate() ([]session.InstanceData, []string, error) {
 	return allData, corrupted, nil
 }
 
+// diskListSessions is the disk-read fallback for `sessions list` when no daemon
+// is reachable (#1029 PR 2). It reproduces the pre-daemon read behavior exactly
+// — repo-scoped or all-repos, keeping the loud corrupt-file error on the
+// all-repos path (#730) — and additionally sorts the result by the daemon's
+// (repoID, title) key so the on-disk order matches the daemon Snapshot path,
+// giving scripts a stable order from either source.
+func diskListSessions(repoID string) ([]session.InstanceData, error) {
+	if repoID != "" {
+		raw, err := config.LoadRepoInstances(repoID)
+		if err != nil {
+			return nil, err
+		}
+		var data []session.InstanceData
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return nil, fmt.Errorf("failed to parse instances: %w", err)
+		}
+		// Single repo: the (repoID, title) key reduces to title order.
+		sort.Slice(data, func(i, j int) bool { return data[i].Title < data[j].Title })
+		return data, nil
+	}
+
+	// Don't silently substitute an empty/partial list when a repo file is
+	// corrupted (#730): warn naming each bad repo and fail loudly so users can
+	// tell "no sessions" apart from "sessions hidden behind a corrupt file."
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return nil, err
+	}
+	type keyedInstance struct {
+		key  string
+		data session.InstanceData
+	}
+	var rows []keyedInstance
+	var corrupted []string
+	for rid, raw := range allInstances {
+		var instances []session.InstanceData
+		if err := json.Unmarshal(raw, &instances); err != nil {
+			log.WarningLog.Printf("skipping repo %s: corrupted instances.json: %v", rid, err)
+			corrupted = append(corrupted, rid)
+			continue
+		}
+		for _, inst := range instances {
+			// Build the same composite key the daemon sorts by:
+			// repoID + NUL + title (daemonInstanceKey). NUL sorts before any
+			// printable byte, so this is exactly the daemon's (repoID, title)
+			// order.
+			rows = append(rows, keyedInstance{key: rid + "\x00" + inst.Title, data: inst})
+		}
+	}
+	if len(corrupted) > 0 {
+		return nil, corruptedReposError(corrupted)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].key < rows[j].key })
+	data := make([]session.InstanceData, 0, len(rows))
+	for _, r := range rows {
+		data = append(data, r.data)
+	}
+	return data, nil
+}
+
+// diskWhoami is the disk-read fallback for `sessions whoami` when no daemon is
+// reachable (#1029 PR 2). It scans every repo for an instance whose TmuxName
+// matches the current tmux session, keeping the loud corrupt-file behavior
+// (#730) so a hidden match is reported instead of a misleading "not found".
+func diskWhoami(tmuxName string) (*session.InstanceData, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load instances: %w", err)
+	}
+	var corrupted []string
+	for repoID, raw := range allInstances {
+		var instances []session.InstanceData
+		if err := json.Unmarshal(raw, &instances); err != nil {
+			log.WarningLog.Printf("skipping repo %s: corrupted instances.json: %v", repoID, err)
+			corrupted = append(corrupted, repoID)
+			continue
+		}
+		for i := range instances {
+			if instances[i].TmuxName == tmuxName {
+				return &instances[i], nil
+			}
+		}
+	}
+	if len(corrupted) > 0 {
+		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, corruptedReposSuffix(corrupted))
+	}
+	return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
+}
+
 func repoHasInstanceTitle(repoID, title string) (bool, error) {
 	raw, err := config.LoadRepoInstances(repoID)
 	if err != nil {
