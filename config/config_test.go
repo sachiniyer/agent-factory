@@ -876,19 +876,27 @@ func TestLoadConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("materializes update_channel into a first-run config.json", func(t *testing.T) {
-		// The key must be visible in the generated file so users discover it
-		// without reading docs, like the other global keys.
+	t.Run("first run materializes config.toml with update_channel visible", func(t *testing.T) {
+		// First run writes config.toml (#1030), not config.json, and the key
+		// must be visible in the generated file so users discover it without
+		// reading docs, like the other global keys.
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		fastShell(t)
 		configDir, err := GetConfigDir()
 		require.NoError(t, err)
 
 		_, err = LoadConfig()
 		require.NoError(t, err)
 
-		data, err := os.ReadFile(filepath.Join(configDir, ConfigFileName))
+		assert.NoFileExists(t, filepath.Join(configDir, ConfigFileName), "first run must not write config.json anymore")
+		data, err := os.ReadFile(filepath.Join(configDir, TomlConfigFileName))
 		require.NoError(t, err)
-		assert.Contains(t, string(data), `"update_channel": "stable"`)
+		assert.Contains(t, string(data), `update_channel = 'stable'`)
+
+		// The materialized file must reload cleanly through the TOML path.
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
 	})
 
 	t.Run("surfaces parse error on invalid JSON instead of using defaults", func(t *testing.T) {
@@ -909,11 +917,12 @@ func TestLoadConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), ConfigFileName)
 	})
 
-	t.Run("re-materializes defaults from an empty config file (#864)", func(t *testing.T) {
-		// An empty config.json is the fingerprint of a failed first-run write,
-		// not a user's settings. It must NOT wedge startup with the #758
-		// "config is empty" hard error; instead the stub is dropped and
-		// defaults regenerated so the next run parses cleanly.
+	t.Run("re-materializes defaults from an empty config.json stub (#864)", func(t *testing.T) {
+		// An empty config.json is the fingerprint of a failed first-run write
+		// from a pre-TOML af, not a user's settings. It must NOT wedge startup
+		// with the #758 "config is empty" hard error; instead the stub is
+		// dropped and defaults regenerated as config.toml so the next run
+		// parses cleanly.
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 		fastShell(t)
 		configDir, err := GetConfigDir()
@@ -928,11 +937,29 @@ func TestLoadConfig(t *testing.T) {
 		require.NotNil(t, cfg)
 		assert.Equal(t, defaultProgram, cfg.DefaultProgram)
 
-		// The empty stub must be replaced by a real, non-empty config so a
-		// subsequent startup does not hit the empty-file path again.
-		data, err := os.ReadFile(configPath)
+		// The empty stub is dropped and defaults land in config.toml; the
+		// stale config.json must not linger to trip the duplicate-config path.
+		assert.NoFileExists(t, configPath, "the empty config.json stub must be removed")
+		data, err := os.ReadFile(filepath.Join(configDir, TomlConfigFileName))
 		require.NoError(t, err)
-		assert.NotEmpty(t, data, "the empty stub must be regenerated, not left in place")
+		assert.NotEmpty(t, data, "defaults must be regenerated as a non-empty config.toml")
+	})
+
+	t.Run("empty config.json is NOT dropped when config.toml already exists", func(t *testing.T) {
+		// With config.toml canonical, an empty config.json beside it is just
+		// noise (rule 1 warns and ignores it); it must not be treated as a
+		// first-run stub, and config.toml must win.
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(configDir, TomlConfigFileName), []byte(`default_program = "codex"`+"\n"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(configDir, ConfigFileName), []byte(``), 0644))
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "codex", cfg.DefaultProgram)
 	})
 
 	t.Run("surfaces error when config file is unreadable", func(t *testing.T) {
@@ -1227,8 +1254,9 @@ func TestSaveConfig(t *testing.T) {
 
 		configDir, err := GetConfigDir()
 		require.NoError(t, err)
-		configPath := filepath.Join(configDir, ConfigFileName)
-		assert.FileExists(t, configPath)
+		// SaveConfig writes the canonical config.toml (#1030), never config.json.
+		assert.FileExists(t, filepath.Join(configDir, TomlConfigFileName))
+		assert.NoFileExists(t, filepath.Join(configDir, ConfigFileName))
 
 		loadedConfig, err := LoadConfig()
 		require.NoError(t, err)

@@ -198,13 +198,16 @@ var (
 				return err
 			}
 
-			configDir, err := config.GetConfigDir()
+			// Name the file LoadConfig actually reads (config.toml once
+			// converted, else the legacy config.json), not a hardcoded name
+			// (#1030).
+			configPath, err := config.GlobalConfigPath()
 			if err != nil {
-				return fmt.Errorf("failed to get config directory: %w", err)
+				return fmt.Errorf("failed to resolve config path: %w", err)
 			}
 			configJson, _ := json.MarshalIndent(cfg, "", "  ")
 
-			fmt.Printf("Config: %s\n%s\n", filepath.Join(configDir, config.ConfigFileName), configJson)
+			fmt.Printf("Config: %s\n%s\n", configPath, configJson)
 
 			return nil
 		},

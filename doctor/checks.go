@@ -386,7 +386,7 @@ func recordedTmuxNames(configDir string) map[string]bool {
 // an agent-factory home. Two or more must match before doctor will even
 // report a directory, let alone remove it.
 var afHomeMarkers = []string{
-	config.ConfigFileName, "state.json", "instances", "daemon.sock", "daemon.pid", "agent-factory.log",
+	config.TomlConfigFileName, config.ConfigFileName, "state.json", "instances", "daemon.sock", "daemon.pid", "agent-factory.log",
 }
 
 // checkStaleTempHomes finds abandoned agent-factory homes under the temp
