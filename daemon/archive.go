@@ -1,13 +1,16 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // ArchiveSession archives a session (#1028): it tears down the session's tmux
@@ -112,6 +115,93 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	m.persistInstance(repoID, instance)
 	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
 	return archivedPath, nil
+}
+
+// RestoreArchived restores an archived session (#1028): it moves the worktree
+// back next to the repo (a free sibling path), re-registers it, re-spawns the
+// agent, and marks the instance Running. Only the agent session is brought back
+// — shell/process tabs were dropped at archive time. Returns the restored
+// worktree path.
+//
+// Concurrency mirrors ArchiveSession/KillSession (killsInFlight + op-lock). On a
+// repo-gone failure the archive is left intact with an actionable error; on a
+// re-spawn failure the worktree is already back in place and the instance is
+// left Lost so the #1108 restore loop heals it.
+func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
+	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+	if err != nil {
+		return "", err
+	}
+	if instance == nil {
+		return "", fmt.Errorf("cannot restore session %q: no such session", req.Title)
+	}
+	if instance.GetStatus() != session.Archived {
+		return "", fmt.Errorf("session %q is not archived", req.Title)
+	}
+
+	key := daemonInstanceKey(repoID, req.Title)
+	m.mu.Lock()
+	if _, busy := m.killsInFlight[key]; busy {
+		m.mu.Unlock()
+		return "", fmt.Errorf("an operation is already in progress for session %q", req.Title)
+	}
+	m.killsInFlight[key] = struct{}{}
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.killsInFlight, key)
+		m.mu.Unlock()
+	}()
+
+	opLock := m.opLockFor(key)
+	opLock.Lock()
+	defer opLock.Unlock()
+
+	// Re-verify under the op-lock (findSession released m.mu).
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	if current != instance || instance.GetStatus() != session.Archived {
+		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
+	}
+
+	repoPath := instance.GetRepoPath()
+	if repoPath == "" {
+		return "", fmt.Errorf("cannot restore session %q: no repo path on record", req.Title)
+	}
+	// Repo-gone check up front: SiblingWorktreePath and the worktree move both
+	// need the origin repo, so surface the actionable message (archive left
+	// intact) before either fails with a generic error.
+	if _, statErr := os.Stat(repoPath); statErr != nil {
+		return "", fmt.Errorf("cannot restore session %q: its origin repo %s is gone; the archived worktree is intact at %s — recover it manually with git", req.Title, repoPath, instance.GetWorktreePath())
+	}
+	dest, err := sessiongit.SiblingWorktreePath(repoPath, req.Title)
+	if err != nil {
+		return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)
+	}
+
+	// Move the worktree back next to the repo. A repo-gone failure leaves the
+	// archive intact (the git layer guarantees this) and surfaces an actionable
+	// message; the instance stays Archived.
+	if err := instance.RestoreArchivedWorktree(dest); err != nil {
+		if errors.Is(err, sessiongit.ErrRepoGone) {
+			return "", fmt.Errorf("cannot restore session %q: its origin repo is gone; the archived worktree is intact at %s — recover it manually with git: %w", req.Title, instance.GetWorktreePath(), err)
+		}
+		return "", fmt.Errorf("failed to restore worktree for %q: %w", req.Title, err)
+	}
+
+	// Worktree is back in place. Re-spawn the agent and flip Running. On a
+	// re-spawn failure RestoreFromArchive leaves the instance started + Lost, so
+	// the Lost-restore loop keeps retrying against the now-restored worktree.
+	if err := instance.RestoreFromArchive(); err != nil {
+		m.persistInstance(repoID, instance)
+		return "", fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err)
+	}
+
+	worktreePath := instance.GetWorktreePath()
+	m.persistInstance(repoID, instance)
+	log.InfoLog.Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
+	return worktreePath, nil
 }
 
 // persistInstance writes one instance's authoritative data through the targeted

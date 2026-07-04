@@ -6,10 +6,54 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// SiblingWorktreePath returns the standard sibling worktree location for a
+// session in the repo at repoPath — {repoParent}/{repoName}-{safeTitle} — with a
+// numeric suffix appended if that path is already occupied. It mirrors the
+// layout NewGitWorktree uses when creating a worktree, so RestoreWorktreeTo can
+// move an archived worktree back to where a fresh session's worktree would live
+// (#1028). The title is sanitized for filesystem safety and the result is
+// validated to sit strictly inside the worktree parent dir (the #461 guard).
+func SiblingWorktreePath(repoPath, title string) (string, error) {
+	repoRoot, err := findGitRepoRoot(repoPath)
+	if err != nil {
+		return "", err
+	}
+	worktreeDir := filepath.Dir(repoRoot)
+	repoName := filepath.Base(repoRoot)
+
+	// Sanitize the title into a single safe path segment, matching the
+	// safeSessionName handling in NewGitWorktree.
+	safe := strings.ReplaceAll(title, "..", "")
+	safe = strings.ReplaceAll(safe, "/", "-")
+	safe = strings.TrimLeft(safe, "-.")
+	if safe == "" {
+		safe = "session"
+	}
+
+	base := filepath.Join(worktreeDir, repoName+"-"+safe)
+	absBase, _ := filepath.Abs(base)
+	absDir, _ := filepath.Abs(worktreeDir)
+	if !isPathStrictlyInside(absBase, absDir) {
+		return "", fmt.Errorf("invalid session title %q: would place worktree outside %s", title, worktreeDir)
+	}
+
+	p := base
+	for i := 2; ; i++ {
+		if _, statErr := os.Stat(p); os.IsNotExist(statErr) {
+			break
+		} else if statErr != nil {
+			return "", fmt.Errorf("cannot check worktree path %q: %w", p, statErr)
+		}
+		p = fmt.Sprintf("%s-%d", base, i)
+	}
+	return p, nil
+}
 
 // ErrRepoGone is returned by RestoreWorktreeTo when the origin repository this
 // worktree is registered against no longer exists (deleted, unmounted, or no
