@@ -3,6 +3,7 @@ package termpane
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -37,6 +38,52 @@ func waitForRender(t *testing.T, tp *TermPane, width, height int, want string) {
 	require.Eventuallyf(t, func() bool {
 		return strings.Contains(plainRender(tp, width, height), want)
 	}, 5*time.Second, 20*time.Millisecond, "grid never showed %q; last frame:\n%s", want, plainRender(tp, width, height))
+}
+
+func TestNewAttachCommandSocketParity(t *testing.T) {
+	// Inside tmux, $TMUX (`socket_path,server_pid,session_id`) is the only
+	// place the server's socket path lives. Stripping it from the child env
+	// (nesting hygiene) must therefore hand the path back as -S, or on a
+	// non-default socket (`tmux -L`/`-S`) the attach resolves
+	// TMUX_TMPDIR/default and dies against the wrong server.
+	cmd := newAttachCommand("mysess", "/private/dir/pt,12345,$0",
+		[]string{"TMUX=/private/dir/pt,12345,$0", "TMUX_PANE=%1", "TERM=screen-256color", "HOME=/home/u", "TMUX_TMPDIR=/private/dir"})
+	assert.Equal(t, []string{"tmux", "-S", "/private/dir/pt", "attach-session", "-t", "=mysess"}, cmd.Args)
+	assert.NotContains(t, cmd.Env, "TMUX=/private/dir/pt,12345,$0", "child env must not carry $TMUX (nesting refusal)")
+	assert.NotContains(t, cmd.Env, "TMUX_PANE=%1")
+	assert.Contains(t, cmd.Env, "TERM=xterm-256color", "TERM pinned to what the vt emulator implements")
+	assert.Contains(t, cmd.Env, "HOME=/home/u", "unrelated env passes through")
+	assert.Contains(t, cmd.Env, "TMUX_TMPDIR=/private/dir", "TMUX_TMPDIR passes through")
+
+	// Outside tmux ($TMUX unset/empty) default socket resolution already
+	// matches every other af tmux call: no -S may be injected.
+	cmd = newAttachCommand("mysess", "", []string{"HOME=/home/u"})
+	assert.Equal(t, []string{"tmux", "attach-session", "-t", "=mysess"}, cmd.Args)
+}
+
+// TestNewAttachesAcrossNonDefaultSocket is the end-to-end pin for the #1121
+// play-test blocker: with af running inside a server on a non-default socket
+// ($TMUX carries its path), New must reach THAT server — not auto-start a
+// transient default-socket one and die.
+func TestNewAttachesAcrossNonDefaultSocket(t *testing.T) {
+	testguard.IsolateTmux(t)
+	sock := filepath.Join(t.TempDir(), "pt-sock")
+	run := func(args ...string) (string, error) {
+		out, err := exec.Command("tmux", append([]string{"-S", sock}, args...)...).CombinedOutput()
+		return string(out), err
+	}
+	t.Cleanup(func() { _, _ = run("kill-server") })
+	out, err := run("new-session", "-d", "-s", "sockparity", "-x", "80", "-y", "24",
+		"sh", "-c", "printf 'SOCK-PARITY-1121\\n'; sleep 120")
+	require.NoError(t, err, "tmux new-session: %s", out)
+
+	// What the TUI sees when it runs inside that server.
+	t.Setenv("TMUX", sock+",12345,$0")
+
+	tp, err := New("sockparity", 80, 24)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tp.Close() })
+	waitForRender(t, tp, 80, 24, "SOCK-PARITY-1121")
 }
 
 func TestScriptedPTYRendersIntoGrid(t *testing.T) {

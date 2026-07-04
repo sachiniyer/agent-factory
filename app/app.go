@@ -170,6 +170,15 @@ type home struct {
 	// liveBindFailedAt is when the last bind attempt failed, for the
 	// liveBindRetryInterval backoff.
 	liveBindFailedAt time.Time
+	// liveBoundAt is when liveTerm was bound, so the client-died warning can
+	// report the client's lifetime (instant death reads very differently
+	// from a session killed hours in).
+	liveBoundAt time.Time
+	// liveDeathLogKey/liveDeathLogAt rate-limit the client-died warning: one
+	// line per binding, refreshed every liveDeathLogInterval while a
+	// respawn-die loop persists, instead of a line per 5s retry.
+	liveDeathLogKey string
+	liveDeathLogAt  time.Time
 
 	// initialPaneOpened latches the one-time startup auto-open: the first
 	// instance selection opens its pane so the workspace isn't empty on

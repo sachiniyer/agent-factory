@@ -31,6 +31,12 @@ import (
 // child every 100ms tick. Capture rendering covers the pane in the meantime.
 const liveBindRetryInterval = 5 * time.Second
 
+// liveDeathLogInterval is how often the client-died warning repeats for the
+// SAME binding: one line when the client first dies, then one per interval
+// while a respawn-die loop persists — enough to diagnose a silent loop
+// without a warning every 5s retry.
+const liveDeathLogInterval = time.Minute
+
 // liveTermAttachment is what the sync needs from a termpane: ui.LiveView
 // (render + resize) plus the lifecycle half (close, death signal). It exists
 // so tests can drive the bind/unbind state machine with a fake instead of
@@ -64,10 +70,19 @@ func (m *home) syncLiveTermPane() {
 	// Reap an attachment whose client died on its own: session killed, tmux
 	// server gone, or an external `tmux detach-client`. The pane falls back
 	// to capture rendering; the backoff below stops a respawn-die loop when
-	// the session is truly gone.
+	// the session is truly gone. This is the ONLY signal a spawned-then-died
+	// client leaves, so it must log — rate-limited, or a persistent
+	// respawn-die loop (e.g. the client attaching to the wrong tmux server)
+	// would emit a warning every retry.
 	if m.liveTerm != nil {
 		select {
 		case <-m.liveTerm.Done():
+			if m.liveBindKey != m.liveDeathLogKey || time.Since(m.liveDeathLogAt) >= liveDeathLogInterval {
+				m.liveDeathLogKey = m.liveBindKey
+				m.liveDeathLogAt = time.Now()
+				log.WarningLog.Printf("termpane: live client for %s died after %v (pane falls back to capture; rebind retries every %v)",
+					m.liveBindKey, time.Since(m.liveBoundAt).Round(time.Millisecond), liveBindRetryInterval)
+			}
 			m.closeLiveTermPane()
 			m.liveBindFailedAt = time.Now()
 		default:
@@ -137,6 +152,7 @@ func (m *home) syncLiveTermPane() {
 	}
 	m.liveTerm = tp
 	m.livePane = target
+	m.liveBoundAt = time.Now()
 	w.SetLive(tp)
 }
 

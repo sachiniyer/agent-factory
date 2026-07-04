@@ -81,19 +81,35 @@ type TermPane struct {
 // `=` forces an exact session-name match, mirroring session/tmux's Restore
 // (#1006) so a sibling session can never be prefix-matched instead.
 func New(sessionName string, width, height int) (*TermPane, error) {
-	cmd := exec.Command("tmux", "attach-session", "-t", "="+sessionName)
-	// The TUI itself may be running inside tmux; strip $TMUX so the embedded
-	// client doesn't refuse to nest, and pin TERM to what the vt emulator
-	// implements so tmux emits escape sequences the grid understands.
+	return NewWithCommand(newAttachCommand(sessionName, os.Getenv("TMUX"), os.Environ()), width, height)
+}
+
+// newAttachCommand builds the attach client's argv and env. The TUI itself
+// may be running inside tmux; strip $TMUX so the embedded client doesn't
+// refuse to nest — but $TMUX is also where the server's socket path lives,
+// so hand it back explicitly as `-S <path>`. Without that the child resolves
+// TMUX_TMPDIR/default and, on a non-default socket (`tmux -L`/`-S`), attaches
+// to the wrong server: it dies instantly while auto-starting a transient
+// default-socket server as a side effect. With af outside tmux ($TMUX unset)
+// the child's default resolution already matches every other af tmux call,
+// so no -S is added. TERM is pinned to what the vt emulator implements so
+// tmux emits escape sequences the grid understands.
+func newAttachCommand(sessionName, tmuxEnv string, environ []string) *exec.Cmd {
+	args := []string{"attach-session", "-t", "=" + sessionName}
+	// $TMUX is `socket_path,server_pid,session_id`; the path is what -S wants.
+	if sock, _, _ := strings.Cut(tmuxEnv, ","); sock != "" {
+		args = append([]string{"-S", sock}, args...)
+	}
+	cmd := exec.Command("tmux", args...)
 	env := []string{"TERM=xterm-256color"}
-	for _, e := range os.Environ() {
+	for _, e := range environ {
 		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_PANE=") || strings.HasPrefix(e, "TERM=") {
 			continue
 		}
 		env = append(env, e)
 	}
 	cmd.Env = env
-	return NewWithCommand(cmd, width, height)
+	return cmd
 }
 
 // NewWithCommand is New with a caller-built command on the PTY instead of the
