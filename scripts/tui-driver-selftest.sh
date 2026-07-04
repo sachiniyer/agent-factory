@@ -46,6 +46,26 @@ step() {
     fi
 }
 
+# _expect_resize_rejected — the NEGATIVE check for af_resize (Greptile, #1201):
+# a resize tmux cannot honor must FAIL LOUDLY, never masquerade as success (or a
+# tiny-size gate would keep running at the wrong size). We point af_resize at a
+# session that does not exist; it must return non-zero. AF_DRIVER_SESSION is
+# saved/restored so the rest of the run is unaffected; af_resize leaves
+# AF_DRIVER_COLS/ROWS untouched because it returns before recording them on a
+# failed resize.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_resize_rejected() {
+    local saved="$AF_DRIVER_SESSION" rc=0
+    AF_DRIVER_SESSION="no-such-driver-session-selftest"
+    af_resize 60 15 >/dev/null 2>&1 || rc=$?
+    AF_DRIVER_SESSION="$saved"
+    if [ "$rc" -eq 0 ]; then
+        _af_log "af_resize wrongly SUCCEEDED on a missing session (should fail loudly)"
+        return 1
+    fi
+    return 0
+}
+
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
@@ -53,7 +73,11 @@ printf 'session=%s size=%sx%s home=%s\n' \
 # Start from a clean slate so the run is deterministic even in a reused
 # container (scoped to the sandbox; fails closed on a non-sandbox home).
 step "reset sandbox to a clean state"                       af_reset_sandbox
+# af_boot routes launch geometry through af_resize, which verifies the window
+# actually took the requested size — so a green boot is also positive proof
+# af_resize works (#1174 item 2 / #1201).
 step "boot af at ${AF_DRIVER_COLS}x${AF_DRIVER_ROWS}"        af_boot
+step "af_resize fails loudly on an impossible resize"       _expect_resize_rejected
 step "create instance 'alpha'"                              af_new_instance alpha
 
 # --- #1174 item 1 / #1199 regression: the SINGLE-instance false positive ---

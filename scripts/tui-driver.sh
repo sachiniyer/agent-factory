@@ -133,9 +133,14 @@ af_ensure_nav() {
 # which snaps the window back to the last-attached client (80x23) and IGNORES
 # the `new-session -x/-y` request — so tiny-size gates (60x15, 40x10) silently
 # ran at 80x23 (#1174 item 2). Pinning `window-size manual` + an explicit
-# `resize-window` makes the geometry deterministic. Also updates
-# AF_DRIVER_COLS/ROWS so later helpers and logs reflect the live size. Sleeps
-# one poll so the TUI observes SIGWINCH and repaints before we assert on it.
+# `resize-window` makes the geometry deterministic.
+#
+# FAILS LOUDLY (non-zero + message) if tmux rejects the resize (invalid dims,
+# missing session) OR the window's actual size doesn't match what was
+# requested — a testing helper that lied about a resize would let a tiny-size
+# gate keep running at the wrong size while believing it resized (Greptile,
+# #1201). AF_DRIVER_COLS/ROWS are updated ONLY after the size is confirmed, so
+# they never advertise a geometry that isn't live.
 af_resize() {
     local cols="$1" rows="$2"
     if [ -z "$cols" ] || [ -z "$rows" ]; then
@@ -145,10 +150,21 @@ af_resize() {
     tmux set-option -t "$AF_DRIVER_SESSION" window-size manual >/dev/null 2>&1 \
         || tmux set-option -w -t "$AF_DRIVER_SESSION" window-size manual >/dev/null 2>&1 \
         || true
-    tmux resize-window -t "$AF_DRIVER_SESSION" -x "$cols" -y "$rows" >/dev/null 2>&1 || true
+    if ! tmux resize-window -t "$AF_DRIVER_SESSION" -x "$cols" -y "$rows" 2>/dev/null; then
+        _af_fail "af_resize: tmux rejected resize to ${cols}x${rows} (invalid size, or missing session '$AF_DRIVER_SESSION')"
+        return 1
+    fi
+    # Let tmux apply the resize and the TUI observe SIGWINCH / repaint, then
+    # verify the window actually took the requested geometry.
+    sleep "$AF_DRIVER_POLL"
+    local actual
+    actual="$(tmux display-message -p -t "$AF_DRIVER_SESSION" '#{window_width}x#{window_height}' 2>/dev/null)"
+    if [ "$actual" != "${cols}x${rows}" ]; then
+        _af_fail "af_resize: requested ${cols}x${rows} but window is ${actual:-unknown} — resize did not stick"
+        return 1
+    fi
     AF_DRIVER_COLS="$cols"
     AF_DRIVER_ROWS="$rows"
-    sleep "$AF_DRIVER_POLL"
 }
 
 # af_focus_tree — put ring focus on the instances tree (the state whose menu
@@ -242,7 +258,8 @@ af_boot() {
     # A detached session ignores -x/-y under `window-size latest`; pin it so the
     # TUI reads the requested geometry on startup (#1174 item 2). Honors any
     # AF_DRIVER_COLS/ROWS override set before af_boot, including tiny sizes.
-    af_resize "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS"
+    # af_resize verifies the geometry took, so a bad size fails the boot loudly.
+    af_resize "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" || return 1
 
     af_send_literal "cd $AF_DRIVER_REPO && $bin"
     af_send Enter
