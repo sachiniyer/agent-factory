@@ -411,10 +411,15 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		m.store.RemoveInstanceByTitle(inst.Title)
 		changed = true
 	}
-	// A removed instance takes its open panes with it (#1088): prune them
-	// here — not just on the next selectionChanged tick — so the focus ring
-	// and pane layout are consistent the moment the reconcile returns.
-	if len(toRemove) > 0 && m.pruneDeadPanes() {
+	// Prune panes whose backing session can no longer render — a removed
+	// instance takes its open panes with it (#1088), and a session archived out
+	// of band (`af sessions archive` while the TUI runs, #1028) leaves its pane
+	// dangling on a torn-down session. Do it here, not just on the next
+	// selectionChanged tick, so the focus ring and pane layout are consistent
+	// the moment the reconcile returns. Unconditional: pruneDeadPanes is O(open
+	// panes) and only relayouts when it actually closed something, so a reconcile
+	// with nothing to prune is a cheap no-op.
+	if m.pruneDeadPanes() {
 		m.relayout()
 	}
 
