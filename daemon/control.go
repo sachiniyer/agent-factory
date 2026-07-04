@@ -88,6 +88,20 @@ type KillSessionResponse struct {
 	OK bool
 }
 
+// ArchiveSessionRequest asks the daemon to archive a session (#1028): tear down
+// its tmux, relocate its worktree to the global archive dir, and mark it
+// Archived while preserving the record.
+type ArchiveSessionRequest struct {
+	Title  string
+	RepoID string
+}
+
+type ArchiveSessionResponse struct {
+	OK bool
+	// ArchivedPath is the new on-disk location of the relocated worktree.
+	ArchivedPath string
+}
+
 type SendPromptRequest struct {
 	Title  string
 	RepoID string
@@ -829,6 +843,22 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 		return err
 	}
 	resp.OK = true
+	return nil
+}
+
+func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	archivedPath, err := s.manager.ArchiveSession(req)
+	if err != nil {
+		return err
+	}
+	resp.OK = true
+	resp.ArchivedPath = archivedPath
 	return nil
 }
 
