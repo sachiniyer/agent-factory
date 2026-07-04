@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -191,6 +192,189 @@ func TestRestoreLostSessions_SkipsIneligible(t *testing.T) {
 			t.Fatalf("the reserved root is EnsureRootAgents' job, got %d recover calls", got)
 		}
 	})
+}
+
+// raceBackend is a readyFakeBackend whose Recover and Kill can each be held
+// open on channels, and which counts both, so kill-vs-recover interleaving can
+// be pinned exactly.
+type raceBackend struct {
+	readyFakeBackend
+	mu             sync.Mutex
+	kills          int
+	recovers       int
+	recoverStarted chan struct{}
+	recoverBlock   chan struct{}
+	killStarted    chan struct{}
+	killBlock      chan struct{}
+}
+
+func (b *raceBackend) Recover(inst *session.Instance) error {
+	b.mu.Lock()
+	b.recovers++
+	b.mu.Unlock()
+	if b.recoverStarted != nil {
+		close(b.recoverStarted)
+		b.recoverStarted = nil
+	}
+	if b.recoverBlock != nil {
+		<-b.recoverBlock
+	}
+	inst.SetStatusIfNotDeleting(session.Running)
+	return nil
+}
+
+func (b *raceBackend) Kill(inst *session.Instance) error {
+	b.mu.Lock()
+	b.kills++
+	b.mu.Unlock()
+	if b.killStarted != nil {
+		close(b.killStarted)
+		b.killStarted = nil
+	}
+	if b.killBlock != nil {
+		<-b.killBlock
+	}
+	return b.readyFakeBackend.Kill(inst)
+}
+
+func (b *raceBackend) counts() (kills, recovers int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.kills, b.recovers
+}
+
+// installRaceBackend registers backend as the factory product and creates a
+// tracked session titled title, returning the manager, repoID, and instance.
+func installRaceBackend(t *testing.T, backend *raceBackend, title string) (*Manager, string, *session.Instance) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {
+		fake := session.NewFakeBackend()
+		fake.CompleteStart()
+		backend.readyFakeBackend = readyFakeBackend{fake}
+		return backend, nil
+	})
+	t.Cleanup(restore)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := manager.CreateSession(CreateSessionRequest{
+		Title:    title,
+		RepoPath: repoPath,
+		Program:  "claude",
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	manager.mu.Lock()
+	inst := manager.instances[daemonInstanceKey(repo.ID, title)]
+	manager.mu.Unlock()
+	if inst == nil {
+		t.Fatal("created instance not tracked")
+	}
+	return manager, repo.ID, inst
+}
+
+// TestKillSession_WaitsForInFlightRecover is the Greptile P1 on #1137: a
+// KillSession arriving while the restore loop is mid-Recover must WAIT for
+// the recover attempt to finish and then tear the freshly-restored session
+// down — never interleave. End state: record deleted, instance dropped,
+// exactly one teardown, exactly one recover.
+func TestKillSession_WaitsForInFlightRecover(t *testing.T) {
+	backend := &raceBackend{
+		recoverStarted: make(chan struct{}),
+		recoverBlock:   make(chan struct{}),
+	}
+	manager, repoID, inst := installRaceBackend(t, backend, "contested")
+	zeroRestoreBackoff(t)
+	inst.SetStatus(session.Lost)
+
+	recoverStarted := backend.recoverStarted
+	restoreDone := make(chan struct{})
+	go func() {
+		manager.RestoreLostSessions()
+		close(restoreDone)
+	}()
+	<-recoverStarted // the loop is inside Recover, holding the op lock
+
+	killDone := make(chan error, 1)
+	go func() {
+		killDone <- manager.KillSession(KillSessionRequest{Title: "contested", RepoID: repoID})
+	}()
+
+	// The kill must be blocked behind the in-flight recover attempt.
+	select {
+	case err := <-killDone:
+		t.Fatalf("KillSession completed mid-Recover (err=%v); it must wait for the attempt", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(backend.recoverBlock) // recover finishes (session "restored")
+	<-restoreDone
+	select {
+	case err := <-killDone:
+		if err != nil {
+			t.Fatalf("KillSession after recover: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("KillSession never proceeded after the recover attempt finished")
+	}
+
+	kills, recovers := backend.counts()
+	if kills != 1 || recovers != 1 {
+		t.Fatalf("want exactly one teardown and one recover, got kills=%d recovers=%d", kills, recovers)
+	}
+	if rec := recordFor(t, repoID, "contested"); rec != nil {
+		t.Fatalf("killed session's record must be deleted, still present: %+v", rec)
+	}
+	manager.mu.Lock()
+	_, tracked := manager.instances[daemonInstanceKey(repoID, "contested")]
+	manager.mu.Unlock()
+	if tracked {
+		t.Fatal("killed session must be dropped from the manager")
+	}
+}
+
+// TestRestoreLostSessions_SkipsDuringInFlightKill is the reverse ordering: a
+// restore pass arriving while a KillSession teardown is in flight must not
+// touch the session — no recover call, ever — and after the kill completes
+// the session is gone for good.
+func TestRestoreLostSessions_SkipsDuringInFlightKill(t *testing.T) {
+	backend := &raceBackend{
+		killStarted: make(chan struct{}),
+		killBlock:   make(chan struct{}),
+	}
+	manager, repoID, inst := installRaceBackend(t, backend, "doomed")
+	zeroRestoreBackoff(t)
+	inst.SetStatus(session.Lost)
+
+	killStarted := backend.killStarted
+	killDone := make(chan error, 1)
+	go func() {
+		killDone <- manager.KillSession(KillSessionRequest{Title: "doomed", RepoID: repoID})
+	}()
+	<-killStarted // teardown in flight, op lock + killsInFlight held
+
+	manager.RestoreLostSessions() // must return promptly without recovering
+
+	close(backend.killBlock)
+	if err := <-killDone; err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+
+	manager.RestoreLostSessions() // session is gone; still nothing to recover
+
+	if _, recovers := backend.counts(); recovers != 0 {
+		t.Fatalf("a session being killed must never be recovered, got %d recover calls", recovers)
+	}
+	if rec := recordFor(t, repoID, "doomed"); rec != nil {
+		t.Fatalf("killed session's record must be deleted, still present: %+v", rec)
+	}
 }
 
 // TestRestoreLostSessions_StateCleanedForGoneSessions: retry state for

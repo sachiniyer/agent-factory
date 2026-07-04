@@ -86,7 +86,11 @@ func (m *Manager) RestoreLostSessions() {
 
 // restoreLostSession attempts recovery of one session when it is eligible:
 // Lost, local, not tombstoned, not the reserved root (EnsureRootAgents owns
-// that), and no kill in flight.
+// that), and no kill in flight. Recover runs under the per-session operation
+// lock KillSession takes, so a kill arriving mid-attempt waits for the
+// attempt and then tears down — the two operations never interleave. This
+// side only TryLocks: the poll goroutine must never stall behind a slow
+// teardown, and the next tick retries.
 func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance) {
 	if inst == nil || !inst.Started() || inst.GetStatus() != session.Lost {
 		return
@@ -119,6 +123,26 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		if logIt {
 			log.InfoLog.Printf("session %q is Lost but remote; not auto-restoring (reconnect is not supported) — kill it to clear the row", inst.Title)
 		}
+		return
+	}
+
+	opLock := m.opLockFor(key)
+	if !opLock.TryLock() {
+		// A kill (or its finish pass) holds the session; skip this tick.
+		return
+	}
+	defer opLock.Unlock()
+
+	// Re-verify under the lock: everything checked above was point-in-time,
+	// and a KillSession that beat us to the lock may have torn the session
+	// down (map entry gone / replaced), tombstoned it, or a racing kill may
+	// have registered its intent after our killsInFlight read. Recover only
+	// what is still provably a wanted Lost session.
+	m.mu.Lock()
+	current := m.instances[key]
+	_, killing := m.killsInFlight[key]
+	m.mu.Unlock()
+	if killing || current != inst || inst.UserKilled() || inst.GetStatus() != session.Lost {
 		return
 	}
 

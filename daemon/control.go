@@ -943,6 +943,16 @@ type Manager struct {
 	// restore loop (#1108 PR 2), keyed by daemon instance key — the general
 	// sibling of rootEnsureStates.
 	lostRestoreStates map[string]*lostRestoreState
+	// instanceOpLocks serializes the mutually-exclusive per-session
+	// operations — kill teardown and Lost-recovery — by daemon instance key.
+	// killsInFlight alone is a point-in-time signal; this lock is what makes
+	// a KillSession arriving mid-Recover WAIT for the recover attempt and
+	// then tear the restored session down, instead of interleaving a teardown
+	// with a re-spawn. The recover side only TryLocks (the poll goroutine
+	// must never stall behind a slow teardown). Lazily populated like
+	// repoStartLocks; entries are never removed (a few bytes per session ever
+	// touched).
+	instanceOpLocks map[string]*sync.Mutex
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -982,6 +992,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		rootKilledByUser:    make(map[string]struct{}),
 		killsInFlight:       make(map[string]struct{}),
 		lostRestoreStates:   make(map[string]*lostRestoreState),
+		instanceOpLocks:     make(map[string]*sync.Mutex),
 	}, nil
 }
 
@@ -1284,6 +1295,20 @@ func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
 	return lock
 }
 
+// opLockFor returns the per-session operation lock serializing kill teardown
+// against Lost-recovery for one daemon instance key (#1108 PR 2).
+func (m *Manager) opLockFor(key string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	lock := m.instanceOpLocks[key]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.instanceOpLocks[key] = lock
+	}
+	return lock
+}
+
 func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), error) {
 	if req.RepoPath == "" {
 		return nil, "", nil, fmt.Errorf("repo path is required")
@@ -1500,6 +1525,16 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 		m.mu.Unlock()
 	}()
 
+	// Serialize against a Lost-recovery in flight for this session (#1108
+	// PR 2): a kill arriving mid-Recover waits for the recover attempt to
+	// finish and then tears the (possibly just-restored) session down —
+	// never an interleaved teardown-vs-respawn. killsInFlight is registered
+	// BEFORE this acquire, so the restore loop's in-lock re-check sees the
+	// kill intent and aborts instead of racing to go first.
+	opLock := m.opLockFor(key)
+	opLock.Lock()
+	defer opLock.Unlock()
+
 	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the
 	// daemon dies or the teardown errors between here and DeleteInstance, the
 	// surviving record is provably a user kill — the status poll finishes the
@@ -1586,6 +1621,16 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		delete(m.killsInFlight, key)
 		m.mu.Unlock()
 	}()
+
+	// TryLock, not Lock: this runs on the poll goroutine, which must not
+	// stall behind a concurrent slow operation on this session; the next
+	// poll retries. (A KillSession in flight was already skipped above, so
+	// contention here is only a still-releasing lock.)
+	opLock := m.opLockFor(key)
+	if !opLock.TryLock() {
+		return
+	}
+	defer opLock.Unlock()
 
 	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
 	// Best-effort: the backing tmux session is typically already gone; Kill
