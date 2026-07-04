@@ -202,7 +202,7 @@ func TestEnterOnRemotePaneFallsBackToFullScreenAttach(t *testing.T) {
 	openTestPane(t, h, inst, 0)
 
 	attached := 0
-	swapAttachOverlayCallbackFn(t, func(m *home, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
 		attached++
 		assert.True(t, rem, "the remote flag must reach the attach path")
 		return nil
@@ -220,7 +220,7 @@ func TestAttachKeyKeepsFullScreenAttach(t *testing.T) {
 		helpTypeInteractive{}.mask()|helpTypeInstanceAttach{}.mask()))
 
 	attached := 0
-	swapAttachOverlayCallbackFn(t, func(m *home, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
 		attached++
 		return nil
 	})

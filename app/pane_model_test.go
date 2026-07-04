@@ -552,9 +552,9 @@ func TestPane_EnterAttachesFocusedPane(t *testing.T) {
 	require.Equal(t, "beta", h.store.GetSelectedInstance().Title)
 
 	var attachedLabel string
-	swapAttachOverlayCallbackFn(t, func(m *home, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
 		attachedLabel = label
-		return m.attachOverlayCallback(label, traceSuffix, rem, func() (chan struct{}, error) {
+		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
 			ch := make(chan struct{})
 			close(ch) // detach immediately — no real PTY
 			return ch, nil

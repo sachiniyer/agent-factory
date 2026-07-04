@@ -35,6 +35,26 @@ var killSessionThroughDaemon = func(title, repoID string) error {
 	return daemon.KillSession(daemon.KillSessionRequest{Title: title, RepoID: repoID})
 }
 
+// pauseStatusPollThroughDaemon / resumeStatusPollThroughDaemon route the TUI's
+// attach-time poll-pause coordination to the daemon (#1160, Fix A follow-up to
+// #1157). While a TUI is attached full-screen to an instance it owns the shared
+// tmux server, so having the daemon pause its capture-pane liveness probe for
+// that ONE instance removes needless contention with the live attach.
+//
+// These are the PRODUCTION defaults for home.pauseStatusPoll / .resumeStatusPoll
+// — plain functions, NOT swappable package globals. The attach heartbeat reads
+// the seam off an off-loop goroutine, so a mutable global would race a test seam
+// swap under `go test -parallel -race` (the #964 / #960-PR4 snapshot-fetcher
+// race). The seams live per-home instead; tests assign a fake to
+// h.pauseStatusPoll / h.resumeStatusPoll directly.
+func pauseStatusPollThroughDaemon(title, repoID string) error {
+	return daemon.PauseStatusPoll(daemon.PauseStatusPollRequest{Title: title, RepoID: repoID})
+}
+
+func resumeStatusPollThroughDaemon(title, repoID string) error {
+	return daemon.ResumeStatusPoll(daemon.ResumeStatusPollRequest{Title: title, RepoID: repoID})
+}
+
 var importRemoteSessionsThroughDaemon = func(repoPath string) ([]session.InstanceData, error) {
 	return daemon.ImportRemoteHookSessions(daemon.ImportRemoteHookSessionsRequest{RepoPath: repoPath})
 }

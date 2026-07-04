@@ -376,13 +376,13 @@ func (m *home) attachSelected(selected *session.Instance) (tea.Model, tea.Cmd) {
 		// selection — or the user could change tabs while the help overlay is
 		// open — before the deferred attach callback runs.
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return attachOverlayCallbackFn(m, "handleEnter-terminal", "", selected.IsRemote(), func() (chan struct{}, error) {
+			return attachOverlayCallbackFn(m, selected.Title, "handleEnter-terminal", "", selected.IsRemote(), func() (chan struct{}, error) {
 				return ui.AttachTerminalTab(selected, activeTab)
 			})
 		})
 	}
 	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-		return attachOverlayCallbackFn(m, "handleEnter-sidebar", "", selected.IsRemote(), func() (chan struct{}, error) {
+		return attachOverlayCallbackFn(m, selected.Title, "handleEnter-sidebar", "", selected.IsRemote(), func() (chan struct{}, error) {
 			return m.store.AttachInstance(selected)
 		})
 	})
