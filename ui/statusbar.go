@@ -37,6 +37,9 @@ func (s *StatusBar) SetRect(r layout.Rect) {
 		menuRows = 0
 	}
 	s.menu.SetSize(r.W, menuRows)
+	// The menu registers per-hint click zones during render (#1024 R4); it
+	// sits at the top of the status-bar rect, so that is its zone origin.
+	s.menu.SetOrigin(layout.Point{X: r.X, Y: r.Y})
 	s.errBox.SetSize(r.W, 1)
 }
 

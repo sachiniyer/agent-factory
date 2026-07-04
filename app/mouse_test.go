@@ -1,0 +1,528 @@
+package app
+
+import (
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
+	"github.com/sachiniyer/agent-factory/ui/overlay"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// ----------------------------------------------------------------------------
+// Root mouse routing (#1024 R4, closes #1025): the RFC §2.5 gesture table,
+// driven hermetically — click coordinates are derived FROM the zone registry
+// the last View() rebuilt (never hardcoded), so a layout change moves the
+// tests with it or fails loudly.
+// ----------------------------------------------------------------------------
+
+// fakeClock drives the double-click detector deterministically.
+type fakeClock struct{ now time.Time }
+
+func (c *fakeClock) Now() time.Time          { return c.now }
+func (c *fakeClock) advance(d time.Duration) { c.now = c.now.Add(d) }
+func newFakeClock(h *home) *fakeClock {
+	c := &fakeClock{now: time.Unix(1000, 0)}
+	h.mouseClock = c.Now
+	return c
+}
+
+// mouseTestHome is a home with two started (mock tmux) instances and two
+// tasks at a real layout size, selection on the first instance.
+func mouseTestHome(t *testing.T) (*home, *session.Instance, *session.Instance) {
+	t.Helper()
+	h := newTestHome(t)
+	alpha := startedLocalInstance(t, "alpha")
+	beta := startedLocalInstance(t, "beta")
+	h.store.AddInstance(alpha)
+	h.store.AddInstance(beta)
+	tasks := []task.Task{
+		{ID: "task-aaa", Name: "nightly-sweep", CronExpr: "0 3 * * *", Enabled: true},
+		{ID: "task-bbb", Name: "log-watch", WatchCmd: "tail -f x", Enabled: true},
+	}
+	h.store.SetTasks(tasks)
+	h.automations.TaskPane().SetTasks(tasks)
+	h.sidebar.SetSelectedInstance(0)
+	resizeHome(h, 140, 40)
+	return h, alpha, beta
+}
+
+// zoneRect renders a frame (rebuilding the registry) and returns id's rect.
+func zoneRect(t *testing.T, h *home, id string) layout.Rect {
+	t.Helper()
+	_ = h.View()
+	r, ok := h.zones.Find(id)
+	require.True(t, ok, "zone %q must be registered; frame has %v", id, h.zones.IDs())
+	return r
+}
+
+// press injects a left press at (x, y) through the root mouse router.
+func press(h *home, x, y int) tea.Cmd {
+	_, cmd := h.handleMouse(tea.MouseMsg{
+		X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft,
+	})
+	return cmd
+}
+
+// clickZone renders, resolves id's rect, and clicks its top-left cell.
+func clickZone(t *testing.T, h *home, id string) tea.Cmd {
+	t.Helper()
+	r := zoneRect(t, h, id)
+	return press(h, r.X, r.Y)
+}
+
+// wheel injects a wheel event at (x, y).
+func wheel(h *home, x, y int, up bool) {
+	b := tea.MouseButtonWheelDown
+	if up {
+		b = tea.MouseButtonWheelUp
+	}
+	_, _ = h.handleMouse(tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: b})
+}
+
+// TestMouse_ClickInstanceRowSelects: clicking a tree instance row selects it
+// (retargeting the workspace binding) and focuses the tree, from wherever
+// focus was.
+func TestMouse_ClickInstanceRowSelects(t *testing.T) {
+	h, _, beta := mouseTestHome(t)
+	newFakeClock(h)
+	h.focusRegion(layout.RegionAutomations)
+
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+
+	require.NotNil(t, h.store.GetSelectedInstance())
+	assert.Equal(t, beta.Title, h.store.GetSelectedInstance().Title,
+		"clicking an instance row retargets the selection")
+	assert.Equal(t, layout.RegionTree, h.ring.Active(), "the click focuses the tree")
+}
+
+// TestMouse_ClickTreeTabRowSelectsTab: clicking a tab child row drives the
+// store's active tab, exactly like landing the tree cursor on it.
+func TestMouse_ClickTreeTabRowSelectsTab(t *testing.T) {
+	h, alpha, _ := mouseTestHome(t)
+	newFakeClock(h)
+
+	clickZone(t, h, zones.TreeTab(alpha.Title, 1))
+
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab, "the cursor lands on the tab row")
+	assert.Equal(t, 1, sel.TabIndex)
+	assert.Equal(t, 1, h.store.ActiveTab(), "the click drives the active tab")
+}
+
+// TestMouse_ClickArrowTogglesExpansion: the ▸/▾ arrow collapses/expands the
+// instance's tab children without entering it or moving the selection off it.
+func TestMouse_ClickArrowTogglesExpansion(t *testing.T) {
+	h, alpha, beta := mouseTestHome(t)
+	clock := newFakeClock(h)
+
+	// alpha is selected and expanded: its tab rows have zones.
+	_ = zoneRect(t, h, zones.TreeTab(alpha.Title, 0))
+
+	clickZone(t, h, zones.TreeArrow(alpha.Title))
+	_ = h.View()
+	_, ok := h.zones.Find(zones.TreeTab(alpha.Title, 0))
+	assert.False(t, ok, "arrow click collapses the expanded selection")
+
+	clock.advance(time.Second) // not a double click
+	clickZone(t, h, zones.TreeArrow(alpha.Title))
+	_ = h.View()
+	_, ok = h.zones.Find(zones.TreeTab(alpha.Title, 0))
+	assert.True(t, ok, "second arrow click re-expands")
+
+	// Arrow on a collapsed non-selected instance selects it, which
+	// auto-expands its subtree.
+	clock.advance(time.Second)
+	clickZone(t, h, zones.TreeArrow(beta.Title))
+	assert.Equal(t, beta.Title, h.store.GetSelectedInstance().Title)
+	_ = h.View()
+	_, ok = h.zones.Find(zones.TreeTab(beta.Title, 0))
+	assert.True(t, ok, "selecting via the arrow expands the new selection")
+}
+
+// TestMouse_DoubleClickTreeRowEntersInteractive: two quick clicks on a tree
+// row take the exact Enter path — open (or focus) the selection's pane, then
+// enter interactive mode; a slow second click stays a plain re-select.
+func TestMouse_DoubleClickTreeRowEntersInteractive(t *testing.T) {
+	h, _, beta := mouseTestHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	fakes, _ := stubLiveTermFactory(t)
+
+	// Slow clicks: select only — no pane opens.
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	clock.advance(time.Second)
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	assert.Zero(t, h.store.NumOpenPanes(), "clicks slower than the double-click interval must not enter")
+
+	// Fast second click: the Enter path — pane opens focused; the deferred
+	// activation arrives as enterInteractiveMsg (driven directly: the batched
+	// cmd also carries selectionChanged's capture dispatches, which are not
+	// hermetic — the TestEnterFromTreeOpensPaneAndEntersInteractive pattern).
+	clock.advance(time.Second)
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	p := h.store.FindOpenPane(beta, 0)
+	require.NotNil(t, p, "double-click must open the selection's pane, like Enter")
+	assert.Equal(t, p, h.focusedOpenPane(), "the opened pane takes focus")
+	_, cmd := h.Update(enterInteractiveMsg{pane: p})
+	runHermeticCmd(t, h, cmd, 0)
+	assert.True(t, h.interactive, "double-click enters interactive mode through the Enter seam")
+	require.Len(t, *fakes, 1)
+}
+
+// TestMouse_PaneClicksFocusThenInteract: a header click focuses the pane; a
+// body click on an unfocused pane focuses it; a click on the already-focused
+// pane's body enters it (the §2.5 "click a focused pane body → interactive"
+// row).
+func TestMouse_PaneClicksFocusThenInteract(t *testing.T) {
+	h, alpha, beta := mouseTestHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	_, _ = stubLiveTermFactory(t)
+	pa := openTestPane(t, h, alpha, 0)
+	pb := openTestPane(t, h, beta, 0) // focused last
+	regionA := layout.PaneRegion(pa.ID())
+	regionB := layout.PaneRegion(pb.ID())
+	require.Equal(t, regionB, h.ring.Active())
+
+	// Header click picks pane A out of the split.
+	clickZone(t, h, zones.PaneHeader(regionA))
+	assert.Equal(t, regionA, h.ring.Active(), "pane A header click focuses pane A")
+
+	// Body click on the unfocused pane B focuses it — and only focuses.
+	clock.advance(time.Second)
+	body := zoneRect(t, h, zones.PaneBody(regionB))
+	press(h, body.X+2, body.Y+4) // below the header row
+	assert.Equal(t, regionB, h.ring.Active(), "body click on an unfocused pane focuses it")
+	assert.False(t, h.interactive, "the focusing click must not enter the pane")
+
+	// A later click on the focused pane's body enters it, like Enter.
+	clock.advance(time.Second)
+	body = zoneRect(t, h, zones.PaneBody(regionB))
+	press(h, body.X+2, body.Y+4)
+	p := h.focusedOpenPane()
+	require.Equal(t, pb, p)
+	_, cmd := h.Update(enterInteractiveMsg{pane: p})
+	runHermeticCmd(t, h, cmd, 0)
+	assert.True(t, h.interactive, "click on the focused pane body enters interactive mode")
+}
+
+// TestMouse_ClickTaskRowFocusesAndSelects: a task-row click focuses the rail's
+// automations section and selects that task; a double click opens the
+// task-manager overlay on it (§2.5).
+func TestMouse_ClickTaskRowFocusesAndSelects(t *testing.T) {
+	h, _, _ := mouseTestHome(t)
+	clock := newFakeClock(h)
+
+	clickZone(t, h, zones.AutoTask("task-bbb"))
+	assert.Equal(t, layout.RegionAutomations, h.ring.Active(), "the click focuses the section")
+	assert.Equal(t, 1, h.automations.SelectedTaskIndex(), "the click selects the row's task")
+	assert.Equal(t, stateDefault, h.state, "a single click must not open the manager")
+
+	clock.advance(time.Second)
+	clickZone(t, h, zones.AutoTask("task-bbb"))
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.AutoTask("task-bbb"))
+	assert.Equal(t, stateTasks, h.state, "double-click opens the task-manager overlay")
+	sel, ok := selectedManagerTask(h)
+	require.True(t, ok)
+	assert.Equal(t, "task-bbb", sel, "the manager opens preselecting the clicked task")
+}
+
+func selectedManagerTask(h *home) (string, bool) {
+	sp := h.automations.TaskPane()
+	tasks := sp.GetTasks()
+	idx := h.automations.SelectedTaskIndex()
+	if idx < 0 || idx >= len(tasks) {
+		return "", false
+	}
+	return tasks[idx].ID, true
+}
+
+// TestMouse_ClickSectionBackgroundFocusesAutomations: clicking the section
+// anywhere off a task row (its title line) just focuses it.
+func TestMouse_ClickSectionBackgroundFocusesAutomations(t *testing.T) {
+	h, _, _ := mouseTestHome(t)
+	newFakeClock(h)
+
+	clickZone(t, h, zones.AutoBG) // top-left: the title line, no task row
+	assert.Equal(t, layout.RegionAutomations, h.ring.Active())
+	assert.Equal(t, stateDefault, h.state)
+}
+
+// TestMouse_ClickStatusHintRunsAction: clicking a status-bar hint presses its
+// key through the full handleKeyPress path. With the automations section
+// focused the bar advertises "tab focus"; the click must cycle the ring
+// exactly like pressing Tab.
+func TestMouse_ClickStatusHintRunsAction(t *testing.T) {
+	h, _, _ := mouseTestHome(t)
+	newFakeClock(h)
+	h.focusRegion(layout.RegionAutomations)
+
+	clickZone(t, h, zones.StatusHint("tab"))
+	assert.Equal(t, layout.RegionTree, h.ring.Active(),
+		"clicking the 'tab focus' hint cycles the focus ring, like the key")
+}
+
+// TestMouse_WheelScrollsRegionUnderCursor: the wheel drives whatever region
+// is under the cursor — tree cursor movement, pane capture scroll, task
+// selection — regardless of where the focus ring points (before this PR it
+// always scrolled the focused pane).
+func TestMouse_WheelScrollsRegionUnderCursor(t *testing.T) {
+	h, alpha, _ := mouseTestHome(t)
+	newFakeClock(h)
+	p := openTestPane(t, h, alpha, 0)
+	region := layout.PaneRegion(p.ID())
+	h.focusRegion(layout.RegionTree)
+	require.False(t, h.sidebar.GetSelection().IsTab)
+
+	// Over the tree: the cursor walks down (alpha → its first tab row).
+	tree := zoneRect(t, h, zones.TreeBG)
+	wheel(h, tree.X+1, tree.Y+3, false)
+	assert.True(t, h.sidebar.GetSelection().IsTab,
+		"wheel over the tree moves the tree cursor, like j/k")
+
+	// Over the automations section: the task cursor moves — even though the
+	// section is NOT focused — and the tree cursor stays put.
+	preSel := h.sidebar.GetSelection()
+	require.Equal(t, 0, h.automations.SelectedTaskIndex())
+	auto := zoneRect(t, h, zones.AutoBG)
+	wheel(h, auto.X+1, auto.Y, false)
+	assert.Equal(t, 1, h.automations.SelectedTaskIndex(),
+		"wheel over the section moves the task cursor")
+	assert.Equal(t, preSel, h.sidebar.GetSelection(), "the tree cursor must not move")
+	assert.Equal(t, layout.RegionTree, h.ring.Active(), "wheel never moves focus")
+
+	// Over the pane's body: the pane enters capture scroll mode.
+	body := zoneRect(t, h, zones.PaneBody(region))
+	wheel(h, body.X+2, body.Y+4, true)
+	assert.True(t, h.paneWindows[p.ID()].IsInScrollMode(),
+		"wheel over the pane scrolls the pane")
+	assert.Equal(t, 1, h.automations.SelectedTaskIndex(),
+		"pane scroll must not leak into the task selection")
+}
+
+// TestMouse_ConfirmOverlayClicks: the kill confirmation's y/n words act as
+// their keys — n cancels, y confirms (row flips to Deleting) — and while the
+// modal is up, clicks on background zones are swallowed.
+func TestMouse_ConfirmOverlayClicks(t *testing.T) {
+	h, alpha, beta := mouseTestHome(t)
+	clock := newFakeClock(h)
+
+	// Open the kill dialog and click background, then "n or esc to cancel".
+	_, _ = h.handleKill()
+	require.Equal(t, stateConfirm, h.state)
+
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	assert.Equal(t, stateConfirm, h.state, "a background click must not close the modal")
+	assert.Equal(t, alpha.Title, h.store.GetSelectedInstance().Title,
+		"a background click must not move the selection behind the modal")
+
+	clock.advance(time.Second)
+	clickZone(t, h, zones.OverlayConfirmNo)
+	assert.Equal(t, stateDefault, h.state, "clicking n cancels the dialog")
+	assert.NotEqual(t, session.Deleting, alpha.GetStatus(), "cancel must not kill")
+
+	// Re-open and click "y to confirm".
+	clock.advance(time.Second)
+	_, _ = h.handleKill()
+	require.Equal(t, stateConfirm, h.state)
+	cmd := clickZone(t, h, zones.OverlayConfirmYes)
+	assert.Equal(t, stateDefault, h.state)
+	assert.Equal(t, session.Deleting, alpha.GetStatus(),
+		"clicking y runs the confirm action, like pressing y")
+	assert.NotNil(t, cmd, "the confirm action's startKillMsg must be forwarded")
+}
+
+// TestMouse_SelectionOverlayRowClick: clicking a program row selects and
+// submits it, like ↓ + enter.
+func TestMouse_SelectionOverlayRowClick(t *testing.T) {
+	h, _, _ := mouseTestHome(t)
+	newFakeClock(h)
+	// The submit handler maps the row index into tmux.SupportedPrograms, so
+	// the overlay must carry the real list (as handleStateNew builds it).
+	h.selectionOverlay = overlay.NewSelectionOverlay("Select Program", tmux.SupportedPrograms)
+	h.selectionOverlay.SetWidth(60)
+	h.state = stateSelectProgram
+
+	clickZone(t, h, zones.OverlaySelectRow(2))
+	assert.Equal(t, stateNew, h.state, "a row click submits the selection")
+	assert.Equal(t, tmux.SupportedPrograms[2], h.pendingProgram,
+		"the clicked row's program is chosen")
+}
+
+// TestMouse_SearchOverlayRowClick: clicking a search result selects it and
+// closes the overlay, like ↓ + enter.
+func TestMouse_SearchOverlayRowClick(t *testing.T) {
+	h, _, beta := mouseTestHome(t)
+	newFakeClock(h)
+	_, _ = h.showSearchOverlay()
+	require.Equal(t, stateSearch, h.state)
+
+	clickZone(t, h, zones.OverlaySearchRow(1))
+	assert.Equal(t, stateDefault, h.state, "a row click submits and closes the search")
+	assert.Equal(t, beta.Title, h.sidebar.GetSelectedInstance().Title,
+		"the clicked result becomes the selection")
+}
+
+// TestMouse_MissAndFallbackAreInert: presses outside every zone, non-left
+// buttons, and releases must all no-op; below the hard minimum there are no
+// zones at all.
+func TestMouse_MissAndFallbackAreInert(t *testing.T) {
+	h, _, _ := mouseTestHome(t)
+	newFakeClock(h)
+	_ = h.View()
+
+	// Motion / release / right-button events are ignored in nav mode.
+	_, cmd := h.handleMouse(tea.MouseMsg{X: 1, Y: 1, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft})
+	assert.Nil(t, cmd)
+	_, cmd = h.handleMouse(tea.MouseMsg{X: 1, Y: 1, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	assert.Nil(t, cmd)
+	_, cmd = h.handleMouse(tea.MouseMsg{X: 1, Y: 1, Action: tea.MouseActionPress, Button: tea.MouseButtonRight})
+	assert.Nil(t, cmd)
+
+	// A press past the frame edge resolves nothing and changes nothing.
+	before := h.ring.Active()
+	press(h, h.termWidth+5, h.termHeight+5)
+	assert.Equal(t, before, h.ring.Active())
+
+	// Below the hard minimum the fallback banner renders and registers nothing.
+	resizeHome(h, layout.HardMinWidth-1, layout.HardMinHeight-1)
+	_ = h.View()
+	assert.Empty(t, h.zones.IDs(), "the fallback banner has no clickable zones")
+	press(h, 1, 1) // must not panic
+}
+
+// TestMouse_ZoneInventoryAtFullLayout pins the expected zone families all
+// registering together in a two-pane layout with tasks — the "each pane
+// registers the expected zones" contract at the frame level.
+func TestMouse_ZoneInventoryAtFullLayout(t *testing.T) {
+	h, alpha, beta := mouseTestHome(t)
+	newFakeClock(h)
+	pa := openTestPane(t, h, alpha, 0)
+	pb := openTestPane(t, h, beta, 0)
+	_ = h.View()
+
+	for _, id := range []string{
+		zones.TreeBG,
+		zones.TreeHeader,
+		zones.TreeInstance(alpha.Title),
+		zones.TreeInstance(beta.Title),
+		zones.TreeArrow(alpha.Title),
+		zones.PaneBody(layout.PaneRegion(pa.ID())),
+		zones.PaneHeader(layout.PaneRegion(pa.ID())),
+		zones.PaneBody(layout.PaneRegion(pb.ID())),
+		zones.PaneHeader(layout.PaneRegion(pb.ID())),
+		zones.AutoBG,
+		zones.AutoTask("task-aaa"),
+		zones.StatusHint("q"),
+	} {
+		_, ok := h.zones.Find(id)
+		assert.True(t, ok, "expected zone %q in the full-layout frame; got %v", id, h.zones.IDs())
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Interactive mode × mouse (RFC §2.5 in-pane ownership): events over the live
+// pane forward into the embedded terminal (grid) or are suppressed (frame/
+// header); host gestures still apply outside the pane and drop the mode when
+// they move focus.
+// ----------------------------------------------------------------------------
+
+// interactiveMouseHome enters interactive mode on a live pane and returns the
+// bound fake attachment.
+func interactiveMouseHome(t *testing.T) (*home, *fakeLiveTerm, string) {
+	t.Helper()
+	h, _, fakes := interactiveTestHome(t)
+	enterInteractive(t, h)
+	require.True(t, h.interactive)
+	require.Len(t, *fakes, 1)
+	region := layout.PaneRegion(h.livePane.ID())
+	newFakeClock(h)
+	return h, (*fakes)[0], region
+}
+
+// TestMouse_InteractiveForwardsGridEvents: press/wheel/release over the live
+// pane's terminal grid forward through SendMouse with GRID-LOCAL coordinates
+// (the zone resolve's local point), and never trigger host actions.
+func TestMouse_InteractiveForwardsGridEvents(t *testing.T) {
+	h, fake, region := interactiveMouseHome(t)
+
+	term := zoneRect(t, h, zones.PaneTerm(region))
+	press(h, term.X+5, term.Y+3)
+	require.Len(t, fake.mice, 1, "a grid press must forward to the attachment")
+	assert.Equal(t, 5, fake.mice[0].x, "coordinates forward grid-local")
+	assert.Equal(t, 3, fake.mice[0].y)
+	assert.Equal(t, tea.MouseButtonLeft, fake.mice[0].msg.Button)
+	assert.True(t, h.interactive, "a forwarded press must not leave the mode")
+
+	wheel(h, term.X+5, term.Y+3, true)
+	require.Len(t, fake.mice, 2, "the wheel forwards too — the inner app owns scroll (§2.5)")
+	assert.Equal(t, tea.MouseButtonWheelUp, fake.mice[1].msg.Button)
+	assert.False(t, h.paneWindows[h.livePane.ID()].IsInScrollMode(),
+		"a forwarded wheel must not flip the live pane into host capture scroll")
+
+	_, _ = h.handleMouse(tea.MouseMsg{
+		X: term.X + 5, Y: term.Y + 3, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft,
+	})
+	require.Len(t, fake.mice, 3, "releases forward so the inner app sees complete clicks")
+}
+
+// TestMouse_InteractiveSuppressesPaneChrome: clicks on the live pane's header
+// or frame are suppressed — no host focus/enter action, nothing forwarded
+// (they are outside the grid).
+func TestMouse_InteractiveSuppressesPaneChrome(t *testing.T) {
+	h, fake, region := interactiveMouseHome(t)
+
+	header := zoneRect(t, h, zones.PaneHeader(region))
+	press(h, header.X+2, header.Y)
+	assert.Empty(t, fake.mice, "chrome clicks must not forward")
+	assert.True(t, h.interactive, "chrome clicks must not drop the mode")
+	assert.Equal(t, region, h.ring.Active(), "chrome clicks must not move focus")
+}
+
+// TestMouse_InteractiveHostGesturesOutsidePane: outside the live pane the
+// host gestures apply (§2.5) — a tree click selects, moves focus to the tree,
+// and thereby ends interactive mode (the mode's premise is "keystrokes go to
+// the FOCUSED pane").
+func TestMouse_InteractiveHostGesturesOutsidePane(t *testing.T) {
+	h, fake, _ := interactiveMouseHome(t)
+	inst := h.store.GetSelectedInstance()
+	require.NotNil(t, inst)
+
+	clickZone(t, h, zones.TreeInstance(inst.Title))
+	assert.Empty(t, fake.mice, "a tree click is a host gesture, not a forward")
+	assert.Equal(t, layout.RegionTree, h.ring.Active(), "the click focuses the tree")
+	assert.False(t, h.interactive, "focus moving off the pane ends interactive mode")
+}
+
+// TestMouse_InteractiveStatusHintExits: the interactive status bar advertises
+// only ctrl+] — clicking it exits to nav mode through the normal key path.
+func TestMouse_InteractiveStatusHintExits(t *testing.T) {
+	h, _, _ := interactiveMouseHome(t)
+
+	clickZone(t, h, zones.StatusHint("ctrl+]"))
+	assert.False(t, h.interactive, "clicking the ctrl+] hint exits interactive mode")
+}
+
+// TestMouse_HintClickMatchesKeyGates: keyMsgFromString covers every primary
+// key the menu can advertise, so a rendered hint is always clickable.
+func TestMouse_HintClickMatchesKeyGates(t *testing.T) {
+	for _, binding := range keys.GlobalKeyBindings {
+		primary := binding.Keys()[0]
+		if primary == "1" { // KeyJumpTab renders no zone by design
+			continue
+		}
+		_, ok := keyMsgFromString(primary)
+		assert.True(t, ok, "primary key %q must synthesize a tea.KeyMsg", primary)
+	}
+}
