@@ -106,36 +106,19 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	}, nil
 }
 
-// newHTTPMux builds the route table. Every client-facing RPC gets a
-// POST /v1/<Method> route that dispatches to the matching controlServer method;
-// GET /v1/health is a liveness alias for Ping. Pure-infra RPCs (Shutdown,
-// Pause/ResumeStatusPoll, ReloadTasks, and bare Ping) are intentionally absent —
-// the HTTP surface mirrors only client-facing session and task ops.
+// newHTTPMux builds the route table by iterating the httpRoutes catalog — the
+// SAME list `af api` prints — so the served routes and the documented catalog
+// cannot diverge (#1029 PR 5). Every client-facing RPC has a POST /v1/<Method>
+// route dispatching to the matching controlServer method; GET /v1/health is a
+// liveness alias for Ping. Pure-infra RPCs (Shutdown, Pause/ResumeStatusPoll,
+// ReloadTasks, and bare Ping) are intentionally absent from the catalog — the
+// HTTP surface mirrors only client-facing session and task ops.
 func newHTTPMux(cs *controlServer) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Sessions.
-	mux.HandleFunc("/v1/CreateSession", rpcHandler(cs.CreateSession))
-	mux.HandleFunc("/v1/Snapshot", rpcHandler(cs.Snapshot))
-	mux.HandleFunc("/v1/KillSession", rpcHandler(cs.KillSession))
-	mux.HandleFunc("/v1/ArchiveSession", rpcHandler(cs.ArchiveSession))
-	mux.HandleFunc("/v1/RestoreArchived", rpcHandler(cs.RestoreArchived))
-	mux.HandleFunc("/v1/SendPrompt", rpcHandler(cs.SendPrompt))
-	mux.HandleFunc("/v1/DeliverPrompt", rpcHandler(cs.DeliverPrompt))
-	mux.HandleFunc("/v1/CreateTab", rpcHandler(cs.CreateTab))
-	mux.HandleFunc("/v1/CloseTab", rpcHandler(cs.CloseTab))
-	mux.HandleFunc("/v1/SetPRInfo", rpcHandler(cs.SetPRInfo))
-	mux.HandleFunc("/v1/ImportRemoteHookSessions", rpcHandler(cs.ImportRemoteHookSessions))
-
-	// Tasks.
-	mux.HandleFunc("/v1/ListTasks", rpcHandler(cs.ListTasks))
-	mux.HandleFunc("/v1/AddTask", rpcHandler(cs.AddTask))
-	mux.HandleFunc("/v1/UpdateTask", rpcHandler(cs.UpdateTask))
-	mux.HandleFunc("/v1/RemoveTask", rpcHandler(cs.RemoveTask))
-	mux.HandleFunc("/v1/TriggerTask", rpcHandler(cs.TriggerTask))
-
-	// Liveness. GET-only alias for the Ping RPC.
-	mux.HandleFunc("/v1/health", healthHandler(cs))
+	for _, rt := range httpRoutes {
+		mux.HandleFunc(rt.Path, rt.handler(cs))
+	}
 
 	// Catch-all: any other path is an unknown route → 404 with the envelope.
 	// ServeMux routes the longest prefix match, so a real route above always

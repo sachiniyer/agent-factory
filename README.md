@@ -102,6 +102,17 @@ af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * *
 
 See [docs/cli.md](docs/cli.md) for the complete command reference.
 
+### HTTP API
+
+The daemon also exposes the same session and task operations as a small JSON API over a **localhost-only Unix socket** (`$AGENT_FACTORY_HOME/daemon-http.sock`, `0600` owner-only — no TCP port, no token), so tools and agents can call Agent Factory without shelling out to `af`. Every response uses the same `{data, error}` envelope as `af --json`:
+
+```bash
+curl --unix-socket ~/.agent-factory/daemon-http.sock http://localhost/v1/health
+# {"data":{"ok":true},"error":null}
+```
+
+Run `af api` to list every endpoint (with a ready-to-run curl example) and the resolved socket path; see [docs/http-api.md](docs/http-api.md) for the full reference.
+
 ### Remote sessions
 
 With `remote_hooks` configured in a repo, `N` launches sessions on a remote backend (your own scripts: launch, list, attach, delete, terminal) and shows them alongside local ones with the same attach/kill/preview experience. See [docs/remote-hooks.md](docs/remote-hooks.md) for the script protocol.
@@ -133,6 +144,7 @@ Upgrading from a `config.json`? The move to TOML is automatic — `af` converts 
 ## Documentation
 
 - [docs/cli.md](docs/cli.md) — full CLI reference (`af sessions`, `af tasks`, `af daemon`, maintenance commands)
+- [docs/http-api.md](docs/http-api.md) — the daemon-hosted HTTP/JSON API: socket path, auth model, every endpoint (`af api` prints the same catalog)
 - [docs/configuration.md](docs/configuration.md) — config keys, global vs. in-repo precedence, state locations
 - [docs/tasks.md](docs/tasks.md) — task triggers, the watch-script contract, daemon lifecycle
 - [docs/remote-hooks.md](docs/remote-hooks.md) — remote backend script protocol
