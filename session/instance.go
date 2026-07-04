@@ -1,6 +1,7 @@
 package session
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,6 +81,16 @@ type Instance struct {
 	// prInfo, diffStats.
 	mu sync.RWMutex
 
+	// ID is the instance's stable identity (#1195): a random UUID minted once at
+	// NewInstance, persisted, and never mutated. The reconcile uses it to tell
+	// "same session" from "title reused" (#765) without leaning on CreatedAt
+	// equality — the audit's identity-by-circumstance gotcha (a manufactured or
+	// zero-CreatedAt record silently degraded a swap into an in-place corpse
+	// mutation). Legacy records persisted before #1195 carry no ID; the reconcile
+	// falls back to title+CreatedAt for them until they are recreated. Immutable
+	// after construction, so cross-goroutine readers may read it without the mutex
+	// (like Title).
+	ID string
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.
@@ -593,6 +604,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 	defer i.mu.RUnlock()
 
 	data := InstanceData{
+		ID:         i.ID,
 		Title:      i.Title,
 		Path:       i.Path,
 		Branch:     i.Branch,
@@ -683,6 +695,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		status = Lost
 	}
 	instance := &Instance{
+		ID:         data.ID,
 		Title:      data.Title,
 		Path:       data.Path,
 		Branch:     data.Branch,
@@ -884,6 +897,22 @@ func SetBackendFactoryForTest(f func(opts InstanceOptions, absPath string) (Back
 	return func() { backendFactory = prev }
 }
 
+// newSessionID mints a random RFC-4122 v4 UUID for an instance's stable identity
+// (#1195). It is a package var so tests can inject deterministic IDs. crypto/rand
+// is the entropy source; on the (near-impossible) read failure it falls back to a
+// timestamp-derived value so session creation never blocks on entropy — still
+// unique per call in practice, and the reconcile's title+CreatedAt fallback covers
+// any theoretical collision.
+var newSessionID = func() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("ts-%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func NewInstance(opts InstanceOptions) (*Instance, error) {
 	t := time.Now()
 
@@ -905,6 +934,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 
 	return &Instance{
+		ID:        newSessionID(),
 		Title:     opts.Title,
 		Status:    Ready,
 		Path:      absPath,

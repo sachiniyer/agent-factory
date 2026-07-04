@@ -117,8 +117,10 @@ func TestReconcileSnapshot_SelectionDriftAfterSwapAndRemoval(t *testing.T) {
 	h.sidebar.SelectInstance(b)
 	require.Same(t, b, h.sidebar.GetSelectedInstance(), "initial selection must be on b")
 
-	// Snapshot: b was recreated (same title, different CreatedAt), a is gone, c unchanged
+	// Snapshot: b was recreated (same title, NEW session id — a kill+recreate
+	// mints a fresh stable id, #1195), a is gone, c unchanged.
 	bData := b.ToInstanceData()
+	bData.ID = "recreated-b"
 	bData.CreatedAt = time.Now().Add(time.Hour)
 	cData := c.ToInstanceData()
 

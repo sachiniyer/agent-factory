@@ -381,7 +381,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 				continue
 			}
 		}
-		if !inst.CreatedAt.Equal(d.CreatedAt) {
+		if !sameSession(inst, d) {
 			// Same title, different session — a kill+recreate reused the title
 			// (#765). Swap the stale row for the live one rather than mutating the
 			// corpse in place.
@@ -436,6 +436,21 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	}
 
 	return changed
+}
+
+// sameSession reports whether an existing same-title row and a snapshot record
+// are the SAME logical session rather than a kill+recreate that reused the title
+// (#765). It prefers the stable per-session ID (#1195): when both the row and the
+// record carry one, identity is a pure ID compare, immune to the CreatedAt-as-
+// identity gotcha the audit flagged (a manufactured or zero-CreatedAt record
+// silently degrading a swap into an in-place corpse mutation). Legacy records
+// written before #1195 have no ID; for them it falls back to CreatedAt equality —
+// exactly the prior behavior — so mixed old/new records reconcile correctly.
+func sameSession(inst *session.Instance, d session.InstanceData) bool {
+	if inst.ID != "" && d.ID != "" {
+		return inst.ID == d.ID
+	}
+	return inst.CreatedAt.Equal(d.CreatedAt)
 }
 
 // addInstanceFromSnapshot builds a live instance from a snapshot record and adds

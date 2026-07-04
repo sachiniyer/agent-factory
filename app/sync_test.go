@@ -131,6 +131,84 @@ func TestReconcileSnapshot_LeavesTransientRowStatusAlone(t *testing.T) {
 		"a mid-teardown row must keep its Deleting marker through a reconcile")
 }
 
+// TestReconcileSnapshot_IdentityUsesStableID guards the #1195 identity fix: the
+// reconcile decides "same session" vs "title reused" (#765) by the stable
+// per-session ID, not CreatedAt equality (the audit's identity-by-circumstance
+// gotcha). It also verifies the legacy fallback: records without an ID still use
+// CreatedAt, exactly as before, so mixed old/new records reconcile correctly.
+func TestReconcileSnapshot_IdentityUsesStableID(t *testing.T) {
+	t1 := time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 7, 4, 11, 0, 0, 0, time.UTC)
+
+	// stubBuilder records swap builds and returns a fresh fake-backed instance
+	// carrying the snapshot record's identity (no real tmux/worktree — the #961
+	// reattach-flake lesson).
+	stubBuilder := func(t *testing.T, built *[]session.InstanceData) func() {
+		return SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+			*built = append(*built, d)
+			inst, err := session.NewInstance(session.InstanceOptions{Title: d.Title, Path: t.TempDir(), Program: "test"})
+			require.NoError(t, err)
+			inst.SetBackend(session.NewFakeBackend())
+			inst.SetStartedForTest(true)
+			inst.ID = d.ID
+			inst.CreatedAt = d.CreatedAt
+			return inst, nil
+		})
+	}
+	makeStored := func(t *testing.T, h *home, id, title string, created time.Time) *session.Instance {
+		inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: t.TempDir(), Program: "test"})
+		require.NoError(t, err)
+		inst.SetBackend(session.NewFakeBackend())
+		inst.SetStartedForTest(true)
+		inst.SetStatus(session.Running)
+		inst.ID = id
+		inst.CreatedAt = created
+		h.store.AddInstance(inst)
+		return inst
+	}
+
+	cases := []struct {
+		name        string
+		storedID    string
+		storedAt    time.Time
+		snapID      string
+		snapAt      time.Time
+		wantSwapped bool
+	}{
+		// ID authoritative: different ID is a title reuse even when CreatedAt matches.
+		{"different id -> swap despite equal CreatedAt", "id-A", t1, "id-B", t1, true},
+		// ID authoritative: same ID is the same session even when CreatedAt drifted.
+		{"same id -> no swap despite differing CreatedAt", "id-A", t1, "id-A", t2, false},
+		// Legacy fallback: no IDs on either side -> CreatedAt decides (prior behavior).
+		{"legacy no ids, differing CreatedAt -> swap", "", t1, "", t2, true},
+		{"legacy no ids, equal CreatedAt -> no swap", "", t1, "", t1, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			var built []session.InstanceData
+			restore := stubBuilder(t, &built)
+			defer restore()
+
+			stored := makeStored(t, h, tc.storedID, "worker", tc.storedAt)
+			h.reconcileSnapshot([]session.InstanceData{
+				{ID: tc.snapID, Title: "worker", CreatedAt: tc.snapAt, Status: session.Ready},
+			})
+
+			got := h.store.GetInstanceByTitle("worker")
+			require.NotNil(t, got)
+			if tc.wantSwapped {
+				require.Len(t, built, 1, "a title reuse must rebuild (swap) the row")
+				require.NotSame(t, stored, got, "swap must replace the stale pointer")
+			} else {
+				require.Empty(t, built, "same session must update in place, not swap")
+				require.Same(t, stored, got, "same session must keep its pointer")
+			}
+		})
+	}
+}
+
 func TestImportRemoteHookSessionsAddsListCmdSessions(t *testing.T) {
 	repoDir := setupRealRepo(t)
 	t.Chdir(repoDir)
