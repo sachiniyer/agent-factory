@@ -17,6 +17,7 @@ const (
 	KeyEnter
 	KeyNew
 	KeyKill
+	KeyArchive // Archive a live session / restore an archived one (#1028)
 	KeyQuit
 
 	KeyTab        // Tab cycles the workspace focus ring (tree → pane → automations).
@@ -112,6 +113,7 @@ var specs = []spec{
 	{name: KeyExitInteractive, keys: []string{"ctrl+]"}, desc: "nav mode"},
 	{name: KeyNew, configKey: "new", keys: []string{"n"}, desc: "new", dispatch: true},
 	{name: KeyKill, configKey: "kill", keys: []string{"D"}, desc: "kill", dispatch: true},
+	{name: KeyArchive, configKey: "archive", keys: []string{"A"}, desc: "archive/restore", dispatch: true},
 	{name: KeyHelp, configKey: "help", keys: []string{"?"}, desc: "help", dispatch: true},
 	{name: KeyQuit, configKey: "quit", keys: []string{"q"}, desc: "quit", dispatch: true},
 	{name: KeyNewRemote, configKey: "new_remote", keys: []string{"N"}, desc: "new remote", dispatch: true},

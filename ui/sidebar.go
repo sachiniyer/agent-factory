@@ -26,6 +26,13 @@ type SidebarSectionKind int
 
 const (
 	SectionInstances SidebarSectionKind = iota
+	// SectionArchived holds archived sessions (#1028) in a folder pinned at the
+	// bottom of the rail, collapsed by default. Its rows are instance rows like
+	// the Instances section's (ItemIndex is a projection index), but flat — an
+	// archived session has no live tabs and is not attachable. The header is
+	// hidden entirely when no session is archived, so the folder only appears
+	// once there is something in it.
+	SectionArchived
 )
 
 // SidebarItem represents one visible row in the sidebar. Within the Instances
@@ -47,6 +54,26 @@ type SidebarSection struct {
 	Kind     SidebarSectionKind
 	Title    string
 	Expanded bool
+}
+
+// isInstanceRow reports whether item is a selectable instance row — a non-header
+// row in either the Instances or Archived section (#1028). Both carry a
+// projection ItemIndex; the difference is only which folder they render under.
+func isInstanceRow(item SidebarItem) bool {
+	return !item.IsHeader && (item.Kind == SectionInstances || item.Kind == SectionArchived)
+}
+
+// partitionByArchived splits projection indices into live and archived, in the
+// projection's stable order (#1028).
+func partitionByArchived(instances []*session.Instance) (live, archived []int) {
+	for i, inst := range instances {
+		if inst != nil && inst.GetStatus() == session.Archived {
+			archived = append(archived, i)
+		} else {
+			live = append(live, i)
+		}
+	}
+	return live, archived
 }
 
 var sectionHeaderStyle = lipgloss.NewStyle().
@@ -153,6 +180,10 @@ func NewSidebar(spin *spinner.Model, autoYes bool, proj *store.Projection) *Side
 		proj: proj,
 		sections: []SidebarSection{
 			{Kind: SectionInstances, Title: "Instances", Expanded: true},
+			// Archived (#1028): pinned last, collapsed by default. Rendered only
+			// when it holds archived sessions (rebuildVisibleItems skips the empty
+			// folder).
+			{Kind: SectionArchived, Title: "Archived", Expanded: false},
 		},
 		renderer:      tree.NewInstanceRenderer(spin),
 		autoyes:       autoYes,
@@ -230,8 +261,16 @@ func (s *Sidebar) structureSig() string {
 		slots = len(tree.TabLabels(inst))
 		expandable = tree.Expandable(inst)
 	}
-	return fmt.Sprintf("%d|%s|%d|%t|%s",
-		s.proj.Version(), selTitle, slots, expandable, s.treeCollapsed)
+	// Fold in the archived partition (#1028): a status flip to/from Archived
+	// changes which folder a row belongs to but does NOT bump the projection
+	// Version (it mutates an existing instance in place), so without this the
+	// sidebar would not re-partition until the next structural change. The
+	// archived index set — stable within a projection order — uniquely
+	// identifies the partition, so it catches both a single archive/restore and
+	// a same-count swap.
+	_, archived := partitionByArchived(s.proj.GetInstances())
+	return fmt.Sprintf("%d|%s|%d|%t|%s|%v",
+		s.proj.Version(), selTitle, slots, expandable, s.treeCollapsed, archived)
 }
 
 // instanceExpanded reports whether inst's tab children are currently shown:
@@ -419,23 +458,41 @@ func (s *Sidebar) rebuildPreservingCursor() {
 // section — the tree rows (instances with tab children for expanded ones).
 func (s *Sidebar) rebuildVisibleItems() {
 	instances := s.proj.GetInstances()
+
+	// Partition projection indices into live and archived (#1028), preserving
+	// order. ItemIndex stays a projection index in both sections so every
+	// downstream resolve (GetSelectedInstance, render) indexes GetInstances()
+	// uniformly.
+	live, archived := partitionByArchived(instances)
+
 	var items []SidebarItem
 	for _, sec := range s.sections {
+		// The Archived folder only appears once it holds something: no empty
+		// "Archived (0)" header cluttering the rail.
+		if sec.Kind == SectionArchived && len(archived) == 0 {
+			continue
+		}
 		items = append(items, SidebarItem{Kind: sec.Kind, IsHeader: true})
-		if sec.Expanded {
-			switch sec.Kind {
-			case SectionInstances:
-				rows := tree.Flatten(len(instances),
-					func(i int) bool { return s.instanceExpanded(instances[i]) },
-					func(i int) int { return len(tree.TabLabels(instances[i])) })
-				for _, r := range rows {
-					item := SidebarItem{Kind: SectionInstances, ItemIndex: r.InstanceIndex}
-					if r.IsTab() {
-						item.IsTab = true
-						item.TabIndex = r.TabIndex
-					}
-					items = append(items, item)
+		if !sec.Expanded {
+			continue
+		}
+		switch sec.Kind {
+		case SectionInstances:
+			rows := tree.Flatten(len(live),
+				func(i int) bool { return s.instanceExpanded(instances[live[i]]) },
+				func(i int) int { return len(tree.TabLabels(instances[live[i]])) })
+			for _, r := range rows {
+				item := SidebarItem{Kind: SectionInstances, ItemIndex: live[r.InstanceIndex]}
+				if r.IsTab() {
+					item.IsTab = true
+					item.TabIndex = r.TabIndex
 				}
+				items = append(items, item)
+			}
+		case SectionArchived:
+			// Flat rows — archived sessions have no live tabs.
+			for _, idx := range archived {
+				items = append(items, SidebarItem{Kind: SectionArchived, ItemIndex: idx})
 			}
 		}
 	}
@@ -625,7 +682,10 @@ func (s *Sidebar) JumpPrevSection() {
 func (s *Sidebar) GetSelectedInstance() *session.Instance {
 	s.syncFromStore()
 	sel := s.rawSelection()
-	if sel.Kind != SectionInstances || sel.IsHeader {
+	// An archived row (#1028) is a real instance row too, so it resolves here —
+	// this is what lets the restore action and the Enter "restore it first"
+	// fence read the selected archived session.
+	if !isInstanceRow(sel) {
 		return nil
 	}
 	instances := s.proj.GetInstances()
@@ -636,24 +696,42 @@ func (s *Sidebar) GetSelectedInstance() *session.Instance {
 }
 
 // SetSelectedInstance sets the cursor to point at the given instance index.
-// If the Instances section is collapsed, it is expanded first so the target
-// row is always reachable.
+// The section holding the target (Instances, or the Archived folder for an
+// archived session, #1028) is expanded first so the target row is always
+// reachable.
 func (s *Sidebar) SetSelectedInstance(idx int) {
 	s.syncFromStore()
-	if idx >= s.proj.NumInstances() {
+	instances := s.proj.GetInstances()
+	if idx < 0 || idx >= len(instances) {
 		return
 	}
-	// Ensure the Instances section is expanded so the target row is part of
+	// Expand whichever section holds the target so its row is part of
 	// visibleItems; otherwise the search below would silently no-op.
-	s.ExpandInstancesSection()
-	// Find the visible item that corresponds to this instance
+	if instances[idx].GetStatus() == session.Archived {
+		s.expandSectionKind(SectionArchived)
+	} else {
+		s.ExpandInstancesSection()
+	}
+	// Find the visible instance row (either section) for this projection index.
 	for i, item := range s.visibleItems {
-		if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab && item.ItemIndex == idx {
+		if isInstanceRow(item) && !item.IsTab && item.ItemIndex == idx {
 			s.selectedIdx = i
 			break
 		}
 	}
 	s.afterCursorMove()
+}
+
+// expandSectionKind expands the given section and rebuilds. Shared by
+// SetSelectedInstance's Instances/Archived branches.
+func (s *Sidebar) expandSectionKind(kind SidebarSectionKind) {
+	for i, sec := range s.sections {
+		if sec.Kind == kind {
+			s.sections[i].Expanded = true
+			break
+		}
+	}
+	s.rebuildVisibleItems()
 }
 
 // SelectInstance finds and selects the given instance.
@@ -771,6 +849,9 @@ func (s *Sidebar) String() string {
 				} else {
 					rows[i] = s.renderInstance(item.ItemIndex, isSelected)
 				}
+			case SectionArchived:
+				// Archived rows are flat instance rows (#1028) — no tab children.
+				rows[i] = s.renderInstance(item.ItemIndex, isSelected)
 			}
 		}
 		heights[i] = lipgloss.Height(rows[i])
@@ -1092,9 +1173,13 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 	}
 
 	var label string
+	live, archived := partitionByArchived(s.proj.GetInstances())
 	switch kind {
 	case SectionInstances:
-		label = fmt.Sprintf("Instances (%d)", s.proj.NumInstances())
+		// Count live sessions only — archived ones live under their own folder.
+		label = fmt.Sprintf("Instances (%d)", len(live))
+	case SectionArchived:
+		label = fmt.Sprintf("Archived (%d)", len(archived))
 	}
 
 	style := sectionHeaderStyle

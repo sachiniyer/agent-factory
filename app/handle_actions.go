@@ -106,6 +106,8 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	// Instance actions
 	case keys.KeyKill:
 		return m.handleKill()
+	case keys.KeyArchive:
+		return m.handleArchive()
 	case keys.KeyEnter:
 		return m.handleEnter()
 	case keys.KeyAttach:
@@ -228,6 +230,91 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 	return m, m.selectionChanged()
 }
 
+// handleArchive is the archive/restore verb (#1028, `A`): on an archived row it
+// restores the session (non-destructive — no confirm); on a live row it archives
+// it behind a confirmation, since archive tears down tmux and relocates the
+// worktree. Remote and in-place sessions can't be archived (no relocatable
+// worktree) and are rejected up front with an immediate message; the daemon
+// enforces the same rules authoritatively.
+func (m *home) handleArchive() (tea.Model, tea.Cmd) {
+	selected := m.sidebar.GetSelectedInstance()
+	if selected == nil || selected.GetStatus() == session.Loading {
+		return m, nil
+	}
+	if selected.GetStatus() == session.Deleting {
+		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
+	}
+	title := selected.Title
+
+	// Archived row → restore. No confirmation: restore only moves the worktree
+	// back and re-spawns the agent.
+	if selected.GetStatus() == session.Archived {
+		return m, m.restoreInstanceCmd(title)
+	}
+
+	// Live row → archive. Fail fast on the unarchivable session kinds for a
+	// snappy message (the daemon rejects them too).
+	if selected.IsRemote() {
+		return m, m.handleError(fmt.Errorf("cannot archive remote session '%s': it has no local worktree to relocate", title))
+	}
+	if selected.IsExternalWorktree() {
+		return m, m.handleError(fmt.Errorf("cannot archive in-place session '%s': archive relocates the worktree, which it doesn't own", title))
+	}
+
+	message := fmt.Sprintf("[!] Archive session '%s'?\n\nIts tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with A.", title)
+	return m, m.confirmAction(message, func() tea.Msg { return startArchiveMsg{title: title} })
+}
+
+// archiveInstanceCmd runs the daemon archive (tmux teardown + worktree move) off
+// the event loop (#1028), mirroring killInstanceCmd — the RPC blocks for the
+// whole operation, so it must not run on the Update goroutine.
+func (m *home) archiveInstanceCmd(title string) tea.Cmd {
+	repoID := m.repoID
+	archive := archiveSessionThroughDaemon
+	return func() tea.Msg {
+		if _, err := archive(title, repoID); err != nil {
+			log.ErrorLog.Printf("could not archive instance %q: %v", title, err)
+			return instanceArchivedMsg{title: title, err: err}
+		}
+		return instanceArchivedMsg{title: title}
+	}
+}
+
+// restoreInstanceCmd runs the daemon restore (worktree move-back + agent
+// re-spawn) off the event loop (#1028).
+func (m *home) restoreInstanceCmd(title string) tea.Cmd {
+	repoID := m.repoID
+	restore := restoreArchivedThroughDaemon
+	return func() tea.Msg {
+		if _, err := restore(title, repoID); err != nil {
+			log.ErrorLog.Printf("could not restore instance %q: %v", title, err)
+			return instanceRestoredMsg{title: title, err: err}
+		}
+		return instanceRestoredMsg{title: title}
+	}
+}
+
+// handleInstanceArchived finalizes an async archive. On success the row's new
+// Archived status arrives via the next daemon Snapshot reconcile, which
+// re-partitions it into the collapsed Archived folder — nothing to do here but
+// refresh selection; on failure the error lands in the error box.
+func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, m.handleError(fmt.Errorf("failed to archive session '%s': %w", msg.title, msg.err))
+	}
+	return m, m.selectionChanged()
+}
+
+// handleInstanceRestored finalizes an async restore. On success the row returns
+// to the live Instances section via the next Snapshot reconcile; on failure the
+// error (e.g. the origin repo is gone) lands in the error box.
+func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, m.handleError(fmt.Errorf("failed to restore session '%s': %w", msg.title, msg.err))
+	}
+	return m, m.selectionChanged()
+}
+
 // killConfirmationWarning returns the data-loss warning line for the kill
 // confirmation dialog, or "" if the worktree at wt is verifiably clean. Kill
 // tears the worktree down with `git worktree remove -f`, which bypasses git's
@@ -271,13 +358,15 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	}
 	sel := m.sidebar.GetSelection()
 
-	// Toggle expandable section headers (only Instances has children)
-	if sel.IsHeader && sel.Kind == ui.SectionInstances {
+	// Toggle expandable section headers (Instances and the Archived folder).
+	if sel.IsHeader && (sel.Kind == ui.SectionInstances || sel.Kind == ui.SectionArchived) {
 		m.sidebar.ToggleSection()
 		return m, m.selectionChanged()
 	}
-	// Instance selected
-	if sel.Kind == ui.SectionInstances {
+	// Instance selected — in either the Instances tree or the Archived folder
+	// (#1028). An archived row is not embeddable: interactiveGuard surfaces the
+	// "restore it first" error before any pane/attach path is reached.
+	if sel.Kind == ui.SectionInstances || sel.Kind == ui.SectionArchived {
 		selected := m.sidebar.GetSelectedInstance()
 		if selected == nil || selected.GetStatus() == session.Loading {
 			return m, nil
@@ -346,7 +435,10 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 		return m.handleEnterPane(p)
 	}
 	sel := m.sidebar.GetSelection()
-	if sel.IsHeader || sel.Kind != ui.SectionInstances {
+	// Accept both the Instances tree and the Archived folder (#1028): an
+	// archived row is non-attachable, and interactiveGuard surfaces the
+	// "restore it first" error rather than a silent no-op.
+	if sel.IsHeader || (sel.Kind != ui.SectionInstances && sel.Kind != ui.SectionArchived) {
 		return m, nil
 	}
 	selected := m.sidebar.GetSelectedInstance()
