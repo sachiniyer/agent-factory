@@ -2,29 +2,29 @@
 
 Agent Factory reads two config files, merged field by field:
 
-1. **Global** — `~/.agent-factory/config.json`: your personal defaults, applied everywhere.
-2. **In-repo** — `<repo-root>/.agent-factory/config.json`: checked into a repository, applied whenever `af` runs in that repo.
+1. **Global** — `~/.agent-factory/config.toml`: your personal defaults, applied everywhere.
+2. **In-repo** — `<repo-root>/.agent-factory/config.toml`: checked into a repository, applied whenever `af` runs in that repo.
 
 Precedence is **app defaults → global config → in-repo config**: an in-repo field overrides the global value only when it is set, and `program_overrides` merges per key (an in-repo entry wins for that agent; global entries for other agents still apply).
 
+Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you are upgrading from a version that used `config.json`, see [Migrating from JSON](#migrating-from-json) below; the change is automatic.
+
 ## Global config
 
-`~/.agent-factory/config.json`:
+`~/.agent-factory/config.toml`:
 
-```json
-{
-  "default_program": "claude",
-  "program_overrides": {
-    "claude": "/home/me/.local/bin/claude --dangerously-skip-permissions"
-  },
-  "auto_yes": false,
-  "daemon_poll_interval": 1000,
-  "branch_prefix": "username/",
-  "detach_keys": "ctrl-w",
-  "log_max_size_mb": 50,
-  "log_max_backups": 2,
-  "update_channel": "stable"
-}
+```toml
+default_program = "claude"
+auto_yes = false
+daemon_poll_interval = 1000
+branch_prefix = "username/"
+detach_keys = "ctrl-w"
+log_max_size_mb = 50
+log_max_backups = 2
+update_channel = "stable"
+
+[program_overrides]
+claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 ```
 
 | Field | Description |
@@ -38,19 +38,17 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
 | `log_max_size_mb` | Size cap in MB for `agent-factory.log` and the per-task watch-script logs before they are rotated (defaults to 50). Must be positive. |
 | `log_max_backups` | How many rotated logs (`agent-factory.log.1`, `.2`, ...) to keep per log file; older ones are deleted (defaults to 2). `0` keeps none. |
 | `update_channel` | Release channel that auto-update and `af upgrade` follow: `stable` (default) tracks manual `1.x.y` releases only; `preview` opts into the automatic `1.x.y-preview-z` prereleases cut every 3 hours. Any other value falls back to `stable` with a warning. See [release-process.md](release-process.md). |
-| `root_agents` | Opt-in map of repositories that get an always-ensured `root` agent (default: none). See [Root agents](#root-agents-always-ensured). |
+| `root_agents` | Opt-in table of repositories that get an always-ensured `root` agent (default: none). See [Root agents](#root-agents-always-ensured). |
+| `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
 ### Root agents (always-ensured)
 
 `root_agents` opts a repository into a **root agent**: a reserved session titled `root` that the daemon guarantees is always running. It is created **in-place** at the repo root (the `af sessions create --here` shape — no worktree or branch is created; killing it never touches your working tree or branch), and if its tmux session dies or vanishes, the daemon re-creates it automatically.
 
-```json
-{
-  "root_agents": {
-    "/home/me/myrepo": {},
-    "~/work/other": { "program": "claude --model opus", "auto_yes": false }
-  }
-}
+```toml
+[root_agents]
+"/home/me/myrepo" = {}
+"~/work/other" = { program = "claude --model opus", auto_yes = false }
 ```
 
 Keys are repository paths (a leading `~` expands to your home directory). Per-repo profile fields:
@@ -62,7 +60,7 @@ Keys are repository paths (a leading `~` expands to your home directory). Per-re
 
 Behavior and guarantees:
 
-- **Strictly opt-in and global-only.** Nothing gets a root agent unless you add it here, in *your* `~/.agent-factory/config.json`. The key is rejected in in-repo configs, so cloning a repository can never opt your machine into an always-on agent.
+- **Strictly opt-in and global-only.** Nothing gets a root agent unless you add it here, in *your* `~/.agent-factory/config.toml`. The key is rejected in in-repo configs, so cloning a repository can never opt your machine into an always-on agent.
 - **Adopt, never clobber.** If a session titled `root` already exists and is alive — however it was created — the daemon leaves it completely alone. Only a `root` whose tmux has died (status `Dead`) or that is missing entirely is (re-)created.
 - **The name `root` is reserved.** Normal session creation (TUI, `af sessions create`, the API, task spawns) rejects the title `root` (case-insensitively); auto-derived titles skip it.
 - **An explicit kill is respected.** If you kill the `root` session (TUI `D`, `af sessions kill root`), the daemon does not resurrect it until the next daemon restart, at which point the configured state is re-asserted.
@@ -70,6 +68,27 @@ Behavior and guarantees:
 - Changes to `root_agents` are picked up on the next **daemon restart**.
 
 Because the default profile skips permission prompts and auto-accepts, only opt in repositories where you are comfortable with a fully autonomous agent running at the repo root.
+
+### Key bindings (`[keys]`)
+
+The TUI's key bindings are rebindable from a `[keys]` table. Each entry maps an **action** to a key string or a list of key strings, replacing that action's default binding entirely; actions you don't list keep their defaults.
+
+```toml
+[keys]
+quit = "Q"
+new = "c"
+up = ["u", "ctrl+p"]
+tasks = "ctrl+t"
+```
+
+- Key strings are the forms the terminal reports: a single character (`Q`, `/`, `?`), a named key (`up`, `enter`, `f5`, `space`), or a `ctrl+`/`alt+`/`shift+` combination (`ctrl+t`, `shift+up`).
+- **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `tasks`, `search`, `open_pr`, `copy_pr`, `hooks`, `open_pane`, `hide_pane`, `collapse`, `expand`, `next_section`, `prev_section`. (Run `af keys` to print the full effective table.)
+- **Reserved keys** cannot be bound: `enter`, `tab`, `shift+tab`, `esc`, the digits `1`–`9` (tab jump), and `ctrl+]` (the fixed exit from interactive mode) — plus `ctrl+c`, which is always a hard exit. Structural keys like `enter`/`tab` are likewise not rebindable actions.
+- Any problem — an unknown action, an unparseable or reserved key, or two actions bound to the same key — is a **hard error at startup** that names the file and the offending action, so a typo can't silently leave you with a dead key. The bottom menu and the `?` help overlay both reflect your rebinds.
+- **Global-only.** `keys` is rejected in in-repo configs — a cloned repository can never rebind your terminal.
+- **TOML-only.** The keymap exists only in `config.toml`; a `keys` block in a legacy `config.json` is ignored with a warning.
+
+Run `af keys` to see the effective bindings (defaults plus your rebinds).
 
 ### Choosing the agent
 
@@ -83,40 +102,61 @@ af -p aider
 
 ## In-repo config
 
-A repository can carry its own configuration in `<repo-root>/.agent-factory/config.json`, so every clone gets the same setup:
+A repository can carry its own configuration in `<repo-root>/.agent-factory/config.toml`, so every clone gets the same setup:
 
-```json
-{
-  "default_program": "codex",
-  "program_overrides": {
-    "codex": "/usr/local/bin/codex --profile work"
-  },
-  "post_worktree_commands": ["npm install"],
-  "remote_hooks": {
-    "launch_cmd": "./infra/launch.sh",
-    "list_cmd": "./infra/list.sh",
-    "attach_cmd": "./infra/attach.sh",
-    "delete_cmd": "./infra/delete.sh",
-    "terminal_cmd": "./infra/terminal.sh"
-  }
-}
+```toml
+default_program = "codex"
+post_worktree_commands = ["npm install"]
+
+[program_overrides]
+codex = "/usr/local/bin/codex --profile work"
+
+[remote_hooks]
+launch_cmd = "./infra/launch.sh"
+list_cmd = "./infra/list.sh"
+attach_cmd = "./infra/attach.sh"
+delete_cmd = "./infra/delete.sh"
+terminal_cmd = "./infra/terminal.sh"
 ```
+
+> **TOML top-level ordering:** put plain keys and arrays (like `post_worktree_commands`) *above* any `[table]` header. Once a table is opened, every following bare key belongs to it — that is TOML, not an af rule.
 
 | Field | Scope |
 |-------|-------|
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
-| `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `"post_worktree_commands": []`. |
-| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel` | Global only. Setting them in-repo is rejected with an error naming the key. |
+| `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
+| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `root_agents` | Global only. Setting them in-repo is rejected with an error naming the key. |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `H` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 
+### In-repo file name: `config.toml` or `config.json`
+
+Because the in-repo file is **checked into your repository**, both names are accepted indefinitely: `<repo-root>/.agent-factory/config.toml` **or** `<repo-root>/.agent-factory/config.json`. This is deliberate — a repo shared with collaborators still on an older `af` (which only understands `config.json`) must keep working, so `af` never renames a checked-in file out from under them.
+
+- New in-repo files that `af` writes (e.g. saving worktree hooks from the TUI) are created as `config.toml`.
+- An existing `config.json` is updated in place, still as JSON, so your collaborators' `af` keeps reading it.
+- A repo carrying **both** `config.toml` **and** `config.json` is a hard error naming both files — `af` will not guess which is live. Keep exactly one.
+
+If your whole team is on a current `af`, prefer `config.toml`. While versions are mixed, keep `config.json`.
+
 ### Relative hook paths
 
-Relative `remote_hooks` paths (like `./infra/launch.sh` above) resolve against the repository root — the repo whose `.agent-factory/config.json` was loaded; for sessions in linked worktrees that is the main repository root — so checked-in hook scripts work no matter what the working directory of `af` or its daemon is. Bare names without a path separator (e.g. `bash`) keep normal `$PATH` lookup. See [remote-hooks.md](remote-hooks.md#command-path-resolution) for the full rules.
+Relative `remote_hooks` paths (like `./infra/launch.sh` above) resolve against the repository root — the repo whose `.agent-factory/config.toml` was loaded; for sessions in linked worktrees that is the main repository root — so checked-in hook scripts work no matter what the working directory of `af` or its daemon is. Bare names without a path separator (e.g. `bash`) keep normal `$PATH` lookup. See [remote-hooks.md](remote-hooks.md#command-path-resolution) for the full rules.
 
 ### Trust
 
-An in-repo config executes what it configures: `post_worktree_commands` run after each worktree is created, and `remote_hooks` and `program_overrides` values are invoked as shell commands. Cloning a repository and running `af` in it implies trusting that repo's `.agent-factory/config.json`. The first time a config carrying such fields loads (and whenever its content changes), `af` records one log line naming the fields and the file's content hash.
+An in-repo config executes what it configures: `post_worktree_commands` run after each worktree is created, and `remote_hooks` and `program_overrides` values are invoked as shell commands. Cloning a repository and running `af` in it implies trusting that repo's in-repo config. The first time a config carrying such fields loads (and whenever its content changes), `af` records one log line naming the fields and the file's content hash.
+
+## Migrating from JSON
+
+Earlier versions stored config as `config.json`. The move to TOML is **automatic and one-time** — you don't run anything:
+
+- The first time a current `af` starts and finds a `~/.agent-factory/config.json` but no `config.toml`, it reads your settings, writes an equivalent `config.toml`, and renames the original to `config.json.bak`. From then on `config.toml` is the file to edit; `config.json.bak` is kept as a backup you can delete once you're happy.
+- If both `config.toml` and `config.json` are ever present, `config.toml` wins and `config.json` is ignored (with a warning). Delete or rename the stray `config.json` to silence it.
+- A `config.json` that can't be parsed is **left untouched** with an error telling you what's wrong — it is not converted until it's valid, so you never lose settings to a half-broken file.
+- If you downgrade to an older `af` after converting, it won't see your `config.toml` and will regenerate a default `config.json`. Your settings are safe in `config.toml` (and `config.json.bak`); when you upgrade again, `config.toml` takes over. To restore the old file explicitly, `mv config.json.bak config.json` before downgrading.
+
+The **in-repo** file is not auto-converted — see [In-repo file name](#in-repo-file-name-configtoml-or-configjson).
 
 ## Where state lives
 
@@ -124,7 +164,8 @@ All data (sessions, tasks) is scoped to the current git repository — the TUI s
 
 | Path | Contents |
 |------|----------|
-| `~/.agent-factory/config.json` | Global config. |
+| `~/.agent-factory/config.toml` | Global config. |
+| `~/.agent-factory/config.json.bak` | Backup of your pre-TOML config, left by the one-time migration. Safe to delete. |
 | `~/.agent-factory/instances/<repoID>/instances.json` | Persisted sessions, per repo. |
 | `~/.agent-factory/tasks.json` | Tasks (see [tasks.md](tasks.md)). |
 | `~/.agent-factory/logs/task-<id>.log` | Per-task watch-script logs. Rotated with the same `log_max_size_mb`/`log_max_backups` policy as the application log (`task-<id>.log.1`, `.2`). |
