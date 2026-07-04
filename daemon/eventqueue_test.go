@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -106,6 +107,105 @@ func TestEventQueue_CorruptCursorReplaysFromStart(t *testing.T) {
 	ev, _, ok, err := reopened.peek()
 	if err != nil || !ok || ev.Line != "event-0" {
 		t.Fatalf("head after corrupt cursor = %q ok=%v err=%v, want event-0", ev.Line, ok, err)
+	}
+}
+
+// TestEventQueue_MaxLineEscapeHeavyRoundTrip is the Greptile P1 regression on
+// #1136: a maxWatchLineBytes line whose JSON-escaped record is several times
+// larger (quotes, backslashes, control chars, multibyte at the boundary) must
+// survive enqueue → reopen → peek → advance intact. The original load() used a
+// bufio.Scanner whose token cap sat just above the RAW line size, so an
+// escape-inflated record silently ended the recovery scan — losing exactly the
+// events durability promised to keep.
+func TestEventQueue_MaxLineEscapeHeavyRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "ab120005")
+
+	// Escape-heavy body: every 4-byte unit escapes to ~14 JSON bytes
+	// (`"` → \", `\` → \\, tab → \t, 0x01 → ), inflating well past any
+	// 64KB token cap; a multibyte rune lands at the very end of the cap.
+	unit := "\"\\\t\x01"
+	body := strings.Repeat(unit, (maxWatchLineBytes-4)/len(unit))
+	line := body + "…" // 3-byte rune at the tail
+	if len(line) > maxWatchLineBytes {
+		t.Fatalf("test bug: line %d bytes exceeds the %d cap", len(line), maxWatchLineBytes)
+	}
+
+	if err := q.enqueue("first"); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	if err := q.enqueue(line); err != nil {
+		t.Fatalf("enqueue max line: %v", err)
+	}
+	if err := q.enqueue("last"); err != nil {
+		t.Fatalf("enqueue last: %v", err)
+	}
+
+	// Reopen: recovery must count all three records despite the oversized one.
+	reopened := newEventQueue(dir, "ab120005")
+	if got := reopened.pendingCount(); got != 3 {
+		t.Fatalf("recovered pending = %d, want 3 (oversized record must not end the scan)", got)
+	}
+	for _, want := range []string{"first", line, "last"} {
+		ev, n, ok, err := reopened.peek()
+		if err != nil || !ok {
+			t.Fatalf("peek: ok=%v err=%v", ok, err)
+		}
+		if ev.Line != want {
+			t.Fatalf("replayed line corrupted: got %d bytes, want %d bytes (first divergence at %d)",
+				len(ev.Line), len(want), firstDivergence(ev.Line, want))
+		}
+		if err := reopened.advance(n); err != nil {
+			t.Fatalf("advance: %v", err)
+		}
+	}
+}
+
+func firstDivergence(a, b string) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return min(len(a), len(b))
+}
+
+// TestEventQueue_TornTrailingRecordTruncated: a torn append (daemon died
+// mid-write, no trailing newline) is discarded on reopen and the file
+// truncated back to a record boundary, so the next enqueue cannot glue two
+// records into one corrupt line.
+func TestEventQueue_TornTrailingRecordTruncated(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "ab120006")
+	if err := q.enqueue("whole"); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	f, err := os.OpenFile(q.path, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := f.WriteString(`{"seq":2,"ts":"2026-07-04T`); err != nil { // no newline: torn
+		t.Fatalf("write torn tail: %v", err)
+	}
+	_ = f.Close()
+
+	reopened := newEventQueue(dir, "ab120006")
+	if got := reopened.pendingCount(); got != 1 {
+		t.Fatalf("pending = %d, want 1 (torn tail is not an event)", got)
+	}
+	if err := reopened.enqueue("after"); err != nil {
+		t.Fatalf("enqueue after torn tail: %v", err)
+	}
+	ev, n, ok, err := reopened.peek()
+	if err != nil || !ok || ev.Line != "whole" {
+		t.Fatalf("head = %q ok=%v err=%v, want whole", ev.Line, ok, err)
+	}
+	if err := reopened.advance(n); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	ev, _, ok, err = reopened.peek()
+	if err != nil || !ok || ev.Line != "after" {
+		t.Fatalf("second record = %q ok=%v err=%v, want intact %q", ev.Line, ok, err, "after")
 	}
 }
 

@@ -120,7 +120,11 @@ func (q *eventQueue) load() {
 	}
 
 	// Count the pending events and recover the sequence counter. The pending
-	// suffix is bounded by watcherQueueMaxBytes, so this scan is cheap.
+	// suffix is bounded by watcherQueueMaxBytes, so this scan is cheap. A
+	// bufio.Reader (not a Scanner) on purpose: JSON-escaping can inflate a
+	// maxWatchLineBytes line severalfold, and a Scanner's token cap would make
+	// the count silently stop at the first oversized record — losing exactly
+	// the events durability promised to keep.
 	f, err := os.Open(q.path)
 	if err != nil {
 		return
@@ -129,12 +133,29 @@ func (q *eventQueue) load() {
 	if _, err := f.Seek(q.offset, 0); err != nil {
 		return
 	}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), maxWatchLineBytes+1024)
-	for sc.Scan() {
+	br := bufio.NewReaderSize(f, 64*1024)
+	scanned := q.offset
+	for {
+		raw, err := br.ReadBytes('\n')
+		if err != nil {
+			if len(raw) > 0 {
+				// A trailing record with no newline is a torn append (daemon
+				// died mid-write). It was never fully enqueued; truncate it
+				// away so the next append starts on a record boundary instead
+				// of gluing two records into one corrupt line.
+				log.WarningLog.Printf("watch task %s: discarding %d bytes of torn trailing event-queue record", q.taskID, len(raw))
+				if terr := os.Truncate(q.path, scanned); terr != nil {
+					log.WarningLog.Printf("watch task %s: failed to truncate torn event-queue tail: %v", q.taskID, terr)
+				} else {
+					q.size = scanned
+				}
+			}
+			return
+		}
+		scanned += int64(len(raw))
 		q.pending++
 		var ev queuedEvent
-		if err := json.Unmarshal(sc.Bytes(), &ev); err == nil && ev.Seq > q.seq {
+		if uerr := json.Unmarshal(raw, &ev); uerr == nil && ev.Seq > q.seq {
 			q.seq = ev.Seq
 		}
 	}
@@ -167,10 +188,20 @@ func (q *eventQueue) enqueue(line string) error {
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
-	q.size += int64(n)
 	if err != nil {
+		// A short write would leave a torn record that corrupts the NEXT
+		// append; truncate back to the last record boundary so the file stays
+		// record-aligned (the caller drops this event — same degradation as
+		// enqueue failing outright).
+		if n > 0 {
+			if terr := os.Truncate(q.path, q.size); terr != nil {
+				log.WarningLog.Printf("watch task %s: failed to truncate short-written event record: %v", q.taskID, terr)
+				q.size += int64(n)
+			}
+		}
 		return err
 	}
+	q.size += int64(n)
 	q.pending++
 
 	return q.dropOldestOverCapsLocked()
