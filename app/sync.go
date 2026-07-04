@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -10,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // prInfoStaleAfter is how long a fetched PR info entry is considered fresh.
@@ -29,6 +31,16 @@ type tickRefreshExternalMessage struct{}
 type snapshotFetchedMsg struct {
 	data []session.InstanceData
 	err  error
+	// tasks is the repo's task list re-read from disk on the same poll (#1168).
+	// Tasks are a disk-backed store shared between the TUI and the daemon — not
+	// solely daemon-owned like sessions (#960) — so an out-of-band `af tasks
+	// add|update|remove` is picked up here and live-projected into the rail/
+	// overlay instead of only appearing after a relaunch. Carried alongside the
+	// session snapshot so both external changes ride one 750ms poll. tasksErr is
+	// independent of err: a warming daemon can fail the session RPC while the
+	// disk task read still succeeds.
+	tasks    []task.Task
+	tasksErr error
 }
 
 // prInfoUpdatedMsg is returned by an async PR info fetch.
@@ -84,7 +96,12 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	fetch := m.snapshotFetcher
 	return func() tea.Msg {
 		data, err := fetch(repoID)
-		return snapshotFetchedMsg{data: data, err: err}
+		// Re-read the repo's tasks on the same poll so an out-of-band task
+		// change live-projects into the TUI (#1168). Independent of the session
+		// snapshot: its own error is carried separately so a warming-daemon RPC
+		// failure never suppresses a successful disk task read.
+		tasks, tasksErr := task.LoadTasksForCurrentRepo()
+		return snapshotFetchedMsg{data: data, err: err, tasks: tasks, tasksErr: tasksErr}
 	}
 }
 
@@ -235,6 +252,40 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 		return false
 	}
 	return m.reconcileSnapshot(msg.data)
+}
+
+// refreshTasks mirrors an out-of-band tasks.json change (a CLI/daemon `af tasks
+// add|update|remove`, or a run that bumped a task's last-run status) into the
+// running TUI, closing the live-projection gap that left a CLI-created task
+// invisible until relaunch (#1168 — the tasks sibling of the #959 tab fix).
+// Tasks are a disk-backed store shared between the TUI and the daemon, so the
+// TUI re-reads them on the snapshot poll rather than through the daemon's
+// session Snapshot. The automations rail (store) always mirrors the fresh list;
+// the tasks overlay pane is re-synced only when the user is not mid-edit, so a
+// background refresh can never clobber an in-progress create/edit or unsaved
+// deletions. Returns whether anything visible changed (the caller repaints on a
+// diff). A read error leaves the last-known list intact, matching handleSnapshot.
+func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
+	if tasksErr != nil {
+		log.WarningLog.Printf("failed to refresh tasks: %v", tasksErr)
+		return false
+	}
+	changed := false
+	if !reflect.DeepEqual(m.store.GetTasks(), tasks) {
+		m.store.SetTasks(tasks)
+		changed = true
+	}
+	// The overlay pane owns transient edit state (create/edit buffers, pending
+	// deletions): only re-sync it while idle so a background refresh never wipes
+	// the user's in-flight form or unsaved deletes.
+	sp := m.automations.TaskPane()
+	if !sp.IsEditing() && !sp.IsCreating() && !sp.IsDirty() {
+		if !reflect.DeepEqual(sp.GetTasks(), tasks) {
+			sp.SetTasks(tasks)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // reconcileSnapshot mirrors the projection store to the daemon's authoritative

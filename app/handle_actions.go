@@ -521,11 +521,18 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 	return m, m.selectionChanged()
 }
 
+// noPRForSessionErr is the actionable message surfaced when p/P is pressed on a
+// session that has no PR yet, so the key press is never a silent no-op (#1170).
+var noPRForSessionErr = fmt.Errorf("no PR for this session yet — push a branch / open a PR first")
+
 // handleOpenPR opens the PR URL in the browser.
 func (m *home) handleOpenPR() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.GetPRInfo() == nil {
+	if selected == nil {
 		return m, nil
+	}
+	if selected.GetPRInfo() == nil {
+		return m, m.handleError(noPRForSessionErr)
 	}
 	url := selected.GetPRInfo().URL
 	var openCmd *exec.Cmd
@@ -548,8 +555,11 @@ func (m *home) handleOpenPR() (tea.Model, tea.Cmd) {
 // handleCopyPR copies the PR URL to the clipboard.
 func (m *home) handleCopyPR() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.GetPRInfo() == nil {
+	if selected == nil {
 		return m, nil
+	}
+	if selected.GetPRInfo() == nil {
+		return m, m.handleError(noPRForSessionErr)
 	}
 	url := selected.GetPRInfo().URL
 	var copyCmd *exec.Cmd
