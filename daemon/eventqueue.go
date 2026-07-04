@@ -85,6 +85,11 @@ type eventQueue struct {
 
 	dropped     int // events dropped to the overflow caps, for the drop log
 	lastDropLog time.Time
+
+	// now stamps each event's enqueue timestamp; a seam so tests can backdate
+	// events into the past and exercise age-based expiry deterministically,
+	// with no real-time sleep. Defaults to time.Now in production.
+	now func() time.Time
 }
 
 // eventQueueDir resolves the queue directory, creating it on first use.
@@ -108,6 +113,7 @@ func newEventQueue(dir, taskID string) *eventQueue {
 		taskID:  taskID,
 		path:    filepath.Join(dir, taskID+".jsonl"),
 		curPath: filepath.Join(dir, taskID+".cursor"),
+		now:     time.Now,
 	}
 	q.load()
 	return q
@@ -190,7 +196,7 @@ func (q *eventQueue) enqueue(line string) error {
 	defer q.mu.Unlock()
 
 	q.seq++
-	rec, err := json.Marshal(queuedEvent{Seq: q.seq, TS: time.Now(), Line: line})
+	rec, err := json.Marshal(queuedEvent{Seq: q.seq, TS: q.now(), Line: line})
 	if err != nil {
 		return err
 	}

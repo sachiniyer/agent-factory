@@ -314,18 +314,25 @@ func TestWatcherDrainExpiresAgedEvents(t *testing.T) {
 	fd := &flakyDeliver{}
 	fd.healed.Store(true)
 	s.deliver = fd.deliver
-	s.queueMaxAge = 150 * time.Millisecond
+	// A generous bound: the "fresh" event has the whole window to be delivered,
+	// which no CI stall approaches — while the stale events are backdated an
+	// hour, an enormous margin past it. The seam replaces the old
+	// "200ms sleep > 150ms max-age" race, which crossed the boundary
+	// unpredictably under arm64/CI load.
+	s.queueMaxAge = 5 * time.Second
 	queueDir, _ := s.queueDir()
 
-	// Two events queued before the watcher exists; both age past the bound.
+	// Two events queued before the watcher exists, backdated an hour so they
+	// are unambiguously past the retention bound — no real-time sleep.
 	seed := newEventQueue(queueDir, "ab130005")
+	seed.now = func() time.Time { return time.Now().Add(-time.Hour) }
 	for _, line := range []string{"stale-1", "stale-2"} {
 		if err := seed.enqueue(line); err != nil {
 			t.Fatalf("seed enqueue: %v", err)
 		}
 	}
-	time.Sleep(200 * time.Millisecond)
-	// A fresh third event right at reload time must still be delivered.
+	// A fresh third event stamped at real now must still be delivered.
+	seed.now = time.Now
 	if err := seed.enqueue("fresh"); err != nil {
 		t.Fatalf("seed enqueue fresh: %v", err)
 	}
