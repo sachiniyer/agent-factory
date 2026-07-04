@@ -13,6 +13,7 @@ import (
 	cmdutil "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -72,6 +73,14 @@ var (
 			cfg, err := config.ResolveConfig(repo.Root)
 			if err != nil {
 				return err
+			}
+
+			// Apply [keys] rebinds before the TUI starts (#1026): the maps
+			// are read concurrently once bubbletea runs, and the config was
+			// already validated at load, so an error here is a programming
+			// error, not a user one.
+			if err := keys.ApplyOverrides(cfg.KeymapOverrides()); err != nil {
+				return fmt.Errorf("failed to apply [keys] rebinds: %w", err)
 			}
 
 			// Program flag overrides config. Both are restricted to bare

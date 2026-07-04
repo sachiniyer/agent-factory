@@ -2,6 +2,9 @@ package app
 
 import (
 	"fmt"
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -11,6 +14,62 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// helpKey renders the effective key glyph(s) for an action from the generated
+// binding table, so a [keys] rebind surfaces in the help overlay exactly as
+// it does in the bottom menu and dispatch (#1026 — one source of truth). The
+// help text is the single place these bindings are shown in full, so it must
+// never fall back to a hardcoded literal.
+func helpKey(name keys.KeyName) string {
+	return keys.GlobalKeyBindings[name].Help().Key
+}
+
+// helpRow is one key→description line in the help overlay. key is a
+// pre-rendered glyph string (usually from helpKey); literal is used for the
+// handful of entries with no rebindable action (e.g. the detach key or the
+// run-task shortcut).
+type helpRow struct {
+	key  string
+	desc string
+}
+
+// helpSection is a titled group of help rows.
+type helpSection struct {
+	title string
+	rows  []helpRow
+}
+
+// renderHelpSections lays the sections out with a single key column whose
+// width fits the widest effective key across ALL sections, so the dashes stay
+// aligned no matter how wide a rebind makes a key. Computing the width at
+// render time (rather than the old hardcoded padding) is what keeps the
+// overlay correct under arbitrary rebinds.
+func renderHelpSections(header string, sections []helpSection) string {
+	width := 0
+	for _, s := range sections {
+		for _, r := range s.rows {
+			if w := lipgloss.Width(r.key); w > width {
+				width = w
+			}
+		}
+	}
+
+	var lines []string
+	lines = append(lines, header, "")
+	for _, s := range sections {
+		lines = append(lines, headerStyle.Render(s.title))
+		for _, r := range s.rows {
+			pad := strings.Repeat(" ", width-lipgloss.Width(r.key)+2)
+			lines = append(lines, keyStyle.Render(r.key)+pad+descStyle.Render("- "+r.desc))
+		}
+		lines = append(lines, "")
+	}
+	// Drop the trailing blank so the overlay isn't bottom-padded.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+}
 
 type helpText interface {
 	// toContent returns the help UI content.
@@ -38,49 +97,55 @@ func helpStart(instance *session.Instance) helpText {
 }
 
 func (h helpTypeGeneral) toContent() string {
-	content := lipgloss.JoinVertical(lipgloss.Left,
+	// Every key glyph below is pulled from the generated binding table via
+	// helpKey, so [keys] rebinds appear here identically to the bottom menu
+	// (#1026). The two entries with no rebindable action — the run-task
+	// shortcut and the tmux detach key — stay literal.
+	navKeys := helpKey(keys.KeyUp) + ", " + helpKey(keys.KeyDown)
+	header := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render(fmt.Sprintf("Agent Factory v%s", Version)),
 		"",
 		"A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.",
-		"",
-		headerStyle.Render("Managing:"),
-		keyStyle.Render("n")+descStyle.Render("         - Create a new session"),
-		keyStyle.Render("N")+descStyle.Render("         - Create a new remote session (requires remote_hooks config)"),
-		keyStyle.Render("S")+descStyle.Render("         - Manage tasks (n inside the manager creates one)"),
-		keyStyle.Render("r")+descStyle.Render("         - Run selected task now"),
-		keyStyle.Render("D")+descStyle.Render("         - Kill (delete) the selected session"),
-		keyStyle.Render("↑/k, ↓/j")+descStyle.Render("  - Navigate between sessions"),
-		keyStyle.Render("↵")+descStyle.Render("         - Interact with the session in its pane (all keys go to it)"),
-		keyStyle.Render("ctrl+]")+descStyle.Render("    - Leave interactive mode (back to navigation)"),
-		keyStyle.Render("o")+descStyle.Render("         - Attach to the selected session full-screen"),
-		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("    - Detach from a full-screen session"),
-		"",
-		headerStyle.Render("Workspace:"),
-		keyStyle.Render("tab")+descStyle.Render("       - Cycle focus: tree → open panes → automations"),
-		keyStyle.Render("shift+tab")+descStyle.Render(" - Cycle focus backwards"),
-		keyStyle.Render("s")+descStyle.Render("         - Open the selected tab as a pane (or focus its pane)"),
-		keyStyle.Render("x")+descStyle.Render("         - Hide the focused pane (the tab keeps running)"),
-		keyStyle.Render("↑/k, ↓/j")+descStyle.Render("  - Navigate the tree (instances and their tabs)"),
-		keyStyle.Render("h/←")+descStyle.Render("       - Collapse the selected instance's tabs"),
-		keyStyle.Render("l/→")+descStyle.Render("       - Expand the selected instance's tabs"),
-		"",
-		headerStyle.Render("Configuration:"),
-		keyStyle.Render("H")+descStyle.Render("         - Open the worktree hooks editor"),
-		"",
-		headerStyle.Render("GitHub PR:"),
-		keyStyle.Render("p")+descStyle.Render("         - Open PR in browser"),
-		keyStyle.Render("P")+descStyle.Render("         - Copy PR URL to clipboard"),
-		"",
-		headerStyle.Render("Tabs:"),
-		keyStyle.Render("1-9")+descStyle.Render("       - Select a tab by number (s opens it, enter attaches)"),
-		keyStyle.Render("t")+descStyle.Render("         - Open a new terminal tab"),
-		keyStyle.Render("w")+descStyle.Render("         - Close the current tab (the agent tab can't be closed)"),
-		keyStyle.Render("shift-↓/↑")+descStyle.Render(" - Scroll in the current tab"),
-		"",
-		headerStyle.Render("Other:"),
-		keyStyle.Render("q")+descStyle.Render("         - Quit the application"),
 	)
-	return content
+	return renderHelpSections(header, []helpSection{
+		{title: "Managing:", rows: []helpRow{
+			{helpKey(keys.KeyNew), "Create a new session"},
+			{helpKey(keys.KeyNewRemote), "Create a new remote session (requires remote_hooks config)"},
+			{helpKey(keys.KeyTaskList), "Manage tasks (n inside the manager creates one)"},
+			{"r", "Run selected task now"},
+			{helpKey(keys.KeyKill), "Kill (delete) the selected session"},
+			{navKeys, "Navigate between sessions"},
+			{helpKey(keys.KeyEnter), "Interact with the session in its pane (all keys go to it)"},
+			{helpKey(keys.KeyExitInteractive), "Leave interactive mode (back to navigation)"},
+			{helpKey(keys.KeyAttach), "Attach to the selected session full-screen"},
+			{tmux.DetachKeyDisplay, "Detach from a full-screen session"},
+		}},
+		{title: "Workspace:", rows: []helpRow{
+			{helpKey(keys.KeyTab), "Cycle focus: tree → open panes → automations"},
+			{helpKey(keys.KeyShiftTab), "Cycle focus backwards"},
+			{helpKey(keys.KeyOpenPane), "Open the selected tab as a pane (or focus its pane)"},
+			{helpKey(keys.KeyHidePane), "Hide the focused pane (the tab keeps running)"},
+			{navKeys, "Navigate the tree (instances and their tabs)"},
+			{helpKey(keys.KeyLeft), "Collapse the selected instance's tabs"},
+			{helpKey(keys.KeyRight), "Expand the selected instance's tabs"},
+		}},
+		{title: "Configuration:", rows: []helpRow{
+			{helpKey(keys.KeyHooks), "Open the worktree hooks editor"},
+		}},
+		{title: "GitHub PR:", rows: []helpRow{
+			{helpKey(keys.KeyOpenPR), "Open PR in browser"},
+			{helpKey(keys.KeyCopyPR), "Copy PR URL to clipboard"},
+		}},
+		{title: "Tabs:", rows: []helpRow{
+			{helpKey(keys.KeyJumpTab), "Select a tab by number (s opens it, enter attaches)"},
+			{helpKey(keys.KeyNewTab), "Open a new terminal tab"},
+			{helpKey(keys.KeyCloseTab), "Close the current tab (the agent tab can't be closed)"},
+			{helpKey(keys.KeyShiftDown) + "/" + helpKey(keys.KeyShiftUp), "Scroll in the current tab"},
+		}},
+		{title: "Other:", rows: []helpRow{
+			{helpKey(keys.KeyQuit), "Quit the application"},
+		}},
+	})
 }
 
 func (h helpTypeInstanceStart) toContent() string {
@@ -89,9 +154,10 @@ func (h helpTypeInstanceStart) toContent() string {
 	// handleCloseTab in app/handle_actions.go) — so only advertise the tab keys
 	// that actually work for the instance type. 1-9 jump works for both (#988);
 	// tabs also live in the left-rail tree since the layout cutover (#1024 PR 4).
-	tabHelp := keyStyle.Render("1-9 jump") + descStyle.Render(" - Select a tab (s opens it; t new tab, w close; tabs live in the tree)")
+	openPane, newTab, closeTab := helpKey(keys.KeyOpenPane), helpKey(keys.KeyNewTab), helpKey(keys.KeyCloseTab)
+	tabHelp := keyStyle.Render("1-9 jump") + descStyle.Render(fmt.Sprintf(" - Select a tab (%s opens it; %s new tab, %s close; tabs live in the tree)", openPane, newTab, closeTab))
 	if h.instance.IsRemote() {
-		tabHelp = keyStyle.Render("1-9 jump") + descStyle.Render(" - Select a tab (s opens it; tabs live in the tree)")
+		tabHelp = keyStyle.Render("1-9 jump") + descStyle.Render(fmt.Sprintf(" - Select a tab (%s opens it; tabs live in the tree)", openPane))
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Instance Created"),
@@ -103,10 +169,10 @@ func (h helpTypeInstanceStart) toContent() string {
 			lipgloss.NewStyle().Bold(true).Render(h.instance.Program))),
 		"",
 		headerStyle.Render("Managing:"),
-		keyStyle.Render("↵")+descStyle.Render("     - Interact with the session in its pane (ctrl+] returns to nav)"),
-		keyStyle.Render("o")+descStyle.Render("     - Attach to the session full-screen"),
+		keyStyle.Render(helpKey(keys.KeyEnter))+descStyle.Render(fmt.Sprintf("     - Interact with the session in its pane (%s returns to nav)", helpKey(keys.KeyExitInteractive))),
+		keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render("     - Attach to the session full-screen"),
 		tabHelp,
-		keyStyle.Render("D")+descStyle.Render("     - Kill (delete) the selected session"),
+		keyStyle.Render(helpKey(keys.KeyKill))+descStyle.Render("     - Kill (delete) the selected session"),
 	)
 	return content
 }
@@ -128,8 +194,8 @@ func (h helpTypeInteractive) toContent() string {
 		descStyle.Render("goes to the agent/shell. The pane's frame turns green while it has the"),
 		descStyle.Render("keyboard, and the instances rail stays visible."),
 		"",
-		descStyle.Render("Press ")+keyStyle.Render("ctrl+]")+descStyle.Render(" to return to navigation."),
-		descStyle.Render("Full-screen attach is still available on ")+keyStyle.Render("o")+descStyle.Render(" (from nav mode)."),
+		descStyle.Render("Press ")+keyStyle.Render(helpKey(keys.KeyExitInteractive))+descStyle.Render(" to return to navigation."),
+		descStyle.Render("Full-screen attach is still available on ")+keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render(" (from nav mode)."),
 	)
 	return content
 }

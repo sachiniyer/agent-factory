@@ -4,9 +4,36 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
 )
+
+// TestHelpReflectsKeymapRebinds is the regression guard for the #1141
+// play-test blocker 2: the help overlay rendered hardcoded key literals, so a
+// [keys] rebind showed everywhere EXCEPT help. It must now build from the same
+// generated binding table as dispatch and the bottom menu.
+func TestHelpReflectsKeymapRebinds(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{
+		"quit": {"Q"},
+		"new":  {"c"},
+		"up":   {"u", "ctrl+p"},
+	}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	content := helpTypeGeneral{}.toContent()
+
+	// Rebound keys must appear...
+	for _, want := range []string{"Q", "c", "u/ctrl+p"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("help must show rebound key %q; got:\n%s", want, content)
+		}
+	}
+	// ...and the replaced defaults must be gone from their action lines.
+	if strings.Contains(content, "q         - Quit") || strings.Contains(content, "↑/k, ↓/j") {
+		t.Errorf("help still shows default keys after a rebind; got:\n%s", content)
+	}
+}
 
 // TestGeneralHelpNavigationMatchesBindings guards against regressing #764, where
 // the help screen documented "↑/j, ↓/k" while the canonical bindings in

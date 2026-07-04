@@ -3,11 +3,13 @@ package app
 import (
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -161,7 +163,7 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if !consumed {
-		if msg.String() == "ctrl+c" || msg.String() == "q" {
+		if msg.String() == "ctrl+c" || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
 			return m.handleQuit()
 		}
 	}
@@ -194,7 +196,7 @@ func (m *home) handleStateHooks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !consumed {
-		if msg.String() == "ctrl+c" || msg.String() == "q" {
+		if msg.String() == "ctrl+c" || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
 			return m.handleQuit()
 		}
 	}

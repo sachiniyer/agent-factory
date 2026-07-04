@@ -1125,6 +1125,73 @@ update_channel = "nightly"
 		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
 	})
 
+	t.Run("keys table: normalizes strings and lists", func(t *testing.T) {
+		writeToml(t, `
+default_program = "claude"
+
+[keys]
+quit = "Q"
+up = ["u", "ctrl+p"]
+`)
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		overrides := cfg.KeymapOverrides()
+		assert.Equal(t, []string{"Q"}, overrides["quit"])
+		assert.Equal(t, []string{"u", "ctrl+p"}, overrides["up"])
+	})
+
+	t.Run("keys table: absent means nil overrides", func(t *testing.T) {
+		writeToml(t, `default_program = "claude"`+"\n")
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		assert.Nil(t, cfg.KeymapOverrides())
+	})
+
+	t.Run("keys table: hard errors name the file and action", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			content string
+			wantErr string
+		}{
+			{"unknown action", "[keys]\nwarp = \"z\"\n", "unknown action"},
+			{"reserved key", "[keys]\nquit = \"enter\"\n", "reserved"},
+			{"conflict", "[keys]\nkill = \"q\"\n", "bound to both"},
+			{"invalid key string", "[keys]\nquit = \"space bar\"\n", "not a valid key"},
+			{"non-string value", "[keys]\nquit = 5\n", "expected a key string"},
+			{"non-string list item", "[keys]\nquit = [5]\n", "expected a key string"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				writeToml(t, "default_program = \"claude\"\n"+tc.content)
+
+				cfg, err := LoadConfig()
+				require.Error(t, err)
+				assert.Nil(t, cfg)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.Contains(t, err.Error(), "Config issue in")
+			})
+		}
+	})
+
+	t.Run("keys in config.json is ignored with a warning, never applied", func(t *testing.T) {
+		// The keymap is the first TOML-only surface (#1026): the json decoder
+		// does not know the field, so it must neither error nor rebind.
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+		jsonContent := `{"default_program": "claude", "keys": {"quit": "Q"}}`
+		require.NoError(t, os.WriteFile(filepath.Join(configDir, ConfigFileName), []byte(jsonContent), 0644))
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Nil(t, cfg.KeymapOverrides(), "a json config must never rebind keys")
+	})
+
 	t.Run("decodes root_agents tables", func(t *testing.T) {
 		writeToml(t, `
 default_program = "claude"

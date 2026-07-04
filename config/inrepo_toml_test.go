@@ -97,6 +97,26 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "auto_yes")
 		assert.Contains(t, err.Error(), "global setting")
+		// A non-TOML-only global key points at the resolved global config file.
+		assert.Contains(t, err.Error(), ConfigFileName)
+	})
+
+	t.Run("rejecting the TOML-only keys table points at config.toml", func(t *testing.T) {
+		// #1141 play-test minor 4: the keymap is TOML-only, so the "move it to
+		// the global config" message must name config.toml — a config.json
+		// carrying "keys" is ignored-with-warning, so directing the user there
+		// would land them in the dead path.
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		repoRoot := t.TempDir()
+		writeInRepoTomlConfig(t, repoRoot, "[keys]\nquit = \"Q\"\n")
+
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "global setting")
+		assert.Contains(t, err.Error(), TomlConfigFileName)
+		assert.NotContains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)),
+			"the keys rejection must not point at the ignored config.json path")
 	})
 
 	t.Run("rejects unknown key", func(t *testing.T) {
