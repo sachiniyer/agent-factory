@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,7 +45,21 @@ const (
 	// the rate limiter, with a running counter.
 	watcherQueueMaxEvents = 500
 	watcherQueueMaxBytes  = 256 * 1024
+
+	// watcherQueueMaxAge is the retention bound (#1129 PR 4): a queued event
+	// older than this is expired at drain time instead of delivered — a
+	// prompt about a three-day-old notification is noise, and the sources
+	// worth watching re-emit on their next poll. Expiries are logged with a
+	// count, never silent.
+	watcherQueueMaxAge = 72 * time.Hour
 )
+
+// watcherQueueCompactBytes caps the delivered prefix a queue file may
+// accumulate before it is compacted (the pending suffix rewritten to a fresh
+// file). The pending backlog is bounded by watcherQueueMaxBytes, but during a
+// long partial drain with live enqueues the delivered prefix would otherwise
+// grow without limit. Package var so tests can shrink it.
+var watcherQueueCompactBytes = int64(1024 * 1024)
 
 // queuedEvent is the on-disk record: the raw stdout line plus a per-queue
 // sequence number and enqueue timestamp for diagnostics (and the PR-4
@@ -255,7 +270,8 @@ func (q *eventQueue) peek() (ev queuedEvent, n int64, ok bool, err error) {
 }
 
 // advance consumes the oldest event AFTER its successful delivery: cursor
-// forward by the length peek reported, files removed once fully drained.
+// forward by the length peek reported, files removed once fully drained, and
+// the delivered prefix compacted away once it outgrows its cap.
 func (q *eventQueue) advance(n int64) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -276,7 +292,53 @@ func (q *eventQueue) advance(n int64) error {
 		}
 		return nil
 	}
+	if q.offset > watcherQueueCompactBytes {
+		if err := q.compactLocked(); err != nil {
+			// Compaction is an optimization; a failure must not lose the
+			// event that was just consumed. Fall through to the cursor write.
+			log.WarningLog.Printf("watch task %s: event-queue compaction failed (will retry later): %v", q.taskID, err)
+		}
+	}
 	return q.persistCursorLocked()
+}
+
+// compactLocked rewrites the queue file to just its pending suffix, dropping
+// the delivered prefix: copy suffix → temp file → rename over the original,
+// then reset the in-memory offset (the caller persists the cursor). Crash
+// safety is rename-based: a crash before the rename leaves the old
+// consistent (file, cursor) pair; a crash after the rename but before the
+// cursor write leaves a stale cursor pointing past the smaller new file,
+// which load()'s off<=size validation rejects — resetting to 0 and
+// redelivering the pending suffix (at-least-once, never loss). Callers hold
+// q.mu.
+func (q *eventQueue) compactLocked() error {
+	src, err := os.Open(q.path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = src.Close() }()
+	if _, err := src.Seek(q.offset, 0); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(q.path), q.taskID+".compact-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	n, err := io.Copy(tmp, src)
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, q.path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	q.offset, q.size = 0, n
+	return nil
 }
 
 // readEventAtLocked reads and parses one JSONL record at the given offset,

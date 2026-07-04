@@ -39,7 +39,8 @@ import (
 //     replays the backlog in order — before newer live events — once
 //     deliveries succeed again, rate-limited by the same 10/min window;
 //     the backlog is bounded (oldest dropped past 500 events / 256KB, with
-//     a logged count) and survives daemon restarts (#1129)
+//     a logged count), survives daemon restarts, and events older than 72h
+//     are expired at replay time with a logged count (#1129)
 //   - each run buffers its recent output (last 10 lines / 2KB: stdout lines
 //     that did not become delivered events, plus stderr). Non-zero exits log
 //     that tail, and the crash-loop breaker persists "errored: <exit>:
@@ -127,6 +128,7 @@ type watcherSupervisor struct {
 	stopGrace        time.Duration
 	drainBaseBackoff time.Duration
 	drainMaxBackoff  time.Duration
+	queueMaxAge      time.Duration
 }
 
 func newWatcherSupervisor() *watcherSupervisor {
@@ -146,6 +148,7 @@ func newWatcherSupervisor() *watcherSupervisor {
 		stopGrace:        watcherStopGrace,
 		drainBaseBackoff: watcherDrainBaseBackoff,
 		drainMaxBackoff:  watcherDrainMaxBackoff,
+		queueMaxAge:      watcherQueueMaxAge,
 	}
 }
 
@@ -906,7 +909,7 @@ func (w *taskWatcher) sleepStopAware(d time.Duration) bool {
 func (w *taskWatcher) drainLoop() {
 	defer w.wg.Done()
 	backoff := w.sup.drainBaseBackoff
-	replayed := 0
+	replayed, expired := 0, 0
 	for {
 		if w.stopRequested() {
 			w.stopDraining()
@@ -918,9 +921,22 @@ func (w *taskWatcher) drainLoop() {
 			w.stopDraining()
 			return
 		}
+		if ok && w.sup.queueMaxAge > 0 && time.Since(ev.TS) > w.sup.queueMaxAge {
+			// Retention (#1129): an event older than the age bound is expired
+			// instead of delivered — a prompt about a days-old notification is
+			// noise, and re-sweepable sources re-emit on their next poll.
+			// Counted and logged below, never silent.
+			if err := w.queue.advance(n); err != nil {
+				log.ErrorLog.Printf("watch task %s: failed to expire aged queued event; replay parked until the next reload: %v", w.taskID, err)
+				w.stopDraining()
+				return
+			}
+			expired++
+			continue
+		}
 		if !ok {
-			if replayed > 0 {
-				log.InfoLog.Printf("watch task %s: replayed %d queued event(s)", w.taskID, replayed)
+			if replayed > 0 || expired > 0 {
+				log.InfoLog.Printf("watch task %s: replayed %d queued event(s), expired %d older than %s", w.taskID, replayed, expired, w.sup.queueMaxAge)
 			}
 			w.stopDraining()
 			// Close the wake-up race: an event enqueued after the empty peek
