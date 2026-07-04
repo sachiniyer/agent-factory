@@ -2148,6 +2148,15 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		return "", fmt.Errorf("cannot create a tab on remote session %q: remote sessions have no local worktree and the hook protocol can't run arbitrary commands; their terminal tab comes from remote_hooks.terminal_cmd", req.Title)
 	}
 
+	// Serialize the tab spawn against an archive/kill/restore teardown+move for
+	// this session and reject if it is archived/mid-archive (#1195); see
+	// archiveExclusiveTabLock for the op-lock ordering and orphan rationale.
+	opLock, err := m.archiveExclusiveTabLock(daemonInstanceKey(repoID, req.Title), instance)
+	if err != nil {
+		return "", err
+	}
+	defer opLock.Unlock()
+
 	// Serialize against other create/tab mutations on this repo, mirroring
 	// CreateSession, so two concurrent CreateTab calls never derive the same name
 	// or interleave a spawn-then-persist with another save.
