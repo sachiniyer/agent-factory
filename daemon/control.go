@@ -449,6 +449,26 @@ func KillSession(req KillSessionRequest) error {
 	return nil
 }
 
+// ArchiveSession asks the daemon to archive a session (#1028) and returns the
+// relocated worktree's new path.
+func ArchiveSession(req ArchiveSessionRequest) (string, error) {
+	var resp ArchiveSessionResponse
+	if err := callDaemon("ArchiveSession", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.ArchivedPath, nil
+}
+
+// RestoreArchived asks the daemon to restore an archived session (#1028) and
+// returns the worktree's restored path.
+func RestoreArchived(req RestoreArchivedRequest) (string, error) {
+	var resp RestoreArchivedResponse
+	if err := callDaemon("RestoreArchived", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.WorktreePath, nil
+}
+
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
 // one attached session (#1160). Best-effort from the caller's side: the pause
 // is lease-bounded server-side, so the worst case of a failed call is the

@@ -15,6 +15,8 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
+
+	"github.com/spf13/cobra"
 )
 
 func TestRepoHasInstanceTitleScopedToRepo(t *testing.T) {
@@ -1187,5 +1189,143 @@ func TestSessionsSendPrompt_BroadcastFlagWithoutAll(t *testing.T) {
 				t.Fatalf("got cobra's generic arity error, want the actionable --all message: %v", err)
 			}
 		})
+	}
+}
+
+// setupRepoForCmd creates a real git repo, points --repo at it, and returns its
+// repo ID. It restores repoFlag on cleanup. Shared by the archive/restore CLI
+// tests, which must pass a resolvable --repo so resolveRepoID yields a repo ID.
+func setupRepoForCmd(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	repoRoot := filepath.Join(tmp, "repo-a")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	repo, err := config.RepoFromPath(repoRoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	prev := repoFlag
+	repoFlag = repoRoot
+	t.Cleanup(func() { repoFlag = prev })
+	return repo.ID
+}
+
+// runCmdCaptureStdout runs a cobra command's RunE while capturing stdout, so
+// tests can assert on the emitted JSON.
+func runCmdCaptureStdout(t *testing.T, cmd *cobra.Command, args []string) ([]byte, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	runErr := cmd.RunE(cmd, args)
+	w.Close()
+	os.Stdout = orig
+	out, _ := io.ReadAll(r)
+	return out, runErr
+}
+
+// TestSessionsArchive_HonorsRepoScopingAndReturnsPath: `af sessions archive`
+// passes the resolved --repo scope to the daemon and emits the JSON contract
+// {ok, title, archived_path}.
+func TestSessionsArchive_HonorsRepoScopingAndReturnsPath(t *testing.T) {
+	repoID := setupRepoForCmd(t)
+
+	var gotReq daemon.ArchiveSessionRequest
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, error) {
+		gotReq = req
+		if req.RepoID == "" {
+			return "", errors.New("RepoID empty: --repo scoping was dropped")
+		}
+		return "/home/u/.agent-factory/archived/" + req.RepoID + "/worker", nil
+	}
+	defer func() { archiveSessionViaDaemon = prev }()
+
+	out, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"worker"})
+	if err != nil {
+		t.Fatalf("archive returned error: %v", err)
+	}
+	if gotReq.RepoID != repoID {
+		t.Fatalf("archive RepoID = %q, want %q", gotReq.RepoID, repoID)
+	}
+	if gotReq.Title != "worker" {
+		t.Fatalf("archive Title = %q, want %q", gotReq.Title, "worker")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("output is not JSON (%q): %v", string(out), err)
+	}
+	if parsed["ok"] != true {
+		t.Fatalf("JSON ok = %v, want true", parsed["ok"])
+	}
+	if parsed["title"] != "worker" {
+		t.Fatalf("JSON title = %v, want worker", parsed["title"])
+	}
+	if parsed["archived_path"] != "/home/u/.agent-factory/archived/"+repoID+"/worker" {
+		t.Fatalf("JSON archived_path = %v", parsed["archived_path"])
+	}
+}
+
+// TestSessionsRestore_HonorsRepoScopingAndReturnsPath: `af sessions restore`
+// passes the --repo scope and emits {ok, title, worktree_path}.
+func TestSessionsRestore_HonorsRepoScopingAndReturnsPath(t *testing.T) {
+	repoID := setupRepoForCmd(t)
+
+	var gotReq daemon.RestoreArchivedRequest
+	prev := restoreArchivedViaDaemon
+	restoreArchivedViaDaemon = func(req daemon.RestoreArchivedRequest) (string, error) {
+		gotReq = req
+		if req.RepoID == "" {
+			return "", errors.New("RepoID empty: --repo scoping was dropped")
+		}
+		return "/home/u/src/repo-worker", nil
+	}
+	defer func() { restoreArchivedViaDaemon = prev }()
+
+	out, err := runCmdCaptureStdout(t, sessionsRestoreCmd, []string{"worker"})
+	if err != nil {
+		t.Fatalf("restore returned error: %v", err)
+	}
+	if gotReq.RepoID != repoID {
+		t.Fatalf("restore RepoID = %q, want %q", gotReq.RepoID, repoID)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("output is not JSON (%q): %v", string(out), err)
+	}
+	if parsed["ok"] != true || parsed["title"] != "worker" {
+		t.Fatalf("JSON ok/title wrong: %v", parsed)
+	}
+	if parsed["worktree_path"] != "/home/u/src/repo-worker" {
+		t.Fatalf("JSON worktree_path = %v", parsed["worktree_path"])
+	}
+}
+
+// TestSessionsArchive_SurfacesDaemonError: a daemon-side rejection (e.g. remote
+// or in-place session) is surfaced as a JSON error, not a silent success.
+func TestSessionsArchive_SurfacesDaemonError(t *testing.T) {
+	setupRepoForCmd(t)
+
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, error) {
+		return "", errors.New("cannot archive remote session")
+	}
+	defer func() { archiveSessionViaDaemon = prev }()
+
+	_, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"faraway"})
+	if err == nil {
+		t.Fatal("archive must surface a daemon rejection as an error, not a silent success")
+	}
+	if !strings.Contains(err.Error(), "cannot archive remote session") {
+		t.Fatalf("error = %v, want the daemon's rejection message", err)
 	}
 }
