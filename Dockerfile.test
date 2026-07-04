@@ -1,0 +1,38 @@
+# Test/playtest container for agent-factory (#1123).
+#
+# Toolchain-only image: the source tree is bind-mounted read-only at run
+# time by scripts/testbox.sh, so this image rebuilds only when the
+# toolchain or system packages change — never on code changes. Build it
+# with no context (`docker build - < Dockerfile.test`); there is no COPY.
+FROM golang:1.24-bookworm
+
+# tmux + git are what the suite drives; procps provides pgrep for the
+# daemon's SIGTERM fallback path.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tmux git procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Give the container a stable git identity so no test or mock-repo commit
+# depends on host git config leaking in.
+RUN git config --system user.name "AF Testbox" \
+    && git config --system user.email "testbox@localhost" \
+    && git config --system init.defaultBranch master
+
+# Non-root: several tests inject failures by chmod-ing dirs read-only
+# (e.g. app/handle_overlay_test.go), which root silently ignores. The
+# /cache and /work dirs are created dev-owned here so docker initializes
+# the named cache volumes with the right ownership on first mount.
+RUN useradd -m -u 1000 dev \
+    && mkdir -p /cache/gomod /cache/gobuild /work \
+    && chown -R dev:dev /cache /work
+
+# SHELL/TERM mirror an interactive dev box (the TUI needs a real TERM);
+# caches live on named volumes mounted at /cache by testbox.sh.
+ENV TERM=xterm-256color \
+    SHELL=/bin/bash \
+    GOMODCACHE=/cache/gomod \
+    GOCACHE=/cache/gobuild \
+    PATH=/home/dev/bin:$PATH
+
+USER dev
+WORKDIR /src

@@ -55,7 +55,9 @@ Working style:
 - Use `af-preview` to spot-check, `af-send` to refine, `af-kill` to tear down
   immediately on completion or abandonment. Don't let sessions accumulate.
 - Run `golangci-lint run --timeout=3m --fast`, `gofmt -l .`, `go build ./...`,
-  and `go test ./...` before opening a PR — CI blocks on all four.
+  and the full test suite before opening a PR — CI blocks on all four. On a
+  shared dev box run the suite as `make test-container` (never bare
+  `go test ./...` on the host; see docs/container-testing.md).
 - Captain Claude is fully autonomous: ship without waiting for greenlight,
   merge own PRs after CI green, close issues that aren't worth doing. The
   audit trail is in PR descriptions and issue close-out comments, not
@@ -67,11 +69,17 @@ Working style:
 # Build
 go build ./...
 
-# Run tests
-go test ./...
+# Run the full test suite — inside a container, isolated from the host
+# tmux server and real AF home (see docs/container-testing.md)
+make test-container
 
-# Run tests verbose
-go test -v ./...
+# Host-side runs: never bare `go test ./...` on a shared dev box — the
+# daemon package spawns real af daemons. Skip it, or use the container.
+go test $(go list ./... | grep -v '/daemon')
+
+# TUI play-testing — containerized sandbox (throwaway home, mock repo,
+# private tmux); see docs/container-testing.md
+make playtest-container
 
 # Install locally
 ./dev-install.sh    # installs to ~/.local/bin/af

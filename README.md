@@ -141,6 +141,7 @@ See [docs/configuration.md](docs/configuration.md) for every key, the precedence
 - [docs/remote-hooks.md](docs/remote-hooks.md) — remote backend script protocol
 - [docs/release-process.md](docs/release-process.md) — release channels: manual stable `1.x.y` (the auto-update default), opt-in auto preview `1.x.y-preview-z`
 - [docs/release-testing-plan.md](docs/release-testing-plan.md) — release gate and smoke checks
+- [docs/container-testing.md](docs/container-testing.md) — running the test suite and TUI play-tests safely in a container (`make test-container` / `make playtest-container`)
 - [examples/](examples/) — runnable task watch-scripts and remote-hook skeletons
 
 ## Maintenance

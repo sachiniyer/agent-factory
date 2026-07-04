@@ -1,0 +1,28 @@
+# Container test/playtest harness (#1123). These targets are the safe way
+# to run the full suite or a TUI play-test on a shared dev box: everything
+# runs inside docker/podman with no access to the host tmux server, the
+# real ~/.agent-factory, or this repo's worktrees.
+# See docs/container-testing.md.
+
+.PHONY: test-container playtest-container playtest-container-detached testbox-image
+
+# Full `go test ./...` inside the container — the one sanctioned way to run
+# the bare full suite on a shared box. Narrow or extend the run with
+# GOTESTARGS, e.g.: make test-container GOTESTARGS="-race ./daemon/..."
+test-container:
+	scripts/testbox.sh test $(GOTESTARGS)
+
+# Interactive TUI play-test sandbox: builds af inside, scaffolds a
+# throwaway AF home + mock project repo, drops you in a shell with a
+# private tmux server. Exiting the shell tears everything down.
+playtest-container:
+	scripts/testbox.sh playtest
+
+# Same sandbox parked in the background for `docker exec` driving (used by
+# the tui-playtest skill). Tear down with: docker rm -f af-playtest
+playtest-container-detached:
+	scripts/testbox.sh playtest -d
+
+# (Re)build the toolchain image only.
+testbox-image:
+	scripts/testbox.sh build
