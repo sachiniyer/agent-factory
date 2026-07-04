@@ -336,7 +336,9 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	case w.boundInstance() == nil:
 		style = paneHeaderDimStyle
 	}
-	header := style.Render(text)
+	// Ellipsize before styling: ClampToRect's hard cut would render a narrow
+	// pane's header as `alpha · Termina` with no mark of the cut (#1098).
+	header := style.Render(fitLine(text, width))
 	return layout.ClampToRect(header, layout.Rect{W: width, H: paneHeaderRows})
 }
 

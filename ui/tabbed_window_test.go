@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
 )
@@ -72,4 +73,22 @@ func TestTabbedWindowViewIsExactlyRectSized(t *testing.T) {
 	for i, line := range lines {
 		assert.Equalf(t, 100, lipgloss.Width(line), "line %d must be exactly rect.W cells", i)
 	}
+}
+
+// TestTabbedWindowHeaderEllipsizesAtNarrowWidth pins #1098 finding 2: at a
+// 40x10 terminal the pane header used to hard-cut (`alpha · Termina`); the
+// cut must be marked with an ellipsis instead.
+func TestTabbedWindowHeaderEllipsizesAtNarrowWidth(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst := startedRemoteInstance(t, false)
+	w := newTestTabbedWindow()
+	setWindowInstance(w, inst)
+
+	// " remote-tabbar · Preview " needs 25 cells; give it 16.
+	header := w.renderHeader(16)
+	assert.LessOrEqual(t, lipgloss.Width(header), 16, "header must fit the pane width")
+	assert.Contains(t, header, "…", "the cut must be marked with an ellipsis")
+	assert.NotContains(t, header, "Preview", "the tail is truncated")
 }

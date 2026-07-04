@@ -27,6 +27,10 @@ var taskPlaceholderStyle = lipgloss.NewStyle().
 	Faint(true).
 	Foreground(lipgloss.AdaptiveColor{Light: "#B5B0B0", Dark: "#5C5757"})
 
+// taskFormMoreStyle dims the ↑/↓ markers flagging fields scrolled out of a
+// height-clamped edit form (#1098).
+var taskFormMoreStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+
 // Edit-form focus stops, in tab order. The form is grouped: Essentials
 // (name, trigger, prompt) then Delivery (target session, path, program).
 // The trigger is a two-step stop: a cron|watch type selector followed by the
@@ -72,6 +76,10 @@ type TaskPane struct {
 	editError          string // last validation error shown to the user
 	editErrorField     int    // focus stop the error is rendered under (-1 = none)
 	focusIndex         int
+	// formScroll is the edit form's line offset when the pane is shorter than
+	// the rendered form (#1098): renderEditMode windows the form so the
+	// focused field stays in view instead of clipping off the top.
+	formScroll int
 
 	// Create mode
 	creating       bool
@@ -239,6 +247,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	s.focusIndex = taskFocusName
 	s.editError = ""
 	s.editErrorField = -1
+	s.formScroll = 0
 }
 
 // EnterCreateMode initializes empty edit fields for creating a new task. An
@@ -496,45 +505,53 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 		s.editError = ""
 		s.editErrorField = -1
 	case tea.KeyEnter:
-		if s.focusIndex == taskFocusSave {
-			if errMsg, errField := s.validateForm(); errMsg != "" {
-				s.editError = errMsg
-				s.editErrorField = errField
-				return true
-			}
-			s.editError = ""
-			s.editErrorField = -1
-			cron, watch := s.triggerValues()
-			if s.creating {
-				s.pendingCreate = true
-				s.creating = false
-			} else {
-				// Mirror the create path (app.handleTaskCreate): expand a
-				// leading ~ then resolve to an absolute form so an empty or
-				// relative value behaves the same when the scheduler fires
-				// as it does in the TUI trigger (#641, #924). validateForm
-				// already normalized editPath, so this is idempotent.
-				absPath, err := filepath.Abs(config.ExpandTilde(s.editPath.Value()))
-				if err != nil {
-					s.editError = fmt.Sprintf("invalid path: %v", err)
-					s.editErrorField = taskFocusPath
-					return true
-				}
-				s.tasks[s.selectedIdx].Name = s.editName.Value()
-				s.tasks[s.selectedIdx].Prompt = s.editPrompt.Value()
-				s.tasks[s.selectedIdx].CronExpr = cron
-				s.tasks[s.selectedIdx].WatchCmd = watch
-				s.tasks[s.selectedIdx].TargetSession = s.editTarget.Value()
-				s.tasks[s.selectedIdx].ProjectPath = absPath
-				s.tasks[s.selectedIdx].Program = s.programValue()
-				s.dirty = true
-				s.editing = false
+		// The prompt keeps Enter for newlines; every other field submits, so
+		// the footer's blanket "enter save" holds wherever focus is (#1098 —
+		// Enter on the Name field used to be a dead key).
+		if s.focusIndex == taskFocusPrompt {
+			s.editPrompt, _ = s.editPrompt.Update(msg)
+			return true
+		}
+		if errMsg, errField := s.validateForm(); errMsg != "" {
+			s.editError = errMsg
+			s.editErrorField = errField
+			// Land focus on the offending field so its inline error is in
+			// view even when the clamped form has it scrolled off-screen.
+			if errField >= 0 && errField != s.focusIndex {
+				s.focusIndex = errField
+				s.updateEditFocus()
 			}
 			return true
 		}
-		if s.focusIndex == taskFocusPrompt {
-			s.editPrompt, _ = s.editPrompt.Update(msg)
+		s.editError = ""
+		s.editErrorField = -1
+		cron, watch := s.triggerValues()
+		if s.creating {
+			s.pendingCreate = true
+			s.creating = false
+		} else {
+			// Mirror the create path (app.handleTaskCreate): expand a
+			// leading ~ then resolve to an absolute form so an empty or
+			// relative value behaves the same when the scheduler fires
+			// as it does in the TUI trigger (#641, #924). validateForm
+			// already normalized editPath, so this is idempotent.
+			absPath, err := filepath.Abs(config.ExpandTilde(s.editPath.Value()))
+			if err != nil {
+				s.editError = fmt.Sprintf("invalid path: %v", err)
+				s.editErrorField = taskFocusPath
+				return true
+			}
+			s.tasks[s.selectedIdx].Name = s.editName.Value()
+			s.tasks[s.selectedIdx].Prompt = s.editPrompt.Value()
+			s.tasks[s.selectedIdx].CronExpr = cron
+			s.tasks[s.selectedIdx].WatchCmd = watch
+			s.tasks[s.selectedIdx].TargetSession = s.editTarget.Value()
+			s.tasks[s.selectedIdx].ProjectPath = absPath
+			s.tasks[s.selectedIdx].Program = s.programValue()
+			s.dirty = true
+			s.editing = false
 		}
+		return true
 	default:
 		switch s.focusIndex {
 		case taskFocusName:
@@ -815,6 +832,24 @@ func (s *TaskPane) renderEditMode() string {
 	}
 
 	var b strings.Builder
+	// Track the focused stop's line range while building, so the form can be
+	// windowed to the pane height with the focused field scrolled into view
+	// (#1098): below ~15 terminal rows the form is taller than the overlay,
+	// and without a window the top fields clip off-screen while still holding
+	// focus. markStart/markEnd bracket each focus stop's lines (including its
+	// inline error, so validation messages scroll into view too).
+	focusStart, focusEnd := -1, -1
+	markStart := func(stop int) {
+		if stop == s.focusIndex {
+			focusStart = strings.Count(b.String(), "\n")
+		}
+	}
+	markEnd := func(stop int) {
+		if stop == s.focusIndex {
+			focusEnd = strings.Count(b.String(), "\n")
+		}
+	}
+
 	if s.creating {
 		b.WriteString(editTitleStyle.Render("New Task"))
 	} else {
@@ -825,13 +860,18 @@ func (s *TaskPane) renderEditMode() string {
 
 	b.WriteString(groupStyle.Render("Essentials"))
 	b.WriteString("\n")
+	markStart(taskFocusName)
 	b.WriteString(label("Name:"))
 	b.WriteString(s.editName.View())
 	b.WriteString("\n")
 	b.WriteString(fieldErr(taskFocusName))
+	markEnd(taskFocusName)
+	markStart(taskFocusTrigger)
 	b.WriteString(label("Trigger:"))
 	b.WriteString(s.renderTriggerSelector())
 	b.WriteString("\n")
+	markEnd(taskFocusTrigger)
+	markStart(taskFocusTriggerValue)
 	if s.editTriggerIsWatch {
 		b.WriteString(label("Watch:"))
 		b.WriteString(s.editWatch.View())
@@ -841,6 +881,8 @@ func (s *TaskPane) renderEditMode() string {
 	}
 	b.WriteString("\n")
 	b.WriteString(fieldErr(taskFocusTriggerValue))
+	markEnd(taskFocusTriggerValue)
+	markStart(taskFocusPrompt)
 	b.WriteString(labelStyle.Render("Prompt:"))
 	if s.editTriggerIsWatch {
 		b.WriteString(hintStyle.Render(" (optional)"))
@@ -849,34 +891,102 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString(s.editPrompt.View())
 	b.WriteString("\n")
 	b.WriteString(fieldErr(taskFocusPrompt))
+	markEnd(taskFocusPrompt)
 	b.WriteString("\n")
 
 	b.WriteString(groupStyle.Render("Delivery"))
 	b.WriteString("\n")
+	markStart(taskFocusTarget)
 	b.WriteString(label("Target:"))
 	b.WriteString(s.editTarget.View())
 	b.WriteString("\n")
+	markEnd(taskFocusTarget)
+	markStart(taskFocusPath)
 	b.WriteString(label("Path:"))
 	b.WriteString(s.editPath.View())
 	b.WriteString("\n")
 	b.WriteString(fieldErr(taskFocusPath))
+	markEnd(taskFocusPath)
+	markStart(taskFocusProgram)
 	b.WriteString(label("Program:"))
 	b.WriteString(s.renderProgramSelector())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	markEnd(taskFocusProgram)
+	b.WriteString("\n")
 
 	submitLabel := " Save "
 	if s.creating {
 		submitLabel = " Create "
 	}
+	markStart(taskFocusSave)
 	if s.focusIndex == taskFocusSave {
 		b.WriteString(focusedButtonStyle.Render(submitLabel))
 	} else {
 		b.WriteString(buttonStyle.Render(submitLabel))
 	}
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	markEnd(taskFocusSave)
+	b.WriteString("\n")
 	b.WriteString(hintStyle.Render(fitLine("tab next • shift+tab prev • enter save • esc cancel", s.width)))
 
-	return b.String()
+	return s.clampFormToHeight(b.String(), focusStart, focusEnd)
+}
+
+// clampFormToHeight windows the rendered edit form to the pane height, keeping
+// the focused field's lines in view (#1098). The key-hint footer stays pinned
+// as the last visible line so tab/esc are always discoverable, and dim ↑/↓
+// markers flag fields scrolled out of the window. focusStart/focusEnd are the
+// focused stop's line range, end-exclusive; a form that already fits renders
+// unchanged.
+func (s *TaskPane) clampFormToHeight(content string, focusStart, focusEnd int) string {
+	maxH := s.height
+	lines := strings.Split(content, "\n")
+	if maxH <= 0 || len(lines) <= maxH {
+		return content
+	}
+	if maxH < 3 {
+		maxH = 3
+	}
+	hint := lines[len(lines)-1]
+	body := lines[:len(lines)-1]
+	visible := maxH - 1
+	if visible > len(body) {
+		// The raised floor can exceed a short body (degenerate heights); a
+		// window larger than the body would slice past its end.
+		visible = len(body)
+	}
+
+	off := s.formScroll
+	if off > len(body)-visible {
+		off = len(body) - visible
+	}
+	if off < 0 {
+		off = 0
+	}
+	if focusStart >= 0 {
+		// Bottom edge first, then top: when the range is taller than the
+		// window the field's first line wins.
+		if focusEnd > off+visible {
+			off = focusEnd - visible
+		}
+		if focusStart < off {
+			off = focusStart
+		}
+	}
+	s.formScroll = off
+
+	win := make([]string, visible)
+	copy(win, body[off:off+visible])
+	inFocusRange := func(line int) bool {
+		return focusStart >= 0 && line >= focusStart && line < focusEnd
+	}
+	if off > 0 && !inFocusRange(off) {
+		win[0] = taskFormMoreStyle.Render("  ↑ more")
+	}
+	if last := off + visible - 1; last < len(body)-1 && !inFocusRange(last) {
+		win[visible-1] = taskFormMoreStyle.Render("  ↓ more")
+	}
+	return strings.Join(append(win, hint), "\n")
 }
 
 // renderTriggerSelector renders the inline cron|watch type selector on one
