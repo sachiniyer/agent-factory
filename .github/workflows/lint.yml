@@ -52,3 +52,6 @@ jobs:
             echo "$out"
             exit 1
           fi
+
+      - name: Check file lengths
+        run: scripts/lint-file-length.sh

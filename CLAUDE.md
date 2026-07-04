@@ -97,9 +97,17 @@ gofmt -w .
 golangci-lint run --timeout=3m --fast
 gofmt -l .   # should produce no output
 deadcode -test ./...   # should produce no output
+scripts/lint-file-length.sh   # or: make lint-file-length
 ```
 
 Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.36.0`; CI pins the same version (`@latest` requires Go 1.25+, above this project's Go floor — see #637).
+
+**File-length lint (#1145):** `scripts/lint-file-length.sh` fails if any Go
+file exceeds its line limit — 1000 lines for production code, 1500 for
+`*_test.go` — unless it's grandfathered in `scripts/file-length-allowlist.txt`.
+Grandfathered files carry a ceiling that ratchets (they can only shrink, and
+their entry must be removed once decomposed under the limit). Don't grandfather
+new files to dodge the limit — split them. See `docs/file-length-lint.md`.
 
 ## Project Structure
 
