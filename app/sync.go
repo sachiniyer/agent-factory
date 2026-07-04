@@ -389,7 +389,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		// SetArchived flipping it inert (#1195 restore regression). Keyed on the
 		// Archived→live transition specifically (not merely !Started), so it fires
 		// on real restores without disturbing live in-place updates.
-		if inst.GetLiveness() == session.LiveArchived && snapshotLiveness(d) != session.LiveArchived {
+		if inst.GetLiveness() == session.LiveArchived && snapshotLiveness(inst.GetLiveness(), d) != session.LiveArchived {
 			if m.swapInstanceFromSnapshot(d) {
 				changed = true
 			}
@@ -523,7 +523,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// still receives the terminal Archived instead of being stranded. The local
 	// in-flight op is a separate axis the daemon snapshot never carries, so this
 	// can never clobber an optimistic kill/archive marker.
-	lv := snapshotLiveness(d)
+	lv := snapshotLiveness(inst.GetLiveness(), d)
 	if inst.GetLiveness() != lv {
 		inst.SetLiveness(lv)
 		changed = true
@@ -590,11 +590,21 @@ func prInfoDiffersFromData(inst *session.Instance, d session.PRInfoData) bool {
 
 // snapshotLiveness resolves the daemon-owned liveness a snapshot record carries
 // (#1195). It prefers the explicit `liveness` field; a record from a daemon that
-// predates the field (LivenessUnset) falls back to deriving it from the legacy
-// `status` int, so a mixed-version snapshot still reconciles correctly.
-func snapshotLiveness(d session.InstanceData) session.Liveness {
+// predates the field (LivenessUnset) falls back to the legacy `status` int.
+//
+// A legacy TRANSIENT (Loading/Deleting) carries NO real liveness in the two-axis
+// model — the new daemon only ever sends liveness, so a legacy transient is
+// version-skew noise from an upgrade window. It must NOT be mapped to Ready
+// (LivenessForStatus's default), which would flip a mid-kill row (legacy
+// `status: Deleting`) to Ready during the window. Instead we keep the row's
+// CURRENT liveness untouched; the daemon reports a real liveness on a later poll
+// once it's upgraded. `cur` is the existing row's liveness for exactly this.
+func snapshotLiveness(cur session.Liveness, d session.InstanceData) session.Liveness {
 	if d.Liveness != session.LivenessUnset {
 		return d.Liveness
+	}
+	if d.Status == session.Loading || d.Status == session.Deleting {
+		return cur
 	}
 	return session.LivenessForStatus(d.Status)
 }

@@ -158,6 +158,30 @@ func TestReconcile_LostToLiveStaysInPlace(t *testing.T) {
 	require.Equal(t, session.Running, inst.GetStatus())
 }
 
+// TestReconcile_LegacyTransientSnapshotKeepsLiveness guards the mixed-version
+// upgrade window (#1195 Greptile): a snapshot from a pre-#1195 daemon has no
+// `liveness` field, only the old composed `status`. A legacy transient
+// (Loading/Deleting) carries no real liveness in the two-axis model — it is
+// version-skew noise — so it must NOT be mapped to Ready (which would flip a
+// mid-kill row live→Ready). The reconcile keeps the row's current liveness until
+// the upgraded daemon reports a real one.
+func TestReconcile_LegacyTransientSnapshotKeepsLiveness(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "worker") // started, LiveRunning
+	h.store.AddInstance(inst)
+
+	// A mixed-version snapshot: NO liveness field (LivenessUnset), only the legacy
+	// composed status Deleting — the shape an old daemon sends for a mid-kill row.
+	data := inst.ToInstanceData()
+	data.Liveness = session.LivenessUnset
+	data.Status = session.Deleting
+
+	h.reconcileSnapshot([]session.InstanceData{data})
+
+	require.Equal(t, session.LiveRunning, inst.GetLiveness(),
+		"a legacy Deleting snapshot (no liveness field) must not flip the row to Ready")
+}
+
 // TestHandleInstanceArchived_FinalizesRowImmediately: on a successful archive the
 // local row is flipped inert Archived immediately (belt-and-suspenders with the
 // reconcile clear-on-settle), so it partitions into the Archived folder without
