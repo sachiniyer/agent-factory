@@ -4,31 +4,30 @@ Agent Factory supports remote machine backends via user-provided hook scripts. W
 
 ## Configuration
 
-Add remote hooks to the repo's own config file at `<repo-root>/.agent-factory/config.json` (check it into the repo so every clone gets the same backend):
+Add remote hooks to the repo's own config file at `<repo-root>/.agent-factory/config.toml` (check it into the repo so every clone gets the same backend):
 
-```json
-{
-  "remote_hooks": {
-    "launch_cmd": "./.agent-factory/hooks/launch.sh",
-    "list_cmd": "./.agent-factory/hooks/list.sh",
-    "attach_cmd": "./.agent-factory/hooks/attach.sh",
-    "delete_cmd": "./.agent-factory/hooks/delete.sh",
-    "terminal_cmd": "./.agent-factory/hooks/terminal.sh"
-  }
-}
+```toml
+[remote_hooks]
+launch_cmd = "./.agent-factory/hooks/launch.sh"
+list_cmd = "./.agent-factory/hooks/list.sh"
+attach_cmd = "./.agent-factory/hooks/attach.sh"
+delete_cmd = "./.agent-factory/hooks/delete.sh"
+terminal_cmd = "./.agent-factory/hooks/terminal.sh"
 ```
+
+(The in-repo file may also be named `config.json` for compatibility with older `af` versions — see [configuration.md](configuration.md#in-repo-file-name-configtoml-or-configjson). The JSON blocks further down this page are hook **script output**, not config.)
 
 ### Command path resolution
 
 Each command value is the path of one executable — it is run directly, not through a shell. Where that path may point:
 
-- **Relative paths resolve against the repository root** — the root of the repository whose `.agent-factory/config.json` was loaded. `./infra/launch.sh`, `infra/launch.sh`, and `../shared/launch.sh` all work no matter what the current working directory of `af` or its daemon is, so hook scripts can be checked into the repo without machine-specific absolute paths. For sessions created from a linked worktree, the base is still the **main** repository root (where the config file lives), never the worktree's own path.
+- **Relative paths resolve against the repository root** — the root of the repository whose `.agent-factory/config.toml` was loaded. `./infra/launch.sh`, `infra/launch.sh`, and `../shared/launch.sh` all work no matter what the current working directory of `af` or its daemon is, so hook scripts can be checked into the repo without machine-specific absolute paths. For sessions created from a linked worktree, the base is still the **main** repository root (where the config file lives), never the worktree's own path.
 - **Absolute paths** are used as-is.
 - **Bare names without any path separator** (`coder-launch`, `bash`) are looked up on `$PATH`, exactly like `exec`. A separator is what opts a value into repo-root resolution — so a script at the repo root must be written `./launch.sh`, not `launch.sh`.
 
 The same rules apply to `remote_hooks` values still read from the deprecated legacy location.
 
-`remote_hooks` is an in-repo-only setting — it describes the repository, so it is not accepted in the global `~/.agent-factory/config.json`. The previous location, `~/.agent-factory/repos/<repoID>/config.json`, is **deprecated**: it keeps working for one more release as a fallback (with a warning in the log pointing here), and is ignored whenever the in-repo file sets `remote_hooks`. See [configuration.md](configuration.md) for the full precedence rules.
+`remote_hooks` is an in-repo-only setting — it describes the repository, so it is not accepted in the global `~/.agent-factory/config.toml`. The previous location, `~/.agent-factory/repos/<repoID>/config.json`, is **deprecated**: it keeps working for one more release as a fallback (with a warning in the log pointing here), and is ignored whenever the in-repo file sets `remote_hooks`. See [configuration.md](configuration.md) for the full precedence rules.
 
 Configuring `remote_hooks` enables the remote backend for that repo, but using it is explicit opt-in: press `N` in the TUI to create a remote session. Pressing `n` still creates a local tmux+git worktree session. When `remote_hooks` is absent, `N` is unavailable and all sessions are local.
 

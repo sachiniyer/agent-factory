@@ -23,16 +23,13 @@ chmod +x .agent-factory/hooks/*.sh
 # Edit each script to add your infrastructure logic
 ```
 
-Then configure your repo to use them in `<repo-root>/.agent-factory/config.json`:
+Then configure your repo to use them in `<repo-root>/.agent-factory/config.toml`:
 
-```json
-{
-  "remote_hooks": {
-    "launch_cmd": "./.agent-factory/hooks/launch.sh",
-    "list_cmd": "./.agent-factory/hooks/list.sh",
-    "attach_cmd": "./.agent-factory/hooks/attach.sh",
-    "delete_cmd": "./.agent-factory/hooks/delete.sh",
-    "terminal_cmd": "./.agent-factory/hooks/terminal.sh"
-  }
-}
+```toml
+[remote_hooks]
+launch_cmd = "./.agent-factory/hooks/launch.sh"
+list_cmd = "./.agent-factory/hooks/list.sh"
+attach_cmd = "./.agent-factory/hooks/attach.sh"
+delete_cmd = "./.agent-factory/hooks/delete.sh"
+terminal_cmd = "./.agent-factory/hooks/terminal.sh"
 ```

@@ -110,30 +110,25 @@ With `remote_hooks` configured in a repo, `N` launches sessions on a remote back
 
 Opt a repository into an always-on **root agent** — a reserved session titled `root` that the daemon keeps alive, attached in-place at the repo root (no worktree; killing it never touches your working tree) and re-created automatically if its tmux dies:
 
-```json
-{
-  "root_agents": {
-    "/home/me/myrepo": {}
-  }
-}
+```toml
+[root_agents]
+"/home/me/myrepo" = {}
 ```
 
-Strictly opt-in via your global `~/.agent-factory/config.json` (never from an in-repo config, so a cloned repo can't spawn one), and the default profile runs `claude --dangerously-skip-permissions` with auto-yes — see [docs/configuration.md](docs/configuration.md#root-agents-always-ensured) before opting in. The name `root` is reserved: normal session creation rejects it.
+Strictly opt-in via your global `~/.agent-factory/config.toml` (never from an in-repo config, so a cloned repo can't spawn one), and the default profile runs `claude --dangerously-skip-permissions` with auto-yes — see [docs/configuration.md](docs/configuration.md#root-agents-always-ensured) before opting in. The name `root` is reserved: normal session creation rejects it.
 
 ### Configuration
 
-Global defaults live in `~/.agent-factory/config.json`; a repo can check in its own `.agent-factory/config.json` that overrides them (and is the only place repo-specific keys like `remote_hooks` and `post_worktree_commands` may live):
+Config is [TOML](https://toml.io), for easy hand-editing. Global defaults live in `~/.agent-factory/config.toml`; a repo can check in its own `.agent-factory/config.toml` that overrides them (and is the only place repo-specific keys like `remote_hooks` and `post_worktree_commands` may live):
 
-```json
-{
-  "default_program": "claude",
-  "program_overrides": {
-    "claude": "/home/me/.local/bin/claude --dangerously-skip-permissions"
-  }
-}
+```toml
+default_program = "claude"
+
+[program_overrides]
+claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 ```
 
-See [docs/configuration.md](docs/configuration.md) for every key, the precedence rules, and where state is stored.
+Upgrading from a `config.json`? The move to TOML is automatic — `af` converts it on first run and keeps a `config.json.bak`. See [docs/configuration.md](docs/configuration.md) for every key, the migration, the precedence rules, and where state is stored.
 
 ## Documentation
 
