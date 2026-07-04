@@ -291,4 +291,39 @@ func TestRotationPolicyDefaults(t *testing.T) {
 			t.Fatalf("got maxBytes=%d backups=%d, want defaults", maxBytes, backups)
 		}
 	})
+	t.Run("config.toml overrides", func(t *testing.T) {
+		home := filepath.Dir(setupRotationHome(t, ""))
+		if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("log_max_size_mb = 10\nlog_max_backups = 5\n"), 0644); err != nil {
+			t.Fatalf("write config.toml: %v", err)
+		}
+		maxBytes, backups := rotationPolicy()
+		if maxBytes != 10<<20 || backups != 5 {
+			t.Fatalf("got maxBytes=%d backups=%d, want 10 MB / 5", maxBytes, backups)
+		}
+	})
+	t.Run("config.toml is canonical over config.json (#1030)", func(t *testing.T) {
+		home := filepath.Dir(setupRotationHome(t, `{"log_max_size_mb": 20, "log_max_backups": 7}`))
+		if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("log_max_size_mb = 10\n"), 0644); err != nil {
+			t.Fatalf("write config.toml: %v", err)
+		}
+		maxBytes, backups := rotationPolicy()
+		// Size comes from the toml; backups falls to the DEFAULT, not the
+		// shadowed json value — the two files never merge.
+		if maxBytes != 10<<20 || backups != DefaultMaxBackups {
+			t.Fatalf("got maxBytes=%d backups=%d, want 10 MB / default backups", maxBytes, backups)
+		}
+	})
+	t.Run("corrupt config.toml -> defaults, no json fallback", func(t *testing.T) {
+		home := filepath.Dir(setupRotationHome(t, `{"log_max_size_mb": 20}`))
+		if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("log_max_size_mb = ["), 0644); err != nil {
+			t.Fatalf("write config.toml: %v", err)
+		}
+		maxBytes, backups := rotationPolicy()
+		// config.LoadConfig refuses to load an unparsable config.toml, so
+		// rotating on the shadowed json's values would diverge from the rest
+		// of af: an existing toml pins the policy to toml-or-defaults.
+		if maxBytes != int64(DefaultMaxSizeMB)<<20 || backups != DefaultMaxBackups {
+			t.Fatalf("got maxBytes=%d backups=%d, want defaults", maxBytes, backups)
+		}
+	})
 }

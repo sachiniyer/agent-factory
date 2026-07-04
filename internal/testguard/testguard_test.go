@@ -110,14 +110,62 @@ func TestConfigTripwire_DisabledByEnv(t *testing.T) {
 	}
 }
 
+func TestConfigTripwire_FiresOnTomlModification(t *testing.T) {
+	jsonPath := sandbox(t)
+	tomlPath := filepath.Join(filepath.Dir(jsonPath), "config.toml")
+	if err := os.WriteFile(tomlPath, []byte("detach_keys = \"ctrl-]\"\n"), 0644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	verify := ConfigTripwire()
+	if err := os.WriteFile(tomlPath, []byte("detach_keys = \"ctrl-w\"\n"), 0644); err != nil {
+		t.Fatalf("mutate config: %v", err)
+	}
+
+	err := verify()
+	if err == nil {
+		t.Fatalf("tripwire did not fire after config.toml was modified")
+	}
+	if !strings.Contains(err.Error(), "MODIFIED") || !strings.Contains(err.Error(), "config.toml") {
+		t.Fatalf("tripwire error %q should name config.toml and the modification", err)
+	}
+}
+
+func TestConfigTripwire_FiresOnTomlCreationFromAbsent(t *testing.T) {
+	jsonPath := sandbox(t)
+	// A real home with only a config.json — the pre-#1030 norm.
+	if err := os.WriteFile(jsonPath, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	verify := ConfigTripwire()
+	tomlPath := filepath.Join(filepath.Dir(jsonPath), "config.toml")
+	if err := os.WriteFile(tomlPath, []byte(""), 0644); err != nil {
+		t.Fatalf("create config.toml: %v", err)
+	}
+
+	err := verify()
+	if err == nil {
+		t.Fatalf("tripwire did not fire after a config.toml was materialized next to the real config.json")
+	}
+	if !strings.Contains(err.Error(), "CREATED") || !strings.Contains(err.Error(), "config.toml") {
+		t.Fatalf("tripwire error %q should name config.toml and the creation", err)
+	}
+}
+
 func TestConfigTripwire_ExpandsTildeHome(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
 	t.Setenv("AGENT_FACTORY_HOME", "~/af-home")
-	require := filepath.Join(fakeHome, "af-home", "config.json")
+	wantDir := filepath.Join(fakeHome, "af-home")
 
-	if got := ambientConfigPath(); got != require {
-		t.Fatalf("ambientConfigPath() = %q, want %q", got, require)
+	if got := ambientConfigDir(); got != wantDir {
+		t.Fatalf("ambientConfigDir() = %q, want %q", got, wantDir)
+	}
+	wantPaths := []string{filepath.Join(wantDir, "config.json"), filepath.Join(wantDir, "config.toml")}
+	got := ambientConfigPaths()
+	if len(got) != len(wantPaths) || got[0] != wantPaths[0] || got[1] != wantPaths[1] {
+		t.Fatalf("ambientConfigPaths() = %q, want %q", got, wantPaths)
 	}
 }
 
@@ -126,9 +174,9 @@ func TestConfigTripwire_FallsBackToDotAgentFactory(t *testing.T) {
 	t.Setenv("HOME", fakeHome)
 	t.Setenv("AGENT_FACTORY_HOME", "")
 
-	want := filepath.Join(fakeHome, ".agent-factory", "config.json")
-	if got := ambientConfigPath(); got != want {
-		t.Fatalf("ambientConfigPath() = %q, want %q", got, want)
+	want := filepath.Join(fakeHome, ".agent-factory")
+	if got := ambientConfigDir(); got != want {
+		t.Fatalf("ambientConfigDir() = %q, want %q", got, want)
 	}
 }
 

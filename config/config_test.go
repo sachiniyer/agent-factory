@@ -959,6 +959,172 @@ func TestLoadConfig(t *testing.T) {
 	})
 }
 
+func TestLoadConfigTOML(t *testing.T) {
+	// writeToml materializes a config.toml in a fresh AGENT_FACTORY_HOME and
+	// returns the config dir.
+	writeToml := func(t *testing.T, content string) string {
+		t.Helper()
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		configDir, err := GetConfigDir()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(configDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(configDir, TomlConfigFileName), []byte(content), 0644))
+		return configDir
+	}
+
+	t.Run("loads valid config.toml", func(t *testing.T) {
+		writeToml(t, `
+default_program = "codex"
+auto_yes = true
+daemon_poll_interval = 2000
+branch_prefix = "test/"
+
+[program_overrides]
+claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
+codex = "/opt/codex/bin/codex --quiet"
+`)
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "codex", cfg.DefaultProgram)
+		assert.True(t, cfg.AutoYes)
+		assert.Equal(t, 2000, cfg.DaemonPollInterval)
+		assert.Equal(t, "test/", cfg.BranchPrefix)
+		assert.Equal(t, "/home/me/.local/bin/claude --dangerously-skip-permissions",
+			cfg.ProgramOverrides[tmux.ProgramClaude])
+		assert.Equal(t, "/opt/codex/bin/codex --quiet",
+			cfg.ProgramOverrides[tmux.ProgramCodex])
+	})
+
+	t.Run("config.toml wins over config.json and never merges", func(t *testing.T) {
+		configDir := writeToml(t, `default_program = "codex"`+"\n")
+		// The json sets a different program AND a key the toml does not carry;
+		// neither may leak through — toml is canonical, not a merge layer.
+		jsonContent := `{"default_program": "gemini", "auto_yes": true}`
+		require.NoError(t, os.WriteFile(filepath.Join(configDir, ConfigFileName), []byte(jsonContent), 0644))
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "codex", cfg.DefaultProgram)
+		assert.False(t, cfg.AutoYes, "auto_yes from the shadowed config.json must not merge in")
+	})
+
+	t.Run("does not materialize config.json when only config.toml exists", func(t *testing.T) {
+		configDir := writeToml(t, `default_program = "claude"`+"\n")
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		_, statErr := os.Stat(filepath.Join(configDir, ConfigFileName))
+		assert.True(t, os.IsNotExist(statErr), "a home with config.toml must not grow a materialized config.json")
+	})
+
+	t.Run("surfaces parse error with position on invalid TOML", func(t *testing.T) {
+		writeToml(t, "default_program = \"claude\"\nauto_yes = maybe\n")
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), TomlConfigFileName)
+		assert.Contains(t, err.Error(), "line 2")
+	})
+
+	t.Run("errors on an empty config.toml instead of shadowing silently", func(t *testing.T) {
+		// Nothing materializes config.toml, so an empty one is a hand-made
+		// stub — and its existence alone shadows config.json. Silence here
+		// would read as a settings loss (#734/#758 posture).
+		configDir := writeToml(t, "")
+		jsonContent := `{"default_program": "gemini"}`
+		require.NoError(t, os.WriteFile(filepath.Join(configDir, ConfigFileName), []byte(jsonContent), 0644))
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), TomlConfigFileName)
+		assert.Contains(t, err.Error(), "empty")
+	})
+
+	t.Run("unknown keys warn but do not fail the load", func(t *testing.T) {
+		// Rollback tolerance within the TOML era: a newer af's config.toml
+		// (e.g. carrying a future [keys] table) must keep loading here.
+		writeToml(t, `
+default_program = "codex"
+some_future_key = "value"
+
+[keys]
+quit = "q"
+`)
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "codex", cfg.DefaultProgram)
+	})
+
+	t.Run("shares enum validation with the JSON path", func(t *testing.T) {
+		writeToml(t, `default_program = "amp"`+"\n")
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), `"amp"`)
+		assert.Contains(t, err.Error(), "program_overrides")
+		assert.Contains(t, err.Error(), TomlConfigFileName)
+	})
+
+	t.Run("rejects unknown agent key in program_overrides", func(t *testing.T) {
+		writeToml(t, `
+default_program = "claude"
+
+[program_overrides]
+amp = "/opt/amp"
+`)
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "program_overrides key")
+	})
+
+	t.Run("applies range clamps from the shared validation", func(t *testing.T) {
+		writeToml(t, `
+default_program = "claude"
+daemon_poll_interval = -500
+log_max_size_mb = 0
+log_max_backups = -1
+update_channel = "nightly"
+`)
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, defaultDaemonPollInterval, cfg.DaemonPollInterval)
+		assert.Equal(t, log.DefaultMaxSizeMB, cfg.LogMaxSizeMB)
+		assert.Equal(t, log.DefaultMaxBackups, cfg.LogMaxBackups)
+		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
+	})
+
+	t.Run("decodes root_agents tables", func(t *testing.T) {
+		writeToml(t, `
+default_program = "claude"
+
+[root_agents."~/repos/mine"]
+program = "claude"
+auto_yes = false
+`)
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		require.Contains(t, cfg.RootAgents, "~/repos/mine")
+		agent := cfg.RootAgents["~/repos/mine"]
+		assert.Equal(t, "claude", agent.Program)
+		assert.False(t, agent.AutoYesEnabled())
+	})
+}
+
 func TestSaveConfig(t *testing.T) {
 	t.Run("saves config to file", func(t *testing.T) {
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())

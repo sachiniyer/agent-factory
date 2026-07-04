@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // Log-rotation defaults (#1059). The log is rotated when it exceeds
@@ -115,12 +117,18 @@ func resolveLogPath() string {
 }
 
 // rotationPolicy resolves the log-rotation cap and backup count from the
-// global config.json ("log_max_size_mb" / "log_max_backups"), falling back to
+// global config file ("log_max_size_mb" / "log_max_backups"), falling back to
 // the package defaults. This package cannot import config (config imports
 // log) and Initialize runs before config.LoadConfig, so the two keys are read
 // here directly with a tolerant parse: a missing or unreadable file, invalid
-// JSON, or out-of-range values all silently yield the defaults —
+// content, or out-of-range values all silently yield the defaults —
 // config.LoadConfig is the layer that warns the user about bad values.
+//
+// Format resolution mirrors config.LoadConfig (#1030): a config.toml that
+// exists is canonical (config.json is never consulted, even when the TOML is
+// unparsable — falling back to json values that config.LoadConfig itself
+// refuses to load would rotate on settings the rest of af is not using);
+// otherwise config.json is read as before.
 //
 // The config file location mirrors config.GetConfigDir: $AGENT_FACTORY_HOME
 // when set, else ~/.agent-factory. Inside a `go test` binary with no home
@@ -130,25 +138,31 @@ func rotationPolicy() (maxBytes int64, backups int) {
 	maxMB := DefaultMaxSizeMB
 	backups = DefaultMaxBackups
 
-	configPath := ""
+	configDir := ""
 	if home := os.Getenv("AGENT_FACTORY_HOME"); home != "" {
 		if dir, ok := expandTilde(home); ok {
-			configPath = filepath.Join(dir, "config.json")
+			configDir = dir
 		}
 	} else if !testing.Testing() {
 		if home, err := os.UserHomeDir(); err == nil {
-			configPath = filepath.Join(home, ".agent-factory", "config.json")
+			configDir = filepath.Join(home, ".agent-factory")
 		}
 	}
-	if configPath != "" {
+	if configDir != "" {
 		// Pointers distinguish "key absent" from an explicit zero:
 		// log_max_backups=0 (keep no rotated files) is valid, an absent key
 		// means the default.
 		var cfg struct {
-			LogMaxSizeMB  *int `json:"log_max_size_mb"`
-			LogMaxBackups *int `json:"log_max_backups"`
+			LogMaxSizeMB  *int `json:"log_max_size_mb" toml:"log_max_size_mb"`
+			LogMaxBackups *int `json:"log_max_backups" toml:"log_max_backups"`
 		}
-		if data, err := os.ReadFile(configPath); err == nil && json.Unmarshal(data, &cfg) == nil {
+		parsed := false
+		if data, err := os.ReadFile(filepath.Join(configDir, "config.toml")); err == nil {
+			parsed = toml.Unmarshal(data, &cfg) == nil
+		} else if data, err := os.ReadFile(filepath.Join(configDir, "config.json")); err == nil {
+			parsed = json.Unmarshal(data, &cfg) == nil
+		}
+		if parsed {
 			if cfg.LogMaxSizeMB != nil && *cfg.LogMaxSizeMB > 0 {
 				maxMB = *cfg.LogMaxSizeMB
 			}
