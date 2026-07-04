@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -124,4 +125,41 @@ func TestKillConfirmationWarning(t *testing.T) {
 		warning := killConfirmationWarning(filepath.Join(t.TempDir(), "gone"))
 		require.Contains(t, warning, "Could not verify worktree status")
 	})
+}
+
+// TestOpenCopyPRNoPRSurfacesMessage is the regression guard for #1170: p (open
+// PR) and P (copy PR URL) on a session that has no PR yet must surface a brief,
+// actionable message via the ErrBox rather than being a silent no-op. A nil
+// selection (no session at all) stays silent — there is no session context to
+// message about.
+func TestOpenCopyPRNoPRSurfacesMessage(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(200, 1)
+
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "no-pr", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	inst.SetStatus(session.Running)
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	require.Nil(t, inst.GetPRInfo(), "precondition: session has no PR")
+
+	// p (open PR)
+	_, cmd := h.handleOpenPR()
+	require.NotNil(t, cmd, "handleOpenPR must return a cmd that clears the message")
+	require.Contains(t, h.errBox.String(), "no PR for this session yet")
+
+	h.errBox.Clear()
+
+	// P (copy PR URL)
+	_, cmd = h.handleCopyPR()
+	require.NotNil(t, cmd, "handleCopyPR must return a cmd that clears the message")
+	require.Contains(t, h.errBox.String(), "no PR for this session yet")
+
+	// Nil selection stays silent — no session context to report.
+	h.errBox.Clear()
+	h.store.RemoveInstanceByTitle("no-pr")
+	require.Nil(t, h.sidebar.GetSelectedInstance(), "precondition: no session selected")
+	_, cmd = h.handleOpenPR()
+	require.Nil(t, cmd, "handleOpenPR on an empty selection must stay a silent no-op")
+	require.Empty(t, strings.TrimSpace(h.errBox.String()))
 }

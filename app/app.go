@@ -658,12 +658,24 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detachTraceMark("snapshotFetchedMsg-handler-entry")
 		tickStart := time.Now()
 		changed := m.handleSnapshot(msg)
+		// Live-project out-of-band task changes on the same poll (#1168),
+		// independent of the session snapshot's own error path.
+		if m.refreshTasks(msg.tasks, msg.tasksErr) {
+			changed = true
+		}
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
 		if changed {
 			cmds = append(cmds, m.selectionChanged())
 		}
 		return m, tea.Batch(cmds...)
+	case taskTriggeredMsg:
+		// The daemon-side run (#1169) failed — surface it. Success needs no
+		// action: the resulting session and updated task status live-project in.
+		if msg.err != nil {
+			return m, m.handleError(fmt.Errorf("failed to trigger task %q: %w", msg.title, msg.err))
+		}
+		return m, nil
 	case tea.MouseMsg:
 		// First-class mouse (#1024 R4, closes #1025): every event is
 		// resolved through the zone registry the last View() rebuilt and
@@ -1027,7 +1039,24 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	return nil
 }
 
-// handleTaskTrigger immediately spawns an instance for the selected task.
+// taskTriggeredMsg reports the outcome of a TUI "run now" (#1169). The run
+// itself happens daemon-side (create-or-deliver + status write); the resulting
+// session and updated task status live-project back into the TUI, so success
+// needs no on-loop mutation — only a failure is surfaced to the user.
+type taskTriggeredMsg struct {
+	title string
+	err   error
+}
+
+// handleTaskTrigger runs the selected task through the daemon's single shared
+// trigger path (daemon.RunTask), the SAME entrypoint `af tasks trigger` and the
+// cron scheduler use. Previously the TUI "run now" unconditionally spawned a new
+// per-run session, ignoring the task's target_session and orphaning it (#1169);
+// routing through RunTask makes it honor target_session (deliver into it,
+// auto-creating when missing) and spawn a fresh session only when there is no
+// target — matching CLI/cron exactly. The daemon owns the create/deliver, so the
+// new/updated session appears via the Snapshot projection and the task's run
+// status via the task refresh, with no divergent TUI spawn path to drift.
 func (m *home) handleTaskTrigger() tea.Cmd {
 	sp := m.automations.TaskPane()
 	tsk := sp.ConsumePendingTrigger()
@@ -1041,66 +1070,28 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 		return m.handleError(fmt.Errorf("task %q is a watch task; it fires when its watch command emits output", task.TaskRunBaseTitle(*tsk)))
 	}
 
-	repo, err := config.RepoFromPath(tsk.ProjectPath)
-	if err != nil {
-		return m.handleError(fmt.Errorf("failed to resolve repo for task path: %w", err))
-	}
-	title, err := task.NextTaskRunTitle(repo.ID, tsk.ProjectPath, task.TaskRunBaseTitle(*tsk), tsk.Program)
-	if err != nil {
-		return m.handleError(fmt.Errorf("failed to allocate task run title: %w", err))
-	}
-
-	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:   title,
-		Path:    tsk.ProjectPath,
-		Program: tsk.Program,
-	})
-	if err != nil {
-		return m.handleError(fmt.Errorf("failed to create instance: %w", err))
-	}
-
-	m.store.AddInstance(instance)
-	m.sidebar.SetSelectedInstance(m.store.NumInstances() - 1)
-	instance.SetStatus(session.Loading)
-	m.menu.SetState(ui.StateDefault)
-	// The run lands as a new session: close the tasks overlay (a trigger is
-	// fired from inside it) and move focus to the tree so the user is looking
-	// at the spawned instance, not the manager.
+	// The trigger fires from inside the tasks overlay: close it and move focus to
+	// the tree so the user is looking at the sessions, where the run lands (a
+	// fresh per-run session, or the delivered-into target_session).
 	if m.state == stateTasks {
 		m.state = stateDefault
-		m.automations.TaskPane().SetFocus(false)
+		sp.SetFocus(false)
 	}
 	m.focusRegion(layout.RegionTree)
 
-	prompt := tsk.Prompt
 	taskID := tsk.ID
-	// Capture the start seam on the event loop before the goroutine reads it, so a
-	// concurrent test-seam swap can't race the read (#960 PR 4 race-fix class).
-	start := startSessionThroughDaemon
-	startCmd := func() tea.Msg {
-		started, err := start(instance, sessionStartRequest{
-			Title:    instance.Title,
-			RepoPath: instance.Path,
-			Program:  instance.Program,
-			Prompt:   prompt,
-			AutoYes:  m.autoYes,
-		})
-		if err != nil {
-			return instanceStartedMsg{instance: instance, err: err}
+	taskTitle := task.TaskRunBaseTitle(*tsk)
+	// Capture the trigger seam on the event loop before the goroutine reads it, so
+	// a concurrent test-seam swap can't race the read (#960 PR 4 race-fix class).
+	trigger := triggerTaskThroughDaemon
+	triggerCmd := func() tea.Msg {
+		if err := trigger(taskID); err != nil {
+			return taskTriggeredMsg{title: taskTitle, err: err}
 		}
-
-		// Update task last run status. UpdateTaskStatus skips Program enum
-		// validation so legacy task records (pre-#658) still receive status
-		// bumps; see #664.
-		now := time.Now()
-		if err := task.UpdateTaskStatus(taskID, &now, "triggered"); err != nil {
-			log.ErrorLog.Printf("failed to update task status: %v", err)
-		}
-
-		return instanceStartedMsg{instance: instance, started: started, err: nil}
+		return taskTriggeredMsg{title: taskTitle}
 	}
 
-	return tea.Batch(tea.WindowSize(), m.selectionChanged(), startCmd)
+	return tea.Batch(tea.WindowSize(), m.selectionChanged(), triggerCmd)
 }
 
 func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly bool) {
