@@ -1,0 +1,31 @@
+# file-length-allowlist.txt — grandfathered oversized Go files (#1145)
+#
+# Each line: <path> <ceiling>
+#   <path>    repo-relative path (as `git ls-files` prints it)
+#   <ceiling> the file's line count when the length lint was introduced
+#
+# These files already exceeded the length limit (1000 lines for production
+# code, 1500 for *_test.go) when scripts/lint-file-length.sh landed. They are
+# grandfathered pending decomposition — the structural-health audit tracks
+# splitting them. The ceiling acts as a RATCHET: a grandfathered file may not
+# grow past its ceiling, so the big files can only shrink. Once a file is
+# decomposed back under the base limit, delete its entry here (the lint fails
+# if a grandfathered file has already dropped under the limit, so the list
+# can't rot).
+#
+# Do NOT add new entries to dodge the limit. A new file over the limit should
+# be split, not grandfathered.
+
+# --- production code (limit 1000) ---
+daemon/control.go 2765
+app/app.go 1889
+session/instance.go 1531
+session/tmux/tmux.go 1424
+ui/sidebar.go 1258
+config/config.go 1128
+ui/task_pane.go 1050
+daemon/watcher.go 1046
+session/backend_hook.go 1026
+
+# --- test code (limit 1500) ---
+session/backend_test.go 2241

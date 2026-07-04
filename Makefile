@@ -5,7 +5,14 @@
 # See docs/container-testing.md.
 
 .PHONY: test-container playtest-container playtest-container-detached \
-	tui-driver tui-driver-selftest testbox-image
+	tui-driver tui-driver-selftest testbox-image lint-file-length
+
+# Structural-health lint (#1145): fail if any Go file exceeds its line limit
+# (1000 for production code, 1500 for *_test.go) unless grandfathered in
+# scripts/file-length-allowlist.txt. Runs on the host — no container needed.
+# See docs/file-length-lint.md.
+lint-file-length:
+	scripts/lint-file-length.sh
 
 # Full `go test ./...` inside the container — the one sanctioned way to run
 # the bare full suite on a shared box. Narrow or extend the run with
