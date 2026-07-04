@@ -228,6 +228,42 @@ func TestSidebarTreeSyncCursorSurvivesStructureRebuild(t *testing.T) {
 	assert.Equal(t, 1, sel.TabIndex)
 }
 
+// TestSidebarTreeCloseLastTabStaysOnInstance is the #1084 regression: with the
+// cursor on the LAST tab row of the selected instance and ANOTHER instance
+// below it, closing that tab (what handleCloseTab does: DropClosedTab +
+// SetActiveTab(idx-1) + SyncCursorToActiveTab) must keep the selection within
+// the acting instance's subtree — the shrunk row list drops the old tab-row
+// flat index onto the trailing instance's row, and the pre-fix code committed
+// that drift as the display selection before it could re-pin by title.
+func TestSidebarTreeCloseLastTabStaysOnInstance(t *testing.T) {
+	s := newTreeSidebar(t, 2)
+	s.SetSelectedInstance(0)
+	s.Down() // tab row 0 of t-00
+	s.Down() // tab row 1 of t-00 (the last tab), active tab = 1
+	require.True(t, s.GetSelection().IsTab)
+	require.Equal(t, 1, s.GetSelection().TabIndex)
+
+	// Simulate handleCloseTab on the last tab: the daemon-authoritative drop
+	// removes the slot in place, the handler selects the left neighbor, then
+	// re-pins the tree cursor.
+	inst := s.proj.GetInstances()[0]
+	require.NoError(t, inst.DropClosedTab(1))
+	s.proj.SetActiveTab(0)
+	s.SyncCursorToActiveTab()
+
+	// Selection must stay on the acting instance (t-00), not drift to t-01.
+	require.NotNil(t, s.GetSelectedInstance())
+	assert.Equal(t, "t-00", s.GetSelectedInstance().Title,
+		"closing the last tab must not drift the selection to the trailing instance")
+	sel := s.GetSelection()
+	assert.Equal(t, 0, sel.ItemIndex, "cursor stays on t-00's row/subtree")
+	assert.True(t, sel.IsTab, "cursor lands on the surviving (agent) tab row")
+	assert.Equal(t, 0, sel.TabIndex)
+	assert.Equal(t, 0, s.proj.ActiveTab(), "the intended active tab survives the rebuild")
+	// The acting instance stays expanded; the trailing one stays folded.
+	assert.Equal(t, 1, tabRowCount(s), "only t-00's surviving tab row is present")
+}
+
 // TestSidebarTreeRepinPreservesTabSelection is the tree extension of the #969
 // re-pin: a reconcile that removes a preceding instance re-pins the selection
 // by title, and the cursor must return to the SAME TAB ROW it was on, not just

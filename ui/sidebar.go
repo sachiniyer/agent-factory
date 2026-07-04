@@ -673,15 +673,25 @@ func (s *Sidebar) SelectInstance(target *session.Instance) {
 // tab-key muscle memory with the cursor on the instance row behaves exactly as
 // before the tree (the cursor stays put; the tree's "*" marker moves).
 //
-// The intended target MUST be captured before syncFromStore runs: when the
-// tab-slot count changed (t create / w close), the sync's structure rebuild
-// fires and pushSelection re-asserts the CURSOR row's tab index into the
-// store, clobbering the active tab the caller just set. Reading ActiveTab()
-// after the sync returned that clobbered value, so the method saw
-// cursor==active and no-oped — t didn't select the new tab and a following w
-// silently closed the wrong tab (PR #1081 play-test). Bare tab jumps/cycles
-// don't change the structure signature, so they never hit the rebuild; both
-// paths now go through the same capture-first flow.
+// The intended target MUST be captured before the row list is rebuilt: when
+// the tab-slot count changed (t create / w close), the structure rebuild fires
+// and its blind index clamp drifts the stale tab-row flat index. Two failures
+// follow if that drift is allowed to reach the store: pushSelection re-asserts
+// the drifted row's tab index, clobbering the active tab the caller just set
+// (t didn't select the new tab and a following w silently closed the wrong tab
+// — PR #1081 play-test); and, when a TRAILING instance sits just below, closing
+// the last tab shrinks the list so the drift lands on that neighbor's row —
+// pushSelection then commits it as the display selection, folding the acting
+// instance's subtree so the re-pin can no longer find its tab rows (#1084).
+//
+// Both are avoided by rebuilding here — while the store still selects the
+// acting instance, so its subtree stays expanded — and re-pinning the cursor
+// by captured title BEFORE any selection is pushed, rather than routing through
+// syncFromStore and trying to undo the drift afterward. Bare tab jumps/cycles
+// don't change the structure, so the rebuild is a no-op for them; both paths go
+// through the same capture-first flow. Any pending #969 SelectInstance
+// assertion has already been consumed by the GetSelectedInstance sync at the
+// top of the tab handler, so bypassing syncFromStore here drops nothing.
 func (s *Sidebar) SyncCursorToActiveTab() {
 	want := s.proj.ActiveTab()
 	pre := s.rawSelection()
@@ -692,10 +702,10 @@ func (s *Sidebar) SyncCursorToActiveTab() {
 	if pre.ItemIndex < 0 || pre.ItemIndex >= len(instances) {
 		return
 	}
-	// Key the parent instance by title: the sync below rebuilds the row list
-	// and flat/instance indices are only stable across it by identity.
+	// Key the parent instance by title: the rebuild below re-derives the row
+	// list and flat/instance indices are only stable across it by identity.
 	title := instances[pre.ItemIndex].Title
-	s.syncFromStore()
+	s.rebuildVisibleItems()
 	instances = s.proj.GetInstances()
 	found := false
 	for j, item := range s.visibleItems {
@@ -708,12 +718,23 @@ func (s *Sidebar) SyncCursorToActiveTab() {
 		}
 	}
 	if found {
-		// Re-assert the captured target: the sync's pushSelection may have
-		// overwritten it with the pre-move cursor row's index.
+		// Re-assert the captured target: the rebuild's clamp may have moved the
+		// cursor, and afterCursorMove's pushSelection reads it back.
 		s.proj.SetActiveTab(want)
+	} else {
+		// The wanted tab row is gone (e.g. a concurrent reconcile shrank the tab
+		// set). Fall back to the acting instance's own row so the cursor stays
+		// within its subtree instead of drifting onto a neighbor; if the
+		// instance itself vanished, no row matches and the clamp position wins.
+		for j, item := range s.visibleItems {
+			if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab &&
+				item.ItemIndex >= 0 && item.ItemIndex < len(instances) &&
+				instances[item.ItemIndex].Title == title {
+				s.selectedIdx = j
+				break
+			}
+		}
 	}
-	// When the wanted row is gone (e.g. a concurrent reconcile shrank the tab
-	// set), the cursor keeps the sync's clamped position and its row wins.
 	s.afterCursorMove()
 }
 
