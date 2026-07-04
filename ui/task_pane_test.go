@@ -989,3 +989,29 @@ func TestTaskPaneEditFormUnclampedWhenItFits(t *testing.T) {
 	assert.NotContains(t, out, "↑ more")
 	assert.NotContains(t, out, "↓ more")
 }
+
+// TestTaskPaneClampFormDegenerateHeights guards the clamp floor (Greptile on
+// #1133): a height-1/2 pane raises the window floor to 3 lines, and a body
+// shorter than the raised window must not slice past its end.
+func TestTaskPaneClampFormDegenerateHeights(t *testing.T) {
+	repo := newGitRepo(t)
+	tp := NewTaskPane()
+	tp.EnterCreateMode(repo)
+
+	for _, h := range []int{1, 2} {
+		tp.SetSize(52, h)
+		assert.NotPanicsf(t, func() {
+			out := tp.String()
+			assert.LessOrEqualf(t, len(strings.Split(out, "\n")), 3,
+				"height %d renders at most the 3-line floor", h)
+		}, "height %d must not panic", h)
+	}
+
+	// Body shorter than the raised window: 2-line content at height 1 used to
+	// slice body[0:2] on a 1-line body.
+	tp.SetSize(52, 1)
+	assert.NotPanics(t, func() {
+		got := tp.clampFormToHeight("only\nhint", 0, 1)
+		assert.Equal(t, "only\nhint", got, "a body shorter than the window renders unchanged")
+	})
+}

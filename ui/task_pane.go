@@ -27,6 +27,10 @@ var taskPlaceholderStyle = lipgloss.NewStyle().
 	Faint(true).
 	Foreground(lipgloss.AdaptiveColor{Light: "#B5B0B0", Dark: "#5C5757"})
 
+// taskFormMoreStyle dims the ↑/↓ markers flagging fields scrolled out of a
+// height-clamped edit form (#1098).
+var taskFormMoreStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+
 // Edit-form focus stops, in tab order. The form is grouped: Essentials
 // (name, trigger, prompt) then Delivery (target session, path, program).
 // The trigger is a two-step stop: a cron|watch type selector followed by the
@@ -946,6 +950,11 @@ func (s *TaskPane) clampFormToHeight(content string, focusStart, focusEnd int) s
 	hint := lines[len(lines)-1]
 	body := lines[:len(lines)-1]
 	visible := maxH - 1
+	if visible > len(body) {
+		// The raised floor can exceed a short body (degenerate heights); a
+		// window larger than the body would slice past its end.
+		visible = len(body)
+	}
 
 	off := s.formScroll
 	if off > len(body)-visible {
@@ -968,15 +977,14 @@ func (s *TaskPane) clampFormToHeight(content string, focusStart, focusEnd int) s
 
 	win := make([]string, visible)
 	copy(win, body[off:off+visible])
-	moreStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
 	inFocusRange := func(line int) bool {
 		return focusStart >= 0 && line >= focusStart && line < focusEnd
 	}
 	if off > 0 && !inFocusRange(off) {
-		win[0] = moreStyle.Render("  ↑ more")
+		win[0] = taskFormMoreStyle.Render("  ↑ more")
 	}
 	if last := off + visible - 1; last < len(body)-1 && !inFocusRange(last) {
-		win[visible-1] = moreStyle.Render("  ↓ more")
+		win[visible-1] = taskFormMoreStyle.Render("  ↓ more")
 	}
 	return strings.Join(append(win, hint), "\n")
 }
