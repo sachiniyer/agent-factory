@@ -74,7 +74,7 @@ One bubbletea program (`tea.NewProgram(newHome(...), tea.WithAltScreen(), tea.Wi
 
 - **Read**: the TUI polls `Snapshot` every 750 ms (`snapshotRefreshInterval`, `app/sync.go:70`), one fetch in flight at a time (`app/app.go:354-377`). The daemon RPC is Go `net/rpc` + gob over a unix socket (`daemon/control.go:843-879`, socket `<configDir>/daemon.sock`), strictly request/response — **no push/subscribe channel exists**. Snapshot payload = `[]session.InstanceData` (`session/storage.go:12`): title, path, branch, status, tabs (`TabData{Name,Kind,Command,TmuxName}`, `session/storage.go:38`), PR info, worktree, remote meta. `reconcileSnapshot` (`app/sync.go:282-362`) mirrors it into the sidebar's instance list: add / swap (same title, different CreatedAt) / update-in-place / remove; selection re-pinned by title. Cold start blocks on `coldStartFromSnapshot` (`app/sync.go:119-136`) with a 2-minute daemon warm-up budget.
 - **Write**: all session/tab mutations are daemon RPCs via swappable seams in `app/session_control.go`: `CreateSession` (`:18`), `KillSession` (`:34`), `CreateTab` (`:46`), `CloseTab` (`:53`), `SetPRInfo` (`:62`), `ImportRemoteHookSessions` (`:38`). Mutations run in `tea.Cmd` goroutines with the seam captured on the event loop first (#960 race pattern, e.g. `app/handle_actions.go:205`).
-- **Exception — tasks**: automations are *not* in the Snapshot and there is no `ListTasks` RPC. The TUI reads/writes `tasks.json` directly (`task.LoadTasksForCurrentRepo` at `app/app.go:190,629,712`; `AddTask`/`UpdateTask`/`RemoveTask` at `app/app.go:707,613,619`) and pokes `daemon.ReloadTasks` after writes (`app/app.go:641`). The #960 single-writer model covers sessions only.
+- **Exception — tasks**: automations are *not* in the Snapshot. The TUI reads/writes `tasks.json` directly (`task.LoadTasksForCurrentRepo` at `app/app.go:190,629,712`; `AddTask`/`UpdateTask`/`RemoveTask` at `app/app.go:707,613,619`) and pokes `daemon.ReloadTasks` after writes (`app/app.go:641`). The #960 single-writer model covers sessions only; task RPCs (`ListTasks`/`AddTask`/`UpdateTask`/`RemoveTask`/`TriggerTask`) were added in #1029 PR 3, completing the CLI single-writer path. TUI direct-write+poke is a tracked follow-up.
 
 ### 1.6 Attach / PTY passthrough
 
@@ -339,7 +339,7 @@ Resolved 2026-07-03:
 
 Still open:
 
-4. **Tasks over RPC** — automations stay disk-read (`tasks.json` + `ReloadTasks` poke) in this rewrite, matching today. Moving them behind daemon RPCs (`ListTasks`/`AddTask`/…) would complete the #960 single-writer story and fits #1029 ("daemon is the core; everything else a client"). RFC recommends: separate #1029 work item, to keep this epic presentation-only.
+4. **Tasks over RPC** — **Partially resolved (#1029 PR 3).** CLI task operations now route through daemon RPCs (`ListTasks`/`AddTask`/`UpdateTask`/`RemoveTask`/`TriggerTask`); the daemon is the sole task writer for CLI, completing that half of the #960 single-writer story. TUI direct-write+poke remains a tracked follow-up to keep this epic presentation-only.
 5. **Automations rail-section scope** — current-repo tasks only (matches today's `LoadTasksForCurrentRepo`), or all repos with a repo column? RFC assumes current-repo.
 6. **Hooks placement** — RFC demotes hooks from a persistent sidebar section to an overlay reachable from the automations section + hotkey. Any objection?
 

@@ -12,8 +12,9 @@ import (
 // taskScheduler evaluates task cron expressions in-process and fires due
 // tasks through RunTask. It replaces the per-task systemd/launchd timer units
 // that previous versions installed (#782): the daemon is the single always-on
-// scheduler host, and task CRUD paths just rewrite tasks.json and ask the
-// daemon to Reload via the ReloadTasks RPC.
+// scheduler host. CLI task CRUD uses daemon RPCs which persist and re-arm
+// schedules atomically; TUI CRUD still writes tasks.json directly and pokes
+// ReloadTasks (tracked follow-up).
 type taskScheduler struct {
 	mu      sync.Mutex
 	cron    *cron.Cron
