@@ -11,12 +11,19 @@ import (
 
 // flipStatus sets Status under the same lock the daemon archive op uses, so the
 // pre-spawn guard and the post-spawn recheck in AddShellTab/AddProcessTab observe
-// an archiving instance — the deterministic stand-in for a concurrent
-// ArchiveSession flipping status Deleting→Archived while started stays true
-// (#1195).
+// the target state (used here for the completed-archive LiveArchived case) (#1195).
 func flipStatus(i *Instance, s Status) {
 	i.mu.Lock()
 	i.setStatusLocked(s)
+	i.mu.Unlock()
+}
+
+// beginArchiving raises the OpArchiving fence under the same lock the daemon
+// archive op uses — the deterministic stand-in for a concurrent ArchiveSession
+// mid teardown+move (started stays true throughout) (#1195).
+func beginArchiving(i *Instance) {
+	i.mu.Lock()
+	i.inFlightOp = OpArchiving
 	i.mu.Unlock()
 }
 
@@ -68,8 +75,8 @@ func TestAddProcessTab_ArchivedInstanceRejected(t *testing.T) {
 }
 
 // TestAddShellTab_ArchiveRaceDoesNotLeakSession is the post-spawn backstop for
-// the #1195 archive-orphan class: if the session begins archiving (status flipped
-// to Deleting, started left true, mirroring ArchiveTeardown) in the window after
+// the #1195 archive-orphan class: if the session begins archiving (OpArchiving raised,
+// started left true, mirroring ArchiveTeardown) in the window after
 // the shell tab's tmux session is spawned but before it is appended, AddShellTab
 // must NOT append the tab, MUST tear down the spawned session (no orphan
 // referencing the worktree being moved), and MUST return an error.
@@ -80,7 +87,7 @@ func TestAddShellTab_ArchiveRaceDoesNotLeakSession(t *testing.T) {
 	const agentName = "af_shell_archrace"
 	var inst *Instance
 	var isAlive func(string) bool
-	inst, isAlive = raceMockInstance(t, agentName, func() { flipStatus(inst, Deleting) })
+	inst, isAlive = raceMockInstance(t, agentName, func() { beginArchiving(inst) })
 
 	tab, err := inst.AddShellTab()
 	require.Error(t, err, "a tab created during archive teardown must be refused")
@@ -98,7 +105,7 @@ func TestAddProcessTab_ArchiveRaceDoesNotLeakSession(t *testing.T) {
 	const agentName = "af_proc_archrace"
 	var inst *Instance
 	var isAlive func(string) bool
-	inst, isAlive = raceMockInstance(t, agentName, func() { flipStatus(inst, Deleting) })
+	inst, isAlive = raceMockInstance(t, agentName, func() { beginArchiving(inst) })
 
 	tab, err := inst.AddProcessTab("btop", "")
 	require.Error(t, err, "a process tab created during archive teardown must be refused")

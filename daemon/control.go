@@ -1496,9 +1496,9 @@ func (m *Manager) RefreshStatuses() {
 }
 
 // refreshInstanceStatus mirrors the old runMetadataTick body for one instance:
-//   - skip unstarted instances and the transient TUI-owned states (a Loading
-//     session's tmux may not exist yet; a Deleting one is mid-teardown — probing
-//     or writing either would poke a dying session, #844);
+//   - skip unstarted instances and any with an in-flight op (an archive/restore
+//     mid-teardown, a create/kill overlay — probing or writing either would poke
+//     a session whose tmux is being spun up or torn down, #844/#1195);
 //   - dismiss a pending trust prompt (CheckAndHandleTrustPrompt), moved here from
 //     the TUI so it works whether or not a TUI is attached;
 //   - HasUpdated → Running; a waiting prompt → TapEnter (the AutoYes path, which
@@ -1510,8 +1510,9 @@ func (m *Manager) RefreshStatuses() {
 //   - a session carrying the kill-intent tombstone (#1108) short-circuits all
 //     of the above: its interrupted teardown is finished instead.
 //
-// Status writes go through SetStatusIfNotDeleting so a concurrent kill's Deleting
-// marker is never clobbered. Only a real transition is persisted, and it persists
+// The poll writes only the liveness axis (SetLiveness), gated on there being no
+// in-flight op — so it can never clobber a concurrent kill/archive marker, which
+// lives on the separate op axis (#1195). Only a real transition is persisted, and it persists
 // under the per-repo start lock (mirroring CreateTab/CloseTab/SetPRInfo) through
 // the targeted writer persistInstanceData — never a whole-list re-marshal, the
 // dual-writer clobber surface #960 PR 4 retired — so an idle session never churns
@@ -1528,16 +1529,16 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		m.finishUserKill(repoID, instance)
 		return
 	}
-	if status := instance.GetStatus(); status == session.Loading || status == session.Deleting {
+	if instance.GetInFlightOp() != session.OpNone {
+		// An op is mid-flight (archive/restore teardown, create/kill overlay): the
+		// poll must not probe a session whose tmux is being spun up/torn down and
+		// mark it Lost — the op's executor writes the settled liveness. Replaces
+		// the old Loading/Deleting skip (#1195).
 		return
 	}
-	if instance.GetStatus() == session.Archived {
-		// An archived session (#1028) has no tmux to probe — its worktree was
-		// moved to the global archive dir and every tab torn down. It loads
-		// inert (started=false), so the !Started guard above already skips it;
-		// this explicit check is belt-and-suspenders so a future change that
-		// leaves an Archived instance started can never have the poll probe it,
-		// mark it Lost, or repaint it Ready. It stays put until RestoreArchived.
+	if instance.GetLiveness() == session.LiveArchived {
+		// Archived (#1028): no tmux to probe, inert (started=false) so already
+		// skipped by !Started above — belt-and-suspenders against a future change.
 		return
 	}
 	if m.isPollPaused(repoID, instance.Title) {
@@ -1554,7 +1555,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	}
 
 	instance.CheckAndHandleTrustPrompt()
-	before := instance.GetStatus()
+	before := instance.GetLiveness()
 	updated, hasPrompt := instance.HasUpdated()
 	if hasPrompt {
 		// Tap enter whenever a prompt is waiting (TapEnter is a no-op unless
@@ -1568,7 +1569,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	}
 	switch {
 	case updated:
-		instance.SetStatusIfNotDeleting(session.Running)
+		instance.SetLiveness(session.LiveRunning)
 	case hasPrompt:
 		// A waiting prompt with otherwise-unchanged output: leave the status for
 		// the next tick to resolve, exactly as runMetadataTick did. The
@@ -1582,15 +1583,15 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// intent on record, so the session vanished out from under a live
 		// record — an outage/reboot casualty that is recovery-eligible, not a
 		// corpse the user wanted gone.
-		instance.SetStatusIfNotDeleting(session.Lost)
+		instance.SetLiveness(session.LiveLost)
 	default:
-		instance.SetStatusIfNotDeleting(session.Ready)
+		instance.SetLiveness(session.LiveReady)
 	}
 
-	after := instance.GetStatus()
-	if after == before || after == session.Deleting || after == session.Loading {
-		// No real transition, or a concurrent kill moved it to a transient state
-		// we must not persist. Only transitions touch disk.
+	after := instance.GetLiveness()
+	if after == before || instance.GetInFlightOp() != session.OpNone {
+		// No real transition, or an op raced in after our top-of-function check —
+		// its executor owns the durable state. Only real transitions touch disk.
 		return
 	}
 
@@ -1705,7 +1706,7 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", err)
 	}
 
-	instance.SetStatus(session.Running)
+	instance.MarkLive()
 	data := instance.ToInstanceData()
 
 	// Register the in-memory instance and persist it to disk inside the

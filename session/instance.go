@@ -1137,18 +1137,34 @@ func (i *Instance) RestoreArchivedWorktree(dest string) error {
 // has been moved back into place (#1028), flipping it live. It marks the
 // instance started + Lost so the Recover re-spawn path is eligible (the same
 // re-spawn the #1108 Lost-restore loop drives), then Recover brings the agent
-// session up and sets Running. On a Recover failure the instance is left
-// started + Lost, so the daemon's Lost-restore loop keeps retrying — the
-// worktree is already back in place, so the session self-heals rather than
-// stranding as Archived with no tmux. Only the agent tab is restored (shell/
-// process tabs were dropped at archive time, per #1028).
+// session up and sets Running (markLive clears the OpRestoring fence). On a
+// Recover failure the instance is dropped to a plain Lost (op cleared), so the
+// daemon's Lost-restore loop keeps retrying — the worktree is already back in
+// place, so the session self-heals rather than stranding as Archived with no
+// tmux. Only the agent tab is restored (shell/process tabs were dropped at
+// archive time, per #1028).
+//
+// liveness is set to Lost (so Recover's ==Lost gate accepts it) and OpRestoring
+// fences the re-spawn window: the daemon poll skips an instance with an
+// in-flight op, so it never probes the half-spawned session and marks it Lost
+// out from under the restore. This replaces the old "park it in Lost purely to
+// trigger the re-spawn loop" overload (#1195).
 func (i *Instance) RestoreFromArchive() error {
 	i.mu.Lock()
 	i.started = true
 	i.liveness = LiveLost
-	i.inFlightOp = OpNone
+	i.inFlightOp = OpRestoring
 	i.mu.Unlock()
-	return i.backend.Recover(i)
+	if err := i.backend.Recover(i); err != nil {
+		// Re-spawn failed: drop the fence to a plain Lost so the #1108
+		// restore loop owns the retry against the now-restored worktree.
+		i.mu.Lock()
+		i.liveness = LiveLost
+		i.inFlightOp = OpNone
+		i.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // CloseAttachOnly releases the resources this instance opened to view or drive

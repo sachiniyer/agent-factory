@@ -294,9 +294,11 @@ func (b *LocalBackend) Recover(i *Instance) error {
 	b.setupTabs(i)
 
 	// The program was just re-spawned and is booting: Running, exactly like a
-	// fresh create. The daemon poll re-derives Ready/Running from the live
-	// session from here on and persists the transition.
-	i.SetStatusIfNotDeleting(Running)
+	// fresh create. markLive clears the OpRestoring/OpCreating fence this
+	// completion resolves while preserving a kill/archive teardown fence. The
+	// daemon poll re-derives Ready/Running from the live session from here on and
+	// persists the transition.
+	i.MarkLive()
 	return nil
 }
 

@@ -117,22 +117,28 @@ func TestGetGitWorktree_RaceWithStart(t *testing.T) {
 	wg.Wait()
 }
 
-// TestSetStatusIfNotDeleting guards the #844 status fence: the metadata tick's
-// Running/Ready writes must not clobber a Deleting marker, while normal status
-// flow stays unaffected and the kill completion handler (which uses SetStatus)
-// can still move the instance out of Deleting.
-func TestSetStatusIfNotDeleting(t *testing.T) {
+// TestSetLivenessNeverClobbersInFlightOp is the #1195 structural replacement for
+// the old #844 fence (SetStatusIfNotDeleting): the daemon poll writes only the
+// liveness axis, so a concurrent kill/archive op — living on the separate op axis
+// — can never be clobbered. The composed status keeps reflecting the op, which is
+// what the SetStatusIfNotDeleting guard used to reconstruct by hand.
+func TestSetLivenessNeverClobbersInFlightOp(t *testing.T) {
 	i := &Instance{liveness: LiveReady}
 
-	i.SetStatusIfNotDeleting(Running)
-	require.Equal(t, Running, i.GetStatus(), "non-deleting status updates must pass through")
-
-	i.SetStatus(Deleting)
-	i.SetStatusIfNotDeleting(Running)
-	require.Equal(t, Deleting, i.GetStatus(), "tick writes must not clobber Deleting")
-	i.SetStatusIfNotDeleting(Ready)
+	// A kill is optimistically in flight (op axis), underlying liveness Running.
+	i.SetLiveness(LiveRunning)
+	i.SetInFlightOp(OpKilling)
 	require.Equal(t, Deleting, i.GetStatus())
 
-	i.SetStatus(Ready)
-	require.Equal(t, Ready, i.GetStatus(), "the kill handler's unconditional SetStatus must still work")
+	// The poll writes liveness (Running/Ready/Lost) — the kill op survives every
+	// write, so the composed status stays Deleting.
+	i.SetLiveness(LiveReady)
+	require.Equal(t, OpKilling, i.GetInFlightOp(), "SetLiveness must not touch the op axis")
+	require.Equal(t, Deleting, i.GetStatus(), "a poll write must never clobber a kill marker")
+	i.SetLiveness(LiveLost)
+	require.Equal(t, Deleting, i.GetStatus())
+
+	// The kill handler clears the op; the composed status then reflects liveness.
+	i.SetInFlightOp(OpNone)
+	require.Equal(t, Lost, i.GetStatus())
 }

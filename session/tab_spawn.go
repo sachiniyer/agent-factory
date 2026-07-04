@@ -7,25 +7,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// TabSpawnStatusErr reports the error, if any, that forbids spawning a new tab
-// for an instance in the given status. Adding a tab to an Archived instance
-// would spawn a tmux session in the moved-away worktree, and adding one to a
-// Deleting instance races the mid-flight teardown+move — the #1195 archive
-// orphan-tmux class: ArchiveTeardown keeps started=true (so the #990
-// started-flag guard never fires during archive), and the daemon's archive op
-// flips status Deleting→Archived across the teardown+move window. Callers guard
-// both before spawning (fail fast) and after (post-spawn recheck), mirroring the
-// #990 kill-race handling. Returns nil for any status in which a tab may spawn.
-func TabSpawnStatusErr(status Status) error {
-	switch status {
-	case Archived:
-		return fmt.Errorf("cannot add a tab to an archived session; restore it first (af sessions restore)")
-	case Deleting:
-		return fmt.Errorf("cannot add a tab to a session that is being archived or removed; try again in a moment")
-	}
-	return nil
-}
-
 // AddShellTab spawns a new Shell-kind tab running $SHELL in the instance's
 // worktree, appends it to Tabs, and returns it. Local instances only — remote
 // instances have no local worktree, so callers must reject IsRemote() before
@@ -37,15 +18,15 @@ func TabSpawnStatusErr(status Status) error {
 func (i *Instance) AddShellTab() (*Tab, error) {
 	i.mu.RLock()
 	started := i.started
-	status := i.statusLocked()
+	spawnErr := i.tabSpawnBlockedLocked()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueShellName(i.Tabs)
 	nTabs := len(i.Tabs)
 	i.mu.RUnlock()
 
-	if err := TabSpawnStatusErr(status); err != nil {
-		return nil, err
+	if spawnErr != nil {
+		return nil, spawnErr
 	}
 	if !started || agentTmux == nil || gw == nil {
 		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
@@ -75,11 +56,11 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	// released the lock to spawn, and Kill (which does NOT take repoStartLock, so
 	// it is not serialized against CreateTab) can have flipped started=false and
 	// snapshotted Tabs for teardown in that window; an archive teardown+move keeps
-	// started=true but flips status to Deleting→Archived (#1195). Appending now
+	// started=true but raises OpArchiving over the window (#1195). Appending now
 	// would leak a tmux session that escapes teardown while its worktree is deleted
 	// or moved (#990, #1028). Make the recheck and append atomic under one
 	// acquisition so no further race opens.
-	stale := !i.started || TabSpawnStatusErr(i.statusLocked()) != nil
+	stale := !i.started || i.tabSpawnBlockedLocked() != nil
 	title := i.Title
 	if !stale {
 		i.Tabs = append(i.Tabs, tab)
@@ -115,15 +96,15 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 
 	i.mu.RLock()
 	started := i.started
-	status := i.statusLocked()
+	spawnErr := i.tabSpawnBlockedLocked()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueTabName(i.Tabs, processTabBaseName(requestedName, command))
 	nTabs := len(i.Tabs)
 	i.mu.RUnlock()
 
-	if err := TabSpawnStatusErr(status); err != nil {
-		return nil, err
+	if spawnErr != nil {
+		return nil, spawnErr
 	}
 	if !started || agentTmux == nil || gw == nil {
 		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
@@ -151,10 +132,10 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// Re-check started AND status under the write lock before appending (see
 	// AddShellTab): Kill can have flipped started=false and snapshotted Tabs for
 	// teardown while we spawned outside the lock, and an archive teardown+move keeps
-	// started=true but flips status to Deleting→Archived (#1195); appending now
+	// started=true but raises OpArchiving over the window (#1195); appending now
 	// would leak a tmux session whose worktree Kill deletes or archive moves (#990,
 	// #1028). Recheck + append are atomic under one acquisition.
-	stale := !i.started || TabSpawnStatusErr(i.statusLocked()) != nil
+	stale := !i.started || i.tabSpawnBlockedLocked() != nil
 	title := i.Title
 	if !stale {
 		i.Tabs = append(i.Tabs, tab)
