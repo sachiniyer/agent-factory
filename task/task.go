@@ -148,22 +148,6 @@ func LoadTasks() ([]Task, error) {
 	return tasks, nil
 }
 
-func SaveTasks(tasks []Task) error {
-	path, err := getTasksPathFn()
-	if err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(tasks, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal tasks: %w", err)
-	}
-
-	return config.WithFileLock(path, func() error {
-		return config.AtomicWriteFile(path, data, 0644)
-	})
-}
-
 // saveTasks writes tasks without locking. Must be called from within WithFileLock.
 func saveTasks(tasks []Task) error {
 	path, err := getTasksPathFn()
