@@ -78,6 +78,7 @@ func TestClose_SessionSurvivesKill_StillErrors(t *testing.T) {
 // (TOCTOU). A gone session is the goal of cleanup, so the vanished one must not
 // fail the sweep, while a survivor still does.
 func TestCleanupSessions_ToleratesVanishedSession(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", "/owned-home")
 	const lsOutput = `af_gone: 1 windows (created Wed May 20 12:00:00 2026) [179x47]
 af_stuck: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
 
@@ -116,6 +117,10 @@ af_stuck: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
 				return nil
 			},
 			OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+				if len(c.Args) > 1 && c.Args[1] == "show-environment" {
+					// Both sessions carry this home's marker (#1122).
+					return []byte("AF_HOME=/owned-home\n"), nil
+				}
 				if strings.Contains(strings.Join(c.Args, " "), "ls") {
 					return []byte(lsOutput), nil
 				}
@@ -142,6 +147,10 @@ af_stuck: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
 				return nil
 			},
 			OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+				if len(c.Args) > 1 && c.Args[1] == "show-environment" {
+					// Both sessions carry this home's marker (#1122).
+					return []byte("AF_HOME=/owned-home\n"), nil
+				}
 				if strings.Contains(strings.Join(c.Args, " "), "ls") {
 					return []byte(lsOutput), nil
 				}

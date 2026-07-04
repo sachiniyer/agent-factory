@@ -91,6 +91,15 @@ func TestCleanupSessionsReapsEscapedProcesses(t *testing.T) {
 	shrinkReapWaits(t)
 
 	escapee := spawnSessionWithEscapee(t, "af_reap-reset-test")
+
+	// Stamp this home's ownership marker: the sweep only kills sessions it
+	// can prove it owns (#1122), and the raw `tmux new-session` above does
+	// not go through the af creation path that stamps it.
+	home, err := afHomeDir()
+	require.NoError(t, err)
+	out, err := exec.Command("tmux", "set-environment", "-t", "=af_reap-reset-test", EnvMarkerHome, home).CombinedOutput()
+	require.NoError(t, err, "set-environment: %s", out)
+
 	require.NoError(t, CleanupSessions(cmd.MakeExecutor()))
 
 	// Synchronous contract: by the time CleanupSessions returns, the sweep

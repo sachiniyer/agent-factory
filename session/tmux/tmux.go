@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1188,7 +1189,14 @@ func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, 
 	return string(output), nil
 }
 
-// CleanupSessions kills all tmux sessions that start with "session-"
+// CleanupSessions kills every af_-prefixed tmux session owned by THIS
+// agent-factory home, ownership proven by the AF_HOME session-environment
+// marker stamped at creation (#1120). Sessions carrying another home's marker
+// (a second install, a test's sandbox home) and sessions with no marker at
+// all (pre-marker builds, tmux <3.2) are skipped and logged: killing a
+// session this home cannot prove it owns is worse than leaving it, and a
+// test sweep that escapes onto the developer's real server must be a no-op
+// (#1122). `af doctor` lists unowned af_ sessions with a manual kill command.
 func CleanupSessions(cmdExec cmd.Executor) error {
 	// First try to list sessions
 	cmd := exec.Command("tmux", "ls")
@@ -1206,9 +1214,29 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// Anchor to start-of-line so `af_` embedded in a non-agent session name
 	// (e.g. `my_af_project:`) is never matched and killed (#613).
 	re := regexp.MustCompile(fmt.Sprintf(`(?m)^%s[^:]*:`, regexp.QuoteMeta(TmuxPrefix)))
-	matches := re.FindAllString(string(output), -1)
-	for i, match := range matches {
-		matches[i] = match[:strings.Index(match, ":")]
+	prefixed := re.FindAllString(string(output), -1)
+	for i, match := range prefixed {
+		prefixed[i] = match[:strings.Index(match, ":")]
+	}
+
+	// Home-scope the sweep (#1122): the af_ prefix alone does not prove this
+	// home owns the session — another install or an escaped test process can
+	// see the same server. Only the AF_HOME marker match does.
+	ownHome, err := afHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot resolve this agent-factory home; refusing to sweep tmux sessions: %w", err)
+	}
+	matches := make([]string, 0, len(prefixed))
+	for _, match := range prefixed {
+		home, ok := sessionHomeMarker(cmdExec, match)
+		switch {
+		case !ok:
+			log.InfoLog.Printf("leaving tmux session %s: no AF_HOME ownership marker (pre-marker build or tmux <3.2); kill manually with: tmux kill-session -t '=%s'", match, match)
+		case filepath.Clean(home) != filepath.Clean(ownHome):
+			log.InfoLog.Printf("leaving tmux session %s: owned by another agent-factory home (%s)", match, home)
+		default:
+			matches = append(matches, match)
+		}
 	}
 
 	// Capture every session's pane process trees before any kill (#1104);
