@@ -51,16 +51,6 @@ func detachTrace(start time.Time, marker string) {
 	log.WarningLog.Printf("[detach-trace] %s elapsed=%v", marker, time.Since(start))
 }
 
-// detachTraceFields logs a marker with elapsed time and a free-form fields
-// string (e.g. instance title, error message). Use this when the marker
-// alone is ambiguous.
-func detachTraceFields(start time.Time, marker, fields string) {
-	if !detachTraceEnabled {
-		return
-	}
-	log.WarningLog.Printf("[detach-trace] %s elapsed=%v %s", marker, time.Since(start), fields)
-}
-
 // detachTraceMark logs a marker without an elapsed time — for boundaries
 // where we don't have a reference start (e.g. tick handlers that may race
 // with a detach in progress; correlating against nearby start-relative
