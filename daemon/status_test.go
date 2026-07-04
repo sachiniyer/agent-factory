@@ -136,25 +136,26 @@ func TestRefreshStatuses_LiveIdleSessionBecomesReady(t *testing.T) {
 	}
 }
 
-// TestRefreshStatuses_DeadSessionMarkedDeadNotReady is the status half of #935:
-// the daemon must not repaint a session whose backing tmux/remote session has
-// vanished as Ready. HasUpdated latches (false,false), indistinguishable from a
-// healthy idle one, so the daemon probes liveness and marks it Dead — and
-// persists it so the hollow dead-dot survives a reload.
-func TestRefreshStatuses_DeadSessionMarkedDeadNotReady(t *testing.T) {
+// TestRefreshStatuses_VanishedSessionMarkedLostNotReady is the status half of
+// #935: the daemon must not repaint a session whose backing tmux/remote session
+// has vanished as Ready. HasUpdated latches (false,false), indistinguishable
+// from a healthy idle one, so the daemon probes liveness and marks it Lost —
+// not Dead, since there is no kill intent on record (#1108) — and persists it
+// so the status survives a reload and the restore loop can find it.
+func TestRefreshStatuses_VanishedSessionMarkedLostNotReady(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	// Start from Running to prove the pass actively transitions it to Dead
+	// Start from Running to prove the pass actively transitions it to Lost
 	// rather than merely leaving a pre-set status untouched.
 	registerStarted(t, manager, repoID, repoPath, "gone", deadTmuxBackend{session.NewFakeBackend()}, true, session.Running)
 
 	manager.RefreshStatuses()
 
 	inst := manager.instances[daemonInstanceKey(repoID, "gone")]
-	if got := inst.GetStatus(); got != session.Dead {
-		t.Fatalf("in-memory status = %v, want Dead (a dead session must never be Ready)", got)
+	if got := inst.GetStatus(); got != session.Lost {
+		t.Fatalf("in-memory status = %v, want Lost (a vanished session must never be Ready, and is not user-killed)", got)
 	}
-	if got := persistedStatus(t, repoID, "gone"); got != session.Dead {
-		t.Fatalf("persisted status = %v, want Dead", got)
+	if got := persistedStatus(t, repoID, "gone"); got != session.Lost {
+		t.Fatalf("persisted status = %v, want Lost", got)
 	}
 }
 
@@ -172,27 +173,28 @@ func (b nilMonitorBackend) HasUpdated(*session.Instance) (bool, bool) { return b
 func (b nilMonitorBackend) IsAlive(*session.Instance) bool            { return b.ts.DoesSessionExist() }
 
 // TestRefreshStatuses_DeadNilMonitorDoesNotPanic is the #999 regression at the
-// daemon poll layer: a persisted Dead instance whose TmuxSession has a nil
+// daemon poll layer: a persisted Dead/Lost instance whose TmuxSession has a nil
 // monitor (Start skipped Restore, #970) must survive a RefreshStatuses pass
 // without panicking. HasUpdated returns (false,false) and the idle liveness
-// probe confirms the vanished session, leaving it Dead.
+// probe confirms the vanished session, marking it Lost (#1108).
 func TestRefreshStatuses_DeadNilMonitorDoesNotPanic(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	// has-session reports "gone" so the idle-branch liveness probe keeps it Dead;
-	// the nil monitor would panic HasUpdated before the fix regardless.
+	// has-session reports "gone" so the idle-branch liveness probe confirms the
+	// vanished session; the nil monitor would panic HasUpdated before the fix
+	// regardless.
 	mockExec := cmd_test.MockCmdExec{
 		RunFunc:    func(*exec.Cmd) error { return errSessionAbsent },
 		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("content"), nil },
 	}
 	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_999_nil_monitor", "claude", tmux.MakePtyFactory(), mockExec)
 	backend := nilMonitorBackend{FakeBackend: session.NewFakeBackend(), ts: ts}
-	registerStarted(t, manager, repoID, repoPath, "corpse", backend, true, session.Dead)
+	registerStarted(t, manager, repoID, repoPath, "corpse", backend, true, session.Lost)
 
 	manager.RefreshStatuses() // must not panic on the nil monitor
 
 	inst := manager.instances[daemonInstanceKey(repoID, "corpse")]
-	if got := inst.GetStatus(); got != session.Dead {
-		t.Fatalf("in-memory status = %v, want Dead (a restored corpse stays Dead)", got)
+	if got := inst.GetStatus(); got != session.Lost {
+		t.Fatalf("in-memory status = %v, want Lost (a vanished session stays Lost)", got)
 	}
 }
 

@@ -91,14 +91,17 @@ func deadInstanceData(t *testing.T, status Status, agentName, shellName string) 
 	}
 }
 
-// TestDeadInstance_NotRespawnedOnLoad is the #970 regression: an instance
-// persisted as Dead (its tmux session was killed out from under it) must reload
-// as a Dead corpse and must NOT re-spawn any tmux session — neither the agent
-// session (TmuxSession.Restore's #386 re-spawn-when-missing path) nor the shell
-// tab (setupTabs). It must still load as started=true so the daemon's
-// SaveInstances checkpoint (which skips !Started instances) keeps the corpse on
+// TestDeadInstance_LoadsAsLostWithoutRespawn is the #970 regression updated for
+// the #1108 rollforward: an instance persisted as Dead by a pre-Lost build (its
+// tmux session vanished out from under it) reloads as Lost — recovery-eligible,
+// since only observed-death paths ever wrote persisted Dead — and must NOT
+// re-spawn any tmux session on load: neither the agent session
+// (TmuxSession.Restore's #386 re-spawn-when-missing path) nor the shell tab
+// (setupTabs). Recovery is the daemon's explicit restore loop, never a
+// load-time side effect. It must still load as started=true so the daemon's
+// SaveInstances checkpoint (which skips !Started instances) keeps the record on
 // disk and the user can still kill it.
-func TestDeadInstance_NotRespawnedOnLoad(t *testing.T) {
+func TestDeadInstance_LoadsAsLostWithoutRespawn(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 	// Isolate config reads from the developer's real ~/.agent-factory (see
@@ -108,7 +111,7 @@ func TestDeadInstance_NotRespawnedOnLoad(t *testing.T) {
 	const agentName = "af_dead_agent"
 	shellName := agentName + shellTmuxSuffix
 
-	// Both sessions are GONE (the kill that produced Dead): a Restore would hit
+	// Both sessions are GONE (the death that produced Dead): a Restore would hit
 	// the missing-session branch and re-spawn via new-session.
 	var newSessions int
 	exec := countingExec(map[string]bool{}, &newSessions)
@@ -123,23 +126,88 @@ func TestDeadInstance_NotRespawnedOnLoad(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, newSessions,
-		"a Dead instance must NOT re-spawn any tmux session on load (#970)")
-	assert.Equal(t, Dead, restored.GetStatus(), "the corpse must stay Dead")
+		"a Dead/Lost instance must NOT re-spawn any tmux session on load (#970)")
+	assert.Equal(t, Lost, restored.GetStatus(),
+		"persisted Dead must roll forward to Lost on load (#1108)")
 	assert.True(t, restored.Started(),
-		"a Dead instance must load started=true so SaveInstances keeps it on disk")
+		"a Lost instance must load started=true so SaveInstances keeps it on disk")
 	assert.False(t, restored.TabAlive(0),
-		"the Dead agent session must not exist server-side after load")
+		"the vanished agent session must not exist server-side after load")
+}
+
+// TestLostInstance_NotRespawnedOnLoad extends the #970 guard to the Lost status
+// itself (#1108): a record persisted as Lost must reload as Lost without any
+// re-spawn — the daemon's explicit restore loop owns recovery, not the loader.
+func TestLostInstance_NotRespawnedOnLoad(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_lost_agent"
+	shellName := agentName + shellTmuxSuffix
+
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	restored, err := FromInstanceData(deadInstanceData(t, Lost, agentName, shellName))
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, newSessions,
+		"a Lost instance must NOT re-spawn any tmux session on load (#970/#1108)")
+	assert.Equal(t, Lost, restored.GetStatus())
+	assert.True(t, restored.Started())
+}
+
+// TestTombstonedInstance_NotRespawnedOnLoad guards the kill-intent tombstone
+// (#1108): a record whose UserKilled flag survived a crash mid-kill must not be
+// re-spawned on load regardless of its persisted status — its only future is
+// having its teardown finished by the daemon poll. Status Running is the
+// realistic crash shape: KillSession tombstones BEFORE any status change, so an
+// interrupted kill leaves the pre-kill status behind — and Running is exactly
+// the status that would otherwise take the #386 re-spawn path.
+func TestTombstonedInstance_NotRespawnedOnLoad(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_tombstone_agent"
+	shellName := agentName + shellTmuxSuffix
+
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	data := deadInstanceData(t, Running, agentName, shellName)
+	data.UserKilled = true
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, newSessions,
+		"a tombstoned instance must NOT be re-spawned on load, whatever its status (#1108)")
+	assert.True(t, restored.UserKilled(), "the tombstone must survive the round-trip")
+	assert.True(t, restored.Started())
 }
 
 // TestDeadInstance_HasUpdatedNilMonitor is the #999 regression, exercised
-// through the production path. A persisted Dead instance loads with
-// started=true but LocalBackend.Start returns before TmuxSession.Restore (the
-// only place the tmux monitor is initialized) so the corpse is not re-spawned
-// (#970). The daemon's refreshInstanceStatus still polls every started
-// instance via instance.HasUpdated(); before the fix that dereferenced a nil
-// monitor and panicked, killing the refresh goroutine and zombifying the
-// daemon. HasUpdated must instead return (false,false) — a session with no live
-// monitor has nothing to report.
+// through the production path. A persisted Dead instance loads (as Lost, per
+// the #1108 rollforward) with started=true but LocalBackend.Start returns
+// before TmuxSession.Restore (the only place the tmux monitor is initialized)
+// so the session is not re-spawned (#970). The daemon's refreshInstanceStatus
+// still polls every started instance via instance.HasUpdated(); before the fix
+// that dereferenced a nil monitor and panicked, killing the refresh goroutine
+// and zombifying the daemon. HasUpdated must instead return (false,false) — a
+// session with no live monitor has nothing to report.
 func TestDeadInstance_HasUpdatedNilMonitor(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
@@ -148,8 +216,9 @@ func TestDeadInstance_HasUpdatedNilMonitor(t *testing.T) {
 	const agentName = "af_dead_hasupdated"
 	shellName := agentName + shellTmuxSuffix
 
-	// Both sessions are GONE (the kill that produced Dead): Start(false) returns
-	// at the Dead guard before Restore, so the agent TmuxSession's monitor is nil.
+	// Both sessions are GONE (the death that produced Dead): Start(false)
+	// returns at the Dead/Lost guard before Restore, so the agent TmuxSession's
+	// monitor is nil.
 	var newSessions int
 	exec := countingExec(map[string]bool{}, &newSessions)
 	pty := persistPtyFactory{t: t, cmdExec: exec}
@@ -161,7 +230,7 @@ func TestDeadInstance_HasUpdatedNilMonitor(t *testing.T) {
 
 	restored, err := FromInstanceData(deadInstanceData(t, Dead, agentName, shellName))
 	require.NoError(t, err)
-	require.Equal(t, Dead, restored.GetStatus())
+	require.Equal(t, Lost, restored.GetStatus())
 	require.True(t, restored.Started())
 
 	// This is the exact call refreshInstanceStatus makes every daemon tick.

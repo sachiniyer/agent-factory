@@ -200,6 +200,9 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	if instance.GetStatus() == session.Deleting {
 		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", instance.Title))
 	}
+	if instance.GetStatus() == session.Lost {
+		return m, m.handleError(fmt.Errorf("session '%s' was lost — its tmux session is gone", instance.Title))
+	}
 	if !instance.TmuxAlive() {
 		return m, m.handleError(fmt.Errorf("session '%s' is no longer running", instance.Title))
 	}

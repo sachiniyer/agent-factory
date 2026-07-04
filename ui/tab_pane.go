@@ -183,6 +183,12 @@ func (p *TabPane) updateAgentLocked(instance *session.Instance) error {
 		// the sidebar's dead-dot so the panes never disagree.
 		p.setFallbackState("Session no longer running.")
 		return nil
+	case instance.GetStatus() == session.Lost:
+		// Lost (#1108): the tmux session vanished with no kill on record —
+		// same synchronous-with-the-sidebar treatment as Dead, but the message
+		// says what happened rather than implying a plain corpse.
+		p.setFallbackState("Session lost — its tmux session is gone.")
+		return nil
 	}
 
 	// If in scroll mode but the viewport hasn't been filled yet, capture the
@@ -456,6 +462,9 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 		return nil
 	case session.Dead:
 		p.setFallbackState("Session no longer running.")
+		return nil
+	case session.Lost:
+		p.setFallbackState("Session lost — its tmux session is gone.")
 		return nil
 	}
 	content, err := instance.Preview()

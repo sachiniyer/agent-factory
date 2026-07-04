@@ -20,7 +20,12 @@ type InstanceData struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	AutoYes   bool      `json:"auto_yes"`
 
-	Program     string                 `json:"program"`
+	Program string `json:"program"`
+	// UserKilled is the kill-intent tombstone (#1108): persisted by
+	// Manager.KillSession before teardown begins. Present only in the crash
+	// window between tombstone write and record deletion — a surviving
+	// tombstoned record means "finish this kill", never "restore this".
+	UserKilled  bool                   `json:"user_killed,omitempty"`
 	TmuxName    string                 `json:"tmux_name,omitempty"`
 	Tabs        []TabData              `json:"tabs,omitempty"`
 	Worktree    GitWorktreeData        `json:"worktree"`
