@@ -1049,14 +1049,15 @@ type taskTriggeredMsg struct {
 }
 
 // handleTaskTrigger runs the selected task through the daemon's single shared
-// trigger path (daemon.RunTask), the SAME entrypoint `af tasks trigger` and the
-// cron scheduler use. Previously the TUI "run now" unconditionally spawned a new
-// per-run session, ignoring the task's target_session and orphaning it (#1169);
-// routing through RunTask makes it honor target_session (deliver into it,
-// auto-creating when missing) and spawn a fresh session only when there is no
-// target — matching CLI/cron exactly. The daemon owns the create/deliver, so the
-// new/updated session appears via the Snapshot projection and the task's run
-// status via the task refresh, with no divergent TUI spawn path to drift.
+// trigger path — via the TriggerTask RPC, which calls daemon.RunTask, the SAME
+// entrypoint `af tasks trigger` and the cron scheduler use. Previously the TUI
+// "run now" unconditionally spawned a new per-run session, ignoring the task's
+// target_session and orphaning it (#1169); routing through RunTask makes it
+// honor target_session (deliver into it, auto-creating when missing) and spawn
+// a fresh session only when there is no target — matching CLI/cron exactly. The
+// daemon owns the create/deliver, so the new/updated session appears via the
+// Snapshot projection and the task's run status via the task refresh, with no
+// divergent TUI spawn path to drift.
 func (m *home) handleTaskTrigger() tea.Cmd {
 	sp := m.automations.TaskPane()
 	tsk := sp.ConsumePendingTrigger()

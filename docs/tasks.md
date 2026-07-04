@@ -92,7 +92,7 @@ af daemon install      # register autostart at login
 af daemon uninstall    # remove it (the daemon still starts on demand)
 ```
 
-- Task edits made through `af tasks` or the TUI take effect live — the daemon is poked to reload `tasks.json`. If the poke fails, the change applies at the next daemon start.
+- Task edits made through `af tasks` go through the daemon: writes persist and the daemon re-arms its schedules atomically in one RPC. TUI edits still write `tasks.json` directly and poke `ReloadTasks`; that path remains correct (cross-process `WithFileLock`) and is a tracked follow-up to migrate it too.
 
 ## Migration notes
 
