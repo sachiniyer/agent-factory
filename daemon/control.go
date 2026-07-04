@@ -440,6 +440,33 @@ func Snapshot(req SnapshotRequest) ([]session.InstanceData, error) {
 	return resp.Instances, nil
 }
 
+// ErrDaemonUnavailable signals that a non-spawning daemon read (SnapshotNoSpawn)
+// found no reachable, ready daemon: the control socket is absent/refused or the
+// daemon is still restoring instances (#829). It is the CLI read path's cue to
+// fall back to reading instances.json off disk — never to spawn a daemon or to
+// surface a transient RPC error from a read-only command (#1029 PR 2).
+var ErrDaemonUnavailable = errors.New("daemon not available")
+
+// SnapshotNoSpawn returns the daemon's authoritative session snapshot WITHOUT
+// starting a daemon. Unlike Snapshot — which calls EnsureDaemon and spawns a
+// daemon when none is running — this dials the existing control socket only if
+// it is already serving. It is the read path for CLI commands (sessions
+// list/get/whoami) that must keep working with no daemon present (scripts, CI)
+// and must never launch one. When no live state is available it returns
+// ErrDaemonUnavailable so the caller falls back to disk; it returns the live
+// instances only on a clean Snapshot success.
+func SnapshotNoSpawn(req SnapshotRequest) ([]session.InstanceData, error) {
+	var resp SnapshotResponse
+	if err := callDaemonNoEnsure("Snapshot", req, &resp); err != nil {
+		// A dial failure means no daemon is running; a starting error (#829)
+		// means one is warming up. Either way there is no authoritative live
+		// state to read, so signal the caller to fall back to disk rather than
+		// spawning a daemon or failing a read-only command.
+		return nil, ErrDaemonUnavailable
+	}
+	return resp.Instances, nil
+}
+
 // KillSession asks the daemon to kill a session and remove it from storage.
 func KillSession(req KillSessionRequest) error {
 	var resp KillSessionResponse

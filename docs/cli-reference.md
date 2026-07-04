@@ -52,6 +52,14 @@ Manage sessions. All subcommands accept **`--repo <path>`** to target a
 repository other than the current directory, and **`--json`** for envelope
 output.
 
+The read commands **`list`**, **`get`**, and **`whoami`** reflect the daemon's
+authoritative in-memory state — the same live view the TUI shows — when a daemon
+is running, so their output no longer lags behind the on-disk `instances.json`.
+They never start a daemon: with none running (a script, CI, or a fresh shell)
+they fall back to reading `instances.json` off disk, so they keep working with
+no daemon present. Both sources return the same shape, sorted identically by
+`(repo, title)`.
+
 ### `af sessions list`
 
 List sessions in scope (the current/`--repo` repo, or every repo when run

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -33,7 +32,57 @@ var (
 	deliverPromptViaDaemon   = daemon.DeliverPrompt
 	createTabViaDaemon       = daemon.CreateTab
 	closeTabViaDaemon        = daemon.CloseTab
+	// snapshotViaDaemon is the non-spawning read path for list/get/whoami
+	// (#1029 PR 2). It reflects the daemon's authoritative in-memory state when
+	// a daemon is already running, and returns daemon.ErrDaemonUnavailable
+	// (never spawning one) when it is not, so callers fall back to disk. Held in
+	// a var so tests can inject a snapshot without a live daemon.
+	snapshotViaDaemon = daemon.SnapshotNoSpawn
 )
+
+// listSessions returns the session list for repoID (empty = all repos),
+// preferring the daemon's live snapshot and falling back to disk when no daemon
+// is reachable (#1029 PR 2). Both paths return the same shape sorted by
+// (repoID, title), so scripts see a consistent order regardless of source.
+func listSessions(repoID string) ([]session.InstanceData, error) {
+	if data, err := snapshotViaDaemon(daemon.SnapshotRequest{RepoID: repoID}); err == nil {
+		return data, nil
+	}
+	return diskListSessions(repoID)
+}
+
+// getSessionByTitle returns the single session matching title, preferring the
+// daemon's live snapshot and falling back to the disk scan when no daemon is
+// reachable (#1029 PR 2). When a live snapshot is available the daemon is
+// authoritative: a miss returns not-found without re-reading disk.
+func getSessionByTitle(title string) (*session.InstanceData, error) {
+	if data, err := snapshotViaDaemon(daemon.SnapshotRequest{}); err == nil {
+		for i := range data {
+			if data[i].Title == title {
+				return &data[i], nil
+			}
+		}
+		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
+		return nil, fmt.Errorf("instance %q %w", title, errTitleNotFound)
+	}
+	data, _, err := findInstanceByTitle(title)
+	return data, err
+}
+
+// whoamiSession returns the session whose TmuxName matches tmuxName, preferring
+// the daemon's live snapshot and falling back to the disk scan when no daemon
+// is reachable (#1029 PR 2).
+func whoamiSession(tmuxName string) (*session.InstanceData, error) {
+	if data, err := snapshotViaDaemon(daemon.SnapshotRequest{}); err == nil {
+		for i := range data {
+			if data[i].TmuxName == tmuxName {
+				return &data[i], nil
+			}
+		}
+		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
+	}
+	return diskWhoami(tmuxName)
+}
 
 var sessionsListCmd = &cobra.Command{
 	Use:   "list",
@@ -47,28 +96,13 @@ var sessionsListCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		var allData []session.InstanceData
-		if repoID != "" {
-			raw, err := config.LoadRepoInstances(repoID)
-			if err != nil {
-				return jsonError(err)
-			}
-			if err := json.Unmarshal(raw, &allData); err != nil {
-				return jsonError(fmt.Errorf("failed to parse instances: %w", err))
-			}
-		} else {
-			// Don't silently substitute an empty/partial list when a repo
-			// file is corrupted (#730): loadAllInstancesAggregate warns naming
-			// each bad repo, and we fail loudly so users can tell "no sessions"
-			// apart from "sessions hidden behind a corrupt file."
-			data, corrupted, err := loadAllInstancesAggregate()
-			if err != nil {
-				return jsonError(err)
-			}
-			if len(corrupted) > 0 {
-				return jsonError(corruptedReposError(corrupted))
-			}
-			allData = data
+		// Read from the daemon's authoritative in-memory state when a daemon is
+		// running, falling back to disk otherwise (#1029 PR 2). listSessions
+		// never spawns a daemon, so `sessions list` in a script or CI keeps
+		// working with none running.
+		allData, err := listSessions(repoID)
+		if err != nil {
+			return jsonError(err)
 		}
 
 		if allData == nil {
@@ -86,7 +120,7 @@ var sessionsGetCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
-		data, _, err := findInstanceByTitle(args[0])
+		data, err := getSessionByTitle(args[0])
 		if err != nil {
 			return jsonError(err)
 		}
@@ -724,33 +758,13 @@ var sessionsWhoamiCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("could not determine tmux session name"))
 		}
 
-		// Scan all instances for a matching tmux_name
-		allInstances, err := config.LoadAllRepoInstances()
+		// Match the tmux session against the daemon's authoritative in-memory
+		// state when a daemon is running, falling back to a disk scan otherwise
+		// (#1029 PR 2). Never spawns a daemon.
+		data, err := whoamiSession(tmuxName)
 		if err != nil {
-			return jsonError(fmt.Errorf("failed to load instances: %w", err))
+			return jsonError(err)
 		}
-
-		var corrupted []string
-		for repoID, raw := range allInstances {
-			var instances []session.InstanceData
-			if err := json.Unmarshal(raw, &instances); err != nil {
-				// Warn and record rather than silently skip (#730): the
-				// current session's record may live in the corrupted repo,
-				// so a bare "not found" would mask the real cause.
-				log.WarningLog.Printf("skipping repo %s: corrupted instances.json: %v", repoID, err)
-				corrupted = append(corrupted, repoID)
-				continue
-			}
-			for i := range instances {
-				if instances[i].TmuxName == tmuxName {
-					return jsonOut(instances[i])
-				}
-			}
-		}
-
-		if len(corrupted) > 0 {
-			return jsonError(fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, corruptedReposSuffix(corrupted)))
-		}
-		return jsonError(fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName))
+		return jsonOut(*data)
 	},
 }
