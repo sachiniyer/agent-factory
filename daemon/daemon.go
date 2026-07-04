@@ -79,6 +79,22 @@ func RunDaemon(cfg *config.Config) error {
 		}
 	}()
 
+	// Start the HTTP/JSON mirror alongside the control socket (#1029 PR 4). It
+	// shares this daemon's live manager, so HTTP is just another thin client of
+	// the same core. Only the winner of bindControlServerExclusive reaches this
+	// point, so no extra spawn race applies. A bind failure is logged but never
+	// fatal: HTTP is auxiliary — the gob control plane every existing client
+	// depends on must not regress if the HTTP socket cannot bind.
+	if closeHTTP, err := startHTTPServer(manager, scheduler, watchers); err != nil {
+		log.WarningLog.Printf("failed to start daemon HTTP server: %v", err)
+	} else {
+		defer func() {
+			if err := closeHTTP(); err != nil {
+				log.WarningLog.Printf("failed to close daemon HTTP server: %v", err)
+			}
+		}()
+	}
+
 	// Write our PID as soon as the socket is bound so `af upgrade`'s SIGTERM
 	// fallback (#504) and StopDaemon can find a still-warming daemon. Both
 	// the SIGTERM and Shutdown-RPC exit paths fall through to the deferred
