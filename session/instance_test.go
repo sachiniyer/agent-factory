@@ -122,7 +122,7 @@ func TestGetGitWorktree_RaceWithStart(t *testing.T) {
 // flow stays unaffected and the kill completion handler (which uses SetStatus)
 // can still move the instance out of Deleting.
 func TestSetStatusIfNotDeleting(t *testing.T) {
-	i := &Instance{Status: Ready}
+	i := &Instance{liveness: LiveReady}
 
 	i.SetStatusIfNotDeleting(Running)
 	require.Equal(t, Running, i.GetStatus(), "non-deleting status updates must pass through")

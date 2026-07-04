@@ -66,7 +66,7 @@ func TestArchivedInstance_NotRecoverable(t *testing.T) {
 	defer log.Close()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	inst := &Instance{Title: "arch", Status: Archived, backend: &LocalBackend{}}
+	inst := &Instance{Title: "arch", liveness: LiveArchived, backend: &LocalBackend{}}
 	err := inst.Recover()
 	require.Error(t, err, "an archived session is not Lost, so Recover must reject it")
 }

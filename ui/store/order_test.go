@@ -116,8 +116,10 @@ func TestLessInstanceOrder_StableAcrossIdenticalSnapshots(t *testing.T) {
 // A Lost root still pins top; a Lost non-root sorts by CreatedAt like any other
 // instance (Lost is not special to ordering, #1108).
 func TestLessInstanceOrder_LostStatusDoesNotAffectOrder(t *testing.T) {
-	lostRoot := &session.Instance{Title: "root", CreatedAt: tNewest, Status: session.Lost}
-	lostBravo := &session.Instance{Title: "bravo", CreatedAt: tMid, Status: session.Lost}
+	lostRoot := &session.Instance{Title: "root", CreatedAt: tNewest}
+	lostRoot.SetStatus(session.Lost)
+	lostBravo := &session.Instance{Title: "bravo", CreatedAt: tMid}
+	lostBravo.SetStatus(session.Lost)
 	in := []*session.Instance{
 		lostBravo,
 		inst("charlie", tNewer),

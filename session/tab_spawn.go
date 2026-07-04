@@ -37,7 +37,7 @@ func TabSpawnStatusErr(status Status) error {
 func (i *Instance) AddShellTab() (*Tab, error) {
 	i.mu.RLock()
 	started := i.started
-	status := i.Status
+	status := i.statusLocked()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueShellName(i.Tabs)
@@ -79,7 +79,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	// would leak a tmux session that escapes teardown while its worktree is deleted
 	// or moved (#990, #1028). Make the recheck and append atomic under one
 	// acquisition so no further race opens.
-	stale := !i.started || TabSpawnStatusErr(i.Status) != nil
+	stale := !i.started || TabSpawnStatusErr(i.statusLocked()) != nil
 	title := i.Title
 	if !stale {
 		i.Tabs = append(i.Tabs, tab)
@@ -115,7 +115,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 
 	i.mu.RLock()
 	started := i.started
-	status := i.Status
+	status := i.statusLocked()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueTabName(i.Tabs, processTabBaseName(requestedName, command))
@@ -154,7 +154,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// started=true but flips status to Deleting→Archived (#1195); appending now
 	// would leak a tmux session whose worktree Kill deletes or archive moves (#990,
 	// #1028). Recheck + append are atomic under one acquisition.
-	stale := !i.started || TabSpawnStatusErr(i.Status) != nil
+	stale := !i.started || TabSpawnStatusErr(i.statusLocked()) != nil
 	title := i.Title
 	if !stale {
 		i.Tabs = append(i.Tabs, tab)

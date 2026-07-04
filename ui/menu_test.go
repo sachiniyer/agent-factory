@@ -8,13 +8,22 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
+// readyUIInstance builds a Ready-status instance for ui-package render tests.
+// liveness is unexported, so it goes through the SetStatus shim rather than a
+// struct literal (#1195 Phase 1b).
+func readyUIInstance() *session.Instance {
+	i := &session.Instance{}
+	i.SetStatus(session.Ready)
+	return i
+}
+
 // TestMenuTerminalTabShowsBothScrollKeys verifies that when the terminal tab
 // is active, the instance menu surfaces both shift+up and shift+down scroll
 // shortcuts. Regression test for issue #270.
 func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 	m := NewMenu()
 	// Use a non-loading instance so addInstanceOptions renders the full menu.
-	m.SetInstance(&session.Instance{Status: session.Ready})
+	m.SetInstance(readyUIInstance())
 	m.SetActiveTab(1)
 
 	var gotShiftUp, gotShiftDown int
@@ -41,7 +50,7 @@ func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 // test for issue #467.
 func TestMenuPreviewTabShowsBothScrollKeys(t *testing.T) {
 	m := NewMenu()
-	m.SetInstance(&session.Instance{Status: session.Ready})
+	m.SetInstance(readyUIInstance())
 	m.SetActiveTab(0)
 
 	var gotShiftUp, gotShiftDown int
@@ -68,7 +77,7 @@ func TestMenuPreviewTabShowsBothScrollKeys(t *testing.T) {
 // tab keys that actually work (cycle / 1-9 jump), while local instances keep
 // the full set.
 func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
-	remote := &session.Instance{Status: session.Ready}
+	remote := readyUIInstance()
 	remote.SetBackend(&session.HookBackend{})
 	if !remote.IsRemote() {
 		t.Fatal("sanity: instance should report as remote")
@@ -97,7 +106,7 @@ func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
 		t.Errorf("remote menu should still surface tab cycle and 1-9 jump; got tab=%d jump=%d", gotTab, gotJump)
 	}
 
-	local := &session.Instance{Status: session.Ready}
+	local := readyUIInstance()
 	if local.IsRemote() {
 		t.Fatal("sanity: instance should report as local")
 	}
@@ -121,7 +130,7 @@ func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
 // workspace pane gets its own option set — attach/scroll on its binding,
 // open-pane, hide-pane.
 func TestMenuPaneHintsFollowFocus(t *testing.T) {
-	local := &session.Instance{Status: session.Ready}
+	local := readyUIInstance()
 	m := NewMenu()
 	m.SetInstance(local)
 

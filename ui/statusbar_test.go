@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,7 +60,7 @@ func TestMenuFocusRegionSwitchesHints(t *testing.T) {
 // hints to vanish on narrow terminals.
 func TestMenuNarrowWidthKeepsHelpAndQuit(t *testing.T) {
 	m := NewMenu()
-	m.SetInstance(&session.Instance{Status: session.Ready})
+	m.SetInstance(readyUIInstance())
 
 	for _, w := range []int{110, 80, 60, 45} {
 		m.SetSize(w, 1)

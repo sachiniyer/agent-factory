@@ -77,8 +77,8 @@ const (
 type Instance struct {
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):
-	// started, Status, Tabs (and the agent tab's tmux session), gitWorktree,
-	// prInfo, diffStats.
+	// started, liveness/inFlightOp, Tabs (and the agent tab's tmux session),
+	// gitWorktree, prInfo, diffStats.
 	mu sync.RWMutex
 
 	// ID is the instance's stable identity (#1195): a random UUID minted once at
@@ -97,8 +97,14 @@ type Instance struct {
 	Path string
 	// Branch is the branch of the instance.
 	Branch string
-	// Status is the status of the instance.
-	Status Status
+	// liveness and inFlightOp are the two orthogonal axes of session state
+	// (#1195): liveness is the daemon-owned health of the backing session
+	// (Running/Ready/Lost/Archived/…), inFlightOp is the transient, never-
+	// persisted client operation overlaid on it (Creating/Killing/Archiving/
+	// Restoring). The legacy Status enum is derived from them via the
+	// GetStatus/SetStatus shim in liveness.go. Both are mutex-protected.
+	liveness   Liveness
+	inFlightOp InFlightOp
 	// Program is the program to run in the instance.
 	Program string
 	// Height is the height of the instance.
@@ -604,11 +610,18 @@ func (i *Instance) ToInstanceData() InstanceData {
 	defer i.mu.RUnlock()
 
 	data := InstanceData{
-		ID:         i.ID,
-		Title:      i.Title,
-		Path:       i.Path,
-		Branch:     i.Branch,
-		Status:     i.Status,
+		ID:     i.ID,
+		Title:  i.Title,
+		Path:   i.Path,
+		Branch: i.Branch,
+		// Persist BOTH axes: Liveness is the new canonical value, Status the
+		// legacy int kept for one release so a binary rolled back to before
+		// #1195 still reads a sensible status (and as the read-fallback source
+		// for records this build wrote before the split). SaveInstances skips
+		// transient (Loading/Deleting) rows, so a persisted Status is always a
+		// settled liveness value.
+		Status:     i.statusLocked(),
+		Liveness:   i.liveness,
 		Height:     i.Height,
 		Width:      i.Width,
 		CreatedAt:  i.CreatedAt,
@@ -684,22 +697,34 @@ func (i *Instance) ToInstanceData() InstanceData {
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
-	status := data.Status
-	if status == Dead {
-		// Rollforward (#1108): records persisted as Dead by pre-Lost builds
-		// were all written by observed-death paths (a user kill deletes the
-		// record instead), so they load as Lost — recovery-eligible. This is
-		// what makes sessions stranded by an outage under an old build
-		// restorable after an upgrade. A tombstoned record keeps its status;
-		// the daemon finishes its teardown rather than restoring it.
-		status = Lost
+	// Resolve the liveness axis: prefer the new `liveness` field; a record
+	// written before #1195 has LivenessUnset and falls back to the legacy
+	// `status` int (rollforward, no dual-read).
+	liveness := data.Liveness
+	if liveness == LivenessUnset {
+		liveness = livenessForStatus(data.Status)
 	}
+	if liveness == LiveDead {
+		// Rollforward (#1108): Dead was only ever written by observed-death
+		// paths (a user kill deletes the record instead), so it loads as Lost —
+		// recovery-eligible. This is what makes sessions stranded by an outage
+		// under an old build restorable after an upgrade. A tombstoned record
+		// keeps its (Lost) status; the daemon finishes its teardown rather than
+		// restoring it.
+		liveness = LiveLost
+	}
+	// Resolve the in-flight-op axis from the legacy status. A persisted record
+	// is always settled (SaveInstances skips transients), but a SNAPSHOT of a
+	// transient instance carries Loading/Deleting, which buildInstanceFromSnapshot
+	// must reconstruct so the rebuilt row composes to the identical Status.
+	inFlightOp := opForStatus(data.Status)
 	instance := &Instance{
 		ID:         data.ID,
 		Title:      data.Title,
 		Path:       data.Path,
 		Branch:     data.Branch,
-		Status:     status,
+		liveness:   liveness,
+		inFlightOp: inFlightOp,
 		Height:     data.Height,
 		Width:      data.Width,
 		CreatedAt:  data.CreatedAt,
@@ -772,7 +797,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// where the worktree currently lives; the Tabs list restored above is
 	// tmux-less for the same reason (its TmuxName entries reference sessions
 	// that no longer exist, and restoreLocalTabs only binds names, never spawns).
-	if status == Archived {
+	if liveness == LiveArchived {
 		return instance, nil
 	}
 
@@ -936,7 +961,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	return &Instance{
 		ID:        newSessionID(),
 		Title:     opts.Title,
-		Status:    Ready,
+		liveness:  LiveReady,
 		Path:      absPath,
 		Program:   opts.Program,
 		Height:    0,
@@ -966,28 +991,6 @@ func (i *Instance) RepoName() (string, error) {
 	return gw.GetRepoName(), nil
 }
 
-func (i *Instance) SetStatus(status Status) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.Status = status
-}
-
-// SetStatusIfNotDeleting sets the status under the instance mutex unless the
-// instance is mid-deletion. The metadata tick runs off the event loop and
-// races the async kill flow (#844): between its own status check and its
-// store, the user can confirm a kill, and an unconditional Running/Ready
-// write would clobber the Deleting marker — re-enabling kill/attach on a
-// session whose teardown is already in flight. Only the kill completion
-// handler may move an instance out of Deleting, via SetStatus.
-func (i *Instance) SetStatusIfNotDeleting(status Status) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.Status == Deleting {
-		return
-	}
-	i.Status = status
-}
-
 // SetAutoYes sets the AutoYes flag under the instance mutex. Writers must use
 // this rather than assigning i.AutoYes directly: TapEnter runs from the
 // metadata-tick background goroutine and reads AutoYes under i.mu.RLock, so
@@ -1008,14 +1011,6 @@ func (i *Instance) GetBranch() string {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.Branch
-}
-
-// GetStatus returns the current status under the Instance's mutex, so
-// cross-goroutine readers don't race with SetStatus.
-func (i *Instance) GetStatus() Status {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.Status
 }
 
 // MarkUserKilled records kill intent on the instance (#1108). Callers persist
@@ -1115,13 +1110,14 @@ func (i *Instance) MoveArchivedWorktree(dest string) error {
 }
 
 // SetArchived flips the instance into the inert Archived state atomically:
-// started=false (no tmux binding backs it) and Status=Archived. Called by the
-// daemon after a successful archive move.
+// started=false (no tmux binding backs it) and liveness=Archived, clearing any
+// in-flight op. Called by the daemon after a successful archive move.
 func (i *Instance) SetArchived() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.started = false
-	i.Status = Archived
+	i.liveness = LiveArchived
+	i.inFlightOp = OpNone
 }
 
 // RestoreArchivedWorktree moves this instance's archived worktree back to dest
@@ -1149,7 +1145,8 @@ func (i *Instance) RestoreArchivedWorktree(dest string) error {
 func (i *Instance) RestoreFromArchive() error {
 	i.mu.Lock()
 	i.started = true
-	i.Status = Lost
+	i.liveness = LiveLost
+	i.inFlightOp = OpNone
 	i.mu.Unlock()
 	return i.backend.Recover(i)
 }
