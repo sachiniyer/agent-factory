@@ -4,8 +4,11 @@
 # the live TUI through a private tmux session, syncing every action on a
 # screen marker instead of a blind `sleep`.
 #
-#   docker exec af-playtest bash -lc \
+#   docker exec "$AF_PLAYTEST_NAME" bash -lc \
 #     'source /src/scripts/tui-driver.sh && af_boot && af_new_instance alpha'
+#
+# (The sandbox container name is unique per run — #1171; pin AF_PLAYTEST_NAME
+# to target it. `make tui-driver-selftest` handles all of this for you.)
 #
 # The container already solves ISOLATION (throwaway home, mock repo, private
 # tmux, pids/memory caps — scripts/testbox.sh + docs/container-testing.md).

@@ -193,11 +193,14 @@ make tui-driver          # boots af via the driver, then attaches you to the
                          # live session (detach with your tmux prefix + d)
 ```
 
-Or drive over `docker exec` against a detached sandbox
-(`make playtest-container-detached`):
+Or drive over `docker exec` against a detached sandbox. The container name is
+unique per run (#1171); pin it with `AF_PLAYTEST_NAME` so your `docker exec`
+targets it:
 
 ```bash
-docker exec af-playtest bash -lc '
+export AF_PLAYTEST_NAME="af-playtest-$$"
+make playtest-container-detached
+docker exec "$AF_PLAYTEST_NAME" bash -lc '
   source /src/scripts/tui-driver.sh
   af_boot
   af_new_instance alpha
@@ -208,6 +211,7 @@ docker exec af-playtest bash -lc '
   af_exit_interactive
   af_assert_no_orphan_clients
 '
+docker rm -f "$AF_PLAYTEST_NAME"   # teardown
 ```
 
 Everything runs inside the container — the host tmux server, the real

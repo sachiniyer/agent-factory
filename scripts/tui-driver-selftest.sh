@@ -13,8 +13,8 @@
 # container sandbox:
 #
 #   make tui-driver-selftest
-#   # or directly:
-#   docker exec af-playtest bash /src/scripts/tui-driver-selftest.sh
+#   # or directly against a running sandbox (name is unique per run, #1171):
+#   docker exec "$AF_PLAYTEST_NAME" bash /src/scripts/tui-driver-selftest.sh
 #
 # Exit status: 0 = every step green; non-zero = the first failed step (with
 # the offending screen dumped to stderr by the driver).
@@ -65,8 +65,16 @@ step "assert beta is selected"                              af_expect_selected b
 
 step "open beta's tab as a pane"                            af_open_pane
 step "enter interactive mode"                               af_enter_interactive
-step "type a command into the pane"                         af_send_to_pane 'echo DRIVER_SELFTEST_OK'
-step "assert the pane ran it"                               af_wait_for 'DRIVER_SELFTEST_OK' 10 'pane output'
+# The command COMPUTES its marker (arithmetic expansion), so the sentinel we
+# assert on — SELFTEST_42 — appears ONLY in the command's output, never in the
+# echoed input line (which shows the literal $((6*7))). A shell that echoed
+# input but failed to RUN it would therefore fail this step (Greptile P2).
+# Single quotes are REQUIRED: the arithmetic must reach the pane's shell
+# unexpanded, not be computed by this script.
+# shellcheck disable=SC2016
+step "type a command into the pane"                         af_send_to_pane 'echo SELFTEST_$((6*7))'
+step "assert the pane RAN it (computed marker, not input echo)" \
+    af_wait_for 'SELFTEST_42([^0-9]|$)' 10 'computed pane output'
 step "exit interactive mode"                                af_exit_interactive
 
 step "attach full-screen"                                   af_attach

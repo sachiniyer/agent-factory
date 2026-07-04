@@ -19,7 +19,21 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${AF_TESTBOX_IMAGE:-agent-factory-testbox}"
-PLAYTEST_NAME="${AF_PLAYTEST_NAME:-af-playtest}"
+
+# _uniq — a per-invocation token (pid + a little randomness) for container
+# names, so two runs never share a name.
+_uniq() {
+    local r=""
+    [ -r /dev/urandom ] && r="$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' ')"
+    printf '%s' "$$${r:+-$r}"
+}
+
+# The sandbox container name defaults to a UNIQUE per-run value so concurrent
+# play-tests can't `docker rm -f` each other mid-run (#1171). Pin it with
+# AF_PLAYTEST_NAME to reuse/target a specific container. Whatever the value,
+# every message, teardown hint, and `docker exec`/`rm` below uses THIS
+# resolved name — never a hardcoded 'af-playtest'.
+PLAYTEST_NAME="${AF_PLAYTEST_NAME:-af-playtest-$(_uniq)}"
 
 # docker-or-podman autodetect (docker on the current dev box; podman kept
 # as a fallback for other boxes).
@@ -137,24 +151,34 @@ playtest)
     fi
     ;;
 selftest)
-    # Bring up (or reuse) a DEDICATED sandbox and run the TUI driver
-    # self-test inside it (#1161). Its own container name means running the
-    # gate never disturbs a `drive`/`playtest` sandbox you have open. The
-    # self-test resets sandbox state at its start, so a reused container is
-    # still deterministic.
-    PLAYTEST_NAME="${AF_SELFTEST_NAME:-af-driver-selftest}"
+    # Run the TUI driver self-test (#1161) in an EPHEMERAL, uniquely-named
+    # dedicated sandbox: unique so concurrent gates don't clobber each other
+    # (#1171), ephemeral so gates leave nothing behind. Pin AF_SELFTEST_NAME
+    # to reuse a specific container (then it is NOT torn down). The self-test
+    # also resets sandbox state at its start, so a pinned reused container
+    # stays deterministic.
+    if [ -n "${AF_SELFTEST_NAME:-}" ]; then
+        PLAYTEST_NAME="$AF_SELFTEST_NAME"; teardown=no
+    else
+        PLAYTEST_NAME="af-driver-selftest-$(_uniq)"; teardown=yes
+    fi
     ensure_playtest_up
-    exec "$ENGINE" exec "$PLAYTEST_NAME" bash /src/scripts/tui-driver-selftest.sh
+    rc=0
+    "$ENGINE" exec "$PLAYTEST_NAME" bash /src/scripts/tui-driver-selftest.sh || rc=$?
+    if [ "$teardown" = yes ]; then
+        "$ENGINE" rm -f "$PLAYTEST_NAME" >/dev/null 2>&1 || true
+    fi
+    exit "$rc"
     ;;
 drive)
-    # Bring up (or reuse) the detached sandbox, boot af through the driver,
+    # Bring up a uniquely-named sandbox (#1171), boot af through the driver,
     # then attach you interactively to the live driver session so you can
-    # watch/drive it by hand. Detach with your tmux prefix + d; tear the
-    # sandbox down with: $ENGINE rm -f $PLAYTEST_NAME
+    # watch/drive it by hand. Detach with your tmux prefix + d.
     ensure_playtest_up
     "$ENGINE" exec "$PLAYTEST_NAME" bash -lc \
         'source /src/scripts/tui-driver.sh && af_boot' >&2
-    echo "testbox: af is up in session 'drive'; attaching (detach with prefix+d)..." >&2
+    echo "testbox: af is up in session 'drive'; attaching (detach with prefix+d)." >&2
+    echo "testbox: tear down with: $ENGINE rm -f $PLAYTEST_NAME" >&2
     exec "$ENGINE" exec -it "$PLAYTEST_NAME" tmux attach -t drive
     ;;
 *)
