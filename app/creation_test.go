@@ -86,9 +86,16 @@ func newTestHome(t *testing.T) *home {
 		snapshotFetcher: func(string) ([]session.InstanceData, error) {
 			return nil, fmt.Errorf("snapshot fetcher not stubbed in test")
 		},
-		store:   proj,
-		spinner: spin,
-		repoID:  repoID,
+		// Default the #1160 poll-pause seams to no-ops so a test that incidentally
+		// drives the attach heartbeat never dials — or spawns — a real daemon.
+		// Per-home fields (not shared globals), so parallel tests can't race each
+		// other's swaps; tests exercising the pause/resume path assign their own
+		// recorders to h.pauseStatusPoll / h.resumeStatusPoll.
+		pauseStatusPoll:  func(string, string) error { return nil },
+		resumeStatusPoll: func(string, string) error { return nil },
+		store:            proj,
+		spinner:          spin,
+		repoID:           repoID,
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, false, proj)
 	wireTestPanes(h, proj)

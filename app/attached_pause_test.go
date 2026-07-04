@@ -104,7 +104,6 @@ func TestTickUpdatePRInfo_PausedWhileAttached(t *testing.T) {
 // two.
 func TestAttachOverlayCallback_ClearsFlagOnDetach(t *testing.T) {
 	h := newTestHome(t)
-	stubStatusPollPause(t)
 	require.False(t, h.attached.Load(), "test pre-condition: not attached")
 
 	ch := make(chan struct{})
@@ -158,24 +157,12 @@ func TestAttachOverlayCallback_LeavesFlagAloneWhenAttachErrors(t *testing.T) {
 			"metadata tick (#598 regression-risk path)")
 }
 
-// stubStatusPollPause swaps the #1160 daemon pause/resume seams with no-ops so
-// a test that drives attachOverlayCallback's heartbeat never reaches the real
-// callDaemon → EnsureDaemon (which would spawn a daemon on this box). Registers
-// its own t.Cleanup.
-func stubStatusPollPause(t *testing.T) {
-	t.Helper()
-	restore := SetPauseResumeStatusPollForTest(
-		func(string, string) error { return nil },
-		func(string, string) error { return nil },
-	)
-	t.Cleanup(restore)
-}
-
 // TestAttachOverlayCallback_PausesAndResumesDaemonPoll is the #1160 TUI-side
 // guard: while attached full-screen the callback must RPC the daemon to pause
 // this instance's capture-pane poll (before the user is blocked on <-ch), and
-// on detach it must resume it. The pause/resume seams are swapped with
-// recorders so no real daemon is contacted.
+// on detach it must resume it. The pause/resume seams are per-home fields (not
+// shared globals — the #964 race-fix), so the recorders are assigned directly
+// on the model under test and no real daemon is contacted.
 func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 	h := newTestHome(t)
 
@@ -183,27 +170,24 @@ func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 	var pausedTitle, resumedTitle string
 	var pauseCount, resumeCount int
 	pausedNow := make(chan struct{}, 1)
-	restore := SetPauseResumeStatusPollForTest(
-		func(title, _ string) error {
-			mu.Lock()
-			pausedTitle = title
-			pauseCount++
-			mu.Unlock()
-			select {
-			case pausedNow <- struct{}{}:
-			default:
-			}
-			return nil
-		},
-		func(title, _ string) error {
-			mu.Lock()
-			resumedTitle = title
-			resumeCount++
-			mu.Unlock()
-			return nil
-		},
-	)
-	defer restore()
+	h.pauseStatusPoll = func(title, _ string) error {
+		mu.Lock()
+		pausedTitle = title
+		pauseCount++
+		mu.Unlock()
+		select {
+		case pausedNow <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	h.resumeStatusPoll = func(title, _ string) error {
+		mu.Lock()
+		resumedTitle = title
+		resumeCount++
+		mu.Unlock()
+		return nil
+	}
 
 	ch := make(chan struct{})
 	attach := func() (chan struct{}, error) { return ch, nil }
@@ -244,16 +228,98 @@ func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 	endDetachWatchdog()
 }
 
+// TestAttachOverlayCallback_ResumeOrderedAfterLastPause is the Greptile-P guard:
+// on a clean detach the resume RPC must land strictly AFTER the heartbeat's
+// final pause, never race ahead of it (which would leave the instance paused
+// until the lease expires). The pause seam blocks on a gate the test releases
+// only after detach, so if resume were NOT ordered after the heartbeat it would
+// be recorded before the (still-blocked) final pause. We assert the recorded
+// call order ends with "resume" and that no resume is ever observed before the
+// final pause returns. Deterministic — gated on channels, not sleeps.
+func TestAttachOverlayCallback_ResumeOrderedAfterLastPause(t *testing.T) {
+	h := newTestHome(t)
+
+	var mu sync.Mutex
+	var order []string
+	pauseEntered := make(chan struct{}, 1)
+	releasePause := make(chan struct{})
+	firstPause := true
+
+	h.pauseStatusPoll = func(_, _ string) error {
+		// Only gate the FIRST pause (the on-attach one) so the test can hold a
+		// pause RPC "in flight" across the detach and prove resume waits for it.
+		mu.Lock()
+		gate := firstPause
+		firstPause = false
+		mu.Unlock()
+		if gate {
+			select {
+			case pauseEntered <- struct{}{}:
+			default:
+			}
+			<-releasePause // stay in-flight until the test releases us
+		}
+		mu.Lock()
+		order = append(order, "pause")
+		mu.Unlock()
+		return nil
+	}
+	h.resumeStatusPoll = func(_, _ string) error {
+		mu.Lock()
+		order = append(order, "resume")
+		mu.Unlock()
+		return nil
+	}
+
+	ch := make(chan struct{})
+	attach := func() (chan struct{}, error) { return ch, nil }
+	done := make(chan tea.Cmd, 1)
+	go func() {
+		done <- h.attachOverlayCallback("alpha", "test-attach", "", false, attach)
+	}()
+
+	// Wait until the on-attach pause is in-flight (blocked on releasePause).
+	select {
+	case <-pauseEntered:
+	case <-time.After(time.Second):
+		t.Fatal("on-attach pause never fired")
+	}
+
+	// Detach while that pause is still in-flight. The callback returns without
+	// blocking; the resume goroutine must WAIT for the heartbeat (and thus the
+	// in-flight pause) to finish before resuming.
+	close(ch)
+	<-done
+
+	// Nothing should be recorded yet — the pause is still gated, so resume must
+	// not have jumped ahead.
+	mu.Lock()
+	require.Empty(t, order, "resume must not fire before the in-flight pause completes")
+	mu.Unlock()
+
+	// Release the pause; now the heartbeat exits and resume runs after it.
+	close(releasePause)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(order) >= 2
+	}, time.Second, time.Millisecond, "both pause and resume must eventually be recorded")
+
+	mu.Lock()
+	require.Equal(t, []string{"pause", "resume"}, order,
+		"resume must be ordered strictly AFTER the heartbeat's final pause on a clean detach")
+	mu.Unlock()
+	endDetachWatchdog()
+}
+
 // TestAttachOverlayCallback_AttachSucceedsWhenPauseErrors proves the best-effort
 // property: a failing Pause RPC (daemon down) must NOT break the attach — the
 // callback still returns the repaint cmd and clears m.attached via its defer.
 func TestAttachOverlayCallback_AttachSucceedsWhenPauseErrors(t *testing.T) {
 	h := newTestHome(t)
-	restore := SetPauseResumeStatusPollForTest(
-		func(string, string) error { return errors.New("daemon down") },
-		func(string, string) error { return errors.New("daemon down") },
-	)
-	defer restore()
+	h.pauseStatusPoll = func(string, string) error { return errors.New("daemon down") }
+	h.resumeStatusPoll = func(string, string) error { return errors.New("daemon down") }
 
 	ch := make(chan struct{})
 	attach := func() (chan struct{}, error) { return ch, nil }

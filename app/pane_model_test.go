@@ -552,7 +552,6 @@ func TestPane_EnterAttachesFocusedPane(t *testing.T) {
 	require.Equal(t, "beta", h.store.GetSelectedInstance().Title)
 
 	var attachedLabel string
-	stubStatusPollPause(t)
 	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
 		attachedLabel = label
 		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {

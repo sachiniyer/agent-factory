@@ -75,7 +75,6 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
-	stubStatusPollPause(t)
 	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
 		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
 			ch := make(chan struct{})
