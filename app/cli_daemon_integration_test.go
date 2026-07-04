@@ -225,6 +225,11 @@ func killIntegrationDaemon(home string) {
 // by skipping transient (Loading/Deleting) rows entirely.
 func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 	skipIfRealBackendDepsMissing(t)
+	// #1122: this test runs a real `af sessions create` (real daemon, real
+	// tmux). Without a private server the "scripts" session lives on the
+	// ambient server for the test's lifetime — the #1121 CI run's daemon
+	// package tripwired on exactly that transient session.
+	testguard.IsolateTmux(t)
 
 	bin := buildIntegrationBinary(t)
 	repoDir := setupRealRepo(t)

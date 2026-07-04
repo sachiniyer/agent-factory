@@ -32,9 +32,15 @@ func TestMain(m *testing.M) {
 	// snapshot the real environment, BEFORE logging resolves its file path.
 	verifyTmux := testguard.TmuxTripwire()
 	restoreHome := testguard.SandboxHome()
+	// #1122: default the whole package onto a private tmux server so a test
+	// that forgets IsolateTmux can never create or sweep sessions on the
+	// developer's real server. CleanupSessions runs in this package's tests —
+	// exactly the sweep that killed every production session in outage #3.
+	restoreTmux := testguard.SandboxTmux()
 	aflog.Initialize(false)
 	code := m.Run()
 	aflog.Close()
+	restoreTmux()
 	restoreHome()
 	if err := verifyRealConfig(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
