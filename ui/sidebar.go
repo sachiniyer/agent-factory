@@ -962,18 +962,27 @@ func (s *Sidebar) registerZones(heights []int, start, end int, topIndicator bool
 		row := layout.Rect{X: s.rect.X, Y: y, W: s.rect.W, H: h}
 		switch {
 		case item.IsHeader:
-			s.zones.Register(zones.TreeHeader, row)
-		case item.Kind == SectionInstances && item.ItemIndex >= 0 && item.ItemIndex < len(instances):
-			inst := instances[item.ItemIndex]
-			if item.IsTab {
-				s.zones.Register(zones.TreeTab(inst.Title, item.TabIndex), row)
+			// Distinct zone per folder so a click toggles the right one (#1028).
+			if item.Kind == SectionArchived {
+				s.zones.Register(zones.TreeHeaderArchived, row)
 			} else {
+				s.zones.Register(zones.TreeHeader, row)
+			}
+		case isInstanceRow(item) && item.ItemIndex >= 0 && item.ItemIndex < len(instances):
+			inst := instances[item.ItemIndex]
+			switch {
+			case item.IsTab:
+				s.zones.Register(zones.TreeTab(inst.Title, item.TabIndex), row)
+			default:
+				// Instance row (live or archived, #1028): a title-keyed select
+				// zone. Archived rows are flat (no tab children), so they get no
+				// expand/collapse arrow — only live, expandable rows do.
 				s.zones.Register(zones.TreeInstance(inst.Title), row)
-				// The arrow cell registers ON TOP of the row (later wins) so
-				// clicking it expands/collapses instead of selecting.
-				if ax, ay, ok := tree.ArrowCell(s.contentWidth()); ok && tree.Expandable(inst) && ay < h {
-					s.zones.Register(zones.TreeArrow(inst.Title),
-						layout.Rect{X: s.rect.X + ax, Y: y + ay, W: 1, H: 1})
+				if item.Kind == SectionInstances {
+					if ax, ay, ok := tree.ArrowCell(s.contentWidth()); ok && tree.Expandable(inst) && ay < h {
+						s.zones.Register(zones.TreeArrow(inst.Title),
+							layout.Rect{X: s.rect.X + ax, Y: y + ay, W: 1, H: 1})
+					}
 				}
 			}
 		}
@@ -987,6 +996,21 @@ func (s *Sidebar) ClickHeader() {
 	s.syncFromStore()
 	for i, item := range s.visibleItems {
 		if item.IsHeader {
+			s.selectedIdx = i
+			break
+		}
+	}
+	s.ToggleSection()
+}
+
+// ClickHeaderKind moves the cursor onto the header of the given section kind and
+// toggles that section (#1028) — the click equivalent of Enter on that header.
+// Unlike ClickHeader (which targets the first/Instances header), this lets a
+// click on the Archived folder header toggle the Archived folder specifically.
+func (s *Sidebar) ClickHeaderKind(kind SidebarSectionKind) {
+	s.syncFromStore()
+	for i, item := range s.visibleItems {
+		if item.IsHeader && item.Kind == kind {
 			s.selectedIdx = i
 			break
 		}

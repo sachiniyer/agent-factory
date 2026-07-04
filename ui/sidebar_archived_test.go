@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
@@ -109,4 +111,71 @@ func TestSidebar_ArchivedRowSelectableWhenExpanded(t *testing.T) {
 
 	// The row renders with the archived marker.
 	assert.True(t, strings.Contains(s.View(), "[archived]"), "archived rows render a distinct marker")
+}
+
+// TestSidebar_ArchivedZonesRegistered (#1028 mouse P2): the Archived folder
+// header gets its OWN zone id (distinct from the Instances header, so a click
+// toggles the right folder), and — once expanded — an archived row registers a
+// clickable TreeInstance zone so the mouse can select/act on it.
+func TestSidebar_ArchivedZonesRegistered(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false, store.NewProjection())
+	reg := zones.NewRegistry()
+	s.SetZoneRegistry(reg)
+	s.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 40})
+
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	addTestInstance(s, archTestInstance(t, "put-away", session.Archived))
+
+	reg.Reset()
+	_ = s.String()
+
+	// Both headers register, on DISTINCT ids (no collision).
+	_, okInst := reg.Find(zones.TreeHeader)
+	require.True(t, okInst, "the Instances header zone must be registered")
+	_, okArch := reg.Find(zones.TreeHeaderArchived)
+	require.True(t, okArch, "the Archived folder header must get its own distinct zone")
+	assert.NotEqual(t, zones.TreeHeader, zones.TreeHeaderArchived, "header zone ids must differ")
+
+	// Collapsed by default → the archived row is not rendered, so no row zone yet.
+	_, okRow := reg.Find(zones.TreeInstance("put-away"))
+	require.False(t, okRow, "a collapsed Archived folder registers no archived-row zone")
+
+	// Expand the Archived folder and re-render: the archived row now has a
+	// clickable select zone, keyed by its title like a live instance row.
+	s.ClickHeaderKind(SectionArchived)
+	reg.Reset()
+	_ = s.String()
+
+	_, okRow = reg.Find(zones.TreeInstance("put-away"))
+	require.True(t, okRow, "an expanded archived row must register a clickable TreeInstance zone")
+	// The live instance's zone is still present (a click there selects it).
+	_, okLive := reg.Find(zones.TreeInstance("live-one"))
+	require.True(t, okLive)
+}
+
+// TestSidebar_ClickHeaderKindTogglesCorrectFolder (#1028 mouse P2): toggling the
+// Archived header must collapse/expand the Archived folder ONLY, leaving the
+// Instances section untouched — the behavior the distinct header zones enable.
+func TestSidebar_ClickHeaderKindTogglesCorrectFolder(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false, store.NewProjection())
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	addTestInstance(s, archTestInstance(t, "put-away", session.Archived))
+	s.SetSize(40, 40)
+
+	instExpanded := func() bool { return s.sections[0].Expanded }
+	archExpanded := func() bool { return s.sections[1].Expanded }
+	require.True(t, instExpanded())
+	require.False(t, archExpanded(), "Archived starts collapsed")
+
+	// Toggle the Archived header: only the Archived folder flips.
+	s.ClickHeaderKind(SectionArchived)
+	assert.True(t, archExpanded(), "clicking the Archived header must expand the Archived folder")
+	assert.True(t, instExpanded(), "the Instances section must be untouched")
+
+	// Toggle the Instances header: only Instances flips.
+	s.ClickHeader()
+	assert.False(t, instExpanded(), "clicking the Instances header toggles Instances")
+	assert.True(t, archExpanded(), "the Archived folder must be untouched")
 }
