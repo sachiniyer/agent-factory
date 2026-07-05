@@ -304,10 +304,16 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		// secondary lines stand out more than the dimmed title (#853).
 		descS = descS.Foreground(deletingTitleColor)
 	}
-	// An archived row (#1028) is explicitly marked and dimmed so it reads as
-	// "filed away, restartable" — restore with A — rather than a live session.
+	// An archived row (#1028) is dimmed and carries the ▧ archived glyph so it
+	// reads as "filed away, restartable" — restore with A — rather than a live
+	// session. It deliberately carries NO "[archived] " text prefix: unlike the
+	// transient [deleting]/[lost] states, the Archived list is a persistent list
+	// the user browses BY NAME, and an 11-char word prefix eats the whole title
+	// cell at ordinary sidebar widths (~13 cols), clipping every name to
+	// "[archived]..." (#1225). The state is already conveyed three other ways on
+	// the same row — the ▧ glyph, the dimming below, and the "▼ Archived (n)"
+	// section header — so the name stays full-width like a live row's.
 	if liveness == session.LiveArchived {
-		titleText = "[archived] " + titleText
 		titleS = titleS.Foreground(deletingTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
 	}

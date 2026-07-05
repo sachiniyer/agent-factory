@@ -242,6 +242,31 @@ func TestInstanceRendererLimitReachedMarker(t *testing.T) {
 	assert.Contains(t, out, "throttled", "the title must remain visible")
 }
 
+// TestInstanceRendererArchivedShowsName pins #1225: an archived row must show
+// its NAME at the widths users actually run (100/80 cols), not a name-eating
+// "[archived] " word prefix that clips every archived session to "[archived]...".
+// The archived state is conveyed by the ▧ glyph + dimming + section header, so
+// the title cell is spent on the identifier, exactly like a live row.
+func TestInstanceRendererArchivedShowsName(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "one",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+	inst.SetArchived()
+
+	for _, terminalW := range []int{100, 80} {
+		title, _, _ := renderForTerminal(t, terminalW, inst, &spin)
+		clean := ansiEscape.ReplaceAllString(title, "")
+		assert.Containsf(t, clean, "one",
+			"archived row must show its name at %d cols; got %q", terminalW, clean)
+		assert.NotContainsf(t, clean, "[archived]",
+			"archived row must not carry the name-eating text prefix at %d cols; got %q", terminalW, clean)
+	}
+}
+
 // TestInstanceRendererDeletingDimsSelectedRow pins the #853 fix: a SELECTED
 // deleting row must dim its branch and PR lines along with the title. Before
 // the fix only titleS picked up deletingTitleColor, so the high-contrast
