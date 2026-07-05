@@ -76,7 +76,7 @@ channel has been testing, and subsequent previews move to `1.0.139-preview-1`.
   than the current build — which happens when you flip `update_channel` from
   `preview` back to `stable` while the newest stable is behind the preview
   you're on — the command is a no-op and prints, e.g.,
-  `af upgrade would downgrade 1.0.140-preview-2 -> 1.0.139 (stable channel).
+  `af upgrade would downgrade 1.0.141-preview-2 -> 1.0.140 (stable channel).
   Re-run with --allow-downgrade to proceed.` Passing `--allow-downgrade`
   installs the older release anyway (and prints a `Downgrading X -> Y` notice);
   when you're already on the channel's newest release it reports
