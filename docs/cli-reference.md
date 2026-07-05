@@ -443,7 +443,8 @@ daemon-exclusively-owned state), and it applies the same way a hand-edit does:
 af version             # print the version and the release URL
 af debug               # print the config path followed by the resolved config as JSON
 af keys                # print the effective TUI key bindings as a table (ACTION/KEYS/DESCRIPTION/SOURCE)
-af upgrade             # self-upgrade to the latest GitHub release (Linux/macOS)
+af upgrade             # self-upgrade to the latest release on the configured channel
+af upgrade --allow-downgrade  # downgrade to an older release (e.g. preview→stable switch)
 af doctor              # diagnose leaked processes/sessions/temp homes and daemon health
 af doctor --fix        # also apply the safe remediations
 af reset               # nuclear cleanup — see below
@@ -452,6 +453,11 @@ af reset               # nuclear cleanup — see below
 - `af debug` prints `Config: <path>` then the resolved config marshaled as
   indented JSON (a diagnostic dump, not part of the scriptable `--json`
   surface).
+- `af upgrade` resolves the newest release on the configured `update_channel`
+  (stable by default) and installs it. A manual upgrade never downgrades: if
+  the channel's latest release is older than the running binary — which happens
+  when switching from preview back to stable — the command is a no-op with an
+  explanation. Pass `--allow-downgrade` to install the older release anyway.
 - `af doctor` is read-only by default: it reports orphaned processes from dead
   sessions, CPU-pegging processes in live sessions, `af_` tmux sessions with no
   backing record, abandoned temp homes, and daemon problems. With `--fix` it
