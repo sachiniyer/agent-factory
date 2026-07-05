@@ -303,15 +303,27 @@ func TestEnsureRootAgentsDoesNotAdoptArchivedRoot(t *testing.T) {
 	}
 }
 
-// TestEnsureRootAgentsRespectsUserKill: an explicit KillSession of the root
-// suppresses re-creation for the rest of the daemon's life; a fresh manager
-// (daemon restart) re-asserts the configured root. This is the conservative
-// #1108-adjacent shape: respect the explicit kill until daemon restart.
-func TestEnsureRootAgentsRespectsUserKill(t *testing.T) {
+// TestEnsureRootAgentsUserKillHealsAfterGraceWindow is the #1223 case-(b)
+// regression: an explicit KillSession of the root is honored only briefly —
+// within rootKillHealDelay the ensure loop leaves it down, room for a manual
+// restart or a deliberate stop — but a still-configured root then SELF-HEALS
+// once the grace window elapses, with NO daemon restart. Config (root_agents),
+// not a runtime kill-tombstone, is the source of truth for an always-on root.
+// The outage this fixes: root killed 10:39, dead until an 11:02 daemon restart
+// (~23 min), because the old kill tombstone was permanent.
+func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
+
+	// Deterministic injected clock — advance it instead of sleeping through the
+	// real grace window.
+	base := time.Unix(1_700_000_000, 0)
+	clock := base
+	origNow := nowFunc
+	nowFunc = func() time.Time { return clock }
+	t.Cleanup(func() { nowFunc = origNow })
 
 	manager, err := NewManager(cfg)
 	if err != nil {
@@ -330,24 +342,83 @@ func TestEnsureRootAgentsRespectsUserKill(t *testing.T) {
 		t.Fatalf("KillSession: %v", err)
 	}
 
+	// Inside the grace window: the kill is honored, no re-create.
+	clock = base.Add(rootKillHealDelay - time.Second)
 	manager.EnsureRootAgents()
 	manager.EnsureRootAgents()
 	if len(*seen) != 1 {
-		t.Fatalf("ensure must respect an explicit root kill until daemon restart, got %d creates", len(*seen))
+		t.Fatalf("ensure must honor the kill inside the grace window, got %d creates", len(*seen))
 	}
 	if findRootInstance(t, manager, repoPath) != nil {
-		t.Fatalf("killed root must stay gone")
+		t.Fatalf("root must stay down inside the grace window")
 	}
 
-	// A daemon restart (fresh manager over the same home) re-asserts the
-	// configured root: the suppression is deliberately in-memory only.
-	restarted, err := NewManager(cfg)
-	if err != nil {
-		t.Fatalf("NewManager (restart): %v", err)
-	}
-	restarted.EnsureRootAgents()
+	// Grace window elapsed: a still-configured root self-heals — NO daemon
+	// restart, unlike the pre-fix behavior.
+	clock = base.Add(rootKillHealDelay + time.Second)
+	manager.EnsureRootAgents()
 	if len(*seen) != 2 {
-		t.Fatalf("a restarted daemon must re-create the configured root, got %d creates", len(*seen))
+		t.Fatalf("configured root must self-heal after the grace window without a daemon restart, got %d creates", len(*seen))
+	}
+	if findRootInstance(t, manager, repoPath) == nil {
+		t.Fatalf("root instance must be back after self-heal")
+	}
+
+	// The kill tombstone is cleared, so a later pass just adopts the live root
+	// rather than churning creates.
+	manager.mu.Lock()
+	_, stillKilled := manager.rootKilledAt[repo.ID]
+	manager.mu.Unlock()
+	if stillKilled {
+		t.Fatalf("kill tombstone must be cleared after self-heal")
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 2 {
+		t.Fatalf("healed root must be adopted, not re-created, got %d creates", len(*seen))
+	}
+}
+
+// TestEnsureRootAgentsDoesNotHealUnconfiguredRoot pins that the self-heal is
+// gated on config: a repo NOT in root_agents is never visited by the ensure
+// loop, so a killed (or absent) root there is never auto-created — even long
+// past the grace window. Removing a repo from root_agents is the ONLY permanent
+// stop, and this proves the loop does not spin-spawn roots for unconfigured
+// repos (#1223).
+func TestEnsureRootAgentsDoesNotHealUnconfiguredRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	base := time.Unix(1_700_000_000, 0)
+	clock := base
+	origNow := nowFunc
+	nowFunc = func() time.Time { return clock }
+	t.Cleanup(func() { nowFunc = origNow })
+
+	// No root_agents entry for this repo.
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	// A kill records a tombstone even for an unconfigured repo (harmless
+	// bookkeeping — see KillSession).
+	manager.mu.Lock()
+	manager.rootKilledAt[repo.ID] = base
+	manager.mu.Unlock()
+
+	// Well past the grace window, the unconfigured repo is still never visited.
+	clock = base.Add(rootKillHealDelay + time.Hour)
+	manager.EnsureRootAgents()
+	manager.EnsureRootAgents()
+	if len(*seen) != 0 {
+		t.Fatalf("ensure must never create a root for a repo absent from root_agents, got %d creates", len(*seen))
+	}
+	if findRootInstance(t, manager, repoPath) != nil {
+		t.Fatalf("unconfigured repo must have no root instance")
 	}
 }
 

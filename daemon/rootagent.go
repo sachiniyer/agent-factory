@@ -49,6 +49,16 @@ var (
 	rootEnsureBackoffMax  = 5 * time.Minute
 )
 
+// rootKillHealDelay is the grace window the ensure loop honors after an
+// explicit KillSession of the root before it self-heals a still-configured
+// root (#1223). Long enough to cover a deliberate manual restart or a brief
+// stop, short enough that an always-on root is never left dead for long — the
+// #1223 outage kept it dead 23 minutes (until a daemon restart). Package var so
+// tests can shorten it; the only permanent stop is removing the repo from
+// root_agents. The ensure loop reads the injectable package clock nowFunc for
+// the grace comparison, so tests advance time instead of sleeping.
+var rootKillHealDelay = 2 * time.Minute
+
 // rootEnsureState is the per-configured-repo retry state for the ensure
 // loop. Guarded by Manager.mu (the loop runs on the daemon poll goroutine,
 // but tests drive EnsureRootAgents directly).
@@ -103,19 +113,33 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 
 	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
 	m.mu.Lock()
-	_, killed := m.rootKilledByUser[repo.ID]
+	killedAt, killed := m.rootKilledAt[repo.ID]
 	inst := m.instances[key]
 	m.mu.Unlock()
 
 	if killed {
-		m.mu.Lock()
-		logSuppression := !st.suppressLogged
-		st.suppressLogged = true
-		m.mu.Unlock()
-		if logSuppression {
-			log.InfoLog.Printf("root agent for %s was explicitly killed; not re-creating until the daemon restarts", repo.Root)
+		if nowFunc().Before(killedAt.Add(rootKillHealDelay)) {
+			// Still inside the grace window: honor the user's stop, but only
+			// briefly. Logged once per suppression so a killed root does not
+			// spam the log every poll tick.
+			m.mu.Lock()
+			logSuppression := !st.suppressLogged
+			st.suppressLogged = true
+			m.mu.Unlock()
+			if logSuppression {
+				log.InfoLog.Printf("root agent for %s was explicitly killed; honoring the stop, will re-create it in ~%s (config is the source of truth for an always-on root — remove it from root_agents to keep it down)", repo.Root, rootKillHealDelay)
+			}
+			return
 		}
-		return
+		// Grace window elapsed and the repo is still configured: config wins,
+		// so clear the kill and fall through to re-create. This is the #1223
+		// self-heal — a killed (or outage-downed) root comes back without a
+		// daemon restart.
+		m.mu.Lock()
+		delete(m.rootKilledAt, repo.ID)
+		st.suppressLogged = false
+		m.mu.Unlock()
+		log.InfoLog.Printf("root agent for %s: kill grace window elapsed; re-creating (always-on self-heal, #1223)", repo.Root)
 	}
 
 	if inst != nil {
@@ -186,18 +210,14 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 
 // repoRootAgentWillMaterialize reports whether the daemon's ensure loop is
 // responsible for (re-)creating the reserved "root" session for this repo: the
-// repo is opted into root_agents AND the root was not explicitly killed by the
-// user (an explicit kill suppresses re-creation until the daemon restarts).
-// When true, a delivery to a momentarily-absent root should wait for the ensure
-// loop rather than auto-create it. Config is immutable after daemon start, so
-// only the killed-set read needs the lock.
+// repo is opted into root_agents. Config is the single source of truth for
+// "root should be running" — a root that is Dead, Lost, or even explicitly
+// killed self-heals (the kill only delays re-creation by rootKillHealDelay,
+// #1223), so a configured root always materializes eventually and a delivery to
+// a momentarily-absent one should wait for the ensure loop rather than
+// auto-create it (which the reserved-name guard would reject). Config is
+// immutable after daemon start, so this needs no lock.
 func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
-	m.mu.Lock()
-	_, killed := m.rootKilledByUser[repoID]
-	m.mu.Unlock()
-	if killed {
-		return false
-	}
 	for path := range m.cfg.RootAgents {
 		repo, err := config.RepoFromPath(config.ExpandTilde(path))
 		if err != nil {
@@ -211,8 +231,8 @@ func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
 }
 
 // reapDeadRoot removes a Dead root instance so ensureRootAgent can re-create
-// the title. Mirrors KillSession's teardown but deliberately does NOT mark
-// rootKilledByUser: this is the daemon healing itself, not a user decision.
+// the title. Mirrors KillSession's teardown but deliberately does NOT record
+// rootKilledAt: this is the daemon healing itself, not a user decision.
 func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) error {
 	// Best-effort by design (#478): tmux is already gone and an in-place
 	// worktree's Cleanup is a no-op, so failures here only log inside Kill.
