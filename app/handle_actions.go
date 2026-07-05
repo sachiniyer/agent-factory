@@ -175,11 +175,49 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	message := fmt.Sprintf("[!] Kill session '%s'?", selectedTitle)
+	reserved := session.IsReservedTitle(selectedTitle)
+	message := killConfirmMessage(selectedTitle, warning, reserved)
+	cmd := m.confirmAction(message, killAction)
+	if reserved && m.confirmationOverlay != nil {
+		// Break the muscle-memory D+y reflex on the daemon-managed singleton
+		// (#1238): a distinct confirm key means a reflexive 'y' — the ordinary
+		// kill confirmation — is ignored, so the user has to read the warning
+		// and press the named key before root is torn down.
+		m.confirmationOverlay.SetConfirmKey(rootKillConfirmKey)
+	}
+	return m, cmd
+}
+
+// rootKillConfirmKey is the confirm key the kill dialog demands for the reserved
+// root agent (#1238). Deliberately NOT the ordinary 'y' so an inattentive D+y —
+// the exact gesture that silently decapitated root's event pipeline on
+// 2026-07-05 — cannot dispatch the kill; the key is surfaced in the rendered
+// prompt ("Press k to confirm").
+const rootKillConfirmKey = "k"
+
+// killConfirmMessage builds the kill-confirmation copy for a session. The
+// reserved root agent (#1238) gets distinct, consequence-bearing copy instead of
+// the generic "[!] Kill session 'root'?" that killing any throwaway worktree
+// shows: killing root stops every scheduled/watch-task delivery to it (the
+// inbound event pipeline) until it self-heals or the daemon is restarted. This
+// mirrors the reserved-title guard the create path already applies
+// (app/handle_input.go). #1237 made root self-heal ~2 min after a kill, so the
+// copy names that recovery rather than the pre-#1237 "until the daemon restarts".
+func killConfirmMessage(title, warning string, reserved bool) string {
+	var message string
+	if reserved {
+		message = fmt.Sprintf(
+			"[!] '%s' is the daemon-managed root agent, not a scratch session.\n"+
+				"Killing it stops scheduled and watch-task delivery to '%s' until it\n"+
+				"self-heals (~2 min) or you restart the daemon.\n\n"+
+				"Kill the root agent anyway?", title, title)
+	} else {
+		message = fmt.Sprintf("[!] Kill session '%s'?", title)
+	}
 	if warning != "" {
 		message += "\n\n" + warning
 	}
-	return m, m.confirmAction(message, killAction)
+	return message
 }
 
 // killInstanceCmd returns a tea.Cmd that performs the actual session teardown
