@@ -41,6 +41,12 @@ const (
 	// StatusBarRows is the fixed status-bar height.
 	StatusBarRows = 2
 
+	// AlarmBarRows is the height of the delivery-failure alarm banner (#1238),
+	// reserved at the very top of the screen only when Grid.Banner is set. One
+	// loud full-width row above everything so a dead delivery pipeline can't be
+	// missed.
+	AlarmBarRows = 1
+
 	// RailRuleRows is the horizontal rule separating the instances tree from
 	// the automations section inside the left rail (#1087).
 	RailRuleRows = 1
@@ -97,6 +103,12 @@ type Grid struct {
 	// a scrollable strip when the tree + automations together can't fit
 	// (#1126); zero keeps the section at its AutomationsRows floor.
 	Automations int
+
+	// Banner reserves the top-of-screen delivery-failure alarm row (#1238) when
+	// set. It is cut before every other region so the alarm sits above the rail,
+	// workspace, and status bar, and it survives the degradation ladder — an
+	// active outage alarm shows even in minimal mode.
+	Banner bool
 }
 
 // Layout is a solved arrangement: the named region rects plus which regions
@@ -127,6 +139,9 @@ type Layout struct {
 	RailRule    Rect
 	Automations Rect
 	StatusBar   Rect
+	// Banner is the top-of-screen delivery-failure alarm row (#1238), non-empty
+	// exactly when Grid.Banner was set and the layout is not a fallback.
+	Banner Rect
 
 	// MaxPanes is how many panes fit at this size (§2.6 pane-count fitting):
 	// always at least 1 outside fallback. The caller auto-hides
@@ -153,7 +168,16 @@ func (g Grid) Solve(width, height int) Layout {
 
 	minimal := width < MinimalWidth || height < MinimalHeight
 
-	rem, statusBar := Rect{X: 0, Y: 0, W: width, H: height}.CutBottom(StatusBarRows)
+	// Reserve the alarm banner at the very top first, so every other region's
+	// absolute Y is shifted down by CutTop and click zones stay accurate. It
+	// is cut regardless of minimal mode — a delivery-failure alarm must survive
+	// a cramped terminal (#1238).
+	full := Rect{X: 0, Y: 0, W: width, H: height}
+	if g.Banner {
+		l.Banner, full = full.CutTop(AlarmBarRows)
+	}
+
+	rem, statusBar := full.CutBottom(StatusBarRows)
 	l.StatusBar = statusBar
 
 	// The left rail and the workspace both run the full height above the

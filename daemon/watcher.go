@@ -287,14 +287,24 @@ func (s *watcherSupervisor) droppedEvents(taskID string) int {
 
 func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	w := &taskWatcher{
-		taskID: t.ID,
-		name:   t.Name,
-		cmdStr: t.WatchCmd,
-		dir:    t.ProjectPath,
-		sig:    watcherSignature(t),
-		sup:    s,
-		stopCh: make(chan struct{}),
-		doneCh: make(chan struct{}),
+		taskID:        t.ID,
+		name:          t.Name,
+		cmdStr:        t.WatchCmd,
+		dir:           t.ProjectPath,
+		sig:           watcherSignature(t),
+		targetSession: t.TargetSession,
+		sup:           s,
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
+	}
+	// Resolve the repo the task belongs to so a delivery alarm can be scoped to
+	// the right repo's snapshot (#1238). A resolution failure only costs the
+	// alarm its repo scope — it never disables the watcher — so it is logged and
+	// left empty rather than propagated.
+	if repo, err := config.RepoFromPath(t.ProjectPath); err != nil {
+		log.WarningLog.Printf("watch task %s: cannot resolve repo for delivery-alarm scope: %v", t.ID, err)
+	} else {
+		w.repoID = repo.ID
 	}
 	// Recover any backlog a previous watcher/daemon left behind (#1129); the
 	// run loop starts the drainer if the queue is non-empty. A queue-dir
@@ -325,75 +335,8 @@ func stopWatchers(ws []*taskWatcher) {
 	wg.Wait()
 }
 
-// tailBuffer is a small bounded ring of one script run's most recent output
-// lines — stdout lines that did not become delivered events, plus stderr —
-// kept so a failing run's log line can show WHY the script died instead of a
-// bare exit status (#797). Bounded to watcherTailMaxLines lines and
-// watcherTailMaxBytes total bytes, always retaining at least the newest line.
-type tailBuffer struct {
-	mu    sync.Mutex
-	lines []string
-	size  int
-}
-
-// add records one output line, trimming the line terminator and capping the
-// line at watcherTailMaxBytes. Blank lines are skipped — they carry no
-// diagnostics and would evict lines that do.
-func (b *tailBuffer) add(line string) {
-	line = strings.TrimRight(line, "\r\n")
-	if strings.TrimSpace(line) == "" {
-		return
-	}
-	if len(line) > watcherTailMaxBytes {
-		line = truncateRunes(line, watcherTailMaxBytes)
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.lines = append(b.lines, line)
-	b.size += len(line)
-	for len(b.lines) > 1 && (len(b.lines) > watcherTailMaxLines || b.size > watcherTailMaxBytes) {
-		b.size -= len(b.lines[0])
-		b.lines = b.lines[1:]
-	}
-}
-
-// logSuffix renders the buffered output for appending to a failure log line:
-// "; last output:" plus one indented line each, or "" when the run produced
-// nothing to show (so failure logs never grow an empty trailer).
-func (b *tailBuffer) logSuffix() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.lines) == 0 {
-		return ""
-	}
-	return "; last output:\n  " + strings.Join(b.lines, "\n  ")
-}
-
-// firstLine returns the oldest buffered line — usually the script's initial
-// complaint — for the persisted status summary.
-func (b *tailBuffer) firstLine() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.lines) == 0 {
-		return ""
-	}
-	return b.lines[0]
-}
-
-// failureSummary builds the status the crash-loop breaker persists:
-// "errored: <exit error>: <first buffered line>", capped at
-// watcherStatusSummaryMax. The "errored" prefix is what the TUI keys the
-// supervision state off (ui.watchTaskStatus), so it must come first.
-func failureSummary(runErr error, tail *tailBuffer) string {
-	summary := "errored: " + runErr.Error()
-	if first := tail.firstLine(); first != "" {
-		summary += ": " + first
-	}
-	if len(summary) > watcherStatusSummaryMax {
-		summary = truncateRunes(summary, watcherStatusSummaryMax) + "…"
-	}
-	return summary
-}
+// tailBuffer and its failure-summary helpers live in tailbuffer.go (extracted
+// to keep watcher.go under its file-length ceiling, #1145).
 
 // taskWatcher supervises one watch task: it restarts the script with backoff
 // on failure and feeds its stdout lines to the supervisor's deliver hook.
@@ -406,6 +349,15 @@ type taskWatcher struct {
 	cmdStr string
 	dir    string
 	sig    string
+	// repoID/targetSession are captured at construction to label a delivery
+	// alarm (#1238) without disk I/O on the snapshot hot path. repoID scopes
+	// the alarm to a repo's snapshot; targetSession names where events are
+	// failing to land (e.g. "root"). Both come from the task's delivery fields,
+	// which are not part of the watcher signature — a target_session edit is
+	// picked up by deliverWatchEvent's per-event reload, so a stale label here
+	// is at worst momentary and never affects delivery itself.
+	repoID        string
+	targetSession string
 
 	sup *watcherSupervisor
 
@@ -428,6 +380,16 @@ type taskWatcher struct {
 	// draining marks a live drainLoop goroutine, so at most one drains the
 	// queue at a time and replay order is preserved.
 	draining bool
+
+	// Delivery-failure alarm state (#1238), guarded by mu. deliverFailSince is
+	// the start of the current run of consecutive failed deliveries (zero when
+	// the last delivery succeeded); deliverFailCount is how many back-to-back
+	// attempts have failed; deliverFailErr is the most recent delivery error.
+	// A single success clears all three, so a task in the map with a non-zero
+	// deliverFailSince is exactly one whose pipeline is currently down.
+	deliverFailSince time.Time
+	deliverFailCount int
+	deliverFailErr   string
 }
 
 // stop requests termination and blocks until the run goroutine returns. The
@@ -821,7 +783,9 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		return
 	}
 
-	if err := w.sup.deliver(w.taskID, line); err != nil {
+	err := w.sup.deliver(w.taskID, line)
+	w.recordDeliveryResult(time.Now(), err)
+	if err != nil {
 		log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
 		w.enqueueEvent(line, tail)
 	}
@@ -958,6 +922,7 @@ func (w *taskWatcher) drainLoop() {
 			continue
 		}
 		if err := w.sup.deliver(w.taskID, ev.Line); err != nil {
+			w.recordDeliveryResult(time.Now(), err)
 			log.WarningLog.Printf("watch task %s: replay delivery failed (%d event(s) pending); retrying in %s: %v", w.taskID, w.queue.pendingCount(), backoff, err)
 			if !w.sleepStopAware(backoff) {
 				w.stopDraining()
@@ -969,6 +934,7 @@ func (w *taskWatcher) drainLoop() {
 			}
 			continue
 		}
+		w.recordDeliveryResult(time.Now(), nil)
 		if err := w.queue.advance(n); err != nil {
 			log.ErrorLog.Printf("watch task %s: failed to advance the event queue; replay parked until the next reload: %v", w.taskID, err)
 			w.stopDraining()

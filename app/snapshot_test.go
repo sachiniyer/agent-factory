@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -186,10 +187,10 @@ func TestFetchSnapshotCmd_UsesFetcherSeam(t *testing.T) {
 	}))
 
 	called := false
-	h.snapshotFetcher = func(repoID string) ([]session.InstanceData, error) {
+	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
 		called = true
 		require.Equal(t, h.repoID, repoID, "the snapshot fetch must be scoped to this repo")
-		return []session.InstanceData{{Title: "viaseam", CreatedAt: time.Now()}}, nil
+		return daemon.SnapshotResponse{Instances: []session.InstanceData{{Title: "viaseam", CreatedAt: time.Now()}}}, nil
 	}
 
 	msg := h.fetchSnapshotCmd()()

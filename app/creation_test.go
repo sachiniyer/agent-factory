@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
@@ -87,8 +88,8 @@ func newTestHome(t *testing.T) *home {
 		// regress this.) Tests exercising the fetch path assign their own fake to
 		// h.snapshotFetcher. The fetcher is a per-home field, not a shared global, so
 		// parallel tests can't race each other's swaps.
-		snapshotFetcher: func(string) ([]session.InstanceData, error) {
-			return nil, fmt.Errorf("snapshot fetcher not stubbed in test")
+		snapshotFetcher: func(string) (daemon.SnapshotResponse, error) {
+			return daemon.SnapshotResponse{}, fmt.Errorf("snapshot fetcher not stubbed in test")
 		},
 		// Default the #1160 poll-pause seams to no-ops so a test that incidentally
 		// drives the attach heartbeat never dials — or spawns — a real daemon.
@@ -116,6 +117,9 @@ func wireTestPanes(h *home, proj *store.Projection) {
 	}
 	if h.errBox == nil {
 		h.errBox = ui.NewErrBox()
+	}
+	if h.alarmBanner == nil {
+		h.alarmBanner = ui.NewAlarmBanner()
 	}
 	h.paneWindows = make(map[int]*ui.TabbedWindow)
 	h.lastPaneCapture = make(map[int]time.Time)

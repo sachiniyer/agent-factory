@@ -151,8 +151,8 @@ var setPRInfoThroughDaemon = func(title, repoID string, info session.PRInfoData)
 // goroutine, so a mutable global would race a test seam swap under
 // `go test -parallel`; the fetcher lives per-home instead, and tests assign a
 // fake to home.snapshotFetcher directly (#960 PR 4 race fix).
-func snapshotThroughDaemon(repoID string) ([]session.InstanceData, error) {
-	return daemon.Snapshot(daemon.SnapshotRequest{RepoID: repoID})
+func snapshotThroughDaemon(repoID string) (daemon.SnapshotResponse, error) {
+	return daemon.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: repoID})
 }
 
 // buildInstanceFromSnapshot materializes a live, tab-reconnected *session.Instance

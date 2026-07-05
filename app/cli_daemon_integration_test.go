@@ -130,9 +130,13 @@ func findSidebarInstance(h *home, title string) *session.Instance {
 // CLI→daemon→TUI integration checks.
 func reconcileFromDaemon(t *testing.T, h *home) bool {
 	t.Helper()
-	data, err := snapshotThroughDaemon(h.repoID)
+	resp, err := snapshotThroughDaemon(h.repoID)
 	require.NoError(t, err)
-	return h.reconcileSnapshot(data)
+	changed := h.reconcileSnapshot(resp.Instances)
+	if h.applyDeliveryAlarms(resp.DeliveryAlarms) {
+		changed = true
+	}
+	return changed
 }
 
 func buildIntegrationBinary(t *testing.T) string {

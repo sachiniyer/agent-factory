@@ -248,18 +248,9 @@ type ResumeStatusPollResponse struct {
 	OK bool `json:"ok"`
 }
 
-// SnapshotRequest asks the daemon for the authoritative session list of a repo
-// (#960 PR 3). RepoID scopes the read like the other sessions verbs (empty =
-// all repos). It is the read side of the single-writer model: the daemon's
-// in-memory instance map is the source of truth, so the TUI mirrors this
-// projection instead of re-reading instances.json off disk.
-type SnapshotRequest struct {
-	RepoID string `json:"repo_id"`
-}
-
-type SnapshotResponse struct {
-	Instances []session.InstanceData `json:"instances"`
-}
+// SnapshotRequest, SnapshotResponse, and the DeliveryAlarm projection live in
+// snapshot.go (extracted to keep control.go under its file-length ceiling,
+// #1145).
 
 type ImportRemoteHookSessionsRequest struct {
 	RepoPath string `json:"repo_path"`
@@ -492,18 +483,9 @@ func SetPRInfo(req SetPRInfoRequest) error {
 	return nil
 }
 
-// Snapshot asks the daemon for the authoritative session list of repoID (empty
-// = all repos). It is the TUI's read path under the single-writer model (#960
-// PR 3): the daemon owns session/tab state, so the TUI mirrors this projection
-// rather than re-reading instances.json. A warming daemon (#829) returns the
-// retryable starting error, which callDaemon already waits out.
-func Snapshot(req SnapshotRequest) ([]session.InstanceData, error) {
-	var resp SnapshotResponse
-	if err := callDaemon("Snapshot", req, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Instances, nil
-}
+// The TUI read path is SnapshotWithAlarms (snapshot.go): it carries the session
+// list plus the delivery-failure alarms in one authoritative response (#1238).
+// SnapshotNoSpawn below is the CLI's non-spawning, instances-only read.
 
 // ErrDaemonUnavailable signals that a non-spawning daemon read (SnapshotNoSpawn)
 // found no reachable, ready daemon: the control socket is absent/refused or the
@@ -1066,6 +1048,7 @@ func (s *controlServer) Snapshot(req SnapshotRequest, resp *SnapshotResponse) er
 		return err
 	}
 	resp.Instances = s.manager.Snapshot(req.RepoID)
+	resp.DeliveryAlarms = s.deliveryAlarms(req.RepoID)
 	return nil
 }
 
