@@ -1599,23 +1599,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		m.resolveIdleLiveness(instance, content)
 	}
 
-	after := instance.GetLiveness()
-	if after == before || instance.GetInFlightOp() != session.OpNone {
-		// No real transition, or an op raced in after our top-of-function check —
-		// its executor owns the durable state. Only real transitions touch disk.
-		// The liveness IS the compared axis (#1195), so a Ready→LimitReached idle
-		// transition (#1146) — invisible to the old composed-Status compare, since
-		// LimitReached composes to Ready — is caught here as a genuine change.
-		return
-	}
-
-	repoStartLock := m.startLockForRepo(repoID)
-	repoStartLock.Lock()
-	err := persistInstanceData(repoID, instance.ToInstanceData())
-	repoStartLock.Unlock()
-	if err != nil {
-		log.WarningLog.Printf("daemon failed to persist status for %q: %v", instance.Title, err)
-	}
+	// Persist only a real liveness transition; see persistLivenessChange in
+	// limit.go (split out to keep control.go under its length ceiling, #1145).
+	m.persistLivenessChange(repoID, instance, before)
 }
 
 // SaveInstances writes the manager's authoritative in-memory instances to disk

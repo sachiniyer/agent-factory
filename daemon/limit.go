@@ -29,6 +29,27 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	}
 }
 
+// persistLivenessChange writes an instance's state to disk only when the poll
+// actually transitioned its LIVENESS this tick (the #960 targeted writer). The
+// liveness is the compared axis (#1195), so a Ready→LimitReached idle transition
+// (#1146) — invisible to the old composed-Status compare, since LimitReached
+// composes to Ready — is caught here as a genuine change. A concurrent client op
+// (create/kill/archive) means that op's executor owns the durable state, so the
+// poll never persists over it. Split from refreshInstanceStatus so control.go
+// stays under its length ceiling (#1145).
+func (m *Manager) persistLivenessChange(repoID string, instance *session.Instance, before session.Liveness) {
+	if instance.GetLiveness() == before || instance.GetInFlightOp() != session.OpNone {
+		return
+	}
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	err := persistInstanceData(repoID, instance.ToInstanceData())
+	repoStartLock.Unlock()
+	if err != nil {
+		log.WarningLog.Printf("daemon failed to persist status for %q: %v", instance.Title, err)
+	}
+}
+
 // This file is the daemon side of the usage-limit manual-retry action (#1146
 // PR2): the ResumeFromLimit RPC and the reusable resumeFromLimit Manager method
 // behind it. Detection itself lives in refreshInstanceStatus (control.go), which
@@ -119,8 +140,15 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 	// Re-spawn only when the agent's tmux session actually exited while blocked
 	// (the edge case where the agent dropped to a shell / the pane vanished). A
 	// live stall — the common claude/codex case — just needs the un-stall prompt.
+	//
+	// Respawn, NOT Recover: the session is LiveLimitReached, and Recover's !Lost
+	// guard rejects any non-Lost liveness, so routing a limit retry through Recover
+	// always failed the guard (#1204 P1). Respawn is the guard-free re-spawn core
+	// (same resumeProgram path: claude --continue, codex resume --last); the
+	// LimitReached/no-tombstone precondition is enforced above under the target
+	// lock.
 	if !instance.TmuxAlive() {
-		if rerr := instance.Recover(); rerr != nil {
+		if rerr := instance.Respawn(); rerr != nil {
 			return fmt.Errorf("failed to re-spawn agent for %q: %w", req.Title, rerr)
 		}
 	}

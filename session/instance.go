@@ -1052,6 +1052,16 @@ func (i *Instance) Recover() error {
 	return i.backend.Recover(i)
 }
 
+// Respawn re-establishes the instance's backing session in place without a
+// liveness precondition — the guard-free core of Recover. The usage-limit
+// manual-retry (#1146, resumeFromLimit) uses it to re-spawn an agent that exited
+// while blocked at a limit wall: that session is LiveLimitReached, which Recover's
+// !Lost guard rejects, but the re-spawn mechanics are identical. The caller owns
+// the precondition.
+func (i *Instance) Respawn() error {
+	return i.backend.Respawn(i)
+}
+
 // ArchiveTeardown tears down every tab's tmux session for an archive (#1028) —
 // the tmux half of Kill, but it PRESERVES the worktree and the instance record.
 // It is deliberately best-effort (a stuck tmux only logs, mirroring Kill) and:

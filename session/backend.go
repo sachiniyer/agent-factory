@@ -70,6 +70,15 @@ type Backend interface {
 	// session is flagged but reconnect semantics are their own design.
 	Recover(instance *Instance) error
 
+	// Respawn re-establishes an instance's backing session in place — re-spawning
+	// the agent program via the resume path (resumeProgram: claude --continue,
+	// codex resume --last) — WITHOUT any liveness precondition. It is the
+	// guard-free core Recover wraps with its Lost guard; the usage-limit
+	// manual-retry (#1146) uses it directly because a LimitReached session (which
+	// Recover's !Lost guard rejects) needs the identical re-spawn. Callers own the
+	// precondition. Remote backends return ErrRecoverUnsupported.
+	Respawn(instance *Instance) error
+
 	// Type returns the backend type identifier ("local" or "remote").
 	Type() string
 }
