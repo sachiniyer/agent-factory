@@ -1,0 +1,50 @@
+# Demo-recording container for agent-factory (#1032).
+#
+# Extends the same golang+tmux+git toolchain as Dockerfile.test with the
+# recording stack, so the README demo GIF can be regenerated from committed
+# scripts inside a throwaway container — never on the host. Build with no
+# context: `docker build -t agent-factory-demo - < scripts/container/Dockerfile.demo`
+#
+# Regenerate the GIF end-to-end with: scripts/container/record-demo.sh
+#
+# Pipeline: scripts/tui-driver.sh drives the real af TUI in a tmux session
+# (marker-synchronized, so it never mis-drives af's stateful focus model the
+# way blind key-timing would); asciinema records a read-only mirror of that
+# session; agg renders the .cast to GIF; gifsicle optimizes it; ffmpeg pulls
+# sample frames.
+FROM golang:1.24-bookworm
+
+# tmux + git drive af; procps provides pgrep; asciinema records the session;
+# ffmpeg + gifsicle render/optimize; a monospace font shapes the text.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        tmux git procps ca-certificates curl \
+        asciinema ffmpeg gifsicle fonts-jetbrains-mono \
+    && rm -rf /var/lib/apt/lists/*
+
+# agg — asciinema's official .cast -> GIF renderer (single static binary). Use
+# the musl build: the gnu build links GLIBC 2.38, newer than bookworm's 2.36.
+ARG AGG_VERSION=v1.9.0
+RUN curl -fsSL -o /usr/local/bin/agg \
+        "https://github.com/asciinema/agg/releases/download/${AGG_VERSION}/agg-x86_64-unknown-linux-musl" \
+    && chmod +x /usr/local/bin/agg
+
+# Stable git identity so mock-repo commits don't depend on host git config.
+RUN git config --system user.name "AF Testbox" \
+    && git config --system user.email "testbox@localhost" \
+    && git config --system init.defaultBranch master
+
+# Non-root dev user, mirroring Dockerfile.test so playtest-entry.sh builds
+# af into /home/dev/bin exactly as the play-test harness expects.
+RUN useradd -m -u 1000 dev \
+    && mkdir -p /cache/gomod /cache/gobuild /work \
+    && chown -R dev:dev /cache /work
+
+ENV TERM=xterm-256color \
+    SHELL=/bin/bash \
+    GOMODCACHE=/cache/gomod \
+    GOCACHE=/cache/gobuild \
+    PATH=/home/dev/bin:$PATH
+
+USER dev
+WORKDIR /src

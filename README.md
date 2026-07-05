@@ -2,7 +2,7 @@
 
 A terminal UI that runs multiple AI coding agents — Claude Code, Codex, Aider, Gemini — side by side, each in its own isolated git worktree. Start several agents on different tasks, watch their terminals live in the preview pane, attach to any of them, and automate the whole thing with scheduled tasks and a JSON CLI.
 
-![Agent Factory: three agent sessions in isolated worktrees, with a live preview of the selected one](docs/assets/screenshot.png)
+![Agent Factory demo: spinning up several AI coding agents, each in its own isolated git worktree, watching their work stream live in the preview pane, and attaching full-screen to one](docs/assets/demo.gif)
 
 Fork of [claude-squad](https://github.com/smtg-ai/claude-squad) with per-repo scoping, a programmatic CLI, and automated tasks.
 
