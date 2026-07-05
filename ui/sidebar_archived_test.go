@@ -135,8 +135,12 @@ func TestSidebar_ArchivedRowSelectableWhenExpanded(t *testing.T) {
 	require.NotNil(t, inst, "an archived row must resolve to its instance")
 	assert.Equal(t, "put-away", inst.Title)
 
-	// The row renders with the archived marker.
-	assert.True(t, strings.Contains(s.View(), "[archived]"), "archived rows render a distinct marker")
+	// The row renders with the distinct archived marker — the ▧ glyph, not a
+	// name-eating "[archived] " text prefix (#1225) — and keeps its NAME visible.
+	view := s.View()
+	assert.True(t, strings.Contains(view, "▧"), "archived rows render the distinct ▧ marker")
+	assert.True(t, strings.Contains(view, "put-away"), "archived rows keep their name visible")
+	assert.False(t, strings.Contains(view, "[archived]"), "archived rows must not carry the name-eating text prefix (#1225)")
 }
 
 // TestSidebar_ArchivedZonesRegistered (#1028 mouse P2): the Archived folder
