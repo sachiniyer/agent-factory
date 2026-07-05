@@ -267,13 +267,6 @@ func (s *TaskPane) ConsumePendingCreate() (name, prompt, cron, watchCmd, targetS
 		s.editTarget.Value(), s.editPath.Value(), s.programValue()
 }
 
-// SetPendingTrigger marks the currently selected task to be triggered.
-func (s *TaskPane) SetPendingTrigger() {
-	if len(s.tasks) > 0 {
-		s.pendingTrigger = true
-	}
-}
-
 // HasPendingTrigger returns true if a task was triggered to run immediately.
 func (s *TaskPane) HasPendingTrigger() bool {
 	return s.pendingTrigger
