@@ -82,9 +82,28 @@ func downloadBinary(url string) ([]byte, error) {
 	return binary, nil
 }
 
+// upgradeAllowDowngrade is the opt-in for intentional channel-switch
+// downgrades (#1212). By default `af upgrade` refuses to install a release
+// that is older than the running binary — e.g. switching update_channel from
+// preview to stable when the newest stable is behind the preview you're on.
+// --allow-downgrade skips that guard.
+var upgradeAllowDowngrade bool
+
+func init() {
+	upgradeCmd.Flags().BoolVar(&upgradeAllowDowngrade, "allow-downgrade", false,
+		"Install the channel's latest release even if it is older than the current binary (e.g. switching from preview back to stable)")
+}
+
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
-	Short: "Upgrade agent-factory to the latest version",
+	Short: "Upgrade agent-factory to the latest release on the configured channel",
+	Long: `Upgrade agent-factory to the newest release on the configured update
+channel (stable by default, or preview via the update_channel config key).
+
+A manual upgrade never downgrades: if the channel's latest release is older
+than the running binary — which happens when you switch from the preview
+channel back to stable — the upgrade is a no-op with an explanation. Pass
+--allow-downgrade to install the older release anyway.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// RequestShutdown's SIGTERM fallback (#504) writes through
 		// log.InfoLog / log.WarningLog. Initialize logging up-front so those
@@ -104,14 +123,70 @@ var upgradeCmd = &cobra.Command{
 		// (#1041). The releases/latest/download redirect only serves the
 		// stable channel; a preview-channel user upgraded through it would
 		// silently downgrade back to the older stable.
-		latestTag, downloadURL, err := latestDownloadURL(updateChannel(), goos, goarch)
+		channel := updateChannel()
+		latestTag, downloadURL, err := latestDownloadURL(channel, goos, goarch)
 		if err != nil {
 			return err
+		}
+
+		// Guard against silently downgrading (#1212): switching from a newer
+		// preview to an older stable resolves an older tag here, and without
+		// this check runUpgrade would happily install it. shouldUpgrade
+		// reuses the same isNewer/parseSemver precedence auto-update relies on.
+		proceed, msg := shouldUpgrade(latestTag, version, channel, upgradeAllowDowngrade)
+		if msg != "" {
+			fmt.Println(msg)
+		}
+		if !proceed {
+			return nil
 		}
 
 		fmt.Printf("Downloading %s for %s/%s...\n", latestTag, goos, goarch)
 		return runUpgrade(downloadURL)
 	},
+}
+
+// shouldUpgrade decides whether `af upgrade` should install latestTag over the
+// currently running version, and returns a user-facing message to print
+// (empty when there is nothing to say beyond the normal download line). It
+// reuses parseSemver/isNewer so preview precedence matches auto-update
+// exactly: 1.2.0 < 1.2.1-preview-1 < 1.2.1-preview-2 < 1.2.1 (#1212).
+//
+//   - latest newer than current  -> proceed (normal upgrade).
+//   - latest older than current  -> refuse unless allowDowngrade, naming both
+//     versions and the channel so a preview->stable switch doesn't silently
+//     roll the binary back.
+//   - already on the latest       -> no-op with a friendly note.
+//   - off-scheme/unparseable tag  -> refuse; we can't prove it isn't a
+//     downgrade, and installing blind is exactly the bug we're guarding.
+func shouldUpgrade(latestTag, current, channel string, allowDowngrade bool) (proceed bool, msg string) {
+	latest := strings.TrimPrefix(latestTag, "v")
+	cur := strings.TrimPrefix(current, "v")
+
+	if parseSemver(latest) == nil {
+		return false, fmt.Sprintf(
+			"Cannot compare latest release %q against the current %s; refusing to upgrade to avoid an accidental downgrade.",
+			latestTag, current)
+	}
+
+	switch {
+	case isNewer(latest, cur):
+		return true, ""
+	case isNewer(cur, latest):
+		// latest is strictly older than current: a real downgrade.
+		if allowDowngrade {
+			return true, fmt.Sprintf("Downgrading %s -> %s (--allow-downgrade).", current, latestTag)
+		}
+		return false, fmt.Sprintf(
+			"af upgrade would downgrade %s -> %s (%s channel). Re-run with --allow-downgrade to proceed.",
+			current, latestTag, channel)
+	default:
+		// Equal base+precedence: already on the channel's latest release.
+		if allowDowngrade {
+			return true, fmt.Sprintf("Reinstalling %s (--allow-downgrade).", latestTag)
+		}
+		return false, fmt.Sprintf("Already on the latest %s release (%s).", channel, current)
+	}
 }
 
 // runUpgrade downloads the release tarball at downloadURL, atomically swaps

@@ -392,6 +392,111 @@ func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
 	}
 }
 
+// TestShouldUpgrade covers the downgrade guard added for #1212: `af upgrade`
+// must proceed only when the channel's latest release is genuinely newer than
+// the running binary, unless --allow-downgrade is set. This is the unit-level
+// guard around runUpgrade's caller so we never hit the network to prove it.
+func TestShouldUpgrade(t *testing.T) {
+	cases := []struct {
+		name          string
+		latestTag     string
+		current       string
+		channel       string
+		allowDown     bool
+		wantProceed   bool
+		wantMsgSubstr string
+	}{
+		{
+			name:        "newer proceeds silently",
+			latestTag:   "v1.0.141",
+			current:     "1.0.140",
+			channel:     "stable",
+			wantProceed: true,
+		},
+		{
+			name:        "newer preview over stable proceeds",
+			latestTag:   "1.0.141-preview-1",
+			current:     "1.0.140",
+			channel:     "preview",
+			wantProceed: true,
+		},
+		{
+			name:          "equal is a no-op",
+			latestTag:     "1.0.140",
+			current:       "1.0.140",
+			channel:       "stable",
+			wantProceed:   false,
+			wantMsgSubstr: "Already on the latest stable release (1.0.140)",
+		},
+		{
+			name:          "older without flag refuses and does not install",
+			latestTag:     "1.0.139",
+			current:       "1.0.140-preview-2",
+			channel:       "stable",
+			wantProceed:   false,
+			wantMsgSubstr: "would downgrade 1.0.140-preview-2 -> 1.0.139 (stable channel)",
+		},
+		{
+			name:          "older with flag proceeds",
+			latestTag:     "1.0.139",
+			current:       "1.0.140-preview-2",
+			channel:       "stable",
+			allowDown:     true,
+			wantProceed:   true,
+			wantMsgSubstr: "Downgrading 1.0.140-preview-2 -> 1.0.139 (--allow-downgrade)",
+		},
+		{
+			name:          "unparseable tag refuses safely",
+			latestTag:     "not-a-version",
+			current:       "1.0.140",
+			channel:       "stable",
+			wantProceed:   false,
+			wantMsgSubstr: "refusing to upgrade",
+		},
+		{
+			name:          "unparseable tag refuses even with flag",
+			latestTag:     "garbage",
+			current:       "1.0.140",
+			channel:       "stable",
+			allowDown:     true,
+			wantProceed:   false,
+			wantMsgSubstr: "refusing to upgrade",
+		},
+		{
+			name:          "equal with flag reinstalls",
+			latestTag:     "1.0.140",
+			current:       "1.0.140",
+			channel:       "stable",
+			allowDown:     true,
+			wantProceed:   true,
+			wantMsgSubstr: "Reinstalling 1.0.140 (--allow-downgrade)",
+		},
+		{
+			name:          "preview precedence: stable outranks its own preview",
+			latestTag:     "1.0.140-preview-9",
+			current:       "1.0.140",
+			channel:       "preview",
+			wantProceed:   false,
+			wantMsgSubstr: "would downgrade 1.0.140 -> 1.0.140-preview-9 (preview channel)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proceed, msg := shouldUpgrade(tc.latestTag, tc.current, tc.channel, tc.allowDown)
+			if proceed != tc.wantProceed {
+				t.Fatalf("shouldUpgrade proceed = %v, want %v (msg=%q)", proceed, tc.wantProceed, msg)
+			}
+			if tc.wantMsgSubstr != "" && !strings.Contains(msg, tc.wantMsgSubstr) {
+				t.Fatalf("shouldUpgrade msg = %q, want substring %q", msg, tc.wantMsgSubstr)
+			}
+			if tc.wantProceed && tc.wantMsgSubstr == "" && msg != "" {
+				t.Fatalf("shouldUpgrade returned unexpected message on a silent proceed: %q", msg)
+			}
+		})
+	}
+}
+
 func makeTarGz(t *testing.T, files map[string][]byte) []byte {
 	t.Helper()
 
