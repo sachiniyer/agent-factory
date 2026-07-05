@@ -29,16 +29,33 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	}
 }
 
-// persistLivenessChange writes an instance's state to disk only when the poll
-// actually transitioned its LIVENESS this tick (the #960 targeted writer). The
-// liveness is the compared axis (#1195), so a Ready→LimitReached idle transition
-// (#1146) — invisible to the old composed-Status compare, since LimitReached
-// composes to Ready — is caught here as a genuine change. A concurrent client op
-// (create/kill/archive) means that op's executor owns the durable state, so the
-// poll never persists over it. Split from refreshInstanceStatus so control.go
-// stays under its length ceiling (#1145).
-func (m *Manager) persistLivenessChange(repoID string, instance *session.Instance, before session.Liveness) {
-	if instance.GetLiveness() == before || instance.GetInFlightOp() != session.OpNone {
+// persistPollChange writes an instance's state to disk when the poll changed
+// something durable this tick (the #960 targeted writer): its LIVENESS
+// transitioned, OR — evaluated INDEPENDENTLY — its usage-limit reset time changed
+// (#1146). The liveness is the compared axis (#1195), so a Ready→LimitReached idle
+// transition (invisible to the old composed-Status compare, since LimitReached
+// composes to Ready) is caught as a genuine change.
+//
+// The reset-time check MUST be independent of the liveness compare: a row can
+// enter LiveLimitReached on one tick with no parsed reset time (the banner
+// matched but the time was not yet captured/parseable) and only parse it on a
+// LATER tick. That later tick leaves the liveness unchanged, so gating
+// persistence on the liveness alone would silently drop the reset time — the
+// [limit] resets <t> badge would never show it, and PR3's auto-resume scheduler
+// would have no time to schedule against once the daemon restarts and reloads
+// from disk. beforeReset is the reset time captured before this tick's poll.
+//
+// A concurrent client op (create/kill/archive) means that op's executor owns the
+// durable state, so the poll never persists over it. Split from
+// refreshInstanceStatus so control.go stays under its length ceiling (#1145).
+func (m *Manager) persistPollChange(repoID string, instance *session.Instance, before session.Liveness, beforeReset time.Time) {
+	if instance.GetInFlightOp() != session.OpNone {
+		return
+	}
+	afterReset, _ := instance.LimitResetAt()
+	livenessChanged := instance.GetLiveness() != before
+	resetChanged := !afterReset.Equal(beforeReset)
+	if !livenessChanged && !resetChanged {
 		return
 	}
 	repoStartLock := m.startLockForRepo(repoID)

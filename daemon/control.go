@@ -1562,6 +1562,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 
 	instance.CheckAndHandleTrustPrompt()
 	before := instance.GetLiveness()
+	beforeReset, _ := instance.LimitResetAt()
 	// HasUpdated hands back the captured pane content so the idle branch can run
 	// the usage-limit detector (#1146) without a second capture-pane.
 	updated, hasPrompt, content := instance.HasUpdated()
@@ -1599,9 +1600,8 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		m.resolveIdleLiveness(instance, content)
 	}
 
-	// Persist only a real liveness transition; see persistLivenessChange in
-	// limit.go (split out to keep control.go under its length ceiling, #1145).
-	m.persistLivenessChange(repoID, instance, before)
+	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
+	m.persistPollChange(repoID, instance, before, beforeReset)
 }
 
 // SaveInstances writes the manager's authoritative in-memory instances to disk
