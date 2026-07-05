@@ -392,3 +392,105 @@ func TestWaitForReadyTimesOutOnPersistentTransientErrors(t *testing.T) {
 		t.Fatal("WaitForReady never timed out on persistent transient errors")
 	}
 }
+
+// setWaitLimitForTest pins WaitForReady's usage-limit detector and clock so a
+// park test resolves a deterministic reset time without loading config or
+// touching the wall clock (#1146 PR4). Returns a restore func.
+func setWaitLimitForTest(detector LimitDetector, now func() time.Time) func() {
+	prevDet, prevNow := newLimitDetectorForWait, waitLimitNow
+	newLimitDetectorForWait = func() LimitDetector { return detector }
+	waitLimitNow = now
+	return func() {
+		newLimitDetectorForWait, waitLimitNow = prevDet, prevNow
+	}
+}
+
+// TestWaitForReadyParksOnUsageLimit is the core PR4 change (#1146): when the
+// agent shows a usage-limit banner during startup instead of its ready prompt,
+// WaitForReady must STOP waiting and return a *LimitReachedError carrying the
+// parsed reset time — a distinct, NON-failure outcome the create path parks on —
+// rather than spinning the full timeout and returning a failure. The 2s watchdog
+// (well under the 10s test timeout) fails the test on the pre-fix spin-to-timeout
+// behavior.
+func TestWaitForReadyParksOnUsageLimit(t *testing.T) {
+	defer setWaitForReadyTimingForTest(10*time.Second, time.Millisecond)()
+	fixed := time.Date(2026, 7, 4, 9, 0, 0, 0, time.UTC)
+	defer setWaitLimitForTest(NewLimitDetector(nil), func() time.Time { return fixed })()
+
+	cases := []struct {
+		name    string
+		program string
+		banner  string
+		wantUTC time.Time
+	}{
+		{
+			name:    "claude",
+			program: "claude",
+			banner:  "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)",
+			// 2pm America/New_York (EDT, UTC-4) on 2026-07-04 = 18:00 UTC.
+			wantUTC: time.Date(2026, 7, 4, 18, 0, 0, 0, time.UTC),
+		},
+		{
+			name:    "codex",
+			program: "codex",
+			banner:  "You've hit your usage limit. Try again at Jul 25th, 2026 5:55 PM.",
+			// codex renders local time; the fixed clock's zone is UTC, so 5:55 PM UTC.
+			wantUTC: time.Date(2026, 7, 25, 17, 55, 0, 0, time.UTC),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := newPreviewInstanceWithProgram(t, tc.program, func() (string, error) {
+				return tc.banner, nil
+			})
+			done := make(chan error, 1)
+			go func() { done <- WaitForReady(inst) }()
+
+			select {
+			case err := <-done:
+				var limitErr *LimitReachedError
+				if !errors.As(err, &limitErr) {
+					t.Fatalf("expected *LimitReachedError, got %v", err)
+				}
+				if !errors.Is(err, ErrLimitReached) {
+					t.Fatalf("park error must wrap ErrLimitReached, got %v", err)
+				}
+				if strings.Contains(err.Error(), "timed out") {
+					t.Fatalf("a park must not be a timeout/failure error, got %q", err.Error())
+				}
+				if got := limitErr.ResetAt.UTC(); !got.Equal(tc.wantUTC) {
+					t.Fatalf("ResetAt = %v, want %v", got, tc.wantUTC)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("WaitForReady did not park on a usage-limit banner; still polling")
+			}
+		})
+	}
+}
+
+// TestWaitForReadyDoesNotParkNonLimitAgent guards the scope boundary (#1146): a
+// gemini/aider pane has no usage-limit matcher, so even a limit-looking banner
+// must NOT park — WaitForReady keeps polling and times out as before. gemini's
+// readiness glyph never appears here, so it hits the (shortened) timeout.
+func TestWaitForReadyDoesNotParkNonLimitAgent(t *testing.T) {
+	defer setWaitForReadyTimingForTest(200*time.Millisecond, time.Millisecond)()
+	defer setWaitLimitForTest(NewLimitDetector(nil), time.Now)()
+
+	inst := newPreviewInstanceWithProgram(t, "gemini", func() (string, error) {
+		return "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", nil
+	})
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(inst) }()
+
+	select {
+	case err := <-done:
+		if errors.Is(err, ErrLimitReached) {
+			t.Fatalf("gemini has no limit matcher and must not park, got %v", err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("expected a plain timeout for a non-limit agent, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady never returned for a non-limit agent")
+	}
+}

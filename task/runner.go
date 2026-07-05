@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -15,6 +16,49 @@ var (
 	waitForReadyTimeout      = 60 * time.Second
 	waitForReadyPollInterval = 500 * time.Millisecond
 )
+
+// LimitReachedError is what WaitForReady returns when the agent shows a
+// usage-limit banner during startup instead of its input prompt (#1146 PR4):
+// the plan is exhausted, so the agent will never become ready and spinning the
+// full readiness timeout would record the task run as FAILED. It is a distinct,
+// NON-failure outcome — callers PARK the session (mark it LimitReached, record a
+// "waiting for the limit window" status, fire no failure side-effects) and let
+// the existing resume machinery (the daemon auto-resume scheduler, or the manual
+// `c` retry) re-deliver the stored prompt once the window resets. ResetAt is the
+// parsed reset time, zero when the banner carried none.
+type LimitReachedError struct {
+	ResetAt time.Time
+}
+
+// ErrLimitReached is the sentinel LimitReachedError wraps so callers can match
+// it with errors.As(&LimitReachedError) or errors.Is(ErrLimitReached) without
+// depending on the concrete type.
+var ErrLimitReached = errors.New("agent hit a usage limit during startup")
+
+func (e *LimitReachedError) Error() string { return ErrLimitReached.Error() }
+
+func (e *LimitReachedError) Unwrap() error { return ErrLimitReached }
+
+// Indirected so tests can pin a fixed detector + clock instead of loading config
+// and calling time.Now(). Production resolves the same limit_patterns overrides
+// the daemon poll uses, so a hand-tuned detect regex parks a task run identically
+// to how it surfaces one (#1146).
+var (
+	newLimitDetectorForWait = defaultLimitDetectorForWait
+	waitLimitNow            = time.Now
+)
+
+// defaultLimitDetectorForWait builds the usage-limit detector WaitForReady uses,
+// honoring config.LimitPatterns. A config-load failure degrades to the built-in
+// claude/codex matchers rather than blocking startup — detection is best-effort
+// and must never break the create path.
+func defaultLimitDetectorForWait() LimitDetector {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return NewLimitDetector(nil)
+	}
+	return NewLimitDetector(cfg.LimitPatterns)
+}
 
 // isReadyContent reports whether the captured pane content indicates that the
 // given agent is ready for input — or is showing a trust/confirmation prompt
@@ -87,6 +131,10 @@ func WaitForReady(instance *session.Instance) error {
 	// program's readiness heuristic, and a non-agent override gets the
 	// generic one instead of waiting 60s for a claude glyph (#1116, #1131).
 	agent := instance.ResolvedAgent()
+	// Resolve the usage-limit detector once so a claude/codex pane that shows a
+	// limit banner mid-startup is recognized and PARKED, not spun into a failure
+	// (#1146 PR4). Only claude/codex ever match; other agents never park here.
+	detector := newLimitDetectorForWait()
 	timeout := time.After(waitForReadyTimeout)
 	ticker := time.NewTicker(waitForReadyPollInterval)
 	defer ticker.Stop()
@@ -108,6 +156,11 @@ func WaitForReady(instance *session.Instance) error {
 				log.ErrorLog.Printf("waitForReady timed out (preview also failed: %v)", err)
 				return formatWaitForReadyTimeoutError(waitForReadyTimeout, "")
 			}
+			// A limit banner may be all that ever rendered: park instead of
+			// failing even at the timeout boundary, symmetric with the ticker case.
+			if perr := limitParkError(detector, content, agent); perr != nil {
+				return perr
+			}
 			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
 			return formatWaitForReadyTimeoutError(waitForReadyTimeout, content)
 		case <-ticker.C:
@@ -123,11 +176,28 @@ func WaitForReady(instance *session.Instance) error {
 				}
 				continue
 			}
+			// Check the usage-limit banner BEFORE readiness: a limit-blocked pane
+			// never shows the ready glyph, but checking limit first keeps the
+			// intent explicit and future-proofs against a banner that also carried
+			// one. On a hit, stop waiting and return the park sentinel (#1146).
+			if perr := limitParkError(detector, content, agent); perr != nil {
+				return perr
+			}
 			if isReadyContent(content, agent) {
 				return nil
 			}
 		}
 	}
+}
+
+// limitParkError returns a *LimitReachedError when content shows a usage-limit
+// banner for agent, else nil. Factored out so both the ticker and timeout
+// branches of WaitForReady detect the banner identically (#1146 PR4).
+func limitParkError(detector LimitDetector, content, agent string) error {
+	if hit, resetAt, _ := detector.Check(content, agent, waitLimitNow()); hit {
+		return &LimitReachedError{ResetAt: resetAt}
+	}
+	return nil
 }
 
 // formatWaitForReadyTimeoutError builds the user-facing timeout error. When
