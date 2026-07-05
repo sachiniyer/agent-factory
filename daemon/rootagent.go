@@ -161,6 +161,55 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 	m.rootEnsureSucceeded(st)
 }
 
+// deliverToReemergingRoot handles a DeliverPrompt whose absent target is this
+// repo's daemon-managed root agent, momentarily gone while the ensure loop
+// re-materializes it in place after a tmux outage (#1223). It waits for the
+// ensure loop to bring root back (bounded by targetDeliverWait, mirroring the
+// concurrent-create retry) and then sends the prompt into it, so a watch/
+// monitor event is delivered once root returns instead of being dropped by the
+// reserved-name guard the auto-create path would hit. Returns handled=false
+// when the target is not a re-emerging root, so DeliverPrompt falls through to
+// its normal create path; on a wait timeout it returns handled=true with an
+// accurate "being recreated" error rather than the misleading reserved-name one.
+func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverPromptRequest) (string, bool, error) {
+	if !session.IsReservedTitle(req.Title) || !m.repoRootAgentWillMaterialize(repo.ID) {
+		return "", false, nil
+	}
+	if err := m.waitForTargetSession(repo.ID, req.Title); err != nil {
+		return "", true, fmt.Errorf("root agent for %q is being recreated (tmux momentarily absent); event not delivered this attempt: %w", repo.Root, err)
+	}
+	if err := m.SendPrompt(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt}); err != nil {
+		return "", true, err
+	}
+	return "sent", true, nil
+}
+
+// repoRootAgentWillMaterialize reports whether the daemon's ensure loop is
+// responsible for (re-)creating the reserved "root" session for this repo: the
+// repo is opted into root_agents AND the root was not explicitly killed by the
+// user (an explicit kill suppresses re-creation until the daemon restarts).
+// When true, a delivery to a momentarily-absent root should wait for the ensure
+// loop rather than auto-create it. Config is immutable after daemon start, so
+// only the killed-set read needs the lock.
+func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
+	m.mu.Lock()
+	_, killed := m.rootKilledByUser[repoID]
+	m.mu.Unlock()
+	if killed {
+		return false
+	}
+	for path := range m.cfg.RootAgents {
+		repo, err := config.RepoFromPath(config.ExpandTilde(path))
+		if err != nil {
+			continue
+		}
+		if repo.ID == repoID {
+			return true
+		}
+	}
+	return false
+}
+
 // reapDeadRoot removes a Dead root instance so ensureRootAgent can re-create
 // the title. Mirrors KillSession's teardown but deliberately does NOT mark
 // rootKilledByUser: this is the daemon healing itself, not a user decision.
