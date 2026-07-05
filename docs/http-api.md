@@ -6,9 +6,11 @@ the same daemon core (`#960` single-writer model) the TUI and `af sessions` /
 `af tasks` commands already drive, reached over HTTP instead of the internal
 `net/rpc` control socket, so the two surfaces can never diverge.
 
-This is a hand-written reference. There is deliberately **no OpenAPI/Swagger
-document and no generated schema** in v1. To discover the surface from the
-command line without reading this file, run:
+This page is a hand-written guide to the transport, auth, and envelope; the
+enumerated endpoint table is generated from the route catalog (see
+[HTTP API reference](reference/api.md)). There is deliberately **no
+OpenAPI/Swagger document** in v1. To discover the surface from the command line
+without reading this file, run:
 
 ```bash
 af api          # human-readable catalog: socket path, auth model, every endpoint + a curl example
@@ -113,61 +115,28 @@ can take minutes on repos with remote-hook sessions. During that window:
 
 ## Endpoints
 
-Request-body fields are the JSON keys of each RPC request struct; a `⟨none⟩`
-body means the route accepts an empty body (`-d '{}'` or no `-d` at all). All
-POST routes accept an empty JSON object as a starting point.
+The full, enumerated route table — every method, path, and request-body field —
+is generated from the daemon's route catalog and lives in the
+**[HTTP API reference](reference/api.md)**. It cannot drift from the server:
+the same catalog backs the mux, the `af api` command, and that page. Request-body
+fields are the JSON keys of each RPC request struct; a route with no listed
+fields accepts an empty body (`-d '{}'` or no `-d` at all).
 
-### `GET /v1/health`
+`GET /v1/health` is the one non-POST route: a liveness probe (alias for the
+internal `Ping` RPC) that answers even while the daemon is restoring sessions,
+with response `data` of `{ "ok": true }`.
 
-Liveness probe (alias for the internal `Ping` RPC). Answers even while the
-daemon is restoring sessions.
-
-- **Request body:** none.
-- **Response `data`:** `{ "ok": true }`
-
-```bash
-curl --unix-socket ~/.agent-factory/daemon-http.sock http://localhost/v1/health
-# {"data":{"ok":true},"error":null}
-```
-
-### Sessions
-
-| Route | Description | Request fields |
-|-------|-------------|----------------|
-| `POST /v1/CreateSession` | Create a new session (git worktree + agent) in a repo. | `title`, `title_base`, `repo_path`, `program`, `prompt`, `auto_yes`, `in_place`, `force_remote` |
-| `POST /v1/Snapshot` | List sessions from the daemon's authoritative in-memory state (empty `repo_id` = all repos). | `repo_id` |
-| `POST /v1/KillSession` | Tear down a session: kill its tmux/agent and remove its worktree and record. | `title`, `repo_id` |
-| `POST /v1/ArchiveSession` | Archive a session: tear down tmux, relocate its worktree to the archive dir, keep the record. | `title`, `repo_id` |
-| `POST /v1/RestoreArchived` | Restore an archived session: move its worktree back and re-spawn the agent. | `title`, `repo_id` |
-| `POST /v1/SendPrompt` | Send a prompt to an existing session's agent. | `title`, `repo_id`, `prompt` |
-| `POST /v1/DeliverPrompt` | Deliver a prompt to a session, auto-creating it if missing. | `title`, `repo_path`, `program`, `prompt`, `auto_yes` |
-| `POST /v1/CreateTab` | Spawn a tab (process or shell) in a session's worktree. | `title`, `repo_id`, `command`, `name`, `shell` |
-| `POST /v1/CloseTab` | Close a non-agent tab of a session (the agent tab cannot be closed). | `title`, `repo_id`, `tab_name`, `tab_index` |
-| `POST /v1/SetPRInfo` | Record or clear the GitHub PR info for a session. | `title`, `repo_id`, `pr_info` |
-| `POST /v1/ImportRemoteHookSessions` | Import sessions discovered via a repo's remote-hook backend. | `repo_path` |
-
-**Response shapes.** `CreateSession` returns `{ "instance": <session> }`;
+**Response shapes.** These are not part of the generated request-field catalog,
+so they are documented here. `CreateSession` returns `{ "instance": <session> }`;
 `Snapshot` and `ImportRemoteHookSessions` return `{ "instances": [<session>…] }`;
 `ArchiveSession` returns `{ "ok": true, "archived_path": "…" }`;
 `RestoreArchived` returns `{ "ok": true, "worktree_path": "…" }`;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab` /
-`CloseTab` return `{ "name": "<resolved-tab-name>" }`; the rest return
-`{ "ok": true }`.
-
-### Tasks
-
-| Route | Description | Request fields |
-|-------|-------------|----------------|
-| `POST /v1/ListTasks` | List every task across all repos. | ⟨none⟩ |
-| `POST /v1/AddTask` | Append a new task and re-arm the scheduler. | `task` |
-| `POST /v1/UpdateTask` | Update an existing task, preserving scheduler-owned fields. | `task` |
-| `POST /v1/RemoveTask` | Remove a task by ID. | `id` |
-| `POST /v1/TriggerTask` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). | `id` |
-
-**Response shapes.** `ListTasks` returns `{ "tasks": [<task>…] }`; the mutations
-return `{ "ok": true }`. The `task` field of `AddTask` / `UpdateTask` is a full
-task object — the CLI/TUI build and validate it, and the daemon re-validates and
-owns the write. See [tasks.md](tasks.md) for the task shape.
+`CloseTab` return `{ "name": "<resolved-tab-name>" }`; `ListTasks` returns
+`{ "tasks": [<task>…] }`; the rest return `{ "ok": true }`. The `task` field of
+`AddTask` / `UpdateTask` is a full task object — the CLI/TUI build and validate
+it, and the daemon re-validates and owns the write. See [tasks.md](tasks.md) for
+the task shape.
 
 ## Examples
 
