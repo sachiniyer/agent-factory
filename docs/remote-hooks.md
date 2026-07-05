@@ -35,6 +35,15 @@ Configuring `remote_hooks` enables the remote backend for that repo, but using i
 
 > **Note:** `list_cmd` is **required for restore**. To carry remote sessions across restarts, Agent Factory re-runs `list_cmd` at startup to confirm each persisted session is still alive (#645). If `list_cmd` is empty, restore cannot verify liveness and the session is dropped with an actionable error naming the missing field — so configure `list_cmd` whenever you want remote sessions to survive restarts.
 
+### Validating your setup
+
+Run `af doctor` from inside the repository to check the remote-hook setup
+before you rely on it. It validates that the required commands are configured,
+that each hook script exists and is executable, and — via a bounded read-only
+`list_cmd --json` probe — that the remote round-trip actually works, with an
+actionable "how to fix" message for each problem. See
+[`af doctor`](cli.md) for the full list of remote checks.
+
 ## Script Protocol
 
 All scripts must:

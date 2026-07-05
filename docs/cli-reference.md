@@ -462,7 +462,13 @@ af reset               # nuclear cleanup — see below
   sessions, CPU-pegging processes in live sessions, `af_` tmux sessions with no
   backing record, abandoned temp homes, and daemon problems. With `--fix` it
   kills verified orphans and removes stale temp homes; anything it cannot verify
-  is reported, never touched. Exits 1 when unresolved issues remain.
+  is reported, never touched. Exits 1 when unresolved issues remain. When the
+  current repo configures a [remote-hook backend](remote-hooks.md), it also
+  validates that setup — required `remote_hooks` commands present
+  (`remote-config`), each hook script present and executable (`remote-hook-script`),
+  and a bounded read-only `list_cmd --json` connectivity probe
+  (`remote-connectivity`). Repos with no remote backend (the common local-only
+  case) get a single `n/a` line and no findings.
 - `af reset` stops the daemon (reporting honestly if it couldn't), kills **all**
   Agent Factory tmux sessions, removes **every linked git worktree and its
   branch** from each repo with stored sessions, and deletes all stored session
