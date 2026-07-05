@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -85,8 +86,11 @@ type home struct {
 	// mutable global swapped by a test seam would race that goroutine against a
 	// sibling test's swap under `go test -parallel`. Each home owns its fetcher,
 	// so there is no cross-test shared state to race. Defaults to
-	// snapshotThroughDaemon in production; tests assign a fake directly.
-	snapshotFetcher func(repoID string) ([]session.InstanceData, error)
+	// snapshotThroughDaemon in production; tests assign a fake directly. It
+	// returns the full daemon.SnapshotResponse so the session list and the
+	// delivery-failure alarms (#1238) arrive from one authoritative RPC — the
+	// alarm is a field on the snapshot, not a side channel.
+	snapshotFetcher func(repoID string) (daemon.SnapshotResponse, error)
 	// pauseStatusPoll / resumeStatusPoll are the daemon poll-pause seams for the
 	// attach heartbeat (#1160). PER-home fields, not package globals, for the
 	// same reason as snapshotFetcher: the heartbeat reads the seam from an
@@ -233,6 +237,11 @@ type home struct {
 	menu *ui.Menu
 	// errBox displays error messages inside the status bar (shared handle)
 	errBox *ui.ErrBox
+	// alarmBanner is the top-of-screen delivery-failure alarm (#1238): a
+	// persistent red bar raised while the daemon snapshot reports a watch task
+	// whose events are failing to reach their target session. Fed each poll by
+	// applyDeliveryAlarms from the snapshot's DeliveryAlarms projection.
+	alarmBanner *ui.AlarmBanner
 	// global spinner instance. we plumb this down to where it's needed
 	spinner spinner.Model
 	// textOverlay displays text information
@@ -292,6 +301,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	errBox := ui.NewErrBox()
 
 	h := &home{
+		alarmBanner:      ui.NewAlarmBanner(),
 		ctx:              ctx,
 		spinner:          spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		store:            proj,
@@ -384,6 +394,10 @@ func (m *home) relayout() {
 	// every automation when the rail has the room, collapsing only when the
 	// tree + automations can't both fit (#1126).
 	m.grid.Automations = m.store.NumTasks()
+	// Reserve the alarm banner row exactly when a delivery-failure alarm is
+	// raised (#1238), so the row appears/disappears with the alarm and never
+	// steals space in the healthy steady state.
+	m.grid.Banner = m.alarmBanner.Active()
 	lay := m.grid.Solve(m.termWidth, m.termHeight)
 	m.lastLayout = lay
 	if lay.Fallback {
@@ -427,6 +441,7 @@ func (m *home) relayout() {
 	m.automations.SetRect(lay.Automations)
 	m.automations.SetCompact(lay.AutomationsCompact)
 	m.statusBar.SetRect(lay.StatusBar)
+	m.alarmBanner.SetRect(lay.Banner)
 
 	if m.textOverlay != nil {
 		m.textOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
@@ -1803,7 +1818,15 @@ func (m *home) View() string {
 		}
 	}
 	top := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
-	mainView := lipgloss.JoinVertical(lipgloss.Left, top, m.statusBar.View())
+	// Stack the delivery-failure alarm banner (#1238) above everything when
+	// raised, so it is visible without navigating and the layout reserved its
+	// row in relayout.
+	viewParts := make([]string, 0, 3)
+	if banner := m.alarmBanner.View(); banner != "" {
+		viewParts = append(viewParts, banner)
+	}
+	viewParts = append(viewParts, top, m.statusBar.View())
+	mainView := lipgloss.JoinVertical(lipgloss.Left, viewParts...)
 
 	if m.state == stateHelp {
 		if m.textOverlay == nil {
@@ -1840,50 +1863,5 @@ func (m *home) View() string {
 	return mainView
 }
 
-// hooksOverlayStyle frames the hooks editor when it is hosted as an overlay
-// (#1024 PR 4: hooks lost their persistent sidebar slot).
-var hooksOverlayStyle = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(ui.AccentColor).
-	Padding(1, 2)
-
-func (m *home) renderHooksOverlay() string {
-	return hooksOverlayStyle.Render(m.hooksPane.String())
-}
-
-// renderTasksOverlay frames the task manager (list + create/edit form) as the
-// centered modal it lives in (#1087 play-test): the manager needs real
-// width/height for its form, which the narrow left rail cannot provide.
-func (m *home) renderTasksOverlay() string {
-	return hooksOverlayStyle.Render(m.automations.TaskPane().String())
-}
-
-// splitDividerStyle recedes the 1-col dividers between panes so the focused
-// pane's frame stays the strongest line on screen.
-var splitDividerStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#DDDADA", Dark: "#3C3C3C"})
-
-// renderDivider renders the 1-col divider right of pane i (§2.6: "N panes
-// divide the workspace width evenly with 1-col dividers").
-func (m *home) renderDivider(i int) string {
-	if i < 0 || i >= len(m.lastLayout.Dividers) {
-		return ""
-	}
-	r := m.lastLayout.Dividers[i]
-	if r.Empty() {
-		return ""
-	}
-	col := strings.TrimSuffix(strings.Repeat("│\n", r.H), "\n")
-	return splitDividerStyle.Render(col)
-}
-
-// renderRailRule renders the full-rail-width horizontal rule separating the
-// instances tree from the bottom-aligned automations section (#1087), in the
-// same receded style as the split divider.
-func (m *home) renderRailRule() string {
-	r := m.lastLayout.RailRule
-	if r.Empty() {
-		return ""
-	}
-	return splitDividerStyle.Render(strings.Repeat("─", r.W))
-}
+// The View render helpers (overlay framing + rail/divider rules) live in
+// render.go, extracted to keep app.go under its file-length ceiling (#1145).

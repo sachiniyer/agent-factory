@@ -276,6 +276,51 @@ func TestGridSolveStatusBarFixedHeight(t *testing.T) {
 	}
 }
 
+// TestGridSolveBannerReservesTopRow pins the delivery-failure alarm banner
+// reservation (#1238): with Grid.Banner set, a full-width AlarmBarRows band is
+// cut from the very top, every other region shifts below it, and the banner
+// plus the visible regions still tile the screen exactly. Without Banner the
+// rect is empty and nothing is reserved.
+func TestGridSolveBannerReservesTopRow(t *testing.T) {
+	for _, size := range [][2]int{{40, 10}, {59, 14}, {80, 24}, {200, 60}} {
+		w, h := size[0], size[1]
+
+		// No banner requested → no row reserved.
+		off := layout.Grid{Panes: 2}.Solve(w, h)
+		require.True(t, off.Banner.Empty(), "no banner row without Grid.Banner at %v", size)
+
+		on := layout.Grid{Panes: 2, Banner: true}.Solve(w, h)
+		require.False(t, on.Fallback)
+		require.Equal(t, layout.Rect{X: 0, Y: 0, W: w, H: layout.AlarmBarRows}, on.Banner,
+			"banner is a full-width top band at %v", size)
+
+		// Every other region sits strictly below the banner.
+		visible := on.VisibleRegions()
+		parts := make([]layout.Rect, 0, len(visible)+1)
+		for id, r := range visible {
+			assert.GreaterOrEqual(t, r.Y, layout.AlarmBarRows,
+				"region %s must sit below the banner at %v", id, size)
+			parts = append(parts, r)
+		}
+		// The banner is passive (not in VisibleRegions); include it to prove the
+		// banner + regions still tile the whole screen with no gap or overlap.
+		parts = append(parts, on.Banner)
+		requireTiles(t, layout.Rect{X: 0, Y: 0, W: w, H: h}, parts)
+	}
+}
+
+// TestGridSolveBannerSurvivesMinimalMode proves an active outage alarm is
+// reserved even in minimal mode — a cramped terminal must not hide it (#1238).
+func TestGridSolveBannerSurvivesMinimalMode(t *testing.T) {
+	// Just inside minimal (below MinimalWidth) but above the hard minimum.
+	w, h := layout.MinimalWidth-1, layout.MinimalHeight
+	l := layout.Grid{Panes: 2, Banner: true}.Solve(w, h)
+	require.False(t, l.Fallback)
+	require.False(t, l.AutomationsVisible, "sanity: this size is minimal mode")
+	require.Equal(t, layout.AlarmBarRows, l.Banner.H, "the banner is reserved in minimal mode too")
+	require.Equal(t, 0, l.Banner.Y)
+}
+
 // TestGridSolveLadderMonotonic shrinks each axis one cell at a time and
 // asserts the degradation level never decreases: shrinking can never
 // re-enable a richer mode.

@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
 )
 
 // prInfoStaleAfter is how long a fetched PR info entry is considered fresh.
@@ -41,6 +42,11 @@ type snapshotFetchedMsg struct {
 	// disk task read still succeeds.
 	tasks    []task.Task
 	tasksErr error
+	// alarms carries any persistent watch-task delivery-failure alarms projected
+	// on the same daemon snapshot (#1238). It rides the session snapshot because
+	// it is a field of the one authoritative Snapshot response, not a separate
+	// subsystem; handleSnapshot mirrors it into the alarm banner state.
+	alarms []daemon.DeliveryAlarm
 }
 
 // prInfoUpdatedMsg is returned by an async PR info fetch.
@@ -95,13 +101,13 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	repoID := m.repoID
 	fetch := m.snapshotFetcher
 	return func() tea.Msg {
-		data, err := fetch(repoID)
+		resp, err := fetch(repoID)
 		// Re-read the repo's tasks on the same poll so an out-of-band task
 		// change live-projects into the TUI (#1168). Independent of the session
 		// snapshot: its own error is carried separately so a warming-daemon RPC
 		// failure never suppresses a successful disk task read.
 		tasks, tasksErr := task.LoadTasksForCurrentRepo()
-		return snapshotFetchedMsg{data: data, err: err, tasks: tasks, tasksErr: tasksErr}
+		return snapshotFetchedMsg{data: resp.Instances, alarms: resp.DeliveryAlarms, err: err, tasks: tasks, tasksErr: tasksErr}
 	}
 }
 
@@ -155,9 +161,9 @@ func (m *home) fetchColdStartSnapshot() ([]session.InstanceData, error) {
 	deadline := time.Now().Add(coldStartWarmupWait)
 	announced := false
 	for {
-		data, err := m.snapshotFetcher(m.repoID)
+		resp, err := m.snapshotFetcher(m.repoID)
 		if err == nil {
-			return data, nil
+			return resp.Instances, nil
 		}
 		if !daemon.IsDaemonStartingErr(err) {
 			return nil, err
@@ -251,7 +257,40 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 		log.WarningLog.Printf("failed to fetch daemon snapshot: %v", msg.err)
 		return false
 	}
-	return m.reconcileSnapshot(msg.data)
+	changed := m.reconcileSnapshot(msg.data)
+	if m.applyDeliveryAlarms(msg.alarms) {
+		changed = true
+	}
+	return changed
+}
+
+// applyDeliveryAlarms mirrors the snapshot's persistent delivery-failure alarms
+// (#1238) into the banner. Because the banner reserves a layout row exactly
+// when it is active, an active-state flip re-solves the grid so the row appears
+// or disappears with the alarm. Returns whether the visible alarm set changed
+// (the caller repaints on a diff). Only ever called on a successful snapshot:
+// a transient RPC error leaves the last-known alarm up rather than clearing a
+// real outage on a hiccup.
+func (m *home) applyDeliveryAlarms(alarms []daemon.DeliveryAlarm) bool {
+	var infos []ui.AlarmInfo
+	for _, a := range alarms {
+		infos = append(infos, ui.AlarmInfo{
+			TaskName: a.TaskName,
+			Target:   a.TargetSession,
+			Pending:  a.Pending,
+			Since:    a.Since,
+		})
+	}
+	// Leave infos nil (not an empty slice) when there are no alarms so the
+	// steady-state DeepEqual against a nil last-known set reports "no change".
+	wasActive := m.alarmBanner.Active()
+	changed := !reflect.DeepEqual(m.alarmBanner.Alarms(), infos)
+	m.alarmBanner.SetAlarms(infos)
+	if m.alarmBanner.Active() != wasActive {
+		// The reserved banner row appeared or vanished — re-rect every region.
+		m.relayout()
+	}
+	return changed
 }
 
 // refreshTasks mirrors an out-of-band tasks.json change (a CLI/daemon `af tasks
