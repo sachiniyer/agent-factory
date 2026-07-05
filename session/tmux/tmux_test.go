@@ -424,7 +424,7 @@ func TestHasUpdatedSilentWhenSessionGone(t *testing.T) {
 
 	logs := captureErrorLog(t)
 
-	updated, hasPrompt := session.HasUpdated()
+	updated, hasPrompt, _ := session.HasUpdated()
 	require.False(t, updated)
 	require.False(t, hasPrompt)
 	require.True(t, session.monitor.dead, "monitor must latch dead after confirming session is gone")
@@ -437,7 +437,7 @@ func TestHasUpdatedSilentWhenSessionGone(t *testing.T) {
 	// 50 more ticks while the session is still gone must produce zero new
 	// log lines and zero additional capture-pane / has-session calls.
 	for i := 0; i < 50; i++ {
-		updated, hasPrompt = session.HasUpdated()
+		updated, hasPrompt, _ = session.HasUpdated()
 		require.False(t, updated)
 		require.False(t, hasPrompt)
 	}
@@ -468,7 +468,7 @@ func TestHasUpdatedRespawnResetsDead(t *testing.T) {
 	require.False(t, session.monitor.dead, "fresh monitor after Restore must not be dead")
 
 	// Polling resumes and produces a normal updated=true on first content.
-	updated, _ := session.HasUpdated()
+	updated, _, _ := session.HasUpdated()
 	require.True(t, updated, "first capture after Restore should report updated")
 }
 
@@ -486,7 +486,7 @@ func TestHasUpdatedTransientErrorKeepsLogging(t *testing.T) {
 	logs := captureErrorLog(t)
 
 	for i := 0; i < 3; i++ {
-		updated, hasPrompt := session.HasUpdated()
+		updated, hasPrompt, _ := session.HasUpdated()
 		require.False(t, updated)
 		require.False(t, hasPrompt)
 	}

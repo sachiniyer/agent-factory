@@ -191,7 +191,7 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	assert.True(t, instance.TmuxAlive(), "TmuxAlive (delegates to IsAlive) should return true")
 
 	// --- Step 6: HasUpdated should always return (false, false) for remote ---
-	updated, hasPrompt := instance.HasUpdated()
+	updated, hasPrompt, _ := instance.HasUpdated()
 	assert.False(t, updated)
 	assert.False(t, hasPrompt)
 

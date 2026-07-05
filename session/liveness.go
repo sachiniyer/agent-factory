@@ -1,6 +1,9 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Two-axis session state (#1195 Phase 1b).
 //
@@ -181,7 +184,10 @@ func (i *Instance) GetStatus() Status {
 	return i.statusLocked()
 }
 
-// GetLiveness returns the daemon-owned health axis under the instance mutex.
+// GetLiveness returns the daemon-owned liveness axis under the Instance's mutex
+// (#1146/#1195). Readers use it where the composed Status is lossy: the snapshot
+// reconcile mirrors liveness (not Status) so LiveLimitReached — which composes to
+// Ready — propagates from the daemon to the read-only TUI.
 func (i *Instance) GetLiveness() Liveness {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -281,4 +287,88 @@ func (i *Instance) TabSpawnBlocked() error {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.tabSpawnBlockedLocked()
+}
+
+// SetLimitReached marks the instance blocked on a usage-limit wall (#1146): it
+// sets the LiveLimitReached liveness and stores the parsed reset time (zero when
+// the banner carried none) for the sidebar badge and PR3's auto-resume
+// scheduler. There is no legacy Status value for SetStatus to decompose onto, so
+// the daemon single-writer (#960) sets the liveness axis directly here. Skips a
+// row mid create/kill teardown so it never clobbers an in-flight op, mirroring
+// SetStatusIfNotDeleting.
+func (i *Instance) SetLimitReached(resetAt time.Time) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if s := i.statusLocked(); s == Loading || s == Deleting {
+		return
+	}
+	i.inFlightOp = OpNone
+	i.liveness = LiveLimitReached
+	i.limitResetAt = resetAt
+}
+
+// SetLimitResetAt records only the display-only reset time (#1146), leaving both
+// axes untouched. The read-only TUI reconcile uses it to mirror the daemon's
+// parsed reset time after it has already applied LiveLimitReached on the liveness
+// axis (Phase 1d applies liveness UNCONDITIONALLY via SetLiveness): the reset
+// time rides the liveness as pure display metadata, so it is set on its own
+// rather than through SetLimitReached, which would re-drive the liveness axis and
+// carry SetLimitReached's transient-op guard into a path that must be
+// unconditional.
+func (i *Instance) SetLimitResetAt(resetAt time.Time) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.limitResetAt = resetAt
+}
+
+// ClearLimitReached moves a limit-blocked instance back to LiveRunning so the
+// daemon poll re-resolves its real state on the next tick and the [limit] badge
+// clears (#1146). A no-op when the instance is not limit-blocked, so the resume
+// action (and PR3's scheduler) can call it unconditionally.
+func (i *Instance) ClearLimitReached() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.liveness != LiveLimitReached {
+		return
+	}
+	i.liveness = LiveRunning
+	i.limitResetAt = time.Time{}
+}
+
+// LimitReached reports whether the instance is blocked on a usage limit (#1146).
+// Every render/serialize site keys its [limit] badge off this rather than the
+// composed Status, which has no limit value (LiveLimitReached composes to Ready).
+func (i *Instance) LimitReached() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.liveness == LiveLimitReached
+}
+
+// LimitResetAt returns the parsed usage-limit reset time and whether one is
+// known (#1146). It reports (zero, false) when the session is not limit-blocked
+// or the banner carried no parseable reset time, so a stale reset value can
+// never leak onto a recovered session.
+func (i *Instance) LimitResetAt() (time.Time, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached || i.limitResetAt.IsZero() {
+		return time.Time{}, false
+	}
+	return i.limitResetAt, true
+}
+
+// livenessFromData resolves the liveness a persisted or snapshot record should
+// take, applying the same rollforward FromInstanceData uses: prefer the
+// `liveness` field, fall back to the legacy `status` int for pre-#1195 records,
+// and map a persisted Dead → Lost (recovery-eligible, #1108). Shared so the
+// snapshot reconcile mirrors liveness identically to a cold-start restore.
+func livenessFromData(data InstanceData) Liveness {
+	lv := data.Liveness
+	if lv == LivenessUnset {
+		lv = LivenessForStatus(data.Status)
+	}
+	if lv == LiveDead {
+		lv = LiveLost
+	}
+	return lv
 }

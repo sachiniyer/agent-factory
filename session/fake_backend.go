@@ -99,7 +99,7 @@ func (b *FakeBackend) Attach(*Instance) (chan struct{}, error) {
 	close(ch)
 	return ch, nil
 }
-func (b *FakeBackend) HasUpdated(*Instance) (bool, bool)         { return false, false }
+func (b *FakeBackend) HasUpdated(*Instance) (bool, bool, string) { return false, false, "" }
 func (b *FakeBackend) SendPrompt(*Instance, string) error        { return nil }
 func (b *FakeBackend) SendPromptCommand(*Instance, string) error { return nil }
 func (b *FakeBackend) SendKeys(*Instance, string) error          { return nil }
@@ -108,4 +108,5 @@ func (b *FakeBackend) IsAlive(*Instance) bool                    { return true }
 func (b *FakeBackend) CheckAndHandleTrustPrompt(*Instance) bool  { return false }
 func (b *FakeBackend) TapEnter(*Instance)                        {}
 func (b *FakeBackend) Recover(*Instance) error                   { return nil }
+func (b *FakeBackend) Respawn(*Instance) error                   { return nil }
 func (b *FakeBackend) Type() string                              { return "local" }

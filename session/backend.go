@@ -32,8 +32,11 @@ type Backend interface {
 	Attach(instance *Instance) (chan struct{}, error)
 
 	// HasUpdated reports whether the session output changed since the last
-	// check and whether the program is showing a prompt.
-	HasUpdated(instance *Instance) (updated bool, hasPrompt bool)
+	// check and whether the program is showing a prompt, and returns the raw
+	// captured pane content so the daemon's usage-limit detector (#1146) can
+	// inspect it without a second capture. content is "" for backends with no
+	// live pane (remote/hook) or when the capture is unavailable.
+	HasUpdated(instance *Instance) (updated bool, hasPrompt bool, content string)
 
 	// SendPrompt sends a prompt string via PTY writes.
 	SendPrompt(instance *Instance, prompt string) error
@@ -66,6 +69,15 @@ type Backend interface {
 	// Remote backends return ErrRecoverUnsupported in v1: a Lost remote
 	// session is flagged but reconnect semantics are their own design.
 	Recover(instance *Instance) error
+
+	// Respawn re-establishes an instance's backing session in place — re-spawning
+	// the agent program via the resume path (resumeProgram: claude --continue,
+	// codex resume --last) — WITHOUT any liveness precondition. It is the
+	// guard-free core Recover wraps with its Lost guard; the usage-limit
+	// manual-retry (#1146) uses it directly because a LimitReached session (which
+	// Recover's !Lost guard rejects) needs the identical re-spawn. Callers own the
+	// precondition. Remote backends return ErrRecoverUnsupported.
+	Respawn(instance *Instance) error
 
 	// Type returns the backend type identifier ("local" or "remote").
 	Type() string

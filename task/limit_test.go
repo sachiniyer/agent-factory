@@ -229,3 +229,32 @@ func TestResolveLimitMatchers(t *testing.T) {
 		t.Fatalf("invalid override should fall back to built-in claude matcher")
 	}
 }
+
+// TestLimitDetector covers the exported facade the daemon uses (#1146 PR2):
+// NewLimitDetector + Check apply config overrides and return the same contract
+// as the internal isLimitContent, and a non-scheduled agent never matches.
+func TestLimitDetector(t *testing.T) {
+	loc := nyLoc(t)
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, loc)
+
+	det := NewLimitDetector(nil)
+	hit, resetAt, hasReset := det.Check("Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", tmux.ProgramClaude, now)
+	if !hit || !hasReset {
+		t.Fatalf("Check should detect the stock claude banner with a reset time; got hit=%v hasReset=%v", hit, hasReset)
+	}
+	want := time.Date(2026, 7, 4, 14, 0, 0, 0, loc).UTC()
+	if !resetAt.Equal(want) {
+		t.Fatalf("resetAt = %v, want %v", resetAt.UTC(), want)
+	}
+
+	// gemini is API-key-metered — no matcher, so never a hit.
+	if hit, _, _ := det.Check("429 RESOURCE_EXHAUSTED", tmux.ProgramGemini, now); hit {
+		t.Fatalf("gemini must not produce a limit hit in v1")
+	}
+
+	// A config override on the detector is honored.
+	overridden := NewLimitDetector(map[string]string{tmux.ProgramClaude: `PLAN LIMIT TRIPPED`})
+	if hit, _, _ := overridden.Check("PLAN LIMIT TRIPPED at 3pm", tmux.ProgramClaude, now); !hit {
+		t.Fatalf("override detector should detect the reworded banner")
+	}
+}

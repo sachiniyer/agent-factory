@@ -114,6 +114,7 @@ func (h helpTypeGeneral) toContent() string {
 			{helpKey(keys.KeyTaskList), "Manage tasks (n inside the manager creates one)"},
 			{"r", "Run selected task now"},
 			{helpKey(keys.KeyKill), "Kill (delete) the selected session"},
+			{helpKey(keys.KeyLimitRetry), "Retry a session blocked at a usage limit (re-spawn + resume)"},
 			{navKeys, "Navigate between sessions"},
 			{helpKey(keys.KeyEnter), "Interact with the session in its pane (all keys go to it)"},
 			{helpKey(keys.KeyExitInteractive), "Leave interactive mode (back to navigation)"},

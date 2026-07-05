@@ -748,9 +748,9 @@ func (t *TmuxSession) SendKeysCommand(text string) error {
 	return t.cmdExec.Run(enterCmd)
 }
 
-// HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if
-// the tmux pane has a prompt for aider or claude code.
-func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
+// HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if the tmux
+// pane has a prompt for aider or claude code, plus the raw captured content so the daemon's usage-limit detector (#1146) can inspect it without a second capture ("" on early return).
+func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string) {
 	// A nil monitor means Restore never ran for this session: a persisted Dead
 	// instance is loaded with started=true but LocalBackend.Start returns before
 	// Restore (which is the only place monitor is initialized) so the corpse is
@@ -762,7 +762,7 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 	// Once the underlying tmux session has been confirmed gone, stay silent
 	// instead of relogging capture-pane failures every daemon tick (#489).
 	if t.monitor == nil || t.monitor.dead {
-		return false, false
+		return false, false, ""
 	}
 
 	content, err := t.CapturePaneContent()
@@ -776,10 +776,10 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 		if errors.Is(err, ErrSessionGone) {
 			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
 			t.monitor.dead = true
-			return false, false
+			return false, false, ""
 		}
 		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
-		return false, false
+		return false, false, ""
 	}
 
 	// Only set hasPrompt for agents with a known confirmation dialog, keyed
@@ -797,9 +797,9 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 	newHash := t.monitor.hash(content)
 	if !bytes.Equal(newHash, t.monitor.prevOutputHash) {
 		t.monitor.prevOutputHash = newHash
-		return true, hasPrompt
+		return true, hasPrompt, content
 	}
-	return false, hasPrompt
+	return false, hasPrompt, content
 }
 
 func (t *TmuxSession) Attach() (chan struct{}, error) {

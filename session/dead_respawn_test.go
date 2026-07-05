@@ -235,7 +235,7 @@ func TestDeadInstance_HasUpdatedNilMonitor(t *testing.T) {
 
 	// This is the exact call refreshInstanceStatus makes every daemon tick.
 	// Before the nil-monitor guard it panicked here.
-	updated, hasPrompt := restored.HasUpdated()
+	updated, hasPrompt, _ := restored.HasUpdated()
 	assert.False(t, updated, "a restored Dead instance has nothing to report")
 	assert.False(t, hasPrompt)
 }

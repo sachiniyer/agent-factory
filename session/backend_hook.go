@@ -507,8 +507,8 @@ func (b *HookBackend) AttachTerminal(i *Instance) (chan struct{}, error) {
 	return done, nil
 }
 
-func (b *HookBackend) HasUpdated(_ *Instance) (updated bool, hasPrompt bool) {
-	return false, false
+func (b *HookBackend) HasUpdated(_ *Instance) (updated bool, hasPrompt bool, content string) {
+	return false, false, ""
 }
 
 func (b *HookBackend) SendPrompt(_ *Instance, _ string) error {
@@ -631,10 +631,10 @@ func (b *HookBackend) CheckAndHandleTrustPrompt(_ *Instance) bool {
 
 func (b *HookBackend) TapEnter(_ *Instance) {}
 
-// Recover is unsupported for remote sessions in v1 (#1108): a vanished remote
-// session is flagged Lost so it is visible, but reconnect semantics are a
-// design of their own — the restore loop skips remote instances.
+// Recover/Respawn are unsupported for remote sessions in v1 (#1108/#1146): a Lost
+// remote session is flagged for visibility, but reconnect semantics are TBD.
 func (b *HookBackend) Recover(_ *Instance) error { return ErrRecoverUnsupported }
+func (b *HookBackend) Respawn(_ *Instance) error { return ErrRecoverUnsupported }
 
 // ListRemoteHookInstanceData converts running sessions reported by list_cmd
 // into persistable remote InstanceData records for the current repo.

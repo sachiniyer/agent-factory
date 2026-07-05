@@ -108,6 +108,8 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.handleKill()
 	case keys.KeyArchive:
 		return m.handleArchive()
+	case keys.KeyLimitRetry:
+		return m.handleLimitRetry()
 	case keys.KeyEnter:
 		return m.handleEnter()
 	case keys.KeyAttach:
@@ -339,6 +341,64 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 		}
 	}
 	return m, m.selectionChanged()
+}
+
+// limitRetriedMsg reports completion of an async usage-limit manual retry
+// (#1146, `c`). On success the daemon cleared the limit and re-delivered the
+// prompt; a non-nil err is surfaced in the error box.
+type limitRetriedMsg struct {
+	title string
+	err   error
+}
+
+// handleLimitRetry is the usage-limit manual-retry verb (#1146, `c`): on a
+// session blocked at a usage-limit wall it asks the daemon to re-spawn (if the
+// agent exited) and re-deliver the pending prompt, un-stalling the work. It is a
+// no-op with an explanatory message on any non-limit row. The daemon RPC re-
+// delivers a prompt (SendPromptCommand sleeps to let control sequences drain, and
+// a respawn can take a beat), so it runs OFF the event loop like the kill/archive
+// cmds rather than freezing the TUI.
+func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
+	selected := m.sidebar.GetSelectedInstance()
+	if selected == nil {
+		return m, nil
+	}
+	if !selected.LimitReached() {
+		return m, m.handleError(fmt.Errorf("session '%s' is not blocked on a usage limit", selected.Title))
+	}
+	return m, m.resumeFromLimitCmd(selected.Title)
+}
+
+// resumeFromLimitCmd runs the daemon resume (re-spawn if needed + re-deliver the
+// prompt + clear the limit state) off the event loop (#1146), mirroring
+// restoreInstanceCmd.
+func (m *home) resumeFromLimitCmd(title string) tea.Cmd {
+	repoID := m.repoID
+	resume := resumeFromLimitThroughDaemon
+	return func() tea.Msg {
+		if err := resume(title, repoID); err != nil {
+			log.ErrorLog.Printf("could not resume limited session %q: %v", title, err)
+			return limitRetriedMsg{title: title, err: err}
+		}
+		return limitRetriedMsg{title: title}
+	}
+}
+
+// handleLimitRetried finalizes an async usage-limit retry. On success the daemon
+// has already cleared the limit + set Running and persisted; clear the local row
+// optimistically for instant feedback (the badge disappears without waiting for
+// the next snapshot reconcile). On failure the error lands in the error box.
+func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, m.handleError(fmt.Errorf("failed to resume session '%s': %w", msg.title, msg.err))
+	}
+	for _, inst := range m.store.GetInstances() {
+		if inst.Title == msg.title {
+			inst.ClearLimitReached()
+			break
+		}
+	}
+	return m, nil
 }
 
 // handleInstanceRestored finalizes an async restore. On success the row returns

@@ -262,7 +262,34 @@ func (b *LocalBackend) Recover(i *Instance) error {
 	if i.UserKilled() {
 		return fmt.Errorf("recover: session %q carries a kill tombstone", i.Title)
 	}
+	return b.respawn(i)
+}
 
+// Respawn re-establishes an instance's backing tmux session in place WITHOUT any
+// liveness precondition — the guard-free core Recover wraps. It exists so the
+// usage-limit manual-retry (#1146) can re-spawn an agent that exited while blocked
+// at a limit wall: that session is LiveLimitReached, which Recover's !Lost guard
+// would reject, but the re-spawn mechanics are identical. Callers own the
+// precondition (Recover enforces Lost/no-tombstone; resumeFromLimit enforces
+// LimitReached/no-tombstone under the target lock).
+func (b *LocalBackend) Respawn(i *Instance) error {
+	return b.respawn(i)
+}
+
+// respawn holds the shared re-spawn mechanics for Recover and Respawn: re-spawn
+// the agent program in its worktree with the same resolved-program flag injection
+// as a first-time launch (#1132 choke-point — never hand-rolled flag logic) and
+// the resume-path rewrite Restore applies (resumeProgram: claude --continue,
+// codex resume --last), then bring the other tabs back through the same setupTabs
+// path a restore uses. No liveness guard — the exported wrappers own that.
+//
+// Idempotence across retries: the injected program is recomputed from the clean
+// persisted i.Program on every attempt (SetProgram replaces, never appends), so
+// repeated failures never accumulate duplicate flags. On failure only the agent
+// tab's attach resources are released (the #1065 rule: no other tab has opened a
+// PTY yet on this path) and the tmux refs are kept, so the next tick's retry
+// reconnects each tab by its exact persisted name.
+func (b *LocalBackend) respawn(i *Instance) error {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
 	gw := i.gitWorktree
@@ -521,14 +548,14 @@ func (b *LocalBackend) Attach(i *Instance) (chan struct{}, error) {
 	return ts.Attach()
 }
 
-func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool) {
+func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
 	i.mu.RLock()
 	s := i.started
 	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s || ts == nil {
-		return false, false
+		return false, false, ""
 	}
 	return ts.HasUpdated()
 }

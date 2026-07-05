@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
@@ -31,12 +32,13 @@ const lostIcon = "◌ "
 // row reads as "put away, restartable" rather than any live/vanished state.
 const archivedIcon = "▧ "
 
-// limitIcon marks a session that hit a usage-limit wall (#1146): the agent is
-// alive but blocked until its limit resets. A half-filled dot — "throttled, not
-// gone" — distinct in shape from the running/ready/lost/dead dots. Provisional:
-// #1204 refines the limit surface (label + reset time + retry key) on top of this
-// exhaustive-render slot.
-const limitIcon = "◒ "
+// limitIcon marks a session blocked at a usage-limit wall (#1146): a filled
+// diamond, distinct in shape from every dot/box glyph so "blocked on limit"
+// never reads as a live Running/Ready session — the honest surface the whole
+// feature exists for. Paired with the [limit] title prefix so it survives low
+// contrast and color-blindness, the same discipline as the dead/lost dots.
+// (Refines the provisional ◒ slot Phase 1e stubbed for #1204.)
+const limitIcon = "◆ "
 
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
 // shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
@@ -68,11 +70,40 @@ var lostStyle = lipgloss.NewStyle().
 var archivedStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
-// limitStyle paints a usage-limit-reached dot amber (#1146): a warning state —
-// the agent is throttled, not healthy-green and not corpse-gray. Provisional
-// color; #1204 may tune it alongside the rest of the limit surface.
+// limitStyle paints the status glyph of a usage-limit-blocked session (#1146): a
+// warning red-orange, distinct from the ready-green, lost-amber, and dead/
+// archived gray so the blocked state is unmistakable at a glance.
 var limitStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#C18401", Dark: "#E5C07B"})
+	Foreground(lipgloss.AdaptiveColor{Light: "#D1493F", Dark: "#E06C75"})
+
+// limitBadgePrefix returns the sidebar title prefix for a usage-limit-blocked
+// session (#1146): "[limit] resets <t> " when a reset time is known, else a bare
+// "[limit] ". Kept a helper (not inlined) so the tab pane / search overlay could
+// reuse the exact same wording if they later surface it.
+func limitBadgePrefix(i *session.Instance) string {
+	resetAt, ok := i.LimitResetAt()
+	if !ok {
+		return "[limit] "
+	}
+	return fmt.Sprintf("[limit] resets %s ", formatLimitReset(resetAt, time.Now()))
+}
+
+// formatLimitReset renders a usage-limit reset time for the sidebar badge in the
+// viewer's local zone: a bare hour like "3pm" on the hour, "3:04pm" otherwise,
+// prefixed with the month/day ("Jul 6 3pm") when the reset is not today so a
+// weekly-limit reset days out is unambiguous. now is passed in for testability.
+func formatLimitReset(reset, now time.Time) string {
+	reset = reset.Local()
+	now = now.Local()
+	clock := strings.ToLower(reset.Format("3:04pm"))
+	if reset.Minute() == 0 {
+		clock = strings.ToLower(reset.Format("3pm"))
+	}
+	if reset.Year() == now.Year() && reset.YearDay() == now.YearDay() {
+		return clock
+	}
+	return reset.Format("Jan 2") + " " + clock
+}
 
 // InstanceTitleColor is the foreground of an unselected instance title — the
 // adaptive near-black (light) / near-white (dark) that reads as primary text
@@ -280,10 +311,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		titleS = titleS.Foreground(deletingTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
 	}
-	// A usage-limit-reached row (#1146) is marked so "throttled until reset" reads
-	// without decoding the amber dot; #1204 adds the reset time + retry key.
+	// A usage-limit-blocked row (#1146) is prefixed with a [limit] marker and its
+	// reset time when known ("[limit] resets 3pm"), so the sidebar says WHY the
+	// session is stalled and roughly when it frees up — retry now with c. The title
+	// keeps full contrast (like [lost]): the session is blocked, not gone.
 	if liveness == session.LiveLimitReached {
-		titleText = "[limit] " + titleText
+		titleText = limitBadgePrefix(i) + titleText
 	}
 	widthAvail := r.width - 3 - prefixWidth - 1
 	if widthAvail <= 0 {

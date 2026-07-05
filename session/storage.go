@@ -27,12 +27,19 @@ type InstanceData struct {
 	// persisted state. omitempty + additive: records written before #1195 have
 	// no `liveness` key and decode to LivenessUnset, signaling FromInstanceData
 	// to fall back to the legacy `status` int (rollforward).
-	Liveness  Liveness  `json:"liveness,omitempty"`
-	Height    int       `json:"height"`
-	Width     int       `json:"width"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	AutoYes   bool      `json:"auto_yes"`
+	Liveness Liveness `json:"liveness,omitempty"`
+	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
+	// written (and carried in the daemon snapshot to the read-only TUI) only for a
+	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and
+	// survive a restart, and so PR3's auto-resume scheduler can read it. omitempty
+	// drops it for every normal session; additive + rollforward, mirroring the
+	// Liveness precedent.
+	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	Height       int       `json:"height"`
+	Width        int       `json:"width"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	AutoYes      bool      `json:"auto_yes"`
 
 	Program string `json:"program"`
 	// UserKilled is the kill-intent tombstone (#1108): persisted by

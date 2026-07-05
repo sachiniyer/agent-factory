@@ -35,8 +35,8 @@ type promptTapBackend struct {
 	tapped int
 }
 
-func (b *promptTapBackend) HasUpdated(*session.Instance) (bool, bool) { return false, true }
-func (b *promptTapBackend) TapEnter(*session.Instance)                { b.tapped++ }
+func (b *promptTapBackend) HasUpdated(*session.Instance) (bool, bool, string) { return false, true, "" }
+func (b *promptTapBackend) TapEnter(*session.Instance)                        { b.tapped++ }
 
 // bothFlagsBackend reports (updated, hasPrompt) == (true, true) — the state a
 // freshly-appeared prompt commonly produces, because the prompt text is itself
@@ -49,8 +49,8 @@ type bothFlagsBackend struct {
 	tapped int
 }
 
-func (b *bothFlagsBackend) HasUpdated(*session.Instance) (bool, bool) { return true, true }
-func (b *bothFlagsBackend) TapEnter(*session.Instance)                { b.tapped++ }
+func (b *bothFlagsBackend) HasUpdated(*session.Instance) (bool, bool, string) { return true, true, "" }
+func (b *bothFlagsBackend) TapEnter(*session.Instance)                        { b.tapped++ }
 
 // updatedOnlyBackend reports (updated, hasPrompt) == (true, false): live output
 // churn with no waiting prompt. It counts TapEnter so the status-only path can
@@ -60,8 +60,10 @@ type updatedOnlyBackend struct {
 	tapped int
 }
 
-func (b *updatedOnlyBackend) HasUpdated(*session.Instance) (bool, bool) { return true, false }
-func (b *updatedOnlyBackend) TapEnter(*session.Instance)                { b.tapped++ }
+func (b *updatedOnlyBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	return true, false, ""
+}
+func (b *updatedOnlyBackend) TapEnter(*session.Instance) { b.tapped++ }
 
 // registerStarted seeds a single on-disk record and registers a live in-memory
 // instance with the supplied backend and starting status under the daemon's key.
@@ -169,8 +171,10 @@ type nilMonitorBackend struct {
 	ts *tmux.TmuxSession
 }
 
-func (b nilMonitorBackend) HasUpdated(*session.Instance) (bool, bool) { return b.ts.HasUpdated() }
-func (b nilMonitorBackend) IsAlive(*session.Instance) bool            { return b.ts.DoesSessionExist() }
+func (b nilMonitorBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	return b.ts.HasUpdated()
+}
+func (b nilMonitorBackend) IsAlive(*session.Instance) bool { return b.ts.DoesSessionExist() }
 
 // TestRefreshStatuses_DeadNilMonitorDoesNotPanic is the #999 regression at the
 // daemon poll layer: a persisted Dead/Lost instance whose TmuxSession has a nil

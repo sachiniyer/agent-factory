@@ -23,7 +23,7 @@ func TestHasUpdated_NilMonitor(t *testing.T) {
 	}
 	ts := NewTmuxSessionFromSanitizedNameWithDeps("af_nil_monitor", "claude", MakePtyFactory(), exec)
 
-	updated, hasPrompt := ts.HasUpdated()
+	updated, hasPrompt, _ := ts.HasUpdated()
 	assert.False(t, updated, "a session with no live monitor has nothing to report")
 	assert.False(t, hasPrompt)
 }

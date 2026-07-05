@@ -717,6 +717,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleInstanceArchived(msg)
 	case instanceRestoredMsg:
 		return m.handleInstanceRestored(msg)
+	case limitRetriedMsg:
+		return m.handleLimitRetried(msg)
 	case repaintAfterDetachMsg:
 		// Trigger an immediate repaint with whatever content is already
 		// cached on the panes (rendered when bubbletea's main loop calls

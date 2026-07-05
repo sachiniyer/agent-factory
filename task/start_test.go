@@ -40,8 +40,8 @@ func (b *startBackend) Attach(*session.Instance) (chan struct{}, error) {
 	return ch, nil
 }
 
-func (b *startBackend) HasUpdated(*session.Instance) (bool, bool)  { return false, false }
-func (b *startBackend) SendPrompt(*session.Instance, string) error { return nil }
+func (b *startBackend) HasUpdated(*session.Instance) (bool, bool, string) { return false, false, "" }
+func (b *startBackend) SendPrompt(*session.Instance, string) error        { return nil }
 func (b *startBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
 	b.sentPrompt = prompt
 	return nil
@@ -59,6 +59,7 @@ func (b *startBackend) CheckAndHandleTrustPrompt(*session.Instance) bool {
 }
 func (b *startBackend) TapEnter(*session.Instance)      {}
 func (b *startBackend) Recover(*session.Instance) error { return nil }
+func (b *startBackend) Respawn(*session.Instance) error { return nil }
 func (b *startBackend) Type() string                    { return "local" }
 
 func newStartTestInstance(t *testing.T, backend *startBackend) *session.Instance {

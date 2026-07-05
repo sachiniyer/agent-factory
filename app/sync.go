@@ -517,16 +517,30 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
-	// the daemon poll computes Running/Ready/Lost/Archived (the #935 liveness) and
-	// the TUI renders it. Applied UNCONDITIONALLY — daemon liveness always wins —
-	// which is what makes #1187 structurally impossible: a locally-archiving row
-	// still receives the terminal Archived instead of being stranded. The local
-	// in-flight op is a separate axis the daemon snapshot never carries, so this
-	// can never clobber an optimistic kill/archive marker.
+	// the daemon poll computes Running/Ready/Lost/Archived/LimitReached (the #935
+	// liveness) and the TUI renders it. Applied UNCONDITIONALLY — daemon liveness
+	// always wins — which is what makes #1187 structurally impossible: a
+	// locally-archiving row still receives the terminal Archived instead of being
+	// stranded. The local in-flight op is a separate axis the daemon snapshot
+	// never carries, so this can never clobber an optimistic kill/archive marker.
 	lv := snapshotLiveness(inst.GetLiveness(), d)
 	if inst.GetLiveness() != lv {
 		inst.SetLiveness(lv)
 		changed = true
+	}
+	// Mirror the usage-limit reset time (#1146) alongside the liveness. It's
+	// display-only metadata that rides LiveLimitReached — which composes to Ready,
+	// so the liveness compare above is what surfaces the [limit] badge; this only
+	// keeps its "resets <t>" suffix fresh. Set it on its own axis (not via
+	// SetLimitReached) so the liveness stays applied unconditionally above. When
+	// the daemon has moved the session off LimitReached, the reset field is left
+	// inert: LimitResetAt/ToInstanceData both gate on the liveness, so a stale
+	// value can never leak to the badge or to disk.
+	if lv == session.LiveLimitReached {
+		if curReset, _ := inst.LimitResetAt(); !curReset.Equal(d.LimitResetAt) {
+			inst.SetLimitResetAt(d.LimitResetAt)
+			changed = true
+		}
 	}
 	// Clear a local optimistic op once the daemon liveness confirms its outcome.
 	// An archive settles at Archived; a kill's op is cleared by row removal, not
