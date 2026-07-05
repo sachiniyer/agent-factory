@@ -59,11 +59,6 @@ func (s *SelectionOverlay) IsSubmitted() bool {
 	return s.submitted
 }
 
-// IsCanceled returns true if the user canceled the selection
-func (s *SelectionOverlay) IsCanceled() bool {
-	return s.canceled
-}
-
 // SetSelectedIndex sets the initially selected item index
 func (s *SelectionOverlay) SetSelectedIndex(idx int) {
 	if idx >= 0 && idx < len(s.items) {
