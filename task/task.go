@@ -284,6 +284,11 @@ func LoadTasksForCurrentRepo() ([]Task, error) {
 // fail current enum validation can still have their run status bumped by the
 // scheduler and TUI dispatch paths. Returns an error if no task with the given
 // ID exists.
+//
+// A nil lastRunAt means "leave LastRunAt untouched" — only LastRunStatus is
+// written. Callers that record a supervision-status change (not an event
+// delivery) pass nil so a concurrent writer's newer LastRunAt is never reverted
+// by a value the caller read outside the file lock (#1215).
 func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) error {
 	if err := ValidateTaskID(taskID); err != nil {
 		return err
@@ -301,7 +306,13 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		found := false
 		for i := range tasks {
 			if tasks[i].ID == taskID {
-				tasks[i].LastRunAt = lastRunAt
+				// nil means "preserve the on-disk LastRunAt": a status-only
+				// update must not clobber a newer event-delivery timestamp that
+				// a concurrent writer committed while this caller held a stale
+				// copy (#1215).
+				if lastRunAt != nil {
+					tasks[i].LastRunAt = lastRunAt
+				}
 				tasks[i].LastRunStatus = lastRunStatus
 				found = true
 				break

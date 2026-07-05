@@ -392,6 +392,33 @@ func TestUpdateTaskStatus_BypassesProgramValidation(t *testing.T) {
 	assert.Equal(t, "/home/foo/bin/claude", got.Program, "Program must not be touched by status updates")
 }
 
+// TestUpdateTaskStatus_NilLastRunAtPreservesTimestamp is the regression guard
+// for #1215: a status-only update (lastRunAt == nil) must write LastRunStatus
+// without touching the on-disk LastRunAt. persistWatcherStatus relies on this
+// so a supervision-status write can't revert a newer event-delivery timestamp
+// committed by a concurrent deliverWatchEvent.
+func TestUpdateTaskStatus_NilLastRunAtPreservesTimestamp(t *testing.T) {
+	existing := time.Now().Truncate(time.Second)
+	stored := []Task{
+		{ID: "w1", Name: "Watcher", Prompt: "p", WatchCmd: "tail -f x", ProjectPath: "/tmp", Enabled: true, LastRunAt: &existing, LastRunStatus: "completed"},
+	}
+	setupTestTasks(t, stored)
+
+	// A newer event delivery lands first (this is the value we must not lose).
+	newer := existing.Add(90 * time.Second)
+	require.NoError(t, UpdateTaskStatus("w1", &newer, "completed"))
+
+	// A supervision-status write races in with a nil timestamp.
+	require.NoError(t, UpdateTaskStatus("w1", nil, "stopped"))
+
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	require.NotNil(t, got.LastRunAt)
+	assert.True(t, got.LastRunAt.Equal(newer),
+		"nil lastRunAt must preserve the newer on-disk timestamp, not revert it")
+	assert.Equal(t, "stopped", got.LastRunStatus, "LastRunStatus must still update")
+}
+
 // TestUpdateTaskStatus_NotFound verifies the not-found error path that the
 // runner / TUI rely on to log a meaningful failure when a task is deleted
 // mid-run.

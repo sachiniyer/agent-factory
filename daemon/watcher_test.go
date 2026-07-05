@@ -528,6 +528,60 @@ func TestDeliverWatchEvent_RendersTemplateAndRecordsStatus(t *testing.T) {
 	}
 }
 
+// TestPersistWatcherStatus_PreservesLastRunAt is the regression guard for
+// #1215: recording a supervision-status change must update LastRunStatus
+// without reverting the LastRunAt that a prior event delivery committed. The
+// old code read LastRunAt outside the file lock and wrote it back, so a
+// status persist that raced a concurrent deliverWatchEvent could revert the
+// timestamp; persistWatcherStatus now passes nil so LastRunAt is never touched.
+func TestPersistWatcherStatus_PreservesLastRunAt(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupTaskRepo(t)
+	_, sends := stubTaskDelivery(t)
+	seedTargetSession(t, repo, "captain")
+
+	if err := task.AddTask(task.Task{
+		ID:            "cafe0002",
+		Name:          "gh-issues",
+		Prompt:        "Triage: {{line}}",
+		WatchCmd:      "watch.sh",
+		TargetSession: "captain",
+		ProjectPath:   repo,
+		Enabled:       true,
+		CreatedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	// An event delivery stamps a fresh LastRunAt.
+	if err := deliverWatchEvent("cafe0002", "new issue #9"); err != nil {
+		t.Fatalf("deliverWatchEvent: %v", err)
+	}
+	_ = sends
+	delivered, err := task.GetTask("cafe0002")
+	if err != nil {
+		t.Fatalf("GetTask after delivery: %v", err)
+	}
+	if delivered.LastRunAt == nil {
+		t.Fatalf("expected LastRunAt set after delivery")
+	}
+	deliveredAt := *delivered.LastRunAt
+
+	// A supervision-status persist must not revert that timestamp.
+	persistWatcherStatus("cafe0002", "stopped")
+
+	got, err := task.GetTask("cafe0002")
+	if err != nil {
+		t.Fatalf("GetTask after persist: %v", err)
+	}
+	if got.LastRunStatus != "stopped" {
+		t.Fatalf("expected LastRunStatus=stopped, got %q", got.LastRunStatus)
+	}
+	if got.LastRunAt == nil || !got.LastRunAt.Equal(deliveredAt) {
+		t.Fatalf("persistWatcherStatus reverted LastRunAt: want %v, got %v", deliveredAt, got.LastRunAt)
+	}
+}
+
 // syncBuffer is a mutex-guarded bytes.Buffer so tests can read captured log
 // output while watcher goroutines may still be writing it.
 type syncBuffer struct {
