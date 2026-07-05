@@ -130,7 +130,7 @@ func readPIDFromFile() (int, bool) {
 // for any zombie before escalating to SIGKILL — visible as a 5s pause in
 // `af upgrade` when the dying daemon's parent isn't waiting.
 //
-// On platforms without /proc (macOS), readProcCmdline returns "" and we
+// On platforms without /proc (macOS), the cmdline read below returns "" and we
 // can't distinguish zombie from "kernel doesn't expose the cmdline"; we
 // fall back to the signal-0 result. The cost there is the 5s grace, which
 // is correct but slow.
@@ -173,7 +173,7 @@ var errPgrepUnavailable = errors.New("pgrep not found in PATH")
 // `agent-factory`. The `--` before the pattern stops pgrep from treating the
 // leading-dash pattern as a flag. We match the bare `--daemon` token rather
 // than "af --daemon" so source-built daemons running as `agent-factory
-// --daemon` are found too (#937); cmdlineIsDaemonBinary restores the
+// --daemon` are found too (#937); argsAreDaemonBinary restores the
 // binary-name specificity the old substring gave. Go test binaries living
 // under /tmp/Test* and the current process are excluded. We rely on pgrep -f
 // rather than parsing /proc directly so the path works on both Linux and macOS.
@@ -207,26 +207,24 @@ func pgrepDaemonCandidates() ([]int, error) {
 		if pid == self {
 			continue
 		}
-		// Defensive: re-read the cmdline and require it to (a) contain
-		// "--daemon" as a discrete token (pgrep -f does substring matching,
-		// not token matching), (b) belong to an `af`/`agent-factory` binary so
-		// the broad `--daemon` pattern can't match an unrelated daemon (#937),
-		// and (c) not be a Go test binary (these live under /tmp/Test... when
-		// invoked from `go test`).
-		cmdline := readProcCmdline(pid)
-		if cmdline == "" {
-			cmdline = readPsArgs(pid)
-		}
-		if cmdline == "" {
+		// Defensive: re-read the argv (boundaries preserved, so a spaced binary
+		// path in argv[0] is classified correctly — #1214) and require it to (a)
+		// contain "--daemon" as a discrete token (pgrep -f does substring
+		// matching, not token matching), (b) belong to an `af`/`agent-factory`
+		// binary so the broad `--daemon` pattern can't match an unrelated daemon
+		// (#937), and (c) not be a Go test binary (these live under /tmp/Test...
+		// when invoked from `go test`).
+		args := daemonArgs(pid)
+		if len(args) == 0 {
 			continue
 		}
-		if !cmdlineHasDaemonFlag(cmdline) {
+		if !argsHaveDaemonFlag(args) {
 			continue
 		}
-		if !cmdlineIsDaemonBinary(cmdline) {
+		if !argsAreDaemonBinary(args) {
 			continue
 		}
-		if isTestBinaryCmdline(cmdline) {
+		if isTestBinaryArgs(args) {
 			continue
 		}
 		pids = append(pids, pid)
@@ -234,14 +232,14 @@ func pgrepDaemonCandidates() ([]int, error) {
 	return pids, nil
 }
 
-// isTestBinaryCmdline filters out Go test binaries spawned during `go test`.
+// isTestBinaryArgs filters out Go test binaries spawned during `go test`.
 // They typically live under /tmp/Test<name>... (t.TempDir paths) or
 // /tmp/go-build... (compiled-test cache). We don't want a test that spawns a
 // fake "af --daemon" subprocess to accidentally claim a real daemon match
 // when run in parallel with another test.
-func isTestBinaryCmdline(cmdline string) bool {
-	for _, field := range strings.Fields(cmdline) {
-		if strings.HasPrefix(field, "/tmp/Test") || strings.HasPrefix(field, "/tmp/go-build") {
+func isTestBinaryArgs(args []string) bool {
+	for _, a := range args {
+		if strings.HasPrefix(a, "/tmp/Test") || strings.HasPrefix(a, "/tmp/go-build") {
 			return true
 		}
 	}

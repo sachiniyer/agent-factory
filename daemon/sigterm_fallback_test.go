@@ -183,31 +183,21 @@ func stubDaemonScan(t *testing.T, pids []int, err error) {
 
 // spawnFakeDaemonWithDaemonFlag launches a long-lived child process whose
 // /proc/<pid>/cmdline presents an agent-factory daemon: an "af" argv[0] plus a
-// discrete "--daemon" token, satisfying both checks isAgentFactoryDaemon
-// requires (#1004). We use bash's `exec -a` to rewrite argv[0] so the cmdline
-// carries both without the underlying `sleep` actually being asked to parse
-// "--daemon" as a flag (it would reject "--daemon" as an invalid time
-// interval). The single process is just sleep, which terminates cleanly on
-// SIGTERM — making this the minimum-moving-parts way to test the fallback's
-// SIGTERM path.
+// discrete "--daemon" token as a real argv element, satisfying both checks
+// isAgentFactoryDaemon requires (#1004, #1214). See spawnFakeDaemonProc for how
+// the crafted argv is built and reaped; it terminates cleanly on SIGTERM,
+// making this the minimum-moving-parts way to test the fallback's SIGTERM path.
 //
 // Returns the *exec.Cmd so the test can call cmd.Wait() to reap the zombie
 // after SIGTERM. Without that, kill(pid, 0) keeps returning success against
 // the zombie, defeating any "did it die?" check based on signal probes.
 func spawnFakeDaemonWithDaemonFlag(t *testing.T) *exec.Cmd {
 	t.Helper()
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash not available, skipping SIGTERM-fallback test: %v", err)
-	}
-	cmd := exec.Command("bash", "-c", "exec -a 'af --daemon af-test' sleep 60")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake daemon: %v", err)
-	}
-	// Wait for bash to exec into sleep so the cmdline we read is the post-exec
-	// one with the rewritten argv[0]. Event-driven with a generous bound so a
-	// loaded CI runner cannot miss the window — the old fixed ~500ms wait could
-	// expire just before the exec landed, failing the caller's cmdline sanity
-	// check spuriously (#878).
+	cmd := spawnFakeDaemonProc(t, "af", "sleep 60; :", "--daemon", "af-test")
+	// Wait until the crafted post-exec argv is visible. Event-driven with a
+	// generous bound so a loaded CI runner cannot miss the window — the old
+	// fixed ~500ms wait could expire just before the exec landed, failing the
+	// caller's cmdline sanity check spuriously (#878).
 	waitForReady(t, "fake daemon cmdline exposes --daemon", func() bool {
 		return isAgentFactoryDaemon(cmd.Process.Pid)
 	})
@@ -293,7 +283,7 @@ func TestSigtermFallback_IgnoresNonMatchingCmdline(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	stubDaemonScan(t, nil, nil)
 
-	// sleep, no --daemon flag in its argv — cmdlineHasDaemonFlag must say no.
+	// sleep, no --daemon flag in its argv — argsHaveDaemonFlag must say no.
 	victim := exec.Command("sleep", "60")
 	if err := victim.Start(); err != nil {
 		t.Fatalf("start victim: %v", err)

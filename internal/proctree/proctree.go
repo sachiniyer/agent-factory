@@ -309,11 +309,39 @@ func EnvValue(pid int, key string) (string, bool) {
 }
 
 // Cmdline returns the process's argv joined with spaces, or "" when
-// unreadable. For kernel threads (empty cmdline) it returns "".
+// unreadable. For kernel threads (empty cmdline) it returns "". This is a
+// lossy, display-oriented view: it collapses argv boundaries, so a binary path
+// containing spaces cannot be recovered from it — use Argv for classification
+// that must survive spaced paths (#1214).
 func Cmdline(pid int) string {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(bytes.ReplaceAll(data, []byte{0}, []byte{' '})))
+}
+
+// Argv returns the process's argv with argument boundaries preserved (each
+// element a distinct argv entry, spaces within an argument kept intact), or nil
+// when unreadable or for kernel threads (empty cmdline). Unlike Cmdline it does
+// not collapse the NUL separators, so a binary path containing spaces stays in
+// a single element (#1214).
+func Argv(pid int) []string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return nil
+	}
+	parts := bytes.Split(data, []byte{0})
+	// Drop the trailing empty element left by the final NUL terminator.
+	for len(parts) > 0 && len(parts[len(parts)-1]) == 0 {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	argv := make([]string, len(parts))
+	for i, p := range parts {
+		argv[i] = string(p)
+	}
+	return argv
 }

@@ -3,7 +3,6 @@ package daemon
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -43,9 +42,6 @@ func startTestControlServer(t *testing.T) {
 // Post-fix, cleanup pings the socket first and leaves the runtime files alone
 // when a live daemon answers.
 func TestStopDaemon_PreservesNewDaemonSocket(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash not available: %v", err)
-	}
 	tmpHome := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
@@ -56,17 +52,11 @@ func TestStopDaemon_PreservesNewDaemonSocket(t *testing.T) {
 	}
 
 	// Daemon A: a fake old daemon that exits on SIGTERM and presents an "af"
-	// argv[0] with a discrete "--daemon" cmdline token, satisfying both checks
-	// isAgentFactoryDaemon requires (same recipe as TestStopDaemon_SIGTERMFirst).
-	cmd := exec.Command("bash", "-c", "exec -a 'af --daemon af-test' sleep 60")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake daemon: %v", err)
-	}
+	// argv[0] with a discrete "--daemon" token as a real argv element,
+	// satisfying both checks isAgentFactoryDaemon requires (same recipe as
+	// TestStopDaemon_SIGTERMFirst).
+	cmd := spawnFakeDaemonProc(t, "af", "sleep 60; :", "--daemon", "af-test")
 	pid := cmd.Process.Pid
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
 
 	// Event-driven readiness with a generous bound so a loaded runner cannot
 	// expire the old fixed 2s wait before the exec rewrites the cmdline (#878).

@@ -151,54 +151,90 @@ func TestStopDaemon_NonExistentPID(t *testing.T) {
 	}
 }
 
-// TestCmdlineHasDaemonFlag verifies that --daemon is matched only as a discrete argument,
-// not as a substring of unrelated flags like --daemonize. Regression test for issue #342.
-func TestCmdlineHasDaemonFlag(t *testing.T) {
+// TestArgsHaveDaemonFlag verifies that --daemon is matched only as a discrete argv element,
+// not as a substring of unrelated flags like --daemonize (#342), and that spaces inside another
+// argument (e.g. a spaced binary path in argv[0]) neither fabricate nor hide a match (#1214).
+func TestArgsHaveDaemonFlag(t *testing.T) {
 	tests := []struct {
-		name    string
-		cmdline string
-		want    bool
+		name string
+		args []string
+		want bool
 	}{
-		{name: "empty", cmdline: "", want: false},
-		{name: "bare --daemon flag", cmdline: "/usr/local/bin/agent-factory --daemon", want: true},
-		{name: "--daemon with leading args", cmdline: "agent-factory --verbose --daemon", want: true},
-		{name: "--daemon= form", cmdline: "agent-factory --daemon=foo", want: true},
-		{name: "--daemonize substring should not match", cmdline: "/usr/bin/some-tool --daemonize", want: false},
-		{name: "--daemon-mode substring should not match", cmdline: "agent-factory --daemon-mode", want: false},
-		{name: "no daemon flag at all", cmdline: "/usr/bin/sleep 60", want: false},
+		{name: "empty", args: nil, want: false},
+		{name: "bare --daemon flag", args: []string{"/usr/local/bin/agent-factory", "--daemon"}, want: true},
+		{name: "--daemon with leading args", args: []string{"agent-factory", "--verbose", "--daemon"}, want: true},
+		{name: "--daemon= form", args: []string{"agent-factory", "--daemon=foo"}, want: true},
+		{name: "--daemonize substring should not match", args: []string{"/usr/bin/some-tool", "--daemonize"}, want: false},
+		{name: "--daemon-mode substring should not match", args: []string{"agent-factory", "--daemon-mode"}, want: false},
+		{name: "no daemon flag at all", args: []string{"/usr/bin/sleep", "60"}, want: false},
+		// #1214: a spaced binary path in argv[0] must not shred into a false
+		// "--daemon" match, and a genuine --daemon still matches alongside it.
+		{name: "spaced path, real --daemon", args: []string{"/home/John Smith/.local/bin/af", "--daemon"}, want: true},
+		{name: "spaced path, no --daemon", args: []string{"/home/John Smith/.local/bin/af", "serve"}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := cmdlineHasDaemonFlag(tt.cmdline); got != tt.want {
-				t.Errorf("cmdlineHasDaemonFlag(%q) = %v, want %v", tt.cmdline, got, tt.want)
+			if got := argsHaveDaemonFlag(tt.args); got != tt.want {
+				t.Errorf("argsHaveDaemonFlag(%q) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestCmdlineIsDaemonBinary verifies the host-wide pgrep scan keeps only
+// TestArgsAreDaemonBinary verifies the host-wide pgrep scan keeps only
 // agent-factory daemon binaries — installed `af` or source-built
 // `agent-factory` — so broadening the pgrep pattern to a bare `--daemon` can't
-// claim an unrelated `--daemon` process (#937). Pure string logic; nothing is
-// signaled.
-func TestCmdlineIsDaemonBinary(t *testing.T) {
+// claim an unrelated `--daemon` process (#937). Pure argv logic; nothing is
+// signaled. Spaced argv[0] paths (#1214) are the key regression: filepath.Base
+// must see the whole path, not a whitespace-split fragment.
+func TestArgsAreDaemonBinary(t *testing.T) {
 	tests := []struct {
-		name    string
-		cmdline string
-		want    bool
+		name string
+		args []string
+		want bool
 	}{
-		{name: "empty", cmdline: "", want: false},
-		{name: "installed af binary", cmdline: "/home/u/.local/bin/af --daemon", want: true},
-		{name: "source-built agent-factory binary", cmdline: "/home/u/src/agent-factory --daemon", want: true},
-		{name: "bare af in PATH", cmdline: "af --daemon", want: true},
-		{name: "bare agent-factory in PATH", cmdline: "agent-factory --daemon", want: true},
-		{name: "unrelated daemon", cmdline: "/usr/bin/dockerd --daemon", want: false},
-		{name: "lookalike suffix", cmdline: "/usr/bin/not-agent-factory --daemon", want: false},
+		{name: "empty", args: nil, want: false},
+		{name: "installed af binary", args: []string{"/home/u/.local/bin/af", "--daemon"}, want: true},
+		{name: "source-built agent-factory binary", args: []string{"/home/u/src/agent-factory", "--daemon"}, want: true},
+		{name: "bare af in PATH", args: []string{"af", "--daemon"}, want: true},
+		{name: "bare agent-factory in PATH", args: []string{"agent-factory", "--daemon"}, want: true},
+		{name: "unrelated daemon", args: []string{"/usr/bin/dockerd", "--daemon"}, want: false},
+		{name: "lookalike suffix", args: []string{"/usr/bin/not-agent-factory", "--daemon"}, want: false},
+		// #1214: the spaced-install path must resolve to base "af"/"agent-factory".
+		{name: "spaced path af", args: []string{"/home/John Smith/.local/bin/af", "--daemon"}, want: true},
+		{name: "spaced path agent-factory", args: []string{"/opt/my tools/agent-factory", "--daemon"}, want: true},
+		{name: "spaced path non-af", args: []string{"/opt/John Smith/tools/dockerd", "--daemon"}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := cmdlineIsDaemonBinary(tt.cmdline); got != tt.want {
-				t.Errorf("cmdlineIsDaemonBinary(%q) = %v, want %v", tt.cmdline, got, tt.want)
+			if got := argsAreDaemonBinary(tt.args); got != tt.want {
+				t.Errorf("argsAreDaemonBinary(%q) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLooksLikeDaemonArgv is the exported-surface counterpart used by `af
+// doctor`'s foreign-daemon scan. It must agree with the daemon's own
+// PID-validation rules (#1004) and classify spaced-install paths correctly
+// (#1214): both a discrete --daemon token AND an af/agent-factory basename.
+func TestLooksLikeDaemonArgv(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "empty", args: nil, want: false},
+		{name: "real af daemon", args: []string{"/home/u/.local/bin/af", "--daemon"}, want: true},
+		{name: "spaced af daemon", args: []string{"/home/John Smith/.local/bin/af", "--daemon"}, want: true},
+		{name: "af without --daemon", args: []string{"/home/u/.local/bin/af", "sessions"}, want: false},
+		{name: "non-af with --daemon", args: []string{"sleep", "--daemon", "af-test"}, want: false},
+		{name: "--daemonize lookalike", args: []string{"af", "--daemonize"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LooksLikeDaemonArgv(tt.args); got != tt.want {
+				t.Errorf("LooksLikeDaemonArgv(%q) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
 	}
@@ -214,33 +250,19 @@ func TestCmdlineIsDaemonBinary(t *testing.T) {
 // scan path (pgrepDaemonCandidates). Hermetic: spawns long-lived sleeps and
 // reads /proc cmdline; never signals any real daemon.
 func TestIsAgentFactoryDaemon_RequiresBinaryName(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash not available: %v", err)
-	}
-
-	// spawn launches `exec -a <argv0> sleep 60` and waits until the rewritten
-	// post-exec cmdline (carrying the af-test marker) is visible in /proc.
+	// spawn launches a process whose argv is [argv0, "--daemon", "af-test"]
+	// with REAL argv boundaries and waits until that argv is visible in /proc.
+	// argv0 may contain spaces (the #1214 spaced-install case).
 	spawn := func(argv0 string) int {
 		t.Helper()
-		cmd := exec.Command("bash", "-c", fmt.Sprintf("exec -a %q sleep 60", argv0))
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("start fake process: %v", err)
-		}
+		cmd := spawnFakeDaemonProc(t, argv0, "sleep 60; :", "--daemon", "af-test")
 		pid := cmd.Process.Pid
-		t.Cleanup(func() {
-			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
-		})
-		// Wait for the post-exec cmdline: the rewritten argv carries the
-		// "af-test" marker, and the "bash -c"/"exec -a" wrapper is gone once
-		// exec replaces the shell. Matching on "af-test" alone would fire on
-		// the pre-exec bash process (whose argv embeds the same script text).
-		waitForReady(t, fmt.Sprintf("pid=%d post-exec cmdline visible", pid), func() bool {
-			cmdline := readProcCmdline(pid)
-			if cmdline == "" {
-				cmdline = readPsArgs(pid)
-			}
-			return strings.Contains(cmdline, "af-test") && !strings.Contains(cmdline, "exec")
+		// Wait until the crafted argv is visible: the last element is the
+		// "af-test" marker. Reading argv (not a joined string) means a spaced
+		// argv0 stays intact, which is the whole point of the fix.
+		waitForReady(t, fmt.Sprintf("pid=%d post-exec argv visible", pid), func() bool {
+			args := daemonArgs(pid)
+			return len(args) > 0 && args[len(args)-1] == "af-test"
 		})
 		return pid
 	}
@@ -248,20 +270,40 @@ func TestIsAgentFactoryDaemon_RequiresBinaryName(t *testing.T) {
 	// The exact #1004 repro: "--daemon" present but argv[0] base is "sleep",
 	// not af/agent-factory. Pre-fix this returned true (the bug); it must now
 	// be false so StopDaemon/locateDaemonPID refuse to signal it.
-	nonAFPID := spawn("sleep --daemon af-test")
+	nonAFPID := spawn("sleep")
 	if isAgentFactoryDaemon(nonAFPID) {
-		t.Errorf("isAgentFactoryDaemon(pid with cmdline %q) = true; "+
+		t.Errorf("isAgentFactoryDaemon(pid with argv %q) = true; "+
 			"want false — a non-af process carrying --daemon must not be treated as our daemon (#1004)",
-			readProcCmdline(nonAFPID))
+			daemonArgs(nonAFPID))
 	}
 
-	// A genuine agent-factory daemon cmdline (af argv[0] + --daemon) must still
+	// A genuine agent-factory daemon (af argv[0] + --daemon) must still
 	// validate true, so the fix doesn't break the real stop/reset path.
-	afPID := spawn("af --daemon af-test")
+	afPID := spawn("af")
 	if !isAgentFactoryDaemon(afPID) {
-		t.Errorf("isAgentFactoryDaemon(pid with cmdline %q) = false; "+
+		t.Errorf("isAgentFactoryDaemon(pid with argv %q) = false; "+
 			"want true — a real af --daemon process must still validate",
-			readProcCmdline(afPID))
+			daemonArgs(afPID))
+	}
+
+	// #1214: a daemon installed under a path with spaces. Pre-fix, the argv was
+	// space-joined and re-split, so filepath.Base saw "John" (not "af") and the
+	// daemon was undetectable — breaking `af reset`, health, and foreign-daemon
+	// scans for every spaced install path. It must now validate true.
+	spacedPID := spawn("/home/John Smith/.local/bin/af")
+	if !isAgentFactoryDaemon(spacedPID) {
+		t.Errorf("isAgentFactoryDaemon(pid with argv %q) = false; "+
+			"want true — an af daemon installed under a spaced path must validate (#1214)",
+			daemonArgs(spacedPID))
+	}
+
+	// A non-af binary under a spaced path carrying --daemon must still be
+	// rejected: the space fix must not weaken the binary-name gate (#1004).
+	spacedNonAFPID := spawn("/opt/John Smith/tools/notdaemon")
+	if isAgentFactoryDaemon(spacedNonAFPID) {
+		t.Errorf("isAgentFactoryDaemon(pid with argv %q) = true; "+
+			"want false — a non-af spaced-path process carrying --daemon must be rejected (#1004)",
+			daemonArgs(spacedNonAFPID))
 	}
 }
 
@@ -271,26 +313,16 @@ func TestIsAgentFactoryDaemon_RequiresBinaryName(t *testing.T) {
 // before the fix this called proc.Kill() unconditionally, bypassing the
 // daemon's state-save path.
 func TestStopDaemon_SIGTERMFirst(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash not available: %v", err)
-	}
 	tmpHome := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
-	// Spawn a process that responds to SIGTERM by exiting (sleep's default
-	// behavior) and presents an agent-factory daemon cmdline: an "af" argv[0]
-	// plus a discrete "--daemon" token (via bash's `exec -a` argv[0] rewrite),
-	// so it satisfies both checks isAgentFactoryDaemon now requires (#1004).
-	// This is the same recipe used in TestSigtermFallback_KillsPIDFileDaemon.
-	cmd := exec.Command("bash", "-c", "exec -a 'af --daemon af-test' sleep 60")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake daemon: %v", err)
-	}
+	// Spawn a process that responds to SIGTERM by exiting (bash re-raises the
+	// signal by default) and presents an agent-factory daemon argv: an "af"
+	// argv[0] plus a discrete "--daemon" token as a real argv element, so it
+	// satisfies both checks isAgentFactoryDaemon requires (#1004, #1214). This
+	// is the same recipe used in TestSigtermFallback_KillsPIDFileDaemon.
+	cmd := spawnFakeDaemonProc(t, "af", "sleep 60; :", "--daemon", "af-test")
 	pid := cmd.Process.Pid
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
 
 	// Wait for the post-exec cmdline to be readable. Event-driven with a
 	// generous bound so a loaded runner cannot expire the old fixed 2s wait
@@ -355,9 +387,6 @@ func TestStopDaemon_SIGTERMFirst(t *testing.T) {
 // when the daemon ignores SIGTERM, StopDaemon must wait stopDaemonGrace and
 // then SIGKILL the process. Companion to TestStopDaemon_SIGTERMFirst.
 func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash not available: %v", err)
-	}
 	tmpHome := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
@@ -371,28 +400,18 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 		stopDaemonPoll = origPoll
 	}()
 
-	// Inner bash sets SIGTERM to SIG_IGN via `trap '' TERM` (the empty-string
-	// form, which truly ignores the signal — `trap : TERM` would run a no-op
-	// but bash still terminates non-interactively after the handler). Outer
-	// bash uses `exec -a` to rewrite argv[0] to an "af" binary name with a
-	// discrete "--daemon" token, so it passes both checks isAgentFactoryDaemon
-	// requires (#1004). A ready-file sentinel proves the trap was installed
-	// before SIGTERM lands, closing a race where the cmdline becomes visible
-	// while bash is still parsing the script.
+	// The fake daemon sets SIGTERM to SIG_IGN via `trap "" TERM` (the
+	// empty-string form, which truly ignores the signal) and loops, so it can
+	// only be stopped by the SIGKILL escalation. Its argv[0] is an "af" binary
+	// name with a discrete "--daemon" token as a real argv element, so it
+	// passes both checks isAgentFactoryDaemon requires (#1004, #1214). A
+	// ready-file sentinel proves the trap was installed before SIGTERM lands,
+	// closing a race where the cmdline becomes visible while bash is still
+	// parsing the script.
 	readyFile := filepath.Join(tmpHome, "trap-ready")
-	script := fmt.Sprintf(
-		`exec -a 'af --daemon af-test' bash -c 'trap "" TERM; : > %q; while :; do sleep 1; done'`,
-		readyFile,
-	)
-	cmd := exec.Command("bash", "-c", script)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake daemon: %v", err)
-	}
+	script := fmt.Sprintf(`trap "" TERM; : > %s; while :; do sleep 1; done`, readyFile)
+	cmd := spawnFakeDaemonProc(t, "af", script, "--daemon", "af-test")
 	pid := cmd.Process.Pid
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
 
 	// Wait until the trap is installed (sentinel present) AND the rewritten
 	// cmdline is visible. Event-driven with a generous bound so a loaded runner
