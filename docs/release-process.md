@@ -70,8 +70,17 @@ channel has been testing, and subsequent previews move to `1.0.139-preview-1`.
   prereleases, which are normally the newest. Prereleases are invisible to
   the `releases/latest` API/redirect, so the updater addresses release
   assets by tag.
-- **`af upgrade`** resolves through the same configured channel, so a manual
-  upgrade never downgrades a preview build back to an older stable.
+- **`af upgrade`** resolves through the same configured channel and compares
+  the channel's newest release against the running binary before installing,
+  so a manual upgrade never downgrades. If the resolved release is *older*
+  than the current build — which happens when you flip `update_channel` from
+  `preview` back to `stable` while the newest stable is behind the preview
+  you're on — the command is a no-op and prints, e.g.,
+  `af upgrade would downgrade 1.0.140-preview-2 -> 1.0.139 (stable channel).
+  Re-run with --allow-downgrade to proceed.` Passing `--allow-downgrade`
+  installs the older release anyway (and prints a `Downgrading X -> Y` notice);
+  when you're already on the channel's newest release it reports
+  `Already on the latest <channel> release (<version>).`
 - **`install.sh` and fresh installs** use the `releases/latest/download/...`
   redirect, which GitHub pins to the newest **stable** — new users start
   (and by default stay) on stable. A specific version (stable or preview)
