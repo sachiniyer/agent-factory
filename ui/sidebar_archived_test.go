@@ -60,6 +60,32 @@ func TestSidebar_ArchivedPartitionedIntoFolder(t *testing.T) {
 	assert.Contains(t, view, "Archived (1)")
 }
 
+// TestSidebar_RestoringRowRehomedToInstances (#1210): a row mid-restore
+// (OpRestoring overlay, liveness still Archived) renders under the live Instances
+// section, not the Archived folder — the eager re-home the archive epic owed
+// restore. Its liveness deliberately stays Archived so the snapshot reconcile
+// still sees the Archived→live transition and runs its rebuild/re-Start (#1203).
+func TestSidebar_RestoringRowRehomedToInstances(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false, store.NewProjection())
+
+	restoring := archTestInstance(t, "coming-back", session.Archived)
+	restoring.SetInFlightOp(session.OpRestoring)
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	addTestInstance(s, restoring)
+	s.SetSize(40, 40)
+
+	require.Equal(t, session.LiveArchived, restoring.GetLiveness(),
+		"the eager re-home must leave liveness Archived so the reconcile rebuild still fires (#1203)")
+	require.False(t, restoring.ShownArchived(), "a mid-restore row is not shown as archived")
+
+	view := s.View()
+	assert.Contains(t, view, "Instances (2)",
+		"a mid-restore row counts under Instances, not Archived (#1210)")
+	assert.NotContains(t, view, "Archived (",
+		"the Archived folder is absent while the only archived-liveness row is restoring")
+}
+
 // TestSidebar_NoArchivedFolderWhenEmpty (#1028): with nothing archived, the
 // Archived folder header is not shown at all.
 func TestSidebar_NoArchivedFolderWhenEmpty(t *testing.T) {
