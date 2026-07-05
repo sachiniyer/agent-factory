@@ -109,7 +109,7 @@ af sessions tab-delete fix-auth-bug --name btop        # delete that tab again (
 af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * * *"
 ```
 
-See [docs/cli.md](docs/cli.md) for the complete command reference.
+See the [CLI guide](docs/cli.md) for a task-oriented tour and the [complete command reference](docs/reference/cli.md) (generated from the command tree) for every command and flag.
 
 ### HTTP API
 
@@ -120,7 +120,7 @@ curl --unix-socket ~/.agent-factory/daemon-http.sock http://localhost/v1/health
 # {"data":{"ok":true},"error":null}
 ```
 
-Run `af api` to list every endpoint (with a ready-to-run curl example) and the resolved socket path; see [docs/http-api.md](docs/http-api.md) for the full reference.
+Run `af api` to list every endpoint (with a ready-to-run curl example) and the resolved socket path; see the [HTTP API guide](docs/http-api.md) for the transport/auth model and the [endpoint reference](docs/reference/api.md) for the full route table.
 
 ### Remote sessions
 
@@ -152,8 +152,10 @@ Read and write the global config from the CLI: `af config list` / `af config get
 
 ## Documentation
 
-- [docs/cli.md](docs/cli.md) — full CLI reference (`af sessions`, `af tasks`, `af daemon`, maintenance commands)
-- [docs/http-api.md](docs/http-api.md) — the daemon-hosted HTTP/JSON API: socket path, auth model, every endpoint (`af api` prints the same catalog)
+📖 **Full documentation site: [sachiniyer.github.io/agent-factory](https://sachiniyer.github.io/agent-factory/)** — capabilities overview, concepts, getting started, and generated CLI/HTTP API references. Source lives in [`docs/`](docs/) and builds with MkDocs.
+
+- [docs/cli.md](docs/cli.md) — narrative CLI guide; the complete generated command reference is [docs/reference/cli.md](docs/reference/cli.md)
+- [docs/http-api.md](docs/http-api.md) — the daemon-hosted HTTP/JSON API: socket path, auth model, response envelope (`af api` prints the same catalog); the generated endpoint reference is [docs/reference/api.md](docs/reference/api.md)
 - [docs/configuration.md](docs/configuration.md) — config keys, global vs. in-repo precedence, state locations
 - [docs/tasks.md](docs/tasks.md) — task triggers, the watch-script contract, daemon lifecycle
 - [docs/usage-limits.md](docs/usage-limits.md) — usage-limit detection, the `[limit]` badge, manual retry, opt-in auto-resume, and task park-don't-fail

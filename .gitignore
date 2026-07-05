@@ -34,3 +34,6 @@ vendor/
 # Debug
 *.prof
 __debug_bin*
+
+# MkDocs build output
+site/

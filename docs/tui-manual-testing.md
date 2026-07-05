@@ -13,9 +13,9 @@ throwaway home, mock repo, private tmux, pids/memory caps; see
 [container-testing.md](container-testing.md)). The container is the *where*;
 this driver is the *how*.
 
-- **Library**: [`scripts/tui-driver.sh`](../scripts/tui-driver.sh)
+- **Library**: [`scripts/tui-driver.sh`](https://github.com/sachiniyer/agent-factory/blob/master/scripts/tui-driver.sh)
 - **Self-test / acceptance proof**:
-  [`scripts/tui-driver-selftest.sh`](../scripts/tui-driver-selftest.sh)
+  [`scripts/tui-driver-selftest.sh`](https://github.com/sachiniyer/agent-factory/blob/master/scripts/tui-driver-selftest.sh)
 - **Run it**: `make tui-driver-selftest` (gate) · `make tui-driver` (drive by
   hand)
 
@@ -364,7 +364,7 @@ the same on-screen markers regardless of the branch under test.
 
 ## 7. Isolation & box safety (inherited from the container)
 
-Every rule from the [tui-playtest skill](../.claude/skills/tui-playtest.md)
+Every rule from the [tui-playtest skill](https://github.com/sachiniyer/agent-factory/blob/master/.claude/skills/tui-playtest.md)
 is satisfied *structurally* by running inside the container: private tmux
 server, throwaway `AGENT_FACTORY_HOME`, pre-built mock repo, pids/memory caps,
 teardown is `docker rm -f`. The driver reinforces this:

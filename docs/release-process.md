@@ -21,12 +21,12 @@ channels:
 
 `z` increments on every preview and resets to 1 whenever a new stable
 changes the base. Version computation lives in
-[`.github/scripts/next-preview-version.sh`](../.github/scripts/next-preview-version.sh)
+[`.github/scripts/next-preview-version.sh`](https://github.com/sachiniyer/agent-factory/blob/master/.github/scripts/next-preview-version.sh)
 and is unit-tested in `release_scripts_test.go`.
 
 ## Preview releases (automatic)
 
-The [`auto-release.yml`](../.github/workflows/auto-release.yml) workflow runs
+The [`auto-release.yml`](https://github.com/sachiniyer/agent-factory/blob/master/.github/workflows/auto-release.yml) workflow runs
 every 3 hours (and on manual dispatch). When `master` has new commits since
 the last tag, it runs the release preflight (gofmt, vet, race tests, build),
 tags `v1.x.y-preview-z`, builds the four platform tarballs with the version
@@ -40,12 +40,12 @@ only the dev-build fallback and holds the latest stable base.
 ## Stable releases (manual)
 
 To cut a stable release, run the **Stable Release** workflow
-([`stable-release.yml`](../.github/workflows/stable-release.yml)) from the
+([`stable-release.yml`](https://github.com/sachiniyer/agent-factory/blob/master/.github/workflows/stable-release.yml)) from the
 Actions tab (`workflow_dispatch`) and enter the version with no leading `v`,
 e.g. `1.1.0`. The maintainer chooses which digit to bump; the workflow
 validates the version (well-formed, untagged, strictly greater than the
 latest stable — see
-[`.github/scripts/validate-stable-version.sh`](../.github/scripts/validate-stable-version.sh)),
+[`.github/scripts/validate-stable-version.sh`](https://github.com/sachiniyer/agent-factory/blob/master/.github/scripts/validate-stable-version.sh)),
 runs the same preflight, and builds all four artifacts **before mutating
 anything**; only then does it commit the version bump to `main.go`, tag,
 and publish the release marked **latest**. A failed preflight or build

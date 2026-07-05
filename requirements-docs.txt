@@ -1,0 +1,18 @@
+# Documentation site toolchain (MkDocs + Material theme). Pinned so local
+# builds and the CI/deploy workflow (.github/workflows/docs.yml) are
+# reproducible. Install into a virtualenv:
+#
+#   python3 -m venv .venv-docs
+#   .venv-docs/bin/pip install -r requirements-docs.txt
+#   .venv-docs/bin/mkdocs serve      # live preview at http://127.0.0.1:8000
+#   .venv-docs/bin/mkdocs build --strict
+mkdocs==1.6.1
+mkdocs-material==9.6.14
+# pymdown-extensions: kept current (within mkdocs-material's ~=10.2 range) so it
+# stays clear of the 10.14.x snippets path-traversal (GHSA-62q4-447f-wv8h) and
+# Figure Capture ReDoS (GHSA-r6h4-mm7h-8pmq) advisories.
+pymdown-extensions==10.21.3
+# Pygments: 2.20.0 clears the 2.18.x GUID-regex ReDoS and renders cleanly. (The
+# older anchor_linenums crash on 2.19+ was a pymdownx bug, fixed by the
+# pymdown-extensions bump above — the two must move together.)
+pygments==2.20.0
