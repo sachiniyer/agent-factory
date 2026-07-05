@@ -133,31 +133,6 @@ func corruptedReposError(corrupted []string) error {
 	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s", len(corrupted), strings.Join(corrupted, ", "))
 }
 
-// loadAllInstancesAggregate aggregates instances across every repo, returning
-// the parsed entries plus the IDs of repos whose instances.json failed to
-// parse. Corrupted repos are logged (naming the repo) and reported via the
-// second return value so callers surface them instead of silently returning a
-// truncated list (#730). Empty/new repos parse cleanly to zero entries and are
-// not treated as corruption, preserving backward-compatible empty results.
-func loadAllInstancesAggregate() ([]session.InstanceData, []string, error) {
-	allInstances, err := config.LoadAllRepoInstances()
-	if err != nil {
-		return nil, nil, err
-	}
-	var allData []session.InstanceData
-	var corrupted []string
-	for repoID, raw := range allInstances {
-		var instances []session.InstanceData
-		if err := json.Unmarshal(raw, &instances); err != nil {
-			log.WarningLog.Printf("skipping repo %s: corrupted instances.json: %v", repoID, err)
-			corrupted = append(corrupted, repoID)
-			continue
-		}
-		allData = append(allData, instances...)
-	}
-	return allData, corrupted, nil
-}
-
 // diskListSessions is the disk-read fallback for `sessions list` when no daemon
 // is reachable (#1029 PR 2). It reproduces the pre-daemon read behavior exactly
 // — repo-scoped or all-repos, keeping the loud corrupt-file error on the
