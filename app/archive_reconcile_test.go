@@ -202,26 +202,78 @@ func TestHandleInstanceArchived_FinalizesRowImmediately(t *testing.T) {
 		"a completed archive must finalize the local row to Archived at once")
 }
 
-// TestHandleInstanceRestored_FinalizesRowImmediately is the #1210 regression:
-// on a successful restore the local row must flip back off Archived immediately
-// (mirroring the archive finalize), so it re-homes into the live Instances
-// section without lingering in the Archived folder until the next snapshot poll.
-func TestHandleInstanceRestored_FinalizesRowImmediately(t *testing.T) {
+// TestRestore_EagerRehomeDoesNotBypassRebuild is the #1210 fix + its #1203
+// non-regression, proven together in one flow (Greptile's landmine): the restore
+// re-homes the row into the live Instances section AT ONCE, yet the snapshot
+// reconcile still runs its Archived→live rebuild so the restored row comes back
+// started==true and attachable — never "live but not started".
+func TestRestore_EagerRehomeDoesNotBypassRebuild(t *testing.T) {
+	h := newTestHome(t)
+	archived, err := session.NewInstance(session.InstanceOptions{Title: "worker", Path: t.TempDir(), Program: "test"})
+	require.NoError(t, err)
+	archived.SetBackend(session.NewFakeBackend())
+	archived.SetArchived() // inert precondition: started=false, liveness=Archived
+	h.store.AddInstance(archived)
+	require.True(t, archived.ShownArchived(), "precondition: row sits in the Archived section")
+
+	// Restore dispatched: handleArchive raises OpRestoring. The row must re-home
+	// into the live Instances section IMMEDIATELY (a) — but its liveness must stay
+	// Archived so the reconcile can still see the Archived→live transition.
+	archived.SetInFlightOp(session.OpRestoring)
+	require.False(t, archived.ShownArchived(),
+		"(a) an OpRestoring row must render in the live Instances section at once")
+	require.Equal(t, session.LiveArchived, archived.GetLiveness(),
+		"the eager re-home must NOT flip liveness — that would bypass the #1203 rebuild")
+
+	// A builder standing in for the reconcile's rebuild (re-Start), yielding a
+	// started, live instance — exactly what buildInstanceFromSnapshot does.
+	built := 0
+	restoreBuilder := SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		built++
+		ri, err := session.NewInstance(session.InstanceOptions{Title: d.Title, Path: t.TempDir(), Program: "test"})
+		require.NoError(t, err)
+		ri.SetBackend(session.NewFakeBackend())
+		ri.SetStartedForTest(true)
+		ri.SetStatus(session.Running)
+		ri.ID = d.ID
+		return ri, nil
+	})
+	defer restoreBuilder()
+
+	// The daemon now reports the session restored (worktree back, agent re-spawned).
+	data := archived.ToInstanceData()
+	data.Liveness = session.LiveRunning
+	h.reconcileSnapshot([]session.InstanceData{data})
+
+	require.Equal(t, 1, built,
+		"the Archived→live transition MUST still trigger the rebuild — the eager re-home cannot bypass it (#1203)")
+	got := h.store.GetInstanceByTitle("worker")
+	require.NotNil(t, got)
+	require.True(t, got.Started(),
+		"(b) the restored row must be started==true — attachable, not 'live but not started'")
+	require.Equal(t, session.Running, got.GetStatus())
+	require.False(t, got.ShownArchived(),
+		"(a) the restored row stays in the live Instances section")
+	require.Equal(t, session.OpNone, got.GetInFlightOp(),
+		"the rebuild clears the OpRestoring overlay by replacing the row")
+}
+
+// TestHandleInstanceRestored_FailureDropsBackToArchived: a failed restore clears
+// the optimistic OpRestoring overlay so the row falls back into the Archived
+// section (its worktree is still shelved) instead of stranding in Instances.
+func TestHandleInstanceRestored_FailureDropsBackToArchived(t *testing.T) {
 	h := newTestHome(t)
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "worker", Path: t.TempDir(), Program: "test"})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
-	inst.SetArchived() // the archived precondition: started=false, liveness=Archived
+	inst.SetArchived()
+	inst.SetInFlightOp(session.OpRestoring) // as the dispatched restore left it
 	h.store.AddInstance(inst)
-	require.Equal(t, session.LiveArchived, inst.GetLiveness(), "precondition: row is archived")
+	require.False(t, inst.ShownArchived(), "precondition: eagerly re-homed to Instances")
 
-	h.handleInstanceRestored(instanceRestoredMsg{title: "worker"})
+	h.handleInstanceRestored(instanceRestoredMsg{title: "worker", err: fmt.Errorf("origin repo gone")})
 
-	require.NotEqual(t, session.LiveArchived, inst.GetLiveness(),
-		"a completed restore must move the row out of the Archived partition at once")
-	require.Equal(t, session.LiveRunning, inst.GetLiveness(),
-		"restore flips liveness back to a live state")
-	require.Equal(t, session.OpNone, inst.GetInFlightOp(), "no op strands after restore")
-	require.True(t, inst.Started(),
-		"restore restores the started flag, symmetric with SetArchived (#1203)")
+	require.Equal(t, session.OpNone, inst.GetInFlightOp(), "a failed restore clears the overlay")
+	require.True(t, inst.ShownArchived(),
+		"a failed restore drops the row back into the Archived section")
 }

@@ -213,6 +213,24 @@ func (i *Instance) GetInFlightOp() InFlightOp {
 	return i.inFlightOp
 }
 
+// ShownArchived reports whether the row belongs in the sidebar's Archived
+// section (#1028): it is archived on the liveness axis AND not mid-restore. An
+// OpRestoring overlay re-homes the row into the live Instances section EAGERLY
+// (#1210) — the visible feedback the archive epic owes restore — WITHOUT touching
+// the liveness axis. Leaving liveness LiveArchived is load-bearing: the snapshot
+// reconcile keys its Archived→live REBUILD (re-Start, restoring started + the
+// agent-tmux binding, #1203) on seeing that exact transition, so an eager
+// liveness flip here would make the reconcile see live→live and SKIP the rebuild,
+// stranding the restored row "live but not started" — the #1203 regression. The
+// rebuild replaces the row with a fresh started instance (OpNone), which clears
+// the overlay; a restore FAILURE clears OpRestoring so the row drops back into
+// the Archived section.
+func (i *Instance) ShownArchived() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.liveness == LiveArchived && i.inFlightOp != OpRestoring
+}
+
 // IsCreating reports whether a create is in flight (the render/gate replacement
 // for the old GetStatus()==Loading check).
 func (i *Instance) IsCreating() bool {

@@ -1138,23 +1138,6 @@ func (i *Instance) SetArchived() {
 	i.inFlightOp = OpNone
 }
 
-// SetRestored is the inverse of SetArchived: it flips the instance back to a
-// live state atomically — started=true (a tmux binding backs it again) and
-// liveness=Running, clearing any in-flight op. The TUI's restore-completion
-// handler calls it so the row re-homes from the Archived folder into the live
-// Instances section immediately, without waiting for the next snapshot poll —
-// mirroring how SetArchived finalizes the archive side (#1210). started=true
-// keeps the flag symmetric with SetArchived's started=false so restore does not
-// reintroduce the started-flag asymmetry #1203 closed; the reconcile settles the
-// exact liveness (Running vs Ready) on the next poll.
-func (i *Instance) SetRestored() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.started = true
-	i.liveness = LiveRunning
-	i.inFlightOp = OpNone
-}
-
 // RestoreArchivedWorktree moves this instance's archived worktree back to dest
 // and re-registers it against the origin repo (#1028). Surfaces git.ErrRepoGone
 // when the repo has been deleted so the caller can leave the archive intact.

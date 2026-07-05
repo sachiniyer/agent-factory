@@ -253,8 +253,18 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	title := selected.Title
 
 	// Archived row → restore. No confirmation: restore only moves the worktree
-	// back and re-spawns the agent.
+	// back and re-spawns the agent. Raise the optimistic OpRestoring op (mirroring
+	// how archive raises OpArchiving): it re-homes the row into the live Instances
+	// section AT ONCE via ShownArchived (#1210) and fences a double-restore, while
+	// leaving liveness LiveArchived so the snapshot reconcile still observes the
+	// Archived→live transition and runs its rebuild/re-Start (#1203). The reconcile
+	// rebuild clears the op by replacing the row; a restore failure clears it in
+	// handleInstanceRestored.
 	if selected.GetLiveness() == session.LiveArchived {
+		if selected.GetInFlightOp() == session.OpRestoring {
+			return m, m.handleError(fmt.Errorf("session '%s' is already being restored", title))
+		}
+		selected.SetInFlightOp(session.OpRestoring)
 		return m, m.restoreInstanceCmd(title)
 	}
 
@@ -401,26 +411,33 @@ func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleInstanceRestored finalizes an async restore. On success the RPC has
-// already returned, so the daemon has committed the session back to a live
-// state; flip the local row live IMMEDIATELY (mirroring how handleInstanceArchived
-// finalizes the archive side) so it re-homes from the Archived folder into the
-// live Instances section without waiting for — or depending on — the next
-// snapshot poll. Without this the row lingered in the Archived section for up to
-// a poll interval, a visible regression from the archive epic (#1210). On failure
-// the error (e.g. the origin repo is gone) lands in the error box.
+// handleInstanceRestored finalizes an async restore. The row already re-homed
+// into the live Instances section the moment the restore was dispatched (the
+// OpRestoring overlay handleArchive raised — #1210), so there is no stale
+// Archived frame to wait out here.
+//
+// On SUCCESS we deliberately do NOT flip liveness: the daemon has committed the
+// session live, and the next snapshot reports it live, at which point the
+// reconcile's Archived→live REBUILD re-Starts the row (restoring started + the
+// agent-tmux binding, #1203) and clears the OpRestoring overlay by replacing the
+// row. Flipping liveness to live here would make that reconcile see live→live,
+// SKIP the rebuild, and strand the row "live but not started" — reintroducing the
+// exact #1203 regression (unattachable restored session). So the visual re-home
+// is eager, but the liveness transition — and thus the rebuild — stays owned by
+// the reconcile path.
+//
+// On FAILURE (e.g. the origin repo is gone) clear the OpRestoring overlay so the
+// row drops back into the Archived section — its worktree is still shelved — and
+// surface the error.
 func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		return m, m.handleError(fmt.Errorf("failed to restore session '%s': %w", msg.title, msg.err))
-	}
-	for _, inst := range m.store.GetInstances() {
-		if inst.Title == msg.title {
-			// SetRestored is the exact inverse of SetArchived (started=true,
-			// liveness=Running, op cleared) — symmetric so the started flag can't
-			// strand (#1203); the reconcile settles the precise liveness next poll.
-			inst.SetRestored()
-			break
+		for _, inst := range m.store.GetInstances() {
+			if inst.Title == msg.title && inst.GetInFlightOp() == session.OpRestoring {
+				inst.SetInFlightOp(session.OpNone)
+				break
+			}
 		}
+		return m, m.handleError(fmt.Errorf("failed to restore session '%s': %w", msg.title, msg.err))
 	}
 	return m, m.selectionChanged()
 }
@@ -521,6 +538,14 @@ func interactiveGuard(inst *session.Instance) error {
 		// happened — same explicit-feedback contract as the Deleting path
 		// (#935). Checked before TmuxAlive so the specific message wins.
 		return fmt.Errorf("session '%s' was lost — its tmux session is gone", inst.Title)
+	}
+	if inst.GetInFlightOp() == session.OpRestoring {
+		// Restore in flight (#1210): the row already re-homed into Instances
+		// (ShownArchived), but its worktree/agent aren't back yet — the reconcile
+		// rebuild hasn't run. Say it's restoring rather than the misleading
+		// "restore it first" the archived branch below would give. Checked before
+		// the LiveArchived branch because liveness is still Archived mid-restore.
+		return fmt.Errorf("session '%s' is being restored", inst.Title)
 	}
 	if inst.GetLiveness() == session.LiveArchived {
 		// Archived (#1028): the user tore the session down and its worktree was
