@@ -126,10 +126,10 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 // so the event loop never blocks on it (#844).
 func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.GetStatus() == session.Loading {
+	if selected == nil || selected.IsCreating() {
 		return m, nil
 	}
-	if selected.GetStatus() == session.Deleting {
+	if selected.IsTearingDown() {
 		return m, m.handleError(fmt.Errorf("session '%s' is already being deleted", selected.Title))
 	}
 
@@ -242,17 +242,17 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 // enforces the same rules authoritatively.
 func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.GetStatus() == session.Loading {
+	if selected == nil || selected.IsCreating() {
 		return m, nil
 	}
-	if selected.GetStatus() == session.Deleting {
+	if selected.IsTearingDown() {
 		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
 	title := selected.Title
 
 	// Archived row → restore. No confirmation: restore only moves the worktree
 	// back and re-spawns the agent.
-	if selected.GetStatus() == session.Archived {
+	if selected.GetLiveness() == session.LiveArchived {
 		return m, m.restoreInstanceCmd(title)
 	}
 
@@ -383,7 +383,7 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		if instErr := interactiveGuard(p.Instance()); instErr != nil {
 			return m, m.handleError(instErr)
 		}
-		if p.Instance() == nil || p.Instance().GetStatus() == session.Loading {
+		if p.Instance() == nil || p.Instance().IsCreating() {
 			return m, nil
 		}
 		if liveSessionName(p.Instance(), p.Tab()) == "" {
@@ -404,7 +404,7 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	// "restore it first" error before any pane/attach path is reached.
 	if sel.Kind == ui.SectionInstances || sel.Kind == ui.SectionArchived {
 		selected := m.sidebar.GetSelectedInstance()
-		if selected == nil || selected.GetStatus() == session.Loading {
+		if selected == nil || selected.IsCreating() {
 			return m, nil
 		}
 		if err := interactiveGuard(selected); err != nil {
@@ -435,20 +435,20 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 // liveSessionName); nil instance and Loading are the caller's silent no-op
 // cases.
 func interactiveGuard(inst *session.Instance) error {
-	if inst == nil || inst.GetStatus() == session.Loading {
+	if inst == nil || inst.IsCreating() {
 		return nil
 	}
-	if inst.GetStatus() == session.Deleting {
+	if inst.IsTearingDown() {
 		return fmt.Errorf("session '%s' is being deleted", inst.Title)
 	}
-	if inst.GetStatus() == session.Lost {
+	if inst.GetLiveness() == session.LiveLost {
 		// Lost (#1108): the backing tmux session vanished with no kill on
 		// record. Entering or attaching is impossible right now; say what
 		// happened — same explicit-feedback contract as the Deleting path
 		// (#935). Checked before TmuxAlive so the specific message wins.
 		return fmt.Errorf("session '%s' was lost — its tmux session is gone", inst.Title)
 	}
-	if inst.GetStatus() == session.Archived {
+	if inst.GetLiveness() == session.LiveArchived {
 		// Archived (#1028): the user tore the session down and its worktree was
 		// moved to the global archive dir; there is no tmux to enter or attach.
 		// Point at the off-ramp (restore) rather than a bare "not running" —
@@ -478,7 +478,7 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.GetStatus() == session.Loading {
+	if selected == nil || selected.IsCreating() {
 		return m, nil
 	}
 	if err := interactiveGuard(selected); err != nil {
@@ -542,7 +542,7 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
 	}
-	if status := selected.GetStatus(); status == session.Loading || status == session.Deleting {
+	if selected.HasInFlightOp() {
 		return m, nil
 	}
 	if selected.IsRemote() {

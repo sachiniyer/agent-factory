@@ -224,6 +224,24 @@ func TestInstanceRendererDeletingMarker(t *testing.T) {
 	assert.Contains(t, after, "going-away", "the title must remain visible while deleting")
 }
 
+// TestInstanceRendererLimitReachedMarker guards the #1195 exhaustive-render
+// requirement for #1146: a LimitReached liveness renders its own explicit marker
+// (no silent default / blank dot). #1204 refines the label + reset time on top.
+func TestInstanceRendererLimitReachedMarker(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "throttled",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+
+	inst.SetLiveness(session.LiveLimitReached)
+	out, _, _ := renderForTerminal(t, 120, inst, &spin)
+	assert.Contains(t, out, "[limit]", "a usage-limit-reached row must be explicitly marked (#1146)")
+	assert.Contains(t, out, "throttled", "the title must remain visible")
+}
+
 // TestInstanceRendererDeletingDimsSelectedRow pins the #853 fix: a SELECTED
 // deleting row must dim its branch and PR lines along with the title. Before
 // the fix only titleS picked up deletingTitleColor, so the high-contrast

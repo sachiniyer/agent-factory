@@ -48,7 +48,7 @@ func (m *home) handleOpenPane() (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
 	}
-	if status := selected.GetStatus(); status == session.Loading || status == session.Deleting {
+	if selected.HasInFlightOp() {
 		return m, nil
 	}
 	return m.openOrFocusPane(selected, m.store.ActiveTab())
@@ -142,7 +142,7 @@ func (m *home) pruneDeadPanes() bool {
 	pruned := false
 	for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
 		inst := p.Instance()
-		if !m.store.ContainsInstance(inst) || (inst != nil && inst.GetStatus() == session.Archived) {
+		if !m.store.ContainsInstance(inst) || (inst != nil && inst.GetLiveness() == session.LiveArchived) {
 			m.closePaneWindow(p)
 			pruned = true
 		}
@@ -211,13 +211,13 @@ func (m *home) reconcilePanesForTabs(instance *session.Instance, oldNames []stri
 // routing — but reads the pane's binding instead of the tree selection.
 func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	instance := p.Instance()
-	if instance == nil || instance.GetStatus() == session.Loading {
+	if instance == nil || instance.IsCreating() {
 		return m, nil
 	}
-	if instance.GetStatus() == session.Deleting {
+	if instance.IsTearingDown() {
 		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", instance.Title))
 	}
-	if instance.GetStatus() == session.Lost {
+	if instance.GetLiveness() == session.LiveLost {
 		return m, m.handleError(fmt.Errorf("session '%s' was lost — its tmux session is gone", instance.Title))
 	}
 	if !instance.TmuxAlive() {

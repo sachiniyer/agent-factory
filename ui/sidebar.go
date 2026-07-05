@@ -67,7 +67,7 @@ func isInstanceRow(item SidebarItem) bool {
 // projection's stable order (#1028).
 func partitionByArchived(instances []*session.Instance) (live, archived []int) {
 	for i, inst := range instances {
-		if inst != nil && inst.GetStatus() == session.Archived {
+		if inst != nil && inst.GetLiveness() == session.LiveArchived {
 			archived = append(archived, i)
 		} else {
 			live = append(live, i)
@@ -707,7 +707,7 @@ func (s *Sidebar) SetSelectedInstance(idx int) {
 	}
 	// Expand whichever section holds the target so its row is part of
 	// visibleItems; otherwise the search below would silently no-op.
-	if instances[idx].GetStatus() == session.Archived {
+	if instances[idx].GetLiveness() == session.LiveArchived {
 		s.expandSectionKind(SectionArchived)
 	} else {
 		s.ExpandInstancesSection()

@@ -1531,7 +1531,7 @@ func (m *home) maybeAutoOpenInitialPane(selected *session.Instance) {
 		}
 		selected = instances[0]
 	}
-	if status := selected.GetStatus(); status == session.Loading || status == session.Deleting {
+	if selected.HasInFlightOp() {
 		return
 	}
 	m.initialPaneOpened = true

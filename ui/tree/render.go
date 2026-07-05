@@ -31,6 +31,13 @@ const lostIcon = "◌ "
 // row reads as "put away, restartable" rather than any live/vanished state.
 const archivedIcon = "▧ "
 
+// limitIcon marks a session that hit a usage-limit wall (#1146): the agent is
+// alive but blocked until its limit resets. A half-filled dot — "throttled, not
+// gone" — distinct in shape from the running/ready/lost/dead dots. Provisional:
+// #1204 refines the limit surface (label + reset time + retry key) on top of this
+// exhaustive-render slot.
+const limitIcon = "◒ "
+
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
 // shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
 // Expandable) aligned with their siblings.
@@ -60,6 +67,12 @@ var lostStyle = lipgloss.NewStyle().
 // as live. Reused for the title/desc foreground below.
 var archivedStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+
+// limitStyle paints a usage-limit-reached dot amber (#1146): a warning state —
+// the agent is throttled, not healthy-green and not corpse-gray. Provisional
+// color; #1204 may tune it alongside the rest of the limit surface.
+var limitStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#C18401", Dark: "#E5C07B"})
 
 // InstanceTitleColor is the foreground of an unselected instance title — the
 // adaptive near-black (light) / near-white (dark) that reads as primary text
@@ -206,21 +219,36 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		descS = listDescStyle
 	}
 
-	// add spinner next to title if it's running
-	status := i.GetStatus()
+	// Status dot / spinner. Read the two axes directly (#1195): a row with any
+	// in-flight op (create/kill/archive) keeps the spinner ("busy"); otherwise
+	// the daemon-owned liveness picks the dot. The liveness switch is TOTAL — every
+	// value is rendered explicitly, no silent default — so adding a Liveness value
+	// (LimitReached landed this way, #1146) forces a deliberate choice here.
+	liveness := i.GetLiveness()
+	op := i.GetInFlightOp()
 	var join string
-	switch status {
-	case session.Running, session.Loading, session.Deleting:
+	switch {
+	case op != session.OpNone:
 		join = fmt.Sprintf("%s ", r.spinner.View())
-	case session.Ready:
-		join = readyStyle.Render(readyIcon)
-	case session.Dead:
-		join = deadStyle.Render(deadIcon)
-	case session.Lost:
-		join = lostStyle.Render(lostIcon)
-	case session.Archived:
-		join = archivedStyle.Render(archivedIcon)
 	default:
+		switch liveness {
+		case session.LiveRunning:
+			join = fmt.Sprintf("%s ", r.spinner.View())
+		case session.LiveReady:
+			join = readyStyle.Render(readyIcon)
+		case session.LiveDead:
+			join = deadStyle.Render(deadIcon)
+		case session.LiveLost:
+			join = lostStyle.Render(lostIcon)
+		case session.LiveArchived:
+			join = archivedStyle.Render(archivedIcon)
+		case session.LiveLimitReached:
+			join = limitStyle.Render(limitIcon)
+		case session.LivenessUnset:
+			// Serialization sentinel, never a live in-memory value; render like
+			// Running so a stray zero never blanks the dot.
+			join = fmt.Sprintf("%s ", r.spinner.View())
+		}
 	}
 
 	// Cut the title if it's too long
@@ -234,10 +262,10 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	// record" (#1108) is readable without decoding the amber dot; the title
 	// keeps full contrast — unlike deleting/dead treatments, the session is
 	// expected back.
-	if status == session.Lost {
+	if liveness == session.LiveLost {
 		titleText = "[lost] " + titleText
 	}
-	if status == session.Deleting {
+	if op == session.OpKilling || op == session.OpArchiving {
 		titleText = "[deleting] " + titleText
 		titleS = titleS.Foreground(deletingTitleColor)
 		// Dim the branch/PR lines too: on a selected row descS is the
@@ -247,10 +275,15 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	}
 	// An archived row (#1028) is explicitly marked and dimmed so it reads as
 	// "filed away, restartable" — restore with A — rather than a live session.
-	if status == session.Archived {
+	if liveness == session.LiveArchived {
 		titleText = "[archived] " + titleText
 		titleS = titleS.Foreground(deletingTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
+	}
+	// A usage-limit-reached row (#1146) is marked so "throttled until reset" reads
+	// without decoding the amber dot; #1204 adds the reset time + retry key.
+	if liveness == session.LiveLimitReached {
+		titleText = "[limit] " + titleText
 	}
 	widthAvail := r.width - 3 - prefixWidth - 1
 	if widthAvail <= 0 {
