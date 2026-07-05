@@ -201,3 +201,27 @@ func TestHandleInstanceArchived_FinalizesRowImmediately(t *testing.T) {
 	require.Equal(t, session.Archived, inst.GetStatus(),
 		"a completed archive must finalize the local row to Archived at once")
 }
+
+// TestHandleInstanceRestored_FinalizesRowImmediately is the #1210 regression:
+// on a successful restore the local row must flip back off Archived immediately
+// (mirroring the archive finalize), so it re-homes into the live Instances
+// section without lingering in the Archived folder until the next snapshot poll.
+func TestHandleInstanceRestored_FinalizesRowImmediately(t *testing.T) {
+	h := newTestHome(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "worker", Path: t.TempDir(), Program: "test"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetArchived() // the archived precondition: started=false, liveness=Archived
+	h.store.AddInstance(inst)
+	require.Equal(t, session.LiveArchived, inst.GetLiveness(), "precondition: row is archived")
+
+	h.handleInstanceRestored(instanceRestoredMsg{title: "worker"})
+
+	require.NotEqual(t, session.LiveArchived, inst.GetLiveness(),
+		"a completed restore must move the row out of the Archived partition at once")
+	require.Equal(t, session.LiveRunning, inst.GetLiveness(),
+		"restore flips liveness back to a live state")
+	require.Equal(t, session.OpNone, inst.GetInFlightOp(), "no op strands after restore")
+	require.True(t, inst.Started(),
+		"restore restores the started flag, symmetric with SetArchived (#1203)")
+}

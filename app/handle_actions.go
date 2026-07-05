@@ -401,12 +401,26 @@ func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleInstanceRestored finalizes an async restore. On success the row returns
-// to the live Instances section via the next Snapshot reconcile; on failure the
-// error (e.g. the origin repo is gone) lands in the error box.
+// handleInstanceRestored finalizes an async restore. On success the RPC has
+// already returned, so the daemon has committed the session back to a live
+// state; flip the local row live IMMEDIATELY (mirroring how handleInstanceArchived
+// finalizes the archive side) so it re-homes from the Archived folder into the
+// live Instances section without waiting for — or depending on — the next
+// snapshot poll. Without this the row lingered in the Archived section for up to
+// a poll interval, a visible regression from the archive epic (#1210). On failure
+// the error (e.g. the origin repo is gone) lands in the error box.
 func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		return m, m.handleError(fmt.Errorf("failed to restore session '%s': %w", msg.title, msg.err))
+	}
+	for _, inst := range m.store.GetInstances() {
+		if inst.Title == msg.title {
+			// SetRestored is the exact inverse of SetArchived (started=true,
+			// liveness=Running, op cleared) — symmetric so the started flag can't
+			// strand (#1203); the reconcile settles the precise liveness next poll.
+			inst.SetRestored()
+			break
+		}
 	}
 	return m, m.selectionChanged()
 }
