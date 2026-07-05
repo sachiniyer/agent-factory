@@ -575,6 +575,30 @@ func TestRemoteConnectivityProbeFails(t *testing.T) {
 	require.Contains(t, findings[0].Detail, "Connection refused")
 }
 
+// TestRemoteConnectivityProbeSucceedsDespiteBenignError: a list_cmd that
+// exits 0 with valid JSON but leaves a background grandchild holding the
+// stdout pipe makes cmd.Run return exec.ErrWaitDelay (a benign non-nil error).
+// The probe must judge by the exit status, not the error, and report NO
+// connectivity failure — a false failure is the worst outcome for a doctor
+// check (#1234 review).
+func TestRemoteConnectivityProbeSucceedsDespiteBenignError(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
+	// The script writes its full JSON, then backgrounds a `sleep` that inherits
+	// the stdout pipe and outlives WaitDelay (500ms), then exits 0. Run() sees a
+	// clean exit-0 but returns ErrWaitDelay because the pipe stayed open.
+	list := writeHookScript(t, dir, "list.sh",
+		"#!/bin/sh\necho '[{\"name\":\"a\",\"status\":\"running\"}]'\nsleep 2 &\nexit 0\n")
+	hooks := &config.RemoteHooks{LaunchCmd: good, ListCmd: list, AttachCmd: good, DeleteCmd: good}
+
+	report, err := Run(withRemote(testOptions(t, false), hooks))
+	require.NoError(t, err)
+	require.Empty(t, findByCheck(report, "remote-connectivity"),
+		"a benign ErrWaitDelay on a successful exit-0 list_cmd must not be a failure")
+	require.True(t, okContains(report, "connectivity probe succeeded"))
+}
+
 // TestRemoteConnectivityProbeTimesOut: a hanging list_cmd is bounded by the
 // probe timeout and reported as unresponsive.
 func TestRemoteConnectivityProbeTimesOut(t *testing.T) {

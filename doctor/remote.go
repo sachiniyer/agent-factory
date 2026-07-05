@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -194,22 +193,47 @@ func probeListCmd(listCmd string, timeout time.Duration) string {
 	cmd.WaitDelay = 500 * time.Millisecond
 
 	err := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
+
+	// Judge the outcome by the process's ACTUAL exit status, not merely by
+	// whether cmd.Run returned an error. Run can return a benign non-nil error
+	// even when the command SUCCEEDED — notably exec.ErrWaitDelay, which fires
+	// when a spawned grandchild keeps a stdout/stderr pipe open past WaitDelay
+	// although the list script itself already exited 0. Treating any err != nil
+	// as a connectivity failure would make doctor cry wolf about a working
+	// remote — the worst outcome for a diagnostic (#1234 review). ExitCode is
+	// -1 when the process was signalled (e.g. killed on our timeout) or never
+	// started.
+	exitCode := -1
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+
+	switch {
+	case ctx.Err() == context.DeadlineExceeded && exitCode != 0:
+		// Deadline fired and the command did not already finish cleanly.
 		return fmt.Sprintf("remote_hooks.list_cmd did not respond within %s — the remote may be "+
 			"unreachable; check connectivity (e.g. the SSH host in %s)", timeout, listCmd)
-	}
-	if err != nil {
+	case exitCode > 0:
+		// Genuine command failure: a non-zero exit.
+		msg := fmt.Sprintf("remote_hooks.list_cmd exited %d", exitCode)
+		if s := strings.TrimSpace(stderr.String()); s != "" {
+			msg += ": " + firstLine(s)
+		}
+		return msg + " — the remote round-trip is not working; run `" + listCmd +
+			" --json` by hand to see the full output"
+	case exitCode < 0:
+		// The process never produced an exit status (failed to start, or was
+		// signalled for a reason other than our deadline) — a real failure.
 		msg := fmt.Sprintf("remote_hooks.list_cmd failed to run (%v)", err)
 		if s := strings.TrimSpace(stderr.String()); s != "" {
 			msg += ": " + firstLine(s)
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			msg += " — the remote round-trip is not working; run `" + listCmd + " --json` by hand to see the full output"
-		}
 		return msg
 	}
-	// Contract: list_cmd writes a JSON array of session objects to stdout.
+
+	// exitCode == 0: the command succeeded. Any err here (e.g. ErrWaitDelay) is
+	// benign and must NOT be reported as a failure. Validate the stdout payload
+	// against the documented contract: a JSON array of session objects.
 	var sessions []map[string]interface{}
 	if jsonErr := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &sessions); jsonErr != nil {
 		return fmt.Sprintf("remote_hooks.list_cmd exited 0 but did not return a JSON array on stdout "+
