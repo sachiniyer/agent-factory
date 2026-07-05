@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,6 +63,47 @@ func spawnSessionWithEscapee(t *testing.T, name string) proctree.Process {
 		_ = proctree.Signal(escapee, syscall.SIGKILL)
 	})
 	return escapee
+}
+
+// TestReapLogsSessionNameLiterally is the #1211 regression: a session name is
+// a runtime value that deliberately preserves `%`, so it must be passed as a
+// `%s` argument to the reap logger — never spliced into the format string,
+// where its `%d`/`%s`/`%n` sequences would be interpreted and corrupt the log
+// with `%!s(MISSING)` / `%!d(...)` garbage.
+func TestReapLogsSessionNameLiterally(t *testing.T) {
+	// Redirect the WARNING logger to a buffer for the duration of this test.
+	var buf bytes.Buffer
+	oldOut, oldFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
+	log.WarningLog.SetOutput(&buf)
+	log.WarningLog.SetFlags(0)
+	t.Cleanup(func() {
+		log.WarningLog.SetOutput(oldOut)
+		log.WarningLog.SetFlags(oldFlags)
+	})
+
+	// A real, live child that survives the (near-zero) grace period, so the
+	// reaper actually SIGTERMs it and emits a log line about it.
+	child := exec.Command("sleep", "300")
+	require.NoError(t, child.Start())
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_, _ = child.Process.Wait()
+	})
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	proc, ok := snap[child.Process.Pid]
+	require.True(t, ok, "child %d not in snapshot", child.Process.Pid)
+
+	// A session name packed with format specifiers — the exact hazard #1211
+	// describes (tmux sanitization preserves `%`).
+	const name = "af_fmt%d%s%n_evil"
+	reapLeakedProcesses(name, []proctree.Process{proc}, time.Millisecond, 300*time.Millisecond)
+
+	out := buf.String()
+	require.Contains(t, out, "tmux "+name+":",
+		"session name must be logged literally, not interpreted as a format string")
+	require.NotContains(t, out, "%!",
+		"format-string corruption markers (%%!s(MISSING), %%!d(...)) must not appear")
 }
 
 // TestCloseReapsEscapedPaneProcesses is the end-to-end #1104 regression

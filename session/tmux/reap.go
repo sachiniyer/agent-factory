@@ -107,6 +107,11 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 // per-process.
 func reapLeakedProcesses(sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) {
 	proctree.KillEscalating(procs, grace, termWait, func(format string, args ...any) {
-		log.WarningLog.Printf("tmux "+sanitizedName+": "+format, args...)
+		// sanitizedName is a runtime value that deliberately preserves `%` (see
+		// tmux name sanitization), so it must be a `%s` ARGUMENT — never spliced
+		// into the format string, where its `%` sequences would be interpreted
+		// and corrupt the log (#1211). `format` itself is a constant literal
+		// supplied by KillEscalating, so concatenating it is safe.
+		log.WarningLog.Printf("tmux %s: "+format, append([]any{sanitizedName}, args...)...)
 	})
 }
