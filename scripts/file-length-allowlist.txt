@@ -17,7 +17,7 @@
 # be split, not grandfathered.
 
 # --- production code (limit 1000) ---
-daemon/control.go 2761
+daemon/control.go 2604
 app/app.go 1889
 session/instance.go 1531
 session/tmux/tmux.go 1424

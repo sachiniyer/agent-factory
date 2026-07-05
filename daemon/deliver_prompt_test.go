@@ -331,6 +331,139 @@ func TestIsConcurrentCreateErr(t *testing.T) {
 	}
 }
 
+// TestDeliverPrompt_RootTargetWaitsForRecreationThenSends is the #1223
+// regression: a watch/monitor delivery to the daemon-managed root agent whose
+// tmux is momentarily absent (being re-materialized by the ensure loop) must
+// NOT fall through to auto-create — which the reserved-name guard rejects,
+// dropping the event with a misleading "pick another name" error. It must wait
+// for root to come back and then send into it, mirroring the concurrent-create
+// retry.
+func TestDeliverPrompt_RootTargetWaitsForRecreationThenSends(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	rec := installRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	// The repo is opted into a root agent, so the ensure loop owns "root".
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Root's tmux is momentarily absent. A short while into the delivery's wait,
+	// the ensure loop re-materializes it in place (allowReserved, as the daemon's
+	// own ensure path does). The delivery must then send into it.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		if _, err := manager.CreateSession(CreateSessionRequest{
+			Title:         session.RootSessionTitle,
+			RepoPath:      repoPath,
+			Program:       "claude",
+			InPlace:       true,
+			allowReserved: true,
+		}); err != nil {
+			t.Errorf("background root (re-)create: %v", err)
+		}
+	}()
+
+	status, err := manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    session.RootSessionTitle,
+		RepoPath: repoPath,
+		Program:  "claude",
+		Prompt:   "monitor-event",
+	})
+	if err != nil {
+		t.Fatalf("delivery to a momentarily-absent root must defer-then-send, not error: %v", err)
+	}
+	if status != "sent" {
+		t.Fatalf("expected status \"sent\" (delivered into the re-materialized root), got %q", status)
+	}
+
+	// The event landed in the root session, not dropped.
+	got := rec.snapshot()
+	if len(got) != 1 || got[0] != "monitor-event" {
+		t.Fatalf("expected the monitor event delivered into root, got %v", got)
+	}
+	if findRootInstance(t, manager, repoPath) == nil {
+		t.Fatalf("root instance should be registered after recreation")
+	}
+}
+
+// TestDeliverPrompt_RootTargetAbsentSurfacesAccurateError pins the accurate-
+// error half of #1223: when the root does not come back within the wait bound,
+// the delivery surfaces a "being recreated" error rather than the misleading
+// reserved-name / "pick another name" one, and no event is delivered.
+func TestDeliverPrompt_RootTargetAbsentSurfacesAccurateError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	rec := installRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	// Bound the wait tightly so the timeout path is exercised fast, not the real
+	// 30s. Restore after the test.
+	origWait := targetDeliverWait
+	targetDeliverWait = 150 * time.Millisecond
+	t.Cleanup(func() { targetDeliverWait = origWait })
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Root never comes back during this delivery (no ensure/create fires).
+	_, err = manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    session.RootSessionTitle,
+		RepoPath: repoPath,
+		Program:  "claude",
+		Prompt:   "monitor-event",
+	})
+	if err == nil {
+		t.Fatal("expected an error when root does not return within the wait bound")
+	}
+	if !strings.Contains(err.Error(), "being recreated") {
+		t.Fatalf("expected an accurate \"being recreated\" error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "reserved") || strings.Contains(err.Error(), "pick another name") {
+		t.Fatalf("must NOT surface the misleading reserved-name error for a root target, got: %v", err)
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("no event should be delivered on the timeout path, got %v", got)
+	}
+}
+
+// TestDeliverPrompt_ReservedRootUnconfiguredStillRejected pins that the #1223
+// special-case is narrow: a delivery to the reserved "root" title on a repo
+// that is NOT opted into root_agents still gets the reserved-name error — the
+// ensure loop will never materialize a root there, so waiting would be pointless
+// and the actionable "add it to root_agents" guidance must remain.
+func TestDeliverPrompt_ReservedRootUnconfiguredStillRejected(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	// No root_agents entry for this repo.
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	start := time.Now()
+	_, err = manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    session.RootSessionTitle,
+		RepoPath: repoPath,
+		Program:  "claude",
+		Prompt:   "monitor-event",
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected the reserved-name error for an unconfigured root target")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("expected the reserved-name error, got: %v", err)
+	}
+	// It must fail fast (the create path), not wait out the root recreation bound.
+	if elapsed > 5*time.Second {
+		t.Errorf("unconfigured reserved-root delivery took %v; must fail fast, not wait for a root that will never come", elapsed)
+	}
+}
+
 // TestDeliverPrompt_TmuxOrphanReturnsImmediatelyWithError pins the #916 fix: a
 // tmux session with no daemon/disk record is a terminal conflict, not a
 // retryable concurrent-create. DeliverPrompt must fail fast with an actionable
