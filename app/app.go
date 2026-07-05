@@ -943,7 +943,11 @@ func (m *home) saveContentPaneState() error {
 	// in-process, so there is no separate ReloadTasks poke here — the write and
 	// its schedule refresh are one atomic daemon call (removing the old
 	// double-reload).
-	for _, tsk := range sp.GetTasks() {
+	//
+	// Persist ONLY the tasks the user actually edited (ConsumeDirty), not the
+	// whole pane: an unmodified task changed out-of-band (CLI, daemon) while the
+	// pane was open must not be clobbered by the pane's stale copy — #1213.
+	for _, tsk := range sp.ConsumeDirty() {
 		if err := updateTaskThroughDaemon(tsk); err != nil {
 			log.ErrorLog.Printf("failed to update task: %v", err)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save task %q: %w", tsk.Name, err))
