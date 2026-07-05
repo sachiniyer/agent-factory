@@ -109,4 +109,28 @@ from a dead Agent Factory session and removes stale temp homes, logging each
 action; anything it cannot verify is reported, never touched. Exits 1 when
 unresolved issues remain.
 
+When the repository you run it in configures a [remote-hook backend](remote-hooks.md),
+`af doctor` also validates that setup, so a misconfigured remote surfaces as a
+diagnosable problem instead of a cryptic failure at session-launch time:
+
+- **remote-config** — the required `remote_hooks` commands (`launch_cmd`,
+  `attach_cmd`, `delete_cmd`) are present, naming the missing field and the
+  in-repo config file when one is not.
+- **remote-hook-script** — every configured hook command resolves to something
+  runnable: a path that exists and carries the execute bit (with the exact
+  `chmod +x` fix otherwise), or a bare name found on `$PATH`.
+- **remote-connectivity** — a bounded, read-only round-trip probe that runs
+  `list_cmd --json` and checks it responds in time (default 10s) with a valid
+  JSON array. `list_cmd` is the only non-mutating verb, so it is the safe probe;
+  a non-zero exit quotes the script's stderr and a hang is reported as
+  unresponsive. When `list_cmd` is not configured the probe (and restore across
+  restarts) are unavailable — noted as informational, not a failure.
+
+These checks run only for a repo that configures `remote_hooks`. Run outside a
+git repo, or in a repo with no remote backend — the common local-only case —
+they collapse to a single `n/a — no remote backend configured` line and add no
+findings, so local users see no new noise. The remote checks are validated
+against the current working directory's repository; run `af doctor` from inside
+the repo whose remote setup you want to check.
+
 `af reset` attempts to stop the daemon (and reports honestly if it couldn't — e.g. a source-built `agent-factory --daemon` that left no PID file), kills **all** Agent Factory tmux sessions, removes **every linked git worktree (and its branch)** from each repo that has stored sessions — including worktrees you created by hand — and deletes all stored session records. Use it to recover from a corrupted state, not for day-to-day cleanup — `af sessions kill <title>` (or `D` in the TUI) removes a single session cleanly.

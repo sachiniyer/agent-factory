@@ -5,6 +5,13 @@
 // agent-factory homes, and unhealthy daemons — and, with --fix, applies only
 // the remediations whose ancestry is verified.
 //
+// It also validates the remote-hook backend (#1039) for the repository
+// containing the current working directory: config completeness, hook-script
+// presence/executability, and a bounded read-only connectivity probe via
+// list_cmd. When no remote backend is configured — the common case — the
+// remote checks record a single informational "n/a" line and add no findings,
+// so local-only users see no new noise.
+//
 // The safety stance is asymmetric by design: detection is generous,
 // remediation is conservative. A process is only ever killed when its
 // AF_SESSION env marker proves it was spawned inside an af tmux session that
@@ -79,6 +86,17 @@ type Options struct {
 	// test or debug run is still coming back for it).
 	MinTempHomeAge time.Duration
 
+	// remoteProbeTimeout bounds the remote connectivity probe (list_cmd);
+	// defaults to remoteProbeTimeoutDefault. Tests shorten it to exercise the
+	// timeout path without waiting.
+	remoteProbeTimeout time.Duration
+
+	// remoteConfig resolves the remote-hook backend to validate and the repo
+	// root it was loaded from; nil hooks mean no remote is configured and the
+	// remote checks skip cleanly. Defaults to resolving the repo of the current
+	// working directory (defaultRemoteConfig); tests inject a hermetic resolver.
+	remoteConfig func() (*config.RemoteHooks, string, error)
+
 	// Escalation windows for --fix kills; default to 2s/2s.
 	killGrace    time.Duration
 	killTermWait time.Duration
@@ -144,6 +162,7 @@ func Run(opts Options) (*Report, error) {
 	checkLeakedTmuxSessions(ctx, report)
 	checkStaleTempHomes(ctx, report)
 	checkForeignDaemons(ctx, report)
+	checkRemoteSetup(ctx, report)
 
 	if opts.Fix {
 		for i := range report.Findings {

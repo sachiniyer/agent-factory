@@ -26,6 +26,9 @@ var doctorCmd = &cobra.Command{
   - af_ tmux sessions with no backing session record
   - abandoned agent-factory homes under the temp dir (leaked by tests/debug runs)
   - daemon health: control socket, autostart unit, pid file, binary freshness
+  - remote-hook setup for the current repo: config completeness, hook-script
+    presence/executability, and a bounded list_cmd connectivity probe
+    (skipped cleanly when no remote backend is configured)
 
 Read-only by default. With --fix, applies the safe remediations — killing
 orphans whose ancestry markers prove they came from a dead af session, and
