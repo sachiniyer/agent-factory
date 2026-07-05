@@ -377,6 +377,81 @@ func TestSaveContentPaneState_RoutesThroughDaemonRPC(t *testing.T) {
 	}
 }
 
+// TestSaveContentPaneState_DoesNotClobberUneditedTask is the regression guard
+// for #1213: saving a dirty task pane must persist ONLY the tasks the user
+// actually edited, never the whole pane. Before the fix, saveContentPaneState
+// iterated every task in the pane and wrote each back, so a stale pane copy of
+// an untouched task silently overwrote a change another writer (CLI, daemon)
+// committed while the pane was open — a lost update.
+//
+// Scenario: the user opens the manager and toggles Task A (only A is dirty).
+// While the pane is open, the CLI changes Task B's prompt on disk. Closing the
+// manager must land A's toggle without reverting B's out-of-band change.
+func TestSaveContentPaneState_DoesNotClobberUneditedTask(t *testing.T) {
+	h := newTestHome(t)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	// newTestHome points the write seams at the direct disk writers, so the
+	// save-on-close and the simulated CLI write both land in the same tasks.json.
+	taskA := task.Task{
+		ID: "task-a-1213", Name: "Task A", Prompt: "prompt A", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	taskB := task.Task{
+		ID: "task-b-1213", Name: "Task B", Prompt: "prompt B original", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(taskA))
+	require.NoError(t, task.AddTask(taskB))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+
+	// User toggles Task A (index 0) off — only A is dirty; B is never touched.
+	tp.SelectTask(0)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	require.True(t, tp.IsDirty(), "toggling A must mark the pane dirty")
+
+	// The CLI changes Task B on disk while the pane is open, holding a stale B.
+	cliB := taskB
+	cliB.Prompt = "CLI MODIFIED"
+	require.NoError(t, task.UpdateTask(cliB))
+
+	// Esc releases focus → the overlay closes and saveContentPaneState runs.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state)
+
+	disk, err := task.LoadTasks()
+	require.NoError(t, err)
+	byID := map[string]task.Task{}
+	for _, tk := range disk {
+		byID[tk.ID] = tk
+	}
+
+	// A's edit landed.
+	gotA, ok := byID["task-a-1213"]
+	require.True(t, ok)
+	assert.False(t, gotA.Enabled, "the toggled task A must be persisted")
+
+	// B's out-of-band CLI change survives — the untouched task was NOT written
+	// back from the stale pane copy (the #1213 lost update).
+	gotB, ok := byID["task-b-1213"]
+	require.True(t, ok)
+	assert.Equal(t, "CLI MODIFIED", gotB.Prompt,
+		"unedited Task B must keep the concurrent CLI change, not be clobbered by the stale pane copy")
+}
+
 // dirtyHooksHome returns a home wired to a real repo with a single dirty,
 // unsaved hook edit ("echo test") in the HooksPane. The hooks-save seam is
 // left at the caller's discretion (default real save, or a stub).

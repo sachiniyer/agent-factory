@@ -89,8 +89,15 @@ type TaskPane struct {
 
 	width, height int
 	dirty         bool
-	deleted       []task.Task
-	hasFocus      bool
+	// dirtyIDs records which tasks the user actually edited (toggle/enabled or
+	// field edit) since the pane was loaded, keyed by task ID. saveContentPaneState
+	// persists ONLY these, so a save can't overwrite an unmodified task whose
+	// on-disk copy a concurrent writer (CLI/daemon) changed while the pane was
+	// open — the lost-update in #1213. Deletions stay tracked separately in
+	// `deleted` (mirrors ConsumeDeleted).
+	dirtyIDs map[string]bool
+	deleted  []task.Task
+	hasFocus bool
 }
 
 // NewTaskPane creates a new task pane.
@@ -104,78 +111,10 @@ func (s *TaskPane) SetSize(width, height int) {
 	s.height = height
 }
 
-// SetTasks sets the task data.
-func (s *TaskPane) SetTasks(tasks []task.Task) {
-	s.tasks = tasks
-	s.dirty = false
-	s.deleted = nil
-	s.editing = false
-	if len(s.tasks) == 0 {
-		s.selectedIdx = 0
-	} else if s.selectedIdx >= len(s.tasks) {
-		s.selectedIdx = len(s.tasks) - 1
-	}
-}
-
-// GetTasks returns the current tasks.
-func (s *TaskPane) GetTasks() []task.Task {
-	return s.tasks
-}
-
-// SelectTask moves the list selection to idx (clamped). The tasks overlay
-// uses it to open the manager on the task the in-rail cursor was resting on.
-func (s *TaskPane) SelectTask(idx int) {
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(s.tasks) {
-		idx = len(s.tasks) - 1
-	}
-	if idx >= 0 {
-		s.selectedIdx = idx
-	}
-}
-
-// ConsumeDeleted returns the tasks pending deletion and clears the pane's
-// dirty state so a subsequent save can't reprocess already-deleted tasks. The
-// deletion loop in saveContentPaneState removes task records as a side
-// effect, so re-running it would call RemoveTask on records that no longer
-// exist and log spurious errors (fixes #763).
-func (s *TaskPane) ConsumeDeleted() []task.Task {
-	deleted := s.deleted
-	s.deleted = nil
-	s.dirty = false
-	return deleted
-}
-
-// IsDirty returns true if tasks were modified.
-func (s *TaskPane) IsDirty() bool {
-	return s.dirty
-}
-
-// HasFocus returns whether the pane has input focus.
-func (s *TaskPane) HasFocus() bool {
-	return s.hasFocus
-}
-
-// SetFocus sets the focus state.
-func (s *TaskPane) SetFocus(focus bool) {
-	s.hasFocus = focus
-	if !focus {
-		s.editing = false
-		s.creating = false
-	}
-}
-
-// IsEditing returns true if in edit mode.
-func (s *TaskPane) IsEditing() bool {
-	return s.editing
-}
-
-// IsCreating returns true if in create mode.
-func (s *TaskPane) IsCreating() bool {
-	return s.creating
-}
+// The TaskPane's task-list, selection, dirty-tracking, and focus/mode state
+// accessors live in task_pane_state.go (SetTasks, GetTasks, SelectTask,
+// ConsumeDirty, ConsumeDeleted, IsDirty, focus/mode getters). This file keeps
+// the create/edit form, rendering, and key handling.
 
 // initForm builds the shared create/edit field set. A nil task initializes an
 // empty create form (path prefilled with defaultPath); otherwise the fields
@@ -405,7 +344,7 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 	case "x":
 		if len(s.tasks) > 0 {
 			s.tasks[s.selectedIdx].Enabled = !s.tasks[s.selectedIdx].Enabled
-			s.dirty = true
+			s.markTaskDirty(s.tasks[s.selectedIdx].ID)
 		}
 		return true
 	case "D":
@@ -413,6 +352,10 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 			deleted := s.tasks[s.selectedIdx]
 			s.deleted = append(s.deleted, deleted)
 			s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
+			// A task queued for deletion must not also be in the update set:
+			// removeTaskThroughDaemon handles it, and an update on a just-removed
+			// task would log a spurious not-found error.
+			delete(s.dirtyIDs, deleted.ID)
 			s.dirty = true
 			if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
 				s.selectedIdx--
@@ -548,7 +491,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.tasks[s.selectedIdx].TargetSession = s.editTarget.Value()
 			s.tasks[s.selectedIdx].ProjectPath = absPath
 			s.tasks[s.selectedIdx].Program = s.programValue()
-			s.dirty = true
+			s.markTaskDirty(s.tasks[s.selectedIdx].ID)
 			s.editing = false
 		}
 		return true

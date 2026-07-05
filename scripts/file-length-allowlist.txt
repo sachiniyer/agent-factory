@@ -23,7 +23,6 @@ session/instance.go 1531
 session/tmux/tmux.go 1424
 ui/sidebar.go 1258
 config/config.go 1128
-ui/task_pane.go 1050
 daemon/watcher.go 1046
 session/backend_hook.go 1026
 

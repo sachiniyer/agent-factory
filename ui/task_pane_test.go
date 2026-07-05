@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newGitRepo creates a throwaway git repository and returns its absolute path.
@@ -56,6 +57,58 @@ func TestTaskPaneSetTasksClampsSelectedIdx(t *testing.T) {
 
 	tp.SetTasks([]task.Task{{ID: "a"}})
 	assert.Equal(t, 0, tp.selectedIdx)
+}
+
+// TestTaskPaneConsumeDirtyTracksOnlyEditedTasks is the pane-level regression
+// guard for #1213: only tasks the user actually edited (toggle or field edit)
+// are returned by ConsumeDirty, so the save path never rewrites unmodified
+// tasks. A no-edit pane returns nothing; toggling one task in a two-task pane
+// returns only that task.
+func TestTaskPaneConsumeDirtyTracksOnlyEditedTasks(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{
+		{ID: "a", Name: "A", Enabled: true},
+		{ID: "b", Name: "B", Enabled: true},
+	})
+	tp.SetFocus(true)
+
+	// Nothing edited yet.
+	assert.Empty(t, tp.ConsumeDirty(), "an unedited pane must have no dirty tasks")
+	assert.False(t, tp.IsDirty())
+
+	// Toggle only task A (selectedIdx defaults to 0).
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
+	assert.True(t, tp.IsDirty(), "toggling a task marks the pane dirty")
+
+	dirty := tp.ConsumeDirty()
+	require.Len(t, dirty, 1, "only the toggled task must be dirty")
+	assert.Equal(t, "a", dirty[0].ID)
+	assert.False(t, dirty[0].Enabled, "the dirty task carries the toggled value")
+
+	// ConsumeDirty clears the set: a second call returns nothing.
+	assert.Empty(t, tp.ConsumeDirty(), "ConsumeDirty must clear the dirty set")
+}
+
+// TestTaskPaneConsumeDirtyExcludesDeletedTask verifies that a task edited and
+// then deleted is not returned by ConsumeDirty — deletion is handled by
+// ConsumeDeleted, and updating a just-removed task would log a spurious
+// not-found error (#1213 / #763).
+func TestTaskPaneConsumeDirtyExcludesDeletedTask(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{
+		{ID: "a", Name: "A", Enabled: true},
+		{ID: "b", Name: "B", Enabled: true},
+	})
+	tp.SetFocus(true)
+
+	// Toggle A (dirty), then delete A.
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")}))
+
+	assert.Empty(t, tp.ConsumeDirty(), "a deleted task must not appear in the dirty update set")
+	deleted := tp.ConsumeDeleted()
+	require.Len(t, deleted, 1)
+	assert.Equal(t, "a", deleted[0].ID)
 }
 
 // TestTaskPaneConsumePendingTriggerEmpty verifies that ConsumePendingTrigger
