@@ -21,24 +21,33 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyHelp:
 		return m.showHelpScreen(helpTypeGeneral{}, nil)
 
-	// Tree navigation
+	// Tree navigation. Each moves the sidebar cursor and re-homes the focus
+	// ring on the tree (focusTreeForNav) so the ring-reading attach verb `o`
+	// resolves the freshly selected instance, not a pane left focused by a
+	// prior interactive session (#1233 wrong-target-input class).
 	case keys.KeyUp:
 		m.sidebar.Up()
+		m.focusTreeForNav()
 		return m, m.selectionChanged()
 	case keys.KeyDown:
 		m.sidebar.Down()
+		m.focusTreeForNav()
 		return m, m.selectionChanged()
 	case keys.KeyLeft:
 		m.sidebar.CollapseSection()
+		m.focusTreeForNav()
 		return m, m.selectionChanged()
 	case keys.KeyRight:
 		m.sidebar.ExpandSection()
+		m.focusTreeForNav()
 		return m, m.selectionChanged()
 	case keys.KeyNextSection:
 		m.sidebar.JumpNextSection()
+		m.focusTreeForNav()
 		return m, m.selectionChanged()
 	case keys.KeyPrevSection:
 		m.sidebar.JumpPrevSection()
+		m.focusTreeForNav()
 		return m, m.selectionChanged()
 
 	// Instance creation
@@ -463,26 +472,21 @@ func killConfirmationWarning(wt string) string {
 
 // handleEnter is the Enter verb (#1089 PR 2, RFC §2.3): enter INTERACTIVE
 // mode on the pane — every keystroke forwards to the agent/shell in place,
-// no full-screen takeover, Ctrl-] returns to nav. With a workspace pane
-// focused it enters that pane; on a tree instance/tab row it opens (or
-// focuses) the selection's pane first, exactly like `s`, then enters it.
-// Bindings that cannot embed — remote instances, whose only local terminal
-// is the full-screen hook PTY — fall back to the full-screen attach Enter
-// used to do; dead/transitional sessions keep their guard errors.
+// no full-screen takeover, Ctrl-] returns to nav.
+//
+// Enter resolves its target from the SIDEBAR SELECTION — the exact
+// target-resolution the open-pane verb (`s`, handleOpenPane) uses — and never
+// from the focus ring (#1233). Reading focusedOpenPane first was the
+// wrong-target-input bug: after Ctrl-] leaves interactive mode the ring stays
+// on instance A's pane, so selecting instance B and pressing Enter re-entered
+// interactive on the stale A pane — typing into the WRONG agent. Enter now
+// opens (or focuses) the SELECTED instance's pane, exactly like `s`, then
+// enters it — one path, always the current selection.
+//
+// Bindings that cannot embed — remote instances, whose only local terminal is
+// the full-screen hook PTY — fall back to the full-screen attach Enter used to
+// do; dead/transitional sessions keep their guard errors.
 func (m *home) handleEnter() (tea.Model, tea.Cmd) {
-	if p := m.focusedOpenPane(); p != nil {
-		if instErr := interactiveGuard(p.Instance()); instErr != nil {
-			return m, m.handleError(instErr)
-		}
-		if p.Instance() == nil || p.Instance().IsCreating() {
-			return m, nil
-		}
-		if liveSessionName(p.Instance(), p.Tab()) == "" {
-			// Not embeddable (remote): the old full-screen behavior.
-			return m.handleEnterPane(p)
-		}
-		return m.requestInteractive(p)
-	}
 	sel := m.sidebar.GetSelection()
 
 	// Toggle expandable section headers (Instances and the Archived folder).
@@ -490,33 +494,35 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		m.sidebar.ToggleSection()
 		return m, m.selectionChanged()
 	}
+	// Only instance/tab rows enter a pane; anything else (e.g. an automations
+	// row) is a no-op, as before.
+	if sel.Kind != ui.SectionInstances && sel.Kind != ui.SectionArchived {
+		return m, nil
+	}
 	// Instance selected — in either the Instances tree or the Archived folder
 	// (#1028). An archived row is not embeddable: interactiveGuard surfaces the
 	// "restore it first" error before any pane/attach path is reached.
-	if sel.Kind == ui.SectionInstances || sel.Kind == ui.SectionArchived {
-		selected := m.sidebar.GetSelectedInstance()
-		if selected == nil || selected.IsCreating() {
-			return m, nil
-		}
-		if err := interactiveGuard(selected); err != nil {
-			return m, m.handleError(err)
-		}
-		if liveSessionName(selected, m.store.ActiveTab()) == "" {
-			// Not embeddable (remote): the old full-screen attach flow.
-			return m.attachSelected(selected)
-		}
-		// Open (or focus) the selection's pane — the `s` semantics — then
-		// enter it. The pane pointer is captured here, at Enter-press time
-		// (#716), for the deferred activation.
-		_, cmd := m.openOrFocusPane(selected, m.store.ActiveTab())
-		p := m.store.FindOpenPane(selected, m.store.ActiveTab())
-		if p == nil {
-			return m, cmd
-		}
-		mod, interactCmd := m.requestInteractive(p)
-		return mod, tea.Batch(cmd, interactCmd)
+	selected := m.sidebar.GetSelectedInstance()
+	if selected == nil || selected.IsCreating() {
+		return m, nil
 	}
-	return m, nil
+	if err := interactiveGuard(selected); err != nil {
+		return m, m.handleError(err)
+	}
+	if liveSessionName(selected, m.store.ActiveTab()) == "" {
+		// Not embeddable (remote): the old full-screen attach flow.
+		return m.attachSelected(selected)
+	}
+	// Open (or focus) the selection's pane — the `s`/open semantics — then
+	// enter it. The pane pointer is captured here, at Enter-press time (#716),
+	// for the deferred activation.
+	_, cmd := m.openOrFocusPane(selected, m.store.ActiveTab())
+	p := m.store.FindOpenPane(selected, m.store.ActiveTab())
+	if p == nil {
+		return m, cmd
+	}
+	mod, interactCmd := m.requestInteractive(p)
+	return mod, tea.Batch(cmd, interactCmd)
 }
 
 // interactiveGuard returns the user-facing error that fences Enter off a

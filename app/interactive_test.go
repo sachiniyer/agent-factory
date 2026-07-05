@@ -189,6 +189,108 @@ func TestEnterFromTreeOpensPaneAndEntersInteractive(t *testing.T) {
 	require.Len(t, *fakes, 1)
 }
 
+// TestSecondEnterTargetsCurrentSelectionNotStalePane is the #1233 P1
+// wrong-target-input regression: enter interactive on instance A, Ctrl-] to
+// nav, select a DIFFERENT instance B, Enter again. Input must route to B — the
+// current selection — never the pane the focus ring was left on (A). Enter
+// resolving from focusedOpenPane (the stale A pane) was the bug; it now
+// resolves purely from the sidebar selection, exactly like the open verb.
+func TestSecondEnterTargetsCurrentSelectionNotStalePane(t *testing.T) {
+	h := newTestHome(t)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	instA := startedLocalInstance(t, "alpha")
+	instB := startedLocalInstance(t, "bravo")
+	h.store.AddInstance(instA)
+	h.store.AddInstance(instB)
+	h.sidebar.SetSelectedInstance(0) // land on A
+	h.store.SetSelectedInstance(instA)
+	h.clampSelectionTab()
+	resizeHome(h, 200, 40) // wide enough for both panes side by side
+	_, _ = stubLiveTermFactory(t)
+
+	// 1. Enter interactive on A (from the tree): opens A's pane, then enters it.
+	// openOrFocusPane focuses the pane it opened, so read it back off the focus
+	// ring (its tab index tracks the tree cursor, not necessarily 0).
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	paneA := h.focusedOpenPane()
+	require.NotNil(t, paneA, "Enter must open A's pane")
+	require.Equal(t, instA, paneA.Instance())
+	_, cmd := h.Update(enterInteractiveMsg{pane: paneA})
+	runHermeticCmd(t, h, cmd, 0)
+	require.True(t, h.interactive, "first Enter must enter interactive mode")
+	require.Equal(t, instA, h.livePane.Instance(), "first Enter binds A")
+	aFake := h.liveTerm.(*fakeLiveTerm)
+
+	// 2. Ctrl-] back to nav. Focus stays on A's pane — the bug precondition.
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	require.False(t, h.interactive, "Ctrl-] must return to nav mode")
+
+	// 3. Navigate to a DIFFERENT instance B through the real tree-nav keys.
+	for i := 0; i < 20 && h.sidebar.GetSelectedInstance() != instB; i++ {
+		_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyDown}, keys.KeyDown)
+	}
+	require.Equal(t, instB, h.sidebar.GetSelectedInstance(), "navigation must land on B")
+
+	// 4. Enter again — must open/enter B, NOT re-enter the stale A pane.
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	paneB := h.focusedOpenPane()
+	require.NotNil(t, paneB, "second Enter must open B's pane")
+	require.Equal(t, instB, paneB.Instance(), "the opened pane must belong to B")
+	require.NotEqual(t, paneA, paneB, "B's pane must be distinct from A's")
+	_, cmd = h.Update(enterInteractiveMsg{pane: paneB})
+	runHermeticCmd(t, h, cmd, 0)
+
+	require.True(t, h.interactive, "second Enter must (re)enter interactive mode")
+	assert.Equal(t, instB, h.livePane.Instance(),
+		"second Enter must bind input to the SELECTED instance B, not the previously-interacted A")
+	assert.Equal(t, paneB, h.livePane, "the live pane must be B's pane")
+
+	// A forwarded keystroke must land in B's attachment, never A's stale one.
+	bFake := h.liveTerm.(*fakeLiveTerm)
+	require.NotSame(t, aFake, bFake, "B must have its own attachment")
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
+	assert.Equal(t, []string{"Z"}, bFake.keys, "keystrokes must forward to the selected instance B")
+	assert.Empty(t, aFake.keys, "the previously-interacted instance A must receive nothing")
+}
+
+// TestEnterResolvesFromSelectionNotFocusRing pins the #1233 fix at the source:
+// with the focus ring left on instance A's pane but the sidebar selection on
+// instance B, Enter must act on the SELECTION (B), the same target-resolution
+// the open verb uses — never the focused pane. This isolates handleEnter's
+// resolution from the focus-rehoming nav helper.
+func TestEnterResolvesFromSelectionNotFocusRing(t *testing.T) {
+	h := newTestHome(t)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	instA := startedLocalInstance(t, "alpha")
+	instB := startedLocalInstance(t, "bravo")
+	h.store.AddInstance(instA)
+	h.store.AddInstance(instB)
+	resizeHome(h, 200, 40)
+	_, _ = stubLiveTermFactory(t)
+
+	// Open A's pane and leave the focus ring on it.
+	paneA := openTestPane(t, h, instA, 0)
+	require.Equal(t, paneA, h.focusedOpenPane(), "A's pane must hold the focus ring")
+
+	// Point the selection at B while the ring stays on A's pane — the exact
+	// desync the wrong-target bug exploited.
+	h.sidebar.SetSelectedInstance(1)
+	h.store.SetSelectedInstance(instB)
+	h.clampSelectionTab()
+	require.Equal(t, instB, h.sidebar.GetSelectedInstance())
+
+	// Enter must open/enter B, not the focused A pane.
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p, "Enter must open the selection's pane")
+	assert.Equal(t, instB, p.Instance(), "Enter must resolve the SELECTED instance B, not the focused A pane")
+
+	_, cmd := h.Update(enterInteractiveMsg{pane: p})
+	runHermeticCmd(t, h, cmd, 0)
+	assert.True(t, h.interactive, "Enter must enter interactive mode on B")
+	assert.Equal(t, instB, h.livePane.Instance(), "input must bind to B")
+}
+
 func TestEnterOnRemotePaneFallsBackToFullScreenAttach(t *testing.T) {
 	h := newTestHome(t)
 	require.NoError(t, h.appState.SetHelpScreensSeen(

@@ -209,14 +209,18 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// Click a pane header (or an unfocused pane's body): focus that pane
 		// — how the mouse picks one of the N panes. Click the FOCUSED pane's
 		// body: enter it, exactly like Enter (§2.5).
-		if p, _ := m.paneByRegion(region); p == nil {
+		p, _ := m.paneByRegion(region)
+		if p == nil {
 			return m, nil
 		}
 		if kind == zones.PaneKindHeader || m.ring.Active() != region {
 			m.focusRegionClick(region)
 			return m, nil
 		}
-		return m.handleEnter()
+		// A click on the already-focused pane's body enters THAT pane — the
+		// click named it, so enter it directly rather than the sidebar selection
+		// keyboard Enter resolves (#1233, §2.5).
+		return m.enterPane(p)
 	}
 	if taskID, ok := zones.AutoTaskID(id); ok {
 		// Click a task row: focus the automations section and select the
