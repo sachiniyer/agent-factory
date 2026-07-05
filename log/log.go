@@ -116,6 +116,28 @@ func resolveLogPath() string {
 	return filepath.Join(dir, "agent-factory.log")
 }
 
+// LogFilePath returns the production agent-factory.log path — the file the
+// daemon and TUI write to — resolved from $AGENT_FACTORY_HOME then the
+// os.UserConfigDir default, exactly like resolveLogPath's env/default branches
+// but WITHOUT the test-scratch branch, the test-only override, and any
+// directory-creating side effect. It is read-only tooling support (e.g. `af
+// bug-report` locating the log to tail); it deliberately never returns the
+// temp test log so a bug report always names the real log even when built by a
+// test binary. Returns "" only when neither a home override nor UserConfigDir
+// can be resolved.
+func LogFilePath() string {
+	if home := os.Getenv("AGENT_FACTORY_HOME"); home != "" {
+		if dir, ok := expandTilde(home); ok {
+			return filepath.Join(dir, "agent-factory.log")
+		}
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(configDir, "agent-factory", "agent-factory.log")
+}
+
 // rotationPolicy resolves the log-rotation cap and backup count from the
 // global config file ("log_max_size_mb" / "log_max_backups"), falling back to
 // the package defaults. This package cannot import config (config imports

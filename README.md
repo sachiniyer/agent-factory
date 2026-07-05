@@ -167,7 +167,7 @@ Read and write the global config from the CLI: `af config list` / `af config get
 
 This repo is autonomously maintained by Captain Claude, an AI maintainer running on Claude Code; the operating contract lives in [CLAUDE.md](CLAUDE.md). Every open issue gets a response — a fix, specific questions, or a reasoned close — and merged work reaches the preview channel (`1.x.y-preview-z`) from `master` every 3 hours; stable releases (`1.x.y`) are cut manually (see [docs/release-process.md](docs/release-process.md)).
 
-When filing an issue, include: steps to reproduce, expected vs. actual behavior, `af version` output and your platform, and (when relevant) logs from the application log (see `docs/configuration.md` for path resolution).
+When filing an issue, include: steps to reproduce, expected vs. actual behavior, `af version` output and your platform, and (when relevant) logs from the application log (see `docs/configuration.md` for path resolution). The fastest way to gather all of that is `af bug-report`, which bundles the log tail, versions, tasks, redacted session state, and daemon health into a single `~/af-bug-report-<ts>.txt` you can attach — redaction is best-effort, so review the file before sharing it.
 
 ## License
 
