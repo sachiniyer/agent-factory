@@ -124,6 +124,58 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	}
 }
 
+// TestRedactInstancesFallbackRedactsOnDecodeFailure exercises the fail-safe
+// fallback: a legacy/corrupt record that fails the typed []InstanceData decode
+// (here `status` is a string, but the field is an int) must still be redacted —
+// MORE aggressively, not less. The prompt holds a proprietary phrase no secret
+// regex would catch, so only the structural key-redaction can remove it; the
+// path and arbitrary remote_meta are dropped wholesale too.
+func TestRedactInstancesFallbackRedactsOnDecodeFailure(t *testing.T) {
+	r := &redactor{home: "/home/alice", users: []string{"alice"}}
+	raw := json.RawMessage(`[{
+		"id": "leg-1",
+		"status": "legacy-string-status",
+		"prompt": "internal codename Bluebird migration runbook",
+		"command": "deploy --token ghp_LEGACYSECRET0123456789ABCDEF",
+		"path": "/home/alice/proprietary-project",
+		"remote_meta": {"weird_key": "arbitrarysecretvalue"}
+	}]`)
+
+	out := string(r.redactInstancesJSON(raw))
+
+	for _, leak := range []string{
+		"Bluebird",                         // proprietary free text — regex would miss it
+		"ghp_LEGACYSECRET0123456789ABCDEF", // secret under a sensitive key
+		"arbitrarysecretvalue",             // arbitrary metadata value
+		"proprietary-project",              // path dropped on the fallback
+	} {
+		if strings.Contains(out, leak) {
+			t.Errorf("fallback path leaked %q:\n%s", leak, out)
+		}
+	}
+	// Safe structural fields still survive.
+	if !strings.Contains(out, "leg-1") || !strings.Contains(out, "legacy-string-status") {
+		t.Errorf("fallback dropped safe structural fields:\n%s", out)
+	}
+	if !strings.Contains(out, redactedMarker) {
+		t.Errorf("expected redaction markers on the fallback path:\n%s", out)
+	}
+}
+
+// TestRedactInstancesInvalidJSONOmitted confirms that a payload which is not
+// even valid JSON surfaces nothing — the contents are omitted with a note.
+func TestRedactInstancesInvalidJSONOmitted(t *testing.T) {
+	r := &redactor{}
+	raw := json.RawMessage(`{not valid json at all sk-RAWSECRET0123456789ABCDEF`)
+	out := string(r.redactInstancesJSON(raw))
+	if strings.Contains(out, "sk-RAWSECRET0123456789ABCDEF") {
+		t.Errorf("invalid-JSON path leaked a secret:\n%s", out)
+	}
+	if !strings.Contains(out, "omitted for safety") {
+		t.Errorf("expected the omission note:\n%s", out)
+	}
+}
+
 // TestBuildEndToEnd plants a full temp home with a secret and a home path in
 // every collected surface (instances, tasks, config, log, daemon status) and
 // asserts the produced bundle scrubs them while keeping the structural fields.

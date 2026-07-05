@@ -110,27 +110,96 @@ func (r *redactor) scrub(s string) string {
 	return s
 }
 
-// redactInstancesJSON parses one repo's instances.json, applies the
-// structural field-redaction policy to every record, re-marshals, and scrubs
-// the result. The typed decode is intentional and fail-closed: any field the
-// current InstanceData does not know about is dropped rather than passed
-// through, so a future secret-bearing field cannot leak before the redactor is
-// taught about it. If the payload does not decode as []InstanceData (corrupt
-// or legacy shape), the raw text is scrubbed and returned so triage still gets
-// something without risking a structural leak.
+// unparsedInstancesNote is emitted (as a JSON string) when instances.json is
+// not even valid JSON, so nothing sensitive is surfaced from a payload we
+// cannot reason about at all.
+const unparsedInstancesNote = `"[instances.json could not be parsed; contents omitted for safety]"`
+
+// redactInstancesJSON parses one repo's instances.json, applies the structural
+// field-redaction policy to every record, re-marshals, and scrubs the result.
+// The typed decode is intentional and fail-closed: any field the current
+// InstanceData does not know about is dropped rather than passed through, so a
+// future secret-bearing field cannot leak before the redactor is taught about
+// it.
+//
+// When the payload does NOT decode as []InstanceData (a corrupt or legacy
+// shape — e.g. a field whose type has since changed), the typed field-level
+// policy can't apply, so we redact MORE, not less (fail-safe — this bundle is
+// shared publicly): a generic key-aware walk blanks every value under a
+// known-sensitive key (prompts, commands, tokens, paths, arbitrary metadata)
+// before the text scrub runs. If it is not even valid JSON, the contents are
+// omitted entirely with a note. The fallback is never raw-with-regex-only —
+// under-including beats leaking.
 func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 	var datas []session.InstanceData
-	if err := json.Unmarshal(raw, &datas); err != nil {
-		return json.RawMessage(r.scrub(string(raw)))
+	if err := json.Unmarshal(raw, &datas); err == nil {
+		for i := range datas {
+			redactInstanceData(&datas[i])
+		}
+		if out, marshalErr := json.MarshalIndent(datas, "", "  "); marshalErr == nil {
+			return json.RawMessage(r.scrub(string(out)))
+		}
 	}
-	for i := range datas {
-		redactInstanceData(&datas[i])
+
+	// Fallback: unknown/corrupt shape. Blank sensitive keys generically, then
+	// scrub. Omit entirely if the payload is not valid JSON.
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return json.RawMessage(unparsedInstancesNote)
 	}
-	out, err := json.MarshalIndent(datas, "", "  ")
+	out, err := json.MarshalIndent(redactUnknownJSON(generic), "", "  ")
 	if err != nil {
-		return json.RawMessage(r.scrub(string(raw)))
+		return json.RawMessage(unparsedInstancesNote)
 	}
 	return json.RawMessage(r.scrub(string(out)))
+}
+
+// sensitiveJSONKeys are object keys whose values are dropped wholesale on the
+// generic fallback path, where the typed field-level policy cannot apply. It is
+// deliberately broad and fail-safe: on a shape we could not parse, a key that
+// *might* hold free text, a secret, a path, or arbitrary metadata is redacted
+// rather than trusted. Structural keys (id, status, program, timestamps, git
+// SHAs, counts, flags) are absent here and so survive the walk (then get the
+// text scrub for any residual $HOME/username/credential).
+var sensitiveJSONKeys = map[string]bool{
+	"title": true, "prompt": true, "prompts": true,
+	"command": true, "cmd": true, "commands": true,
+	"args": true, "argv": true, "arg": true,
+	"env": true, "environment": true,
+	"token": true, "tokens": true, "secret": true, "secrets": true,
+	"password": true, "passwd": true, "pwd": true,
+	"credential": true, "credentials": true,
+	"api_key": true, "apikey": true, "key": true, "keys": true,
+	"auth": true, "authorization": true, "bearer": true,
+	"private_key": true, "url": true,
+	"path": true, "home": true, "repo_path": true, "worktree_path": true,
+	"remote_meta": true,
+}
+
+// redactUnknownJSON recursively rebuilds a decoded JSON value, blanking any
+// value whose object key is in sensitiveJSONKeys and recursing everywhere else.
+// Non-container leaves are returned unchanged (the caller text-scrubs them).
+func redactUnknownJSON(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			if sensitiveJSONKeys[strings.ToLower(k)] {
+				out[k] = redactedMarker
+				continue
+			}
+			out[k] = redactUnknownJSON(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = redactUnknownJSON(e)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // redactInstanceData blanks the free-text and arbitrary-payload fields of a
