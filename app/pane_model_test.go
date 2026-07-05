@@ -536,10 +536,13 @@ func TestPane_FollowsSameTitleSwap(t *testing.T) {
 		"open-pane bindings must follow a same-title swap (#765 class)")
 }
 
-// TestPane_EnterAttachesFocusedPane: Enter attaches the FOCUSED pane's
-// binding — a pane's (instance, tab) when a pane has focus, the tree
-// selection everywhere else — and detach hands back focus + panes intact.
-func TestPane_EnterAttachesFocusedPane(t *testing.T) {
+// TestPane_EnterAttachesSelectionNotFocusedPane: keyboard Enter resolves its
+// target from the SIDEBAR SELECTION — like the open verb — never the focus ring
+// (#1233). With a non-embeddable selection it falls back to the full-screen
+// attach of that selection, whether the ring sits on a pane or the tree; detach
+// hands back focus + panes intact. (The mouse click-to-interact path, which
+// enters the CLICKED pane, is covered by the mouse suite via enterPane.)
+func TestPane_EnterAttachesSelectionNotFocusedPane(t *testing.T) {
 	resetDetachWatchdog(t)
 	h := paneTestHome(t)
 	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInstanceAttach{}.mask()))
@@ -547,13 +550,14 @@ func TestPane_EnterAttachesFocusedPane(t *testing.T) {
 	// Open alpha's pane, then drive the tree selection to beta.
 	pressKey(t, h, "s")
 	p := h.store.OpenPanes()[0]
+	require.Equal(t, "alpha", p.Instance().Title)
 	h.sidebar.SetSelectedInstance(1)
 	_ = h.selectionChanged()
 	require.Equal(t, "beta", h.store.GetSelectedInstance().Title)
 
-	var attachedLabel string
+	var attachedLabel, attachedTitle string
 	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
-		attachedLabel = label
+		attachedLabel, attachedTitle = label, title
 		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
 			ch := make(chan struct{})
 			close(ch) // detach immediately — no real PTY
@@ -561,13 +565,15 @@ func TestPane_EnterAttachesFocusedPane(t *testing.T) {
 		})
 	})
 
-	// Focus the pane: Enter must take the pane attach path (alpha, not the
-	// beta selection).
+	// Focus alpha's pane: Enter must STILL attach the selection (beta), never
+	// the focused alpha pane — the wrong-target class the #1233 fix closed.
 	h.focusRegion(layout.PaneRegion(p.ID()))
 	_, cmd := h.handleEnter()
-	require.NotNil(t, cmd, "the pane attach must run")
-	assert.Equal(t, "handleEnter-pane", attachedLabel,
-		"Enter with a pane focused attaches that pane's binding")
+	require.NotNil(t, cmd, "the selection attach must run")
+	assert.Equal(t, "handleEnter-sidebar", attachedLabel,
+		"Enter resolves the selection, not the focused pane (#1233)")
+	assert.Equal(t, "beta", attachedTitle,
+		"Enter must target the selected beta, not the focused alpha pane")
 	endDetachWatchdog()
 
 	// Detach restored everything: focus still on the pane, binding intact.
@@ -575,13 +581,28 @@ func TestPane_EnterAttachesFocusedPane(t *testing.T) {
 	assert.Equal(t, 1, h.store.NumOpenPanes(), "detach keeps the pane open")
 	assert.Equal(t, "alpha", h.store.OpenPanes()[0].Instance().Title)
 
-	// Focus the tree: Enter attaches the selection, as before.
+	// Focus the tree: Enter attaches the same selection.
 	h.focusRegion(layout.RegionTree)
 	_, cmd = h.handleEnter()
 	require.NotNil(t, cmd)
-	assert.Equal(t, "handleEnter-sidebar", attachedLabel,
-		"Enter with tree focus attaches the selection, as before the pane model")
+	assert.Equal(t, "handleEnter-sidebar", attachedLabel)
+	assert.Equal(t, "beta", attachedTitle)
 	endDetachWatchdog()
+}
+
+// TestPane_TreeNavFromPaneRefocusesTree: a tree-navigation key pressed while a
+// pane holds the focus ring re-homes the ring on the tree, so the ring-reading
+// attach verb `o` resolves the freshly selected instance rather than the stale
+// focused pane (#1233 adjacent-audit fix; focusTreeForNav).
+func TestPane_TreeNavFromPaneRefocusesTree(t *testing.T) {
+	h := paneTestHome(t)
+	pressKey(t, h, "s") // open alpha's pane and focus it
+	p := h.store.OpenPanes()[0]
+	require.Equal(t, layout.PaneRegion(p.ID()), h.ring.Active(), "the opened pane holds focus")
+
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyDown}, keys.KeyDown)
+	assert.Equal(t, layout.RegionTree, h.ring.Active(),
+		"tree navigation must return focus to the tree so o/attach resolves the selection")
 }
 
 // TestPane_HideMiddleFocusesSuccessor: hiding a middle pane lands focus on

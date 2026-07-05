@@ -203,6 +203,49 @@ func (m *home) reconcilePanesForTabs(instance *session.Instance, oldNames []stri
 	return changed
 }
 
+// focusTreeForNav returns the focus ring to the tree when a tree-navigation
+// key (Up/Down, section jumps, collapse/expand) is pressed while a pane holds
+// focus. Those keys move the SIDEBAR cursor regardless of which region the ring
+// points at, so leaving the ring on a stale pane desyncs the two: the
+// full-screen attach verb `o` (handleAttach) reads the focus ring first and
+// would keep attaching the previously-focused pane's instance instead of the
+// just-selected one — the same wrong-target class as the #1233 Enter bug (Enter
+// itself now resolves purely from the selection, see handleEnter). After Ctrl-]
+// leaves interactive mode the ring stays on instance A's pane, so without this
+// a user who navigates to instance B and presses `o` would attach A. Re-homing
+// the ring on the tree makes `o` resolve the current selection fresh. No-op
+// unless a pane is focused, so it never churns the tree/automations ring or the
+// live attachment (which persists on its still-visible pane).
+func (m *home) focusTreeForNav() {
+	if layout.IsPaneRegion(m.ring.Active()) {
+		m.focusRegion(layout.RegionTree)
+	}
+}
+
+// enterPane enters interactive mode on a SPECIFIC pane — the mouse
+// click-to-interact target (§2.5). Keyboard Enter (handleEnter) resolves the
+// SIDEBAR SELECTION so it can never type into a stale focused pane (#1233); a
+// body click, by contrast, has already named its exact pane, so it enters that
+// one directly. Remote/non-embeddable panes fall back to the full-screen attach
+// of the pane's tab, mirroring handleEnter's remote branch; guard errors
+// surface the same way.
+func (m *home) enterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
+	if p == nil {
+		return m, nil
+	}
+	if instErr := interactiveGuard(p.Instance()); instErr != nil {
+		return m, m.handleError(instErr)
+	}
+	if p.Instance() == nil || p.Instance().IsCreating() {
+		return m, nil
+	}
+	if liveSessionName(p.Instance(), p.Tab()) == "" {
+		// Not embeddable (remote): the full-screen attach of this pane's tab.
+		return m.handleEnterPane(p)
+	}
+	return m.requestInteractive(p)
+}
+
 // handleEnterPane attaches the focused pane's (instance, tab) full-screen:
 // the Enter half of "attach the FOCUSED pane". It mirrors the tree path in
 // handleEnter guard for guard — Loading/Deleting fences, the #935 dead-tmux
