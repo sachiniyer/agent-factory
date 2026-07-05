@@ -201,6 +201,14 @@ func RunDaemon(cfg *config.Config) error {
 			// root title). Backoff-throttled per session, like root-ensure.
 			manager.RestoreLostSessions()
 
+			// Opt-in auto-resume of usage-limit-blocked sessions (#1146 PR3):
+			// re-prompt a LiveLimitReached row once its limit window elapsed. A
+			// no-op unless limit_auto_resume is set, so a default install keeps
+			// a limit surface-only. Runs after RestoreLostSessions because a
+			// session must be settled onto its liveness first; it borrows the
+			// same per-session op-lock discipline.
+			manager.ResumeLimitedSessions()
+
 			// Handle stop before ticker.
 			select {
 			case <-stopCh:
@@ -400,6 +408,18 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 func daemonInstanceKey(repoID, title string) string {
 	return repoID + "\x00" + title
+}
+
+// splitDaemonInstanceKey is the inverse of daemonInstanceKey: it splits a
+// "<repoID>\x00<title>" key back into (repoID, title). A key with no NUL
+// separator (unexpected) is returned as ("", key).
+func splitDaemonInstanceKey(key string) (string, string) {
+	for i := 0; i < len(key); i++ {
+		if key[i] == 0 {
+			return key[:i], key[i+1:]
+		}
+	}
+	return "", key
 }
 
 func daemonInstances(instanceMap map[string]*session.Instance) []*session.Instance {

@@ -22,6 +22,8 @@ detach_keys = "ctrl-w"
 log_max_size_mb = 50
 log_max_backups = 2
 update_channel = "stable"
+limit_auto_resume = false
+limit_retry_interval = "30m"
 
 [program_overrides]
 claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
@@ -39,6 +41,8 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | `log_max_backups` | How many rotated logs (`agent-factory.log.1`, `.2`, ...) to keep per log file; older ones are deleted (defaults to 2). `0` keeps none. |
 | `update_channel` | Release channel that auto-update and `af upgrade` follow: `stable` (default) tracks manual `1.x.y` releases only; `preview` opts into the automatic `1.x.y-preview-z` prereleases cut every 3 hours. Any other value falls back to `stable` with a warning. See [release-process.md](release-process.md). |
 | `root_agents` | Opt-in table of repositories that get an always-ensured `root` agent (default: none). See [Root agents](#root-agents-always-ensured). |
+| `limit_auto_resume` | Opt in to the daemon auto-resuming a session parked at a usage-limit wall once its limit window elapses (default: `false`). See [Usage-limit auto-resume](#usage-limit-auto-resume). |
+| `limit_retry_interval` | Fallback retry cadence (Go duration, e.g. `30m`) used only when `limit_auto_resume` is on **and** the limit banner carried no parseable reset time (default: `30m`). Empty or `0` disables the fallback. |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
 ### Root agents (always-ensured)
@@ -68,6 +72,25 @@ Behavior and guarantees:
 - Changes to `root_agents` are picked up on the next **daemon restart**.
 
 Because the default profile skips permission prompts and auto-accepts, only opt in repositories where you are comfortable with a fully autonomous agent running at the repo root.
+
+### Usage-limit auto-resume
+
+When a `claude` or `codex` session hits a plan usage-limit wall, af marks it with a `[limit]` badge in the sidebar and — when the banner states a reset time — shows when the limit resets. By default the row stays there until you resume it yourself (the `c` key on the session).
+
+`limit_auto_resume = true` opts the **daemon** into resuming such a session on its own once the limit window has elapsed:
+
+```toml
+limit_auto_resume = true
+limit_retry_interval = "30m"
+```
+
+- **Off by default.** With `limit_auto_resume = false` (the default), a limit is surface-only — the badge and the manual `c` retry — and the daemon does no scheduling.
+- **When it resumes.** If the banner carried a parseable reset time, the daemon resumes shortly after that time (a small grace buffer is added because limit windows are rolling and approximate). A reset time already in the past resumes promptly.
+- **No parseable reset time.** Some banners don't state a reset time. In that case the daemon falls back to retrying on the fixed `limit_retry_interval` cadence (a Go duration such as `30m` or `1h`). Setting `limit_retry_interval` to empty or `0` leaves such a session surface-only.
+- **Re-limit backoff.** If a resumed session immediately hits the wall again, the daemon backs off exponentially (settling at one attempt every 5 minutes) rather than hammering a genuinely exhausted plan. Killing the session is always the off-ramp.
+- **Global-only, daemon behavior.** Both keys are rejected in in-repo configs and take effect on the next daemon restart.
+
+Resuming re-delivers the session's stored task prompt (task-driven sessions resume their work); an interactive session with no stored prompt is sent a bare `continue`, which loses the agent's prior in-context state.
 
 ### Key bindings (`[keys]`)
 
@@ -126,7 +149,7 @@ terminal_cmd = "./infra/terminal.sh"
 |-------|-------|
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
-| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `root_agents` | Global only. Setting them in-repo is rejected with an error naming the key. |
+| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `root_agents`, `limit_auto_resume`, `limit_retry_interval` | Global only. Setting them in-repo is rejected with an error naming the key. |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `H` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 

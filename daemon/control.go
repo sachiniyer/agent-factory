@@ -1324,6 +1324,10 @@ type Manager struct {
 	// restore loop (#1108 PR 2), keyed by daemon instance key — the general
 	// sibling of rootEnsureStates.
 	lostRestoreStates map[string]*lostRestoreState
+	// limitResumeStates tracks per-session retry state for the usage-limit
+	// auto-resume scheduler (#1146 PR3), keyed by daemon instance key — the
+	// opt-in sibling of lostRestoreStates. Guarded by m.mu.
+	limitResumeStates map[string]*limitResumeState
 	// instanceOpLocks serializes the mutually-exclusive per-session
 	// operations — kill teardown and Lost-recovery — by daemon instance key.
 	// killsInFlight alone is a point-in-time signal; this lock is what makes
@@ -1387,6 +1391,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		rootKilledByUser:    make(map[string]struct{}),
 		killsInFlight:       make(map[string]struct{}),
 		lostRestoreStates:   make(map[string]*lostRestoreState),
+		limitResumeStates:   make(map[string]*limitResumeState),
 		instanceOpLocks:     make(map[string]*sync.Mutex),
 		pausedPolls:         make(map[string]time.Time),
 	}, nil
@@ -2753,13 +2758,4 @@ func ghostCleanup(data *session.InstanceData, title string) {
 		}
 	}
 	ghostCleanupWorktree(data, title)
-}
-
-func splitDaemonInstanceKey(key string) (string, string) {
-	for i := 0; i < len(key); i++ {
-		if key[i] == 0 {
-			return key[:i], key[i+1:]
-		}
-	}
-	return "", key
 }

@@ -92,12 +92,14 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	"detach_keys":          true,
 	// The [keys] keymap is a user/host preference: a cloned repo must never
 	// be able to rebind someone's terminal (#1026).
-	"keys":            true,
-	"log_max_backups": true,
-	"log_max_size_mb": true,
-	"root_agents":     true,
-	"update_channel":  true,
-	"worktree_root":   true,
+	"keys":                 true,
+	"limit_auto_resume":    true,
+	"limit_retry_interval": true,
+	"log_max_backups":      true,
+	"log_max_size_mb":      true,
+	"root_agents":          true,
+	"update_channel":       true,
+	"worktree_root":        true,
 }
 
 // tomlOnlyGlobalKeys is the subset of inRepoGlobalOnlyKeys that exists only in

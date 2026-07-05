@@ -172,6 +172,23 @@ type Config struct {
 	// without a release. Empty keeps every built-in default. See
 	// sanitizeLimitPatterns in limit_patterns.go for validation and semantics.
 	LimitPatterns map[string]string `json:"limit_patterns,omitempty" toml:"limit_patterns,omitempty"`
+	// LimitAutoResume opts a machine into the daemon's usage-limit auto-resume
+	// scheduler (#1146 PR3): when true, the daemon re-prompts a session parked at
+	// a usage-limit wall on its own once the limit window has elapsed (its parsed
+	// reset time + a grace buffer, or limit_retry_interval when the banner carried
+	// no parseable reset time). DEFAULT FALSE — opt-in for the first release. When
+	// false a limit is surface-only (the sidebar [limit] badge and the manual `c`
+	// retry from PR2) and the scheduler does zero work. Deliberately GLOBAL-ONLY
+	// (it configures daemon behavior), like auto_yes / daemon_poll_interval.
+	LimitAutoResume bool `json:"limit_auto_resume" toml:"limit_auto_resume"`
+	// LimitRetryInterval is the fixed fallback cadence the auto-resume scheduler
+	// uses ONLY when a usage-limit banner carried no parseable reset time (#1146
+	// PR3): a Go duration string ("30m", "1h"). Empty or a non-positive duration
+	// disables the fallback, leaving a no-reset-time limit surface-only even with
+	// limit_auto_resume on. Ignored when limit_auto_resume is false, or when a
+	// reset time WAS parsed (that schedules against the reset time + grace).
+	// Global-only, like limit_auto_resume. See LimitRetryIntervalDuration.
+	LimitRetryInterval string `json:"limit_retry_interval" toml:"limit_retry_interval"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
 	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —
@@ -284,6 +301,8 @@ func DefaultConfig() *Config {
 		DefaultProgram:     defaultProgram,
 		AutoYes:            false,
 		DaemonPollInterval: defaultDaemonPollInterval,
+		LimitAutoResume:    false,
+		LimitRetryInterval: defaultLimitRetryInterval,
 		LogMaxSizeMB:       log.DefaultMaxSizeMB,
 		LogMaxBackups:      log.DefaultMaxBackups,
 		UpdateChannel:      UpdateChannelStable,
@@ -998,6 +1017,7 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	}
 
 	sanitizeLimitPatterns(config)
+	config.LimitRetryInterval = sanitizeLimitRetryInterval(config.LimitRetryInterval, prettyConfigPath)
 
 	if config.DaemonPollInterval <= 0 {
 		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)
