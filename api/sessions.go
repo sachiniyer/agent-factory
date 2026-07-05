@@ -506,6 +506,21 @@ var (
 	tabCreateNameFlag    string
 )
 
+// bindTabCreateFlags registers the tab-create flags on c, bound to the shared
+// globals. Called for both the hyphen verb and the tabs-create alias (#1192).
+func bindTabCreateFlags(c *cobra.Command) {
+	c.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in the new tab (required)")
+	c.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name (defaults to the command basename; auto-suffixed on collision)")
+	c.MarkFlagRequired("command")
+}
+
+// bindTabDeleteFlags registers the tab-delete flag on c, bound to the shared
+// global. Called for both the hyphen verb and the tabs-delete alias (#1192).
+func bindTabDeleteFlags(c *cobra.Command) {
+	c.Flags().StringVar(&tabDeleteNameFlag, "name", "", "Name of the tab to delete (required)")
+	c.MarkFlagRequired("name")
+}
+
 var sessionsTabCreateCmd = &cobra.Command{
 	Use:   "tab-create <title>",
 	Short: "Spawn a process tab running a command in a session's worktree",
@@ -520,34 +535,40 @@ sessions: they have no local worktree and the hook protocol can't run arbitrary
 commands — a remote session's only terminal tab comes from
 remote_hooks.terminal_cmd.`,
 	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
+	RunE: runTabCreate,
+}
 
-		if strings.TrimSpace(tabCreateCommandFlag) == "" {
-			return jsonError(fmt.Errorf("--command is required"))
-		}
+// runTabCreate is the shared RunE body behind both the legacy hyphen verb
+// (sessions tab-create) and the noun-subcommand alias (sessions tabs create),
+// so the two stay byte-identical (#1192). External users script the hyphen
+// verb, so it stays first-class — the alias is purely additive.
+func runTabCreate(cmd *cobra.Command, args []string) error {
+	log.Initialize(false)
+	defer log.Close()
 
-		// Honor --repo scoping (#891, same class as kill/send-prompt/attach). An
-		// empty repoID preserves the all-repo search; a non-empty one confines the
-		// session lookup to that repo so a same-titled session in another repo
-		// never receives the tab.
-		repoID, err := resolveRepoID()
-		if err != nil {
-			return jsonError(err)
-		}
+	if strings.TrimSpace(tabCreateCommandFlag) == "" {
+		return jsonError(fmt.Errorf("--command is required"))
+	}
 
-		name, err := createTabViaDaemon(daemon.CreateTabRequest{
-			Title:   args[0],
-			RepoID:  repoID,
-			Command: tabCreateCommandFlag,
-			Name:    tabCreateNameFlag,
-		})
-		if err != nil {
-			return jsonError(err)
-		}
-		return jsonOut(map[string]string{"name": name})
-	},
+	// Honor --repo scoping (#891, same class as kill/send-prompt/attach). An
+	// empty repoID preserves the all-repo search; a non-empty one confines the
+	// session lookup to that repo so a same-titled session in another repo
+	// never receives the tab.
+	repoID, err := resolveRepoID()
+	if err != nil {
+		return jsonError(err)
+	}
+
+	name, err := createTabViaDaemon(daemon.CreateTabRequest{
+		Title:   args[0],
+		RepoID:  repoID,
+		Command: tabCreateCommandFlag,
+		Name:    tabCreateNameFlag,
+	})
+	if err != nil {
+		return jsonError(err)
+	}
+	return jsonOut(map[string]string{"name": name})
 }
 
 var tabDeleteNameFlag string
@@ -567,33 +588,67 @@ session. Deleting a tab or session that doesn't exist is an error, not a
 silent success. Not available for remote sessions: their tabs are fixed by
 remote_hooks config.`,
 	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
+	RunE: runTabDelete,
+}
 
-		if strings.TrimSpace(tabDeleteNameFlag) == "" {
-			return jsonError(fmt.Errorf("--name is required"))
-		}
+// runTabDelete is the shared RunE body behind both sessions tab-delete and the
+// sessions tabs delete alias (#1192); see runTabCreate.
+func runTabDelete(cmd *cobra.Command, args []string) error {
+	log.Initialize(false)
+	defer log.Close()
 
-		// Honor --repo scoping (#891 class), mirroring tab-create: an empty
-		// repoID preserves the all-repo search; a non-empty one confines the
-		// session lookup to that repo so a same-titled session in another repo
-		// never loses a tab.
-		repoID, err := resolveRepoID()
-		if err != nil {
-			return jsonError(err)
-		}
+	if strings.TrimSpace(tabDeleteNameFlag) == "" {
+		return jsonError(fmt.Errorf("--name is required"))
+	}
 
-		name, err := closeTabViaDaemon(daemon.CloseTabRequest{
-			Title:   args[0],
-			RepoID:  repoID,
-			TabName: tabDeleteNameFlag,
-		})
-		if err != nil {
-			return jsonError(err)
-		}
-		return jsonOut(map[string]string{"name": name})
-	},
+	// Honor --repo scoping (#891 class), mirroring tab-create: an empty
+	// repoID preserves the all-repo search; a non-empty one confines the
+	// session lookup to that repo so a same-titled session in another repo
+	// never loses a tab.
+	repoID, err := resolveRepoID()
+	if err != nil {
+		return jsonError(err)
+	}
+
+	name, err := closeTabViaDaemon(daemon.CloseTabRequest{
+		Title:   args[0],
+		RepoID:  repoID,
+		TabName: tabDeleteNameFlag,
+	})
+	if err != nil {
+		return jsonError(err)
+	}
+	return jsonOut(map[string]string{"name": name})
+}
+
+// The sessions tabs {create,delete} group gives a noun-subcommand spelling of
+// the tab-create/tab-delete verbs (#1192). Both spellings share the same RunE
+// and flag globals; the hyphen verbs are kept for the scripts that already use
+// them. tab-list has no equivalent — tabs are listed via `sessions get`.
+var sessionsTabsCmd = &cobra.Command{
+	Use:   "tabs",
+	Short: "Manage a session's process tabs (create/delete)",
+	Long: `Noun-subcommand aliases for the tab-create/tab-delete verbs.
+
+"sessions tabs create" is identical to "sessions tab-create" and "sessions tabs
+delete" is identical to "sessions tab-delete"; the hyphen verbs remain supported
+for existing scripts. To list a session's tabs, use "sessions get <title>".`,
+}
+
+var sessionsTabsCreateCmd = &cobra.Command{
+	Use:   "create <title>",
+	Short: "Spawn a process tab running a command in a session's worktree",
+	Long:  `Alias for "sessions tab-create". See "af sessions tab-create --help" for details.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTabCreate,
+}
+
+var sessionsTabsDeleteCmd = &cobra.Command{
+	Use:   "delete <title>",
+	Short: "Delete a single tab from a session",
+	Long:  `Alias for "sessions tab-delete". See "af sessions tab-delete --help" for details.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTabDelete,
 }
 
 var sessionsPreviewCmd = &cobra.Command{

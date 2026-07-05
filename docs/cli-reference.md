@@ -174,6 +174,13 @@ The removal is persistent (the daemon won't respawn it). The agent tab can't be
 deleted — use `kill` to tear down the whole session. Not available for remote
 sessions.
 
+### `af sessions tabs {create,delete}`
+
+Noun-subcommand aliases for the two verbs above: `af sessions tabs create` is
+identical to `af sessions tab-create`, and `af sessions tabs delete` is identical
+to `af sessions tab-delete` (same flags, same output). The hyphen verbs remain
+supported — nothing is renamed. To list a session's tabs, use `af sessions get`.
+
 ### `af sessions preview <title>`
 
 Snapshot the session's terminal pane. Emits `{"title": "<title>", "content":
@@ -347,7 +354,44 @@ exists; installing an autostart unit keeps schedules firing after reboots. See
 ```bash
 af daemon install      # register autostart at login (systemd user unit / launchd agent)
 af daemon uninstall    # remove the autostart unit (the daemon still starts on demand)
+af daemon status       # read-only health snapshot (see below); add --json for the envelope
 ```
+
+### `af daemon status`
+
+Print a read-only snapshot of the daemon: whether it is responding on the
+control socket, the control and HTTP socket paths (and whether their files are
+present), the recorded pid and whether it is a verified `af` daemon, whether the
+autostart unit is installed, and whether a running daemon is on a since-replaced
+binary. It uses the same no-spawn health probe as `af doctor`, so it never
+contacts a paused daemon in a way that starts one. `--json` emits
+`{running, control_socket, control_socket_file, http_socket, http_socket_file,
+pid, pid_verified, autostart_unit, binary_stale}` in the shared envelope.
+
+---
+
+## `af config`
+
+Read keys from the **global** config (`~/.agent-factory/config.toml`) so scripts
+and agents can discover the current settings without hand-parsing TOML.
+**Read-only** (config is file-owned, hand-edited; there is no daemon RPC for it),
+and it reports the effective global values with defaults applied — i.e. what a
+session sees before any in-repo `.agent-factory/config.toml` override is layered
+on. **Text output**, or `--json` for the shared envelope.
+
+```bash
+af config list                     # every key and its effective value
+af config get default_program      # one key; scalars print bare (script-friendly)
+af config get program_overrides    # composite values print as JSON
+af config list --json              # [{key, value}, …] wrapped in the envelope
+```
+
+Known keys: `default_program`, `program_overrides`, `auto_yes`,
+`daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`,
+`detach_keys`, `update_channel`, `root_agents`, `limit_patterns`, `keys`. To
+change a value, edit `config.toml` directly — see
+[configuration.md](configuration.md). A CLI write path (`config set`) is tracked
+in [#1192](https://github.com/sachiniyer/agent-factory/issues/1192).
 
 ---
 

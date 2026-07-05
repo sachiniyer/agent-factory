@@ -142,7 +142,7 @@ default_program = "claude"
 claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 ```
 
-Upgrading from a `config.json`? The move to TOML is automatic — `af` converts it on first run and keeps a `config.json.bak`. See [docs/configuration.md](docs/configuration.md) for every key, the migration, the precedence rules, and where state is stored.
+Read the effective global config from the CLI with `af config list` (or `af config get <key>`) — handy for scripts and agents; editing values is still done in the file. Upgrading from a `config.json`? The move to TOML is automatic — `af` converts it on first run and keeps a `config.json.bak`. See [docs/configuration.md](docs/configuration.md) for every key, the migration, the precedence rules, and where state is stored.
 
 ## Documentation
 
