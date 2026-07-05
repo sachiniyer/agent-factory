@@ -1519,23 +1519,23 @@ func (m *home) clampSelectionTab() {
 // latch is set the workspace is entirely verb-driven: hiding every pane
 // leaves it empty until `s` opens one.
 //
-// A nil selected falls back to the first sidebar instance: launch never
-// auto-selects a row (the cursor rests on the Instances header — launch
-// selection parity, #1024 PR 2), so a cold start with restored sessions has
-// no selection to auto-open from. The fallback opens the first instance's
-// pane without touching the selection, and because selectionChanged re-enters
-// on every preview tick, it also re-fires once a restored instance leaves a
-// transient status (#1099 play-test).
+// A nil selected falls back to the first NON-reserved sidebar instance
+// (firstAutoOpenCandidate): launch never auto-selects a row (the cursor rests
+// on the Instances header — #1024 PR 2), so a cold start with restored sessions
+// has no selection to auto-open from. Preferring a non-reserved row keeps root
+// from being front-and-center after every relaunch (#1238). The fallback opens
+// the pane without touching the selection, and because selectionChanged
+// re-enters on every preview tick, it also re-fires once a restored instance
+// leaves a transient status (#1099 play-test).
 func (m *home) maybeAutoOpenInitialPane(selected *session.Instance) {
 	if m.initialPaneOpened || m.store.NumOpenPanes() > 0 {
 		return
 	}
 	if selected == nil {
-		instances := m.store.GetInstances()
-		if len(instances) == 0 {
+		selected = firstAutoOpenCandidate(m.store.GetInstances())
+		if selected == nil {
 			return
 		}
-		selected = instances[0]
 	}
 	if selected.HasInFlightOp() {
 		return
