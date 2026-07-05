@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
@@ -103,15 +106,15 @@ func formatConfigValue(v any) string {
 
 var configCmd = &cobra.Command{
 	Use:   "config",
-	Short: "Read the global agent-factory config",
-	Long: `Read keys from the global config (~/.agent-factory/config.toml).
+	Short: "Read and write the global agent-factory config",
+	Long: `Read and write keys in the global config (~/.agent-factory/config.toml).
 
-Values are the effective global config with defaults applied — what a session
-gets before any in-repo .agent-factory/config.toml override is layered on.
-
-This command is read-only. To change a value, edit config.toml directly (it is
-plain TOML, made for hand-editing); a CLI write path (config set) is tracked in
-#1192.`,
+"get"/"list" print the effective global config with defaults applied — what a
+session gets before any in-repo .agent-factory/config.toml override is layered
+on. "set" writes a single settable key, editing only that value in place so all
+comments and ordering in your config.toml are preserved. Changes apply the same
+way a hand-edit does: af and the daemon read config.toml at startup, so restart
+them to pick up a change.`,
 }
 
 var configGetCmd = &cobra.Command{
@@ -167,10 +170,72 @@ var configListCmd = &cobra.Command{
 	},
 }
 
+var configSetCmd = &cobra.Command{
+	Use:   "set <key> <value>",
+	Short: "Set a single settable global config key",
+	Long: `Write one key into the global config.toml, editing only that value in place —
+every comment, blank line, section header, and key ordering is preserved (the
+file is not regenerated). Only a curated set of scalar keys is settable; the
+value is validated with the same rules the config loader uses before anything is
+written, so set can never leave a config that fails to load.
+
+Settable keys:
+  default_program            agent enum (claude, codex, aider, gemini)
+  program_overrides.<agent>  full command string for an agent
+  auto_yes                   true | false
+  daemon_poll_interval       positive integer (ms)
+  log_max_size_mb            positive integer
+  log_max_backups            non-negative integer
+  branch_prefix              string
+  detach_keys                string (e.g. ctrl-w)
+  update_channel             stable | preview
+  limit_patterns.<agent>     usage-limit banner regex for an agent
+
+Structural keys (root_agents, the [keys] rebind table) are not settable here —
+edit config.toml directly. Changes apply on the next af / daemon start.
+
+Examples:
+  af config set default_program codex
+  af config set auto_yes true
+  af config set program_overrides.claude "/usr/local/bin/claude --verbose"`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		res, err := config.SetGlobalConfigValue(args[0], args[1])
+		if err != nil {
+			return jsonWrapError(cmd.ErrOrStderr(), configJSONFlag, err)
+		}
+		if configJSONFlag {
+			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s in %s\n", res.Key, res.Value, prettyPath(res.Path))
+		if res.RequiresRestart {
+			fmt.Fprintln(cmd.OutOrStdout(),
+				"note: af and the daemon read config.toml at startup — restart them to apply (same as a hand-edit)")
+		}
+		return nil
+	},
+}
+
+// prettyPath abbreviates $HOME to ~ for display, matching how the config
+// package renders paths in diagnostics.
+func prettyPath(p string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if rel, err := filepath.Rel(home, p); err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.Join("~", rel)
+		}
+	}
+	return p
+}
+
 func init() {
 	const jsonUsage = "Emit the value(s) as JSON wrapped in the {data,error} envelope"
 	configGetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
 	configListCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
+	configSetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
 	configCmd.AddCommand(configGetCmd)
 	configCmd.AddCommand(configListCmd)
+	configCmd.AddCommand(configSetCmd)
 }

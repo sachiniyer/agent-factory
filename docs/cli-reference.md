@@ -372,12 +372,15 @@ pid, pid_verified, autostart_unit, binary_stale}` in the shared envelope.
 
 ## `af config`
 
-Read keys from the **global** config (`~/.agent-factory/config.toml`) so scripts
-and agents can discover the current settings without hand-parsing TOML.
-**Read-only** (config is file-owned, hand-edited; there is no daemon RPC for it),
-and it reports the effective global values with defaults applied — i.e. what a
-session sees before any in-repo `.agent-factory/config.toml` override is layered
-on. **Text output**, or `--json` for the shared envelope.
+Read and write keys in the **global** config (`~/.agent-factory/config.toml`) so
+scripts and agents can discover and change settings without hand-parsing TOML.
+Config is **file-owned** (hand-editable; read by the daemon and TUI at startup —
+there is no daemon RPC for it). **Text output**, or `--json` for the shared
+envelope on both success and error.
+
+`get`/`list` report the effective global values with defaults applied — i.e.
+what a session sees before any in-repo `.agent-factory/config.toml` override is
+layered on:
 
 ```bash
 af config list                     # every key and its effective value
@@ -386,12 +389,49 @@ af config get program_overrides    # composite values print as JSON
 af config list --json              # [{key, value}, …] wrapped in the envelope
 ```
 
-Known keys: `default_program`, `program_overrides`, `auto_yes`,
+Readable keys: `default_program`, `program_overrides`, `auto_yes`,
 `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`,
-`detach_keys`, `update_channel`, `root_agents`, `limit_patterns`, `keys`. To
-change a value, edit `config.toml` directly — see
-[configuration.md](configuration.md). A CLI write path (`config set`) is tracked
-in [#1192](https://github.com/sachiniyer/agent-factory/issues/1192).
+`detach_keys`, `update_channel`, `root_agents`, `limit_patterns`, `keys`.
+
+### `af config set <key> <value>`
+
+Write a single settable key. The value is edited **in place** — every comment,
+blank line, section header, and key ordering in your `config.toml` is preserved
+(the file is *not* regenerated from the parsed struct, which would strip
+comments). The value is validated with the **same rules the loader uses** before
+anything is written, and the edited file is re-parsed as a final gate, so `set`
+can never leave a config that fails to load.
+
+```bash
+af config set default_program codex
+af config set auto_yes true
+af config set program_overrides.claude "/usr/local/bin/claude --verbose"
+af config set update_channel preview
+af config set default_program bad --json   # failure envelope on stderr, exit 1
+```
+
+Settable keys (curated scalars + the two simple string maps):
+
+| Key | Value |
+|-----|-------|
+| `default_program` | agent enum: `claude`, `codex`, `aider`, `gemini` |
+| `program_overrides.<agent>` | full command string for an agent |
+| `auto_yes` | `true` / `false` |
+| `daemon_poll_interval` | positive integer (ms) |
+| `log_max_size_mb` | positive integer |
+| `log_max_backups` | non-negative integer |
+| `branch_prefix` | string |
+| `detach_keys` | string (e.g. `ctrl-w`) |
+| `update_channel` | `stable` / `preview` |
+| `limit_patterns.<agent>` | usage-limit banner regex for an agent |
+
+Structural keys (`root_agents`, the `[keys]` rebind table) are **not** settable
+here — they stay hand-edited; `set` rejects them with the settable list. A
+change is a plain file write guarded by a file lock (config is not
+daemon-exclusively-owned state), and it applies the same way a hand-edit does:
+`af` and the daemon read `config.toml` at startup, so restart them to pick it up
+(`set` prints this reminder). Full key reference:
+[configuration.md](configuration.md).
 
 ---
 
