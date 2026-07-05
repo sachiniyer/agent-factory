@@ -97,8 +97,24 @@ af keys                # print the effective TUI key bindings (defaults + [keys]
 af upgrade             # self-upgrade to the latest GitHub release (Linux/macOS)
 af doctor              # diagnose leaked processes/sessions/temp homes and daemon health
 af doctor --fix        # also apply the safe remediations
+af bug-report          # bundle logs + versions + tasks + redacted state into one file to attach
+af bug-report --json   # emit the structured manifest to stdout instead of writing a file
 af reset               # nuclear option — see below
 ```
+
+`af bug-report` collects one shareable diagnostics file: the daemon log tail
+(bounded to the last ~2MiB / 5000 lines), versions (af, Go, OS/arch, the daemon
+snapshot), the configured tasks, the session state from `instances.json`, the
+`af daemon status` health snapshot, and the global config. It writes a single
+text file (default `~/af-bug-report-<ts>.txt`, mode 0600; override with
+`-o/--output`) so you can read the whole thing in one scroll before attaching
+it. Redaction is **best-effort**: free-text and secret-bearing fields (session
+titles, task prompts, tab commands, remote metadata) are dropped, `$HOME` and
+your username are collapsed to `~` / `[user]`, and known credential shapes are
+scrubbed everywhere — but perfect redaction is impossible, so **review the file
+before sharing it publicly**. It is read-only and local (like `af doctor`): it
+never dials the daemon or the network, and is not part of the HTTP `af api`
+surface.
 
 `af doctor` is read-only by default: it reports orphaned processes left behind
 by dead sessions, processes pegging a CPU core inside live sessions, `af_` tmux

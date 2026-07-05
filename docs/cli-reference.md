@@ -447,6 +447,8 @@ af upgrade             # self-upgrade to the latest release on the configured ch
 af upgrade --allow-downgrade  # downgrade to an older release (e.g. preview→stable switch)
 af doctor              # diagnose leaked processes/sessions/temp homes and daemon health
 af doctor --fix        # also apply the safe remediations
+af bug-report          # bundle logs + versions + tasks + redacted state into one file
+af bug-report --json   # emit the structured manifest to stdout instead of writing a file
 af reset               # nuclear cleanup — see below
 ```
 
@@ -469,6 +471,25 @@ af reset               # nuclear cleanup — see below
   and a bounded read-only `list_cmd --json` connectivity probe
   (`remote-connectivity`). Repos with no remote backend (the common local-only
   case) get a single `n/a` line and no findings.
+- `af bug-report` bundles diagnostics for triage into **one** file: the daemon
+  log tail (bounded to the last ~2MiB / 5000 lines), versions (af, Go, OS/arch,
+  the daemon version snapshot), the configured tasks, the session state from
+  `instances.json`, the `af daemon status` health snapshot, and the global
+  config file. The default writes a single text file to
+  `~/af-bug-report-<ts>.txt` (mode 0600) and prints its path; `-o`/`--output`
+  overrides the path, and `--json` emits the structured manifest (wrapped in the
+  `{data, error}` envelope) to stdout instead of writing a file. It is read-only
+  and local — the same no-spawn probe as `af doctor`, never dialing the daemon
+  or the network — and is a CLI-only maintenance command, not part of the HTTP
+  `af api` route surface. **Redaction is best-effort**: free-text and
+  secret-bearing fields (session titles, task prompts, tab commands, remote
+  metadata) are dropped; structural triage fields (ids, status/liveness,
+  program, timestamps, git SHAs, counts) are kept; `$HOME` and your username are
+  collapsed to `~` / `[user]`; and known credential shapes (`sk-…`, `ghp_…`,
+  AWS/Slack/Google keys, `key = "…"` assignments, PEM private keys) are scrubbed
+  wherever they appear. Perfect redaction is impossible, so the bundle carries a
+  "review before sharing" banner — open it and check it before attaching it to a
+  public issue.
 - `af reset` stops the daemon (reporting honestly if it couldn't), kills **all**
   Agent Factory tmux sessions, removes **every linked git worktree and its
   branch** from each repo with stored sessions, and deletes all stored session
