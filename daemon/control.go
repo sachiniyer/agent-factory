@@ -1704,14 +1704,13 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 	}
 
 	// Single creation flow (#930 PR 3): every instance owns its worktree 1:1.
-	// InPlace only changes WHICH worktree that is — the repo's own working
-	// tree, marked external — not the flow itself.
-	if err = task.StartAndSendPrompt(instance, req.Prompt); err != nil {
+	// InPlace only changes WHICH worktree that is — the repo's own working tree,
+	// marked external — not the flow itself. finishCreateStart marks the instance
+	// live, PARKS it at a usage-limit wall (#1146 PR4), or returns a fatal error.
+	if serr := finishCreateStart(instance, req.Prompt, task.StartAndSendPrompt(instance, req.Prompt)); serr != nil {
 		_ = instance.Kill()
-		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", err)
+		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
 	}
-
-	instance.MarkLive()
 	data := instance.ToInstanceData()
 
 	// Register the in-memory instance and persist it to disk inside the
@@ -2358,13 +2357,14 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 	// The session is absent and, because deliveries to this target serialize on
 	// the per-target lock, no other in-daemon delivery is creating it. Create it
 	// now and deliver the prompt as its initial prompt.
-	if _, err := m.CreateSession(CreateSessionRequest{
+	created, err := m.CreateSession(CreateSessionRequest{
 		Title:    req.Title,
 		RepoPath: req.RepoPath,
 		Program:  req.Program,
 		Prompt:   req.Prompt,
 		AutoYes:  req.AutoYes,
-	}); err != nil {
+	})
+	if err != nil {
 		// A creator outside this daemon (a plain `af sessions create`, the API)
 		// can still claim the title between our check and reserveCreate. Rather
 		// than drop the prompt (#865), wait for the session to materialize and
@@ -2381,7 +2381,7 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 		}
 		return "", fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
 	}
-	return "started", nil
+	return createdTaskStatus(created), nil
 }
 
 // lockTarget acquires the per-(repo, title) delivery lock, creating it on first

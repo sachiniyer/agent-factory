@@ -1,13 +1,57 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
+
+// finishCreateStart settles a freshly created instance after StartAndSendPrompt
+// returns (#1146 PR4). It is the single place CreateSession translates that
+// outcome into liveness:
+//   - startErr nil: the agent came up — mark it live.
+//   - startErr is a usage-limit park (task.LimitReachedError): the agent hit a
+//     usage-limit wall during startup before the prompt could be delivered. KEEP
+//     the session — mark it limit-blocked with its parsed reset time and stash
+//     the prompt so the resume machinery (the daemon auto-resume scheduler when
+//     limit_auto_resume is on, or the manual `c` retry) re-delivers it once the
+//     window resets. Return nil so CreateSession registers+persists it as a
+//     parked row, not a failed one, firing no failure side-effects. instance.Prompt
+//     is the only input resumeFromLimit re-delivers and is never otherwise set on
+//     a daemon-created instance (the initial prompt goes straight to
+//     StartAndSendPrompt), so it is set here so a parked task run resumes its OWN
+//     work rather than a bare "continue".
+//   - any other error: return it for CreateSession to surface after tearing the
+//     half-started session down.
+func finishCreateStart(instance *session.Instance, prompt string, startErr error) error {
+	if startErr == nil {
+		instance.MarkLive()
+		return nil
+	}
+	var limitErr *task.LimitReachedError
+	if errors.As(startErr, &limitErr) {
+		instance.SetLimitReached(limitErr.ResetAt)
+		instance.Prompt = prompt
+		return nil
+	}
+	return startErr
+}
+
+// createdTaskStatus maps a freshly created session's data to the task-run status
+// DeliverPrompt records (#1146 PR4): the parked status when the create hit a
+// usage-limit wall at startup (a NON-failure outcome the resume machinery owns),
+// else the historical "started".
+func createdTaskStatus(data session.InstanceData) string {
+	if data.Liveness == session.LiveLimitReached {
+		return TaskStatusLimitParked
+	}
+	return "started"
+}
 
 // resolveIdleLiveness settles a session whose pane went idle this tick (#1146):
 // it sets LimitReached when the captured content shows a usage-limit banner for

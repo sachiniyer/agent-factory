@@ -91,6 +91,12 @@ Tasks deliver a prompt to an agent automatically — on a cron schedule, or ever
 
 Tasks are hosted by a background daemon that starts on demand; run `af daemon install` once to keep them firing across reboots. See [docs/tasks.md](docs/tasks.md) for the full trigger × delivery matrix and the watch-script contract.
 
+### Usage limits
+
+When a `claude` or `codex` session hits a plan usage-limit wall, af detects the banner, marks the row `[limit]` in the sidebar (with the reset time when the banner states one), and keeps the session parked rather than treating it as dead. Press **`c`** on the session to resume it immediately; a task-driven session re-sends its stored prompt so it picks up where it left off.
+
+Opt into hands-off recovery with `limit_auto_resume = true` (global config): the daemon then resumes a parked `claude`/`codex` session on its own once its limit window elapses. Task runs that hit a limit at startup are **parked, not failed** — recorded as waiting for the window and resumed to completion, never counted as an errored run. `gemini`/`aider` are API-key-metered (transient 429s), so they are out of scope. See [docs/usage-limits.md](docs/usage-limits.md).
+
 ### JSON CLI
 
 Everything the TUI does is scriptable — `af sessions` and `af tasks` print JSON, so other tools (or other agents) can orchestrate Agent Factory:
@@ -150,6 +156,7 @@ Read and write the global config from the CLI: `af config list` / `af config get
 - [docs/http-api.md](docs/http-api.md) — the daemon-hosted HTTP/JSON API: socket path, auth model, every endpoint (`af api` prints the same catalog)
 - [docs/configuration.md](docs/configuration.md) — config keys, global vs. in-repo precedence, state locations
 - [docs/tasks.md](docs/tasks.md) — task triggers, the watch-script contract, daemon lifecycle
+- [docs/usage-limits.md](docs/usage-limits.md) — usage-limit detection, the `[limit]` badge, manual retry, opt-in auto-resume, and task park-don't-fail
 - [docs/remote-hooks.md](docs/remote-hooks.md) — remote backend script protocol
 - [docs/release-process.md](docs/release-process.md) — release channels: manual stable `1.x.y` (the auto-update default), opt-in auto preview `1.x.y-preview-z`
 - [docs/release-testing-plan.md](docs/release-testing-plan.md) — release gate and smoke checks

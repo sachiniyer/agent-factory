@@ -45,6 +45,7 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | `root_agents` | Opt-in table of repositories that get an always-ensured `root` agent (default: none). See [Root agents](#root-agents-always-ensured). |
 | `limit_auto_resume` | Opt in to the daemon auto-resuming a session parked at a usage-limit wall once its limit window elapses (default: `false`). See [Usage-limit auto-resume](#usage-limit-auto-resume). |
 | `limit_retry_interval` | Fallback retry cadence (Go duration, e.g. `30m`) used only when `limit_auto_resume` is on **and** the limit banner carried no parseable reset time (default: `30m`). Empty or `0` disables the fallback. |
+| `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
 ### Root agents (always-ensured)
@@ -77,6 +78,8 @@ Because the default profile skips permission prompts and auto-accepts, only opt 
 
 ### Usage-limit auto-resume
 
+> This section covers the two auto-resume config keys. For the whole usage-limit feature end to end — detection, the `[limit]` badge, manual retry, auto-resume, and task park-don't-fail — see [docs/usage-limits.md](usage-limits.md).
+
 When a `claude` or `codex` session hits a plan usage-limit wall, af marks it with a `[limit]` badge in the sidebar and — when the banner states a reset time — shows when the limit resets. By default the row stays there until you resume it yourself (the `c` key on the session).
 
 `limit_auto_resume = true` opts the **daemon** into resuming such a session on its own once the limit window has elapsed:
@@ -93,6 +96,26 @@ limit_retry_interval = "30m"
 - **Global-only, daemon behavior.** Both keys are rejected in in-repo configs and take effect on the next daemon restart.
 
 Resuming re-delivers the session's stored task prompt (task-driven sessions resume their work); an interactive session with no stored prompt is sent a bare `continue`, which loses the agent's prior in-context state.
+
+- **Task runs park, don't fail.** When a cron/watch task fires while your plan is already exhausted, the task-driven session that hits the wall at startup is **parked** — kept, marked `[limit]`, and recorded with the run status `parked: usage limit` — instead of being torn down and recorded as a failed run. Once the window resets, the same resume machinery (auto-resume or your manual `c` retry) re-delivers the stored task prompt and the run proceeds to completion. See [docs/usage-limits.md](usage-limits.md#task-runs-park-dont-fail).
+
+### Custom usage-limit detection (`limit_patterns`)
+
+The built-in usage-limit detection recognizes the shipped `claude`/`codex`
+banners. If an agent reworded its banner, override the **detection** regex per
+agent with `limit_patterns`; the built-in reset-time parser is kept, so a custom
+detect pattern still schedules auto-resume against the parsed reset time.
+
+```toml
+[limit_patterns]
+claude = "Claude usage limit reached\\."
+codex  = "You've hit your usage limit"
+```
+
+- Keys must be a supported agent enum (`claude`, `codex`, `aider`, `gemini`).
+- An override for an agent with no built-in matcher (`aider`/`gemini` today — they are API-key-metered and have no plan reset window) is ignored with a warning.
+- An uncompilable regex warns and falls back to the built-in default, so a typo can never disable detection.
+- `limit_patterns` is a detection tweak, not a behavior switch: it is honored everywhere the built-in detector runs (the daemon status poll, and the task-run startup park path).
 
 ### Key bindings (`[keys]`)
 

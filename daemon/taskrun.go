@@ -10,9 +10,19 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 )
+
+// TaskStatusLimitParked is the run status recorded when a task-driven session
+// hits a usage-limit wall during startup and is PARKED instead of failed (#1146
+// PR4). It is deliberately NOT an "errored:"-prefixed value, so the TUI and task
+// history show the run waiting for the limit window to reset — not failed — and
+// no failure side-effects fire. The daemon auto-resume scheduler (opt-in) or the
+// manual `c` retry re-delivers the stored prompt once the window resets, after
+// which the run records its normal completion status.
+const TaskStatusLimitParked = "parked: usage limit"
 
 // Indirected so delivery tests can observe the daemon RPCs without dialing —
 // or spawning — a real daemon. Both helpers loop back through the daemon's
@@ -46,6 +56,14 @@ func deliverTaskPrompt(t *task.Task, prompt string) (string, error) {
 		})
 		if err != nil {
 			return "", fmt.Errorf("failed to start task session: %w", err)
+		}
+		// The freshly created session hit a usage-limit wall during startup and
+		// was parked, not failed (#1146 PR4). Record the parked status so the run
+		// is NOT counted as a failure; the resume machinery re-delivers the
+		// prompt once the limit window resets.
+		if data.Liveness == session.LiveLimitReached {
+			log.InfoLog.Printf("task %s parked at a usage limit as instance %s; waiting for the limit window to reset", t.ID, data.Title)
+			return TaskStatusLimitParked, nil
 		}
 		log.InfoLog.Printf("task %s started successfully as instance %s", t.ID, data.Title)
 		return "started", nil
