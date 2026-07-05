@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"text/tabwriter"
 
@@ -12,6 +13,20 @@ import (
 
 	"github.com/spf13/cobra"
 )
+
+// jsonWrapError honors the --json contract for the CLI commands in package
+// main: when jsonMode is set, a failure is emitted as the shared {data,error}
+// envelope on errOut (the command's stderr, matching the api package's
+// jsonError), so a `--json` caller always gets the envelope it was promised
+// instead of a bare Go error. The error is returned unchanged so the exit code
+// is unaffected. Off the --json path it is a no-op passthrough for cobra's
+// normal error handling.
+func jsonWrapError(errOut io.Writer, jsonMode bool, err error) error {
+	if jsonMode && err != nil {
+		_ = apiproto.WriteEnvelope(errOut, apiproto.Failure(err.Error()))
+	}
+	return err
+}
 
 // The `af config` group is a read-only view over the global config
 // (~/.agent-factory/config.toml) so users and scripts can discover the current
@@ -113,7 +128,7 @@ keys) print as JSON.`,
 
 		entries, err := loadGlobalConfigEntries()
 		if err != nil {
-			return err
+			return jsonWrapError(cmd.ErrOrStderr(), configJSONFlag, err)
 		}
 		for _, e := range entries {
 			if e.Key == args[0] {
@@ -124,7 +139,8 @@ keys) print as JSON.`,
 				return nil
 			}
 		}
-		return fmt.Errorf("unknown config key %q; run `af config list` to see all keys", args[0])
+		return jsonWrapError(cmd.ErrOrStderr(), configJSONFlag,
+			fmt.Errorf("unknown config key %q; run `af config list` to see all keys", args[0]))
 	},
 }
 
@@ -138,7 +154,7 @@ var configListCmd = &cobra.Command{
 
 		entries, err := loadGlobalConfigEntries()
 		if err != nil {
-			return err
+			return jsonWrapError(cmd.ErrOrStderr(), configJSONFlag, err)
 		}
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entries))

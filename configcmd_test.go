@@ -93,6 +93,45 @@ func TestConfigGetUnknownKeyErrors(t *testing.T) {
 	}
 }
 
+// TestConfigGetUnknownKeyJSONEnvelope pins the #1206 Greptile fix: a failed
+// `config get --json` must emit the shared {data,error} envelope on stderr, not
+// a bare Go error, so scripts parsing --json still get a structured error.
+func TestConfigGetUnknownKeyJSONEnvelope(t *testing.T) {
+	tempAFHome(t)
+	prev := configJSONFlag
+	configJSONFlag = true
+	defer func() { configJSONFlag = prev }()
+
+	cmd := &cobra.Command{}
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	err := configGetCmd.RunE(cmd, []string{"not_a_key"})
+	if err == nil {
+		t.Fatal("expected error for unknown key")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("error path must not write stdout, got: %s", stdout.String())
+	}
+
+	var env struct {
+		Data  any `json:"data"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &env); err != nil {
+		t.Fatalf("stderr is not the shared envelope: %v\n%s", err, stderr.String())
+	}
+	if env.Data != nil {
+		t.Errorf("failure envelope data should be null, got %v", env.Data)
+	}
+	if env.Error == nil || !strings.Contains(env.Error.Message, "unknown config key") {
+		t.Fatalf("envelope missing the unknown-key message: %s", stderr.String())
+	}
+}
+
 func TestConfigListJSONEnvelope(t *testing.T) {
 	tempAFHome(t)
 	prev := configJSONFlag
