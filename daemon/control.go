@@ -1309,11 +1309,11 @@ type Manager struct {
 	// root-agent ensure loop (#1106), keyed by the root_agents config key
 	// (the repo path as written in config.json).
 	rootEnsureStates map[string]*rootEnsureState
-	// rootKilledByUser records repos (by repo ID) whose root agent was
-	// removed through an explicit KillSession. The ensure loop respects the
-	// kill and stops re-creating that root until the daemon restarts —
-	// in-memory on purpose, so a restart re-asserts the configured state.
-	rootKilledByUser map[string]struct{}
+	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
+	// killed, and WHEN. The ensure loop honors the kill only for
+	// rootKillHealDelay, then self-heals a still-configured root (#1223): config
+	// (root_agents), not a runtime kill, decides whether an always-on root runs.
+	rootKilledAt map[string]time.Time
 	// killsInFlight marks sessions (by daemon instance key) whose KillSession
 	// teardown is currently running, so the status poll's finish-kill pass for
 	// tombstoned records (#1108) never runs a second concurrent teardown of
@@ -1388,7 +1388,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		repoStartLocks:      make(map[string]*sync.Mutex),
 		targetLocks:         make(map[string]*sync.Mutex),
 		rootEnsureStates:    make(map[string]*rootEnsureState),
-		rootKilledByUser:    make(map[string]struct{}),
+		rootKilledAt:        make(map[string]time.Time),
 		killsInFlight:       make(map[string]struct{}),
 		lostRestoreStates:   make(map[string]*lostRestoreState),
 		limitResumeStates:   make(map[string]*limitResumeState),
@@ -2019,14 +2019,14 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	m.mu.Lock()
 	delete(m.instances, key)
 	if session.IsReservedTitle(req.Title) {
-		// An explicit kill of the root agent is a user decision the ensure
-		// loop must respect (#1106): suppress re-creation for this repo until
-		// the daemon restarts, rather than fighting the user by resurrecting
-		// a session they just tore down. Recorded even for repos not (or no
-		// longer) in root_agents — harmless there, and it keeps the ordering
-		// between a kill and a concurrent config change race-free.
-		m.rootKilledByUser[repoID] = struct{}{}
-		log.InfoLog.Printf("root agent for repo %s killed by user; the ensure loop will not re-create it until the daemon restarts", repoID)
+		// An explicit kill is honored only briefly: the ensure loop suppresses
+		// re-creation for rootKillHealDelay, then self-heals a still-configured
+		// root (#1223). Config (root_agents) is the source of truth — removing
+		// the repo from it is the only permanent stop. Recorded even for
+		// unconfigured repos (harmless — the loop never visits them — and it
+		// keeps kill-vs-config-change ordering race-free).
+		m.rootKilledAt[repoID] = nowFunc()
+		log.InfoLog.Printf("root agent for repo %s killed by user; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.mu.Unlock()
 	return nil
