@@ -3,10 +3,55 @@ package config
 import (
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+// defaultLimitRetryInterval is the fallback cadence for auto-resuming a
+// usage-limit-blocked session whose banner carried no parseable reset time
+// (#1146 PR3). Only consulted when limit_auto_resume is enabled, so it is
+// harmless while the feature is off by default.
+const defaultLimitRetryInterval = "30m"
+
+// LimitRetryIntervalDuration returns the parsed limit_retry_interval (#1146
+// PR3), or 0 when it is unset or disables the fallback. The value is validated
+// at load (sanitizeLimitRetryInterval), so a parse error here degrades safely to
+// 0 — surface-only for a no-parseable-reset-time limit.
+func (c *Config) LimitRetryIntervalDuration() time.Duration {
+	if c.LimitRetryInterval == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.LimitRetryInterval)
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
+}
+
+// sanitizeLimitRetryInterval validates the limit_retry_interval duration string
+// (#1146 PR3). An empty string is the explicit "no fallback" value and is kept.
+// A non-empty value must parse as a non-negative Go duration; anything else
+// warns and falls back to the default so a typo can neither silently disable
+// auto-resume nor mis-time it.
+func sanitizeLimitRetryInterval(raw, prettyConfigPath string) string {
+	if raw == "" {
+		return ""
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		log.WarningLog.Printf("Config issue in %s: limit_retry_interval=%q is not a valid duration (%v); using default %q",
+			prettyConfigPath, raw, err, defaultLimitRetryInterval)
+		return defaultLimitRetryInterval
+	}
+	if d < 0 {
+		log.WarningLog.Printf("Config issue in %s: limit_retry_interval=%q is negative; using default %q",
+			prettyConfigPath, raw, defaultLimitRetryInterval)
+		return defaultLimitRetryInterval
+	}
+	return raw
+}
 
 // sanitizeLimitPatterns validates the limit_patterns override map in place,
 // dropping any entry that names an unknown agent or whose value is not a
