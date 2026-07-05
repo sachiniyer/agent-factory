@@ -274,10 +274,14 @@ var (
 
 // setTOMLScalar returns content with [section] leaf set to encoded, changing only
 // the target value's bytes. If the key exists its value (and only its value) is
-// replaced, preserving any trailing inline comment. If the key is absent it is
-// inserted with minimal disturbance — appended to the end of its section's block
-// (or, for a root key, the pre-section block); if the section itself is absent a
-// new [section] block is appended. section == "" targets the root block.
+// replaced, preserving any trailing inline comment. It recognizes both TOML
+// spellings of a table entry — a leaf under a [section] header AND a top-level
+// dotted key (section.leaf = …) — and edits whichever is present, so a
+// hand-edited dotted-key file is never left with a duplicate. If the key is
+// absent it is inserted with minimal disturbance — appended to the end of its
+// section's block (or, for a root key, the pre-section block); if the section
+// itself is absent a new [section] block is appended. section == "" targets the
+// root block.
 func setTOMLScalar(content, section, leaf, encoded string) string {
 	newLine := leaf + " = " + encoded
 
@@ -295,6 +299,17 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 	}
 
 	keyRe := regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
+
+	// TOML also lets a hand-editor write a table entry as a top-level dotted key
+	// (program_overrides.claude = "…") instead of under a [program_overrides]
+	// header. For a dynamic key we must recognize that form too, or we would
+	// miss the existing key and append a duplicate — corrupting the file (a
+	// valid config never has both forms, so at most one matches). dotted whitespace
+	// around the '.' is allowed by TOML, so tolerate it.
+	var dottedKeyRe *regexp.Regexp
+	if section != "" {
+		dottedKeyRe = regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(section) + `\s*\.\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
+	}
 
 	curSection := ""
 	firstHeaderIdx := -1
@@ -320,6 +335,15 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 			}
 			curSection = name
 			continue
+		}
+		// Top-level dotted form (section.leaf = …). Only valid at the root: the
+		// same text under another header would name a different key.
+		if dottedKeyRe != nil && curSection == "" {
+			if m := dottedKeyRe.FindStringSubmatch(line); m != nil {
+				_, comment := splitTrailingComment(m[2])
+				ls[i] = m[1] + encoded + comment
+				return rebuild()
+			}
 		}
 		if curSection != section {
 			continue

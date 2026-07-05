@@ -50,6 +50,39 @@ func TestSetTOMLScalarAppendsNewSection(t *testing.T) {
 	}
 }
 
+// TestSetTOMLScalarEditsDottedForm guards the #1208 Greptile fix: a table entry
+// hand-written as a top-level dotted key must be edited in place, never
+// duplicated by appending a [section] block.
+func TestSetTOMLScalarEditsDottedForm(t *testing.T) {
+	in := "default_program = 'claude'\nprogram_overrides.claude = '/bin/claude'  # dotted\n"
+	got := setTOMLScalar(in, "program_overrides", "claude", "'/bin/codex'")
+	want := "default_program = 'claude'\nprogram_overrides.claude = '/bin/codex'  # dotted\n"
+	if got != want {
+		t.Fatalf("dotted edit wrong.\n got: %q\nwant: %q", got, want)
+	}
+	if strings.Contains(got, "[program_overrides]") {
+		t.Fatal("must not append a [program_overrides] block for the dotted form")
+	}
+}
+
+// TestSetTOMLScalarDottedFormWhitespaceAndScoping checks tolerance of spaces
+// around the dot, and that the dotted match is scoped to the root — the same
+// text under another header is a different key and must not be touched.
+func TestSetTOMLScalarDottedFormWhitespaceAndScoping(t *testing.T) {
+	got := setTOMLScalar("program_overrides . claude = 'x'\n", "program_overrides", "claude", "'y'")
+	if got != "program_overrides . claude = 'y'\n" {
+		t.Fatalf("spaced dotted edit wrong: %q", got)
+	}
+
+	// Under [other], the line other.program_overrides.claude is unrelated: no
+	// root match, so a canonical [program_overrides] block is appended instead.
+	in := "[other]\nprogram_overrides.claude = 'x'\n"
+	res := setTOMLScalar(in, "program_overrides", "claude", "'z'")
+	if !strings.Contains(res, "[program_overrides]\nclaude = 'z'") {
+		t.Fatalf("expected canonical block appended, got: %q", res)
+	}
+}
+
 func TestSetTOMLScalarEmptyFile(t *testing.T) {
 	if got := setTOMLScalar("", "", "auto_yes", "true"); got != "auto_yes = true\n" {
 		t.Fatalf("empty root wrong: %q", got)
@@ -141,6 +174,36 @@ func TestSetGlobalConfigValueRoundTrip(t *testing.T) {
 	}
 	if cfg.DefaultProgram != "codex" {
 		t.Fatalf("loaded default_program = %q, want codex", cfg.DefaultProgram)
+	}
+}
+
+// TestSetGlobalConfigValueDottedRoundTrip is the end-to-end #1208 guard: a
+// config whose program override is written in dotted-key form is updated in
+// place, with no duplicate and no [program_overrides] block appended, and the
+// result loads with the new value.
+func TestSetGlobalConfigValueDottedRoundTrip(t *testing.T) {
+	orig := "default_program = 'claude'\nprogram_overrides.claude = '/bin/claude'\n"
+	path := writeTempConfig(t, orig)
+
+	if _, err := SetGlobalConfigValue("program_overrides.claude", "/bin/codex"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	got, _ := os.ReadFile(path)
+	want := "default_program = 'claude'\nprogram_overrides.claude = '/bin/codex'\n"
+	if string(got) != want {
+		t.Fatalf("dotted round-trip wrong.\n got: %q\nwant: %q", got, want)
+	}
+	if strings.Contains(string(got), "[program_overrides]") {
+		t.Fatal("must not append a [program_overrides] block")
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("written config does not load: %v", err)
+	}
+	if cfg.ProgramOverrides["claude"] != "/bin/codex" {
+		t.Fatalf("loaded override = %q, want /bin/codex", cfg.ProgramOverrides["claude"])
 	}
 }
 
