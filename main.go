@@ -284,6 +284,7 @@ func init() {
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(daemonCmd)
+	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(api.SessionsCmd)
 	rootCmd.AddCommand(api.TasksCmd)
 	rootCmd.AddCommand(api.APICmd)

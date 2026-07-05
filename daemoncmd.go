@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
@@ -64,9 +66,123 @@ var daemonUninstallCmd = &cobra.Command{
 	},
 }
 
+// daemonStatusJSON switches `af daemon status` to the shared {data,error}
+// envelope. Local to this command (like `af api`'s --json) — there is no
+// bare-vs-envelope legacy to preserve.
+var daemonStatusJSON bool
+
+// daemonStatusInfo is the read-only liveness/topology snapshot printed by
+// `af daemon status`. It is derived entirely from daemon.Health() (the same
+// no-spawn probe `af doctor` uses) plus an os.Stat of the HTTP socket, so the
+// command never dials or starts a daemon and needs no new RPC.
+type daemonStatusInfo struct {
+	Running           bool   `json:"running"`
+	ControlSocket     string `json:"control_socket"`
+	ControlSocketFile bool   `json:"control_socket_file"`
+	HTTPSocket        string `json:"http_socket"`
+	HTTPSocketFile    bool   `json:"http_socket_file"`
+	PID               int    `json:"pid"`
+	PIDVerified       bool   `json:"pid_verified"`
+	AutostartUnit     bool   `json:"autostart_unit"`
+	BinaryStale       bool   `json:"binary_stale"`
+}
+
+// collectDaemonStatus builds a daemonStatusInfo from the read-only health
+// probe. httpSocketPath is resolved separately (its own path helper) and
+// stat'd; a missing config dir leaves the field empty rather than erroring, so
+// status still reports the control-plane facts.
+func collectDaemonStatus() daemonStatusInfo {
+	h := daemon.Health()
+	info := daemonStatusInfo{
+		Running:           h.PingErr == nil,
+		ControlSocket:     h.SocketPath,
+		ControlSocketFile: h.SocketExists,
+		PID:               h.PIDFilePID,
+		PIDVerified:       h.PIDVerified,
+		AutostartUnit:     h.AutostartUnit,
+		BinaryStale:       h.BinaryDeleted,
+	}
+	if httpPath, err := daemon.DaemonHTTPSocketPath(); err == nil {
+		info.HTTPSocket = httpPath
+		if _, err := os.Stat(httpPath); err == nil {
+			info.HTTPSocketFile = true
+		}
+	}
+	return info
+}
+
+// printDaemonStatusHuman renders the snapshot as a short human report mirroring
+// the wording `af doctor` uses for the daemon check.
+func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
+	w := cmd.OutOrStdout()
+	if info.Running {
+		fmt.Fprintln(w, "daemon: running")
+	} else {
+		fmt.Fprintln(w, "daemon: not running (starts on demand when you run af with an enabled task)")
+	}
+	fmt.Fprintf(w, "  control socket: %s (%s)\n", info.ControlSocket, presence(info.ControlSocketFile))
+	if info.HTTPSocket != "" {
+		fmt.Fprintf(w, "  http socket:    %s (%s)\n", info.HTTPSocket, presence(info.HTTPSocketFile))
+	}
+	if info.PID > 0 {
+		pidNote := "unverified"
+		if info.PIDVerified {
+			pidNote = "verified"
+		}
+		fmt.Fprintf(w, "  pid:            %d (%s)\n", info.PID, pidNote)
+	} else {
+		fmt.Fprintln(w, "  pid:            (no daemon.pid on disk)")
+	}
+	if info.AutostartUnit {
+		fmt.Fprintln(w, "  autostart:      installed")
+	} else {
+		fmt.Fprintln(w, "  autostart:      not installed (`af daemon install` to keep schedules running across reboots)")
+	}
+	if info.BinaryStale {
+		fmt.Fprintf(w, "  warning:        pid %d is running a binary since replaced on disk — restart the daemon to pick up the new version\n", info.PID)
+	}
+}
+
+// presence is the file-present/absent label shared by the two socket lines.
+func presence(exists bool) string {
+	if exists {
+		return "present"
+	}
+	return "absent"
+}
+
+var daemonStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Report daemon liveness, sockets, pid, and autostart",
+	Long: `Print a read-only snapshot of the background daemon: whether it is responding
+on the control socket, the control and HTTP socket paths (and whether their
+files are present), the recorded pid and whether it is a verified af daemon,
+whether the autostart unit is installed, and whether the running daemon is on a
+since-replaced binary.
+
+It never contacts a paused daemon in a way that spawns one and never starts the
+daemon — it uses the same no-spawn health probe as af doctor. Use --json for a
+machine-readable form wrapped in the shared {data,error} envelope.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		info := collectDaemonStatus()
+		if daemonStatusJSON {
+			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(info))
+		}
+		printDaemonStatusHuman(cmd, info)
+		return nil
+	},
+}
+
 func init() {
+	daemonStatusCmd.Flags().BoolVar(&daemonStatusJSON, "json", false,
+		"Emit the status as JSON wrapped in the {data,error} envelope")
 	daemonCmd.AddCommand(daemonInstallCmd)
 	daemonCmd.AddCommand(daemonUninstallCmd)
+	daemonCmd.AddCommand(daemonStatusCmd)
 }
 
 // respawnDaemonFn is indirected so upgrade/auto-update tests can observe the

@@ -460,12 +460,15 @@ func init() {
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllReposFlag, "all-repos", false, "With --all, broadcast across every repo instead of only the current/--repo one")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptIncludeRootFlag, "include-root", false, "With --all, also deliver to the reserved root session (excluded by default)")
 
-	sessionsTabCreateCmd.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in the new tab (required)")
-	sessionsTabCreateCmd.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name (defaults to the command basename; auto-suffixed on collision)")
-	sessionsTabCreateCmd.MarkFlagRequired("command")
-
-	sessionsTabDeleteCmd.Flags().StringVar(&tabDeleteNameFlag, "name", "", "Name of the tab to delete (required)")
-	sessionsTabDeleteCmd.MarkFlagRequired("name")
+	// tab-create/tab-delete and their tabs {create,delete} aliases (#1192)
+	// share the same flag globals via these binders, so the two spellings stay
+	// in lockstep.
+	bindTabCreateFlags(sessionsTabCreateCmd)
+	bindTabCreateFlags(sessionsTabsCreateCmd)
+	bindTabDeleteFlags(sessionsTabDeleteCmd)
+	bindTabDeleteFlags(sessionsTabsDeleteCmd)
+	sessionsTabsCmd.AddCommand(sessionsTabsCreateCmd)
+	sessionsTabsCmd.AddCommand(sessionsTabsDeleteCmd)
 
 	SessionsCmd.AddCommand(sessionsListCmd)
 	SessionsCmd.AddCommand(sessionsGetCmd)
@@ -473,6 +476,7 @@ func init() {
 	SessionsCmd.AddCommand(sessionsSendPromptCmd)
 	SessionsCmd.AddCommand(sessionsTabCreateCmd)
 	SessionsCmd.AddCommand(sessionsTabDeleteCmd)
+	SessionsCmd.AddCommand(sessionsTabsCmd)
 	SessionsCmd.AddCommand(sessionsPreviewCmd)
 	SessionsCmd.AddCommand(sessionsKillCmd)
 	SessionsCmd.AddCommand(sessionsArchiveCmd)
