@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -129,6 +131,64 @@ func TestConfigGetUnknownKeyJSONEnvelope(t *testing.T) {
 	}
 	if env.Error == nil || !strings.Contains(env.Error.Message, "unknown config key") {
 		t.Fatalf("envelope missing the unknown-key message: %s", stderr.String())
+	}
+}
+
+// TestConfigSetWritesAndReflects drives the set command through cobra and
+// confirms the value is written and read back, comments in the seeded config
+// preserved.
+func TestConfigSetWritesAndReflects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	path := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(path, []byte("# hi\ndefault_program = 'claude'  # note\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	if err := configSetCmd.RunE(cmd, []string{"default_program", "codex"}); err != nil {
+		t.Fatalf("config set: %v", err)
+	}
+
+	got, _ := os.ReadFile(path)
+	want := "# hi\ndefault_program = 'codex'  # note\n"
+	if string(got) != want {
+		t.Fatalf("file not preserved.\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestConfigSetBadValueJSONEnvelope pins that a failed `config set --json`
+// emits the shared failure envelope on stderr, consistent with config get.
+func TestConfigSetBadValueJSONEnvelope(t *testing.T) {
+	tempAFHome(t)
+	prev := configJSONFlag
+	configJSONFlag = true
+	defer func() { configJSONFlag = prev }()
+
+	cmd := &cobra.Command{}
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	err := configSetCmd.RunE(cmd, []string{"default_program", "notanagent"})
+	if err == nil {
+		t.Fatal("expected error for invalid value")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("error path must not write stdout: %s", stdout.String())
+	}
+	var env struct {
+		Data  any `json:"data"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &env); err != nil {
+		t.Fatalf("stderr not an envelope: %v\n%s", err, stderr.String())
+	}
+	if env.Error == nil || !strings.Contains(env.Error.Message, "must be one of") {
+		t.Fatalf("envelope missing validation message: %s", stderr.String())
 	}
 }
 
