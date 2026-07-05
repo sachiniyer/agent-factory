@@ -488,7 +488,7 @@ func tempHomeDaemonAlive(dir string) bool {
 	if err != nil || pid <= 0 {
 		return false
 	}
-	return daemon.LooksLikeDaemonCmdline(proctree.Cmdline(pid))
+	return daemon.LooksLikeDaemonArgv(proctree.Argv(pid))
 }
 
 // newestMtime returns the most recent mtime among the dir itself and its
@@ -532,8 +532,8 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 			continue
 		}
 		p := ctx.snap[pid]
-		cmdline := proctree.Cmdline(pid)
-		if cmdline == "" || !daemon.LooksLikeDaemonCmdline(cmdline) {
+		args := proctree.Argv(pid)
+		if len(args) == 0 || !daemon.LooksLikeDaemonArgv(args) {
 			continue
 		}
 		home, ok := proctree.EnvValue(pid, "AGENT_FACTORY_HOME")

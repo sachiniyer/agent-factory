@@ -67,11 +67,12 @@ func Health() HealthStatus {
 	return h
 }
 
-// LooksLikeDaemonCmdline reports whether a command line names an
-// agent-factory daemon process (an `af`/`agent-factory` binary carrying a
-// discrete --daemon flag). Exported for `af doctor`'s host-wide scan so its
-// matching stays in lockstep with the daemon's own PID-validation rules
-// (#1004).
-func LooksLikeDaemonCmdline(cmdline string) bool {
-	return cmdlineHasDaemonFlag(cmdline) && cmdlineIsDaemonBinary(cmdline)
+// LooksLikeDaemonArgv reports whether argv names an agent-factory daemon
+// process (an `af`/`agent-factory` binary carrying a discrete --daemon flag).
+// It takes real argv elements (boundaries preserved) so a daemon installed
+// under a path containing spaces is classified correctly (#1214). Exported for
+// `af doctor`'s host-wide scan so its matching stays in lockstep with the
+// daemon's own PID-validation rules (#1004).
+func LooksLikeDaemonArgv(args []string) bool {
+	return argsHaveDaemonFlag(args) && argsAreDaemonBinary(args)
 }

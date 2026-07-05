@@ -672,55 +672,57 @@ func cleanupDaemonRuntimeFiles(pidFile string) {
 }
 
 // isAgentFactoryDaemon checks whether the process at pid looks like an agent-factory daemon:
-// its command line must carry the --daemon flag as a discrete argument AND its executable must
-// be an agent-factory binary ("af" or "agent-factory"). It tries /proc/<pid>/cmdline first
-// (Linux) and falls back to `ps -p <pid> -o args=` (macOS and other unixes). If neither source
-// yields a readable command line, returns false so callers treat the PID as unverified.
+// its argv must carry the --daemon flag as a discrete argument AND its executable must be an
+// agent-factory binary ("af" or "agent-factory"). It reads the process argv with argument
+// boundaries preserved (see daemonArgs); if no readable argv is available, returns false so
+// callers treat the PID as unverified.
 //
 // Both checks are required so that a stale PID file whose PID has been reused by an unrelated
 // process carrying a "--daemon" token (e.g. "sleep --daemon af-test") is not mistaken for our
 // daemon and signaled by StopDaemon/locateDaemonPID. This mirrors the host-wide pgrep scan in
-// sigterm_fallback.go, which already requires both cmdlineHasDaemonFlag and cmdlineIsDaemonBinary;
+// sigterm_fallback.go, which also requires both argsHaveDaemonFlag and argsAreDaemonBinary;
 // the two PID-validation paths must agree (#1004).
 //
-// We split the command line on whitespace and require an exact "--daemon" token (or a
-// "--daemon=..." form), so flags like --daemonize don't get matched as substrings.
+// Detection operates on real argv elements (not a space-joined string), so a binary installed
+// under a path containing spaces — e.g. "/home/John Smith/.local/bin/af" — is classified
+// correctly instead of having its path shredded across argv boundaries (#1214). We still require
+// an exact "--daemon" token (or the "--daemon=..." form), so flags like --daemonize never match.
 func isAgentFactoryDaemon(pid int) bool {
-	cmdline := readProcCmdline(pid)
-	if cmdline == "" {
-		cmdline = readPsArgs(pid)
-	}
-	if cmdline == "" {
+	args := daemonArgs(pid)
+	if len(args) == 0 {
 		return false
 	}
-	return cmdlineHasDaemonFlag(cmdline) && cmdlineIsDaemonBinary(cmdline)
+	return argsHaveDaemonFlag(args) && argsAreDaemonBinary(args)
 }
 
-// cmdlineHasDaemonFlag reports whether cmdline contains "--daemon" as a discrete argument
-// (either bare or in the "--daemon=value" form). It deliberately rejects substring matches like
-// "--daemonize" or "--daemon-mode".
-func cmdlineHasDaemonFlag(cmdline string) bool {
-	for _, field := range strings.Fields(cmdline) {
-		if field == "--daemon" || strings.HasPrefix(field, "--daemon=") {
+// argsHaveDaemonFlag reports whether argv contains "--daemon" as a discrete argument (either bare
+// or in the "--daemon=value" form). It deliberately rejects substring matches like "--daemonize"
+// or "--daemon-mode". Because it scans real argv elements, spaces inside another argument (such as
+// a spaced binary path in argv[0]) can never fabricate or hide a "--daemon" token (#1214).
+func argsHaveDaemonFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--daemon" || strings.HasPrefix(a, "--daemon=") {
 			return true
 		}
 	}
 	return false
 }
 
-// cmdlineIsDaemonBinary reports whether the executable in cmdline is an
-// agent-factory daemon binary: installed as "af" or built from source
-// (`go build .`) as "agent-factory". The host-wide pgrep scan in
-// sigterm_fallback.go matches any process carrying a "--daemon" token, so this
-// restores the binary-name specificity that the old "af --daemon" substring
-// pattern provided — while still catching source-built `agent-factory --daemon`
-// daemons that the old pattern missed (#937).
-func cmdlineIsDaemonBinary(cmdline string) bool {
-	fields := strings.Fields(cmdline)
-	if len(fields) == 0 {
+// argsAreDaemonBinary reports whether argv[0] is an agent-factory daemon binary: installed as "af"
+// or built from source (`go build .`) as "agent-factory". The host-wide pgrep scan in
+// sigterm_fallback.go matches any process carrying a "--daemon" token, so this restores the
+// binary-name specificity that the old "af --daemon" substring pattern provided — while still
+// catching source-built `agent-factory --daemon` daemons that the old pattern missed (#937).
+//
+// argv[0] is a single argv element, so filepath.Base sees the whole executable path even when it
+// contains spaces (e.g. "/home/John Smith/.local/bin/af" → base "af"). The previous
+// implementation space-joined the argv and re-split on whitespace, which turned that same path
+// into base "John" and made every spaced-install daemon undetectable (#1214).
+func argsAreDaemonBinary(args []string) bool {
+	if len(args) == 0 {
 		return false
 	}
-	switch filepath.Base(fields[0]) {
+	switch filepath.Base(args[0]) {
 	case "af", "agent-factory":
 		return true
 	default:
@@ -728,15 +730,45 @@ func cmdlineIsDaemonBinary(cmdline string) bool {
 	}
 }
 
-// readProcCmdline returns the full command line for pid via /proc/<pid>/cmdline (Linux).
-// Returns "" if /proc is unavailable or the file cannot be read.
-func readProcCmdline(pid int) string {
+// daemonArgs returns the argv of pid with argument boundaries preserved. It prefers
+// /proc/<pid>/cmdline (NUL-separated argv, Linux), the only source that keeps spaces inside an
+// individual argument intact. When /proc is unavailable (macOS and other unixes) it falls back to
+// `ps -p <pid> -o args=`, whose output is already space-joined and therefore CANNOT recover the
+// original argv boundaries for a spaced binary path — the fallback splits on whitespace and is
+// best-effort, so spaced-install detection (#1214) is only fully reliable where /proc exists.
+func daemonArgs(pid int) []string {
+	if args := readProcArgv(pid); args != nil {
+		return args
+	}
+	ps := readPsArgs(pid)
+	if ps == "" {
+		return nil
+	}
+	return strings.Fields(ps)
+}
+
+// readProcArgv reads /proc/<pid>/cmdline (Linux) and splits it into argv on the NUL separators,
+// preserving spaces within an individual argument. Returns nil when /proc is unavailable or the
+// process has no cmdline (zombies, kernel threads).
+func readProcArgv(pid int) []string {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
-		return ""
+		return nil
 	}
-	// /proc/<pid>/cmdline separates args with NUL bytes.
-	return strings.ReplaceAll(strings.TrimRight(string(data), "\x00"), "\x00", " ")
+	return splitNULArgv(data)
+}
+
+// splitNULArgv splits a /proc cmdline blob on its NUL separators into argv, dropping the trailing
+// empty element left by the final NUL terminator. Returns nil for an empty/whitespace-only blob.
+func splitNULArgv(data []byte) []string {
+	parts := strings.Split(string(data), "\x00")
+	for len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return parts
 }
 
 // readPsArgs returns the full command line for pid via `ps -p <pid> -o args=`. This flag set is
