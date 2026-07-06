@@ -1082,18 +1082,17 @@ func (i *Instance) RestoreArchivedWorktree(dest string) error {
 // out from under the restore. This replaces the old "park it in Lost purely to
 // trigger the re-spawn loop" overload (#1195).
 func (i *Instance) RestoreFromArchive() error {
-	i.mu.Lock()
-	i.started = true
-	i.liveness = LiveLost
-	i.inFlightOp = OpRestoring
-	i.mu.Unlock()
+	// Enter the restore fence through the chokepoint (#1195 Phase 2d): BeginRestore
+	// is legal only from Archived and sets started=true + Lost + OpRestoring — the
+	// exact head this used to write by hand, now enforcing I3 (a restore may begin
+	// only from an archived session; no double-restore).
+	if err := i.Transition(BeginRestore()); err != nil {
+		return err
+	}
 	if err := i.backend.Recover(i); err != nil {
-		// Re-spawn failed: drop the fence to a plain Lost so the #1108
-		// restore loop owns the retry against the now-restored worktree.
-		i.mu.Lock()
-		i.liveness = LiveLost
-		i.inFlightOp = OpNone
-		i.mu.Unlock()
+		// Re-spawn failed: drop the fence to a plain Lost (started left true) so
+		// the #1108 restore loop owns the retry against the now-restored worktree.
+		_ = i.Transition(AbortRestoreToLost())
 		return err
 	}
 	return nil
