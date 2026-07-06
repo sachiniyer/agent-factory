@@ -102,6 +102,7 @@ validation:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - Comparison: comparison.md
   - Concepts:
       - Worktree-isolated agents: concepts/worktree-agents.md
       - The daemon: concepts/daemon.md
