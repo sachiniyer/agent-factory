@@ -726,28 +726,6 @@ func (t *TmuxSession) SendKeys(keys string) error {
 	return err
 }
 
-// SendKeysCommand sends text to the tmux pane using the `tmux send-keys` command
-// instead of writing to the PTY. This is more reliable for headless/scheduled runs
-// where the PTY connection may not persist. Text is sent literally (with -l flag)
-// followed by a pause to let terminal control sequences drain, then Enter to submit.
-func (t *TmuxSession) SendKeysCommand(text string) error {
-	// Send text literally to avoid key name interpretation. `=` forces an
-	// exact session match so input is never sent to a prefix-matched sibling
-	// session if the agent session has died (#1006).
-	textCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "-l", text)
-	if err := t.cmdExec.Run(textCmd); err != nil {
-		return fmt.Errorf("error sending text via send-keys: %w", err)
-	}
-
-	// Wait for terminal control sequences (e.g. OSC color responses) to drain
-	// before sending Enter, otherwise they can corrupt the input
-	time.Sleep(500 * time.Millisecond)
-
-	// Send Enter separately to submit
-	enterCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "Enter")
-	return t.cmdExec.Run(enterCmd)
-}
-
 // HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if the tmux
 // pane has a prompt for aider or claude code, plus the raw captured content so the daemon's usage-limit detector (#1146) can inspect it without a second capture ("" on early return).
 func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string) {
