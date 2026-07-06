@@ -1003,69 +1003,28 @@ func (i *Instance) Respawn() error {
 	return i.backend.Respawn(i)
 }
 
-// ArchiveTeardown tears down every tab's tmux session for an archive (#1028) —
-// the tmux half of Kill, but it PRESERVES the worktree and the instance record.
-// It is deliberately best-effort (a stuck tmux only logs, mirroring Kill) and:
+// ArchiveTeardown tears down every tab's tmux session for an archive AND
+// relocates the worktree to dest in one operation (#1028) — the tmux half of
+// Kill, but it PRESERVES the record and MOVES the worktree instead of deleting
+// it. It routes through the shared teardownTabs core in the archive mode, so the
+// #802 "wait for every pane to exit before touching the worktree" ordering is
+// shared code with Kill rather than the duplicated prose it was when the move
+// lived in a separate daemon step (#1195 Phase 2b). It is deliberately
+// best-effort for tmux (a stuck session only logs, mirroring Kill) and:
 //   - keeps the AGENT tab's tmux binding (its session name) so a failed archive
 //     can re-spawn it in place via the Lost-restore loop;
 //   - drops the shell/process tabs entirely — only the agent session is brought
 //     back on un-archive (Sachin's #1028 requirement);
 //   - leaves gitWorktree and started untouched, so the daemon caller controls
 //     the final state (started=false + Archived on success; Lost on a failed
-//     move, where started stays true so the loop re-spawns the agent).
+//     move — returned here — where started stays true so the loop re-spawns the
+//     agent).
 //
-// Local instances only — remote sessions have no local tmux/worktree and the
-// daemon rejects archiving them before reaching here.
-func (i *Instance) ArchiveTeardown() {
-	i.mu.Lock()
-	type tabSession struct {
-		name string
-		ts   *tmux.TmuxSession
-	}
-	sessions := make([]tabSession, 0, len(i.Tabs))
-	var agentTab *Tab
-	for idx, tab := range i.Tabs {
-		if idx == 0 {
-			agentTab = tab
-		}
-		if tab.tmux != nil {
-			sessions = append(sessions, tabSession{name: tab.Name, ts: tab.tmux})
-		}
-	}
-	title := i.Title
-	i.mu.Unlock()
-
-	// Tear each tab's tmux session down and wait for the pane to exit before the
-	// worktree is relocated, mirroring Kill's ordering (a process still flushing
-	// state races the move otherwise).
-	for _, s := range sessions {
-		if err := s.ts.CloseAndWaitForPaneExit(); err != nil {
-			log.WarningLog.Printf("archive %q: tmux teardown for tab %q failed: %v", title, s.name, err)
-		}
-	}
-
-	i.mu.Lock()
-	// Reduce to the agent tab only. Its tmux binding is kept (the server-side
-	// session is gone, but the name-holder lets a rollback Recover re-spawn it,
-	// and a successful archive persists it as an inert name-holder).
-	if agentTab != nil {
-		i.Tabs = []*Tab{agentTab}
-	}
-	i.mu.Unlock()
-}
-
-// MoveArchivedWorktree relocates this instance's worktree to dest (#1028),
-// delegating to the git relocation primitive. The caller holds the daemon
-// op-lock and has already run ArchiveTeardown, so no live tmux pane is cwd'd
-// into the worktree during the move.
-func (i *Instance) MoveArchivedWorktree(dest string) error {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return fmt.Errorf("cannot archive %q: instance has no worktree to relocate", i.Title)
-	}
-	return gw.MoveWorktree(dest)
+// Returns the worktree-move error (nil on success). Local instances only —
+// remote sessions have no local tmux/worktree and the daemon rejects archiving
+// them before reaching here.
+func (i *Instance) ArchiveTeardown(dest string) error {
+	return i.teardownTabs(teardownArchive{dest: dest})
 }
 
 // SetArchived flips the instance into the inert Archived state atomically:
