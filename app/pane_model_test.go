@@ -144,6 +144,29 @@ func TestPane_OpenAlreadyOpenFocuses(t *testing.T) {
 	assert.Equal(t, layout.PaneRegion(p1.ID()), h.ring.Active(), "s focuses the existing pane")
 }
 
+// TestPane_HeaderAnnotatesSelectionDivergence is the #1289 session-level
+// reconciliation guard: open panes are explicit bindings, so selecting beta
+// must not silently make an alpha pane look like the selected workspace. The
+// header names both facts: what the pane is showing and which row is selected.
+func TestPane_HeaderAnnotatesSelectionDivergence(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Same(t, alpha, paneA.Instance())
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.Same(t, beta, h.store.GetSelectedInstance())
+	require.Same(t, alpha, paneA.Instance(), "selection must not retarget explicit panes")
+
+	view := h.View()
+	assert.Contains(t, view, "alpha · Preview · selected: beta · Preview",
+		"the visible pane header must reconcile selected row vs shown content")
+}
+
 // TestPane_TabDimension: opening from a tree TAB row binds that tab, distinct
 // (instance, tab) pairs get distinct panes, and later selection tab jumps
 // don't touch open panes.
@@ -211,6 +234,32 @@ func TestPane_NumberJumpTargetsFocusedPaneNotSidebarSelection(t *testing.T) {
 	assert.Equal(t, 1, h.store.ActiveTab(), "tree-focus jump must still target the sidebar selection")
 	assert.Equal(t, 1, paneA.Tab(), "tree-focus jump must not mutate pane A further")
 	assert.Equal(t, 0, paneB.Tab(), "tree-focus jump only changes the selection's active tab")
+}
+
+// TestPane_NumberJumpAnnotatesSelectedTabDivergence covers the #1289 tab-level
+// mismatch while preserving #1255: when a pane-focused digit jump changes the
+// visible pane tab, the sidebar-selected active tab is not retargeted, so the
+// pane header must make that divergence explicit.
+func TestPane_NumberJumpAnnotatesSelectedTabDivergence(t *testing.T) {
+	h := paneTestHome(t)
+	beta := h.store.GetInstanceByTitle("beta")
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+	paneB := h.store.OpenPanes()[0]
+	require.Same(t, beta, paneB.Instance())
+	require.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active())
+	require.Equal(t, 0, h.store.ActiveTab())
+
+	_, _ = h.handleTabJump(2)
+
+	assert.Equal(t, 1, paneB.Tab(), "focused beta pane jumps to tab 2")
+	assert.Equal(t, 0, h.store.ActiveTab(), "pane-focused jump must not retarget the sidebar selection")
+	view := h.View()
+	assert.Contains(t, view, "beta · Terminal · selected: beta · Preview",
+		"pane header shows the jumped tab and the still-selected tree tab")
+	assert.Contains(t, view, "1 Preview *", "sidebar active-tab marker stays on the selected tab")
 }
 
 // TestPane_FocusRingCyclesNPanes: with three panes open, Tab cycles

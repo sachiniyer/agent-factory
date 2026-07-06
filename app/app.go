@@ -503,21 +503,6 @@ func (m *home) syncFocus() {
 	m.menu.SetFocusRegion(active)
 }
 
-// focusedOpenPane returns the open pane the focus ring points at, or nil when
-// focus is on the tree/automations (or the pane vanished).
-func (m *home) focusedOpenPane() *store.OpenPane {
-	active := m.ring.Active()
-	if !layout.IsPaneRegion(active) {
-		return nil
-	}
-	for _, p := range m.visiblePanes {
-		if layout.PaneRegion(p.ID()) == active {
-			return p
-		}
-	}
-	return nil
-}
-
 // focusRegion moves focus directly to the given region and re-solves the
 // layout so ring visibility and pane rects stay coherent.
 func (m *home) focusRegion(region string) {
@@ -1814,6 +1799,7 @@ func (m *home) View() string {
 			cols = append(cols, m.renderDivider(i-1))
 		}
 		if w := m.paneWindows[p.ID()]; w != nil {
+			w.SetSelectionHint(m.paneSelectionHint(p))
 			cols = append(cols, w.View())
 		}
 	}

@@ -99,6 +99,13 @@ type TabbedWindow struct {
 	// capture — the capture polling for this pane is skipped by the root
 	// model for the same duration. Event-loop only.
 	live LiveView
+
+	// selectionHint names the current tree/sidebar selection when it differs
+	// from this pane's explicit binding. Open panes are intentionally not
+	// selection-driven, so the header makes that divergence visible instead of
+	// leaving the selected row and displayed content to appear contradictory
+	// (#1289).
+	selectionHint string
 }
 
 // LiveView is a live embedded-terminal render source (#1089): the termpane
@@ -299,6 +306,12 @@ func (w *TabbedWindow) SetRegion(region string) {
 	w.region = region
 }
 
+// SetSelectionHint annotates the pane header when the tree selection differs
+// from the pane's explicit binding. Empty clears the annotation.
+func (w *TabbedWindow) SetSelectionHint(title string) {
+	w.selectionHint = title
+}
+
 // registerZones records this frame's hit-test rects: the whole pane as the
 // body (click focuses; click focused interacts; wheel scrolls), the one-line
 // `title · tab` header inside the frame on top of it, and — exactly while the
@@ -404,6 +417,9 @@ func (w *TabbedWindow) renderHeader(width int) string {
 			label = labels[idx]
 		}
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
+		if w.selectionHint != "" {
+			text = fmt.Sprintf(" %s · %s · selected: %s ", inst.Title, label, w.selectionHint)
+		}
 	} else {
 		text = " no session selected "
 	}
