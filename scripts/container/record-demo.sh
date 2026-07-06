@@ -29,8 +29,13 @@ ROWS="${DEMO_ROWS:-36}"
 AGG_FONT_SIZE="${DEMO_FONT_SIZE:-14}"
 AGG_THEME="${DEMO_THEME:-dracula}"
 AGG_FPS="${DEMO_FPS:-15}"
-AGG_IDLE="${DEMO_IDLE:-1.5}"           # trim static gaps; animation is untouched
-AGG_SPEED="${DEMO_SPEED:-1.9}"         # playback speed-up (keeps GIF ~15-20s)
+# idle-time-limit caps *static* gaps. It must stay ABOVE the scenario's
+# deliberate "hold" beats (the automations overlay, the full-screen attach, the
+# finale) — those are held on a still screen, so a lower cap would trim the very
+# shots the demo is meant to linger on (e.g. the overlay collapsing to a
+# ~0.3s flash). 3.0 preserves every hold; --speed then does the global compress.
+AGG_IDLE="${DEMO_IDLE:-3.0}"           # preserve deliberate holds; still trims dead air
+AGG_SPEED="${DEMO_SPEED:-2.2}"         # playback speed-up (keeps the richer flow ~22-28s)
 GIFSICLE_LOSSY="${DEMO_LOSSY:-80}"
 GIFSICLE_COLORS="${DEMO_COLORS:-64}"
 
@@ -56,9 +61,38 @@ default_program = "claude"
 claude = "$SANDBOX/demo-agent.sh"
 EOF
 
+    # A tab is a real process in the agent's worktree, not another agent. Put a
+    # fake dev-server (demo-tab.sh) on PATH as `dev` so the demo can open a
+    # second tab beside an agent and stream `npm run dev`-style output; and a
+    # long-lived `watch-ci` stub so the seeded watch task shows [watching], not
+    # a "command not found" error (see the Automations seed below).
+    DEV_BIN=/home/dev/bin
+    mkdir -p "$DEV_BIN"
+    cp /src/docs/assets/demo-tab.sh "$DEV_BIN/dev"
+    chmod +x "$DEV_BIN/dev"
+    printf '#!/usr/bin/env bash\nexec sleep infinity\n' >"$DEV_BIN/watch-ci"
+    chmod +x "$DEV_BIN/watch-ci"
+
     # shellcheck disable=SC1091
     source /src/scripts/tui-driver.sh
     af_reset_sandbox
+
+    # Seed the Automations rail with a believable schedule (a cron "triage every
+    # morning", a nightly test run, and a watch task) so the demo shows real
+    # scheduling, not an empty section. Written AFTER af_reset_sandbox (which
+    # wipes the sandbox home) and BEFORE af_boot (the TUI reads tasks.json from
+    # disk at startup — #960 the daemon is the only *writer*, but reads are from
+    # disk, and the demo runs no daemon). ProjectPath must equal the mock-repo
+    # root so LoadTasksForCurrentRepo() surfaces them.
+    REPO_ROOT="$(git -C "$AF_DRIVER_REPO" rev-parse --show-toplevel 2>/dev/null || echo "$AF_DRIVER_REPO")"
+    cat >"$AGENT_FACTORY_HOME/tasks.json" <<EOF
+[
+ {"id":"a1a1a1a1","name":"Triage new issues","prompt":"Triage new GitHub issues: label, dedupe, and reply","cron_expr":"0 9 * * *","project_path":"$REPO_ROOT","program":"claude","enabled":true,"created_at":"2026-07-01T09:00:00Z"},
+ {"id":"b2b2b2b2","name":"Nightly test + coverage","prompt":"Run the full suite and post the coverage delta","cron_expr":"0 2 * * *","project_path":"$REPO_ROOT","program":"claude","enabled":true,"created_at":"2026-07-01T09:00:00Z"},
+ {"id":"c3c3c3c3","name":"Rerun failing CI","prompt":"A CI run failed: {{line}} — reproduce and fix","watch_cmd":"watch-ci","project_path":"$REPO_ROOT","program":"claude","enabled":true,"created_at":"2026-07-01T09:00:00Z"}
+]
+EOF
+
     af_boot                                   # af, empty TUI, in tmux session 'drive'
     # Hide every tmux status bar (the driver's 'drive' session AND each
     # instance's own af_* session) so the recording shows only af's chrome, not
@@ -83,32 +117,57 @@ EOF
     beat() { sleep "$1"; }
 
     # ---- the demo scenario -------------------------------------------------
-    # Only auto-opened (on-creation) previews and full-screen attach render af's
-    # panes at their native width; re-opening/tiling a pane reflows it to a
-    # narrower width and mangles the transcript, so the scenario deliberately
-    # sticks to those two clean surfaces.
+    # Surface-width note: an agent's transcript is pre-streamed at native
+    # (full-preview / full-screen) width, so re-opening it in a narrower tiled
+    # pane reflows and mangles it. The scenario therefore only ever shows the
+    # AGENT transcript on those two native surfaces — and reserves the tiled
+    # split (Act 4) for a *tab* whose content (the dev-server) is generated
+    # live at the pane's current width, so it renders clean.
     #
     # Act 1 — create one agent and watch it work (the hero streaming shot).
     af_new_instance fix-auth-timeout
-    beat 2.5
-    # Act 2 — spin up the fleet; the sidebar fills with agents + ready dots
-    # while the live preview keeps showing the first agent's result.
-    af_new_instance add-dark-mode;            beat 1.0
-    af_new_instance refactor-api-client;      beat 1.0
-    # Act 3 — create the last agent, let its (fuller) transcript finish
-    # streaming in the background while the fleet sits ready, then dive
-    # full-screen into it. Attaching only AFTER it settles matters: attaching
-    # mid-stream leaves the pane transiently reflowing (content jumps, menu
-    # strands), whereas a settled pane renders clean and fills the screen. No
-    # typing, so there is no interactive-mode toggle to strand af's menu bar;
-    # af_attach syncs on the TUI chrome vanishing, so the recording only lands
-    # on the fully-attached state.
+    beat 2.2
+    # Act 2 — spin up the fleet; the sidebar fills with agents, a running
+    # spinner on the newest and ● ready dots on the rest, while the live
+    # preview keeps streaming. The Automations rail sits seeded below.
+    af_new_instance add-dark-mode;            beat 0.9
+    af_new_instance refactor-api-client;      beat 1.4
+    # Act 3 — spotlight the Automations: open the task manager (S) over the
+    # fleet to show the cron/watch schedule ("triage every morning", nightly
+    # tests, rerun-failing-CI), then dismiss it (a modal overlay: clean open +
+    # Escape close, no pane-focus state to strand).
+    af_open_tasks
+    beat 2.6
+    af_close_tasks
+    beat 0.6
+    # Act 4 — create the last agent, let its (fuller) transcript finish
+    # streaming while the fleet sits ready, then dive full-screen into it (o).
+    # Attaching only AFTER it settles matters: a settled pane renders clean and
+    # fills the screen, where mid-stream would strand a reflowing pane. No
+    # typing, so no interactive-mode toggle strands the menu bar; af_attach
+    # syncs on the TUI chrome vanishing, so the recording lands on the fully-
+    # attached state.
     af_new_instance write-integration-tests
-    beat 3.5                                    # fleet-ready beat + transcript settles
+    beat 3.0                                     # fleet-ready beat + transcript settles
     af_attach
-    beat 2.2                                    # hold on the clean, full agent session
+    beat 2.2                                     # hold on the clean, full agent session
     af_detach
-    beat 1.2
+    beat 0.9
+    # Act 5 (finale) — a tab is a real process in the worktree, not another
+    # agent. Open a second tab on the first agent (t auto-tiles a
+    # Preview | Terminal split), step in (Enter → interact in-pane, no full-
+    # screen), and run the dev server — it streams live beside the agent's own
+    # transcript. This is the closing shot: an agent and a running dev-server
+    # side by side in one worktree. Ending here (rather than tearing the split
+    # back down) keeps the scenario to only the clean surfaces — the fragile
+    # part was collapsing a two-tab pane back to the tree, which we now avoid.
+    af_select fix-auth-timeout
+    af_new_tab                                  # auto-opens the tiled Terminal split
+    af_enter_interactive
+    af_send_to_pane "dev"
+    beat 3.6                                     # dev-server boots + serves requests
+    af_exit_interactive                          # both panes back to the calm single border
+    beat 1.6
 
     # ---- stop recording cleanly: kill asciinema (which saves the cast). Do
     # NOT `tmux detach-client`, which would paint a "[detached]" frame into the
@@ -138,8 +197,8 @@ EOF
     total="$(ffmpeg -i "$OUT/demo.gif" -map 0:v:0 -c copy -f null /dev/null 2>&1 | grep -oE 'frame= *[0-9]+' | tail -1 | grep -oE '[0-9]+')"
     total="${total:-60}"
     i=1
-    for f in $(seq 1 6); do
-        n=$(( (total * f) / 7 ))
+    for f in $(seq 1 9); do
+        n=$(( (total * f) / 10 ))
         [ "$n" -lt 1 ] && n=1
         ffmpeg -y -loglevel error -i "$OUT/demo.gif" -vf "select=eq(n\,$n)" -vframes 1 \
             "$(printf "%s/frames/frame-%02d.png" "$OUT" "$i")"
