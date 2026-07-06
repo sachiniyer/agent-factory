@@ -14,6 +14,17 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
+func advanceEventQueue(t *testing.T, q *eventQueue, cursor eventQueueCursor) {
+	t.Helper()
+	advanced, err := q.advance(cursor)
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if !advanced {
+		t.Fatal("advance skipped the current queued event")
+	}
+}
+
 // TestEventQueue_EnqueuePeekAdvanceRoundTrip pins the queue's core contract:
 // strict FIFO across enqueue/peek/advance, and both files removed once the
 // backlog fully drains (the steady healthy state is no queue files at all).
@@ -31,16 +42,14 @@ func TestEventQueue_EnqueuePeekAdvanceRoundTrip(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		ev, n, ok, err := q.peek()
+		ev, cursor, ok, err := q.peek()
 		if err != nil || !ok {
 			t.Fatalf("peek %d: ok=%v err=%v", i, ok, err)
 		}
 		if want := fmt.Sprintf("event-%d", i); ev.Line != want {
 			t.Fatalf("peek %d = %q, want %q (FIFO order)", i, ev.Line, want)
 		}
-		if err := q.advance(n); err != nil {
-			t.Fatalf("advance %d: %v", i, err)
-		}
+		advanceEventQueue(t, q, cursor)
 	}
 
 	if got := q.pendingCount(); got != 0 {
@@ -64,13 +73,11 @@ func TestEventQueue_RecoversAcrossReopen(t *testing.T) {
 			t.Fatalf("enqueue: %v", err)
 		}
 	}
-	_, n, ok, err := q.peek()
+	_, cursor, ok, err := q.peek()
 	if err != nil || !ok {
 		t.Fatalf("peek: ok=%v err=%v", ok, err)
 	}
-	if err := q.advance(n); err != nil { // deliver event-0
-		t.Fatalf("advance: %v", err)
-	}
+	advanceEventQueue(t, q, cursor) // deliver event-0
 
 	reopened := newEventQueue(dir, "ab120002")
 	if got := reopened.pendingCount(); got != 2 {
@@ -147,7 +154,7 @@ func TestEventQueue_MaxLineEscapeHeavyRoundTrip(t *testing.T) {
 		t.Fatalf("recovered pending = %d, want 3 (oversized record must not end the scan)", got)
 	}
 	for _, want := range []string{"first", line, "last"} {
-		ev, n, ok, err := reopened.peek()
+		ev, cursor, ok, err := reopened.peek()
 		if err != nil || !ok {
 			t.Fatalf("peek: ok=%v err=%v", ok, err)
 		}
@@ -155,9 +162,7 @@ func TestEventQueue_MaxLineEscapeHeavyRoundTrip(t *testing.T) {
 			t.Fatalf("replayed line corrupted: got %d bytes, want %d bytes (first divergence at %d)",
 				len(ev.Line), len(want), firstDivergence(ev.Line, want))
 		}
-		if err := reopened.advance(n); err != nil {
-			t.Fatalf("advance: %v", err)
-		}
+		advanceEventQueue(t, reopened, cursor)
 	}
 }
 
@@ -196,13 +201,11 @@ func TestEventQueue_TornTrailingRecordTruncated(t *testing.T) {
 	if err := reopened.enqueue("after"); err != nil {
 		t.Fatalf("enqueue after torn tail: %v", err)
 	}
-	ev, n, ok, err := reopened.peek()
+	ev, cursor, ok, err := reopened.peek()
 	if err != nil || !ok || ev.Line != "whole" {
 		t.Fatalf("head = %q ok=%v err=%v, want whole", ev.Line, ok, err)
 	}
-	if err := reopened.advance(n); err != nil {
-		t.Fatalf("advance: %v", err)
-	}
+	advanceEventQueue(t, reopened, cursor)
 	ev, _, ok, err = reopened.peek()
 	if err != nil || !ok || ev.Line != "after" {
 		t.Fatalf("second record = %q ok=%v err=%v, want intact %q", ev.Line, ok, err, "after")
@@ -238,6 +241,59 @@ func TestEventQueue_DropsOldestOverEventCap(t *testing.T) {
 	}
 }
 
+// TestEventQueue_StaleAdvanceAfterOverflowDropDoesNotSkipBacklog covers the
+// #1262 race: replay peeks the head, live enqueues overflow-drop that same
+// head, then the stale replay advance arrives. The stale advance must not
+// move the new head; every remaining queued event must still replay once.
+func TestEventQueue_StaleAdvanceAfterOverflowDropDoesNotSkipBacklog(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "ab120008")
+	for i := 0; i < 2; i++ {
+		if err := q.enqueue(fmt.Sprintf("event-%d", i)); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+
+	ev, stale, ok, err := q.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek stale head: ok=%v err=%v", ok, err)
+	}
+	if ev.Line != "event-0" {
+		t.Fatalf("stale head = %q, want event-0", ev.Line)
+	}
+
+	for i := 2; i <= watcherQueueMaxEvents; i++ {
+		if err := q.enqueue(fmt.Sprintf("event-%d", i)); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+	if got := q.pendingCount(); got != watcherQueueMaxEvents {
+		t.Fatalf("pending after overflow = %d, want %d", got, watcherQueueMaxEvents)
+	}
+
+	advanced, err := q.advance(stale)
+	if err != nil {
+		t.Fatalf("stale advance: %v", err)
+	}
+	if advanced {
+		t.Fatal("stale advance consumed the new queue head")
+	}
+
+	for i := 1; i <= watcherQueueMaxEvents; i++ {
+		ev, cursor, ok, err := q.peek()
+		if err != nil || !ok {
+			t.Fatalf("peek event-%d: ok=%v err=%v", i, ok, err)
+		}
+		if want := fmt.Sprintf("event-%d", i); ev.Line != want {
+			t.Fatalf("backlog skipped/reordered: got %q, want %q", ev.Line, want)
+		}
+		advanceEventQueue(t, q, cursor)
+	}
+	if got := q.pendingCount(); got != 0 {
+		t.Fatalf("pending after replay = %d, want 0", got)
+	}
+}
+
 // TestEventQueue_CompactsDeliveredPrefix (#1129 PR 4): once the delivered
 // prefix outgrows watcherQueueCompactBytes, advance rewrites the file down to
 // its pending suffix — offset back to 0, remaining events intact and in
@@ -259,13 +315,11 @@ func TestEventQueue_CompactsDeliveredPrefix(t *testing.T) {
 	// Consume until the delivered prefix crosses the threshold; compaction
 	// must kick in and reset the offset while events remain pending.
 	for i := 0; i < 5; i++ {
-		_, n, ok, err := q.peek()
+		_, cursor, ok, err := q.peek()
 		if err != nil || !ok {
 			t.Fatalf("peek %d: ok=%v err=%v", i, ok, err)
 		}
-		if err := q.advance(n); err != nil {
-			t.Fatalf("advance %d: %v", i, err)
-		}
+		advanceEventQueue(t, q, cursor)
 	}
 
 	q.mu.Lock()
@@ -291,16 +345,14 @@ func TestEventQueue_CompactsDeliveredPrefix(t *testing.T) {
 		t.Fatalf("reopened pending = %d, want 5", got)
 	}
 	for i := 5; i < 10; i++ {
-		ev, n, ok, err := reopened.peek()
+		ev, cursor, ok, err := reopened.peek()
 		if err != nil || !ok {
 			t.Fatalf("reopened peek %d: ok=%v err=%v", i, ok, err)
 		}
 		if want := fmt.Sprintf("event-%d", i); ev.Line != want {
 			t.Fatalf("compaction reordered/corrupted: got %q, want %q", ev.Line, want)
 		}
-		if err := reopened.advance(n); err != nil {
-			t.Fatalf("reopened advance: %v", err)
-		}
+		advanceEventQueue(t, reopened, cursor)
 	}
 }
 
