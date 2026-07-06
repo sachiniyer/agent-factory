@@ -4,8 +4,9 @@
 # real ~/.agent-factory, or this repo's worktrees.
 # See docs/container-testing.md.
 
-.PHONY: test-container playtest-container playtest-container-detached \
-	tui-driver tui-driver-selftest testbox-image lint-file-length docs
+.PHONY: test-container remote-roundtrip-container playtest-container \
+	playtest-container-detached tui-driver tui-driver-selftest testbox-image \
+	lint-file-length docs
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
 # (1000 for production code, 1500 for *_test.go) unless grandfathered in
@@ -26,6 +27,11 @@ docs:
 # GOTESTARGS, e.g.: make test-container GOTESTARGS="-race ./daemon/..."
 test-container:
 	scripts/testbox.sh test $(GOTESTARGS)
+
+# Focused remote-hook integration harness (#1039): runs the mock remote
+# round-trip gate inside the same container fence as the full suite.
+remote-roundtrip-container:
+	scripts/testbox.sh test ./integration -run TestRemoteHookRoundTripMockRemote
 
 # Interactive TUI play-test sandbox: builds af inside, scaffolds a
 # throwaway AF home + mock project repo, drops you in a shell with a

@@ -40,6 +40,20 @@ What the harness does:
   runaway process generator suffocates inside the container instead of
   taking the box down.
 
+## `make remote-roundtrip-container` — mock remote hooks
+
+```bash
+make remote-roundtrip-container
+```
+
+Runs the focused remote-hook integration harness inside the testbox. The test
+builds `af`, starts its daemon, configures a repo-local mock remote backend
+whose hook paths and state directory include spaces, then drives a full remote
+session lifecycle through the real hook path: create (`launch_cmd`), snapshot
+and restore (`list_cmd`), CLI attach/detach (`attach_cmd`), archive rejection,
+and kill (`delete_cmd`). It does not need Docker-in-Docker; the mock remote is
+stateful shell hooks running inside the already-isolated test container.
+
 ## `make playtest-container` — TUI play-testing
 
 ```bash
