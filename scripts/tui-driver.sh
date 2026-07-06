@@ -507,11 +507,11 @@ _af_tab_count() {
     af_capture | grep -cE '[├└][[:space:]]+[0-9]+[[:space:]]+(Preview|Terminal|Diff)' || true
 }
 
-# af_open_tasks — open the task-manager overlay (`S`). Syncs on the overlay's
+# af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
 # unique `r run now` hint line.
 af_open_tasks() {
     af_ensure_nav
-    af_send S
+    af_send m
     af_wait_for 'run now' "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
 }
 

@@ -47,18 +47,19 @@ Tabs persist across restarts, and each is a real process the daemon tracks.
 
 ## Working with results
 
-- **`p`** opens the session's pull request; **`P`** copies its URL.
-- **`H`** runs the repo's worktree hooks.
+- **`p`** opens the session's pull request; **`y`** copies its URL.
+- **`e`** runs the repo's worktree hooks.
 - **`/`** searches; **`?`** shows the full, live help overlay.
 
 ## Sessions, tasks, and other surfaces
 
 - **`n`** creates a new local session; **`N`** creates a remote one.
-- **`D`** kills the selected session; **`A`** archives it (or restores an
+- **`D`** kills the selected session; **`a`** archives it (or restores an
   archived one).
-- **`S`** opens the tasks view to manage [scheduled and event-driven
+- **`m`** opens the tasks view to manage [scheduled and event-driven
   automations](../tasks.md).
 - **`c`** retries a session that's parked on a [usage limit](../usage-limits.md).
+- **`Ctrl-u`** / **`Ctrl-d`** scroll the current tab up and down.
 
 ## Key bindings are yours
 
@@ -72,4 +73,5 @@ af keys
 
 to print every action with its **effective** binding (default or your rebind).
 See [Configuration → key bindings](../configuration.md#key-bindings-keys) for how
-to set them, and the [CLI reference](../reference/cli.md#af-keys) for the command.
+to set them, including how to restore pre-#1027 keys, and the
+[CLI reference](../reference/cli.md#af-keys) for the command.

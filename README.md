@@ -75,9 +75,25 @@ Common TUI keys:
 | `o` | Attach to the selected tab full-screen |
 | `Ctrl-w` | Detach from a full-screen attach |
 | `t` | Open a helper shell tab in the session worktree |
-| `A` | Archive or restore a session |
+| `a` | Archive or restore a session |
 | `D` | Kill a session and clean up its worktree |
-| `S` | Open the task manager |
+| `m` | Open the task manager |
+| `y` | Copy the selected session's PR URL |
+| `e` | Open the worktree hooks editor |
+| `Ctrl-u` / `Ctrl-d` | Scroll the selected tab up/down |
+
+Previous default keys are not built-in aliases. To restore the old visible
+keymap, pin those bindings in `~/.agent-factory/config.toml`:
+
+```toml
+[keys]
+archive = "A"
+tasks = "S"
+copy_pr = "P"
+hooks = "H"
+scroll_up = "shift+up"
+scroll_down = "shift+down"
+```
 
 Everything the TUI does is also scriptable:
 
@@ -155,7 +171,8 @@ performance.
 - [Configuration](docs/configuration.md), [tasks](docs/tasks.md),
   [remote hooks](docs/remote-hooks.md), and [usage limits](docs/usage-limits.md).
 - [Container testing](docs/container-testing.md), [release process](docs/release-process.md),
-  and [release testing plan](docs/release-testing-plan.md).
+  [release notes](docs/release-notes.md), and
+  [release testing plan](docs/release-testing-plan.md).
 
 ## Maintenance
 

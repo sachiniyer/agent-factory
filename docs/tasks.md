@@ -15,7 +15,7 @@ When `target_session` is set, the session title is looked up in the task's own r
 
 ## Task fields
 
-Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CLI) or the TUI Tasks pane (`S` to open, `n` to create).
+Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CLI) or the TUI Tasks pane (`m` to open, `n` to create).
 
 | Field | Meaning |
 |---|---|

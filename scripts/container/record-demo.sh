@@ -132,7 +132,7 @@ EOF
     # preview keeps streaming. The Automations rail sits seeded below.
     af_new_instance add-dark-mode;            beat 0.9
     af_new_instance refactor-api-client;      beat 1.4
-    # Act 3 — spotlight the Automations: open the task manager (S) over the
+    # Act 3 — spotlight the Automations: open the task manager (m) over the
     # fleet to show the cron/watch schedule ("triage every morning", nightly
     # tests, rerun-failing-CI), then dismiss it (a modal overlay: clean open +
     # Escape close, no pane-focus state to strand).

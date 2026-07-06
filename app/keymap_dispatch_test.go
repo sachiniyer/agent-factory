@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,4 +61,78 @@ func TestQuitDispatchesThroughKeymap(t *testing.T) {
 
 		assert.True(t, reachesQuit(dispatchKey(h, tea.KeyMsg{Type: tea.KeyCtrlC})), "ctrl+c must always quit")
 	})
+}
+
+func TestErgonomicDefaultKeysDispatchThroughKeymap(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(nil))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	t.Run("task manager uses m and not S", func(t *testing.T) {
+		h := newTestHome(t)
+		_ = dispatchKey(h, runeKey('m'))
+		assert.Equal(t, stateTasks, h.state)
+
+		h = newTestHome(t)
+		_ = dispatchKey(h, runeKey('S'))
+		assert.Equal(t, stateDefault, h.state, "old task key must be unbound by default")
+	})
+
+	t.Run("hooks uses e and not H", func(t *testing.T) {
+		h := newTestHome(t)
+		_ = dispatchKey(h, runeKey('e'))
+		assert.Equal(t, stateHooks, h.state)
+
+		h = newTestHome(t)
+		_ = dispatchKey(h, runeKey('H'))
+		assert.Equal(t, stateDefault, h.state, "old hooks key must be unbound by default")
+	})
+
+	t.Run("archive uses a and not A", func(t *testing.T) {
+		h := newTestHome(t)
+		inst := archiveActionInstance(t, "worker", session.Ready)
+		selectInstance(h, inst)
+
+		_ = dispatchKey(h, runeKey('a'))
+		assert.Equal(t, stateConfirm, h.state)
+
+		h = newTestHome(t)
+		inst = archiveActionInstance(t, "worker", session.Ready)
+		selectInstance(h, inst)
+		_ = dispatchKey(h, runeKey('A'))
+		assert.Equal(t, stateDefault, h.state, "old archive key must be unbound by default")
+	})
+
+	t.Run("copy PR URL uses y and not P", func(t *testing.T) {
+		h := newTestHome(t)
+		h.errBox.SetSize(200, 1)
+		inst, err := session.NewInstance(session.InstanceOptions{Title: "no-pr", Path: t.TempDir(), Program: "claude"})
+		require.NoError(t, err)
+		inst.SetStatus(session.Running)
+		selectInstance(h, inst)
+
+		_ = dispatchKey(h, runeKey('y'))
+		assert.Contains(t, h.errBox.String(), "no PR for this session yet")
+
+		h = newTestHome(t)
+		h.errBox.SetSize(200, 1)
+		inst, err = session.NewInstance(session.InstanceOptions{Title: "no-pr", Path: t.TempDir(), Program: "claude"})
+		require.NoError(t, err)
+		inst.SetStatus(session.Running)
+		selectInstance(h, inst)
+		_ = dispatchKey(h, runeKey('P'))
+		assert.NotContains(t, h.errBox.String(), "no PR for this session yet", "old copy key must be unbound by default")
+	})
+}
+
+func TestPinnedOldDefaultDispatchesThroughKeymap(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"tasks": {"S"}}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := newTestHome(t)
+	_ = dispatchKey(h, runeKey('S'))
+	assert.Equal(t, stateTasks, h.state)
+
+	h = newTestHome(t)
+	_ = dispatchKey(h, runeKey('m'))
+	assert.Equal(t, stateDefault, h.state, "pinning S replaces the ergonomic default")
 }

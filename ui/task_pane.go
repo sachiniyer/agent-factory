@@ -282,7 +282,7 @@ func (s *TaskPane) ConsumePendingTrigger() *task.Task {
 	return nil
 }
 
-// ScrollUp moves the selection up one row. Used by shift+up and mouse wheel
+// ScrollUp moves the selection up one row. Used by scroll keys and mouse wheel
 // regardless of focus, so the user can browse the task list without first
 // focusing the pane. No-op while a task is being edited or created so the
 // background selection doesn't drift out from under the form.

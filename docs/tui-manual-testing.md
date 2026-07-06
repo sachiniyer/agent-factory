@@ -91,9 +91,11 @@ it.
 | `o` | attach full-screen | | `t` | new tab |
 | `Ctrl-]` | exit interactive → nav | | `w` | close tab |
 | `Tab` | cycle focus ring | | `1`–`9` | jump to tab |
-| `j`/`k`,`↓`/`↑` | move tree cursor | | `S` | tasks overlay |
+| `j`/`k`,`↓`/`↑` | move tree cursor | | `m` | tasks overlay |
 | `D` | kill instance | | `/` | search |
-| `Ctrl-W` | detach (full-screen) | | `q` | quit |
+| `a` | archive/restore | | `q` | quit |
+| `p`/`y` | open/copy PR | | `e` | hooks editor |
+| `Ctrl-U`/`Ctrl-D` | scroll tab | | `Ctrl-W` | detach (full-screen) |
 
 `Enter`, `Tab`, `Shift-Tab`, `Esc`, `Ctrl-]`, and `1`–`9` are **reserved** and
 cannot be rebound (`[keys]` config). `Ctrl-W` is the configurable detach key
@@ -153,7 +155,7 @@ compose across `docker exec` invocations.
 | `af_detach` | `Ctrl-W` | TUI chrome back **and** the attach client is reaped (guards #1157) |
 | `af_new_tab` | `t` | tab-child count rises |
 | `af_close_tab` | `w` | tab-child count falls |
-| `af_open_tasks` / `af_close_tasks` | `S` / `Esc` | tasks overlay (`r run now`) appears / gone |
+| `af_open_tasks` / `af_close_tasks` | `m` / `Esc` | tasks overlay (`r run now`) appears / gone |
 | `af_click <x> <y>` / `af_click_instance <name>` | SGR mouse | injects a left click at a cell / on an instance row |
 | `af_scroll <up\|down> [x] [y]` | SGR wheel | injects a wheel event |
 | `af_set_config <toml>` + `af_relaunch` | — | rewrites `config.toml` (canonical since #1030) and reboots the TUI |

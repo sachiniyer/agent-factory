@@ -130,7 +130,7 @@ func TestKillConfirmationWarning(t *testing.T) {
 }
 
 // TestOpenCopyPRNoPRSurfacesMessage is the regression guard for #1170: p (open
-// PR) and P (copy PR URL) on a session that has no PR yet must surface a brief,
+// PR) and y (copy PR URL) on a session that has no PR yet must surface a brief,
 // actionable message via the ErrBox rather than being a silent no-op. A nil
 // selection (no session at all) stays silent — there is no session context to
 // message about.
@@ -152,7 +152,7 @@ func TestOpenCopyPRNoPRSurfacesMessage(t *testing.T) {
 
 	h.errBox.Clear()
 
-	// P (copy PR URL)
+	// y (copy PR URL)
 	_, cmd = h.handleCopyPR()
 	require.NotNil(t, cmd, "handleCopyPR must return a cmd that clears the message")
 	require.Contains(t, h.errBox.String(), "no PR for this session yet")

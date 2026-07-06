@@ -283,7 +283,7 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 	return m, m.selectionChanged()
 }
 
-// handleArchive is the archive/restore verb (#1028, `A`): on an archived row it
+// handleArchive is the archive/restore verb (#1028, `a`): on an archived row it
 // restores the session (non-destructive — no confirm); on a live row it archives
 // it behind a confirmation, since archive tears down tmux and relocates the
 // worktree. Remote and in-place sessions can't be archived (no relocatable
