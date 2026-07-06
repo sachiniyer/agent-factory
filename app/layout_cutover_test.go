@@ -126,7 +126,12 @@ func TestLayoutCutover_AutomationsEscReturnsFocusToTree(t *testing.T) {
 // TestLayoutCutover_EnterOpensTasksOverlay: Enter on the focused in-rail
 // section opens the task manager as a centered modal (#1096 play-test fix 1),
 // preselecting the section cursor's task; Esc closes it and saving runs.
-func TestLayoutCutover_EnterOpensTasksOverlay(t *testing.T) {
+// TestLayoutCutover_EnterOpensTaskInEditMode is the #1249 guard: acting on a
+// task once (Enter on the section cursor's task) drops straight into that
+// task's editable config form — no second keypress to leave the list. Esc
+// steps back out of the form to the list (overlay still open), and a second
+// Esc closes the overlay.
+func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 100, 30)
 	tasks := []task.Task{
@@ -143,14 +148,24 @@ func TestLayoutCutover_EnterOpensTasksOverlay(t *testing.T) {
 	require.True(t, consumed)
 	require.Equal(t, stateTasks, h.state, "Enter opens the tasks overlay")
 	require.True(t, h.automations.TaskPane().HasFocus(), "the manager opens with input focus")
+	require.True(t, h.automations.TaskPane().IsEditing(),
+		"acting on a task once lands directly in its config editor (#1249)")
 
 	view := h.View()
 	requireViewSized(t, view, 100, 30)
-	assert.Contains(t, view, "Tasks", "the overlay hosts the manager list")
-	assert.Contains(t, view, "▸ [✓]  beta-task", "the manager preselects the section cursor's task")
+	assert.Contains(t, view, "Edit Task 2",
+		"the overlay opens the cursor's task straight into its edit form")
+	assert.Contains(t, view, "beta-task", "the form is prefilled with the selected task")
 
+	// First Esc backs the form out to the list — the overlay stays open.
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
-	assert.Equal(t, stateDefault, h.state, "Esc closes the overlay")
+	assert.Equal(t, stateTasks, h.state, "Esc from the form returns to the list, not out")
+	assert.False(t, h.automations.TaskPane().IsEditing(), "Esc leaves edit mode")
+	assert.Contains(t, h.View(), "n new", "the list view (and its key line) is back")
+
+	// Second Esc closes the overlay.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+	assert.Equal(t, stateDefault, h.state, "Esc from the list closes the overlay")
 	assert.NotContains(t, h.View(), "n new", "the manager's key line leaves with the overlay")
 }
 

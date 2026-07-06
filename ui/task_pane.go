@@ -378,6 +378,18 @@ func (s *TaskPane) enterEditMode() {
 	s.editing = true
 }
 
+// EnterEditSelected drops straight into the edit form for the currently
+// selected task, no-op'ing when the list is empty (so an empty overlay stays
+// in list mode where `n` creates the first task). It bounds-guards the
+// selected index that the unexported enterEditMode assumes, letting the
+// overlay open a task directly into its config in a single action (#1249).
+func (s *TaskPane) EnterEditSelected() {
+	if len(s.tasks) == 0 {
+		return
+	}
+	s.enterEditMode()
+}
+
 // validateForm enforces the shared create/edit form contract, mirroring
 // `af tasks add` (api/tasks.go). The trigger-type selector already guarantees
 // at most one trigger, so validation reduces to: a name, a non-empty value
