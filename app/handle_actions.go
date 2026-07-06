@@ -845,20 +845,8 @@ func (m *home) handleCopyPR() (tea.Model, tea.Cmd) {
 		return m, m.handleError(noPRForSessionErr)
 	}
 	url := selected.GetPRInfo().URL
-	var copyCmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		copyCmd = exec.Command("pbcopy")
-	default:
-		if _, err := exec.LookPath("wl-copy"); err == nil {
-			copyCmd = exec.Command("wl-copy")
-		} else {
-			copyCmd = exec.Command("xclip", "-selection", "clipboard")
-		}
-	}
-	copyCmd.Stdin = strings.NewReader(url)
-	if err := copyCmd.Run(); err != nil {
-		return m, m.handleError(fmt.Errorf("failed to copy PR URL: %w", err))
+	if err := copyToClipboard(url); err != nil {
+		return m, m.handleError(fmt.Errorf("%w; PR URL: %s", err, url))
 	}
 	return m, nil
 }

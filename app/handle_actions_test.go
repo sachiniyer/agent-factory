@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // recordingAttachBackend wraps a FakeBackend and records the title of the
@@ -162,4 +164,75 @@ func TestOpenCopyPRNoPRSurfacesMessage(t *testing.T) {
 	_, cmd = h.handleOpenPR()
 	require.Nil(t, cmd, "handleOpenPR on an empty selection must stay a silent no-op")
 	require.Empty(t, strings.TrimSpace(h.errBox.String()))
+}
+
+func TestClipboardCommandForPlatform(t *testing.T) {
+	lookPath := func(paths map[string]string) func(string) (string, error) {
+		return func(name string) (string, error) {
+			if path, ok := paths[name]; ok {
+				return path, nil
+			}
+			return "", exec.ErrNotFound
+		}
+	}
+
+	t.Run("darwin uses pbcopy", func(t *testing.T) {
+		spec, err := clipboardCommandForPlatform("darwin", lookPath(map[string]string{"pbcopy": "/bin/pbcopy"}))
+		require.NoError(t, err)
+		require.Equal(t, clipboardCommandSpec{path: "/bin/pbcopy"}, spec)
+	})
+
+	t.Run("non-darwin prefers wl-copy", func(t *testing.T) {
+		spec, err := clipboardCommandForPlatform("linux", lookPath(map[string]string{
+			"wl-copy": "/bin/wl-copy",
+			"xclip":   "/bin/xclip",
+		}))
+		require.NoError(t, err)
+		require.Equal(t, clipboardCommandSpec{path: "/bin/wl-copy"}, spec)
+	})
+
+	t.Run("non-darwin falls back to xclip", func(t *testing.T) {
+		spec, err := clipboardCommandForPlatform("linux", lookPath(map[string]string{"xclip": "/bin/xclip"}))
+		require.NoError(t, err)
+		require.Equal(t, clipboardCommandSpec{path: "/bin/xclip", args: []string{"-selection", "clipboard"}}, spec)
+	})
+
+	t.Run("missing tools are actionable", func(t *testing.T) {
+		_, err := clipboardCommandForPlatform("linux", lookPath(nil))
+		require.EqualError(t, err, "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS)")
+	})
+}
+
+func TestRunClipboardCommandCapturesStderr(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "cat >/dev/null; printf 'cannot open display\\n' >&2; exit 1")
+	err := runClipboardCommand(cmd, "https://github.com/sachiniyer/agent-factory/pull/1")
+	require.EqualError(t, err, "copy failed: cannot open display")
+}
+
+func TestHandleCopyPRFailureShowsReasonAndURL(t *testing.T) {
+	const url = "https://github.com/sachiniyer/agent-factory/pull/1284"
+
+	h := newTestHome(t)
+	h.errBox.SetSize(500, 1)
+
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "has-pr", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	inst.SetStatus(session.Running)
+	inst.SetPRInfo(&sessiongit.PRInfo{Number: 1284, Title: "clipboard", URL: url, State: "OPEN"})
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	prevCopy := copyToClipboard
+	copyToClipboard = func(text string) error {
+		require.Equal(t, url, text)
+		return errors.New("copy failed: cannot open display")
+	}
+	t.Cleanup(func() { copyToClipboard = prevCopy })
+
+	_, cmd := h.handleCopyPR()
+	require.NotNil(t, cmd, "copy failure should return the normal clear-message command")
+
+	rendered := h.errBox.String()
+	require.Contains(t, rendered, "copy failed: cannot open display")
+	require.Contains(t, rendered, "PR URL: "+url)
 }
