@@ -1478,8 +1478,8 @@ func (m *home) selectionChanged() tea.Cmd {
 	if sel.Kind == ui.SectionInstances && !sel.IsHeader {
 		selected := m.sidebar.GetSelectedInstance()
 		// Track the cursor's instance in the store's display selection — what
-		// the pane verbs (`s`, Enter-from-tree, 1-9) act on — then re-clamp
-		// the active tab index against the new instance's tab count.
+		// selection-scoped verbs (`s`, Enter-from-tree, tree-focus 1-9) act on —
+		// then re-clamp the active tab index against the new instance's tab count.
 		m.store.SetSelectedInstance(selected)
 		m.clampSelectionTab()
 		m.menu.SetInstance(selected)

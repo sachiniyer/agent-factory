@@ -209,26 +209,26 @@ func (m *home) reconcilePanesForTabs(instance *session.Instance, oldNames []stri
 // points at, so leaving the ring on a stale pane desyncs the two: the
 // full-screen attach verb `o` (handleAttach) reads the focus ring first and
 // would keep attaching the previously-focused pane's instance instead of the
-// just-selected one — the same wrong-target class as the #1233 Enter bug (Enter
-// itself now resolves purely from the selection, see handleEnter). After Ctrl-]
-// leaves interactive mode the ring stays on instance A's pane, so without this
-// a user who navigates to instance B and presses `o` would attach A. Re-homing
-// the ring on the tree makes `o` resolve the current selection fresh. No-op
-// unless a pane is focused, so it never churns the tree/automations ring or the
-// live attachment (which persists on its still-visible pane).
+// just-selected one — the same wrong-target class as the #1233 Enter bug. Enter
+// is context-dependent now: a focused pane owns Enter, while tree focus resolves
+// the current selection. After Ctrl-] leaves interactive mode the ring stays on
+// instance A's pane, so without this a user who navigates to instance B and
+// presses `o` or Enter would target A. Re-homing the ring on the tree makes
+// those verbs resolve the current selection fresh. No-op unless a pane is
+// focused, so it never churns the tree/automations ring or the live attachment
+// (which persists on its still-visible pane).
 func (m *home) focusTreeForNav() {
 	if layout.IsPaneRegion(m.ring.Active()) {
 		m.focusRegion(layout.RegionTree)
 	}
 }
 
-// enterPane enters interactive mode on a SPECIFIC pane — the mouse
-// click-to-interact target (§2.5). Keyboard Enter (handleEnter) resolves the
-// SIDEBAR SELECTION so it can never type into a stale focused pane (#1233); a
-// body click, by contrast, has already named its exact pane, so it enters that
-// one directly. Remote/non-embeddable panes fall back to the full-screen attach
-// of the pane's tab, mirroring handleEnter's remote branch; guard errors
-// surface the same way.
+// enterPane enters interactive mode on a SPECIFIC pane — the keyboard
+// focused-pane target and the mouse click-to-interact target (§2.5). Tree-focus
+// Enter still resolves through the sidebar selection; callers that already have
+// a pane binding enter that pane directly. Remote/non-embeddable panes fall
+// back to the full-screen attach of the pane's tab, mirroring handleEnter's
+// remote branch; guard errors surface the same way.
 func (m *home) enterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, nil

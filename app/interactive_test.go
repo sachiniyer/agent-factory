@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // ----------------------------------------------------------------------------
@@ -189,12 +190,11 @@ func TestEnterFromTreeOpensPaneAndEntersInteractive(t *testing.T) {
 	require.Len(t, *fakes, 1)
 }
 
-// TestSecondEnterTargetsCurrentSelectionNotStalePane is the #1233 P1
+// TestSecondEnterTargetsCurrentSelectionNotStalePane is the #1233/#1236 P1
 // wrong-target-input regression: enter interactive on instance A, Ctrl-] to
-// nav, select a DIFFERENT instance B, Enter again. Input must route to B — the
-// current selection — never the pane the focus ring was left on (A). Enter
-// resolving from focusedOpenPane (the stale A pane) was the bug; it now
-// resolves purely from the sidebar selection, exactly like the open verb.
+// nav, select a DIFFERENT instance B through the real tree-nav keys, Enter
+// again. Tree navigation must re-home focus to the tree, so Enter routes to B
+// — the current selection — never the pane focus was previously left on (A).
 func TestSecondEnterTargetsCurrentSelectionNotStalePane(t *testing.T) {
 	h := newTestHome(t)
 	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
@@ -253,12 +253,11 @@ func TestSecondEnterTargetsCurrentSelectionNotStalePane(t *testing.T) {
 	assert.Empty(t, aFake.keys, "the previously-interacted instance A must receive nothing")
 }
 
-// TestEnterResolvesFromSelectionNotFocusRing pins the #1233 fix at the source:
-// with the focus ring left on instance A's pane but the sidebar selection on
-// instance B, Enter must act on the SELECTION (B), the same target-resolution
-// the open verb uses — never the focused pane. This isolates handleEnter's
-// resolution from the focus-rehoming nav helper.
-func TestEnterResolvesFromSelectionNotFocusRing(t *testing.T) {
+// TestEnterWithFocusedPaneTargetsFocusNotSidebarSelection pins #1253: with two
+// panes open, a focused pane owns Enter even if the sidebar selection points at
+// another instance. Switching the sidebar selection while a pane is focused
+// must not silently retarget input to the selected row.
+func TestEnterWithFocusedPaneTargetsFocusNotSidebarSelection(t *testing.T) {
 	h := newTestHome(t)
 	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
 	instA := startedLocalInstance(t, "alpha")
@@ -266,29 +265,31 @@ func TestEnterResolvesFromSelectionNotFocusRing(t *testing.T) {
 	h.store.AddInstance(instA)
 	h.store.AddInstance(instB)
 	resizeHome(h, 200, 40)
-	_, _ = stubLiveTermFactory(t)
+	fakes, _ := stubLiveTermFactory(t)
 
-	// Open A's pane and leave the focus ring on it.
+	// Open both panes, then focus A while the sidebar selection points at B.
 	paneA := openTestPane(t, h, instA, 0)
+	paneB := openTestPane(t, h, instB, 0)
+	require.Equal(t, paneB, h.focusedOpenPane(), "opening B focuses B")
+	h.focusRegion(layout.PaneRegion(paneA.ID()))
 	require.Equal(t, paneA, h.focusedOpenPane(), "A's pane must hold the focus ring")
 
-	// Point the selection at B while the ring stays on A's pane — the exact
-	// desync the wrong-target bug exploited.
 	h.sidebar.SetSelectedInstance(1)
 	h.store.SetSelectedInstance(instB)
 	h.clampSelectionTab()
 	require.Equal(t, instB, h.sidebar.GetSelectedInstance())
 
-	// Enter must open/enter B, not the focused A pane.
-	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
-	p := h.focusedOpenPane()
-	require.NotNil(t, p, "Enter must open the selection's pane")
-	assert.Equal(t, instB, p.Instance(), "Enter must resolve the SELECTED instance B, not the focused A pane")
-
-	_, cmd := h.Update(enterInteractiveMsg{pane: p})
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 	runHermeticCmd(t, h, cmd, 0)
-	assert.True(t, h.interactive, "Enter must enter interactive mode on B")
-	assert.Equal(t, instB, h.livePane.Instance(), "input must bind to B")
+
+	require.True(t, h.interactive, "Enter must enter interactive mode")
+	require.Equal(t, paneA, h.focusedOpenPane(), "Enter must keep focus on pane A")
+	require.Equal(t, paneA, h.livePane, "input must bind to focused pane A")
+	assert.Equal(t, instA, h.livePane.Instance(), "input must target A, not sidebar-selected B")
+	assert.Equal(t, instB, h.sidebar.GetSelectedInstance(), "sidebar selection is unchanged")
+	require.Len(t, *fakes, 1)
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
+	assert.Equal(t, []string{"Z"}, (*fakes)[0].keys)
 }
 
 func TestEnterOnRemotePaneFallsBackToFullScreenAttach(t *testing.T) {

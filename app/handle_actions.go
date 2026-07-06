@@ -512,19 +512,22 @@ func killConfirmationWarning(wt string) string {
 // mode on the pane — every keystroke forwards to the agent/shell in place,
 // no full-screen takeover, Ctrl-] returns to nav.
 //
-// Enter resolves its target from the SIDEBAR SELECTION — the exact
-// target-resolution the open-pane verb (`s`, handleOpenPane) uses — and never
-// from the focus ring (#1233). Reading focusedOpenPane first was the
-// wrong-target-input bug: after Ctrl-] leaves interactive mode the ring stays
-// on instance A's pane, so selecting instance B and pressing Enter re-entered
-// interactive on the stale A pane — typing into the WRONG agent. Enter now
-// opens (or focuses) the SELECTED instance's pane, exactly like `s`, then
-// enters it — one path, always the current selection.
+// Enter resolves its target from context: a focused workspace pane owns Enter,
+// otherwise the SIDEBAR SELECTION owns Enter. The tree/nav path keeps the
+// #1233/#1236 stale-target fix because tree navigation re-homes the focus ring
+// on the tree before Enter is pressed; in that context Enter opens (or focuses)
+// the selected instance's pane, exactly like `s`, then enters it. But when the
+// ring is already on a pane, re-reading GetSelectedInstance would silently jump
+// input to whichever row the sidebar currently highlights (#1253).
 //
 // Bindings that cannot embed — remote instances, whose only local terminal is
 // the full-screen hook PTY — fall back to the full-screen attach Enter used to
 // do; dead/transitional sessions keep their guard errors.
 func (m *home) handleEnter() (tea.Model, tea.Cmd) {
+	if p := m.focusedOpenPane(); p != nil {
+		return m.enterPane(p)
+	}
+
 	sel := m.sidebar.GetSelection()
 
 	// Toggle expandable section headers (Instances and the Archived folder).
@@ -775,14 +778,23 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	return m, m.selectionChanged()
 }
 
-// handleTabJump jumps the selection's active tab to a 1-based tab number (the
-// 1-9 number keys). Out-of-range numbers are a no-op (#930 PR 4). When the
-// sidebar cursor rests on one of the selected instance's tab rows, it follows
-// the jump so the tree can't disagree; the jumped-to tab is what `s` opens
-// and Enter attaches (#1088 — panes are explicit bindings, so the jump moves
-// the selection, not any open pane).
+// handleTabJump jumps to a 1-based tab number (the 1-9 number keys). With a
+// pane focused, the pane's own binding changes tab; with tree focus, the
+// sidebar selection's active tab changes. Out-of-range numbers are a no-op
+// (#930 PR 4). When the sidebar cursor rests on one of the selected instance's
+// tab rows, it follows the tree-focus jump so the tree and active tab agree.
 func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 	idx := oneBased - 1
+	if p := m.focusedOpenPane(); p != nil {
+		w := m.paneWindows[p.ID()]
+		if w == nil || !w.JumpToTab(idx) {
+			return m, nil
+		}
+		if p == m.livePane {
+			m.syncLiveTermPane()
+		}
+		return m, m.selectionChanged()
+	}
 	if idx < 0 || idx >= len(tree.TabLabels(m.store.GetSelectedInstance())) {
 		return m, nil
 	}
