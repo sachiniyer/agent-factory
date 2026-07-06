@@ -33,7 +33,11 @@ type instanceData struct {
 	TmuxName    string                 `json:"tmux_name"`
 	BackendType string                 `json:"backend_type"`
 	RemoteMeta  map[string]interface{} `json:"remote_meta"`
-	Worktree    struct {
+	Tabs        []struct {
+		Name string `json:"name"`
+		Kind int    `json:"kind"`
+	} `json:"tabs"`
+	Worktree struct {
 		WorktreePath string `json:"worktree_path"`
 	} `json:"worktree"`
 }
