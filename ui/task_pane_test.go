@@ -397,6 +397,48 @@ func TestTaskPaneEnterEditSelectedThenEscLeavesNoDirty(t *testing.T) {
 	assert.Empty(t, tp.ConsumeDirty(), "no task should be persisted after a no-op open")
 }
 
+// TestTaskPaneEditModeKeepsListActionsReachable is the #1288 guard: the
+// #1249 one-step edit flow must not hide the documented list verbs. Opening a
+// selected task directly into edit mode still lets the user run, toggle, or
+// delete that selected task without first knowing to press Esc.
+func TestTaskPaneEditModeKeepsListActionsReachable(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "* * * * *",
+		ProjectPath: newGitRepo(t),
+		Program:     "claude",
+		Enabled:     true,
+	}})
+	tp.SetFocus(true)
+	tp.EnterEditSelected()
+	require.True(t, tp.IsEditing())
+
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	require.True(t, tp.HasPendingTrigger(), "r must remain reachable from edit mode")
+	pending := tp.ConsumePendingTrigger()
+	require.NotNil(t, pending)
+	assert.Equal(t, "abc", pending.ID)
+	assert.True(t, tp.IsEditing(), "run-now leaves the edit form in place until the app consumes it")
+
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	require.True(t, tp.IsEditing(), "toggle should not kick the user out of edit")
+	require.True(t, tp.IsDirty(), "toggle from edit mode marks the task dirty")
+	assert.False(t, tp.GetTasks()[0].Enabled)
+	dirty := tp.ConsumeDirty()
+	require.Len(t, dirty, 1)
+	assert.Equal(t, "abc", dirty[0].ID)
+
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	assert.False(t, tp.IsEditing(), "deleting the task being edited returns to list mode")
+	assert.Empty(t, tp.GetTasks())
+	deleted := tp.ConsumeDeleted()
+	require.Len(t, deleted, 1)
+	assert.Equal(t, "abc", deleted[0].ID)
+}
+
 // TestTaskPaneEditModeCtrlCCancels is the regression guard for #526: Ctrl+C
 // inside the edit form must cancel the edit (matching Esc) instead of being
 // silently swallowed. Dirty buffer changes must not be written back.

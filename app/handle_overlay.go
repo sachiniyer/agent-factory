@@ -109,10 +109,11 @@ func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 // showTasksOverlay opens the task manager (list + create/edit form) as a
 // centered modal overlay, preselecting the in-rail cursor's task and dropping
 // straight into that task's editable config in a single action (#1249) — no
-// second keypress to enter edit mode. Esc backs the form out to the list,
-// where the rest of the key loop (j/k, n new, x toggle, D delete, r run, esc
-// close) is live. When there are no tasks the overlay stays in list mode so
-// `n` can create the first one.
+// second keypress to enter edit mode. The edit form still handles the selected
+// task's list verbs (`r` run now, `x` toggle, `D` delete) and advertises Esc
+// as the way back to the list, so the one-step edit flow does not hide the
+// run-now path (#1288). When there are no tasks the overlay stays in list mode
+// so `n` can create the first one.
 func (m *home) showTasksOverlay() (tea.Model, tea.Cmd) {
 	sp := m.automations.TaskPane()
 	if idx := m.automations.SelectedTaskIndex(); idx >= 0 {
