@@ -63,6 +63,24 @@ type LocalBackend struct{}
 
 func (b *LocalBackend) Type() string { return "local" }
 
+// WorktreeUnavailableError marks a recover/respawn failure caused by the
+// persisted worktree path being unavailable before tmux is touched. The daemon
+// uses the typed shape to add one-shot diagnostics for vanished live worktrees
+// without parsing error strings (#1303).
+type WorktreeUnavailableError struct {
+	Title        string
+	WorktreePath string
+	Err          error
+}
+
+func (e *WorktreeUnavailableError) Error() string {
+	return fmt.Sprintf("recover: session %q worktree unavailable: %v", e.Title, e.Err)
+}
+
+func (e *WorktreeUnavailableError) Unwrap() error {
+	return e.Err
+}
+
 func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	if strings.TrimSpace(i.Title) == "" {
 		return fmt.Errorf("instance title cannot be empty")
@@ -311,7 +329,7 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		// Surface the real cause instead of a generic tmux new-session error:
 		// a deleted worktree is the expected permanent-failure shape, and the
 		// restore loop's escalation log should say so.
-		return fmt.Errorf("recover: session %q worktree unavailable: %w", i.Title, err)
+		return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 	}
 
 	ts.SetProgram(injectSystemPrompt(resolveProgramForInstance(i)))

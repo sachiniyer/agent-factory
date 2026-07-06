@@ -1,11 +1,16 @@
 package daemon
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // The Lost-session restore loop (#1108 PR 2): the general form of the
@@ -41,6 +46,9 @@ type lostRestoreState struct {
 	// remoteLogged dedupes the "not restoring a remote session" note to once
 	// per Lost episode.
 	remoteLogged bool
+	// vanishedWorktreesLogged dedupes the high-visibility #1303 diagnostic to
+	// one ERROR per distinct missing worktree path during a Lost episode.
+	vanishedWorktreesLogged map[string]struct{}
 }
 
 // RestoreLostSessions runs one restore pass over every Lost session the
@@ -152,6 +160,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	}
 
 	if err := inst.Recover(); err != nil {
+		m.logVanishedWorktreeOnce(key, repoID, st, inst, err)
 		m.lostRestoreFailed(key, st, inst.Title, err)
 		return
 	}
@@ -181,8 +190,162 @@ func (m *Manager) lostRestoreFailed(key string, st *lostRestoreState, title stri
 	}
 	st.nextAttempt = time.Now().Add(backoff)
 	if st.consecutiveFailures == lostRestoreEscalationThreshold {
+		if path, ok := missingWorktreePath(err); ok && st.vanishedWorktreeWasLogged(path) {
+			log.WarningLog.Printf("restore of lost session %q failed %d consecutive times; missing worktree %q was already logged at ERROR — will keep retrying every %s (kill the session to stop): %v", title, st.consecutiveFailures, path, lostRestoreBackoffMax, err)
+			return
+		}
 		log.ErrorLog.Printf("restore of lost session %q failed %d consecutive times; the cause looks persistent — will keep retrying every %s (kill the session to stop): %v", title, st.consecutiveFailures, lostRestoreBackoffMax, err)
 		return
 	}
 	log.WarningLog.Printf("restore of lost session %q failed (attempt %d), retrying in %s: %v", title, st.consecutiveFailures, backoff, err)
+}
+
+func (m *Manager) logVanishedWorktreeOnce(key, repoID string, st *lostRestoreState, inst *session.Instance, restoreErr error) {
+	worktreePath, ok := missingWorktreePath(restoreErr)
+	if !ok {
+		return
+	}
+
+	m.mu.Lock()
+	alreadyLogged := st.vanishedWorktreeWasLogged(worktreePath)
+	if !alreadyLogged {
+		if st.vanishedWorktreesLogged == nil {
+			st.vanishedWorktreesLogged = make(map[string]struct{})
+		}
+		st.vanishedWorktreesLogged[worktreePath] = struct{}{}
+	}
+	_, killInFlight := m.killsInFlight[key]
+	m.mu.Unlock()
+	if alreadyLogged {
+		return
+	}
+
+	gw, _ := inst.GetGitWorktree()
+	diag := sessiongit.MissingWorktreeDiagnosis{
+		WorktreePath: worktreePath,
+		ParentPath:   filepath.Dir(worktreePath),
+	}
+	if gw != nil {
+		diag = gw.DiagnoseMissingWorktree()
+	}
+	branch := inst.GetBranch()
+	if branch == "" {
+		branch = diag.BranchName
+	}
+	liveness := inst.GetLiveness()
+	op := inst.GetInFlightOp()
+	userKilled := inst.UserKilled()
+	teardownIntent := userKilled || killInFlight || op == session.OpKilling || op == session.OpArchiving
+	classification := classifyMissingWorktree(diag.WorktreeRegistrationKnown, diag.WorktreeRegistered, teardownIntent)
+
+	log.ErrorLog.Printf(
+		"WORKTREE_MISSING_DETECTED classification=%q title=%q instance_id=%q repo_id=%q repo_path=%q worktree_path=%q branch=%q liveness=%q status=%q started=%t user_killed=%t kill_in_flight=%t in_flight_op=%d external_worktree=%t branch_created_by_us=%t observed_at=%q parent_path=%q parent_exists=%t parent_stat_error=%q repo_exists=%t repo_stat_error=%q git_worktree_registered=%q git_worktree_list_error=%q branch_exists=%q branch_probe_error=%q recover_error=%q",
+		classification,
+		inst.Title,
+		inst.ID,
+		repoID,
+		diag.RepoPath,
+		worktreePath,
+		branch,
+		livenessLabel(liveness),
+		statusLabel(inst.GetStatus()),
+		inst.Started(),
+		userKilled,
+		killInFlight,
+		op,
+		diag.ExternalWorktree,
+		diag.BranchCreatedByUs,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		diag.ParentPath,
+		diag.ParentExists,
+		diag.ParentStatError,
+		diag.RepoExists,
+		diag.RepoStatError,
+		triBool(diag.WorktreeRegistrationKnown, diag.WorktreeRegistered),
+		diag.WorktreeListError,
+		triBool(diag.BranchKnown, diag.BranchExists),
+		diag.BranchError,
+		restoreErr.Error(),
+	)
+}
+
+func missingWorktreePath(err error) (string, bool) {
+	var wtErr *session.WorktreeUnavailableError
+	if !errors.As(err, &wtErr) || !errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	if wtErr.WorktreePath == "" {
+		return "<empty>", true
+	}
+	return wtErr.WorktreePath, true
+}
+
+func (st *lostRestoreState) vanishedWorktreeWasLogged(path string) bool {
+	if st == nil || st.vanishedWorktreesLogged == nil {
+		return false
+	}
+	_, ok := st.vanishedWorktreesLogged[path]
+	return ok
+}
+
+func classifyMissingWorktree(registrationKnown, registered, teardownIntent bool) string {
+	if teardownIntent {
+		return "expected_teardown"
+	}
+	if registrationKnown && registered {
+		return "unexpected_external_removal"
+	}
+	if registrationKnown {
+		return "missing_unregistered_live_worktree"
+	}
+	return "missing_worktree_registration_unknown"
+}
+
+func triBool(known, value bool) string {
+	if !known {
+		return "unknown"
+	}
+	return strconv.FormatBool(value)
+}
+
+func livenessLabel(lv session.Liveness) string {
+	switch lv {
+	case session.LivenessUnset:
+		return "LivenessUnset"
+	case session.LiveRunning:
+		return "LiveRunning"
+	case session.LiveReady:
+		return "LiveReady"
+	case session.LiveLost:
+		return "LiveLost"
+	case session.LiveDead:
+		return "LiveDead"
+	case session.LiveArchived:
+		return "LiveArchived"
+	case session.LiveLimitReached:
+		return "LiveLimitReached"
+	default:
+		return "Liveness(" + strconv.Itoa(int(lv)) + ")"
+	}
+}
+
+func statusLabel(s session.Status) string {
+	switch s {
+	case session.Running:
+		return "Running"
+	case session.Ready:
+		return "Ready"
+	case session.Loading:
+		return "Loading"
+	case session.Deleting:
+		return "Deleting"
+	case session.Dead:
+		return "Dead"
+	case session.Lost:
+		return "Lost"
+	case session.Archived:
+		return "Archived"
+	default:
+		return "Status(" + strconv.Itoa(int(s)) + ")"
+	}
 }
