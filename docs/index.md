@@ -24,7 +24,7 @@ hide:
 
     ---
 
-    A sidebar lists every session with live status; the preview pane snapshots
+    A sidebar lists every session with live status; the Agent tab snapshots
     any agent without attaching; `↵` takes you full-screen. Extra tabs run a
     shell or dev server alongside the agent in the same worktree.
 
@@ -56,7 +56,7 @@ hide:
 
     With remote hooks, sessions run on a backend you define — your own
     launch/list/attach/delete scripts — and appear in the same sidebar with the
-    same attach, kill, and preview experience.
+    same Agent tab, attach, and kill experience.
 
     [:octicons-arrow-right-24: Remote hooks](remote-hooks.md)
 
@@ -80,7 +80,7 @@ HTTP API can never show you three different worlds.
 
 ```
         ┌──────────────────────────────────────────────┐
-        │  af TUI  (sidebar · preview · attach · tabs)  │
+        │  af TUI  (sidebar · agent · attach · tabs)    │
         └──────────────────────┬───────────────────────┘
                                │ read-only projection + RPC
         ┌──────────────────────┴───────────────────────┐

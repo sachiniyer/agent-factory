@@ -33,7 +33,7 @@ Because each session gets its own worktree:
    [configuration](../configuration.md) for the subdirectory option), and starts
    your chosen agent in that directory. Any configured post-worktree setup commands
    run first, so the agent starts in a ready environment.
-2. **Work.** The agent runs in its worktree. You watch it in the preview pane,
+2. **Work.** The agent runs in its worktree. You watch it in the Agent tab,
    interact in-pane, or attach full-screen. Extra [tabs](tui.md#tabs) can run a
    shell or a long-lived process (a dev server, a test watcher) in the *same*
    worktree, sharing the agent's files.
@@ -60,7 +60,7 @@ Everything above describes **local** sessions — worktrees on the machine runni
 `af`. Sessions can also run on a **remote** backend you define, through
 [remote hooks](../remote-hooks.md): your own scripts launch, list, attach to,
 and delete sessions elsewhere, and they show up in the same sidebar with the
-same preview/attach/kill experience. The worktree-isolation model is the same;
+same Agent tab, attach, and kill experience. The worktree-isolation model is the same;
 only the machine changes.
 
 ## Who owns the state

@@ -155,7 +155,7 @@ EOF
     beat 0.9
     # Act 5 (finale) — a tab is a real process in the worktree, not another
     # agent. Open a second tab on the first agent (t auto-tiles a
-    # Preview | Terminal split), step in (Enter → interact in-pane, no full-
+    # Agent | Terminal split), step in (Enter → interact in-pane, no full-
     # screen), and run the dev server — it streams live beside the agent's own
     # transcript. This is the closing shot: an agent and a running dev-server
     # side by side in one worktree. Ending here (rather than tearing the split

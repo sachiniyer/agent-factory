@@ -4,7 +4,7 @@
 [![Docs](https://img.shields.io/badge/docs-live-2e7c80)](https://sachiniyer.github.io/agent-factory/)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-2e7c80)](LICENSE.md)
 
-![Agent Factory demo: multiple AI coding agents running in isolated git worktrees, with live previews, scheduled automations, helper tabs, and full-screen attach](docs/assets/demo.gif)
+![Agent Factory demo: multiple AI coding agents running in isolated git worktrees, with live Agent tabs, scheduled automations, helper tabs, and full-screen attach](docs/assets/demo.gif)
 
 Agent Factory (`af`) is a terminal UI for running many AI coding agents at once:
 Claude Code, Codex, Aider, and Gemini. Each normal session gets its own git
@@ -21,7 +21,7 @@ branded docs site.
 ## Why Agent Factory
 
 - **Worktree isolation:** one agent, one branch, one reviewable working tree.
-- **One-screen supervision:** watch live previews, attach full-screen, and add
+- **One-screen supervision:** watch agents live, attach full-screen, and add
   helper tabs beside an agent in the same worktree.
 - **Daemon-owned state:** sessions, tasks, usage-limit recovery, and APIs share
   one source of truth.

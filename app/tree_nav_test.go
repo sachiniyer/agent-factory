@@ -54,7 +54,7 @@ func TestTreeNav_JKWalksTabChildren(t *testing.T) {
 	sel := h.sidebar.GetSelection()
 	assert.True(t, sel.IsTab)
 	assert.Equal(t, 0, h.store.ActiveTab())
-	assert.Equal(t, 0, h.store.ActiveTab(), "the agent (Preview) slot is active")
+	assert.Equal(t, 0, h.store.ActiveTab(), "the Agent slot is active")
 
 	pressNav(t, h, "j")
 	sel = h.sidebar.GetSelection()

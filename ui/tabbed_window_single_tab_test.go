@@ -20,7 +20,7 @@ func TestTabbedWindowSingleTabHeaderRendering(t *testing.T) {
 	inst := startedRemoteInstance(t, false)
 	w := newTestTabbedWindow()
 	setWindowInstance(w, inst)
-	require.Equal(t, []string{"Preview"}, w.tabLabels(), "remote without terminal_cmd has a single tab")
+	require.Equal(t, []string{"Agent"}, w.tabLabels(), "remote without terminal_cmd has a single tab")
 	require.Equal(t, 0, w.GetActiveTab(), "the lone tab is active")
 
 	setWindowSize(w, 120, 40)
@@ -28,7 +28,7 @@ func TestTabbedWindowSingleTabHeaderRendering(t *testing.T) {
 	lines := strings.Split(w.String(), "\n")
 	require.Greater(t, len(lines), 1, "expected the framed pane output")
 	headerRow := lines[1] // row 0 is the top border; the header is inside the frame
-	require.Contains(t, headerRow, "remote-tabbar · Preview",
+	require.Contains(t, headerRow, "remote-tabbar · Agent",
 		"the pane header must carry `title · tab`; got %q", headerRow)
 
 	require.False(t, w.JumpToTab(1), "the phantom second slot must not be jumpable")

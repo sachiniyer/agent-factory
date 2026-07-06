@@ -7,7 +7,7 @@
 #
 # The transcript is chosen from the worktree/branch name, so each demo session
 # ("fix-auth-timeout", "add-dark-mode", …) tells its own little story in the
-# preview pane. Nothing here talks to the network or a real model.
+# Agent tab. Nothing here talks to the network or a real model.
 set -u
 
 c_cyan=$'\033[36m'; c_yellow=$'\033[33m'; c_blue=$'\033[34m'

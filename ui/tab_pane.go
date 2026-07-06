@@ -261,7 +261,7 @@ func (p *TabPane) updateShellLocked(instance *session.Instance, activeTab int) e
 		if instance.SupportsRemoteTerminal() {
 			p.setFallbackState("Press Enter to open a terminal on the remote machine.")
 		} else {
-			p.setFallbackState("Terminal tab not available for remote sessions.\nConfigure remote_hooks.terminal_cmd to enable it.\nUse the Preview tab to see session output.")
+			p.setFallbackState("Terminal tab not available for remote sessions.\nConfigure remote_hooks.terminal_cmd to enable it.\nUse the Agent tab to see session output.")
 		}
 		return nil
 	}

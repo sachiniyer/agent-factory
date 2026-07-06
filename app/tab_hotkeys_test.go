@@ -327,7 +327,7 @@ func TestFreshInstanceSingleTabSlotUI(t *testing.T) {
 	inst := freshLocalInstance(t, "fresh-ui")
 	selectInstance(h, inst)
 
-	require.Equal(t, []string{"Preview"}, tree.TabLabels(inst),
+	require.Equal(t, []string{"Agent"}, tree.TabLabels(inst),
 		"a fresh instance renders exactly one tab slot — the agent tab")
 
 	_, _ = h.handleTabJump(2)
@@ -345,7 +345,7 @@ func TestFreshInstanceSingleTabSlotUI(t *testing.T) {
 	stubTabDaemonSeams(t, inst)
 	_, _ = h.handleNewTab()
 	require.Equal(t, 2, inst.TabCount())
-	require.Equal(t, []string{"Preview", "Terminal"}, tree.TabLabels(inst),
+	require.Equal(t, []string{"Agent", "Terminal"}, tree.TabLabels(inst),
 		"after t the terminal is a real second slot")
 	require.Equal(t, 1, h.store.ActiveTab(), "t selects the fresh terminal")
 
