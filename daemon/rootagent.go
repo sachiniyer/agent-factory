@@ -234,6 +234,23 @@ func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
 // the title. Mirrors KillSession's teardown but deliberately does NOT record
 // rootKilledAt: this is the daemon healing itself, not a user decision.
 func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) error {
+	key := daemonInstanceKey(repoID, session.RootSessionTitle)
+	opLock := m.opLockFor(key)
+	if !opLock.TryLock() {
+		// A user kill (or its finish pass) owns this title right now. Let that
+		// operation decide whether the root is removed or left for the next tick.
+		return nil
+	}
+	defer opLock.Unlock()
+
+	m.mu.Lock()
+	current := m.instances[key]
+	_, killing := m.killsInFlight[key]
+	m.mu.Unlock()
+	if killing || current != inst {
+		return nil
+	}
+
 	// Best-effort by design (#478): tmux is already gone and an in-place
 	// worktree's Cleanup is a no-op, so failures here only log inside Kill.
 	if err := inst.Kill(); err != nil {
@@ -243,11 +260,18 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) error {
 	if err != nil {
 		return err
 	}
-	if err := storage.DeleteInstance(session.RootSessionTitle); err != nil {
+	deleted, err := storage.DeleteInstanceByStableID(session.RootSessionTitle, inst.ID)
+	if err != nil {
 		return err
 	}
+	if !deleted {
+		log.InfoLog.Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)
+		return nil
+	}
 	m.mu.Lock()
-	delete(m.instances, daemonInstanceKey(repoID, session.RootSessionTitle))
+	if m.instances[key] == inst {
+		delete(m.instances, key)
+	}
 	m.mu.Unlock()
 	return nil
 }

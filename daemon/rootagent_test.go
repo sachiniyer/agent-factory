@@ -378,6 +378,106 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	}
 }
 
+// TestKillDeadRootDoesNotDeleteSelfHealedRoot pins #1266: a KillSession that
+// resolved dead root-A must not delete a newly self-healed root-B that reused
+// the reserved title while the stale kill was waiting on the session op lock.
+func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
+
+	manager, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 1 {
+		t.Fatalf("expected initial root create, got %d", len(*seen))
+	}
+	rootA := findRootInstance(t, manager, repoPath)
+	if rootA == nil {
+		t.Fatal("root-A missing after initial ensure")
+	}
+	rootA.SetStatus(session.Dead)
+
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
+	opLock := manager.opLockFor(key)
+	opLock.Lock()
+
+	killDone := make(chan error, 1)
+	go func() {
+		killDone <- manager.KillSession(KillSessionRequest{Title: session.RootSessionTitle, RepoID: repo.ID})
+	}()
+	waitUntil(t, 5*time.Second, "KillSession to resolve root-A and wait on the op lock", func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		_, killing := manager.killsInFlight[key]
+		return killing
+	})
+
+	storage, err := session.NewStorage(config.LoadState(), repo.ID)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	deleted, err := storage.DeleteInstanceByStableID(session.RootSessionTitle, rootA.ID)
+	if err != nil || !deleted {
+		t.Fatalf("delete root-A during self-heal: deleted=%v err=%v", deleted, err)
+	}
+	manager.mu.Lock()
+	delete(manager.instances, key)
+	manager.mu.Unlock()
+
+	rootBData, err := manager.CreateSession(CreateSessionRequest{
+		Title:         session.RootSessionTitle,
+		RepoPath:      repo.Root,
+		Program:       "claude",
+		InPlace:       true,
+		allowReserved: true,
+	})
+	if err != nil {
+		t.Fatalf("self-heal create root-B: %v", err)
+	}
+	if rootBData.ID == "" || rootBData.ID == rootA.ID {
+		t.Fatalf("root-B must have a fresh stable ID, rootA=%q rootB=%q", rootA.ID, rootBData.ID)
+	}
+	rootB := findRootInstance(t, manager, repoPath)
+	if rootB == nil || rootB.ID != rootBData.ID {
+		t.Fatalf("root-B not registered after self-heal: got %+v want ID %q", rootB, rootBData.ID)
+	}
+
+	opLock.Unlock()
+	select {
+	case err := <-killDone:
+		if err != nil {
+			t.Fatalf("stale KillSession returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale KillSession did not finish")
+	}
+
+	if got := findRootInstance(t, manager, repoPath); got != rootB {
+		t.Fatalf("stale kill must leave self-healed root-B registered, got %+v want %+v", got, rootB)
+	}
+	data, err := loadRepoInstanceData(repo.ID)
+	if err != nil {
+		t.Fatalf("loadRepoInstanceData: %v", err)
+	}
+	if len(data) != 1 || data[0].Title != session.RootSessionTitle || data[0].ID != rootBData.ID {
+		t.Fatalf("persisted root after stale kill = %+v, want only root-B ID %q", data, rootBData.ID)
+	}
+	manager.mu.Lock()
+	_, killed := manager.rootKilledAt[repo.ID]
+	manager.mu.Unlock()
+	if killed {
+		t.Fatal("stale kill of root-A must not start the root-B kill grace window")
+	}
+}
+
 // TestEnsureRootAgentsDoesNotHealUnconfiguredRoot pins that the self-heal is
 // gated on config: a repo NOT in root_agents is never visited by the ensure
 // loop, so a killed (or absent) root there is never auto-created — even long

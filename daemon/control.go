@@ -1949,6 +1949,7 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	if err != nil {
 		return err
 	}
+	targetID := killTargetStableID(instance, data)
 
 	key := daemonInstanceKey(repoID, req.Title)
 	m.mu.Lock()
@@ -1974,6 +1975,11 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	opLock.Lock()
 	defer opLock.Unlock()
 
+	if m.currentInstanceReplaced(key, instance, targetID) {
+		log.InfoLog.Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
+		return nil
+	}
+
 	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the
 	// daemon dies or the teardown errors between here and DeleteInstance, the
 	// surviving record is provably a user kill — the status poll finishes the
@@ -1995,12 +2001,19 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := storage.DeleteInstance(req.Title); err != nil {
+	deleted, err := storage.DeleteInstanceByStableID(req.Title, targetID)
+	if err != nil {
 		return fmt.Errorf("failed to delete instance from storage: %w", err)
+	}
+	if !deleted {
+		log.InfoLog.Printf("kill of session %q skipped storage delete: current record has a different instance identity", req.Title)
+		return nil
 	}
 
 	m.mu.Lock()
-	delete(m.instances, key)
+	if current := m.instances[key]; current == nil || current == instance || stableIDMatchesForDaemon(current.ID, targetID) {
+		delete(m.instances, key)
+	}
 	if session.IsReservedTitle(req.Title) {
 		// An explicit kill is honored only briefly: the ensure loop suppresses
 		// re-creation for rootKillHealDelay, then self-heals a still-configured
@@ -2013,6 +2026,30 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+func killTargetStableID(instance *session.Instance, data *session.InstanceData) string {
+	if instance != nil {
+		return instance.ID
+	}
+	if data != nil {
+		return data.ID
+	}
+	return ""
+}
+
+func (m *Manager) currentInstanceReplaced(key string, target *session.Instance, targetID string) bool {
+	if targetID == "" {
+		return false
+	}
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	return current != nil && current != target && current.ID != "" && current.ID != targetID
+}
+
+func stableIDMatchesForDaemon(recordID, expectedID string) bool {
+	return expectedID == "" || recordID == "" || recordID == expectedID
 }
 
 // persistKillTombstone writes the kill-intent tombstone (#1108) for the session
@@ -2033,7 +2070,7 @@ func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance
 	}
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
-	err := persistInstanceData(repoID, d)
+	err := persistInstanceDataByStableID(repoID, d)
 	repoStartLock.Unlock()
 	if err != nil {
 		log.WarningLog.Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
@@ -2071,6 +2108,13 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	}
 	defer opLock.Unlock()
 
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	if current != instance {
+		return
+	}
+
 	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
 	// Best-effort: the backing tmux session is typically already gone; Kill
 	// failures here only mean there is less left to tear down.
@@ -2082,12 +2126,19 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		log.WarningLog.Printf("finishing kill of %q: %v", instance.Title, err)
 		return
 	}
-	if err := storage.DeleteInstance(instance.Title); err != nil {
+	deleted, err := storage.DeleteInstanceByStableID(instance.Title, instance.ID)
+	if err != nil {
 		log.WarningLog.Printf("finishing kill of %q: failed to delete record (will retry next poll): %v", instance.Title, err)
 		return
 	}
+	if !deleted {
+		log.InfoLog.Printf("finishing kill of %q skipped storage delete: current record has a different instance identity", instance.Title)
+		return
+	}
 	m.mu.Lock()
-	delete(m.instances, key)
+	if m.instances[key] == instance {
+		delete(m.instances, key)
+	}
 	m.mu.Unlock()
 }
 
@@ -2465,6 +2516,39 @@ func persistInstanceData(repoID string, data session.InstanceData) error {
 		return raw, nil
 	}); err != nil {
 		return err
+	}
+	if !found {
+		return fmt.Errorf("instance %q not found in storage", data.Title)
+	}
+	return nil
+}
+
+func persistInstanceDataByStableID(repoID string, data session.InstanceData) error {
+	found := false
+	sameTitleDifferentID := false
+	if err := config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
+		var existing []session.InstanceData
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
+		}
+		for i := range existing {
+			if existing[i].Title != data.Title {
+				continue
+			}
+			if !stableIDMatchesForDaemon(existing[i].ID, data.ID) {
+				sameTitleDifferentID = true
+				return raw, nil
+			}
+			existing[i] = data
+			found = true
+			return json.MarshalIndent(existing, "", "  ")
+		}
+		return raw, nil
+	}); err != nil {
+		return err
+	}
+	if sameTitleDifferentID {
+		return fmt.Errorf("instance %q identity changed in storage", data.Title)
 	}
 	if !found {
 		return fmt.Errorf("instance %q not found in storage", data.Title)
