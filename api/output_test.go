@@ -101,6 +101,16 @@ func TestJSONError_EnvelopeWrapsError(t *testing.T) {
 	sentinel := errors.New("nope")
 	var ret error
 	var out string
+	SessionsCmd.SilenceUsage = false
+	SessionsCmd.SilenceErrors = false
+	TasksCmd.SilenceUsage = false
+	TasksCmd.SilenceErrors = false
+	t.Cleanup(func() {
+		SessionsCmd.SilenceUsage = false
+		SessionsCmd.SilenceErrors = false
+		TasksCmd.SilenceUsage = false
+		TasksCmd.SilenceErrors = false
+	})
 	withEnvelope(t, func() {
 		out = captureStderr(t, func() {
 			ret = jsonError(sentinel)
@@ -108,4 +118,8 @@ func TestJSONError_EnvelopeWrapsError(t *testing.T) {
 	})
 	require.Equal(t, sentinel, ret)
 	require.JSONEq(t, `{"data":null,"error":{"message":"nope"}}`, out)
+	require.True(t, SessionsCmd.SilenceUsage)
+	require.True(t, SessionsCmd.SilenceErrors)
+	require.True(t, TasksCmd.SilenceUsage)
+	require.True(t, TasksCmd.SilenceErrors)
 }

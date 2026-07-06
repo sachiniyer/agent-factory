@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,9 +23,16 @@ import (
 // instead of a bare Go error. The error is returned unchanged so the exit code
 // is unaffected. Off the --json path it is a no-op passthrough for cobra's
 // normal error handling.
-func jsonWrapError(errOut io.Writer, jsonMode bool, err error) error {
+func jsonWrapError(cmd *cobra.Command, jsonMode bool, err error) error {
 	if jsonMode && err != nil {
-		_ = apiproto.WriteEnvelope(errOut, apiproto.Failure(err.Error()))
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		if root := cmd.Root(); root != nil {
+			root.SilenceUsage = true
+			root.SilenceErrors = true
+		}
+		log.CloseQuiet()
+		_ = apiproto.WriteEnvelope(cmd.ErrOrStderr(), apiproto.Failure(err.Error()))
 	}
 	return err
 }
@@ -131,7 +137,7 @@ keys) print as JSON.`,
 
 		entries, err := loadGlobalConfigEntries()
 		if err != nil {
-			return jsonWrapError(cmd.ErrOrStderr(), configJSONFlag, err)
+			return jsonWrapError(cmd, configJSONFlag, err)
 		}
 		for _, e := range entries {
 			if e.Key == args[0] {
@@ -142,7 +148,7 @@ keys) print as JSON.`,
 				return nil
 			}
 		}
-		return jsonWrapError(cmd.ErrOrStderr(), configJSONFlag,
+		return jsonWrapError(cmd, configJSONFlag,
 			fmt.Errorf("unknown config key %q; run `af config list` to see all keys", args[0]))
 	},
 }
@@ -157,7 +163,7 @@ var configListCmd = &cobra.Command{
 
 		entries, err := loadGlobalConfigEntries()
 		if err != nil {
-			return jsonWrapError(cmd.ErrOrStderr(), configJSONFlag, err)
+			return jsonWrapError(cmd, configJSONFlag, err)
 		}
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entries))
@@ -205,7 +211,7 @@ Examples:
 
 		res, err := config.SetGlobalConfigValue(args[0], args[1])
 		if err != nil {
-			return jsonWrapError(cmd.ErrOrStderr(), configJSONFlag, err)
+			return jsonWrapError(cmd, configJSONFlag, err)
 		}
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
