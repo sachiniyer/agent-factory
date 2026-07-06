@@ -212,8 +212,12 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 			return setupErr
 		}
 
-		// Inject Agent Factory instructions into the session.
-		tmuxSession.SetProgram(injectSystemPrompt(resolveProgramForInstance(i)))
+		// Inject Agent Factory instructions into the session. On a first launch
+		// only, seed provider conversation identity when a supported agent offers
+		// an explicit id flag; restore/respawn paths keep their existing latest-
+		// session behavior until PR2 wires resume-by-recorded-id.
+		program := prepareLaunchConversation(i, resolveProgramForInstance(i))
+		tmuxSession.SetProgram(injectSystemPrompt(program))
 
 		// Create new session
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {

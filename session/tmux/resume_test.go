@@ -341,6 +341,38 @@ func TestResumeProgram_QuotedCodexPath(t *testing.T) {
 	require.Equal(t, "'/path with space/codex' resume --last --model gpt-5", got)
 }
 
+func TestClaudeProgramWithSessionID(t *testing.T) {
+	const id = "019f386f-7206-7fc2-803b-f7045e07a242"
+	cases := []struct {
+		name     string
+		in       string
+		want     string
+		injected bool
+	}{
+		{"bare", "claude", "claude --session-id " + id, true},
+		{"with flag", "claude --model sonnet", "claude --model sonnet --session-id " + id, true},
+		{"wrapper", "ionice -c 3 claude", "ionice -c 3 claude --session-id " + id, true},
+		{"quoted path", "'/Applications/Claude Code.app/Contents/MacOS/claude' --foo", "'/Applications/Claude Code.app/Contents/MacOS/claude' --foo --session-id " + id, true},
+		{"already session id", "claude --session-id abc", "claude --session-id abc", false},
+		{"already session id equals", "claude --session-id=abc", "claude --session-id=abc", false},
+		{"already resume", "claude --resume abc", "claude --resume abc", false},
+		{"already continue", "claude --continue", "claude --continue", false},
+		{"unknown", "mytool --foo", "mytool --foo", false},
+		{"empty id", "claude", "claude", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotID := id
+			if tc.name == "empty id" {
+				gotID = ""
+			}
+			got, injected := ClaudeProgramWithSessionID(tc.in, gotID)
+			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.injected, injected)
+		})
+	}
+}
+
 // TestResumeProgram_CodexProfileResumeFalsePositive guards #632: the codex
 // "already has resume" check must be position-aware. A profile named "resume"
 // (or any other flag value of "resume") must not be mistaken for the resume

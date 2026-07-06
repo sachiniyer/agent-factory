@@ -608,6 +608,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 		if tab.tmux != nil {
 			td.TmuxName = tab.tmux.SanitizedName()
 		}
+		td.Conversation = conversationDataPtr(tab.Conversation)
 		data.Tabs = append(data.Tabs, td)
 	}
 
@@ -616,6 +617,9 @@ func (i *Instance) ToInstanceData() InstanceData {
 	// agent session by its exact name, and old readers ignore the new Tabs list.
 	if ts := i.tmuxLocked(); ts != nil {
 		data.TmuxName = ts.SanitizedName()
+	}
+	if len(i.Tabs) > 0 {
+		data.AgentConversation = conversationDataPtr(i.Tabs[0].Conversation)
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -773,17 +777,24 @@ var restoreTmuxSession = tmux.NewTmuxSessionFromSanitizedName
 //     No shell tab is synthesized: terminal tabs are on-demand only (#1100).
 func restoreLocalTabs(instance *Instance, data InstanceData) {
 	if len(data.Tabs) > 0 {
-		for _, td := range data.Tabs {
+		for idx, td := range data.Tabs {
 			kind := tabKindForData(td.Kind)
 			var ts *tmux.TmuxSession
 			if td.TmuxName != "" {
 				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
 			}
+			var conversation AgentConversationData
+			if td.Conversation != nil {
+				conversation = *td.Conversation
+			} else if idx == 0 && data.AgentConversation != nil {
+				conversation = *data.AgentConversation
+			}
 			instance.Tabs = append(instance.Tabs, &Tab{
-				Name:    td.Name,
-				Kind:    kind,
-				Command: td.Command,
-				tmux:    ts,
+				Name:         td.Name,
+				Kind:         kind,
+				Command:      td.Command,
+				Conversation: conversation,
+				tmux:         ts,
 			})
 		}
 		return
@@ -794,6 +805,9 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 		instance.setTmuxLocked(restoreTmuxSession(data.TmuxName, data.Program))
 	} else {
 		instance.setTmuxLocked(tmux.NewTmuxSession(data.Title, data.Program))
+	}
+	if data.AgentConversation != nil {
+		instance.SetAgentConversation(*data.AgentConversation)
 	}
 }
 

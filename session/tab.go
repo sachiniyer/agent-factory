@@ -54,6 +54,10 @@ type Tab struct {
 	// Command is the process to run; empty means the kind's default. Unused in
 	// PR 1 — the agent program is still resolved by the local backend.
 	Command string
+	// Conversation is the provider-specific id that resumes this tab's agent
+	// conversation exactly. Empty means recovery falls back to the provider's
+	// existing latest-session behavior.
+	Conversation AgentConversationData
 	// tmux is the tab's tmux session. nil until the instance is started, and
 	// always nil for remote/hook-backed instances, which drive their agent
 	// session through hook commands rather than a local tmux session.

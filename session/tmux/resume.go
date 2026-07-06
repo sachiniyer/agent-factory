@@ -101,6 +101,30 @@ func resumeProgram(program string) string {
 	return program
 }
 
+// ClaudeProgramWithSessionID appends Claude Code's explicit conversation id flag
+// to a first-launch program string. It preserves the original program verbatim
+// except for the appended tokens and refuses to inject when the Claude command
+// already carries a resume/continue/session-id flag.
+func ClaudeProgramWithSessionID(program, sessionID string) (string, bool) {
+	if strings.TrimSpace(sessionID) == "" {
+		return program, false
+	}
+	tokens, _ := splitShellTokens(program)
+	agentIdx, agent := findAgentToken(tokens)
+	if agent != ProgramClaude {
+		return program, false
+	}
+	for _, tok := range tokens[agentIdx+1:] {
+		if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
+			strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
+			isShortResumeWithAttachedValue(tok) ||
+			tok == "--session-id" || strings.HasPrefix(tok, "--session-id=") {
+			return program, false
+		}
+	}
+	return program + " --session-id " + sessionID, true
+}
+
 // DetectAgentFromCommand returns the canonical agent name (one of
 // SupportedPrograms) that a resolved command string will actually run, or ""
 // when no agent token is present — e.g. a program_overrides entry that points

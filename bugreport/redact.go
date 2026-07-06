@@ -231,6 +231,12 @@ func redactInstanceData(d *session.InstanceData) {
 		if d.Tabs[i].Command != "" {
 			d.Tabs[i].Command = redactedMarker
 		}
+		if d.Tabs[i].Conversation != nil {
+			d.Tabs[i].Conversation.ID = ""
+		}
+	}
+	if d.AgentConversation != nil {
+		d.AgentConversation.ID = ""
 	}
 	if d.PRInfo.Title != "" {
 		d.PRInfo.Title = redactedMarker

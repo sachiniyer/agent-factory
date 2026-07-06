@@ -46,13 +46,16 @@ type InstanceData struct {
 	// Manager.KillSession before teardown begins. Present only in the crash
 	// window between tombstone write and record deletion — a surviving
 	// tombstoned record means "finish this kill", never "restore this".
-	UserKilled  bool                   `json:"user_killed,omitempty"`
-	TmuxName    string                 `json:"tmux_name,omitempty"`
-	Tabs        []TabData              `json:"tabs,omitempty"`
-	Worktree    GitWorktreeData        `json:"worktree"`
-	PRInfo      PRInfoData             `json:"pr_info,omitempty"`
-	BackendType string                 `json:"backend_type,omitempty"`
-	RemoteMeta  map[string]interface{} `json:"remote_meta,omitempty"`
+	UserKilled bool      `json:"user_killed,omitempty"`
+	TmuxName   string    `json:"tmux_name,omitempty"`
+	Tabs       []TabData `json:"tabs,omitempty"`
+	// AgentConversation mirrors the Agent tab's provider conversation id for
+	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
+	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`
+	Worktree          GitWorktreeData        `json:"worktree"`
+	PRInfo            PRInfoData             `json:"pr_info,omitempty"`
+	BackendType       string                 `json:"backend_type,omitempty"`
+	RemoteMeta        map[string]interface{} `json:"remote_meta,omitempty"`
 }
 
 // TabData is the serializable form of a session.Tab. The full list is persisted
@@ -66,6 +69,10 @@ type TabData struct {
 	Kind     TabKind `json:"kind"`
 	Command  string  `json:"command,omitempty"`
 	TmuxName string  `json:"tmux_name,omitempty"`
+	// Conversation is the provider-specific conversation id for this tab, when
+	// the underlying agent exposes a durable resume id. Omitted for legacy rows
+	// and providers where af can only resume "latest".
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
 }
 
 // PRInfoData represents the serializable data of a PRInfo

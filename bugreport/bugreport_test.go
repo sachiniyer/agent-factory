@@ -123,9 +123,17 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 		Status:  session.Status(1),
 		Program: "claude",
 		Tabs: []session.TabData{
-			{Name: "agent", Command: "claude --token sk-SUPERSECRETTOKEN0123456"},
+			{
+				Name:    "agent",
+				Command: "claude --token sk-SUPERSECRETTOKEN0123456",
+				Conversation: &session.AgentConversationData{
+					Agent: "claude",
+					ID:    "019f386f-7206-7fc2-803b-f7045e07a242",
+				},
+			},
 		},
-		PRInfo: session.PRInfoData{Number: 42, State: "open", Title: "secret pr title", URL: "https://example.com/pr/42"},
+		AgentConversation: &session.AgentConversationData{Agent: "claude", ID: "019f386f-7206-7fc2-803b-f7045e07a242"},
+		PRInfo:            session.PRInfoData{Number: 42, State: "open", Title: "secret pr title", URL: "https://example.com/pr/42"},
 		Worktree: session.GitWorktreeData{
 			RepoPath:      "/home/alice/Desktop/proj",
 			WorktreePath:  "/home/alice/Desktop/proj-fix",
@@ -141,6 +149,9 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	}
 	if d.Tabs[0].Command != redactedMarker {
 		t.Errorf("tab command not redacted: %q", d.Tabs[0].Command)
+	}
+	if d.Tabs[0].Conversation.ID != "" || d.AgentConversation.ID != "" {
+		t.Errorf("conversation ids not redacted: tab=%q instance=%q", d.Tabs[0].Conversation.ID, d.AgentConversation.ID)
 	}
 	if d.PRInfo.Title != redactedMarker || d.PRInfo.URL != redactedMarker {
 		t.Errorf("PR free-text not redacted: %+v", d.PRInfo)
