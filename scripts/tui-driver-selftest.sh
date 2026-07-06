@@ -66,6 +66,33 @@ _expect_resize_rejected() {
     return 0
 }
 
+# _expect_wrapped_send_no_timeout — regression proof for #1287. At a narrow
+# width the echoed command wraps inside the framed pane; af_send_to_pane must
+# still confirm it without burning the old 8s false timeout.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_wrapped_send_no_timeout() {
+    local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
+    local started elapsed rc=0
+    # shellcheck disable=SC2016
+    local long_cmd='printf "%s\n" "wrap-check-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789"; echo WRAP_SEND_DONE_$((1200+87))'
+
+    af_resize 60 18 || return 1
+    af_wait_for 'nav mode' 10 'interactive mode after narrow resize' || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        started="$(_af_now)"
+        af_send_to_pane "$long_cmd" || rc=$?
+        elapsed=$(( $(_af_now) - started ))
+        if [ "$elapsed" -ge 7 ]; then
+            _af_log "wrapped command echo confirmation took ${elapsed}s; likely hit the old false timeout"
+            rc=1
+        fi
+        af_wait_for 'WRAP_SEND_DONE_1287([^0-9]|$)' 10 'wrapped command output' || rc=$?
+    fi
+
+    af_resize "$saved_cols" "$saved_rows" || return 1
+    return "$rc"
+}
+
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
@@ -104,6 +131,7 @@ step "assert beta is selected"                              af_expect_selected b
 
 step "open beta's tab as a pane"                            af_open_pane
 step "enter interactive mode"                               af_enter_interactive
+step "send a wrapped command without echo false-timeout"     _expect_wrapped_send_no_timeout
 # The command COMPUTES its marker (arithmetic expansion), so the sentinel we
 # assert on — SELFTEST_42 — appears ONLY in the command's output, never in the
 # echoed input line (which shows the literal $((6*7))). A shell that echoed

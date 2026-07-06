@@ -120,6 +120,69 @@ af_wait_gone() {
     done
 }
 
+# _af_strip_screen_frame — remove the TUI frame columns from captured rows so
+# a terminal line wrapped inside a framed pane can be joined back together.
+_af_strip_screen_frame() {
+    sed -E 's/\r//g;
+            s/^[^│║┃┆┇┊┋]*[│║┃┆┇┊┋]//;
+            s/[│║┃┆┇┊┋][^│║┃┆┇┊┋]*$//;
+            s/^[[:space:]│║┃┆┇┊┋╭╮╰╯┌┐└┘╔╗╚╝╠╣╦╩╬─═]+//;
+            s/[[:space:]│║┃┆┇┊┋╭╮╰╯┌┐└┘╔╗╚╝╠╣╦╩╬─═]+$//'
+}
+
+_af_join_lines_tight() {
+    tr -d '\n'
+}
+
+_af_join_lines_spaced() {
+    awk 'NR > 1 { printf " " } { printf "%s", $0 }'
+}
+
+_af_squash_ws() {
+    tr '\n\r\t' '   ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+# _af_wait_for_pane_echo <literal> [timeout_s] [label] — wait for pane input
+# echo without assuming the marker remains on one captured row. The embedded
+# pane is framed by the TUI, so normalize both "wrap inside a word" and "wrap
+# at whitespace" cases before falling back to a whitespace-squashed comparison.
+_af_wait_for_pane_echo() {
+    local text="$1" timeout="${2:-8}" label="${3:-pane echo}" screen
+    local tight spaced spaced_ws text_ws
+    local deadline; deadline=$(( $(_af_now) + timeout ))
+    text_ws="$(printf '%s' "$text" | _af_squash_ws)"
+    while :; do
+        screen="$(af_capture)"
+        if printf '%s\n' "$screen" | grep -Fq -- "$text"; then
+            return 0
+        fi
+
+        tight="$(printf '%s\n' "$screen" | _af_strip_screen_frame | _af_join_lines_tight)"
+        if printf '%s' "$tight" | grep -Fq -- "$text"; then
+            return 0
+        fi
+
+        spaced="$(printf '%s\n' "$screen" | _af_strip_screen_frame | _af_join_lines_spaced)"
+        if printf '%s' "$spaced" | grep -Fq -- "$text"; then
+            return 0
+        fi
+
+        spaced_ws="$(printf '%s' "$spaced" | _af_squash_ws)"
+        if [ -n "$text_ws" ] && printf '%s' "$spaced_ws" | grep -Fq -- "$text_ws"; then
+            return 0
+        fi
+
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_log "TIMEOUT ${timeout}s waiting for: $label"
+            _af_log "----- last screen -----"
+            printf '%s\n' "$screen" >&2
+            _af_log "-----------------------"
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+}
+
 # af_ensure_nav — force a known focus state. Ctrl-] exits interactive mode (a
 # no-op in nav mode). This one primitive fixes the #1156 class: after it, keys
 # are guaranteed to reach the host, not a live pane as literal text.
@@ -354,14 +417,17 @@ af_exit_interactive() {
 }
 
 # af_send_to_pane <text> — type <text> + Enter into the pane. Precondition:
-# interactive mode is active (af_enter_interactive). Best-effort syncs on the
-# input echoing back; the CALLER should af_wait_for the command's output.
+# interactive mode is active (af_enter_interactive). Best-effort syncs on a
+# short no-op delivery marker, not the full command text, so confirmation stays
+# wrap-tolerant while the caller's command remains the final command executed.
+# The CALLER should af_wait_for the command's output.
 af_send_to_pane() {
-    local text="$1"
-    af_send_literal "$text"
+    local text="$1" marker
+    printf -v marker 'AF%04X%04X' "$RANDOM" "$RANDOM"
+    af_send_literal ": \"$marker\"; $text"
     af_send Enter
-    af_wait_for "$(_af_regex_escape "$text")" 8 "pane echoed '$text'" \
-        || _af_log "note: '$text' not seen echoed (may have scrolled off)"
+    _af_wait_for_pane_echo "$marker" 8 "pane echoed delivery marker for '$text'" \
+        || _af_log "note: delivery marker for '$text' not seen echoed (may have scrolled off)"
 }
 
 # af_attach — attach the selected instance full-screen (`o`). Precondition: an
@@ -373,6 +439,9 @@ af_attach() {
     _af_client_count > "$AF_DRIVER_STATE_DIR/attach_baseline"
     af_send o
     af_wait_gone 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'full-screen attach' || return 1
+    # Attach intentionally discards terminal probe bytes for ~50ms; let that
+    # window pass so an immediate scripted af_detach is not swallowed.
+    sleep "$AF_DRIVER_POLL"
 }
 
 # af_detach — detach from a full-screen attach (Ctrl-W by default) and, the
@@ -380,6 +449,10 @@ af_attach() {
 # count returns to the pre-attach baseline). A leaked client fails here.
 af_detach() {
     af_send "$AF_DRIVER_DETACH_KEY"
+    sleep "$AF_DRIVER_POLL"
+    if ! af_capture | grep -q 'Agent Factory'; then
+        af_send "$AF_DRIVER_DETACH_KEY"
+    fi
     af_wait_for 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'detached back to TUI' || return 1
     local baseline; baseline="$(cat "$AF_DRIVER_STATE_DIR/attach_baseline" 2>/dev/null || echo 0)"
     local deadline; deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))

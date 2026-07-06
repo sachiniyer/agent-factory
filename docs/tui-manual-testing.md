@@ -148,7 +148,7 @@ compose across `docker exec` invocations.
 | `af_hide_pane` | `x` | focus back on tree (`n new`) |
 | `af_enter_interactive` | `Enter` | interactive menu (`ctrl+] nav mode`) |
 | `af_exit_interactive` | `Ctrl-]` | interactive menu gone |
-| `af_send_to_pane <text>` | text,`Enter` | input echoes in the pane (then wait for output yourself) |
+| `af_send_to_pane <text>` | marker+text,`Enter` | short delivery marker echoes in the pane (then wait for output yourself) |
 | `af_attach` | `o` | TUI chrome gone (full-screen) |
 | `af_detach` | `Ctrl-W` | TUI chrome back **and** the attach client is reaped (guards #1157) |
 | `af_new_tab` | `t` | tab-child count rises |
