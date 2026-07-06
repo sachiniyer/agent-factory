@@ -194,6 +194,28 @@ af_focus_tree() {
 # touches the driver's own session and NEVER runs kill-server. Fails closed if
 # AGENT_FACTORY_HOME does not look like a sandbox path, so it can never wipe a
 # real ~/.agent-factory.
+# _af_is_throwaway_sandbox <dir> — POSITIVE proof a path is a disposable driver
+# sandbox before any destructive cleanup runs against it. Fails CLOSED: a real
+# dev checkout (any repo with a remote), or any path missing the scaffolding's
+# sentinel, is rejected. A weak `*/sandbox/*` substring guard once let this
+# cleanup delete real dev worktrees + every non-master branch (#1303); this hard
+# gate replaces it. All three conditions must hold.
+_af_is_throwaway_sandbox() {
+    local dir="$1"
+    [ -n "$dir" ] || return 1
+    # 1) The sandbox scaffolding writes this sentinel; a real checkout never has it.
+    [ -f "$dir/.af-throwaway-sandbox" ] || return 1
+    # 2) A throwaway mock repo has NO remotes; a real checkout has 'origin'.
+    if [ -d "$dir/.git" ] && [ -n "$(git -C "$dir" remote 2>/dev/null)" ]; then
+        return 1
+    fi
+    # 3) Belt-and-suspenders: still require a sandbox-shaped path.
+    case "$dir" in
+        */sandbox/*|*/sandbox|/tmp/*|*/af-driver*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 af_reset_sandbox() {
     case "$AGENT_FACTORY_HOME" in
         */sandbox/*|*/sandbox|/tmp/*|*/af-driver*) ;;
@@ -212,21 +234,24 @@ af_reset_sandbox() {
           "$AGENT_FACTORY_HOME/state.json" 2>/dev/null || true
     # Remove leftover instance worktrees + branches in the mock repo, else a
     # re-created instance of the same name collides on the existing branch.
-    # Scoped to a sandbox mock-repo path only.
-    case "$AF_DRIVER_REPO" in
-        */sandbox/*|/tmp/*)
-            rm -rf "${AF_DRIVER_REPO}"-* 2>/dev/null || true
-            if [ -d "$AF_DRIVER_REPO/.git" ]; then
-                git -C "$AF_DRIVER_REPO" worktree prune 2>/dev/null || true
-                local b
-                for b in $(git -C "$AF_DRIVER_REPO" for-each-ref \
-                    --format='%(refname:short)' refs/heads/ 2>/dev/null \
-                    | grep -vE '^(master|main)$' || true); do
-                    git -C "$AF_DRIVER_REPO" branch -D "$b" 2>/dev/null || true
-                done
-            fi
-            ;;
-    esac
+    # DESTRUCTIVE (rm -rf glob + `branch -D` every non-master ref): fail CLOSED,
+    # only ever against a PROVEN throwaway sandbox. The old `*/sandbox/*` guard
+    # honored an AF_DRIVER_REPO pointed at the real dev repo and deleted every
+    # sibling worktree + session branch (#1303).
+    if _af_is_throwaway_sandbox "$AF_DRIVER_REPO"; then
+        rm -rf "${AF_DRIVER_REPO}"-* 2>/dev/null || true
+        if [ -d "$AF_DRIVER_REPO/.git" ]; then
+            git -C "$AF_DRIVER_REPO" worktree prune 2>/dev/null || true
+            local b
+            for b in $(git -C "$AF_DRIVER_REPO" for-each-ref \
+                --format='%(refname:short)' refs/heads/ 2>/dev/null \
+                | grep -vE '^(master|main)$' || true); do
+                git -C "$AF_DRIVER_REPO" branch -D "$b" 2>/dev/null || true
+            done
+        fi
+    else
+        _af_log "af_reset_sandbox: SKIP worktree/branch cleanup — '$AF_DRIVER_REPO' is not a proven throwaway sandbox (needs a .af-throwaway-sandbox marker + no remote); refusing destructive rm/branch -D (#1303)"
+    fi
     sleep 0.5
 }
 

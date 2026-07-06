@@ -43,6 +43,11 @@ if [ ! -d "$MOCK" ]; then
     mkdir -p "$MOCK"
     cd "$MOCK"
     git init -q -b master
+    # Sentinel proving this is a disposable driver sandbox. tui-driver.sh's
+    # af_reset_sandbox refuses its destructive worktree/branch cleanup unless
+    # this marker is present, so the cleanup can never run against a real repo
+    # (#1303). Must be created before any instance worktrees exist.
+    : >.af-throwaway-sandbox
     # printf writes literal shell into the mock repo — the $VARs are meant to
     # stay unexpanded, so single quotes are correct here.
     # shellcheck disable=SC2016
