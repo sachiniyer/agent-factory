@@ -70,6 +70,16 @@ type queuedEvent struct {
 	Line string    `json:"line"`
 }
 
+// eventQueueCursor binds a peeked event to the exact queue position and record
+// identity observed at peek time. Live enqueues may overflow-drop old events
+// while replay delivery is in progress, so advance must validate this token
+// before consuming the current head.
+type eventQueueCursor struct {
+	offset int64
+	length int64
+	seq    int64
+}
+
 // eventQueue is one task's durable backlog. Zero pending events is the steady
 // state: no files on disk, every field zero.
 type eventQueue struct {
@@ -260,43 +270,58 @@ func (q *eventQueue) dropOldestOverCapsLocked() error {
 	return q.persistCursorLocked()
 }
 
-// peek returns the oldest undelivered event and its on-disk length without
+// peek returns the oldest undelivered event and an advance cursor without
 // consuming it. ok is false when the queue is empty.
-func (q *eventQueue) peek() (ev queuedEvent, n int64, ok bool, err error) {
+func (q *eventQueue) peek() (ev queuedEvent, cursor eventQueueCursor, ok bool, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.pending == 0 {
-		return queuedEvent{}, 0, false, nil
+		return queuedEvent{}, eventQueueCursor{}, false, nil
 	}
-	ev, n, err = q.readEventAtLocked(q.offset)
+	ev, n, err := q.readEventAtLocked(q.offset)
 	if err != nil {
-		return queuedEvent{}, 0, false, err
+		return queuedEvent{}, eventQueueCursor{}, false, err
 	}
-	return ev, n, true, nil
+	return ev, eventQueueCursor{offset: q.offset, length: n, seq: ev.Seq}, true, nil
 }
 
 // advance consumes the oldest event AFTER its successful delivery: cursor
-// forward by the length peek reported, files removed once fully drained, and
-// the delivered prefix compacted away once it outgrows its cap.
-func (q *eventQueue) advance(n int64) error {
+// forward by the cursor peek reported, files removed once fully drained, and
+// the delivered prefix compacted away once it outgrows its cap. If another
+// queue mutation moved the head since peek, advance returns false without
+// consuming anything; callers should re-peek.
+func (q *eventQueue) advance(cursor eventQueueCursor) (bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.pending == 0 {
-		return nil
+		return false, nil
 	}
-	q.offset += n
+	if cursor.length <= 0 {
+		return false, fmt.Errorf("invalid event-queue cursor length %d", cursor.length)
+	}
+	if q.offset != cursor.offset {
+		return false, nil
+	}
+	ev, n, err := q.readEventAtLocked(q.offset)
+	if err != nil {
+		return false, err
+	}
+	if ev.Seq != cursor.seq || n != cursor.length {
+		return false, nil
+	}
+	q.offset += cursor.length
 	q.pending--
 	if q.pending == 0 {
 		// Fully drained: reclaim the delivered prefix by removing both files —
 		// the steady healthy state is no queue files at all.
 		q.offset, q.size = 0, 0
 		if err := os.Remove(q.path); err != nil && !os.IsNotExist(err) {
-			return err
+			return false, err
 		}
 		if err := os.Remove(q.curPath); err != nil && !os.IsNotExist(err) {
-			return err
+			return false, err
 		}
-		return nil
+		return true, nil
 	}
 	if q.offset > watcherQueueCompactBytes {
 		if err := q.compactLocked(); err != nil {
@@ -305,7 +330,7 @@ func (q *eventQueue) advance(n int64) error {
 			log.WarningLog.Printf("watch task %s: event-queue compaction failed (will retry later): %v", q.taskID, err)
 		}
 	}
-	return q.persistCursorLocked()
+	return true, q.persistCursorLocked()
 }
 
 // compactLocked rewrites the queue file to just its pending suffix, dropping
