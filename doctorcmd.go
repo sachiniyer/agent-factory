@@ -9,6 +9,7 @@ import (
 )
 
 var doctorFixFlag bool
+var doctorSetupFlag bool
 
 // doctorCmd is `af doctor` (#1044, #1104): detect orphaned session
 // processes, runaway CPU children, leaked af_ tmux sessions, stale temp
@@ -18,8 +19,20 @@ var doctorFixFlag bool
 // whose home was deleted). Anything ambiguous is reported, never touched.
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Diagnose leaked processes, sessions, temp homes, and daemon health",
-	Long: `Diagnose problems that accumulate silently on a machine running agent-factory:
+	Short: "Diagnose setup, daemon health, and leaked session resources",
+	Long: `Diagnose the local agent-factory environment.
+
+For first-run setup checks, use:
+
+  af doctor --setup
+
+The setup profile checks the prerequisites needed to create the first local
+session: AF home writability, config materialization and parsing, git and the
+current repo, git identity, tmux, configured agent commands, state/log storage,
+daemon health, and remote-hook setup when this repo configures it.
+
+Without --setup, doctor runs the full maintenance sweep for problems that
+accumulate silently on a machine running agent-factory:
 
   - orphaned processes spawned by sessions that no longer exist
   - processes that escaped a live session's pane, or peg a CPU core for hours
@@ -40,7 +53,7 @@ Exits 1 when unresolved issues remain, 0 when healthy.`,
 		log.Initialize(false)
 		defer log.Close()
 
-		report, err := doctor.Run(doctor.Options{Fix: doctorFixFlag})
+		report, err := doctor.Run(doctor.Options{Fix: doctorFixFlag, Setup: doctorSetupFlag})
 		if err != nil {
 			return err
 		}
@@ -57,6 +70,8 @@ Exits 1 when unresolved issues remain, 0 when healthy.`,
 }
 
 func init() {
+	doctorCmd.Flags().BoolVar(&doctorSetupFlag, "setup", false,
+		"run the first-run setup profile (prerequisites, config, agent commands)")
 	doctorCmd.Flags().BoolVar(&doctorFixFlag, "fix", false,
 		"apply safe remediations (kill verified orphans, remove stale temp homes)")
 	rootCmd.AddCommand(doctorCmd)

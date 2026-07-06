@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -231,6 +232,32 @@ func TestHandleStateNewRejectsDuplicateTitle(t *testing.T) {
 	assert.Equal(t, stateNew, h.state)
 	require.NotNil(t, h.namingInstance)
 	assert.Contains(t, h.errBox.String(), "fix-bug")
+}
+
+func TestHandleStateNewPreflightErrorKeepsNamingFlow(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	h.errBox.SetSize(160, 1)
+	h.pendingProgram = "claude"
+
+	preflightErr := errors.New("Claude Code is not installed or not on PATH")
+	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error {
+		return preflightErr
+	}))
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "first-agent",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateNew, h.state)
+	assert.Same(t, naming, h.namingInstance)
+	assert.Contains(t, h.errBox.String(), "Claude Code is not installed")
 }
 
 // TestHandleStateNewWhitespaceViaRealInput is the regression guard for #973: a

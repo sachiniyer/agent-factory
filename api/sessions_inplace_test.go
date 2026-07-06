@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -36,11 +37,14 @@ func setSessionsCreateFlags(t *testing.T, name, repo string, here, inPlace bool)
 	t.Helper()
 	prevName, prevPrompt, prevProgram := createNameFlag, createPromptFlag, createProgramFlag
 	prevHere, prevInPlace, prevRepo := createHereFlag, createInPlaceFlag, repoFlag
+	prevPreflight := preflightLocalSession
 	createNameFlag, createPromptFlag, createProgramFlag = name, "do the thing", ""
 	createHereFlag, createInPlaceFlag, repoFlag = here, inPlace, repo
+	preflightLocalSession = func(*config.Config, string) error { return nil }
 	t.Cleanup(func() {
 		createNameFlag, createPromptFlag, createProgramFlag = prevName, prevPrompt, prevProgram
 		createHereFlag, createInPlaceFlag, repoFlag = prevHere, prevInPlace, prevRepo
+		preflightLocalSession = prevPreflight
 	})
 }
 
@@ -128,5 +132,45 @@ func TestSessionsCreate_HereOutsideRepoErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--here") || !strings.Contains(err.Error(), "git repository") {
 		t.Fatalf("error must name --here and the git-repo requirement, got: %v", err)
+	}
+}
+
+func TestSessionsCreatePreflightErrorSkipsDaemon(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	silenceStdio(t)
+
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	if out, err := exec.Command("git", "init", repoRoot).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+
+	prevName, prevPrompt, prevProgram := createNameFlag, createPromptFlag, createProgramFlag
+	prevHere, prevInPlace, prevRepo := createHereFlag, createInPlaceFlag, repoFlag
+	createNameFlag, createPromptFlag, createProgramFlag = "blocked", "", ""
+	createHereFlag, createInPlaceFlag, repoFlag = false, false, repoRoot
+	t.Cleanup(func() {
+		createNameFlag, createPromptFlag, createProgramFlag = prevName, prevPrompt, prevProgram
+		createHereFlag, createInPlaceFlag, repoFlag = prevHere, prevInPlace, prevRepo
+	})
+
+	prevPreflight := preflightLocalSession
+	preflightLocalSession = func(*config.Config, string) error {
+		return errors.New("tmux is not installed")
+	}
+	t.Cleanup(func() { preflightLocalSession = prevPreflight })
+
+	prevCreate := createSessionViaDaemon
+	createSessionViaDaemon = func(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
+		t.Fatalf("daemon must not be reached after preflight failure: %+v", req)
+		return nil, nil
+	}
+	t.Cleanup(func() { createSessionViaDaemon = prevCreate })
+
+	err := sessionsCreateCmd.RunE(sessionsCreateCmd, nil)
+	if err == nil {
+		t.Fatal("expected preflight failure")
+	}
+	if !strings.Contains(err.Error(), "tmux is not installed") {
+		t.Fatalf("error should surface preflight detail, got: %v", err)
 	}
 }

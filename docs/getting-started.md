@@ -20,6 +20,9 @@ This installs the `af` binary (Linux/macOS, amd64/arm64) to `~/.local/bin` —
 override with `AF_INSTALL_DIR`, or pin a release with `--version`. Make sure
 `~/.local/bin` is on your `PATH`.
 
+Run `af doctor --setup` after install to verify tmux, git, your configured
+agent command, git identity, config/state/log storage, and daemon health.
+
 To update later, re-run the script or run `af upgrade`. Installed binaries also
 auto-update along the **stable** channel; set `"update_channel": "preview"` in
 your global config to track preview builds instead (see the
@@ -34,14 +37,15 @@ needs Go).
 
 ```bash
 cd your-project    # must be a git repo
+af doctor --setup  # optional but recommended on first run
 af                 # launch the TUI
 ```
 
 The TUI opens with an empty sidebar. From here:
 
 1. Press **`n`** to create a new session. Give it a name and, optionally, an
-   initial prompt. `af` creates a fresh git worktree on a new branch and starts
-   your agent in it.
+   choose the agent with **Tab**. `af` creates a fresh git worktree on a new
+   branch and starts your agent in it.
 2. The session appears in the sidebar with a live status. The **preview pane**
    on the right shows a snapshot of the agent's terminal — you can watch its
    progress without attaching.

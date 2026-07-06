@@ -436,9 +436,12 @@ func TestSessionsSendPrompt_CreateRoutesThroughDeliverPrompt(t *testing.T) {
 	repoFlag = repoRoot
 	prevCreate := sendPromptCreateFlag
 	sendPromptCreateFlag = true
+	prevPreflight := preflightLocalSession
+	preflightLocalSession = func(*config.Config, string) error { return nil }
 	defer func() {
 		repoFlag = prevRepoFlag
 		sendPromptCreateFlag = prevCreate
+		preflightLocalSession = prevPreflight
 	}()
 
 	var gotReq daemon.DeliverPromptRequest

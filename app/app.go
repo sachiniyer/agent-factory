@@ -1790,7 +1790,11 @@ func (m *home) View() string {
 	rail := lipgloss.JoinVertical(lipgloss.Left, railParts...)
 	cols := []string{rail}
 	if len(m.visiblePanes) == 0 {
-		cols = append(cols, ui.EmptyWorkspace(m.lastLayout.Workspace))
+		if m.store.NumInstances() == 0 {
+			cols = append(cols, ui.FirstRunWorkspace(m.lastLayout.Workspace))
+		} else {
+			cols = append(cols, ui.EmptyWorkspace(m.lastLayout.Workspace))
+		}
 	}
 	for i, p := range m.visiblePanes {
 		if i > 0 {

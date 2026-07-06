@@ -75,3 +75,12 @@ func TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys(t *testing.T) {
 		t.Errorf("local instance-start help should advertise the full t/w/1-9 tab hint; got:\n%s", localContent)
 	}
 }
+
+func TestInstanceStartHelpMentionsFullScreenDetach(t *testing.T) {
+	local := newStartedInstance(t, "local")
+	content := helpStart(local).toContent()
+
+	if !strings.Contains(content, "ctrl-w") || !strings.Contains(content, "Detach from a full-screen session") {
+		t.Errorf("instance-start help must name the full-screen detach key; got:\n%s", content)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 
@@ -32,6 +33,7 @@ var (
 	deliverPromptViaDaemon   = daemon.DeliverPrompt
 	createTabViaDaemon       = daemon.CreateTab
 	closeTabViaDaemon        = daemon.CloseTab
+	preflightLocalSession    = preflight.LocalSessionPrereqs
 	// snapshotViaDaemon is the non-spawning read path for list/get/whoami
 	// (#1029 PR 2). It reflects the daemon's authoritative in-memory state when
 	// a daemon is already running, and returns daemon.ErrDaemonUnavailable
@@ -198,6 +200,9 @@ pointing at one).`,
 		} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
 			return jsonError(err)
 		}
+		if err := preflightLocalSession(&cfg.Config, program); err != nil {
+			return jsonError(err)
+		}
 
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
 			Title:    createNameFlag,
@@ -315,6 +320,9 @@ sessions fail, so scripts can inspect per-session results.`,
 			if program == "" {
 				program = cfg.DefaultProgram
 			} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
+				return jsonError(err)
+			}
+			if err := preflightLocalSession(&cfg.Config, program); err != nil {
 				return jsonError(err)
 			}
 
@@ -766,7 +774,7 @@ path is printed on success.`,
 var sessionsAttachCmd = &cobra.Command{
 	Use:   "attach <title>",
 	Short: "Attach to a session's terminal",
-	Long:  "Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-b d).",
+	Long:  "Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-w).",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
