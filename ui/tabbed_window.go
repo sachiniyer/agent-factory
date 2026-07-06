@@ -445,7 +445,7 @@ func (w *TabbedWindow) InvalidateContent(instance *session.Instance, tab int, me
 
 // ResetToNormalMode resets the pane's tab view to normal (non-scroll) mode.
 func (w *TabbedWindow) ResetToNormalMode(instance *session.Instance) error {
-	return w.tab.ResetToNormalMode(instance, w.effectiveTab())
+	return w.tab.ResetToNormalMode(instance, w.activeTab())
 }
 
 func (w *TabbedWindow) ScrollUp() {

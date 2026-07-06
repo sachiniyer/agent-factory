@@ -81,6 +81,10 @@ func (b *previewTextBackend) Preview(*session.Instance) (string, error) {
 	return b.text, nil
 }
 
+func (b *previewTextBackend) PreviewFullHistory(*session.Instance) (string, error) {
+	return b.text, nil
+}
+
 func setPreviewText(inst *session.Instance, text string) {
 	inst.SetBackend(&previewTextBackend{FakeBackend: session.NewFakeBackend(), text: text})
 }
@@ -263,6 +267,44 @@ func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 	assert.Contains(t, view, "GAMMA_PREVIEW_CONTENT")
 	assert.NotContains(t, view, "BETA_PREVIEW_CONTENT")
 	assert.Same(t, alpha, paneA.Instance(), "latest-wins preview must still be transient")
+}
+
+func TestPanePreviewEscFromScrollRevertsOriginalCommittedTab(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+	setPreviewText(beta, "BETA_PREVIEW_HISTORY")
+
+	_, _ = h.openOrFocusPane(alpha, 1)
+	paneA := h.store.OpenPanes()[0]
+	w := h.paneWindows[paneA.ID()]
+	require.NotNil(t, w)
+	require.Equal(t, 1, paneA.Tab(), "precondition: original pane is alpha's terminal tab")
+
+	h.store.SetActiveTab(0)
+	h.menu.SetActiveTab(0)
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+	require.True(t, w.Previewing())
+
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyCtrlU}, keys.KeyShiftUp)
+	require.True(t, w.IsInScrollMode(), "precondition: preview pane is in scroll mode")
+
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	require.NotNil(t, cmd, "Esc should schedule an original-pane refresh after canceling preview")
+
+	require.Nil(t, h.panePreviewTxn, "Esc from preview scroll must cancel the transient preview")
+	require.False(t, w.Previewing())
+	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active(), "Esc cancel focuses the owner pane")
+	assert.Same(t, alpha, paneA.Instance())
+	assert.Equal(t, 1, paneA.Tab(), "Esc must restore alpha's original tab, not alpha's agent tab")
+
+	view := h.View()
+	assert.Contains(t, view, "alpha · Terminal")
+	assert.NotContains(t, view, "PREVIEW beta")
+	assert.NotContains(t, view, "alpha · Agent",
+		"reset must not pair the committed alpha instance with the preview agent tab")
 }
 
 // TestPane_TabDimension: opening from a tree TAB row binds that tab, distinct

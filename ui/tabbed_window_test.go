@@ -6,14 +6,31 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // setWindowSize rects the pane at origin, the test shorthand for the layout
 // engine's SetRect call.
 func setWindowSize(w *TabbedWindow, width, height int) {
 	w.SetRect(layout.Rect{W: width, H: height})
+}
+
+func startedWindowInstance(t *testing.T, title string) *session.Instance {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   title,
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatus(session.Running)
+	addAgentShellTabs(inst)
+	return inst
 }
 
 // TestTabbedWindowSetRectClampsNegativeDimensions verifies that SetRect never
@@ -56,6 +73,26 @@ func TestTabbedWindowSetRectNormal(t *testing.T) {
 	previewW, previewH := w.GetPreviewSize()
 	assert.Greater(t, previewW, 0)
 	assert.Greater(t, previewH, 0)
+}
+
+func TestTabbedWindowResetPreviewScrollUsesCommittedBinding(t *testing.T) {
+	alpha := startedWindowInstance(t, "alpha")
+	beta := startedWindowInstance(t, "beta")
+	w := newTestTabbedWindow()
+	setWindowInstance(w, alpha)
+	setWindowSize(w, 100, 30)
+	require.True(t, w.JumpToTab(1), "precondition: original pane is alpha's terminal tab")
+
+	w.SetPreview(beta, 0, "alpha · Terminal")
+	w.InvalidateContent(beta, 0, "Loading preview...")
+	w.ScrollUp()
+	require.True(t, w.IsInScrollMode(), "precondition: preview target is scrolled")
+
+	require.NoError(t, w.ResetToNormalMode(alpha))
+	assert.False(t, w.IsInScrollMode())
+	assert.Same(t, alpha, w.tab.currentInstance)
+	assert.Equal(t, 1, w.tab.currentTab,
+		"reset must use the committed tab, not the preview target's agent tab")
 }
 
 // TestTabbedWindowViewIsExactlyRectSized enforces the layout.Pane contract

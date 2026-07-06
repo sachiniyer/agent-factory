@@ -515,6 +515,7 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	if instance == nil || !wasScrolling {
 		return nil
 	}
+	p.dropStaleView(instance, activeTab)
 
 	// A shell/process slot simply returns to live capture on the next refresh —
 	// no re-capture here (the former TerminalPane.ResetToNormalMode behavior).

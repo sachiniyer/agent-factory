@@ -532,6 +532,10 @@ func (m *home) focusRegion(region string) {
 // only inside the tasks overlay, which saves on close (handleStateTasks) —
 // the in-rail automations section is read-only, so no save is needed here.
 func (m *home) cycleFocus(back bool) tea.Cmd {
+	if m.panePreviewTxn != nil {
+		m.cancelPanePreview(true)
+		return m.panesRefresh(m.attached.Load())
+	}
 	if back {
 		m.ring.Prev()
 	} else {
@@ -1104,6 +1108,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		if pane, bound := m.focusedContentPane(); pane != nil && pane.IsInScrollMode() {
 			if err := pane.ResetToNormalMode(bound); err != nil {
 				return m, m.handleError(err)
+			}
+			if m.panePreviewTxn != nil {
+				m.cancelPanePreview(true)
+				return m, m.panesRefresh(m.attached.Load())
 			}
 			return m, m.selectionChanged()
 		}
