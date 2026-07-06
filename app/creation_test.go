@@ -135,6 +135,7 @@ func wireTestPanes(h *home, proj *store.Projection) {
 	h.mouseClock = time.Now
 	h.wireZoneRegistry()
 	h.syncFocus()
+	h.rememberTUIViewState()
 }
 
 // openTestPane opens (instance, tab) as a pane the way the `s` verb does —
