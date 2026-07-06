@@ -7,6 +7,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -35,6 +36,49 @@ func (m *home) openPaneWindow(instance *session.Instance, tab int) *store.OpenPa
 	w.SetZoneRegistry(m.zones)
 	m.paneWindows[p.ID()] = w
 	return p
+}
+
+// focusedOpenPane returns the open pane the focus ring points at, or nil when
+// focus is on the tree/automations (or the pane vanished).
+func (m *home) focusedOpenPane() *store.OpenPane {
+	active := m.ring.Active()
+	if !layout.IsPaneRegion(active) {
+		return nil
+	}
+	for _, p := range m.visiblePanes {
+		if layout.PaneRegion(p.ID()) == active {
+			return p
+		}
+	}
+	return nil
+}
+
+// paneSelectionHint names the current tree/sidebar selection when a visible
+// pane is bound elsewhere. Panes are explicit workspace bindings, not
+// selection-driven previews; showing the selected title in the header makes
+// that divergence visible instead of letting the tree highlight and pane
+// content appear to disagree (#1289).
+func (m *home) paneSelectionHint(p *store.OpenPane) string {
+	if p == nil {
+		return ""
+	}
+	selected := m.store.GetSelectedInstance()
+	if selected == nil {
+		return ""
+	}
+	if p.Instance() == selected && p.Tab() == m.store.ActiveTab() {
+		return ""
+	}
+	tabLabel := ""
+	labels := tree.TabLabels(selected)
+	activeTab := m.store.ActiveTab()
+	if activeTab >= 0 && activeTab < len(labels) {
+		tabLabel = labels[activeTab]
+	}
+	if tabLabel == "" {
+		return selected.Title
+	}
+	return fmt.Sprintf("%s · %s", selected.Title, tabLabel)
 }
 
 // handleOpenPane dispatches the `s` key: open the tree selection's (instance,
