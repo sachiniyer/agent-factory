@@ -3,6 +3,8 @@ package keys
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // resetAfter restores the default maps when the test finishes, since
@@ -123,6 +125,48 @@ func TestApplyOverridesRebindsDispatchAndHelp(t *testing.T) {
 	}
 }
 
+func TestApplyOverridesNormalizesMultiModifierOverrides(t *testing.T) {
+	resetAfter(t)
+
+	runtimeKey := tea.KeyMsg{Type: tea.KeyCtrlShiftUp, Alt: true}.String()
+	if runtimeKey != "alt+ctrl+shift+up" {
+		t.Fatalf("Bubble Tea changed Ctrl+Alt+Shift+Up spelling to %q", runtimeKey)
+	}
+
+	err := ApplyOverrides(map[string][]string{
+		"up": {"shift+ctrl+alt+up"},
+	})
+	if err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+
+	if got, ok := GlobalKeyStringsMap[runtimeKey]; !ok || got != KeyUp {
+		t.Fatalf("%q should dispatch KeyUp, got %v (present=%v)", runtimeKey, got, ok)
+	}
+	if _, dead := GlobalKeyStringsMap["shift+ctrl+alt+up"]; dead {
+		t.Fatalf("non-canonical override spelling must not be stored in the runtime dispatch map")
+	}
+	if got := GlobalKeyBindings[KeyUp].Help().Key; got != runtimeKey {
+		t.Fatalf("help label = %q, want normalized %q", got, runtimeKey)
+	}
+
+	infos, err := EffectiveBindings(map[string][]string{
+		"up": {"shift+ctrl+up"},
+	})
+	if err != nil {
+		t.Fatalf("EffectiveBindings: %v", err)
+	}
+	for _, info := range infos {
+		if info.Action == "up" {
+			if len(info.Keys) != 1 || info.Keys[0] != "ctrl+shift+up" {
+				t.Fatalf("EffectiveBindings up keys = %v, want [ctrl+shift+up]", info.Keys)
+			}
+			return
+		}
+	}
+	t.Fatal("EffectiveBindings omitted the up action")
+}
+
 func TestValidateOverridesErrors(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -137,6 +181,7 @@ func TestValidateOverridesErrors(t *testing.T) {
 		{"reserved interactive exit", map[string][]string{"quit": {"ctrl+]"}}, "reserved"},
 		{"conflict with another default", map[string][]string{"kill": {"q"}}, "bound to both"},
 		{"conflict between two overrides", map[string][]string{"kill": {"z"}, "quit": {"z"}}, "bound to both"},
+		{"canonicalized conflict between overrides", map[string][]string{"up": {"shift+ctrl+up"}, "down": {"ctrl+shift+up"}}, "bound to both"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,13 +215,13 @@ func TestValidateOverridesLeavesGlobalsUntouched(t *testing.T) {
 }
 
 func TestValidKeySpec(t *testing.T) {
-	valid := []string{"q", "Q", "?", "/", "[", "å", "ctrl+a", "alt+x", "shift+up", "ctrl+shift+up", "f5", "space", "pgup", "ctrl+enter"}
+	valid := []string{"q", "Q", "?", "/", "[", "å", "ctrl+a", "alt+x", "shift+up", "shift+ctrl+up", "ctrl+shift+up", "f5", "space", "pgup", "ctrl+enter"}
 	for _, s := range valid {
 		if !validKeySpec(s) {
 			t.Fatalf("validKeySpec(%q) = false, want true", s)
 		}
 	}
-	invalid := []string{"", " ", "space bar", "qq", "ctrl+", "ctrl+alt+", "control+a", "\t"}
+	invalid := []string{"", " ", "space bar", "qq", "ctrl+", "ctrl+alt+", "ctrl+ctrl+a", "control+a", "\t"}
 	for _, s := range invalid {
 		if validKeySpec(s) {
 			t.Fatalf("validKeySpec(%q) = true, want false", s)
