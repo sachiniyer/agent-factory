@@ -76,3 +76,16 @@ func Health() HealthStatus {
 func LooksLikeDaemonArgv(args []string) bool {
 	return argsHaveDaemonFlag(args) && argsAreDaemonBinary(args)
 }
+
+// ProcessArgv returns pid's argv using the daemon package's cross-platform
+// lookup: /proc where available, then a best-effort `ps` fallback for macOS
+// and other Unix platforms without /proc.
+func ProcessArgv(pid int) []string {
+	return daemonArgs(pid)
+}
+
+// PIDLooksAlive reports whether pid still appears to name a live process,
+// using the same zombie-aware liveness probe as daemon shutdown paths.
+func PIDLooksAlive(pid int) bool {
+	return pidLooksAlive(pid)
+}

@@ -21,6 +21,11 @@ func selfPID() int { return os.Getpid() }
 
 func tempDirDefault() string { return os.TempDir() }
 
+var (
+	daemonProcessArgv   = daemon.ProcessArgv
+	daemonPIDLooksAlive = daemon.PIDLooksAlive
+)
+
 // runawayCPUFraction and runawayMinAge define "pegging a core for an
 // extended period": lifetime-average CPU ≥ 80% of a core for a process at
 // least 30 minutes old. A legitimate build rarely sustains that average; the
@@ -392,28 +397,22 @@ var afHomeMarkers = []string{
 // checkStaleTempHomes finds abandoned agent-factory homes under the temp
 // dir (leaked by tests/debug runs — the #1093 immortal-daemon fuel). A home
 // is stale only when nothing references it: no live process has it as
-// AGENT_FACTORY_HOME, its daemon.pid (if any) is dead, and it has not been
-// touched for MinTempHomeAge.
+// AGENT_FACTORY_HOME, no live tmux session marks it as AF_HOME, its
+// daemon.pid (if any) is verified absent/dead/stale rather than merely
+// unreadable, and it has not been touched for MinTempHomeAge.
 func checkStaleTempHomes(ctx *scanContext, report *Report) {
 	tempDir := filepath.Clean(ctx.opts.TempDir)
 	activeHome := filepath.Clean(ctx.opts.ConfigDir)
-
-	homesInUse := map[string]bool{}
-	if ctx.snap != nil {
-		for pid := range ctx.snap {
-			if home, ok := proctree.EnvValue(pid, "AGENT_FACTORY_HOME"); ok && home != "" {
-				homesInUse[filepath.Clean(home)] = true
-			}
-		}
-	}
+	homesInUse := processReferencedHomes(ctx.snap)
+	tmuxHomesInUse := liveTmuxHomes(ctx)
 
 	for _, dir := range candidateTempHomes(tempDir) {
 		dir = filepath.Clean(dir)
 		if dir == activeHome || !isAFHome(dir) {
 			continue
 		}
-		if homesInUse[dir] || tempHomeDaemonAlive(dir) {
-			report.OK = append(report.OK, fmt.Sprintf("temp home %s is in use (live process references it)", dir))
+		if reason := tempHomeInUseReason(dir, homesInUse, tmuxHomesInUse); reason != "" {
+			report.OK = append(report.OK, fmt.Sprintf("temp home %s is in use (%s)", dir, reason))
 			continue
 		}
 		age := timeSince(newestMtime(dir))
@@ -421,8 +420,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 			continue
 		}
 		// Containment re-check before offering an rm -rf.
-		rel, err := filepath.Rel(tempDir, dir)
-		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		if !pathInside(tempDir, dir) {
 			continue
 		}
 		removeDir := dir
@@ -431,7 +429,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 			Detail: fmt.Sprintf("abandoned agent-factory home %s (untouched for %s)",
 				dir, formatAge(age.Seconds())),
 			FixAction: "remove " + dir,
-			fix:       func() error { return os.RemoveAll(removeDir) },
+			fix:       staleTempHomeRemoveFix(ctx, removeDir),
 		})
 	}
 }
@@ -477,18 +475,133 @@ func isAFHome(dir string) bool {
 	return found >= 2
 }
 
-// tempHomeDaemonAlive reports whether the home's daemon.pid names a live
-// agent-factory daemon.
-func tempHomeDaemonAlive(dir string) bool {
+func processReferencedHomes(snap map[int]proctree.Process) map[string]bool {
+	homes := map[string]bool{}
+	if snap == nil {
+		return homes
+	}
+	for pid := range snap {
+		if home, ok := proctree.EnvValue(pid, "AGENT_FACTORY_HOME"); ok && home != "" {
+			homes[filepath.Clean(home)] = true
+		}
+	}
+	return homes
+}
+
+func liveTmuxHomes(ctx *scanContext) map[string]bool {
+	homes := map[string]bool{}
+	for _, name := range listTmuxSessions(ctx) {
+		if !strings.HasPrefix(name, tmux.TmuxPrefix) {
+			continue
+		}
+		if home, ok := tmuxSessionHomeMarker(ctx, name); ok && home != "" {
+			homes[filepath.Clean(home)] = true
+		}
+	}
+	return homes
+}
+
+func tmuxSessionHomeMarker(ctx *scanContext, name string) (string, bool) {
+	out, err := ctx.opts.Exec.Output(exec.Command("tmux", "show-environment", "-t",
+		fmt.Sprintf("=%s:", name), tmux.EnvMarkerHome))
+	if err != nil {
+		return "", false
+	}
+	return strings.CutPrefix(strings.TrimSpace(string(out)), tmux.EnvMarkerHome+"=")
+}
+
+type tempHomeDaemonStatus int
+
+const (
+	tempHomeDaemonAbsentOrDead tempHomeDaemonStatus = iota
+	tempHomeDaemonAlive
+	tempHomeDaemonUnknown
+)
+
+// tempHomeDaemonLiveness reports whether the home's daemon.pid names a live
+// agent-factory daemon. A live PID with unreadable argv is unknown, not dead:
+// doctor must not delete a home when daemon liveness cannot be verified.
+func tempHomeDaemonLiveness(dir string) tempHomeDaemonStatus {
 	data, err := os.ReadFile(filepath.Join(dir, "daemon.pid"))
 	if err != nil {
-		return false
+		if os.IsNotExist(err) {
+			return tempHomeDaemonAbsentOrDead
+		}
+		return tempHomeDaemonUnknown
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || pid <= 0 {
+		return tempHomeDaemonUnknown
+	}
+	if !daemonPIDLooksAlive(pid) {
+		return tempHomeDaemonAbsentOrDead
+	}
+	args := daemonProcessArgv(pid)
+	if len(args) == 0 {
+		return tempHomeDaemonUnknown
+	}
+	if daemon.LooksLikeDaemonArgv(args) {
+		return tempHomeDaemonAlive
+	}
+	return tempHomeDaemonAbsentOrDead
+}
+
+func tempHomeInUseReason(dir string, processHomes, tmuxHomes map[string]bool) string {
+	dir = filepath.Clean(dir)
+	switch {
+	case processHomes[dir]:
+		return "live process references it"
+	case tmuxHomes[dir]:
+		return "live tmux session references it"
+	}
+	switch tempHomeDaemonLiveness(dir) {
+	case tempHomeDaemonAlive:
+		return "daemon pid is live"
+	case tempHomeDaemonUnknown:
+		return "daemon.pid liveness is uncertain"
+	default:
+		return ""
+	}
+}
+
+func staleTempHomeRemoveFix(ctx *scanContext, dir string) func() error {
+	return func() error {
+		dir := filepath.Clean(dir)
+		if _, err := os.Stat(dir); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("cannot stat %s before removal: %w", dir, err)
+		}
+		if !pathInside(filepath.Clean(ctx.opts.TempDir), dir) {
+			return fmt.Errorf("refusing to remove %s outside temp dir %s", dir, ctx.opts.TempDir)
+		}
+		if filepath.Clean(ctx.opts.ConfigDir) == dir {
+			return fmt.Errorf("refusing to remove active agent-factory home %s", dir)
+		}
+		if !isAFHome(dir) {
+			return fmt.Errorf("refusing to remove %s: it no longer looks like an agent-factory home", dir)
+		}
+
+		snap := ctx.snap
+		if ctx.opts.snapshot != nil {
+			if fresh, err := ctx.opts.snapshot(); err == nil {
+				snap = fresh
+			}
+		}
+		if reason := tempHomeInUseReason(dir, processReferencedHomes(snap), liveTmuxHomes(ctx)); reason != "" {
+			return fmt.Errorf("refusing to remove %s: %s", dir, reason)
+		}
+		return os.RemoveAll(dir)
+	}
+}
+
+func pathInside(base, path string) bool {
+	rel, err := filepath.Rel(base, path)
+	if err != nil || rel == "." || rel == ".." {
 		return false
 	}
-	return daemon.LooksLikeDaemonArgv(proctree.Argv(pid))
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // newestMtime returns the most recent mtime among the dir itself and its
@@ -532,7 +645,7 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 			continue
 		}
 		p := ctx.snap[pid]
-		args := proctree.Argv(pid)
+		args := daemonProcessArgv(pid)
 		if len(args) == 0 || !daemon.LooksLikeDaemonArgv(args) {
 			continue
 		}
