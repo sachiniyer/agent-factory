@@ -136,7 +136,7 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 // shared envelope. Status mapping (kept pragmatic, documented here):
 //
 //	200 — success: {"data": <resp>, "error": null}
-//	400 — malformed / unreadable JSON request body
+//	400 — malformed / unreadable JSON request body, or unknown request field
 //	405 — wrong HTTP verb (not POST)
 //	413 — request body exceeds maxHTTPBodyBytes
 //	500 — the handler (validation or execution) returned an error
@@ -190,6 +190,8 @@ func healthHandler(cs *controlServer) http.HandlerFunc {
 // decodeHTTPRequest reads the size-capped body and unmarshals it into dst. An
 // empty body is treated as a zero-value request so no-argument RPCs (ListTasks,
 // an all-repo Snapshot, health) work with `curl -d ”` or no body at all.
+// Unknown fields are rejected so typo'd request keys cannot silently fall back
+// to zero-value RPC semantics such as an empty RepoID meaning all repos.
 //
 // The cap is enforced with http.MaxBytesReader (NOT io.LimitReader): once the
 // body exceeds maxHTTPBodyBytes the read fails with an *http.MaxBytesError, so an
@@ -207,7 +209,15 @@ func decodeHTTPRequest(w http.ResponseWriter, r *http.Request, dst any) error {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil
 	}
-	if err := json.Unmarshal(body, dst); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return fmt.Errorf("malformed JSON request body: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("malformed JSON request body: multiple JSON values")
+		}
 		return fmt.Errorf("malformed JSON request body: %w", err)
 	}
 	return nil
