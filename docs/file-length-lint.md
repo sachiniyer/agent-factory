@@ -40,7 +40,7 @@ splitting them):
 | -------------------------- | ------- |
 | `session/backend_test.go`  | 2241    |
 | `app/app.go`               | 1889    |
-| `session/instance.go`      | 1531    |
+| `session/instance.go`      | 1400    |
 | `session/tmux/tmux.go`     | 1424    |
 | `ui/sidebar.go`            | 1258    |
 | `config/config.go`         | 1128    |
