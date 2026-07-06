@@ -67,7 +67,10 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		{"BeginArchive from Running", stateAxes{LiveRunning, OpNone}, true, false, BeginArchive(), LiveRunning, OpArchiving, true},
 		{"CommitArchive clears started", stateAxes{LiveRunning, OpArchiving}, true, false, CommitArchive(), LiveArchived, OpNone, false},
 		{"AbortArchiveToLost", stateAxes{LiveRunning, OpArchiving}, true, false, AbortArchiveToLost(), LiveLost, OpNone, true},
-		{"BeginRestore from Archived", stateAxes{LiveArchived, OpNone}, false, false, BeginRestore(), LiveLost, OpRestoring, false},
+		// BeginRestore SETS started=true on the archived (started=false) row,
+		// mirroring RestoreFromArchive — else Recover's !Started() gate would
+		// short-circuit and restore would never start (Greptile #1314).
+		{"BeginRestore from Archived sets started", stateAxes{LiveArchived, OpNone}, false, false, BeginRestore(), LiveLost, OpRestoring, true},
 		{"AbortRestoreToLost", stateAxes{LiveLost, OpRestoring}, true, false, AbortRestoreToLost(), LiveLost, OpNone, true},
 	}
 	for _, tc := range cases {

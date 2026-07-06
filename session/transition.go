@@ -130,6 +130,20 @@ type stateAxes struct {
 	op       InFlightOp
 }
 
+// startedEffect is a transition's effect on the started flag: most transitions
+// leave it to the teardown/spawn machinery, but two own it — CommitArchive
+// clears it (the inert Archived state has no tmux behind it) and BeginRestore
+// sets it (mirroring RestoreFromArchive, whose head flips started=true before
+// Recover so the re-spawn is eligible — Recover's !Started() gate would
+// otherwise short-circuit and the restore would silently never start).
+type startedEffect int
+
+const (
+	startedUnchanged startedEffect = iota
+	startedSet                     // started = true (BeginRestore)
+	startedClear                   // started = false (CommitArchive)
+)
+
 // edgeSpec is one row of the allowed-edge table: which from-states an event is
 // legal from, the resulting state, and the event's side effects.
 type edgeSpec struct {
@@ -137,9 +151,9 @@ type edgeSpec struct {
 	allowedFrom func(s stateAxes) bool
 	// target computes the resulting state (ev carries ObserveLiveness's lv).
 	target func(s stateAxes, ev TransitionEvent) stateAxes
-	// clearsStarted marks whether the transition also sets started=false
-	// (CommitArchive: the inert Archived state has no tmux behind it).
-	clearsStarted bool
+	// started is the transition's effect on the started flag (default: leave it
+	// to the teardown/spawn machinery).
+	started startedEffect
 	// yieldWhenBlocked makes an out-of-set from-state a silent no-op instead of a
 	// rejection — for the daemon-truth edge (ObserveLiveness is always allowed)
 	// and ConfirmLive (yields to an in-flight teardown rather than fighting it).
@@ -182,9 +196,9 @@ var transitionTable = map[transitionKind]edgeSpec{
 		target: func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpArchiving} },
 	},
 	tkCommitArchive: {
-		allowedFrom:   func(s stateAxes) bool { return s.op == OpArchiving },
-		target:        func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveArchived, OpNone} },
-		clearsStarted: true,
+		allowedFrom: func(s stateAxes) bool { return s.op == OpArchiving },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveArchived, OpNone} },
+		started:     startedClear,
 	},
 	tkAbortArchiveToLost: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpArchiving },
@@ -193,6 +207,9 @@ var transitionTable = map[transitionKind]edgeSpec{
 	tkBeginRestore: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpNone && s.liveness == LiveArchived },
 		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLost, OpRestoring} },
+		// started=true mirrors RestoreFromArchive: Recover's !Started() gate would
+		// otherwise short-circuit and the restore would never start (Greptile #1314).
+		started: startedSet,
 	},
 	tkAbortRestoreToLost: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpRestoring && s.liveness == LiveLost },
@@ -237,7 +254,10 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 	to := spec.target(from, ev)
 	i.liveness = to.liveness
 	i.inFlightOp = to.op
-	if spec.clearsStarted {
+	switch spec.started {
+	case startedSet:
+		i.started = true
+	case startedClear:
 		i.started = false
 	}
 	return nil
