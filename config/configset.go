@@ -398,6 +398,7 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 // preceded the '#'), so the comment can be reattached byte-for-byte.
 func splitTrailingComment(rest string) (value, comment string) {
 	inSingle, inDouble := false, false
+	escape := false
 	for i := 0; i < len(rest); i++ {
 		c := rest[i]
 		switch {
@@ -406,13 +407,20 @@ func splitTrailingComment(rest string) (value, comment string) {
 				inSingle = false
 			}
 		case inDouble:
-			if c == '"' {
+			if escape {
+				escape = false
+			} else if c == '\\' {
+				escape = true
+			} else if c == '"' {
 				inDouble = false
+				escape = false
 			}
 		case c == '\'':
 			inSingle = true
+			escape = false
 		case c == '"':
 			inDouble = true
+			escape = false
 		case c == '#':
 			j := i
 			for j > 0 && (rest[j-1] == ' ' || rest[j-1] == '\t') {

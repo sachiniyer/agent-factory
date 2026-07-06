@@ -104,6 +104,15 @@ func TestSetTOMLScalarHashInStringValue(t *testing.T) {
 	}
 }
 
+func TestSetTOMLScalarEscapedQuoteInDoubleQuotedString(t *testing.T) {
+	in := `branch_prefix = "a\"b"  # trailing`
+	got := setTOMLScalar(in, "", "branch_prefix", "'c#d'")
+	want := `branch_prefix = 'c#d'  # trailing`
+	if got != want {
+		t.Fatalf("escaped quote handling wrong.\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestResolveSettable(t *testing.T) {
 	if s, leaf, _, ok := resolveSettable("default_program"); !ok || s != "" || leaf != "default_program" {
 		t.Fatalf("default_program resolve wrong: s=%q leaf=%q ok=%v", s, leaf, ok)
