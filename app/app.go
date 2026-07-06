@@ -445,6 +445,11 @@ func (m *home) relayout() {
 
 	if m.textOverlay != nil {
 		m.textOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
+		overlayHeight := m.termHeight - 2
+		if overlayHeight < 6 {
+			overlayHeight = m.termHeight
+		}
+		m.textOverlay.SetHeight(overlayHeight)
 	}
 	if m.selectionOverlay != nil {
 		m.selectionOverlay.SetWidth(int(float32(m.termWidth) * 0.6))

@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -274,7 +275,16 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 // handleHelpState handles key events when in help state
 func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Any key press will close the help overlay
+	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftUp]) {
+		m.textOverlay.ScrollUp()
+		return m, nil
+	}
+	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftDown]) {
+		m.textOverlay.ScrollDown()
+		return m, nil
+	}
+
+	// Any non-scroll key press will close the help overlay.
 	dismissCmd, shouldClose := m.textOverlay.HandleKeyPress(msg)
 	if shouldClose {
 		m.state = stateDefault
