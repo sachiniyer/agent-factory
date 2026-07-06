@@ -56,6 +56,40 @@ func TestLoadTasks(t *testing.T) {
 	assert.Equal(t, "do stuff", tasks[0].Prompt)
 }
 
+func TestLoadTasksMigratesLegacyArrayFileToEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, tasksFileName)
+	legacyJSON := []byte(`[
+  {"id":"legacy","name":"Old Task","prompt":"do it","cron_expr":"0 9 * * *","project_path":"/tmp","enabled":true,"created_at":"2025-01-01T00:00:00Z","unknown":"preserved"}
+]`)
+	require.NoError(t, os.WriteFile(path, legacyJSON, 0644))
+
+	origGetPath := getTasksPathFn
+	getTasksPathFn = func() (string, error) { return path, nil }
+	t.Cleanup(func() { getTasksPathFn = origGetPath })
+
+	tasks, err := LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "legacy", tasks[0].ID)
+	assert.Equal(t, "", tasks[0].Program, "legacy task without program key must keep loading with Program=\"\"")
+
+	onDisk, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var envelope struct {
+		SchemaVersion int               `json:"schema_version"`
+		Tasks         []json.RawMessage `json:"tasks"`
+	}
+	require.NoError(t, json.Unmarshal(onDisk, &envelope))
+	assert.Equal(t, TasksSchemaVersion, envelope.SchemaVersion)
+	require.Len(t, envelope.Tasks, 1)
+	assert.JSONEq(t, `{"id":"legacy","name":"Old Task","prompt":"do it","cron_expr":"0 9 * * *","project_path":"/tmp","enabled":true,"created_at":"2025-01-01T00:00:00Z","unknown":"preserved"}`, string(envelope.Tasks[0]))
+
+	backup, err := os.ReadFile(path + ".bak.schema-v0")
+	require.NoError(t, err)
+	assert.Equal(t, legacyJSON, backup)
+}
+
 func TestSaveAndLoadRoundTrip(t *testing.T) {
 	setupTestTasks(t, []Task{})
 

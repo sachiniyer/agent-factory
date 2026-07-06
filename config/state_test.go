@@ -158,3 +158,18 @@ func TestSaveRepoInstances_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, string(payload), string(got))
 }
+
+func TestSaveStateWritesSchemaVersion(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tempHome)
+
+	require.NoError(t, SaveState(&State{HelpScreensSeen: 7}))
+
+	raw, err := os.ReadFile(filepath.Join(tempHome, StateFileName))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"schema_version":1,"help_screens_seen":7}`, string(raw))
+
+	loaded := LoadState()
+	assert.Equal(t, StateSchemaVersion, loaded.SchemaVersion)
+	assert.Equal(t, uint32(7), loaded.HelpScreensSeen)
+}

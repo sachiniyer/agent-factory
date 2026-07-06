@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -123,6 +122,7 @@ func GetConfigDir() (string, error) {
 // from config.toml when present and config.json otherwise (#1030), and the
 // two decoders must agree on key names.
 type Config struct {
+	SchemaVersion int `json:"schema_version" toml:"schema_version"`
 	// DefaultProgram is the default agent program name. Must be one of
 	// tmux.SupportedPrograms (e.g. "claude", "codex", "aider", "gemini").
 	DefaultProgram string `json:"default_program" toml:"default_program"`
@@ -300,6 +300,7 @@ func ResolveProgram(cfg *Config, agent string) string {
 // a bare agent enum name.
 func DefaultConfig() *Config {
 	cfg := &Config{
+		SchemaVersion:      GlobalConfigSchemaVersion,
 		DefaultProgram:     defaultProgram,
 		AutoYes:            false,
 		DaemonPollInterval: defaultDaemonPollInterval,
@@ -887,6 +888,9 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	if err := json.Unmarshal(data, config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
 	}
+	if err := validateLoadedConfigSchemaVersion(config.SchemaVersion, prettyConfigPath); err != nil {
+		return nil, err
+	}
 
 	// Warn about keys the frozen reader ignores so they are not silently lost
 	// on conversion. The [keys] keymap gets a specific message (it is a real,
@@ -905,22 +909,6 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 
 	return validateConfig(config, prettyConfigPath)
-}
-
-// knownJSONConfigKeys returns the set of top-level JSON keys the frozen
-// Config schema recognizes, derived from the struct's json tags so it cannot
-// drift from the fields. Fields tagged json:"-" (e.g. the TOML-only keymap)
-// are deliberately excluded — they are not valid config.json keys.
-func knownJSONConfigKeys() map[string]bool {
-	out := map[string]bool{}
-	t := reflect.TypeOf(Config{})
-	for i := 0; i < t.NumField(); i++ {
-		name := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
-		if name != "" && name != "-" {
-			out[name] = true
-		}
-	}
-	return out
 }
 
 // parseConfigTOML validates and unmarshals raw config.toml bytes on top of
@@ -948,6 +936,9 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	config := DefaultConfig()
 	if err := toml.Unmarshal(data, config); err != nil {
 		return nil, tomlParseError("config file "+prettyConfigPath, err)
+	}
+	if err := validateLoadedConfigSchemaVersion(config.SchemaVersion, prettyConfigPath); err != nil {
+		return nil, err
 	}
 	warnUnknownTomlKeys(data, prettyConfigPath)
 
@@ -1000,6 +991,9 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 // parseConfig and parseConfigTOML: enum validation hard-errors, range checks
 // warn and fall back to defaults.
 func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
+	if config.SchemaVersion == LegacySchemaVersion {
+		config.SchemaVersion = GlobalConfigSchemaVersion
+	}
 	if err := ValidateProgramEnum(
 		fmt.Sprintf("Config issue in %s: default_program", prettyConfigPath),
 		"default_program",
@@ -1113,6 +1107,7 @@ func saveConfig(config *Config) error {
 	}
 
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+	config.SchemaVersion = GlobalConfigSchemaVersion
 	data, err := toml.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)

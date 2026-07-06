@@ -53,6 +53,7 @@ type AppState interface {
 
 // State represents the application state that persists between sessions
 type State struct {
+	SchemaVersion int `json:"schema_version"`
 	// HelpScreensSeen is a bitmask tracking which help screens have been shown
 	HelpScreensSeen uint32 `json:"help_screens_seen"`
 }
@@ -60,6 +61,7 @@ type State struct {
 // DefaultState returns the default state
 func DefaultState() *State {
 	return &State{
+		SchemaVersion:   StateSchemaVersion,
 		HelpScreensSeen: 0,
 	}
 }
@@ -88,13 +90,24 @@ func LoadState() *State {
 		return DefaultState()
 	}
 
-	var state State
-	if err := json.Unmarshal(data, &state); err != nil {
-		log.ErrorLog.Printf("failed to parse state file: %v", err)
+	if version, err := DetectJSONSchemaVersion(data); err != nil {
+		log.ErrorLog.Printf("failed to detect state file schema version: %v", err)
+		return DefaultState()
+	} else if version > StateSchemaVersion {
+		log.ErrorLog.Printf("state file has schema_version %d, but this binary supports up to %d; using defaults", version, StateSchemaVersion)
 		return DefaultState()
 	}
 
-	return &state
+	state := DefaultState()
+	if err := json.Unmarshal(data, state); err != nil {
+		log.ErrorLog.Printf("failed to parse state file: %v", err)
+		return DefaultState()
+	}
+	if state.SchemaVersion == LegacySchemaVersion {
+		state.SchemaVersion = StateSchemaVersion
+	}
+
+	return state
 }
 
 // SaveState saves the state to disk
@@ -109,6 +122,7 @@ func SaveState(state *State) error {
 	}
 
 	statePath := filepath.Join(configDir, StateFileName)
+	state.SchemaVersion = StateSchemaVersion
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal state: %w", err)
@@ -164,7 +178,7 @@ func LoadRepoInstances(repoID string) (json.RawMessage, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return json.RawMessage("[]"), nil
 	}
-	return json.RawMessage(data), nil
+	return extractInstancesArray(data, path)
 }
 
 // SaveRepoInstances saves instances for a specific repo using atomic writes.
@@ -173,7 +187,18 @@ func SaveRepoInstances(repoID string, data json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	return AtomicWriteFile(path, data, 0644)
+	diskData, err := marshalInstancesEnvelope(data)
+	if err != nil {
+		// Several recovery tests deliberately plant corrupt bytes through this
+		// low-level helper. Preserve that ability while normal valid array saves
+		// move to the v1 envelope.
+		if !json.Valid(data) {
+			diskData = data
+		} else {
+			return err
+		}
+	}
+	return AtomicWriteFile(path, diskData, 0644)
 }
 
 // RepoInstancesPath returns the file path for a repo's instances file.
@@ -234,7 +259,7 @@ func LoadAllRepoInstances() (map[string]json.RawMessage, error) {
 			continue
 		}
 		repoID := entry.Name()
-		data, err := LoadRepoInstances(repoID)
+		data, err := loadRepoInstancesForAll(repoID)
 		if err != nil {
 			log.WarningLog.Printf("failed to load instances for repo %s: %v", repoID, err)
 			continue

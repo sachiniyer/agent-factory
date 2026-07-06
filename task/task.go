@@ -132,6 +132,26 @@ func LoadTasks() ([]Task, error) {
 		return nil, err
 	}
 
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return []Task{}, nil
+		}
+		return nil, fmt.Errorf("failed to read tasks file: %w", err)
+	}
+
+	data, _, err := loadAndMigrateTasksFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse tasks file: %w", err)
+	}
+
+	return tasksFromSchemaBytes(data)
+}
+
+// loadTasksLocked reads tasks while the caller already holds path's file lock.
+// It must not call LoadTasks because LoadTasks may migrate and acquire the same
+// lock. If a legacy array sneaks in between the pre-lock migration and this
+// read, saveTasks will still write the updated v1 envelope.
+func loadTasksLocked(path string) ([]Task, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -139,13 +159,25 @@ func LoadTasks() ([]Task, error) {
 		}
 		return nil, fmt.Errorf("failed to read tasks file: %w", err)
 	}
-
-	var tasks []Task
-	if err := json.Unmarshal(data, &tasks); err != nil {
+	migrated, _, err := migrateTasksSchemaBytes(data, path)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse tasks file: %w", err)
 	}
+	return tasksFromSchemaBytes(migrated)
+}
 
-	return tasks, nil
+func ensureTasksSchemaMigrated(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read tasks file: %w", err)
+	}
+	_, _, err := loadAndMigrateTasksFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to parse tasks file: %w", err)
+	}
+	return nil
 }
 
 // saveTasks writes tasks without locking. Must be called from within WithFileLock.
@@ -158,7 +190,11 @@ func saveTasks(tasks []Task) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal tasks: %w", err)
 	}
-	return config.AtomicWriteFile(path, data, 0644)
+	enveloped, err := marshalTasksEnvelope(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal tasks envelope: %w", err)
+	}
+	return config.AtomicWriteFile(path, enveloped, 0644)
 }
 
 func AddTask(t Task) error {
@@ -179,8 +215,11 @@ func AddTask(t Task) error {
 	if err != nil {
 		return err
 	}
+	if err := ensureTasksSchemaMigrated(path); err != nil {
+		return err
+	}
 	return config.WithFileLock(path, func() error {
-		tasks, err := LoadTasks()
+		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
 		}
@@ -197,8 +236,11 @@ func RemoveTask(id string) error {
 	if err != nil {
 		return err
 	}
+	if err := ensureTasksSchemaMigrated(path); err != nil {
+		return err
+	}
 	return config.WithFileLock(path, func() error {
-		tasks, err := LoadTasks()
+		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
 		}
@@ -297,8 +339,11 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 	if err != nil {
 		return err
 	}
+	if err := ensureTasksSchemaMigrated(path); err != nil {
+		return err
+	}
 	return config.WithFileLock(path, func() error {
-		tasks, err := LoadTasks()
+		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
 		}
@@ -345,8 +390,11 @@ func UpdateTask(t Task) error {
 	if err != nil {
 		return err
 	}
+	if err := ensureTasksSchemaMigrated(path); err != nil {
+		return err
+	}
 	return config.WithFileLock(path, func() error {
-		tasks, err := LoadTasks()
+		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
 		}

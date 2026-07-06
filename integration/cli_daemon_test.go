@@ -170,12 +170,16 @@ func TestScheduledTaskRunnerUsesDaemonAndAllocatesRerunTitle(t *testing.T) {
 	sessions := h.listSessions()
 	assertTitles(t, sessions, "nightly", "nightly-2")
 
-	var tasks []struct {
-		ID            string     `json:"id"`
-		LastRunAt     *time.Time `json:"last_run_at"`
-		LastRunStatus string     `json:"last_run_status"`
+	var tasksFile struct {
+		SchemaVersion int `json:"schema_version"`
+		Tasks         []struct {
+			ID            string     `json:"id"`
+			LastRunAt     *time.Time `json:"last_run_at"`
+			LastRunStatus string     `json:"last_run_status"`
+		} `json:"tasks"`
 	}
-	readJSONFile(t, filepath.Join(h.home, "tasks.json"), &tasks)
+	readJSONFile(t, filepath.Join(h.home, "tasks.json"), &tasksFile)
+	tasks := tasksFile.Tasks
 	if len(tasks) != 1 || tasks[0].LastRunAt == nil || tasks[0].LastRunStatus != "started" {
 		t.Fatalf("task status was not updated after run: %+v", tasks)
 	}

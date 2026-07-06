@@ -238,7 +238,7 @@ func TestConfigSetWritesAndReflects(t *testing.T) {
 	}
 
 	got, _ := os.ReadFile(path)
-	want := "# hi\ndefault_program = 'codex'  # note\n"
+	want := "# hi\ndefault_program = 'codex'  # note\nschema_version = 1\n"
 	if string(got) != want {
 		t.Fatalf("file not preserved.\n got: %q\nwant: %q", got, want)
 	}

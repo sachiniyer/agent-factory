@@ -326,6 +326,9 @@ func applyHomeCheck(homeDir string, misses int) (int, bool) {
 var fromInstanceDataForRefresh = session.FromInstanceData
 
 func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, error) {
+	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
+		return existing, err
+	}
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
 		return existing, err

@@ -1031,6 +1031,26 @@ codex = "/opt/codex/bin/codex --quiet"
 			cfg.ProgramOverrides[tmux.ProgramCodex])
 	})
 
+	t.Run("loads legacy config.toml without schema_version as current schema", func(t *testing.T) {
+		writeToml(t, `default_program = "codex"`+"\n")
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, GlobalConfigSchemaVersion, cfg.SchemaVersion)
+		assert.Equal(t, "codex", cfg.DefaultProgram)
+	})
+
+	t.Run("refuses newer config.toml schema_version", func(t *testing.T) {
+		writeToml(t, "schema_version = 2\n"+"default_program = \"codex\"\n")
+
+		cfg, err := LoadConfig()
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "schema_version 2")
+		assert.Contains(t, err.Error(), "supports up to 1")
+	})
+
 	t.Run("config.toml wins over config.json and never merges", func(t *testing.T) {
 		configDir := writeToml(t, `default_program = "codex"`+"\n")
 		// The json sets a different program AND a key the toml does not carry;
