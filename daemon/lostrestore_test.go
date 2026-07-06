@@ -1,13 +1,23 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
+	stdlog "log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // recoverFakeBackend counts Recover calls and emulates LocalBackend.Recover's
@@ -127,6 +137,96 @@ func TestRestoreLostSessions_BacksOffBetweenFailures(t *testing.T) {
 
 	if got := backend.recoverCalls(); got != 1 {
 		t.Fatalf("passes inside the backoff window must not re-attempt: want 1, got %d", got)
+	}
+}
+
+type failPtyFactory struct{}
+
+func (failPtyFactory) Start(*exec.Cmd) (*os.File, error) {
+	return nil, errors.New("tmux spawn should not be reached when worktree is missing")
+}
+
+func (failPtyFactory) Close() {}
+
+// TestRestoreLostSessions_LogsVanishedWorktreeOnce covers the #1303
+// instrumentation: when a live registered Lost session points at a worktree
+// directory that disappeared but Git still has the worktree admin entry, the
+// daemon emits one high-visibility ERROR with the diagnostic context and does
+// not repeat it on the next retry.
+func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	zeroRestoreBackoff(t)
+
+	worktreePath := filepath.Join(t.TempDir(), "repo-vanished")
+	branch := "af/vanished-worktree"
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, worktreePath).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, worktreePath, "vanished", branch, "", false, true)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+	if err := os.RemoveAll(worktreePath); err != nil {
+		t.Fatalf("remove worktree directory: %v", err)
+	}
+
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "vanished", Path: repoPath, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.Branch = branch
+	inst.SetBackend(&session.LocalBackend{})
+	inst.SetStartedForTest(true)
+	inst.SetStatus(session.Lost)
+	inst.SetGitWorktreeForTest(gw)
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		"af_1303_vanished",
+		"claude",
+		failPtyFactory{},
+		cmd_test.MockCmdExec{
+			RunFunc: func(*exec.Cmd) error {
+				return errors.New("tmux command should not be reached when worktree is missing")
+			},
+			OutputFunc: func(*exec.Cmd) ([]byte, error) {
+				return nil, errors.New("tmux command should not be reached when worktree is missing")
+			},
+		},
+	))
+
+	seedDiskInstance(t, repoID, "vanished", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "vanished")] = inst
+	manager.mu.Unlock()
+
+	var buf bytes.Buffer
+	prevError := aflog.ErrorLog
+	aflog.ErrorLog = stdlog.New(&buf, "ERROR: ", 0)
+	t.Cleanup(func() { aflog.ErrorLog = prevError })
+
+	manager.RestoreLostSessions()
+	manager.RestoreLostSessions()
+
+	logged := buf.String()
+	if count := strings.Count(logged, "WORKTREE_MISSING_DETECTED"); count != 1 {
+		t.Fatalf("missing-worktree diagnostic count = %d, want 1; logs:\n%s", count, logged)
+	}
+	for _, want := range []string{
+		`classification="unexpected_external_removal"`,
+		`title="vanished"`,
+		`repo_id="` + repoID + `"`,
+		`worktree_path="` + worktreePath + `"`,
+		`branch="` + branch + `"`,
+		`liveness="LiveLost"`,
+		`status="Lost"`,
+		`parent_exists=true`,
+		`repo_exists=true`,
+		`git_worktree_registered="true"`,
+		`branch_exists="true"`,
+		`recover_error="recover: session \"vanished\" worktree unavailable: stat `,
+	} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("missing diagnostic field %s in logs:\n%s", want, logged)
+		}
 	}
 }
 
