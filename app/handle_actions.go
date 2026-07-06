@@ -790,6 +790,9 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 	idx := oneBased - 1
 	if p := m.focusedOpenPane(); p != nil {
 		w := m.paneWindows[p.ID()]
+		if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID == p.ID() {
+			m.cancelPanePreview(false)
+		}
 		if w == nil || !w.JumpToTab(idx) {
 			return m, nil
 		}

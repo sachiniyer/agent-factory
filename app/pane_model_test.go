@@ -72,6 +72,23 @@ func visibleTitles(h *home) []string {
 	return out
 }
 
+type previewTextBackend struct {
+	*session.FakeBackend
+	text string
+}
+
+func (b *previewTextBackend) Preview(*session.Instance) (string, error) {
+	return b.text, nil
+}
+
+func (b *previewTextBackend) PreviewFullHistory(*session.Instance) (string, error) {
+	return b.text, nil
+}
+
+func setPreviewText(inst *session.Instance, text string) {
+	inst.SetBackend(&previewTextBackend{FakeBackend: session.NewFakeBackend(), text: text})
+}
+
 func TestFirstRunWorkspaceEmptyState(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 120, 30)
@@ -158,9 +175,9 @@ func TestPane_OpenAlreadyOpenFocuses(t *testing.T) {
 }
 
 // TestPane_HeaderAnnotatesSelectionDivergence is the #1289 session-level
-// reconciliation guard: open panes are explicit bindings, so selecting beta
-// must not silently make an alpha pane look like the selected workspace. The
-// header names both facts: what the pane is showing and which row is selected.
+// reconciliation guard with #1321 previews layered on: preview state must name
+// both the transient target and original pane, and canceling the preview must
+// restore the old selected-vs-shown header invariant.
 func TestPane_HeaderAnnotatesSelectionDivergence(t *testing.T) {
 	h := paneTestHome(t)
 	alpha := h.store.GetInstanceByTitle("alpha")
@@ -176,8 +193,118 @@ func TestPane_HeaderAnnotatesSelectionDivergence(t *testing.T) {
 	require.Same(t, alpha, paneA.Instance(), "selection must not retarget explicit panes")
 
 	view := h.View()
+	assert.Contains(t, view, "PREVIEW beta · Agent (original alpha · Agent)",
+		"preview header must reconcile transient target vs original pane")
+	assert.NotContains(t, view, "alpha · Agent · selected: beta · Agent",
+		"selected divergence is hidden while PREVIEW owns the render binding")
+
+	h.cancelPanePreview(false)
+	view = h.View()
 	assert.Contains(t, view, "alpha · Agent · selected: beta · Agent",
-		"the visible pane header must reconcile selected row vs shown content")
+		"canceling preview restores the #1289 selected row vs shown content invariant")
+}
+
+func TestPanePreviewInvalidatesStaleContentSynchronously(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+	setPreviewText(alpha, "ALPHA_PREVIEW_CONTENT")
+	setPreviewText(beta, "BETA_PREVIEW_CONTENT")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	w := h.paneWindows[paneA.ID()]
+	require.NotNil(t, w)
+	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, alpha, 0, w.ContentSeq())())
+	require.Contains(t, h.View(), "ALPHA_PREVIEW_CONTENT")
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+
+	view := h.View()
+	assert.Contains(t, view, "PREVIEW beta · Agent (original alpha · Agent)")
+	assert.Contains(t, view, "Loading preview...")
+	assert.NotContains(t, view, "ALPHA_PREVIEW_CONTENT",
+		"retargeting preview must clear the original content before async beta capture returns")
+	assert.Same(t, alpha, paneA.Instance(), "preview must not mutate the committed pane binding")
+	assert.Same(t, beta, h.panePreviewTxn.target.instance)
+}
+
+func TestPanePreviewFastScrollLatestWins(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+	gamma := h.store.GetInstanceByTitle("gamma")
+	setPreviewText(beta, "BETA_PREVIEW_CONTENT")
+	setPreviewText(gamma, "GAMMA_PREVIEW_CONTENT")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	w := h.paneWindows[paneA.ID()]
+	require.NotNil(t, w)
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+	betaSeq := h.panePreviewTxn.seq
+
+	h.sidebar.SetSelectedInstance(2)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+	gammaSeq := h.panePreviewTxn.seq
+	require.NotEqual(t, betaSeq, gammaSeq)
+
+	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, beta, 0, betaSeq)())
+	view := h.View()
+	assert.Contains(t, view, "PREVIEW gamma · Agent (original alpha · Agent)")
+	assert.Contains(t, view, "Loading preview...")
+	assert.NotContains(t, view, "BETA_PREVIEW_CONTENT",
+		"late beta capture must not overwrite the newer gamma preview target")
+
+	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, gamma, 0, gammaSeq)())
+	view = h.View()
+	assert.Contains(t, view, "PREVIEW gamma · Agent (original alpha · Agent)")
+	assert.Contains(t, view, "GAMMA_PREVIEW_CONTENT")
+	assert.NotContains(t, view, "BETA_PREVIEW_CONTENT")
+	assert.Same(t, alpha, paneA.Instance(), "latest-wins preview must still be transient")
+}
+
+func TestPanePreviewEscFromScrollRevertsOriginalCommittedTab(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+	setPreviewText(beta, "BETA_PREVIEW_HISTORY")
+
+	_, _ = h.openOrFocusPane(alpha, 1)
+	paneA := h.store.OpenPanes()[0]
+	w := h.paneWindows[paneA.ID()]
+	require.NotNil(t, w)
+	require.Equal(t, 1, paneA.Tab(), "precondition: original pane is alpha's terminal tab")
+
+	h.store.SetActiveTab(0)
+	h.menu.SetActiveTab(0)
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+	require.True(t, w.Previewing())
+
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyCtrlU}, keys.KeyShiftUp)
+	require.True(t, w.IsInScrollMode(), "precondition: preview pane is in scroll mode")
+
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	require.NotNil(t, cmd, "Esc should schedule an original-pane refresh after canceling preview")
+
+	require.Nil(t, h.panePreviewTxn, "Esc from preview scroll must cancel the transient preview")
+	require.False(t, w.Previewing())
+	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active(), "Esc cancel focuses the owner pane")
+	assert.Same(t, alpha, paneA.Instance())
+	assert.Equal(t, 1, paneA.Tab(), "Esc must restore alpha's original tab, not alpha's agent tab")
+
+	view := h.View()
+	assert.Contains(t, view, "alpha · Terminal")
+	assert.NotContains(t, view, "PREVIEW beta")
+	assert.NotContains(t, view, "alpha · Agent",
+		"reset must not pair the committed alpha instance with the preview agent tab")
 }
 
 // TestPane_TabDimension: opening from a tree TAB row binds that tab, distinct

@@ -41,7 +41,7 @@ type tabContentState struct {
 //
 // All hard-won race/edge fixes from both panes live here, in one place:
 //   - #684 the active-tab index is an atomic on TabbedWindow (not here).
-//   - #579 UpdateContent serialises capture writes against String() reads via
+//   - #579 UpdateContent serialises state writes against String() reads via
 //     p.mu so the renderer never observes a half-written state.
 //   - #702/#746/#384 the mouse/keyboard scroll path can fire before the async
 //     UpdateContent for a newly selected tab/instance — dropStaleView resets
@@ -53,10 +53,10 @@ type tabContentState struct {
 //   - #496/#920/#935 session-gone / Deleting / Dead fallbacks.
 //   - #898/#649 trailing-newline strip + newest-lines truncation.
 type TabPane struct {
-	// mu serialises UpdateContent (called off the bubbletea Update goroutine via
-	// refreshPanesCmd) against String() (called from the renderer), plus the
-	// scroll-mode mutators. Without it the renderer can observe partially
-	// written state while a capture is in flight (#579).
+	// mu serialises UpdateContent writes (called off the bubbletea Update
+	// goroutine via refreshPanesCmd) against String() (called from the
+	// renderer), plus the scroll-mode mutators. Without it the renderer can
+	// observe partially written state while a capture is in flight (#579).
 	mu sync.Mutex
 
 	width  int
@@ -145,49 +145,85 @@ func (p *TabPane) setFallbackState(message string) {
 	p.viewport.SetContent("")
 }
 
-// UpdateContent captures the selected tab's content. Safe to call from a
-// goroutine — it serialises against String() via p.mu (#579). activeTab is the
-// 0-based selected tab index: index 0 is the agent tab (captured via the backend
-// preview), any other index is a shell/process tab captured straight from that
-// tab's tmux session. The slot selects the capture source and the fallback copy,
-// so the merged pane reproduces the old PreviewPane and TerminalPane behaviors.
-func (p *TabPane) UpdateContent(instance *session.Instance, activeTab int) error {
+type contentGuard func() bool
+
+func guardOK(guard contentGuard) bool {
+	return guard == nil || guard()
+}
+
+func (p *TabPane) isCurrentViewLocked(instance *session.Instance, activeTab int) bool {
+	return p.currentInstance == instance && p.currentTab == activeTab
+}
+
+// InvalidateContent synchronously adopts a new view key and fallback state.
+// This is used by #1321 preview retargeting so the next render frame cannot
+// pair a new PREVIEW header with stale content from the previous binding.
+func (p *TabPane) InvalidateContent(instance *session.Instance, activeTab int, message string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.dropStaleView(instance, activeTab)
-	if activeTab == 0 {
-		return p.updateAgentLocked(instance)
-	}
-	return p.updateShellLocked(instance, activeTab)
+	p.setFallbackState(message)
 }
 
-// updateAgentLocked reproduces the former PreviewPane.UpdateContent. Caller
-// must hold p.mu.
-func (p *TabPane) updateAgentLocked(instance *session.Instance) error {
+// UpdateContent captures the selected tab's content. Safe to call from a
+// goroutine — it serialises state writes against String() via p.mu (#579).
+// activeTab is the 0-based selected tab index: index 0 is the agent tab
+// (captured via the backend preview), any other index is a shell/process tab
+// captured straight from that tab's tmux session. The slot selects the capture
+// source and the fallback copy, so the merged pane reproduces the old
+// PreviewPane and TerminalPane behaviors.
+func (p *TabPane) UpdateContent(instance *session.Instance, activeTab int) error {
+	return p.UpdateContentGuarded(instance, activeTab, nil)
+}
+
+// UpdateContentGuarded captures the selected tab's content and publishes it
+// only while guard still reports that the caller's render binding is current.
+// Capture itself runs outside p.mu so event-loop invalidation can immediately
+// clear stale content even if an older capture is still in flight.
+func (p *TabPane) UpdateContentGuarded(instance *session.Instance, activeTab int, guard contentGuard) error {
+	if activeTab == 0 {
+		return p.updateAgent(instance, guard)
+	}
+	return p.updateShell(instance, activeTab, guard)
+}
+
+// updateAgent reproduces the former PreviewPane.UpdateContent.
+func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) error {
+	p.mu.Lock()
+	if !guardOK(guard) {
+		p.mu.Unlock()
+		return nil
+	}
+	p.dropStaleView(instance, 0)
 	switch {
 	case instance == nil:
 		p.setFallbackState("No agents running yet. Spin up a new instance with 'n' to get started!")
+		p.mu.Unlock()
 		return nil
 	case instance.IsCreating():
 		p.setFallbackState("Setting up workspace...")
+		p.mu.Unlock()
 		return nil
 	case instance.IsTearingDown():
 		// Mirror the creating case for a teardown op (#920/#1195): during
 		// teardown Preview() returns ("", nil) and Started()==false, so without
 		// this the generic name fallback below would claim throughout the delete.
 		p.setFallbackState("Tearing down session...")
+		p.mu.Unlock()
 		return nil
 	case instance.GetLiveness() == session.LiveDead:
 		// The daemon poll marks a session Dead once its backing session is
 		// gone (#935); keying off the liveness makes the fallback synchronous with
 		// the sidebar's dead-dot so the panes never disagree.
 		p.setFallbackState("Session no longer running.")
+		p.mu.Unlock()
 		return nil
 	case instance.GetLiveness() == session.LiveLost:
 		// Lost (#1108): the tmux session vanished with no kill on record —
 		// same synchronous-with-the-sidebar treatment as Dead, but the message
 		// says what happened rather than implying a plain corpse.
 		p.setFallbackState("Session lost — its tmux session is gone.")
+		p.mu.Unlock()
 		return nil
 	}
 	// A LimitReached agent (#1146) is deliberately NOT a fallback: its tmux is
@@ -197,7 +233,13 @@ func (p *TabPane) updateAgentLocked(instance *session.Instance) error {
 	// If in scroll mode but the viewport hasn't been filled yet, capture the
 	// full scrollback now (the agent slot fills lazily here; see ScrollUp).
 	if p.isScrolling && p.viewport.Height > 0 && len(p.viewport.View()) == 0 {
+		p.mu.Unlock()
 		content, err := instance.PreviewFullHistory()
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if !guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
+			return nil
+		}
 		if err != nil {
 			if errors.Is(err, tmux.ErrSessionGone) {
 				// setFallbackState clears scroll state and the stale viewport, so
@@ -207,15 +249,24 @@ func (p *TabPane) updateAgentLocked(instance *session.Instance) error {
 			}
 			return err
 		}
-		p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
+		if p.isScrolling && p.viewport.Height > 0 && len(p.viewport.View()) == 0 {
+			p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
+		}
 		return nil
 	}
 
 	if p.isScrolling {
+		p.mu.Unlock()
 		return nil
 	}
+	p.mu.Unlock()
 
 	content, err := instance.Preview()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
+		return nil
+	}
 	if err != nil {
 		// Tmux session vanished out from under us (#496): render an inactive
 		// fallback instead of logging at ERROR every preview tick.
@@ -235,11 +286,18 @@ func (p *TabPane) updateAgentLocked(instance *session.Instance) error {
 	return nil
 }
 
-// updateShellLocked reproduces the former TerminalPane.UpdateContent for the
-// shell/process tab at activeTab. Caller must hold p.mu.
-func (p *TabPane) updateShellLocked(instance *session.Instance, activeTab int) error {
+// updateShell reproduces the former TerminalPane.UpdateContent for the
+// shell/process tab at activeTab.
+func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard contentGuard) error {
+	p.mu.Lock()
+	if !guardOK(guard) {
+		p.mu.Unlock()
+		return nil
+	}
+	p.dropStaleView(instance, activeTab)
 	if instance == nil {
 		p.setFallbackState("Select an instance to open a terminal")
+		p.mu.Unlock()
 		return nil
 	}
 	// A tearing-down instance reports Started()==false during teardown, so without
@@ -247,10 +305,12 @@ func (p *TabPane) updateShellLocked(instance *session.Instance, activeTab int) e
 	// while the session is going away (#920/#1195).
 	if instance.IsTearingDown() {
 		p.setFallbackState("Tearing down session...")
+		p.mu.Unlock()
 		return nil
 	}
 	if !instance.Started() {
 		p.setFallbackState("Instance is not started yet.")
+		p.mu.Unlock()
 		return nil
 	}
 
@@ -263,6 +323,7 @@ func (p *TabPane) updateShellLocked(instance *session.Instance, activeTab int) e
 		} else {
 			p.setFallbackState("Terminal tab not available for remote sessions.\nConfigure remote_hooks.terminal_cmd to enable it.\nUse the Agent tab to see session output.")
 		}
+		p.mu.Unlock()
 		return nil
 	}
 
@@ -275,19 +336,27 @@ func (p *TabPane) updateShellLocked(instance *session.Instance, activeTab int) e
 	// of leaving stale scrollback pinned on screen forever (#977). setFallbackState
 	// clears scroll state, so String() (which checks isScrolling first) renders the
 	// fallback message. This mirrors the agent slot, whose Dead check also precedes
-	// its scroll guard in updateAgentLocked.
+	// its scroll guard in updateAgent.
 	if !instance.TabAlive(activeTab) {
 		p.setFallbackState("Terminal session not available.")
+		p.mu.Unlock()
 		return nil
 	}
 
 	// Skip content updates while scrolling (the shell slot fills its viewport
 	// eagerly in enterScrollMode, not here).
 	if p.isScrolling {
+		p.mu.Unlock()
 		return nil
 	}
+	p.mu.Unlock()
 
 	content, err := instance.PreviewTab(activeTab)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
+		return nil
+	}
 	if err != nil {
 		// The alive pre-check above can race an external kill: fall through to a
 		// fallback instead of propagating an error logged at ERROR (#496).
@@ -402,7 +471,7 @@ func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab in
 		// return: a bare return leaves p.content (fallback==false) holding the
 		// last-rendered capture and isScrolling==false, so String() renders stale
 		// terminal output instead of the dead-session message. This mirrors
-		// updateShellLocked's !TabAlive branch and the ErrSessionGone path below,
+		// updateShell's !TabAlive branch and the ErrSessionGone path below,
 		// which both set the same fallback — the early-return was the inconsistency
 		// (#998, sibling of #977/#984).
 		if !instance.TabAlive(activeTab) {
@@ -446,6 +515,7 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	if instance == nil || !wasScrolling {
 		return nil
 	}
+	p.dropStaleView(instance, activeTab)
 
 	// A shell/process slot simply returns to live capture on the next refresh —
 	// no re-capture here (the former TerminalPane.ResetToNormalMode behavior).

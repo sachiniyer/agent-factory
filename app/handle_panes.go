@@ -102,6 +102,7 @@ func (m *home) handleOpenPane() (tea.Model, tea.Cmd) {
 // pane already bound to it. The new/refocused pane is stamped most recently
 // focused, so the §2.6 fitting keeps it visible even at capacity.
 func (m *home) openOrFocusPane(instance *session.Instance, tab int) (tea.Model, tea.Cmd) {
+	m.cancelPanePreview(false)
 	p := m.store.FindOpenPane(instance, tab)
 	if p == nil {
 		p = m.openPaneWindow(instance, tab)
@@ -158,6 +159,9 @@ func (m *home) hidePane(p *store.OpenPane) {
 // tab-kill rebind, snapshot reconcile, dead-instance prune) goes through.
 // Callers relayout afterwards.
 func (m *home) closePaneWindow(p *store.OpenPane) {
+	if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID == p.ID() {
+		m.cancelPanePreview(false)
+	}
 	// Release the live termpane attachment before its window goes away —
 	// its (pane, window) binding is about to dangle (#1089).
 	if p == m.livePane {
@@ -240,6 +244,9 @@ func (m *home) reconcilePanesForTabs(instance *session.Instance, oldNames []stri
 			m.closePaneWindow(p)
 			changed = true
 		case idx != slot:
+			if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID == p.ID() {
+				m.cancelPanePreview(false)
+			}
 			p.SetTab(idx)
 			changed = true
 		}
