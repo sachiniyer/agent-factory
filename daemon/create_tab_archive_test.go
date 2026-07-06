@@ -160,6 +160,39 @@ func TestCreateTab_SerializedWithInFlightArchiveDoesNotOrphan(t *testing.T) {
 	assert.False(t, isAlive(agentName+"__btop"), "no process tmux session may be spawned during/after the archive move")
 }
 
+// TestArchiveSession_ModeBTearsDownExtraTabsNoOrphan pins the Phase 2b archive
+// mode (teardownArchive) structurally: archiving a session that has a live
+// shell/process tab must tear that tab's tmux DOWN and reduce the instance to
+// the agent tab alone (#1028) — leaving no orphaned session behind — with the
+// worktree relocated in the same folded teardown step (#1195 Ph2b). Together
+// with the OpArchiving fence over the teardown+move window (exercised by
+// TestCreateTab_SerializedWithInFlightArchiveDoesNotOrphan), this closes the
+// archive-orphan gap (audit #2/#5) by construction rather than by convention.
+func TestArchiveSession_ModeBTearsDownExtraTabsNoOrphan(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	const title, agentName = "worker", "af_worker_agent"
+	inst, srcPath, isAlive := registerArchivableWithTmux(t, manager, repoID, repoPath, title, agentName)
+
+	// Give the session a second (process) tab BEFORE archiving, so the archive
+	// teardown has an extra live tmux session it must not orphan into the worktree
+	// it is about to move.
+	_, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"})
+	require.NoError(t, err, "a process tab must spawn on a live session")
+	require.Equal(t, 2, inst.TabCount(), "the session now has agent + process tabs")
+	require.True(t, isAlive(agentName+"__btop"), "the process tab's tmux session is live before archive")
+
+	_, err = manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+	require.NoError(t, err)
+
+	// Mode B: the extra tab is torn down and dropped, only the agent name-holder
+	// remains, and the worktree has been relocated — no orphan left behind.
+	assert.Equal(t, 1, inst.TabCount(), "archive reduces the instance to the agent tab alone (#1028)")
+	assert.False(t, isAlive(agentName+"__btop"), "the process tab's tmux must be killed, not orphaned into the moved-away worktree")
+	assert.Equal(t, session.LiveArchived, inst.GetLiveness(), "a successful archive marks the session Archived")
+	assert.Equal(t, session.OpNone, inst.GetInFlightOp(), "the OpArchiving fence is cleared on success")
+	assert.False(t, exists(srcPath), "the worktree was moved out of its original path")
+}
+
 // TestCreateTab_ShellRejectedAfterArchive is the Shell=true (TUI `t`) counterpart
 // of TestCreateTab_RejectedAfterArchive: the shell-tab path is guarded too.
 func TestCreateTab_ShellRejectedAfterArchive(t *testing.T) {

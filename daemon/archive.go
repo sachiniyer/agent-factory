@@ -98,9 +98,11 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	// the fence can never be confused with a TUI optimistic kill (#1187).
 	instance.SetInFlightOp(session.OpArchiving)
 
-	instance.ArchiveTeardown()
-
-	if err := instance.MoveArchivedWorktree(dest); err != nil {
+	// Tear down tmux and relocate the worktree in one call: the move is folded
+	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
+	// so no live pane is cwd'd in the worktree during the move (previously a
+	// separate MoveArchivedWorktree step relying on duplicated ordering prose).
+	if err := instance.ArchiveTeardown(dest); err != nil {
 		// The worktree is still at a valid location (the git layer guarantees
 		// worktreePath points at the actual bytes even on a repair failure).
 		// Mark Lost — started is still true and the agent tmux binding was kept —

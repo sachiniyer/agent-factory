@@ -166,3 +166,47 @@ func (teardownReleasePTY) clearsStarted() bool { return true }
 func (teardownReleasePTY) finalize(_ *Instance, closed []closedTab, _ *git.GitWorktree) {
 	clearClosedTmuxRefs(closed)
 }
+
+// teardownArchive tears down every tab's tmux session and RELOCATES the worktree
+// to dest (#1028) — the tmux half of Kill, but it preserves the record and MOVES
+// the worktree instead of deleting it. Folding the move into the core (via
+// handleWorktree, right after closeTab's pane-exit wait) is the whole point of
+// Phase 2b: the #802 "wait for every pane to exit before touching the worktree"
+// ordering becomes shared code instead of the duplicated prose it was when the
+// move lived in a separate daemon step. It keeps the agent tab's tmux binding as
+// a name-holder (a failed move / un-archive re-spawns it) and drops the
+// shell/process tabs; started is left true (the OpArchiving fence, not the #990
+// started guard, owns the teardown window) so a failed move self-heals via the
+// Lost-restore loop.
+type teardownArchive struct{ dest string }
+
+func (teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) error {
+	// Wait for the pane to exit before handleWorktree relocates the worktree: a
+	// process still flushing state races the move otherwise (#802). Best-effort.
+	if err := ts.CloseAndWaitForPaneExit(); err != nil {
+		log.WarningLog.Printf("archive %q: tmux teardown for tab %q failed: %v", title, tabName, err)
+	}
+	return nil
+}
+
+func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) error {
+	if gw == nil {
+		return fmt.Errorf("cannot archive %q: instance has no worktree to relocate", title)
+	}
+	return gw.MoveWorktree(m.dest)
+}
+
+func (teardownArchive) clearsStarted() bool { return false }
+
+func (teardownArchive) finalize(i *Instance, _ []closedTab, _ *git.GitWorktree) {
+	// Reduce to the agent tab (i.Tabs[0]) only. Its tmux binding is KEPT (the
+	// server-side session is gone, but the name-holder lets a rollback Recover
+	// re-spawn it, and a successful archive persists it as an inert name-holder);
+	// the shell/process tabs are dropped — only the agent returns on un-archive
+	// (#1028). gitWorktree is left in place (the move relocated it; it still
+	// points at valid bytes) and started is left as the fence set it, so the
+	// refs are deliberately NOT cleared here.
+	if len(i.Tabs) > 0 {
+		i.Tabs = []*Tab{i.Tabs[0]}
+	}
+}
