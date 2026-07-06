@@ -156,6 +156,10 @@ func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
 	assert.Contains(t, view, "Edit Task 2",
 		"the overlay opens the cursor's task straight into its edit form")
 	assert.Contains(t, view, "beta-task", "the form is prefilled with the selected task")
+	assert.Contains(t, view, "run now",
+		"the first edit screen must keep the documented run-now path visible (#1288)")
+	assert.Contains(t, view, "esc list",
+		"the edit footer must document how to reach the full list actions")
 
 	// First Esc backs the form out to the list — the overlay stays open.
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})

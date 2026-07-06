@@ -335,25 +335,10 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 		}
 		return true
 	case "x":
-		if len(s.tasks) > 0 {
-			s.tasks[s.selectedIdx].Enabled = !s.tasks[s.selectedIdx].Enabled
-			s.markTaskDirty(s.tasks[s.selectedIdx].ID)
-		}
+		s.toggleSelectedTask()
 		return true
 	case "D":
-		if len(s.tasks) > 0 {
-			deleted := s.tasks[s.selectedIdx]
-			s.deleted = append(s.deleted, deleted)
-			s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
-			// A task queued for deletion must not also be in the update set:
-			// removeTaskThroughDaemon handles it, and an update on a just-removed
-			// task would log a spurious not-found error.
-			delete(s.dirtyIDs, deleted.ID)
-			s.dirty = true
-			if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
-				s.selectedIdx--
-			}
-		}
+		s.deleteSelectedTask()
 		return true
 	case "enter":
 		if len(s.tasks) > 0 {
@@ -361,15 +346,49 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 		}
 		return true
 	case "r":
-		if len(s.tasks) > 0 {
-			s.pendingTrigger = true
-		}
+		s.runSelectedTask()
 		return true
 	case "n":
 		s.EnterCreateMode(s.createPath)
 		return true
 	}
 	return true
+}
+
+func (s *TaskPane) selectedTaskInRange() bool {
+	return s.selectedIdx >= 0 && s.selectedIdx < len(s.tasks)
+}
+
+func (s *TaskPane) toggleSelectedTask() {
+	if !s.selectedTaskInRange() {
+		return
+	}
+	s.tasks[s.selectedIdx].Enabled = !s.tasks[s.selectedIdx].Enabled
+	s.markTaskDirty(s.tasks[s.selectedIdx].ID)
+}
+
+func (s *TaskPane) deleteSelectedTask() {
+	if !s.selectedTaskInRange() {
+		return
+	}
+	deleted := s.tasks[s.selectedIdx]
+	s.deleted = append(s.deleted, deleted)
+	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
+	// A task queued for deletion must not also be in the update set:
+	// removeTaskThroughDaemon handles it, and an update on a just-removed
+	// task would log a spurious not-found error.
+	delete(s.dirtyIDs, deleted.ID)
+	s.dirty = true
+	if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
+		s.selectedIdx--
+	}
+}
+
+func (s *TaskPane) runSelectedTask() {
+	if !s.selectedTaskInRange() {
+		return
+	}
+	s.pendingTrigger = true
 }
 
 func (s *TaskPane) enterEditMode() {
@@ -440,6 +459,22 @@ func (s *TaskPane) validateForm() (string, int) {
 }
 
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
+	if s.editing && !s.creating {
+		switch msg.String() {
+		case "r":
+			s.runSelectedTask()
+			return true
+		case "x":
+			s.toggleSelectedTask()
+			return true
+		case "D":
+			s.deleteSelectedTask()
+			s.editing = false
+			s.editError = ""
+			s.editErrorField = -1
+			return true
+		}
+	}
 	switch msg.Type {
 	case tea.KeyTab:
 		s.focusIndex = (s.focusIndex + 1) % taskFocusCount
@@ -875,7 +910,13 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString("\n")
 	markEnd(taskFocusSave)
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render(fitLine("tab next • shift+tab prev • enter save • esc cancel", s.width)))
+	if s.creating {
+		b.WriteString(hintStyle.Render(fitLine("tab/shift+tab fields • enter create • esc cancel", s.width)))
+	} else {
+		b.WriteString(hintStyle.Render(fitLine("tab/shift+tab fields • enter save", s.width)))
+		b.WriteString("\n")
+		b.WriteString(hintStyle.Render(fitLine("r run now • x toggle • D delete • esc list", s.width)))
+	}
 
 	return s.clampFormToHeight(b.String(), focusStart, focusEnd)
 }
