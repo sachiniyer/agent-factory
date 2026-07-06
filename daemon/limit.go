@@ -186,6 +186,36 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 		return fmt.Errorf("session %q is not blocked on a usage limit", req.Title)
 	}
 
+	key := daemonInstanceKey(repoID, instance.Title)
+	m.mu.Lock()
+	if _, killing := m.killsInFlight[key]; killing {
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
+
+	opLock := m.opLockFor(key)
+	if !opLock.TryLock() {
+		return nil
+	}
+	defer opLock.Unlock()
+
+	m.mu.Lock()
+	current := m.instances[key]
+	_, killing := m.killsInFlight[key]
+	m.mu.Unlock()
+	if killing || current != instance || instance.IsTearingDown() {
+		return nil
+	}
+
+	return m.resumeFromLimitLocked(repoID, key, instance, req.Title)
+}
+
+// resumeFromLimitLocked performs the shared limit-resume action. The caller
+// must hold the per-session op lock for key, so a manual retry cannot interleave
+// with kill teardown and auto-resume can reuse the body after its own op-lock
+// guard.
+func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.Instance, requestedTitle string) error {
 	unlock := m.lockTarget(repoID, instance.Title)
 	defer unlock()
 
@@ -194,8 +224,15 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 	if !instance.LimitReached() {
 		return nil
 	}
+	m.mu.Lock()
+	current := m.instances[key]
+	_, killing := m.killsInFlight[key]
+	m.mu.Unlock()
+	if killing || current != instance || instance.IsTearingDown() {
+		return nil
+	}
 	if instance.UserKilled() || session.IsReservedTitle(instance.Title) {
-		return fmt.Errorf("session %q cannot be resumed", req.Title)
+		return fmt.Errorf("session %q cannot be resumed", requestedTitle)
 	}
 
 	// Re-spawn only when the agent's tmux session actually exited while blocked
@@ -210,7 +247,7 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 	// lock.
 	if !instance.TmuxAlive() {
 		if rerr := instance.Respawn(); rerr != nil {
-			return fmt.Errorf("failed to re-spawn agent for %q: %w", req.Title, rerr)
+			return fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
 	}
 
@@ -221,7 +258,7 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 		prompt = "continue"
 	}
 	if serr := instance.SendPromptCommand(prompt); serr != nil {
-		return fmt.Errorf("failed to resume %q: %w", req.Title, serr)
+		return fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 	}
 	instance.ClearLimitReached()
 

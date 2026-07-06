@@ -420,6 +420,9 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
 	}
+	if selected.IsTearingDown() {
+		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
+	}
 	if !selected.LimitReached() {
 		return m, m.handleError(fmt.Errorf("session '%s' is not blocked on a usage limit", selected.Title))
 	}
