@@ -1686,6 +1686,8 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 		return session.InstanceData{}, err
 	}
 
+	conversationCapture := session.BeginConversationCapture()
+
 	// Single creation flow (#930 PR 3): every instance owns its worktree 1:1.
 	// InPlace only changes WHICH worktree that is — the repo's own working tree,
 	// marked external — not the flow itself. finishCreateStart marks the instance
@@ -1718,6 +1720,7 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 		_ = instance.Kill()
 		return session.InstanceData{}, persistErr
 	}
+	m.captureAgentConversationAsync(repo.ID, key, instance, conversationCapture)
 
 	return data, nil
 }
