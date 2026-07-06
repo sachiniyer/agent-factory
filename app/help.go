@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -216,6 +217,22 @@ func (h helpTypeInteractive) mask() uint32 {
 	return 1 << 3
 }
 
+// layoutTextOverlay sizes help/intro text overlays to fit the terminal. The
+// overlay itself decides whether the content needs height-windowing, so short
+// one-shot help screens stay compact while the general help becomes scrollable
+// at 80x24 (#1290).
+func (m *home) layoutTextOverlay() {
+	if m.textOverlay == nil {
+		return
+	}
+	m.textOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
+	overlayHeight := m.termHeight - 2
+	if overlayHeight < 6 {
+		overlayHeight = m.termHeight
+	}
+	m.textOverlay.SetHeight(overlayHeight)
+}
+
 var (
 	titleStyle  = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(ui.AccentColor)
 	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#36CFC9"))
@@ -274,7 +291,16 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 // handleHelpState handles key events when in help state
 func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Any key press will close the help overlay
+	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftUp]) {
+		m.textOverlay.ScrollUp()
+		return m, nil
+	}
+	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftDown]) {
+		m.textOverlay.ScrollDown()
+		return m, nil
+	}
+
+	// Any non-scroll key press will close the help overlay.
 	dismissCmd, shouldClose := m.textOverlay.HandleKeyPress(msg)
 	if shouldClose {
 		m.state = stateDefault

@@ -76,3 +76,51 @@ func TestTextOverlayAllowsPlaceOverlayCentering(t *testing.T) {
 	assert.Equal(t, len(bgLines), strings.Count(out, "\n")+1,
 		"output should retain background height, confirming overlay was composited")
 }
+
+// TestTextOverlayHeightWindowsContent verifies that a tall text overlay renders
+// within its configured outer height instead of relying on PlaceOverlay to
+// handle an oversized foreground.
+func TestTextOverlayHeightWindowsContent(t *testing.T) {
+	overlay := NewTextOverlay(strings.Join([]string{
+		"title",
+		"line 1",
+		"line 2",
+		"line 3",
+		"line 4",
+		"line 5",
+		"line 6",
+		"line 7",
+	}, "\n"))
+	overlay.SetWidth(30)
+	overlay.SetHeight(6)
+
+	rendered := overlay.Render()
+	assert.Equal(t, 6, strings.Count(rendered, "\n")+1,
+		"rendered overlay should fit the requested outer height")
+	assert.Contains(t, rendered, "title", "initial viewport starts at the top")
+	assert.Contains(t, rendered, "↓ more", "overflow below is visible")
+}
+
+func TestTextOverlayScrollsContent(t *testing.T) {
+	overlay := NewTextOverlay(strings.Join([]string{
+		"title",
+		"line 1",
+		"line 2",
+		"line 3",
+		"line 4",
+		"line 5",
+		"line 6",
+		"line 7",
+	}, "\n"))
+	overlay.SetWidth(30)
+	overlay.SetHeight(6)
+
+	overlay.ScrollDown()
+	rendered := overlay.Render()
+	assert.NotContains(t, rendered, "title", "scrolling down moves the viewport")
+	assert.Contains(t, rendered, "↑ more", "overflow above is visible")
+
+	overlay.ScrollUp()
+	rendered = overlay.Render()
+	assert.Contains(t, rendered, "title", "scrolling up returns toward the top")
+}
