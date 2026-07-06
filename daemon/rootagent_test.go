@@ -478,6 +478,66 @@ func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
 	}
 }
 
+// TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff pins the Greptile
+// review on #1272: if the dead-root reap cannot take the per-session op lock,
+// ensure must wait for the next tick instead of falling through to CreateSession
+// and recording a backoff-causing create failure against the still-owned title.
+func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
+
+	manager, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 1 {
+		t.Fatalf("expected initial root create, got %d", len(*seen))
+	}
+	rootA := findRootInstance(t, manager, repoPath)
+	if rootA == nil {
+		t.Fatal("root-A missing after initial ensure")
+	}
+	rootA.SetStatus(session.Dead)
+
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
+	opLock := manager.opLockFor(key)
+	opLock.Lock()
+
+	manager.EnsureRootAgents()
+	if len(*seen) != 1 {
+		t.Fatalf("busy reap skip must not create another root, got %d creates", len(*seen))
+	}
+	if got := findRootInstance(t, manager, repoPath); got != rootA {
+		t.Fatalf("busy reap skip must leave root-A in place, got %+v want %+v", got, rootA)
+	}
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("expected root ensure state")
+	}
+	if st.consecutiveFailures != 0 || !st.nextAttempt.IsZero() {
+		t.Fatalf("busy reap skip must not record an ensure failure/backoff: failures=%d next=%v", st.consecutiveFailures, st.nextAttempt)
+	}
+
+	opLock.Unlock()
+	manager.EnsureRootAgents()
+	if len(*seen) != 2 {
+		t.Fatalf("next tick after lock release must heal immediately, got %d creates", len(*seen))
+	}
+	rootB := findRootInstance(t, manager, repoPath)
+	if rootB == nil || rootB == rootA {
+		t.Fatalf("root must be reaped and replaced after lock release, got %+v", rootB)
+	}
+}
+
 // TestEnsureRootAgentsDoesNotHealUnconfiguredRoot pins that the self-heal is
 // gated on config: a repo NOT in root_agents is never visited by the ensure
 // loop, so a killed (or absent) root there is never auto-created — even long

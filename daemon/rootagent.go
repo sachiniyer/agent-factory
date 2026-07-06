@@ -162,9 +162,13 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 		// for the general Lost-restore loop. Kill is best-effort teardown of
 		// already-dead tmux, and an in-place worktree's Cleanup never touches
 		// the user's tree (#1107), so this can only remove daemon-owned state.
-		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); re-creating it in place", repo.Root)
-		if err := m.reapDeadRoot(repo.ID, inst); err != nil {
+		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", repo.Root)
+		reaped, err := m.reapDeadRoot(repo.ID, inst)
+		if err != nil {
 			m.rootEnsureFailed(path, st, fmt.Errorf("failed to remove dead root record: %w", err))
+			return
+		}
+		if !reaped {
 			return
 		}
 	}
@@ -231,15 +235,18 @@ func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
 }
 
 // reapDeadRoot removes a Dead root instance so ensureRootAgent can re-create
-// the title. Mirrors KillSession's teardown but deliberately does NOT record
-// rootKilledAt: this is the daemon healing itself, not a user decision.
-func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) error {
+// the title. The boolean reports whether the root was actually reaped; false
+// means a concurrent operation owns or changed the title, so ensure should wait
+// for a later tick instead of falling through to CreateSession. Mirrors
+// KillSession's teardown but deliberately does NOT record rootKilledAt: this is
+// the daemon healing itself, not a user decision.
+func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (bool, error) {
 	key := daemonInstanceKey(repoID, session.RootSessionTitle)
 	opLock := m.opLockFor(key)
 	if !opLock.TryLock() {
 		// A user kill (or its finish pass) owns this title right now. Let that
 		// operation decide whether the root is removed or left for the next tick.
-		return nil
+		return false, nil
 	}
 	defer opLock.Unlock()
 
@@ -248,7 +255,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) error {
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing || current != inst {
-		return nil
+		return false, nil
 	}
 
 	// Best-effort by design (#478): tmux is already gone and an in-place
@@ -258,22 +265,22 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) error {
 	}
 	storage, err := session.NewStorage(config.LoadState(), repoID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	deleted, err := storage.DeleteInstanceByStableID(session.RootSessionTitle, inst.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !deleted {
 		log.InfoLog.Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)
-		return nil
+		return false, nil
 	}
 	m.mu.Lock()
 	if m.instances[key] == inst {
 		delete(m.instances, key)
 	}
 	m.mu.Unlock()
-	return nil
+	return true, nil
 }
 
 // rootEnsureSucceeded resets a repo's retry state after a pass that left a
