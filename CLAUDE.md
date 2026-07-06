@@ -75,6 +75,10 @@ go build ./...
 # tmux server and real AF home (see docs/container-testing.md)
 make test-container
 
+# Focused remote-hook integration harness — mock remote round-trip
+# inside the same container fence (see docs/container-testing.md)
+make remote-roundtrip-container
+
 # Host-side runs: never bare `go test ./...` on a shared dev box — the
 # daemon package spawns real af daemons. Skip it, or use the container.
 go test $(go list ./... | grep -v '/daemon')
