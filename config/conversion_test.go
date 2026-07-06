@@ -33,9 +33,20 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 		"default_program": "codex",
 		"auto_yes": true,
 		"daemon_poll_interval": 2500,
-		"program_overrides": {"claude": "/opt/claude --dsp"}
+		"program_overrides": {"claude": "/opt/claude --dsp", "codex": "/opt/codex --quiet"},
+		"log_max_size_mb": 12,
+		"log_max_backups": 3,
+		"branch_prefix": "team/",
+		"worktree_root": "subdirectory",
+		"detach_keys": "ctrl-q",
+		"update_channel": "preview",
+		"limit_patterns": {"claude": "custom limit banner"},
+		"limit_auto_resume": true,
+		"limit_retry_interval": "45m",
+		"root_agents": {"/tmp/repo": {"program": "codex", "auto_yes": false}}
 	}`)
 	infoBuf := captureLog(t, &aflog.InfoLog)
+	warnBuf := captureLog(t, &aflog.WarningLog)
 
 	cfg, err := LoadConfig()
 	require.NoError(t, err)
@@ -46,12 +57,32 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 	assert.True(t, cfg.AutoYes)
 	assert.Equal(t, 2500, cfg.DaemonPollInterval)
 	assert.Equal(t, "/opt/claude --dsp", cfg.ProgramOverrides["claude"])
+	assert.Equal(t, "/opt/codex --quiet", cfg.ProgramOverrides["codex"])
+	assert.Equal(t, 12, cfg.LogMaxSizeMB)
+	assert.Equal(t, 3, cfg.LogMaxBackups)
+	assert.Equal(t, "team/", cfg.BranchPrefix)
+	assert.Equal(t, WorktreeRootSubdirectory, cfg.WorktreeRoot)
+	assert.Equal(t, "ctrl-q", cfg.DetachKeys)
+	assert.Equal(t, UpdateChannelPreview, cfg.UpdateChannel)
+	assert.Equal(t, "custom limit banner", cfg.LimitPatterns["claude"])
+	assert.True(t, cfg.LimitAutoResume)
+	assert.Equal(t, "45m", cfg.LimitRetryInterval)
+	require.Contains(t, cfg.RootAgents, "/tmp/repo")
+	rootAgent := cfg.RootAgents["/tmp/repo"]
+	assert.Equal(t, "codex", rootAgent.Program)
+	require.NotNil(t, rootAgent.AutoYes)
+	assert.False(t, rootAgent.AutoYesEnabled())
+	assert.NotContains(t, warnBuf.String(), "worktree_root", "worktree_root must be recognized and preserved, not warned as dropped")
 
 	// config.toml is now canonical; config.json is moved aside to .bak.
-	assert.FileExists(t, filepath.Join(configDir, TomlConfigFileName))
+	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+	assert.FileExists(t, tomlPath)
 	assert.NoFileExists(t, filepath.Join(configDir, ConfigFileName))
 	assert.FileExists(t, filepath.Join(configDir, ConfigFileName+".bak"))
 	assert.Contains(t, infoBuf.String(), "migrated config to TOML")
+	tomlData, err := os.ReadFile(tomlPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(tomlData), "worktree_root = 'subdirectory'")
 
 	// The .bak still holds the original bytes, verbatim.
 	bak, err := os.ReadFile(filepath.Join(configDir, ConfigFileName+".bak"))
@@ -60,11 +91,12 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 
 	// Re-loading now reads config.toml canonically, with no duplicate-config
 	// warning (config.json is gone).
-	warnBuf := captureLog(t, &aflog.WarningLog)
+	reloadWarnBuf := captureLog(t, &aflog.WarningLog)
 	cfg2, err := LoadConfig()
 	require.NoError(t, err)
 	assert.Equal(t, "codex", cfg2.DefaultProgram)
-	assert.NotContains(t, warnBuf.String(), "both", "a clean conversion leaves no duplicate-config warning")
+	assert.Equal(t, WorktreeRootSubdirectory, cfg2.WorktreeRoot)
+	assert.NotContains(t, reloadWarnBuf.String(), "both", "a clean conversion leaves no duplicate-config warning")
 }
 
 func TestConversion_PreservesExistingBackup(t *testing.T) {

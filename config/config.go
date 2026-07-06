@@ -149,6 +149,8 @@ type Config struct {
 	LogMaxBackups int `json:"log_max_backups" toml:"log_max_backups"`
 	// BranchPrefix is the prefix used for git branches created by the application.
 	BranchPrefix string `json:"branch_prefix" toml:"branch_prefix"`
+	// WorktreeRoot controls where new worktrees are created.
+	WorktreeRoot string `json:"worktree_root" toml:"worktree_root"`
 	// DetachKeys is the key combination used to detach from an attached session (e.g. "ctrl-w", "ctrl-q").
 	DetachKeys string `json:"detach_keys" toml:"detach_keys"`
 	// UpdateChannel selects which release channel auto-update and
@@ -306,6 +308,7 @@ func DefaultConfig() *Config {
 		LogMaxSizeMB:       log.DefaultMaxSizeMB,
 		LogMaxBackups:      log.DefaultMaxBackups,
 		UpdateChannel:      UpdateChannelStable,
+		WorktreeRoot:       WorktreeRootSibling,
 		BranchPrefix: func() string {
 			user, err := user.Current()
 			if err != nil || user == nil || user.Username == "" {
@@ -1018,6 +1021,7 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 
 	sanitizeLimitPatterns(config)
 	config.LimitRetryInterval = sanitizeLimitRetryInterval(config.LimitRetryInterval, prettyConfigPath)
+	config.WorktreeRoot = normalizeWorktreeRoot(config.WorktreeRoot, prettyConfigPath)
 
 	if config.DaemonPollInterval <= 0 {
 		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)

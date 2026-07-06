@@ -70,6 +70,12 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"log_max_size_mb":      {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
 	"log_max_backups":      {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
 	"branch_prefix":        {kind: cfgString},
+	"worktree_root": {kind: cfgString, validate: func(_, v string) error {
+		if !validateWorktreeRootValue(v) {
+			return fmt.Errorf("worktree_root must be one of [%s, %s], got %q", WorktreeRootSubdirectory, WorktreeRootSibling, v)
+		}
+		return nil
+	}},
 	"detach_keys": {kind: cfgString, validate: func(_, v string) error {
 		if _, err := ParseDetachKey(v); err != nil {
 			return fmt.Errorf("detach_keys: %w", err)

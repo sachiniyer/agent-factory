@@ -9,7 +9,7 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
 
 Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you are upgrading from a version that used `config.json`, see [Migrating from JSON](#migrating-from-json) below; the change is automatic.
 
-You can also read and write the global config from the CLI: `af config get <key>` / `af config list` print the effective values, and `af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_yes`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`; structural keys (`root_agents`, `[keys]`) are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+You can also read and write the global config from the CLI: `af config get <key>` / `af config list` print the effective values, and `af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_yes`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`; structural keys (`root_agents`, `[keys]`) are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
 
 ## Global config
 
@@ -20,6 +20,7 @@ default_program = "claude"
 auto_yes = false
 daemon_poll_interval = 1000
 branch_prefix = "username/"
+worktree_root = "sibling"
 detach_keys = "ctrl-w"
 log_max_size_mb = 50
 log_max_backups = 2
@@ -38,6 +39,7 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | `auto_yes` | Auto-accept agent prompts (experimental). |
 | `daemon_poll_interval` | Daemon polling interval in ms. |
 | `branch_prefix` | Prefix for worktree branches (defaults to `username/`). |
+| `worktree_root` | Where new worktrees are created: `sibling` (default, next to the repo as `<repo>-<session>`) or `subdirectory` (under `~/.agent-factory/worktrees/<branch>`). |
 | `detach_keys` | Key combination that detaches from an attached session (defaults to `ctrl-w`). |
 | `log_max_size_mb` | Size cap in MB for `agent-factory.log` and the per-task watch-script logs before they are rotated (defaults to 50). Must be positive. |
 | `log_max_backups` | How many rotated logs (`agent-factory.log.1`, `.2`, ...) to keep per log file; older ones are deleted (defaults to 2). `0` keeps none. |
@@ -174,7 +176,7 @@ terminal_cmd = "./infra/terminal.sh"
 |-------|-------|
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
-| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `root_agents`, `limit_auto_resume`, `limit_retry_interval` | Global only. Setting them in-repo is rejected with an error naming the key. |
+| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `root_agents`, `limit_auto_resume`, `limit_retry_interval` | Global only. Setting them in-repo is rejected with an error naming the key. |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `H` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 

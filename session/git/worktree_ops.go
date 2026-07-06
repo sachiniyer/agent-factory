@@ -26,7 +26,7 @@ func (g *GitWorktree) Setup() error {
 		return fmt.Errorf("failed to get worktree directory: empty worktree directory")
 	}
 
-	if err := os.MkdirAll(g.worktreeDir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(g.worktreePath), 0755); err != nil {
 		return err
 	}
 

@@ -224,6 +224,7 @@ func TestSetGlobalConfigValueRejectsBadValues(t *testing.T) {
 		{"daemon_poll_interval", "abc", "integer"},
 		{"daemon_poll_interval", "0", "positive"},
 		{"log_max_backups", "-1", "non-negative"},
+		{"worktree_root", "elsewhere", "must be one of"},
 		{"update_channel", "banana", "must be one of"},
 		{"limit_patterns.claude", "(", "regular expression"},
 		{"program_overrides.notaprogram", "cmd", "must be one of"},
