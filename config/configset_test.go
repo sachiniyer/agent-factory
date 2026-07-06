@@ -172,7 +172,7 @@ func TestSetGlobalConfigValueRoundTrip(t *testing.T) {
 	}
 
 	got, _ := os.ReadFile(path)
-	want := "# keep me\ndefault_program = 'codex'  # fav\nauto_yes = false\n\n[program_overrides]\nclaude = '/bin/claude'\n"
+	want := "# keep me\ndefault_program = 'codex'  # fav\nauto_yes = false\nschema_version = 1\n\n[program_overrides]\nclaude = '/bin/claude'\n"
 	if string(got) != want {
 		t.Fatalf("file not preserved.\n got: %q\nwant: %q", got, want)
 	}
@@ -199,7 +199,7 @@ func TestSetGlobalConfigValueDottedRoundTrip(t *testing.T) {
 	}
 
 	got, _ := os.ReadFile(path)
-	want := "default_program = 'claude'\nprogram_overrides.claude = '/bin/codex'\n"
+	want := "default_program = 'claude'\nprogram_overrides.claude = '/bin/codex'\nschema_version = 1\n"
 	if string(got) != want {
 		t.Fatalf("dotted round-trip wrong.\n got: %q\nwant: %q", got, want)
 	}

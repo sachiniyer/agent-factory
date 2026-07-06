@@ -208,6 +208,7 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 			return fmt.Errorf("failed to read %s: %w", prettyPath, err)
 		}
 		updated := setTOMLScalar(string(current), section, leaf, encoded)
+		updated = setTOMLScalar(updated, "", SchemaVersionField, strconv.Itoa(GlobalConfigSchemaVersion))
 
 		// Final gate: the edited bytes must parse and validate exactly as the
 		// loader would, so `config set` can never leave an unloadable config.
