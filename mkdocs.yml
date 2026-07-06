@@ -12,40 +12,59 @@ docs_dir: docs
 
 theme:
   name: material
+  custom_dir: docs/overrides
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
   icon:
     repo: fontawesome/brands/github
   features:
+    - navigation.tabs
     - navigation.sections
     - navigation.top
     - navigation.instant
+    - navigation.instant.progress
     - navigation.tracking
     - navigation.footer
     - toc.follow
     - content.code.copy
     - content.code.annotate
+    - content.tabs.link
     - search.suggest
     - search.highlight
   palette:
+    # Auto (respects the OS): the icon toggles light <-> dark. The accent
+    # teal (ui/theme.go #7cb8bb) and its contrast-safe derivatives are defined
+    # in docs/stylesheets/extra.css, so both schemes use `custom`.
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: indigo
-      accent: indigo
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: indigo
-      accent: indigo
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
+  font:
+    text: Inter
+    code: Roboto Mono
 
 markdown_extensions:
   - admonition
   - attr_list
   - md_in_html
   - tables
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - toc:
       permalink: true
   - pymdownx.details
@@ -56,6 +75,15 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/sachiniyer/agent-factory
+      name: Agent Factory on GitHub
 
 plugins:
   - search

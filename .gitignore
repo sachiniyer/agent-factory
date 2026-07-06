@@ -37,3 +37,6 @@ __debug_bin*
 
 # MkDocs build output
 site/
+
+# Local docs virtualenv (see requirements-docs.txt)
+.venv-docs/
