@@ -265,11 +265,29 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 // directly, avoiding the need to reconstruct live Instance objects (which
 // may fail if tmux/worktree has already been destroyed).
 func (s *Storage) DeleteInstance(title string) error {
+	deleted, err := s.DeleteInstanceByStableID(title, "")
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return fmt.Errorf("instance not found: %s", title)
+	}
+	return nil
+}
+
+// DeleteInstanceByStableID removes an instance from storage only when the
+// record still matches the stable session identity captured by the caller. A
+// false nil result means a same-titled record exists but belongs to a different
+// instance, so the caller must treat the delete as stale and leave it alone.
+// Empty IDs are legacy-compatible and fall back to title matching.
+func (s *Storage) DeleteInstanceByStableID(title, id string) (bool, error) {
 	path, pathErr := config.RepoInstancesPath(s.repoID)
 	if pathErr != nil {
-		return pathErr
+		return false, pathErr
 	}
-	return config.WithFileLock(path, func() error {
+	deleted := false
+	sameTitleDifferentID := false
+	if err := config.WithFileLock(path, func() error {
 		raw, err := s.state.GetInstances(s.repoID)
 		if err != nil {
 			return err
@@ -287,13 +305,20 @@ func (s *Storage) DeleteInstance(title string) error {
 		found := false
 		for _, d := range data {
 			if d.Title == title {
-				found = true
-				continue
+				if stableIDMatches(d.ID, id) {
+					found = true
+					deleted = true
+					continue
+				}
+				sameTitleDifferentID = true
 			}
 			filtered = append(filtered, d)
 		}
 
 		if !found {
+			if sameTitleDifferentID {
+				return nil
+			}
 			return fmt.Errorf("instance not found: %s", title)
 		}
 
@@ -302,7 +327,14 @@ func (s *Storage) DeleteInstance(title string) error {
 			return fmt.Errorf("failed to marshal instances: %w", err)
 		}
 		return s.state.SaveInstances(s.repoID, out)
-	})
+	}); err != nil {
+		return false, err
+	}
+	return deleted, nil
+}
+
+func stableIDMatches(recordID, expectedID string) bool {
+	return expectedID == "" || recordID == "" || recordID == expectedID
 }
 
 // LoadInstanceData reads and unmarshals instance data from disk without

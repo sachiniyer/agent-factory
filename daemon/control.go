@@ -1949,6 +1949,7 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	if err != nil {
 		return err
 	}
+	targetID := killTargetStableID(instance, data)
 
 	key := daemonInstanceKey(repoID, req.Title)
 	m.mu.Lock()
@@ -1974,6 +1975,11 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	opLock.Lock()
 	defer opLock.Unlock()
 
+	if m.currentInstanceReplaced(key, instance, targetID) {
+		log.InfoLog.Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
+		return nil
+	}
+
 	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the
 	// daemon dies or the teardown errors between here and DeleteInstance, the
 	// surviving record is provably a user kill — the status poll finishes the
@@ -1995,12 +2001,19 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := storage.DeleteInstance(req.Title); err != nil {
+	deleted, err := storage.DeleteInstanceByStableID(req.Title, targetID)
+	if err != nil {
 		return fmt.Errorf("failed to delete instance from storage: %w", err)
+	}
+	if !deleted {
+		log.InfoLog.Printf("kill of session %q skipped storage delete: current record has a different instance identity", req.Title)
+		return nil
 	}
 
 	m.mu.Lock()
-	delete(m.instances, key)
+	if current := m.instances[key]; current == nil || current == instance || stableIDMatchesForDaemon(current.ID, targetID) {
+		delete(m.instances, key)
+	}
 	if session.IsReservedTitle(req.Title) {
 		// An explicit kill is honored only briefly: the ensure loop suppresses
 		// re-creation for rootKillHealDelay, then self-heals a still-configured
@@ -2013,82 +2026,6 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	}
 	m.mu.Unlock()
 	return nil
-}
-
-// persistKillTombstone writes the kill-intent tombstone (#1108) for the session
-// KillSession is about to tear down, so a record surviving a crash or teardown
-// failure mid-kill is never classified Lost and restored. Best-effort by
-// design: a failed write only degrades to the pre-tombstone crash window.
-func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance, data *session.InstanceData) {
-	var d session.InstanceData
-	switch {
-	case instance != nil:
-		instance.MarkUserKilled()
-		d = instance.ToInstanceData()
-	case data != nil:
-		d = *data
-		d.UserKilled = true
-	default:
-		return
-	}
-	repoStartLock := m.startLockForRepo(repoID)
-	repoStartLock.Lock()
-	err := persistInstanceData(repoID, d)
-	repoStartLock.Unlock()
-	if err != nil {
-		log.WarningLog.Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
-	}
-}
-
-// finishUserKill completes the teardown of a session whose record carries the
-// kill-intent tombstone (#1108): the previous KillSession was interrupted by a
-// daemon crash or a teardown error after the tombstone write. Mirrors the tail
-// of KillSession — best-effort Kill, targeted record delete, map removal — and
-// retries on the next poll if the record delete fails. Skips while an explicit
-// KillSession for the same session is still in flight.
-func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
-	key := daemonInstanceKey(repoID, instance.Title)
-	m.mu.Lock()
-	if _, busy := m.killsInFlight[key]; busy {
-		m.mu.Unlock()
-		return
-	}
-	m.killsInFlight[key] = struct{}{}
-	m.mu.Unlock()
-	defer func() {
-		m.mu.Lock()
-		delete(m.killsInFlight, key)
-		m.mu.Unlock()
-	}()
-
-	// TryLock, not Lock: this runs on the poll goroutine, which must not
-	// stall behind a concurrent slow operation on this session; the next
-	// poll retries. (A KillSession in flight was already skipped above, so
-	// contention here is only a still-releasing lock.)
-	opLock := m.opLockFor(key)
-	if !opLock.TryLock() {
-		return
-	}
-	defer opLock.Unlock()
-
-	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
-	// Best-effort: the backing tmux session is typically already gone; Kill
-	// failures here only mean there is less left to tear down.
-	if err := instance.Kill(); err != nil {
-		log.WarningLog.Printf("finishing kill of %q: teardown reported: %v", instance.Title, err)
-	}
-	storage, err := session.NewStorage(config.LoadState(), repoID)
-	if err != nil {
-		log.WarningLog.Printf("finishing kill of %q: %v", instance.Title, err)
-		return
-	}
-	if err := storage.DeleteInstance(instance.Title); err != nil {
-		log.WarningLog.Printf("finishing kill of %q: failed to delete record (will retry next poll): %v", instance.Title, err)
-		return
-	}
-	m.mu.Lock()
-	delete(m.instances, key)
-	m.mu.Unlock()
 }
 
 func (m *Manager) SendPrompt(req SendPromptRequest) error {
