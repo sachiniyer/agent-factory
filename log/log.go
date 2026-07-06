@@ -403,6 +403,17 @@ func Initialize(daemon bool) {
 }
 
 func Close() {
+	closeWithReport(true)
+}
+
+// CloseQuiet closes the current log file without printing the usual
+// "wrote logs to ..." stderr note. Structured CLI output uses this before
+// returning a JSON envelope error so stderr remains machine-parseable.
+func CloseQuiet() {
+	closeWithReport(false)
+}
+
+func closeWithReport(report bool) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -429,7 +440,7 @@ func Close() {
 		_ = globalLogFile.Close()
 		globalLogFile = nil
 	}
-	if fileWasOpened {
+	if fileWasOpened && report {
 		fmt.Fprintln(os.Stderr, "wrote logs to "+logFileName)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,39 @@ import (
 func tempAFHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+}
+
+func captureProcessStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func resetCobraSilence(cmd *cobra.Command) {
+	cmd.SilenceUsage = false
+	cmd.SilenceErrors = false
+	for _, child := range cmd.Commands() {
+		resetCobraSilence(child)
+	}
 }
 
 func TestFormatConfigValue(t *testing.T) {
@@ -131,6 +165,58 @@ func TestConfigGetUnknownKeyJSONEnvelope(t *testing.T) {
 	}
 	if env.Error == nil || !strings.Contains(env.Error.Message, "unknown config key") {
 		t.Fatalf("envelope missing the unknown-key message: %s", stderr.String())
+	}
+}
+
+func TestConfigGetUnknownKeyJSONRootSuppressesCobraAndLog(t *testing.T) {
+	tempAFHome(t)
+	prevJSON := configJSONFlag
+	t.Cleanup(func() {
+		configJSONFlag = prevJSON
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(os.Stdout)
+		rootCmd.SetErr(os.Stderr)
+		resetCobraSilence(rootCmd)
+		if flag := configGetCmd.Flags().Lookup("json"); flag != nil {
+			_ = flag.Value.Set("false")
+			flag.Changed = false
+		}
+	})
+
+	var stdout bytes.Buffer
+	rootCmd.SetOut(&stdout)
+	rootCmd.SetArgs([]string{"config", "get", "not_a_key", "--json"})
+
+	var execErr error
+	stderr := captureProcessStderr(t, func() {
+		rootCmd.SetErr(os.Stderr)
+		execErr = rootCmd.Execute()
+	})
+	if execErr == nil {
+		t.Fatal("expected root execute error for unknown key")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("error path must not write stdout, got: %s", stdout.String())
+	}
+	if strings.Contains(stderr, "Usage:") || strings.Contains(stderr, "Error:") ||
+		strings.Contains(stderr, "wrote logs to") {
+		t.Fatalf("--json stderr contains non-envelope text: %q", stderr)
+	}
+
+	var env struct {
+		Data  any `json:"data"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(stderr), &env); err != nil {
+		t.Fatalf("stderr is not a clean JSON envelope: %v\n%s", err, stderr)
+	}
+	if env.Data != nil {
+		t.Errorf("failure envelope data should be null, got %v", env.Data)
+	}
+	if env.Error == nil || !strings.Contains(env.Error.Message, "unknown config key") {
+		t.Fatalf("envelope missing the unknown-key message: %s", stderr)
 	}
 }
 

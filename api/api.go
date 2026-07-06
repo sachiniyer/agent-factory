@@ -400,12 +400,29 @@ func jsonOut(v any) error {
 // original error is always returned so exit codes are unchanged.
 func jsonError(err error) error {
 	if envelopeOutput {
+		silenceEnvelopeCobra()
+		log.CloseQuiet()
 		_ = writeEnvelope(os.Stderr, errorEnvelope(err.Error()))
 		return err
 	}
 	msg, _ := json.Marshal(map[string]string{"error": err.Error()})
 	fmt.Fprintln(os.Stderr, string(msg))
 	return err
+}
+
+func silenceEnvelopeCobra() {
+	SessionsCmd.SilenceUsage = true
+	SessionsCmd.SilenceErrors = true
+	TasksCmd.SilenceUsage = true
+	TasksCmd.SilenceErrors = true
+	if root := SessionsCmd.Root(); root != nil {
+		root.SilenceUsage = true
+		root.SilenceErrors = true
+	}
+	if root := TasksCmd.Root(); root != nil {
+		root.SilenceUsage = true
+		root.SilenceErrors = true
+	}
 }
 
 func init() {
