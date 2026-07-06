@@ -40,10 +40,11 @@ var secretPatterns = []*regexp.Regexp{
 // keyValueSecret matches a `<credential-key> = <value>` / `<key>: <value>`
 // assignment and redacts only the value, preserving the key so triage can see
 // *that* a credential is configured without leaking it. The key half tolerates
-// a prefix (github_token, x-api-key, client_secret) and an optional opening
-// quote; the value half is any run of 6+ non-space, non-quote characters.
+// a prefix (github_token, x-api-key, client_secret) and optional quotes. The
+// value half recognizes TOML/JSON-style double-quoted strings, TOML literal
+// single-quoted strings, and bare token-like values.
 var keyValueSecret = regexp.MustCompile(
-	`(?i)("?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?"?\s*[:=]\s*"?)([^\s"',}\]]{6,})`)
+	`(?i)(["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}\]]{6,})`)
 
 // privateKeyBlock matches a PEM private-key block in its entirety.
 var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
@@ -96,7 +97,7 @@ func appendUserToken(users []string, name string) []string {
 // defense.
 func (r *redactor) scrub(s string) string {
 	s = privateKeyBlock.ReplaceAllString(s, secretMarker)
-	s = keyValueSecret.ReplaceAllString(s, "${1}"+secretMarker)
+	s = keyValueSecret.ReplaceAllStringFunc(s, redactKeyValueSecret)
 	for _, re := range secretPatterns {
 		s = re.ReplaceAllString(s, secretMarker)
 	}
@@ -108,6 +109,22 @@ func (r *redactor) scrub(s string) string {
 		s = re.ReplaceAllString(s, userMarker)
 	}
 	return s
+}
+
+func redactKeyValueSecret(match string) string {
+	idx := keyValueSecret.FindStringSubmatchIndex(match)
+	if len(idx) < 4 || idx[2] < 0 {
+		return secretMarker
+	}
+	prefix := match[idx[2]:idx[3]]
+	value := match[idx[3]:]
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		return prefix + `"` + secretMarker + `"`
+	}
+	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+		return prefix + `'` + secretMarker + `'`
+	}
+	return prefix + secretMarker
 }
 
 // unparsedInstancesNote is emitted (as a JSON string) when instances.json is

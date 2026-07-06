@@ -65,6 +65,43 @@ func TestScrubRedactsSecretsPathsAndUser(t *testing.T) {
 	}
 }
 
+func TestScrubRedactsSingleQuotedConfigSecrets(t *testing.T) {
+	r := &redactor{}
+	cases := []struct {
+		name string
+		in   string
+		leak string
+	}{
+		{
+			name: "password",
+			in:   "password = 'superSecretValue123'",
+			leak: "superSecretValue123",
+		},
+		{
+			name: "api key",
+			in:   "internal_api_key = 'company-internal-api-key'",
+			leak: "company-internal-api-key",
+		},
+		{
+			name: "token",
+			in:   "internal_token = 'internal-service-token-xyz'",
+			leak: "internal-service-token-xyz",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := r.scrub(tc.in)
+			if strings.Contains(out, tc.leak) {
+				t.Errorf("single-quoted secret leaked: input=%q output=%q", tc.in, out)
+			}
+			if !strings.Contains(out, secretMarker) {
+				t.Errorf("expected redaction marker in output: %q", out)
+			}
+		})
+	}
+}
+
 func TestScrubRedactsPEMPrivateKey(t *testing.T) {
 	r := &redactor{}
 	in := "before\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsecretkeymaterial\n-----END OPENSSH PRIVATE KEY-----\nafter"
@@ -212,8 +249,11 @@ func TestBuildEndToEnd(t *testing.T) {
 	tasks := `[{"id": "t1", "name": "nightly", "prompt": "run with sk-TASKSECRET0123456789ABCD", "cron_expr": "0 9 * * *", "enabled": true, "project_path": "` + home + `/Desktop/proj", "program": "claude"}]`
 	writeFile(t, filepath.Join(afHome, "tasks.json"), tasks)
 
-	// config.toml with a planted credential and a home path.
-	cfg := "default_program = \"codex\"\ngithub_token = \"ghp_PLANTEDCONFIGSECRET0123456789ABCD\"\n# note path " + home + "/Desktop\n"
+	// config.toml with planted credentials and a home path.
+	cfg := "default_program = \"codex\"\n" +
+		"github_token = \"ghp_PLANTEDCONFIGSECRET0123456789ABCD\"\n" +
+		"internal_api_key = 'company-internal-credential-value'\n" +
+		"# note path " + home + "/Desktop\n"
 	writeFile(t, filepath.Join(afHome, "config.toml"), cfg)
 
 	// log tail with a home path and a secret.
@@ -249,6 +289,7 @@ func TestBuildEndToEnd(t *testing.T) {
 		"sk-TASKSECRET0123456789ABCD",
 		"sk-LOGSECRET0123456789ABCDEF",
 		"ghp_PLANTEDCONFIGSECRET0123456789ABCD",
+		"company-internal-credential-value",
 		"topsecretremote",
 		"my proprietary session",
 		"secret pr",
