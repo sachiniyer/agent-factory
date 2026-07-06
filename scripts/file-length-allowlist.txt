@@ -20,7 +20,7 @@
 daemon/control.go 2587
 app/app.go 1867
 session/instance.go 1531
-session/tmux/tmux.go 1424
+session/tmux/tmux.go 1393
 ui/sidebar.go 1258
 config/config.go 1128
 daemon/watcher.go 1011

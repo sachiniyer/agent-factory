@@ -38,7 +38,11 @@ type TmuxSession struct {
 	//
 	// The name of the tmux session and the sanitized name used for tmux commands.
 	sanitizedName string
-	program       string
+	// program is the command the pane runs. It is mutated by Restore() while
+	// other goroutines read it, so all access goes through the programMu-guarded
+	// accessors in program.go (#1254) — never touch these two fields directly.
+	program   string
+	programMu sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -225,19 +229,6 @@ func newTmuxSession(sanitizedName string, program string, ptyFactory PtyFactory,
 	}
 }
 
-// SetProgram updates the program command before the session is started.
-func (t *TmuxSession) SetProgram(program string) {
-	t.program = program
-}
-
-// Program returns the command this session's pane runs — after SetProgram,
-// the override-resolved, flag-injected string. This is the ground truth for
-// agent detection (DetectAgentFromCommand): what actually runs in the pane,
-// as opposed to the config-name enum the instance was created with (#1116).
-func (t *TmuxSession) Program() string {
-	return t.program
-}
-
 // NewSiblingSession builds a second TmuxSession in the same worktree that
 // shares this session's PTY factory and command executor. Used for the #930
 // per-tab sessions (e.g. an instance's shell tab alongside its agent tab):
@@ -263,7 +254,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// spawns back to this session even after it is orphaned (#1104).
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName)...)
-	args = append(args, t.program)
+	args = append(args, t.programCmd())
 	cmd := exec.Command("tmux", args...)
 
 	ptmx, err := t.ptyFactory.Start(cmd)
@@ -292,7 +283,7 @@ func (t *TmuxSession) Start(workDir string) error {
 			// takes the whole tmux session down before this existence poll
 			// ever sees it — name the likely cause and the exact command so
 			// the user isn't left with a bare timeout (#1116, #1131).
-			timeoutErr := fmt.Errorf("timed out waiting for tmux session %s; the pane program may have exited immediately after launch — check that it runs and accepts its flags (program: %q)", t.sanitizedName, t.program)
+			timeoutErr := fmt.Errorf("timed out waiting for tmux session %s; the pane program may have exited immediately after launch — check that it runs and accepts its flags (program: %q)", t.sanitizedName, t.programCmd())
 			if cleanupErr := t.Close(); cleanupErr != nil {
 				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
 			}
@@ -332,7 +323,7 @@ func (t *TmuxSession) Start(workDir string) error {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 		}
 		if vanished {
-			return fmt.Errorf("tmux session %s vanished before attach; the pane program likely exited immediately after launch — check that it runs and accepts its flags (program: %q): %w", t.sanitizedName, t.program, err)
+			return fmt.Errorf("tmux session %s vanished before attach; the pane program likely exited immediately after launch — check that it runs and accepts its flags (program: %q): %w", t.sanitizedName, t.programCmd(), err)
 		}
 		return fmt.Errorf("error restoring tmux session: %w", err)
 	}
@@ -351,7 +342,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	// Key off the agent actually running in the pane, token-matched — a loose
 	// substring check would route e.g. /opt/claude-wrapper/run through the
 	// claude branch (#1116 defect class).
-	if DetectAgentFromCommand(t.program) == ProgramClaude {
+	if DetectAgentFromCommand(t.programCmd()) == ProgramClaude {
 		if strings.Contains(content, "Do you trust the files in this folder?") ||
 			strings.Contains(content, "new MCP server") {
 			if err := t.TapEnter(); err != nil {
@@ -391,7 +382,7 @@ func (t *TmuxSession) Restore(workDir string) error {
 			return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
 		}
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
-		t.program = resumeProgram(t.program)
+		t.setProgramCmd(resumeProgram(t.programCmd()))
 		return t.Start(workDir)
 	}
 
@@ -726,28 +717,6 @@ func (t *TmuxSession) SendKeys(keys string) error {
 	return err
 }
 
-// SendKeysCommand sends text to the tmux pane using the `tmux send-keys` command
-// instead of writing to the PTY. This is more reliable for headless/scheduled runs
-// where the PTY connection may not persist. Text is sent literally (with -l flag)
-// followed by a pause to let terminal control sequences drain, then Enter to submit.
-func (t *TmuxSession) SendKeysCommand(text string) error {
-	// Send text literally to avoid key name interpretation. `=` forces an
-	// exact session match so input is never sent to a prefix-matched sibling
-	// session if the agent session has died (#1006).
-	textCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "-l", text)
-	if err := t.cmdExec.Run(textCmd); err != nil {
-		return fmt.Errorf("error sending text via send-keys: %w", err)
-	}
-
-	// Wait for terminal control sequences (e.g. OSC color responses) to drain
-	// before sending Enter, otherwise they can corrupt the input
-	time.Sleep(500 * time.Millisecond)
-
-	// Send Enter separately to submit
-	enterCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "Enter")
-	return t.cmdExec.Run(enterCmd)
-}
-
 // HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if the tmux
 // pane has a prompt for aider or claude code, plus the raw captured content so the daemon's usage-limit detector (#1146) can inspect it without a second capture ("" on early return).
 func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string) {
@@ -785,7 +754,7 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	// Only set hasPrompt for agents with a known confirmation dialog, keyed
 	// off the agent actually running in the pane (a non-agent override or a
 	// substring-matching path must not get an agent's prompt heuristic).
-	switch DetectAgentFromCommand(t.program) {
+	switch DetectAgentFromCommand(t.programCmd()) {
 	case ProgramClaude:
 		hasPrompt = strings.Contains(content, "No, and tell Claude what to do differently")
 	case ProgramAider:
