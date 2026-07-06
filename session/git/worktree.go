@@ -25,9 +25,25 @@ func isPathStrictlyInside(absBase, absDir string) bool {
 	return true
 }
 
-// getWorktreeDirectoryForRepo returns the parent directory of the repo,
-// so worktrees are created as siblings next to the repository.
 func getWorktreeDirectoryForRepo(repoPath string) (string, error) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return "", err
+	}
+	return getWorktreeDirectoryForRepoWithConfig(cfg, repoPath)
+}
+
+// getWorktreeDirectoryForRepoWithConfig returns the parent directory for new
+// worktrees under the configured placement mode.
+func getWorktreeDirectoryForRepoWithConfig(cfg *config.Config, repoPath string) (string, error) {
+	if cfg != nil && cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
+		configDir, err := config.GetConfigDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(configDir, "worktrees"), nil
+	}
+
 	if repoPath == "" {
 		return "", fmt.Errorf("repo path is required for worktree creation")
 	}
@@ -137,14 +153,10 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		return nil, "", err
 	}
 
-	worktreeDir, err := getWorktreeDirectoryForRepo(repoPath)
+	worktreeDir, err := getWorktreeDirectoryForRepoWithConfig(cfg, repoPath)
 	if err != nil {
 		return nil, "", err
 	}
-
-	// Worktree is placed as a sibling: {repoParent}/{repoName}-{sessionName}
-	// Only append a numeric suffix if the path already exists (collision).
-	repoName := filepath.Base(repoPath)
 
 	// Sanitize sessionName for filesystem path to prevent directory traversal
 	safeSessionName := strings.ReplaceAll(sessionName, "..", "")
@@ -154,7 +166,14 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		safeSessionName = "session"
 	}
 
-	basePath := filepath.Join(worktreeDir, repoName+"-"+safeSessionName)
+	var basePath string
+	if cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
+		basePath = filepath.Join(worktreeDir, branchName)
+	} else {
+		// Sibling mode: {repoParent}/{repoName}-{sessionName}
+		repoName := filepath.Base(repoPath)
+		basePath = filepath.Join(worktreeDir, repoName+"-"+safeSessionName)
+	}
 
 	// Ensure the worktree path is strictly nested inside worktreeDir. We use
 	// filepath.Rel instead of a HasPrefix check so the validation is correct

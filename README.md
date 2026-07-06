@@ -125,6 +125,7 @@ agent paths or flags.
 
 ```toml
 default_program = "claude"
+worktree_root = "sibling"
 
 [program_overrides]
 claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"

@@ -341,6 +341,7 @@ func TestDefaultConfig(t *testing.T) {
 		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
 		assert.NotEmpty(t, cfg.BranchPrefix)
 		assert.True(t, strings.HasSuffix(cfg.BranchPrefix, "/"))
+		assert.Equal(t, WorktreeRootSibling, cfg.WorktreeRoot)
 
 		// The detected path with --dangerously-skip-permissions lands in the
 		// nested overrides map; default_program stays a bare enum.
@@ -650,6 +651,7 @@ func TestLoadConfig(t *testing.T) {
 		assert.False(t, cfg.AutoYes)
 		assert.Equal(t, 1000, cfg.DaemonPollInterval)
 		assert.NotEmpty(t, cfg.BranchPrefix)
+		assert.Equal(t, WorktreeRootSibling, cfg.WorktreeRoot)
 	})
 
 	t.Run("loads valid config with enum default_program", func(t *testing.T) {
@@ -663,7 +665,8 @@ func TestLoadConfig(t *testing.T) {
 			"default_program": "codex",
 			"auto_yes": true,
 			"daemon_poll_interval": 2000,
-			"branch_prefix": "test/"
+			"branch_prefix": "test/",
+			"worktree_root": "subdirectory"
 		}`
 		require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
 
@@ -674,6 +677,7 @@ func TestLoadConfig(t *testing.T) {
 		assert.True(t, cfg.AutoYes)
 		assert.Equal(t, 2000, cfg.DaemonPollInterval)
 		assert.Equal(t, "test/", cfg.BranchPrefix)
+		assert.Equal(t, WorktreeRootSubdirectory, cfg.WorktreeRoot)
 	})
 
 	t.Run("loads program_overrides nested map", func(t *testing.T) {
@@ -892,6 +896,7 @@ func TestLoadConfig(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join(configDir, TomlConfigFileName))
 		require.NoError(t, err)
 		assert.Contains(t, string(data), `update_channel = 'stable'`)
+		assert.Contains(t, string(data), `worktree_root = 'sibling'`)
 
 		// The materialized file must reload cleanly through the TOML path.
 		cfg, err := LoadConfig()
@@ -1005,6 +1010,7 @@ default_program = "codex"
 auto_yes = true
 daemon_poll_interval = 2000
 branch_prefix = "test/"
+worktree_root = "subdirectory"
 
 [program_overrides]
 claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
@@ -1018,6 +1024,7 @@ codex = "/opt/codex/bin/codex --quiet"
 		assert.True(t, cfg.AutoYes)
 		assert.Equal(t, 2000, cfg.DaemonPollInterval)
 		assert.Equal(t, "test/", cfg.BranchPrefix)
+		assert.Equal(t, WorktreeRootSubdirectory, cfg.WorktreeRoot)
 		assert.Equal(t, "/home/me/.local/bin/claude --dangerously-skip-permissions",
 			cfg.ProgramOverrides[tmux.ProgramClaude])
 		assert.Equal(t, "/opt/codex/bin/codex --quiet",

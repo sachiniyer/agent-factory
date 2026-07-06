@@ -59,6 +59,21 @@ func TestGetWorktreeDirectoryForRepo(t *testing.T) {
 	assert.Equal(t, filepath.Dir(repoRoot), worktreeDir)
 }
 
+func TestGetWorktreeDirectoryForRepoSubdirectory(t *testing.T) {
+	sandboxHome(t)
+
+	repoRoot := createGitRepo(t)
+	cfg := config.DefaultConfig()
+	cfg.WorktreeRoot = config.WorktreeRootSubdirectory
+	require.NoError(t, config.SaveConfig(cfg))
+
+	worktreeDir, err := getWorktreeDirectoryForRepo(repoRoot)
+	require.NoError(t, err)
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(configDir, "worktrees"), worktreeDir)
+}
+
 func TestGetWorktreeDirectoryForRepo_RequiresRepoPath(t *testing.T) {
 	_, err := getWorktreeDirectoryForRepo("")
 	require.Error(t, err)
@@ -85,6 +100,25 @@ func TestNewGitWorktree_CleanName(t *testing.T) {
 
 	// Should be in the parent directory of the repo
 	assert.Equal(t, filepath.Dir(repoRoot), filepath.Dir(gw.GetWorktreePath()))
+}
+
+func TestNewGitWorktree_SubdirectoryCleanName(t *testing.T) {
+	sandboxHome(t)
+
+	repoRoot := createGitRepo(t)
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	cfg.WorktreeRoot = config.WorktreeRootSubdirectory
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, branchName, err := NewGitWorktree(repoRoot, "my-feature")
+	require.NoError(t, err)
+
+	assert.Equal(t, "test/my-feature", branchName)
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(configDir, "worktrees", "test", "my-feature"), gw.GetWorktreePath())
 }
 
 func TestNewGitWorktree_CollisionSuffix(t *testing.T) {

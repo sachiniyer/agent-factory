@@ -70,6 +70,7 @@ func configEntries(cfg *config.Config) []configEntry {
 		{"log_max_size_mb", cfg.LogMaxSizeMB},
 		{"log_max_backups", cfg.LogMaxBackups},
 		{"branch_prefix", cfg.BranchPrefix},
+		{"worktree_root", cfg.WorktreeRoot},
 		{"detach_keys", cfg.DetachKeys},
 		{"update_channel", cfg.UpdateChannel},
 		{"root_agents", cfg.RootAgents},
@@ -193,6 +194,7 @@ Settable keys:
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
   branch_prefix              string
+  worktree_root              subdirectory | sibling
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
   limit_patterns.<agent>     usage-limit banner regex for an agent

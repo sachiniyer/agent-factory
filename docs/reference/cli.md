@@ -359,6 +359,7 @@ Settable keys:
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
   branch_prefix              string
+  worktree_root              subdirectory | sibling
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
   limit_patterns.<agent>     usage-limit banner regex for an agent

@@ -90,7 +90,7 @@ func TestConfigEntriesCoverAllKeys(t *testing.T) {
 	want := []string{
 		"default_program", "program_overrides", "auto_yes", "daemon_poll_interval",
 		"log_max_size_mb", "log_max_backups", "branch_prefix", "detach_keys",
-		"update_channel", "root_agents", "limit_patterns", "keys",
+		"worktree_root", "update_channel", "root_agents", "limit_patterns", "keys",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("configEntries has %d keys, want %d", len(got), len(want))
