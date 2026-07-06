@@ -23,7 +23,7 @@ import (
 // per-agent prompt heuristics, so a program_overrides redirect can't
 // misclassify the pane.
 func (t *TmuxSession) SendKeysCommand(text string) error {
-	if DetectAgentFromCommand(t.program) == ProgramCodex {
+	if DetectAgentFromCommand(t.programCmd()) == ProgramCodex {
 		return t.sendKeysBracketedPaste(text)
 	}
 
