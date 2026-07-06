@@ -118,9 +118,23 @@ func printAPICatalogHuman(w io.Writer, socketPath string, routes []daemon.HTTPRo
 // no-argument RPC accepts as-is and every other RPC accepts as a starting point
 // to fill in.
 func curlExample(socketPath string, rt daemon.HTTPRoute) string {
-	base := fmt.Sprintf("curl --unix-socket %s http://localhost%s", socketPath, rt.Path)
+	base := fmt.Sprintf("curl --unix-socket %s http://localhost%s", shellQuoteArg(socketPath), rt.Path)
 	if rt.Method == "GET" {
 		return base
 	}
 	return base + " -d '{}'"
+}
+
+func shellQuoteArg(arg string) string {
+	if arg == "" {
+		return "''"
+	}
+	for _, r := range arg {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			strings.ContainsRune("@%_+=:,./-", r) {
+			continue
+		}
+		return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+	}
+	return arg
 }
