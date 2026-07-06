@@ -443,14 +443,7 @@ func (m *home) relayout() {
 	m.statusBar.SetRect(lay.StatusBar)
 	m.alarmBanner.SetRect(lay.Banner)
 
-	if m.textOverlay != nil {
-		m.textOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
-		overlayHeight := m.termHeight - 2
-		if overlayHeight < 6 {
-			overlayHeight = m.termHeight
-		}
-		m.textOverlay.SetHeight(overlayHeight)
-	}
+	m.layoutTextOverlay()
 	if m.selectionOverlay != nil {
 		m.selectionOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
 	}
