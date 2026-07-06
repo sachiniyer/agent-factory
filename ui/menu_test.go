@@ -18,8 +18,8 @@ func readyUIInstance() *session.Instance {
 }
 
 // TestMenuTerminalTabShowsBothScrollKeys verifies that when the terminal tab
-// is active, the instance menu surfaces both shift+up and shift+down scroll
-// shortcuts. Regression test for issue #270.
+// is active, the instance menu surfaces both scroll shortcuts. Regression test
+// for issue #270.
 func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 	m := NewMenu()
 	// Use a non-loading instance so addInstanceOptions renders the full menu.
@@ -45,7 +45,7 @@ func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 }
 
 // TestMenuPreviewTabShowsBothScrollKeys verifies that the preview tab also
-// surfaces shift+up and shift+down — preview supports scrolling identically to
+// surfaces both scroll shortcuts — preview supports scrolling identically to
 // terminal, and the help screen documents the shortcuts for both. Regression
 // test for issue #467.
 func TestMenuPreviewTabShowsBothScrollKeys(t *testing.T) {

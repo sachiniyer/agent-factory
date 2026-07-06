@@ -11,7 +11,7 @@ import (
 
 // storeArchivingInstance adds a started, mock-backed instance to the store and
 // raises the optimistic OpArchiving op over a live (Running) liveness — the exact
-// local state the TUI `A` archive action leaves behind while the daemon RPC runs.
+// local state the TUI `a` archive action leaves behind while the daemon RPC runs.
 func storeArchivingInstance(t *testing.T, h *home, title string) *session.Instance {
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: t.TempDir(), Program: "test"})

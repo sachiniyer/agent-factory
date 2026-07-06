@@ -51,7 +51,7 @@ The TUI opens with an empty sidebar. From here:
    tmux detach key drops you back to the sidebar. Either way the agent keeps
    running.
 4. When you're done with a session, **`D`** kills it and removes its worktree
-   and branch, or **`A`** archives it to set it aside and restore it later.
+   and branch, or **`a`** archives it to set it aside and restore it later.
 
 Because each session is a real git branch, reviewing and merging an agent's work
 is just your normal git/PR flow.

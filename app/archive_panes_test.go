@@ -11,7 +11,7 @@ import (
 // TestArchive_ClosesOpenPanesViaFinalize (#1028 P1): archiving a session that has
 // an open pane must close that pane — an archived session's tmux/worktree is
 // torn down, so a live pane would dangle (the archived-row "no live panes"
-// contract). The finalize path (TUI `A` → handleInstanceArchived) closes it via
+// contract). The finalize path (TUI `a` → handleInstanceArchived) closes it via
 // the synchronous pane prune in selectionChanged.
 func TestArchive_ClosesOpenPanesViaFinalize(t *testing.T) {
 	h := newTestHome(t)
@@ -34,7 +34,7 @@ func TestArchive_ClosesOpenPanesViaFinalize(t *testing.T) {
 
 // TestArchive_ReconcileClosesOpenPanes (#1028 P1): an out-of-band archive (`af
 // sessions archive` while the TUI runs) mirrored by the snapshot reconcile must
-// ALSO close the session's panes, not just the TUI `A` path.
+// ALSO close the session's panes, not just the TUI `a` path.
 func TestArchive_ReconcileClosesOpenPanes(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "worker")

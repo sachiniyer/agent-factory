@@ -253,7 +253,7 @@ func (m *Menu) addInstanceOptions() {
 
 	// Navigation group: every tab is a captured tmux session and supports
 	// scroll mode (#930 PR 2 — the agent "Preview" tab and the terminal tab
-	// both scroll), so the shift-scroll keys always show for an instance.
+	// both scroll), so the scroll keys always show for an instance.
 	actionGroup = append(actionGroup, keys.KeyShiftUp)
 	actionGroup = append(actionGroup, keys.KeyShiftDown)
 
@@ -335,7 +335,7 @@ func centerStart(box, content int) int {
 
 // hintDropOrder lists the options that may be dropped when the hint row is
 // wider than the status bar, least valuable first; options in the same inner
-// slice drop together (a lone "⇧↓ scroll" without its ⇧↑ twin reads like a
+// slice drop together (a lone "ctrl+d scroll" without its ctrl+u twin reads like a
 // bug). The full instance row is ~108 cells, so on narrow terminals something
 // has to go — and before this priority existed the CLAMP decided, silently
 // cutting the RIGHT edge, i.e. `? help` and `q quit` first: exactly the hints

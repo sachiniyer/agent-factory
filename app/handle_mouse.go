@@ -365,6 +365,10 @@ func keyMsgFromString(s string) (tea.KeyMsg, bool) {
 		return tea.KeyMsg{Type: tea.KeyShiftUp}, true
 	case "shift+down":
 		return tea.KeyMsg{Type: tea.KeyShiftDown}, true
+	case "ctrl+u":
+		return tea.KeyMsg{Type: tea.KeyCtrlU}, true
+	case "ctrl+d":
+		return tea.KeyMsg{Type: tea.KeyCtrlD}, true
 	case "ctrl+]":
 		return tea.KeyMsg{Type: tea.KeyCtrlCloseBracket}, true
 	}

@@ -141,6 +141,21 @@ tasks = "ctrl+t"
 
 Run `af keys` to see the effective bindings (defaults plus your rebinds).
 
+The default TUI keys changed to ergonomic lower-case bindings in #1027:
+archive is `a`, the task manager is `m`, copy PR URL is `y`, hooks is `e`,
+and scrolling is `ctrl+u` / `ctrl+d`. The previous defaults are not built-in
+aliases; restore any old binding you still want by pinning it here:
+
+```toml
+[keys]
+archive = "A"
+tasks = "S"
+copy_pr = "P"
+hooks = "H"
+scroll_up = "shift+up"
+scroll_down = "shift+down"
+```
+
 ### Choosing the agent
 
 Override the agent for new sessions with `-p`:
@@ -178,7 +193,7 @@ terminal_cmd = "./infra/terminal.sh"
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
 | `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `root_agents`, `limit_auto_resume`, `limit_retry_interval` | Global only. Setting them in-repo is rejected with an error naming the key. |
 
-`post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `H` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
+`post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 
 ### In-repo file name: `config.toml` or `config.json`
 

@@ -121,6 +121,7 @@ nav:
       - Container testing: container-testing.md
       - File-length lint: file-length-lint.md
       - Release process: release-process.md
+      - Release notes: release-notes.md
       - Release testing plan: release-testing-plan.md
       - TUI manual testing: tui-manual-testing.md
       - TUI rewrite (design): design/tui-rewrite.md

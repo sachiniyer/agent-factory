@@ -365,7 +365,7 @@ func (a *AutomationsPane) String() string {
 	lines := []string{title}
 	if len(tasks) == 0 {
 		lines = append(lines, automationsDisabledStyle.Render(
-			fitLine("  no tasks — press S, then n to create one", a.rect.W)))
+			fitLine("  no tasks — press m, then n to create one", a.rect.W)))
 	}
 
 	// Window the rows around the cursor so a focused selection below the fold

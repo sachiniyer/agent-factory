@@ -209,7 +209,7 @@ func TestLayoutCutover_DegradationLadder(t *testing.T) {
 	assert.False(t, h.lastLayout.AutomationsCompact)
 }
 
-// TestLayoutCutover_HooksOverlay: H opens the hooks editor as a modal overlay
+// TestLayoutCutover_HooksOverlay: e opens the hooks editor as a modal overlay
 // (#1024 PR 4 — hooks lost their persistent sidebar slot); Esc closes it and
 // returns to the workspace.
 func TestLayoutCutover_HooksOverlay(t *testing.T) {
@@ -217,7 +217,7 @@ func TestLayoutCutover_HooksOverlay(t *testing.T) {
 	resizeHome(h, 100, 30)
 	h.hooksPane.SetCommands([]string{"make setup"})
 
-	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("H")}, keys.KeyHooks)
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")}, keys.KeyHooks)
 	require.Equal(t, stateHooks, h.state)
 	require.True(t, h.hooksPane.HasFocus(), "the editor opens with input focus")
 
@@ -231,15 +231,15 @@ func TestLayoutCutover_HooksOverlay(t *testing.T) {
 	assert.NotContains(t, h.View(), "Post-Worktree Hooks")
 }
 
-// TestLayoutCutover_TaskKeysOpenOverlay: S opens the task manager overlay,
-// and task creation lives on the manager's own `n` key — the "S, then n"
+// TestLayoutCutover_TaskKeysOpenOverlay: m opens the task manager overlay,
+// and task creation lives on the manager's own `n` key — the "m, then n"
 // muscle memory survives the overlay move (#1096 play-test fix 1).
 func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 100, 30)
 
-	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeyTaskList)
-	assert.Equal(t, stateTasks, h.state, "S opens the tasks overlay")
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")}, keys.KeyTaskList)
+	assert.Equal(t, stateTasks, h.state, "m opens the tasks overlay")
 	assert.True(t, h.automations.TaskPane().HasFocus())
 	assert.False(t, h.automations.TaskPane().IsCreating())
 
@@ -250,7 +250,7 @@ func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 // TestE2E_LayoutCutover_FocusRingAndHooksOverlay drives the real tea.Program
 // through the new workspace: Tab cycles the focus ring end to end (through
 // handleMenuHighlighting's re-emit path), the automations strip expands while
-// focused, Esc returns to the tree, and H opens/closes the hooks overlay.
+// focused, Esc returns to the tree, and e opens/closes the hooks overlay.
 func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	eh := newE2EHarness(t)
 	eh.addStartedInstance("alpha")
@@ -296,9 +296,9 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 		return activeRegion() == layout.RegionTree
 	})
 
-	// H opens the hooks overlay; Esc closes it.
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
-	eh.waitUntil(e2eAsyncTimeout, "H opens the hooks overlay", func() bool {
+	// e opens the hooks overlay; Esc closes it.
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	eh.waitUntil(e2eAsyncTimeout, "e opens the hooks overlay", func() bool {
 		return eh.homeState() == stateHooks
 	})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEsc})

@@ -135,7 +135,7 @@ func (m *home) closePaneWindow(p *store.OpenPane) {
 // instance stays PRESENT in the projection when archived (it moves to the
 // Archived folder), so the containment check alone would skip it; the status
 // check closes it. Keying on status here (not just the finalize handler) covers
-// EVERY archive path — the TUI `A` verb and a CLI `af sessions archive` mirrored
+// EVERY archive path — the TUI `a` verb and a CLI `af sessions archive` mirrored
 // by the reconcile — since panesRefresh runs this on selection changes and
 // reconciles. Reports whether anything closed; callers relayout on true.
 func (m *home) pruneDeadPanes() bool {

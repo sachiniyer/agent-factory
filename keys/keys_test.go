@@ -18,48 +18,48 @@ func resetAfter(t *testing.T) {
 	})
 }
 
-// TestDefaultMapsMatchLegacyTable pins the generated defaults to the exact
-// hand-written maps this package carried before the spec registry (#1026):
-// a regression here means a user's muscle memory changed without a rebind.
-func TestDefaultMapsMatchLegacyTable(t *testing.T) {
-	legacyStrings := map[string]KeyName{
-		"up":         KeyUp,
-		"k":          KeyUp,
-		"down":       KeyDown,
-		"j":          KeyDown,
-		"shift+up":   KeyShiftUp,
-		"shift+down": KeyShiftDown,
-		"N":          KeyNewRemote,
-		"enter":      KeyEnter,
-		"o":          KeyAttach,
-		"n":          KeyNew,
-		"D":          KeyKill,
-		"A":          KeyArchive,
-		"c":          KeyLimitRetry,
-		"q":          KeyQuit,
-		"tab":        KeyTab,
-		"shift+tab":  KeyShiftTab,
-		"t":          KeyNewTab,
-		"w":          KeyCloseTab,
-		"?":          KeyHelp,
-		"s":          KeyOpenPane,
-		"x":          KeyHidePane,
-		"S":          KeyTaskList,
-		"/":          KeySearch,
-		"p":          KeyOpenPR,
-		"P":          KeyCopyPR,
-		"H":          KeyHooks,
-		"h":          KeyLeft,
-		"left":       KeyLeft,
-		"l":          KeyRight,
-		"right":      KeyRight,
-		"]":          KeyNextSection,
-		"[":          KeyPrevSection,
+// TestDefaultMapsMatchApprovedKeymap pins the generated defaults to the
+// approved ergonomic keymap (#1027). Old defaults are intentionally absent;
+// users who want them can restore them through [keys].
+func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
+	defaultStrings := map[string]KeyName{
+		"up":        KeyUp,
+		"k":         KeyUp,
+		"down":      KeyDown,
+		"j":         KeyDown,
+		"ctrl+u":    KeyShiftUp,
+		"ctrl+d":    KeyShiftDown,
+		"N":         KeyNewRemote,
+		"enter":     KeyEnter,
+		"o":         KeyAttach,
+		"n":         KeyNew,
+		"D":         KeyKill,
+		"a":         KeyArchive,
+		"c":         KeyLimitRetry,
+		"q":         KeyQuit,
+		"tab":       KeyTab,
+		"shift+tab": KeyShiftTab,
+		"t":         KeyNewTab,
+		"w":         KeyCloseTab,
+		"?":         KeyHelp,
+		"s":         KeyOpenPane,
+		"x":         KeyHidePane,
+		"m":         KeyTaskList,
+		"/":         KeySearch,
+		"p":         KeyOpenPR,
+		"y":         KeyCopyPR,
+		"e":         KeyHooks,
+		"h":         KeyLeft,
+		"left":      KeyLeft,
+		"l":         KeyRight,
+		"right":     KeyRight,
+		"]":         KeyNextSection,
+		"[":         KeyPrevSection,
 	}
-	if len(GlobalKeyStringsMap) != len(legacyStrings) {
-		t.Fatalf("GlobalKeyStringsMap has %d entries, want %d", len(GlobalKeyStringsMap), len(legacyStrings))
+	if len(GlobalKeyStringsMap) != len(defaultStrings) {
+		t.Fatalf("GlobalKeyStringsMap has %d entries, want %d", len(GlobalKeyStringsMap), len(defaultStrings))
 	}
-	for k, want := range legacyStrings {
+	for k, want := range defaultStrings {
 		if got, ok := GlobalKeyStringsMap[k]; !ok || got != want {
 			t.Fatalf("GlobalKeyStringsMap[%q] = %v (present=%v), want %v", k, got, ok, want)
 		}
@@ -68,8 +68,12 @@ func TestDefaultMapsMatchLegacyTable(t *testing.T) {
 	helpChecks := map[KeyName]string{
 		KeyUp:                "↑/k",
 		KeyDown:              "↓/j",
-		KeyShiftUp:           "⇧↑",
-		KeyShiftDown:         "⇧↓",
+		KeyShiftUp:           "ctrl+u",
+		KeyShiftDown:         "ctrl+d",
+		KeyArchive:           "a",
+		KeyTaskList:          "m",
+		KeyCopyPR:            "y",
+		KeyHooks:             "e",
 		KeyEnter:             "↵",
 		KeyManageAutomations: "↵",
 		KeyJumpTab:           "1-9",
@@ -87,6 +91,71 @@ func TestDefaultMapsMatchLegacyTable(t *testing.T) {
 	}
 	if len(GlobalKeyBindings) != len(specs) {
 		t.Fatalf("GlobalKeyBindings has %d entries, want one per spec (%d)", len(GlobalKeyBindings), len(specs))
+	}
+}
+
+func TestOldErgonomicReplacementsAreNotBoundByDefault(t *testing.T) {
+	oldDefaults := map[string]KeyName{
+		"A":          KeyArchive,
+		"S":          KeyTaskList,
+		"P":          KeyCopyPR,
+		"H":          KeyHooks,
+		"shift+up":   KeyShiftUp,
+		"shift+down": KeyShiftDown,
+	}
+	for k, action := range oldDefaults {
+		if got, ok := GlobalKeyStringsMap[k]; ok {
+			t.Fatalf("old default %q must not be bound by default; got %v, want absent from %v", k, got, action)
+		}
+	}
+	if got := GlobalKeyStringsMap["D"]; got != KeyKill {
+		t.Fatalf("kill safety key D must remain bound; got %v", got)
+	}
+	if _, gotLowerD := GlobalKeyStringsMap["d"]; gotLowerD {
+		t.Fatal("lower-case d must not kill sessions by default")
+	}
+	if got := GlobalKeyStringsMap["N"]; got != KeyNewRemote {
+		t.Fatalf("new remote key N must remain bound; got %v", got)
+	}
+}
+
+func TestOldDefaultsCanBePinnedViaOverrides(t *testing.T) {
+	resetAfter(t)
+	err := ApplyOverrides(map[string][]string{
+		"archive":     {"A"},
+		"tasks":       {"S"},
+		"copy_pr":     {"P"},
+		"hooks":       {"H"},
+		"scroll_up":   {"shift+up"},
+		"scroll_down": {"shift+down"},
+	})
+	if err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+
+	pinned := map[string]KeyName{
+		"A":          KeyArchive,
+		"S":          KeyTaskList,
+		"P":          KeyCopyPR,
+		"H":          KeyHooks,
+		"shift+up":   KeyShiftUp,
+		"shift+down": KeyShiftDown,
+	}
+	for k, want := range pinned {
+		if got, ok := GlobalKeyStringsMap[k]; !ok || got != want {
+			t.Fatalf("pinned old key %q = %v (present=%v), want %v", k, got, ok, want)
+		}
+	}
+	for _, k := range []string{"a", "m", "y", "e", "ctrl+u", "ctrl+d"} {
+		if _, still := GlobalKeyStringsMap[k]; still {
+			t.Fatalf("override must replace the ergonomic default; %q is still bound", k)
+		}
+	}
+	if got := GlobalKeyBindings[KeyArchive].Help().Key; got != "A" {
+		t.Fatalf("pinned archive help label = %q, want A", got)
+	}
+	if got := GlobalKeyBindings[KeyShiftUp].Help().Key; got != "⇧↑" {
+		t.Fatalf("pinned scroll-up help label = %q, want ⇧↑", got)
 	}
 }
 
