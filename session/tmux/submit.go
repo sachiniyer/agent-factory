@@ -4,8 +4,17 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
+// concurrent deliveries to the same session can never race on a shared tmux
+// buffer (load-buffer overwrite between another call's load and paste). The
+// daemon op-lock usually serializes same-session deliveries, but the submit
+// path releases the instance lock before these tmux calls, so it must not
+// assume serialization.
+var pasteBufferSeq atomic.Uint64
 
 // SendKeysCommand sends text to the tmux pane using the `tmux send-keys` command
 // instead of writing to the PTY. This is more reliable for headless/scheduled runs
@@ -54,10 +63,11 @@ func (t *TmuxSession) SendKeysCommand(text string) error {
 // stdin rather than an argv argument so arbitrarily large prompts are not
 // bounded by ARG_MAX.
 func (t *TmuxSession) sendKeysBracketedPaste(text string) error {
-	// One buffer name per session; sends to a single session are serialized, so
-	// reuse (load-buffer overwrites) is fine and `-d` clears it after pasting so
-	// buffers never accumulate.
-	buf := "af_paste_" + t.sanitizedName
+	// A per-call unique buffer name: two concurrent deliveries to the same
+	// session must not share a buffer, or one call's load-buffer could overwrite
+	// the other's content between its load and paste and corrupt the submit.
+	// `-d` clears the buffer after pasting so buffers never accumulate.
+	buf := fmt.Sprintf("af_paste_%s_%d", t.sanitizedName, pasteBufferSeq.Add(1))
 
 	loadCmd := exec.Command("tmux", "load-buffer", "-b", buf, "-")
 	loadCmd.Stdin = strings.NewReader(text)
