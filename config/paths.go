@@ -29,15 +29,13 @@ func prettyHomePath(absPath string) string {
 	return absPath
 }
 
-// shellQuotePath wraps a path that contains shell-special characters
-// (spaces, apostrophes) in single quotes, escaping any embedded apostrophes
-// with the standard POSIX '\” idiom. Paths free of those characters are
-// returned unchanged. Used by DefaultConfig when persisting auto-detected
-// claude paths into ProgramOverrides — the value is passed to `sh -c` by
-// tmux, so paths with spaces (e.g. macOS App Bundles, #569) would otherwise
-// be split into separate tokens.
+// shellQuotePath wraps a non-empty filesystem path in single quotes, escaping
+// any embedded apostrophes with the standard POSIX single-quote escape idiom.
+// Used by DefaultConfig when persisting auto-detected claude paths into
+// ProgramOverrides — the value is passed to `sh -c` by tmux, so shell
+// metacharacters in paths must never be left for the shell to interpret.
 func shellQuotePath(path string) string {
-	if path == "" || !strings.ContainsAny(path, " '") {
+	if path == "" {
 		return path
 	}
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
