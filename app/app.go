@@ -546,7 +546,7 @@ func (m *home) Init() tea.Cmd {
 }
 
 func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	defer m.persistTUIViewStateIfChanged()
+	defer m.persistTUIViewStateAfter(msg)
 	switch msg := msg.(type) {
 	case hideErrMsg:
 		m.errBox.Clear()

@@ -1,9 +1,11 @@
 package app
 
 import (
+	"os"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +54,8 @@ func TestRepaintAfterDetachMsg_KicksOffRefresh(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 	resizeHome(h, 120, 40)
 	openTestPane(t, h, inst, 0)
+	statePath, err := config.TUIStatePath()
+	require.NoError(t, err)
 
 	start := time.Now()
 	_, cmd := h.Update(repaintAfterDetachMsg{})
@@ -62,6 +66,9 @@ func TestRepaintAfterDetachMsg_KicksOffRefresh(t *testing.T) {
 			"with fresh content immediately after detach")
 	assert.Less(t, elapsed, 5*time.Millisecond,
 		"Update for repaintAfterDetachMsg must not block; saw %s", elapsed)
+	_, statErr := os.Stat(statePath)
+	assert.True(t, os.IsNotExist(statErr),
+		"repaintAfterDetachMsg must not synchronously flush TUI view-state")
 }
 
 // TestRefreshPanesCmd_ProducesPanesRefreshedMsg verifies the goroutine body

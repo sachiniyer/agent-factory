@@ -6,6 +6,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -203,6 +205,22 @@ func (m *home) persistTUIViewStateIfChanged() {
 	}
 	m.lastTUIViewState = next
 	m.hasLastTUIViewState = true
+}
+
+func (m *home) persistTUIViewStateAfter(msg tea.Msg) {
+	if !shouldPersistTUIViewStateAfter(msg) {
+		return
+	}
+	m.persistTUIViewStateIfChanged()
+}
+
+func shouldPersistTUIViewStateAfter(msg tea.Msg) bool {
+	switch msg.(type) {
+	case previewTickMsg, panesRefreshedMsg, repaintAfterDetachMsg, spinner.TickMsg, keyupMsg, hideErrMsg:
+		return false
+	default:
+		return true
+	}
 }
 
 func (m *home) flushTUIViewStateBestEffort() {
