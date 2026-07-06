@@ -63,6 +63,26 @@ func TestHandleLimitRetry_LimitRow_Dispatches(t *testing.T) {
 	require.Equal(t, "worker", gotTitle, "the resume command must call the daemon for the selected title")
 }
 
+// TestHandleLimitRetry_TearingDownRow_NoDispatch: pressing c on a limit-blocked
+// row that is already being deleted must not race a resume RPC against teardown.
+func TestHandleLimitRetry_TearingDownRow_NoDispatch(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(200, 1)
+	inst := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
+	inst.SetInFlightOp(session.OpKilling)
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	called := false
+	restore := SetLimitResumerForTest(func(string, string) error { called = true; return nil })
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.False(t, called, "a deleting row must not dispatch the resume RPC")
+	require.NotNil(t, cmd, "the user should get a transient error message")
+	require.Contains(t, h.errBox.String(), "session 'worker' is being deleted")
+}
+
 // TestResumeFromLimitCmd_SurfacesError: a daemon rejection is carried back on the
 // completion message (handled into the error box, limit state left intact).
 func TestResumeFromLimitCmd_SurfacesError(t *testing.T) {

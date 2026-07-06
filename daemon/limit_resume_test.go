@@ -134,6 +134,63 @@ func TestResumeFromLimit_LiveStall_SendsContinueNoRespawn(t *testing.T) {
 	}
 }
 
+// TestResumeFromLimit_TeardownInFlightNoops pins #1263: a manual retry must not
+// send a prompt or respawn while a kill/delete already owns the session.
+func TestResumeFromLimit_TeardownInFlightNoops(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, *Manager, string, *session.Instance)
+	}{
+		{
+			name: "optimistic killing op",
+			setup: func(_ *testing.T, _ *Manager, _ string, inst *session.Instance) {
+				inst.SetInFlightOp(session.OpKilling)
+			},
+		},
+		{
+			name: "manager kill in flight",
+			setup: func(_ *testing.T, manager *Manager, repoID string, inst *session.Instance) {
+				key := daemonInstanceKey(repoID, inst.Title)
+				manager.mu.Lock()
+				manager.killsInFlight[key] = struct{}{}
+				manager.mu.Unlock()
+			},
+		},
+		{
+			name: "op lock busy",
+			setup: func(t *testing.T, manager *Manager, repoID string, inst *session.Instance) {
+				key := daemonInstanceKey(repoID, inst.Title)
+				opLock := manager.opLockFor(key)
+				opLock.Lock()
+				t.Cleanup(opLock.Unlock)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+			inst := registerStarted(t, manager, repoID, repoPath, "deleting-limit", backend, true, session.Running)
+			inst.Prompt = "finish the migration"
+			inst.SetLimitReached(time.Now())
+			tt.setup(t, manager, repoID, inst)
+
+			if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+				t.Fatalf("resumeFromLimit returned %v, want nil no-op", err)
+			}
+
+			recoverCalls, respawnCalls, prompts := backend.snapshot()
+			if recoverCalls != 0 || respawnCalls != 0 || len(prompts) != 0 {
+				t.Fatalf("teardown no-op must not act: recover=%d respawn=%d prompts=%v", recoverCalls, respawnCalls, prompts)
+			}
+			if !inst.LimitReached() {
+				t.Fatal("teardown no-op must leave the limit state intact")
+			}
+		})
+	}
+}
+
 // TestResumeFromLimit_NotLimited_Errors: resuming a session that is not blocked
 // on a usage limit is rejected before any re-spawn or prompt delivery, so PR3's
 // scheduler and the manual retry can both call it without a pre-check racing the

@@ -194,7 +194,7 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// never a hot re-limit loop.
 	attempts, wait := m.limitResumeAttempted(st, now, hadReset, retryInterval)
 
-	if err := m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if err := m.resumeFromLimitLocked(repoID, key, inst, inst.Title); err != nil {
 		log.WarningLog.Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, err)
 		return
 	}
