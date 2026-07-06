@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -106,6 +107,21 @@ type TabbedWindow struct {
 	// leaving the selected row and displayed content to appear contradictory
 	// (#1289).
 	selectionHint string
+
+	// preview is a transient render binding for #1321. While set, the window
+	// still owns its committed store.OpenPane binding, but capture/render uses
+	// preview.instance + preview.tab and the header makes that explicit.
+	preview *windowPreview
+	// contentSeq invalidates off-loop captures whose binding was superseded
+	// while they were in flight. The root model captures a sequence on the event
+	// loop and TabPane writes only if the sequence is still current.
+	contentSeq atomic.Uint64
+}
+
+type windowPreview struct {
+	instance *session.Instance
+	tab      int
+	original string
 }
 
 // LiveView is a live embedded-terminal render source (#1089): the termpane
@@ -131,12 +147,19 @@ func NewTabbedWindow(tab *TabPane, pane *store.OpenPane) *TabbedWindow {
 	}
 }
 
-// boundInstance returns the instance the window renders. Event-loop only.
+// boundInstance returns the committed pane instance. Event-loop only.
 func (w *TabbedWindow) boundInstance() *session.Instance {
 	if w.pane == nil {
 		return nil
 	}
 	return w.pane.Instance()
+}
+
+func (w *TabbedWindow) effectiveInstance() *session.Instance {
+	if w.preview != nil {
+		return w.preview.instance
+	}
+	return w.boundInstance()
 }
 
 // activeTab returns the window's 0-based tab index through the pane's atomic
@@ -148,12 +171,63 @@ func (w *TabbedWindow) activeTab() int {
 	return w.pane.Tab()
 }
 
+func (w *TabbedWindow) effectiveTab() int {
+	if w.preview != nil {
+		return w.preview.tab
+	}
+	return w.activeTab()
+}
+
 // setActiveTab writes the window's tab index to its pane binding.
 func (w *TabbedWindow) setActiveTab(idx int) {
 	if w.pane == nil {
 		return
 	}
+	if w.pane.Tab() == idx {
+		return
+	}
 	w.pane.SetTab(idx)
+	w.bumpContentSeq()
+}
+
+func (w *TabbedWindow) bumpContentSeq() uint64 {
+	return w.contentSeq.Add(1)
+}
+
+// ContentSeq returns the current render-binding generation.
+func (w *TabbedWindow) ContentSeq() uint64 {
+	return w.contentSeq.Load()
+}
+
+// SetPreview applies a transient render binding without mutating the committed
+// pane binding. original is rendered in the PREVIEW header so the reversible
+// state is visible to the user.
+func (w *TabbedWindow) SetPreview(instance *session.Instance, tab int, original string) uint64 {
+	if w.preview != nil &&
+		w.preview.instance == instance &&
+		w.preview.tab == tab &&
+		w.preview.original == original {
+		return w.ContentSeq()
+	}
+	w.preview = &windowPreview{instance: instance, tab: tab, original: original}
+	return w.bumpContentSeq()
+}
+
+// ClearPreview drops any transient render binding and returns the generation
+// after the clear. It is intentionally a no-op when there is no preview so
+// refresh throttling does not churn sequences.
+func (w *TabbedWindow) ClearPreview() uint64 {
+	if w.preview == nil {
+		return w.ContentSeq()
+	}
+	w.preview = nil
+	return w.bumpContentSeq()
+}
+
+// Previewing reports whether the window is currently rendering a transient
+// binding.
+func (w *TabbedWindow) Previewing() bool {
+	return w.preview != nil
 }
 
 // ClampActiveTab bounds the pane's tab index into [0, len(tabLabels())-1].
@@ -200,10 +274,18 @@ func (w *TabbedWindow) tabLabels() []string {
 	return tree.TabLabels(w.boundInstance())
 }
 
-// isAgentSlot reports whether the pane's tab index is the agent tab (index 0).
+func tabLabelFor(inst *session.Instance, idx int) string {
+	labels := tree.TabLabels(inst)
+	if idx >= 0 && idx < len(labels) {
+		return labels[idx]
+	}
+	return ""
+}
+
+// isAgentSlot reports whether the effective tab index is the agent tab (index 0).
 // Index 0 is always the agent tab; every other slot is a shell/terminal tab.
 func (w *TabbedWindow) isAgentSlot() bool {
-	return w.activeTab() == 0
+	return w.effectiveTab() == 0
 }
 
 // SetRect implements layout.Pane: the pane renders exactly r. The inner
@@ -341,25 +423,39 @@ func (w *TabbedWindow) registerZones(liveShowing bool) {
 // nil. It is called from the refreshPanesCmd goroutine with the instance
 // captured on the event loop at dispatch time — deliberately a parameter, not
 // a store read, so the capture is keyed to the binding the refresh was
-// dispatched for; only the tab index is read here, through the pane's
-// atomic (#684).
+// dispatched for.
 func (w *TabbedWindow) UpdateContent(instance *session.Instance) error {
-	return w.tab.UpdateContent(instance, w.activeTab())
+	return w.UpdateContentAt(instance, w.activeTab(), w.ContentSeq())
+}
+
+// UpdateContentAt captures a specific render binding if seq is still current.
+// It is used by #1321 previews so a fast sidebar scroll cannot let an older
+// off-loop capture overwrite the newest preview target.
+func (w *TabbedWindow) UpdateContentAt(instance *session.Instance, tab int, seq uint64) error {
+	return w.tab.UpdateContentGuarded(instance, tab, func() bool {
+		return w.ContentSeq() == seq
+	})
+}
+
+// InvalidateContent synchronously adopts a new view key and fallback message so
+// the next frame cannot show a preview header over the previous pane content.
+func (w *TabbedWindow) InvalidateContent(instance *session.Instance, tab int, message string) {
+	w.tab.InvalidateContent(instance, tab, message)
 }
 
 // ResetToNormalMode resets the pane's tab view to normal (non-scroll) mode.
 func (w *TabbedWindow) ResetToNormalMode(instance *session.Instance) error {
-	return w.tab.ResetToNormalMode(instance, w.activeTab())
+	return w.tab.ResetToNormalMode(instance, w.effectiveTab())
 }
 
 func (w *TabbedWindow) ScrollUp() {
-	if err := w.tab.ScrollUp(w.boundInstance(), w.activeTab()); err != nil {
+	if err := w.tab.ScrollUp(w.effectiveInstance(), w.effectiveTab()); err != nil {
 		log.InfoLog.Printf("tabbed window failed to scroll up: %v", err)
 	}
 }
 
 func (w *TabbedWindow) ScrollDown() {
-	if err := w.tab.ScrollDown(w.boundInstance(), w.activeTab()); err != nil {
+	if err := w.tab.ScrollDown(w.effectiveInstance(), w.effectiveTab()); err != nil {
 		log.InfoLog.Printf("tabbed window failed to scroll down: %v", err)
 	}
 }
@@ -409,13 +505,12 @@ func (w *TabbedWindow) IsInScrollMode() bool {
 // the highlight doubles as the pane's focus indicator.
 func (w *TabbedWindow) renderHeader(width int) string {
 	var text string
-	if inst := w.boundInstance(); inst != nil {
-		labels := w.tabLabels()
-		idx := w.activeTab()
-		label := ""
-		if idx >= 0 && idx < len(labels) {
-			label = labels[idx]
-		}
+	if w.preview != nil && w.preview.instance != nil {
+		inst := w.preview.instance
+		label := tabLabelFor(inst, w.preview.tab)
+		text = fmt.Sprintf(" PREVIEW %s · %s (original %s) ", inst.Title, label, w.preview.original)
+	} else if inst := w.boundInstance(); inst != nil {
+		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
 		if w.selectionHint != "" {
 			text = fmt.Sprintf(" %s · %s · selected: %s ", inst.Title, label, w.selectionHint)

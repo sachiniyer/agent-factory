@@ -182,6 +182,14 @@ type home struct {
 	// lastPaneCapture is when each pane's capture was last dispatched, keyed
 	// by pane id; the paneCaptureMinInterval throttle reads it (RFC §5.2).
 	lastPaneCapture map[int]time.Time
+	// panePreviewTxn is a transient #1321 preview binding owned by the most
+	// recently focused content pane. It never mutates the pane's committed
+	// store.OpenPane binding; commit/cancel semantics land in later PRs.
+	panePreviewTxn *panePreviewTxn
+	// lastFocusedPaneID remembers the focused pane before sidebar navigation
+	// re-homes focus to the tree (#1233/#1236). Preview-on-scroll uses it as
+	// the owner pane while the tree cursor moves.
+	lastFocusedPaneID int
 	// -- Live embedded terminal (#1089 PR 1, read-only proof path) --
 	//
 	// At most ONE pane holds a live termpane attachment: the focused pane
@@ -508,6 +516,7 @@ func (m *home) syncFocus() {
 	}
 	if p := m.focusedOpenPane(); p != nil {
 		m.store.TouchOpenPane(p)
+		m.lastFocusedPaneID = p.ID()
 	}
 	m.menu.SetFocusRegion(active)
 }
@@ -1360,6 +1369,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		// just in the explicit tab-jump handlers.
 		m.menu.SetActiveTab(m.store.ActiveTab())
 		m.maybeAutoOpenInitialPane(selected)
+		m.updatePanePreview(selected, attachedNow)
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
 		// Lazily refresh PR info when the user lands on an instance that
 		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
@@ -1376,6 +1386,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		// cold start with restored sessions landed on the empty workspace
 		// until the first cursor move (#1099 play-test).
 		m.maybeAutoOpenInitialPane(nil)
+		m.cancelPanePreview(false)
 		m.menu.SetInstance(nil)
 		if selected := m.store.GetSelectedInstance(); selected != nil && !m.store.ContainsInstance(selected) {
 			// The sticky binding dangles — its instance was removed (e.g. the
@@ -1477,7 +1488,8 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 			continue
 		}
 		m.lastPaneCapture[p.ID()] = time.Now()
-		cmds = append(cmds, refreshPanesCmd(w, p.Instance()))
+		binding, seq := m.renderBindingForPane(p)
+		cmds = append(cmds, refreshPaneBindingCmd(w, binding.instance, binding.tab, seq))
 	}
 	return tea.Batch(cmds...)
 }
@@ -1516,14 +1528,18 @@ type panesRefreshedMsg struct{}
 // refreshPanesCmd runs the active tab's capture off the bubbletea Update
 // goroutine. It shells out to `tmux capture-pane` (~3–5ms locally), which
 // previously blocked the event loop on every previewTickMsg (every 100ms) and
-// on every post-detach repaint. TabPane serialises its capture writes against
-// String() reads with an internal mutex, so the goroutine can mutate the
-// captured content concurrently with the renderer (#579).
+// on every post-detach repaint. TabPane serialises its state writes against
+// String() reads with an internal mutex, so the goroutine can publish captured
+// content concurrently with the renderer (#579).
 func refreshPanesCmd(tw *ui.TabbedWindow, selected *session.Instance) tea.Cmd {
+	return refreshPaneBindingCmd(tw, selected, tw.GetActiveTab(), tw.ContentSeq())
+}
+
+func refreshPaneBindingCmd(tw *ui.TabbedWindow, selected *session.Instance, activeTab int, seq uint64) tea.Cmd {
 	return func() tea.Msg {
 		cmdStart := time.Now()
 		detachTraceMark("refreshPanesCmd-goroutine-entry")
-		if err := tw.UpdateContent(selected); err != nil {
+		if err := tw.UpdateContentAt(selected, activeTab, seq); err != nil {
 			log.WarningLog.Printf("UpdateContent failed: %v", err)
 		}
 		detachTrace(cmdStart, "refreshPanesCmd-goroutine-exit")
