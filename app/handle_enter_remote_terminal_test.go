@@ -35,7 +35,7 @@ func swapAttachOverlayCallbackFn(t *testing.T, fn func(*home, string, string, st
 }
 
 // driveHandleEnterAttach presses Enter on a single instance (remote or local)
-// with either the Terminal or the sidebar (Preview) tab active, and returns the
+// with either the Terminal or the sidebar Agent tab active, and returns the
 // post-detach cmd plus whatever was written to the remote-detach reset writer.
 //
 // The first-time attach help overlay is marked seen so showHelpScreen runs the
@@ -70,7 +70,7 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 		h.store.SetActiveTab(1)
 		require.Equal(t, 1, h.store.ActiveTab(), "precondition: Terminal tab must be active")
 	} else {
-		require.Equal(t, 0, h.store.ActiveTab(), "precondition: sidebar (Preview) tab must be active")
+		require.Equal(t, 0, h.store.ActiveTab(), "precondition: sidebar Agent tab must be active")
 	}
 
 	var out bytes.Buffer

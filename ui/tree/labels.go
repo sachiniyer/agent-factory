@@ -10,12 +10,12 @@ import (
 // terminal tabs exist on demand only (#1100) — so promising a second slot
 // before the real tab list exists would manufacture a phantom jump/attach
 // target in every consumer of TabLabels.
-var placeholderTabLabels = []string{"Preview"}
+var placeholderTabLabels = []string{"Agent"}
 
 // TabLabels returns the display labels for an instance's tab slots — the
 // single source of truth shared by the TabbedWindow's header, the sidebar
 // tree (#1024 PR 3), and the 1-9 jump keys, so slot numbering can never
-// disagree between them. Agent tabs render as "Preview", shell tabs as
+// disagree between them. Agent tabs render as "Agent", shell tabs as
 // "Terminal"; any Process tab renders under its own name.
 //
 // Once an instance's tabs have materialized the labels mirror the real tab
@@ -41,7 +41,7 @@ func TabLabels(instance *session.Instance) []string {
 func labelForTab(tab *session.Tab) string {
 	switch tab.Kind {
 	case session.TabKindAgent:
-		return "Preview"
+		return "Agent"
 	case session.TabKindShell:
 		return "Terminal"
 	default:

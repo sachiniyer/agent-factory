@@ -1,6 +1,6 @@
 # Remote Hooks
 
-Agent Factory supports remote machine backends via user-provided hook scripts. When configured, remote sessions appear alongside local sessions in the TUI with the same attach/kill/preview experience.
+Agent Factory supports remote machine backends via user-provided hook scripts. When configured, remote sessions appear alongside local sessions in the TUI with the same Agent tab, attach, and kill experience.
 
 ## Configuration
 
@@ -123,16 +123,16 @@ Agent Factory runs this command behind a local PTY and intercepts the configured
 
 When the attach stream ends — whether by the detach key or natural exit — Agent Factory emits terminal reset sequences that restore the local terminal to a neutral state: main screen buffer, cursor visible, no scroll region, all mouse/focus/paste reporting modes off. Your script does not need to emit these sequences; Agent Factory handles cleanup automatically (#845).
 
-Agent Factory also uses this script for the preview pane by running it in a background process and capturing its output.
+Agent Factory also uses this script for the Agent tab by running it in a background process and capturing its output.
 
-#### Preview output contract
+#### Agent tab output contract
 
-Preview output is rendered **inside a TUI pane**, not on a raw terminal. Two rules apply to the captured stream:
+Captured output is rendered **inside a TUI pane**, not on a raw terminal. Two rules apply to the captured stream:
 
 - **Control sequences are stripped.** Cursor movement, erase, scroll-region, alt-screen, and mode sequences (e.g. `\033[H`, `\033[?1049h`, `\033[?25l`), OSC strings, and bare carriage returns are removed before rendering — only SGR color sequences (`\033[...m`) and plain text (with `\n`/`\t`) reach the pane. Scripts don't need to avoid emitting these, but they have no effect.
 - **`\033[2J` (clear screen) starts a fresh snapshot.** Everything captured before the last `\033[2J` is discarded, so a clear-then-capture loop replaces the previous frame instead of concatenating stale ones.
 
-A preview-friendly capture loop looks like:
+A capture loop for the Agent tab looks like:
 
 ```bash
 while true; do
@@ -142,7 +142,7 @@ while true; do
 done
 ```
 
-Each iteration becomes the new preview frame. `capture-pane -e` keeps colors; they are preserved in the pane.
+Each iteration becomes the new Agent tab frame. `capture-pane -e` keeps colors; they are preserved in the pane.
 
 ### `terminal_cmd` (optional)
 
@@ -158,8 +158,8 @@ Agent Factory runs this command behind a local PTY with the same detach-key hand
 
 Remote sessions follow the same ephemeral-tab model as local ones (see the README "Tabs" section), with one structural difference driven by the protocol:
 
-- A remote session **always** has an agent tab (driven by `attach_cmd` and the preview loop above).
-- It has a **terminal tab if and only if `terminal_cmd` is configured.** Attaching to that tab runs `terminal_cmd`; previewing it shows a "Press Enter to open a terminal" prompt (the surface is interactive-only — `terminal_cmd` is never used for preview capture).
+- A remote session **always** has an Agent tab (driven by `attach_cmd` and the capture loop above).
+- It has a **terminal tab if and only if `terminal_cmd` is configured.** Attaching to that tab runs `terminal_cmd`; viewing it in the TUI shows a "Press Enter to open a terminal" prompt (the surface is interactive-only — `terminal_cmd` is never used for preview capture).
 - When `terminal_cmd` is **not** configured, a remote session has only its agent tab, and the would-be Terminal tab shows a "not available — configure `remote_hooks.terminal_cmd`" fallback.
 
 Because the protocol has no run-arbitrary-command verb, remote sessions **cannot** host extra process tabs: the `t` new-tab key, `af sessions tab-create`, and `af sessions tab-delete` are rejected for remote sessions with a message pointing at `terminal_cmd`. A remote session's terminal tab is the one defined by `terminal_cmd` and nothing else. These tabs persist across an `af`/daemon restart like local tabs, but are reconstructed from your live `terminal_cmd` config on restore rather than from any saved local session — so adding or removing `terminal_cmd` while `af` is down is honored on the next start.

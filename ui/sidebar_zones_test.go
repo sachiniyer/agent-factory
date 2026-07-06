@@ -81,7 +81,7 @@ func TestSidebarRegistersRowZones(t *testing.T) {
 
 	// The selected (expanded) instance registers its tab child rows, and each
 	// zone's row renders that tab's label.
-	for idx, label := range []string{"1 Preview", "2 Terminal"} {
+	for idx, label := range []string{"1 Agent", "2 Terminal"} {
 		r, ok := reg.Find(zones.TreeTab("t-00", idx))
 		require.True(t, ok, "tab zone for slot %d; got %v", idx, reg.IDs())
 		assert.Equal(t, 1, r.H, "tab rows are single-line")

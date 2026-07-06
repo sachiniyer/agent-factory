@@ -364,7 +364,7 @@ func (w *TabbedWindow) ScrollDown() {
 	}
 }
 
-// IsInPreviewTab returns true if the agent (Preview) tab is the pane's tab.
+// IsInPreviewTab returns true if the Agent tab is the pane's tab.
 func (w *TabbedWindow) IsInPreviewTab() bool {
 	return w.isAgentSlot()
 }

@@ -252,7 +252,7 @@ func (m *Menu) addInstanceOptions() {
 	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach}
 
 	// Navigation group: every tab is a captured tmux session and supports
-	// scroll mode (#930 PR 2 — the agent "Preview" tab and the terminal tab
+	// scroll mode (#930 PR 2 — the Agent tab and the terminal tab
 	// both scroll), so the scroll keys always show for an instance.
 	actionGroup = append(actionGroup, keys.KeyShiftUp)
 	actionGroup = append(actionGroup, keys.KeyShiftDown)

@@ -44,11 +44,11 @@ func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 	}
 }
 
-// TestMenuPreviewTabShowsBothScrollKeys verifies that the preview tab also
-// surfaces both scroll shortcuts — preview supports scrolling identically to
+// TestMenuAgentTabShowsBothScrollKeys verifies that the Agent tab also
+// surfaces both scroll shortcuts — the agent output supports scrolling identically to
 // terminal, and the help screen documents the shortcuts for both. Regression
 // test for issue #467.
-func TestMenuPreviewTabShowsBothScrollKeys(t *testing.T) {
+func TestMenuAgentTabShowsBothScrollKeys(t *testing.T) {
 	m := NewMenu()
 	m.SetInstance(readyUIInstance())
 	m.SetActiveTab(0)
@@ -64,10 +64,10 @@ func TestMenuPreviewTabShowsBothScrollKeys(t *testing.T) {
 	}
 
 	if gotShiftUp != 1 {
-		t.Errorf("expected exactly 1 KeyShiftUp in preview tab menu, got %d", gotShiftUp)
+		t.Errorf("expected exactly 1 KeyShiftUp in agent tab menu, got %d", gotShiftUp)
 	}
 	if gotShiftDown != 1 {
-		t.Errorf("expected exactly 1 KeyShiftDown in preview tab menu, got %d", gotShiftDown)
+		t.Errorf("expected exactly 1 KeyShiftDown in agent tab menu, got %d", gotShiftDown)
 	}
 }
 

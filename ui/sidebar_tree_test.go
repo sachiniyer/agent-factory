@@ -61,7 +61,7 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 
 	s.SetSelectedInstance(0)
 	out = s.String()
-	assert.Contains(t, out, "├ 1 Preview *", "agent tab child with slot number and active marker")
+	assert.Contains(t, out, "├ 1 Agent *", "agent tab child with slot number and active marker")
 	assert.Contains(t, out, "└ 2 Terminal", "terminal tab child with └ terminator")
 	assert.Contains(t, out, "▾", "selected instance shows the expanded arrow")
 	assert.Contains(t, out, "▸", "non-selected instance stays collapsed")
@@ -71,7 +71,7 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 	s.proj.SetActiveTab(1)
 	out = s.String()
 	assert.Contains(t, out, "└ 2 Terminal *")
-	assert.NotContains(t, out, "├ 1 Preview *")
+	assert.NotContains(t, out, "├ 1 Agent *")
 }
 
 // TestSidebarTreeFreshInstanceSingleTabRow pins the #1100 tree rendering: a
@@ -92,7 +92,7 @@ func TestSidebarTreeFreshInstanceSingleTabRow(t *testing.T) {
 
 	require.Equal(t, 1, tabRowCount(s), "fresh instance: exactly one tab row")
 	out := s.String()
-	assert.Contains(t, out, "└ 1 Preview *", "the agent tab is the only — and last — child row")
+	assert.Contains(t, out, "└ 1 Agent *", "the agent tab is the only — and last — child row")
 	assert.NotContains(t, out, "Terminal", "no phantom Terminal row before t is pressed")
 
 	// `t` materializes the shell tab; the tree grows a real second row.

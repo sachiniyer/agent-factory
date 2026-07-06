@@ -176,7 +176,7 @@ func TestPane_HeaderAnnotatesSelectionDivergence(t *testing.T) {
 	require.Same(t, alpha, paneA.Instance(), "selection must not retarget explicit panes")
 
 	view := h.View()
-	assert.Contains(t, view, "alpha · Preview · selected: beta · Preview",
+	assert.Contains(t, view, "alpha · Agent · selected: beta · Agent",
 		"the visible pane header must reconcile selected row vs shown content")
 }
 
@@ -270,9 +270,9 @@ func TestPane_NumberJumpAnnotatesSelectedTabDivergence(t *testing.T) {
 	assert.Equal(t, 1, paneB.Tab(), "focused beta pane jumps to tab 2")
 	assert.Equal(t, 0, h.store.ActiveTab(), "pane-focused jump must not retarget the sidebar selection")
 	view := h.View()
-	assert.Contains(t, view, "beta · Terminal · selected: beta · Preview",
+	assert.Contains(t, view, "beta · Terminal · selected: beta · Agent",
 		"pane header shows the jumped tab and the still-selected tree tab")
-	assert.Contains(t, view, "1 Preview *", "sidebar active-tab marker stays on the selected tab")
+	assert.Contains(t, view, "1 Agent *", "sidebar active-tab marker stays on the selected tab")
 }
 
 // TestPane_FocusRingCyclesNPanes: with three panes open, Tab cycles
@@ -777,7 +777,7 @@ func TestE2E_PaneFlow(t *testing.T) {
 	// Pane 2's tab label is whatever the shared active-tab index resolved to
 	// after the tree walk (the index survives instance switches by design),
 	// so assert the instance halves only.
-	assert.Contains(t, view, "alpha · Preview", "pane 1 header shows its binding")
+	assert.Contains(t, view, "alpha · Agent", "pane 1 header shows its binding")
 	assert.Contains(t, view, "beta · ", "pane 2 header shows its binding")
 
 	// Tab from the beta pane wraps via automations/tree back around to the

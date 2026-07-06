@@ -47,7 +47,7 @@ func startedRemoteInstance(t *testing.T, withTerminal bool) *session.Instance {
 }
 
 // TestTabbedWindowRemoteTabBar verifies a remote instance is tab-driven: its
-// tab set is the agent (Preview) tab plus a Terminal tab only when
+// tab set is the Agent tab plus a Terminal tab only when
 // terminal_cmd is configured — never the local two-tab default when
 // terminal_cmd is absent.
 func TestTabbedWindowRemoteTabBar(t *testing.T) {
@@ -59,8 +59,8 @@ func TestTabbedWindowRemoteTabBar(t *testing.T) {
 		withTerm   bool
 		wantLabels []string
 	}{
-		{"with terminal_cmd shows agent + terminal", true, []string{"Preview", "Terminal"}},
-		{"without terminal_cmd shows only the agent tab", false, []string{"Preview"}},
+		{"with terminal_cmd shows agent + terminal", true, []string{"Agent", "Terminal"}},
+		{"without terminal_cmd shows only the agent tab", false, []string{"Agent"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := startedRemoteInstance(t, tc.withTerm)

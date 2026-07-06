@@ -12,7 +12,7 @@
 #     workspace pane the way the agent transcript (pre-streamed at native
 #     width) would not.
 #   * ASCII-only markers. The tab is a raw passthrough terminal (unlike the
-#     agent Preview, which af renders itself), so multibyte glyphs like the
+#     Agent tab, which af renders itself), so multibyte glyphs like the
 #     Vite "arrow" can degrade to a box/underscore depending on the pane's
 #     locale. A plain ">" bullet reads just as well and never mangles.
 # Nothing here talks to the network.

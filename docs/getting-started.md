@@ -46,7 +46,7 @@ The TUI opens with an empty sidebar. From here:
 1. Press **`n`** to create a new session. Give it a name and, optionally, an
    choose the agent with **Tab**. `af` creates a fresh git worktree on a new
    branch and starts your agent in it.
-2. The session appears in the sidebar with a live status. The **preview pane**
+2. The session appears in the sidebar with a live status. The **Agent tab**
    on the right shows a snapshot of the agent's terminal — you can watch its
    progress without attaching.
 3. Press **`↵`** (Enter) to **interact** with the selected agent right in the
@@ -99,6 +99,6 @@ See [The daemon](concepts/daemon.md) for what it owns and why.
 
 - [Concepts: worktree-isolated agents](concepts/worktree-agents.md) — the core
   model.
-- [The TUI](concepts/tui.md) — the sidebar, preview, tabs, and key bindings.
+- [The TUI](concepts/tui.md) — the sidebar, Agent tab, tabs, and key bindings.
 - [Configuration](configuration.md) — choosing agents, global vs. in-repo
   config, and every key.

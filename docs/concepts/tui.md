@@ -16,7 +16,7 @@ af
 - **Sidebar.** Every session, with a live status indicator (running, waiting on
   you, hit a usage limit, dead-and-being-recovered). Sessions are grouped and
   navigable with the arrow keys or `j`/`k`.
-- **Preview pane.** A snapshot of the selected agent's terminal, updated as it
+- **Agent tab.** A snapshot of the selected agent's terminal, updated as it
   works — so you can follow progress across several agents without attaching to
   any of them. Toggle it with `s` (open) and `x` (hide).
 

@@ -362,8 +362,8 @@ func TestRenderTabRows(t *testing.T) {
 	r.SetWidth(30)
 	r.SetIndexWidth(1)
 
-	mid := ansiEscape.ReplaceAllString(r.RenderTab("Preview", 1, false, false, true), "")
-	assert.Contains(t, mid, "├ 1 Preview *", "active non-last tab: ├ connector + slot number + * marker")
+	mid := ansiEscape.ReplaceAllString(r.RenderTab("Agent", 1, false, false, true), "")
+	assert.Contains(t, mid, "├ 1 Agent *", "active non-last tab: ├ connector + slot number + * marker")
 
 	last := ansiEscape.ReplaceAllString(r.RenderTab("Terminal", 2, true, false, false), "")
 	assert.Contains(t, last, "└ 2 Terminal", "last tab uses the └ connector")
@@ -400,25 +400,25 @@ func TestFlatten(t *testing.T) {
 // mid-start) the placeholder is the single guaranteed slot, never a padded
 // two-slot bar that would advertise a phantom Terminal target.
 func TestTabLabelsMirrorRealTabs(t *testing.T) {
-	assert.Equal(t, []string{"Preview"}, TabLabels(nil),
+	assert.Equal(t, []string{"Agent"}, TabLabels(nil),
 		"nil instance: single-slot placeholder, no phantom Terminal")
 
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "labeled", Path: t.TempDir(), Program: "test",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"Preview"}, TabLabels(inst),
+	assert.Equal(t, []string{"Agent"}, TabLabels(inst),
 		"mid-start (no tabs yet): single-slot placeholder")
 
 	inst.AddTabForTest("agent", session.TabKindAgent)
-	assert.Equal(t, []string{"Preview"}, TabLabels(inst),
+	assert.Equal(t, []string{"Agent"}, TabLabels(inst),
 		"fresh instance (#1100): exactly one real slot, no padding to two")
 
 	inst.AddTabForTest("shell", session.TabKindShell)
-	assert.Equal(t, []string{"Preview", "Terminal"}, TabLabels(inst),
+	assert.Equal(t, []string{"Agent", "Terminal"}, TabLabels(inst),
 		"after t: the on-demand terminal is the second slot")
 
 	inst.AddTabForTest("btop", session.TabKindProcess)
-	assert.Equal(t, []string{"Preview", "Terminal", "btop"}, TabLabels(inst),
+	assert.Equal(t, []string{"Agent", "Terminal", "btop"}, TabLabels(inst),
 		"process tabs extend the list under their own names")
 }
