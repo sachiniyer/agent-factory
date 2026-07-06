@@ -72,6 +72,19 @@ func visibleTitles(h *home) []string {
 	return out
 }
 
+func TestFirstRunWorkspaceEmptyState(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 120, 30)
+
+	view := h.View()
+
+	assert.Contains(t, view, "No sessions yet")
+	assert.Contains(t, view, "Press n to create a local session")
+	assert.Contains(t, view, "Press ? for all keys")
+	assert.Contains(t, view, "af doctor --setup")
+	assert.NotContains(t, view, "s opens the selected tab")
+}
+
 // TestPane_OpenHideFlow walks the core verb set: s with tree focus opens the
 // selection as a focused pane; a second s on another instance opens a second
 // pane to the RIGHT; x hides the focused pane, the survivor re-divides the

@@ -149,13 +149,17 @@ echo "Version: $installed_version"
 
 case ":$PATH:" in
 	*":$INSTALL_DIR:"*)
-		echo "Run 'af' in a git repository to launch the TUI."
+		echo "Next:"
+		echo "  1. Make sure tmux, git, and an agent CLI (Claude Code, Codex, Aider, or Gemini) are installed."
+		echo "  2. Run: af doctor --setup"
+		echo "  3. In a git repository, run: af"
 		;;
 	*)
 		echo ""
 		echo "NOTE: $INSTALL_DIR is not on your PATH."
 		echo "Add it to your shell profile, e.g.:"
 		echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
-		echo "Then restart your shell, or run af directly: $INSTALL_DIR/af"
+		echo "Then restart your shell and run: af doctor --setup"
+		echo "You can also run the installed binary directly: $INSTALL_DIR/af doctor --setup"
 		;;
 esac

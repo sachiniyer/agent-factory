@@ -95,7 +95,8 @@ af version             # print the version and the release URL
 af debug               # print the resolved config and its path
 af keys                # print the effective TUI key bindings (defaults + [keys] rebinds)
 af upgrade             # self-upgrade to the latest GitHub release (Linux/macOS)
-af doctor              # diagnose leaked processes/sessions/temp homes and daemon health
+af doctor --setup      # verify first-run prerequisites and writable storage
+af doctor              # diagnose setup, leaked resources, and daemon health
 af doctor --fix        # also apply the safe remediations
 af bug-report          # bundle logs + versions + tasks + redacted state into one file to attach
 af bug-report --json   # emit the structured manifest to stdout instead of writing a file
@@ -115,6 +116,10 @@ scrubbed everywhere — but perfect redaction is impossible, so **review the fil
 before sharing it publicly**. It is read-only and local (like `af doctor`): it
 never dials the daemon or the network, and is not part of the HTTP `af api`
 surface.
+
+`af doctor --setup` is the first-run profile: it checks AF home/config/state/log
+writability, git and git identity, tmux, configured agent commands, daemon
+health, and remote-hook setup for the current repo when configured.
 
 `af doctor` is read-only by default: it reports orphaned processes left behind
 by dead sessions, processes pegging a CPU core inside live sessions, `af_` tmux

@@ -81,6 +81,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				))
 			}
 		}
+		if err := m.preflightSessionCreate(instance); err != nil {
+			return m, m.handleError(err)
+		}
 
 		// Apply the program selected during naming
 		instance.Program = m.pendingProgram
@@ -174,6 +177,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // If remote is true, the instance is forced to use the remote hook backend.
 func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.pendingProgram = m.program
+	if m.pendingProgram == "" && m.appConfig != nil {
+		m.pendingProgram = m.appConfig.DefaultProgram
+	}
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:       "",
 		Path:        ".",

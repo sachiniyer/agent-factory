@@ -40,6 +40,7 @@ func newTestHome(t *testing.T) *home {
 	t.Cleanup(SetTaskAdderForTest(task.AddTask))
 	t.Cleanup(SetTaskUpdaterForTest(task.UpdateTask))
 	t.Cleanup(SetTaskRemoverForTest(task.RemoveTask))
+	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
 	// The tab + PR-info mutations now route through daemon RPCs (#960 PR 2).
 	// Stub the seams with safe defaults so tests that incidentally trigger them

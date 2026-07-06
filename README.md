@@ -47,6 +47,10 @@ The installer places `af` in `~/.local/bin` by default. Override with
 Run `af upgrade` or rerun the script to update. Installed binaries auto-update
 on the stable channel unless you opt into preview builds in config.
 
+After install, run `af doctor --setup` to verify tmux, git, your configured
+agent command, git identity, config/state/log storage, and daemon health before
+creating your first session.
+
 Build from source with Go 1.24+:
 
 ```bash
@@ -61,6 +65,7 @@ Run `af` inside a git repository:
 
 ```bash
 cd your-project
+af doctor --setup
 af
 ```
 

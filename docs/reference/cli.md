@@ -25,7 +25,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af daemon status`](#af-daemon-status) — Report daemon liveness, sockets, pid, and autostart
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
 - [`af debug`](#af-debug) — Print debug information like config paths
-- [`af doctor`](#af-doctor) — Diagnose leaked processes, sessions, temp homes, and daemon health
+- [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af reset`](#af-reset) — Reset all stored instances
 - [`af sessions`](#af-sessions) — Manage sessions
@@ -70,7 +70,7 @@ af [flags]
 - [`af config`](#af-config) — Read and write the global agent-factory config
 - [`af daemon`](#af-daemon) — Manage the background daemon that schedules tasks
 - [`af debug`](#af-debug) — Print debug information like config paths
-- [`af doctor`](#af-doctor) — Diagnose leaked processes, sessions, temp homes, and daemon health
+- [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af reset`](#af-reset) — Reset all stored instances
 - [`af sessions`](#af-sessions) — Manage sessions
@@ -452,9 +452,21 @@ af debug
 
 ## af doctor
 
-Diagnose leaked processes, sessions, temp homes, and daemon health
+Diagnose setup, daemon health, and leaked session resources
 
-Diagnose problems that accumulate silently on a machine running agent-factory:
+Diagnose the local agent-factory environment.
+
+For first-run setup checks, use:
+
+  af doctor --setup
+
+The setup profile checks the prerequisites needed to create the first local
+session: AF home writability, config materialization and parsing, git and the
+current repo, git identity, tmux, configured agent commands, state/log storage,
+daemon health, and remote-hook setup when this repo configures it.
+
+Without --setup, doctor runs the full maintenance sweep for problems that
+accumulate silently on a machine running agent-factory:
 
   - orphaned processes spawned by sessions that no longer exist
   - processes that escaped a live session's pane, or peg a CPU core for hours
@@ -481,6 +493,7 @@ af doctor [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--fix` |  | apply safe remediations (kill verified orphans, remove stale temp homes) |
+| `--setup` |  | run the first-run setup profile (prerequisites, config, agent commands) |
 
 ## af keys
 
@@ -562,7 +575,7 @@ af sessions archive <title>
 
 Attach to a session's terminal
 
-Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-b d).
+Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-w).
 
 ```
 af sessions attach <title>

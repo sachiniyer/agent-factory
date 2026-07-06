@@ -26,3 +26,28 @@ func EmptyWorkspace(r layout.Rect) string {
 	inner := lipgloss.Place(iw, ih, lipgloss.Center, lipgloss.Center, hint)
 	return layout.ClampToRect(blurredWindowStyle.Render(inner), r)
 }
+
+// FirstRunWorkspace renders the zero-session onboarding state. It is distinct
+// from EmptyWorkspace because there is no selected tab yet, so the useful next
+// action is session creation, not opening a pane.
+func FirstRunWorkspace(r layout.Rect) string {
+	if r.Empty() {
+		return ""
+	}
+	iw := r.W - blurredWindowStyle.GetHorizontalFrameSize()
+	ih := r.H - blurredWindowStyle.GetVerticalFrameSize()
+	if iw < 0 {
+		iw = 0
+	}
+	if ih < 0 {
+		ih = 0
+	}
+	content := lipgloss.JoinVertical(lipgloss.Center,
+		paneHeaderDimStyle.Render("No sessions yet"),
+		paneHeaderDimStyle.Render("Press n to create a local session"),
+		paneHeaderDimStyle.Render("Press ? for all keys"),
+		paneHeaderDimStyle.Render("Setup check: run af doctor --setup"),
+	)
+	inner := lipgloss.Place(iw, ih, lipgloss.Center, lipgloss.Center, content)
+	return layout.ClampToRect(blurredWindowStyle.Render(inner), r)
+}

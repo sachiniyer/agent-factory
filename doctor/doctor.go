@@ -73,6 +73,10 @@ func (r *Report) UnresolvedCount() int {
 type Options struct {
 	// Fix applies the safe remediations instead of only reporting.
 	Fix bool
+	// Setup runs the onboarding profile only: local prerequisites, writable
+	// AF home/config/state/log storage, daemon health, and remote-hook setup.
+	// It intentionally skips the full process/tmux/temp-home leak sweep.
+	Setup bool
 	// ConfigDir is the active agent-factory home; defaults to
 	// config.GetConfigDir().
 	ConfigDir string
@@ -143,11 +147,17 @@ func Run(opts Options) (*Report, error) {
 		opts.killTermWait = 2 * time.Second
 	}
 
+	ctx := &scanContext{opts: opts, selfAncestors: map[int]bool{}}
+	report := &Report{}
+	if opts.Setup {
+		checkSetup(ctx, report)
+		return report, nil
+	}
+
 	if opts.snapshot == nil {
 		opts.snapshot = proctree.Snapshot
 	}
 
-	ctx := &scanContext{opts: opts, selfAncestors: map[int]bool{}}
 	if snap, err := opts.snapshot(); err == nil {
 		ctx.snap = snap
 		for pid := range selfAndAncestors(snap) {
@@ -155,7 +165,6 @@ func Run(opts Options) (*Report, error) {
 		}
 	}
 
-	report := &Report{}
 	checkDaemonHealth(ctx, report)
 	checkOrphanedProcesses(ctx, report)
 	checkRunawayChildren(ctx, report)
