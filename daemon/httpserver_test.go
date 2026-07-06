@@ -141,6 +141,23 @@ func TestHTTP_MalformedJSON_400(t *testing.T) {
 	assert.Contains(t, env.Error.Message, "malformed JSON")
 }
 
+// TestHTTP_UnknownJSONField_400 covers strict request decoding: a typo like
+// repo_idd must fail as a bad request instead of silently becoming the
+// zero-value RepoID and dispatching an all-repo Snapshot.
+func TestHTTP_UnknownJSONField_400(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/Snapshot", `{"repo_idd":"typo"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	env := decodeEnvelope(t, rec)
+	require.Nil(t, env.Data)
+	require.NotNil(t, env.Error)
+	assert.Contains(t, env.Error.Message, `unknown field "repo_idd"`)
+}
+
 // TestHTTP_OversizeBody_413_NotDispatched covers the body-over-limit → 413
 // mapping AND proves the oversize request is REJECTED, never
 // truncated-then-dispatched: with a well-formed AddTask body that exceeds the
