@@ -29,9 +29,10 @@ Because each session gets its own worktree:
 
 1. **Create.** You give a session a name (and optionally a starting prompt).
    `af` creates a branch (prefixed per your config, e.g. `af/`), adds a worktree
-   for it next to your repo, and starts your chosen agent in that directory. Any
-   configured post-worktree setup commands run first, so the agent starts in a
-   ready environment.
+   for it (next to your repo by default; see `worktree_root` in
+   [configuration](../configuration.md) for the subdirectory option), and starts
+   your chosen agent in that directory. Any configured post-worktree setup commands
+   run first, so the agent starts in a ready environment.
 2. **Work.** The agent runs in its worktree. You watch it in the preview pane,
    interact in-pane, or attach full-screen. Extra [tabs](tui.md#tabs) can run a
    shell or a long-lived process (a dev server, a test watcher) in the *same*
