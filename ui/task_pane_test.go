@@ -340,6 +340,63 @@ func TestTaskPaneEditModeCollapsesLegacyProgramToDefault(t *testing.T) {
 	}
 }
 
+// TestTaskPaneEnterEditSelectedEntersEditWhenTaskExists is the #1249 unit
+// guard: EnterEditSelected drops straight into the edit form for the selected
+// task, so the overlay can open a task into its editable config in a single
+// action rather than list-then-enter.
+func TestTaskPaneEnterEditSelectedEntersEditWhenTaskExists(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "* * * * *",
+		ProjectPath: newGitRepo(t),
+		Program:     "claude",
+		Enabled:     true,
+	}})
+	tp.SetFocus(true)
+	tp.EnterEditSelected()
+	assert.True(t, tp.IsEditing(), "a single action must land directly in edit mode")
+}
+
+// TestTaskPaneEnterEditSelectedNoopsOnEmptyList verifies the empty-list guard:
+// with no tasks there is nothing to edit, so EnterEditSelected stays in list
+// mode where `n` can create the first task (and never indexes an empty slice).
+func TestTaskPaneEnterEditSelectedNoopsOnEmptyList(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{})
+	tp.SetFocus(true)
+	tp.EnterEditSelected()
+	assert.False(t, tp.IsEditing(), "empty list must stay in list mode so `n` works")
+}
+
+// TestTaskPaneEnterEditSelectedThenEscLeavesNoDirty is the #1213 guarantee for
+// the #1249 auto-open: merely opening a task into its edit form (then backing
+// out with Esc) must not mark the task dirty, so save-on-exit won't rewrite an
+// otherwise-untouched task over a concurrent CLI/daemon change.
+func TestTaskPaneEnterEditSelectedThenEscLeavesNoDirty(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "* * * * *",
+		ProjectPath: newGitRepo(t),
+		Program:     "claude",
+		Enabled:     true,
+	}})
+	tp.SetFocus(true)
+	tp.EnterEditSelected()
+	assert.True(t, tp.IsEditing())
+
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc}) // back out to list mode
+	assert.False(t, tp.IsEditing(), "Esc must return to the list")
+	assert.True(t, tp.HasFocus(), "Esc in edit mode keeps the overlay open")
+	assert.False(t, tp.IsDirty(), "auto-opening then cancelling must not mark the task dirty")
+	assert.Empty(t, tp.ConsumeDirty(), "no task should be persisted after a no-op open")
+}
+
 // TestTaskPaneEditModeCtrlCCancels is the regression guard for #526: Ctrl+C
 // inside the edit form must cancel the edit (matching Esc) instead of being
 // silently swallowed. Dirty buffer changes must not be written back.

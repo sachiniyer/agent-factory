@@ -99,6 +99,9 @@ func TestHandleStateTasks_PendingCreateFlushesDirtyTaskState(t *testing.T) {
 	tp.SetTasks(loaded)
 	_, _ = h.showTasksOverlay()
 	require.Equal(t, stateTasks, h.state)
+	// The overlay now opens the task straight into its edit form (#1249); Esc
+	// steps back to the list to drive the list-mode keys below.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 
 	// User presses 'x' to toggle the task off — dirty in memory, not yet on disk.
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
@@ -197,6 +200,9 @@ func TestHandleStateTasks_ValidationFailureLeavesTaskPaneStale(t *testing.T) {
 	_, _ = h.showTasksOverlay()
 	require.Equal(t, stateTasks, h.state)
 	h.errBox.SetSize(500, 1)
+	// The overlay now opens the task straight into its edit form (#1249); Esc
+	// steps back to the list to drive the list-mode keys below.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 
 	// User presses 'x' to toggle the task off — dirty in memory, not yet saved.
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
@@ -335,6 +341,9 @@ func TestSaveContentPaneState_RoutesThroughDaemonRPC(t *testing.T) {
 	h.store.SetTasks(loaded)
 	_, _ = h.showTasksOverlay()
 	require.Equal(t, stateTasks, h.state)
+	// The overlay now opens the task straight into its edit form (#1249); Esc
+	// steps back to the list to drive the list-mode keys below.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 
 	// Swap the write seams for recorders AFTER seeding (the seed used the direct
 	// writer); the save-on-close must now dispatch through these instead of disk.
@@ -417,6 +426,9 @@ func TestSaveContentPaneState_DoesNotClobberUneditedTask(t *testing.T) {
 	h.store.SetTasks(loaded)
 	_, _ = h.showTasksOverlay()
 	require.Equal(t, stateTasks, h.state)
+	// The overlay now opens the task straight into its edit form (#1249); Esc
+	// steps back to the list to drive the list-mode keys below.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 
 	// User toggles Task A (index 0) off — only A is dirty; B is never touched.
 	tp.SelectTask(0)
@@ -604,6 +616,9 @@ func TestSaveContentPaneState_HooksAndTaskFailuresBothSurfaced(t *testing.T) {
 	tp := h.automations.TaskPane()
 	tp.SetTasks(loaded)
 	_, _ = h.showTasksOverlay()
+	// The overlay now opens the task straight into its edit form (#1249); Esc
+	// steps back to the list where `x` toggles enabled and marks it dirty.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	require.True(t, tp.IsDirty(), "toggle must mark the task pane dirty")
 
