@@ -338,10 +338,12 @@ func TestLayoutCutover_DigitJumpGatedByFocusRegion(t *testing.T) {
 	require.Equal(t, 1, h.store.ActiveTab(),
 		"a digit with the automations strip focused must not retarget the selection")
 
-	// A workspace pane focused: digit jumps again.
+	// A workspace pane focused: digit jumps the pane binding without
+	// retargeting the sidebar selection's active tab.
 	alpha := h.store.GetSelectedInstance()
-	openTestPane(t, h, alpha, 0)
+	p := openTestPane(t, h, alpha, 1)
 	require.True(t, layout.IsPaneRegion(h.ring.Active()))
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
-	require.Equal(t, 0, h.store.ActiveTab(), "digit with pane focus jumps tabs")
+	require.Equal(t, 1, h.store.ActiveTab(), "digit with pane focus must not retarget the selection")
+	require.Equal(t, 0, p.Tab(), "digit with pane focus jumps the focused pane's tab")
 }

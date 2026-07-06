@@ -163,6 +163,7 @@ func TestPane_TabDimension(t *testing.T) {
 
 	// Jumping the selection tab must not move the open pane's binding —
 	// and s on the OTHER tab of the same instance opens a second pane.
+	h.focusRegion(layout.RegionTree)
 	_, _ = h.handleTabJump(1)
 	require.Equal(t, 0, h.store.ActiveTab())
 	assert.Equal(t, 1, terminalPane.Tab(), "the pane's tab is bound independently of the selection")
@@ -170,6 +171,46 @@ func TestPane_TabDimension(t *testing.T) {
 	pressKey(t, h, "s")
 	require.Equal(t, 2, h.store.NumOpenPanes(), "each (instance, tab) pair is its own pane")
 	assert.Equal(t, 0, h.store.OpenPanes()[1].Tab())
+}
+
+// TestPane_NumberJumpTargetsFocusedPaneNotSidebarSelection covers the sibling
+// target-resolution path from #1253: digit jumps are routed while a pane is
+// focused, so they must retarget that pane's tab binding instead of the
+// sidebar-selected instance's active tab.
+func TestPane_NumberJumpTargetsFocusedPaneNotSidebarSelection(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Same(t, alpha, paneA.Instance())
+	require.Equal(t, 0, paneA.Tab())
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+	paneB := h.store.OpenPanes()[1]
+	require.Same(t, beta, h.store.GetSelectedInstance())
+	require.Same(t, beta, paneB.Instance())
+	require.Equal(t, 0, h.store.ActiveTab())
+
+	h.focusRegion(layout.PaneRegion(paneA.ID()))
+	_, _ = h.handleTabJump(2)
+
+	assert.Equal(t, 1, paneA.Tab(), "focused pane A must jump to tab 2")
+	assert.Equal(t, 0, paneB.Tab(), "sidebar-selected pane B must not be retargeted")
+	assert.Equal(t, 0, h.store.ActiveTab(), "sidebar active tab must stay on B's tab 1")
+	assert.Same(t, beta, h.store.GetSelectedInstance(), "sidebar selection must stay on B")
+
+	h.focusRegion(layout.RegionTree)
+	_, _ = h.handleTabJump(2)
+
+	assert.Equal(t, 1, h.store.ActiveTab(), "tree-focus jump must still target the sidebar selection")
+	assert.Equal(t, 1, paneA.Tab(), "tree-focus jump must not mutate pane A further")
+	assert.Equal(t, 0, paneB.Tab(), "tree-focus jump only changes the selection's active tab")
 }
 
 // TestPane_FocusRingCyclesNPanes: with three panes open, Tab cycles
@@ -536,13 +577,11 @@ func TestPane_FollowsSameTitleSwap(t *testing.T) {
 		"open-pane bindings must follow a same-title swap (#765 class)")
 }
 
-// TestPane_EnterAttachesSelectionNotFocusedPane: keyboard Enter resolves its
-// target from the SIDEBAR SELECTION — like the open verb — never the focus ring
-// (#1233). With a non-embeddable selection it falls back to the full-screen
-// attach of that selection, whether the ring sits on a pane or the tree; detach
-// hands back focus + panes intact. (The mouse click-to-interact path, which
-// enters the CLICKED pane, is covered by the mouse suite via enterPane.)
-func TestPane_EnterAttachesSelectionNotFocusedPane(t *testing.T) {
+// TestPane_EnterAttachTargetFollowsFocusContext: for non-embeddable panes,
+// keyboard Enter follows the same context rule as the embedded path. A focused
+// pane owns Enter even when the sidebar selection points elsewhere (#1253);
+// with tree focus, Enter falls back to the sidebar selection (#1233/#1236).
+func TestPane_EnterAttachTargetFollowsFocusContext(t *testing.T) {
 	resetDetachWatchdog(t)
 	h := paneTestHome(t)
 	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInstanceAttach{}.mask()))
@@ -565,15 +604,15 @@ func TestPane_EnterAttachesSelectionNotFocusedPane(t *testing.T) {
 		})
 	})
 
-	// Focus alpha's pane: Enter must STILL attach the selection (beta), never
-	// the focused alpha pane — the wrong-target class the #1233 fix closed.
+	// Focus alpha's pane: Enter must attach alpha, never silently retarget to
+	// the sidebar-selected beta.
 	h.focusRegion(layout.PaneRegion(p.ID()))
 	_, cmd := h.handleEnter()
-	require.NotNil(t, cmd, "the selection attach must run")
-	assert.Equal(t, "handleEnter-sidebar", attachedLabel,
-		"Enter resolves the selection, not the focused pane (#1233)")
-	assert.Equal(t, "beta", attachedTitle,
-		"Enter must target the selected beta, not the focused alpha pane")
+	require.NotNil(t, cmd, "the focused-pane attach must run")
+	assert.Equal(t, "handleEnter-pane", attachedLabel,
+		"focused-pane Enter must use the pane attach path")
+	assert.Equal(t, "alpha", attachedTitle,
+		"Enter must target focused alpha, not sidebar-selected beta")
 	endDetachWatchdog()
 
 	// Detach restored everything: focus still on the pane, binding intact.
@@ -581,7 +620,7 @@ func TestPane_EnterAttachesSelectionNotFocusedPane(t *testing.T) {
 	assert.Equal(t, 1, h.store.NumOpenPanes(), "detach keeps the pane open")
 	assert.Equal(t, "alpha", h.store.OpenPanes()[0].Instance().Title)
 
-	// Focus the tree: Enter attaches the same selection.
+	// Focus the tree: Enter attaches the sidebar selection.
 	h.focusRegion(layout.RegionTree)
 	_, cmd = h.handleEnter()
 	require.NotNil(t, cmd)
