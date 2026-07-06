@@ -220,6 +220,7 @@ func TestSetGlobalConfigValueRejectsBadValues(t *testing.T) {
 	writeTempConfig(t, "default_program = 'claude'\n")
 	cases := []struct{ key, val, wantSub string }{
 		{"default_program", "bogus", "must be one of"},
+		{"detach_keys", "alt-w", "detach_keys"},
 		{"daemon_poll_interval", "abc", "integer"},
 		{"daemon_poll_interval", "0", "positive"},
 		{"log_max_backups", "-1", "non-negative"},
@@ -238,6 +239,23 @@ func TestSetGlobalConfigValueRejectsBadValues(t *testing.T) {
 		if !strings.Contains(err.Error(), c.wantSub) {
 			t.Errorf("set %s=%s: error %q missing %q", c.key, c.val, err.Error(), c.wantSub)
 		}
+	}
+}
+
+func TestSetGlobalConfigValueRejectsInvalidDetachKeysWithoutWriting(t *testing.T) {
+	path := writeTempConfig(t, "default_program = 'claude'\ndetach_keys = 'ctrl-w'  # keep\n")
+	before, _ := os.ReadFile(path)
+
+	_, err := SetGlobalConfigValue("detach_keys", "alt-w")
+	if err == nil {
+		t.Fatal("expected invalid detach_keys to be rejected")
+	}
+	if !strings.Contains(err.Error(), "detach_keys") || !strings.Contains(err.Error(), "ctrl-") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Fatalf("config file must be untouched when detach_keys is invalid.\n before: %q\n after:  %q", before, after)
 	}
 }
 
