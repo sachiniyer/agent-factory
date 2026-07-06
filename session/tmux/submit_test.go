@@ -7,8 +7,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	cmdpkg "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,6 +61,15 @@ func bufferOf(args []string) string {
 	return ""
 }
 
+func hasArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCodexSubmitUsesBracketedPaste is the #1254 regression: codex's composer
 // swallows the trailing Enter after a plain `send-keys -l` paste (paste-burst
 // detection), so the prompt lands but never submits. Codex must instead deliver
@@ -102,27 +114,43 @@ func TestCodexSubmitUsesBracketedPaste(t *testing.T) {
 	}
 }
 
-// TestNonCodexSubmitUsesLiteralSendKeys guards against regressing the agents
-// that already submit fine (claude/aider/gemini and unknown/override panes):
-// they keep the plain `send-keys -l` + Enter path and must not switch to
-// bracketed paste.
-func TestNonCodexSubmitUsesLiteralSendKeys(t *testing.T) {
+// TestNonCodexSubmitUsesPlainPasteBuffer guards against regressing the agents
+// that do not need bracketed-paste submit semantics (claude/aider/gemini and
+// unknown/override panes): they use tmux's plain paste-buffer path plus Enter.
+// This keeps codex's #1256 bracketed-paste behavior scoped to codex while
+// avoiding the literal `send-keys -l` wrapped-redraw issue seen in bash-backed
+// sessions (#1292).
+func TestNonCodexSubmitUsesPlainPasteBuffer(t *testing.T) {
 	for _, program := range []string{"claude", "aider", "gemini", "some-custom-shell"} {
 		t.Run(program, func(t *testing.T) {
-			cmds := recordTmuxCommands(t, program, "hello")
+			const prompt = "hello"
+			cmds := recordTmuxCommands(t, program, prompt)
 			joined := joinedArgs(cmds)
 
-			require.Len(t, cmds, 2, "literal path is send-keys -l then send-keys Enter; got %v", joined)
-			require.Contains(t, joined[0], "send-keys", "first command must be send-keys; got %v", joined)
-			require.Contains(t, joined[0], "-l", "non-codex must send text literally; got %v", joined)
-			require.Contains(t, joined[0], "hello", "literal text must be passed as an argv arg; got %v", joined)
-			require.Contains(t, joined[1], "Enter", "second command must submit with Enter; got %v", joined)
+			require.Len(t, cmds, 3, "plain paste path is load-buffer, paste-buffer, send-keys Enter; got %v", joined)
+			require.Contains(t, joined[0], "load-buffer", "first command must load the paste buffer; got %v", joined)
+			require.Equal(t, prompt, cmds[0].stdin, "paste text must be streamed on stdin")
+			require.Contains(t, joined[1], "paste-buffer", "second command must paste the buffer; got %v", joined)
+			require.Contains(t, joined[1], "-d", "paste must delete the buffer afterward (-d)")
+			require.False(t, hasArg(cmds[1].args, "-p"),
+				"non-codex panes must use plain paste, not bracketed paste; got %v", joined)
+			require.Contains(t, joined[2], "send-keys", "last command must send Enter; got %v", joined)
+			require.Contains(t, joined[2], "Enter", "last command must submit with Enter; got %v", joined)
 
 			for _, j := range joined {
-				require.NotContains(t, j, "paste-buffer",
-					"non-codex agents must not use the bracketed-paste path; got %v", joined)
-				require.NotContains(t, j, "load-buffer",
-					"non-codex agents must not use the bracketed-paste path; got %v", joined)
+				require.NotContains(t, j, "send-keys -t =af_proj: -l",
+					"non-codex must not use the literal send-keys path that redraws wrapped bash input (#1292); got %v", joined)
+			}
+
+			loadBuf, pasteBuf := bufferOf(cmds[0].args), bufferOf(cmds[1].args)
+			require.NotEmpty(t, loadBuf, "load-buffer must name a buffer; got %v", joined)
+			require.Equal(t, loadBuf, pasteBuf, "paste must read back the buffer the load wrote; got %v", joined)
+
+			for _, c := range cmds {
+				if tgt := targetOf(c.args); tgt != "" {
+					require.Equal(t, "=af_proj:", tgt,
+						"plain paste submit commands must target by exact match (#1006); got %q in %v", tgt, joined)
+				}
 			}
 		})
 	}
@@ -181,4 +209,50 @@ func TestCodexSubmitConcurrentDeliveriesUseDistinctBuffers(t *testing.T) {
 	// Every paste targeted a buffer that some load wrote, and no fixed name was
 	// shared across all calls.
 	require.Equal(t, unique, pasteBufs, "each paste must read back a per-call load buffer")
+}
+
+func TestBashWrappedSubmitDoesNotDuplicateCommandPrefix(t *testing.T) {
+	testguard.IsolateTmux(t)
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+
+	session := newTmuxSession(
+		toTmuxName("wrap-submit", ""),
+		"bash --noprofile --norc -i",
+		MakePtyFactory(),
+		cmdpkg.MakeExecutor(),
+	)
+	require.NoError(t, session.Start(t.TempDir()))
+	t.Cleanup(func() {
+		require.NoError(t, session.Close())
+	})
+
+	require.NoError(t, session.SetDetachedSize(24, 10))
+	resizeCmd := exec.Command("tmux", "resize-window", "-t", exactTarget(session.sanitizedName), "-x", "24", "-y", "10")
+	require.NoError(t, session.cmdExec.Run(resizeCmd))
+
+	time.Sleep(100 * time.Millisecond)
+
+	const command = "printf '%s\\n' AF1292_DONE"
+	require.NoError(t, session.SendKeysCommand(command))
+
+	require.Eventually(t, func() bool {
+		content, err := captureRawPane(session)
+		return err == nil && strings.Contains(content, "\nAF1292_DONE\n")
+	}, 2*time.Second, 50*time.Millisecond, "wrapped bash command did not run")
+
+	content, err := captureRawPane(session)
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(content, "printf '%s"),
+		"wrapped command prefix must be captured once, not duplicated:\n%s", content)
+}
+
+func captureRawPane(session *TmuxSession) (string, error) {
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-t", exactTarget(session.sanitizedName))
+	out, err := session.cmdExec.Output(cmd)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
