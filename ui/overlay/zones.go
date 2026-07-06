@@ -126,7 +126,7 @@ func (s *SearchOverlay) RegisterZones(reg *zones.Registry, origin layout.Point) 
 func searchRowTitle(line string) (string, bool) {
 	t := strings.Trim(xansi.Strip(line), "│ ")
 	r, size := utf8.DecodeRuneInString(t)
-	if r != '●' && r != '○' && r != '◌' {
+	if r != '●' && r != '○' && r != '◌' && r != '◆' {
 		return "", false
 	}
 	t = strings.TrimLeft(t[size:], " ")
