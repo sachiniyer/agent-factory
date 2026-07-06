@@ -260,11 +260,16 @@ func EffectiveBindings(overrides map[string][]string) ([]BindingInfo, error) {
 	if err := ValidateOverrides(overrides); err != nil {
 		return nil, err
 	}
+	byConfigKey := specsByConfigKey()
+	normalizedOverrides, err := normalizeOverrides(overrides, byConfigKey)
+	if err != nil {
+		return nil, err
+	}
 	var rebindable, fixed []BindingInfo
 	for _, sp := range specs {
 		info := BindingInfo{Action: sp.configKey, Desc: sp.desc, Keys: sp.keys, Default: sp.keys}
 		if sp.configKey != "" {
-			if o, ok := overrides[sp.configKey]; ok {
+			if o, ok := normalizedOverrides[sp.configKey]; ok {
 				info.Keys = o
 				info.Rebound = true
 			}
@@ -293,27 +298,10 @@ func RebindableActions() []string {
 // buildMaps generates the strings and bindings maps from specs with
 // overrides applied, validating as it goes.
 func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]key.Binding, error) {
-	byConfigKey := map[string]spec{}
-	for _, sp := range specs {
-		if sp.configKey != "" {
-			byConfigKey[sp.configKey] = sp
-		}
-	}
-	for action, keyList := range overrides {
-		if _, ok := byConfigKey[action]; !ok {
-			return nil, nil, fmt.Errorf("keys: unknown action %q (rebindable actions: %s)", action, strings.Join(RebindableActions(), ", "))
-		}
-		if len(keyList) == 0 {
-			return nil, nil, fmt.Errorf("keys: action %q has no keys; give it a key string or a list of key strings", action)
-		}
-		for _, k := range keyList {
-			if !validKeySpec(k) {
-				return nil, nil, fmt.Errorf("keys: action %q: %q is not a valid key (use a single character, a named key like \"up\" or \"f5\", or a ctrl+/alt+/shift+ combination)", action, k)
-			}
-			if reason, reserved := reservedKeys[k]; reserved {
-				return nil, nil, fmt.Errorf("keys: action %q: %q is reserved — %s", action, k, reason)
-			}
-		}
+	byConfigKey := specsByConfigKey()
+	normalizedOverrides, err := normalizeOverrides(overrides, byConfigKey)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	stringsMap := make(map[string]KeyName, 64)
@@ -327,7 +315,7 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 		effective := sp.keys
 		overridden := false
 		if sp.configKey != "" {
-			if o, ok := overrides[sp.configKey]; ok {
+			if o, ok := normalizedOverrides[sp.configKey]; ok {
 				effective = o
 				overridden = true
 			}
@@ -359,6 +347,44 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 	return stringsMap, bindings, nil
 }
 
+func specsByConfigKey() map[string]spec {
+	byConfigKey := make(map[string]spec, len(specs))
+	for _, sp := range specs {
+		if sp.configKey != "" {
+			byConfigKey[sp.configKey] = sp
+		}
+	}
+	return byConfigKey
+}
+
+func normalizeOverrides(overrides map[string][]string, byConfigKey map[string]spec) (map[string][]string, error) {
+	if len(overrides) == 0 {
+		return nil, nil
+	}
+	normalized := make(map[string][]string, len(overrides))
+	for action, keyList := range overrides {
+		if _, ok := byConfigKey[action]; !ok {
+			return nil, fmt.Errorf("keys: unknown action %q (rebindable actions: %s)", action, strings.Join(RebindableActions(), ", "))
+		}
+		if len(keyList) == 0 {
+			return nil, fmt.Errorf("keys: action %q has no keys; give it a key string or a list of key strings", action)
+		}
+		normalizedList := make([]string, 0, len(keyList))
+		for _, k := range keyList {
+			normalizedKey, ok := normalizeKeySpec(k)
+			if !ok {
+				return nil, fmt.Errorf("keys: action %q: %q is not a valid key (use a single character, a named key like \"up\" or \"f5\", or a ctrl+/alt+/shift+ combination)", action, k)
+			}
+			if reason, reserved := reservedKeys[normalizedKey]; reserved {
+				return nil, fmt.Errorf("keys: action %q: %q is reserved — %s", action, normalizedKey, reason)
+			}
+			normalizedList = append(normalizedList, normalizedKey)
+		}
+		normalized[action] = normalizedList
+	}
+	return normalized, nil
+}
+
 // helpLabelFor renders a key list for the help/menu column: each key mapped
 // through keyDisplayNames and joined with "/" (e.g. ["up","k"] → "↑/k").
 func helpLabelFor(keyList []string) string {
@@ -375,30 +401,61 @@ func helpLabelFor(keyList []string) string {
 
 // validKeySpec reports whether s is a key string bubbletea can produce:
 // an optional run of ctrl+/alt+/shift+ modifiers followed by a named key or
-// a single character. Whitespace never matches a tea.KeyMsg.String(), so it
-// is rejected outright (the classic mistake is "space", which IS the named
-// form bubbletea uses, vs " ").
+// a single character. Modifier order is accepted flexibly, but runtime maps
+// store normalizeKeySpec's Bubble Tea spelling so override lookup compares
+// against tea.KeyMsg.String() forms. Whitespace never matches a configured
+// key string, so it is rejected outright (the classic mistake is "space",
+// which IS the named form bubbletea uses, vs " ").
 func validKeySpec(s string) bool {
+	_, ok := normalizeKeySpec(s)
+	return ok
+}
+
+func normalizeKeySpec(s string) (string, bool) {
 	if s == "" || strings.ContainsAny(s, " \t\n") {
-		return false
+		return "", false
 	}
 	rest := s
+	var ctrl, alt, shift bool
 	for {
 		switch {
 		case strings.HasPrefix(rest, "ctrl+"):
+			if ctrl {
+				return "", false
+			}
+			ctrl = true
 			rest = rest[len("ctrl+"):]
 		case strings.HasPrefix(rest, "alt+"):
+			if alt {
+				return "", false
+			}
+			alt = true
 			rest = rest[len("alt+"):]
 		case strings.HasPrefix(rest, "shift+"):
+			if shift {
+				return "", false
+			}
+			shift = true
 			rest = rest[len("shift+"):]
 		default:
-			if namedKeys[rest] {
-				return true
+			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
+				return "", false
 			}
-			return utf8.RuneCountInString(rest) == 1
+			var b strings.Builder
+			if alt {
+				b.WriteString("alt+")
+			}
+			if ctrl {
+				b.WriteString("ctrl+")
+			}
+			if shift {
+				b.WriteString("shift+")
+			}
+			b.WriteString(rest)
+			return b.String(), true
 		}
 		if rest == "" {
-			return false
+			return "", false
 		}
 	}
 }
