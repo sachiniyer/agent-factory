@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -118,4 +119,31 @@ func TestAPICmd_CurlExampleShape(t *testing.T) {
 			assert.Contains(t, line, "-d '{}'", "POST curl must include an empty JSON body")
 		}
 	}
+}
+
+func TestAPICmd_CurlExampleQuotesSpacedSocketPath(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "home with spaces and 'quote'", "daemon-http.sock")
+	line := curlExample(socketPath, daemon.HTTPRoute{Method: "GET", Path: "/v1/health"})
+
+	binDir := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "curl-args")
+	fakeCurl := filepath.Join(binDir, "curl")
+	require.NoError(t, os.WriteFile(fakeCurl, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AF_CURL_ARGS\"\n"), 0755))
+
+	cmd := exec.Command("sh", "-c", line)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AF_CURL_ARGS="+argsPath,
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	raw, err := os.ReadFile(argsPath)
+	require.NoError(t, err)
+	args := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	require.Equal(t, []string{
+		"--unix-socket",
+		socketPath,
+		"http://localhost/v1/health",
+	}, args)
 }
