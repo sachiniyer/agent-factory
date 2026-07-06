@@ -40,12 +40,17 @@ jobs:
             changed="$(git diff --name-only "$before" "$after")"
           fi
 
-          docs_paths='^(docs/|mkdocs\.yml$|docs_gen\.go$|scripts/gen-docs\.sh$|requirements-docs\.txt$|README\.md$)'
-          if printf '%s\n' "$changed" | grep -Eq "$docs_paths"; then
-            echo "docs_changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "docs_changed=false" >> "$GITHUB_OUTPUT"
-          fi
+          docs_changed=false
+          while IFS= read -r path; do
+            case "$path" in
+              docs/*|mkdocs.yml|README.md|docs_gen.go|requirements-docs.txt|scripts/gen-docs.sh)
+                docs_changed=true
+                break
+                ;;
+            esac
+          done <<< "$changed"
+
+          echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -95,8 +100,31 @@ jobs:
       contents: read
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url || steps.deployment_final.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+
+      - name: Back off before retrying Pages deploy
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 15
+
+      - name: Retry GitHub Pages deploy
+        id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+
+      - name: Back off before final Pages deploy retry
+        if: steps.deployment.outcome == 'failure' && steps.deployment_retry.outcome == 'failure'
+        run: sleep 30
+
+      - name: Final GitHub Pages deploy retry
+        id: deployment_final
+        if: steps.deployment.outcome == 'failure' && steps.deployment_retry.outcome == 'failure'
+        timeout-minutes: 5
         uses: actions/deploy-pages@v4
