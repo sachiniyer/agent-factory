@@ -16,53 +16,29 @@ import (
 // assume serialization.
 var pasteBufferSeq atomic.Uint64
 
-// SendKeysCommand sends text to the tmux pane using the `tmux send-keys` command
-// instead of writing to the PTY. This is more reliable for headless/scheduled runs
-// where the PTY connection may not persist. Text is sent literally (with -l flag)
-// followed by a pause to let terminal control sequences drain, then Enter to submit.
+// SendKeysCommand sends text to the tmux pane using tmux commands instead of
+// writing to the PTY. This is more reliable for headless/scheduled runs where
+// the PTY connection may not persist. Text is loaded into a tmux paste buffer,
+// pasted into the pane, followed by a pause to let terminal control sequences
+// drain, then Enter to submit.
 //
-// Codex is the exception: its composer runs paste-burst detection, so a large
-// run of characters delivered via `send-keys -l` is treated as an in-progress
-// paste and a following Enter is absorbed into it as a newline rather than
-// submitting. The prompt lands in the input box but never sends until a human
-// presses Enter (#1254). Codex therefore takes the bracketed-paste path, which
-// gives it an explicit end-of-paste marker so the trailing Enter is
-// unambiguously a submit. Submit handling is keyed off the agent actually
-// running in the pane (DetectAgentFromCommand), mirroring HasUpdated's
-// per-agent prompt heuristics, so a program_overrides redirect can't
-// misclassify the pane.
+// Most panes receive a plain paste. Codex is the exception: its composer runs
+// paste-burst detection, so it needs explicit bracketed-paste boundaries before
+// the following Enter is unambiguously a submit (#1254/#1256). Submit handling
+// is keyed off the agent actually running in the pane (DetectAgentFromCommand),
+// mirroring HasUpdated's per-agent prompt heuristics, so a program_overrides
+// redirect can't misclassify the pane.
 func (t *TmuxSession) SendKeysCommand(text string) error {
-	if DetectAgentFromCommand(t.programCmd()) == ProgramCodex {
-		return t.sendKeysBracketedPaste(text)
-	}
-
-	// Send text literally to avoid key name interpretation. `=` forces an
-	// exact session match so input is never sent to a prefix-matched sibling
-	// session if the agent session has died (#1006).
-	textCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "-l", text)
-	if err := t.cmdExec.Run(textCmd); err != nil {
-		return fmt.Errorf("error sending text via send-keys: %w", err)
-	}
-
-	// Wait for terminal control sequences (e.g. OSC color responses) to drain
-	// before sending Enter, otherwise they can corrupt the input
-	time.Sleep(500 * time.Millisecond)
-
-	// Send Enter separately to submit
-	enterCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "Enter")
-	return t.cmdExec.Run(enterCmd)
+	return t.sendKeysPasteBuffer(text, DetectAgentFromCommand(t.programCmd()) == ProgramCodex)
 }
 
-// sendKeysBracketedPaste delivers text to the pane as a bracketed paste (`tmux
-// load-buffer` + `paste-buffer -p`) and then sends Enter to submit. tmux's `-p`
-// only wraps the buffer in bracketed-paste control codes when the running
-// application has actually requested bracketed-paste mode, so this is safe even
-// mid-dialog (it degrades to a plain paste). The end-of-paste marker lets codex
-// finalize its input buffer immediately, so the following Enter submits instead
-// of being swallowed by paste-burst detection (#1254). Text is streamed via
+// sendKeysPasteBuffer delivers text to the pane through a tmux paste buffer
+// (`load-buffer` + `paste-buffer`) and then sends Enter to submit. This avoids
+// the literal `send-keys -l` text path whose per-character delivery can leave a
+// duplicated wrapped prefix in bash/readline panes (#1292). Text is streamed via
 // stdin rather than an argv argument so arbitrarily large prompts are not
 // bounded by ARG_MAX.
-func (t *TmuxSession) sendKeysBracketedPaste(text string) error {
+func (t *TmuxSession) sendKeysPasteBuffer(text string, bracketed bool) error {
 	// A per-call unique buffer name: two concurrent deliveries to the same
 	// session must not share a buffer, or one call's load-buffer could overwrite
 	// the other's content between its load and paste and corrupt the submit.
@@ -75,10 +51,21 @@ func (t *TmuxSession) sendKeysBracketedPaste(text string) error {
 		return fmt.Errorf("error loading paste buffer: %w", err)
 	}
 
-	// `-p` inserts bracketed-paste markers (when the app requested the mode),
 	// `-d` deletes the buffer after pasting, `=` forces an exact session match
 	// so input never reaches a prefix-matched sibling session (#1006).
-	pasteCmd := exec.Command("tmux", "paste-buffer", "-d", "-p", "-b", buf, "-t", exactTarget(t.sanitizedName))
+	//
+	// Codex additionally needs `-p`: tmux inserts bracketed-paste markers (when
+	// the app requested the mode), giving codex an end-of-paste marker so the
+	// following Enter submits instead of being swallowed by paste-burst
+	// detection (#1254/#1256). Other panes intentionally use a plain paste to
+	// preserve their pre-existing raw-input newline behavior while still
+	// avoiding the wrapped-prefix redraw issue (#1292).
+	args := []string{"paste-buffer", "-d"}
+	if bracketed {
+		args = append(args, "-p")
+	}
+	args = append(args, "-b", buf, "-t", exactTarget(t.sanitizedName))
+	pasteCmd := exec.Command("tmux", args...)
 	if err := t.cmdExec.Run(pasteCmd); err != nil {
 		return fmt.Errorf("error pasting buffer: %w", err)
 	}
