@@ -143,6 +143,21 @@ func TestSearchOverlayRegistersRowZonesAndSetSelectedIndex(t *testing.T) {
 	assert.Same(t, instances[0], s2.GetSelectedInstance())
 }
 
+func TestSearchOverlayRegistersLimitReachedRowZone(t *testing.T) {
+	inst := &session.Instance{Title: "blocked-session"}
+	inst.SetLiveness(session.LiveLimitReached)
+	s := NewSearchOverlay([]*session.Instance{inst})
+	reg := zones.NewRegistry()
+
+	s.RegisterZones(reg, layout.Point{})
+
+	r, ok := reg.Find(zones.OverlaySearchRow(0))
+	require.True(t, ok, "limit-reached search rows must stay mouse-clickable")
+	line := strings.Split(s.Render(), "\n")[r.Y]
+	assert.Contains(t, xansi.Strip(line), "◆", "test must exercise the limit glyph")
+	assert.Contains(t, xansi.Strip(line), inst.Title)
+}
+
 // TestSearchOverlayScrolledWindowRegistersVisibleRows pins the Greptile P1 on
 // the original mouse PR (#1086): once the selection scrolls past the first
 // page, Render windows the results — and the registered zones must be the
