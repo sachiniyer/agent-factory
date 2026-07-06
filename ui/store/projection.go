@@ -523,6 +523,10 @@ type OpenPane struct {
 // ID returns the pane's stable id, used as its focus-ring region id.
 func (o *OpenPane) ID() int { return o.id }
 
+// LastFocus returns the pane's focus-recency stamp. It is serialized by the
+// TUI view-state store so auto-hide ordering survives a restart.
+func (o *OpenPane) LastFocus() uint64 { return o.lastFocus }
+
 // Instance returns the instance the pane is bound to. Like the display
 // selection, the pointer may briefly dangle after its instance is removed
 // from the projection; the root model closes such panes on its next tick

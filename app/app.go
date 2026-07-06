@@ -106,6 +106,9 @@ type home struct {
 	appConfig *config.Config
 	// appState stores persistent application state like seen help screens
 	appState config.AppState
+	// lastTUIViewState prevents preview ticks from rewriting unchanged state.
+	lastTUIViewState    config.TUIRepoViewState
+	hasLastTUIViewState bool
 
 	// -- State --
 
@@ -208,6 +211,10 @@ type home struct {
 	// respawn-die loop persists, instead of a line per 5s retry.
 	liveDeathLogKey string
 	liveDeathLogAt  time.Time
+	// pendingTUIViewFocus is loaded before Bubble Tea reports the terminal size.
+	// The pane bindings can restore immediately, but a pane focus target is only
+	// focusable after the first non-fallback relayout has rebuilt the ring.
+	pendingTUIViewFocus *config.TUIStateFocus
 
 	// interactive is the two-mode keyboard switch (#1089 PR 2, RFC §2.3).
 	// Nav mode (false): the host owns the keyboard — focus ring, verbs,
@@ -346,6 +353,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	}
 
 	h.importRemoteHookSessions()
+	h.restoreTUIViewStateOnLaunch()
 
 	// Load tasks for sidebar display
 	tasks, err := task.LoadTasksForCurrentRepo()
@@ -425,6 +433,7 @@ func (m *home) relayout() {
 	ids = append(ids, layout.RegionAutomations)
 	m.ring.SetIDs(ids...)
 	m.ring.SetHidden(layout.RegionAutomations, !lay.AutomationsVisible)
+	m.applyPendingTUIViewFocus()
 	m.syncFocus()
 
 	m.sidebar.SetRect(lay.Tree)
@@ -537,6 +546,7 @@ func (m *home) Init() tea.Cmd {
 }
 
 func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	defer m.persistTUIViewStateIfChanged()
 	switch msg := msg.(type) {
 	case hideErrMsg:
 		m.errBox.Clear()
@@ -864,6 +874,7 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	if err := m.saveContentPaneState(); err != nil {
 		return m, m.handleError(err)
 	}
+	m.flushTUIViewStateBestEffort()
 
 	// No instances.json write on quit: the daemon is the sole writer (#960 PR 4)
 	// and every session/tab mutation already persisted through it as it
