@@ -13,11 +13,7 @@ import (
 // reachesQuit reports whether the command returned by the key handler resolves
 // to tea.Quit.
 func reachesQuit(cmd tea.Cmd) bool {
-	if cmd == nil {
-		return false
-	}
-	_, isQuit := cmd().(tea.QuitMsg)
-	return isQuit
+	return commandEmitsQuit(cmd)
 }
 
 func runeKey(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }

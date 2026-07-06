@@ -573,10 +573,7 @@ func TestHandleQuit_HooksSaveSuccessQuitsAndUpdatesHookCount(t *testing.T) {
 	assert.NotContains(t, h.errBox.String(), "failed to save hooks",
 		"no error must be surfaced on a successful save")
 
-	// The returned command must be tea.Quit.
-	msg := cmd()
-	_, isQuit := msg.(tea.QuitMsg)
-	assert.True(t, isQuit, "a successful save must proceed to tea.Quit")
+	assert.True(t, commandEmitsQuit(cmd), "a successful save must proceed to tea.Quit")
 
 	assert.Equal(t, 1, h.store.GetHookCount(),
 		"the sidebar hook count must reflect the saved hook")

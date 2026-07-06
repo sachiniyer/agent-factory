@@ -111,6 +111,9 @@ type home struct {
 
 	// state is the current discrete state of the application
 	state state
+	// quitting suppresses Bubble Tea's final graceful render after handleQuit has
+	// started terminal teardown, so stale TUI chrome is not repainted on exit.
+	quitting bool
 	// namingInstance is the instance currently being named in stateNew.
 	// Stored as a direct pointer so background sync cannot change which
 	// instance the naming keystrokes target.
@@ -876,7 +879,8 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	// CLIENT (the session survives, exactly like a detach) so no orphaned
 	// `tmux attach-session` child outlives the TUI (#1089).
 	m.closeLiveTermPane()
-	return m, tea.Quit
+	m.quitting = true
+	return m, cleanQuitCmd()
 }
 
 // saveContentPaneState persists any changes from the hooks/task panes and
@@ -1771,6 +1775,9 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 // mirrors exactly what this frame put on screen.
 func (m *home) View() string {
 	m.zones.Reset()
+	if m.quitting {
+		return ""
+	}
 
 	// Below the hard minimum no layout exists; render the banner alone (and
 	// register nothing — there is nothing to click).

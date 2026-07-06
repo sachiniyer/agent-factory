@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,8 +29,6 @@ func TestHandleQuit_ReachesQuitWithCorruptedInstances(t *testing.T) {
 	_, cmd := h.handleQuit()
 
 	require.NotNil(t, cmd, "handleQuit must return a command even with corrupted instances.json")
-	msg := cmd()
-	_, isQuit := msg.(tea.QuitMsg)
-	assert.True(t, isQuit, "handleQuit must reach tea.Quit (got %T) instead of trapping the user in an error loop (#938)", msg)
+	assert.True(t, commandEmitsQuit(cmd), "handleQuit must reach tea.Quit instead of trapping the user in an error loop (#938)")
 	assert.Empty(t, strings.TrimSpace(h.errBox.String()), "a recoverable corruption must not surface a blocking error overlay")
 }
