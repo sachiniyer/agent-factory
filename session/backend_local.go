@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -414,53 +413,13 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 // the rest. The in-memory pointers are cleared regardless so the daemon
 // caller can always proceed to remove the persisted record. See issue #478.
 func (b *LocalBackend) Kill(i *Instance) error {
-	i.mu.Lock()
-	// Snapshot every tab's tmux session under the lock. PR 2 of #930 gives an
-	// instance N tabs (agent + shell today), so Kill tears down each tab's
-	// session, not just the agent's.
-	type tabSession struct {
-		name string
-		ts   *tmux.TmuxSession
-	}
-	sessions := make([]tabSession, 0, len(i.Tabs))
-	for _, tab := range i.Tabs {
-		if tab.tmux != nil {
-			sessions = append(sessions, tabSession{name: tab.Name, ts: tab.tmux})
-		}
-	}
-	gw := i.gitWorktree
-	title := i.Title
-	i.started = false
-	i.mu.Unlock()
-
-	// Tear down every tab's tmux session BEFORE the worktree cleanup below, and
-	// wait for each pane's process to actually exit: kill-session only SIGHUPs
-	// it, and a process still flushing state mid-shutdown races git's recursive
-	// delete of the worktree, leaking a half-deleted directory ("Directory not
-	// empty", #802). The ordering — all panes exit, then remove the worktree
-	// once — is preserved across all tabs.
-	for _, s := range sessions {
-		if err := s.ts.CloseAndWaitForPaneExit(); err != nil {
-			log.WarningLog.Printf("kill %q: tmux cleanup for tab %q failed: %v", title, s.name, err)
-		}
-	}
-
-	if gw != nil {
-		if err := gw.Cleanup(); err != nil {
-			log.WarningLog.Printf("kill %q: git worktree cleanup failed: %v", title, err)
-		}
-	}
-
-	i.mu.Lock()
-	for _, tab := range i.Tabs {
-		tab.tmux = nil
-	}
-	if i.gitWorktree == gw {
-		i.gitWorktree = nil
-	}
-	i.mu.Unlock()
-
-	return nil
+	// PR 2 of #930 gives an instance N tabs (agent + shell today), so Kill tears
+	// down each tab's session, not just the agent's. The kill mode kill-sessions
+	// every tab (waiting for each pane to exit before the worktree delete, #802),
+	// deletes the worktree, and clears the refs — see teardownTabs. Best-effort:
+	// a stuck tmux or a failed worktree cleanup only logs so the caller can still
+	// drop the record (#478/#802). Returns nil regardless.
+	return i.teardownTabs(teardownKill{})
 }
 
 // CloseAttachOnly releases this instance's hold on its tmux sessions — the
@@ -471,45 +430,14 @@ func (b *LocalBackend) Kill(i *Instance) error {
 // (#867): the duplicate must surrender the PTYs it opened during restore
 // without tearing down the live sessions the canonical Instance shares.
 func (b *LocalBackend) CloseAttachOnly(i *Instance) error {
-	// Snapshot every tab's tmux session under the lock, mirroring Kill. Since
-	// #930 an instance holds N tabs (agent + shell/process), and restoring the
-	// duplicate opened an attach PTY for EVERY tab (Start restores the agent
-	// tab, setupTabs the rest), so releasing only the agent tab's PTY leaked
-	// one fd per extra tab each time the daemon discarded a duplicate —
-	// eventually EMFILE in the long-running daemon (#1065).
-	type tabSession struct {
-		tab *Tab
-		ts  *tmux.TmuxSession
-	}
-	i.mu.Lock()
-	sessions := make([]tabSession, 0, len(i.Tabs))
-	for _, tab := range i.Tabs {
-		if tab.tmux != nil {
-			sessions = append(sessions, tabSession{tab: tab, ts: tab.tmux})
-		}
-	}
-	i.started = false
-	i.mu.Unlock()
-
-	// Close outside the lock: CloseAttachOnly blocks draining the attach
-	// goroutines, and holding i.mu across it would stall every reader.
-	var errs []error
-	for _, s := range sessions {
-		if err := s.ts.CloseAttachOnly(); err != nil {
-			errs = append(errs, fmt.Errorf("tab %q: %w", s.tab.Name, err))
-		}
-	}
-
-	i.mu.Lock()
-	for _, s := range sessions {
-		// Only clear a ref that is still the session we closed: a concurrent
-		// Start may have swapped in a fresh session while the lock was released.
-		if s.tab.tmux == s.ts {
-			s.tab.tmux = nil
-		}
-	}
-	i.mu.Unlock()
-	return errors.Join(errs...)
+	// Since #930 an instance holds N tabs (agent + shell/process), and restoring
+	// the duplicate opened an attach PTY for EVERY tab (Start restores the agent
+	// tab, setupTabs the rest), so releasing only the agent tab's PTY leaked one
+	// fd per extra tab each time the daemon discarded a duplicate — eventually
+	// EMFILE in the long-running daemon (#1065). The release-PTY mode drops every
+	// tab's attach without kill-session and leaves the worktree intact — see
+	// teardownTabs — returning the joined per-tab close errors.
+	return i.teardownTabs(teardownReleasePTY{})
 }
 
 func (b *LocalBackend) Preview(i *Instance) (string, error) {
