@@ -3,10 +3,14 @@ package main
 import (
 	"errors"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/daemon"
 )
 
+const testUpgradeDaemonPath = "/tmp/af-upgraded"
+
 // Tests for the unit-aware upgrade respawn (#796) and the unconditional
-// fallback (#813). All three collaborators are stubbed so nothing here
+// fallback (#813). All collaborators are stubbed so nothing here
 // touches the real systemctl/launchctl or spawns a daemon process — a real
 // supervised daemon may be running on the machine executing these tests.
 
@@ -20,12 +24,12 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 	t.Helper()
 	prevInstalled := autostartInstalledFn
 	prevRestart := restartAutostartUnitFn
-	prevEnsure := ensureDaemonFn
+	prevEnsure := ensureDaemonFromPathFn
 	prevWait := waitForShutdownCompletionFn
 	t.Cleanup(func() {
 		autostartInstalledFn = prevInstalled
 		restartAutostartUnitFn = prevRestart
-		ensureDaemonFn = prevEnsure
+		ensureDaemonFromPathFn = prevEnsure
 		waitForShutdownCompletionFn = prevWait
 	})
 	restartCalls = new(int)
@@ -35,7 +39,7 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 		*restartCalls++
 		return restartErr
 	}
-	ensureDaemonFn = func() error {
+	ensureDaemonFromPathFn = func(string) error {
 		*ensureCalls++
 		return nil
 	}
@@ -50,7 +54,9 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, nil)
 
-	respawnDaemonAfterUpgrade()
+	if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
+	}
 
 	if *restartCalls != 1 {
 		t.Fatalf("unit restarts = %d, want 1", *restartCalls)
@@ -65,7 +71,9 @@ func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	respawnDaemonAfterUpgrade()
+	if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
+	}
 
 	if *restartCalls != 0 {
 		t.Fatalf("unit restarts = %d, want 0 when no unit is installed", *restartCalls)
@@ -81,7 +89,9 @@ func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 func TestRespawnAfterUpgradeFallsBackWhenRestartFails(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, errors.New("systemctl exited 1"))
 
-	respawnDaemonAfterUpgrade()
+	if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
+	}
 
 	if *restartCalls != 1 {
 		t.Fatalf("unit restarts = %d, want 1", *restartCalls)
@@ -102,10 +112,29 @@ func TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	_, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	respawnDaemonAfterUpgrade()
+	if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
+	}
 
 	if *ensureCalls != 1 {
 		t.Fatalf("ad-hoc spawns = %d, want 1 even with zero enabled tasks (autoyes-only daemon must be restored, #813)", *ensureCalls)
+	}
+}
+
+func TestRespawnAfterUpgradeSpawnsAdHocFromProvidedPath(t *testing.T) {
+	stubRespawnCollaborators(t, false, nil)
+	var gotPath string
+	ensureDaemonFromPathFn = func(path string) error {
+		gotPath = path
+		return nil
+	}
+
+	if err := respawnDaemonAfterUpgrade("/opt/af/new"); err != nil {
+		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
+	}
+
+	if gotPath != "/opt/af/new" {
+		t.Fatalf("ad-hoc respawn path = %q, want /opt/af/new", gotPath)
 	}
 }
 
@@ -134,21 +163,75 @@ func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 				seq = append(seq, "wait")
 				return tc.waitErr
 			}
-			prevRestart, prevEnsure := restartAutostartUnitFn, ensureDaemonFn
+			prevRestart, prevEnsure := restartAutostartUnitFn, ensureDaemonFromPathFn
 			restartAutostartUnitFn = func() error {
 				seq = append(seq, "restart")
 				return prevRestart()
 			}
-			ensureDaemonFn = func() error {
+			ensureDaemonFromPathFn = func(path string) error {
 				seq = append(seq, "ensure")
-				return prevEnsure()
+				return prevEnsure(path)
 			}
 
-			respawnDaemonAfterUpgrade()
+			if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+				t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
+			}
 
 			if len(seq) != 2 || seq[0] != "wait" || seq[1] != tc.wantStep {
 				t.Fatalf("call sequence = %v, want [wait %s]", seq, tc.wantStep)
 			}
 		})
+	}
+}
+
+func TestRestartDaemonFromPathNoDaemonIsNoOp(t *testing.T) {
+	prevShutdown := requestDaemonShutdownFn
+	prevRespawn := respawnDaemonFn
+	t.Cleanup(func() {
+		requestDaemonShutdownFn = prevShutdown
+		respawnDaemonFn = prevRespawn
+	})
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+		return daemon.ShutdownNoDaemon, nil
+	}
+	respawnDaemonFn = func(string) error {
+		t.Fatalf("respawn must not run when no daemon is present")
+		return nil
+	}
+
+	result, err := restartDaemonFromPath(testUpgradeDaemonPath)
+	if err != nil {
+		t.Fatalf("restartDaemonFromPath: %v", err)
+	}
+	if result != daemon.ShutdownNoDaemon {
+		t.Fatalf("restart result = %v, want ShutdownNoDaemon", result)
+	}
+}
+
+func TestRestartDaemonFromPathRespawnsStoppedDaemon(t *testing.T) {
+	prevShutdown := requestDaemonShutdownFn
+	prevRespawn := respawnDaemonFn
+	t.Cleanup(func() {
+		requestDaemonShutdownFn = prevShutdown
+		respawnDaemonFn = prevRespawn
+	})
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+		return daemon.ShutdownViaRPC, nil
+	}
+	var gotPath string
+	respawnDaemonFn = func(path string) error {
+		gotPath = path
+		return nil
+	}
+
+	result, err := restartDaemonFromPath("/opt/af/current")
+	if err != nil {
+		t.Fatalf("restartDaemonFromPath: %v", err)
+	}
+	if result != daemon.ShutdownViaRPC {
+		t.Fatalf("restart result = %v, want ShutdownViaRPC", result)
+	}
+	if gotPath != "/opt/af/current" {
+		t.Fatalf("respawn path = %q, want /opt/af/current", gotPath)
 	}
 }

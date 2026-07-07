@@ -457,6 +457,10 @@ func launchDaemonProcess() error {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
+	return launchDaemonProcessAt(execPath)
+}
+
+func launchDaemonProcessAt(execPath string) error {
 	pid, err := startDaemonChild(execPath)
 	if err != nil {
 		return err

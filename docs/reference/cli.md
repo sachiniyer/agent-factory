@@ -22,6 +22,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config set`](#af-config-set) — Set a single settable global config key
 - [`af daemon`](#af-daemon) — Manage the background daemon that schedules tasks
 - [`af daemon install`](#af-daemon-install) — Register the daemon to start automatically at login
+- [`af daemon restart`](#af-daemon-restart) — Restart the running daemon without stopping live sessions
 - [`af daemon status`](#af-daemon-status) — Report daemon liveness, sockets, pid, and autostart
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
 - [`af debug`](#af-debug) — Print debug information like config paths
@@ -399,6 +400,7 @@ af daemon
 **Subcommands**
 
 - [`af daemon install`](#af-daemon-install) — Register the daemon to start automatically at login
+- [`af daemon restart`](#af-daemon-restart) — Restart the running daemon without stopping live sessions
 - [`af daemon status`](#af-daemon-status) — Report daemon liveness, sockets, pid, and autostart
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
 
@@ -409,6 +411,24 @@ Register the daemon to start automatically at login
 ```
 af daemon install
 ```
+
+## af daemon restart
+
+Restart the running daemon without stopping live sessions
+
+Restart the background daemon if one is running. Live sessions keep running
+in tmux; the new daemon re-adopts persisted session state on startup. If no
+daemon is running, this command exits successfully without starting one.
+
+```
+af daemon restart [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--quiet` |  | Suppress output when no daemon is running |
 
 ## af daemon status
 

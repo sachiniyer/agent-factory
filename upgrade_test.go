@@ -219,7 +219,12 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func() { respawnCalls++ }
+	var respawnPath string
+	respawnDaemonFn = func(path string) error {
+		respawnCalls++
+		respawnPath = path
+		return nil
+	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
@@ -236,6 +241,9 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 	}
 	if respawnCalls != 1 {
 		t.Fatalf("expected the daemon respawn check to run once after shutdown, got %d", respawnCalls)
+	}
+	if respawnPath != tempBin {
+		t.Fatalf("daemon respawn path = %q, want %q", respawnPath, tempBin)
 	}
 	got, err := os.ReadFile(tempBin)
 	if err != nil {
@@ -270,7 +278,10 @@ func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func() { respawnCalls++ }
+	respawnDaemonFn = func(string) error {
+		respawnCalls++
+		return nil
+	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
@@ -317,7 +328,10 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func() { respawnCalls++ }
+	respawnDaemonFn = func(string) error {
+		respawnCalls++
+		return nil
+	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
@@ -360,7 +374,12 @@ func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func() { respawnCalls++ }
+	var respawnPath string
+	respawnDaemonFn = func(path string) error {
+		respawnCalls++
+		respawnPath = path
+		return nil
+	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
@@ -389,6 +408,12 @@ func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
 	want := "Upgraded successfully! Stopped the running daemon (pre-fix; used SIGTERM)"
 	if !strings.Contains(got, want) {
 		t.Fatalf("runUpgrade stdout missing SIGTERM-fallback message.\n got=%q\nwant substring=%q", got, want)
+	}
+	if respawnCalls != 1 {
+		t.Fatalf("expected the daemon respawn check to run once after SIGTERM fallback, got %d", respawnCalls)
+	}
+	if respawnPath != tempBin {
+		t.Fatalf("daemon respawn path = %q, want %q", respawnPath, tempBin)
 	}
 }
 

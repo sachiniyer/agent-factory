@@ -17,5 +17,10 @@ chmod +x "${BIN_DIR}/${BINARY_NAME}"
 
 echo "Installed successfully: $(${BIN_DIR}/${BINARY_NAME} version 2>/dev/null || echo "${BIN_DIR}/${BINARY_NAME}")"
 
+if ! "${BIN_DIR}/${BINARY_NAME}" daemon restart --quiet; then
+	echo "warning: installed af, but failed to restart the running daemon" >&2
+	echo "         run '${BIN_DIR}/${BINARY_NAME} daemon restart' to retry" >&2
+fi
+
 echo ""
 echo "Setup complete!"

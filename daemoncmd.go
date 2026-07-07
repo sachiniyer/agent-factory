@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -177,10 +178,58 @@ machine-readable form wrapped in the shared {data,error} envelope.`,
 	},
 }
 
+// daemonRestartQuiet suppresses the "no daemon" no-op line. The install
+// scripts use this so fresh installs stay quiet while real restarts still
+// print a confirmation.
+var daemonRestartQuiet bool
+
+var daemonRestartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the running daemon without stopping live sessions",
+	Long: `Restart the background daemon if one is running. Live sessions keep running
+in tmux; the new daemon re-adopts persisted session state on startup. If no
+daemon is running, this command exits successfully without starting one.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		execPath, err := osExecutableFn()
+		if err != nil {
+			return fmt.Errorf("failed to find current executable: %w", err)
+		}
+		resolvedPath, err := filepath.EvalSymlinks(execPath)
+		if err != nil {
+			return fmt.Errorf("failed to resolve executable path: %w", err)
+		}
+
+		result, err := restartDaemonFromPath(resolvedPath)
+		if err != nil {
+			return err
+		}
+
+		w := cmd.OutOrStdout()
+		switch result {
+		case daemon.ShutdownNoDaemon:
+			if !daemonRestartQuiet {
+				fmt.Fprintln(w, "no running daemon to restart")
+			}
+		case daemon.ShutdownViaSIGTERM:
+			fmt.Fprintln(w, "daemon restarted (stopped old daemon via SIGTERM fallback)")
+		default:
+			fmt.Fprintln(w, "daemon restarted")
+		}
+		return nil
+	},
+}
+
 func init() {
 	daemonStatusCmd.Flags().BoolVar(&daemonStatusJSON, "json", false,
 		"Emit the status as JSON wrapped in the {data,error} envelope")
+	daemonRestartCmd.Flags().BoolVar(&daemonRestartQuiet, "quiet", false,
+		"Suppress output when no daemon is running")
 	daemonCmd.AddCommand(daemonInstallCmd)
+	daemonCmd.AddCommand(daemonRestartCmd)
 	daemonCmd.AddCommand(daemonUninstallCmd)
 	daemonCmd.AddCommand(daemonStatusCmd)
 }
@@ -195,9 +244,23 @@ var respawnDaemonFn = respawnDaemonAfterUpgrade
 var (
 	autostartInstalledFn        = daemon.AutostartInstalled
 	restartAutostartUnitFn      = daemon.RestartAutostartUnit
-	ensureDaemonFn              = daemon.EnsureDaemon
+	ensureDaemonFromPathFn      = daemon.EnsureDaemonFromPath
 	waitForShutdownCompletionFn = daemon.WaitForShutdownCompletion
 )
+
+func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
+	result, shutdownErr := requestDaemonShutdownFn()
+	if shutdownErr != nil {
+		return result, fmt.Errorf("failed to stop running daemon: %w", shutdownErr)
+	}
+	if result == daemon.ShutdownNoDaemon {
+		return result, nil
+	}
+	if err := respawnDaemonFn(execPath); err != nil {
+		return result, fmt.Errorf("failed to restart daemon: %w", err)
+	}
+	return result, nil
+}
 
 // respawnDaemonAfterUpgrade restores the daemon that the upgrade/auto-update
 // path just stopped. The Shutdown RPC is a clean exit, and the autostart unit
@@ -215,7 +278,7 @@ var (
 // left autoyes-only users without a daemon until the next af run (#813). The
 // task gate belongs only on the cold-start path (ensureDaemonForTasks), where
 // nothing was running and "no enabled tasks" means there is nothing to start.
-func respawnDaemonAfterUpgrade() {
+func respawnDaemonAfterUpgrade(execPath string) error {
 	// The Shutdown RPC acks before the daemon tears down, so the old daemon's
 	// control socket can still answer pings here. Respawning into that window
 	// makes EnsureDaemon — or the unit-restarted daemon's own startup ping
@@ -228,17 +291,24 @@ func respawnDaemonAfterUpgrade() {
 	if err := waitForShutdownCompletionFn(); err != nil {
 		log.WarningLog.Printf("post-upgrade respawn: %v; respawning anyway, but the new daemon may see the old one as alive and exit — run af again if schedules stay dark", err)
 	}
+	var unitErr error
 	if autostartInstalledFn() {
 		err := restartAutostartUnitFn()
 		if err == nil {
 			log.InfoLog.Printf("restarted the daemon autostart unit from the new binary")
-			return
+			return nil
 		}
+		unitErr = err
 		log.WarningLog.Printf("failed to restart the daemon autostart unit; falling back to an ad-hoc daemon: %v", err)
 	}
-	if err := ensureDaemonFn(); err != nil {
+	if err := ensureDaemonFromPathFn(execPath); err != nil {
 		log.ErrorLog.Printf("failed to respawn daemon after upgrade: %v", err)
+		if unitErr != nil {
+			return fmt.Errorf("unit restart failed: %w; ad-hoc fallback failed: %v", unitErr, err)
+		}
+		return err
 	}
+	return nil
 }
 
 // ensureDaemonForTasks starts the daemon when any enabled task exists, so

@@ -21,8 +21,8 @@ import (
 // requestDaemonShutdownFn is indirected so tests can stub the daemon
 // shutdown call without standing up a real control socket. The production
 // implementation contacts the local control plane (#436) and asks any
-// running daemon to exit so the next RPC respawns from the freshly written
-// binary (#498).
+// running daemon to exit before the upgrade path respawns it from the freshly
+// written binary (#498/#1386).
 var requestDaemonShutdownFn = daemon.RequestShutdown
 
 // osExecutableFn is indirected so tests can point the upgrade flow at a
@@ -214,30 +214,22 @@ func runUpgrade(downloadURL string) error {
 		return fmt.Errorf("failed to write new binary: %w", err)
 	}
 
-	// The running daemon process still references the old binary's inode
-	// on Linux, so users would keep running the stale image until they
-	// killed it manually. Ask any running daemon to exit; the next `af`
-	// invocation will EnsureDaemon-respawn from the new binary (#498).
-	// Pre-#501 daemons don't speak the Shutdown RPC, so RequestShutdown
-	// falls back to PID-file-based SIGTERM (#504).
-	result, shutdownErr := requestDaemonShutdownFn()
+	// The running daemon process still references the old binary's inode on
+	// Linux, so users would keep running the stale image until they killed it
+	// manually. Restart any running daemon now from the freshly written binary
+	// (#498/#1386). Pre-#501 daemons don't speak the Shutdown RPC, so
+	// RequestShutdown falls back to PID-file-based SIGTERM (#504).
+	result, restartErr := restartDaemonFromPath(resolvedPath)
 	switch {
-	case shutdownErr != nil:
-		fmt.Printf("Upgraded successfully! Failed to restart the running daemon: %v\n", shutdownErr)
+	case restartErr != nil:
+		fmt.Printf("Upgraded successfully! Failed to restart the running daemon: %v\n", restartErr)
 		fmt.Println("Stop the daemon manually (e.g. `af reset`) or kill the `--daemon` process to pick up the new binary.")
 	case result == daemon.ShutdownViaRPC:
-		fmt.Println("Upgraded successfully! Stopped the running daemon; it will respawn from the new binary on next use.")
+		fmt.Println("Upgraded successfully! Restarted the running daemon from the new binary.")
 	case result == daemon.ShutdownViaSIGTERM:
-		fmt.Println("Upgraded successfully! Stopped the running daemon (pre-fix; used SIGTERM); it will respawn from the new binary on next use.")
+		fmt.Println("Upgraded successfully! Stopped the running daemon (pre-fix; used SIGTERM) and restarted it from the new binary.")
 	default:
 		fmt.Println("Upgraded successfully!")
-	}
-	if shutdownErr == nil && result != daemon.ShutdownNoDaemon {
-		// The daemon hosts task schedules and autoyes mode (#782); we just
-		// stopped a running one, so respawn it unconditionally from the
-		// freshly written binary instead of leaving schedules and autoyes
-		// sessions dark until the next af invocation (#813).
-		respawnDaemonFn()
 	}
 	return nil
 }
