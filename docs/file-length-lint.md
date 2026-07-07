@@ -38,7 +38,6 @@ splitting them):
 
 | File                       | Ceiling |
 | -------------------------- | ------- |
-| `session/backend_test.go`  | 2241    |
 | `app/app.go`               | 1867    |
 | `session/instance.go`      | 1400    |
 | `session/tmux/tmux.go`     | 1393    |
