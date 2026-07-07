@@ -61,7 +61,9 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		// fence (a mid-archive row still receives the terminal liveness — #1187).
 		{"ObserveLiveness sets liveness, keeps op", stateAxes{LiveRunning, OpArchiving}, true, false, ObserveLiveness(LiveLost), LiveLost, OpArchiving, true},
 		{"ObserveLiveness on idle row", stateAxes{LiveRunning, OpNone}, true, false, ObserveLiveness(LiveReady), LiveReady, OpNone, true},
-		{"BeginKill with tombstone", stateAxes{LiveRunning, OpNone}, true, true, BeginKill(), LiveRunning, OpKilling, true},
+		{"BeginKill from idle", stateAxes{LiveRunning, OpNone}, true, false, BeginKill(), LiveRunning, OpKilling, true},
+		// BeginKill is always legal — a kill supersedes any in-flight op.
+		{"BeginKill supersedes archiving", stateAxes{LiveRunning, OpArchiving}, true, false, BeginKill(), LiveRunning, OpKilling, true},
 		{"RevertKill", stateAxes{LiveRunning, OpKilling}, true, false, RevertKill(), LiveRunning, OpNone, true},
 		{"BeginArchive from Ready", stateAxes{LiveReady, OpNone}, true, false, BeginArchive(), LiveReady, OpArchiving, true},
 		{"BeginArchive from Running", stateAxes{LiveRunning, OpNone}, true, false, BeginArchive(), LiveRunning, OpArchiving, true},
@@ -88,14 +90,10 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 	}
 }
 
-// TestTransition_I1_KillWithoutTombstonePanics: BeginKill without a recorded
-// kill-intent tombstone is rejected — a teardown of a wanted session that a
-// crash could reclassify Lost and resurrect (#1108).
-func TestTransition_I1_KillWithoutTombstonePanics(t *testing.T) {
-	i := &Instance{liveness: LiveRunning, inFlightOp: OpNone, userKilled: false}
-	assert.Panics(t, func() { _ = i.Transition(BeginKill()) })
-	assert.Equal(t, OpNone, i.inFlightOp, "a rejected transition must not mutate state")
-}
+// I1 (tombstone-before-teardown) is intentionally NOT a chokepoint edge —
+// BeginKill is an unconstrained optimistic overlay (see its doc and
+// TestTransition_LegalEdgesApply's "BeginKill supersedes archiving"). I1 is
+// enforced by the daemon KillSession ordering instead.
 
 // TestTransition_I2_CommitArchiveWithoutArchivingPanics: CommitArchive is
 // reachable only from the OpArchiving fence — flipping Archived without it would

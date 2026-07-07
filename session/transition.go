@@ -17,9 +17,14 @@ import (
 // transition is caught by the edge table instead of silently corrupting state.
 //
 // The four ordering invariants it enforces (audit item #6):
-//   - I1 tombstone-before-kill: a kill may not begin unless the kill-intent
-//     tombstone is recorded — otherwise a crash mid-teardown reclassifies the
-//     session Lost and resurrects it.
+//   - I1 tombstone-before-teardown is NOT a (liveness,op) edge, so it is NOT
+//     enforced here: the tombstone (userKilled) is a daemon-side field the
+//     client optimistic kill overlay never has, and daemon-internal kills (reap,
+//     create-cleanup) legitimately carry no tombstone. The daemon KillSession
+//     enforces I1 by ordering (MarkUserKilled before Instance.Kill) while setting
+//     NO op — keeping the snapshot pure liveness for out-of-band kills. BeginKill
+//     is therefore an unconstrained optimistic overlay. I2–I4 below are genuine
+//     edges the table enforces.
 //   - I2 move-before-Archived: the inert Archived state is reachable ONLY out of
 //     the archive fence, which is only entered after the worktree move ran.
 //   - I3 move-before-respawn: a restore may begin only from Archived, and the
@@ -98,8 +103,12 @@ func ObserveLiveness(lv Liveness) TransitionEvent {
 	return TransitionEvent{kind: tkObserveLiveness, lv: lv}
 }
 
-// BeginKill overlays OpKilling for an optimistic kill. Requires the kill-intent
-// tombstone already recorded (I1).
+// BeginKill overlays OpKilling for an optimistic kill. It is always legal — a
+// kill is the terminal user intent and supersedes any in-flight op. I1
+// (tombstone-before-teardown) is NOT enforced here: the tombstone is a daemon-
+// side field the client optimistic overlay never has, and the daemon's
+// KillSession enforces I1 by ordering (MarkUserKilled before Instance.Kill)
+// while setting NO op (the snapshot stays pure liveness for out-of-band kills).
 func BeginKill() TransitionEvent { return TransitionEvent{kind: tkBeginKill} }
 
 // RevertKill clears an optimistic kill overlay (kill aborted / reverted).
@@ -109,7 +118,10 @@ func RevertKill() TransitionEvent { return TransitionEvent{kind: tkRevertKill} }
 func BeginArchive() TransitionEvent { return TransitionEvent{kind: tkBeginArchive} }
 
 // CommitArchive flips the session to the inert Archived state, started=false, on
-// a successful archive move (was SetArchived). Reachable only from the fence (I2).
+// a successful archive move (the daemon path). Reachable ONLY from the OpArchiving
+// fence (I2). The TUI's finalize is a separate unconditional projection-mirror
+// (SetArchived), not this fenced commit — it copies the daemon's already-committed
+// Archived state onto the read-only row, so it is not subject to I2.
 func CommitArchive() TransitionEvent { return TransitionEvent{kind: tkCommitArchive} }
 
 // AbortArchiveToLost rolls a failed archive move back to Lost so the restore
@@ -158,8 +170,6 @@ type edgeSpec struct {
 	// rejection — for the daemon-truth edge (ObserveLiveness is always allowed)
 	// and ConfirmLive (yields to an in-flight teardown rather than fighting it).
 	yieldWhenBlocked bool
-	// requiresTombstone gates BeginKill on a recorded kill intent (I1).
-	requiresTombstone bool
 }
 
 // transitionTable is the allowed-edge table — the single declarative source of
@@ -181,9 +191,10 @@ var transitionTable = map[transitionKind]edgeSpec{
 		target:      func(s stateAxes, ev TransitionEvent) stateAxes { return stateAxes{ev.lv, s.op} },
 	},
 	tkBeginKill: {
-		allowedFrom:       func(s stateAxes) bool { return s.op == OpNone },
-		target:            func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpKilling} },
-		requiresTombstone: true,
+		// Always legal: a kill supersedes any in-flight op (see BeginKill doc). I1
+		// is enforced by the daemon KillSession ordering, not this overlay.
+		allowedFrom: func(stateAxes) bool { return true },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpKilling} },
 	},
 	tkRevertKill: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpKilling },
@@ -261,9 +272,6 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 			return nil
 		}
 		return i.rejectTransitionLocked(ev, from, "edge not allowed from this state")
-	}
-	if spec.requiresTombstone && !i.userKilled {
-		return i.rejectTransitionLocked(ev, from, "kill without a recorded tombstone (I1)")
 	}
 
 	to := spec.target(from, ev)

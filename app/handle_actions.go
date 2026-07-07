@@ -160,7 +160,7 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	killAction := func() tea.Msg {
 		for _, inst := range m.store.GetInstances() {
 			if inst.Title == selectedTitle {
-				inst.SetInFlightOp(session.OpKilling)
+				_ = inst.Transition(session.BeginKill())
 				return startKillMsg{title: selectedTitle}
 			}
 		}
@@ -259,7 +259,7 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 			if inst.Title == msg.title && inst.GetInFlightOp() == session.OpKilling {
 				// Clear the optimistic kill op: the row reverts to its underlying
 				// daemon liveness so the user can retry the kill.
-				inst.SetInFlightOp(session.OpNone)
+				_ = inst.Transition(session.RevertKill())
 				break
 			}
 		}
@@ -335,7 +335,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		// completion handler finalizes it — so the row can never strand (#1187).
 		for _, inst := range m.store.GetInstances() {
 			if inst.Title == title {
-				inst.SetInFlightOp(session.OpArchiving)
+				_ = inst.Transition(session.BeginArchive())
 				break
 			}
 		}
@@ -394,8 +394,13 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 	}
 	for _, inst := range m.store.GetInstances() {
 		if inst.Title == msg.title {
-			// SetArchived flips the row inert (started=false, liveness=Archived,
-			// op cleared) — matching the daemon's committed state.
+			// SetArchived is an unconditional projection-mirror: it copies the
+			// daemon's already-committed Archived state (started=false,
+			// liveness=Archived, op cleared) onto the read-only row. It is NOT the
+			// fenced CommitArchive transition (that's the daemon's I2 enforcement
+			// point) — the TUI row may be in any state here (optimistic OpArchiving,
+			// or already Archived if the reconcile settled first), so it stays a
+			// direct unconditional mirror rather than a fenced edge (#1195 Phase 2d).
 			inst.SetArchived()
 			break
 		}
