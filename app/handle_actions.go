@@ -668,29 +668,26 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 // callbacks must attach to this captured instance, not re-read the live
 // selection (#716).
 func (m *home) attachSelected(selected *session.Instance) (tea.Model, tea.Cmd) {
-	if activeTab := m.store.ActiveTab(); activeTab != 0 {
-		// The terminal tab attaches a local tmux session for local
-		// instances, but a remote instance's terminal_cmd PTY for remote
-		// ones (#843) — and that remote PTY hands the terminal back via
-		// session.hookAttachTerminalRestore (main screen, modes off), the
-		// same neutral state the sidebar remote attach leaves. So the
-		// post-detach handling must key off the instance's real
-		// remote-ness, exactly like the sidebar path below: a remote
-		// terminal_cmd detach needs the #845/#848 full reset + reassert,
-		// or the TUI keeps rendering on the main screen (#889).
-		// Capture the active tab index at keypress time alongside the
-		// instance (#716): a background refresh could otherwise drift the
-		// selection — or the user could change tabs while the help overlay is
-		// open — before the deferred attach callback runs.
+	return m.attachInstanceTab(selected, m.store.ActiveTab(), "handleEnter-sidebar", "handleEnter-terminal")
+}
+
+// attachInstanceTab runs the full-screen attach flow for a captured
+// instance+tab binding. The terminal tab attaches a local tmux session for
+// local instances, but a remote instance's terminal_cmd PTY for remote ones
+// (#843), so the post-detach handling must key off the instance's real
+// remote-ness (#889). Callers pass the tab index captured at keypress time
+// (#716), before help-overlay deferral can let selection or active tab drift.
+func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLabel, terminalLabel string) (tea.Model, tea.Cmd) {
+	if tabIdx != 0 {
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return attachOverlayCallbackFn(m, selected.Title, "handleEnter-terminal", "", selected.IsRemote(), func() (chan struct{}, error) {
-				return ui.AttachTerminalTab(selected, activeTab)
+			return attachOverlayCallbackFn(m, instance.Title, terminalLabel, "", instance.IsRemote(), func() (chan struct{}, error) {
+				return ui.AttachTerminalTab(instance, tabIdx)
 			})
 		})
 	}
 	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-		return attachOverlayCallbackFn(m, selected.Title, "handleEnter-sidebar", "", selected.IsRemote(), func() (chan struct{}, error) {
-			return m.store.AttachInstance(selected)
+		return attachOverlayCallbackFn(m, instance.Title, agentLabel, "", instance.IsRemote(), func() (chan struct{}, error) {
+			return m.store.AttachInstance(instance)
 		})
 	})
 }

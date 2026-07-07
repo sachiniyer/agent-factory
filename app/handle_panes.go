@@ -337,17 +337,5 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	if !instance.TmuxAlive() {
 		return m, m.handleError(fmt.Errorf("session '%s' is no longer running", instance.Title))
 	}
-	tabIdx := p.Tab()
-	if tabIdx != 0 {
-		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return attachOverlayCallbackFn(m, instance.Title, "handleEnter-pane-terminal", "", instance.IsRemote(), func() (chan struct{}, error) {
-				return ui.AttachTerminalTab(instance, tabIdx)
-			})
-		})
-	}
-	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-		return attachOverlayCallbackFn(m, instance.Title, "handleEnter-pane", "", instance.IsRemote(), func() (chan struct{}, error) {
-			return m.store.AttachInstance(instance)
-		})
-	})
+	return m.attachInstanceTab(instance, p.Tab(), "handleEnter-pane", "handleEnter-pane-terminal")
 }
