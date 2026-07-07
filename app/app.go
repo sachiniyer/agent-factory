@@ -1115,6 +1115,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			}
 			return m, m.selectionChanged()
 		}
+		if m.panePreviewTxn != nil {
+			m.cancelPanePreview(true)
+			return m, m.panesRefresh(m.attached.Load())
+		}
 	}
 
 	// Ctrl+C is an always-on hard exit — never rebindable, so it stays a
