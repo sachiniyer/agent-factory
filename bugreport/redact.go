@@ -227,6 +227,9 @@ func redactInstanceData(d *session.InstanceData) {
 	if d.Title != "" {
 		d.Title = redactedMarker
 	}
+	if d.Worktree.SessionName != "" {
+		d.Worktree.SessionName = redactedMarker
+	}
 	for i := range d.Tabs {
 		if d.Tabs[i].Command != "" {
 			d.Tabs[i].Command = redactedMarker
