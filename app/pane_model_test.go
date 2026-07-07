@@ -817,6 +817,40 @@ func TestPaneArrowKeysSwitchFocusedPaneAndClamp(t *testing.T) {
 	assert.Equal(t, layout.RegionTree, h.ring.Active(), "right on the tree stays sidebar navigation, not pane switching")
 }
 
+func TestPaneArrowKeysMoveAfterCancelingPreview(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+	panes := h.store.OpenPanes()
+	require.Len(t, panes, 2)
+	paneA := panes[0]
+	paneB := panes[1]
+	require.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "precondition: beta's right pane is focused")
+
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn, "selecting alpha while beta's pane is focused creates a transient preview")
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyLeft})
+	require.Nil(t, h.panePreviewTxn, "left cancels the preview")
+	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active(), "left still moves focus to the previous pane")
+	assert.Same(t, alpha, h.store.GetSelectedInstance(), "pane switching must not retarget the tree selection")
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn, "selecting beta while alpha's pane is focused creates a transient preview")
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
+	require.Nil(t, h.panePreviewTxn, "right cancels the preview")
+	assert.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "right still moves focus to the next pane")
+	assert.Same(t, beta, h.store.GetSelectedInstance(), "pane switching must not retarget the tree selection")
+}
+
 // TestPane_AutoHideOnShrinkRestoreOnGrow drives the §2.6 pane-count fitting:
 // shrinking below what fits auto-hides the least-recently-focused panes —
 // bindings retained, focused pane always visible — and growing restores them
