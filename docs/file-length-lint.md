@@ -38,7 +38,6 @@ splitting them):
 
 | File                       | Ceiling |
 | -------------------------- | ------- |
-| `config/config.go`         | 1128    |
 | `session/backend_hook.go`  | 1026    |
 
 ## Running it
