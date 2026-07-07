@@ -58,7 +58,7 @@ One bubbletea program (`tea.NewProgram(newHome(...), tea.WithAltScreen(), tea.Wi
 
 ### 1.3 Panes
 
-- **Sidebar** (`ui/sidebar.go`, 804 lines) — hand-rolled flat windowed list (no `bubbles/list`), three sections: Instances (expanded, children = instance rows), Tasks and Hooks (leaf headers with counts only, `ui/sidebar.go:762-772`). Instance *tabs* are **not** in the sidebar. Crucially, the sidebar **owns the instance data** (`instances []*session.Instance`, `ui/sidebar.go:66`) plus repo bookkeeping — it is a model, not a view.
+- **Sidebar** (`ui/sidebar.go`, 804 lines) — hand-rolled flat windowed list (no `bubbles/list`), three sections: Instances (expanded, children = instance rows), Tasks and Hooks (leaf headers with counts only, `ui/sidebar.go:762-772`). Instance *tabs* are **not** in the sidebar. The sidebar is a view that renders from `store.Projection` (§2.2); it does not own instance data or repo bookkeeping.
 - **ContentPane** (`ui/content_pane.go`) — mode switch (Instance/Tasks/Hooks/Empty) wrapping:
   - **TabbedWindow** (`ui/tabbed_window.go`) — tab bar sourced from the instance's real tabs (`tabLabels()`, `ui/tabbed_window.go:122-147`), one `TabPane`;
   - **TabPane** (`ui/tab_pane.go`) — renders `tmux capture-pane` content, mutex-guarded against the background refresh goroutine (`ui/tab_pane.go:59`), with a viewport-based scroll mode;
