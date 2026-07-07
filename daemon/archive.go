@@ -90,13 +90,18 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 		return "", err
 	}
 
-	// Fence the operation window with OpArchiving: the status poll skips an
-	// instance with an in-flight op (and the checkpoint save skips persisting a
-	// mid-op row) while tmux is down and the worktree is mid-move, so it is never
-	// misread as Lost. started is left true throughout so a move failure
-	// self-heals via the Lost loop. OpArchiving is a DISTINCT op from a kill, so
-	// the fence can never be confused with a TUI optimistic kill (#1187).
-	instance.SetInFlightOp(session.OpArchiving)
+	// Raise the archive fence through the chokepoint (#1195 Phase 2d): BeginArchive
+	// sets OpArchiving (I4) so the status poll skips this instance (and the
+	// checkpoint save skips persisting a mid-op row) while tmux is down and the
+	// worktree is mid-move — never misread as Lost. started is left true
+	// throughout so a move failure self-heals via the Lost loop. OpArchiving is a
+	// DISTINCT op from a kill, so the fence can never be confused with a TUI
+	// optimistic kill (#1187). The up-front guards (not archived, op==None) plus
+	// the op-lock guarantee this edge is legal; a rejection would surface here
+	// before any teardown.
+	if err := instance.Transition(session.BeginArchive()); err != nil {
+		return "", fmt.Errorf("cannot archive session %q: %w", req.Title, err)
+	}
 
 	// Tear down tmux and relocate the worktree in one call: the move is folded
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
@@ -105,18 +110,18 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	if err := instance.ArchiveTeardown(dest); err != nil {
 		// The worktree is still at a valid location (the git layer guarantees
 		// worktreePath points at the actual bytes even on a repair failure).
-		// Mark Lost — started is still true and the agent tmux binding was kept —
-		// so the Lost-restore loop re-spawns the agent in place. Clear the archive
-		// fence and persist the recovery-eligible state, then surface the failure.
-		instance.SetLiveness(session.LiveLost)
-		instance.SetInFlightOp(session.OpNone)
+		// Roll the fence back to Lost — started is still true and the agent tmux
+		// binding was kept — so the Lost-restore loop re-spawns the agent in place.
+		// Persist the recovery-eligible state, then surface the failure.
+		_ = instance.Transition(session.AbortArchiveToLost())
 		m.persistInstance(repoID, instance)
 		return "", fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w", req.Title, err)
 	}
 
-	// Success: worktree relocated, tmux down. Flip to the inert Archived state
-	// (started=false) and persist the new path + status.
-	instance.SetArchived()
+	// Success: worktree relocated, tmux down. Commit the inert Archived state
+	// (started=false, op cleared) — reachable only from the fence (I2) — and
+	// persist the new path + status.
+	_ = instance.Transition(session.CommitArchive())
 	archivedPath := instance.GetWorktreePath()
 	m.persistInstance(repoID, instance)
 	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)

@@ -190,10 +190,13 @@ var transitionTable = map[transitionKind]edgeSpec{
 		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpNone} },
 	},
 	tkBeginArchive: {
-		allowedFrom: func(s stateAxes) bool {
-			return s.op == OpNone && (s.liveness == LiveRunning || s.liveness == LiveReady)
-		},
-		target: func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpArchiving} },
+		// Any non-archived session with no op in flight may be archived — matching
+		// the daemon's guards, which reject only an already-archived or busy
+		// session (a Lost / LimitReached session is archivable: shelving it tears
+		// down whatever tmux remains and moves the worktree out). I4 is the fence
+		// itself, not a liveness restriction.
+		allowedFrom: func(s stateAxes) bool { return s.op == OpNone && s.liveness != LiveArchived },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpArchiving} },
 	},
 	tkCommitArchive: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpArchiving },
