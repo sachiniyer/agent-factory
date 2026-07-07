@@ -15,10 +15,11 @@ import (
 // This file hosts the N-pane verbs (#1088, RFC §2.3, replacing the PR-5 A/B
 // split): `s` opens the selected tab as a new vertical-split pane to the
 // right of the existing panes (or focuses its pane when the tab is already
-// open), `x` hides the focused pane back to the background. Hiding never
-// kills anything — the tab keeps running in its tmux session and reopens from
-// the tree any time. There is no pinned/primary pane distinction: every pane
-// is an explicit (instance, tab) binding in the store's open-pane list.
+// open), `S` commits an active #1321 preview alongside the owner pane, and
+// `x` hides the focused pane back to the background. Hiding never kills
+// anything — the tab keeps running in its tmux session and reopens from the
+// tree any time. There is no pinned/primary pane distinction: every pane is
+// an explicit (instance, tab) binding in the store's open-pane list.
 
 // openPaneWindow appends a pane bound to (instance, tab) to the store's
 // open-pane list and creates its content window. Callers dedupe via
@@ -114,6 +115,16 @@ func (m *home) openOrFocusPane(instance *session.Instance, tab int) (tea.Model, 
 	m.relayout()
 	m.focusRegion(layout.PaneRegion(p.ID()))
 	return m, m.selectionChanged()
+}
+
+// handleSplitPane dispatches the `S` key: commit the active preview alongside
+// its owner pane. The owner returns to its original committed binding, then
+// the preview target is opened as a new pane or, if already open, focused.
+func (m *home) handleSplitPane() (tea.Model, tea.Cmd) {
+	if m.panePreviewTxn == nil {
+		return m, nil
+	}
+	return m, m.commitPanePreviewAlongside()
 }
 
 // handleHidePane dispatches the `x` key: hide the FOCUSED pane back to the

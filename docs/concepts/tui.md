@@ -59,6 +59,8 @@ Tabs persist across restarts, and each is a real process the daemon tracks.
 - **`m`** opens the tasks view to manage [scheduled and event-driven
   automations](../tasks.md).
 - **`c`** retries a session that's parked on a [usage limit](../usage-limits.md).
+- **`s`** opens the selected tab as a workspace pane; **`S`** commits an
+  active preview as another pane.
 - **`Ctrl-u`** / **`Ctrl-d`** scroll the current tab up and down.
 
 ## Key bindings are yours

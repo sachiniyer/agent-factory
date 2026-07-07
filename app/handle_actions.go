@@ -64,10 +64,13 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		// so its form is never clamped into the narrow rail.
 		return m.showTasksOverlay()
 
-	// N-pane verbs (#1088): s opens the selected tab as a pane (or focuses
-	// its pane); x hides the focused pane back to the background.
+	// N-pane verbs (#1088/#1321): s opens the selected tab as a pane (or
+	// focuses its pane); S commits an active preview alongside; x hides the
+	// focused pane back to the background.
 	case keys.KeyOpenPane:
 		return m.handleOpenPane()
+	case keys.KeySplitPane:
+		return m.handleSplitPane()
 	case keys.KeyHidePane:
 		return m.handleHidePane()
 

@@ -43,6 +43,7 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		"w":         KeyCloseTab,
 		"?":         KeyHelp,
 		"s":         KeyOpenPane,
+		"S":         KeySplitPane,
 		"x":         KeyHidePane,
 		"m":         KeyTaskList,
 		"/":         KeySearch,
@@ -97,7 +98,6 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 func TestOldErgonomicReplacementsAreNotBoundByDefault(t *testing.T) {
 	oldDefaults := map[string]KeyName{
 		"A":          KeyArchive,
-		"S":          KeyTaskList,
 		"P":          KeyCopyPR,
 		"H":          KeyHooks,
 		"shift+up":   KeyShiftUp,
@@ -117,6 +117,9 @@ func TestOldErgonomicReplacementsAreNotBoundByDefault(t *testing.T) {
 	if got := GlobalKeyStringsMap["N"]; got != KeyNewRemote {
 		t.Fatalf("new remote key N must remain bound; got %v", got)
 	}
+	if got := GlobalKeyStringsMap["S"]; got != KeySplitPane {
+		t.Fatalf("S is now the approved split-pane default; got %v", got)
+	}
 }
 
 func TestOldDefaultsCanBePinnedViaOverrides(t *testing.T) {
@@ -124,6 +127,7 @@ func TestOldDefaultsCanBePinnedViaOverrides(t *testing.T) {
 	err := ApplyOverrides(map[string][]string{
 		"archive":     {"A"},
 		"tasks":       {"S"},
+		"split_pane":  {"alt+s"},
 		"copy_pr":     {"P"},
 		"hooks":       {"H"},
 		"scroll_up":   {"shift+up"},
@@ -136,6 +140,7 @@ func TestOldDefaultsCanBePinnedViaOverrides(t *testing.T) {
 	pinned := map[string]KeyName{
 		"A":          KeyArchive,
 		"S":          KeyTaskList,
+		"alt+s":      KeySplitPane,
 		"P":          KeyCopyPR,
 		"H":          KeyHooks,
 		"shift+up":   KeyShiftUp,
