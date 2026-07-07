@@ -855,15 +855,15 @@ func (b *HookBackend) ensurePTY(i *Instance) error {
 		b.ptys = make(map[string]*hookPTY)
 	}
 	if existing, ok := b.ptys[i.Title]; ok {
-		// If the existing entry is still alive, reuse it. Otherwise drop
-		// the stale entry and fall through to create a fresh process so
-		// preview can recover after attach_cmd has exited.
+		// If the existing entry is still alive, reuse it. Otherwise close and
+		// drop it before creating a fresh process after attach_cmd exits.
 		existing.mu.Lock()
 		alive := !existing.closed
 		existing.mu.Unlock()
 		if alive {
 			return nil
 		}
+		existing.closeStdout()
 		delete(b.ptys, i.Title)
 	}
 
