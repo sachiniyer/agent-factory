@@ -368,11 +368,11 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	b.setupTabs(i)
 
 	// The program was just re-spawned and is booting: Running, exactly like a
-	// fresh create. markLive clears the OpRestoring/OpCreating fence this
-	// completion resolves while preserving a kill/archive teardown fence. The
-	// daemon poll re-derives Ready/Running from the live session from here on and
-	// persists the transition.
-	i.MarkLive()
+	// fresh create. ConfirmLive clears the OpRestoring/OpCreating fence this
+	// completion resolves while yielding to a kill/archive teardown fence (#1195
+	// Phase 2d — the chokepoint form of MarkLive). The daemon poll re-derives
+	// Ready/Running from the live session from here on and persists the transition.
+	_ = i.Transition(ConfirmLive())
 	return nil
 }
 
