@@ -49,7 +49,7 @@ fi
 build_image() {
     # Dockerfile via stdin: no build context is sent (the Dockerfile has no
     # COPY), so this is instant when layers are cached.
-    "$ENGINE" build -q -t "$IMAGE" - <"$REPO_ROOT/Dockerfile.test" >/dev/null
+    "$ENGINE" build -q -t "$IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
 }
 
 # Flags shared by every run:
@@ -122,7 +122,7 @@ cmd="${1:-test}"
 
 case "$cmd" in
 build)
-    "$ENGINE" build -t "$IMAGE" - <"$REPO_ROOT/Dockerfile.test"
+    "$ENGINE" build -t "$IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test"
     ;;
 test)
     build_image

@@ -3,7 +3,8 @@
 # Toolchain-only image: the source tree is bind-mounted read-only at run
 # time by scripts/testbox.sh, so this image rebuilds only when the
 # toolchain or system packages change — never on code changes. Build it
-# with no context (`docker build - < Dockerfile.test`); there is no COPY.
+# with no context (`docker build - < scripts/container/Dockerfile.test`);
+# there is no COPY.
 FROM golang:1.24-bookworm
 
 # tmux + git are what the suite drives; procps provides pgrep for the

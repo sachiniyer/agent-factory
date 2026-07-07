@@ -1,7 +1,8 @@
 # Demo-recording container for agent-factory (#1032).
 #
-# Extends the same golang+tmux+git toolchain as Dockerfile.test with the
-# recording stack, so the README demo GIF can be regenerated from committed
+# Extends the same golang+tmux+git toolchain as
+# scripts/container/Dockerfile.test with the recording stack, so the README
+# demo GIF can be regenerated from committed
 # scripts inside a throwaway container — never on the host. Build with no
 # context: `docker build -t agent-factory-demo - < scripts/container/Dockerfile.demo`
 #
@@ -34,8 +35,9 @@ RUN git config --system user.name "AF Testbox" \
     && git config --system user.email "testbox@localhost" \
     && git config --system init.defaultBranch master
 
-# Non-root dev user, mirroring Dockerfile.test so playtest-entry.sh builds
-# af into /home/dev/bin exactly as the play-test harness expects.
+# Non-root dev user, mirroring scripts/container/Dockerfile.test so
+# playtest-entry.sh builds af into /home/dev/bin exactly as the play-test
+# harness expects.
 RUN useradd -m -u 1000 dev \
     && mkdir -p /cache/gomod /cache/gobuild /work \
     && chown -R dev:dev /cache /work
