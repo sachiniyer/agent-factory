@@ -237,14 +237,19 @@ func (p *Projection) KillInstance(target *session.Instance) error {
 		return nil
 	}
 	// Capture repo name before Kill(), because Kill() sets started=false
-	// which causes RepoName() to fail.
-	repoName, repoErr := target.RepoName()
+	// which causes RepoName() to fail. Unstarted placeholders were never
+	// registered in the repo counts, so there is nothing to decrement.
+	var repoName string
+	var repoErr error
+	if target.Started() {
+		repoName, repoErr = target.RepoName()
+	}
 	if err := target.Kill(); err != nil {
 		return fmt.Errorf("could not kill instance: %w", err)
 	}
 	if repoErr != nil {
 		log.ErrorLog.Printf("could not get repo name: %v", repoErr)
-	} else {
+	} else if repoName != "" {
 		p.rmRepo(repoName)
 	}
 	p.instances = append(p.instances[:idx], p.instances[idx+1:]...)
@@ -342,19 +347,16 @@ func (p *Projection) ReplaceInstanceByTitle(title string, replacement *session.I
 
 // RemoveInstanceByTitle removes an instance by title without killing it (the
 // external process already cleaned up tmux/worktree).
-// Note: the instance may already have been killed (started=false), so we fall
-// back to looking up the repo name from the gitWorktree directly.
 func (p *Projection) RemoveInstanceByTitle(title string) bool {
 	for i, inst := range p.instances {
 		if inst.Title == title {
-			repoName, err := inst.RepoName()
-			if err != nil {
-				// If RepoName() fails (e.g. instance already killed/not started),
-				// we cannot decrement the repo count without the name, so log and
-				// continue — the repo map will be corrected on next full rebuild.
-				log.ErrorLog.Printf("could not get repo name: %v", err)
-			} else {
-				p.rmRepo(repoName)
+			if inst.Started() {
+				repoName, err := inst.RepoName()
+				if err != nil {
+					log.ErrorLog.Printf("could not get repo name: %v", err)
+				} else {
+					p.rmRepo(repoName)
+				}
 			}
 			p.instances = append(p.instances[:i], p.instances[i+1:]...)
 			p.bump()
