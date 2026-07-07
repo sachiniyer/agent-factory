@@ -1003,8 +1003,9 @@ func (i *Instance) Kill() error {
 	return i.backend.Kill(i)
 }
 
-// Recover re-establishes a Lost instance's backing session (#1108). Only the
-// daemon's restore loop calls this; loads stay side-effect free (#970).
+// Recover re-establishes a Lost instance's backing session (#1108). Called by
+// the daemon's restore loop and by user-initiated restore (#1300); loads stay
+// side-effect free (#970).
 func (i *Instance) Recover() error {
 	return i.backend.Recover(i)
 }

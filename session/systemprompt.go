@@ -24,7 +24,7 @@ Sessions (one agent per isolated worktree):
   af sessions attach <title>                           Attach interactively (foreground)
   af sessions kill <title>                             Kill a session and clean up its worktree
   af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
-  af sessions restore <title>                          Bring an archived session back
+  af sessions restore <title>                          Restore an archived, lost, or dead session
 
 Tabs (extra processes in a session's worktree; max 9 per session; not available for remote sessions):
   af sessions tab-create <title> --command <cmd> [--name <tab>]   Prints the resolved tab name; tabs persist across restarts

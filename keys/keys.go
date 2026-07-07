@@ -17,7 +17,7 @@ const (
 	KeyEnter
 	KeyNew
 	KeyKill
-	KeyArchive    // Archive a live session / restore an archived one (#1028)
+	KeyArchive    // Archive a live session / restore an archived, Lost, or Dead one (#1028, #1300)
 	KeyLimitRetry // Retry a session blocked at a usage-limit wall (#1146)
 	KeyQuit
 

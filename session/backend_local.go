@@ -187,9 +187,10 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		// its status, survives the next SaveInstances checkpoint (which skips
 		// !Started instances), and stays killable; the daemon liveness poll
 		// re-confirms the state because the bound session does not exist
-		// server-side. A Lost session's recovery is the daemon's explicit
-		// restore loop (#1108 PR 2), never a load-time side effect; a
-		// tombstoned record's only future is having its kill finished.
+		// server-side. A Lost session's recovery is via the daemon's restore
+		// loop or user-initiated restore (#1108 PR 2, #1300), never a
+		// load-time side effect; a tombstoned record's only future is
+		// having its kill finished.
 		if status := i.GetStatus(); status == Dead || status == Lost || i.UserKilled() {
 			return nil
 		}
@@ -266,8 +267,8 @@ var ErrRecoverUnsupported = fmt.Errorf("backend does not support recovery")
 // agent program in its worktree with the same resolved-program flag injection
 // as a first-time launch (#1132 choke-point — never hand-rolled flag logic),
 // then bring the other tabs back through the same setupTabs path a restore
-// uses. Invoked ONLY by the daemon's restore loop; the #970 guard in Start
-// keeps loads side-effect free.
+// uses. Invoked by the daemon's restore loop and by user-initiated restore
+// (#1300); the #970 guard in Start keeps loads side-effect free.
 //
 // Idempotence across retries: the injected program is recomputed from the
 // clean persisted i.Program on every attempt (SetProgram replaces, never
