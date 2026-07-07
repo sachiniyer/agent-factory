@@ -120,18 +120,23 @@ func (m *Manager) lockTarget(repoID, title string) func() {
 }
 
 // targetSessionState reports whether a session with the given title exists for
-// the repo (in memory or persisted) and whether its live instance is mid-
-// teardown. Deleting is transient in-memory state that is never persisted
-// (#844/#847), so only a live in-memory instance can carry it — a disk-only
-// record is treated as a normal existing session.
+// the repo (in memory or persisted) and whether it is mid-teardown. Deleting is
+// transient in-memory state that is never persisted (#844/#847); the daemon's
+// KillSession path records it in killsInFlight, while TUI-initiated teardown is
+// reflected on the live instance as OpKilling.
 func (m *Manager) targetSessionState(repoID, title string) (exists, deleting bool, err error) {
 	m.mu.Lock()
 	if rerr := m.refreshLocked(); rerr != nil {
 		m.mu.Unlock()
 		return false, false, rerr
 	}
-	inst := m.instances[daemonInstanceKey(repoID, title)]
+	key := daemonInstanceKey(repoID, title)
+	inst := m.instances[key]
+	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
+	if killing {
+		return true, true, nil
+	}
 	if inst != nil {
 		return true, inst.IsTearingDown(), nil
 	}

@@ -48,6 +48,21 @@ func (b recordingBackend) SendPromptCommand(_ *session.Instance, prompt string) 
 	return nil
 }
 
+// slowRecordingKillBackend records prompts like recordingBackend and holds Kill
+// inside the teardown window so a test can exercise delivery while the daemon's
+// killsInFlight marker is set.
+type slowRecordingKillBackend struct {
+	recordingBackend
+	killStarted chan struct{}
+	killBlock   chan struct{}
+}
+
+func (b *slowRecordingKillBackend) Kill(inst *session.Instance) error {
+	close(b.killStarted)
+	<-b.killBlock
+	return b.recordingBackend.Kill(inst)
+}
+
 // installRecordingBackend wires a backend factory whose Start completes
 // immediately (so creates do not block) and that records delivered prompts.
 func installRecordingBackend(t *testing.T) *promptRecorder {
@@ -269,6 +284,85 @@ func TestDeliverPrompt_RefusesDeletingTarget(t *testing.T) {
 	if got := len(rec.snapshot()); got != before {
 		t.Fatalf("prompt was delivered into a Deleting session: recorded count went %d -> %d", before, got)
 	}
+}
+
+// TestDeliverPrompt_RefusesKillInFlightTarget pins the daemon-initiated teardown
+// path: KillSession marks killsInFlight but does not set OpKilling, so
+// DeliverPrompt must consult the manager's in-flight kill marker and reject
+// instead of reporting success for a prompt that may be lost mid-kill (#1333).
+func TestDeliverPrompt_RefusesKillInFlightTarget(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	rec := &promptRecorder{}
+	backend := &slowRecordingKillBackend{
+		killStarted: make(chan struct{}),
+		killBlock:   make(chan struct{}),
+	}
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {
+		fake := session.NewFakeBackend()
+		fake.CompleteStart()
+		backend.recordingBackend = recordingBackend{readyFakeBackend{fake}, rec}
+		return backend, nil
+	})
+	t.Cleanup(restore)
+
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if _, err := manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    "captain",
+		RepoPath: repoPath,
+		Program:  "claude",
+		Prompt:   "init",
+	}); err != nil {
+		t.Fatalf("initial create: %v", err)
+	}
+
+	killDone := make(chan error, 1)
+	go func() {
+		killDone <- manager.KillSession(KillSessionRequest{Title: "captain", RepoID: repo.ID})
+	}()
+	select {
+	case <-backend.killStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("KillSession never reached the backend teardown")
+	}
+
+	var releaseOnce sync.Once
+	releaseKill := func() {
+		close(backend.killBlock)
+		select {
+		case err := <-killDone:
+			if err != nil {
+				t.Errorf("KillSession: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("KillSession did not complete after the teardown was released")
+		}
+	}
+	defer releaseOnce.Do(releaseKill)
+
+	before := len(rec.snapshot())
+	_, err = manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    "captain",
+		RepoPath: repoPath,
+		Program:  "claude",
+		Prompt:   "during-kill",
+	})
+	if err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Fatalf("expected a 'being deleted' error during KillSession teardown, got: %v", err)
+	}
+	if got := len(rec.snapshot()); got != before {
+		t.Fatalf("prompt was delivered into a kill-in-flight session: recorded count went %d -> %d", before, got)
+	}
+
+	releaseOnce.Do(releaseKill)
 }
 
 // TestWaitForTargetSession_ReturnsWhenSessionAppears covers the cross-process
