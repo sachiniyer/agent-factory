@@ -38,7 +38,6 @@ splitting them):
 
 | File                       | Ceiling |
 | -------------------------- | ------- |
-| `ui/sidebar.go`            | 1258    |
 | `config/config.go`         | 1128    |
 | `session/backend_hook.go`  | 1026    |
 
