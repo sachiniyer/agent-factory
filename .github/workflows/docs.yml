@@ -43,7 +43,7 @@ jobs:
           docs_changed=false
           while IFS= read -r path; do
             case "$path" in
-              docs/*|mkdocs.yml|README.md|docs_gen.go|requirements-docs.txt|scripts/gen-docs.sh)
+              docs/*|mkdocs.yml|README.md|commands/docs_gen.go|requirements-docs.txt|scripts/gen-docs.sh)
                 docs_changed=true
                 break
                 ;;
