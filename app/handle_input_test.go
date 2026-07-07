@@ -378,3 +378,37 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	assert.Equal(t, "my_app", h.namingInstance.Title)
 	assert.Contains(t, h.errBox.String(), "myapp")
 }
+
+// TestNamingCreateFlow_NoDoubleTransition guards the #1350 regression: the
+// naming→create flow must raise the optimistic OpCreating exactly once. When the
+// naming flow began, startNewInstance already raised BeginCreate; the Enter
+// confirm handler must NOT re-raise it (a second BeginCreate from OpCreating is
+// an illegal edge). With the app-test panic hook installed (transition_hook_test),
+// a double-transition panics — so this drives the flow from the real precondition
+// (op already OpCreating) and asserts it does not.
+func TestNamingCreateFlow_NoDoubleTransition(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	h.pendingProgram = "claude"
+	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "valid-title",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	// Precondition: startNewInstance already raised the optimistic create op.
+	require.NoError(t, inst.Transition(session.BeginCreate()))
+	require.Equal(t, session.OpCreating, inst.GetInFlightOp())
+	h.namingInstance = inst
+
+	// A second BeginCreate here would panic via the app illegal-transition hook.
+	assert.NotPanics(t, func() {
+		_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+	})
+
+	// Op raised exactly once — still Creating (the daemon start is deferred to the
+	// returned async cmd, which this test does not run).
+	assert.Equal(t, session.OpCreating, inst.GetInFlightOp())
+}

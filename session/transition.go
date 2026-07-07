@@ -228,6 +228,18 @@ var transitionTable = map[transitionKind]edgeSpec{
 // of the production binary.
 var onIllegalTransition func(msg string)
 
+// SetIllegalTransitionHook installs fn as the illegal-transition hook and returns
+// a restore func. It exists so test binaries in OTHER packages (app, daemon) can
+// install the same panic-on-illegal guard the session tests install directly — a
+// mis-ordered transition must be a loud failure everywhere a writer routes
+// through the chokepoint, not only in session-package tests. Production never
+// calls this: the hook stays nil and an illegal edge degrades to the soft error.
+func SetIllegalTransitionHook(fn func(msg string)) (restore func()) {
+	prev := onIllegalTransition
+	onIllegalTransition = fn
+	return func() { onIllegalTransition = prev }
+}
+
 // Transition applies a lifecycle event to the two-axis (liveness, inFlightOp)
 // state under i.mu, validating it against the allowed-edge table. It is the
 // single writer-side chokepoint for lifecycle-state changes (#1195 Phase 2c) and

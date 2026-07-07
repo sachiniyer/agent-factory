@@ -85,9 +85,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(err)
 		}
 
-		// Apply the program selected during naming
+		// Apply the program selected during naming. The optimistic create op
+		// (OpCreating) was already raised in startNewInstance when the naming flow
+		// began — re-raising it here would be a second BeginCreate from OpCreating,
+		// an illegal edge the chokepoint rejects (#1350). Set it exactly once.
 		instance.Program = m.pendingProgram
-		_ = instance.Transition(session.BeginCreate())
 		m.namingInstance = nil
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
