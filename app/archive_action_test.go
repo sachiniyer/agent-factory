@@ -2,10 +2,12 @@ package app
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -40,6 +42,38 @@ func TestHandleArchive_LiveRowConfirms(t *testing.T) {
 
 	require.Equal(t, stateConfirm, h.state, "archiving a live session must ask for confirmation")
 	require.False(t, called, "the archive RPC must not fire before confirmation")
+}
+
+func TestHandleArchive_ConfirmationUsesEffectiveArchiveKey(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		overrides map[string][]string
+		wantKey   string
+		notKey    string
+	}{
+		{name: "default", wantKey: "with a.", notKey: "with A."},
+		{name: "pinned old archive key", overrides: map[string][]string{"archive": {"A"}}, wantKey: "with A.", notKey: "with a."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, keys.ApplyOverrides(tc.overrides))
+			t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+			h := newTestHome(t)
+			inst := archiveActionInstance(t, "worker", session.Ready)
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(0)
+
+			model, _ := h.handleArchive()
+			h = model.(*home)
+
+			require.Equal(t, stateConfirm, h.state)
+			require.NotNil(t, h.confirmationOverlay)
+			rendered := strings.Join(strings.Fields(h.confirmationOverlay.Render()), " ")
+			require.Contains(t, rendered, "Restore later")
+			require.Contains(t, rendered, tc.wantKey)
+			require.NotContains(t, rendered, tc.notKey)
+		})
+	}
 }
 
 func TestHandleArchive_LostRowRestoresWithoutConfirmation(t *testing.T) {
