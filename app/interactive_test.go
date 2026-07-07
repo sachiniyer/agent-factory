@@ -94,6 +94,8 @@ func TestInteractiveForwardsAllKeysIncludingTab(t *testing.T) {
 		{Type: tea.KeyRunes, Runes: []rune("1")}, // nav tab-jump digit — forwards here
 		{Type: tea.KeyCtrlC},                     // forwards (quit still reachable via nav)
 		{Type: tea.KeyRunes, Runes: []rune("x")}, // nav hide-pane key — forwards here
+		{Type: tea.KeyLeft},                      // nav pane-switch key — forwards here
+		{Type: tea.KeyRight},                     // nav pane-switch key — forwards here
 		{Type: tea.KeyEnter},                     //
 		{Type: tea.KeyCtrlW},                     // the full-screen detach key — not host-reserved here
 	} {
@@ -101,7 +103,7 @@ func TestInteractiveForwardsAllKeysIncludingTab(t *testing.T) {
 		assert.Nil(t, cmd, "forwarded keys must not trigger host actions (%s)", msg.String())
 	}
 
-	assert.Equal(t, []string{"tab", "q", "1", "ctrl+c", "x", "enter", "ctrl+w"}, fake.keys,
+	assert.Equal(t, []string{"tab", "q", "1", "ctrl+c", "x", "left", "right", "enter", "ctrl+w"}, fake.keys,
 		"every keystroke must forward to the pane's attachment")
 	assert.True(t, h.interactive, "forwarding must not leave interactive mode")
 	assert.Equal(t, ringBefore, h.ring.Active(), "Tab must not cycle host focus while interactive")

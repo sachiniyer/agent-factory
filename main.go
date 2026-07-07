@@ -227,7 +227,9 @@ var (
 		Short: "Show the effective TUI key bindings (defaults plus [keys] rebinds)",
 		Long: "Show every TUI action with its effective key binding: the built-in default,\n" +
 			"or the rebind from the [keys] table in config.toml (#1026). Fixed bindings —\n" +
-			"structural keys config cannot touch — are listed last.",
+			"structural keys config cannot touch — are listed last. Contextual pane\n" +
+			"actions such as pane_prev/pane_next are included; their default arrow keys\n" +
+			"apply only while a workspace pane has focus.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			log.Initialize(false)
 			defer log.Close()

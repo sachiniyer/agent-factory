@@ -128,6 +128,7 @@ func (h helpTypeGeneral) toContent() string {
 			{helpKey(keys.KeyOpenPane), "Open the selected tab as a pane (or focus its pane)"},
 			{helpKey(keys.KeySplitPane), "Commit the current preview as another pane"},
 			{helpKey(keys.KeyHidePane), "Hide the focused pane (the tab keeps running)"},
+			{helpKey(keys.KeyPanePrev) + "/" + helpKey(keys.KeyPaneNext), "Move focus between open panes"},
 			{navKeys, "Navigate the tree (instances and their tabs)"},
 			{helpKey(keys.KeyLeft), "Collapse the selected instance's tabs"},
 			{helpKey(keys.KeyRight), "Expand the selected instance's tabs"},

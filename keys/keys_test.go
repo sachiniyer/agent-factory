@@ -83,6 +83,8 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		KeyExitInteractive:   "ctrl+]",
 		KeyLeft:              "h/←",
 		KeyRight:             "l/→",
+		KeyPanePrev:          "←",
+		KeyPaneNext:          "→",
 		KeyQuit:              "q",
 	}
 	for name, want := range helpChecks {
@@ -295,6 +297,8 @@ func TestValidateOverridesErrors(t *testing.T) {
 		{"conflict with another default", map[string][]string{"kill": {"q"}}, "bound to both"},
 		{"conflict between two overrides", map[string][]string{"kill": {"z"}, "quit": {"z"}}, "bound to both"},
 		{"canonicalized conflict between overrides", map[string][]string{"up": {"shift+ctrl+up"}, "down": {"ctrl+shift+up"}}, "bound to both"},
+		{"contextual pane key conflicts with unrelated action", map[string][]string{"pane_prev": {"q"}}, "bound to both"},
+		{"contextual pane keys conflict with each other", map[string][]string{"pane_prev": {"z"}, "pane_next": {"z"}}, "bound to both"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -312,6 +316,9 @@ func TestValidateOverridesErrors(t *testing.T) {
 	// on the effective keys, not the defaults.
 	if err := ValidateOverrides(map[string][]string{"quit": {"D"}, "kill": {"q"}}); err != nil {
 		t.Fatalf("swapping two bindings must validate, got: %v", err)
+	}
+	if err := ValidateOverrides(map[string][]string{"pane_prev": {"h"}, "pane_next": {"l"}}); err != nil {
+		t.Fatalf("pane switch keys may share tree-horizontal keys by context, got: %v", err)
 	}
 }
 
@@ -379,6 +386,10 @@ func TestEffectiveBindings(t *testing.T) {
 	up := byAction["up"]
 	if up.Rebound || len(up.Keys) != 2 || up.Keys[0] != "up" || up.Keys[1] != "k" {
 		t.Fatalf("up info = %+v, want default up/k not rebound", up)
+	}
+	panePrev := byAction["pane_prev"]
+	if panePrev.Rebound || len(panePrev.Keys) != 1 || panePrev.Keys[0] != "left" {
+		t.Fatalf("pane_prev info = %+v, want default left not rebound", panePrev)
 	}
 
 	// A broken table reports the same error the TUI would refuse to start

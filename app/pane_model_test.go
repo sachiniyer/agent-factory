@@ -748,6 +748,42 @@ func TestPane_FocusRingCyclesNPanes(t *testing.T) {
 	}
 }
 
+func TestPaneArrowKeysSwitchFocusedPaneAndClamp(t *testing.T) {
+	h := paneTestHome(t)
+	for i := 0; i < 3; i++ {
+		h.sidebar.SetSelectedInstance(i)
+		_ = h.selectionChanged()
+		pressKey(t, h, "s")
+	}
+	require.Equal(t, []string{"alpha", "beta", "gamma"}, visibleTitles(h))
+	panes := h.store.OpenPanes()
+	selectedBefore := h.store.GetSelectedInstance()
+
+	h.focusRegion(layout.PaneRegion(panes[0].ID()))
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyLeft})
+	assert.Equal(t, layout.PaneRegion(panes[0].ID()), h.ring.Active(), "left edge clamps")
+
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
+	assert.Equal(t, layout.PaneRegion(panes[1].ID()), h.ring.Active(), "right moves to the next visible pane")
+
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
+	assert.Equal(t, layout.PaneRegion(panes[2].ID()), h.ring.Active())
+
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
+	assert.Equal(t, layout.PaneRegion(panes[2].ID()), h.ring.Active(), "right edge clamps")
+
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyLeft})
+	assert.Equal(t, layout.PaneRegion(panes[1].ID()), h.ring.Active(), "left moves to the previous visible pane")
+	assert.Same(t, selectedBefore, h.store.GetSelectedInstance(), "pane focus switches must not retarget the tree selection")
+	assert.Equal(t, []string{"alpha", "beta", "gamma"}, visibleTitles(h), "switching focus must not reorder panes")
+
+	h.focusRegion(layout.RegionTree)
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyLeft})
+	assert.Equal(t, layout.RegionTree, h.ring.Active(), "left/right on the tree stay sidebar navigation, not pane switching")
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
+	assert.Equal(t, layout.RegionTree, h.ring.Active(), "right on the tree stays sidebar navigation, not pane switching")
+}
+
 // TestPane_AutoHideOnShrinkRestoreOnGrow drives the §2.6 pane-count fitting:
 // shrinking below what fits auto-hides the least-recently-focused panes —
 // bindings retained, focused pane always visible — and growing restores them

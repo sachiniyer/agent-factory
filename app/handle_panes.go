@@ -3,6 +3,8 @@ package app
 import (
 	"fmt"
 
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -166,6 +168,79 @@ func (m *home) hidePane(p *store.OpenPane) {
 	}
 	m.suppressPanePreviewForSelection(focusedAfter)
 	m.syncFocus()
+}
+
+// handlePaneFocusKey owns pane-local navigation shortcuts in nav mode. The
+// default LEFT/RIGHT bindings intentionally overlap the tree's collapse/expand
+// arrows; this handler runs only when the focus ring is on a workspace pane,
+// so sidebar focus keeps the sidebar behavior and interactive mode forwards
+// arrows to the agent before this path can run.
+func (m *home) handlePaneFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	if m.focusedOpenPane() == nil {
+		return m, nil, false
+	}
+	if paneFocusReservedKey(msg) {
+		return m, nil, false
+	}
+	switch {
+	case key.Matches(msg, keys.GlobalKeyBindings[keys.KeyPanePrev]):
+		return m, m.focusAdjacentPane(-1), true
+	case key.Matches(msg, keys.GlobalKeyBindings[keys.KeyPaneNext]):
+		return m, m.focusAdjacentPane(1), true
+	default:
+		return m, nil, false
+	}
+}
+
+func paneFocusReservedKey(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "ctrl+c", "enter", "tab", "shift+tab", "esc", "ctrl+]":
+		return true
+	}
+	if len(msg.Runes) == 1 {
+		return msg.Runes[0] >= '1' && msg.Runes[0] <= '9'
+	}
+	return false
+}
+
+// focusAdjacentPane moves pane focus left/right in visible workspace order.
+// Edges clamp: pressing previous on the leftmost pane or next on the rightmost
+// pane is consumed but leaves focus where it is.
+func (m *home) focusAdjacentPane(delta int) tea.Cmd {
+	if m.panePreviewTxn != nil {
+		m.suppressActivePanePreview()
+		m.cancelPanePreview(true)
+		return m.panesRefresh(m.attached.Load())
+	}
+	if delta == 0 || len(m.visiblePanes) < 2 {
+		return nil
+	}
+	current := m.focusedOpenPane()
+	if current == nil {
+		return nil
+	}
+	pos := -1
+	for i, p := range m.visiblePanes {
+		if p == current {
+			pos = i
+			break
+		}
+	}
+	if pos < 0 {
+		return nil
+	}
+	next := pos + delta
+	if next < 0 {
+		next = 0
+	}
+	if next >= len(m.visiblePanes) {
+		next = len(m.visiblePanes) - 1
+	}
+	if next == pos {
+		return nil
+	}
+	m.focusRegion(layout.PaneRegion(m.visiblePanes[next].ID()))
+	return nil
 }
 
 // closePaneWindow removes a pane from the open list and drops its window and

@@ -1106,6 +1106,22 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return mod, cmd
 	}
 
+	// Ctrl+C is an always-on hard exit — never rebindable, so it stays a
+	// hardcoded check ahead of contextual handlers and the keymap. The quit
+	// VERB (default q, or whatever [keys].quit rebinds it to) dispatches
+	// through the generated table like every other rebindable action, via
+	// keys.KeyQuit in handleDefaultKeyPress (#1026).
+	if msg.String() == "ctrl+c" {
+		return m.handleQuit()
+	}
+
+	// Pane-local nav shortcuts are contextual: LEFT/RIGHT switch visible
+	// workspace panes only while a pane owns focus. With tree focus, those
+	// same physical arrows continue through the global map as collapse/expand.
+	if mod, cmd, consumed := m.handlePaneFocusKey(msg); consumed {
+		return mod, cmd
+	}
+
 	// Exit scrolling mode when ESC is pressed (each pane keeps its own
 	// scroll state, #1088)
 	if msg.Type == tea.KeyEsc {
@@ -1125,15 +1141,6 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			m.cancelPanePreview(true)
 			return m, m.panesRefresh(m.attached.Load())
 		}
-	}
-
-	// Ctrl+C is an always-on hard exit — never rebindable, so it stays a
-	// hardcoded check ahead of the keymap. The quit VERB (default q, or
-	// whatever [keys].quit rebinds it to) dispatches through the generated
-	// table like every other rebindable action, via keys.KeyQuit in
-	// handleDefaultKeyPress (#1026).
-	if msg.String() == "ctrl+c" {
-		return m.handleQuit()
 	}
 
 	// Number-key tab jump (1-9): jump directly to that tab of the selected
