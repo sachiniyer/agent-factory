@@ -134,7 +134,7 @@ func CommitArchive() TransitionEvent { return TransitionEvent{kind: tkCommitArch
 // loop heals the agent in place.
 func AbortArchiveToLost() TransitionEvent { return TransitionEvent{kind: tkAbortArchiveToLost} }
 
-// BeginRestore enters the restore fence for an archived session (I3): Lost +
+// BeginRestore enters the restore fence for a restorable session (I3): Lost +
 // OpRestoring (replaces RestoreFromArchive's "park in Lost" head).
 func BeginRestore() TransitionEvent { return TransitionEvent{kind: tkBeginRestore} }
 

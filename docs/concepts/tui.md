@@ -55,7 +55,7 @@ Tabs persist across restarts, and each is a real process the daemon tracks.
 
 - **`n`** creates a new local session; **`N`** creates a remote one.
 - **`D`** kills the selected session; **`a`** archives it (or restores an
-  archived one).
+  archived, Lost, or Dead one).
 - **`m`** opens the tasks view to manage [scheduled and event-driven
   automations](../tasks.md).
 - **`c`** retries a session that's parked on a [usage limit](../usage-limits.md).
