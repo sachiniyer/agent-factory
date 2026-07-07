@@ -248,7 +248,7 @@ to cross-check the help view against reality):
 5. **Search** — `/`, find an instance by name, clear the search. Try a
    query with no matches.
 6. **Task flows** — create a task via `"$AF" tasks` (a bounded script,
-   e.g. `echo hello`), open the task list with `S`, trigger with `r`,
+   e.g. `echo hello`), open the task list with `m`, trigger with `r`,
    check the output landed. Manage automations from the rail.
 7. **Navigation & help** — `[`/`]` sections, `h`/`l` collapse/expand,
    `?` help overlay, scroll with `shift+up/down`.
