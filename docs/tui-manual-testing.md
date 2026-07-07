@@ -46,7 +46,7 @@ In nav mode, `Tab`/`Shift-Tab` cycle **ring focus** across regions: the
 The menu bar is context-sensitive and follows focus:
 
 - **tree** focused → `n new • …` (plus instance verbs when a row is selected)
-- **pane** focused → `↵ interact • o attach • … • s open pane • x hide pane`
+- **pane** focused → `↵ interact • o attach • ← prev pane • → next pane • … • s open pane • x hide pane`
 - **automations** focused → `enter manage • …`
 
 `af_focus_tree` walks the ring (checking *before* it presses, so it never

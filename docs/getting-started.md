@@ -53,7 +53,8 @@ The TUI opens with an empty sidebar. From here:
    pane, or **`o`** to **attach** full-screen. From an in-pane interaction,
    **`Ctrl-]`** returns you to navigation mode; from a full-screen attach, the
    tmux detach key drops you back to the sidebar. Either way the agent keeps
-   running.
+   running. Use **`s`** to open a selected tab as a workspace pane; when a pane
+   has focus, **`←`** / **`→`** move focus between open panes.
 4. When you're done with a session, **`D`** kills it and removes its worktree
    and branch, or **`a`** archives it to set it aside and restore it later.
    If a session is marked Lost or Dead after a crash, reboot, or missing
