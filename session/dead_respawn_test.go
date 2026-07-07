@@ -310,6 +310,45 @@ func TestRunningInstance_DeadShellTabReplacedWithFreshShellOnLoad(t *testing.T) 
 	assert.True(t, restored.Started())
 }
 
+func TestRunningInstance_DeadNonDefaultShellTabKeepsTmuxNameOnLoad(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_1335_agent"
+	defaultShellName := agentName + shellTmuxSuffix
+	nonDefaultShellName := agentName + "__shell-2"
+
+	var newSessions, ptyNewSessions int
+	exec := countingExec(map[string]bool{agentName: true}, &newSessions)
+	pty := failFirstNewSessionPty{t: t, cmdExec: exec, count: &ptyNewSessions}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	data := deadInstanceData(t, Running, agentName, nonDefaultShellName)
+	data.Tabs[1].Name = "shell-2"
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	tabs := restored.GetTabs()
+	require.Len(t, tabs, 2)
+	assert.Equal(t, "shell-2", tabs[1].Name)
+	assert.Equal(t, nonDefaultShellName, tabs[1].tmux.SanitizedName(),
+		"the recovered non-default shell tab must keep its #930-derived tmux name")
+	assert.True(t, restored.TabAlive(1), "the recovered non-default shell tab must be live")
+
+	tab, err := restored.AddShellTab()
+	require.NoError(t, err, "creating the default shell tab after recovery must not collide")
+	assert.Equal(t, shellTabName, tab.Name)
+	assert.Equal(t, defaultShellName, tab.tmux.SanitizedName())
+	assert.Equal(t, 2, newSessions,
+		"setupTabs should spawn shell-2, then AddShellTab should spawn shell")
+}
+
 // TestLiveInstance_RespawnsMissingSessionOnLoad guards the seam from the other
 // side: the #970 fix must NOT regress the #386/#930 re-spawn-across-reboot path.
 // A non-Dead (Running) instance whose tmux server died across a reboot must
