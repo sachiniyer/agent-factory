@@ -380,12 +380,16 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 	// dead-shell replacement below applies.
 	hasShellTab := false
 	hasLiveShell := false
+	replacementShellName := ""
 	for idx, tab := range tabs {
 		if idx == 0 {
 			continue
 		}
 		if tab.Kind == TabKindShell {
 			hasShellTab = true
+			if replacementShellName == "" {
+				replacementShellName = tab.Name
+			}
 		}
 		if tab.tmux == nil {
 			continue
@@ -415,7 +419,10 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 	// executor — real in production, mock in tests — keeping the create path
 	// hermetic. The name extends the agent session's name deterministically so
 	// it is collision-free and restorable by exact name.
-	shellTmux := agentTmux.NewSiblingSession(agentTmux.SanitizedName()+shellTmuxSuffix, defaultShell())
+	if replacementShellName == "" {
+		replacementShellName = shellTabName
+	}
+	shellTmux := agentTmux.NewSiblingSession(agentTmux.SanitizedName()+"__"+replacementShellName, defaultShell())
 	if err := shellTmux.Start(worktreePath); err != nil {
 		log.WarningLog.Printf("start shell tab for %q failed: %v", i.Title, err)
 		return
@@ -425,7 +432,9 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 	if existing := i.shellTabLocked(); existing != nil {
 		existing.tmux = shellTmux
 	} else {
-		i.Tabs = append(i.Tabs, newShellTab(shellTmux))
+		tab := newShellTab(shellTmux)
+		tab.Name = replacementShellName
+		i.Tabs = append(i.Tabs, tab)
 	}
 	i.mu.Unlock()
 }
