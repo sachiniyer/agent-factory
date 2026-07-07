@@ -361,6 +361,32 @@ func TestSaveInRepoRefusesSymlinkDirOutsideRepo(t *testing.T) {
 	}
 }
 
+func TestSaveInRepoRefusesSymlinkDirSwappedOutsideBeforeWrite(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	configDir := filepath.Join(repoRoot, InRepoConfigDirName)
+	writeInRepoTomlConfig(t, repoRoot, `default_program = "claude"`+"\n")
+	outsideDir := t.TempDir()
+
+	prevHook := beforeInRepoConfigWrite
+	beforeInRepoConfigWrite = func() error {
+		if err := os.RemoveAll(configDir); err != nil {
+			return err
+		}
+		return os.Symlink(outsideDir, configDir)
+	}
+	t.Cleanup(func() { beforeInRepoConfigWrite = prevHook })
+
+	err := SaveInRepoPostWorktreeCommands(repoRoot, []string{"echo hi"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the repository")
+
+	for _, name := range []string{ConfigFileName, TomlConfigFileName} {
+		_, statErr := os.Stat(filepath.Join(outsideDir, name))
+		assert.True(t, os.IsNotExist(statErr), "nothing must be written outside the repo (%s)", name)
+	}
+}
+
 func TestSaveInRepoPostWorktreeCommands(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 

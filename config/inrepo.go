@@ -1,9 +1,11 @@
 package config
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/sachiniyer/agent-factory/log"
+	"golang.org/x/sys/unix"
 )
 
 // InRepoConfigDirName is the directory at a repository root that holds the
@@ -400,6 +404,115 @@ func resolveSymlinksForCompare(path string) string {
 	}
 }
 
+// beforeInRepoConfigWrite is a test hook for exercising filesystem races at
+// the last point before the save opens its destination for writing.
+var beforeInRepoConfigWrite func() error
+
+func inRepoConfigWriteTarget(repoRoot, path string) (string, string, error) {
+	resolvedRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve repo root %s: %w", repoRoot, err)
+	}
+	resolvedRoot = filepath.Clean(resolvedRoot)
+	path = filepath.Clean(path)
+
+	if info, lstatErr := os.Lstat(path); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		resolvedPath, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to resolve in-repo config %s: %w", prettyHomePath(path), err)
+		}
+		resolvedPath = filepath.Clean(resolvedPath)
+		if !isPathStrictlyInside(resolvedPath, resolvedRoot) {
+			return "", "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
+		}
+		return filepath.Dir(resolvedPath), filepath.Base(resolvedPath), nil
+	} else if lstatErr != nil && !os.IsNotExist(lstatErr) {
+		return "", "", fmt.Errorf("failed to stat in-repo config %s: %w", prettyHomePath(path), lstatErr)
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.Mkdir(dir, 0755); err != nil && !os.IsExist(err) {
+		return "", "", fmt.Errorf("failed to create %s: %w", dir, err)
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve in-repo config directory %s: %w", prettyHomePath(dir), err)
+	}
+	resolvedDir = filepath.Clean(resolvedDir)
+	resolvedPath := filepath.Join(resolvedDir, filepath.Base(path))
+	if !isPathStrictlyInside(resolvedPath, resolvedRoot) {
+		return "", "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
+	}
+	return resolvedDir, filepath.Base(path), nil
+}
+
+func atomicWriteFileInDirNoFollow(dir, name string, data []byte, perm os.FileMode) error {
+	if name == "" || filepath.Base(name) != name {
+		return fmt.Errorf("invalid in-repo config file name %q", name)
+	}
+	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open in-repo config directory %s without following symlinks: %w", prettyHomePath(dir), err)
+	}
+	defer unix.Close(dirFD)
+
+	tmp, tmpName, err := createTempFileInOpenDir(dirFD, name)
+	if err != nil {
+		return err
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = unix.Unlinkat(dirFD, tmpName, 0)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to chmod temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	if err := unix.Renameat(dirFD, tmpName, dirFD, name); err != nil {
+		return fmt.Errorf("failed to rename temp file to %s: %w", filepath.Join(dir, name), err)
+	}
+	success = true
+
+	if err := unix.Fsync(dirFD); err != nil {
+		log.WarningLog.Printf("AtomicWriteFile: failed to fsync directory %s after rename of %s: %v", dir, filepath.Join(dir, name), err)
+	}
+	return nil
+}
+
+func createTempFileInOpenDir(dirFD int, base string) (*os.File, string, error) {
+	for range 32 {
+		var suffix [8]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return nil, "", fmt.Errorf("failed to generate temp file name: %w", err)
+		}
+		name := "." + base + ".tmp." + hex.EncodeToString(suffix[:])
+		fd, err := unix.Openat(dirFD, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0600)
+		if err == nil {
+			return os.NewFile(uintptr(fd), name), name, nil
+		}
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		return nil, "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	return nil, "", fmt.Errorf("failed to create temp file: exhausted random names")
+}
+
 // SaveInRepoPostWorktreeCommands writes the given post-worktree commands into
 // the repo's in-repo config file — the canonical location for this field
 // since #800 — creating the file if needed and preserving every other field
@@ -493,21 +606,22 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 			return fmt.Errorf("failed to marshal in-repo config: %w", err)
 		}
 	}
-	dir := filepath.Join(repoRoot, InRepoConfigDirName)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create %s: %w", dir, err)
+	if beforeInRepoConfigWrite != nil {
+		if err := beforeInRepoConfigWrite(); err != nil {
+			return err
+		}
 	}
 	// Write through a symlinked config file to its resolved target (#1092):
 	// renaming the temp file onto the link path would replace the symlink with
 	// a new regular file and strand the old target with stale content, while
 	// the read path (readInRepoConfigFile) resolves the link before reading.
-	// Using resolvedPath keeps the temp+rename inside the target's own
-	// directory, so the link survives and readers still go through it; the
-	// containment guard above already proved the target lives inside the repo.
-	// A path that is not a symlink — the normal case — is written in place.
-	writePath := path
-	if info, lstatErr := os.Lstat(path); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
-		writePath = resolvedPath
+	// Resolve the destination after the last pre-write point, then pin the
+	// resolved directory with O_NOFOLLOW and perform temp+rename via that
+	// directory fd. A parent-dir symlink swapped in after the earlier guard is
+	// rejected here instead of being followed by AtomicWriteFile.
+	writeDir, writeName, err := inRepoConfigWriteTarget(repoRoot, path)
+	if err != nil {
+		return err
 	}
-	return AtomicWriteFile(writePath, out, 0644)
+	return atomicWriteFileInDirNoFollow(writeDir, writeName, out, 0644)
 }
