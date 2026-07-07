@@ -85,10 +85,12 @@ func TestLimitReached_PersistRoundTrip(t *testing.T) {
 	i, err := NewInstance(InstanceOptions{Title: "limited", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 	i.SetLimitReached(reset)
+	i.Prompt = "run the nightly report"
 
 	data := i.ToInstanceData()
 	require.Equal(t, LiveLimitReached, data.Liveness)
 	require.True(t, data.LimitResetAt.Equal(reset))
+	require.Equal(t, "run the nightly report", data.Prompt)
 
 	// JSON round-trip (the on-disk + snapshot format).
 	raw, err := json.Marshal(data)
@@ -97,6 +99,7 @@ func TestLimitReached_PersistRoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &back))
 	require.Equal(t, LiveLimitReached, back.Liveness)
 	require.True(t, back.LimitResetAt.Equal(reset))
+	require.Equal(t, "run the nightly report", back.Prompt)
 
 	// FromInstanceData maps the reset time onto the rebuilt instance's field.
 	require.Equal(t, reset, back.LimitResetAt)

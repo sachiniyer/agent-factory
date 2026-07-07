@@ -577,6 +577,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 		UpdatedAt:  time.Now(),
 		Program:    i.Program,
 		AutoYes:    i.AutoYes,
+		Prompt:     i.Prompt,
 		UserKilled: i.userKilled,
 	}
 
@@ -684,6 +685,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		UpdatedAt:    data.UpdatedAt,
 		Program:      data.Program,
 		AutoYes:      data.AutoYes,
+		Prompt:       data.Prompt,
 		userKilled:   data.UserKilled,
 		remoteMeta:   data.RemoteMeta,
 	}

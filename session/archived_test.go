@@ -38,6 +38,7 @@ func TestFromInstanceData_ArchivedLoadsInert(t *testing.T) {
 	t.Cleanup(func() { restoreTmuxSession = prev })
 
 	data := deadInstanceData(t, Archived, agentName, shellName)
+	data.Prompt = "run the nightly report"
 	// Deliberately DO NOT create data.Worktree.WorktreePath: an inert load must
 	// not depend on the worktree existing (the Lost path would MkdirAll it).
 
@@ -48,6 +49,7 @@ func TestFromInstanceData_ArchivedLoadsInert(t *testing.T) {
 	assert.False(t, restored.Started(), "an archived session loads inert: Start is skipped, started=false")
 	assert.False(t, restored.TabAlive(0), "no tmux session is spawned or reconnected on load")
 	assert.Equal(t, 0, newSessions, "loading an archived session must never spawn tmux")
+	assert.Equal(t, data.Prompt, restored.Prompt, "persisted prompts must restore onto the instance")
 	assert.Equal(t, data.Worktree.WorktreePath, restored.GetWorktreePath(),
 		"gitWorktree is bound to the persisted archived path so restore knows where the worktree lives")
 
