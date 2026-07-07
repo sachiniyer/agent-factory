@@ -56,6 +56,9 @@ The TUI opens with an empty sidebar. From here:
    running.
 4. When you're done with a session, **`D`** kills it and removes its worktree
    and branch, or **`a`** archives it to set it aside and restore it later.
+   If a session is marked Lost or Dead after a crash, reboot, or missing
+   worktree, select it and press **`a`** or run `af sessions restore <title>` to
+   recover it and resume its recorded agent conversation when possible.
 
 Because each session is a real git branch, reviewing and merging an agent's work
 is just your normal git/PR flow.

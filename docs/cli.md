@@ -35,7 +35,7 @@ af sessions attach <title>                                # attach interactively
 af sessions whoami                                        # report the session this shell is inside
 af sessions kill <title>                                  # kill the session, clean up its worktree
 af sessions archive <title>                               # tmux down + worktree moved out; restartable
-af sessions restore <title>                               # bring an archived session back
+af sessions restore <title>                               # restore an archived/lost/dead session
 ```
 
 Flags:
@@ -46,7 +46,7 @@ Flags:
 - `tab-delete`: the counterpart of `tab-create` — `--name` (required) selects the tab to delete. The tab is removed from the daemon's session state and its tmux window is killed; the removal is persistent (the daemon won't respawn it, and it doesn't return on restart). The deleted tab's name is printed as `{"name": "..."}`. The agent tab can't be deleted — use `af sessions kill` to tear down the whole session. Targeting a missing tab or session is an error. Not available for remote sessions (their tabs are fixed by `remote_hooks` config).
 - `tabs {create,delete}`: additive noun-subcommand aliases — `af sessions tabs create` == `af sessions tab-create` and `af sessions tabs delete` == `af sessions tab-delete` (same flags and output). The hyphen verbs are kept for existing scripts; nothing is renamed. There is no `tabs list` — list a session's tabs via `af sessions get`.
 - `archive`: tears down the session's tmux and **moves its git worktree** out to the global archive directory (`<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/`), preserving the branch and any uncommitted changes. The session is not deleted — it becomes a quiescent **archived** row that survives restarts and is never auto-restored. Prints `{"ok": true, "title": "...", "archived_path": "..."}`. Not available for remote or in-place (`--here`) sessions (they don't own a relocatable worktree). Bring it back with `restore`.
-- `restore`: the counterpart of `archive` — moves the worktree back next to the repo, re-registers it, re-spawns **only the agent** (shell/process tabs are not restored), and marks the session running. Prints `{"ok": true, "title": "...", "worktree_path": "..."}`. Fails if the session isn't archived, or if its origin repo is gone (the archived worktree is left intact for manual recovery). Honors `--repo` like `kill`.
+- `restore`: restores an **archived**, **Lost**, or **Dead** session. Archived sessions move their worktree back next to the repo, re-register it, re-spawn **only the agent** (shell/process tabs are not restored), and mark the session running. Lost/Dead sessions recover in place, rebuilding a missing worktree when possible and resuming the recorded agent conversation when required. Prints `{"ok": true, "title": "...", "worktree_path": "..."}`. Fails if the session is not restorable, or if its origin repo is gone (an archived worktree is left intact for manual recovery). Honors `--repo` like `kill`.
 
 ## `af tasks`
 

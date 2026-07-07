@@ -246,8 +246,9 @@ func (m *Menu) addInstanceOptions() {
 		return
 	}
 
-	// Instance management group
-	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyKill}
+	// Instance management group. The `a` verb is archive for live rows and
+	// restore for Archived/Lost/Dead rows.
+	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyKill, keys.KeyArchive}
 
 	// Action group: enter interacts in-pane, o attaches full-screen (#1089).
 	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach}
@@ -355,8 +356,10 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyHidePane},
 	{keys.KeyTab},
 	{keys.KeyEnter},
+	{keys.KeyAttach},
 	{keys.KeyKill},
 	{keys.KeyNew},
+	{keys.KeyArchive},
 }
 
 func (m *Menu) String() string {

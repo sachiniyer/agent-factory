@@ -18,6 +18,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/KillSession` | `title`, `repo_id` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
 | `POST` | `/v1/ArchiveSession` | `title`, `repo_id` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record. |
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
+| `POST` | `/v1/RestoreSession` | `title`, `repo_id` | Restore an archived, Lost, or Dead session. |
 | `POST` | `/v1/SendPrompt` | `title`, `repo_id`, `prompt` | Send a prompt to an existing session's agent. |
 | `POST` | `/v1/DeliverPrompt` | `title`, `repo_path`, `program`, `prompt`, `auto_yes` | Deliver a prompt to a session, auto-creating it if it does not exist yet. |
 | `POST` | `/v1/CreateTab` | `title`, `repo_id`, `command`, `name`, `shell` | Spawn a tab (process or shell) in a session's worktree. |
