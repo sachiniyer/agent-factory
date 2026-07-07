@@ -65,6 +65,10 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		{"RevertKill", stateAxes{LiveRunning, OpKilling}, true, false, RevertKill(), LiveRunning, OpNone, true},
 		{"BeginArchive from Ready", stateAxes{LiveReady, OpNone}, true, false, BeginArchive(), LiveReady, OpArchiving, true},
 		{"BeginArchive from Running", stateAxes{LiveRunning, OpNone}, true, false, BeginArchive(), LiveRunning, OpArchiving, true},
+		// A Lost / LimitReached session is archivable too (shelving it), matching
+		// the daemon guards — BeginArchive gates on the op/Archived, not liveness.
+		{"BeginArchive from Lost", stateAxes{LiveLost, OpNone}, true, false, BeginArchive(), LiveLost, OpArchiving, true},
+		{"BeginArchive from LimitReached", stateAxes{LiveLimitReached, OpNone}, true, false, BeginArchive(), LiveLimitReached, OpArchiving, true},
 		{"CommitArchive clears started", stateAxes{LiveRunning, OpArchiving}, true, false, CommitArchive(), LiveArchived, OpNone, false},
 		{"AbortArchiveToLost", stateAxes{LiveRunning, OpArchiving}, true, false, AbortArchiveToLost(), LiveLost, OpNone, true},
 		// BeginRestore SETS started=true on the archived (started=false) row,
@@ -117,6 +121,16 @@ func TestTransition_DoubleRestorePanics(t *testing.T) {
 	i := &Instance{liveness: LiveLost, inFlightOp: OpRestoring}
 	assert.Panics(t, func() { _ = i.Transition(BeginRestore()) })
 	assert.Equal(t, OpRestoring, i.inFlightOp, "a rejected transition must not mutate state")
+}
+
+// TestTransition_I4_BeginArchiveAlreadyArchivedPanics: an archive may not begin
+// on an already-archived session (I4 — the fence is raised once). Also covers
+// the busy case (op in flight) implicitly via allowedFrom.
+func TestTransition_I4_BeginArchiveAlreadyArchivedPanics(t *testing.T) {
+	i := &Instance{liveness: LiveArchived, inFlightOp: OpNone}
+	assert.Panics(t, func() { _ = i.Transition(BeginArchive()) })
+	assert.Equal(t, LiveArchived, i.liveness, "a rejected transition must not mutate state")
+	assert.Equal(t, OpNone, i.inFlightOp)
 }
 
 // TestTransition_IllegalReturnsSoftErrorInProd pins the production semantics:
