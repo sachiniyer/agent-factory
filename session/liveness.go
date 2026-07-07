@@ -262,22 +262,10 @@ func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 	i.inFlightOp = op
 }
 
-// MarkLive flips the instance to Running and clears a completing create/restore
-// op — the two-axis translation of the old SetStatusIfNotDeleting(Running) that
-// backend Start/Recover used. It preserves a teardown fence (OpKilling/
-// OpArchiving): a Start/Recover completing must never resurrect a session that a
-// kill or archive is tearing down; that owner writes the terminal liveness. It
-// does clear OpCreating/OpRestoring, which is exactly the op this completion
-// resolves.
-func (i *Instance) MarkLive() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.inFlightOp == OpKilling || i.inFlightOp == OpArchiving {
-		return
-	}
-	i.liveness = LiveRunning
-	i.inFlightOp = OpNone
-}
+// MarkLive is retired (#1195 Phase 2e): marking a completed create/recover live
+// is now the Transition chokepoint's ConfirmLive edge (Running + clear the
+// completing create/restore op, while yielding to an in-flight kill/archive
+// teardown). No direct "mark live" setter remains to bypass it.
 
 // tabSpawnBlockedLocked reports the error, if any, forbidding a new tab spawn.
 // Caller holds i.mu. It reads the two axes directly (the #1195 structural fold of
