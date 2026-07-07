@@ -179,6 +179,9 @@ func (m *home) handlePaneFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.focusedOpenPane() == nil {
 		return m, nil, false
 	}
+	if paneFocusReservedKey(msg) {
+		return m, nil, false
+	}
 	switch {
 	case key.Matches(msg, keys.GlobalKeyBindings[keys.KeyPanePrev]):
 		return m, m.focusAdjacentPane(-1), true
@@ -187,6 +190,17 @@ func (m *home) handlePaneFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	default:
 		return m, nil, false
 	}
+}
+
+func paneFocusReservedKey(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "ctrl+c", "enter", "tab", "shift+tab", "esc", "ctrl+]":
+		return true
+	}
+	if len(msg.Runes) == 1 {
+		return msg.Runes[0] >= '1' && msg.Runes[0] <= '9'
+	}
+	return false
 }
 
 // focusAdjacentPane moves pane focus left/right in visible workspace order.

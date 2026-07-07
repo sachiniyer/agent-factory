@@ -59,6 +59,21 @@ func TestQuitDispatchesThroughKeymap(t *testing.T) {
 	})
 }
 
+func TestCtrlCHardExitWinsOverPaneSwitchRebind(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"pane_prev": {"ctrl+c"}}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := newTestHome(t)
+	inst := startedLocalInstance(t, "worker")
+	selectInstance(h, inst)
+	resizeHome(h, 120, 40)
+	openTestPane(t, h, inst, 0)
+	require.NotNil(t, h.focusedOpenPane(), "test needs a focused pane so pane_prev could otherwise consume the key")
+
+	assert.True(t, reachesQuit(dispatchKey(h, tea.KeyMsg{Type: tea.KeyCtrlC})),
+		"ctrl+c must quit before contextual pane-switch bindings are considered")
+}
+
 func TestErgonomicDefaultKeysDispatchThroughKeymap(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
