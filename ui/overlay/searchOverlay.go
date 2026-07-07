@@ -192,7 +192,7 @@ func (s *SearchOverlay) visibleWindow() (startIdx, endIdx int) {
 }
 
 // Render renders the search overlay.
-func (s *SearchOverlay) Render(opts ...WhitespaceOption) string {
+func (s *SearchOverlay) Render() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ui.AccentColor)
 	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
 	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))

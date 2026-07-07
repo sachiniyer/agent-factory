@@ -53,7 +53,7 @@ func (t *TextOverlay) HandleKeyPress(msg tea.KeyMsg) (tea.Cmd, bool) {
 }
 
 // Render renders the text overlay
-func (t *TextOverlay) Render(opts ...WhitespaceOption) string {
+func (t *TextOverlay) Render() string {
 	// Create styles
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
