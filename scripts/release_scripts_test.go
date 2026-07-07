@@ -13,6 +13,28 @@ import (
 // GitHub workflows (#1041). They are hermetic: tags are fed on stdin, no git
 // or network involved.
 
+// repoRoot returns the repository root even when this package is tested from
+// scripts/.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			if info, err := os.Stat(filepath.Join(dir, ".github", "scripts")); err == nil && info.IsDir() {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find repo root from %s", dir)
+		}
+		dir = parent
+	}
+}
+
 // runVersionScript runs .github/scripts/<script> with args, feeding tags
 // (one per line) on stdin. Returns trimmed stdout and any error.
 func runVersionScript(t *testing.T, script string, args []string, tags []string) (string, error) {
@@ -20,7 +42,7 @@ func runVersionScript(t *testing.T, script string, args []string, tags []string)
 	if runtime.GOOS == "windows" {
 		t.Skip("release scripts are POSIX sh; not run on Windows")
 	}
-	path := filepath.Join(".github", "scripts", script)
+	path := filepath.Join(repoRoot(t), ".github", "scripts", script)
 	cmd := exec.Command("sh", append([]string{path}, args...)...)
 	cmd.Stdin = strings.NewReader(strings.Join(tags, "\n") + "\n")
 	out, err := cmd.Output()
@@ -203,7 +225,9 @@ AF
 esac
 `)
 
-	cmd := exec.Command("sh", "install.sh", "--version", "v9.9.9")
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, "install.sh"), "--version", "v9.9.9")
+	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"AF_INSTALL_DIR="+installDir,
@@ -247,11 +271,7 @@ AF
 chmod +x "$out"
 `)
 
-	scriptPath, err := filepath.Abs("dev-install.sh")
-	if err != nil {
-		t.Fatalf("resolve dev-install.sh: %v", err)
-	}
-	cmd := exec.Command("sh", scriptPath)
+	cmd := exec.Command("sh", filepath.Join(repoRoot(t), "dev-install.sh"))
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
