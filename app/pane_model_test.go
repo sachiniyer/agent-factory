@@ -307,6 +307,39 @@ func TestPanePreviewEscFromScrollRevertsOriginalCommittedTab(t *testing.T) {
 		"reset must not pair the committed alpha instance with the preview agent tab")
 }
 
+func TestPanePreviewTabRowCommitsSameInstanceTerminal(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Same(t, alpha, paneA.Instance())
+	require.Equal(t, 0, paneA.Tab(), "precondition: alpha's agent pane is open")
+
+	// Walk the tree cursor onto alpha's terminal tab row. The selected tab is
+	// a full (instance, tab) target, not "any open pane for this instance".
+	pressNav(t, h, "j")
+	pressNav(t, h, "j")
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab)
+	require.Equal(t, 1, sel.TabIndex)
+	require.NotNil(t, h.panePreviewTxn)
+	assert.Same(t, alpha, h.panePreviewTxn.target.instance)
+	assert.Equal(t, 1, h.panePreviewTxn.target.tab)
+	assert.Equal(t, 0, paneA.Tab(), "preview remains transient until commit")
+	assert.Contains(t, h.View(), "PREVIEW alpha · Terminal (original alpha · Agent)")
+
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+
+	require.Nil(t, h.panePreviewTxn)
+	assert.Equal(t, 1, h.store.NumOpenPanes(), "commit-replace must not duplicate panes")
+	assert.Same(t, paneA, h.store.FindOpenPane(alpha, 1))
+	assert.Nil(t, h.store.FindOpenPane(alpha, 0),
+		"the already-open agent pane must not be treated as the terminal target")
+	assert.Equal(t, 1, paneA.Tab(), "the focused pane binds the selected terminal tab")
+	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
+}
+
 func TestPanePreviewEnterCommitsReplace(t *testing.T) {
 	h := paneTestHome(t)
 	alpha := h.store.GetInstanceByTitle("alpha")

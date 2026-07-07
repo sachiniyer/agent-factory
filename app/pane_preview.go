@@ -32,7 +32,7 @@ func samePaneBinding(a, b paneBinding) bool {
 	return a.instance == b.instance && a.tab == b.tab
 }
 
-func (m *home) updatePanePreview(selected *session.Instance, attachedNow bool) {
+func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabSpecific bool, attachedNow bool) {
 	if attachedNow || m.interactive || selected == nil {
 		m.cancelPanePreview(false)
 		return
@@ -54,10 +54,12 @@ func (m *home) updatePanePreview(selected *session.Instance, attachedNow bool) {
 	if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID == owner.ID() {
 		original = m.panePreviewTxn.original
 	}
-	target := paneBinding{instance: selected, tab: 0}
-	// #1321 is an instance preview, not a tab preview: selecting a different
-	// tab row on the pane's original instance keeps the #1289 divergence header.
-	if original.instance == target.instance {
+	target := paneBinding{instance: selected, tab: targetTab}
+	// Plain instance-row previews stay on the selected instance's agent tab
+	// (#1321). Explicit tab rows, however, name a full (instance, tab) target:
+	// a same-instance terminal tab is distinct from the already-open agent pane.
+	if (!tabSpecific && original.instance == target.instance) ||
+		(tabSpecific && samePaneBinding(original, target)) {
 		m.cancelPanePreview(false)
 		return
 	}
