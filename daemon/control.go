@@ -1595,7 +1595,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	}
 	switch {
 	case updated:
-		instance.SetLiveness(session.LiveRunning)
+		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 	case hasPrompt:
 		// A waiting prompt with otherwise-unchanged output: leave the status for
 		// the next tick to resolve, exactly as runMetadataTick did. The
@@ -1609,7 +1609,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// intent on record, so the session vanished out from under a live
 		// record — an outage/reboot casualty that is recovery-eligible, not a
 		// corpse the user wanted gone.
-		instance.SetLiveness(session.LiveLost)
+		_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
 	default:
 		// Idle output: settle to Ready, or LimitReached when the pane shows a
 		// usage-limit banner for a claude/codex session (#1146). content is

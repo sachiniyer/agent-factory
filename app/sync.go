@@ -564,7 +564,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// never carries, so this can never clobber an optimistic kill/archive marker.
 	lv := snapshotLiveness(inst.GetLiveness(), d)
 	if inst.GetLiveness() != lv {
-		inst.SetLiveness(lv)
+		_ = inst.Transition(session.ObserveLiveness(lv))
 		changed = true
 	}
 	// Mirror the usage-limit reset time (#1146) alongside the liveness. It's

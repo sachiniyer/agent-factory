@@ -69,7 +69,7 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 	switch instance.GetLiveness() {
 	case session.LiveLost:
 	case session.LiveDead:
-		instance.SetLiveness(session.LiveLost)
+		_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
 	default:
 		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
 	}
