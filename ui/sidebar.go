@@ -348,7 +348,7 @@ func (s *Sidebar) moveCursorToInstance(target *session.Instance) {
 	}
 	instRow := -1
 	for j, item := range s.visibleItems {
-		if item.Kind != SectionInstances || item.IsHeader || item.ItemIndex != instIdx {
+		if !isInstanceRow(item) || item.ItemIndex != instIdx {
 			continue
 		}
 		if item.IsTab {

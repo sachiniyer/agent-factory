@@ -143,6 +143,42 @@ func TestSidebar_ArchivedRowSelectableWhenExpanded(t *testing.T) {
 	assert.False(t, strings.Contains(view, "[archived]"), "archived rows must not carry the name-eating text prefix (#1225)")
 }
 
+func TestSidebar_MoveCursorToArchivedInstance(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false, store.NewProjection())
+
+	liveInst := archTestInstance(t, "live-one", session.Ready)
+	archivedInst := archTestInstance(t, "put-away", session.Archived)
+	addTestInstance(s, liveInst)
+	addTestInstance(s, archivedInst)
+	s.SetSize(40, 40)
+
+	s.SetSelectedInstance(0)
+	require.Same(t, liveInst, s.GetSelectedInstance())
+
+	s.ClickHeaderKind(SectionArchived)
+	require.True(t, archivedRowVisible(s), "archived row must be visible after expanding Archived")
+
+	s.proj.SelectInstance(archivedInst)
+	s.syncFromStore()
+
+	sel := s.rawSelection()
+	assert.Equal(t, SectionArchived, sel.Kind, "cursor should move to the archived row")
+	assert.False(t, sel.IsHeader)
+	assert.Same(t, archivedInst, s.GetSelectedInstance())
+	assert.Same(t, archivedInst, s.proj.GetSelectedInstance(),
+		"sync must not reassert the previous live cursor row over the archived selection")
+}
+
+func archivedRowVisible(s *Sidebar) bool {
+	for _, it := range s.visibleItems {
+		if it.Kind == SectionArchived && !it.IsHeader && it.ItemIndex >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // TestSidebar_ArchivedZonesRegistered (#1028 mouse P2): the Archived folder
 // header gets its OWN zone id (distinct from the Instances header, so a click
 // toggles the right folder), and — once expanded — an archived row registers a
