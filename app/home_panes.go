@@ -49,7 +49,13 @@ func (m *home) selectionChanged() tea.Cmd {
 		// just in the explicit tab-jump handlers.
 		m.menu.SetActiveTab(m.store.ActiveTab())
 		m.maybeAutoOpenInitialPane(selected)
-		m.updatePanePreview(selected, attachedNow)
+		previewTab := 0
+		previewTabSpecific := false
+		if sel.IsTab {
+			previewTab = sel.TabIndex
+			previewTabSpecific = true
+		}
+		m.updatePanePreview(selected, previewTab, previewTabSpecific, attachedNow)
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
 		// Lazily refresh PR info when the user lands on an instance that
 		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
