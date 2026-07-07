@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Agent Factory documentation
+    url: https://sachiniyer.github.io/agent-factory/
+    about: Check setup, commands, and troubleshooting in the docs.
