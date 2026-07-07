@@ -69,6 +69,9 @@ func TestMenuNarrowWidthKeepsHelpAndQuit(t *testing.T) {
 			"width %d: the prioritized row must fit the bar", w)
 		assert.Containsf(t, out, "q quit", "width %d: quit must survive", w)
 		assert.Containsf(t, out, "? help", "width %d: help must survive", w)
+		if w == 45 {
+			assert.Contains(t, out, "archive/restore", "the live-row archive hint should outrank attach at narrow widths")
+		}
 	}
 
 	// At a roomy width nothing is dropped: the scroll hints still render.
