@@ -190,6 +190,9 @@ type home struct {
 	// re-homes focus to the tree (#1233/#1236). Preview-on-scroll uses it as
 	// the owner pane while the tree cursor moves.
 	lastFocusedPaneID int
+	// panePreviewSuppression remembers a user-dismissed preview target so the
+	// 100ms preview tick does not recreate it until the sidebar target changes.
+	panePreviewSuppression *panePreviewSuppression
 	// -- Live embedded terminal (#1089 PR 1, read-only proof path) --
 	//
 	// At most ONE pane holds a live termpane attachment: the focused pane
@@ -533,6 +536,7 @@ func (m *home) focusRegion(region string) {
 // the in-rail automations section is read-only, so no save is needed here.
 func (m *home) cycleFocus(back bool) tea.Cmd {
 	if m.panePreviewTxn != nil {
+		m.suppressActivePanePreview()
 		m.cancelPanePreview(true)
 		return m.panesRefresh(m.attached.Load())
 	}
@@ -1110,12 +1114,14 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				return m, m.handleError(err)
 			}
 			if m.panePreviewTxn != nil {
+				m.suppressActivePanePreview()
 				m.cancelPanePreview(true)
 				return m, m.panesRefresh(m.attached.Load())
 			}
 			return m, m.selectionChanged()
 		}
 		if m.panePreviewTxn != nil {
+			m.suppressActivePanePreview()
 			m.cancelPanePreview(true)
 			return m, m.panesRefresh(m.attached.Load())
 		}
@@ -1399,6 +1405,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		// until the first cursor move (#1099 play-test).
 		m.maybeAutoOpenInitialPane(nil)
 		m.cancelPanePreview(false)
+		m.panePreviewSuppression = nil
 		m.menu.SetInstance(nil)
 		if selected := m.store.GetSelectedInstance(); selected != nil && !m.store.ContainsInstance(selected) {
 			// The sticky binding dangles — its instance was removed (e.g. the
