@@ -30,7 +30,8 @@ import (
 //     half-started session down.
 func finishCreateStart(instance *session.Instance, prompt string, startErr error) error {
 	if startErr == nil {
-		instance.MarkLive()
+		// Create succeeded: mark live through the chokepoint (#1195 Phase 2d).
+		_ = instance.Transition(session.ConfirmLive())
 		return nil
 	}
 	var limitErr *task.LimitReachedError
