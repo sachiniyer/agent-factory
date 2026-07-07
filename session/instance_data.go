@@ -1,0 +1,269 @@
+package session
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+// ToInstanceData converts an Instance to its serializable form
+func (i *Instance) ToInstanceData() InstanceData {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	data := InstanceData{
+		ID:     i.ID,
+		Title:  i.Title,
+		Path:   i.Path,
+		Branch: i.Branch,
+		// Persist BOTH axes: Liveness is the new canonical value, Status the
+		// legacy int kept for one release so a binary rolled back to before
+		// #1195 still reads a sensible status (and as the read-fallback source
+		// for records this build wrote before the split). SaveInstances skips
+		// transient (Loading/Deleting) rows, so a persisted Status is always a
+		// settled liveness value.
+		Status:     i.statusLocked(),
+		Liveness:   i.liveness,
+		Height:     i.Height,
+		Width:      i.Width,
+		CreatedAt:  i.CreatedAt,
+		UpdatedAt:  time.Now(),
+		Program:    i.Program,
+		AutoYes:    i.AutoYes,
+		Prompt:     i.Prompt,
+		UserKilled: i.userKilled,
+	}
+
+	if i.backend != nil {
+		data.BackendType = i.backend.Type()
+	}
+	if i.remoteMeta != nil {
+		data.RemoteMeta = i.remoteMeta
+	}
+
+	// Persist the usage-limit reset time only while the session is actually
+	// limit-blocked (#1146). Gating on the liveness keeps a recovered session
+	// from carrying a stale reset time to disk or into the snapshot — the
+	// in-memory field lingers after ClearLimitReached but is never serialized.
+	if i.liveness == LiveLimitReached {
+		data.LimitResetAt = i.limitResetAt
+	}
+
+	// Persist each tab so the full agent+shell tab list survives a restart
+	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
+	// each local tab's tmux session by its exact persisted name, reconnecting
+	// live sessions across an af/daemon restart. Remote tabs (agent + optional
+	// terminal) carry no tmux session, so they serialize with an empty TmuxName;
+	// on restore HookBackend.Start re-derives them from the live terminal_cmd
+	// config (syncRemoteTabs) rather than from this serialized list, so a
+	// terminal_cmd added or removed while af was down is honored.
+	for _, tab := range i.Tabs {
+		td := TabData{Name: tab.Name, Kind: tab.Kind, Command: tab.Command}
+		if tab.tmux != nil {
+			td.TmuxName = tab.tmux.SanitizedName()
+		}
+		td.Conversation = conversationDataPtr(tab.Conversation)
+		data.Tabs = append(data.Tabs, td)
+	}
+
+	// Keep writing the legacy single TmuxName field (set from the agent tab) for
+	// one release: a binary rolled back to before #930 PR 2 still finds the
+	// agent session by its exact name, and old readers ignore the new Tabs list.
+	if ts := i.tmuxLocked(); ts != nil {
+		data.TmuxName = ts.SanitizedName()
+	}
+	if len(i.Tabs) > 0 {
+		data.AgentConversation = conversationDataPtr(i.Tabs[0].Conversation)
+	}
+
+	// Only include worktree data if gitWorktree is initialized
+	if i.gitWorktree != nil {
+		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
+		// ExternalWorktree is true for in-place sessions (`af sessions create
+		// --here`, which attach to the repo's own working tree) and for
+		// instances persisted by the pre-#930-PR-3 create-on-existing-worktree
+		// feature. Cleanup() honors it by skipping removal of the user-owned
+		// worktree+branch. (BranchCreatedByUs is independent — it also flips
+		// false on the normal path when Setup reuses an existing branch; see
+		// git/worktree_ops.go setupFromExistingBranch.)
+		data.Worktree = GitWorktreeData{
+			RepoPath:          i.gitWorktree.GetRepoPath(),
+			WorktreePath:      i.gitWorktree.GetWorktreePath(),
+			SessionName:       i.Title,
+			BranchName:        i.gitWorktree.GetBranchName(),
+			BaseCommitSHA:     i.gitWorktree.GetBaseCommitSHA(),
+			ExternalWorktree:  i.gitWorktree.IsExternalWorktree(),
+			BranchCreatedByUs: &branchCreatedByUs,
+		}
+	}
+
+	// Only include PR info if it exists
+	if i.prInfo != nil {
+		data.PRInfo = PRInfoData{
+			Number: i.prInfo.Number,
+			Title:  i.prInfo.Title,
+			URL:    i.prInfo.URL,
+			State:  i.prInfo.State,
+		}
+	}
+
+	return data
+}
+
+// FromInstanceData creates a new Instance from serialized data
+func FromInstanceData(data InstanceData) (*Instance, error) {
+	// Resolve the liveness axis via the shared rollforward (#1108/#1195): prefer
+	// the new `liveness` field, fall back to the legacy `status` int for records
+	// written before #1195, and load a persisted Dead as Lost — recovery-
+	// eligible, which is what makes sessions stranded by an outage under an old
+	// build restorable after an upgrade. A tombstoned record keeps its (Lost)
+	// status; the daemon finishes its teardown rather than restoring it.
+	liveness := livenessFromData(data)
+	// Resolve the in-flight-op axis from the legacy status. A persisted record
+	// is always settled (SaveInstances skips transients), but a SNAPSHOT of a
+	// transient instance carries Loading/Deleting, which buildInstanceFromSnapshot
+	// must reconstruct so the rebuilt row composes to the identical Status.
+	inFlightOp := opForStatus(data.Status)
+	instance := &Instance{
+		ID:           data.ID,
+		Title:        data.Title,
+		Path:         data.Path,
+		Branch:       data.Branch,
+		liveness:     liveness,
+		inFlightOp:   inFlightOp,
+		limitResetAt: data.LimitResetAt,
+		Height:       data.Height,
+		Width:        data.Width,
+		CreatedAt:    data.CreatedAt,
+		UpdatedAt:    data.UpdatedAt,
+		Program:      data.Program,
+		AutoYes:      data.AutoYes,
+		Prompt:       data.Prompt,
+		userKilled:   data.UserKilled,
+		remoteMeta:   data.RemoteMeta,
+	}
+
+	// Pick backend based on persisted BackendType.
+	if data.BackendType == "remote" {
+		hook, err := loadHookBackendForPath(data.Path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load remote hooks config: %w", err)
+		}
+		instance.backend = hook
+	} else {
+		instance.backend = &LocalBackend{}
+
+		// Preserve backward compatibility: when the branch_created_by_us
+		// field is missing from persisted data (written before this field
+		// was added), default to true. Old saved sessions were created
+		// under the assumption that the session owned the branch, so
+		// keeping that behavior avoids surprising changes on restore.
+		branchCreatedByUs := true
+		if data.Worktree.BranchCreatedByUs != nil {
+			branchCreatedByUs = *data.Worktree.BranchCreatedByUs
+		}
+
+		gw, err := git.NewGitWorktreeFromStorage(
+			data.Worktree.RepoPath,
+			data.Worktree.WorktreePath,
+			data.Worktree.SessionName,
+			data.Worktree.BranchName,
+			data.Worktree.BaseCommitSHA,
+			data.Worktree.ExternalWorktree,
+			branchCreatedByUs,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to restore git worktree: %w", err)
+		}
+		instance.gitWorktree = gw
+
+		// Rebuild the instance's tab list from disk so every tab (agent + shell)
+		// reconnects to its exact tmux session across an af/daemon restart — the
+		// load-bearing #930 requirement. LocalBackend.Start(false) then restores
+		// each tab's session.
+		restoreLocalTabs(instance, data)
+	}
+
+	if data.PRInfo.Number != 0 {
+		instance.prInfo = &git.PRInfo{
+			Number: data.PRInfo.Number,
+			Title:  data.PRInfo.Title,
+			URL:    data.PRInfo.URL,
+			State:  data.PRInfo.State,
+		}
+	}
+
+	// An archived session (#1028) loads INERT: its tmux was torn down and its
+	// worktree moved to the global archive dir at archive time, so there is
+	// nothing to re-spawn or reconnect. Skipping Start leaves started=false and
+	// no tmux binding, which is exactly what makes the status poll (skips
+	// !Started), the Lost-restore loop (gates on ==Lost), and EnsureRootAgents
+	// pass it by — the session sits quiescent until an explicit RestoreArchived.
+	// This is also #970-consistent: a load must never itself un-archive a
+	// session (no worktree move, no spawn) as a side effect. gitWorktree is
+	// already bound above to the persisted (archived) path so restore knows
+	// where the worktree currently lives; the Tabs list restored above is
+	// tmux-less for the same reason (its TmuxName entries reference sessions
+	// that no longer exist, and restoreLocalTabs only binds names, never spawns).
+	if liveness == LiveArchived {
+		return instance, nil
+	}
+
+	if err := instance.Start(false); err != nil {
+		return nil, err
+	}
+
+	return instance, nil
+}
+
+// restoreTmuxSession constructs a tmux session for an exact persisted name. It
+// is a package var (not a direct call) so restore-survival tests can inject
+// mock-backed sessions and stay hermetic; production uses the real constructor.
+var restoreTmuxSession = tmux.NewTmuxSessionFromSanitizedName
+
+// restoreLocalTabs rebuilds a local instance's tab list from persisted data.
+//
+//   - New format (data.Tabs present): each tab is reconstructed in order, and
+//     any tab with a persisted tmux name is bound to that exact session so
+//     LocalBackend.Start can reconnect it across a restart.
+//   - Legacy format (no data.Tabs, written before #930 PR 2): synthesize the
+//     single Agent tab from the legacy TmuxName/Program — keeping the EXACT
+//     legacy tmux name so an existing live agent session survives the upgrade.
+//     No shell tab is synthesized: terminal tabs are on-demand only (#1100).
+func restoreLocalTabs(instance *Instance, data InstanceData) {
+	if len(data.Tabs) > 0 {
+		for idx, td := range data.Tabs {
+			kind := tabKindForData(td.Kind)
+			var ts *tmux.TmuxSession
+			if td.TmuxName != "" {
+				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
+			}
+			var conversation AgentConversationData
+			if td.Conversation != nil {
+				conversation = *td.Conversation
+			} else if idx == 0 && data.AgentConversation != nil {
+				conversation = *data.AgentConversation
+			}
+			instance.Tabs = append(instance.Tabs, &Tab{
+				Name:         td.Name,
+				Kind:         kind,
+				Command:      td.Command,
+				Conversation: conversation,
+				tmux:         ts,
+			})
+		}
+		return
+	}
+
+	// Legacy single-session format: the agent tab keeps its exact legacy name.
+	if data.TmuxName != "" {
+		instance.setTmuxLocked(restoreTmuxSession(data.TmuxName, data.Program))
+	} else {
+		instance.setTmuxLocked(tmux.NewTmuxSession(data.Title, data.Program))
+	}
+	if data.AgentConversation != nil {
+		instance.SetAgentConversation(*data.AgentConversation)
+	}
+}

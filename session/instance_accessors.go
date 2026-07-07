@@ -1,0 +1,194 @@
+package session
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+func (i *Instance) RepoName() (string, error) {
+	if i.IsRemote() {
+		return "", fmt.Errorf("remote instances do not have a local repo")
+	}
+	i.mu.RLock()
+	started := i.started
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if !started {
+		return "", fmt.Errorf("cannot get repo name for instance that has not been started")
+	}
+	if gw == nil {
+		return "", fmt.Errorf("cannot get repo name for instance without a git worktree")
+	}
+	return gw.GetRepoName(), nil
+}
+
+// SetAutoYes sets the AutoYes flag under the instance mutex. Writers must use
+// this rather than assigning i.AutoYes directly: TapEnter runs from the
+// metadata-tick background goroutine and reads AutoYes under i.mu.RLock, so
+// any unsynchronized write produces a data race (issue #563, regression from
+// PR #560 which moved the tick off the bubbletea event loop).
+func (i *Instance) SetAutoYes(autoYes bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.AutoYes = autoYes
+}
+
+// GetBranch returns the current worktree branch name under the Instance's
+// mutex. Readers that run from goroutines other than the one mutating the
+// instance (notably the bubbletea renderer) must use this accessor rather
+// than reading i.Branch directly, or the race detector flags a write in
+// LocalBackend.Start vs a read in InstanceRenderer.Render.
+func (i *Instance) GetBranch() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Branch
+}
+
+// MarkUserKilled records kill intent on the instance (#1108). Callers persist
+// the instance afterwards so the tombstone survives a daemon crash mid-kill.
+func (i *Instance) MarkUserKilled() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.userKilled = true
+}
+
+// UserKilled reports whether an explicit kill was recorded for this instance.
+func (i *Instance) UserKilled() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.userKilled
+}
+
+// GetGitWorktree returns the git worktree for the instance
+func (i *Instance) GetGitWorktree() (*git.GitWorktree, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if !i.started {
+		return nil, fmt.Errorf("cannot get git worktree for instance that has not been started")
+	}
+	return i.gitWorktree, nil
+}
+
+// GetWorktreePath returns the worktree path for the instance, or empty string if unavailable
+func (i *Instance) GetWorktreePath() string {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+
+	if gw == nil {
+		return ""
+	}
+	return gw.GetWorktreePath()
+}
+
+// GetRepoPath returns the resolved git repo path stored in the instance's
+// worktree, or empty string when no worktree is attached (e.g. a remote-
+// backend instance). Callers using the result to derive a repo ID must
+// fall back to Instance.Path when this is empty (#667).
+func (i *Instance) GetRepoPath() string {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+
+	if gw == nil {
+		return ""
+	}
+	return gw.GetRepoPath()
+}
+
+func (i *Instance) Started() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.started
+}
+
+// IsExternalWorktree reports whether the instance's worktree is external/in-place
+// (`af sessions create --here`, or a legacy external record) — the same flag
+// MoveWorktree checks. Such a worktree is the user's own working tree and must
+// never be relocated, so the daemon rejects archiving it (#1028). Returns false
+// when the instance has no worktree yet.
+func (i *Instance) IsExternalWorktree() bool {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	return gw != nil && gw.IsExternalWorktree()
+}
+
+// SetTitle sets the title of the instance. Returns an error if the instance has started.
+// We cant change the title once it's been used for a tmux session etc.
+func (i *Instance) SetTitle(title string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.started {
+		return fmt.Errorf("cannot change title of a started instance")
+	}
+	i.Title = title
+	return nil
+}
+
+// TmuxAlive returns true if the underlying session is alive.
+// For remote backends this delegates to IsAlive.
+func (i *Instance) TmuxAlive() bool {
+	return i.backend.IsAlive(i)
+}
+
+// ResolvedAgent returns the canonical agent (one of tmux.SupportedPrograms)
+// this instance's pane will actually run, or "" when the resolved command
+// runs no known agent — e.g. a program_overrides entry pointing an agent name
+// at a plain shell (#1131). Agent-specific behavior (readiness heuristics,
+// trust-prompt handling, flag injection) must key off this, never off
+// Instance.Program: Program is the config-name enum the instance was created
+// with, and an override may point it at a different program entirely (#1116).
+//
+// Once the tmux session exists, its program string (override-resolved and
+// flag-injected by Start) is the ground truth. Before Start — or in tests
+// that never attach a tmux session — detection falls back to the raw Program
+// value, which also covers legacy free-form persisted values like
+// "/home/foo/bin/claude --plugin-dir x" (#677).
+func (i *Instance) ResolvedAgent() string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts != nil {
+		if p := ts.Program(); strings.TrimSpace(p) != "" {
+			return tmux.DetectAgentFromCommand(p)
+		}
+	}
+	return tmux.DetectAgentFromCommand(i.Program)
+}
+
+// SetTmuxSession sets the agent tab's tmux session for testing purposes,
+// materializing the single Agent tab if needed.
+func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
+	i.setTmuxLocked(session)
+}
+
+// SetStartedForTest toggles the started flag for testing purposes. Prefer
+// Start() in non-test code; this exists so unit tests can exercise flows
+// gated on Started() without spinning up a real tmux session.
+func (i *Instance) SetStartedForTest(started bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.started = started
+}
+
+// SetGitWorktreeForTest assigns a git worktree to this instance. Test-only:
+// the real flow sets this inside LocalBackend.Start, which isn't available
+// in unit tests that use FakeBackend.
+func (i *Instance) SetGitWorktreeForTest(gw *git.GitWorktree) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.gitWorktree = gw
+}
+
+// AddTabForTest appends a tmux-less tab record. Test-only: UI tests (the
+// sidebar tree, tab labels) need instances with a populated tab LIST without
+// spinning up real tmux sessions; the tab is never attachable or previewable.
+func (i *Instance) AddTabForTest(name string, kind TabKind) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Tabs = append(i.Tabs, &Tab{Name: name, Kind: kind})
+}
