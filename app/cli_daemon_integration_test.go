@@ -257,7 +257,7 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 		Program: tmux.ProgramClaude,
 	})
 	require.NoError(t, err)
-	placeholder.SetStatus(session.Loading)
+	placeholder.SetStatusForTest(session.Loading)
 	h.store.AddInstance(placeholder)
 
 	// The daemon persists the session record mid-create — emulated by a CLI

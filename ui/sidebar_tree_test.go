@@ -325,7 +325,7 @@ func TestSidebarTreeTransientRowsCollapse(t *testing.T) {
 	require.Equal(t, 2, tabRowCount(s))
 
 	inst := s.proj.GetInstances()[0]
-	inst.SetStatus(session.Deleting)
+	inst.SetStatusForTest(session.Deleting)
 	// Status flips in place (no store version bump) — the structure signature
 	// must still pick it up on the next read.
 	assert.Equal(t, 0, tabRowCount(s), "deleting instance folds its tab children")
@@ -334,7 +334,7 @@ func TestSidebarTreeTransientRowsCollapse(t *testing.T) {
 	assert.NotContains(t, out, "├", "no tab children while deleting")
 	assert.NotContains(t, out, "▾", "no expanded arrow while deleting")
 
-	inst.SetStatus(session.Ready)
+	inst.SetStatusForTest(session.Ready)
 	assert.Equal(t, 2, tabRowCount(s), "back to Ready re-expands the selection")
 }
 

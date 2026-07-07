@@ -192,7 +192,7 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 			// sync removes it. It is not Loading, so sync is allowed to remove
 			// it (Loading rows are protected as in-flight creations).
 			preceding := newLoadingInstance(t, "preceding")
-			preceding.SetStatus(session.Running)
+			preceding.SetStatusForTest(session.Running)
 			h.store.AddInstance(preceding)
 
 			// The naming instance: Loading, empty title — exactly what
@@ -203,7 +203,7 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 				Program: "claude",
 			})
 			require.NoError(t, err)
-			naming.SetStatus(session.Loading)
+			naming.SetStatusForTest(session.Loading)
 			h.store.AddInstance(naming)
 			h.sidebar.SetSelectedInstance(h.store.NumInstances() - 1)
 			h.namingInstance = naming
@@ -211,7 +211,7 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 			// A trailing instance gives the drift somewhere to land now that
 			// the rail has no trailing Tasks/Hooks headers (#1024 PR 4).
 			trailing := newLoadingInstance(t, "trailing")
-			trailing.SetStatus(session.Running)
+			trailing.SetStatusForTest(session.Running)
 			h.store.AddInstance(trailing)
 
 			// A background mutation removes `preceding` (a daemon-owned row the

@@ -58,10 +58,10 @@ func TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift(t *testing.T) {
 
 	a, err := session.NewInstance(session.InstanceOptions{Title: "instance-a", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
-	a.SetStatus(session.Running)
+	a.SetStatusForTest(session.Running)
 	b, err := session.NewInstance(session.InstanceOptions{Title: "instance-b", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
-	b.SetStatus(session.Running)
+	b.SetStatusForTest(session.Running)
 
 	h.store.AddInstance(a)
 	h.store.AddInstance(b)
@@ -140,7 +140,7 @@ func TestOpenCopyPRNoPRSurfacesMessage(t *testing.T) {
 
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "no-pr", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 	require.Nil(t, inst.GetPRInfo(), "precondition: session has no PR")
@@ -217,7 +217,7 @@ func TestHandleCopyPRFailureShowsReasonAndURL(t *testing.T) {
 
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "has-pr", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	inst.SetPRInfo(&sessiongit.PRInfo{Number: 1284, Title: "clipboard", URL: url, State: "OPEN"})
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)

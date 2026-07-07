@@ -13,7 +13,7 @@ import (
 // struct literal (#1195 Phase 1b).
 func readyUIInstance() *session.Instance {
 	i := &session.Instance{}
-	i.SetStatus(session.Ready)
+	i.SetStatusForTest(session.Ready)
 	return i
 }
 
@@ -86,7 +86,7 @@ func TestMenuArchiveRestoreActionByRowState(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := &session.Instance{}
-			inst.SetStatus(tc.status)
+			inst.SetStatusForTest(tc.status)
 			m := NewMenu()
 			m.SetInstance(inst)
 

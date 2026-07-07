@@ -40,7 +40,7 @@ func TestSetLimitReached_NoResetTime(t *testing.T) {
 func TestSetLimitReached_SkipsTransient(t *testing.T) {
 	for _, s := range []Status{Loading, Deleting} {
 		i := &Instance{}
-		i.SetStatus(s)
+		i.SetStatusForTest(s)
 		i.SetLimitReached(time.Now())
 		require.False(t, i.LimitReached(), "%v must not be overwritten by SetLimitReached", s)
 		require.Equal(t, s, i.GetStatus())
@@ -60,7 +60,7 @@ func TestClearLimitReached(t *testing.T) {
 
 	// No-op on a Ready instance.
 	r := &Instance{}
-	r.SetStatus(Ready)
+	r.SetStatusForTest(Ready)
 	r.ClearLimitReached()
 	require.Equal(t, Ready, r.GetStatus())
 }
@@ -70,7 +70,7 @@ func TestClearLimitReached(t *testing.T) {
 func TestLimitResetAt_ClearedWhenNotLimit(t *testing.T) {
 	i := &Instance{}
 	i.SetLimitReached(time.Now().Add(time.Hour))
-	i.SetStatus(Ready) // shim moves liveness to LiveReady, limitResetAt lingers
+	i.SetStatusForTest(Ready) // shim moves liveness to LiveReady, limitResetAt lingers
 	require.False(t, i.LimitReached())
 	_, ok := i.LimitResetAt()
 	require.False(t, ok, "a lingering reset time must not surface once off LimitReached")
@@ -110,7 +110,7 @@ func TestLimitReached_PersistRoundTrip(t *testing.T) {
 func TestToInstanceData_NoLimitResetForNormalSession(t *testing.T) {
 	i, err := NewInstance(InstanceOptions{Title: "normal", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
-	i.SetStatus(Ready)
+	i.SetStatusForTest(Ready)
 	data := i.ToInstanceData()
 	require.True(t, data.LimitResetAt.IsZero(), "a non-limit session must not carry a reset time")
 }

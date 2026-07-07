@@ -214,11 +214,11 @@ func TestInstanceRendererDeletingMarker(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	inst.SetStatus(session.Ready)
+	inst.SetStatusForTest(session.Ready)
 	before, _, _ := renderForTerminal(t, 120, inst, &spin)
 	assert.NotContains(t, before, "[deleting]")
 
-	inst.SetStatus(session.Deleting)
+	inst.SetStatusForTest(session.Deleting)
 	after, _, _ := renderForTerminal(t, 120, inst, &spin)
 	assert.Contains(t, after, "[deleting]", "deleting rows must be explicitly marked")
 	assert.Contains(t, after, "going-away", "the title must remain visible while deleting")
@@ -311,13 +311,13 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 		return lines
 	}
 
-	inst.SetStatus(session.Ready)
+	inst.SetStatusForTest(session.Ready)
 	before := renderLines()
 	require.NotContains(t, before[1], dimFG, "selected title must not be dimmed before deletion")
 	require.NotContains(t, before[2], dimFG, "selected branch line must not be dimmed before deletion")
 	require.NotContains(t, before[4], dimFG, "selected PR line must not be dimmed before deletion")
 
-	inst.SetStatus(session.Deleting)
+	inst.SetStatusForTest(session.Deleting)
 	after := renderLines()
 	assert.Contains(t, after[1], dimFG, "selected deleting title must be dimmed")
 	assert.Contains(t, after[2], dimFG, "selected deleting branch line must be dimmed")
@@ -345,7 +345,7 @@ func TestInstanceRendererTreeArrow(t *testing.T) {
 	expanded := strings.Split(r.Render(inst, 1, false, false, true), "\n")[1]
 	assert.Contains(t, expanded, expandedArrow, "expanded row must show ▾")
 
-	inst.SetStatus(session.Loading)
+	inst.SetStatusForTest(session.Loading)
 	transient := strings.Split(r.Render(inst, 1, false, false, false), "\n")[1]
 	assert.NotContains(t, transient, collapsedArrow, "transient rows are not expandable")
 	assert.NotContains(t, transient, expandedArrow, "transient rows are not expandable")

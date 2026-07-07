@@ -167,9 +167,15 @@ func (i *Instance) setStatusLocked(s Status) {
 	}
 }
 
-// SetStatus sets the status under the instance mutex (legacy shim — decomposes
-// onto the two axes).
-func (i *Instance) SetStatus(status Status) {
+// SetStatusForTest sets the status under the instance mutex by decomposing the
+// legacy composed Status onto the two axes — TEST scaffolding only (#1195 Phase
+// 2e), for establishing a precondition state via the familiar single-value API.
+// Production code never writes lifecycle state through the legacy Status: every
+// (liveness, inFlightOp) mutation goes through the Transition chokepoint. Mirrors
+// the SetInFlightOpForTest / SetStartedForTest scaffolding pattern. (GetStatus
+// stays — the composed value is still a legitimate read for rendering and test
+// assertions, pending a separate retirement of the legacy Status enum.)
+func (i *Instance) SetStatusForTest(status Status) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.setStatusLocked(status)

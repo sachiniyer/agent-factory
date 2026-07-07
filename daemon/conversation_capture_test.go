@@ -37,7 +37,7 @@ func TestCaptureAgentConversationPersistsCodexRolloutID(t *testing.T) {
 	})
 	require.NoError(t, err)
 	inst.SetTmuxSession(tmux.NewTmuxSession("codex-worker", tmux.ProgramCodex))
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	key := daemonInstanceKey(repo.ID, inst.Title)
 	manager.mu.Lock()
 	manager.instances[key] = inst

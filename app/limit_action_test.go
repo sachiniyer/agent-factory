@@ -30,7 +30,7 @@ func TestHandleLimitRetry_NonLimitRow_NoDispatch(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Ready)
+	inst.SetStatusForTest(session.Ready)
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 

@@ -163,7 +163,7 @@ func TestEnsureRootAgentsAdoptsLiveRoot(t *testing.T) {
 	}
 
 	for _, status := range []session.Status{session.Running, session.Ready, session.Loading} {
-		first.SetStatus(status)
+		first.SetStatusForTest(status)
 		manager.EnsureRootAgents()
 		if len(*seen) != 1 {
 			t.Fatalf("ensure over a live root (status %v) must be a no-op, got %d creates", status, len(*seen))
@@ -191,7 +191,7 @@ func TestEnsureRootAgentsHealsDeadRoot(t *testing.T) {
 		t.Fatalf("root instance missing after first ensure")
 	}
 
-	first.SetStatus(session.Dead)
+	first.SetStatusForTest(session.Dead)
 	manager.EnsureRootAgents()
 
 	if len(*seen) != 2 {
@@ -247,7 +247,7 @@ func TestEnsureRootAgentsHealsLostRoot(t *testing.T) {
 		t.Fatalf("root instance missing after first ensure")
 	}
 
-	first.SetStatus(session.Lost)
+	first.SetStatusForTest(session.Lost)
 	manager.EnsureRootAgents()
 
 	if len(*seen) != 2 {
@@ -285,7 +285,7 @@ func TestEnsureRootAgentsDoesNotAdoptArchivedRoot(t *testing.T) {
 		t.Fatalf("root instance missing after first ensure")
 	}
 
-	first.SetStatus(session.Archived)
+	first.SetStatusForTest(session.Archived)
 	manager.EnsureRootAgents()
 
 	if len(*seen) != 2 {
@@ -399,7 +399,7 @@ func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
 	if rootA == nil {
 		t.Fatal("root-A missing after initial ensure")
 	}
-	rootA.SetStatus(session.Dead)
+	rootA.SetStatusForTest(session.Dead)
 
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -500,7 +500,7 @@ func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
 	if rootA == nil {
 		t.Fatal("root-A missing after initial ensure")
 	}
-	rootA.SetStatus(session.Dead)
+	rootA.SetStatusForTest(session.Dead)
 
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

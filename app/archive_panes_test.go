@@ -16,7 +16,7 @@ import (
 func TestArchive_ClosesOpenPanesViaFinalize(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "worker")
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
@@ -38,7 +38,7 @@ func TestArchive_ClosesOpenPanesViaFinalize(t *testing.T) {
 func TestArchive_ReconcileClosesOpenPanes(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "worker")
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
@@ -63,7 +63,7 @@ func TestArchive_ReconcileClosesOpenPanes(t *testing.T) {
 func TestRestore_LeavesNoStalePaneBinding(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "worker")
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
@@ -83,7 +83,7 @@ func TestRestore_LeavesNoStalePaneBinding(t *testing.T) {
 		require.NoError(t, err)
 		ri.SetBackend(session.NewFakeBackend())
 		ri.SetStartedForTest(true)
-		ri.SetStatus(session.Running)
+		ri.SetStatusForTest(session.Running)
 		ri.ID = d.ID
 		return ri, nil
 	})

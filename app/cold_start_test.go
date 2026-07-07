@@ -168,7 +168,7 @@ func TestColdStartFromSnapshot_AutoOpenWaitsOutTransientStatus(t *testing.T) {
 	h.initialPaneOpened = false
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		inst := newSnapshotTestInstance(t, d.Title)
-		inst.SetStatus(session.Loading)
+		inst.SetStatusForTest(session.Loading)
 		return inst, nil
 	}))
 	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
@@ -181,7 +181,7 @@ func TestColdStartFromSnapshot_AutoOpenWaitsOutTransientStatus(t *testing.T) {
 	require.False(t, h.initialPaneOpened, "the latch must stay unset so the auto-open can re-fire")
 
 	// The instance finishes restoring; the next tick's selectionChanged opens it.
-	h.store.GetInstances()[0].SetStatus(session.Running)
+	h.store.GetInstances()[0].SetStatusForTest(session.Running)
 	_ = h.selectionChanged()
 	require.Equal(t, 1, h.store.NumOpenPanes(), "the pane must auto-open once the instance leaves Loading")
 	require.Equal(t, "restoring", h.store.OpenPanes()[0].Instance().Title)

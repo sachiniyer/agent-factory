@@ -56,7 +56,7 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 	inst := instanceWithFakeBackend(t, "inst")
 	if remote {
 		inst.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
-		inst.SetStatus(session.Running)
+		inst.SetStatusForTest(session.Running)
 	}
 	require.Equal(t, remote, inst.IsRemote(),
 		"precondition: instance remote-ness must match the case under test")

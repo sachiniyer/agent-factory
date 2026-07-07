@@ -40,7 +40,7 @@ func newKillableInstance(t *testing.T, title string) *session.Instance {
 	defer restore()
 	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
-	inst.SetStatus(session.Ready)
+	inst.SetStatusForTest(session.Ready)
 	return inst
 }
 
@@ -180,7 +180,7 @@ func TestHandleKill_DeletingInstanceIsNoOp(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(500, 1)
 	inst := newKillableInstance(t, "going-away")
-	inst.SetStatus(session.Deleting)
+	inst.SetStatusForTest(session.Deleting)
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
@@ -197,7 +197,7 @@ func TestHandleEnter_DeletingInstanceIsNoOp(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(500, 1)
 	inst := newKillableInstance(t, "going-away")
-	inst.SetStatus(session.Deleting)
+	inst.SetStatusForTest(session.Deleting)
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 

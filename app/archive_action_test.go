@@ -17,7 +17,7 @@ func archiveActionInstance(t *testing.T, title string, status session.Status) *s
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStartedForTest(true)
-	inst.SetStatus(status)
+	inst.SetStatusForTest(status)
 	return inst
 }
 

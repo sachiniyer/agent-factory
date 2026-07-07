@@ -46,7 +46,7 @@ func newCountingInstance(t *testing.T, title, repoPath string) (*session.Instanc
 	backend := &attachCountingBackend{FakeBackend: session.NewFakeBackend()}
 	inst.SetBackend(backend)
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	return inst, backend
 }
 

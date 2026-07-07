@@ -269,7 +269,7 @@ func TestDeliverPrompt_RefusesDeletingTarget(t *testing.T) {
 	if inst == nil {
 		t.Fatal("expected the created session to be in the manager's instance map")
 	}
-	inst.SetStatus(session.Deleting)
+	inst.SetStatusForTest(session.Deleting)
 
 	before := len(rec.snapshot())
 	_, err = manager.DeliverPrompt(DeliverPromptRequest{

@@ -38,7 +38,7 @@ func (b *recoverFakeBackend) Recover(inst *session.Instance) error {
 	if b.failWith != nil {
 		return b.failWith
 	}
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	return nil
 }
 
@@ -225,7 +225,7 @@ func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
 	inst.Branch = branch
 	inst.SetBackend(&session.LocalBackend{})
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Lost)
+	inst.SetStatusForTest(session.Lost)
 	inst.SetGitWorktreeForTest(gw)
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
 		"af_1303_vanished",
@@ -372,7 +372,7 @@ func (b *raceBackend) Recover(inst *session.Instance) error {
 	if b.recoverBlock != nil {
 		<-b.recoverBlock
 	}
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	return nil
 }
 
@@ -445,7 +445,7 @@ func TestKillSession_WaitsForInFlightRecover(t *testing.T) {
 	}
 	manager, repoID, inst := installRaceBackend(t, backend, "contested")
 	zeroRestoreBackoff(t)
-	inst.SetStatus(session.Lost)
+	inst.SetStatusForTest(session.Lost)
 
 	recoverStarted := backend.recoverStarted
 	restoreDone := make(chan struct{})
@@ -504,7 +504,7 @@ func TestRestoreLostSessions_SkipsDuringInFlightKill(t *testing.T) {
 	}
 	manager, repoID, inst := installRaceBackend(t, backend, "doomed")
 	zeroRestoreBackoff(t)
-	inst.SetStatus(session.Lost)
+	inst.SetStatusForTest(session.Lost)
 
 	killStarted := backend.killStarted
 	killDone := make(chan error, 1)

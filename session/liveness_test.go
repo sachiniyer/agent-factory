@@ -14,7 +14,7 @@ import (
 func TestStatusShimRoundTrips(t *testing.T) {
 	for _, s := range []Status{Running, Ready, Loading, Deleting, Dead, Lost, Archived} {
 		i := &Instance{}
-		i.SetStatus(s)
+		i.SetStatusForTest(s)
 		require.Equal(t, s, i.GetStatus(), "SetStatus(%v) must round-trip through GetStatus", s)
 	}
 }
@@ -36,22 +36,22 @@ func TestStatusAxesDecomposition(t *testing.T) {
 	}
 	for _, c := range cases {
 		i := &Instance{}
-		i.SetStatus(c.status)
+		i.SetStatusForTest(c.status)
 		assert.Equal(t, c.liveness, i.liveness, "%v liveness", c.status)
 		assert.Equal(t, c.op, i.inFlightOp, "%v op", c.status)
 	}
 
 	// Transient values set the op and leave the underlying liveness intact.
 	i := &Instance{}
-	i.SetStatus(Running) // underlying liveness
-	i.SetStatus(Deleting)
+	i.SetStatusForTest(Running) // underlying liveness
+	i.SetStatusForTest(Deleting)
 	assert.Equal(t, LiveRunning, i.liveness, "Deleting must overlay, not overwrite, liveness")
 	assert.Equal(t, OpKilling, i.inFlightOp)
 	assert.Equal(t, Deleting, i.GetStatus())
 
 	i2 := &Instance{}
-	i2.SetStatus(Ready)
-	i2.SetStatus(Loading)
+	i2.SetStatusForTest(Ready)
+	i2.SetStatusForTest(Loading)
 	assert.Equal(t, LiveReady, i2.liveness, "Loading must overlay, not overwrite, liveness")
 	assert.Equal(t, OpCreating, i2.inFlightOp)
 }
@@ -62,7 +62,7 @@ func TestStatusAxesDecomposition(t *testing.T) {
 func TestLivenessPersistenceRollforward(t *testing.T) {
 	// New record: ToInstanceData writes both axes; the `liveness` key is present.
 	i := &Instance{}
-	i.SetStatus(Lost)
+	i.SetStatusForTest(Lost)
 	data := i.ToInstanceData()
 	require.Equal(t, LiveLost, data.Liveness)
 	require.Equal(t, Lost, data.Status, "legacy status still written for rollback")
