@@ -110,6 +110,13 @@ func (m *home) commitPanePreviewReplace() tea.Cmd {
 		m.cancelPanePreview(false)
 		return nil
 	}
+	if existing := m.store.FindOpenPane(txn.target.instance, txn.target.tab); existing != nil && existing != owner {
+		m.cancelPanePreview(false)
+		m.store.TouchOpenPane(existing)
+		m.relayout()
+		m.focusRegion(layout.PaneRegion(existing.ID()))
+		return m.panesRefresh(m.attached.Load())
+	}
 	w := m.paneWindows[owner.ID()]
 	m.panePreviewTxn = nil
 	if w != nil {

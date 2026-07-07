@@ -332,6 +332,38 @@ func TestPanePreviewEnterCommitsReplace(t *testing.T) {
 	assert.NotContains(t, view, "PREVIEW")
 }
 
+func TestPanePreviewEnterCommitFocusesAlreadyOpenTarget(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Same(t, alpha, paneA.Instance())
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+	require.Equal(t, 2, h.store.NumOpenPanes())
+	paneB := h.store.OpenPanes()[1]
+	require.Same(t, beta, paneB.Instance())
+
+	h.focusRegion(layout.PaneRegion(paneA.ID()))
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+
+	require.NotNil(t, cmd, "focusing the existing target should schedule a refresh")
+	require.Nil(t, h.panePreviewTxn)
+	assert.Same(t, alpha, paneA.Instance(), "owner pane must keep its original binding")
+	assert.Same(t, beta, paneB.Instance())
+	assert.Equal(t, 2, h.store.NumOpenPanes(), "commit onto an already-open target must not duplicate panes")
+	assert.Same(t, paneB, h.store.FindOpenPane(beta, 0))
+	assert.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "existing target pane takes focus")
+}
+
 func TestPanePreviewTabAndEscCancelToOwnerPane(t *testing.T) {
 	for _, tc := range []struct {
 		name string
