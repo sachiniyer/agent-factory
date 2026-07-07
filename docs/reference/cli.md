@@ -36,7 +36,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions kill`](#af-sessions-kill) — Kill a session
 - [`af sessions list`](#af-sessions-list) — List sessions
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
-- [`af sessions restore`](#af-sessions-restore) — Restore an archived session (worktree back in place, agent re-spawned)
+- [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab running a command in a session's worktree
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -532,7 +532,7 @@ af sessions
 - [`af sessions kill`](#af-sessions-kill) — Kill a session
 - [`af sessions list`](#af-sessions-list) — List sessions
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
-- [`af sessions restore`](#af-sessions-restore) — Restore an archived session (worktree back in place, agent re-spawned)
+- [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab running a command in a session's worktree
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -683,15 +683,17 @@ af sessions preview <title>
 
 ## af sessions restore
 
-Restore an archived session (worktree back in place, agent re-spawned)
+Restore an archived, lost, or dead session
 
-Restore a previously archived session: move its git worktree back next to the
-repository, re-register it, re-spawn the agent, and mark it running. Only the
-agent session is brought back — shell/process tabs are not restored.
+Restore a session that is currently archived, lost, or dead.
 
-Fails if the session is not archived, or if its origin repository is gone (the
-archived worktree is left intact for manual recovery). The restored worktree
-path is printed on success.
+Archived sessions are moved back next to the repository, re-registered,
+re-spawned, and marked running. Lost/dead sessions are recovered in place,
+rebuilding a missing worktree when possible and resuming the recorded agent
+conversation when required.
+
+Fails if the session is not restorable, or if its origin repository is gone.
+The restored worktree path is printed on success.
 
 ```
 af sessions restore <title>
