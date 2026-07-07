@@ -12,10 +12,9 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// SearchResult holds a matched instance and its index in the original list.
+// SearchResult holds a matched instance.
 type SearchResult struct {
 	Instance *session.Instance
-	Index    int
 }
 
 // SearchOverlay provides fuzzy search across sessions.
@@ -26,7 +25,6 @@ type SearchOverlay struct {
 
 	selectedIdx int
 	submitted   bool
-	closed      bool
 	width       int
 }
 
@@ -43,11 +41,6 @@ func NewSearchOverlay(instances []*session.Instance) *SearchOverlay {
 // SetWidth sets the overlay width.
 func (s *SearchOverlay) SetWidth(width int) {
 	s.width = width
-}
-
-// IsClosed returns true if the overlay should be dismissed.
-func (s *SearchOverlay) IsClosed() bool {
-	return s.closed
 }
 
 // IsSubmitted returns true if the user selected a result.
@@ -78,15 +71,12 @@ func (s *SearchOverlay) GetSelectedInstance() *session.Instance {
 func (s *SearchOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 	switch msg.Type {
 	case tea.KeyEsc:
-		s.closed = true
 		return true
 	case tea.KeyCtrlC:
-		s.closed = true
 		return true
 	case tea.KeyEnter:
 		if len(s.results) > 0 {
 			s.submitted = true
-			s.closed = true
 			return true
 		}
 	case tea.KeyUp:
@@ -116,9 +106,9 @@ func (s *SearchOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 func (s *SearchOverlay) updateResults() {
 	s.results = nil
 
-	for i, inst := range s.all {
+	for _, inst := range s.all {
 		if s.matches(inst, s.query) {
-			s.results = append(s.results, SearchResult{Instance: inst, Index: i})
+			s.results = append(s.results, SearchResult{Instance: inst})
 		}
 	}
 
