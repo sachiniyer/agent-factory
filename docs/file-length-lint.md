@@ -38,7 +38,6 @@ splitting them):
 
 | File                       | Ceiling |
 | -------------------------- | ------- |
-| `app/app.go`               | 1867    |
 | `session/instance.go`      | 1400    |
 | `session/tmux/tmux.go`     | 1393    |
 | `ui/sidebar.go`            | 1258    |
