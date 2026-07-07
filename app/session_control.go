@@ -36,15 +36,15 @@ var killSessionThroughDaemon = func(title, repoID string) error {
 	return daemon.KillSession(daemon.KillSessionRequest{Title: title, RepoID: repoID})
 }
 
-// archiveSessionThroughDaemon / restoreArchivedThroughDaemon route the #1028
-// archive/restore verbs through the daemon (the single writer). Package vars so
-// the app test suite can stub them without dialing a real daemon.
+// archiveSessionThroughDaemon / restoreSessionThroughDaemon route archive and
+// restore verbs through the daemon (the single writer). Package vars so the app
+// test suite can stub them without dialing a real daemon.
 var archiveSessionThroughDaemon = func(title, repoID string) (string, error) {
 	return daemon.ArchiveSession(daemon.ArchiveSessionRequest{Title: title, RepoID: repoID})
 }
 
-var restoreArchivedThroughDaemon = func(title, repoID string) (string, error) {
-	return daemon.RestoreArchived(daemon.RestoreArchivedRequest{Title: title, RepoID: repoID})
+var restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
+	return daemon.RestoreSession(daemon.RestoreSessionRequest{Title: title, RepoID: repoID})
 }
 
 // resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)

@@ -286,12 +286,12 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 	return m, m.selectionChanged()
 }
 
-// handleArchive is the archive/restore verb (#1028, `a`): on an archived row it
-// restores the session (non-destructive — no confirm); on a live row it archives
-// it behind a confirmation, since archive tears down tmux and relocates the
-// worktree. Remote and in-place sessions can't be archived (no relocatable
-// worktree) and are rejected up front with an immediate message; the daemon
-// enforces the same rules authoritatively.
+// handleArchive is the archive/restore verb (`a`): on an archived row it restores
+// the session (non-destructive — no confirm); on a Lost/Dead row it runs recovery
+// through the daemon; on a live row it archives behind a confirmation, since
+// archive tears down tmux and relocates the worktree. Remote and in-place
+// sessions can't be archived (no relocatable worktree) and are rejected up front
+// with an immediate message; the daemon enforces the same rules authoritatively.
 func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil || selected.IsCreating() {
@@ -310,7 +310,9 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	// Archived→live transition and runs its rebuild/re-Start (#1203). The reconcile
 	// rebuild clears the op by replacing the row; a restore failure clears it in
 	// handleInstanceRestored.
-	if selected.GetLiveness() == session.LiveArchived {
+	if selected.GetLiveness() == session.LiveArchived ||
+		selected.GetLiveness() == session.LiveLost ||
+		selected.GetLiveness() == session.LiveDead {
 		if selected.GetInFlightOp() == session.OpRestoring {
 			return m, m.handleError(fmt.Errorf("session '%s' is already being restored", title))
 		}
@@ -358,11 +360,10 @@ func (m *home) archiveInstanceCmd(title string) tea.Cmd {
 	}
 }
 
-// restoreInstanceCmd runs the daemon restore (worktree move-back + agent
-// re-spawn) off the event loop (#1028).
+// restoreInstanceCmd runs the daemon restore/recovery off the event loop.
 func (m *home) restoreInstanceCmd(title string) tea.Cmd {
 	repoID := m.repoID
-	restore := restoreArchivedThroughDaemon
+	restore := restoreSessionThroughDaemon
 	return func() tea.Msg {
 		if _, err := restore(title, repoID); err != nil {
 			log.ErrorLog.Printf("could not restore instance %q: %v", title, err)
@@ -492,6 +493,15 @@ func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.C
 		}
 		return m, m.handleError(fmt.Errorf("failed to restore session '%s': %w", msg.title, msg.err))
 	}
+	for _, inst := range m.store.GetInstances() {
+		switch {
+		case inst.Title != msg.title:
+			continue
+		case inst.GetLiveness() == session.LiveLost || inst.GetLiveness() == session.LiveDead:
+			inst.MarkLive()
+		}
+		break
+	}
 	return m, m.selectionChanged()
 }
 
@@ -588,20 +598,21 @@ func interactiveGuard(inst *session.Instance) error {
 	if inst.IsTearingDown() {
 		return fmt.Errorf("session '%s' is being deleted", inst.Title)
 	}
+	if inst.GetInFlightOp() == session.OpRestoring {
+		// Restore in flight (#1210/#1300): archived rows are re-homed into
+		// Instances while the daemon moves/spawns, and Lost/Dead rows keep their
+		// unavailable liveness until recovery completes.
+		return fmt.Errorf("session '%s' is being restored", inst.Title)
+	}
 	if inst.GetLiveness() == session.LiveLost {
 		// Lost (#1108): the backing tmux session vanished with no kill on
 		// record. Entering or attaching is impossible right now; say what
 		// happened — same explicit-feedback contract as the Deleting path
 		// (#935). Checked before TmuxAlive so the specific message wins.
-		return fmt.Errorf("session '%s' was lost — its tmux session is gone", inst.Title)
+		return fmt.Errorf("session '%s' was lost — restore it first (af sessions restore %s)", inst.Title, inst.Title)
 	}
-	if inst.GetInFlightOp() == session.OpRestoring {
-		// Restore in flight (#1210): the row already re-homed into Instances
-		// (ShownArchived), but its worktree/agent aren't back yet — the reconcile
-		// rebuild hasn't run. Say it's restoring rather than the misleading
-		// "restore it first" the archived branch below would give. Checked before
-		// the LiveArchived branch because liveness is still Archived mid-restore.
-		return fmt.Errorf("session '%s' is being restored", inst.Title)
+	if inst.GetLiveness() == session.LiveDead {
+		return fmt.Errorf("session '%s' is no longer running — restore it first (af sessions restore %s)", inst.Title, inst.Title)
 	}
 	if inst.GetLiveness() == session.LiveArchived {
 		// Archived (#1028): the user tore the session down and its worktree was

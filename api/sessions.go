@@ -25,15 +25,15 @@ var SessionsCmd = &cobra.Command{
 }
 
 var (
-	createSessionViaDaemon   = daemon.CreateSession
-	killSessionViaDaemon     = daemon.KillSession
-	archiveSessionViaDaemon  = daemon.ArchiveSession
-	restoreArchivedViaDaemon = daemon.RestoreArchived
-	sendPromptViaDaemon      = daemon.SendPrompt
-	deliverPromptViaDaemon   = daemon.DeliverPrompt
-	createTabViaDaemon       = daemon.CreateTab
-	closeTabViaDaemon        = daemon.CloseTab
-	preflightLocalSession    = preflight.LocalSessionPrereqs
+	createSessionViaDaemon  = daemon.CreateSession
+	killSessionViaDaemon    = daemon.KillSession
+	archiveSessionViaDaemon = daemon.ArchiveSession
+	restoreSessionViaDaemon = daemon.RestoreSession
+	sendPromptViaDaemon     = daemon.SendPrompt
+	deliverPromptViaDaemon  = daemon.DeliverPrompt
+	createTabViaDaemon      = daemon.CreateTab
+	closeTabViaDaemon       = daemon.CloseTab
+	preflightLocalSession   = preflight.LocalSessionPrereqs
 	// snapshotViaDaemon is the non-spawning read path for list/get/whoami
 	// (#1029 PR 2). It reflects the daemon's authoritative in-memory state when
 	// a daemon is already running, and returns daemon.ErrDaemonUnavailable
@@ -756,14 +756,16 @@ success.`,
 
 var sessionsRestoreCmd = &cobra.Command{
 	Use:   "restore <title>",
-	Short: "Restore an archived session (worktree back in place, agent re-spawned)",
-	Long: `Restore a previously archived session: move its git worktree back next to the
-repository, re-register it, re-spawn the agent, and mark it running. Only the
-agent session is brought back — shell/process tabs are not restored.
+	Short: "Restore an archived, lost, or dead session",
+	Long: `Restore a session that is currently archived, lost, or dead.
 
-Fails if the session is not archived, or if its origin repository is gone (the
-archived worktree is left intact for manual recovery). The restored worktree
-path is printed on success.`,
+Archived sessions are moved back next to the repository, re-registered,
+re-spawned, and marked running. Lost/dead sessions are recovered in place,
+rebuilding a missing worktree when possible and resuming the recorded agent
+conversation when required.
+
+Fails if the session is not restorable, or if its origin repository is gone.
+The restored worktree path is printed on success.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -774,7 +776,7 @@ path is printed on success.`,
 			return jsonError(err)
 		}
 
-		worktreePath, err := restoreArchivedViaDaemon(daemon.RestoreArchivedRequest{Title: args[0], RepoID: repoID})
+		worktreePath, err := restoreSessionViaDaemon(daemon.RestoreSessionRequest{Title: args[0], RepoID: repoID})
 		if err != nil {
 			return jsonError(err)
 		}

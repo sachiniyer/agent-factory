@@ -322,8 +322,14 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	if instance.IsTearingDown() {
 		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", instance.Title))
 	}
+	if instance.GetInFlightOp() == session.OpRestoring {
+		return m, m.handleError(fmt.Errorf("session '%s' is being restored", instance.Title))
+	}
 	if instance.GetLiveness() == session.LiveLost {
-		return m, m.handleError(fmt.Errorf("session '%s' was lost — its tmux session is gone", instance.Title))
+		return m, m.handleError(fmt.Errorf("session '%s' was lost — restore it first (af sessions restore %s)", instance.Title, instance.Title))
+	}
+	if instance.GetLiveness() == session.LiveDead {
+		return m, m.handleError(fmt.Errorf("session '%s' is no longer running — restore it first (af sessions restore %s)", instance.Title, instance.Title))
 	}
 	if !instance.TmuxAlive() {
 		return m, m.handleError(fmt.Errorf("session '%s' is no longer running", instance.Title))

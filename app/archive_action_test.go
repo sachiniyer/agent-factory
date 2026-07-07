@@ -42,6 +42,34 @@ func TestHandleArchive_LiveRowConfirms(t *testing.T) {
 	require.False(t, called, "the archive RPC must not fire before confirmation")
 }
 
+func TestHandleArchive_LostRowRestoresWithoutConfirmation(t *testing.T) {
+	h := newTestHome(t)
+	inst := archiveActionInstance(t, "worker", session.Lost)
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	var gotTitle string
+	prev := restoreSessionThroughDaemon
+	restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
+		gotTitle = title
+		return "/worktree/path", nil
+	}
+	defer func() { restoreSessionThroughDaemon = prev }()
+
+	model, cmd := h.handleArchive()
+	h = model.(*home)
+
+	require.Equal(t, stateDefault, h.state, "restoring a Lost session must not open the archive confirmation")
+	require.Equal(t, session.OpRestoring, inst.GetInFlightOp(), "Lost restore should show an in-flight restore state")
+	require.NotNil(t, cmd, "Lost restore must dispatch the restore command")
+
+	msg := cmd()
+	require.Equal(t, "worker", gotTitle)
+	done, ok := msg.(instanceRestoredMsg)
+	require.True(t, ok, "the command must emit instanceRestoredMsg")
+	require.NoError(t, done.err)
+}
+
 // TestArchiveInstanceCmd_CallsDaemon: the archive command invokes the daemon
 // seam and reports completion.
 func TestArchiveInstanceCmd_CallsDaemon(t *testing.T) {
@@ -84,16 +112,29 @@ func TestRestoreInstanceCmd_CallsDaemon(t *testing.T) {
 	h := newTestHome(t)
 
 	var gotTitle string
-	prev := restoreArchivedThroughDaemon
-	restoreArchivedThroughDaemon = func(title, repoID string) (string, error) {
+	prev := restoreSessionThroughDaemon
+	restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
 		gotTitle = title
 		return "/worktree/path", nil
 	}
-	defer func() { restoreArchivedThroughDaemon = prev }()
+	defer func() { restoreSessionThroughDaemon = prev }()
 
 	msg := h.restoreInstanceCmd("worker")()
 	require.Equal(t, "worker", gotTitle)
 	done, ok := msg.(instanceRestoredMsg)
 	require.True(t, ok, "the command must emit instanceRestoredMsg")
 	require.NoError(t, done.err)
+}
+
+func TestHandleInstanceRestored_LostRowMarksLive(t *testing.T) {
+	h := newTestHome(t)
+	inst := archiveActionInstance(t, "worker", session.Lost)
+	inst.SetInFlightOp(session.OpRestoring)
+	h.store.AddInstance(inst)
+
+	model, _ := h.handleInstanceRestored(instanceRestoredMsg{title: "worker"})
+	h = model.(*home)
+
+	require.Equal(t, session.Running, inst.GetStatus())
+	require.Equal(t, session.OpNone, inst.GetInFlightOp())
 }

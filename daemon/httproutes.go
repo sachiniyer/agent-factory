@@ -88,6 +88,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/RestoreSession",
+		Description:   "Restore an archived, Lost, or Dead session.",
+		RequestFields: jsonFields(reflect.TypeOf(RestoreSessionRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RestoreSession) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/SendPrompt",
 		Description:   "Send a prompt to an existing session's agent.",
 		RequestFields: jsonFields(reflect.TypeOf(SendPromptRequest{})),

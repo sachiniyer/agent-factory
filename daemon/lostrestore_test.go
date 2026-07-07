@@ -93,6 +93,51 @@ func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	}
 }
 
+func TestRestoreSession_RecoversLostInstanceOnDemand(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "stranded", backend, true, session.Lost)
+	key := daemonInstanceKey(repoID, "stranded")
+	manager.mu.Lock()
+	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 3}
+	manager.mu.Unlock()
+
+	_, err := manager.RestoreSession(RestoreSessionRequest{Title: "stranded", RepoID: repoID})
+	if err != nil {
+		t.Fatalf("RestoreSession returned error: %v", err)
+	}
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("recover calls = %d, want 1", got)
+	}
+	if got := inst.GetStatus(); got != session.Running {
+		t.Fatalf("status = %v, want Running after manual restore", got)
+	}
+	manager.mu.Lock()
+	_, hasState := manager.lostRestoreStates[key]
+	manager.mu.Unlock()
+	if hasState {
+		t.Fatal("manual restore must drop Lost retry state")
+	}
+}
+
+func TestRestoreSession_RecoversDeadInstanceOnDemand(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "dead", backend, true, session.Ready)
+	inst.SetLiveness(session.LiveDead)
+
+	_, err := manager.RestoreSession(RestoreSessionRequest{Title: "dead", RepoID: repoID})
+	if err != nil {
+		t.Fatalf("RestoreSession returned error: %v", err)
+	}
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("recover calls = %d, want 1", got)
+	}
+	if got := inst.GetStatus(); got != session.Running {
+		t.Fatalf("status = %v, want Running after manual restore", got)
+	}
+}
+
 // TestRestoreLostSessions_KeepsRetryingAndHeals mirrors the #1128 root-ensure
 // guarantee for the general loop: failures past the escalation threshold never
 // park the retry permanently, and the first pass after the cause clears heals.

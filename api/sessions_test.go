@@ -1352,16 +1352,16 @@ func TestSessionsArchive_HonorsRepoScopingAndReturnsPath(t *testing.T) {
 func TestSessionsRestore_HonorsRepoScopingAndReturnsPath(t *testing.T) {
 	repoID := setupRepoForCmd(t)
 
-	var gotReq daemon.RestoreArchivedRequest
-	prev := restoreArchivedViaDaemon
-	restoreArchivedViaDaemon = func(req daemon.RestoreArchivedRequest) (string, error) {
+	var gotReq daemon.RestoreSessionRequest
+	prev := restoreSessionViaDaemon
+	restoreSessionViaDaemon = func(req daemon.RestoreSessionRequest) (string, error) {
 		gotReq = req
 		if req.RepoID == "" {
 			return "", errors.New("RepoID empty: --repo scoping was dropped")
 		}
 		return "/home/u/src/repo-worker", nil
 	}
-	defer func() { restoreArchivedViaDaemon = prev }()
+	defer func() { restoreSessionViaDaemon = prev }()
 
 	out, err := runCmdCaptureStdout(t, sessionsRestoreCmd, []string{"worker"})
 	if err != nil {

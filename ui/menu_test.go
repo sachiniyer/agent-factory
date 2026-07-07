@@ -71,6 +71,26 @@ func TestMenuAgentTabShowsBothScrollKeys(t *testing.T) {
 	}
 }
 
+func TestMenuRestorableRowsShowArchiveRestoreAction(t *testing.T) {
+	for _, status := range []session.Status{session.Lost, session.Dead, session.Archived} {
+		inst := &session.Instance{}
+		inst.SetStatus(status)
+		m := NewMenu()
+		m.SetInstance(inst)
+
+		var found bool
+		for _, k := range m.options {
+			if k == keys.KeyArchive {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("status %v: restore action not shown in menu options", status)
+		}
+	}
+}
+
 // TestMenuRemoteInstanceOmitsUnsupportedTabKeys guards against regressing #988:
 // remote instances block `t` (new tab) and `w` (close tab) — those handlers
 // reject IsRemote() with an error — so the footer menu must only surface the

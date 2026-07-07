@@ -125,6 +125,20 @@ type RestoreArchivedResponse struct {
 	WorktreePath string `json:"worktree_path"`
 }
 
+// RestoreSessionRequest asks the daemon to restore a restorable session:
+// archived sessions are moved back from the archive, while Lost/Dead sessions
+// are recovered in place.
+type RestoreSessionRequest struct {
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
+}
+
+type RestoreSessionResponse struct {
+	OK bool `json:"ok"`
+	// WorktreePath is the on-disk location of the restored/recovered worktree.
+	WorktreePath string `json:"worktree_path"`
+}
+
 type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
@@ -533,11 +547,10 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	return resp.ArchivedPath, nil
 }
 
-// RestoreArchived asks the daemon to restore an archived session (#1028) and
-// returns the worktree's restored path.
-func RestoreArchived(req RestoreArchivedRequest) (string, error) {
-	var resp RestoreArchivedResponse
-	if err := callDaemon("RestoreArchived", req, &resp); err != nil {
+// RestoreSession asks the daemon to restore an archived, Lost, or Dead session.
+func RestoreSession(req RestoreSessionRequest) (string, error) {
+	var resp RestoreSessionResponse
+	if err := callDaemon("RestoreSession", req, &resp); err != nil {
 		return "", err
 	}
 	return resp.WorktreePath, nil
@@ -1090,6 +1103,22 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 		return err
 	}
 	worktreePath, err := s.manager.RestoreArchived(req)
+	if err != nil {
+		return err
+	}
+	resp.OK = true
+	resp.WorktreePath = worktreePath
+	return nil
+}
+
+func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreSessionResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	worktreePath, err := s.manager.RestoreSession(req)
 	if err != nil {
 		return err
 	}
