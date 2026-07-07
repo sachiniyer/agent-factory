@@ -193,7 +193,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	}
 	_ = instance.Transition(session.BeginCreate())
 	m.store.AddInstance(instance)
-	m.sidebar.SetSelectedInstance(m.store.NumInstances() - 1)
+	m.sidebar.SelectInstance(instance)
 	m.namingInstance = instance
 	m.state = stateNew
 	m.menu.SetState(ui.StateNewInstance)

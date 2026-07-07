@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -134,6 +135,35 @@ func TestHandleMenuHighlightingNewInstanceEnterTab(t *testing.T) {
 				"menu highlight render path should run for %s during stateNew", tc.name)
 		})
 	}
+}
+
+func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
+	h := newTestHome(t)
+
+	existing, err := session.NewInstance(session.InstanceOptions{
+		Title:   "existing",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	existing.CreatedAt = time.Now().Add(time.Hour)
+	h.store.AddInstance(existing)
+	h.sidebar.SetSelectedInstance(0)
+
+	model, cmd := h.startNewInstance(false)
+	require.Same(t, h, model)
+	require.Nil(t, cmd)
+	require.NotNil(t, h.namingInstance)
+
+	require.Equal(t, []string{"", "existing"}, collectTitles(h.store.GetInstances()),
+		"precondition: sorted insert placed the naming placeholder before the existing row")
+	assert.Same(t, h.namingInstance, h.sidebar.GetSelectedInstance(),
+		"sidebar highlight must track the naming placeholder after AddInstance sorts")
+	assert.Same(t, h.namingInstance, h.store.GetSelectedInstance(),
+		"store selection must agree with the highlighted naming placeholder")
+	assert.Equal(t, stateNew, h.state)
+	assert.Equal(t, session.OpCreating, h.namingInstance.GetInFlightOp(),
+		"the #1350 BeginCreate chokepoint still fires exactly once when naming starts")
 }
 
 // TestCancelNamingRemovesZombieAfterSelectionDrift is the regression guard for
