@@ -163,7 +163,7 @@ func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
 // TestMenuPaneHintsFollowFocus pins the #1088 hint model: tree focus
 // advertises the open-pane verb with the instance actions; a focused
 // workspace pane gets its own option set — attach/scroll on its binding,
-// open-pane, hide-pane.
+// pane switching, open-pane, hide-pane.
 func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	local := readyUIInstance()
 	m := NewMenu()
@@ -187,8 +187,9 @@ func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	}
 
 	m.SetFocusRegion(layout.PaneRegion(7))
-	if !has(keys.KeyOpenPane) || !has(keys.KeySplitPane) || !has(keys.KeyHidePane) || !has(keys.KeyEnter) {
-		t.Errorf("a focused pane must advertise open/split/hide pane + attach; options=%v", m.options)
+	if !has(keys.KeyOpenPane) || !has(keys.KeySplitPane) || !has(keys.KeyHidePane) ||
+		!has(keys.KeyPanePrev) || !has(keys.KeyPaneNext) || !has(keys.KeyEnter) {
+		t.Errorf("a focused pane must advertise pane focus/open/split/hide + attach; options=%v", m.options)
 	}
 	if has(keys.KeyNewTab) {
 		t.Errorf("pane focus swaps to the pane option set; options=%v", m.options)

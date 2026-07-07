@@ -60,6 +60,8 @@ const (
 	KeyOpenPane  // OpenPane: open the selected tab as a pane / focus its pane.
 	KeySplitPane // SplitPane commits the active preview as a pane beside the owner.
 	KeyHidePane  // HidePane hides the focused pane back to the background.
+	KeyPanePrev  // PanePrev focuses the previous visible workspace pane.
+	KeyPaneNext  // PaneNext focuses the next visible workspace pane.
 
 	// KeyManageAutomations is the automations-section display alias of Enter
 	// (menu/help only): with the in-rail section focused, Enter opens the task
@@ -100,6 +102,11 @@ type spec struct {
 	// entries (KeyJumpTab, KeySubmitName, ...) never enter the strings map —
 	// their dispatch is root-routed or overlay-local.
 	dispatch bool
+	// contextual marks actions routed by a focused UI region before
+	// GlobalKeyStringsMap. They are still validated, rebindable, and rendered
+	// in help/status surfaces, but they may share a physical key with one
+	// explicitly disjoint global action.
+	contextual bool
 }
 
 // specs is the canonical binding table. Order is stable but carries no
@@ -131,6 +138,8 @@ var specs = []spec{
 	{name: KeyOpenPane, configKey: "open_pane", keys: []string{"s"}, desc: "open pane", dispatch: true},
 	{name: KeySplitPane, configKey: "split_pane", keys: []string{"S"}, desc: "split pane", dispatch: true},
 	{name: KeyHidePane, configKey: "hide_pane", keys: []string{"x"}, desc: "hide pane", dispatch: true},
+	{name: KeyPanePrev, configKey: "pane_prev", keys: []string{"left"}, desc: "prev pane", contextual: true},
+	{name: KeyPaneNext, configKey: "pane_next", keys: []string{"right"}, desc: "next pane", contextual: true},
 	{name: KeySearch, configKey: "search", keys: []string{"/"}, desc: "search", dispatch: true},
 	{name: KeyOpenPR, configKey: "open_pr", keys: []string{"p"}, desc: "open PR", dispatch: true},
 	{name: KeyCopyPR, configKey: "copy_pr", keys: []string{"y"}, desc: "copy PR URL", dispatch: true},
@@ -311,11 +320,11 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 
 	stringsMap := make(map[string]KeyName, 64)
 	bindings := make(map[KeyName]key.Binding, len(specs))
-	// boundBy tracks which action owns each dispatch key, to name both sides
-	// of a conflict. Fixed dispatch specs (enter/tab/shift+tab) participate,
-	// so an override cannot silently shadow them either (they are also in
-	// reservedKeys, which reports the clearer error first).
-	boundBy := map[string]string{}
+	// boundBy tracks which action owns each dispatch/contextual key, to name
+	// both sides of a conflict. Fixed dispatch specs (enter/tab/shift+tab)
+	// participate, so an override cannot silently shadow them either (they
+	// are also in reservedKeys, which reports the clearer error first).
+	boundBy := map[string]bindingOwner{}
 	for _, sp := range specs {
 		effective := sp.keys
 		overridden := false
@@ -326,16 +335,19 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 			}
 		}
 
-		if sp.dispatch {
+		if sp.dispatch || sp.contextual {
 			for _, k := range effective {
-				owner := sp.configKey
-				if owner == "" {
-					owner = sp.desc
-				}
+				owner := bindingOwner{name: sp.name, action: ownerAction(sp)}
 				if prev, taken := boundBy[k]; taken {
-					return nil, nil, fmt.Errorf("keys: %q is bound to both %q and %q; each key can trigger only one action", k, prev, owner)
+					if !contextualKeyOverlapAllowed(prev.name, owner.name) {
+						return nil, nil, fmt.Errorf("keys: %q is bound to both %q and %q; each key can trigger only one action", k, prev.action, owner.action)
+					}
+				} else {
+					boundBy[k] = owner
 				}
-				boundBy[k] = owner
+				if !sp.dispatch {
+					continue
+				}
 				stringsMap[k] = sp.name
 			}
 		}
@@ -350,6 +362,31 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 		)
 	}
 	return stringsMap, bindings, nil
+}
+
+type bindingOwner struct {
+	name   KeyName
+	action string
+}
+
+func ownerAction(sp spec) string {
+	if sp.configKey != "" {
+		return sp.configKey
+	}
+	return sp.desc
+}
+
+func contextualKeyOverlapAllowed(a, b KeyName) bool {
+	return (isPaneSwitchKey(a) && isTreeHorizontalKey(b)) ||
+		(isPaneSwitchKey(b) && isTreeHorizontalKey(a))
+}
+
+func isPaneSwitchKey(name KeyName) bool {
+	return name == KeyPanePrev || name == KeyPaneNext
+}
+
+func isTreeHorizontalKey(name KeyName) bool {
+	return name == KeyLeft || name == KeyRight
 }
 
 func specsByConfigKey() map[string]spec {

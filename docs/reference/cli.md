@@ -502,6 +502,8 @@ Show the effective TUI key bindings (defaults plus [keys] rebinds)
 Show every TUI action with its effective key binding: the built-in default,
 or the rebind from the [keys] table in config.toml (#1026). Fixed bindings —
 structural keys config cannot touch — are listed last.
+Contextual pane actions such as `pane_prev`/`pane_next` are included; their
+default arrow keys apply only while a workspace pane has focus.
 
 ```
 af keys
@@ -1069,4 +1071,3 @@ Print the version number of agent-factory
 ```
 af version
 ```
-

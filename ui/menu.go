@@ -95,10 +95,11 @@ var automationsMenuOptions = []keys.KeyName{
 // paneMenuOptions are the status-bar hints while a workspace pane has focus
 // (#1088): enter interacts in-pane / o attaches full-screen (#1089), scroll
 // acts on the pane's own binding, s opens the selected tab as another pane,
-// S commits a preview as another pane, and x hides this pane back to the
-// background.
+// S commits a preview as another pane, left/right switch panes, and x hides
+// this pane back to the background.
 var paneMenuOptions = []keys.KeyName{
 	keys.KeyEnter, keys.KeyAttach, keys.KeyShiftUp, keys.KeyShiftDown,
+	keys.KeyPanePrev, keys.KeyPaneNext,
 	keys.KeyOpenPane, keys.KeySplitPane, keys.KeyHidePane,
 	keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
 }
@@ -201,8 +202,9 @@ func (m *Menu) updateOptions() {
 		m.options = paneMenuOptions
 		m.groups = []menuGroup{
 			{start: 0, end: 4, isAction: true},
-			{start: 4, end: 7, isAction: false},
-			{start: 7, end: len(paneMenuOptions), isAction: false},
+			{start: 4, end: 6, isAction: false},
+			{start: 6, end: 9, isAction: false},
+			{start: 9, end: len(paneMenuOptions), isAction: false},
 		}
 		return
 	}
@@ -349,6 +351,7 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyJumpTab},
 	{keys.KeyCloseTab},
 	{keys.KeyNewTab},
+	{keys.KeyPanePrev, keys.KeyPaneNext},
 	{keys.KeyOpenPane, keys.KeySplitPane},
 	{keys.KeySearch},
 	{keys.KeyNewRemote},

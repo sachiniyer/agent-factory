@@ -1106,6 +1106,13 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return mod, cmd
 	}
 
+	// Pane-local nav shortcuts are contextual: LEFT/RIGHT switch visible
+	// workspace panes only while a pane owns focus. With tree focus, those
+	// same physical arrows continue through the global map as collapse/expand.
+	if mod, cmd, consumed := m.handlePaneFocusKey(msg); consumed {
+		return mod, cmd
+	}
+
 	// Exit scrolling mode when ESC is pressed (each pane keeps its own
 	// scroll state, #1088)
 	if msg.Type == tea.KeyEsc {

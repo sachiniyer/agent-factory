@@ -82,6 +82,7 @@ Common TUI keys:
 | `t` | Open a helper shell tab in the session worktree |
 | `s` | Open the selected tab as a workspace pane |
 | `S` | Commit a preview as a new workspace pane |
+| `←` / `→` | Move focus between open workspace panes when a pane is focused |
 | `a` | Archive or restore a session |
 | `D` | Kill a session and clean up its worktree |
 | `m` | Open the task manager |

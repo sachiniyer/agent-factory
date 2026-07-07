@@ -92,6 +92,7 @@ it.
 | `Ctrl-]` | exit interactive → nav | | `w` | close tab |
 | `Tab` | cycle focus ring | | `1`–`9` | jump to tab |
 | `j`/`k`,`↓`/`↑` | move tree cursor | | `m` | tasks overlay |
+| `←`/`→` | switch focused pane | | `[`/`]` | previous/next section |
 | `D` | kill instance | | `/` | search |
 | `a` | archive/restore | | `q` | quit |
 | `p`/`y` | open/copy PR | | `e` | hooks editor |
@@ -100,6 +101,8 @@ it.
 `Enter`, `Tab`, `Shift-Tab`, `Esc`, `Ctrl-]`, and `1`–`9` are **reserved** and
 cannot be rebound (`[keys]` config). `Ctrl-W` is the configurable detach key
 (`detach_keys`); the driver reads it from `AF_DRIVER_DETACH_KEY`.
+`←`/`→` switch panes only when a workspace pane has focus; with tree focus they
+keep the tree's collapse/expand behavior.
 
 ---
 
