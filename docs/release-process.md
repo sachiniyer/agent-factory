@@ -22,7 +22,7 @@ channels:
 `z` increments on every preview and resets to 1 whenever a new stable
 changes the base. Version computation lives in
 [`.github/scripts/next-preview-version.sh`](https://github.com/sachiniyer/agent-factory/blob/master/.github/scripts/next-preview-version.sh)
-and is unit-tested in `release_scripts_test.go`.
+and is unit-tested in `scripts/release_scripts_test.go`.
 
 ## Preview releases (automatic)
 
