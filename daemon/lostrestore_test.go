@@ -150,9 +150,9 @@ func (failPtyFactory) Close() {}
 
 // TestRestoreLostSessions_LogsVanishedWorktreeOnce covers the #1303
 // instrumentation: when a live registered Lost session points at a worktree
-// directory that disappeared but Git still has the worktree admin entry, the
-// daemon emits one high-visibility ERROR with the diagnostic context and does
-// not repeat it on the next retry.
+// directory that disappeared and the branch is also gone, the daemon emits one
+// high-visibility ERROR with the diagnostic context and does not repeat it on
+// the next retry.
 func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	zeroRestoreBackoff(t)
@@ -168,6 +168,9 @@ func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
 	}
 	if err := os.RemoveAll(worktreePath); err != nil {
 		t.Fatalf("remove worktree directory: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoPath, "update-ref", "-d", "refs/heads/"+branch).CombinedOutput(); err != nil {
+		t.Fatalf("delete branch ref: %v\n%s", err, out)
 	}
 
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "vanished", Path: repoPath, Program: "claude"})
@@ -221,7 +224,7 @@ func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
 		`parent_exists=true`,
 		`repo_exists=true`,
 		`git_worktree_registered="true"`,
-		`branch_exists="true"`,
+		`branch_exists="false"`,
 		`recover_error="recover: session \"vanished\" worktree unavailable: stat `,
 	} {
 		if !strings.Contains(logged, want) {

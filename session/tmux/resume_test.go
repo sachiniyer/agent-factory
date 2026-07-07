@@ -373,6 +373,43 @@ func TestClaudeProgramWithSessionID(t *testing.T) {
 	}
 }
 
+func TestResumeProgramWithConversationID(t *testing.T) {
+	const id = "019f386f-7206-7fc2-803b-f7045e07a242"
+	cases := []struct {
+		name          string
+		agent         string
+		in            string
+		want          string
+		wantRewritten bool
+	}{
+		{"claude bare", ProgramClaude, "claude", "claude --resume " + id, true},
+		{"claude with flag", ProgramClaude, "claude --model sonnet", "claude --model sonnet --resume " + id, true},
+		{"claude wrapper", ProgramClaude, "ionice -c 3 claude", "ionice -c 3 claude --resume " + id, true},
+		{"claude already resume", ProgramClaude, "claude --resume old", "claude --resume old", false},
+		{"claude already continue", ProgramClaude, "claude --continue", "claude --continue", false},
+		{"codex bare", ProgramCodex, "codex", "codex resume " + id, true},
+		{"codex with flag", ProgramCodex, "codex --model gpt-5", "codex resume " + id + " --model gpt-5", true},
+		{"codex exec", ProgramCodex, "codex exec --foo bar", "codex exec resume " + id + " --foo bar", true},
+		{"codex quoted path", ProgramCodex, "'/path with spaces/codex' --model gpt-5", "'/path with spaces/codex' resume " + id + " --model gpt-5", true},
+		{"codex already resume", ProgramCodex, "codex resume --last", "codex resume --last", false},
+		{"provider mismatch", ProgramClaude, "codex --model gpt-5", "codex --model gpt-5", false},
+		{"unsupported provider", ProgramGemini, "gemini", "gemini", false},
+		{"empty id", ProgramCodex, "codex", "codex", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotID := id
+			if tc.name == "empty id" {
+				gotID = ""
+			}
+			got, rewritten := ResumeProgramWithConversationID(tc.in, tc.agent, gotID)
+			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.wantRewritten, rewritten)
+		})
+	}
+}
+
 // TestResumeProgram_CodexProfileResumeFalsePositive guards #632: the codex
 // "already has resume" check must be position-aware. A profile named "resume"
 // (or any other flag value of "resume") must not be mistaken for the resume
