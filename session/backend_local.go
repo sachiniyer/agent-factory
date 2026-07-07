@@ -325,6 +325,7 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	if workDir == "" {
 		return fmt.Errorf("recover: session %q has no worktree to re-spawn into", i.Title)
 	}
+	resolvedProgram := resolveProgramForInstance(i)
 	if _, err := os.Stat(workDir); err != nil {
 		if !os.IsNotExist(err) {
 			// Surface the real cause instead of a generic tmux new-session error:
@@ -333,16 +334,31 @@ func (b *LocalBackend) respawn(i *Instance) error {
 			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 		}
 		if rebuildErr := gw.RebuildFromExistingBranch(); rebuildErr != nil {
-			return &WorktreeUnavailableError{
-				Title:        i.Title,
-				WorktreePath: workDir,
-				Err:          fmt.Errorf("%w (rebuild from existing branch failed: %v)", err, rebuildErr),
+			exactProgram, ok := prepareExactResumeConversation(i, resolvedProgram)
+			if !ok {
+				return &WorktreeUnavailableError{
+					Title:        i.Title,
+					WorktreePath: workDir,
+					Err: fmt.Errorf("%w (rebuild from existing branch failed: %v; fresh rebuild requires a recorded conversation id for the resolved agent)",
+						err, rebuildErr),
+				}
 			}
+			if freshErr := gw.RebuildFreshFromRecordedBase(); freshErr != nil {
+				return &WorktreeUnavailableError{
+					Title:        i.Title,
+					WorktreePath: workDir,
+					Err: fmt.Errorf("%w (rebuild from existing branch failed: %v; fresh rebuild from recorded base failed: %v)",
+						err, rebuildErr, freshErr),
+				}
+			}
+			resolvedProgram = exactProgram
+			log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from recorded base and recreated branch %s", i.Title, workDir, gw.GetBranchName())
+		} else {
+			log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from branch %s", i.Title, workDir, gw.GetBranchName())
 		}
-		log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from branch %s", i.Title, workDir, gw.GetBranchName())
 	}
 
-	ts.SetProgram(injectSystemPrompt(prepareResumeConversation(i, resolveProgramForInstance(i))))
+	ts.SetProgram(injectSystemPrompt(prepareResumeConversation(i, resolvedProgram)))
 	if err := ts.Restore(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)

@@ -81,6 +81,69 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 	return nil
 }
 
+// RebuildFreshFromRecordedBase recreates a vanished session worktree when both
+// the directory and branch are gone. It creates a new branch with the persisted
+// name from the recorded base commit when possible, falling back to origin's
+// default branch and then HEAD. The caller must only use this when it can resume
+// the agent's exact recorded conversation; otherwise this would be a fresh
+// redispatch into an empty worktree.
+func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
+	if g.externalWorktree {
+		return fmt.Errorf("cannot rebuild external worktree %s", g.worktreePath)
+	}
+	if g.worktreeDir == "" {
+		return fmt.Errorf("failed to get worktree directory: empty worktree directory")
+	}
+	if strings.TrimSpace(g.branchName) == "" {
+		return fmt.Errorf("cannot rebuild worktree %s: branch name is empty", g.worktreePath)
+	}
+	if err := os.MkdirAll(filepath.Dir(g.worktreePath), 0755); err != nil {
+		return err
+	}
+	if _, err := g.runGitCommand(g.repoPath, "show-ref", "--verify", fmt.Sprintf("refs/heads/%s", g.branchName)); err == nil {
+		return fmt.Errorf("cannot fresh rebuild worktree %s: branch %s already exists", g.worktreePath, g.branchName)
+	}
+
+	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
+	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
+
+	baseCommit, err := g.rebuildBaseCommit()
+	if err != nil {
+		return err
+	}
+	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
+		return fmt.Errorf("failed to create fresh worktree from commit %s: %w", baseCommit, err)
+	}
+
+	g.baseCommitSHA = baseCommit
+	g.branchCreatedByUs = true
+	RunPostWorktreeHooksAsync(g.hooksCtx, g.repoPath, g.worktreePath)
+	return nil
+}
+
+func (g *GitWorktree) rebuildBaseCommit() (string, error) {
+	if recorded := strings.TrimSpace(g.baseCommitSHA); recorded != "" {
+		if output, err := g.runGitCommand(g.repoPath, "rev-parse", "--verify", recorded+"^{commit}"); err == nil {
+			return strings.TrimSpace(output), nil
+		}
+		log.WarningLog.Printf("recorded base commit %s for worktree %s is unavailable; falling back to origin default/HEAD", recorded, g.worktreePath)
+	}
+	if baseCommit := g.resolveOriginHead(); baseCommit != "" {
+		return baseCommit, nil
+	}
+	output, err := g.runGitCommand(g.repoPath, "rev-parse", "HEAD")
+	if err != nil {
+		if strings.Contains(err.Error(), "fatal: ambiguous argument 'HEAD'") ||
+			strings.Contains(err.Error(), "fatal: not a valid object name") ||
+			strings.Contains(err.Error(), "fatal: HEAD: not a valid object name") {
+			return "", fmt.Errorf("this appears to be a brand new repository: please create an initial commit before restoring an instance")
+		}
+		return "", fmt.Errorf("failed to get HEAD commit hash: %w", err)
+	}
+	log.InfoLog.Printf("no recorded base/origin remote found, falling back to HEAD for recovered worktree")
+	return strings.TrimSpace(output), nil
+}
+
 // setupFromExistingBranch creates a worktree from an existing branch
 func (g *GitWorktree) setupFromExistingBranch() error {
 	// Directory already created in Setup(), skip duplicate creation

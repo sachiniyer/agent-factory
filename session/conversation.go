@@ -113,12 +113,19 @@ func prepareLaunchConversation(i *Instance, program string) string {
 }
 
 func prepareResumeConversation(i *Instance, program string) string {
-	conv := i.AgentConversation()
-	if !conv.HasID() {
-		return program
-	}
-	if rewritten, ok := tmux.ResumeProgramWithConversationID(program, conv.Agent, conv.ID); ok {
+	if rewritten, ok := prepareExactResumeConversation(i, program); ok {
 		return rewritten
 	}
 	return program
+}
+
+func prepareExactResumeConversation(i *Instance, program string) (string, bool) {
+	conv := i.AgentConversation()
+	if !conv.HasID() {
+		return program, false
+	}
+	if rewritten, ok := tmux.ResumeProgramWithConversationID(program, conv.Agent, conv.ID); ok {
+		return rewritten, true
+	}
+	return program, false
 }
