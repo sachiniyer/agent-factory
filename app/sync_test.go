@@ -121,7 +121,7 @@ func TestReconcileSnapshot_MirrorsStatusOntoExistingRow(t *testing.T) {
 func TestReconcileSnapshot_LeavesTransientOpAlone(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
-	inst.SetInFlightOp(session.OpKilling)
+	inst.SetInFlightOpForTest(session.OpKilling)
 	h.store.AddInstance(inst)
 
 	data := inst.ToInstanceData()

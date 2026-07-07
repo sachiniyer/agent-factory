@@ -69,7 +69,7 @@ func TestHandleLimitRetry_TearingDownRow_NoDispatch(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
 	inst := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
-	inst.SetInFlightOp(session.OpKilling)
+	inst.SetInFlightOpForTest(session.OpKilling)
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 

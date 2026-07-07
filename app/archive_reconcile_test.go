@@ -18,7 +18,7 @@ func storeArchivingInstance(t *testing.T, h *home, title string) *session.Instan
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatus(session.Running)
-	inst.SetInFlightOp(session.OpArchiving)
+	inst.SetInFlightOpForTest(session.OpArchiving)
 	h.store.AddInstance(inst)
 	return inst
 }
@@ -75,7 +75,7 @@ func TestReconcile_OptimisticKillPreservedForNonTerminal(t *testing.T) {
 			require.NoError(t, err)
 			inst.SetBackend(session.NewFakeBackend())
 			inst.SetStatus(session.Running)
-			inst.SetInFlightOp(session.OpKilling)
+			inst.SetInFlightOpForTest(session.OpKilling)
 			h.store.AddInstance(inst)
 
 			data := inst.ToInstanceData()
@@ -192,7 +192,7 @@ func TestHandleInstanceArchived_FinalizesRowImmediately(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatus(session.Running)
-	inst.SetInFlightOp(session.OpArchiving) // as left by the optimistic archive action
+	inst.SetInFlightOpForTest(session.OpArchiving) // as left by the optimistic archive action
 	h.store.AddInstance(inst)
 
 	h.handleInstanceArchived(instanceArchivedMsg{title: "worker"})
@@ -219,7 +219,7 @@ func TestRestore_EagerRehomeDoesNotBypassRebuild(t *testing.T) {
 	// Restore dispatched: handleArchive raises OpRestoring. The row must re-home
 	// into the live Instances section IMMEDIATELY (a) — but its liveness must stay
 	// Archived so the reconcile can still see the Archived→live transition.
-	archived.SetInFlightOp(session.OpRestoring)
+	archived.SetInFlightOpForTest(session.OpRestoring)
 	require.False(t, archived.ShownArchived(),
 		"(a) an OpRestoring row must render in the live Instances section at once")
 	require.Equal(t, session.LiveArchived, archived.GetLiveness(),
@@ -267,7 +267,7 @@ func TestHandleInstanceRestored_FailureDropsBackToArchived(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetArchived()
-	inst.SetInFlightOp(session.OpRestoring) // as the dispatched restore left it
+	inst.SetInFlightOpForTest(session.OpRestoring) // as the dispatched restore left it
 	h.store.AddInstance(inst)
 	require.False(t, inst.ShownArchived(), "precondition: eagerly re-homed to Instances")
 

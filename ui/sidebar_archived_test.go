@@ -70,7 +70,7 @@ func TestSidebar_RestoringRowRehomedToInstances(t *testing.T) {
 	s := NewSidebar(&spin, false, store.NewProjection())
 
 	restoring := archTestInstance(t, "coming-back", session.Archived)
-	restoring.SetInFlightOp(session.OpRestoring)
+	restoring.SetInFlightOpForTest(session.OpRestoring)
 	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
 	addTestInstance(s, restoring)
 	s.SetSize(40, 40)

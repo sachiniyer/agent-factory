@@ -51,6 +51,8 @@ const (
 	tkAbortArchiveToLost
 	tkBeginRestore
 	tkAbortRestoreToLost
+	tkMarkRestoring
+	tkClearOp
 	numTransitionKinds
 )
 
@@ -76,6 +78,10 @@ func (k transitionKind) String() string {
 		return "BeginRestore"
 	case tkAbortRestoreToLost:
 		return "AbortRestoreToLost"
+	case tkMarkRestoring:
+		return "MarkRestoring"
+	case tkClearOp:
+		return "ClearOp"
 	}
 	return fmt.Sprintf("transitionKind(%d)", int(k))
 }
@@ -135,6 +141,19 @@ func BeginRestore() TransitionEvent { return TransitionEvent{kind: tkBeginRestor
 // AbortRestoreToLost drops a failed restore's fence to a plain Lost so the
 // #1108 loop retries against the now-restored worktree.
 func AbortRestoreToLost() TransitionEvent { return TransitionEvent{kind: tkAbortRestoreToLost} }
+
+// MarkRestoring overlays OpRestoring WITHOUT touching liveness — the TUI's
+// optimistic restore action. It deliberately keeps liveness=Archived (unlike
+// BeginRestore, the daemon edge, which flips to Lost) so the reconcile still
+// sees the Archived→live transition and rebuilds the row (#1203), while
+// ShownArchived re-homes it into the live section eagerly (#1210).
+func MarkRestoring() TransitionEvent { return TransitionEvent{kind: tkMarkRestoring} }
+
+// ClearOp drops any in-flight optimistic op back to None, leaving liveness
+// untouched — the client-projection bookkeeping for when an optimistic op's
+// outcome is confirmed by the reconcile or the op's RPC failed and the overlay
+// must revert to the underlying daemon liveness.
+func ClearOp() TransitionEvent { return TransitionEvent{kind: tkClearOp} }
 
 // stateAxes is the two-axis lifecycle state a transition reads and writes.
 type stateAxes struct {
@@ -228,6 +247,18 @@ var transitionTable = map[transitionKind]edgeSpec{
 	tkAbortRestoreToLost: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpRestoring && s.liveness == LiveLost },
 		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLost, OpNone} },
+	},
+	tkMarkRestoring: {
+		// Optimistic restore overlay: op None -> OpRestoring, liveness UNCHANGED
+		// (the reconcile keys its rebuild on the still-Archived liveness, #1203).
+		allowedFrom: func(s stateAxes) bool { return s.op == OpNone },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpRestoring} },
+	},
+	tkClearOp: {
+		// Clearing an optimistic overlay back to None is always valid — it never
+		// resurrects or teardown-clobbers (liveness is untouched).
+		allowedFrom: func(stateAxes) bool { return true },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpNone} },
 	},
 }
 

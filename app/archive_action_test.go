@@ -129,7 +129,7 @@ func TestRestoreInstanceCmd_CallsDaemon(t *testing.T) {
 func TestHandleInstanceRestored_LostRowMarksLive(t *testing.T) {
 	h := newTestHome(t)
 	inst := archiveActionInstance(t, "worker", session.Lost)
-	inst.SetInFlightOp(session.OpRestoring)
+	inst.SetInFlightOpForTest(session.OpRestoring)
 	h.store.AddInstance(inst)
 
 	model, _ := h.handleInstanceRestored(instanceRestoredMsg{title: "worker"})

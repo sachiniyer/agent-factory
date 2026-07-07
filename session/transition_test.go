@@ -78,6 +78,12 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		// short-circuit and restore would never start (Greptile #1314).
 		{"BeginRestore from Archived sets started", stateAxes{LiveArchived, OpNone}, false, false, BeginRestore(), LiveLost, OpRestoring, true},
 		{"AbortRestoreToLost", stateAxes{LiveLost, OpRestoring}, true, false, AbortRestoreToLost(), LiveLost, OpNone, true},
+		// MarkRestoring: optimistic restore overlay — OpRestoring, liveness KEPT
+		// Archived (unlike BeginRestore which flips to Lost), started untouched.
+		{"MarkRestoring keeps liveness", stateAxes{LiveArchived, OpNone}, false, false, MarkRestoring(), LiveArchived, OpRestoring, false},
+		// ClearOp: drop any optimistic overlay to None, liveness untouched.
+		{"ClearOp from archiving", stateAxes{LiveReady, OpArchiving}, true, false, ClearOp(), LiveReady, OpNone, true},
+		{"ClearOp from restoring keeps liveness", stateAxes{LiveArchived, OpRestoring}, false, false, ClearOp(), LiveArchived, OpNone, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

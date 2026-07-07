@@ -316,7 +316,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		if selected.GetInFlightOp() == session.OpRestoring {
 			return m, m.handleError(fmt.Errorf("session '%s' is already being restored", title))
 		}
-		selected.SetInFlightOp(session.OpRestoring)
+		_ = selected.Transition(session.MarkRestoring())
 		return m, m.restoreInstanceCmd(title)
 	}
 
@@ -387,7 +387,7 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 		// underlying daemon liveness rather than stranding as archiving.
 		for _, inst := range m.store.GetInstances() {
 			if inst.Title == msg.title && inst.GetInFlightOp() == session.OpArchiving {
-				inst.SetInFlightOp(session.OpNone)
+				_ = inst.Transition(session.ClearOp())
 				break
 			}
 		}
@@ -492,7 +492,7 @@ func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.C
 	if msg.err != nil {
 		for _, inst := range m.store.GetInstances() {
 			if inst.Title == msg.title && inst.GetInFlightOp() == session.OpRestoring {
-				inst.SetInFlightOp(session.OpNone)
+				_ = inst.Transition(session.ClearOp())
 				break
 			}
 		}

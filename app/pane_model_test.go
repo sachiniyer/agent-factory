@@ -488,7 +488,7 @@ func TestPanePreviewEnterBlocksUncommittableTargets(t *testing.T) {
 		},
 		{
 			name:      "in-flight",
-			configure: func(inst *session.Instance) { inst.SetInFlightOp(session.OpKilling) },
+			configure: func(inst *session.Instance) { inst.SetInFlightOpForTest(session.OpKilling) },
 			wantErr:   "operation in flight",
 		},
 	} {
@@ -531,7 +531,7 @@ func TestPanePreviewSplitBlocksUncommittableTargets(t *testing.T) {
 		},
 		{
 			name:      "in-flight",
-			configure: func(inst *session.Instance) { inst.SetInFlightOp(session.OpKilling) },
+			configure: func(inst *session.Instance) { inst.SetInFlightOpForTest(session.OpKilling) },
 			wantErr:   "operation in flight",
 		},
 	} {
