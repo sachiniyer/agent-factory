@@ -1,0 +1,101 @@
+name: Bug report
+description: Report something in Agent Factory that is broken or surprising.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Agent Factory. Clear steps, environment details, and logs make bugs much easier to reproduce.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem and where you saw it.
+      placeholder: I ran `af ...` and ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest set of steps that shows the issue.
+      placeholder: |
+        1. Run `af ...`
+        2. Select ...
+        3. See ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What should Agent Factory have done?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual behavior
+      description: What did Agent Factory do instead?
+    validations:
+      required: true
+
+  - type: input
+    id: af-version
+    attributes:
+      label: Agent Factory version
+      description: Run `af --version`.
+      placeholder: af version ...
+    validations:
+      required: true
+
+  - type: input
+    id: os-platform
+    attributes:
+      label: OS / platform
+      placeholder: macOS 15.5, Ubuntu 24.04, Fedora 42, ...
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      placeholder: Terminal.app, iTerm2, Ghostty, GNOME Terminal, tmux, ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent used
+      description: Which program was Agent Factory running?
+      options:
+        - claude
+        - codex
+        - aider
+        - gemini
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Agent Factory logs to `~/.config/agent-factory/agent-factory.log`. `af bug-report` bundles a redacted report, and `af doctor` checks your environment.
+      placeholder: Paste the relevant excerpt or attach the redacted `af bug-report` output.
+      render: shell
+
+  - type: checkboxes
+    id: latest-version
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have checked that I am on the latest Agent Factory version.
+          required: true

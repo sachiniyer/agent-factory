@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest an improvement for Agent Factory.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea. A short description of the workflow and tradeoffs is enough.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like to change?
+      description: Describe the feature or improvement.
+      placeholder: I want Agent Factory to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why is this useful?
+      description: What workflow, problem, or outcome would this improve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What are you using now, or what other approaches might work?
+      placeholder: Today I work around this by ...
