@@ -489,6 +489,18 @@ func runBroadcast(prompt string) error {
 			})
 			continue
 		}
+		// Archived sessions are deliberately inert (#1028): there is no running
+		// backend to receive a prompt until the user restores them.
+		if t.Status == session.Archived {
+			result.Skipped++
+			result.Results = append(result.Results, broadcastTarget{
+				Title:  t.Title,
+				RepoID: t.RepoID,
+				Status: "skipped",
+				Reason: "session is archived; restore it before broadcasting",
+			})
+			continue
+		}
 		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: t.Title, RepoID: t.RepoID, Prompt: prompt}); err != nil {
 			result.Failed++
 			result.Results = append(result.Results, broadcastTarget{

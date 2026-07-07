@@ -1033,6 +1033,75 @@ func TestSessionsSendPrompt_BroadcastToleratesLost(t *testing.T) {
 	}
 }
 
+// TestSessionsSendPrompt_BroadcastSkipsArchived verifies archived sessions are
+// treated as intentionally non-deliverable: broadcast reports them as skipped
+// with guidance and still delivers to live sessions instead of failing the
+// command or attempting a daemon send that can only return "instance not
+// started" (#1328).
+func TestSessionsSendPrompt_BroadcastSkipsArchived(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	resetBroadcastFlags(t)
+
+	repoRoot := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	repo, err := config.RepoFromPath(repoRoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	raw, err := json.Marshal([]session.InstanceData{
+		{Title: "alive", Status: session.Running},
+		{Title: "parked-away", Status: session.Archived},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := config.SaveRepoInstances(repo.ID, raw); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	repoFlag = repoRoot
+
+	var attempted []string
+	prevSend := sendPromptViaDaemon
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+		attempted = append(attempted, req.Title)
+		if req.Title == "parked-away" {
+			return errors.New("instance not started")
+		}
+		return nil
+	}
+	defer func() { sendPromptViaDaemon = prevSend }()
+
+	res, err := runBroadcastCmd(t, []string{"status?"})
+	if err != nil {
+		t.Fatalf("broadcast must not fail when archived sessions are in scope, got: %v", err)
+	}
+	if res.Delivered != 1 || res.Failed != 0 || res.Skipped != 1 {
+		t.Fatalf("counts = delivered %d / failed %d / skipped %d, want 1/0/1 (%+v)", res.Delivered, res.Failed, res.Skipped, res.Results)
+	}
+	for _, title := range attempted {
+		if title == "parked-away" {
+			t.Fatalf("broadcast attempted delivery to archived session %q; it should be skipped", title)
+		}
+	}
+	byTitle := map[string]broadcastTarget{}
+	for _, r := range res.Results {
+		byTitle[r.Title] = r
+	}
+	if byTitle["alive"].Status != "delivered" {
+		t.Fatalf("alive status = %q, want delivered", byTitle["alive"].Status)
+	}
+	if byTitle["parked-away"].Status != "skipped" || !strings.Contains(byTitle["parked-away"].Reason, "archived") {
+		t.Fatalf("archived result = %+v, want skipped with archived reason", byTitle["parked-away"])
+	}
+}
+
 // TestSessionsSendPrompt_BroadcastRequiresScope verifies the broadcast refuses
 // to guess its scope: with no current repo, no --repo, and no --all-repos it
 // errors instead of silently blasting every repo (the #761 hazard).
