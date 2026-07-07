@@ -87,7 +87,8 @@ func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
 // full manager lives in the tasks overlay. Cursor keys move the section's
 // selection, Enter opens the manager overlay on it, Esc returns focus to the
 // tree. Everything else falls through to the caller so the global bindings
-// (Tab/Shift-Tab focus ring, S manage, H hooks, ? help, q quit) keep working.
+// (Tab/Shift-Tab focus ring, task manager, hooks, ? help, q quit) keep
+// working.
 func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.ring.Active() != layout.RegionAutomations {
 		return m, nil, false
