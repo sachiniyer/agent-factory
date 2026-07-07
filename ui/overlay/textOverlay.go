@@ -5,8 +5,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 
 	"github.com/sachiniyer/agent-factory/ui"
+)
+
+const (
+	textOverlayHorizontalPadding = 2
+	textOverlayVerticalPadding   = 1
 )
 
 // TextOverlay represents a text screen overlay
@@ -58,7 +64,7 @@ func (t *TextOverlay) Render() string {
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ui.AccentColor).
-		Padding(1, 2).
+		Padding(textOverlayVerticalPadding, textOverlayHorizontalPadding).
 		Width(t.width)
 	if inner := t.innerHeight(); inner > 0 && t.contentOverflows(inner) {
 		style = style.Height(inner)
@@ -92,11 +98,19 @@ func (t *TextOverlay) innerHeight() int {
 	if t.height <= 0 {
 		return 0
 	}
-	inner := t.height - 2 - 2 // border + vertical padding
+	inner := t.height - 2 - textOverlayVerticalPadding*2 // border + vertical padding
 	if inner < 1 {
 		return 1
 	}
 	return inner
+}
+
+func (t *TextOverlay) textWidth() int {
+	width := t.width - textOverlayHorizontalPadding*2
+	if width < 1 {
+		return 1
+	}
+	return width
 }
 
 func (t *TextOverlay) clampScroll(inner int) {
@@ -106,7 +120,7 @@ func (t *TextOverlay) clampScroll(inner int) {
 	if inner <= 0 {
 		return
 	}
-	lines := strings.Split(t.content, "\n")
+	lines := t.wrappedContentLines()
 	maxScroll := len(lines) - inner
 	if maxScroll < 0 {
 		maxScroll = 0
@@ -117,7 +131,7 @@ func (t *TextOverlay) clampScroll(inner int) {
 }
 
 func (t *TextOverlay) contentOverflows(inner int) bool {
-	return inner > 0 && len(strings.Split(t.content, "\n")) > inner
+	return inner > 0 && len(t.wrappedContentLines()) > inner
 }
 
 func (t *TextOverlay) visibleContent() string {
@@ -125,10 +139,10 @@ func (t *TextOverlay) visibleContent() string {
 	if inner <= 0 {
 		return t.content
 	}
-	lines := strings.Split(t.content, "\n")
+	lines := t.wrappedContentLines()
 	t.clampScroll(inner)
 	if len(lines) <= inner {
-		return t.content
+		return strings.Join(lines, "\n")
 	}
 	end := t.scroll + inner
 	if end > len(lines) {
@@ -136,12 +150,16 @@ func (t *TextOverlay) visibleContent() string {
 	}
 	visible := append([]string(nil), lines[t.scroll:end]...)
 	if t.scroll > 0 && len(visible) > 0 {
-		visible[0] = textOverlayScrollMarker(t.width, "↑ more")
+		visible[0] = textOverlayScrollMarker(t.textWidth(), "↑ more")
 	}
 	if end < len(lines) && len(visible) > 0 {
-		visible[len(visible)-1] = textOverlayScrollMarker(t.width, "↓ more")
+		visible[len(visible)-1] = textOverlayScrollMarker(t.textWidth(), "↓ more")
 	}
 	return strings.Join(visible, "\n")
+}
+
+func (t *TextOverlay) wrappedContentLines() []string {
+	return strings.Split(wordwrap.String(t.content, t.textWidth()), "\n")
 }
 
 func textOverlayScrollMarker(width int, marker string) string {

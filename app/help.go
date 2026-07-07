@@ -281,6 +281,7 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 		m.textOverlay = overlay.NewTextOverlay(content)
 		m.textOverlay.OnDismiss = onDismiss
+		m.layoutTextOverlay()
 		m.state = stateHelp
 		return m, nil
 	}

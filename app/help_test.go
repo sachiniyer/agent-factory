@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
@@ -83,4 +84,22 @@ func TestInstanceStartHelpMentionsFullScreenDetach(t *testing.T) {
 	if !strings.Contains(content, "ctrl-w") || !strings.Contains(content, "Detach from a full-screen session") {
 		t.Errorf("instance-start help must name the full-screen detach key; got:\n%s", content)
 	}
+}
+
+func TestGeneralHelpOverlayFitsAndMarksScrollAt80x24(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+
+	_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+	fg := h.textOverlay.Render()
+	require.LessOrEqual(t, strings.Count(fg, "\n")+1, 24, "help overlay foreground must fit inside the terminal")
+	out := h.View()
+	require.Contains(t, out, "Agent Factory v", "initial viewport must include the title")
+	require.Contains(t, out, "↓ more", "initial viewport must show overflow below")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyCtrlD})
+	fg = h.textOverlay.Render()
+	require.LessOrEqual(t, strings.Count(fg, "\n")+1, 24, "scrolled help overlay foreground must fit inside the terminal")
+	out = h.View()
+	require.Contains(t, out, "↑ more", "scrolled viewport must show overflow above")
 }

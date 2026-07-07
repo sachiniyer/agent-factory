@@ -124,3 +124,25 @@ func TestTextOverlayScrollsContent(t *testing.T) {
 	rendered = overlay.Render()
 	assert.Contains(t, rendered, "title", "scrolling up returns toward the top")
 }
+
+func TestTextOverlayHeightWindowsWrappedContent(t *testing.T) {
+	overlay := NewTextOverlay(strings.Join([]string{
+		"title",
+		"this line is intentionally long enough to wrap into several visual rows inside the overlay",
+		"tail",
+	}, "\n"))
+	overlay.SetWidth(24)
+	overlay.SetHeight(8)
+
+	rendered := overlay.Render()
+	assert.Equal(t, 8, strings.Count(rendered, "\n")+1,
+		"wrapped content should still fit the requested outer height")
+	assert.Contains(t, rendered, "title")
+	assert.Contains(t, rendered, "↓ more")
+
+	overlay.ScrollDown()
+	rendered = overlay.Render()
+	assert.Equal(t, 8, strings.Count(rendered, "\n")+1,
+		"scrolled wrapped content should still fit the requested outer height")
+	assert.Contains(t, rendered, "↑ more")
+}
