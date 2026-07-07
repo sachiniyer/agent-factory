@@ -94,4 +94,8 @@ if ((fail)); then
 	exit 1
 fi
 
-echo "file-length lint passed ($(git ls-files -- '*.go' | wc -l | tr -d ' ') Go files checked; ${#CEIL[@]} grandfathered)."
+grandfathered_count=0
+if [[ ${CEIL[@]+set} ]]; then
+	grandfathered_count=${#CEIL[@]}
+fi
+echo "file-length lint passed ($(git ls-files -- '*.go' | wc -l | tr -d ' ') Go files checked; $grandfathered_count grandfathered)."

@@ -33,12 +33,7 @@ dropped to/under the limit (a dead entry), so the allowlist can't rot.
 Do **not** add new entries to dodge the limit. A brand-new file over the limit
 should be split, not grandfathered.
 
-The currently grandfathered files (the structural-health audit tracks
-splitting them):
-
-| File                       | Ceiling |
-| -------------------------- | ------- |
-| `session/backend_hook.go`  | 1026    |
+There are currently no grandfathered files.
 
 ## Running it
 
