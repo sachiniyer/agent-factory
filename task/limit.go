@@ -35,13 +35,13 @@ type agentLimitMatcher struct {
 	// — detection must never depend on successful time parsing, so a reworded
 	// or truncated reset phrase still surfaces as a limit hit.
 	detect *regexp.Regexp
-	// parseReset extracts and parses the reset timestamp from content that
-	// detect has already matched, returning an absolute UTC reset time. It
-	// returns ok=false when no reset time is present or it cannot be parsed;
-	// detection still stands. now is the injected clock used to resolve
-	// relative and time-of-day-only forms into an absolute instant — the
-	// tested path never calls time.Now() itself, so tests are deterministic.
-	// nil for a detect-only (surface-only) agent; there are none in v1.
+	// parseReset extracts and parses the reset timestamp from content starting
+	// at detect's match, returning an absolute UTC reset time. It returns
+	// ok=false when no reset time is present or it cannot be parsed; detection
+	// still stands. now is the injected clock used to resolve relative and
+	// time-of-day-only forms into an absolute instant — the tested path never
+	// calls time.Now() itself, so tests are deterministic. nil for a detect-only
+	// (surface-only) agent; there are none in v1.
 	parseReset func(content string, now time.Time) (time.Time, bool)
 }
 
@@ -162,13 +162,14 @@ func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher
 	if !ok || matcher.detect == nil {
 		return false, time.Time{}, false
 	}
-	if !matcher.detect.MatchString(content) {
+	match := matcher.detect.FindStringIndex(content)
+	if match == nil {
 		return false, time.Time{}, false
 	}
 	if matcher.parseReset == nil {
 		return true, time.Time{}, false
 	}
-	if reset, parsed := matcher.parseReset(content, now); parsed {
+	if reset, parsed := matcher.parseReset(content[match[0]:], now); parsed {
 		return true, reset.UTC(), true
 	}
 	return true, time.Time{}, false
@@ -210,11 +211,11 @@ var (
 // reset clause still detects (hit=true) even when this yields no parse.
 var claudeResetAnchor = regexp.MustCompile(`(?i)reset\s+(?:at\s+)?([^\r\n]+)`)
 
-// parseClaudeReset scans content for Claude's "reset at <tail>" clause and
-// resolves the tail, in order: an optional timezone in parens (falling back to
-// now's location when absent — Claude renders in the account tz, which we
-// cannot know without the paren, so the injected clock's zone is the
-// deterministic stand-in), a required 12-hour clock time, and an optional
+// parseClaudeReset scans the detector-matched tail for Claude's "reset at
+// <tail>" clause and resolves the tail, in order: an optional timezone in parens
+// (falling back to now's location when absent — Claude renders in the account
+// tz, which we cannot know without the paren, so the injected clock's zone is
+// the deterministic stand-in), a required 12-hour clock time, and an optional
 // calendar date or weekday (the weekly variant). Without any date it mints the
 // next occurrence of that clock time strictly after now. Returns ok=false when
 // there is no reset clause or no clock time in it, so an unrecognized/reworded
@@ -285,8 +286,8 @@ var (
 	ordinalSuffix = regexp.MustCompile(`(?i)(\d{1,2})(st|nd|rd|th)`)
 )
 
-// parseCodexReset scans the whole captured pane content for Codex's reset
-// phrase. It prefers an absolute "try again at <ts>" timestamp (weekly
+// parseCodexReset scans the detector-matched tail for Codex's reset phrase. It
+// prefers an absolute "try again at <ts>" timestamp (weekly
 // date+time or 5h time-only), then falls back to a relative "try again in
 // <duration>" countdown. Codex renders in local time with no timezone in the
 // banner, so absolute forms are interpreted in now's location. Returns

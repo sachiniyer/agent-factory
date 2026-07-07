@@ -1,6 +1,7 @@
 package task
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,18 @@ func TestIsLimitContent(t *testing.T) {
 			wantHit:      true,
 			wantReset:    true,
 			wantResetUTC: time.Date(2026, 7, 4, 14, 0, 0, 0, loc).UTC(), // 18:00 UTC
+		},
+		{
+			name:  "claude ignores earlier visible reset text before limit banner",
+			agent: tmux.ProgramClaude,
+			content: strings.Join([]string{
+				"Running deployment notes: reset at 3pm (America/New_York)",
+				"Build still in progress...",
+				"Claude usage limit reached. Your limit will reset at 7pm (America/New_York)",
+			}, "\n"),
+			wantHit:      true,
+			wantReset:    true,
+			wantResetUTC: time.Date(2026, 7, 4, 19, 0, 0, 0, loc).UTC(), // 23:00 UTC
 		},
 		{
 			name:         "claude weekly: explicit date + year + tz",
