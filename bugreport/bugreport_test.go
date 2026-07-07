@@ -135,9 +135,13 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 		AgentConversation: &session.AgentConversationData{Agent: "claude", ID: "019f386f-7206-7fc2-803b-f7045e07a242"},
 		PRInfo:            session.PRInfoData{Number: 42, State: "open", Title: "secret pr title", URL: "https://example.com/pr/42"},
 		Worktree: session.GitWorktreeData{
-			RepoPath:      "/home/alice/Desktop/proj",
-			WorktreePath:  "/home/alice/Desktop/proj-fix",
-			BaseCommitSHA: testSHA,
+			RepoPath:          "/home/alice/Desktop/proj",
+			WorktreePath:      "/home/alice/Desktop/proj-fix",
+			SessionName:       "proprietary session name",
+			BranchName:        "alice/fix",
+			BaseCommitSHA:     testSHA,
+			ExternalWorktree:  true,
+			BranchCreatedByUs: boolPtr(true),
 		},
 		RemoteMeta: map[string]interface{}{"api_secret": "topsecretvalue"},
 	}
@@ -170,6 +174,48 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	if d.Worktree.BaseCommitSHA != testSHA {
 		t.Errorf("base commit SHA must survive: %q", d.Worktree.BaseCommitSHA)
 	}
+	if d.Worktree.BranchName != "alice/fix" || !d.Worktree.ExternalWorktree || d.Worktree.BranchCreatedByUs == nil || !*d.Worktree.BranchCreatedByUs {
+		t.Errorf("structural worktree fields mutated: %+v", d.Worktree)
+	}
+	if d.Worktree.SessionName != redactedMarker {
+		t.Errorf("worktree session name not redacted: %q", d.Worktree.SessionName)
+	}
+}
+
+func TestRedactInstancesJSONDropsTitleSecretEverywhere(t *testing.T) {
+	const plantedSecret = "customer roadmap acquisition codename"
+
+	r := &redactor{}
+	raw, err := json.Marshal([]session.InstanceData{{
+		ID:      "abc123",
+		Title:   plantedSecret,
+		Program: "claude",
+		Worktree: session.GitWorktreeData{
+			RepoPath:      "/repo",
+			WorktreePath:  "/repo-worktree",
+			SessionName:   plantedSecret,
+			BranchName:    "feature/safe-branch-name",
+			BaseCommitSHA: testSHA,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("marshal test instance: %v", err)
+	}
+
+	out := string(r.redactInstancesJSON(raw))
+	if strings.Contains(out, plantedSecret) {
+		t.Fatalf("planted title secret leaked through redacted bundle:\n%s", out)
+	}
+	if !strings.Contains(out, redactedMarker) {
+		t.Fatalf("expected redaction marker in bundle:\n%s", out)
+	}
+	if !strings.Contains(out, testSHA) || !strings.Contains(out, "feature/safe-branch-name") {
+		t.Fatalf("structural worktree fields should survive redaction:\n%s", out)
+	}
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
 
 // TestRedactInstancesFallbackRedactsOnDecodeFailure exercises the fail-safe
