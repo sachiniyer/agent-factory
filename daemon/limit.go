@@ -70,7 +70,7 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 		// writes only the liveness axis and never clobbers an in-flight op, so it
 		// needs no "if not deleting" guard — this is exactly what the poll's Ready
 		// fallback does inline in refreshInstanceStatus.
-		instance.SetLiveness(session.LiveReady)
+		_ = instance.Transition(session.ObserveLiveness(session.LiveReady))
 	}
 }
 
