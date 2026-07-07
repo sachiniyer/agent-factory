@@ -236,6 +236,45 @@ func TestApplyOverridesNormalizesMultiModifierOverrides(t *testing.T) {
 	t.Fatal("EffectiveBindings omitted the up action")
 }
 
+func TestApplyOverridesNormalizesSpaceOverridesToRuntimeKeys(t *testing.T) {
+	resetAfter(t)
+
+	spaceKey := tea.KeyMsg{Type: tea.KeySpace}.String()
+	ctrlSpaceKey := tea.KeyMsg{Type: tea.KeyCtrlAt}.String()
+	if spaceKey != " " {
+		t.Fatalf("Bubble Tea changed Space spelling to %q", spaceKey)
+	}
+	if ctrlSpaceKey != "ctrl+@" {
+		t.Fatalf("Bubble Tea changed Ctrl+Space spelling to %q", ctrlSpaceKey)
+	}
+
+	err := ApplyOverrides(map[string][]string{
+		"quit": {"space"},
+		"up":   {"ctrl+space"},
+	})
+	if err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+
+	if got, ok := GlobalKeyStringsMap[spaceKey]; !ok || got != KeyQuit {
+		t.Fatalf("%q should dispatch KeyQuit, got %v (present=%v)", spaceKey, got, ok)
+	}
+	if got, ok := GlobalKeyStringsMap[ctrlSpaceKey]; !ok || got != KeyUp {
+		t.Fatalf("%q should dispatch KeyUp, got %v (present=%v)", ctrlSpaceKey, got, ok)
+	}
+	for _, dead := range []string{"space", "ctrl+space"} {
+		if _, ok := GlobalKeyStringsMap[dead]; ok {
+			t.Fatalf("non-runtime override spelling %q must not be stored in the dispatch map", dead)
+		}
+	}
+	if got := GlobalKeyBindings[KeyQuit].Help().Key; got != "space" {
+		t.Fatalf("space help label = %q, want space", got)
+	}
+	if got := GlobalKeyBindings[KeyUp].Help().Key; got != "ctrl+space" {
+		t.Fatalf("ctrl+space help label = %q, want ctrl+space", got)
+	}
+}
+
 func TestValidateOverridesErrors(t *testing.T) {
 	cases := []struct {
 		name      string
