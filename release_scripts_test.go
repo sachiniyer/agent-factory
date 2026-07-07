@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -146,5 +147,146 @@ func TestValidateStableVersionScript(t *testing.T) {
 		if ok := err == nil; ok != c.wantOK {
 			t.Errorf("%s: validate %q ok=%v, want ok=%v (err: %v)", c.name, c.version, ok, c.wantOK, err)
 		}
+	}
+}
+
+func TestInstallScriptRestartsDaemonWithInstalledBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is POSIX sh; not run on Windows")
+	}
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "fakebin")
+	installDir := filepath.Join(dir, "install")
+	callsFile := filepath.Join(dir, "af-calls")
+
+	writeExecutable(t, filepath.Join(fakeBin, "curl"), `#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = "-o" ]; then
+		out="$2"
+		break
+	fi
+	shift
+done
+[ -n "$out" ] || exit 2
+printf fake-tarball > "$out"
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "tar"), `#!/bin/sh
+case "$1" in
+	tzf)
+		exit 0
+		;;
+	xzf)
+		outdir=
+		shift 2
+		while [ "$#" -gt 0 ]; do
+			if [ "$1" = "-C" ]; then
+				outdir="$2"
+				break
+			fi
+			shift
+		done
+		[ -n "$outdir" ] || exit 2
+		cat > "$outdir/agent-factory" <<'AF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$AF_FAKE_AF_CALLS"
+if [ "$1" = "version" ]; then
+	echo "agent-factory version fake"
+fi
+exit 0
+AF
+		chmod +x "$outdir/agent-factory"
+		;;
+	*)
+		exit 2
+		;;
+esac
+`)
+
+	cmd := exec.Command("sh", "install.sh", "--version", "v9.9.9")
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AF_INSTALL_DIR="+installDir,
+		"AF_FAKE_AF_CALLS="+callsFile,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, out)
+	}
+
+	assertScriptRestartCall(t, callsFile)
+}
+
+func TestDevInstallScriptRestartsDaemonWithInstalledBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("dev-install.sh is POSIX sh; not run on Windows")
+	}
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "fakebin")
+	installDir := filepath.Join(dir, "install")
+	callsFile := filepath.Join(dir, "af-calls")
+
+	writeExecutable(t, filepath.Join(fakeBin, "go"), `#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = "-o" ]; then
+		out="$2"
+		break
+	fi
+	shift
+done
+[ -n "$out" ] || exit 2
+cat > "$out" <<'AF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$AF_FAKE_AF_CALLS"
+if [ "$1" = "version" ]; then
+	echo "agent-factory version fake"
+fi
+exit 0
+AF
+chmod +x "$out"
+`)
+
+	scriptPath, err := filepath.Abs("dev-install.sh")
+	if err != nil {
+		t.Fatalf("resolve dev-install.sh: %v", err)
+	}
+	cmd := exec.Command("sh", scriptPath)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"BIN_DIR="+installDir,
+		"AF_FAKE_AF_CALLS="+callsFile,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dev-install.sh failed: %v\n%s", err, out)
+	}
+
+	assertScriptRestartCall(t, callsFile)
+}
+
+func writeExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir fake tool dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		t.Fatalf("write fake tool %s: %v", path, err)
+	}
+}
+
+func assertScriptRestartCall(t *testing.T, callsFile string) {
+	t.Helper()
+	raw, err := os.ReadFile(callsFile)
+	if err != nil {
+		t.Fatalf("read fake af calls: %v", err)
+	}
+	calls := string(raw)
+	if !strings.Contains(calls, "version\n") {
+		t.Fatalf("installed af version command was not called; calls:\n%s", calls)
+	}
+	if !strings.Contains(calls, "daemon restart --quiet\n") {
+		t.Fatalf("installed af daemon restart --quiet was not called; calls:\n%s", calls)
 	}
 }

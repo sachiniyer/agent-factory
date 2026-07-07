@@ -147,6 +147,11 @@ echo "Installed af to $INSTALL_DIR/af"
 installed_version="$("$INSTALL_DIR/af" version 2>/dev/null || echo "unknown")"
 echo "Version: $installed_version"
 
+if ! "$INSTALL_DIR/af" daemon restart --quiet; then
+	echo "warning: installed af, but failed to restart the running daemon" >&2
+	echo "         run '$INSTALL_DIR/af daemon restart' to retry" >&2
+fi
+
 case ":$PATH:" in
 	*":$INSTALL_DIR:"*)
 		echo "Next:"

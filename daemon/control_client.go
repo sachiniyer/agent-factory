@@ -51,6 +51,21 @@ func DaemonSocketPath() (string, error) {
 
 // EnsureDaemon starts the daemon if the control socket is not already serving.
 func EnsureDaemon() error {
+	return ensureDaemonWithLauncher(launchDaemonProcessFn)
+}
+
+// EnsureDaemonFromPath starts the daemon from execPath if the control socket is
+// not already serving. It is used by post-upgrade restart paths after the
+// current process's executable may have been replaced on disk: asking the
+// still-running old process for os.Executable can resolve to a deleted inode,
+// while execPath is the freshly written binary path the new daemon must run.
+func EnsureDaemonFromPath(execPath string) error {
+	return ensureDaemonWithLauncher(func() error {
+		return launchDaemonProcessAt(execPath)
+	})
+}
+
+func ensureDaemonWithLauncher(launch func() error) error {
 	ensureDaemonMu.Lock()
 	defer ensureDaemonMu.Unlock()
 
@@ -65,7 +80,7 @@ func EnsureDaemon() error {
 		log.WarningLog.Printf("failed to stop stale daemon before launch: %v", err)
 	}
 
-	if err := launchDaemonProcessFn(); err != nil {
+	if err := launch(); err != nil {
 		return err
 	}
 

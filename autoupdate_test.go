@@ -257,7 +257,12 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func() { respawnCalls++ }
+	var respawnPath string
+	respawnDaemonFn = func(path string) error {
+		respawnCalls++
+		respawnPath = path
+		return nil
+	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 
 	runtimeGOOS = "linux"
@@ -280,6 +285,9 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	}
 	if respawnCalls != 1 {
 		t.Fatalf("expected the daemon respawn check to run once after shutdown, got %d", respawnCalls)
+	}
+	if respawnPath != tempBin {
+		t.Fatalf("daemon respawn path = %q, want %q", respawnPath, tempBin)
 	}
 	got, err := os.ReadFile(tempBin)
 	if err != nil {
@@ -327,7 +335,10 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func() { respawnCalls++ }
+	respawnDaemonFn = func(string) error {
+		respawnCalls++
+		return nil
+	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 
 	runtimeGOOS = "linux"
@@ -703,7 +714,7 @@ func TestAutoUpdateDownloadsByTag(t *testing.T) {
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		return daemon.ShutdownNoDaemon, nil
 	}
-	respawnDaemonFn = func() {}
+	respawnDaemonFn = func(string) error { return nil }
 
 	if err := autoUpdate(); err != nil {
 		t.Fatalf("autoUpdate: %v", err)

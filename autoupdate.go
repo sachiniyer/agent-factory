@@ -120,28 +120,21 @@ func autoUpdate() error {
 		return fmt.Errorf("failed to write new binary: %w", err)
 	}
 
-	// Same rationale as `af upgrade` (#498): take down the running daemon so
-	// the next RPC respawns it from the freshly written binary. Quiet on the
-	// no-daemon path since autoUpdate runs in the background on every launch.
-	// Pre-#501 daemons don't speak the Shutdown RPC; RequestShutdown falls
-	// back to PID-file-based SIGTERM (#504).
-	result, shutdownErr := requestDaemonShutdownFn()
+	// Same rationale as `af upgrade` (#498/#1386): restart the running daemon
+	// immediately from the freshly written binary. Quiet on the no-daemon path
+	// since autoUpdate runs in the background on every launch. Pre-#501
+	// daemons don't speak the Shutdown RPC; RequestShutdown falls back to
+	// PID-file-based SIGTERM (#504).
+	result, restartErr := restartDaemonFromPath(resolvedPath)
 	switch {
-	case shutdownErr != nil:
-		log.WarningLog.Printf("auto-update: updated to %s but failed to restart daemon: %v", latestVersion, shutdownErr)
+	case restartErr != nil:
+		log.WarningLog.Printf("auto-update: updated to %s but failed to restart daemon: %v", latestVersion, restartErr)
 	case result == daemon.ShutdownViaRPC:
-		log.InfoLog.Printf("auto-update: updated to %s and stopped running daemon", latestVersion)
+		log.InfoLog.Printf("auto-update: updated to %s and restarted running daemon", latestVersion)
 	case result == daemon.ShutdownViaSIGTERM:
-		log.InfoLog.Printf("auto-update: updated to %s and stopped pre-#501 running daemon via SIGTERM fallback", latestVersion)
+		log.InfoLog.Printf("auto-update: updated to %s and restarted pre-#501 running daemon via SIGTERM fallback", latestVersion)
 	default:
 		log.InfoLog.Printf("auto-update: updated to %s (effective on next launch)", latestVersion)
-	}
-	if shutdownErr == nil && result != daemon.ShutdownNoDaemon {
-		// The daemon hosts task schedules and autoyes mode (#782); we just
-		// stopped a running one, so respawn it unconditionally from the
-		// freshly written binary instead of leaving schedules and autoyes
-		// sessions dark until the next af invocation (#813).
-		respawnDaemonFn()
 	}
 	return nil
 }
