@@ -99,6 +99,16 @@ func TestCreateSession_ParksOnUsageLimitBanner(t *testing.T) {
 	if len(stored) != 1 || stored[0].Liveness != session.LiveLimitReached {
 		t.Fatalf("persisted store = %+v, want exactly one LiveLimitReached row", stored)
 	}
+	if stored[0].Prompt != "run the nightly report" {
+		t.Fatalf("persisted InstanceData prompt = %q, want the parked task prompt", stored[0].Prompt)
+	}
+	var persisted []map[string]any
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("unmarshal persisted map: %v", err)
+	}
+	if len(persisted) != 1 || persisted[0]["prompt"] != "run the nightly report" {
+		t.Fatalf("persisted prompt = %v, want the parked task prompt to survive daemon restart", persisted)
+	}
 }
 
 // stubParkedCreate swaps createSessionForTask for one that reports a session
