@@ -1,0 +1,232 @@
+package session
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"sync"
+	"time"
+
+	"github.com/creack/pty"
+
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+func (b *HookBackend) Attach(i *Instance) (chan struct{}, error) {
+	i.mu.RLock()
+	s := i.started
+	i.mu.RUnlock()
+
+	if !s {
+		return nil, fmt.Errorf("cannot attach instance that has not been started")
+	}
+
+	// Stop the background preview process so it doesn't compete, but reap it
+	// in the background: Attach runs on the bubbletea event loop, and waiting
+	// out the 2s grace period here froze the whole TUI whenever the preview
+	// process didn't exit promptly (#817). The dying preview only writes into
+	// its own buffer via its own pipe (see stopPreview), so it cannot
+	// interleave output with the interactive attach_cmd started below.
+	if hp := b.stopPreview(i.Title); hp != nil {
+		go hp.reap()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			// Restart preview process after detach. Failure is non-fatal —
+			// the user can still re-attach interactively; we just lose the
+			// background preview snapshot.
+			if err := b.ensurePTY(i); err != nil {
+				log.WarningLog.Printf("hook backend: preview process failed to restart for %s: %v", i.Title, err)
+			}
+		}()
+
+		slug := hookNameForInstance(i)
+		cmd := exec.Command(b.Hooks.AttachCmd, slug)
+		if err := runHookAttachWithDetach(cmd, os.Stdin, os.Stdout, os.Stderr); err != nil {
+			log.ErrorLog.Printf("attach_cmd error: %v", err)
+		}
+	}()
+	return done, nil
+}
+
+// AttachTerminal gives interactive terminal access to the remote workspace by
+// running terminal_cmd behind a local PTY, with the same detach-key handling
+// as Attach. It powers the Terminal tab for remote sessions (#843): where
+// attach_cmd connects to the AGENT's session, terminal_cmd opens a plain
+// shell on the remote machine (typically `ssh <box>` into the workspace).
+//
+// Unlike Attach, the background preview process is left running: it captures
+// the agent's attach_cmd stream over its own pipe, while terminal_cmd talks to
+// a separate shell over its own PTY, so the two cannot compete for output.
+func (b *HookBackend) AttachTerminal(i *Instance) (chan struct{}, error) {
+	if !b.HasTerminalCmd() {
+		return nil, fmt.Errorf("remote terminal is not configured: add a terminal_cmd to remote_hooks to enable the Terminal tab for remote sessions")
+	}
+
+	i.mu.RLock()
+	s := i.started
+	i.mu.RUnlock()
+	if !s {
+		return nil, fmt.Errorf("cannot open remote terminal for instance that has not been started")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		slug := hookNameForInstance(i)
+		cmd := exec.Command(b.Hooks.TerminalCmd, slug)
+		if err := runHookAttachWithDetach(cmd, os.Stdin, os.Stdout, os.Stderr); err != nil {
+			log.ErrorLog.Printf("terminal_cmd error: %v", err)
+		}
+	}()
+	return done, nil
+}
+
+// hookAttachTerminalRestore is written to stdout after an interactive
+// attach_cmd stream ends, returning the terminal to the neutral state a
+// well-behaved full-screen program leaves behind on exit: main screen,
+// cursor visible, no scroll region, no mouse/focus/paste reporting.
+//
+// The attach stream is a raw remote PTY copied byte-for-byte to the local
+// terminal, so whatever modes the remote program set (tmux enters the alt
+// screen, sets a scroll region, enables mouse and focus reporting) are set
+// on the local terminal too. On a graceful exit the remote emits its own
+// restore sequences, but the detach key kills the attach_cmd process
+// mid-stream and nothing ever resets those modes — the TUI then repaints
+// into a terminal with a stale scroll region and screen buffer, which is the
+// "messed up UI until I resize" of #845.
+//
+// The restore is deliberately caller-agnostic: this path serves both the TUI
+// (which re-asserts its own bubbletea modes afterwards, see
+// app.attachOverlayCallback) and `af sessions attach` (a plain CLI, for which
+// this neutral state is exactly right). Hand-rolled escapes are the only
+// option here — there is no bubbletea program at this layer.
+//
+// Order matters: reporting modes off first (so nothing new arrives while we
+// restore), then keyboard modes, then geometry, then the buffer switch, and
+// finally cosmetics on the buffer we land on. The scroll region is reset on
+// both sides of the 1049l switch because emulators disagree on whether
+// DECSTBM margins are shared or per-buffer.
+const hookAttachTerminalRestore = "" +
+	"\x1b[?1003l\x1b[?1002l\x1b[?1000l" + // all mouse tracking variants off
+	"\x1b[?1015l\x1b[?1006l\x1b[?1005l" + // all mouse encoding extensions off
+	"\x1b[?1004l" + // focus reporting off
+	"\x1b[?2004l" + // bracketed paste off
+	"\x1b[?1l\x1b>" + // cursor keys and keypad back to normal mode
+	"\x1b[?7h" + // autowrap back on (xterm default)
+	"\x1b[r" + // scroll region = full screen (current buffer)
+	"\x1b[?1049l" + // back to the main screen buffer (no-op if already there)
+	"\x1b[r" + // scroll region again on the main buffer
+	"\x1b[0m" + // SGR attributes reset
+	"\x1b[?25h" // cursor visible
+
+// hookAttachDrainTimeout bounds how long we wait for the PTY copy goroutine to
+// drain after the child exits. On the natural-exit path the master returns the
+// child's remaining buffered output and then EIO once the slave is gone, so
+// io.Copy terminates on its own — but a grandchild that inherited and kept the
+// slave open would keep the master from ever EOFing. 2s is generous for a
+// genuine drain while still bounding that pathological case (#912).
+const hookAttachDrainTimeout = 2 * time.Second
+
+func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer) error {
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		return err
+	}
+	defer ptmx.Close()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+
+	copyDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(stdout, ptmx)
+		close(copyDone)
+	}()
+
+	detached := make(chan struct{})
+	var detachOnce sync.Once
+	detach := func() {
+		detachOnce.Do(func() {
+			close(detached)
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = ptmx.Close()
+		})
+	}
+
+	go func() {
+		buf := make([]byte, 32)
+		for {
+			n, err := stdin.Read(buf)
+			if n > 0 {
+				// stdin.Read can batch the detach key with preceding bytes in a
+				// single read (buffered terminal input), so check the last byte
+				// rather than requiring it to be the sole byte — otherwise
+				// Ctrl-W is forwarded to the PTY and the detach is silently
+				// missed (#975). Forward any preceding bytes first so they still
+				// reach the remote session, preserving the surrounding
+				// write-error handling.
+				if buf[n-1] == tmux.DetachKeyByte {
+					if n > 1 {
+						if _, writeErr := ptmx.Write(buf[:n-1]); writeErr != nil {
+							return
+						}
+					}
+					detach()
+					return
+				}
+				if _, writeErr := ptmx.Write(buf[:n]); writeErr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	err = <-waitDone
+
+	// Drain before closing. Now that the child (slave) has exited, io.Copy
+	// reads the master's remaining buffered output and then sees EIO, so it
+	// terminates on its own. Closing ptmx here — before copyDone — would race
+	// that final read and truncate the remote's last bytes (#912). The detach
+	// path already closed ptmx in detach(), so copyDone closes promptly there
+	// and this drain is a harmless no-op. Bound the wait in case a grandchild
+	// inherited the slave and is holding the master open: on timeout, force the
+	// close to unblock io.Copy, then still wait for copyDone.
+	select {
+	case <-copyDone:
+	case <-time.After(hookAttachDrainTimeout):
+		_ = ptmx.Close() // grandchild holding slave open; stop waiting
+		<-copyDone
+	}
+	_ = ptmx.Close() // idempotent; no-op if already closed
+
+	// Every byte of the remote stream has been flushed (copyDone), so this
+	// lands strictly after any modes the remote set. Emitted on every exit
+	// path — detach kill, graceful exit, and error exit — because the remote
+	// may have touched the terminal in all three (#845). Best-effort: if
+	// stdout is gone there is no terminal left to restore.
+	_, _ = io.WriteString(stdout, hookAttachTerminalRestore)
+
+	select {
+	case <-detached:
+		return nil
+	default:
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "remote attach exited: %v\n", err)
+		return err
+	}
+	return nil
+}
