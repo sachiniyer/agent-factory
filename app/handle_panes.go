@@ -207,17 +207,18 @@ func paneFocusReservedKey(msg tea.KeyMsg) bool {
 // Edges clamp: pressing previous on the leftmost pane or next on the rightmost
 // pane is consumed but leaves focus where it is.
 func (m *home) focusAdjacentPane(delta int) tea.Cmd {
+	var refresh tea.Cmd
 	if m.panePreviewTxn != nil {
 		m.suppressActivePanePreview()
 		m.cancelPanePreview(true)
-		return m.panesRefresh(m.attached.Load())
+		refresh = m.panesRefresh(m.attached.Load())
 	}
 	if delta == 0 || len(m.visiblePanes) < 2 {
-		return nil
+		return refresh
 	}
 	current := m.focusedOpenPane()
 	if current == nil {
-		return nil
+		return refresh
 	}
 	pos := -1
 	for i, p := range m.visiblePanes {
@@ -227,7 +228,7 @@ func (m *home) focusAdjacentPane(delta int) tea.Cmd {
 		}
 	}
 	if pos < 0 {
-		return nil
+		return refresh
 	}
 	next := pos + delta
 	if next < 0 {
@@ -237,10 +238,10 @@ func (m *home) focusAdjacentPane(delta int) tea.Cmd {
 		next = len(m.visiblePanes) - 1
 	}
 	if next == pos {
-		return nil
+		return refresh
 	}
 	m.focusRegion(layout.PaneRegion(m.visiblePanes[next].ID()))
-	return nil
+	return refresh
 }
 
 // closePaneWindow removes a pane from the open list and drops its window and
