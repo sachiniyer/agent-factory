@@ -39,13 +39,11 @@ splitting them):
 | File                       | Ceiling |
 | -------------------------- | ------- |
 | `session/backend_test.go`  | 2241    |
-| `app/app.go`               | 1889    |
+| `app/app.go`               | 1867    |
 | `session/instance.go`      | 1400    |
-| `session/tmux/tmux.go`     | 1424    |
+| `session/tmux/tmux.go`     | 1393    |
 | `ui/sidebar.go`            | 1258    |
 | `config/config.go`         | 1128    |
-| `daemon/control.go`        | 2604    |
-| `daemon/watcher.go`        | 1046    |
 | `session/backend_hook.go`  | 1026    |
 
 ## Running it
