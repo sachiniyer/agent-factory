@@ -585,7 +585,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// An archive settles at Archived; a kill's op is cleared by row removal, not
 	// here, so it survives liveness updates until the daemon drops the record.
 	if inst.GetInFlightOp() == session.OpArchiving && lv == session.LiveArchived {
-		inst.SetInFlightOp(session.OpNone)
+		_ = inst.Transition(session.ClearOp())
 		changed = true
 	}
 	// Remote instances' tabs come from hook config (terminal_cmd), not the

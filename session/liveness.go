@@ -249,10 +249,14 @@ func (i *Instance) HasInFlightOp() bool {
 	return i.inFlightOp != OpNone
 }
 
-// SetInFlightOp writes the op axis under the instance mutex, leaving the liveness
-// untouched. The daemon archive executor uses it to raise OpArchiving as a fence
-// over its teardown+move window (and to clear it back to OpNone on a rollback).
-func (i *Instance) SetInFlightOp(op InFlightOp) {
+// SetInFlightOpForTest writes the op axis directly, for TEST scaffolding only —
+// establishing a precondition state rather than exercising a transition (#1195
+// Phase 2e). Production code never sets the op axis directly: every op write goes
+// through the Transition chokepoint (BeginCreate/BeginKill/BeginArchive/
+// BeginRestore/MarkRestoring raise an op; ConfirmLive/RevertKill/CommitArchive/
+// AbortArchive/AbortRestore/ClearOp clear it). Mirrors the SetStartedForTest /
+// SetGitWorktreeForTest scaffolding pattern.
+func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.inFlightOp = op

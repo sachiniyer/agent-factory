@@ -144,7 +144,7 @@ func TestResumeFromLimit_TeardownInFlightNoops(t *testing.T) {
 		{
 			name: "optimistic killing op",
 			setup: func(_ *testing.T, _ *Manager, _ string, inst *session.Instance) {
-				inst.SetInFlightOp(session.OpKilling)
+				inst.SetInFlightOpForTest(session.OpKilling)
 			},
 		},
 		{
