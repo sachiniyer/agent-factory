@@ -844,7 +844,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.store.AddInstance(started)
 		}
 
-		started.SetStatus(session.Running)
+		_ = started.Transition(session.ConfirmLive())
 		if !swapped && !started.IsRemote() {
 			m.store.RegisterRepoForInstance(started)
 		}

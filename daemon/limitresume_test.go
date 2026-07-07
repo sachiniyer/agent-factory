@@ -154,7 +154,7 @@ func TestResumeLimitedSessions_ArchivedClearsTimer(t *testing.T) {
 	}
 
 	// The session is archived out from under the scheduler.
-	inst.SetLiveness(session.LiveArchived)
+	_ = inst.Transition(session.ObserveLiveness(session.LiveArchived))
 	advance(2 * time.Hour)
 	manager.ResumeLimitedSessions()
 

@@ -145,7 +145,7 @@ func TestSearchOverlayRegistersRowZonesAndSetSelectedIndex(t *testing.T) {
 
 func TestSearchOverlayRegistersLimitReachedRowZone(t *testing.T) {
 	inst := &session.Instance{Title: "blocked-session"}
-	inst.SetLiveness(session.LiveLimitReached)
+	_ = inst.Transition(session.ObserveLiveness(session.LiveLimitReached))
 	s := NewSearchOverlay([]*session.Instance{inst})
 	reg := zones.NewRegistry()
 

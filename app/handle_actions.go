@@ -503,7 +503,7 @@ func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.C
 		case inst.Title != msg.title:
 			continue
 		case inst.GetLiveness() == session.LiveLost || inst.GetLiveness() == session.LiveDead:
-			inst.MarkLive()
+			_ = inst.Transition(session.ConfirmLive())
 		}
 		break
 	}
