@@ -24,7 +24,7 @@ func newSnapshotTestInstance(t *testing.T, title string) *session.Instance {
 		Program: "claude",
 	})
 	require.NoError(t, err)
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	return inst
 }
 

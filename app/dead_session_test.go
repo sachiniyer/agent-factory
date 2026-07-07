@@ -27,7 +27,7 @@ func newDeadInstance(t *testing.T, title string, status session.Status) *session
 	require.NoError(t, err)
 	inst.SetBackend(&deadBackend{FakeBackend: session.NewFakeBackend()})
 	inst.SetStartedForTest(true)
-	inst.SetStatus(status)
+	inst.SetStatusForTest(status)
 	return inst
 }
 

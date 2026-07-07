@@ -55,7 +55,7 @@ func TestPreviewScrollModeThenDeletingFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
-	inst.SetStatus(session.Deleting)
+	inst.SetStatusForTest(session.Deleting)
 
 	p := NewTabPane()
 	p.SetSize(80, 30)
@@ -117,7 +117,7 @@ func TestPreviewScrollModeThenLoadingFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
-	inst.SetStatus(session.Loading)
+	inst.SetStatusForTest(session.Loading)
 
 	p := NewTabPane()
 	p.SetSize(80, 30)
@@ -149,7 +149,7 @@ func TestPreviewScrollModeViewportContentCleared(t *testing.T) {
 	})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
-	inst.SetStatus(session.Deleting)
+	inst.SetStatusForTest(session.Deleting)
 
 	p := NewTabPane()
 	p.SetSize(80, 30)

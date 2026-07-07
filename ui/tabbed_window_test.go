@@ -28,7 +28,7 @@ func startedWindowInstance(t *testing.T, title string) *session.Instance {
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	addAgentShellTabs(inst)
 	return inst
 }

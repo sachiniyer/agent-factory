@@ -82,7 +82,7 @@ func registerArchivableWithTmux(t *testing.T, m *Manager, repoID, repoPath, titl
 	inst.SetGitWorktreeForTest(gw)
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, e))
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Ready)
+	inst.SetStatusForTest(session.Ready)
 
 	seedDiskInstance(t, repoID, title, repoPath)
 	m.mu.Lock()
@@ -147,7 +147,7 @@ func TestCreateTab_SerializedWithInFlightArchiveDoesNotOrphan(t *testing.T) {
 	// exactly as ArchiveSession.SetArchived does — then release so CreateTab can
 	// proceed and observe it. Because CreateTab is serialized behind the op-lock,
 	// it cannot have spawned anything before this point.
-	inst.SetStatus(session.Archived)
+	inst.SetStatusForTest(session.Archived)
 	manager.mu.Lock()
 	delete(manager.killsInFlight, key)
 	manager.mu.Unlock()

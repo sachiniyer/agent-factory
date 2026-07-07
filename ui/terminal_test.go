@@ -181,7 +181,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 		})
 		require.NoError(t, err)
 		inst.SetBackend(session.NewFakeBackend())
-		inst.SetStatus(session.Deleting)
+		inst.SetStatusForTest(session.Deleting)
 
 		require.NoError(t, p.UpdateContent(inst, 1))
 		p.mu.Lock()

@@ -50,7 +50,7 @@ func newStartedInstance(t *testing.T, title string) *session.Instance {
 	})
 	require.NoError(t, err)
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	return inst
 }
 

@@ -852,7 +852,7 @@ func TestPane_CloseTabRebindsPanes(t *testing.T) {
 func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "snaprebind")
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
@@ -889,7 +889,7 @@ func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
 func TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding(t *testing.T) {
 	h := newTestHome(t)
 	inst := startedLocalInstance(t, "snapkeep")
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 

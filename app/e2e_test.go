@@ -135,7 +135,7 @@ func (eh *e2eHarness) addStartedInstance(title string) *session.Instance {
 		eh.t.Fatal(err)
 	}
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	eh.home.store.AddInstance(inst)
 	return inst
 }

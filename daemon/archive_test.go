@@ -39,7 +39,7 @@ func registerArchivable(t *testing.T, m *Manager, repoID, repoPath, title string
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetGitWorktreeForTest(gw)
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Ready)
+	inst.SetStatusForTest(session.Ready)
 
 	seedDiskInstance(t, repoID, title, repoPath)
 	m.mu.Lock()
@@ -127,7 +127,7 @@ func TestArchiveSession_RejectsReservedRoot(t *testing.T) {
 func TestArchiveSession_RejectsAlreadyArchived(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
-	inst.SetStatus(session.Archived)
+	inst.SetStatusForTest(session.Archived)
 
 	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
@@ -167,7 +167,7 @@ func TestArchiveSession_RejectsExternalWorktree(t *testing.T) {
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetGitWorktreeForTest(gw)
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Ready)
+	inst.SetStatusForTest(session.Ready)
 	seedDiskInstance(t, repoID, "inplace", repoPath)
 	manager.mu.Lock()
 	manager.instances[daemonInstanceKey(repoID, "inplace")] = inst
@@ -295,7 +295,7 @@ func TestArchiveSession_RejectsRemote(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetBackend(fakeRemoteBackend{session.NewFakeBackend()})
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Ready)
+	inst.SetStatusForTest(session.Ready)
 	seedDiskInstance(t, repoID, "faraway", repoPath)
 	manager.mu.Lock()
 	manager.instances[daemonInstanceKey(repoID, "faraway")] = inst

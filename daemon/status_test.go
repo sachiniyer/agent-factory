@@ -77,7 +77,7 @@ func registerStarted(t *testing.T, m *Manager, repoID, repoPath, title string, b
 	}
 	inst.SetBackend(backend)
 	inst.SetStartedForTest(started)
-	inst.SetStatus(status)
+	inst.SetStatusForTest(status)
 	seedDiskInstance(t, repoID, title, repoPath)
 	m.mu.Lock()
 	m.instances[daemonInstanceKey(repoID, title)] = inst

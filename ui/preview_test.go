@@ -543,7 +543,7 @@ func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
-	inst.SetStatus(session.Loading)
+	inst.SetStatusForTest(session.Loading)
 
 	p := NewTabPane()
 	p.SetSize(80, 30)
@@ -583,7 +583,7 @@ func TestPreviewUpdateContentDeletingShowsTeardownFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
-	inst.SetStatus(session.Deleting)
+	inst.SetStatusForTest(session.Deleting)
 
 	// Precondition: this instance has empty preview content and is not started,
 	// exactly the state that previously produced the wrong "Please enter a

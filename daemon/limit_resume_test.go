@@ -41,7 +41,7 @@ func (b *limitResumeBackend) Recover(i *session.Instance) error {
 	if s := i.GetStatus(); s != session.Lost {
 		return fmt.Errorf("recover: session %q is %v, not Lost", i.Title, s)
 	}
-	i.MarkLive()
+	_ = i.Transition(session.ConfirmLive())
 	return nil
 }
 
@@ -51,7 +51,7 @@ func (b *limitResumeBackend) Respawn(i *session.Instance) error {
 	b.mu.Unlock()
 	// The guard-free core: re-spawn regardless of liveness (matches the real
 	// LocalBackend.respawn, which ends by marking the session live).
-	i.MarkLive()
+	_ = i.Transition(session.ConfirmLive())
 	return nil
 }
 

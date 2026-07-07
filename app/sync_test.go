@@ -87,7 +87,7 @@ func instanceWithFakeBackend(t *testing.T, title string) *session.Instance {
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	return inst
 }
 
@@ -164,7 +164,7 @@ func TestReconcileSnapshot_IdentityUsesStableID(t *testing.T) {
 		require.NoError(t, err)
 		inst.SetBackend(session.NewFakeBackend())
 		inst.SetStartedForTest(true)
-		inst.SetStatus(session.Running)
+		inst.SetStatusForTest(session.Running)
 		inst.ID = id
 		inst.CreatedAt = created
 		h.store.AddInstance(inst)

@@ -179,7 +179,7 @@ func newLoadingInstance(t *testing.T, title string) *session.Instance {
 		Program: "claude",
 	})
 	require.NoError(t, err)
-	inst.SetStatus(session.Loading)
+	inst.SetStatusForTest(session.Loading)
 	return inst
 }
 
@@ -215,7 +215,7 @@ func TestInstanceStarted_Success_UserMovedToAnotherInstance(t *testing.T) {
 	h := newTestHome(t)
 	creating := newLoadingInstance(t, "still-creating")
 	other := newLoadingInstance(t, "other")
-	other.SetStatus(session.Running)
+	other.SetStatusForTest(session.Running)
 	h.store.AddInstance(creating)
 	h.store.AddInstance(other)
 	// User navigated to `other` while `creating` was still starting.
@@ -261,7 +261,7 @@ func TestInstanceStarted_Failure_RemovesByTitleNotBySelection(t *testing.T) {
 	h := newTestHome(t)
 	failing := newLoadingInstance(t, "failing")
 	innocent := newLoadingInstance(t, "innocent")
-	innocent.SetStatus(session.Running)
+	innocent.SetStatusForTest(session.Running)
 	h.store.AddInstance(failing)
 	h.store.AddInstance(innocent)
 	// User moved to `innocent` while `failing` was still starting.
@@ -341,7 +341,7 @@ func TestInstanceStartedRegistersRepoAfterStart(t *testing.T) {
 		Program: "claude",
 	})
 	require.NoError(t, err)
-	inst.SetStatus(session.Loading)
+	inst.SetStatusForTest(session.Loading)
 	inst.SetStartedForTest(true)
 	inst.SetGitWorktreeForTest(gw)
 
@@ -419,7 +419,7 @@ func TestInstanceStarted_ReplacesSwappedSameTitleRow(t *testing.T) {
 	placeholder := newLoadingInstance(t, "scripts")
 	diskCopy := newLoadingInstance(t, "scripts")
 	diskCopy.SetStartedForTest(true)
-	diskCopy.SetStatus(session.Running)
+	diskCopy.SetStatusForTest(session.Running)
 	h.store.AddInstance(diskCopy)
 
 	started := newLoadingInstance(t, "scripts")

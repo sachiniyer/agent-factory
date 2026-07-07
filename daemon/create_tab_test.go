@@ -115,7 +115,7 @@ func startedLocalTabInstance(t *testing.T, m *Manager, repoID, repoPath, title, 
 	inst.SetGitWorktreeForTest(gw)
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, exec))
 	inst.SetStartedForTest(true)
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 
 	seedDiskInstance(t, repoID, title, repoPath)
 	m.mu.Lock()

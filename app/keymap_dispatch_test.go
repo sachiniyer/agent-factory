@@ -103,7 +103,7 @@ func TestErgonomicDefaultKeysDispatchThroughKeymap(t *testing.T) {
 		h.errBox.SetSize(200, 1)
 		inst, err := session.NewInstance(session.InstanceOptions{Title: "no-pr", Path: t.TempDir(), Program: "claude"})
 		require.NoError(t, err)
-		inst.SetStatus(session.Running)
+		inst.SetStatusForTest(session.Running)
 		selectInstance(h, inst)
 
 		_ = dispatchKey(h, runeKey('y'))
@@ -113,7 +113,7 @@ func TestErgonomicDefaultKeysDispatchThroughKeymap(t *testing.T) {
 		h.errBox.SetSize(200, 1)
 		inst, err = session.NewInstance(session.InstanceOptions{Title: "no-pr", Path: t.TempDir(), Program: "claude"})
 		require.NoError(t, err)
-		inst.SetStatus(session.Running)
+		inst.SetStatusForTest(session.Running)
 		selectInstance(h, inst)
 		_ = dispatchKey(h, runeKey('P'))
 		assert.NotContains(t, h.errBox.String(), "no PR for this session yet", "old copy key must be unbound by default")

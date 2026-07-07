@@ -17,7 +17,7 @@ func storeArchivingInstance(t *testing.T, h *home, title string) *session.Instan
 	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: t.TempDir(), Program: "test"})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	inst.SetInFlightOpForTest(session.OpArchiving)
 	h.store.AddInstance(inst)
 	return inst
@@ -74,7 +74,7 @@ func TestReconcile_OptimisticKillPreservedForNonTerminal(t *testing.T) {
 			inst, err := session.NewInstance(session.InstanceOptions{Title: "worker", Path: t.TempDir(), Program: "test"})
 			require.NoError(t, err)
 			inst.SetBackend(session.NewFakeBackend())
-			inst.SetStatus(session.Running)
+			inst.SetStatusForTest(session.Running)
 			inst.SetInFlightOpForTest(session.OpKilling)
 			h.store.AddInstance(inst)
 
@@ -114,7 +114,7 @@ func TestReconcile_ArchivedToLiveRebuildsStarted(t *testing.T) {
 		require.NoError(t, err)
 		ri.SetBackend(session.NewFakeBackend())
 		ri.SetStartedForTest(true)
-		ri.SetStatus(session.Running)
+		ri.SetStatusForTest(session.Running)
 		ri.ID = d.ID
 		return ri, nil
 	})
@@ -141,7 +141,7 @@ func TestReconcile_ArchivedToLiveRebuildsStarted(t *testing.T) {
 func TestReconcile_LostToLiveStaysInPlace(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "worker") // started=true
-	inst.SetStatus(session.Lost)
+	inst.SetStatusForTest(session.Lost)
 	h.store.AddInstance(inst)
 
 	restore := SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
@@ -191,7 +191,7 @@ func TestHandleInstanceArchived_FinalizesRowImmediately(t *testing.T) {
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "worker", Path: t.TempDir(), Program: "test"})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
-	inst.SetStatus(session.Running)
+	inst.SetStatusForTest(session.Running)
 	inst.SetInFlightOpForTest(session.OpArchiving) // as left by the optimistic archive action
 	h.store.AddInstance(inst)
 
@@ -234,7 +234,7 @@ func TestRestore_EagerRehomeDoesNotBypassRebuild(t *testing.T) {
 		require.NoError(t, err)
 		ri.SetBackend(session.NewFakeBackend())
 		ri.SetStartedForTest(true)
-		ri.SetStatus(session.Running)
+		ri.SetStatusForTest(session.Running)
 		ri.ID = d.ID
 		return ri, nil
 	})

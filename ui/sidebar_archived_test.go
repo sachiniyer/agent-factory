@@ -20,7 +20,7 @@ func archTestInstance(t *testing.T, title string, status session.Status) *sessio
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStartedForTest(status != session.Archived)
-	inst.SetStatus(status)
+	inst.SetStatusForTest(status)
 	return inst
 }
 
