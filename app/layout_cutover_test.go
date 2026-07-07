@@ -55,7 +55,8 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		// The header ellipsizes at the narrowest rails, so assert the stable
 		// prefix plus the manage affordance FIX 2 guarantees is never cut.
 		assert.Contains(t, view, "Automation", "%dx%d: automations section", tc.w, tc.h)
-		assert.Contains(t, view, "S manage", "%dx%d: the manage affordance survives", tc.w, tc.h)
+		manageHint := helpKey(keys.KeyTaskList) + " manage"
+		assert.Contains(t, view, manageHint, "%dx%d: the manage affordance survives", tc.w, tc.h)
 		// #1087: the automations section lives inside the left rail, under a
 		// full-rail-width horizontal rule.
 		assert.Contains(t, view, strings.Repeat("─", h.lastLayout.RailRule.W),
@@ -97,7 +98,7 @@ func TestLayoutCutover_FocusRingCycles(t *testing.T) {
 	assert.Equal(t, layout.RegionAutomations, h.ring.Active())
 	assert.True(t, h.automations.Focused())
 	assert.False(t, h.automations.TaskPane().HasFocus(),
-		"focusing the section must not focus the manager — Enter/S open it as an overlay")
+		"focusing the section must not focus the manager — Enter or the task key opens it as an overlay")
 	assert.Equal(t, layout.AutomationsRows, h.lastLayout.Automations.H,
 		"the focused section keeps its compact allocation — no in-rail expansion")
 

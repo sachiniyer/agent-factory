@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
@@ -77,8 +78,8 @@ func fitLine(s string, w int) string {
 // after a reload.
 //
 // It implements layout.Pane. While focused the rows carry a cursor
-// (up/down/j/k via HandleKey); the root opens the manager overlay on Enter/S
-// and moves the focus ring on Esc.
+// (up/down/j/k via HandleKey); the root opens the manager overlay on Enter or
+// the global task-manager key and moves the focus ring on Esc.
 type AutomationsPane struct {
 	proj     *store.Projection
 	taskPane *TaskPane
@@ -299,16 +300,27 @@ func (a *AutomationsPane) enabledCount() int {
 	return n
 }
 
-// titleLine renders the section header width-aware: segments drop
-// right-to-left ("H hooks" first, then the task counts) and finally the name
-// shrinks with an ellipsis — the "S manage" affordance is the last thing cut,
-// so the key to the manager stays visible even at the 22-col rail minimum
-// (#1090 width).
+func automationHelpKey(name keys.KeyName) string {
+	return keys.GlobalKeyBindings[name].Help().Key
+}
+
+func automationsManageHint() string {
+	return "· " + automationHelpKey(keys.KeyTaskList) + " manage"
+}
+
+func automationsActionHint(name keys.KeyName, desc string) string {
+	return automationHelpKey(name) + " " + desc
+}
+
+// titleLine renders the section header width-aware: segments drop right-to-left
+// (hooks first, then the task counts) and finally the name shrinks with an
+// ellipsis. The manage affordance is the last thing cut, so the key to the
+// manager stays visible even at the 22-col rail minimum (#1090 width).
 func (a *AutomationsPane) titleLine(name string, nameStyle lipgloss.Style) string {
 	w := a.rect.W
 	const shortName = " Automations "
-	const manage = "· S manage"
-	const hooks = " · H hooks"
+	manage := automationsManageHint()
+	hooks := " · " + automationsActionHint(keys.KeyHooks, "hooks")
 	if runewidth.StringWidth(name+manage+hooks) <= w {
 		return nameStyle.Render(name) + automationsHintStyle.Render(manage+hooks)
 	}
@@ -365,7 +377,7 @@ func (a *AutomationsPane) String() string {
 	lines := []string{title}
 	if len(tasks) == 0 {
 		lines = append(lines, automationsDisabledStyle.Render(
-			fitLine("  no tasks — press m, then n to create one", a.rect.W)))
+			fitLine(fmt.Sprintf("  no tasks — press %s, then n to create one", automationHelpKey(keys.KeyTaskList)), a.rect.W)))
 	}
 
 	// Window the rows around the cursor so a focused selection below the fold

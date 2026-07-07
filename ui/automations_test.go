@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
@@ -133,29 +134,33 @@ func TestAutomationsStripKeyRouting(t *testing.T) {
 }
 
 // TestAutomationsTitleWidthAware pins the #1096 play-test fix: the header's
-// hint segments drop right-to-left ("H hooks" first) and the name shrinks
-// with an ellipsis so the "S manage" affordance survives even the 22-col
-// rail minimum — never a bare hard clamp.
+// hint segments drop right-to-left (hooks first) and the name shrinks with an
+// ellipsis so the manage affordance survives even the 22-col rail minimum —
+// never a bare hard clamp.
 func TestAutomationsTitleWidthAware(t *testing.T) {
 	tasks := stripTasks()
+	manageHint := automationHelpKey(keys.KeyTaskList) + " manage"
+	hooksHint := automationHelpKey(keys.KeyHooks) + " hooks"
 
 	wide := newTestAutomations(tasks)
 	wide.SetRect(layout.Rect{W: 60, H: 3})
 	out := wide.View()
-	assert.Contains(t, out, "S manage", "wide rail shows the manage hint")
-	assert.Contains(t, out, "H hooks", "wide rail shows the hooks hint")
+	assert.Contains(t, out, manageHint, "wide rail shows the manage hint")
+	assert.Contains(t, out, hooksHint, "wide rail shows the hooks hint")
+	assert.NotContains(t, out, "S manage", "the old task-manager key must not be advertised by default")
+	assert.NotContains(t, out, "H hooks", "the old hooks key must not be advertised by default")
 
 	mid := newTestAutomations(tasks)
 	mid.SetRect(layout.Rect{W: 36, H: 3})
 	out = mid.View()
-	assert.Contains(t, out, "S manage", "36-col rail keeps the manage hint")
-	assert.NotContains(t, out, "H hooks", "the hooks hint drops first under width pressure")
+	assert.Contains(t, out, manageHint, "36-col rail keeps the manage hint")
+	assert.NotContains(t, out, hooksHint, "the hooks hint drops first under width pressure")
 
 	narrow := newTestAutomations(tasks)
 	narrow.SetRect(layout.Rect{W: 22, H: 3})
 	out = narrow.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 3}, "22-col section")
-	assert.Contains(t, out, "S manage", "22-col rail still shows the manage affordance")
+	assert.Contains(t, out, manageHint, "22-col rail still shows the manage affordance")
 	assert.Contains(t, out, "…", "the shrunk name marks its cut with an ellipsis")
 
 	// The 1-line degraded summary applies the same policy.
@@ -164,7 +169,25 @@ func TestAutomationsTitleWidthAware(t *testing.T) {
 	compact.SetCompact(true)
 	out = compact.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 1}, "22-col compact summary")
-	assert.Contains(t, out, "S manage", "the compact summary keeps the manage affordance")
+	assert.Contains(t, out, manageHint, "the compact summary keeps the manage affordance")
+}
+
+func TestAutomationsHintsReflectKeymapRebinds(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{
+		"tasks": {"f"},
+		"hooks": {"g"},
+	}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	a := newTestAutomations(nil)
+	a.SetRect(layout.Rect{W: 80, H: 3})
+
+	out := a.View()
+	assert.Contains(t, out, "f manage", "manage title hint follows the rebound task-manager key")
+	assert.Contains(t, out, "g hooks", "hooks title hint follows the rebound hooks key")
+	assert.Contains(t, out, "press f, then n", "empty-state hint follows the rebound task-manager key")
+	assert.NotContains(t, out, "m manage", "default task-manager key must not be hardcoded")
+	assert.NotContains(t, out, "e hooks", "default hooks key must not be hardcoded")
 }
 
 // TestAutomationsEmptyStateEllipsized: the no-tasks hint ellipsizes instead
