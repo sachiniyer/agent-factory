@@ -17,6 +17,5 @@
 # be split, not grandfathered.
 
 # --- production code (limit 1000) ---
-ui/sidebar.go 1258
 config/config.go 1128
 session/backend_hook.go 1026
