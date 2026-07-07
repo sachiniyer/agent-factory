@@ -1,4 +1,4 @@
-package main
+package commands
 
 import (
 	"encoding/json"
@@ -16,8 +16,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// jsonWrapError honors the --json contract for the CLI commands in package
-// main: when jsonMode is set, a failure is emitted as the shared {data,error}
+// jsonWrapError honors the --json contract for the CLI commands in this
+// package: when jsonMode is set, a failure is emitted as the shared {data,error}
 // envelope on errOut (the command's stderr, matching the api package's
 // jsonError), so a `--json` caller always gets the envelope it was promised
 // instead of a bare Go error. The error is returned unchanged so the exit code
