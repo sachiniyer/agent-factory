@@ -581,6 +581,28 @@ func (p *Projection) AddOpenPane(instance *session.Instance, tab int) *OpenPane 
 	return pane
 }
 
+// RebindOpenPane retargets an existing pane's local UI binding. This is used by
+// preview commit/replace flows: daemon-owned session/tab state is untouched, but
+// the workspace pane now renders a different explicit (instance, tab).
+func (p *Projection) RebindOpenPane(pane *OpenPane, instance *session.Instance, tab int) bool {
+	if pane == nil || instance == nil {
+		return false
+	}
+	for _, cur := range p.openPanes {
+		if cur != pane {
+			continue
+		}
+		if cur.instance == instance && cur.Tab() == tab {
+			return true
+		}
+		cur.instance = instance
+		cur.SetTab(tab)
+		p.bump()
+		return true
+	}
+	return false
+}
+
 // CloseOpenPane removes a pane from the open list — the hide verb (`x`) and
 // the dead-instance prune both land here. The pane's tab keeps running in
 // its tmux session; nothing is killed (§2.3). Reports whether the pane was

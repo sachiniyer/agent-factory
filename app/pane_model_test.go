@@ -307,6 +307,118 @@ func TestPanePreviewEscFromScrollRevertsOriginalCommittedTab(t *testing.T) {
 		"reset must not pair the committed alpha instance with the preview agent tab")
 }
 
+func TestPanePreviewEnterCommitsReplace(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Same(t, alpha, paneA.Instance())
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+
+	require.NotNil(t, cmd, "commit-replace should schedule a refresh for the committed pane")
+	require.Nil(t, h.panePreviewTxn)
+	assert.Same(t, beta, paneA.Instance(), "Enter commits the highlighted preview into the owner pane")
+	assert.Equal(t, 0, paneA.Tab())
+	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
+	view := h.View()
+	assert.Contains(t, view, "beta · Agent")
+	assert.NotContains(t, view, "PREVIEW")
+}
+
+func TestPanePreviewTabAndEscCancelToOwnerPane(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*home) tea.Cmd
+	}{
+		{
+			name: "Tab",
+			run: func(h *home) tea.Cmd {
+				_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
+				return cmd
+			},
+		},
+		{
+			name: "Esc",
+			run: func(h *home) tea.Cmd {
+				_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyEsc})
+				return cmd
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := paneTestHome(t)
+			alpha := h.store.GetInstanceByTitle("alpha")
+
+			pressKey(t, h, "s")
+			paneA := h.store.OpenPanes()[0]
+			h.sidebar.SetSelectedInstance(1)
+			_ = h.selectionChanged()
+			require.NotNil(t, h.panePreviewTxn)
+
+			cmd := tc.run(h)
+
+			require.NotNil(t, cmd, "cancel should schedule an owner-pane refresh")
+			require.Nil(t, h.panePreviewTxn)
+			assert.Same(t, alpha, paneA.Instance())
+			assert.Equal(t, 0, paneA.Tab())
+			assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
+			view := h.View()
+			assert.Contains(t, view, "alpha · Agent · selected: beta · Agent")
+			assert.NotContains(t, view, "PREVIEW")
+		})
+	}
+}
+
+func TestPanePreviewEnterBlocksUncommittableTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		configure func(*session.Instance)
+		wantErr   string
+	}{
+		{
+			name:      "dead",
+			configure: func(inst *session.Instance) { inst.SetLiveness(session.LiveDead) },
+			wantErr:   "no longer running",
+		},
+		{
+			name:      "lost",
+			configure: func(inst *session.Instance) { inst.SetLiveness(session.LiveLost) },
+			wantErr:   "was lost",
+		},
+		{
+			name:      "in-flight",
+			configure: func(inst *session.Instance) { inst.SetInFlightOp(session.OpKilling) },
+			wantErr:   "operation in flight",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := paneTestHome(t)
+			alpha := h.store.GetInstanceByTitle("alpha")
+			beta := h.store.GetInstanceByTitle("beta")
+			tc.configure(beta)
+
+			pressKey(t, h, "s")
+			paneA := h.store.OpenPanes()[0]
+			h.sidebar.SetSelectedInstance(1)
+			_ = h.selectionChanged()
+			require.NotNil(t, h.panePreviewTxn, "preview remains allowed for blocked commit targets")
+
+			_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+
+			require.NotNil(t, h.panePreviewTxn, "blocked commit should keep the preview active")
+			assert.Same(t, alpha, paneA.Instance())
+			assert.Contains(t, h.errBox.String(), tc.wantErr)
+		})
+	}
+}
+
 // TestPane_TabDimension: opening from a tree TAB row binds that tab, distinct
 // (instance, tab) pairs get distinct panes, and later selection tab jumps
 // don't touch open panes.
@@ -782,6 +894,7 @@ func TestPane_EnterAttachTargetFollowsFocusContext(t *testing.T) {
 	h.sidebar.SetSelectedInstance(1)
 	_ = h.selectionChanged()
 	require.Equal(t, "beta", h.store.GetSelectedInstance().Title)
+	h.cancelPanePreview(false)
 
 	var attachedLabel, attachedTitle string
 	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
@@ -959,6 +1072,11 @@ func TestPane_StoreOpenPanePrimitives(t *testing.T) {
 	vis = proj.VisibleOpenPanes(1)
 	require.Equal(t, []*store.OpenPane{p1}, vis)
 	assert.Empty(t, proj.VisibleOpenPanes(0))
+
+	require.True(t, proj.RebindOpenPane(p1, b, 1))
+	assert.Same(t, b, p1.Instance())
+	assert.Equal(t, 1, p1.Tab())
+	assert.Same(t, p1, proj.FindOpenPane(b, 1))
 
 	require.True(t, proj.CloseOpenPane(p2))
 	require.False(t, proj.CloseOpenPane(p2), "closing twice reports absence")

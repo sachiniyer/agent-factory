@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
@@ -94,6 +95,51 @@ func (m *home) cancelPanePreview(focusOwner bool) {
 			m.focusRegion(layout.PaneRegion(p.ID()))
 		}
 	}
+}
+
+func (m *home) commitPanePreviewReplace() tea.Cmd {
+	txn := m.panePreviewTxn
+	if txn == nil {
+		return nil
+	}
+	if err := previewCommitError(txn.target.instance); err != nil {
+		return m.handleError(err)
+	}
+	owner := m.openPaneByID(txn.ownerPaneID)
+	if owner == nil {
+		m.cancelPanePreview(false)
+		return nil
+	}
+	w := m.paneWindows[owner.ID()]
+	m.panePreviewTxn = nil
+	if w != nil {
+		w.ClearPreview()
+		w.InvalidateContent(txn.target.instance, txn.target.tab, "Loading pane...")
+	}
+	if !m.store.RebindOpenPane(owner, txn.target.instance, txn.target.tab) {
+		return nil
+	}
+	m.store.TouchOpenPane(owner)
+	m.lastPaneCapture[owner.ID()] = time.Time{}
+	m.relayout()
+	m.focusRegion(layout.PaneRegion(owner.ID()))
+	return m.panesRefresh(m.attached.Load())
+}
+
+func previewCommitError(inst *session.Instance) error {
+	if inst == nil {
+		return fmt.Errorf("no preview to commit")
+	}
+	if inst.HasInFlightOp() {
+		return fmt.Errorf("cannot commit preview for %q: session operation in flight", inst.Title)
+	}
+	switch inst.GetLiveness() {
+	case session.LiveDead:
+		return fmt.Errorf("cannot commit preview for %q: session no longer running", inst.Title)
+	case session.LiveLost:
+		return fmt.Errorf("cannot commit preview for %q: session was lost", inst.Title)
+	}
+	return nil
 }
 
 func (m *home) renderBindingForPane(p *store.OpenPane) (paneBinding, uint64) {

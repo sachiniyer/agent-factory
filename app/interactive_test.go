@@ -231,18 +231,24 @@ func TestSecondEnterTargetsCurrentSelectionNotStalePane(t *testing.T) {
 	}
 	require.Equal(t, instB, h.sidebar.GetSelectedInstance(), "navigation must land on B")
 
-	// 4. Enter again — must open/enter B, NOT re-enter the stale A pane.
+	// 4. Enter again commits the active sidebar preview: the current
+	// selection B replaces the focused pane binding, rather than re-entering
+	// stale A (#1321 commit-replace preserving the #1233/#1236 target rule).
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 	paneB := h.focusedOpenPane()
-	require.NotNil(t, paneB, "second Enter must open B's pane")
-	require.Equal(t, instB, paneB.Instance(), "the opened pane must belong to B")
-	require.NotEqual(t, paneA, paneB, "B's pane must be distinct from A's")
+	require.NotNil(t, paneB, "second Enter must leave a focused pane")
+	require.Same(t, paneA, paneB, "commit-replace keeps the owner pane")
+	require.Equal(t, instB, paneB.Instance(), "the committed pane must belong to selected B")
+	require.False(t, h.interactive, "commit-replace does not also enter interactive mode")
+
+	// 5. With no preview active now, Enter on the focused pane enters B.
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 	_, cmd = h.Update(enterInteractiveMsg{pane: paneB})
 	runHermeticCmd(t, h, cmd, 0)
 
-	require.True(t, h.interactive, "second Enter must (re)enter interactive mode")
+	require.True(t, h.interactive, "third Enter must enter interactive mode on committed B")
 	assert.Equal(t, instB, h.livePane.Instance(),
-		"second Enter must bind input to the SELECTED instance B, not the previously-interacted A")
+		"input must bind to the committed instance B, not the previously-interacted A")
 	assert.Equal(t, paneB, h.livePane, "the live pane must be B's pane")
 
 	// A forwarded keystroke must land in B's attachment, never A's stale one.

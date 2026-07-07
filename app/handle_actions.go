@@ -527,6 +527,9 @@ func killConfirmationWarning(wt string) string {
 // the full-screen hook PTY — fall back to the full-screen attach Enter used to
 // do; dead/transitional sessions keep their guard errors.
 func (m *home) handleEnter() (tea.Model, tea.Cmd) {
+	if m.panePreviewTxn != nil {
+		return m, m.commitPanePreviewReplace()
+	}
 	if p := m.focusedOpenPane(); p != nil {
 		return m.enterPane(p)
 	}
