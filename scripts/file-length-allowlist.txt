@@ -23,6 +23,3 @@ session/tmux/tmux.go 1393
 ui/sidebar.go 1258
 config/config.go 1128
 session/backend_hook.go 1026
-
-# --- test code (limit 1500) ---
-session/backend_test.go 2241
