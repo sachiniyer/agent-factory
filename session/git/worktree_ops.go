@@ -49,6 +49,38 @@ func (g *GitWorktree) Setup() error {
 	return nil
 }
 
+// RebuildFromExistingBranch recreates this session worktree at its persisted
+// path using its persisted branch. It is the Lost-recovery path for a vanished
+// worktree whose branch survived: unlike Setup, it must never create a fresh
+// branch when the recorded branch is gone.
+func (g *GitWorktree) RebuildFromExistingBranch() error {
+	if g.externalWorktree {
+		return fmt.Errorf("cannot rebuild external worktree %s", g.worktreePath)
+	}
+	if g.worktreeDir == "" {
+		return fmt.Errorf("failed to get worktree directory: empty worktree directory")
+	}
+	if strings.TrimSpace(g.branchName) == "" {
+		return fmt.Errorf("cannot rebuild worktree %s: branch name is empty", g.worktreePath)
+	}
+	if err := os.MkdirAll(filepath.Dir(g.worktreePath), 0755); err != nil {
+		return err
+	}
+	if _, err := g.runGitCommand(g.repoPath, "show-ref", "--verify", fmt.Sprintf("refs/heads/%s", g.branchName)); err != nil {
+		return fmt.Errorf("cannot rebuild worktree %s: branch %s is unavailable: %w", g.worktreePath, g.branchName, err)
+	}
+
+	branchCreatedByUs := g.branchCreatedByUs
+	if err := g.setupFromExistingBranch(); err != nil {
+		g.branchCreatedByUs = branchCreatedByUs
+		return err
+	}
+	g.branchCreatedByUs = branchCreatedByUs
+
+	RunPostWorktreeHooksAsync(g.hooksCtx, g.repoPath, g.worktreePath)
+	return nil
+}
+
 // setupFromExistingBranch creates a worktree from an existing branch
 func (g *GitWorktree) setupFromExistingBranch() error {
 	// Directory already created in Setup(), skip duplicate creation

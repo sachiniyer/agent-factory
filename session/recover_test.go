@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -152,6 +153,93 @@ func TestRecover_FailsWithoutWorktree(t *testing.T) {
 	assert.Contains(t, err.Error(), "worktree", "the failure must name the missing worktree")
 	assert.Equal(t, 0, newSessions, "no spawn may happen without a worktree")
 	assert.Equal(t, Lost, restored.GetStatus())
+}
+
+func TestRecover_RebuildsMissingWorktreeFromExistingBranchAndResumesRecordedConversation(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_branch"
+	shellName := agentName + shellTmuxSuffix
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+			{Name: shellTabName, Kind: TabKindShell, TmuxName: shellName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	var newSessions int
+	var spawns []string
+	exec := recordingExec(map[string]bool{}, &newSessions, &spawns)
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+	_, statErr := os.Stat(worktreePath)
+	require.True(t, os.IsNotExist(statErr), "test setup should start with a missing worktree")
+
+	require.NoError(t, restored.Recover())
+
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.True(t, restored.TabAlive(0), "Recover must re-spawn the agent after rebuilding the worktree")
+	require.DirExists(t, worktreePath)
+	assert.Equal(t, branch, gitOut(t, worktreePath, "rev-parse", "--abbrev-ref", "HEAD"))
+
+	var agentSpawn string
+	for _, spawn := range spawns {
+		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, shellTmuxSuffix) {
+			agentSpawn = spawn
+			break
+		}
+	}
+	require.NotEmpty(t, agentSpawn, "expected to record the agent new-session command")
+	assert.Contains(t, agentSpawn, "codex resume "+conversationID,
+		"Recover must resume the recorded Codex conversation, not the latest one")
+	assert.NotContains(t, agentSpawn, "resume --last")
+
+	saved := restored.ToInstanceData()
+	require.NotNil(t, saved.Worktree.BranchCreatedByUs)
+	assert.True(t, *saved.Worktree.BranchCreatedByUs,
+		"rebuilding from the surviving branch must preserve original branch ownership")
 }
 
 // TestRecover_RefusesNonLostAndTombstoned: Recover is for Lost sessions only —

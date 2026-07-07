@@ -326,13 +326,23 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		return fmt.Errorf("recover: session %q has no worktree to re-spawn into", i.Title)
 	}
 	if _, err := os.Stat(workDir); err != nil {
-		// Surface the real cause instead of a generic tmux new-session error:
-		// a deleted worktree is the expected permanent-failure shape, and the
-		// restore loop's escalation log should say so.
-		return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
+		if !os.IsNotExist(err) {
+			// Surface the real cause instead of a generic tmux new-session error:
+			// a deleted worktree is the expected permanent-failure shape, and the
+			// restore loop's escalation log should say so.
+			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
+		}
+		if rebuildErr := gw.RebuildFromExistingBranch(); rebuildErr != nil {
+			return &WorktreeUnavailableError{
+				Title:        i.Title,
+				WorktreePath: workDir,
+				Err:          fmt.Errorf("%w (rebuild from existing branch failed: %v)", err, rebuildErr),
+			}
+		}
+		log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from branch %s", i.Title, workDir, gw.GetBranchName())
 	}
 
-	ts.SetProgram(injectSystemPrompt(resolveProgramForInstance(i)))
+	ts.SetProgram(injectSystemPrompt(prepareResumeConversation(i, resolveProgramForInstance(i))))
 	if err := ts.Restore(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)

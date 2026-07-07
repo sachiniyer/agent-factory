@@ -101,6 +101,48 @@ func resumeProgram(program string) string {
 	return program
 }
 
+// ResumeProgramWithConversationID derives a "resume this exact conversation"
+// variant of program when the detected agent matches the recorded provider. It
+// returns ok=false when the provider has no id-specific resume path here, when
+// the command already carries an explicit resume/session flag, or when the
+// recorded provider no longer matches the resolved command. Callers should fall
+// back to Restore's latest-session resume behavior in those cases.
+func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritten string, ok bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return program, false
+	}
+	tokens, ends := splitShellTokens(program)
+	agentIdx, agent := findAgentToken(tokens)
+	if agentIdx < 0 || agent == "" || recordedAgent != agent {
+		return program, false
+	}
+
+	switch agent {
+	case ProgramClaude:
+		for _, tok := range tokens[agentIdx+1:] {
+			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
+				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
+				isShortResumeWithAttachedValue(tok) ||
+				tok == "--session-id" || strings.HasPrefix(tok, "--session-id=") {
+				return program, false
+			}
+		}
+		return program + " --resume " + id, true
+	case ProgramCodex:
+		insertAt := agentIdx + 1
+		if insertAt < len(tokens) && tokens[insertAt] == "exec" {
+			insertAt++
+		}
+		if insertAt < len(tokens) && tokens[insertAt] == "resume" {
+			return program, false
+		}
+		off := ends[insertAt-1]
+		return program[:off] + " resume " + id + program[off:], true
+	}
+	return program, false
+}
+
 // ClaudeProgramWithSessionID appends Claude Code's explicit conversation id flag
 // to a first-launch program string. It preserves the original program verbatim
 // except for the appended tokens and refuses to inject when the Claude command

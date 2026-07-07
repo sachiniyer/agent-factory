@@ -111,3 +111,14 @@ func prepareLaunchConversation(i *Instance, program string) string {
 	})
 	return rewritten
 }
+
+func prepareResumeConversation(i *Instance, program string) string {
+	conv := i.AgentConversation()
+	if !conv.HasID() {
+		return program
+	}
+	if rewritten, ok := tmux.ResumeProgramWithConversationID(program, conv.Agent, conv.ID); ok {
+		return rewritten
+	}
+	return program
+}
