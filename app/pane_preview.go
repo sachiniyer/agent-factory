@@ -23,6 +23,11 @@ type panePreviewTxn struct {
 	seq         uint64
 }
 
+type panePreviewSuppression struct {
+	original paneBinding
+	target   paneBinding
+}
+
 func samePaneBinding(a, b paneBinding) bool {
 	return a.instance == b.instance && a.tab == b.tab
 }
@@ -53,6 +58,10 @@ func (m *home) updatePanePreview(selected *session.Instance, attachedNow bool) {
 	// #1321 is an instance preview, not a tab preview: selecting a different
 	// tab row on the pane's original instance keeps the #1289 divergence header.
 	if original.instance == target.instance {
+		m.cancelPanePreview(false)
+		return
+	}
+	if m.isPanePreviewSuppressed(original, target) {
 		m.cancelPanePreview(false)
 		return
 	}
@@ -95,6 +104,48 @@ func (m *home) cancelPanePreview(focusOwner bool) {
 			m.focusRegion(layout.PaneRegion(p.ID()))
 		}
 	}
+}
+
+func (m *home) suppressActivePanePreview() {
+	if txn := m.panePreviewTxn; txn != nil {
+		m.suppressPanePreview(txn.original, txn.target)
+	}
+}
+
+func (m *home) suppressPanePreviewForSelection(owner *store.OpenPane) {
+	if owner == nil {
+		return
+	}
+	selected := m.store.GetSelectedInstance()
+	if selected == nil {
+		return
+	}
+	m.suppressPanePreview(
+		paneBinding{instance: owner.Instance(), tab: owner.Tab()},
+		paneBinding{instance: selected, tab: 0},
+	)
+}
+
+func (m *home) suppressPanePreview(original, target paneBinding) {
+	if original.instance == nil || target.instance == nil || samePaneBinding(original, target) {
+		return
+	}
+	m.panePreviewSuppression = &panePreviewSuppression{
+		original: original,
+		target:   target,
+	}
+}
+
+func (m *home) isPanePreviewSuppressed(original, target paneBinding) bool {
+	suppressed := m.panePreviewSuppression
+	if suppressed == nil {
+		return false
+	}
+	if !samePaneBinding(suppressed.target, target) {
+		m.panePreviewSuppression = nil
+		return false
+	}
+	return samePaneBinding(suppressed.original, original)
 }
 
 func (m *home) commitPanePreviewReplace() tea.Cmd {
@@ -146,6 +197,7 @@ func (m *home) commitPanePreviewAlongside() tea.Cmd {
 		return nil
 	}
 	target := txn.target
+	m.suppressActivePanePreview()
 	m.cancelPanePreview(false)
 	_, cmd := m.openOrFocusPane(target.instance, target.tab)
 	return cmd

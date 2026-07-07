@@ -394,6 +394,56 @@ func TestPanePreviewSplitCommitsAlongside(t *testing.T) {
 	assert.NotContains(t, view, "PREVIEW")
 }
 
+func TestPanePreviewSplitHideDoesNotStickInPanePreview(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Same(t, alpha, paneA.Instance())
+
+	for i := 0; i < 3; i++ {
+		pressNav(t, h, "j")
+	}
+	require.Same(t, beta, h.store.GetSelectedInstance())
+	require.Equal(t, layout.RegionTree, h.ring.Active(), "tree navigation owns focus during preview")
+	require.NotNil(t, h.panePreviewTxn)
+	require.Contains(t, h.View(), "PREVIEW beta · Agent (original alpha · Agent)")
+
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeySplitPane)
+	require.NotNil(t, cmd)
+	require.Nil(t, h.panePreviewTxn)
+	require.Equal(t, 2, h.store.NumOpenPanes())
+	paneB := h.store.OpenPanes()[1]
+	require.Same(t, beta, paneB.Instance())
+	require.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active())
+
+	pressTab(t, h, false)
+	require.Equal(t, layout.RegionAutomations, h.ring.Active())
+	pressTab(t, h, true)
+	require.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active())
+
+	pressKey(t, h, "x")
+
+	require.Equal(t, 1, h.store.NumOpenPanes())
+	require.Same(t, paneA, h.store.OpenPanes()[0])
+	require.Nil(t, h.panePreviewTxn, "hiding the split target must not recreate its preview")
+	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active(), "focus lands on the surviving pane")
+	view := h.View()
+	assert.Contains(t, view, "alpha · Agent · selected: beta ·",
+		"the survivor keeps the #1289 selected-vs-shown header")
+	assert.NotContains(t, view, "PREVIEW", "the hidden split pane must not leave a transient preview")
+
+	_ = h.selectionChanged()
+	require.Nil(t, h.panePreviewTxn, "the preview tick must not recreate the dismissed split target")
+
+	pressTab(t, h, false)
+	assert.Equal(t, layout.RegionAutomations, h.ring.Active(), "Tab must cycle out of pane context")
+	pressTab(t, h, false)
+	assert.Equal(t, layout.RegionTree, h.ring.Active(), "the focus ring must remain able to reach the tree")
+}
+
 func TestPanePreviewSplitFocusesAlreadyOpenTarget(t *testing.T) {
 	h := paneTestHome(t)
 	alpha := h.store.GetInstanceByTitle("alpha")

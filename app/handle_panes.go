@@ -154,14 +154,17 @@ func (m *home) hidePane(p *store.OpenPane) {
 	}
 	m.closePaneWindow(p)
 	m.relayout()
+	var focusedAfter *store.OpenPane
 	if pos >= 0 && len(m.visiblePanes) > 0 {
 		if pos >= len(m.visiblePanes) {
 			pos = len(m.visiblePanes) - 1
 		}
-		m.ring.Focus(layout.PaneRegion(m.visiblePanes[pos].ID()))
+		focusedAfter = m.visiblePanes[pos]
+		m.ring.Focus(layout.PaneRegion(focusedAfter.ID()))
 	} else {
 		m.ring.Focus(layout.RegionTree)
 	}
+	m.suppressPanePreviewForSelection(focusedAfter)
 	m.syncFocus()
 }
 
