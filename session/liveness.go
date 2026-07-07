@@ -194,17 +194,10 @@ func (i *Instance) GetLiveness() Liveness {
 	return i.liveness
 }
 
-// SetLiveness writes the health axis under the instance mutex, leaving the
-// in-flight op untouched. This is what the daemon poll uses instead of the old
-// SetStatusIfNotDeleting: writing liveness can never clobber an in-flight op
-// because the op is a separate field, so no "if not deleting" guard is needed —
-// a concurrent kill/archive op survives the write and still composes to the
-// transient status (#1195).
-func (i *Instance) SetLiveness(lv Liveness) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.liveness = lv
-}
+// SetLiveness is retired (#1195 Phase 2e): the liveness axis is now written only
+// through the Transition chokepoint's ObserveLiveness edge (the daemon-truth
+// edge — sets liveness, preserves the in-flight op, never rejects), so there is
+// no direct liveness setter left to bypass it.
 
 // GetInFlightOp returns the client/executor op axis under the instance mutex.
 func (i *Instance) GetInFlightOp() InFlightOp {

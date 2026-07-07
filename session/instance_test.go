@@ -117,28 +117,29 @@ func TestGetGitWorktree_RaceWithStart(t *testing.T) {
 	wg.Wait()
 }
 
-// TestSetLivenessNeverClobbersInFlightOp is the #1195 structural replacement for
-// the old #844 fence (SetStatusIfNotDeleting): the daemon poll writes only the
-// liveness axis, so a concurrent kill/archive op — living on the separate op axis
-// — can never be clobbered. The composed status keeps reflecting the op, which is
-// what the SetStatusIfNotDeleting guard used to reconstruct by hand.
-func TestSetLivenessNeverClobbersInFlightOp(t *testing.T) {
+// TestObserveLivenessNeverClobbersInFlightOp is the #1195 structural replacement
+// for the old #844 fence (SetStatusIfNotDeleting): the daemon poll writes only
+// the liveness axis (via the ObserveLiveness chokepoint edge), so a concurrent
+// kill/archive op — living on the separate op axis — can never be clobbered. The
+// composed status keeps reflecting the op, which is what SetStatusIfNotDeleting
+// used to reconstruct by hand.
+func TestObserveLivenessNeverClobbersInFlightOp(t *testing.T) {
 	i := &Instance{liveness: LiveReady}
 
 	// A kill is optimistically in flight (op axis), underlying liveness Running.
-	i.SetLiveness(LiveRunning)
-	i.SetInFlightOp(OpKilling)
+	require.NoError(t, i.Transition(ObserveLiveness(LiveRunning)))
+	require.NoError(t, i.Transition(BeginKill()))
 	require.Equal(t, Deleting, i.GetStatus())
 
 	// The poll writes liveness (Running/Ready/Lost) — the kill op survives every
 	// write, so the composed status stays Deleting.
-	i.SetLiveness(LiveReady)
-	require.Equal(t, OpKilling, i.GetInFlightOp(), "SetLiveness must not touch the op axis")
+	require.NoError(t, i.Transition(ObserveLiveness(LiveReady)))
+	require.Equal(t, OpKilling, i.GetInFlightOp(), "ObserveLiveness must not touch the op axis")
 	require.Equal(t, Deleting, i.GetStatus(), "a poll write must never clobber a kill marker")
-	i.SetLiveness(LiveLost)
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost)))
 	require.Equal(t, Deleting, i.GetStatus())
 
 	// The kill handler clears the op; the composed status then reflects liveness.
-	i.SetInFlightOp(OpNone)
+	require.NoError(t, i.Transition(RevertKill()))
 	require.Equal(t, Lost, i.GetStatus())
 }

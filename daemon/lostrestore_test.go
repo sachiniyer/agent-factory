@@ -124,7 +124,7 @@ func TestRestoreSession_RecoversDeadInstanceOnDemand(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "dead", backend, true, session.Ready)
-	inst.SetLiveness(session.LiveDead)
+	_ = inst.Transition(session.ObserveLiveness(session.LiveDead))
 
 	_, err := manager.RestoreSession(RestoreSessionRequest{Title: "dead", RepoID: repoID})
 	if err != nil {

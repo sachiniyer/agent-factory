@@ -236,7 +236,7 @@ func TestInstanceRendererLimitReachedMarker(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	inst.SetLiveness(session.LiveLimitReached)
+	_ = inst.Transition(session.ObserveLiveness(session.LiveLimitReached))
 	out, _, _ := renderForTerminal(t, 120, inst, &spin)
 	assert.Contains(t, out, "[limit]", "a usage-limit-reached row must be explicitly marked (#1146)")
 	assert.Contains(t, out, "throttled", "the title must remain visible")

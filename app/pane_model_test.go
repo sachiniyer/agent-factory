@@ -478,12 +478,12 @@ func TestPanePreviewEnterBlocksUncommittableTargets(t *testing.T) {
 	}{
 		{
 			name:      "dead",
-			configure: func(inst *session.Instance) { inst.SetLiveness(session.LiveDead) },
+			configure: func(inst *session.Instance) { _ = inst.Transition(session.ObserveLiveness(session.LiveDead)) },
 			wantErr:   "no longer running",
 		},
 		{
 			name:      "lost",
-			configure: func(inst *session.Instance) { inst.SetLiveness(session.LiveLost) },
+			configure: func(inst *session.Instance) { _ = inst.Transition(session.ObserveLiveness(session.LiveLost)) },
 			wantErr:   "was lost",
 		},
 		{
@@ -521,12 +521,12 @@ func TestPanePreviewSplitBlocksUncommittableTargets(t *testing.T) {
 	}{
 		{
 			name:      "dead",
-			configure: func(inst *session.Instance) { inst.SetLiveness(session.LiveDead) },
+			configure: func(inst *session.Instance) { _ = inst.Transition(session.ObserveLiveness(session.LiveDead)) },
 			wantErr:   "no longer running",
 		},
 		{
 			name:      "lost",
-			configure: func(inst *session.Instance) { inst.SetLiveness(session.LiveLost) },
+			configure: func(inst *session.Instance) { _ = inst.Transition(session.ObserveLiveness(session.LiveLost)) },
 			wantErr:   "was lost",
 		},
 		{
