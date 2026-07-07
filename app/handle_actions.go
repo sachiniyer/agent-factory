@@ -329,7 +329,8 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("cannot archive in-place session '%s': archive relocates the worktree, which it doesn't own", title))
 	}
 
-	message := fmt.Sprintf("[!] Archive session '%s'?\n\nIts tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with A.", title)
+	archiveKey := keys.GlobalKeyBindings[keys.KeyArchive].Help().Key
+	message := fmt.Sprintf("[!] Archive session '%s'?\n\nIts tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with %s.", title, archiveKey)
 	return m, m.confirmAction(message, func() tea.Msg {
 		// Raise the optimistic OpArchiving op so the row visibly shows archiving
 		// while the RPC runs (#1195). It composes to Deleting for rendering; the
