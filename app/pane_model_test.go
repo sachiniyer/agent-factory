@@ -364,6 +364,68 @@ func TestPanePreviewEnterCommitFocusesAlreadyOpenTarget(t *testing.T) {
 	assert.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "existing target pane takes focus")
 }
 
+func TestPanePreviewSplitCommitsAlongside(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Same(t, alpha, paneA.Instance())
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeySplitPane)
+
+	require.NotNil(t, cmd, "commit-alongside should schedule a refresh")
+	require.Nil(t, h.panePreviewTxn)
+	require.Equal(t, 2, h.store.NumOpenPanes())
+	paneB := h.store.OpenPanes()[1]
+	assert.Same(t, alpha, paneA.Instance(), "split must restore the owner pane's original binding")
+	assert.Equal(t, 0, paneA.Tab())
+	assert.Same(t, beta, paneB.Instance(), "split appends the highlighted preview target")
+	assert.Equal(t, 0, paneB.Tab())
+	assert.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "new target pane takes focus")
+	view := h.View()
+	assert.Contains(t, view, "alpha · Agent")
+	assert.Contains(t, view, "beta · Agent")
+	assert.NotContains(t, view, "PREVIEW")
+}
+
+func TestPanePreviewSplitFocusesAlreadyOpenTarget(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Same(t, alpha, paneA.Instance())
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+	require.Equal(t, 2, h.store.NumOpenPanes())
+	paneB := h.store.OpenPanes()[1]
+	require.Same(t, beta, paneB.Instance())
+
+	h.focusRegion(layout.PaneRegion(paneA.ID()))
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeySplitPane)
+
+	require.NotNil(t, cmd, "focusing the existing target should schedule a refresh")
+	require.Nil(t, h.panePreviewTxn)
+	assert.Same(t, alpha, paneA.Instance(), "owner pane must keep its original binding")
+	assert.Same(t, beta, paneB.Instance())
+	assert.Equal(t, 2, h.store.NumOpenPanes(), "split onto an already-open target must not duplicate panes")
+	assert.Same(t, paneB, h.store.FindOpenPane(beta, 0))
+	assert.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "existing target pane takes focus")
+}
+
 func TestPanePreviewTabAndEscCancelToOwnerPane(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -445,6 +507,50 @@ func TestPanePreviewEnterBlocksUncommittableTargets(t *testing.T) {
 			_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 
 			require.NotNil(t, h.panePreviewTxn, "blocked commit should keep the preview active")
+			assert.Same(t, alpha, paneA.Instance())
+			assert.Contains(t, h.errBox.String(), tc.wantErr)
+		})
+	}
+}
+
+func TestPanePreviewSplitBlocksUncommittableTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		configure func(*session.Instance)
+		wantErr   string
+	}{
+		{
+			name:      "dead",
+			configure: func(inst *session.Instance) { inst.SetLiveness(session.LiveDead) },
+			wantErr:   "no longer running",
+		},
+		{
+			name:      "lost",
+			configure: func(inst *session.Instance) { inst.SetLiveness(session.LiveLost) },
+			wantErr:   "was lost",
+		},
+		{
+			name:      "in-flight",
+			configure: func(inst *session.Instance) { inst.SetInFlightOp(session.OpKilling) },
+			wantErr:   "operation in flight",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := paneTestHome(t)
+			alpha := h.store.GetInstanceByTitle("alpha")
+			beta := h.store.GetInstanceByTitle("beta")
+			tc.configure(beta)
+
+			pressKey(t, h, "s")
+			paneA := h.store.OpenPanes()[0]
+			h.sidebar.SetSelectedInstance(1)
+			_ = h.selectionChanged()
+			require.NotNil(t, h.panePreviewTxn, "preview remains allowed for blocked commit targets")
+
+			_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeySplitPane)
+
+			require.NotNil(t, h.panePreviewTxn, "blocked split should keep the preview active")
+			assert.Equal(t, 1, h.store.NumOpenPanes(), "blocked split must not append a pane")
 			assert.Same(t, alpha, paneA.Instance())
 			assert.Contains(t, h.errBox.String(), tc.wantErr)
 		})

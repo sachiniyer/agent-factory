@@ -70,7 +70,7 @@ func TestErgonomicDefaultKeysDispatchThroughKeymap(t *testing.T) {
 
 		h = newTestHome(t)
 		_ = dispatchKey(h, runeKey('S'))
-		assert.Equal(t, stateDefault, h.state, "old task key must be unbound by default")
+		assert.Equal(t, stateDefault, h.state, "S is split-pane by default, not task manager")
 	})
 
 	t.Run("hooks uses e and not H", func(t *testing.T) {
@@ -121,7 +121,7 @@ func TestErgonomicDefaultKeysDispatchThroughKeymap(t *testing.T) {
 }
 
 func TestPinnedOldDefaultDispatchesThroughKeymap(t *testing.T) {
-	require.NoError(t, keys.ApplyOverrides(map[string][]string{"tasks": {"S"}}))
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"tasks": {"S"}, "split_pane": {"alt+s"}}))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
 
 	h := newTestHome(t)

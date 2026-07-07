@@ -144,16 +144,16 @@ func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	}
 
 	m.SetFocusRegion(layout.RegionTree)
-	if !has(keys.KeyOpenPane) || has(keys.KeyHidePane) {
-		t.Errorf("tree focus must advertise open-pane, not hide; options=%v", m.options)
+	if !has(keys.KeyOpenPane) || !has(keys.KeySplitPane) || has(keys.KeyHidePane) {
+		t.Errorf("tree focus must advertise open/split pane, not hide; options=%v", m.options)
 	}
 	if !has(keys.KeyNewTab) || !has(keys.KeyKill) {
 		t.Errorf("tree focus keeps the instance actions; options=%v", m.options)
 	}
 
 	m.SetFocusRegion(layout.PaneRegion(7))
-	if !has(keys.KeyOpenPane) || !has(keys.KeyHidePane) || !has(keys.KeyEnter) {
-		t.Errorf("a focused pane must advertise open-pane + hide-pane + attach; options=%v", m.options)
+	if !has(keys.KeyOpenPane) || !has(keys.KeySplitPane) || !has(keys.KeyHidePane) || !has(keys.KeyEnter) {
+		t.Errorf("a focused pane must advertise open/split/hide pane + attach; options=%v", m.options)
 	}
 	if has(keys.KeyNewTab) {
 		t.Errorf("pane focus swaps to the pane option set; options=%v", m.options)

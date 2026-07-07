@@ -133,6 +133,24 @@ func (m *home) commitPanePreviewReplace() tea.Cmd {
 	return m.panesRefresh(m.attached.Load())
 }
 
+func (m *home) commitPanePreviewAlongside() tea.Cmd {
+	txn := m.panePreviewTxn
+	if txn == nil {
+		return nil
+	}
+	if err := previewCommitError(txn.target.instance); err != nil {
+		return m.handleError(err)
+	}
+	if m.openPaneByID(txn.ownerPaneID) == nil {
+		m.cancelPanePreview(false)
+		return nil
+	}
+	target := txn.target
+	m.cancelPanePreview(false)
+	_, cmd := m.openOrFocusPane(target.instance, target.tab)
+	return cmd
+}
+
 func previewCommitError(inst *session.Instance) error {
 	if inst == nil {
 		return fmt.Errorf("no preview to commit")

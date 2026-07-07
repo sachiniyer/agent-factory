@@ -80,6 +80,8 @@ Common TUI keys:
 | `o` | Attach to the selected tab full-screen |
 | `Ctrl-w` | Detach from a full-screen attach |
 | `t` | Open a helper shell tab in the session worktree |
+| `s` | Open the selected tab as a workspace pane |
+| `S` | Commit a preview as a new workspace pane |
 | `a` | Archive or restore a session |
 | `D` | Kill a session and clean up its worktree |
 | `m` | Open the task manager |
@@ -94,6 +96,7 @@ keymap, pin those bindings in `~/.agent-factory/config.toml`:
 [keys]
 archive = "A"
 tasks = "S"
+split_pane = "alt+s"
 copy_pr = "P"
 hooks = "H"
 scroll_up = "shift+up"

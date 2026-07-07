@@ -54,10 +54,12 @@ const (
 
 	// N-pane workspace verbs (#1088, replaces the PR-5 A/B split): `s` opens
 	// the selected tab as a new vertical-split pane (or focuses its pane when
-	// already open); `x` hides the focused pane back to the background — the
-	// tab keeps running, nothing is killed.
-	KeyOpenPane // OpenPane: open the selected tab as a pane / focus its pane.
-	KeyHidePane // HidePane hides the focused pane back to the background.
+	// already open); `S` commits a #1321 preview beside the owner pane; `x`
+	// hides the focused pane back to the background — the tab keeps running,
+	// nothing is killed.
+	KeyOpenPane  // OpenPane: open the selected tab as a pane / focus its pane.
+	KeySplitPane // SplitPane commits the active preview as a pane beside the owner.
+	KeyHidePane  // HidePane hides the focused pane back to the background.
 
 	// KeyManageAutomations is the automations-section display alias of Enter
 	// (menu/help only): with the in-rail section focused, Enter opens the task
@@ -127,6 +129,7 @@ var specs = []spec{
 	{name: KeyTaskList, configKey: "tasks", keys: []string{"m"}, desc: "tasks", dispatch: true},
 	{name: KeyManageAutomations, keys: []string{"enter"}, desc: "manage"},
 	{name: KeyOpenPane, configKey: "open_pane", keys: []string{"s"}, desc: "open pane", dispatch: true},
+	{name: KeySplitPane, configKey: "split_pane", keys: []string{"S"}, desc: "split pane", dispatch: true},
 	{name: KeyHidePane, configKey: "hide_pane", keys: []string{"x"}, desc: "hide pane", dispatch: true},
 	{name: KeySearch, configKey: "search", keys: []string{"/"}, desc: "search", dispatch: true},
 	{name: KeyOpenPR, configKey: "open_pr", keys: []string{"p"}, desc: "open PR", dispatch: true},
