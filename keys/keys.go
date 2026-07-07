@@ -175,6 +175,8 @@ var keyDisplayNames = map[string]string{
 	"enter":      "↵",
 	"shift+up":   "⇧↑",
 	"shift+down": "⇧↓",
+	" ":          "space",
+	"ctrl+@":     "ctrl+space",
 }
 
 // namedKeys are the non-rune key names bubbletea produces (tea.KeyMsg.String()
@@ -403,9 +405,9 @@ func helpLabelFor(keyList []string) string {
 // an optional run of ctrl+/alt+/shift+ modifiers followed by a named key or
 // a single character. Modifier order is accepted flexibly, but runtime maps
 // store normalizeKeySpec's Bubble Tea spelling so override lookup compares
-// against tea.KeyMsg.String() forms. Whitespace never matches a configured
-// key string, so it is rejected outright (the classic mistake is "space",
-// which IS the named form bubbletea uses, vs " ").
+// against tea.KeyMsg.String() forms. Literal whitespace in config remains
+// invalid; users spell the spacebar as "space", and normalizeKeySpec maps it
+// to Bubble Tea's runtime spelling.
 func validKeySpec(s string) bool {
 	_, ok := normalizeKeySpec(s)
 	return ok
@@ -438,6 +440,13 @@ func normalizeKeySpec(s string) (string, bool) {
 			shift = true
 			rest = rest[len("shift+"):]
 		default:
+			if rest == "space" {
+				if ctrl {
+					rest = "@"
+				} else if !alt && !shift {
+					return " ", true
+				}
+			}
 			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
 				return "", false
 			}
