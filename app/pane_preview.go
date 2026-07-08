@@ -55,9 +55,9 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		original = m.panePreviewTxn.original
 	}
 	target := paneBinding{instance: selected, tab: targetTab}
-	// Plain instance-row previews stay on the selected instance's agent tab
-	// (#1321). Explicit tab rows, however, name a full (instance, tab) target:
-	// a same-instance terminal tab is distinct from the already-open agent pane.
+	// The preview target must match the selected/action tab. An instance row
+	// whose active tab is Terminal still names the full (instance, tab)
+	// target, so preview and commit cannot diverge (#1415, #1289 class).
 	if (!tabSpecific && original.instance == target.instance) ||
 		(tabSpecific && samePaneBinding(original, target)) {
 		m.cancelPanePreview(false)
@@ -124,7 +124,7 @@ func (m *home) suppressPanePreviewForSelection(owner *store.OpenPane) {
 	}
 	m.suppressPanePreview(
 		paneBinding{instance: owner.Instance(), tab: owner.Tab()},
-		paneBinding{instance: selected, tab: 0},
+		paneBinding{instance: selected, tab: m.store.ActiveTab()},
 	)
 }
 

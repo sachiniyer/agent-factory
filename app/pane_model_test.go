@@ -340,6 +340,32 @@ func TestPanePreviewTabRowCommitsSameInstanceTerminal(t *testing.T) {
 	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
 }
 
+func TestPanePreviewInstanceRowUsesSelectedTerminalTab(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Same(t, alpha, paneA.Instance())
+	require.Equal(t, 0, paneA.Tab(), "precondition: alpha's agent pane is open")
+
+	h.sidebar.SetSelectedInstance(1)
+	h.store.SetActiveTab(1)
+	h.menu.SetActiveTab(1)
+	_ = h.selectionChanged()
+
+	sel := h.sidebar.GetSelection()
+	require.False(t, sel.IsTab, "precondition: cursor remains on beta's instance row")
+	require.Equal(t, 1, h.store.ActiveTab(), "precondition: selected/action tab is Terminal")
+	require.NotNil(t, h.panePreviewTxn)
+	assert.Same(t, beta, h.panePreviewTxn.target.instance)
+	assert.Equal(t, 1, h.panePreviewTxn.target.tab,
+		"preview target must match the selected/action (instance, tab), not default to Agent")
+	assert.Contains(t, h.View(), "PREVIEW beta · Terminal (original alpha · Agent)")
+	assert.NotContains(t, h.View(), "PREVIEW beta · Agent")
+}
+
 func TestPanePreviewEnterCommitsReplace(t *testing.T) {
 	h := paneTestHome(t)
 	alpha := h.store.GetInstanceByTitle("alpha")
@@ -442,7 +468,7 @@ func TestPanePreviewSplitHideDoesNotStickInPanePreview(t *testing.T) {
 	require.Same(t, beta, h.store.GetSelectedInstance())
 	require.Equal(t, layout.RegionTree, h.ring.Active(), "tree navigation owns focus during preview")
 	require.NotNil(t, h.panePreviewTxn)
-	require.Contains(t, h.View(), "PREVIEW beta · Agent (original alpha · Agent)")
+	require.Contains(t, h.View(), "PREVIEW beta · Terminal (original alpha · Agent)")
 
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeySplitPane)
 	require.NotNil(t, cmd)
@@ -450,6 +476,7 @@ func TestPanePreviewSplitHideDoesNotStickInPanePreview(t *testing.T) {
 	require.Equal(t, 2, h.store.NumOpenPanes())
 	paneB := h.store.OpenPanes()[1]
 	require.Same(t, beta, paneB.Instance())
+	require.Equal(t, 1, paneB.Tab())
 	require.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active())
 
 	pressTab(t, h, false)
