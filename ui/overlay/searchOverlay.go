@@ -174,14 +174,10 @@ func runeEqualFold(a, b rune) bool {
 	return false
 }
 
-// visibleWindow returns the [start, end) result window Render shows: at most
-// maxVisible rows, slid so the selected item is always included. Shared with
-// the mouse zone registration (zones.go) so the rows registered are exactly
-// the rows rendered.
-func (s *SearchOverlay) visibleWindow() (startIdx, endIdx int) {
-	return s.visibleWindowForRows(10)
-}
-
+// visibleWindowForRows returns the [start, end) result window Render shows:
+// at most maxVisible rows, slid so the selected item is always included.
+// Shared with the mouse zone registration (zones.go) so the rows registered
+// are exactly the rows rendered.
 func (s *SearchOverlay) visibleWindowForRows(maxVisible int) (startIdx, endIdx int) {
 	if maxVisible < 1 {
 		maxVisible = 1
