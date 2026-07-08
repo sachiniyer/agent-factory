@@ -340,6 +340,32 @@ func TestTasksUpdate_DisablePersistsViaDaemon(t *testing.T) {
 	assert.Equal(t, 1, calls.writes, "update must dispatch the write to the daemon")
 }
 
+func TestTasksUpdate_SwitchWatchToCronAndDisableWithoutPrompt(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	calls := stubDaemon(t)
+
+	seedTask(t, task.Task{
+		ID:       "watch1437",
+		Name:     "watch",
+		WatchCmd: "tail -f events.log",
+		Enabled:  true,
+	})
+
+	taskUpdateCronFlag = "30 6 * * 1"
+	taskUpdateEnabledFlag = "false"
+	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"watch1437"})
+	require.NoError(t, err)
+
+	got, err := task.GetTask("watch1437")
+	require.NoError(t, err)
+	assert.Equal(t, "30 6 * * 1", got.CronExpr)
+	assert.Empty(t, got.WatchCmd)
+	assert.Empty(t, got.Prompt)
+	assert.False(t, got.Enabled)
+	assert.Equal(t, 1, calls.writes)
+}
+
 func TestTasksUpdate_CronChangePersistsViaDaemon(t *testing.T) {
 	useTempConfig(t)
 	resetUpdateFlags(t)
