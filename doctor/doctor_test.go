@@ -374,6 +374,25 @@ func TestForeignDaemonHandling(t *testing.T) {
 	require.True(t, alive(intentional))
 }
 
+func TestForeignDaemonStatErrorIsNotReportedAsMissing(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	loopHome := filepath.Join(t.TempDir(), "loop-home")
+	require.NoError(t, os.Symlink(loopHome, loopHome))
+	uncertain := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": loopHome})
+
+	report, err := Run(testOptions(t, true, uncertain.PID))
+	require.NoError(t, err)
+	findings := findByCheck(report, "foreign-daemon")
+	require.Len(t, findings, 1)
+	require.Contains(t, findings[0].Detail, loopHome)
+	require.Contains(t, findings[0].Detail, "status cannot be verified")
+	require.NotContains(t, findings[0].Detail, "no longer exists")
+	require.Empty(t, findings[0].FixAction, "non-ENOENT stat errors must be report-only")
+	require.False(t, findings[0].Fixed)
+	require.True(t, alive(uncertain), "an uncertain foreign daemon must survive --fix")
+}
+
 // TestCleanRunHasNoFindings: an empty environment yields a clean bill of
 // health and exit-0 semantics.
 func TestCleanRunHasNoFindings(t *testing.T) {

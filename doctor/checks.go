@@ -657,13 +657,19 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 		if home == activeHome || home == "" {
 			continue // this install's daemon; covered by checkDaemonHealth
 		}
-		if _, err := os.Stat(home); err != nil {
+		if _, err := os.Stat(home); os.IsNotExist(err) {
 			report.Findings = append(report.Findings, Finding{
 				Check: "foreign-daemon",
 				Detail: fmt.Sprintf("%s serves agent-factory home %s which no longer exists "+
 					"(abandoned daemon will run its cron tasks forever)", describeProc(p), home),
 				FixAction: fmt.Sprintf("kill pid %d", pid),
 				fix:       killFix(ctx, p),
+			})
+		} else if err != nil {
+			report.Findings = append(report.Findings, Finding{
+				Check: "foreign-daemon",
+				Detail: fmt.Sprintf("%s serves agent-factory home %s whose status cannot be verified: %v",
+					describeProc(p), home, err),
 			})
 		} else {
 			report.Findings = append(report.Findings, Finding{
