@@ -105,8 +105,24 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 	if instance == nil {
 		return fmt.Errorf("failed to restore instance %q", req.Title)
 	}
+	if instance.IsTearingDown() {
+		return fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title)
+	}
+	if err := promptTargetLivenessError(req.Title, instance.GetLiveness()); err != nil {
+		return err
+	}
 	if err := instance.SendPromptCommand(req.Prompt); err != nil {
 		return fmt.Errorf("failed to send prompt: %w", err)
+	}
+	return nil
+}
+
+func promptTargetLivenessError(title string, liveness session.Liveness) error {
+	switch liveness {
+	case session.LiveLost:
+		return fmt.Errorf("target session %q is Lost; prompt not delivered; recover it first", title)
+	case session.LiveDead:
+		return fmt.Errorf("target session %q is Dead; prompt not delivered; recover it first", title)
 	}
 	return nil
 }

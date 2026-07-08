@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // targetDeliverWait bounds how long DeliverPrompt waits for a target session to
@@ -48,12 +49,15 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 	unlock := m.lockTarget(repo.ID, req.Title)
 	defer unlock()
 
-	exists, deleting, err := m.targetSessionState(repo.ID, req.Title)
+	exists, deleting, liveness, err := m.targetSessionState(repo.ID, req.Title)
 	if err != nil {
 		return "", err
 	}
 	if deleting {
 		return "", fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title)
+	}
+	if err := promptTargetLivenessError(req.Title, liveness); err != nil {
+		return "", err
 	}
 	if exists {
 		if err := m.SendPrompt(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt}); err != nil {
@@ -120,42 +124,47 @@ func (m *Manager) lockTarget(repoID, title string) func() {
 }
 
 // targetSessionState reports whether a session with the given title exists for
-// the repo (in memory or persisted) and whether it is mid-teardown. Deleting is
-// transient in-memory state that is never persisted (#844/#847); the daemon's
-// KillSession path records it in killsInFlight, while TUI-initiated teardown is
-// reflected on the live instance as OpKilling.
-func (m *Manager) targetSessionState(repoID, title string) (exists, deleting bool, err error) {
+// the repo (in memory or persisted), whether it is mid-teardown, and the live
+// daemon instance's liveness when one is tracked. Deleting is transient
+// in-memory state that is never persisted (#844/#847); the daemon's KillSession
+// path records it in killsInFlight, while TUI-initiated teardown is reflected on
+// the live instance as OpKilling.
+func (m *Manager) targetSessionState(repoID, title string) (exists, deleting bool, liveness session.Liveness, err error) {
 	m.mu.Lock()
 	if rerr := m.refreshLocked(); rerr != nil {
 		m.mu.Unlock()
-		return false, false, rerr
+		return false, false, session.LivenessUnset, rerr
 	}
 	key := daemonInstanceKey(repoID, title)
 	inst := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return true, true, nil
+		return true, true, session.LivenessUnset, nil
 	}
 	if inst != nil {
-		return true, inst.IsTearingDown(), nil
+		return true, inst.IsTearingDown(), inst.GetLiveness(), nil
 	}
 
 	exists, err = repoHasSessionTitle(repoID, title)
-	return exists, false, err
+	return exists, false, session.LivenessUnset, err
 }
 
-// waitForTargetSession blocks until the target session exists, surfacing a
-// Deleting session rather than delivering into it, bounded by targetDeliverWait.
+// waitForTargetSession blocks until the target session exists, surfacing
+// undeliverable liveness states rather than delivering into them, bounded by
+// targetDeliverWait.
 func (m *Manager) waitForTargetSession(repoID, title string) error {
 	deadline := time.Now().Add(targetDeliverWait)
 	for {
-		exists, deleting, err := m.targetSessionState(repoID, title)
+		exists, deleting, liveness, err := m.targetSessionState(repoID, title)
 		if err != nil {
 			return err
 		}
 		if deleting {
 			return fmt.Errorf("target session %q is being deleted; prompt not delivered", title)
+		}
+		if err := promptTargetLivenessError(title, liveness); err != nil {
+			return err
 		}
 		if exists {
 			return nil
