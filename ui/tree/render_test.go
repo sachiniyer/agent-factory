@@ -376,6 +376,13 @@ func TestRenderTabRows(t *testing.T) {
 	assert.LessOrEqual(t, lipgloss.Width(narrow), 14, "tab rows must hard-truncate to the row width")
 }
 
+func TestTabRowForegroundMatchesAgentTab(t *testing.T) {
+	assert.Equal(t, tabRowActiveStyle.GetForeground(), tabRowStyle.GetForeground(),
+		"Terminal/default tab rows must use the same foreground as the Agent/active tab")
+	assert.NotEqual(t, lipgloss.NoColor{}, tabRowSelectedStyle.GetBackground(),
+		"selected tab rows keep their highlight background")
+}
+
 // TestFlatten pins the tree flattening order: each instance row immediately
 // followed by its tab children when expanded.
 func TestFlatten(t *testing.T) {
