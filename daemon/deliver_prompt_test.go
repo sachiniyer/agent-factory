@@ -48,6 +48,18 @@ func (b recordingBackend) SendPromptCommand(_ *session.Instance, prompt string) 
 	return nil
 }
 
+// failingPromptBackend returns the low-level send error that should never leak
+// once daemon delivery has rejected an undeliverable liveness state.
+type failingPromptBackend struct {
+	readyFakeBackend
+	sent int
+}
+
+func (b *failingPromptBackend) SendPromptCommand(*session.Instance, string) error {
+	b.sent++
+	return fmt.Errorf("tmux error: session not found")
+}
+
 // slowRecordingKillBackend records prompts like recordingBackend and holds Kill
 // inside the teardown window so a test can exercise delivery while the daemon's
 // killsInFlight marker is set.
@@ -283,6 +295,73 @@ func TestDeliverPrompt_RefusesDeletingTarget(t *testing.T) {
 	}
 	if got := len(rec.snapshot()); got != before {
 		t.Fatalf("prompt was delivered into a Deleting session: recorded count went %d -> %d", before, got)
+	}
+}
+
+// TestDeliverPrompt_RefusesLostTargetBeforeTmuxSend is the #1432 regression:
+// a target session whose daemon record is Lost must produce an actionable
+// liveness error instead of attempting tmux delivery and leaking "session not
+// found" to the RPC/API caller.
+func TestDeliverPrompt_RefusesLostTargetBeforeTmuxSend(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &failingPromptBackend{readyFakeBackend: readyFakeBackend{session.NewFakeBackend()}}
+	registerStarted(t, manager, repoID, repoPath, "captain", backend, true, session.Lost)
+
+	_, err := manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    "captain",
+		RepoPath: repoPath,
+		Program:  "claude",
+		Prompt:   "during-outage",
+	})
+	if err == nil {
+		t.Fatal("expected Lost target delivery to fail")
+	}
+	if !strings.Contains(err.Error(), `target session "captain" is Lost; prompt not delivered; recover it first`) {
+		t.Fatalf("expected actionable Lost error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "tmux") || strings.Contains(err.Error(), "session not found") {
+		t.Fatalf("Lost delivery must not leak raw tmux errors, got: %v", err)
+	}
+	if backend.sent != 0 {
+		t.Fatalf("Lost delivery reached SendPromptCommand %d time(s); want 0", backend.sent)
+	}
+}
+
+func TestSendPrompt_RefusesLostAndDeadTargetsBeforeBackendSend(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     session.Status
+		wantStatus string
+	}{
+		{name: "lost", status: session.Lost, wantStatus: "Lost"},
+		{name: "dead", status: session.Dead, wantStatus: "Dead"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			backend := &failingPromptBackend{readyFakeBackend: readyFakeBackend{session.NewFakeBackend()}}
+			registerStarted(t, manager, repoID, repoPath, "captain", backend, true, tc.status)
+
+			err := manager.SendPrompt(SendPromptRequest{
+				Title:  "captain",
+				RepoID: repoID,
+				Prompt: "during-outage",
+			})
+			if err == nil {
+				t.Fatalf("expected %s target send to fail", tc.wantStatus)
+			}
+			want := fmt.Sprintf(`target session "captain" is %s; prompt not delivered; recover it first`, tc.wantStatus)
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected actionable %s error, got: %v", tc.wantStatus, err)
+			}
+			if strings.Contains(err.Error(), "tmux") || strings.Contains(err.Error(), "session not found") {
+				t.Fatalf("%s send must not leak raw tmux errors, got: %v", tc.wantStatus, err)
+			}
+			if backend.sent != 0 {
+				t.Fatalf("%s send reached SendPromptCommand %d time(s); want 0", tc.wantStatus, backend.sent)
+			}
+		})
 	}
 }
 
@@ -603,7 +682,7 @@ func TestDeliverPrompt_TmuxOrphanReturnsImmediatelyWithError(t *testing.T) {
 	if !tmux.NewTmuxSessionForRepo(orphanTitle, repo.Root, program).DoesSessionExist() {
 		t.Fatal("orphan tmux session should exist after creation")
 	}
-	if exists, _, err := manager.targetSessionState(repo.ID, orphanTitle); err != nil {
+	if exists, _, _, err := manager.targetSessionState(repo.ID, orphanTitle); err != nil {
 		t.Fatalf("targetSessionState: %v", err)
 	} else if exists {
 		t.Fatal("orphan title should NOT exist in daemon state")
