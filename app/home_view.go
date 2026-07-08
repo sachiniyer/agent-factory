@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -63,6 +64,9 @@ func (m *home) View() string {
 	m.zones.Reset()
 	if m.quitting {
 		return ""
+	}
+	if m.attachTransitioning {
+		return blankFrame(m.termWidth, m.termHeight)
 	}
 
 	// Below the hard minimum no layout exists; render the banner alone (and
@@ -142,6 +146,18 @@ func (m *home) View() string {
 	}
 
 	return mainView
+}
+
+func blankFrame(width, height int) string {
+	if width < 1 || height < 1 {
+		return ""
+	}
+	line := strings.Repeat(" ", width)
+	lines := make([]string, height)
+	for i := range lines {
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
 }
 
 // The View render helpers (overlay framing + rail/divider rules) live in

@@ -85,7 +85,8 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 
 	model, cmd := h.handleEnter()
 	require.Nil(t, model.(*home).textOverlay,
-		"the attach help overlay must be skipped so the attach callback ran")
+		"the attach help overlay must be skipped so the attach transition is scheduled")
+	cmd = runAttachTransitionCmd(t, h, cmd)
 	endDetachWatchdog()
 	return cmd, out.String()
 }

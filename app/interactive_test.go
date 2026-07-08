@@ -338,7 +338,8 @@ func TestEnterOnRemotePaneFallsBackToFullScreenAttach(t *testing.T) {
 		return nil
 	})
 
-	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	_ = runAttachTransitionCmd(t, h, cmd)
 
 	assert.Equal(t, 1, attached, "a remote pane cannot embed: Enter must fall back to full-screen attach")
 	assert.False(t, h.interactive)
@@ -355,7 +356,8 @@ func TestAttachKeyKeepsFullScreenAttach(t *testing.T) {
 		return nil
 	})
 
-	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")}, keys.KeyAttach)
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")}, keys.KeyAttach)
+	_ = runAttachTransitionCmd(t, h, cmd)
 
 	assert.Equal(t, 1, attached, "`o` must run the full-screen attach flow")
 	assert.False(t, h.interactive, "`o` must not enter interactive mode")

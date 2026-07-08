@@ -96,6 +96,9 @@ type home struct {
 	// quitting suppresses Bubble Tea's final graceful render after handleQuit has
 	// started terminal teardown, so stale TUI chrome is not repainted on exit.
 	quitting bool
+	// attachTransitioning suppresses the final pre-attach View so Bubble Tea
+	// clears AF chrome before the blocking full-screen tmux attach takes over.
+	attachTransitioning bool
 	// namingInstance is the instance currently being named in stateNew.
 	// Stored as a direct pointer so background sync cannot change which
 	// instance the naming keystrokes target.
