@@ -81,6 +81,25 @@ func TestEnterOnFocusedLivePaneEntersInteractive(t *testing.T) {
 	assert.Contains(t, h.menu.String(), "ctrl+]", "the status bar must show the escape hatch")
 }
 
+func TestFirstRunInteractiveHelpForwardsDismissKey(t *testing.T) {
+	h, _ := liveTestHome(t)
+	fakes, _ := stubLiveTermFactory(t)
+
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	require.Nil(t, cmd, "first-time interactive entry waits on the help overlay")
+	require.Equal(t, stateHelp, h.state)
+	require.NotNil(t, h.textOverlay)
+	require.Empty(t, *fakes, "the live terminal must not bind until help is dismissed")
+
+	_, cmd = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	runHermeticCmd(t, h, cmd, 0)
+
+	require.True(t, h.interactive, "dismissing first-run help should enter interactive mode")
+	require.Len(t, *fakes, 1)
+	assert.Equal(t, []string{"q"}, (*fakes)[0].keys,
+		"the key that dismisses the first-run interactive help must reach the pane")
+}
+
 func TestInteractiveForwardsAllKeysIncludingTab(t *testing.T) {
 	h, _, fakes := interactiveTestHome(t)
 	enterInteractive(t, h)

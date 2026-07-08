@@ -27,7 +27,9 @@ import (
 // where model state must not be touched (#716 capture discipline: the pane
 // is captured at Enter-press time, then re-validated on arrival).
 type enterInteractiveMsg struct {
-	pane *store.OpenPane
+	pane      *store.OpenPane
+	replayKey tea.KeyMsg
+	replay    bool
 }
 
 // requestInteractive routes Enter-on-a-live-eligible-pane through the

@@ -181,7 +181,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case enterInteractiveMsg:
 		// Deferred by the first-time interactive help screen's dismiss cmd
 		// (#1089 PR 2); the pane pointer is re-validated inside.
-		return m, m.activateInteractive(msg.pane)
+		cmd := m.activateInteractive(msg.pane)
+		if msg.replay && m.interactive {
+			_, replayCmd := m.handleInteractiveKey(msg.replayKey)
+			cmd = tea.Batch(cmd, replayCmd)
+		}
+		return m, cmd
 	case startKillMsg:
 		// The row was already flipped to Deleting synchronously by the kill
 		// confirmation; dispatch the slow teardown off the event loop (#844).

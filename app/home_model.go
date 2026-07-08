@@ -246,6 +246,10 @@ type home struct {
 	spinner spinner.Model
 	// textOverlay displays text information
 	textOverlay *overlay.TextOverlay
+	// replayHelpDismissKey marks the first-run interactive pane help: the
+	// key that closes that overlay is the user's first pane keystroke, so it
+	// must be forwarded after the deferred live bind completes (#1410).
+	replayHelpDismissKey bool
 	// confirmationOverlay displays confirmation modals
 	confirmationOverlay *overlay.ConfirmationOverlay
 	// pendingConfirmMsg holds a non-error tea.Msg returned by a confirmation
