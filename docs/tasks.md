@@ -114,7 +114,7 @@ af tasks trigger <id>          # cron tasks only
 af tasks remove <id>
 ```
 
-On `update`, setting one trigger clears the other (switching watch→cron requires a prompt). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
+On `update`, setting one trigger clears the other (switching watch→cron requires a prompt when the resulting cron task is enabled). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 
 ## Examples
 
