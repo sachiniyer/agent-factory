@@ -307,14 +307,27 @@ var tasksUpdateCmd = &cobra.Command{
 		if taskUpdateWatchCmdFlag != "" && strings.TrimSpace(taskUpdateWatchCmdFlag) == "" {
 			return jsonError(errors.New("watch-cmd must be non-empty"))
 		}
+
+		updatedEnabled := s.Enabled
+		switch taskUpdateEnabledFlag {
+		case "true":
+			updatedEnabled = true
+		case "false":
+			updatedEnabled = false
+		case "":
+			// not changed
+		default:
+			return jsonError(fmt.Errorf("--enabled must be 'true' or 'false'"))
+		}
+
 		if taskUpdateCronFlag != "" {
 			if err := task.ValidateCronExpr(taskUpdateCronFlag); err != nil {
 				return jsonError(fmt.Errorf("invalid cron expression: %w", err))
 			}
 			// Watch tasks may have an empty prompt (events default to the raw
 			// line), but a cron fire has no line to fall back to — switching
-			// triggers must supply one.
-			if s.WatchCmd != "" && strings.TrimSpace(s.Prompt) == "" {
+			// triggers must supply one when the resulting cron task is enabled.
+			if updatedEnabled && s.WatchCmd != "" && strings.TrimSpace(s.Prompt) == "" {
 				return jsonError(errors.New("switching to a cron trigger needs a prompt; set one with --prompt"))
 			}
 			// Setting one trigger clears the other so the exactly-one rule
@@ -333,16 +346,7 @@ var tasksUpdateCmd = &cobra.Command{
 			s.TargetSession = taskUpdateTargetSessionFlag
 		}
 
-		switch taskUpdateEnabledFlag {
-		case "true":
-			s.Enabled = true
-		case "false":
-			s.Enabled = false
-		case "":
-			// not changed
-		default:
-			return jsonError(fmt.Errorf("--enabled must be 'true' or 'false'"))
-		}
+		s.Enabled = updatedEnabled
 
 		// Partial-update semantics: "" means "leave unchanged" (mirroring
 		// --name and the add path's taskAddProgramFlag != "" guard). There is
