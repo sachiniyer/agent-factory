@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -151,6 +152,18 @@ func TestTaskPaneNormalModeAllowsQuitKeysToPropagate(t *testing.T) {
 
 	assert.False(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}))
 	assert.False(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlC}))
+}
+
+func TestTaskPaneNormalModeAllowsReboundQuitKeyToPropagate(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {"Q"}}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	tp := NewTaskPane()
+	tp.SetFocus(true)
+
+	assert.False(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Q")}))
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}),
+		"the old default key must not keep propagating after quit is rebound")
 }
 
 // tabTo advances the edit-form focus from its current position by pressing

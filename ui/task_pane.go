@@ -314,7 +314,7 @@ func (s *TaskPane) HandleKeyPress(msg tea.KeyMsg) bool {
 }
 
 func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
-	if msg.String() == "ctrl+c" || msg.String() == "q" {
+	if msg.String() == "ctrl+c" || configuredQuitKey(msg) {
 		return false
 	}
 	switch msg.String() {

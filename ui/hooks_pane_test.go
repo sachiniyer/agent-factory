@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHooksPaneEditModeCtrlCCancels(t *testing.T) {
@@ -19,6 +21,19 @@ func TestHooksPaneEditModeCtrlCCancels(t *testing.T) {
 	assert.False(t, h.editing)
 	assert.False(t, h.adding)
 	assert.Empty(t, h.editBuffer)
+}
+
+func TestHooksPaneNormalModeAllowsReboundQuitKeyToPropagate(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {"Q"}}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := NewHooksPane()
+	h.SetCommands([]string{"make test"})
+	h.SetFocus(true)
+
+	assert.False(t, h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Q")}))
+	assert.True(t, h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}),
+		"the old default key must not keep propagating after quit is rebound")
 }
 
 func TestHooksPaneSetCommandsEmptySliceBug(t *testing.T) {

@@ -132,8 +132,13 @@ func (m *home) showTasksOverlay() (tea.Model, tea.Cmd) {
 // processes its pending actions. Esc in list mode drops the manager's own
 // focus: the overlay closes and any dirty edits are saved — a failed save
 // reloads both views to match disk and is surfaced inline so the dropped
-// edit isn't silent. q and ctrl+c are not consumed by the manager and quit.
+// edit isn't silent. The configured quit key is root-routed before the task
+// form can type it into an input, and ctrl+c still quits from normal mode.
 func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
+		return m.handleQuit()
+	}
+
 	sp := m.automations.TaskPane()
 	consumed := sp.HandleKeyPress(msg)
 
@@ -189,10 +194,14 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 }
 
 // handleStateHooks routes key events to the hooks editor overlay. Esc closes
-// the overlay (the pane drops its own focus) and persists any edits; q and
-// ctrl+c are not consumed by the pane and quit, exactly as they did when the
-// editor was hosted in the content pane.
+// the overlay (the pane drops its own focus) and persists any edits; the
+// configured quit key is root-routed before the pane can type it into an edit
+// field, and ctrl+c still quits from normal mode.
 func (m *home) handleStateHooks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
+		return m.handleQuit()
+	}
+
 	consumed := m.hooksPane.HandleKeyPress(msg)
 	if !m.hooksPane.HasFocus() {
 		// The pane released focus (Esc): close the overlay and save. A failed

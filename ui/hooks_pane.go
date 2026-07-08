@@ -73,7 +73,7 @@ func (h *HooksPane) HandleKeyPress(msg tea.KeyMsg) bool {
 }
 
 func (h *HooksPane) handleNormalMode(msg tea.KeyMsg) bool {
-	if msg.String() == "ctrl+c" || msg.String() == "q" {
+	if msg.String() == "ctrl+c" || configuredQuitKey(msg) {
 		return false
 	}
 	switch msg.String() {

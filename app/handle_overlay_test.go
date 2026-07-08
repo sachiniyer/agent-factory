@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -46,6 +47,34 @@ func TestHandleStateSelectProgramSwitchesAgent(t *testing.T) {
 	_, _ = h.handleStateSelectProgram(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, tmux.ProgramCodex, h.pendingProgram)
+}
+
+func TestPaneOverlaysQuitWithReboundKeyBeforeEditFieldsConsumeIt(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {"Q"}}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	t.Run("tasks create form", func(t *testing.T) {
+		h := newTestHome(t)
+		tp := h.automations.TaskPane()
+		tp.SetFocus(true)
+		tp.EnterCreateMode("/tmp/repo")
+		h.state = stateTasks
+
+		_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Q")})
+
+		assert.True(t, reachesQuit(cmd), "rebound quit must quit before the task form types it")
+	})
+
+	t.Run("hooks add form", func(t *testing.T) {
+		h := newTestHome(t)
+		h.hooksPane.SetFocus(true)
+		h.state = stateHooks
+		_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+
+		_, cmd := h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Q")})
+
+		assert.True(t, reachesQuit(cmd), "rebound quit must quit before the hooks form types it")
+	})
 }
 
 // TestHandleStateTasks_PendingCreateFlushesDirtyTaskState is the regression
