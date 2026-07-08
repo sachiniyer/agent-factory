@@ -83,9 +83,11 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 // CloseTab closes a non-agent tab of the target session, kills its tmux
 // session, and persists the shrunk tab list (#960 PR 1). It is the close-side
 // counterpart of CreateTab and mirrors its discipline: find the session, run
-// the mutate+persist under the per-repo start lock so a concurrent
-// CreateSession/CreateTab/CloseTab on the same repo can't interleave with the
-// tab-list write, and persist through the targeted per-repo writer
+// take the per-session op-lock so a concurrent kill/archive teardown can't
+// close the same tmux session, run the mutate+persist under the per-repo start
+// lock so a concurrent CreateSession/CreateTab/CloseTab on the same repo can't
+// interleave with the tab-list write, and persist through the targeted per-repo
+// writer
 // (persistInstanceData) rather than a whole-list SaveInstances — the
 // clobber-safe single-writer direction of #960.
 //
@@ -107,6 +109,26 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	}
 	if instance.IsRemote() {
 		return "", fmt.Errorf("cannot close a tab on remote session %q: its tabs are fixed by remote_hooks config, not user-managed", req.Title)
+	}
+
+	// Serialize the tab close against archive/kill/restore teardown for this
+	// session. Those paths hold the same op-lock while closing every tab's tmux
+	// session; without this CloseTab can concurrently call TmuxSession.Close on
+	// the same object (#1434). Take this before the repo start lock, matching
+	// CreateTab and the kill/archive persist ordering.
+	key := daemonInstanceKey(repoID, req.Title)
+	opLock := m.opLockFor(key)
+	opLock.Lock()
+	defer opLock.Unlock()
+
+	// findSession runs before the op-lock is acquired. If a kill/archive won the
+	// lock first, it may have deleted or replaced the tracked instance while we
+	// waited; never mutate or re-persist a stale pointer after teardown.
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	if current != instance || instance.UserKilled() {
+		return "", fmt.Errorf("session %q changed state before tab close could start", req.Title)
 	}
 
 	// Serialize against other create/tab mutations on this repo, mirroring
