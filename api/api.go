@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -381,12 +382,12 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 
 // jsonOut marshals v to JSON and writes to stdout. By default it prints the
 // bare payload (byte-identical to before #1029). With the opt-in --json flag it
-// wraps the payload in the shared success Envelope via writeEnvelope.
+// wraps the payload in the shared success Envelope.
 func jsonOut(v any) error {
 	if envelopeOutput {
-		return writeEnvelope(os.Stdout, successEnvelope(v))
+		return apiproto.WriteEnvelope(os.Stdout, apiproto.Success(v))
 	}
-	data, err := marshalIndented(v)
+	data, err := apiproto.MarshalIndented(v)
 	if err != nil {
 		return err
 	}
@@ -402,7 +403,7 @@ func jsonError(err error) error {
 	if envelopeOutput {
 		silenceEnvelopeCobra()
 		log.CloseQuiet()
-		_ = writeEnvelope(os.Stderr, errorEnvelope(err.Error()))
+		_ = apiproto.WriteEnvelope(os.Stderr, apiproto.Failure(err.Error()))
 		return err
 	}
 	msg, _ := json.Marshal(map[string]string{"error": err.Error()})
