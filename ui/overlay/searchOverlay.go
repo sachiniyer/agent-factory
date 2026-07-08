@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -26,6 +27,8 @@ type SearchOverlay struct {
 	selectedIdx int
 	submitted   bool
 	width       int
+	maxWidth    int
+	maxHeight   int
 }
 
 // NewSearchOverlay creates a search overlay with the given instances.
@@ -41,6 +44,12 @@ func NewSearchOverlay(instances []*session.Instance) *SearchOverlay {
 // SetWidth sets the overlay width.
 func (s *SearchOverlay) SetWidth(width int) {
 	s.width = width
+}
+
+// SetMaxSize sets the maximum outer size the rendered search overlay may occupy.
+func (s *SearchOverlay) SetMaxSize(width, height int) {
+	s.maxWidth = width
+	s.maxHeight = height
 }
 
 // IsSubmitted returns true if the user selected a result.
@@ -165,12 +174,14 @@ func runeEqualFold(a, b rune) bool {
 	return false
 }
 
-// visibleWindow returns the [start, end) result window Render shows: at most
-// maxVisible rows, slid so the selected item is always included. Shared with
-// the mouse zone registration (zones.go) so the rows registered are exactly
-// the rows rendered.
-func (s *SearchOverlay) visibleWindow() (startIdx, endIdx int) {
-	const maxVisible = 10
+// visibleWindowForRows returns the [start, end) result window Render shows:
+// at most maxVisible rows, slid so the selected item is always included.
+// Shared with the mouse zone registration (zones.go) so the rows registered
+// are exactly the rows rendered.
+func (s *SearchOverlay) visibleWindowForRows(maxVisible int) (startIdx, endIdx int) {
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
 	if s.selectedIdx >= maxVisible {
 		startIdx = s.selectedIdx - maxVisible + 1
 	}
@@ -179,6 +190,106 @@ func (s *SearchOverlay) visibleWindow() (startIdx, endIdx int) {
 		endIdx = len(s.results)
 	}
 	return startIdx, endIdx
+}
+
+type searchRenderPlan struct {
+	styleWidth    int
+	styleHeight   int
+	contentWidth  int
+	contentHeight int
+	compact       bool
+	startIdx      int
+	endIdx        int
+	showAbove     bool
+	showBelow     bool
+}
+
+func searchOverlayStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ui.AccentColor).
+		Padding(1, 2)
+}
+
+func (s *SearchOverlay) renderPlan(style lipgloss.Style) searchRenderPlan {
+	fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
+	if fit.W <= 0 {
+		fit.W = s.width
+	}
+	if fit.W <= 0 {
+		fit.W = 1
+	}
+	textRect := overlayTextRect(fit, style)
+	compact := textRect.H > 0 && textRect.H <= 8
+	baseRows := 6
+	if compact {
+		baseRows = 3
+	}
+	availableRows := 10
+	if textRect.H > 0 {
+		availableRows = textRect.H - baseRows
+		if len(s.results) == 0 {
+			availableRows = 0
+		} else if availableRows < 1 {
+			availableRows = 1
+		}
+		startIdx, endIdx, showAbove, showBelow := s.windowForAvailableRows(availableRows)
+		return searchRenderPlan{
+			styleWidth:    fit.W,
+			styleHeight:   fit.H,
+			contentWidth:  textRect.W,
+			contentHeight: textRect.H,
+			compact:       compact,
+			startIdx:      startIdx,
+			endIdx:        endIdx,
+			showAbove:     showAbove,
+			showBelow:     showBelow,
+		}
+	}
+
+	startIdx, endIdx := s.visibleWindowForRows(availableRows)
+	return searchRenderPlan{
+		styleWidth:    fit.W,
+		styleHeight:   fit.H,
+		contentWidth:  textRect.W,
+		contentHeight: textRect.H,
+		compact:       compact,
+		startIdx:      startIdx,
+		endIdx:        endIdx,
+		showAbove:     startIdx > 0,
+		showBelow:     endIdx < len(s.results),
+	}
+}
+
+func (s *SearchOverlay) windowForAvailableRows(available int) (startIdx, endIdx int, showAbove, showBelow bool) {
+	if len(s.results) == 0 {
+		return 0, 0, false, false
+	}
+	if available <= 0 {
+		available = 10
+	}
+	rows := available
+	if rows > 10 {
+		rows = 10
+	}
+	for rows > 0 {
+		startIdx, endIdx = s.visibleWindowForRows(rows)
+		showAbove = startIdx > 0
+		showBelow = endIdx < len(s.results)
+		need := endIdx - startIdx
+		if showAbove {
+			need++
+		}
+		if showBelow {
+			need++
+		}
+		if need <= available {
+			return startIdx, endIdx, showAbove, showBelow
+		}
+		rows--
+	}
+	startIdx, endIdx = s.visibleWindowForRows(1)
+	return startIdx, endIdx, false, false
 }
 
 // Render renders the search overlay.
@@ -195,25 +306,33 @@ func (s *SearchOverlay) Render() string {
 	// warning red + diamond glyph so it never reads as a live Running/Ready dot.
 	statusLimit := lipgloss.NewStyle().Foreground(lipgloss.Color("#E06C75"))
 
-	content := titleStyle.Render("Search Sessions") + "\n\n"
-	content += "/ " + queryStyle.Render(s.query+"_") + "\n\n"
+	style := searchOverlayStyle()
+	plan := s.renderPlan(style)
+
+	var lines []string
+	lines = append(lines, truncateOverlayLine(titleStyle.Render("Search Sessions"), plan.contentWidth))
+	if !plan.compact {
+		lines = append(lines, "")
+	}
+	lines = append(lines, truncateOverlayLine("/ "+queryStyle.Render(s.query+"_"), plan.contentWidth))
+	if !plan.compact {
+		lines = append(lines, "")
+	}
 
 	if len(s.results) == 0 {
 		if s.query == "" {
-			content += normalStyle.Render("  Type to search...") + "\n"
+			lines = append(lines, truncateOverlayLine(normalStyle.Render("  Type to search..."), plan.contentWidth))
 		} else {
-			content += normalStyle.Render("  No matches found.") + "\n"
+			lines = append(lines, truncateOverlayLine(normalStyle.Render("  No matches found."), plan.contentWidth))
 		}
 	}
 
-	startIdx, endIdx := s.visibleWindow()
-
-	if startIdx > 0 {
-		content += normalStyle.Render(
-			fmt.Sprintf("    ... %d more above", startIdx)) + "\n"
+	if plan.showAbove {
+		lines = append(lines, truncateOverlayLine(normalStyle.Render(
+			fmt.Sprintf("    ... %d more above", plan.startIdx)), plan.contentWidth))
 	}
 
-	for i := startIdx; i < endIdx; i++ {
+	for i := plan.startIdx; i < plan.endIdx; i++ {
 		r := s.results[i]
 
 		// Status indicator. Two axes (#1195): a create in flight reads as loading;
@@ -251,30 +370,34 @@ func (s *SearchOverlay) Render() string {
 		}
 
 		if i == s.selectedIdx {
-			content += "  " + statusStr + " " + selectedStyle.Render("▸ "+r.Instance.Title)
+			line := "  " + statusStr + " " + selectedStyle.Render("▸ "+r.Instance.Title)
 			if branch != "" {
-				content += normalStyle.Render(" (" + branch + ")")
+				line += normalStyle.Render(" (" + branch + ")")
 			}
-			content += "\n"
+			lines = append(lines, truncateOverlayLine(line, plan.contentWidth))
 		} else {
-			content += "  " + statusStr + " " + normalStyle.Render("  "+label) + "\n"
+			lines = append(lines, truncateOverlayLine("  "+statusStr+" "+normalStyle.Render("  "+label), plan.contentWidth))
 		}
 	}
 
-	if endIdx < len(s.results) {
-		remaining := len(s.results) - endIdx
-		content += normalStyle.Render(
-			fmt.Sprintf("    ... and %d more below", remaining)) + "\n"
+	if plan.showBelow {
+		remaining := len(s.results) - plan.endIdx
+		lines = append(lines, truncateOverlayLine(normalStyle.Render(
+			fmt.Sprintf("    ... and %d more below", remaining)), plan.contentWidth))
 	}
 
-	content += "\n"
-	content += hintStyle.Render("↑/↓ navigate • enter select • esc close")
+	if !plan.compact {
+		lines = append(lines, "")
+	}
+	hint := "↑/↓ navigate • enter select • esc close"
+	if plan.compact || lipgloss.Width(hint) > plan.contentWidth {
+		hint = "↑/↓ nav • enter • esc close"
+	}
+	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), plan.contentWidth))
 
-	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.AccentColor).
-		Padding(1, 2).
-		Width(s.width)
-
-	return style.Render(content)
+	style = style.Width(plan.styleWidth)
+	if plan.styleHeight > 0 && len(lines) >= plan.contentHeight {
+		style = style.Height(plan.styleHeight)
+	}
+	return style.Render(strings.Join(lines, "\n"))
 }

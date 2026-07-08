@@ -163,7 +163,11 @@ func (h *HooksPane) String() string {
 	b.WriteString("\n\n")
 
 	if len(h.commands) == 0 && !h.adding {
-		b.WriteString(normalStyle.Render("  No hooks configured. Press Enter to focus, then n to add."))
+		msg := "  No hooks configured. Press Enter to focus, then n to add."
+		if h.width > 0 && lipgloss.Width(msg) > h.width {
+			msg = "  No hooks configured. Press n to add."
+		}
+		b.WriteString(normalStyle.Render(msg))
 		b.WriteString("\n")
 	}
 
@@ -189,11 +193,15 @@ func (h *HooksPane) String() string {
 		if h.editing || h.adding {
 			b.WriteString(hintStyle.Render("enter save • esc cancel"))
 		} else {
-			b.WriteString(hintStyle.Render("n add • enter edit • D delete • esc back"))
+			hint := "n add • enter edit • D delete • esc back"
+			if h.width > 0 && lipgloss.Width(hint) > h.width {
+				hint = "n add • enter • esc back"
+			}
+			b.WriteString(hintStyle.Render(hint))
 		}
 	} else {
 		b.WriteString(hintStyle.Render("enter to focus and edit hooks"))
 	}
 
-	return b.String()
+	return fitBlockToSize(b.String(), h.width, h.height, 1)
 }

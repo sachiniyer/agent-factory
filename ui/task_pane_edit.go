@@ -237,12 +237,16 @@ func (s *TaskPane) renderEditMode() string {
 		Background(AccentColor).
 		Foreground(lipgloss.Color("0"))
 
-	inputWidth := s.width - 6
-	if inputWidth < 20 {
-		inputWidth = 20
+	inputWidth := s.width - 9
+	if inputWidth < 1 {
+		inputWidth = 1
 	}
 	s.editName.Width = inputWidth
-	s.editPrompt.SetWidth(inputWidth)
+	promptWidth := s.width
+	if promptWidth < 1 {
+		promptWidth = 1
+	}
+	s.editPrompt.SetWidth(promptWidth)
 	if s.height > 0 {
 		s.editPrompt.SetHeight(s.height / 4)
 	}
@@ -370,14 +374,26 @@ func (s *TaskPane) renderEditMode() string {
 	markEnd(taskFocusSave)
 	b.WriteString("\n")
 	if s.creating {
-		b.WriteString(hintStyle.Render(fitLine("tab/shift+tab fields • enter create • esc cancel", s.width)))
+		hint := "tab/shift+tab fields • enter create • esc cancel"
+		if s.width > 0 && lipgloss.Width(hint) > s.width {
+			hint = "tab fields • enter • esc cancel"
+		}
+		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 	} else {
-		b.WriteString(hintStyle.Render(fitLine("tab/shift+tab fields • enter save", s.width)))
+		hint := "tab/shift+tab fields • enter save"
+		if s.width > 0 && lipgloss.Width(hint) > s.width {
+			hint = "tab fields • enter save"
+		}
+		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 		b.WriteString("\n")
-		b.WriteString(hintStyle.Render(fitLine("r run now • x toggle • D delete • esc list", s.width)))
+		actions := "r run now • x toggle • D delete • esc list"
+		if s.width > 0 && lipgloss.Width(actions) > s.width {
+			actions = "r run • x toggle • D del • esc list"
+		}
+		b.WriteString(hintStyle.Render(fitLine(actions, s.width)))
 	}
 
-	return s.clampFormToHeight(b.String(), focusStart, focusEnd)
+	return fitBlockToSize(s.clampFormToHeight(b.String(), focusStart, focusEnd), s.width, 0, 0)
 }
 
 // clampFormToHeight windows the rendered edit form to the pane height, keeping

@@ -449,23 +449,7 @@ func (m *home) relayout() {
 	m.statusBar.SetRect(lay.StatusBar)
 	m.alarmBanner.SetRect(lay.Banner)
 
-	m.layoutTextOverlay()
-	if m.selectionOverlay != nil {
-		m.selectionOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
-	}
-	m.hooksPane.SetSize(int(float32(m.termWidth)*0.6), int(float32(m.termHeight)*0.6))
-	// The task manager renders in the centered tasks overlay (stateTasks), so
-	// it sizes off the terminal like the hooks editor — never off the rail.
-	// Floor the width so the edit form's fields and key line stay readable at
-	// an 80-col terminal, capped under the window for the overlay frame.
-	taskPaneW := int(float32(m.termWidth) * 0.6)
-	if taskPaneW < 52 {
-		taskPaneW = 52
-	}
-	if lim := m.termWidth - 8; taskPaneW > lim {
-		taskPaneW = lim
-	}
-	m.automations.TaskPane().SetSize(taskPaneW, int(float32(m.termHeight)*0.6))
+	m.layoutModalOverlays()
 
 	// tmux sessions render at the pane content size. Panes divide the
 	// workspace evenly, so the first visible pane's inner size stands for all

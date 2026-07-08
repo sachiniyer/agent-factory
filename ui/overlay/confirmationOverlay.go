@@ -7,6 +7,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const (
+	confirmationOverlayHorizontalPadding = 2
+	confirmationOverlayVerticalPadding   = 1
+)
+
 // ConfirmationOverlay represents a confirmation dialog overlay
 type ConfirmationOverlay struct {
 	// Whether the overlay has been dismissed
@@ -15,6 +20,9 @@ type ConfirmationOverlay struct {
 	message string
 	// Width of the overlay
 	width int
+	// Maximum outer dimensions available for rendering.
+	maxWidth  int
+	maxHeight int
 	// Callback function to be called when the user confirms (presses 'y')
 	OnConfirm func()
 	// Callback function to be called when the user cancels (presses 'n' or 'esc')
@@ -71,14 +79,17 @@ func (c *ConfirmationOverlay) Render() string {
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(c.borderColor).
-		Padding(1, 2).
-		Width(c.width)
+		Padding(confirmationOverlayVerticalPadding, confirmationOverlayHorizontalPadding)
 
-	// Add the confirmation instructions
-	content := c.message + "\n\n" +
-		"Press " + lipgloss.NewStyle().Bold(true).Render(c.ConfirmKey) + " to confirm, " +
-		lipgloss.NewStyle().Bold(true).Render(c.CancelKey) + " or " +
-		lipgloss.NewStyle().Bold(true).Render("esc") + " to cancel"
+	fit := fitOverlayContent(c.width, 0, c.maxWidth, c.maxHeight, style)
+	if fit.W > 0 {
+		style = style.Width(fit.W)
+	}
+	textRect := overlayTextRect(fit, style)
+	content := c.visibleContent(textRect.W, textRect.H)
+	if fit.H > 0 && renderedLineCount(content) >= textRect.H {
+		style = style.Height(fit.H)
+	}
 
 	// Apply the border style and return
 	return style.Render(content)
@@ -89,7 +100,67 @@ func (c *ConfirmationOverlay) SetWidth(width int) {
 	c.width = width
 }
 
+// SetMaxSize sets the maximum outer size the rendered confirmation may occupy.
+func (c *ConfirmationOverlay) SetMaxSize(width, height int) {
+	c.maxWidth = width
+	c.maxHeight = height
+}
+
 // SetConfirmKey sets the key used to confirm the action
 func (c *ConfirmationOverlay) SetConfirmKey(key string) {
 	c.ConfirmKey = key
+}
+
+func (c *ConfirmationOverlay) visibleContent(width, height int) string {
+	body := wrapOverlayLines(c.message, width)
+	hint := wrapOverlayLines(c.instruction(false), width)
+	compactHint := wrapOverlayLines(c.instruction(true), width)
+	if height > 0 && (len(body)+1+len(hint) > height || len(hint) > 2) {
+		hint = compactHint
+	}
+	if height <= 0 {
+		return strings.Join(append(append([]string{}, body...), append([]string{""}, hint...)...), "\n")
+	}
+	if len(hint) >= height {
+		return strings.Join(hint[:height], "\n")
+	}
+
+	gap := 1
+	bodyLimit := height - len(hint) - gap
+	if bodyLimit < 1 {
+		gap = 0
+		bodyLimit = height - len(hint)
+	}
+	body = windowOverlayBody(body, bodyLimit, width)
+	lines := append([]string{}, body...)
+	if gap > 0 && len(lines) > 0 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, hint...)
+	return strings.Join(lines, "\n")
+}
+
+func (c *ConfirmationOverlay) instruction(compact bool) string {
+	bold := lipgloss.NewStyle().Bold(true).Render
+	if compact {
+		return bold(c.ConfirmKey) + " confirm • " +
+			bold(c.CancelKey) + "/" + bold("esc") + " cancel"
+	}
+	return "Press " + bold(c.ConfirmKey) + " to confirm, " +
+		bold(c.CancelKey) + " or " + bold("esc") + " to cancel"
+}
+
+func windowOverlayBody(lines []string, limit, width int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	if len(lines) <= limit {
+		return lines
+	}
+	if limit == 1 {
+		return []string{truncateOverlayLine("…", width)}
+	}
+	out := append([]string{}, lines[:limit-1]...)
+	out = append(out, truncateOverlayLine("…", width))
+	return out
 }
