@@ -49,8 +49,8 @@ func (m *home) selectionChanged() tea.Cmd {
 		// just in the explicit tab-jump handlers.
 		m.menu.SetActiveTab(m.store.ActiveTab())
 		m.maybeAutoOpenInitialPane(selected)
-		previewTab := 0
-		previewTabSpecific := false
+		previewTab := m.store.ActiveTab()
+		previewTabSpecific := previewTab != 0
 		if sel.IsTab {
 			previewTab = sel.TabIndex
 			previewTabSpecific = true
