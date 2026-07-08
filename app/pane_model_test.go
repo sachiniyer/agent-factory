@@ -1229,6 +1229,7 @@ func TestPane_EnterAttachTargetFollowsFocusContext(t *testing.T) {
 	h.focusRegion(layout.PaneRegion(p.ID()))
 	_, cmd := h.handleEnter()
 	require.NotNil(t, cmd, "the focused-pane attach must run")
+	_ = runAttachTransitionCmd(t, h, cmd)
 	assert.Equal(t, "handleEnter-pane", attachedLabel,
 		"focused-pane Enter must use the pane attach path")
 	assert.Equal(t, "alpha", attachedTitle,
@@ -1244,6 +1245,7 @@ func TestPane_EnterAttachTargetFollowsFocusContext(t *testing.T) {
 	h.focusRegion(layout.RegionTree)
 	_, cmd = h.handleEnter()
 	require.NotNil(t, cmd)
+	_ = runAttachTransitionCmd(t, h, cmd)
 	assert.Equal(t, "handleEnter-sidebar", attachedLabel)
 	assert.Equal(t, "beta", attachedTitle)
 	endDetachWatchdog()

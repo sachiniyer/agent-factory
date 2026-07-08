@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,43 @@ func runAttachOverlayCallback(t *testing.T, h *home, remote bool) tea.Cmd {
 		t.Fatalf("attachOverlayCallback did not return after detach")
 		return nil
 	}
+}
+
+func runAttachTransitionCmd(t *testing.T, h *home, cmd tea.Cmd) tea.Cmd {
+	t.Helper()
+	var postAttachCmd tea.Cmd
+	for _, msg := range drainCmd(t, cmd, time.Second) {
+		if begin, ok := msg.(beginAttachMsg); ok {
+			_, postAttachCmd = h.Update(begin)
+		}
+	}
+	return postAttachCmd
+}
+
+func TestBeginAttachTransitionClearsFrameBeforeAttachStarts(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+
+	attachStarted := false
+	cmd := h.beginAttachTransition(func() tea.Cmd {
+		attachStarted = true
+		return func() tea.Msg { return repaintAfterDetachMsg{} }
+	})
+
+	require.True(t, h.attachTransitioning, "attach transition must blank the next pre-attach frame")
+	frame := h.View()
+	require.Equal(t, 24, strings.Count(frame, "\n")+1,
+		"pre-attach blank frame must cover the full terminal height")
+	require.NotContains(t, frame, "help", "pre-attach frame must not repaint AF footer chrome")
+
+	begin, ok := cmd().(beginAttachMsg)
+	require.True(t, ok, "transition command must dispatch beginAttachMsg")
+
+	_, postAttachCmd := h.Update(begin)
+	require.True(t, attachStarted, "attach callback must start after the blank pre-attach frame")
+	require.NotNil(t, postAttachCmd)
+	_, isRepaint := postAttachCmd().(repaintAfterDetachMsg)
+	require.True(t, isRepaint, "beginAttachMsg must return the attach callback's cmd")
 }
 
 // TestAttachOverlayCallback_RemoteReassertsTerminalModes is the app half of

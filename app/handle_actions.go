@@ -681,14 +681,18 @@ func (m *home) attachSelected(selected *session.Instance) (tea.Model, tea.Cmd) {
 func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLabel, terminalLabel string) (tea.Model, tea.Cmd) {
 	if tabIdx != 0 {
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return attachOverlayCallbackFn(m, instance.Title, terminalLabel, "", instance.IsRemote(), func() (chan struct{}, error) {
-				return ui.AttachTerminalTab(instance, tabIdx)
+			return m.beginAttachTransition(func() tea.Cmd {
+				return attachOverlayCallbackFn(m, instance.Title, terminalLabel, "", instance.IsRemote(), func() (chan struct{}, error) {
+					return ui.AttachTerminalTab(instance, tabIdx)
+				})
 			})
 		})
 	}
 	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-		return attachOverlayCallbackFn(m, instance.Title, agentLabel, "", instance.IsRemote(), func() (chan struct{}, error) {
-			return m.store.AttachInstance(instance)
+		return m.beginAttachTransition(func() tea.Cmd {
+			return attachOverlayCallbackFn(m, instance.Title, agentLabel, "", instance.IsRemote(), func() (chan struct{}, error) {
+				return m.store.AttachInstance(instance)
+			})
 		})
 	})
 }

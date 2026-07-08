@@ -79,8 +79,10 @@ func TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift(t *testing.T) {
 	require.Same(t, b, h.sidebar.GetSelectedInstance(),
 		"precondition: selection must have drifted onto instance-b")
 
-	// Dismissing the overlay runs the deferred attach callback.
-	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEnter})
+	// Dismissing the overlay schedules the attach transition; run it so the
+	// deferred attach callback fires.
+	_, cmd := h.handleHelpState(tea.KeyMsg{Type: tea.KeyEnter})
+	_ = runAttachTransitionCmd(t, h, cmd)
 
 	require.Equal(t, []string{"instance-a"}, attachLog,
 		"attach must target the instance captured at Enter-press time, not the drifted selection")

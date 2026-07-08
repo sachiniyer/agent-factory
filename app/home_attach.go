@@ -43,6 +43,21 @@ const remoteDetachTerminalReassert = "" +
 // the real terminal in production, swappable so tests can capture it.
 var remoteDetachResetWriter io.Writer = os.Stdout
 
+type beginAttachMsg struct {
+	run func() tea.Cmd
+}
+
+// beginAttachTransition gives Bubble Tea one explicit blank/clear frame before
+// the existing blocking attach callback hands stdout to tmux. Direct writes from
+// the callback are too late for the renderer-owned status/footer diff; the final
+// TUI frame itself must contain no AF chrome (#1448).
+func (m *home) beginAttachTransition(run func() tea.Cmd) tea.Cmd {
+	m.attachTransitioning = true
+	return tea.Tick(20*time.Millisecond, func(time.Time) tea.Msg {
+		return beginAttachMsg{run: run}
+	})
+}
+
 // attachOverlayCallbackFn is the indirection handleEnter reaches
 // attachOverlayCallback through. Production points it at the method; tests swap
 // it to substitute a hermetic attach func (no real tmux client or remote
@@ -82,6 +97,7 @@ func (m *home) attachOverlayCallback(title, label, traceSuffix string, remote bo
 	detachTraceMark(label + "-onDismiss-entry" + traceSuffix)
 	ch, err := attach()
 	if err != nil {
+		m.attachTransitioning = false
 		log.ErrorLog.Printf("failed to attach (%s): %v", label+traceSuffix, err)
 		return nil
 	}
@@ -124,6 +140,7 @@ func (m *home) attachOverlayCallback(title, label, traceSuffix string, remote bo
 	go runStatusPollResume(resume, title, repoID, heartbeatExited)
 	detachStart := time.Now()
 	detachTraceMark(label + "-<-ch-unblocked" + traceSuffix)
+	m.attachTransitioning = false
 	m.state = stateDefault
 	// Arm the slow-detach watchdog: if the post-detach paint
 	// (panesRefreshedMsg) does not arrive within slowDetachThreshold, a

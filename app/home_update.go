@@ -187,6 +187,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd = tea.Batch(cmd, replayCmd)
 		}
 		return m, cmd
+	case beginAttachMsg:
+		if msg.run == nil {
+			m.attachTransitioning = false
+			return m, nil
+		}
+		return m, msg.run()
 	case startKillMsg:
 		// The row was already flipped to Deleting synchronously by the kill
 		// confirmation; dispatch the slow teardown off the event loop (#844).
