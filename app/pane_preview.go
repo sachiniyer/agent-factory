@@ -150,25 +150,25 @@ func (m *home) isPanePreviewSuppressed(original, target paneBinding) bool {
 	return samePaneBinding(suppressed.original, original)
 }
 
-func (m *home) commitPanePreviewReplace() tea.Cmd {
+func (m *home) commitPanePreviewReplace() (*store.OpenPane, tea.Cmd) {
 	txn := m.panePreviewTxn
 	if txn == nil {
-		return nil
+		return nil, nil
 	}
 	if err := previewCommitError(txn.target.instance); err != nil {
-		return m.handleError(err)
+		return nil, m.handleError(err)
 	}
 	owner := m.openPaneByID(txn.ownerPaneID)
 	if owner == nil {
 		m.cancelPanePreview(false)
-		return nil
+		return nil, nil
 	}
 	if existing := m.store.FindOpenPane(txn.target.instance, txn.target.tab); existing != nil && existing != owner {
 		m.cancelPanePreview(false)
 		m.store.TouchOpenPane(existing)
 		m.relayout()
 		m.focusRegion(layout.PaneRegion(existing.ID()))
-		return m.panesRefresh(m.attached.Load())
+		return existing, m.panesRefresh(m.attached.Load())
 	}
 	w := m.paneWindows[owner.ID()]
 	m.panePreviewTxn = nil
@@ -177,13 +177,13 @@ func (m *home) commitPanePreviewReplace() tea.Cmd {
 		w.InvalidateContent(txn.target.instance, txn.target.tab, "Loading pane...")
 	}
 	if !m.store.RebindOpenPane(owner, txn.target.instance, txn.target.tab) {
-		return nil
+		return nil, nil
 	}
 	m.store.TouchOpenPane(owner)
 	m.lastPaneCapture[owner.ID()] = time.Time{}
 	m.relayout()
 	m.focusRegion(layout.PaneRegion(owner.ID()))
-	return m.panesRefresh(m.attached.Load())
+	return owner, m.panesRefresh(m.attached.Load())
 }
 
 func (m *home) commitPanePreviewAlongside() tea.Cmd {
