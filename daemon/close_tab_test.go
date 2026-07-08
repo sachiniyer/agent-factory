@@ -3,11 +3,18 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // TestCloseTab_RemovesNonAgentTabAndPersists is the headline CloseTab test: a
@@ -208,6 +215,164 @@ func TestCloseTab_RejectsRemoteInstance(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "remote") {
 		t.Fatalf("expected remote-rejection error, got: %v", err)
+	}
+}
+
+func closeBlockingTabExec(alive map[string]bool, blockedKillName string, killStarted chan<- struct{}, releaseKill <-chan struct{}) (cmd_test.MockCmdExec, func(string) bool) {
+	var mu sync.Mutex
+	existing := map[string]bool{}
+	for name, ok := range alive {
+		existing[name] = ok
+	}
+	nameOf := func(cmd *exec.Cmd) string {
+		for i, a := range cmd.Args {
+			switch {
+			case (a == "-t" || a == "-s") && i+1 < len(cmd.Args):
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
+			case strings.HasPrefix(a, "-t="):
+				return strings.TrimPrefix(a, "-t=")
+			case strings.HasPrefix(a, "-s="):
+				return strings.TrimPrefix(a, "-s=")
+			}
+		}
+		return ""
+	}
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			name := nameOf(cmd)
+			switch {
+			case strings.Contains(s, "has-session"):
+				mu.Lock()
+				ok := existing[name]
+				mu.Unlock()
+				if ok {
+					return nil
+				}
+				return &tabNoSessionErr{}
+			case strings.Contains(s, "new-session"):
+				mu.Lock()
+				existing[name] = true
+				mu.Unlock()
+				return nil
+			case strings.Contains(s, "kill-session"):
+				if name == blockedKillName {
+					select {
+					case killStarted <- struct{}{}:
+					default:
+					}
+					<-releaseKill
+				}
+				mu.Lock()
+				delete(existing, name)
+				mu.Unlock()
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("content"), nil },
+	}
+	return exec, func(name string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return existing[name]
+	}
+}
+
+func startedLocalTabInstanceWithExec(t *testing.T, m *Manager, repoID, repoPath, title, agentName string, exec cmd_test.MockCmdExec) *session.Instance {
+	t.Helper()
+	pty := tabPtyFactory{t: t, cmdExec: exec}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, filepath.Join(t.TempDir(), "wt"), title,
+		title+"-branch", "", false, true)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoPath, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, exec))
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+
+	seedDiskInstance(t, repoID, title, repoPath)
+	m.mu.Lock()
+	m.instances[daemonInstanceKey(repoID, title)] = inst
+	m.mu.Unlock()
+	return inst
+}
+
+// TestCloseTab_SerializedWithInFlightKillDoesNotCloseStaleTab models the
+// #1434 race: a kill/archive holds the per-session op-lock while tearing down
+// tmux, and a concurrent CloseTab must wait instead of also closing the process
+// tab's tmux session. If the destructive op wins and removes the session while
+// CloseTab waits, CloseTab must reject the stale pointer and must not re-persist
+// it.
+func TestCloseTab_SerializedWithInFlightKillDoesNotCloseStaleTab(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	const title, agentName = "worker", "af_worker_agent"
+	processTmuxName := agentName + "__btop"
+	killStarted := make(chan struct{}, 1)
+	releaseKill := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseKill) }) })
+
+	exec, isAlive := closeBlockingTabExec(map[string]bool{agentName: true}, processTmuxName, killStarted, releaseKill)
+	inst := startedLocalTabInstanceWithExec(t, manager, repoID, repoPath, title, agentName, exec)
+	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"}); err != nil {
+		t.Fatalf("CreateTab: %v", err)
+	}
+	if !isAlive(processTmuxName) {
+		t.Fatalf("process tab %q was not spawned", processTmuxName)
+	}
+
+	key := daemonInstanceKey(repoID, title)
+	opLock := manager.opLockFor(key)
+	opLock.Lock()
+
+	type result struct {
+		name string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "btop"})
+		done <- result{name: name, err: err}
+	}()
+
+	select {
+	case <-killStarted:
+		releaseOnce.Do(func() { close(releaseKill) })
+		t.Fatal("CloseTab reached tmux kill-session while the teardown op-lock was held")
+	case res := <-done:
+		t.Fatalf("CloseTab returned while the teardown op-lock was held: name=%q err=%v", res.name, res.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if !isAlive(processTmuxName) {
+		t.Fatalf("CloseTab closed process tmux %q while teardown op-lock was held", processTmuxName)
+	}
+
+	manager.mu.Lock()
+	delete(manager.instances, key)
+	manager.mu.Unlock()
+	opLock.Unlock()
+
+	res := <-done
+	if res.err == nil {
+		t.Fatalf("CloseTab on a stale instance returned nil error")
+	}
+	if !strings.Contains(res.err.Error(), "changed state") {
+		t.Fatalf("CloseTab stale-instance error = %v, want changed-state error", res.err)
+	}
+	if res.name != "" {
+		t.Fatalf("CloseTab stale-instance name = %q, want empty", res.name)
+	}
+	if got := inst.TabCount(); got != 2 {
+		t.Fatalf("CloseTab mutated stale instance tabs: got %d, want 2", got)
+	}
+	if !isAlive(processTmuxName) {
+		t.Fatalf("CloseTab closed stale process tmux %q after kill won", processTmuxName)
 	}
 }
 
