@@ -131,10 +131,10 @@ var selectedDescStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
-// tabRowStyle renders an inactive tab child row in the same recede gray as the
-// branch line, so the tree's children read as secondary to the instance rows.
+// tabRowStyle renders tab child rows in the same primary foreground as the
+// Agent/active tab label (#1456). Selection still supplies the row highlight.
 var tabRowStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+	Foreground(InstanceTitleColor)
 
 // tabRowActiveStyle brightens the tab the content pane is showing (plus its
 // tmux-style "*" marker) so the active tab is findable without the tab bar.
