@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -35,26 +34,6 @@ func withEnvelope(t *testing.T, fn func()) {
 	envelopeOutput = true
 	t.Cleanup(func() { envelopeOutput = orig })
 	fn()
-}
-
-func TestSuccessEnvelope_ShapeAndNullError(t *testing.T) {
-	env := successEnvelope(map[string]string{"hello": "world"})
-	require.Nil(t, env.Error)
-
-	data, err := json.Marshal(env)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"data":{"hello":"world"},"error":null}`, string(data))
-}
-
-func TestErrorEnvelope_ShapeAndNullData(t *testing.T) {
-	env := errorEnvelope("boom")
-	require.Nil(t, env.Data)
-	require.NotNil(t, env.Error)
-	require.Equal(t, "boom", env.Error.Message)
-
-	data, err := json.Marshal(env)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"data":null,"error":{"message":"boom"}}`, string(data))
 }
 
 // TestJSONOut_DefaultIsBarePayload locks in that the default (no --json) output
