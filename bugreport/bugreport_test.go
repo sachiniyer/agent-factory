@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -118,6 +119,7 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	d := session.InstanceData{
 		ID:      "abc123",
 		Title:   "proprietary session name",
+		Prompt:  "confidential task instructions with internal codename Bluebird",
 		Path:    "/home/alice/Desktop/proj",
 		Branch:  "alice/fix",
 		Status:  session.Status(1),
@@ -150,6 +152,9 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 
 	if d.Title != redactedMarker {
 		t.Errorf("title not redacted: %q", d.Title)
+	}
+	if d.Prompt != redactedMarker {
+		t.Errorf("prompt not redacted: %q", d.Prompt)
 	}
 	if d.Tabs[0].Command != redactedMarker {
 		t.Errorf("tab command not redacted: %q", d.Tabs[0].Command)
@@ -282,25 +287,39 @@ func TestBuildEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// instances.json for one repo.
+	// instances.json for one repo. This row is limit-parked and carries the
+	// stashed task prompt that resume needs; the bug report must redact it.
 	instDir := filepath.Join(afHome, "instances", "testrepo")
 	if err := os.MkdirAll(instDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	instances := `[{
-      "id": "abc123",
-      "title": "my proprietary session",
-      "path": "` + home + `/Desktop/proj",
-      "branch": "feature",
-      "status": 1,
-      "program": "claude",
-      "created_at": "2026-01-01T00:00:00Z",
-      "worktree": {"repo_path": "` + home + `/Desktop/proj", "worktree_path": "` + home + `/Desktop/proj-fix", "base_commit_sha": "` + testSHA + `"},
-      "tabs": [{"name": "agent", "command": "claude --token sk-INSTANCESECRET0123456789"}],
-      "pr_info": {"number": 42, "state": "open", "title": "secret pr", "url": "https://x/pr/42"},
-      "remote_meta": {"key": "topsecretremote"}
-    }]`
-	writeFile(t, filepath.Join(instDir, "instances.json"), instances)
+	createdAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	instances, err := json.Marshal([]session.InstanceData{{
+		ID:        "abc123",
+		Title:     "my proprietary session",
+		Prompt:    "Project Nightingale task body with customer launch details",
+		Path:      filepath.Join(home, "Desktop/proj"),
+		Branch:    "feature",
+		Status:    session.Ready,
+		Liveness:  session.LiveLimitReached,
+		Program:   "claude",
+		CreatedAt: createdAt,
+		Worktree: session.GitWorktreeData{
+			RepoPath:      filepath.Join(home, "Desktop/proj"),
+			WorktreePath:  filepath.Join(home, "Desktop/proj-fix"),
+			BaseCommitSHA: testSHA,
+		},
+		Tabs: []session.TabData{{
+			Name:    "agent",
+			Command: "claude --token sk-INSTANCESECRET0123456789",
+		}},
+		PRInfo:     session.PRInfoData{Number: 42, State: "open", Title: "secret pr", URL: "https://x/pr/42"},
+		RemoteMeta: map[string]interface{}{"key": "topsecretremote"},
+	}})
+	if err != nil {
+		t.Fatalf("marshal instances: %v", err)
+	}
+	writeFile(t, filepath.Join(instDir, "instances.json"), string(instances))
 
 	// tasks.json
 	tasks := `[{"id": "t1", "name": "nightly", "prompt": "run with sk-TASKSECRET0123456789ABCD", "cron_expr": "0 9 * * *", "enabled": true, "project_path": "` + home + `/Desktop/proj", "program": "claude"}]`
@@ -349,6 +368,8 @@ func TestBuildEndToEnd(t *testing.T) {
 		"company-internal-credential-value",
 		"topsecretremote",
 		"my proprietary session",
+		"Project Nightingale",
+		"customer launch details",
 		"secret pr",
 		home, // raw home path (username-revealing) must never appear verbatim
 	}
