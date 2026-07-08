@@ -47,7 +47,7 @@ Everything is written to a single text file (default ~/af-bug-report-<ts>.txt)
 so you can read the whole thing in one scroll before attaching it.
 
 REDACTION IS BEST-EFFORT. Free-text and secret-bearing fields (session titles,
-task prompts, tab commands, remote metadata) are dropped; $HOME and your
+session prompts, task prompts, tab commands, remote metadata) are dropped; $HOME and your
 username are collapsed to ~ / [user]; and known credential shapes are scrubbed
 wherever they appear. Perfect redaction is impossible — open the file and
 review it before sharing it publicly.
