@@ -271,6 +271,7 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 	// Check if this help screen has been seen before
 	// Only show if we're showing the general help screen or the corresponding flag is not set
 	// in the seen bitmask.
+	m.replayHelpDismissKey = false
 	if alwaysShow || (m.appState.GetHelpScreensSeen()&flag) == 0 {
 		// Mark this help screen as seen and save state
 		if err := m.appState.SetHelpScreensSeen(m.appState.GetHelpScreensSeen() | flag); err != nil {
@@ -281,6 +282,9 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 		m.textOverlay = overlay.NewTextOverlay(content)
 		m.textOverlay.OnDismiss = onDismiss
+		if _, ok := helpType.(helpTypeInteractive); ok {
+			m.replayHelpDismissKey = true
+		}
 		m.layoutTextOverlay()
 		m.state = stateHelp
 		return m, nil
@@ -307,11 +311,16 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Any non-scroll key press will close the help overlay.
 	dismissCmd, shouldClose := m.textOverlay.HandleKeyPress(msg)
 	if shouldClose {
+		replayDismissKey := m.replayHelpDismissKey
+		m.replayHelpDismissKey = false
 		m.state = stateDefault
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
 		m.menu.SetState(ui.StateDefault)
+		if replayDismissKey {
+			dismissCmd = replayKeyAfterInteractiveHelpDismiss(dismissCmd, msg)
+		}
 		// dismissCmd forwards repaintAfterDetachMsg{} from the attach
 		// callback (#579) so the post-detach repaint doesn't have to wait
 		// for the next previewTickMsg cycle.
@@ -319,4 +328,19 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func replayKeyAfterInteractiveHelpDismiss(dismissCmd tea.Cmd, keyMsg tea.KeyMsg) tea.Cmd {
+	if dismissCmd == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		msg := dismissCmd()
+		if enter, ok := msg.(enterInteractiveMsg); ok {
+			enter.replayKey = keyMsg
+			enter.replay = true
+			return enter
+		}
+		return msg
+	}
 }
