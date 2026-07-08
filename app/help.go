@@ -282,6 +282,10 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 		m.textOverlay = overlay.NewTextOverlay(content)
 		m.textOverlay.OnDismiss = onDismiss
+		m.textOverlayDismissAnyKey = true
+		if _, ok := helpType.(helpTypeGeneral); ok {
+			m.textOverlayDismissAnyKey = false
+		}
 		if _, ok := helpType.(helpTypeInteractive); ok {
 			m.replayHelpDismissKey = true
 		}
@@ -299,20 +303,24 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 // handleHelpState handles key events when in help state
 func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftUp]) {
+	if isHelpScrollUpKey(msg) {
 		m.textOverlay.ScrollUp()
 		return m, nil
 	}
-	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftDown]) {
+	if isHelpScrollDownKey(msg) {
 		m.textOverlay.ScrollDown()
 		return m, nil
 	}
 
-	// Any non-scroll key press will close the help overlay.
+	if !m.textOverlayDismissAnyKey && !isHelpDismissKey(msg) {
+		return m, nil
+	}
+
 	dismissCmd, shouldClose := m.textOverlay.HandleKeyPress(msg)
 	if shouldClose {
 		replayDismissKey := m.replayHelpDismissKey
 		m.replayHelpDismissKey = false
+		m.textOverlayDismissAnyKey = false
 		m.state = stateDefault
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -328,6 +336,20 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func isHelpScrollUpKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyShiftUp || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftUp])
+}
+
+func isHelpScrollDownKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyShiftDown || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftDown])
+}
+
+func isHelpDismissKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyEsc ||
+		msg.Type == tea.KeyCtrlC ||
+		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyHelp])
 }
 
 func replayKeyAfterInteractiveHelpDismiss(dismissCmd tea.Cmd, keyMsg tea.KeyMsg) tea.Cmd {
