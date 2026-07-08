@@ -1,11 +1,14 @@
 package git
 
 import (
+	"bytes"
 	"errors"
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"testing"
 
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,15 +33,21 @@ func archiveTestWorktree(t *testing.T) (gw *GitWorktree, repoRoot, wtPath string
 	return gw, repoRoot, wtPath
 }
 
-// archiveTestWorktreeWithSubmodule creates a linked worktree whose submodule is
-// initialized. Git refuses to move this shape via `git worktree move`, so it
-// exercises the archive fallback path that raw-moves bytes and repairs gitdirs.
+// archiveTestWorktreeWithSubmodule creates a linked worktree whose nested
+// submodules are initialized. Git refuses to move this shape via `git worktree
+// move`, so it exercises the archive fallback path that raw-moves bytes and
+// repairs gitdirs at every submodule depth.
 func archiveTestWorktreeWithSubmodule(t *testing.T) (gw *GitWorktree, repoRoot, wtPath string) {
 	t.Helper()
 	sandboxHome(t)
 
+	nestedRoot := createGitRepo(t)
+	runGitInPlaceTest(t, nestedRoot, "commit", "--allow-empty", "-m", "nested submodule init")
+
 	subRoot := createGitRepo(t)
 	runGitInPlaceTest(t, subRoot, "commit", "--allow-empty", "-m", "submodule init")
+	runGitInPlaceTest(t, subRoot, "-c", "protocol.file.allow=always", "submodule", "add", nestedRoot, "nested/child")
+	runGitInPlaceTest(t, subRoot, "commit", "-m", "add nested submodule")
 
 	repoRoot = createGitRepo(t)
 	runGitInPlaceTest(t, repoRoot, "commit", "--allow-empty", "-m", "init")
@@ -51,6 +60,7 @@ func archiveTestWorktreeWithSubmodule(t *testing.T) (gw *GitWorktree, repoRoot, 
 
 	require.NoError(t, os.WriteFile(filepath.Join(wtPath, "dirty.txt"), []byte("uncommitted work"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(wtPath, "deps", "sub", "dirty-sub.txt"), []byte("submodule work"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(wtPath, "deps", "sub", "nested", "child", "dirty-nested.txt"), []byte("nested work"), 0644))
 
 	var err error
 	gw, err = NewGitWorktreeFromStorage(repoRoot, wtPath, "arch", "arch/branch", "", false, true)
@@ -95,6 +105,19 @@ func assertSubmoduleIntactAt(t *testing.T, path string) {
 	dirty, err := os.ReadFile(filepath.Join(subPath, "dirty-sub.txt"))
 	require.NoError(t, err, "submodule dirty file must survive the move")
 	assert.Equal(t, "submodule work", string(dirty))
+
+	nestedPath := filepath.Join(subPath, "nested", "child")
+	assert.Equal(t, nestedPath,
+		runGitInPlaceTest(t, nestedPath, "rev-parse", "--show-toplevel"),
+		"the nested submodule gitdir must point at this moved nested submodule")
+	assert.Contains(t,
+		runGitInPlaceTest(t, nestedPath, "status", "--short"),
+		"dirty-nested.txt",
+		"uncommitted nested submodule work must survive the move")
+
+	nestedDirty, err := os.ReadFile(filepath.Join(nestedPath, "dirty-nested.txt"))
+	require.NoError(t, err, "nested submodule dirty file must survive the move")
+	assert.Equal(t, "nested work", string(nestedDirty))
 }
 
 // TestMoveWorktree_FastPathPreservesTreeAndReregisters: the `git worktree move`
@@ -154,6 +177,39 @@ func TestRestoreWorktreeTo_FallbackRepairsSubmoduleGitdirs(t *testing.T) {
 	assert.False(t, pathExists(archiveDest), "the archive directory must be gone after restore")
 	assertLiveWorktreeAt(t, gw, restoreDest)
 	assertSubmoduleIntactAt(t, restoreDest)
+}
+
+// TestRestoreWorktreeTo_SubmoduleRepairFailureIsBestEffort proves the
+// submodule-gitdir repair cannot strand an archive/restore after the byte move
+// and superproject registration repair already succeeded. The worktree bytes and
+// git registration are at dest, so the only safe outcome is a warning plus nil.
+func TestRestoreWorktreeTo_SubmoduleRepairFailureIsBestEffort(t *testing.T) {
+	prevMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return errors.New("forced fast-path failure")
+	}
+	t.Cleanup(func() { worktreeMoveFast = prevMove })
+	prevSubmoduleRepair := worktreeRepairSubmodules
+	worktreeRepairSubmodules = func(*GitWorktree, string) error {
+		return errors.New("forced submodule repair failure")
+	}
+	t.Cleanup(func() { worktreeRepairSubmodules = prevSubmoduleRepair })
+	var warnings bytes.Buffer
+	origWarning := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
+	t.Cleanup(func() { aflog.WarningLog = origWarning })
+
+	gw, _, _ := archiveTestWorktree(t)
+	archiveDest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+	require.NoError(t, gw.MoveWorktree(archiveDest))
+	assertLiveWorktreeAt(t, gw, archiveDest)
+
+	restoreDest := filepath.Join(t.TempDir(), "restored", "repo-arch-restored")
+	require.NoError(t, gw.RestoreWorktreeTo(restoreDest))
+
+	assert.False(t, pathExists(archiveDest), "the archive directory must be gone after restore")
+	assertLiveWorktreeAt(t, gw, restoreDest)
+	assert.Contains(t, warnings.String(), "failed to repair submodule gitdirs")
 }
 
 // TestSiblingWorktreePath_DefaultCollisionAndSanitize: the restore-side path

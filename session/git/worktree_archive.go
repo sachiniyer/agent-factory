@@ -86,9 +86,14 @@ var worktreeRepair = func(g *GitWorktree, dest string) error {
 // directory move. `git worktree repair` fixes the superproject's .git pointer,
 // but submodule .git files can still contain relative gitdir paths computed
 // from the old worktree location. `git submodule absorbgitdirs` rewrites those
-// pointers without fetching or checking out new content.
+// pointers without fetching or checking out new content; the foreach pass makes
+// the repair explicit for initialized nested submodules on Git versions whose
+// top-level absorb does not recurse.
 var worktreeRepairSubmodules = func(g *GitWorktree, dest string) error {
-	_, err := g.runGitCommand(dest, "submodule", "absorbgitdirs")
+	if _, err := g.runGitCommand(dest, "submodule", "absorbgitdirs"); err != nil {
+		return err
+	}
+	_, err := g.runGitCommand(dest, "submodule", "foreach", "--recursive", "git submodule absorbgitdirs")
 	return err
 }
 
@@ -171,7 +176,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 			return fmt.Errorf("moved worktree to %s but failed to repair its git registration: %w", dest, rErr)
 		}
 		if sErr := worktreeRepairSubmodules(g, dest); sErr != nil {
-			return fmt.Errorf("moved worktree to %s but failed to repair submodule gitdirs: %w", dest, sErr)
+			log.WarningLog.Printf("moved worktree to %s but failed to repair submodule gitdirs; continuing because the worktree move and registration repair already succeeded: %v", dest, sErr)
 		}
 		return nil
 	}
