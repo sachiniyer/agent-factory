@@ -547,7 +547,12 @@ func killConfirmationWarning(wt string) string {
 // do; dead/transitional sessions keep their guard errors.
 func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	if m.panePreviewTxn != nil {
-		return m, m.commitPanePreviewReplace()
+		p, commitCmd := m.commitPanePreviewReplace()
+		if p == nil || liveSessionName(p.Instance(), p.Tab()) == "" {
+			return m, commitCmd
+		}
+		mod, interactCmd := m.enterPane(p)
+		return mod, tea.Batch(commitCmd, interactCmd)
 	}
 	if p := m.focusedOpenPane(); p != nil {
 		return m.enterPane(p)

@@ -211,6 +211,41 @@ func TestEnterFromTreeOpensPaneAndEntersInteractive(t *testing.T) {
 	require.Len(t, *fakes, 1)
 }
 
+func TestEnterOnPreviewedTabRowCommitsAndEntersInteractive(t *testing.T) {
+	h := newTestHome(t)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	inst := startedLocalInstance(t, "tab-row-live")
+	selectInstance(h, inst)
+	resizeHome(h, 120, 40)
+	fakes, sessions := stubLiveTermFactory(t)
+
+	pane := openTestPane(t, h, inst, 0)
+	require.Equal(t, 0, pane.Tab(), "precondition: the Agent tab is open")
+
+	h.focusRegion(layout.RegionTree)
+	pressNav(t, h, "j") // Agent tab row.
+	pressNav(t, h, "j") // Terminal tab row.
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab)
+	require.Equal(t, 1, sel.TabIndex)
+	require.NotNil(t, h.panePreviewTxn, "the terminal row must be a preview before Enter")
+	require.Equal(t, 0, pane.Tab(), "preview remains transient until Enter")
+
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	require.Nil(t, h.panePreviewTxn)
+	require.Equal(t, 1, pane.Tab(), "Enter commits the Terminal tab into the pane")
+	require.Equal(t, pane, h.focusedOpenPane(), "the committed pane keeps focus")
+	runHermeticCmd(t, h, cmd, 0)
+
+	require.True(t, h.interactive, "the same Enter must enter the committed tab")
+	require.Equal(t, pane, h.livePane)
+	require.Len(t, *fakes, 1)
+	require.Equal(t, inst.TabTmuxName(1), (*sessions)[0])
+
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
+	assert.Equal(t, []string{"Z"}, (*fakes)[0].keys, "typing after one Enter must route into the tab")
+}
+
 // TestSecondEnterTargetsCurrentSelectionNotStalePane is the #1233/#1236 P1
 // wrong-target-input regression: enter interactive on instance A, Ctrl-] to
 // nav, select a DIFFERENT instance B through the real tree-nav keys, Enter
@@ -255,19 +290,15 @@ func TestSecondEnterTargetsCurrentSelectionNotStalePane(t *testing.T) {
 	// 4. Enter again commits the active sidebar preview: the current
 	// selection B replaces the focused pane binding, rather than re-entering
 	// stale A (#1321 commit-replace preserving the #1233/#1236 target rule).
-	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	// The same Enter also enters the committed pane (#1455).
+	_, cmd = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 	paneB := h.focusedOpenPane()
 	require.NotNil(t, paneB, "second Enter must leave a focused pane")
 	require.Same(t, paneA, paneB, "commit-replace keeps the owner pane")
 	require.Equal(t, instB, paneB.Instance(), "the committed pane must belong to selected B")
-	require.False(t, h.interactive, "commit-replace does not also enter interactive mode")
-
-	// 5. With no preview active now, Enter on the focused pane enters B.
-	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
-	_, cmd = h.Update(enterInteractiveMsg{pane: paneB})
 	runHermeticCmd(t, h, cmd, 0)
 
-	require.True(t, h.interactive, "third Enter must enter interactive mode on committed B")
+	require.True(t, h.interactive, "second Enter must enter interactive mode on committed B")
 	assert.Equal(t, instB, h.livePane.Instance(),
 		"input must bind to the committed instance B, not the previously-interacted A")
 	assert.Equal(t, paneB, h.livePane, "the live pane must be B's pane")
