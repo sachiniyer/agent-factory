@@ -13,7 +13,7 @@ import (
 )
 
 // Redaction markers. `redactedMarker` replaces a whole free-text field the
-// policy always drops (session titles, task prompts, tab commands);
+// policy always drops (session titles, session prompts, task prompts, tab commands);
 // `secretMarker` replaces a substring a best-effort pattern flagged as a
 // credential inside otherwise-kept text (log lines, config values).
 const (
