@@ -14,6 +14,7 @@ import (
 )
 
 func appendInstanceData(repoID string, data session.InstanceData) error {
+	data = data.ForStorage()
 	return config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
 		var existing []session.InstanceData
 		if err := json.Unmarshal(raw, &existing); err != nil {
@@ -50,6 +51,7 @@ func appendInstanceData(repoID string, data session.InstanceData) error {
 // no record with that title exists (the caller already resolved a live
 // instance, so a missing disk record means storage drifted out from under us).
 func persistInstanceData(repoID string, data session.InstanceData) error {
+	data = data.ForStorage()
 	found := false
 	if err := config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
 		var existing []session.InstanceData

@@ -28,6 +28,12 @@ type InstanceData struct {
 	// no `liveness` key and decode to LivenessUnset, signaling FromInstanceData
 	// to fall back to the legacy `status` int (rollforward).
 	Liveness Liveness `json:"liveness,omitempty"`
+	// InFlightOp is the transient operation axis (#1195/#1436) carried by the
+	// daemon Snapshot so secondary TUIs can reconstruct non-round-trippable ops
+	// exactly (OpArchiving vs OpKilling; OpRestoring vs plain Lost). It is scrubbed
+	// at disk write/load boundaries: in-flight operations are process-local and
+	// must not be resurrected after a daemon restart.
+	InFlightOp InFlightOp `json:"in_flight_op,omitempty"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and
@@ -57,6 +63,17 @@ type InstanceData struct {
 	PRInfo            PRInfoData             `json:"pr_info,omitempty"`
 	BackendType       string                 `json:"backend_type,omitempty"`
 	RemoteMeta        map[string]interface{} `json:"remote_meta,omitempty"`
+}
+
+// ForStorage returns data suitable for instances.json. InstanceData is also the
+// daemon Snapshot payload, so it can carry transient in-flight operation state;
+// disk persistence must not.
+func (d InstanceData) ForStorage() InstanceData {
+	lv := livenessFromData(d)
+	d.Status = composeStatus(lv, OpNone)
+	d.Liveness = lv
+	d.InFlightOp = OpNone
+	return d
 }
 
 // TabData is the serializable form of a session.Tab. The full list is persisted
@@ -194,7 +211,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 			root = inst.Path
 		}
 		rid := config.RepoIDFromRoot(root)
-		grouped[rid] = append(grouped[rid], inst.ToInstanceData())
+		grouped[rid] = append(grouped[rid], inst.ToInstanceData().ForStorage())
 	}
 
 	for rid, group := range grouped {
@@ -254,6 +271,7 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 		// immediately, not just after the next save rewrites the file.
 		instancesData = dedupeInstanceData(instancesData)
 		for _, data := range instancesData {
+			data = data.ForStorage()
 			instance, err := FromInstanceData(data)
 			if err != nil {
 				// Instance's tmux session or worktree may have been

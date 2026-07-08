@@ -18,14 +18,13 @@ func (i *Instance) ToInstanceData() InstanceData {
 		Title:  i.Title,
 		Path:   i.Path,
 		Branch: i.Branch,
-		// Persist BOTH axes: Liveness is the new canonical value, Status the
-		// legacy int kept for one release so a binary rolled back to before
-		// #1195 still reads a sensible status (and as the read-fallback source
-		// for records this build wrote before the split). SaveInstances skips
-		// transient (Loading/Deleting) rows, so a persisted Status is always a
-		// settled liveness value.
+		// Serialize the two-axis state plus the legacy composed Status. Liveness is
+		// the daemon truth; InFlightOp rides daemon snapshots so secondary TUIs can
+		// cold-start into archive/restore operations without lossy Status
+		// reconstruction (#1436). Disk writers scrub InFlightOp before persistence.
 		Status:     i.statusLocked(),
 		Liveness:   i.liveness,
+		InFlightOp: i.inFlightOp,
 		Height:     i.Height,
 		Width:      i.Width,
 		CreatedAt:  i.CreatedAt,
@@ -121,11 +120,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// build restorable after an upgrade. A tombstoned record keeps its (Lost)
 	// status; the daemon finishes its teardown rather than restoring it.
 	liveness := livenessFromData(data)
-	// Resolve the in-flight-op axis from the legacy status. A persisted record
-	// is always settled (SaveInstances skips transients), but a SNAPSHOT of a
-	// transient instance carries Loading/Deleting, which buildInstanceFromSnapshot
-	// must reconstruct so the rebuilt row composes to the identical Status.
-	inFlightOp := opForStatus(data.Status)
+	// Resolve the in-flight-op axis from the snapshot payload, falling back to
+	// the legacy status for old daemons/records. A persisted record is always
+	// settled (disk writers scrub this field and SaveInstances skips
+	// Loading/Deleting), but a SNAPSHOT can catch archive/restore in progress and
+	// must round-trip the exact op (#1436).
+	inFlightOp := inFlightOpFromData(data)
 	instance := &Instance{
 		ID:           data.ID,
 		Title:        data.Title,

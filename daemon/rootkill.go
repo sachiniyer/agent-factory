@@ -124,6 +124,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 }
 
 func persistInstanceDataByStableID(repoID string, data session.InstanceData) error {
+	data = data.ForStorage()
 	found := false
 	sameTitleDifferentID := false
 	if err := config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {

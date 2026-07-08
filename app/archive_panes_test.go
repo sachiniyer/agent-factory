@@ -91,7 +91,9 @@ func TestRestore_LeavesNoStalePaneBinding(t *testing.T) {
 
 	title := inst.Title
 	data := inst.ToInstanceData()
+	data.Status = session.Running
 	data.Liveness = session.LiveRunning
+	data.InFlightOp = session.OpNone
 	h.reconcileSnapshot([]session.InstanceData{data})
 
 	// The restore rebuilt the row: re-resolve by title (the pointer changed) and

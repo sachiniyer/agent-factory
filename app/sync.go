@@ -560,11 +560,14 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// liveness) and the TUI renders it. Applied UNCONDITIONALLY — daemon liveness
 	// always wins — which is what makes #1187 structurally impossible: a
 	// locally-archiving row still receives the terminal Archived instead of being
-	// stranded. The local in-flight op is a separate axis the daemon snapshot
-	// never carries, so this can never clobber an optimistic kill/archive marker.
+	// stranded. The op axis is reconciled separately below so a liveness write
+	// never clobbers a local optimistic marker by accident.
 	lv := snapshotLiveness(inst.GetLiveness(), d)
 	if inst.GetLiveness() != lv {
 		_ = inst.Transition(session.ObserveLiveness(lv))
+		changed = true
+	}
+	if reconcileSnapshotOp(inst, d.InFlightOp, lv) {
 		changed = true
 	}
 	// Mirror the usage-limit reset time (#1146) alongside the liveness. It's
@@ -580,13 +583,6 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 			inst.SetLimitResetAt(d.LimitResetAt)
 			changed = true
 		}
-	}
-	// Clear a local optimistic op once the daemon liveness confirms its outcome.
-	// An archive settles at Archived; a kill's op is cleared by row removal, not
-	// here, so it survives liveness updates until the daemon drops the record.
-	if inst.GetInFlightOp() == session.OpArchiving && lv == session.LiveArchived {
-		_ = inst.Transition(session.ClearOp())
-		changed = true
 	}
 	// Remote instances' tabs come from hook config (terminal_cmd), not the
 	// snapshot, so the backend owns them — skip the tab reconcile.
@@ -616,6 +612,62 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		changed = true
 	}
 	return changed
+}
+
+// reconcileSnapshotOp mirrors the daemon snapshot's operation axis while
+// preserving local optimistic operations until the daemon liveness confirms an
+// outcome. Snapshot ops are transient but authoritative for daemon-side
+// archive/restore windows (#1436); terminal snapshots carry OpNone and clear
+// stale overlays through the Transition chokepoint.
+func reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
+	if op != session.OpNone {
+		return adoptSnapshotOp(inst, op, lv)
+	}
+
+	switch inst.GetInFlightOp() {
+	case session.OpArchiving, session.OpKilling:
+		if lv == session.LiveArchived || lv == session.LiveLost {
+			_ = inst.Transition(session.ClearOp())
+			return true
+		}
+	case session.OpRestoring:
+		if lv != session.LiveArchived {
+			_ = inst.Transition(session.ClearOp())
+			return true
+		}
+	}
+	return false
+}
+
+func adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
+	if inst.GetInFlightOp() == op {
+		return false
+	}
+	if inst.GetInFlightOp() != session.OpNone {
+		_ = inst.Transition(session.ClearOp())
+	}
+
+	var err error
+	switch op {
+	case session.OpCreating:
+		err = inst.Transition(session.BeginCreate())
+	case session.OpKilling:
+		err = inst.Transition(session.BeginKill())
+	case session.OpArchiving:
+		if lv == session.LiveArchived {
+			return true
+		}
+		err = inst.Transition(session.BeginArchive())
+	case session.OpRestoring:
+		err = inst.Transition(session.MarkRestoring())
+	default:
+		return false
+	}
+	if err != nil {
+		log.WarningLog.Printf("failed to adopt snapshot op %v for %q: %v", op, inst.Title, err)
+		return false
+	}
+	return true
 }
 
 // prInfoFromData rebuilds a *git.PRInfo from its serialized form, returning nil

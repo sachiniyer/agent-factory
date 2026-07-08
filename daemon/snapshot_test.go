@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestManagerSnapshot_RepoScopedAndOrdered verifies Manager.Snapshot returns the
@@ -53,6 +54,33 @@ func TestManagerSnapshot_RepoScopedAndOrdered(t *testing.T) {
 	sort.Strings(sortedAll)
 	if !equalStrings(sortedAll, []string{"a1", "a2", "b1"}) {
 		t.Fatalf("Snapshot(\"\") = %v, want all three sessions", gotAll)
+	}
+}
+
+func TestManagerSnapshot_CarriesInFlightOp(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	m, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	inst := startedLocalTabInstance(t, m, repo.ID, repoPath, "worker", "af_worker_agent")
+	inst.SetInFlightOpForTest(session.OpArchiving)
+
+	data := m.Snapshot(repo.ID)
+	if len(data) != 1 {
+		t.Fatalf("Snapshot returned %d instances, want 1", len(data))
+	}
+	if data[0].InFlightOp != session.OpArchiving {
+		t.Fatalf("snapshot in-flight op = %v, want OpArchiving", data[0].InFlightOp)
+	}
+	if data[0].Status != session.Deleting {
+		t.Fatalf("snapshot legacy status = %v, want Deleting", data[0].Status)
 	}
 }
 

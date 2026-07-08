@@ -54,10 +54,10 @@ const (
 )
 
 // InFlightOp is the client/executor-owned axis: the operation a client (or the
-// daemon executor) is mid-way through, overlaid on the liveness. It is NEVER
-// serialized and NEVER carried in the daemon snapshot — a transient overlay that
-// clears when the liveness confirms the op's outcome. A separate field for it is
-// what will retire the reconstruct-at-read apparatus (1d).
+// daemon executor) is mid-way through, overlaid on the liveness. It is carried
+// in daemon Snapshots so read-only TUIs can cold-start into the exact
+// archive/restore operation, but disk writers scrub it before persistence: a
+// transient overlay must not survive a daemon restart.
 type InFlightOp int
 
 const (
@@ -142,6 +142,16 @@ func opForStatus(s Status) InFlightOp {
 		return OpKilling
 	}
 	return OpNone
+}
+
+// inFlightOpFromData resolves the operation axis a persisted or snapshot record
+// should take. New daemon snapshots carry the exact op; older payloads and disk
+// records omit it and fall back to the legacy composed Status.
+func inFlightOpFromData(data InstanceData) InFlightOp {
+	if data.InFlightOp != OpNone {
+		return data.InFlightOp
+	}
+	return opForStatus(data.Status)
 }
 
 // statusLocked composes the legacy Status under the caller-held mutex. It is the
