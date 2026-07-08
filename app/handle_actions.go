@@ -154,9 +154,9 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	// Runs synchronously in the confirmation overlay's OnConfirm, on the
 	// event loop — keep it fast. Raising the optimistic OpKilling op here (not in
 	// the background cmd) guarantees the row is visibly deleting and kill/attach
-	// are fenced off before any other event can be processed. The op is a local
-	// overlay the daemon snapshot never carries (#1195), so it composes to
-	// Deleting for rendering and can never be clobbered by a reconcile.
+	// are fenced off before any other event can be processed. OpKilling is a local
+	// overlay (the daemon does not emit a kill op; it drops the record), so it
+	// composes to Deleting for rendering and survives non-terminal reconciles.
 	killAction := func() tea.Msg {
 		for _, inst := range m.store.GetInstances() {
 			if inst.Title == selectedTitle {

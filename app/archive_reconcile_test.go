@@ -27,18 +27,18 @@ func storeArchivingInstance(t *testing.T, h *home, title string) *session.Instan
 // #1195 regression gate. The old bug: a locally-archiving row was skipped by
 // isTransientStatus on every reconcile, so a poll that caught the archive fence
 // stranded it on "Tearing down session…" forever. Under the two-axis model the
-// daemon liveness is applied UNCONDITIONALLY (it never carries the op), so the row
-// can never be stranded: a mid-archive snapshot leaves it archiving, and the
-// terminal Archived always lands and clears the op. This test makes the failure
-// structurally impossible to reproduce.
+// daemon liveness is applied UNCONDITIONALLY and the op is reconciled on its own
+// axis, so the row can never be stranded: a mid-archive snapshot leaves it
+// archiving, and the terminal Archived always lands and clears the op. This test
+// makes the failure structurally impossible to reproduce.
 func TestReconcile_ArchivingRowReachesArchived(t *testing.T) {
 	h := newTestHome(t)
 	inst := storeArchivingInstance(t, h, "worker")
 	require.Equal(t, session.Deleting, inst.GetStatus(), "an archiving row renders as Deleting")
 
 	// A poll lands INSIDE the archive fence: the daemon still reports the live
-	// liveness (its OpArchiving fence is not serialized). The row must keep
-	// showing archiving — applied liveness, op preserved — never stranded.
+	// liveness and the archive op. The row must keep showing archiving — applied
+	// liveness, op preserved — never stranded.
 	mid := inst.ToInstanceData()
 	mid.Liveness = session.LiveRunning
 	h.reconcileSnapshot([]session.InstanceData{mid})
@@ -48,11 +48,123 @@ func TestReconcile_ArchivingRowReachesArchived(t *testing.T) {
 	// The daemon completes the archive and reports the terminal liveness. The row
 	// MUST reach Archived and clear its op — the strand the old code allowed.
 	done := inst.ToInstanceData()
+	done.Status = session.Archived
 	done.Liveness = session.LiveArchived
+	done.InFlightOp = session.OpNone
 	h.reconcileSnapshot([]session.InstanceData{done})
 	require.Equal(t, session.OpNone, inst.GetInFlightOp(), "the settled Archived liveness clears the op")
 	require.Equal(t, session.Archived, inst.GetStatus(),
 		"a daemon-confirmed Archived must always land — never stranded on Tearing down")
+}
+
+// TestReconcile_SecondaryColdStartMidArchiveReachesArchived is the #1436
+// secondary-TUI regression. A non-primary TUI can cold-start while another
+// client/CLI has the daemon mid-archive. The snapshot must carry OpArchiving
+// explicitly; reconstructing it from Status=Deleting turns it into OpKilling,
+// and the later LiveArchived snapshot never clears the stale Deleting overlay.
+func TestReconcile_SecondaryColdStartMidArchiveReachesArchived(t *testing.T) {
+	h := newTestHome(t)
+
+	daemonInst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "worker",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+	daemonInst.SetBackend(session.NewFakeBackend())
+	daemonInst.SetStartedForTest(true)
+	daemonInst.SetStatusForTest(session.Running)
+	daemonInst.SetInFlightOpForTest(session.OpArchiving)
+
+	mid := daemonInst.ToInstanceData()
+	require.Equal(t, session.Deleting, mid.Status, "archive fence still composes to the legacy Deleting value")
+	require.Equal(t, session.LiveRunning, mid.Liveness)
+	require.Equal(t, session.OpArchiving, mid.InFlightOp,
+		"the daemon snapshot must preserve archiving, not only legacy Deleting")
+
+	restore := SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title:   d.Title,
+			Path:    t.TempDir(),
+			Program: "test",
+		})
+		require.NoError(t, err)
+		inst.ID = d.ID
+		inst.CreatedAt = d.CreatedAt
+		inst.SetBackend(session.NewFakeBackend())
+		inst.SetStartedForTest(true)
+		_ = inst.Transition(session.ObserveLiveness(snapshotLiveness(inst.GetLiveness(), d)))
+		inst.SetInFlightOpForTest(d.InFlightOp)
+		return inst, nil
+	})
+	defer restore()
+
+	h.reconcileSnapshot([]session.InstanceData{mid})
+	projection := h.store.GetInstanceByTitle("worker")
+	require.NotNil(t, projection)
+	require.Equal(t, session.OpArchiving, projection.GetInFlightOp(),
+		"cold-started projection must adopt the daemon's exact archive op")
+	require.Equal(t, session.Deleting, projection.GetStatus())
+
+	done := mid
+	done.Status = session.Archived
+	done.Liveness = session.LiveArchived
+	done.InFlightOp = session.OpNone
+	h.reconcileSnapshot([]session.InstanceData{done})
+
+	require.Same(t, projection, h.store.GetInstanceByTitle("worker"),
+		"same-session archive completion updates in place")
+	require.Equal(t, session.OpNone, projection.GetInFlightOp(),
+		"the settled Archived liveness clears the archive op")
+	require.Equal(t, session.Archived, projection.GetStatus(),
+		"a secondary TUI must converge to Archived instead of staying Deleting")
+}
+
+// TestReconcile_StaleDeletingProjectionClearsOnArchivedSnapshot covers the
+// already-stranded half of #1436: a secondary TUI that reconstructed
+// Status=Deleting as OpKilling must still converge once the daemon reports the
+// terminal Archived liveness.
+func TestReconcile_StaleDeletingProjectionClearsOnArchivedSnapshot(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "worker")
+	inst.SetInFlightOpForTest(session.OpKilling)
+	h.store.AddInstance(inst)
+	require.Equal(t, session.Deleting, inst.GetStatus(), "precondition: stale projection is stuck as Deleting")
+
+	data := inst.ToInstanceData()
+	data.Status = session.Archived
+	data.Liveness = session.LiveArchived
+	data.InFlightOp = session.OpNone
+
+	h.reconcileSnapshot([]session.InstanceData{data})
+
+	require.Equal(t, session.OpNone, inst.GetInFlightOp())
+	require.Equal(t, session.Archived, inst.GetStatus(),
+		"terminal daemon Archived must clear a stale Deleting overlay")
+}
+
+// TestReconcile_StaleRestoringProjectionClearsOnLiveSnapshot is the restore-side
+// #1436 convergence check. A secondary row that is visibly Lost only because of
+// OpRestoring must clear that overlay when the daemon reports the restored live
+// state.
+func TestReconcile_StaleRestoringProjectionClearsOnLiveSnapshot(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "worker")
+	inst.SetStatusForTest(session.Lost)
+	inst.SetInFlightOpForTest(session.OpRestoring)
+	h.store.AddInstance(inst)
+	require.Equal(t, session.Lost, inst.GetStatus(), "precondition: restoring overlay composes to Lost")
+
+	data := inst.ToInstanceData()
+	data.Status = session.Running
+	data.Liveness = session.LiveRunning
+	data.InFlightOp = session.OpNone
+
+	h.reconcileSnapshot([]session.InstanceData{data})
+
+	require.Equal(t, session.OpNone, inst.GetInFlightOp())
+	require.Equal(t, session.Running, inst.GetStatus(),
+		"terminal daemon Running must clear a stale restore overlay")
 }
 
 // TestReconcile_OptimisticKillPreservedForNonTerminal guards the kill UX: a
@@ -80,6 +192,7 @@ func TestReconcile_OptimisticKillPreservedForNonTerminal(t *testing.T) {
 
 			data := inst.ToInstanceData()
 			data.Liveness = tc.liveness
+			data.InFlightOp = session.OpNone
 			h.reconcileSnapshot([]session.InstanceData{data})
 
 			require.Equal(t, session.OpKilling, inst.GetInFlightOp())
@@ -122,7 +235,9 @@ func TestReconcile_ArchivedToLiveRebuildsStarted(t *testing.T) {
 
 	// The daemon reports the session restored (worktree back, agent re-spawned).
 	data := archived.ToInstanceData()
+	data.Status = session.Running
 	data.Liveness = session.LiveRunning
+	data.InFlightOp = session.OpNone
 	h.reconcileSnapshot([]session.InstanceData{data})
 
 	require.Equal(t, 1, built, "an archived→live transition must rebuild (re-Start), not update in place")
@@ -150,7 +265,9 @@ func TestReconcile_LostToLiveStaysInPlace(t *testing.T) {
 	defer restore()
 
 	data := inst.ToInstanceData()
+	data.Status = session.Running
 	data.Liveness = session.LiveRunning
+	data.InFlightOp = session.OpNone
 	h.reconcileSnapshot([]session.InstanceData{data})
 
 	require.Same(t, inst, h.store.GetInstanceByTitle("worker"), "same pointer preserved (in-place update)")
@@ -242,7 +359,9 @@ func TestRestore_EagerRehomeDoesNotBypassRebuild(t *testing.T) {
 
 	// The daemon now reports the session restored (worktree back, agent re-spawned).
 	data := archived.ToInstanceData()
+	data.Status = session.Running
 	data.Liveness = session.LiveRunning
+	data.InFlightOp = session.OpNone
 	h.reconcileSnapshot([]session.InstanceData{data})
 
 	require.Equal(t, 1, built,

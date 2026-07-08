@@ -95,10 +95,11 @@ type Instance struct {
 	Branch string
 	// liveness and inFlightOp are the two orthogonal axes of session state
 	// (#1195): liveness is the daemon-owned health of the backing session
-	// (Running/Ready/Lost/Archived/…), inFlightOp is the transient, never-
-	// persisted client operation overlaid on it (Creating/Killing/Archiving/
-	// Restoring). The legacy Status enum is derived from them via the
-	// GetStatus/SetStatus shim in liveness.go. Both are mutex-protected.
+	// (Running/Ready/Lost/Archived/…), inFlightOp is the transient client
+	// operation overlaid on it (Creating/Killing/Archiving/Restoring). Snapshots
+	// carry the op so secondary TUIs converge; disk persistence strips it. The
+	// legacy Status enum is derived from them via the GetStatus/SetStatus shim in
+	// liveness.go. Both are mutex-protected.
 	liveness   Liveness
 	inFlightOp InFlightOp
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in

@@ -84,3 +84,53 @@ func TestLivenessPersistenceRollforward(t *testing.T) {
 	assert.Equal(t, LiveLost, LivenessForStatus(legacy.Status),
 		"the fallback maps the legacy status onto the liveness axis")
 }
+
+// TestSnapshotInFlightOpRoundTrips guards #1436: a daemon Snapshot must carry
+// the transient operation axis explicitly. The legacy Status value is lossy
+// (OpArchiving and OpKilling both compose to Deleting; OpRestoring composes to
+// Lost), so secondary TUIs must not reconstruct the op from Status alone.
+func TestSnapshotInFlightOpRoundTrips(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		op     InFlightOp
+		status Status
+	}{
+		{name: "archiving", op: OpArchiving, status: Deleting},
+		{name: "restoring", op: OpRestoring, status: Lost},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			i := &Instance{}
+			i.SetStatusForTest(Running)
+			i.SetInFlightOpForTest(tc.op)
+
+			data := i.ToInstanceData()
+			require.Equal(t, tc.status, data.Status, "legacy status still carries the composed value")
+			require.Equal(t, tc.op, data.InFlightOp, "snapshot data must preserve the non-round-trippable op")
+
+			raw, err := json.Marshal(data)
+			require.NoError(t, err)
+			assert.Contains(t, string(raw), `"in_flight_op":`, "snapshots encode the op axis")
+
+			var back InstanceData
+			require.NoError(t, json.Unmarshal(raw, &back))
+			require.Equal(t, tc.op, inFlightOpFromData(back))
+		})
+	}
+
+	legacy := InstanceData{Status: Deleting}
+	require.Equal(t, OpKilling, inFlightOpFromData(legacy),
+		"legacy data without in_flight_op keeps the old Deleting fallback")
+}
+
+func TestInFlightOpStrippedFromStorageRecords(t *testing.T) {
+	data := InstanceData{Status: Deleting, Liveness: LiveRunning, InFlightOp: OpArchiving}
+	stored := data.ForStorage()
+	require.Equal(t, OpNone, stored.InFlightOp)
+	require.Equal(t, Running, stored.Status,
+		"storage must persist the settled liveness status, not a transient overlay")
+
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "in_flight_op",
+		"instances.json must not persist transient operations")
+}

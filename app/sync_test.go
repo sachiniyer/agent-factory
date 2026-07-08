@@ -115,9 +115,10 @@ func TestReconcileSnapshot_MirrorsStatusOntoExistingRow(t *testing.T) {
 
 // TestReconcileSnapshot_LeavesTransientOpAlone guards the #1195 structural
 // property: a row the TUI owns mid-kill (local OpKilling) keeps its op through a
-// reconcile even though the daemon liveness is applied. The daemon snapshot never
-// carries the op, and a liveness write can't touch the separate op axis, so the
-// composed status stays Deleting — replacing the old isTransientStatus skip.
+// reconcile even though the daemon liveness is applied. A terminal snapshot
+// clears kill by removing the row; a non-terminal liveness write can't touch the
+// separate local op axis, so the composed status stays Deleting — replacing the
+// old isTransientStatus skip.
 func TestReconcileSnapshot_LeavesTransientOpAlone(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
@@ -126,6 +127,7 @@ func TestReconcileSnapshot_LeavesTransientOpAlone(t *testing.T) {
 
 	data := inst.ToInstanceData()
 	data.Liveness = session.LiveReady // daemon doesn't know about the in-flight kill
+	data.InFlightOp = session.OpNone
 
 	h.reconcileSnapshot([]session.InstanceData{data})
 
