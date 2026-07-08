@@ -98,8 +98,31 @@ func TestGeneralHelpOverlayFitsAndMarksScrollAt80x24(t *testing.T) {
 	require.Contains(t, out, "↓ more", "initial viewport must show overflow below")
 
 	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyCtrlD})
+	require.Equal(t, stateHelp, h.state, "configured scroll key must keep the help overlay open")
 	fg = h.textOverlay.Render()
 	require.LessOrEqual(t, strings.Count(fg, "\n")+1, 24, "scrolled help overlay foreground must fit inside the terminal")
 	out = h.View()
 	require.Contains(t, out, "↑ more", "scrolled viewport must show overflow above")
+}
+
+func TestGeneralHelpOverlayShiftArrowsScrollAt80x24(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+
+	_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyShiftDown})
+	require.Equal(t, stateHelp, h.state, "Shift+Down must scroll, not dismiss the help overlay")
+	require.False(t, h.textOverlay.Dismissed, "scrolling must not mark the overlay dismissed")
+	require.Contains(t, h.View(), "↑ more", "Shift+Down should move the viewport down")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyShiftUp})
+	require.Equal(t, stateHelp, h.state, "Shift+Up must scroll, not dismiss the help overlay")
+	require.False(t, h.textOverlay.Dismissed, "scrolling up must not mark the overlay dismissed")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	require.Equal(t, stateHelp, h.state, "non-dismiss keys must not close the scrollable general help overlay")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "Esc remains the explicit help dismiss key")
 }

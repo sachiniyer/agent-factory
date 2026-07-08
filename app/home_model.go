@@ -246,6 +246,10 @@ type home struct {
 	spinner spinner.Model
 	// textOverlay displays text information
 	textOverlay *overlay.TextOverlay
+	// textOverlayDismissAnyKey keeps the one-shot intro/attach overlays as
+	// press-any-key gates while the general ? help behaves like a scrollable
+	// modal with explicit dismiss keys.
+	textOverlayDismissAnyKey bool
 	// replayHelpDismissKey marks the first-run interactive pane help: the
 	// key that closes that overlay is the user's first pane keystroke, so it
 	// must be forwarded after the deferred live bind completes (#1410).
