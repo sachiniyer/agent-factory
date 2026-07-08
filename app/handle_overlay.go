@@ -78,6 +78,7 @@ func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
 	}
 	m.searchOverlay = overlay.NewSearchOverlay(instances)
 	m.searchOverlay.SetWidth(60)
+	m.layoutSearchOverlay()
 	m.state = stateSearch
 	return m, nil
 }
@@ -122,6 +123,7 @@ func (m *home) showTasksOverlay() (tea.Model, tea.Cmd) {
 	}
 	sp.SetFocus(true)
 	sp.EnterEditSelected()
+	m.layoutPaneOverlays()
 	m.state = stateTasks
 	return m, nil
 }
@@ -181,6 +183,7 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // is live immediately.
 func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 	m.hooksPane.SetFocus(true)
+	m.layoutPaneOverlays()
 	m.state = stateHooks
 	return m, nil
 }

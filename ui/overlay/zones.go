@@ -36,11 +36,25 @@ func (c *ConfirmationOverlay) RegisterZones(reg *zones.Registry, origin layout.P
 	}
 	yesNeedle := c.ConfirmKey + " to confirm"
 	noNeedle := c.CancelKey + " or esc to cancel"
+	compactYesNeedle := c.ConfirmKey + " confirm"
+	compactNoNeedle := c.CancelKey + "/esc cancel"
 	lines := strings.Split(c.Render(), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		plain := xansi.Strip(lines[i])
 		yi := strings.Index(plain, yesNeedle)
 		ni := strings.Index(plain, noNeedle)
+		if yi < 0 {
+			yi = strings.Index(plain, compactYesNeedle)
+			if yi >= 0 {
+				yesNeedle = compactYesNeedle
+			}
+		}
+		if ni < 0 {
+			ni = strings.Index(plain, compactNoNeedle)
+			if ni >= 0 {
+				noNeedle = compactNoNeedle
+			}
+		}
 		if yi < 0 && ni < 0 {
 			continue
 		}
@@ -98,7 +112,8 @@ func (s *SearchOverlay) RegisterZones(reg *zones.Registry, origin layout.Point) 
 	rendered := s.Render()
 	width := lipglossWidth(rendered)
 	lines := strings.Split(rendered, "\n")
-	startIdx, endIdx := s.visibleWindow()
+	plan := s.renderPlan(searchOverlayStyle())
+	startIdx, endIdx := plan.startIdx, plan.endIdx
 	next := startIdx
 	for i, line := range lines {
 		if next >= endIdx {

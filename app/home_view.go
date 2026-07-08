@@ -26,6 +26,7 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 	m.state = stateConfirm
 	m.confirmationOverlay = overlay.NewConfirmationOverlay(message)
 	m.confirmationOverlay.SetWidth(50)
+	m.layoutConfirmationOverlay()
 
 	m.confirmationOverlay.OnConfirm = func() {
 		m.state = stateDefault

@@ -129,6 +129,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selectionOverlay = overlay.NewSelectionOverlay("Select Program", items)
 		m.selectionOverlay.SetWidth(40)
 		m.selectionOverlay.SetSelectedIndex(selectedIdx)
+		m.layoutSelectionOverlay()
 		m.state = stateSelectProgram
 		return m, nil
 	case tea.KeyRunes:

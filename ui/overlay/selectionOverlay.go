@@ -1,6 +1,8 @@
 package overlay
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -15,6 +17,8 @@ type SelectionOverlay struct {
 	submitted   bool
 	canceled    bool
 	width       int
+	maxWidth    int
+	maxHeight   int
 }
 
 // NewSelectionOverlay creates a new selection overlay with the given title and items
@@ -71,6 +75,12 @@ func (s *SelectionOverlay) SetWidth(width int) {
 	s.width = width
 }
 
+// SetMaxSize sets the maximum outer size the rendered selection overlay may occupy.
+func (s *SelectionOverlay) SetMaxSize(width, height int) {
+	s.maxWidth = width
+	s.maxHeight = height
+}
+
 // Render renders the selection overlay
 func (s *SelectionOverlay) Render() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ui.AccentColor)
@@ -78,23 +88,85 @@ func (s *SelectionOverlay) Render() string {
 	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
 
-	content := titleStyle.Render(s.title) + "\n\n"
-
-	for i, item := range s.items {
-		if i == s.selectedIdx {
-			content += selectedStyle.Render("▸ "+item) + "\n"
-		} else {
-			content += normalStyle.Render("  "+item) + "\n"
-		}
-	}
-
-	content += "\n" + hintStyle.Render("↑/↓ navigate • enter select • esc cancel")
-
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ui.AccentColor).
-		Padding(1, 2).
-		Width(s.width)
+		Padding(1, 2)
+	fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
+	if fit.W <= 0 {
+		fit.W = s.width
+	}
+	if fit.W <= 0 {
+		fit.W = 1
+	}
+	textRect := overlayTextRect(fit, style)
+	compact := textRect.H > 0 && textRect.H <= 8
 
-	return style.Render(content)
+	lines := []string{truncateOverlayLine(titleStyle.Render(s.title), textRect.W)}
+	if !compact {
+		lines = append(lines, "")
+	}
+
+	availableItems := len(s.items)
+	if textRect.H > 0 {
+		base := 4
+		if compact {
+			base = 2
+		}
+		availableItems = textRect.H - base
+		if availableItems < 1 {
+			availableItems = 1
+		}
+	}
+	start, end := selectionWindow(s.selectedIdx, len(s.items), availableItems)
+	if start > 0 {
+		lines = append(lines, truncateOverlayLine(normalStyle.Render("  ... more above"), textRect.W))
+	}
+	for i := start; i < end; i++ {
+		item := s.items[i]
+		if i == s.selectedIdx {
+			lines = append(lines, truncateOverlayLine(selectedStyle.Render("▸ "+item), textRect.W))
+		} else {
+			lines = append(lines, truncateOverlayLine(normalStyle.Render("  "+item), textRect.W))
+		}
+	}
+	if end < len(s.items) {
+		lines = append(lines, truncateOverlayLine(normalStyle.Render("  ... more below"), textRect.W))
+	}
+
+	if !compact {
+		lines = append(lines, "")
+	}
+	hint := "↑/↓ navigate • enter select • esc cancel"
+	if compact || lipgloss.Width(hint) > textRect.W {
+		hint = "↑/↓ nav • enter • esc cancel"
+	}
+	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), textRect.W))
+
+	style = style.Width(fit.W)
+	if fit.H > 0 && len(lines) >= textRect.H {
+		style = style.Height(fit.H)
+	}
+	return style.Render(strings.Join(lines, "\n"))
+}
+
+func selectionWindow(selected, total, maxVisible int) (start, end int) {
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+	if total <= maxVisible {
+		return 0, total
+	}
+	if selected >= maxVisible {
+		start = selected - maxVisible + 1
+	}
+	end = start + maxVisible
+	if end > total {
+		end = total
+		start = end - maxVisible
+		if start < 0 {
+			start = 0
+		}
+	}
+	return start, end
 }

@@ -474,8 +474,8 @@ func (s *TaskPane) renderListMode() string {
 
 	// Width available to the indented detail lines under the selected row.
 	detailWidth := s.width - 8
-	if detailWidth < 20 {
-		detailWidth = 20
+	if detailWidth < 1 {
+		detailWidth = 1
 	}
 
 	for i, tsk := range s.tasks {
@@ -507,7 +507,7 @@ func (s *TaskPane) renderListMode() string {
 		// A crash-looped watcher gets its full #797 failure summary on a
 		// detail line — the only always-on detail, and only when errored.
 		if tsk.IsWatch() && strings.HasPrefix(tsk.LastRunStatus, "errored:") {
-			b.WriteString(erroredStyle.Render("      " + tsk.LastRunStatus))
+			b.WriteString(erroredStyle.Render(fitLine("      "+tsk.LastRunStatus, s.width)))
 			b.WriteString("\n")
 		}
 
@@ -535,20 +535,23 @@ func (s *TaskPane) renderListMode() string {
 				}
 				detail += " (" + statusLabel + ")"
 			}
-			b.WriteString(detailStyle.Render(detail))
+			b.WriteString(detailStyle.Render(fitLine(detail, s.width)))
 			b.WriteString("\n")
 		}
 	}
 
 	b.WriteString("\n")
 	if s.hasFocus {
-		b.WriteString(hintStyle.Render(fitLine(
-			"↑/↓ select • n new • enter edit • r run now • x toggle • D delete • esc back", s.width)))
+		hint := "↑/↓ select • n new • enter edit • r run now • x toggle • D delete • esc back"
+		if s.width > 0 && lipgloss.Width(hint) > s.width {
+			hint = "↑/↓ • n new • enter • esc back"
+		}
+		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 	} else {
 		b.WriteString(hintStyle.Render(fitLine("enter to focus and edit tasks", s.width)))
 	}
 
-	return b.String()
+	return fitBlockToSize(b.String(), s.width, s.height, 1)
 }
 
 // promptSnippet collapses a prompt to a single line truncated to maxWidth,
