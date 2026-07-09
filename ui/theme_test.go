@@ -20,13 +20,14 @@ func TestAccentColorValue(t *testing.T) {
 // TestAccentSitesUseConstant guards against the half-finished migration that
 // left accent surfaces on unrelated literals while the rest of the TUI used
 // the configured accent. These are the most prominent accent surfaces.
+// Pane borders are semantic state colors and are covered in tabbed-window
+// tests.
 func TestAccentSitesUseConstant(t *testing.T) {
 	cases := []struct {
 		name string
 		got  lipgloss.TerminalColor
 	}{
 		{"sidebar title banner background", mainTitle.GetBackground()},
-		{"focused window border", windowStyle.GetBorderBottomForeground()},
 		{"automations strip title", automationsTitleStyle.GetForeground()},
 		{"menu action group", actionGroupStyle.GetForeground()},
 	}
@@ -47,6 +48,7 @@ func TestApplyThemeRebuildsProminentStyles(t *testing.T) {
 	custom.ForegroundMuted = "#556677"
 	custom.SelectionBackground = "#223344"
 	custom.SelectionForeground = "#DDEEFF"
+	custom.PaneBorderDefault = "#778899"
 	ApplyTheme(custom)
 
 	assertColor := func(name string, got lipgloss.TerminalColor, want string) {
@@ -57,7 +59,7 @@ func TestApplyThemeRebuildsProminentStyles(t *testing.T) {
 	}
 	assertColor("AccentColor", lipgloss.TerminalColor(AccentColor), "#112233")
 	assertColor("mainTitle background", mainTitle.GetBackground(), "#112233")
-	assertColor("window border", windowStyle.GetBorderBottomForeground(), "#112233")
+	assertColor("window border", windowStyle.GetBorderBottomForeground(), "#778899")
 	assertColor("menu action group", actionGroupStyle.GetForeground(), "#112233")
 	assertColor("tree title", lipgloss.TerminalColor(tree.InstanceTitleColor), "#445566")
 	assertColor("pane focused header background", paneHeaderFocusedStyle.GetBackground(), "#223344")

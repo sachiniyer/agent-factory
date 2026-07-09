@@ -119,6 +119,7 @@ func (m *home) View() string {
 			cols = append(cols, m.renderDivider(i-1))
 		}
 		if w := m.paneWindows[p.ID()]; w != nil {
+			w.SetSidebarSelected(m.paneMatchesSelection(p))
 			w.SetSelectionHint(m.paneSelectionHint(p))
 			cols = append(cols, w.View())
 		}
