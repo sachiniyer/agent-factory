@@ -70,6 +70,11 @@ type Menu struct {
 	// terminal (#1089, RFC §2.3), so the bar shows only the escape hatch.
 	interactive bool
 
+	// splitPaneAvailable is true only while there is an active preview that
+	// `S` can commit as another pane. Without that preview the key no-ops, so
+	// the footer must not advertise it (#1419).
+	splitPaneAvailable bool
+
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
 
@@ -90,18 +95,6 @@ var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName, keys.KeyChangePr
 // the cross-region ones.
 var automationsMenuOptions = []keys.KeyName{
 	keys.KeyManageAutomations, keys.KeyTab, keys.KeyHooks, keys.KeyHelp, keys.KeyQuit,
-}
-
-// paneMenuOptions are the status-bar hints while a workspace pane has focus
-// (#1088): enter interacts in-pane / o attaches full-screen (#1089), scroll
-// acts on the pane's own binding, s opens the selected tab as another pane,
-// S commits a preview as another pane, left/right switch panes, and x hides
-// this pane back to the background.
-var paneMenuOptions = []keys.KeyName{
-	keys.KeyEnter, keys.KeyAttach, keys.KeyShiftUp, keys.KeyShiftDown,
-	keys.KeyPanePrev, keys.KeyPaneNext,
-	keys.KeyOpenPane, keys.KeySplitPane, keys.KeyHidePane,
-	keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
 }
 
 // interactiveMenuOptions is the whole bar while interactive (#1089, RFC
@@ -172,6 +165,14 @@ func (m *Menu) SetInteractive(on bool) {
 	m.updateOptions()
 }
 
+// SetSplitPaneAvailable controls whether the split-pane commit key is
+// advertised. The key is still globally bound; this only keeps the footer
+// honest when no preview exists to commit (#1419).
+func (m *Menu) SetSplitPaneAvailable(available bool) {
+	m.splitPaneAvailable = available
+	m.updateOptions()
+}
+
 // updateOptions updates the menu options based on current state, focus
 // region, and instance
 func (m *Menu) updateOptions() {
@@ -199,13 +200,7 @@ func (m *Menu) updateOptions() {
 	// attach/scroll on its binding, open another pane, hide this one. Same
 	// naming-flow exception as the strip.
 	if layout.IsPaneRegion(m.focusRegion) && m.state != StateNewInstance {
-		m.options = paneMenuOptions
-		m.groups = []menuGroup{
-			{start: 0, end: 4, isAction: true},
-			{start: 4, end: 6, isAction: false},
-			{start: 6, end: 9, isAction: false},
-			{start: 9, end: len(paneMenuOptions), isAction: false},
-		}
+		m.setPaneFocusOptions()
 		return
 	}
 	switch m.state {
@@ -280,8 +275,12 @@ func (m *Menu) addInstanceOptions() {
 	}
 
 	// Pane group (#1088/#1321): s opens the selected tab as a workspace pane
-	// (or focuses its pane when already open); S commits a preview alongside.
-	paneGroup := []keys.KeyName{keys.KeyOpenPane, keys.KeySplitPane}
+	// (or focuses its pane when already open); S commits a preview alongside
+	// only while one exists (#1419).
+	paneGroup := []keys.KeyName{keys.KeyOpenPane}
+	if m.splitPaneAvailable {
+		paneGroup = append(paneGroup, keys.KeySplitPane)
+	}
 
 	// System group: the focus-ring cycle plus help/quit.
 	systemGroup := []keys.KeyName{keys.KeyTab, keys.KeyHelp, keys.KeyQuit}
@@ -306,6 +305,38 @@ func (m *Menu) addInstanceOptions() {
 		{start: mgmtEnd, end: actionEnd, isAction: true},
 		{start: actionEnd, end: tabEnd, isAction: false},
 		{start: tabEnd, end: paneEnd, isAction: false},
+		{start: paneEnd, end: systemEnd, isAction: false},
+	}
+}
+
+func (m *Menu) setPaneFocusOptions() {
+	// Action group: enter interacts in-pane / o attaches full-screen (#1089),
+	// and scroll acts on this pane's binding.
+	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach, keys.KeyShiftUp, keys.KeyShiftDown}
+	focusGroup := []keys.KeyName{keys.KeyPanePrev, keys.KeyPaneNext}
+	paneGroup := []keys.KeyName{keys.KeyOpenPane}
+	if m.splitPaneAvailable {
+		paneGroup = append(paneGroup, keys.KeySplitPane)
+	}
+	paneGroup = append(paneGroup, keys.KeyHidePane)
+	systemGroup := []keys.KeyName{keys.KeyTab, keys.KeyHelp, keys.KeyQuit}
+
+	actionEnd := len(actionGroup)
+	focusEnd := actionEnd + len(focusGroup)
+	paneEnd := focusEnd + len(paneGroup)
+	systemEnd := paneEnd + len(systemGroup)
+
+	options := make([]keys.KeyName, 0, systemEnd)
+	options = append(options, actionGroup...)
+	options = append(options, focusGroup...)
+	options = append(options, paneGroup...)
+	options = append(options, systemGroup...)
+
+	m.options = options
+	m.groups = []menuGroup{
+		{start: 0, end: actionEnd, isAction: true},
+		{start: actionEnd, end: focusEnd, isAction: false},
+		{start: focusEnd, end: paneEnd, isAction: false},
 		{start: paneEnd, end: systemEnd, isAction: false},
 	}
 }

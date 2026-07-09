@@ -33,6 +33,8 @@ func samePaneBinding(a, b paneBinding) bool {
 }
 
 func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabSpecific bool, attachedNow bool) {
+	defer m.syncSplitPaneHint()
+
 	if attachedNow || m.interactive || selected == nil {
 		m.cancelPanePreview(false)
 		return
@@ -95,6 +97,8 @@ func (m *home) cancelPanePreview(focusOwner bool) {
 	if txn == nil {
 		return
 	}
+	defer m.syncSplitPaneHint()
+
 	m.panePreviewTxn = nil
 	if w := m.paneWindows[txn.ownerPaneID]; w != nil {
 		w.ClearPreview()
@@ -219,6 +223,18 @@ func previewCommitError(inst *session.Instance) error {
 		return fmt.Errorf("cannot commit preview for %q: session was lost", inst.Title)
 	}
 	return nil
+}
+
+func (m *home) syncSplitPaneHint() {
+	if m.menu == nil {
+		return
+	}
+	m.menu.SetSplitPaneAvailable(m.splitPaneAvailable())
+}
+
+func (m *home) splitPaneAvailable() bool {
+	txn := m.panePreviewTxn
+	return txn != nil && previewCommitError(txn.target.instance) == nil
 }
 
 func (m *home) renderBindingForPane(p *store.OpenPane) (paneBinding, uint64) {
