@@ -1,0 +1,39 @@
+merge_queue:
+  mode: serial
+  max_parallel_checks: 1
+  queue_controls_comment: true
+  status_comments: outcomes
+  queued_label: queued
+  dequeued_label: dequeued
+
+queue_rules:
+  - name: default
+    merge_method: squash
+    batch_size: 1
+    queue_conditions:
+      - base = master
+      - -draft
+      - -conflict
+      - check-success = Lint
+      - check-success = Build
+    merge_conditions:
+      - check-success = Lint
+      - check-success = Build
+      - -draft
+      - -conflict
+
+merge_protections_settings:
+  reporting_method: check-runs
+  post_comment: true
+  auto_merge_conditions:
+    - label = ready-to-merge
+
+merge_protections:
+  - name: require-current-ci
+    if:
+      - base = master
+    success_conditions:
+      - check-success = Lint
+      - check-success = Build
+      - -draft
+      - -conflict
