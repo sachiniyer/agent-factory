@@ -15,6 +15,9 @@ import (
 
 // Close terminates the tmux session and cleans up resources
 func (t *TmuxSession) Close() error {
+	t.attachMu.Lock()
+	defer t.attachMu.Unlock()
+
 	var errs []error
 
 	// Coordinate with any in-flight Attach goroutines (mirrors Detach):
@@ -47,10 +50,7 @@ func (t *TmuxSession) Close() error {
 	t.killAttach = nil
 	t.termAttach = nil
 
-	if t.attachCh != nil {
-		close(t.attachCh)
-		t.attachCh = nil
-	}
+	t.closeAttachChLocked()
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
@@ -105,6 +105,9 @@ func (t *TmuxSession) Close() error {
 // still-tracked instance shares the same live session — calling Close there
 // would kill that session out from under the canonical instance.
 func (t *TmuxSession) CloseAttachOnly() error {
+	t.attachMu.Lock()
+	defer t.attachMu.Unlock()
+
 	var errs []error
 
 	// Mirror Close/Detach ordering: cancel any Attach goroutines before
@@ -141,10 +144,7 @@ func (t *TmuxSession) CloseAttachOnly() error {
 	t.killAttach = nil
 	t.termAttach = nil
 
-	if t.attachCh != nil {
-		close(t.attachCh)
-		t.attachCh = nil
-	}
+	t.closeAttachChLocked()
 
 	if len(errs) == 0 {
 		return nil

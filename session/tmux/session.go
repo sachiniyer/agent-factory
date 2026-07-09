@@ -76,6 +76,11 @@ type TmuxSession struct {
 	// and cleared in lockstep with killAttach (same pairing invariant that
 	// the #602 regression broke — see Detach's inline clear).
 	termAttach func() (int, error)
+
+	// attachMu serializes attach lifecycle teardown. Detach is invoked by an
+	// Attach-spawned stdin goroutine that is intentionally outside wg, so Close
+	// cannot rely on wg.Wait before touching attachCh/cancel/ptmx (#1477).
+	attachMu sync.Mutex
 }
 
 const TmuxPrefix = "af_"

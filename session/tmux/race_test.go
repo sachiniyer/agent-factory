@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -175,6 +176,121 @@ func TestDetachHappyPathReplacesPtmx(t *testing.T) {
 	}
 	if session.ptmx == original {
 		t.Fatalf("expected Detach to swap in a fresh ptmx, got the original handle")
+	}
+}
+
+type blockingRestorePtyFactory struct {
+	t *testing.T
+
+	mu             sync.Mutex
+	starts         int
+	restoreStarted chan struct{}
+	releaseRestore chan struct{}
+}
+
+func (pt *blockingRestorePtyFactory) Start(_ *exec.Cmd) (*os.File, error) {
+	pt.mu.Lock()
+	pt.starts++
+	start := pt.starts
+	if start == 2 {
+		close(pt.restoreStarted)
+	}
+	pt.mu.Unlock()
+
+	if start == 2 {
+		<-pt.releaseRestore
+	}
+	return os.CreateTemp(pt.t.TempDir(), "pty-*")
+}
+
+func (pt *blockingRestorePtyFactory) Close() {}
+
+// TestDetachCloseConcurrentAttachChClose is the #1477 regression test.
+//
+// The stdin-reader goroutine that calls Detach is intentionally outside
+// t.wg. Before the fix, Close could run while Detach was still executing
+// (here, blocked in the post-detach Restore) and close t.attachCh; Detach's
+// deferred cleanup then closed the same channel again and panicked. This
+// interleaving must be serialized so exactly one teardown path owns the
+// attach channel close.
+func TestDetachCloseConcurrentAttachChClose(t *testing.T) {
+	ptyFactory := &blockingRestorePtyFactory{
+		t:              t,
+		restoreStarted: make(chan struct{}),
+		releaseRestore: make(chan struct{}),
+	}
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc:    func(cmd *exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte(""), nil },
+	}
+
+	session := newTmuxSession(toTmuxName("detach-close-double-close", ""), "claude", ptyFactory, cmdExec)
+	if err := session.Restore(""); err != nil {
+		t.Fatalf("initial Restore: %v", err)
+	}
+
+	attachCh := make(chan struct{})
+	session.attachCh = attachCh
+	session.wg = &sync.WaitGroup{}
+	session.ctx, session.cancel = context.WithCancel(context.Background())
+
+	releaseWG := make(chan struct{})
+	session.wg.Add(1)
+	go func(wg *sync.WaitGroup) {
+		defer wg.Done()
+		<-releaseWG
+	}(session.wg)
+
+	detachDone := make(chan struct{})
+	panicCh := make(chan any, 1)
+	go func() {
+		defer close(detachDone)
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
+			}
+		}()
+		session.Detach()
+	}()
+
+	close(releaseWG)
+	select {
+	case <-ptyFactory.restoreStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Detach did not reach blocked Restore")
+	}
+
+	closeErrCh := make(chan error, 1)
+	go func() {
+		closeErrCh <- session.Close()
+	}()
+
+	select {
+	case <-attachCh:
+		// Pre-fix Close wins here, then Detach panics when released.
+	case <-time.After(200 * time.Millisecond):
+		// Fixed path: Close is serialized behind Detach and cannot close
+		// attachCh while Detach is still in progress.
+	}
+	close(ptyFactory.releaseRestore)
+
+	select {
+	case <-detachDone:
+	case <-time.After(time.Second):
+		t.Fatal("Detach did not return")
+	}
+	select {
+	case err := <-closeErrCh:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return")
+	}
+	select {
+	case r := <-panicCh:
+		t.Fatalf("Detach panicked closing attachCh: %v", r)
+	default:
 	}
 }
 

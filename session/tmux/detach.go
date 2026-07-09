@@ -252,7 +252,17 @@ func defaultKillByPid(pid int) error {
 	return nil
 }
 
+func (t *TmuxSession) closeAttachChLocked() {
+	if t.attachCh != nil {
+		close(t.attachCh)
+		t.attachCh = nil
+	}
+}
+
 func (t *TmuxSession) Attach() (chan struct{}, error) {
+	t.attachMu.Lock()
+	defer t.attachMu.Unlock()
+
 	// Detach clears t.ptmx after closing it so a Restore failure in the
 	// detach path can't leave a stale closed handle behind (issue #464).
 	// Refuse to attach without a live PTY rather than binding goroutines
@@ -377,12 +387,26 @@ func detachTracef(format string, args ...any) {
 // Detach disconnects from the current tmux session. Logs errors instead of panicking
 // so the application can attempt graceful recovery.
 func (t *TmuxSession) Detach() {
+	t.attachMu.Lock()
+	defer t.attachMu.Unlock()
+
 	detachStart := time.Now()
 	detachTracef("tmux.Detach-entry name=%s", t.sanitizedName)
+	if t.attachCh == nil {
+		detachTracef("tmux.Detach-noop name=%s reason=not-attached", t.sanitizedName)
+		return
+	}
+	if t.cancel == nil || t.ptmx == nil {
+		detachTracef("tmux.Detach-noop name=%s reason=attach-already-closing", t.sanitizedName)
+		t.closeAttachChLocked()
+		t.cancel = nil
+		t.ctx = nil
+		t.wg = nil
+		return
+	}
 	defer func() {
 		detachTracef("tmux.Detach-exit name=%s total=%v", t.sanitizedName, time.Since(detachStart))
-		close(t.attachCh)
-		t.attachCh = nil
+		t.closeAttachChLocked()
 		t.cancel = nil
 		t.ctx = nil
 		t.wg = nil
