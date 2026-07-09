@@ -37,6 +37,7 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		"a":         KeyArchive,
 		"c":         KeyLimitRetry,
 		"q":         KeyQuit,
+		"E":         KeyErrorDetails,
 		"tab":       KeyTab,
 		"shift+tab": KeyShiftTab,
 		"t":         KeyNewTab,
@@ -86,6 +87,7 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		KeyPanePrev:          "←",
 		KeyPaneNext:          "→",
 		KeyQuit:              "q",
+		KeyErrorDetails:      "E",
 	}
 	for name, want := range helpChecks {
 		if got := GlobalKeyBindings[name].Help().Key; got != want {

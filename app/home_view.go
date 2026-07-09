@@ -23,6 +23,19 @@ func (m *home) handleError(err error) tea.Cmd {
 	}
 }
 
+func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
+	full := m.errBox.FullError()
+	if full == "" {
+		return m, nil
+	}
+	m.textOverlay = overlay.NewTextOverlay("Last error\n\n" + full)
+	m.textOverlayDismissAnyKey = false
+	m.replayHelpDismissKey = false
+	m.layoutTextOverlay()
+	m.state = stateHelp
+	return m, nil
+}
+
 func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 	m.state = stateConfirm
 	m.confirmationOverlay = overlay.NewConfirmationOverlay(message)

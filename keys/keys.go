@@ -20,6 +20,7 @@ const (
 	KeyArchive    // Archive a live session / restore an archived, Lost, or Dead one (#1028, #1300)
 	KeyLimitRetry // Retry a session blocked at a usage-limit wall (#1146)
 	KeyQuit
+	KeyErrorDetails // Show the full last error when the status line is truncated (#1423).
 
 	KeyTab        // Tab cycles the workspace focus ring (tree → pane → automations).
 	KeyShiftTab   // ShiftTab cycles the focus ring in reverse.
@@ -127,6 +128,7 @@ var specs = []spec{
 	{name: KeyLimitRetry, configKey: "limit_retry", keys: []string{"c"}, desc: "retry limit", dispatch: true},
 	{name: KeyHelp, configKey: "help", keys: []string{"?"}, desc: "help", dispatch: true},
 	{name: KeyQuit, configKey: "quit", keys: []string{"q"}, desc: "quit", dispatch: true},
+	{name: KeyErrorDetails, configKey: "error_details", keys: []string{"E"}, desc: "details", dispatch: true},
 	{name: KeyNewRemote, configKey: "new_remote", keys: []string{"N"}, desc: "new remote", dispatch: true},
 	{name: KeyTab, keys: []string{"tab"}, desc: "focus", dispatch: true},
 	{name: KeyShiftTab, keys: []string{"shift+tab"}, desc: "focus prev", dispatch: true},
