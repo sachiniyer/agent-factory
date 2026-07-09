@@ -374,26 +374,26 @@ func centerStart(box, content int) int {
 // bug). The full instance row is ~108 cells, so on narrow terminals something
 // has to go — and before this priority existed the CLAMP decided, silently
 // cutting the RIGHT edge, i.e. `? help` and `q quit` first: exactly the hints
-// a lost user needs (#1083 play-test). Help and quit are deliberately absent
-// from this list — they are never dropped — as are the naming-flow options
-// (that row is short).
+// a lost user needs (#1083 play-test). New, help, quit, and kill are
+// deliberately absent from this list: `n new` is the tree-focus affordance,
+// help/quit are the global escape hatches, and `D kill` is the selected-
+// instance affordance the containerized TUI driver uses to distinguish a real
+// row cursor from the sticky single-instance display selection (#1174/#1422
+// redo). Naming-flow options are also absent because that row is short.
 var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyShiftUp, keys.KeyShiftDown},
-	{keys.KeyJumpTab},
-	{keys.KeyCloseTab},
-	{keys.KeyNewTab},
-	{keys.KeyPanePrev, keys.KeyPaneNext},
-	{keys.KeyOpenPane, keys.KeySplitPane},
+	{keys.KeyAttach},
 	{keys.KeySearch},
 	{keys.KeyNewRemote},
 	{keys.KeyHooks},
-	{keys.KeyHidePane},
-	{keys.KeyTab},
-	{keys.KeyEnter},
-	{keys.KeyAttach},
-	{keys.KeyKill},
-	{keys.KeyNew},
 	{keys.KeyArchive},
+	{keys.KeyEnter},
+	{keys.KeyTab},
+	{keys.KeyPanePrev, keys.KeyPaneNext},
+	{keys.KeyOpenPane, keys.KeySplitPane, keys.KeyHidePane},
+	{keys.KeyJumpTab},
+	{keys.KeyCloseTab},
+	{keys.KeyNewTab},
 }
 
 func (m *Menu) String() string {

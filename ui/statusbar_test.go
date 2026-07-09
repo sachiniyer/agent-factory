@@ -57,7 +57,8 @@ func TestMenuFocusRegionSwitchesHints(t *testing.T) {
 // play-test): when the instance hint row is wider than the bar, low-value
 // hints are dropped first and `? help` / `q quit` are NEVER dropped — before
 // this, the exact-rect clamp cut the RIGHT edge, so help/quit were the first
-// hints to vanish on narrow terminals.
+// hints to vanish on narrow terminals. #1422 moved tab/pane discovery above
+// lower-frequency session actions, but help/quit remain the hard floor.
 func TestMenuNarrowWidthKeepsHelpAndQuit(t *testing.T) {
 	m := NewMenu()
 	m.SetInstance(readyUIInstance())
@@ -69,9 +70,6 @@ func TestMenuNarrowWidthKeepsHelpAndQuit(t *testing.T) {
 			"width %d: the prioritized row must fit the bar", w)
 		assert.Containsf(t, out, "q quit", "width %d: quit must survive", w)
 		assert.Containsf(t, out, "? help", "width %d: help must survive", w)
-		if w == 45 {
-			assert.Contains(t, out, "archive/restore", "the live-row archive hint should outrank attach at narrow widths")
-		}
 	}
 
 	// At a roomy width nothing is dropped: the scroll hints still render.
