@@ -77,6 +77,33 @@ func TestPaneOverlaysQuitWithReboundKeyBeforeEditFieldsConsumeIt(t *testing.T) {
 	})
 }
 
+func TestTaskOverlayQuitKeysBypassFocusedCreateForm(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(nil))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	for _, tc := range []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{name: "configured quit", msg: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}},
+		{name: "ctrl+c hard quit", msg: tea.KeyMsg{Type: tea.KeyCtrlC}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			tp := h.automations.TaskPane()
+			tp.SetFocus(true)
+			tp.EnterCreateMode("/tmp/repo")
+			h.state = stateTasks
+
+			_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("draft")})
+			_, cmd := h.handleStateTasks(tc.msg)
+
+			assert.True(t, reachesQuit(cmd), "%s must quit before the form consumes it", tc.name)
+			assert.True(t, tp.IsCreating(), "quit routing must not first cancel the form")
+		})
+	}
+}
+
 // TestHandleStateTasks_PendingCreateFlushesDirtyTaskState is the regression
 // guard for #578, re-homed to the tasks overlay (#1096 play-test moved the
 // manager out of the rail).

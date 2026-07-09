@@ -154,7 +154,7 @@ func (m *home) showTasksOverlay() (tea.Model, tea.Cmd) {
 // edit isn't silent. The configured quit key is root-routed before the task
 // form can type it into an input, and ctrl+c still quits from normal mode.
 func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
+	if msg.String() == "ctrl+c" || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
 		return m.handleQuit()
 	}
 
