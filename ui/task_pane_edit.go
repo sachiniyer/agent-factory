@@ -222,20 +222,21 @@ func (s *TaskPane) updateEditFocus() {
 }
 
 func (s *TaskPane) renderEditMode() string {
+	t := CurrentTheme()
 	editTitleStyle := lipgloss.NewStyle().
-		Foreground(AccentColor).
+		Foreground(t.Accent).
 		Bold(true).
 		MarginBottom(1)
 
 	labelStyle := lipgloss.NewStyle().Bold(true)
-	groupStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7F7A7A"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	groupStyle := lipgloss.NewStyle().Bold(true).Foreground(t.ForegroundDim)
+	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	errorStyle := lipgloss.NewStyle().Foreground(t.Error).Bold(true)
 
-	buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	buttonStyle := lipgloss.NewStyle().Foreground(t.Foreground)
 	focusedButtonStyle := buttonStyle.
-		Background(AccentColor).
-		Foreground(lipgloss.Color("0"))
+		Background(t.Accent).
+		Foreground(t.Background)
 
 	inputWidth := s.width - 9
 	if inputWidth < 1 {
@@ -459,10 +460,11 @@ func (s *TaskPane) clampFormToHeight(content string, focusStart, focusEnd int) s
 // otherwise), matching the Program selector's treatment.
 func (s *TaskPane) renderTriggerSelector() string {
 	focused := s.focusIndex == taskFocusTrigger
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
-	dimSelectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+	t := CurrentTheme()
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
 
 	option := func(name string, sel bool) string {
 		switch {
@@ -485,9 +487,10 @@ func (s *TaskPane) renderTriggerSelector() string {
 // the current choice; ←/→ steps through the options when focused.
 func (s *TaskPane) renderProgramSelector() string {
 	focused := s.focusIndex == taskFocusProgram
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
-	dimSelectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+	t := CurrentTheme()
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
 
 	value := programDefaultLabel
 	if s.editProgramIdx >= 0 && s.editProgramIdx < len(s.editProgramOptions) {

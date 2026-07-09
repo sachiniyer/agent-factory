@@ -83,14 +83,15 @@ func (s *SelectionOverlay) SetMaxSize(width, height int) {
 
 // Render renders the selection overlay
 func (s *SelectionOverlay) Render() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ui.AccentColor)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+	t := ui.CurrentTheme()
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
+	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.AccentColor).
+		BorderForeground(t.Accent).
 		Padding(1, 2)
 	fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
 	if fit.W <= 0 {

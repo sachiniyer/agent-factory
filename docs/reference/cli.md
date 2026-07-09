@@ -366,7 +366,7 @@ Settable keys:
   update_channel             stable | preview
   limit_patterns.<agent>     usage-limit banner regex for an agent
 
-Structural keys (root_agents, the [keys] rebind table) are not settable here —
+Structural keys (root_agents, [theme], the [keys] rebind table) are not settable here —
 edit config.toml directly. Changes apply on the next af / daemon start.
 
 Examples:

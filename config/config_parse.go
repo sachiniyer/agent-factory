@@ -156,6 +156,7 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	}
 
 	sanitizeLimitPatterns(config)
+	sanitizeThemeColors(config, prettyConfigPath)
 	config.LimitRetryInterval = sanitizeLimitRetryInterval(config.LimitRetryInterval, prettyConfigPath)
 	config.WorktreeRoot = normalizeWorktreeRoot(config.WorktreeRoot, prettyConfigPath)
 

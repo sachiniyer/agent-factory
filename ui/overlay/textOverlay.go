@@ -63,7 +63,7 @@ func (t *TextOverlay) Render() string {
 	// Create styles
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.AccentColor).
+		BorderForeground(ui.CurrentTheme().Accent).
 		Padding(textOverlayVerticalPadding, textOverlayHorizontalPadding).
 		Width(t.width)
 	if inner := t.innerHeight(); inner > 0 && t.contentOverflows(inner) {
@@ -167,6 +167,6 @@ func textOverlayScrollMarker(width int, marker string) string {
 		width = 1
 	}
 	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#7F7A7A")).
+		Foreground(ui.CurrentTheme().ForegroundDim).
 		Render(lipgloss.PlaceHorizontal(width, lipgloss.Center, marker))
 }

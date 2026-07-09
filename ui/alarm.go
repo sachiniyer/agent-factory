@@ -33,12 +33,11 @@ type AlarmBanner struct {
 	alarms []AlarmInfo
 }
 
-// alarmStyle is a loud white-on-red bar. Red reads as an alert in both light
-// and dark terminals, so it is a fixed color rather than adaptive — the whole
-// point is that it stands apart from every normal surface.
+// alarmStyle is rebuilt from the active theme so alerts remain distinct under
+// user-configured palettes.
 var alarmStyle = lipgloss.NewStyle().
-	Background(lipgloss.Color("#B00020")).
-	Foreground(lipgloss.Color("#FFFFFF")).
+	Background(activeTheme.Error).
+	Foreground(activeTheme.SelectionForeground).
 	Bold(true)
 
 func NewAlarmBanner() *AlarmBanner { return &AlarmBanner{} }

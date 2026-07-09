@@ -119,6 +119,20 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 			"the keys rejection must not point at the ignored config.json path")
 	})
 
+	t.Run("rejecting the TOML-only theme table points at config.toml", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		repoRoot := t.TempDir()
+		writeInRepoTomlConfig(t, repoRoot, "[theme]\naccent = \"#8CD0D3\"\n")
+
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "global setting")
+		assert.Contains(t, err.Error(), TomlConfigFileName)
+		assert.NotContains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)),
+			"the theme rejection must not point at the ignored config.json path")
+	})
+
 	t.Run("rejects unknown key", func(t *testing.T) {
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 		repoRoot := t.TempDir()

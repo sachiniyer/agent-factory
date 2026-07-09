@@ -22,11 +22,11 @@ const programDefaultLabel = "(use config default)"
 // cron "e.g. 0 9 * * 1-5") can never be mistaken for a typed value.
 var taskPlaceholderStyle = lipgloss.NewStyle().
 	Faint(true).
-	Foreground(lipgloss.AdaptiveColor{Light: "#B5B0B0", Dark: "#5C5757"})
+	Foreground(activeTheme.ForegroundDim)
 
 // taskFormMoreStyle dims the ↑/↓ markers flagging fields scrolled out of a
 // height-clamped edit form (#1098).
-var taskFormMoreStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+var taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundDim)
 
 // Edit-form focus stops, in tab order. The form is grouped: Essentials
 // (name, trigger, prompt) then Delivery (target session, path, program).
@@ -472,13 +472,14 @@ func taskDeliverySummary(tsk task.Task) string {
 }
 
 func (s *TaskPane) renderListMode() string {
-	tStyle := lipgloss.NewStyle().Bold(true).Foreground(AccentColor)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
-	enabledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#36CFC9"))
-	disabledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-	detailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-	erroredStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	t := CurrentTheme()
+	tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
+	enabledStyle := lipgloss.NewStyle().Foreground(t.Info)
+	disabledStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	detailStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	erroredStyle := lipgloss.NewStyle().Foreground(t.Error)
 
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Tasks"))

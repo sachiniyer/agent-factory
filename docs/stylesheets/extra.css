@@ -1,16 +1,16 @@
 /* ==========================================================================
    Agent Factory — docs theme
-   Built around the TUI accent (teal #7cb8bb, ui/theme.go). The deeper teals
+   Built around the TUI Zenburn accent (#8cd0d3, ui/theme.go). The deeper teals
    here are contrast-safe derivatives of that accent so the docs read as the
    same product: the raw accent shines in dark mode, a deeper teal carries the
    light-mode header/links where white-on-accent would fail WCAG.
    ========================================================================== */
 
 :root {
-  --af-teal:        #7cb8bb;  /* the TUI AccentColor, verbatim */
-  --af-teal-deep:   #2e7c80;  /* light-mode primary (header, contrast-safe) */
-  --af-teal-deeper: #245f62;
-  --af-teal-soft:   #e5f1f1;
+  --af-teal:        #8cd0d3;  /* the default TUI AccentColor, verbatim */
+  --af-teal-deep:   #34787b;  /* light-mode primary (header, contrast-safe) */
+  --af-teal-deeper: #285f62;
+  --af-teal-soft:   #e8f4f4;
   --md-code-font: "Roboto Mono", SFMono-Regular, Consolas, monospace;
 }
 

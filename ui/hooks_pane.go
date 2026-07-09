@@ -149,12 +149,13 @@ func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 }
 
 func (h *HooksPane) String() string {
-	tStyle := lipgloss.NewStyle().Bold(true).Foreground(AccentColor)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-	editStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF79C6"))
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A")).Italic(true)
+	t := CurrentTheme()
+	tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
+	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	editStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Purple)
+	descStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim).Italic(true)
 
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Post-Worktree Hooks"))

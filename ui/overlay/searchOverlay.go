@@ -207,7 +207,7 @@ type searchRenderPlan struct {
 func searchOverlayStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.AccentColor).
+		BorderForeground(ui.CurrentTheme().Accent).
 		Padding(1, 2)
 }
 
@@ -294,17 +294,18 @@ func (s *SearchOverlay) windowForAvailableRows(available int) (startIdx, endIdx 
 
 // Render renders the search overlay.
 func (s *SearchOverlay) Render() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ui.AccentColor)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9C9494"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
-	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF79C6"))
-	statusRunning := lipgloss.NewStyle().Foreground(lipgloss.Color("#51bd73"))
-	statusReady := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC00"))
-	statusLoading := lipgloss.NewStyle().Foreground(lipgloss.Color("#7F7A7A"))
+	t := ui.CurrentTheme()
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
+	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Purple)
+	statusRunning := lipgloss.NewStyle().Foreground(t.Success)
+	statusReady := lipgloss.NewStyle().Foreground(t.Warning)
+	statusLoading := lipgloss.NewStyle().Foreground(t.ForegroundDim)
 	// statusLimit marks a usage-limit-blocked result (#1146) with a distinct
 	// warning red + diamond glyph so it never reads as a live Running/Ready dot.
-	statusLimit := lipgloss.NewStyle().Foreground(lipgloss.Color("#E06C75"))
+	statusLimit := lipgloss.NewStyle().Foreground(t.Error)
 
 	style := searchOverlayStyle()
 	plan := s.renderPlan(style)

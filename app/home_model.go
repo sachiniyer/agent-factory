@@ -303,6 +303,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		fmt.Printf("Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+	applyTheme(appConfig.Theme)
 
 	// Apply configured detach key
 	if appConfig.DetachKeys != "" {
