@@ -12,20 +12,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var keyStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{
-	Light: "#655F5F",
-	Dark:  "#7F7A7A",
-})
+var keyStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundDim)
 
-var descStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{
-	Light: "#7A7474",
-	Dark:  "#9C9494",
-})
+var descStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundMuted)
 
-var sepStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{
-	Light: "#DDDADA",
-	Dark:  "#3C3C3C",
-})
+var sepStyle = lipgloss.NewStyle().Foreground(activeTheme.BackgroundSubtle)
 
 var actionGroupStyle = lipgloss.NewStyle().Foreground(AccentColor)
 
@@ -33,7 +24,7 @@ var separator = " • "
 var verticalSeparator = " │ "
 
 var menuStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("205"))
+	Foreground(activeTheme.Purple)
 
 // MenuState represents different states the menu can be in
 type MenuState int

@@ -77,7 +77,7 @@ func TestFormatConfigValue(t *testing.T) {
 }
 
 // TestConfigEntriesCoverAllKeys guards that configEntries lists exactly the
-// documented settable top-level config keys — if a key is added to the Config
+// documented top-level global config keys — if a key is added to the Config
 // struct, this fails until the entry (and docs) are updated.
 func TestConfigEntriesCoverAllKeys(t *testing.T) {
 	got := map[string]bool{}
@@ -90,7 +90,7 @@ func TestConfigEntriesCoverAllKeys(t *testing.T) {
 	want := []string{
 		"default_program", "program_overrides", "auto_yes", "auto_update", "daemon_poll_interval",
 		"log_max_size_mb", "log_max_backups", "branch_prefix", "detach_keys",
-		"worktree_root", "update_channel", "root_agents", "limit_patterns", "keys",
+		"worktree_root", "update_channel", "theme", "root_agents", "limit_patterns", "keys",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("configEntries has %d keys, want %d", len(got), len(want))

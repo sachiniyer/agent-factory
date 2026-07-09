@@ -15,6 +15,20 @@ import (
 
 const readyIcon = "● "
 
+// Theme is the subset of the TUI palette the tree renderer needs. It is
+// supplied by ui.ApplyTheme so this subpackage does not import ui.
+type Theme struct {
+	Foreground          lipgloss.TerminalColor
+	ForegroundStrong    lipgloss.TerminalColor
+	ForegroundMuted     lipgloss.TerminalColor
+	ForegroundDim       lipgloss.TerminalColor
+	SelectionBackground lipgloss.TerminalColor
+	SelectionForeground lipgloss.TerminalColor
+	Success             lipgloss.TerminalColor
+	Warning             lipgloss.TerminalColor
+	Error               lipgloss.TerminalColor
+}
+
 // deadIcon is hollow (not the filled readyIcon) so a dead session differs from
 // a healthy Ready one by shape as well as color — the distinction survives low
 // contrast and color-blindness (#935).
@@ -49,31 +63,31 @@ const (
 )
 
 var readyStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#51bd73", Dark: "#51bd73"})
+	Foreground(lipgloss.Color("#7F9F7F"))
 
 // deadStyle paints the status dot of a session whose backing tmux/remote
 // session has vanished (#935). A muted gray — the same recede treatment used
 // for a deleting row — keeps a corpse from reading as a healthy green session.
 var deadStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+	Foreground(lipgloss.Color("#989890"))
 
 // lostStyle paints the status dot of a Lost session (#1108): amber, not the
 // corpse gray — the session is expected to come back, but must not read as a
 // healthy green either.
 var lostStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#C18401", Dark: "#E5C07B"})
+	Foreground(lipgloss.Color("#F0DFAF"))
 
 // archivedStyle paints an archived session's dot + dims its title (#1028): the
 // same muted gray as a deleting/dead recede, so a filed-away session never reads
 // as live. Reused for the title/desc foreground below.
 var archivedStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+	Foreground(lipgloss.Color("#989890"))
 
 // limitStyle paints the status glyph of a usage-limit-blocked session (#1146): a
 // warning red-orange, distinct from the ready-green, lost-amber, and dead/
 // archived gray so the blocked state is unmistakable at a glance.
 var limitStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#D1493F", Dark: "#E06C75"})
+	Foreground(lipgloss.Color("#CC9393"))
 
 // limitBadgePrefix returns the sidebar title prefix for a usage-limit-blocked
 // session (#1146): "[limit] resets <t> " when a reset time is known, else a bare
@@ -110,7 +124,7 @@ func formatLimitReset(reset, now time.Time) string {
 // stacked below the tree — the automations rail (#1126) — can paint their own
 // titles in the exact same color and the two lists can never drift apart, the
 // same single-definition discipline AccentColor uses for the accent.
-var InstanceTitleColor = lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"}
+var InstanceTitleColor lipgloss.TerminalColor = lipgloss.Color("#DCDCCC")
 
 var titleStyle = lipgloss.NewStyle().
 	Padding(1, 1, 0, 1).
@@ -118,38 +132,71 @@ var titleStyle = lipgloss.NewStyle().
 
 var listDescStyle = lipgloss.NewStyle().
 	Padding(0, 1, 1, 1).
-	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+	Foreground(lipgloss.Color("#989890"))
 
 var selectedTitleStyle = lipgloss.NewStyle().
 	Padding(1, 1, 0, 1).
-	Background(lipgloss.Color("#dde4f0")).
-	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
+	Background(lipgloss.Color("#4F4F4F")).
+	Foreground(lipgloss.Color("#FFFFEF"))
 
 var selectedDescStyle = lipgloss.NewStyle().
 	Padding(0, 1, 1, 1).
-	Background(lipgloss.Color("#dde4f0")).
-	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
+	Background(lipgloss.Color("#4F4F4F")).
+	Foreground(lipgloss.Color("#FFFFEF"))
 
 // tabRowStyle renders tab child rows in the same primary foreground as the
 // Agent/active tab label (#1456). Selection still supplies the row highlight.
 var tabRowStyle = lipgloss.NewStyle().
 	Foreground(InstanceTitleColor)
 
-// tabRowActiveStyle brightens the tab the content pane is showing (plus its
-// tmux-style "*" marker) so the active tab is findable without the tab bar.
+// tabRowActiveStyle keeps tab rows in the same foreground; the tmux-style "*"
+// marker carries the active cue.
 var tabRowActiveStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
+	Foreground(InstanceTitleColor)
 
 // tabRowSelectedStyle highlights the tab row under the tree cursor with the
 // same background the selected instance row uses.
 var tabRowSelectedStyle = lipgloss.NewStyle().
-	Background(lipgloss.Color("#dde4f0")).
-	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
+	Background(lipgloss.Color("#4F4F4F")).
+	Foreground(lipgloss.Color("#FFFFEF"))
 
 // deletingTitleColor dims a mid-deletion row — title and branch/PR lines —
 // to the description gray so it visually recedes while its teardown runs in
 // the background (#844, #853).
-var deletingTitleColor = lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"}
+var deletingTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
+
+// ApplyTheme rebuilds package-level tree styles after the TUI palette changes.
+func ApplyTheme(t Theme) {
+	readyStyle = lipgloss.NewStyle().Foreground(t.Success)
+	deadStyle = lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	lostStyle = lipgloss.NewStyle().Foreground(t.Warning)
+	archivedStyle = lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	limitStyle = lipgloss.NewStyle().Foreground(t.Error)
+
+	InstanceTitleColor = t.Foreground
+	titleStyle = lipgloss.NewStyle().
+		Padding(1, 1, 0, 1).
+		Foreground(InstanceTitleColor)
+	listDescStyle = lipgloss.NewStyle().
+		Padding(0, 1, 1, 1).
+		Foreground(t.ForegroundMuted)
+	selectedTitleStyle = lipgloss.NewStyle().
+		Padding(1, 1, 0, 1).
+		Background(t.SelectionBackground).
+		Foreground(t.SelectionForeground)
+	selectedDescStyle = lipgloss.NewStyle().
+		Padding(0, 1, 1, 1).
+		Background(t.SelectionBackground).
+		Foreground(t.SelectionForeground)
+	tabRowStyle = lipgloss.NewStyle().
+		Foreground(InstanceTitleColor)
+	tabRowActiveStyle = lipgloss.NewStyle().
+		Foreground(InstanceTitleColor)
+	tabRowSelectedStyle = lipgloss.NewStyle().
+		Background(t.SelectionBackground).
+		Foreground(t.SelectionForeground)
+	deletingTitleColor = t.ForegroundMuted
+}
 
 // InstanceRenderer renders the tree's rows: session.Instance rows (absorbed
 // from ui/list.go) and their tab child rows.

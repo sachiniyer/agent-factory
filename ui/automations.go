@@ -23,13 +23,13 @@ var automationsTitleStyle = lipgloss.NewStyle().
 
 var automationsTitleDimStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+	Foreground(activeTheme.ForegroundMuted)
 
 var automationsEnabledStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("#36CFC9"))
+	Foreground(activeTheme.Info)
 
 var automationsDisabledStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("#9C9494"))
+	Foreground(activeTheme.ForegroundMuted)
 
 // automationItemTitleStyle paints an automation's title in the SAME adaptive
 // color the instances tree uses for instance titles (tree.InstanceTitleColor),
@@ -42,10 +42,10 @@ var automationItemTitleStyle = lipgloss.NewStyle().
 // line — the recede gray the tree uses for its branch/description lines, so the
 // detail reads as secondary to the title it hangs under (#1126).
 var automationDetailStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+	Foreground(activeTheme.ForegroundMuted)
 
 var automationsHintStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("#7F7A7A"))
+	Foreground(activeTheme.ForegroundDim)
 
 // fitLine truncates plain text to w cells, marking a cut with a trailing "…"
 // (dropped when even the ellipsis cannot fit) — the same treatment the tree

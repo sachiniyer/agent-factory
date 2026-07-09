@@ -175,7 +175,7 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
 		return nil, fmt.Errorf("%q is not a settable config key. Settable keys: %s. "+
-			"Structural keys (root_agents, [keys] rebinds) are edited directly in config.toml",
+			"Structural keys (root_agents, [theme], [keys] rebinds) are edited directly in config.toml",
 			key, strings.Join(SettableKeys(), ", "))
 	}
 

@@ -244,10 +244,10 @@ func (m *home) layoutTextOverlay() {
 }
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(ui.AccentColor)
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#36CFC9"))
-	keyStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFCC00"))
-	descStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
+	titleStyle  = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(ui.CurrentTheme().Accent)
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Info)
+	keyStyle    = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Warning)
+	descStyle   = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Foreground)
 )
 
 // showHelpScreen displays the help screen overlay if it hasn't been shown

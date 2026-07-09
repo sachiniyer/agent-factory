@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -340,6 +342,7 @@ func TestDefaultConfig(t *testing.T) {
 		assert.True(t, cfg.AutoUpdate)
 		assert.Equal(t, 1000, cfg.DaemonPollInterval)
 		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
+		assert.Equal(t, DefaultThemeConfig(), cfg.Theme)
 		assert.NotEmpty(t, cfg.BranchPrefix)
 		assert.True(t, strings.HasSuffix(cfg.BranchPrefix, "/"))
 		assert.Equal(t, WorktreeRootSibling, cfg.WorktreeRoot)
@@ -899,6 +902,9 @@ func TestLoadConfig(t *testing.T) {
 		assert.Contains(t, string(data), `update_channel = 'stable'`)
 		assert.Contains(t, string(data), `auto_update = true`)
 		assert.Contains(t, string(data), `worktree_root = 'sibling'`)
+		assert.Contains(t, string(data), `[theme]`)
+		assert.Contains(t, string(data), `accent = '#8CD0D3'`)
+		assert.Contains(t, string(data), `pane_border_preview = '#DC8CC3'`)
 
 		// The materialized file must reload cleanly through the TOML path.
 		cfg, err := LoadConfig()
@@ -1014,6 +1020,11 @@ daemon_poll_interval = 2000
 branch_prefix = "test/"
 worktree_root = "subdirectory"
 
+[theme]
+accent = "#abcdef"
+foreground = "#010203"
+pane_border_preview = "#aabbcc"
+
 [program_overrides]
 claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 codex = "/opt/codex/bin/codex --quiet"
@@ -1027,10 +1038,36 @@ codex = "/opt/codex/bin/codex --quiet"
 		assert.Equal(t, 2000, cfg.DaemonPollInterval)
 		assert.Equal(t, "test/", cfg.BranchPrefix)
 		assert.Equal(t, WorktreeRootSubdirectory, cfg.WorktreeRoot)
+		assert.Equal(t, "#ABCDEF", cfg.Theme.Accent)
+		assert.Equal(t, "#010203", cfg.Theme.Foreground)
+		assert.Equal(t, "#AABBCC", cfg.Theme.PaneBorderPreview)
+		assert.Equal(t, DefaultThemeConfig().Success, cfg.Theme.Success,
+			"omitted theme fields keep their Zenburn defaults")
 		assert.Equal(t, "/home/me/.local/bin/claude --dangerously-skip-permissions",
 			cfg.ProgramOverrides[tmux.ProgramClaude])
 		assert.Equal(t, "/opt/codex/bin/codex --quiet",
 			cfg.ProgramOverrides[tmux.ProgramCodex])
+	})
+
+	t.Run("invalid theme color warns and falls back", func(t *testing.T) {
+		var warnings bytes.Buffer
+		prevWarning := log.WarningLog
+		log.WarningLog = stdlog.New(&warnings, "", 0)
+		t.Cleanup(func() { log.WarningLog = prevWarning })
+
+		writeToml(t, `
+[theme]
+accent = "blue"
+error = "#cc9393"
+`)
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, DefaultThemeConfig().Accent, cfg.Theme.Accent)
+		assert.Equal(t, "#CC9393", cfg.Theme.Error)
+		assert.Contains(t, warnings.String(), "theme.accent")
+		assert.Contains(t, warnings.String(), "not a #RRGGBB color")
 	})
 
 	t.Run("loads legacy config.toml without schema_version as current schema", func(t *testing.T) {

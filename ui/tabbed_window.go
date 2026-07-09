@@ -22,7 +22,7 @@ var windowStyle = lipgloss.NewStyle().
 // blurredWindowStyle recedes the pane frame when focus is elsewhere in the
 // workspace, so the focus ring is legible at a glance.
 var blurredWindowStyle = windowStyle.
-	BorderForeground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#555555"})
+	BorderForeground(activeTheme.PaneBorderDefault)
 
 // interactiveWindowStyle marks the pane that owns the keyboard in
 // interactive mode (#1089, RFC §2.3): a green DOUBLE border — unmistakably
@@ -30,26 +30,26 @@ var blurredWindowStyle = windowStyle.
 // colors unavailable — signals "keystrokes go INTO this terminal".
 var interactiveWindowStyle = windowStyle.
 	Border(lipgloss.DoubleBorder()).
-	BorderForeground(lipgloss.AdaptiveColor{Light: "#1A7F37", Dark: "#3FB950"})
+	BorderForeground(activeTheme.PaneBorderInteractive)
 
 var paneHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
+	Foreground(activeTheme.Foreground)
 
 var paneHeaderFocusedStyle = lipgloss.NewStyle().
 	Bold(true).
-	Background(lipgloss.Color("#dde4f0")).
-	Foreground(lipgloss.Color("#1a1a1a"))
+	Background(activeTheme.SelectionBackground).
+	Foreground(activeTheme.SelectionForeground)
 
 var paneHeaderDimStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+	Foreground(activeTheme.ForegroundMuted)
 
 // paneHeaderInteractiveStyle matches the interactive frame: green header bar
 // on the pane whose terminal owns the keyboard.
 var paneHeaderInteractiveStyle = lipgloss.NewStyle().
 	Bold(true).
-	Background(lipgloss.AdaptiveColor{Light: "#D2F3DC", Dark: "#1A7F37"}).
-	Foreground(lipgloss.AdaptiveColor{Light: "#0A3D1E", Dark: "#EAFBEF"})
+	Background(activeTheme.Success).
+	Foreground(activeTheme.Background)
 
 // paneHeaderRows is the height of the `title · tab` header line rendered
 // inside the pane frame. With the tab bar gone (#1024 PR 4) the header is

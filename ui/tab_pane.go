@@ -15,10 +15,10 @@ import (
 )
 
 var tabPaneStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
+	Foreground(activeTheme.Foreground)
 
 var tabPaneFooterStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#808080", Dark: "#808080"})
+	Foreground(activeTheme.ForegroundMuted)
 
 // tabContentState holds the rendered content of the tab pane.
 //

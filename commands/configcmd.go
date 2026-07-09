@@ -74,6 +74,7 @@ func configEntries(cfg *config.Config) []configEntry {
 		{"worktree_root", cfg.WorktreeRoot},
 		{"detach_keys", cfg.DetachKeys},
 		{"update_channel", cfg.UpdateChannel},
+		{"theme", cfg.Theme},
 		{"root_agents", cfg.RootAgents},
 		{"limit_patterns", cfg.LimitPatterns},
 		{"keys", cfg.KeymapOverrides()},
@@ -201,7 +202,7 @@ Settable keys:
   update_channel             stable | preview
   limit_patterns.<agent>     usage-limit banner regex for an agent
 
-Structural keys (root_agents, the [keys] rebind table) are not settable here —
+Structural keys (root_agents, [theme], the [keys] rebind table) are not settable here —
 edit config.toml directly. Changes apply on the next af / daemon start.
 
 Examples:

@@ -9,7 +9,7 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
 
 Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you are upgrading from a version that used `config.json`, see [Migrating from JSON](#migrating-from-json) below; the change is automatic.
 
-You can also read and write the global config from the CLI: `af config get <key>` / `af config list` print the effective values, and `af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`; structural keys (`root_agents`, `[keys]`) are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+You can also read and write the global config from the CLI: `af config get <key>` / `af config list` print the effective values, and `af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`; structural tables (`root_agents`, `[theme]`, `[keys]`) are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
 
 ## Global config
 
@@ -31,6 +31,27 @@ limit_retry_interval = "30m"
 
 [program_overrides]
 claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
+
+[theme]
+foreground = "#DCDCCC"
+foreground_strong = "#FFFFEF"
+foreground_muted = "#989890"
+foreground_dim = "#656555"
+background = "#3F3F3F"
+background_subtle = "#494949"
+background_panel = "#4F4F4F"
+accent = "#8CD0D3"
+success = "#7F9F7F"
+warning = "#F0DFAF"
+error = "#CC9393"
+info = "#93E0E3"
+purple = "#DC8CC3"
+selection_background = "#4F4F4F"
+selection_foreground = "#FFFFEF"
+pane_border_default = "#989890"
+pane_border_selected = "#8CD0D3"
+pane_border_interactive = "#7F9F7F"
+pane_border_preview = "#DC8CC3"
 ```
 
 | Field | Description |
@@ -50,7 +71,28 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | `limit_auto_resume` | Opt in to the daemon auto-resuming a session parked at a usage-limit wall once its limit window elapses (default: `false`). See [Usage-limit auto-resume](#usage-limit-auto-resume). |
 | `limit_retry_interval` | Fallback retry cadence (Go duration, e.g. `30m`) used only when `limit_auto_resume` is on **and** the limit banner carried no parseable reset time (default: `30m`). Empty or `0` disables the fallback. |
 | `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
+| `theme` | Optional TUI color table. Defaults to a Zenburn-derived palette and validates each value as `#RRGGBB`; invalid values fall back to the corresponding default with a warning. See [Theme colors](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
+
+### Theme colors (`theme`)
+
+The TUI palette defaults to Zenburn: low-contrast foreground/background colors
+with muted green, red, yellow, blue, cyan, and purple accents. Override any
+slot in the global `[theme]` table; omitted slots keep their defaults.
+
+```toml
+[theme]
+accent = "#8CD0D3"
+success = "#7F9F7F"
+warning = "#F0DFAF"
+error = "#CC9393"
+pane_border_preview = "#DC8CC3"
+```
+
+All values must be `#RRGGBB`. Invalid values are ignored with a warning and the
+default for that slot is used, so a bad color cannot prevent the TUI from
+starting. `[theme]` is global-only and TOML-only, like `[keys]`: in-repo configs
+reject it so a cloned repository cannot recolor your terminal.
 
 ### Root agents (always-ensured)
 

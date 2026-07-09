@@ -167,7 +167,7 @@ func paneOverlayContentRect(styleRect layout.Rect) layout.Rect {
 // splitDividerStyle recedes the 1-col dividers between panes so the focused
 // pane's frame stays the strongest line on screen.
 var splitDividerStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#DDDADA", Dark: "#3C3C3C"})
+	Foreground(ui.CurrentTheme().BackgroundSubtle)
 
 // renderDivider renders the 1-col divider right of pane i (§2.6: "N panes
 // divide the workspace width evenly with 1-col dividers").

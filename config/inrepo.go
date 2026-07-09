@@ -104,15 +104,19 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	"log_max_backups":      true,
 	"log_max_size_mb":      true,
 	"root_agents":          true,
-	"update_channel":       true,
-	"worktree_root":        true,
+	// The [theme] table is a user/host visual preference; repositories must
+	// not be able to recolor a cloned user's TUI (#1389).
+	"theme":          true,
+	"update_channel": true,
+	"worktree_root":  true,
 }
 
 // tomlOnlyGlobalKeys is the subset of inRepoGlobalOnlyKeys that exists only in
 // config.toml (#1026/#1030), so their in-repo rejection message must direct
 // the user to config.toml rather than the resolved global config file.
 var tomlOnlyGlobalKeys = map[string]bool{
-	"keys": true,
+	"keys":  true,
+	"theme": true,
 }
 
 // InRepoConfigPath returns the path of the in-repo JSON config file for a

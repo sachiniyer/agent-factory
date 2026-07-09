@@ -75,29 +75,29 @@ func partitionByArchived(instances []*session.Instance) (live, archived []int) {
 
 var sectionHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
+	Foreground(activeTheme.Foreground)
 
 var sectionHeaderSelectedStyle = lipgloss.NewStyle().
 	Bold(true).
-	Background(lipgloss.Color("#dde4f0")).
-	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
+	Background(activeTheme.SelectionBackground).
+	Foreground(activeTheme.SelectionForeground)
 
 var windowIndicatorStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
+	Foreground(activeTheme.ForegroundMuted)
 
 var mainTitle = lipgloss.NewStyle().
 	Background(AccentColor).
-	Foreground(lipgloss.Color("230"))
+	Foreground(activeTheme.Background)
 
 // blurredTitle is the title chip with tree focus elsewhere (#1024 PR 4 focus
 // ring): same shape, receded color.
 var blurredTitle = lipgloss.NewStyle().
-	Background(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#555555"}).
-	Foreground(lipgloss.Color("230"))
+	Background(activeTheme.ForegroundDim).
+	Foreground(activeTheme.ForegroundStrong)
 
 var autoYesStyle = lipgloss.NewStyle().
-	Background(lipgloss.Color("#dde4f0")).
-	Foreground(lipgloss.Color("#1a1a1a"))
+	Background(activeTheme.SelectionBackground).
+	Foreground(activeTheme.SelectionForeground)
 
 // Sidebar is the unified left navigation pane with collapsible sections. It is
 // a VIEW over the store.Projection (#1024 PR 2): the instance/task/hook data —

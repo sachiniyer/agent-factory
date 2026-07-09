@@ -332,9 +332,8 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetPRInfo(&git.PRInfo{Number: 7, Title: "teardown", State: "OPEN"})
 
-	// SGR foreground params of the dark-background deleting gray, e.g.
-	// "38;2;119;119;119" under TrueColor.
-	dimFG := termenv.RGBColor(deletingTitleColor.Dark).Sequence(false)
+	// SGR foreground params of the default Zenburn deleting gray.
+	dimFG := termenv.RGBColor("#989890").Sequence(false)
 
 	r := NewInstanceRenderer(&spin)
 	r.SetWidth(effectiveWidth(36))
