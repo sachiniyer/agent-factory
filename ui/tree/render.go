@@ -2,7 +2,6 @@ package tree
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -160,14 +159,6 @@ type InstanceRenderer struct {
 	// usable column (its rect minus row padding), keeping the layout math in
 	// one place outside this package.
 	width int
-	// indexWidth is the number of digits to left-pad the 1-based row index to,
-	// so every row in a list shares one prefix width and the branch/PR lines
-	// stay aligned across power-of-10 boundaries (9→10, 99→100, …). The caller
-	// sets it to the digit count of the largest index in the list; a small list
-	// keeps the original single-digit prefix and pays no extra width. When it is
-	// 0 (or smaller than idx's own digit count) Render falls back to idx's width
-	// so the index is never truncated (#871, #923, #939).
-	indexWidth int
 }
 
 // NewInstanceRenderer creates a renderer sharing the app-wide spinner.
@@ -180,12 +171,6 @@ func (r *InstanceRenderer) SetWidth(width int) {
 	r.width = width
 }
 
-// SetIndexWidth sets the digit width of the largest 1-based instance index in
-// the rendered list. See the indexWidth field.
-func (r *InstanceRenderer) SetIndexWidth(digits int) {
-	r.indexWidth = digits
-}
-
 // ɹ and ɻ are other options.
 const branchIcon = "Ꮧ"
 
@@ -196,8 +181,8 @@ const branchIcon = "Ꮧ"
 // leading space. ok is false at ultra-narrow widths, where Render drops the
 // arrow from the prefix entirely (the #646 fallback) — the sidebar registers
 // no arrow zone then. Kept next to Render so the prefix layout and the hit
-// target can't drift apart; the render test pins them together against
-// actual output.
+// target can't drift apart; the render test pins them together against actual
+// output.
 func ArrowCell(w int) (x, y int, ok bool) {
 	if w <= 9 {
 		return 0, 0, false
@@ -205,25 +190,19 @@ func ArrowCell(w int) (x, y int, ok bool) {
 	return 2, 1, true
 }
 
+// instancePrefix renders the display-only tree prefix on instance rows. It
+// intentionally does not include the instance's 1-based index (#1494).
+func instancePrefix(arrow string, width int) string {
+	if width <= 9 {
+		return ""
+	}
+	return fmt.Sprintf(" %s ", arrow)
+}
+
 // Render renders an instance row. expanded selects the ▾/▸ tree arrow; a
 // non-expandable instance (see Expandable) renders a blank arrow cell so its
 // title stays aligned with its siblings.
-func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, hasMultipleRepos bool, expanded bool) string {
-	// Each extra digit grows the prefix by one cell, which shifts the
-	// prefix-width-derived branch/PR indentation and misaligns adjacent visible
-	// rows at every power-of-10 boundary (9→10, 99→100, 999→1000, …). Left-pad
-	// the NUMBER (right-justified) to a width derived from the largest index in
-	// the list so every row's prefix is the same width while the dot and full
-	// index are always preserved. An earlier trim-loop (#923) held width by
-	// deleting the rightmost char per tier, which corrupted content — dropping
-	// the dot at idx≥100 and a digit at idx≥1000 (e.g. 1000 rendered as "100").
-	// Padding keeps the same alignment without eating content, and because the
-	// width tracks the list size a small list still renders the original
-	// single-digit prefix (#871, #923, #939).
-	digits := r.indexWidth
-	if d := len(strconv.Itoa(idx)); d > digits {
-		digits = d
-	}
+func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, hasMultipleRepos bool, expanded bool) string {
 	arrow := nonExpandableArrow
 	if Expandable(i) {
 		if expanded {
@@ -232,14 +211,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 			arrow = collapsedArrow
 		}
 	}
-	prefix := fmt.Sprintf(" %s %*d. ", arrow, digits, idx)
-	if r.width <= 9 {
-		// At ultra-narrow widths the 2-cell arrow prefix overflows the sidebar
-		// container (the #646 overflow class the padding drop below also
-		// handles) and there is no room to render children anyway; fall back
-		// to the pre-tree prefix.
-		prefix = fmt.Sprintf(" %*d. ", digits, idx)
-	}
+	prefix := instancePrefix(arrow, r.width)
 	// The arrow is multibyte, so alignment math below must use the prefix's
 	// CELL width, never len(prefix).
 	prefixWidth := runewidth.StringWidth(prefix)
@@ -327,7 +299,11 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	if liveness == session.LiveLimitReached {
 		titleText = limitBadgePrefix(i) + titleText
 	}
-	widthAvail := r.width - 3 - prefixWidth - 1
+	prefixSepWidth := 0
+	if prefix != "" {
+		prefixSepWidth = 1
+	}
+	widthAvail := r.width - 3 - prefixWidth - prefixSepWidth
 	if widthAvail <= 0 {
 		// No room for any title text at this width; render just the prefix.
 		// lipgloss.Place doesn't clip oversize content, so leaving titleText
@@ -356,9 +332,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		titleS = titleS.PaddingLeft(0).PaddingRight(0)
 		descS = descS.PaddingLeft(0).PaddingRight(0)
 	}
+	titleContent := titleText
+	if prefix != "" {
+		titleContent = fmt.Sprintf("%s %s", prefix, titleText)
+	}
 	title := titleS.Render(lipgloss.JoinHorizontal(
 		lipgloss.Left,
-		lipgloss.Place(r.width-3, 1, lipgloss.Left, lipgloss.Center, fmt.Sprintf("%s %s", prefix, titleText)),
+		lipgloss.Place(r.width-3, 1, lipgloss.Left, lipgloss.Center, titleContent),
 		" ",
 		join,
 	))
@@ -440,14 +420,9 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 	if active {
 		marker = " *"
 	}
-	// Indent the connector to the instance title's start column: the instance
-	// prefix " ▸ <idx>. " is digits+5 cells wide (see Render), so children read
-	// as nested under their parent regardless of list size.
-	digits := r.indexWidth
-	if digits < 1 {
-		digits = 1
-	}
-	text := fmt.Sprintf("%s%s %d %s%s", strings.Repeat(" ", digits+5), connector, oneBased, label, marker)
+	text := fmt.Sprintf("%s%s %d %s%s",
+		strings.Repeat(" ", runewidth.StringWidth(instancePrefix(expandedArrow, r.width))),
+		connector, oneBased, label, marker)
 	if r.width > 0 && runewidth.StringWidth(text) > r.width {
 		// Same narrow-width handling as the instance rows: drop the "..." tail
 		// when it would itself overflow, since lipgloss.Place won't clip

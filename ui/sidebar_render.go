@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -291,10 +290,6 @@ func (s *Sidebar) renderInstance(idx int, selected bool) string {
 		return ""
 	}
 	inst := instances[idx]
-	// Pad the index to the digit width of the largest 1-based index in the list
-	// so every row's prefix is the same width and the branch/PR lines align,
-	// without widening the common small-list case (#871, #923, #939).
-	s.renderer.SetIndexWidth(len(strconv.Itoa(len(instances))))
 	return s.renderer.Render(inst, idx+1, selected, s.proj.NumRepos() > 1, s.instanceExpanded(inst))
 }
 
@@ -310,7 +305,6 @@ func (s *Sidebar) renderTabRow(item SidebarItem, selected bool) string {
 	if item.TabIndex < 0 || item.TabIndex >= len(labels) {
 		return ""
 	}
-	s.renderer.SetIndexWidth(len(strconv.Itoa(len(instances))))
 	return s.renderer.RenderTab(labels[item.TabIndex], item.TabIndex+1,
 		item.TabIndex == len(labels)-1, selected, s.proj.ActiveTab() == item.TabIndex)
 }

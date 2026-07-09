@@ -36,7 +36,6 @@ func TestArrowCellMatchesRenderedArrow(t *testing.T) {
 
 	r := NewInstanceRenderer(&spin)
 	r.SetWidth(30)
-	r.SetIndexWidth(1)
 
 	x, y, ok := ArrowCell(30)
 	require.True(t, ok)
