@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -162,6 +164,10 @@ type home struct {
 	// left-to-right order — rebuilt by relayout (§2.6 pane-count fitting:
 	// the least-recently-focused panes beyond Layout.MaxPanes are hidden).
 	visiblePanes []*store.OpenPane
+	// pendingPaneAutoHideStatus is set by relayout when a previously visible
+	// pane is auto-hidden by width pressure. Callers that can return a tea.Cmd
+	// consume it to start the same transient clear timer normal errors use.
+	pendingPaneAutoHideStatus string
 	// lastPaneCapture is when each pane's capture was last dispatched, keyed
 	// by pane id; the paneCaptureMinInterval throttle reads it (RFC §5.2).
 	lastPaneCapture map[int]time.Time
@@ -387,10 +393,11 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 
 // updateHandleWindowSizeEvent records the terminal size and re-solves the
 // layout.
-func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
+func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) tea.Cmd {
 	m.termWidth = msg.Width
 	m.termHeight = msg.Height
 	m.relayout()
+	return m.consumePaneAutoHideStatus()
 }
 
 // relayout is the single sizing path (#1024 PR 4): layout.Grid turns the
@@ -399,6 +406,7 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 // every WindowSizeMsg and whenever a grid input changes without a resize (a
 // pane opening or closing).
 func (m *home) relayout() {
+	previousVisible := append([]*store.OpenPane(nil), m.visiblePanes...)
 	// The grid is asked for every open pane; it honors at most MaxPanes of
 	// them (§2.6). The store then picks WHICH panes stay visible — the
 	// most-recently-focused ones, in workspace order — while the hidden
@@ -423,7 +431,11 @@ func (m *home) relayout() {
 		return
 	}
 
-	m.visiblePanes = m.store.VisibleOpenPanes(lay.PaneCount())
+	nextVisible := m.store.VisibleOpenPanes(lay.PaneCount())
+	if hidden := newlyAutoHiddenPane(previousVisible, nextVisible, m.store.OpenPanes()); hidden != nil {
+		m.setPaneAutoHideStatus(hidden, m.store.NumOpenPanes())
+	}
+	m.visiblePanes = nextVisible
 
 	// Rebuild the ring's pane entries to the visible set (auto-hidden panes
 	// leave the ring; the focused pane is most-recently-focused, so it is
@@ -472,6 +484,75 @@ func (m *home) relayout() {
 			}
 		}
 	}
+}
+
+func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPane) *store.OpenPane {
+	if len(previousVisible) == 0 || len(openPanes) <= len(nextVisible) {
+		return nil
+	}
+	open := make(map[*store.OpenPane]bool, len(openPanes))
+	for _, p := range openPanes {
+		open[p] = true
+	}
+	visible := make(map[*store.OpenPane]bool, len(nextVisible))
+	for _, p := range nextVisible {
+		visible[p] = true
+	}
+	for _, p := range previousVisible {
+		if p != nil && open[p] && !visible[p] {
+			return p
+		}
+	}
+	return nil
+}
+
+func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
+	if p == nil || paneCount <= 1 {
+		return
+	}
+	msg := fmt.Sprintf("%s hidden: terminal too narrow for %d panes; resize wider%s",
+		paneStatusTitle(p), paneCount, paneRecoveryStatusHint())
+	m.pendingPaneAutoHideStatus = msg
+	m.errBox.SetError(errors.New(msg))
+}
+
+func paneStatusTitle(p *store.OpenPane) string {
+	if p == nil || p.Instance() == nil || p.Instance().Title == "" {
+		return "pane"
+	}
+	return p.Instance().Title
+}
+
+func paneRecoveryStatusHint() string {
+	if key := bindingKeyWithDesc("pane list"); key != "" {
+		return fmt.Sprintf(" or use `%s` pane list", key)
+	}
+	if binding, ok := keys.GlobalKeyBindings[keys.KeyOpenPane]; ok {
+		help := binding.Help()
+		if help.Key != "" && help.Desc != "" {
+			return fmt.Sprintf(" or use `%s` %s", help.Key, help.Desc)
+		}
+	}
+	return ""
+}
+
+func bindingKeyWithDesc(desc string) string {
+	for _, binding := range keys.GlobalKeyBindings {
+		help := binding.Help()
+		if help.Desc == desc && help.Key != "" {
+			return help.Key
+		}
+	}
+	return ""
+}
+
+func (m *home) consumePaneAutoHideStatus() tea.Cmd {
+	if m.pendingPaneAutoHideStatus == "" {
+		return nil
+	}
+	status := m.pendingPaneAutoHideStatus
+	m.pendingPaneAutoHideStatus = ""
+	return m.showTransientError(errors.New(status))
 }
 
 // syncFocus applies the focus ring's active region to the panes and the

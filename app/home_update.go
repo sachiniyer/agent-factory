@@ -166,8 +166,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 	case tea.WindowSizeMsg:
-		m.updateHandleWindowSizeEvent(msg)
-		return m, nil
+		return m, m.updateHandleWindowSizeEvent(msg)
 	case error:
 		return m, m.handleError(msg)
 	case runOnEventLoopMsg:

@@ -116,7 +116,9 @@ func (m *home) openOrFocusPane(instance *session.Instance, tab int) (tea.Model, 
 	m.store.TouchOpenPane(p)
 	m.relayout()
 	m.focusRegion(layout.PaneRegion(p.ID()))
-	return m, m.selectionChanged()
+	selectionCmd := m.selectionChanged()
+	statusCmd := m.consumePaneAutoHideStatus()
+	return m, tea.Batch(selectionCmd, statusCmd)
 }
 
 // handleSplitPane dispatches the `S` key: commit the active preview alongside
