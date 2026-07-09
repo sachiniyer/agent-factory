@@ -86,6 +86,7 @@ type eventQueue struct {
 	taskID  string
 	path    string // <dir>/<taskID>.jsonl
 	curPath string // <dir>/<taskID>.cursor
+	remove  func(string) error
 
 	mu      sync.Mutex
 	offset  int64 // byte offset of the first undelivered event
@@ -123,6 +124,7 @@ func newEventQueue(dir, taskID string) *eventQueue {
 		taskID:  taskID,
 		path:    filepath.Join(dir, taskID+".jsonl"),
 		curPath: filepath.Join(dir, taskID+".cursor"),
+		remove:  os.Remove,
 		now:     time.Now,
 	}
 	q.load()
@@ -205,6 +207,9 @@ func (q *eventQueue) enqueue(line string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	if err := q.resetCursorBeforeFreshAppendLocked(); err != nil {
+		return err
+	}
 	q.seq++
 	rec, err := json.Marshal(queuedEvent{Seq: q.seq, TS: q.now(), Line: line})
 	if err != nil {
@@ -236,6 +241,22 @@ func (q *eventQueue) enqueue(line string) error {
 	q.pending++
 
 	return q.dropOldestOverCapsLocked()
+}
+
+// resetCursorBeforeFreshAppendLocked removes or zeroes any leftover cursor
+// before a brand-new queue file is created. A stale nonzero cursor beside a
+// fresh jsonl file could make a later daemon skip bytes on reload.
+func (q *eventQueue) resetCursorBeforeFreshAppendLocked() error {
+	if q.pending != 0 || q.offset != 0 || q.size != 0 {
+		return nil
+	}
+	if err := q.remove(q.curPath); err != nil && !os.IsNotExist(err) {
+		if resetErr := config.AtomicWriteFile(q.curPath, []byte("0"), 0644); resetErr != nil {
+			return fmt.Errorf("failed to reset stale event-queue cursor before enqueue: remove failed: %v; reset failed: %w", err, resetErr)
+		}
+		log.WarningLog.Printf("watch task %s: failed to remove stale event-queue cursor before enqueue; reset it to 0: %v", q.taskID, err)
+	}
+	return nil
 }
 
 // dropOldestOverCapsLocked advances the cursor past the oldest pending events
@@ -312,16 +333,7 @@ func (q *eventQueue) advance(cursor eventQueueCursor) (bool, error) {
 	q.offset += cursor.length
 	q.pending--
 	if q.pending == 0 {
-		// Fully drained: reclaim the delivered prefix by removing both files —
-		// the steady healthy state is no queue files at all.
-		q.offset, q.size = 0, 0
-		if err := os.Remove(q.path); err != nil && !os.IsNotExist(err) {
-			return false, err
-		}
-		if err := os.Remove(q.curPath); err != nil && !os.IsNotExist(err) {
-			return false, err
-		}
-		return true, nil
+		return q.removeDrainedFilesLocked()
 	}
 	if q.offset > watcherQueueCompactBytes {
 		if err := q.compactLocked(); err != nil {
@@ -331,6 +343,25 @@ func (q *eventQueue) advance(cursor eventQueueCursor) (bool, error) {
 		}
 	}
 	return true, q.persistCursorLocked()
+}
+
+// removeDrainedFilesLocked reclaims queue storage after the final event is
+// delivered. The in-memory delivered-prefix state must stay intact until the
+// jsonl file is gone; otherwise a later append can make already-delivered bytes
+// look pending and silently lose the appended event (#1433).
+func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
+	if err := q.remove(q.path); err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := q.remove(q.curPath); err != nil && !os.IsNotExist(err) {
+		if resetErr := config.AtomicWriteFile(q.curPath, []byte("0"), 0644); resetErr != nil {
+			q.offset, q.size = 0, 0
+			return false, fmt.Errorf("failed to reset drained event-queue cursor: remove failed: %v; reset failed: %w", err, resetErr)
+		}
+		log.WarningLog.Printf("watch task %s: failed to remove drained event-queue cursor; reset it to 0: %v", q.taskID, err)
+	}
+	q.offset, q.size = 0, 0
+	return true, nil
 }
 
 // compactLocked rewrites the queue file to just its pending suffix, dropping
