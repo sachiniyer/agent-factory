@@ -253,6 +253,9 @@ type home struct {
 	// press-any-key gates while the general ? help behaves like a scrollable
 	// modal with explicit dismiss keys.
 	textOverlayDismissAnyKey bool
+	// textOverlayDismissPolicy, when set, decides whether a help overlay key
+	// closes the overlay and whether its OnDismiss callback should run.
+	textOverlayDismissPolicy func(tea.KeyMsg) (dismiss bool, runOnDismiss bool)
 	// replayHelpDismissKey marks the first-run interactive pane help: the
 	// key that closes that overlay is the user's first pane keystroke, so it
 	// must be forwarded after the deferred live bind completes (#1410).

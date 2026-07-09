@@ -267,6 +267,23 @@ func TestInstanceRendererArchivedShowsName(t *testing.T) {
 	}
 }
 
+func TestInstanceRendererCreatingRowLabelsNamePrompt(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "alpha",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+	require.NoError(t, inst.Transition(session.BeginCreate()))
+
+	r := NewInstanceRenderer(&spin)
+	r.SetWidth(40)
+
+	title := strings.Split(ansiEscape.ReplaceAllString(r.Render(inst, 1, true, false, false), ""), "\n")[1]
+	assert.Contains(t, title, "Session name: alpha", "creating rows must label the active name target")
+}
+
 // TestInstanceRendererDeletingDimsSelectedRow pins the #853 fix: a SELECTED
 // deleting row must dim its branch and PR lines along with the title. Before
 // the fix only titleS picked up deletingTitleColor, so the high-contrast

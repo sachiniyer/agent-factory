@@ -107,6 +107,19 @@ func menuHasOption(m *Menu, want keys.KeyName) bool {
 	return false
 }
 
+func TestMenuNewInstanceShowsSubmitProgramAndCancel(t *testing.T) {
+	m := NewMenu()
+	m.SetState(StateNewInstance)
+	m.SetSize(80, 1)
+
+	out := m.String()
+	for _, want := range []string{"enter submit name", "tab change program", "esc cancel"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("new-instance footer missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestMenuRemoteInstanceOmitsUnsupportedTabKeys guards against regressing #988:
 // remote instances block `t` (new tab) and `w` (close tab) — those handlers
 // reject IsRemote() with an error — so the footer menu must only surface the

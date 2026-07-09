@@ -85,12 +85,12 @@ func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 	assert.Nil(t, cmd)
 }
 
-// TestHandleMenuHighlightingNewInstanceEnterTab is the regression guard for
-// issue #691: pressing Enter or Tab while naming a new instance must drive the
+// TestHandleMenuHighlightingNewInstanceActions is the regression guard for
+// issue #691/#1413: pressing Enter, Tab, or Esc while naming a new instance must drive the
 // menu highlight animation. The bug (commit f294e5b) folded stateNew into the
 // early-return filter, which made the Enter→KeySubmitName / Tab→KeyChangeProgram
 // remapping — and thus the highlight render path — unreachable.
-func TestHandleMenuHighlightingNewInstanceEnterTab(t *testing.T) {
+func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 	// Force a real color profile so lipgloss emits the underline escape that
 	// signals a highlighted menu option; the Ascii profile used by default in
 	// non-TTY test runs strips all styling and would hide the highlight.
@@ -109,6 +109,7 @@ func TestHandleMenuHighlightingNewInstanceEnterTab(t *testing.T) {
 	}{
 		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
 		{"tab", tea.KeyMsg{Type: tea.KeyTab}},
+		{"esc", tea.KeyMsg{Type: tea.KeyEsc}},
 	}
 
 	for _, tc := range cases {
@@ -125,7 +126,7 @@ func TestHandleMenuHighlightingNewInstanceEnterTab(t *testing.T) {
 			cmd, returnEarly := h.handleMenuHighlighting(tc.key)
 
 			// The keypress is intercepted so the highlight + re-emit fire.
-			assert.True(t, returnEarly, "Enter/Tab should be intercepted during stateNew")
+			assert.True(t, returnEarly, "naming action keys should be intercepted during stateNew")
 			assert.NotNil(t, cmd)
 			assert.True(t, h.keySent, "keySent guards the re-emitted key from re-highlighting")
 

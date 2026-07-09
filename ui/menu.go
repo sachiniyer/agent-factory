@@ -87,7 +87,7 @@ type Menu struct {
 }
 
 var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
-var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName, keys.KeyChangeProgram}
+var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName, keys.KeyChangeProgram, keys.KeyCancelName}
 
 // automationsMenuOptions are the status-bar hints while the in-rail
 // automations section has focus: Enter opens the task manager overlay (which

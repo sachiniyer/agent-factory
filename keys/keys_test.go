@@ -81,6 +81,7 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		KeyJumpTab:           "1-9",
 		KeySubmitName:        "enter",
 		KeyChangeProgram:     "tab",
+		KeyCancelName:        "esc",
 		KeyExitInteractive:   "ctrl+]",
 		KeyLeft:              "h/←",
 		KeyRight:             "l/→",

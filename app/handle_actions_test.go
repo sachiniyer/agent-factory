@@ -88,6 +88,30 @@ func TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift(t *testing.T) {
 		"attach must target the instance captured at Enter-press time, not the drifted selection")
 }
 
+func TestFirstRunAttachHelpEscCancelsAttach(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "alpha")
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	attached := 0
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, attach func() (chan struct{}, error)) tea.Cmd {
+		attached++
+		return nil
+	})
+
+	model, _ := h.handleAttach()
+	h = model.(*home)
+	require.Equal(t, stateHelp, h.state, "first-time attach must show the help overlay")
+	require.NotNil(t, h.textOverlay)
+
+	_, cmd := h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "Esc must close the attach help overlay")
+	require.False(t, h.attachTransitioning, "Esc cancel must not schedule the full-screen attach transition")
+	runHermeticCmd(t, h, cmd, 0)
+	require.Zero(t, attached, "Esc cancel must not invoke the attach callback")
+}
+
 // TestKillConfirmationWarning is the regression guard for issue #815. Kill
 // force-removes the worktree (`git worktree remove -f`), bypassing git's own
 // refusal to delete a dirty worktree, so the confirmation dialog's warning is

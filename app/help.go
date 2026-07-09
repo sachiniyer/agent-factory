@@ -97,6 +97,10 @@ func helpStart(instance *session.Instance) helpText {
 	return helpTypeInstanceStart{instance: instance}
 }
 
+func firstRunActionLine(actions string) string {
+	return descStyle.Render(actions)
+}
+
 func (h helpTypeGeneral) toContent() string {
 	// Every key glyph below is pulled from the generated binding table via
 	// helpKey, so [keys] rebinds appear here identically to the bottom menu
@@ -169,8 +173,7 @@ func (h helpTypeInstanceStart) toContent() string {
 		descStyle.Render("New session created:"),
 		descStyle.Render(fmt.Sprintf("• Git branch: %s (isolated worktree)",
 			lipgloss.NewStyle().Bold(true).Render(h.instance.GetBranch()))),
-		descStyle.Render(fmt.Sprintf("• %s running in background tmux session",
-			lipgloss.NewStyle().Bold(true).Render(h.instance.Program))),
+		descStyle.Render("• Agent process running in background tmux session"),
 		"",
 		headerStyle.Render("Managing:"),
 		keyStyle.Render(helpKey(keys.KeyEnter))+descStyle.Render(fmt.Sprintf("     - Interact with the session in its pane (%s returns to nav)", helpKey(keys.KeyExitInteractive))),
@@ -178,6 +181,9 @@ func (h helpTypeInstanceStart) toContent() string {
 		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("     - Detach from a full-screen session"),
 		tabHelp,
 		keyStyle.Render(helpKey(keys.KeyKill))+descStyle.Render("     - Kill (delete) the selected session"),
+		"",
+		headerStyle.Render("Actions:"),
+		firstRunActionLine("enter continue • esc close"),
 	)
 	return content
 }
@@ -186,7 +192,8 @@ func (h helpTypeInstanceAttach) toContent() string {
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Attaching to Instance"),
 		"",
-		descStyle.Render("To detach from a session, press ")+keyStyle.Render(tmux.DetachKeyDisplay),
+		firstRunActionLine("enter attach full-screen • esc cancel"),
+		descStyle.Render("Detach later with ")+keyStyle.Render(tmux.DetachKeyDisplay),
 	)
 	return content
 }
@@ -272,6 +279,7 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 	// Only show if we're showing the general help screen or the corresponding flag is not set
 	// in the seen bitmask.
 	m.replayHelpDismissKey = false
+	m.textOverlayDismissPolicy = nil
 	if alwaysShow || (m.appState.GetHelpScreensSeen()&flag) == 0 {
 		// Mark this help screen as seen and save state
 		if err := m.appState.SetHelpScreensSeen(m.appState.GetHelpScreensSeen() | flag); err != nil {
@@ -285,6 +293,10 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 		m.textOverlayDismissAnyKey = true
 		if _, ok := helpType.(helpTypeGeneral); ok {
 			m.textOverlayDismissAnyKey = false
+		}
+		if _, ok := helpType.(helpTypeInstanceAttach); ok {
+			m.textOverlayDismissAnyKey = false
+			m.textOverlayDismissPolicy = attachHelpDismissPolicy
 		}
 		if _, ok := helpType.(helpTypeInteractive); ok {
 			m.replayHelpDismissKey = true
@@ -312,15 +324,30 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if !m.textOverlayDismissAnyKey && !isHelpDismissKey(msg) {
+	runOnDismiss := true
+	if m.textOverlayDismissPolicy != nil {
+		dismiss, run := m.textOverlayDismissPolicy(msg)
+		if !dismiss {
+			return m, nil
+		}
+		runOnDismiss = run
+	} else if !m.textOverlayDismissAnyKey && !isHelpDismissKey(msg) {
 		return m, nil
 	}
 
-	dismissCmd, shouldClose := m.textOverlay.HandleKeyPress(msg)
+	var dismissCmd tea.Cmd
+	var shouldClose bool
+	if runOnDismiss {
+		dismissCmd, shouldClose = m.textOverlay.HandleKeyPress(msg)
+	} else {
+		m.textOverlay.Dismissed = true
+		shouldClose = true
+	}
 	if shouldClose {
 		replayDismissKey := m.replayHelpDismissKey
 		m.replayHelpDismissKey = false
 		m.textOverlayDismissAnyKey = false
+		m.textOverlayDismissPolicy = nil
 		m.state = stateDefault
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -336,6 +363,17 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func attachHelpDismissPolicy(msg tea.KeyMsg) (bool, bool) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		return true, true
+	case tea.KeyEsc, tea.KeyCtrlC:
+		return true, false
+	default:
+		return false, false
+	}
 }
 
 func isHelpScrollUpKey(msg tea.KeyMsg) bool {

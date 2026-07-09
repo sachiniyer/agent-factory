@@ -46,6 +46,7 @@ const (
 	KeyHooks  // Key for editing post-worktree hooks
 
 	KeyChangeProgram // Key for changing the program during new instance naming
+	KeyCancelName    // Display-only cancel hint during new instance naming
 
 	// Sidebar navigation
 	KeyLeft        // Collapse section / move to parent
@@ -154,6 +155,7 @@ var specs = []spec{
 	// -- Special keybindings --
 	{name: KeySubmitName, keys: []string{"enter"}, helpLabel: "enter", desc: "submit name"},
 	{name: KeyChangeProgram, keys: []string{"tab"}, desc: "change program"},
+	{name: KeyCancelName, keys: []string{"esc"}, desc: "cancel"},
 }
 
 // reservedKeys are key strings the config may never bind an action to: they
