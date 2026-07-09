@@ -103,12 +103,41 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 	if req.Prompt == "" {
 		return fmt.Errorf("prompt is required")
 	}
-	instance, _, _, err := m.findSession(req.Title, req.RepoID)
+	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
 	if err != nil {
 		return err
 	}
 	if instance == nil {
 		return fmt.Errorf("failed to restore instance %q", req.Title)
+	}
+
+	key := daemonInstanceKey(repoID, req.Title)
+	m.mu.Lock()
+	_, killing := m.killsInFlight[key]
+	m.mu.Unlock()
+	if killing {
+		return fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title)
+	}
+
+	opLock := m.opLockFor(key)
+	opLock.Lock()
+	defer opLock.Unlock()
+
+	m.mu.Lock()
+	current := m.instances[key]
+	_, killing = m.killsInFlight[key]
+	m.mu.Unlock()
+	if killing {
+		return fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title)
+	}
+	if current == nil {
+		return fmt.Errorf("target session %q was deleted; prompt not delivered", req.Title)
+	}
+	if current != instance {
+		if instance.ID != "" && current.ID != "" && current.ID != instance.ID {
+			return fmt.Errorf("target session %q changed while preparing prompt; prompt not delivered", req.Title)
+		}
+		instance = current
 	}
 	if instance.IsTearingDown() {
 		return fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title)
