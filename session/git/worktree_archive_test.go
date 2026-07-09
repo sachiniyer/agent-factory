@@ -209,7 +209,9 @@ func TestRestoreWorktreeTo_SubmoduleRepairFailureIsBestEffort(t *testing.T) {
 
 	assert.False(t, pathExists(archiveDest), "the archive directory must be gone after restore")
 	assertLiveWorktreeAt(t, gw, restoreDest)
-	assert.Contains(t, warnings.String(), "failed to repair submodule gitdirs")
+	assert.Contains(t, warnings.String(), "submodule gitdir repair failed after moving worktree")
+	assert.Contains(t, warnings.String(), "git -C \""+restoreDest+"\" submodule absorbgitdirs")
+	assert.Contains(t, warnings.String(), "git -C \""+restoreDest+"\" submodule update --init --recursive")
 }
 
 // TestSiblingWorktreePath_DefaultCollisionAndSanitize: the restore-side path

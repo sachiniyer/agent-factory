@@ -176,7 +176,14 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 			return fmt.Errorf("moved worktree to %s but failed to repair its git registration: %w", dest, rErr)
 		}
 		if sErr := worktreeRepairSubmodules(g, dest); sErr != nil {
-			log.WarningLog.Printf("moved worktree to %s but failed to repair submodule gitdirs; continuing because the worktree move and registration repair already succeeded: %v", dest, sErr)
+			log.WarningLog.Printf(
+				"submodule gitdir repair failed after moving worktree to %s; "+
+					"run `git -C %q submodule absorbgitdirs` "+
+					"(or `git -C %q submodule update --init --recursive`) "+
+					"to fix submodule status; continuing because the worktree move "+
+					"and registration repair already succeeded: %v",
+				dest, dest, dest, sErr,
+			)
 		}
 		return nil
 	}
