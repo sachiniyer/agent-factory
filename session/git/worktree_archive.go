@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -27,14 +26,7 @@ func SiblingWorktreePath(repoPath, title string) (string, error) {
 	worktreeDir := filepath.Dir(repoRoot)
 	repoName := filepath.Base(repoRoot)
 
-	// Sanitize the title into a single safe path segment, matching the
-	// safeSessionName handling in NewGitWorktree.
-	safe := strings.ReplaceAll(title, "..", "")
-	safe = strings.ReplaceAll(safe, "/", "-")
-	safe = strings.TrimLeft(safe, "-.")
-	if safe == "" {
-		safe = "session"
-	}
+	safe := sanitizeWorktreePathSegment(title)
 
 	base := filepath.Join(worktreeDir, repoName+"-"+safe)
 	absBase, _ := filepath.Abs(base)
