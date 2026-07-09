@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      deploy_docs:
+        description: 'Deploy docs from master without a push event'
+        required: false
+        default: false
+        type: boolean
 
 # GITHUB_TOKEN defaults to read-only; the deploy job needs to publish the Pages
 # artifact and mint the OIDC token actions/deploy-pages exchanges.
@@ -28,9 +34,14 @@ jobs:
 
       - name: Check docs deploy paths
         id: docs_changes
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "docs_changed=${{ inputs.deploy_docs }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           before="${{ github.event.before }}"
           after="${{ github.sha }}"
 
