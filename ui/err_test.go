@@ -96,6 +96,24 @@ func TestErrBoxWithoutANSIUnchanged(t *testing.T) {
 	}
 }
 
+func TestErrBoxTruncatedErrorShowsDetailsHint(t *testing.T) {
+	const full = "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS); PR URL: https://example.invalid/pr/987"
+	e := NewErrBox()
+	e.SetSize(64, 1)
+	e.SetError(errors.New(full))
+
+	out := stripANSI(e.String())
+	if !strings.Contains(out, "E details") {
+		t.Fatalf("truncated error should advertise the full-details key, got %q", out)
+	}
+	if strings.Contains(out, "https://example.invalid/pr/987") {
+		t.Fatalf("test precondition failed: rendered status line was not truncated: %q", out)
+	}
+	if got := e.FullError(); got != full {
+		t.Fatalf("FullError() = %q, want %q", got, full)
+	}
+}
+
 // TestErrBoxStripsANSIVariants is a regression matrix covering every ANSI
 // variant the strip pass has had to learn the hard way:
 //   - Plain CSI / SGR (#525, original bug — partial CSI bytes leaked).

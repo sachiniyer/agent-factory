@@ -394,6 +394,9 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 	if name == keys.KeyShiftDown || name == keys.KeyShiftUp {
 		return nil, false
 	}
+	if name == keys.KeyErrorDetails {
+		return nil, false
+	}
 	// Skip sidebar nav keys from menu highlighting
 	if name == keys.KeyLeft || name == keys.KeyRight || name == keys.KeyNextSection || name == keys.KeyPrevSection {
 		return nil, false
