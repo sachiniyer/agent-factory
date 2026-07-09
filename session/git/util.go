@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	reUnsafe    = regexp.MustCompile(`[^a-z0-9\-_/.]+`)
-	reMultiDash = regexp.MustCompile(`-+`)
+	reUnsafe                    = regexp.MustCompile(`[^a-z0-9\-_/.]+`)
+	reUnsafeWorktreePathSegment = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+	reMultiDash                 = regexp.MustCompile(`-+`)
 )
 
 // SanitizeBranchName transforms an arbitrary string into a Git branch name friendly string.
@@ -93,6 +94,21 @@ func trimBranchNameEdges(s string) string {
 // validation and the TUI's pre-submit naming check derive branches identically.
 func BranchForTitle(branchPrefix, title string) string {
 	return SanitizeBranchName(branchPrefix + title)
+}
+
+// sanitizeWorktreePathSegment turns a display title into one filesystem path
+// segment for AF-owned worktree directories. It preserves ordinary title case
+// for readability while removing separators/traversal and replacing whitespace
+// or shell-hostile punctuation with dashes.
+func sanitizeWorktreePathSegment(title string) string {
+	s := reUnsafeWorktreePathSegment.ReplaceAllString(title, "-")
+	s = strings.ReplaceAll(s, "..", "")
+	s = reMultiDash.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-.")
+	if s == "" {
+		return "session"
+	}
+	return s
 }
 
 // TitlesCollide reports whether two session titles cannot coexist in the same

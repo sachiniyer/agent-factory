@@ -158,13 +158,7 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		return nil, "", err
 	}
 
-	// Sanitize sessionName for filesystem path to prevent directory traversal
-	safeSessionName := strings.ReplaceAll(sessionName, "..", "")
-	safeSessionName = strings.ReplaceAll(safeSessionName, "/", "-")
-	safeSessionName = strings.TrimLeft(safeSessionName, "-.")
-	if safeSessionName == "" {
-		safeSessionName = "session"
-	}
+	safeSessionName := sanitizeWorktreePathSegment(sessionName)
 
 	var basePath string
 	if cfg.WorktreeRoot == config.WorktreeRootSubdirectory {

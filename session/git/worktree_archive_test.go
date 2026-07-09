@@ -277,6 +277,11 @@ func TestSiblingWorktreePath_DefaultCollisionAndSanitize(t *testing.T) {
 	ps, err := SiblingWorktreePath(repoRoot, "a/b..c")
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(parent, "repo-a-bc"), ps)
+
+	spaced, err := SiblingWorktreePath(repoRoot, "Review Threads")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(parent, "repo-Review-Threads"), spaced)
+	assert.NotContains(t, filepath.Base(spaced), " ")
 }
 
 // TestMoveWorktree_RepairFailureStillCommitsLocation (#1028 Greptile P1): in the

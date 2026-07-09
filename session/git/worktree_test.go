@@ -102,6 +102,26 @@ func TestNewGitWorktree_CleanName(t *testing.T) {
 	assert.Equal(t, filepath.Dir(repoRoot), filepath.Dir(gw.GetWorktreePath()))
 }
 
+func TestNewGitWorktree_SpaceTitleUsesSluggedSiblingPath(t *testing.T) {
+	sandboxHome(t)
+
+	repoRoot := createGitRepo(t)
+	repoName := filepath.Base(repoRoot)
+
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, branchName, err := NewGitWorktree(repoRoot, "Review Threads")
+	require.NoError(t, err)
+
+	assert.Equal(t, "test/review-threads", branchName)
+	assert.Equal(t, "Review Threads", gw.sessionName)
+	assert.NotContains(t, filepath.Base(gw.GetWorktreePath()), " ")
+	assert.True(t, strings.HasSuffix(gw.GetWorktreePath(), repoName+"-Review-Threads"),
+		"expected slugged worktree path, got: %s", gw.GetWorktreePath())
+}
+
 func TestNewGitWorktree_SubdirectoryCleanName(t *testing.T) {
 	sandboxHome(t)
 
