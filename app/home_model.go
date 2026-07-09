@@ -255,9 +255,11 @@ type home struct {
 	spinner spinner.Model
 	// textOverlay displays text information
 	textOverlay *overlay.TextOverlay
-	// textOverlayDismissAnyKey keeps the one-shot intro/attach overlays as
+	// textOverlayDismissAnyKey keeps the one-shot intro/created overlays as
 	// press-any-key gates while the general ? help behaves like a scrollable
-	// modal with explicit dismiss keys.
+	// modal with explicit dismiss keys. The attach overlay has its own policy
+	// (attachHelpDismissPolicy) distinguishing Enter (proceed) from Esc/Ctrl+C
+	// (cancel).
 	textOverlayDismissAnyKey bool
 	// textOverlayDismissPolicy, when set, decides whether a help overlay key
 	// closes the overlay and whether its OnDismiss callback should run.
