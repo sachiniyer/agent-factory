@@ -34,6 +34,22 @@ func newUnstartedProjectionInstance(t *testing.T, title string) *session.Instanc
 }
 
 func TestProjectionRemoveUnstartedInstanceDoesNotLogError(t *testing.T) {
+	t.Run("RegisterRepoForInstance", func(t *testing.T) {
+		errLog := captureProjectionErrorLog(t)
+		p := NewProjection()
+		inst := newUnstartedProjectionInstance(t, "unstarted-register")
+
+		finalize := p.AddInstance(inst)
+		finalize()
+
+		if got := p.NumRepos(); got != 0 {
+			t.Fatalf("NumRepos() = %d, want 0", got)
+		}
+		if got := errLog.String(); got != "" {
+			t.Fatalf("ErrorLog = %q, want empty", got)
+		}
+	})
+
 	t.Run("KillInstance", func(t *testing.T) {
 		errLog := captureProjectionErrorLog(t)
 		p := NewProjection()
