@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 	"golang.org/x/sys/unix"
 )
@@ -114,24 +115,6 @@ var tomlOnlyGlobalKeys = map[string]bool{
 	"keys": true,
 }
 
-// isPathStrictlyInside reports whether absBase is a strict descendant of
-// absDir (absBase != absDir and absBase is not outside absDir). Both
-// arguments must be absolute, cleaned paths. Built on filepath.Rel rather
-// than strings.HasPrefix(path, dir+Separator) because the latter constructs
-// "//" when dir is the filesystem root, rejecting valid children of a repo
-// rooted at "/" (#852). Duplicates session/git.isPathStrictlyInside, which
-// this package cannot import without a cycle.
-func isPathStrictlyInside(absBase, absDir string) bool {
-	rel, err := filepath.Rel(absDir, absBase)
-	if err != nil {
-		return false
-	}
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return true
-}
-
 // InRepoConfigPath returns the path of the in-repo JSON config file for a
 // repo root. The file is optional; callers should use LoadInRepoConfig rather
 // than reading this path directly so symlink and file-type guards apply.
@@ -227,7 +210,7 @@ func readInRepoConfigFile(repoRoot string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to resolve repo root %s: %w", repoRoot, err)
 	}
-	if !isPathStrictlyInside(resolved, filepath.Clean(resolvedRoot)) {
+	if !pathutil.IsStrictlyInside(resolved, filepath.Clean(resolvedRoot)) {
 		return nil, "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to read it", prettyHomePath(path), prettyHomePath(resolved))
 	}
 
@@ -423,7 +406,7 @@ func inRepoConfigWriteTarget(repoRoot, path string) (string, string, error) {
 			return "", "", fmt.Errorf("failed to resolve in-repo config %s: %w", prettyHomePath(path), err)
 		}
 		resolvedPath = filepath.Clean(resolvedPath)
-		if !isPathStrictlyInside(resolvedPath, resolvedRoot) {
+		if !pathutil.IsStrictlyInside(resolvedPath, resolvedRoot) {
 			return "", "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
 		}
 		return filepath.Dir(resolvedPath), filepath.Base(resolvedPath), nil
@@ -441,7 +424,7 @@ func inRepoConfigWriteTarget(repoRoot, path string) (string, string, error) {
 	}
 	resolvedDir = filepath.Clean(resolvedDir)
 	resolvedPath := filepath.Join(resolvedDir, filepath.Base(path))
-	if !isPathStrictlyInside(resolvedPath, resolvedRoot) {
+	if !pathutil.IsStrictlyInside(resolvedPath, resolvedRoot) {
 		return "", "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
 	}
 	return resolvedDir, filepath.Base(path), nil
@@ -561,7 +544,7 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 	// dir symlinked outside the repo must not receive the save. The read
 	// guard alone can't cover this — it only fires when the config file
 	// already exists at the resolved location.
-	if !isPathStrictlyInside(resolvedPath, resolveSymlinksForCompare(repoRoot)) {
+	if !pathutil.IsStrictlyInside(resolvedPath, resolveSymlinksForCompare(repoRoot)) {
 		return fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
 	}
 	data, _, err := readInRepoConfigFile(repoRoot)
