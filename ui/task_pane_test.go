@@ -137,13 +137,37 @@ func TestTaskPaneConsumePendingTriggerReturnsSelected(t *testing.T) {
 		{ID: "b"},
 	})
 	tp.selectedIdx = 1
-	tp.pendingTrigger = true
+	tp.runSelectedTask()
 
 	got := tp.ConsumePendingTrigger()
 	if assert.NotNil(t, got) {
 		assert.Equal(t, "b", got.ID)
 	}
 	assert.False(t, tp.pendingTrigger)
+}
+
+// TestTaskPaneConsumePendingTriggerResolvesByIDAfterReload verifies that a
+// pending run-now intent survives a task reload by task ID, not by stale index.
+func TestTaskPaneConsumePendingTriggerResolvesByIDAfterReload(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{
+		{ID: "a"},
+		{ID: "b"},
+	})
+	tp.SelectTask(1)
+	tp.runSelectedTask()
+
+	tp.SetTasks([]task.Task{
+		{ID: "b"},
+		{ID: "a"},
+	})
+
+	got := tp.ConsumePendingTrigger()
+	if assert.NotNil(t, got) {
+		assert.Equal(t, "b", got.ID)
+	}
+	assert.False(t, tp.pendingTrigger)
+	assert.Empty(t, tp.pendingTriggerID)
 }
 
 func TestTaskPaneNormalModeAllowsQuitKeysToPropagate(t *testing.T) {
