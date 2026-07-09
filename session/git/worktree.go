@@ -8,22 +8,9 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 )
-
-// isPathStrictlyInside reports whether absBase is a strict descendant of
-// absDir (absBase != absDir and absBase is not outside absDir). Both
-// arguments must be absolute, cleaned paths.
-func isPathStrictlyInside(absBase, absDir string) bool {
-	rel, err := filepath.Rel(absDir, absBase)
-	if err != nil {
-		return false
-	}
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return true
-}
 
 func getWorktreeDirectoryForRepo(repoPath string) (string, error) {
 	cfg, err := config.LoadConfig()
@@ -175,7 +162,7 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 	// produces "//" and rejects every valid child path. See #461.
 	absBase, _ := filepath.Abs(basePath)
 	absDir, _ := filepath.Abs(worktreeDir)
-	if !isPathStrictlyInside(absBase, absDir) {
+	if !pathutil.IsStrictlyInside(absBase, absDir) {
 		return nil, "", fmt.Errorf("invalid session name: would create worktree outside expected directory")
 	}
 

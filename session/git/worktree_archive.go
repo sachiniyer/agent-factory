@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -31,7 +32,7 @@ func SiblingWorktreePath(repoPath, title string) (string, error) {
 	base := filepath.Join(worktreeDir, repoName+"-"+safe)
 	absBase, _ := filepath.Abs(base)
 	absDir, _ := filepath.Abs(worktreeDir)
-	if !isPathStrictlyInside(absBase, absDir) {
+	if !pathutil.IsStrictlyInside(absBase, absDir) {
 		return "", fmt.Errorf("invalid session title %q: would place worktree outside %s", title, worktreeDir)
 	}
 
