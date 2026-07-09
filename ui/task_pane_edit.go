@@ -373,10 +373,11 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString("\n")
 	markEnd(taskFocusSave)
 	b.WriteString("\n")
+	quitHint := configuredQuitHelp() + " quit"
 	if s.creating {
-		hint := "tab/shift+tab fields • enter create • esc cancel"
+		hint := "tab/shift+tab fields • enter create • esc cancel • " + quitHint
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = "tab fields • enter • esc cancel"
+			hint = "tab fields • enter • esc cancel • " + quitHint
 		}
 		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 	} else {
@@ -386,9 +387,9 @@ func (s *TaskPane) renderEditMode() string {
 		}
 		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 		b.WriteString("\n")
-		actions := "r run now • x toggle • D delete • esc list"
+		actions := "r run now • x toggle • D delete • esc list • " + quitHint
 		if s.width > 0 && lipgloss.Width(actions) > s.width {
-			actions = "r run • x toggle • D del • esc list"
+			actions = "r run • x toggle • D del • esc • " + quitHint
 		}
 		b.WriteString(hintStyle.Render(fitLine(actions, s.width)))
 	}

@@ -1127,6 +1127,55 @@ func TestTaskPaneCreateModeEnterInPromptInsertsNewline(t *testing.T) {
 		"enter in the prompt must insert a newline")
 }
 
+func TestTaskPaneCreateModeCompactFooterShowsQuitKey(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(nil))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	tp := NewTaskPane()
+	tp.SetSize(40, 10)
+	tp.EnterCreateMode(newGitRepo(t))
+
+	lines := strings.Split(tp.String(), "\n")
+	assert.Contains(t, lines[len(lines)-1], "esc cancel", "cancel remains visible")
+	assert.Contains(t, lines[len(lines)-1], "q quit", "configured quit key stays visible in the compact form footer")
+}
+
+func TestTaskPaneCreateModeFooterUsesReboundQuitKey(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {"Q"}}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	tp := NewTaskPane()
+	tp.SetSize(40, 10)
+	tp.EnterCreateMode(newGitRepo(t))
+
+	lines := strings.Split(tp.String(), "\n")
+	assert.Contains(t, lines[len(lines)-1], "Q quit", "form footer must derive the quit hint from the keymap")
+	assert.NotContains(t, lines[len(lines)-1], "q quit", "the old default quit key must not be advertised after rebinding")
+}
+
+func TestTaskPaneEditModeCompactActionFooterShowsQuitKey(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(nil))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	tp := NewTaskPane()
+	tp.SetSize(40, 10)
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "0 0 * * *",
+		ProjectPath: newGitRepo(t),
+		Program:     "claude",
+		Enabled:     true,
+	}})
+	tp.SetFocus(true)
+	tp.EnterEditSelected()
+
+	lines := strings.Split(tp.String(), "\n")
+	assert.Contains(t, lines[len(lines)-1], "esc", "list escape remains visible")
+	assert.Contains(t, lines[len(lines)-1], "q quit", "quit key stays visible on the pinned edit action footer")
+}
+
 // TestTaskPaneEditFormClampsToHeightWithFocusInView pins #1098 finding 1: at
 // a 60x15 terminal the edit form is taller than the tasks overlay and used to
 // clip off the TOP — Name/Trigger invisible while Name silently held focus.
