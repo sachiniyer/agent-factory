@@ -16,6 +16,11 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 		return err
 	}
 	targetID := killTargetStableID(instance, data)
+	if !req.Force {
+		if err := guardKillRecoverableWork(req.Title, instance, data); err != nil {
+			return err
+		}
+	}
 
 	key := daemonInstanceKey(repoID, req.Title)
 	m.mu.Lock()

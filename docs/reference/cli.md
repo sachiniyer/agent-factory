@@ -30,11 +30,11 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af reset`](#af-reset) — Reset all stored instances
 - [`af sessions`](#af-sessions) — Manage sessions
-- [`af sessions archive`](#af-sessions-archive) — Archive a session (tmux down, worktree relocated, restartable)
+- [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
-- [`af sessions kill`](#af-sessions-kill) — Kill a session
+- [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
 - [`af sessions list`](#af-sessions-list) — List sessions
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
@@ -547,11 +547,11 @@ af sessions
 
 **Subcommands**
 
-- [`af sessions archive`](#af-sessions-archive) — Archive a session (tmux down, worktree relocated, restartable)
+- [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
-- [`af sessions kill`](#af-sessions-kill) — Kill a session
+- [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
 - [`af sessions list`](#af-sessions-list) — List sessions
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
@@ -570,13 +570,14 @@ af sessions
 
 ## af sessions archive
 
-Archive a session (tmux down, worktree relocated, restartable)
+Finish with a session by archiving it for later restore
 
-Archive a session: tear down its tmux and move its git worktree out to the
-global archive directory (<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/),
-preserving the branch and any uncommitted changes. The session is not deleted —
-it becomes a quiescent "archived" row that survives restarts and can be brought
-back later with 'af sessions restore <title>'.
+Archive is the default way to finish with a session: tear down its tmux
+and move its git worktree out to the global archive directory
+(<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/), preserving the branch and any
+uncommitted changes. The session is not deleted — it becomes a quiescent
+"archived" row that survives restarts and can be brought back later with
+'af sessions restore <title>'.
 
 Not available for remote or in-place (--here) sessions: archive relocates the
 worktree, which those don't own. The relocated worktree path is printed on
@@ -660,11 +661,28 @@ af sessions get <title>
 
 ## af sessions kill
 
-Kill a session
+Permanently destroy a session and prune its worktree branch
+
+Permanently destroy a session: tear down tmux, remove the worktree,
+delete the stored session record, and prune the session branch when Agent
+Factory owns it.
+
+For normal "done with this session" cleanup, prefer:
+  af sessions archive <title>
+
+Kill refuses by default unless it can confirm the worktree is clean and HEAD
+has no commits unreachable from the session's base/default branch. Use --force
+to skip that guard and destroy the session anyway.
 
 ```
-af sessions kill <title>
+af sessions kill <title> [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--force` |  | Destroy even when the session has unmerged commits or uncommitted work |
 
 **Global flags**
 

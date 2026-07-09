@@ -452,6 +452,7 @@ func init() {
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllFlag, "all", false, "Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllReposFlag, "all-repos", false, "With --all, broadcast across every repo instead of only the current/--repo one")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptIncludeRootFlag, "include-root", false, "With --all, also deliver to the reserved root session (excluded by default)")
+	sessionsKillCmd.Flags().BoolVar(&sessionsKillForce, "force", false, "Destroy even when the session has unmerged commits or uncommitted work")
 
 	// tab-create/tab-delete and their tabs {create,delete} aliases (#1192)
 	// share the same flag globals via these binders, so the two spellings stay

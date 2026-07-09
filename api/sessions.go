@@ -29,6 +29,7 @@ var (
 	killSessionViaDaemon    = daemon.KillSession
 	archiveSessionViaDaemon = daemon.ArchiveSession
 	restoreSessionViaDaemon = daemon.RestoreSession
+	sessionsKillForce       bool
 	sendPromptViaDaemon     = daemon.SendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPrompt
 	createTabViaDaemon      = daemon.CreateTab
@@ -697,8 +698,18 @@ var sessionsPreviewCmd = &cobra.Command{
 
 var sessionsKillCmd = &cobra.Command{
 	Use:   "kill <title>",
-	Short: "Kill a session",
-	Args:  cobra.ExactArgs(1),
+	Short: "Permanently destroy a session and prune its worktree branch",
+	Long: `Permanently destroy a session: tear down tmux, remove the worktree,
+delete the stored session record, and prune the session branch when Agent
+Factory owns it.
+
+For normal "done with this session" cleanup, prefer:
+  af sessions archive <title>
+
+Kill refuses by default unless it can confirm the worktree is clean and HEAD
+has no commits unreachable from the session's base/default branch. Use --force
+to skip that guard and destroy the session anyway.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
@@ -712,7 +723,7 @@ var sessionsKillCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID}); err != nil {
+		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID, Force: sessionsKillForce}); err != nil {
 			return jsonError(err)
 		}
 
@@ -722,12 +733,13 @@ var sessionsKillCmd = &cobra.Command{
 
 var sessionsArchiveCmd = &cobra.Command{
 	Use:   "archive <title>",
-	Short: "Archive a session (tmux down, worktree relocated, restartable)",
-	Long: `Archive a session: tear down its tmux and move its git worktree out to the
-global archive directory (<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/),
-preserving the branch and any uncommitted changes. The session is not deleted —
-it becomes a quiescent "archived" row that survives restarts and can be brought
-back later with 'af sessions restore <title>'.
+	Short: "Finish with a session by archiving it for later restore",
+	Long: `Archive is the default way to finish with a session: tear down its tmux
+and move its git worktree out to the global archive directory
+(<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/), preserving the branch and any
+uncommitted changes. The session is not deleted — it becomes a quiescent
+"archived" row that survives restarts and can be brought back later with
+'af sessions restore <title>'.
 
 Not available for remote or in-place (--here) sessions: archive relocates the
 worktree, which those don't own. The relocated worktree path is printed on

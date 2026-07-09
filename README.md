@@ -83,8 +83,8 @@ Common TUI keys:
 | `s` | Open the selected tab as a workspace pane |
 | `S` | Commit a preview as a new workspace pane |
 | `←` / `→` | Move focus between open workspace panes when a pane is focused |
-| `a` | Archive or restore a session |
-| `D` | Kill a session and clean up its worktree |
+| `a` | Archive or restore a session (default done action) |
+| `D` | Permanently kill a session and clean up its worktree |
 | `m` | Open the task manager |
 | `y` | Copy the selected session's PR URL |
 | `e` | Open the worktree hooks editor |
