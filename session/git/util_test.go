@@ -97,6 +97,16 @@ func TestSanitizeBranchName(t *testing.T) {
 			expected: "feature.branch",
 		},
 		{
+			name:     "final trim cannot reveal trailing dot",
+			input:    "myteam/feat.-fix-bug.-.",
+			expected: "myteam/feat.-fix-bug",
+		},
+		{
+			name:     "final trim cannot reveal .lock suffix",
+			input:    ".-test.lock.-.",
+			expected: "test",
+		},
+		{
 			name:     "path component is only dots",
 			input:    "john/.../file",
 			expected: "john/file",

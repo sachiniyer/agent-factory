@@ -58,10 +58,10 @@ func SanitizeBranchName(s string) string {
 	s = strings.Join(filtered, "/")
 	// 2. Replace any remaining double dots with a dash (e.g., "a..b")
 	s = strings.ReplaceAll(s, "..", "-")
-	// 3. No trailing dots
-	s = strings.TrimRight(s, ".")
-	// 4. Clean up any trailing dashes or slashes left after dot removal
-	s = strings.Trim(s, "-/")
+	// 3. Clean up invalid suffixes and edge separators until stable. Trimming
+	// dashes/slashes can reveal a trailing dot or .lock suffix that was not at
+	// the end of the string during the earlier component pass (#1476).
+	s = trimBranchNameEdges(s)
 
 	// If the result is empty (e.g., input was only special characters),
 	// generate a fallback branch name to prevent worktree creation failures.
@@ -70,6 +70,20 @@ func SanitizeBranchName(s string) string {
 	}
 
 	return s
+}
+
+func trimBranchNameEdges(s string) string {
+	for {
+		before := s
+		s = strings.Trim(s, "-/")
+		s = strings.TrimRight(s, ".")
+		for strings.HasSuffix(s, ".lock") {
+			s = strings.TrimSuffix(s, ".lock")
+		}
+		if s == before {
+			return s
+		}
+	}
 }
 
 // BranchForTitle derives the git branch name a session title would receive,
