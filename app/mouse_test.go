@@ -276,23 +276,28 @@ func TestMouse_ClickStatusHintRunsAction(t *testing.T) {
 // TestMouse_WheelScrollsRegionUnderCursor: the wheel drives whatever region
 // is under the cursor — tree cursor movement, pane capture scroll, task
 // selection — regardless of where the focus ring points (before this PR it
-// always scrolled the focused pane).
+// always scrolled the focused pane). Tree cursor movement also returns focus
+// to the tree so the next keyboard action targets the row the wheel selected.
 func TestMouse_WheelScrollsRegionUnderCursor(t *testing.T) {
 	h, alpha, _ := mouseTestHome(t)
 	newFakeClock(h)
 	p := openTestPane(t, h, alpha, 0)
 	region := layout.PaneRegion(p.ID())
-	h.focusRegion(layout.RegionTree)
+	h.focusRegion(region)
 	require.False(t, h.sidebar.GetSelection().IsTab)
 
-	// Over the tree: the cursor walks down (alpha → its first tab row).
+	// Over the tree: the cursor walks down (alpha → its first tab row) and
+	// focus follows that selection, matching keyboard tree navigation (#1418).
 	tree := zoneRect(t, h, zones.TreeBG)
 	wheel(h, tree.X+1, tree.Y+3, false)
 	assert.True(t, h.sidebar.GetSelection().IsTab,
 		"wheel over the tree moves the tree cursor, like j/k")
+	assert.Equal(t, layout.RegionTree, h.ring.Active(),
+		"wheel over the tree must focus the tree so Enter targets the selected row")
 
 	// Over the automations section: the task cursor moves — even though the
 	// section is NOT focused — and the tree cursor stays put.
+	h.focusRegion(region)
 	preSel := h.sidebar.GetSelection()
 	require.Equal(t, 0, h.automations.SelectedTaskIndex())
 	auto := zoneRect(t, h, zones.AutoBG)
@@ -300,7 +305,7 @@ func TestMouse_WheelScrollsRegionUnderCursor(t *testing.T) {
 	assert.Equal(t, 1, h.automations.SelectedTaskIndex(),
 		"wheel over the section moves the task cursor")
 	assert.Equal(t, preSel, h.sidebar.GetSelection(), "the tree cursor must not move")
-	assert.Equal(t, layout.RegionTree, h.ring.Active(), "wheel never moves focus")
+	assert.Equal(t, region, h.ring.Active(), "automation wheel scroll must not steal pane focus")
 
 	// Over the pane's body: the pane enters capture scroll mode.
 	body := zoneRect(t, h, zones.PaneBody(region))
