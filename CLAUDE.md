@@ -54,8 +54,10 @@ Working style:
   (merge, kill, dispatch), single git/gh commands, memory edits, and the
   hourly self-review.
 - Use `af sessions preview` to spot-check, `af sessions send-prompt` to
-  refine, `af sessions kill` to tear down immediately on completion or
-  abandonment. Don't let sessions accumulate.
+  refine, and `af sessions archive` as the default "done" action so the session
+  stays restorable. Use `af sessions kill --force` only when you explicitly mean
+  to permanently destroy the session and prune its branch. Don't let sessions
+  accumulate.
 - Run `golangci-lint run --timeout=3m --fast`, `gofmt -l .`, `go build ./...`,
   and the full test suite before opening a PR — CI blocks on all four. On a
   shared dev box run the suite as `make test-container` (never bare

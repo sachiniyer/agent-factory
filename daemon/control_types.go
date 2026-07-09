@@ -41,6 +41,7 @@ type CreateSessionResponse struct {
 type KillSessionRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
+	Force  bool   `json:"force,omitempty"`
 }
 
 type KillSessionResponse struct {

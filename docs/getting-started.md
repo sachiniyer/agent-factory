@@ -55,8 +55,10 @@ The TUI opens with an empty sidebar. From here:
    tmux detach key drops you back to the sidebar. Either way the agent keeps
    running. Use **`s`** to open a selected tab as a workspace pane; when a pane
    has focus, **`←`** / **`→`** move focus between open panes.
-4. When you're done with a session, **`D`** kills it and removes its worktree
-   and branch, or **`a`** archives it to set it aside and restore it later.
+4. When you're done with a session, **`a`** archives it: tmux is torn down, the
+   worktree is moved aside, and the session can be restored later. **`D`**
+   permanently kills a session and removes its worktree/branch; it refuses when
+   the branch still has recoverable work.
    If a session is marked Lost or Dead after a crash, reboot, or missing
    worktree, select it and press **`a`** or run `af sessions restore <title>` to
    recover it and resume its recorded agent conversation when possible.
@@ -75,7 +77,7 @@ af sessions list
 af sessions preview fix-auth-bug          # snapshot its terminal
 af sessions tab-create fix-auth-bug --command "npm run dev"   # a process tab in the worktree
 af sessions attach fix-auth-bug           # attach interactively
-af sessions kill fix-auth-bug             # tear it down
+af sessions archive fix-auth-bug          # finish with it, restorable later
 ```
 
 Schedule an agent to run on its own:

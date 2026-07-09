@@ -21,9 +21,10 @@ Because each session gets its own worktree:
 - **Every session is reviewable.** The work lands on a branch. You review and
   merge it with your normal git and pull-request flow — nothing about Agent
   Factory is in the way of `git diff`, `gh pr create`, or your CI.
-- **Throwing work away is cheap and safe.** Kill a session and `af` removes its
-  worktree and branch. Your main checkout is untouched because it was never
-  involved.
+- **Finishing work is restorable by default.** Archive a session and `af` moves
+  the worktree aside with the branch and changes intact, ready for restore. If
+  you really want to discard it, kill refuses recoverable branch/worktree work
+  unless you force the permanent cleanup.
 
 ## The lifecycle of a session
 
@@ -37,12 +38,15 @@ Because each session gets its own worktree:
    interact in-pane, or attach full-screen. Extra [tabs](tui.md#tabs) can run a
    shell or a long-lived process (a dev server, a test watcher) in the *same*
    worktree, sharing the agent's files.
-3. **Archive (optional).** Archiving tears down the session's tmux and moves its
-   worktree out of the way, but keeps the record and branch. Restore it later
-   and the worktree comes back and the agent re-spawns. Use it to park work you
-   aren't ready to finish or discard.
-4. **Kill.** Killing a session ends the agent, removes the worktree, and deletes
-   the branch. It's the clean end-state for work you've merged or abandoned.
+3. **Archive.** Archiving is the default "done" action: it tears down the
+   session's tmux and moves its worktree out of the way, but keeps the record
+   and branch. Restore it later and the worktree comes back and the agent
+   re-spawns.
+4. **Kill.** Killing a session permanently ends the agent, removes the worktree,
+   and deletes the branch when Agent Factory owns it. It refuses by default
+   unless it can confirm the worktree is clean and HEAD has no commits
+   unreachable from the session's base/default branch; use `--force` only when
+   you mean to discard that work.
 
 ## In-place sessions
 

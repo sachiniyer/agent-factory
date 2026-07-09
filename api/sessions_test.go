@@ -211,6 +211,41 @@ func TestSessionsKill_HonorsRepoScoping(t *testing.T) {
 	}
 }
 
+func TestSessionsKill_ForceFlagPassedToDaemon(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	prevRepoFlag := repoFlag
+	repoFlag = ""
+	prevForce := sessionsKillForce
+	sessionsKillForce = false
+	if err := sessionsKillCmd.Flags().Set("force", "true"); err != nil {
+		t.Fatalf("set force flag: %v", err)
+	}
+	t.Cleanup(func() {
+		repoFlag = prevRepoFlag
+		sessionsKillForce = prevForce
+		_ = sessionsKillCmd.Flags().Set("force", "false")
+	})
+
+	var gotReq daemon.KillSessionRequest
+	prevKill := killSessionViaDaemon
+	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {
+		gotReq = req
+		return nil
+	}
+	t.Cleanup(func() { killSessionViaDaemon = prevKill })
+
+	if _, err := runCmdCaptureStdout(t, sessionsKillCmd, []string{"worker"}); err != nil {
+		t.Fatalf("sessionsKillCmd returned error: %v", err)
+	}
+	if gotReq.Title != "worker" {
+		t.Fatalf("kill request Title = %q, want worker", gotReq.Title)
+	}
+	if !gotReq.Force {
+		t.Fatal("kill request Force = false, want true")
+	}
+}
+
 // TestSessionsAttach_HonorsRepoScoping is the regression test for issue #891
 // (same class as #761 kill / #776 send-prompt). Two repos each hold a session
 // with the same title but a distinct Path. Resolving the attach with

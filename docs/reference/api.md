@@ -15,7 +15,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `GET` | `/v1/health` | — | Liveness probe (alias for the Ping RPC); answers even while the daemon is restoring sessions. |
 | `POST` | `/v1/CreateSession` | `title`, `title_base`, `repo_path`, `program`, `prompt`, `auto_yes`, `in_place`, `force_remote` | Create a new session (git worktree + agent) in a repo. |
 | `POST` | `/v1/Snapshot` | `repo_id` | List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos). |
-| `POST` | `/v1/KillSession` | `title`, `repo_id` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
+| `POST` | `/v1/KillSession` | `title`, `repo_id`, `force` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
 | `POST` | `/v1/ArchiveSession` | `title`, `repo_id` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record. |
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
 | `POST` | `/v1/RestoreSession` | `title`, `repo_id` | Restore an archived, Lost, or Dead session. |
