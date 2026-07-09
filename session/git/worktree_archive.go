@@ -97,6 +97,13 @@ var worktreeRepairSubmodules = func(g *GitWorktree, dest string) error {
 	return err
 }
 
+// Filesystem operation seams let tests force cross-device and cleanup-failure
+// paths deterministically. Production never reassigns them.
+var (
+	renamePath    = os.Rename
+	removeAllPath = os.RemoveAll
+)
+
 // MoveWorktree relocates this worktree's directory to dest and keeps git's
 // two-way worktree link consistent (the worktree's `.git` file and the repo's
 // `.git/worktrees/<name>/gitdir`). It is the archive-side primitive (#1028):
@@ -158,9 +165,14 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		// The fast path may have moved the directory before failing to update
 		// its config (rare). Only move bytes ourselves if the dir is still at
 		// src; either way, repair fixes the two-way registration.
+		var sourceCleanupErr error
 		if !pathExists(dest) {
 			if mErr := moveDirCrossDevice(src, dest); mErr != nil {
-				return fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr)
+				var copiedErr *copiedWorktreeSourceCleanupError
+				if !errors.As(mErr, &copiedErr) {
+					return fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr)
+				}
+				sourceCleanupErr = mErr
 			}
 		}
 		// The bytes are now at dest. Commit the new location to the worktree
@@ -173,6 +185,9 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		// relies on a consistent worktree location.
 		g.setWorktreeLocation(dest)
 		if rErr := worktreeRepair(g, dest); rErr != nil {
+			if sourceCleanupErr != nil {
+				return fmt.Errorf("copied worktree to %s but failed to remove original %s and failed to repair its git registration: %v: %w", dest, src, rErr, sourceCleanupErr)
+			}
 			return fmt.Errorf("moved worktree to %s but failed to repair its git registration: %w", dest, rErr)
 		}
 		if sErr := worktreeRepairSubmodules(g, dest); sErr != nil {
@@ -184,6 +199,9 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 					"and registration repair already succeeded: %v",
 				dest, dest, dest, sErr,
 			)
+		}
+		if sourceCleanupErr != nil {
+			return fmt.Errorf("worktree copied and registered at %s, but failed to remove original %s; remove the original manually: %w", dest, src, sourceCleanupErr)
 		}
 		return nil
 	}
@@ -222,7 +240,7 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // The copy preserves file contents, modes, and symlinks, so uncommitted changes
 // survive verbatim.
 func moveDirCrossDevice(src, dest string) error {
-	if err := os.Rename(src, dest); err == nil {
+	if err := renamePath(src, dest); err == nil {
 		return nil
 	} else if !errors.Is(err, syscall.EXDEV) {
 		return err
@@ -230,13 +248,27 @@ func moveDirCrossDevice(src, dest string) error {
 	// Cross-device: copy the tree, then remove the original.
 	if err := copyTree(src, dest); err != nil {
 		// Best-effort cleanup of a partial copy so a retry sees a clean dest.
-		_ = os.RemoveAll(dest)
+		_ = removeAllPath(dest)
 		return err
 	}
-	if err := os.RemoveAll(src); err != nil {
-		return fmt.Errorf("copied worktree to %s but failed to remove original %s: %w", dest, src, err)
+	if err := removeAllPath(src); err != nil {
+		return &copiedWorktreeSourceCleanupError{src: src, dest: dest, err: err}
 	}
 	return nil
+}
+
+type copiedWorktreeSourceCleanupError struct {
+	src  string
+	dest string
+	err  error
+}
+
+func (e *copiedWorktreeSourceCleanupError) Error() string {
+	return fmt.Sprintf("copied worktree to %s but failed to remove original %s: %v", e.dest, e.src, e.err)
+}
+
+func (e *copiedWorktreeSourceCleanupError) Unwrap() error {
+	return e.err
 }
 
 // copyTree recursively copies the directory rooted at src to dest, preserving

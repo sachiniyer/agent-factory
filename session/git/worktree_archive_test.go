@@ -6,6 +6,7 @@ import (
 	stdlog "log"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	aflog "github.com/sachiniyer/agent-factory/log"
@@ -149,6 +150,44 @@ func TestMoveWorktree_FallbackRepairsRegistration(t *testing.T) {
 	require.NoError(t, gw.MoveWorktree(dest))
 
 	assert.False(t, pathExists(srcPath), "the source directory must be gone after the fallback move")
+	assertLiveWorktreeAt(t, gw, dest)
+}
+
+// TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation covers a
+// copy-then-remove failure in the cross-device fallback. Before #1475, the
+// error returned before worktreePath was updated, so callers persisted the
+// partially deleted source while the complete copy at dest was orphaned.
+func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *testing.T) {
+	prevMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return errors.New("forced fast-path failure")
+	}
+	t.Cleanup(func() { worktreeMoveFast = prevMove })
+
+	prevRename := renamePath
+	renamePath = func(_, _ string) error {
+		return syscall.EXDEV
+	}
+	t.Cleanup(func() { renamePath = prevRename })
+
+	gw, _, srcPath := archiveTestWorktree(t)
+	dest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+
+	cleanupErr := errors.New("forced source cleanup failure")
+	prevRemoveAll := removeAllPath
+	removeAllPath = func(path string) error {
+		if path == srcPath {
+			return cleanupErr
+		}
+		return os.RemoveAll(path)
+	}
+	t.Cleanup(func() { removeAllPath = prevRemoveAll })
+
+	err := gw.MoveWorktree(dest)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, cleanupErr)
+	assert.Contains(t, err.Error(), "worktree copied and registered")
+	assert.True(t, pathExists(srcPath), "the source cleanup failure leaves the original for manual cleanup")
 	assertLiveWorktreeAt(t, gw, dest)
 }
 
