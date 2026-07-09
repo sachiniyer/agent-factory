@@ -44,7 +44,7 @@ af                 # launch the TUI
 
 The TUI opens with an empty sidebar. From here:
 
-1. Press **`n`** to create a new session. Give it a name and, optionally, an
+1. Press **`n`** to create a new session. Give it a name and, optionally,
    choose the agent with **Tab**. `af` creates a fresh git worktree on a new
    branch and starts your agent in it.
 2. The session appears in the sidebar with a live status. The **Agent tab**
