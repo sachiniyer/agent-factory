@@ -359,6 +359,37 @@ func TestPanePreviewTabRowCommitsSameInstanceTerminal(t *testing.T) {
 	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
 }
 
+func TestPanePreviewSelectionFocusesAlreadyOpenTabPane(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+
+	paneAgent := openTestPane(t, h, alpha, 0)
+	paneTerminal := openTestPane(t, h, alpha, 1)
+	require.Equal(t, 2, h.store.NumOpenPanes())
+
+	h.focusRegion(layout.PaneRegion(paneAgent.ID()))
+	h.focusRegion(layout.RegionTree)
+
+	pressNav(t, h, "j") // Agent tab row: same as the preview owner.
+	require.Nil(t, h.panePreviewTxn)
+	require.Equal(t, layout.RegionTree, h.ring.Active(),
+		"selecting the owner binding must preserve tree focus")
+
+	pressNav(t, h, "j") // Terminal tab row: already open in paneTerminal.
+
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab)
+	require.Equal(t, 1, sel.TabIndex)
+	require.Nil(t, h.panePreviewTxn, "already-open tab rows must not create previews")
+	assert.Equal(t, layout.PaneRegion(paneTerminal.ID()), h.ring.Active(),
+		"selection must jump to the existing tab pane")
+	assert.Same(t, alpha, paneAgent.Instance())
+	assert.Equal(t, 0, paneAgent.Tab())
+	assert.Same(t, alpha, paneTerminal.Instance())
+	assert.Equal(t, 1, paneTerminal.Tab())
+	assert.NotContains(t, h.View(), "PREVIEW")
+}
+
 func TestPanePreviewInstanceRowUsesSelectedTerminalTab(t *testing.T) {
 	h := paneTestHome(t)
 	alpha := h.store.GetInstanceByTitle("alpha")
@@ -421,14 +452,14 @@ func TestPanePreviewEnterCommitFocusesAlreadyOpenTarget(t *testing.T) {
 
 	h.sidebar.SetSelectedInstance(1)
 	_ = h.selectionChanged()
-	pressKey(t, h, "s")
+	require.NotNil(t, h.panePreviewTxn)
+	paneB := h.openPaneWindow(beta, 0)
+	require.NotNil(t, paneB)
+	h.relayout()
 	require.Equal(t, 2, h.store.NumOpenPanes())
-	paneB := h.store.OpenPanes()[1]
 	require.Same(t, beta, paneB.Instance())
 
 	h.focusRegion(layout.PaneRegion(paneA.ID()))
-	h.sidebar.SetSelectedInstance(1)
-	_ = h.selectionChanged()
 	require.NotNil(t, h.panePreviewTxn)
 
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
@@ -534,14 +565,14 @@ func TestPanePreviewSplitFocusesAlreadyOpenTarget(t *testing.T) {
 
 	h.sidebar.SetSelectedInstance(1)
 	_ = h.selectionChanged()
-	pressKey(t, h, "s")
+	require.NotNil(t, h.panePreviewTxn)
+	paneB := h.openPaneWindow(beta, 0)
+	require.NotNil(t, paneB)
+	h.relayout()
 	require.Equal(t, 2, h.store.NumOpenPanes())
-	paneB := h.store.OpenPanes()[1]
 	require.Same(t, beta, paneB.Instance())
 
 	h.focusRegion(layout.PaneRegion(paneA.ID()))
-	h.sidebar.SetSelectedInstance(1)
-	_ = h.selectionChanged()
 	require.NotNil(t, h.panePreviewTxn)
 
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeySplitPane)
@@ -857,6 +888,8 @@ func TestPaneArrowKeysSwitchFocusedPaneAndClamp(t *testing.T) {
 	assert.Equal(t, []string{"alpha", "beta", "gamma"}, visibleTitles(h), "switching focus must not reorder panes")
 
 	h.focusRegion(layout.RegionTree)
+	h.store.SetActiveTab(1) // Unopened terminal tab: isolate tree routing from #1493 open-pane focus.
+	h.menu.SetActiveTab(1)
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyLeft})
 	assert.Equal(t, layout.RegionTree, h.ring.Active(), "left/right on the tree stay sidebar navigation, not pane switching")
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
@@ -865,8 +898,7 @@ func TestPaneArrowKeysSwitchFocusedPaneAndClamp(t *testing.T) {
 
 func TestPaneArrowKeysMoveAfterCancelingPreview(t *testing.T) {
 	h := paneTestHome(t)
-	alpha := h.store.GetInstanceByTitle("alpha")
-	beta := h.store.GetInstanceByTitle("beta")
+	gamma := h.store.GetInstanceByTitle("gamma")
 
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
@@ -880,21 +912,21 @@ func TestPaneArrowKeysMoveAfterCancelingPreview(t *testing.T) {
 	paneB := panes[1]
 	require.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "precondition: beta's right pane is focused")
 
-	h.sidebar.SetSelectedInstance(0)
+	h.sidebar.SetSelectedInstance(2)
 	_ = h.selectionChanged()
-	require.NotNil(t, h.panePreviewTxn, "selecting alpha while beta's pane is focused creates a transient preview")
+	require.NotNil(t, h.panePreviewTxn, "selecting unopened gamma while beta's pane is focused creates a transient preview")
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyLeft})
 	require.Nil(t, h.panePreviewTxn, "left cancels the preview")
 	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active(), "left still moves focus to the previous pane")
-	assert.Same(t, alpha, h.store.GetSelectedInstance(), "pane switching must not retarget the tree selection")
+	assert.Same(t, gamma, h.store.GetSelectedInstance(), "pane switching must not retarget the tree selection")
 
-	h.sidebar.SetSelectedInstance(1)
+	h.sidebar.SetSelectedInstance(2)
 	_ = h.selectionChanged()
-	require.NotNil(t, h.panePreviewTxn, "selecting beta while alpha's pane is focused creates a transient preview")
+	require.NotNil(t, h.panePreviewTxn, "selecting unopened gamma while alpha's pane is focused creates a transient preview")
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
 	require.Nil(t, h.panePreviewTxn, "right cancels the preview")
 	assert.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "right still moves focus to the next pane")
-	assert.Same(t, beta, h.store.GetSelectedInstance(), "pane switching must not retarget the tree selection")
+	assert.Same(t, gamma, h.store.GetSelectedInstance(), "pane switching must not retarget the tree selection")
 }
 
 // TestPane_AutoHideOnShrinkRestoreOnGrow drives the §2.6 pane-count fitting:
@@ -1097,8 +1129,8 @@ func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
 	assert.Equal(t, "shell-2", inst.GetTabs()[p.Tab()].Name,
 		"no pane may be left showing a shifted/stale tab")
 	assert.Equal(t, 1, h.lastLayout.PaneCount(), "the layout re-solves in the same reconcile")
-	assert.Equal(t, layout.RegionTree, h.ring.Active(),
-		"focus falls back cleanly off the closed (focused) pane")
+	assert.Equal(t, layout.PaneRegion(p.ID()), h.ring.Active(),
+		"focus lands cleanly on the surviving selected pane after the focused pane closes")
 }
 
 // TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding: removing a HIGHER

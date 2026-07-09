@@ -113,12 +113,21 @@ func (m *home) openOrFocusPane(instance *session.Instance, tab int) (tea.Model, 
 			return m, nil
 		}
 	}
-	m.store.TouchOpenPane(p)
-	m.relayout()
-	m.focusRegion(layout.PaneRegion(p.ID()))
+	m.focusOpenPane(p)
 	selectionCmd := m.selectionChanged()
 	statusCmd := m.consumePaneAutoHideStatus()
 	return m, tea.Batch(selectionCmd, statusCmd)
+}
+
+// focusOpenPane stamps an existing pane as recently focused, makes it visible
+// if pane-count fitting had hidden it, and moves the focus ring onto it.
+func (m *home) focusOpenPane(p *store.OpenPane) {
+	if p == nil {
+		return
+	}
+	m.store.TouchOpenPane(p)
+	m.relayout()
+	m.focusRegion(layout.PaneRegion(p.ID()))
 }
 
 // handleSplitPane dispatches the `S` key: commit the active preview alongside

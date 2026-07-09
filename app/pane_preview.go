@@ -65,6 +65,11 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		m.cancelPanePreview(false)
 		return
 	}
+	if existing := m.store.FindOpenPane(target.instance, target.tab); existing != nil && existing != owner {
+		m.cancelPanePreview(false)
+		m.focusOpenPane(existing)
+		return
+	}
 	if m.isPanePreviewSuppressed(original, target) {
 		m.cancelPanePreview(false)
 		return
