@@ -41,8 +41,14 @@
 : "${AF_DRIVER_POLL:=0.25}"                       # capture-pane poll interval
 : "${AF_DRIVER_DETACH_KEY:=C-w}"                 # tmux key that detaches attach
 : "${AF_DRIVER_STATE_DIR:=${TMPDIR:-/tmp}/af-driver}"  # cross-call scratch
+: "${AGENT_FACTORY_AUTO_UPDATE:=false}"          # disable startup auto-update: a
+                                                 # branch binary built behind the
+                                                 # latest release would try to
+                                                 # self-update mid-test and time
+                                                 # out instance creation.
 
 export AGENT_FACTORY_HOME
+export AGENT_FACTORY_AUTO_UPDATE
 
 # ----------------------------------------------------------------------------
 # Low-level plumbing.
