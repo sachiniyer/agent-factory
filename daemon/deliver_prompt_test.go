@@ -75,6 +75,33 @@ func (b *slowRecordingKillBackend) Kill(inst *session.Instance) error {
 	return b.recordingBackend.Kill(inst)
 }
 
+// blockingSendKillBackend blocks SendPromptCommand and records when Kill
+// reaches backend teardown. It proves SendPrompt holds the per-session op lock
+// across the prompt write, so a kill that starts after the kill-in-flight
+// pre-check cannot destroy the session mid-send.
+type blockingSendKillBackend struct {
+	readyFakeBackend
+	rec *promptRecorder
+
+	sendStarted chan struct{}
+	releaseSend chan struct{}
+	killStarted chan struct{}
+	killBlock   chan struct{}
+}
+
+func (b *blockingSendKillBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
+	close(b.sendStarted)
+	<-b.releaseSend
+	b.rec.add(prompt)
+	return nil
+}
+
+func (b *blockingSendKillBackend) Kill(inst *session.Instance) error {
+	close(b.killStarted)
+	<-b.killBlock
+	return b.readyFakeBackend.Kill(inst)
+}
+
 // installRecordingBackend wires a backend factory whose Start completes
 // immediately (so creates do not block) and that records delivered prompts.
 func installRecordingBackend(t *testing.T) *promptRecorder {
@@ -362,6 +389,188 @@ func TestSendPrompt_RefusesLostAndDeadTargetsBeforeBackendSend(t *testing.T) {
 				t.Fatalf("%s send reached SendPromptCommand %d time(s); want 0", tc.wantStatus, backend.sent)
 			}
 		})
+	}
+}
+
+// TestSendPrompt_RefusesKillInFlightTarget is the #1473 regression test for
+// the direct SendPrompt RPC/API path. KillSession marks killsInFlight but does
+// not set OpKilling on the instance, so SendPrompt must check the daemon kill
+// marker instead of writing into a session that is already being torn down.
+func TestSendPrompt_RefusesKillInFlightTarget(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	rec := &promptRecorder{}
+	backend := &slowRecordingKillBackend{
+		killStarted: make(chan struct{}),
+		killBlock:   make(chan struct{}),
+	}
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {
+		fake := session.NewFakeBackend()
+		fake.CompleteStart()
+		backend.recordingBackend = recordingBackend{readyFakeBackend{fake}, rec}
+		return backend, nil
+	})
+	t.Cleanup(restore)
+
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if _, err := manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    "captain",
+		RepoPath: repoPath,
+		Program:  "claude",
+		Prompt:   "init",
+	}); err != nil {
+		t.Fatalf("initial create: %v", err)
+	}
+
+	killDone := make(chan error, 1)
+	go func() {
+		killDone <- manager.KillSession(KillSessionRequest{Title: "captain", RepoID: repo.ID})
+	}()
+	select {
+	case <-backend.killStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("KillSession never reached the backend teardown")
+	}
+
+	var releaseOnce sync.Once
+	releaseKill := func() {
+		close(backend.killBlock)
+		select {
+		case err := <-killDone:
+			if err != nil {
+				t.Errorf("KillSession: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("KillSession did not complete after the teardown was released")
+		}
+	}
+	defer releaseOnce.Do(releaseKill)
+
+	before := len(rec.snapshot())
+	err = manager.SendPrompt(SendPromptRequest{
+		Title:  "captain",
+		RepoID: repo.ID,
+		Prompt: "during-kill",
+	})
+	if err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Fatalf("expected a 'being deleted' error during KillSession teardown, got: %v", err)
+	}
+	if got := len(rec.snapshot()); got != before {
+		t.Fatalf("SendPrompt delivered into a kill-in-flight session: recorded count went %d -> %d", before, got)
+	}
+
+	releaseOnce.Do(releaseKill)
+}
+
+func TestSendPrompt_DeliversBeforeLaterKillStartsTeardown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	rec := &promptRecorder{}
+	backend := &blockingSendKillBackend{
+		rec:         rec,
+		sendStarted: make(chan struct{}),
+		releaseSend: make(chan struct{}),
+		killStarted: make(chan struct{}),
+		killBlock:   make(chan struct{}),
+	}
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {
+		fake := session.NewFakeBackend()
+		fake.CompleteStart()
+		backend.readyFakeBackend = readyFakeBackend{fake}
+		return backend, nil
+	})
+	t.Cleanup(restore)
+
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if _, err := manager.CreateSession(CreateSessionRequest{
+		Title:    "captain",
+		RepoPath: repoPath,
+		Program:  "claude",
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- manager.SendPrompt(SendPromptRequest{
+			Title:  "captain",
+			RepoID: repo.ID,
+			Prompt: "during-send",
+		})
+	}()
+	select {
+	case <-backend.sendStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SendPrompt never reached backend send")
+	}
+
+	killDone := make(chan error, 1)
+	go func() {
+		killDone <- manager.KillSession(KillSessionRequest{Title: "captain", RepoID: repo.ID})
+	}()
+	key := daemonInstanceKey(repo.ID, "captain")
+	deadline := time.After(5 * time.Second)
+	for {
+		manager.mu.Lock()
+		_, killing := manager.killsInFlight[key]
+		manager.mu.Unlock()
+		if killing {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("KillSession never registered killsInFlight")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	select {
+	case <-backend.killStarted:
+		t.Fatal("KillSession reached backend teardown before SendPromptCommand returned")
+	default:
+	}
+
+	close(backend.releaseSend)
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Fatalf("SendPrompt: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SendPrompt did not return after backend send was released")
+	}
+	if got := rec.snapshot(); len(got) != 1 || got[0] != "during-send" {
+		t.Fatalf("prompt was not delivered before kill teardown: got %v", got)
+	}
+
+	select {
+	case <-backend.killStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("KillSession did not reach backend teardown after SendPrompt returned")
+	}
+	close(backend.killBlock)
+	select {
+	case err := <-killDone:
+		if err != nil {
+			t.Fatalf("KillSession: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("KillSession did not complete after teardown was released")
 	}
 }
 

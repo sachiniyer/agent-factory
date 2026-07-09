@@ -233,7 +233,8 @@ func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
 }
 
 // opLockFor returns the per-session operation lock serializing kill teardown
-// against Lost-recovery for one daemon instance key (#1108 PR 2).
+// against Lost-recovery and prompt writes for one daemon instance key (#1108 PR
+// 2, #1473).
 func (m *Manager) opLockFor(key string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
