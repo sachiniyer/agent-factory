@@ -497,6 +497,7 @@ func (m *home) syncFocus() {
 		m.lastFocusedPaneID = p.ID()
 	}
 	m.menu.SetFocusRegion(active)
+	m.syncSplitPaneHint()
 }
 
 // focusRegion moves focus directly to the given region and re-solves the

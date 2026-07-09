@@ -230,6 +230,25 @@ func TestPanePreviewInvalidatesStaleContentSynchronously(t *testing.T) {
 	assert.Same(t, beta, h.panePreviewTxn.target.instance)
 }
 
+func TestPanePreviewSplitHintRequiresActivePreview(t *testing.T) {
+	h := paneTestHome(t)
+
+	pressKey(t, h, "s")
+	require.Nil(t, h.panePreviewTxn)
+	assert.NotContains(t, h.menu.String(), "split pane",
+		"the footer must not advertise S when there is no preview to commit")
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+	assert.Contains(t, h.menu.String(), "split pane",
+		"the footer should advertise S while a preview can be committed")
+
+	h.cancelPanePreview(false)
+	assert.NotContains(t, h.menu.String(), "split pane",
+		"canceling the preview must remove the split hint immediately")
+}
+
 func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 	h := paneTestHome(t)
 	alpha := h.store.GetInstanceByTitle("alpha")

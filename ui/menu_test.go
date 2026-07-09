@@ -160,8 +160,9 @@ func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
 	}
 }
 
-// TestMenuPaneHintsFollowFocus pins the #1088 hint model: tree focus
-// advertises the open-pane verb with the instance actions; a focused
+// TestMenuPaneHintsFollowFocus pins the #1088/#1419 hint model: tree focus
+// advertises the open-pane verb with the instance actions; split-pane is
+// advertised only while a preview exists to commit; a focused
 // workspace pane gets its own option set — attach/scroll on its binding,
 // pane switching, open-pane, hide-pane.
 func TestMenuPaneHintsFollowFocus(t *testing.T) {
@@ -179,19 +180,28 @@ func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	}
 
 	m.SetFocusRegion(layout.RegionTree)
-	if !has(keys.KeyOpenPane) || !has(keys.KeySplitPane) || has(keys.KeyHidePane) {
-		t.Errorf("tree focus must advertise open/split pane, not hide; options=%v", m.options)
+	if !has(keys.KeyOpenPane) || has(keys.KeySplitPane) || has(keys.KeyHidePane) {
+		t.Errorf("tree focus must advertise open pane, not split/hide without a preview; options=%v", m.options)
 	}
 	if !has(keys.KeyNewTab) || !has(keys.KeyKill) {
 		t.Errorf("tree focus keeps the instance actions; options=%v", m.options)
 	}
+	m.SetSplitPaneAvailable(true)
+	if !has(keys.KeySplitPane) {
+		t.Errorf("tree focus must advertise split pane while a preview can be committed; options=%v", m.options)
+	}
+	m.SetSplitPaneAvailable(false)
 
 	m.SetFocusRegion(layout.PaneRegion(7))
-	if !has(keys.KeyOpenPane) || !has(keys.KeySplitPane) || !has(keys.KeyHidePane) ||
+	if !has(keys.KeyOpenPane) || has(keys.KeySplitPane) || !has(keys.KeyHidePane) ||
 		!has(keys.KeyPanePrev) || !has(keys.KeyPaneNext) || !has(keys.KeyEnter) {
-		t.Errorf("a focused pane must advertise pane focus/open/split/hide + attach; options=%v", m.options)
+		t.Errorf("a focused pane must advertise pane focus/open/hide + attach, not split without a preview; options=%v", m.options)
 	}
 	if has(keys.KeyNewTab) {
 		t.Errorf("pane focus swaps to the pane option set; options=%v", m.options)
+	}
+	m.SetSplitPaneAvailable(true)
+	if !has(keys.KeySplitPane) {
+		t.Errorf("a focused pane must advertise split pane while a preview can be committed; options=%v", m.options)
 	}
 }
