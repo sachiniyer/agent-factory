@@ -93,6 +93,20 @@ _expect_wrapped_send_no_timeout() {
     return "$rc"
 }
 
+# _enter_interactive_and_probe_literal_send — regression proof for #1504. The
+# literal sender used to pass the text as tmux command arguments, so leading
+# hyphens were parsed as flags and repeated semicolons were parsed as command
+# separators. Type but do not run the probe, then clear the shell line.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_enter_interactive_and_probe_literal_send() {
+    local text='- item ;; literal-send-1504'
+    af_enter_interactive || return 1
+    af_send_literal "$text" || return 1
+    _af_wait_for_pane_echo "$text" 8 "literal send preserves leading hyphen and ;;" || return 1
+    af_send C-u
+    sleep "$AF_DRIVER_POLL"
+}
+
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
@@ -130,7 +144,7 @@ step "select beta"                                          af_select beta
 step "assert beta is selected"                              af_expect_selected beta
 
 step "open beta's tab as a pane"                            af_open_pane
-step "enter interactive mode"                               af_enter_interactive
+step "enter interactive mode and probe literal send"         _enter_interactive_and_probe_literal_send
 step "send a wrapped command without echo false-timeout"     _expect_wrapped_send_no_timeout
 # The command COMPUTES its marker (arithmetic expansion), so the sentinel we
 # assert on — SELFTEST_42 — appears ONLY in the command's output, never in the

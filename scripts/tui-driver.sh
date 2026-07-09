@@ -66,9 +66,16 @@ af_capture() { tmux capture-pane -p -t "$AF_DRIVER_SESSION" 2>/dev/null; }
 # Escape, 'C-]', or literal chars). Keys are interpreted by tmux.
 af_send() { tmux send-keys -t "$AF_DRIVER_SESSION" "$@"; }
 
-# af_send_literal <string> — deliver a string verbatim (no key-name parsing);
-# also the injection path for raw SGR mouse sequences.
-af_send_literal() { tmux send-keys -t "$AF_DRIVER_SESSION" -l "$1"; }
+# af_send_literal <string> — deliver a string verbatim; also the injection path
+# for raw SGR mouse sequences. Use a tmux paste buffer so the payload is stdin
+# data, not tmux command syntax (`-foo`, `;;`, and friends stay literal).
+af_send_literal() {
+    local text="$1" buffer
+    [ -n "$text" ] || return 0
+    buffer="af-driver-literal-${BASHPID:-$$}-${RANDOM}"
+    printf '%s' "$text" | tmux load-buffer -b "$buffer" - || return 1
+    tmux paste-buffer -r -d -t "$AF_DRIVER_SESSION" -b "$buffer"
+}
 
 # _af_resolve_bin — the af binary to launch/readiness-check. Prefer PATH, fall
 # back to the container's build output.
