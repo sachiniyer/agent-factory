@@ -60,9 +60,9 @@ while every other instance collapses (arrow `▸`). That arrow is the reliable,
 text-greppable selection signal the driver asserts on:
 
 ```
-  ▾ 1.  alpha         ●      ← selected (expanded); ● = ready
+  ▾ alpha          ●      ← selected (expanded); ● = ready
        └ 1 Agent *
-  ▸ 2.  beta          ●      ← not selected (collapsed)
+  ▸ beta           ●      ← not selected (collapsed)
 ```
 
 On a cold boot the cursor sits on the **section header** (no instance selected
