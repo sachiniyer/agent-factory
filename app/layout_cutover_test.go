@@ -66,8 +66,11 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		assert.Equal(t, tc.h-layout.StatusBarRows, h.lastLayout.Panes[0].H,
 			"%dx%d: the pane takes the full height above the status bar", tc.w, tc.h)
 		// The hint row prioritizes under width pressure (low-value hints are
-		// dropped first), so help/quit must survive at BOTH sizes.
-		assert.Contains(t, view, "n new", "%dx%d: status-bar hints", tc.w, tc.h)
+		// dropped first), so #1422 tab management plus help/quit must survive
+		// at BOTH sizes.
+		assert.Contains(t, view, "t new tab", "%dx%d: tab-create hint", tc.w, tc.h)
+		assert.Contains(t, view, "w close tab", "%dx%d: tab-close hint", tc.w, tc.h)
+		assert.Contains(t, view, "1-9 jump", "%dx%d: tab-jump hint", tc.w, tc.h)
 		assert.Contains(t, view, "q quit", "%dx%d: quit hint must survive narrow widths", tc.w, tc.h)
 		assert.Contains(t, view, "? help", "%dx%d: help hint must survive narrow widths", tc.w, tc.h)
 	}

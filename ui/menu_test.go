@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/keys"
@@ -160,6 +161,60 @@ func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
 	}
 }
 
+func TestMenuNormalWidthSurfacesTabAndPaneManagement(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetSize(100, 1)
+
+	out := m.String()
+	for _, want := range []string{
+		"D kill",
+		"t new tab",
+		"w close tab",
+		"1-9 jump",
+		"s open pane",
+		"tab focus",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("normal-width footer missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "S split pane") {
+		t.Fatalf("normal-width footer must not advertise split without a preview:\n%s", out)
+	}
+
+	m.SetSplitPaneAvailable(true)
+	if out = m.String(); !strings.Contains(out, "S split pane") {
+		t.Fatalf("normal-width footer missing split hint while preview is active:\n%s", out)
+	}
+}
+
+func TestMenuSelftestWidthKeepsSelectedRowAndTabPaneHints(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetSize(100, 1)
+
+	out := m.String()
+	for _, want := range []string{
+		"n new",
+		"D kill",
+		"t new tab",
+		"w close tab",
+		"1-9 jump",
+		"s open pane",
+		"tab focus",
+		"? help",
+		"q quit",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("selftest-width footer missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "↵ interact") {
+		t.Fatalf("selftest-width footer should drop interact before tree-focus/selected-row/tab/pane hints:\n%s", out)
+	}
+}
+
 // TestMenuPaneHintsFollowFocus pins the #1088/#1419 hint model: tree focus
 // advertises the open-pane verb with the instance actions; split-pane is
 // advertised only while a preview exists to commit; a focused
@@ -203,5 +258,17 @@ func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	m.SetSplitPaneAvailable(true)
 	if !has(keys.KeySplitPane) {
 		t.Errorf("a focused pane must advertise split pane while a preview can be committed; options=%v", m.options)
+	}
+}
+
+func TestMenuNarrowPaneFocusDoesNotShowHideWithoutOpen(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetFocusRegion(layout.PaneRegion(7))
+	m.SetSize(80, 1)
+
+	out := m.String()
+	if strings.Contains(out, "hide pane") && !strings.Contains(out, "open pane") {
+		t.Fatalf("narrow pane footer must not show hide without the recovery/open action:\n%s", out)
 	}
 }
