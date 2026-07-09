@@ -1,0 +1,61 @@
+name: Auto Gate
+
+on:
+  check_suite:
+    types: [completed]
+  pull_request_review:
+  pull_request:
+    types: [labeled]
+  status:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  checks: read
+  statuses: read
+  issues: read
+
+concurrency:
+  group: auto-gate-${{ github.event.pull_request.number || github.event.check_suite.head_sha || github.event.sha || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  auto-gate:
+    name: Evaluate auto-merge gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out gate logic
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Evaluate gate
+        id: evaluate
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.AUTO_GATE_TOKEN || github.token }}
+          script: |
+            const autoGate = require("./.github/scripts/auto-gate.js");
+            await autoGate.evaluate({ github, context, core });
+
+      - name: Report disabled merge
+        if: steps.evaluate.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED != 'true'
+        run: |
+          echo "::notice::AUTO_GATE_ENABLED is not true; would squash-merge PR #${{ steps.evaluate.outputs.pr_number }}."
+          echo "::notice::Docs workflow dispatch after merge: ${{ steps.evaluate.outputs.docs_changed }}."
+          echo "${{ steps.evaluate.outputs.summary }}"
+
+      - name: Squash merge PR
+        if: steps.evaluate.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED == 'true'
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.AUTO_GATE_TOKEN || github.token }}
+          script: |
+            const autoGate = require("./.github/scripts/auto-gate.js");
+            await autoGate.merge({
+              github,
+              context,
+              core,
+              prNumber: Number("${{ steps.evaluate.outputs.pr_number }}"),
+            });
