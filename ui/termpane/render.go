@@ -32,6 +32,10 @@ var cursorNone = cursorAt{}
 // with a reset so the styles can never bleed into the host TUI's surrounding
 // chrome.
 func renderGrid(emu *vt.Emulator, width, height int, cursor cursorAt) string {
+	return renderGridWindow(emu, width, height, 0, cursor)
+}
+
+func renderGridWindow(emu *vt.Emulator, width, height, sourceY int, cursor cursorAt) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
@@ -41,10 +45,11 @@ func renderGrid(emu *vt.Emulator, width, height int, cursor cursorAt) string {
 		if y > 0 {
 			sb.WriteByte('\n')
 		}
+		row := y + sourceY
 		prev := uv.Style{}
 		for x := 0; x < width; {
 			content, cellWidth, style := " ", 1, uv.Style{}
-			if c := emu.CellAt(x, y); c != nil && c.Width > 0 && c.Content != "" {
+			if c := emu.CellAt(x, row); c != nil && c.Width > 0 && c.Content != "" {
 				content, cellWidth, style = c.Content, c.Width, c.Style
 			}
 			if x+cellWidth > width {
@@ -53,7 +58,7 @@ func renderGrid(emu *vt.Emulator, width, height int, cursor cursorAt) string {
 				// would overflow the row: blank it instead.
 				content, cellWidth = " ", 1
 			}
-			if cursor.show && y == cursor.y && x <= cursor.x && cursor.x < x+cellWidth {
+			if cursor.show && row == cursor.y && x <= cursor.x && cursor.x < x+cellWidth {
 				style.Attrs ^= uv.AttrReverse
 			}
 			sb.WriteString(style.Diff(&prev))
@@ -64,6 +69,25 @@ func renderGrid(emu *vt.Emulator, width, height int, cursor cursorAt) string {
 		if !prev.IsZero() {
 			sb.WriteString("\x1b[m")
 		}
+	}
+	return sb.String()
+}
+
+func padRenderedRows(grid string, width, rows int) string {
+	if width <= 0 || rows <= 0 {
+		return grid
+	}
+	blank := strings.Repeat(" ", width)
+	var sb strings.Builder
+	sb.Grow(len(grid) + rows*(width+1))
+	sb.WriteString(grid)
+	wrote := grid != ""
+	for range rows {
+		if wrote {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(blank)
+		wrote = true
 	}
 	return sb.String()
 }
