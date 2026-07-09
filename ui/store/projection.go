@@ -202,6 +202,9 @@ func (p *Projection) sortInstances() {
 // RegisterRepoForInstance records the instance's repo after the instance has
 // started and its worktree is available.
 func (p *Projection) RegisterRepoForInstance(instance *session.Instance) {
+	if !instance.Started() {
+		return
+	}
 	repoName, err := instance.RepoName()
 	if err != nil {
 		log.ErrorLog.Printf("could not get repo name: %v", err)
