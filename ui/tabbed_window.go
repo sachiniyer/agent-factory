@@ -16,21 +16,29 @@ import (
 )
 
 var windowStyle = lipgloss.NewStyle().
-	BorderForeground(AccentColor).
+	BorderForeground(activeTheme.PaneBorderDefault).
 	Border(lipgloss.RoundedBorder())
 
-// blurredWindowStyle recedes the pane frame when focus is elsewhere in the
-// workspace, so the focus ring is legible at a glance.
+// blurredWindowStyle is the neutral pane frame for ordinary panes.
 var blurredWindowStyle = windowStyle.
 	BorderForeground(activeTheme.PaneBorderDefault)
 
+// selectedWindowStyle marks the pane that matches the current sidebar
+// highlight, while the focus ring is elsewhere.
+var selectedWindowStyle = windowStyle.
+	BorderForeground(activeTheme.PaneBorderSelected)
+
 // interactiveWindowStyle marks the pane that owns the keyboard in
-// interactive mode (#1089, RFC §2.3): a green DOUBLE border — unmistakably
-// distinct from the teal rounded nav-focus ring, and still distinct with
-// colors unavailable — signals "keystrokes go INTO this terminal".
+// interactive mode (#1089, RFC §2.3): a green DOUBLE border still signals
+// "keystrokes go INTO this terminal" even when colors are unavailable.
 var interactiveWindowStyle = windowStyle.
 	Border(lipgloss.DoubleBorder()).
 	BorderForeground(activeTheme.PaneBorderInteractive)
+
+// previewWindowStyle marks a transient #1321 preview binding without
+// mutating the pane's committed store binding.
+var previewWindowStyle = windowStyle.
+	BorderForeground(activeTheme.PaneBorderPreview)
 
 var paneHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
@@ -107,6 +115,10 @@ type TabbedWindow struct {
 	// leaving the selected row and displayed content to appear contradictory
 	// (#1289).
 	selectionHint string
+	// sidebarSelected marks whether the pane's committed binding matches the
+	// current sidebar selection. It colors selected-but-not-focused panes blue
+	// without moving focus or mutating the pane binding.
+	sidebarSelected bool
 
 	// preview is a transient render binding for #1321. While set, the window
 	// still owns its committed store.OpenPane binding, but capture/render uses
@@ -394,6 +406,12 @@ func (w *TabbedWindow) SetSelectionHint(title string) {
 	w.selectionHint = title
 }
 
+// SetSidebarSelected marks whether this pane corresponds to the current
+// sidebar highlight. The root model updates it immediately before rendering.
+func (w *TabbedWindow) SetSidebarSelected(on bool) {
+	w.sidebarSelected = on
+}
+
 // registerZones records this frame's hit-test rects: the whole pane as the
 // body (click focuses; click focused interacts; wheel scrolls), the one-line
 // `title · tab` header inside the frame on top of it, and — exactly while the
@@ -537,6 +555,19 @@ func (w *TabbedWindow) renderHeader(width int) string {
 // live capture view.
 func (w *TabbedWindow) View() string { return w.String() }
 
+func (w *TabbedWindow) frameStyle() lipgloss.Style {
+	switch {
+	case w.preview != nil:
+		return previewWindowStyle
+	case w.interactive:
+		return interactiveWindowStyle
+	case w.sidebarSelected && !w.focused:
+		return selectedWindowStyle
+	default:
+		return blurredWindowStyle
+	}
+}
+
 func (w *TabbedWindow) String() string {
 	if w.rect.Empty() {
 		return ""
@@ -560,12 +591,5 @@ func (w *TabbedWindow) String() string {
 		w.renderHeader(iw),
 		layout.ClampToRect(content, layout.Rect{W: iw, H: ih}),
 	)
-	frame := windowStyle
-	switch {
-	case w.interactive:
-		frame = interactiveWindowStyle
-	case !w.focused:
-		frame = blurredWindowStyle
-	}
-	return layout.ClampToRect(frame.Render(inner), w.rect)
+	return layout.ClampToRect(w.frameStyle().Render(inner), w.rect)
 }

@@ -69,7 +69,7 @@ func (m *home) paneSelectionHint(p *store.OpenPane) string {
 	if selected == nil {
 		return ""
 	}
-	if p.Instance() == selected && p.Tab() == m.store.ActiveTab() {
+	if m.paneMatchesSelection(p) {
 		return ""
 	}
 	tabLabel := ""
@@ -82,6 +82,14 @@ func (m *home) paneSelectionHint(p *store.OpenPane) string {
 		return selected.Title
 	}
 	return fmt.Sprintf("%s · %s", selected.Title, tabLabel)
+}
+
+func (m *home) paneMatchesSelection(p *store.OpenPane) bool {
+	if p == nil {
+		return false
+	}
+	selected := m.store.GetSelectedInstance()
+	return selected != nil && p.Instance() == selected && p.Tab() == m.store.ActiveTab()
 }
 
 // handleOpenPane dispatches the `s` key: open the tree selection's (instance,

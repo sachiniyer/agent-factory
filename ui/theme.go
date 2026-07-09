@@ -92,13 +92,17 @@ func CurrentTheme() Theme {
 
 func applyThemeStyles() {
 	windowStyle = lipgloss.NewStyle().
-		BorderForeground(activeTheme.Accent).
+		BorderForeground(activeTheme.PaneBorderDefault).
 		Border(lipgloss.RoundedBorder())
 	blurredWindowStyle = windowStyle.
 		BorderForeground(activeTheme.PaneBorderDefault)
+	selectedWindowStyle = windowStyle.
+		BorderForeground(activeTheme.PaneBorderSelected)
 	interactiveWindowStyle = windowStyle.
 		Border(lipgloss.DoubleBorder()).
 		BorderForeground(activeTheme.PaneBorderInteractive)
+	previewWindowStyle = windowStyle.
+		BorderForeground(activeTheme.PaneBorderPreview)
 
 	paneHeaderStyle = lipgloss.NewStyle().
 		Bold(true).
