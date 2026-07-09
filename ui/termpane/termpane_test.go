@@ -28,6 +28,14 @@ func startScript(t *testing.T, script string, width, height int) *TermPane {
 	return tp
 }
 
+func startScriptWithStatusLayout(t *testing.T, script string, width, height, statusRows int, pos statusPosition) *TermPane {
+	t.Helper()
+	tp, err := newWithCommand(exec.Command("/bin/sh", "-c", script), width, height, statusRows, pos)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tp.Close() })
+	return tp
+}
+
 // plainRender is Render with the styling stripped, for content assertions.
 func plainRender(tp *TermPane, width, height int) string {
 	return ansi.Strip(tp.Render(width, height, false))
@@ -61,6 +69,24 @@ func TestNewAttachCommandSocketParity(t *testing.T) {
 	assert.Equal(t, []string{"tmux", "attach-session", "-t", "=mysess"}, cmd.Args)
 }
 
+func TestParseTmuxStatusRows(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  int
+	}{
+		{value: "", want: 1},
+		{value: "on", want: 1},
+		{value: "off", want: 0},
+		{value: "0", want: 0},
+		{value: "2", want: 2},
+		{value: "5", want: 5},
+		{value: "6", want: 5},
+		{value: "bad", want: 1},
+	} {
+		assert.Equalf(t, tc.want, parseTmuxStatusRows(tc.value), "status %q", tc.value)
+	}
+}
+
 // TestNewAttachesAcrossNonDefaultSocket is the end-to-end pin for the #1121
 // play-test blocker: with af running inside a server on a non-default socket
 // ($TMUX carries its path), New must reach THAT server — not auto-start a
@@ -76,6 +102,8 @@ func TestNewAttachesAcrossNonDefaultSocket(t *testing.T) {
 	out, err := run("new-session", "-d", "-s", "sockparity", "-x", "80", "-y", "24",
 		"sh", "-c", "printf 'SOCK-PARITY-1121\\n'; sleep 120")
 	require.NoError(t, err, "tmux new-session: %s", out)
+	out, err = run("set-option", "-t", "sockparity", "status", "2")
+	require.NoError(t, err, "tmux set status: %s", out)
 
 	// What the TUI sees when it runs inside that server.
 	t.Setenv("TMUX", sock+",12345,$0")
@@ -83,6 +111,7 @@ func TestNewAttachesAcrossNonDefaultSocket(t *testing.T) {
 	tp, err := New("sockparity", 80, 24)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tp.Close() })
+	assert.Equal(t, 2, tp.statusRows, "status query must use the non-default socket too")
 	waitForRender(t, tp, 80, 24, "SOCK-PARITY-1121")
 }
 
@@ -106,6 +135,34 @@ func TestResizePropagatesPTYWinsize(t *testing.T) {
 
 	tp.Resize(100, 30)
 	waitForRender(t, tp, 100, 30, "30 100")
+}
+
+func TestHiddenStatusRowsAreNotRendered(t *testing.T) {
+	tp := startScriptWithStatusLayout(t, "printf 'VISIBLE-1425\\033[7;1HSTATUS-1425-A\\033[8;1HSTATUS-1425-B'; sleep 30", 30, 6, 2, statusBottom)
+	waitForRender(t, tp, 30, 6, "VISIBLE-1425")
+
+	out := plainRender(tp, 30, 6)
+	assert.NotContains(t, out, "STATUS-1425-A", "first hidden bottom row must be cropped out of the pane")
+	assert.NotContains(t, out, "STATUS-1425-B", "second hidden bottom row must be cropped out of the pane")
+	gridLines(t, tp.Render(30, 6, false), 30, 6)
+}
+
+func TestTopStatusRowsAreNotRendered(t *testing.T) {
+	tp := startScriptWithStatusLayout(t, "printf 'TOP-STATUS-1425-A\\033[2;1HTOP-STATUS-1425-B\\033[3;1HVISIBLE-1425'; sleep 30", 30, 6, 2, statusTop)
+	waitForRender(t, tp, 30, 6, "VISIBLE-1425")
+
+	out := plainRender(tp, 30, 6)
+	assert.NotContains(t, out, "TOP-STATUS-1425-A", "first hidden top row must be cropped out of the pane")
+	assert.NotContains(t, out, "TOP-STATUS-1425-B", "second hidden top row must be cropped out of the pane")
+	gridLines(t, tp.Render(30, 6, false), 30, 6)
+}
+
+func TestHiddenStatusRowsAreIncludedInPTYWinsize(t *testing.T) {
+	tp := startScriptWithStatusLayout(t, "while :; do stty size; sleep 0.05; done", 80, 24, 2, statusBottom)
+	waitForRender(t, tp, 80, 24, "26 80")
+
+	tp.Resize(100, 30)
+	waitForRender(t, tp, 100, 30, "32 100")
 }
 
 func TestCloseKillsClientAndSignalsDone(t *testing.T) {
@@ -208,4 +265,41 @@ func TestCloseLeavesTmuxSessionAlive(t *testing.T) {
 		out, err := run("list-clients", "-t", "=termpane1089")
 		return err == nil && strings.TrimSpace(out) == ""
 	}, 3*time.Second, 50*time.Millisecond, "no attach client may survive Close")
+}
+
+func TestNewHidesNestedTmuxStatusLine(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const (
+		sessionName  = "termpane1425"
+		statusMarker = "NESTED-STATUS-1425"
+	)
+	run := func(args ...string) (string, error) {
+		out, err := exec.Command("tmux", args...).CombinedOutput()
+		return string(out), err
+	}
+	t.Cleanup(func() { _, _ = run("kill-server") })
+	out, err := run("new-session", "-d", "-s", sessionName, "-x", "40", "-y", "6",
+		"sh", "-c", "printf 'LIVE-1425\\n'; sleep 120")
+	require.NoError(t, err, "tmux new-session: %s", out)
+	for _, args := range [][]string{
+		{"set-option", "-t", sessionName, "status", "2"},
+		{"set-option", "-t", sessionName, "status-format[0]", statusMarker + "-A"},
+		{"set-option", "-t", sessionName, "status-format[1]", statusMarker + "-B"},
+		{"set-option", "-t", sessionName, "status-interval", "0"},
+	} {
+		out, err = run(args...)
+		require.NoError(t, err, "tmux %v: %s", args, out)
+	}
+
+	tp, err := New(sessionName, 40, 6)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tp.Close() })
+	assert.Equal(t, 2, tp.statusRows, "New must query tmux's configured status row count")
+
+	waitForRender(t, tp, 40, 6, "LIVE-1425")
+	assert.Never(t, func() bool {
+		return strings.Contains(plainRender(tp, 40, 6), statusMarker)
+	}, 500*time.Millisecond, 20*time.Millisecond, "embedded pane must crop tmux's nested status line")
+	gridLines(t, tp.Render(40, 6, false), 40, 6)
 }

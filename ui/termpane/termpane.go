@@ -4,12 +4,14 @@
 //
 // A TermPane owns one attach client: a PTY running `tmux attach-session -t
 // =<name>`, whose output is fed through a charmbracelet/x/vt terminal
-// emulator into a cell grid. Render turns the grid into an ANSI-styled block
-// the TUI places inside a pane rect — no full-screen takeover, the rail stays
-// visible. Resize propagates the pane geometry to the PTY (tmux reflows on
-// the SIGWINCH) and to the emulator grid in step. Close kills the attach
-// CLIENT only; the tmux session keeps running server-side, exactly like a
-// detach.
+// emulator into a cell grid. Production tmux attachments are taller than the
+// pane rect by the nested session's configured status height (0-5 rows) so
+// tmux can draw its status line outside the rendered content window; Render
+// turns only the visible grid area into an ANSI-styled block the TUI places
+// inside a pane rect — no full-screen takeover, the rail stays visible. Resize
+// propagates the pane geometry to the PTY (tmux reflows on the SIGWINCH) and
+// to the emulator grid in step. Close kills the attach CLIENT only; the tmux
+// session keeps running server-side, exactly like a detach.
 //
 // This package is deliberately a pure projection: it never creates, kills, or
 // mutates tmux sessions — the daemon stays the sole session owner (#960).
@@ -31,6 +33,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,7 +53,21 @@ import (
 // returns anyway and leaks the goroutine: a leaked goroutine is strictly
 // better than freezing the event loop, the same trade waitForAttachDrain
 // makes.
-const closeDrainDeadline = 2 * time.Second
+const (
+	closeDrainDeadline = 2 * time.Second
+
+	// tmux clamps the status option to off/on or 2-5 rows. Embedded panes are
+	// already framed by af, so production attachments allocate those rows but
+	// crop them out of the rendered pane.
+	maxTmuxStatusRows = 5
+)
+
+type statusPosition int
+
+const (
+	statusBottom statusPosition = iota
+	statusTop
+)
 
 // TermPane is one live embedded terminal: PTY + attach client + vt emulator.
 //
@@ -75,7 +92,9 @@ type TermPane struct {
 	// Starts true (terminals boot with the cursor shown).
 	cursorVisible bool
 
-	width, height int
+	width, height  int
+	statusRows     int
+	statusPosition statusPosition
 
 	// done is closed when the PTY reader pump exits — on Close, or when the
 	// attach client dies on its own (session killed, tmux server gone, or an
@@ -89,7 +108,9 @@ type TermPane struct {
 // `=` forces an exact session-name match, mirroring session/tmux's Restore
 // (#1006) so a sibling session can never be prefix-matched instead.
 func New(sessionName string, width, height int) (*TermPane, error) {
-	return NewWithCommand(newAttachCommand(sessionName, os.Getenv("TMUX"), os.Environ()), width, height)
+	tmuxEnv, environ := os.Getenv("TMUX"), os.Environ()
+	rows, pos := tmuxStatusLayout(sessionName, tmuxEnv, environ)
+	return newWithCommand(newAttachCommand(sessionName, tmuxEnv, environ), width, height, rows, pos)
 }
 
 // newAttachCommand builds the attach client's argv and env. The TUI itself
@@ -104,6 +125,10 @@ func New(sessionName string, width, height int) (*TermPane, error) {
 // tmux emits escape sequences the grid understands.
 func newAttachCommand(sessionName, tmuxEnv string, environ []string) *exec.Cmd {
 	args := []string{"attach-session", "-t", "=" + sessionName}
+	return newTmuxCommand(tmuxEnv, environ, args...)
+}
+
+func newTmuxCommand(tmuxEnv string, environ []string, args ...string) *exec.Cmd {
 	// $TMUX is `socket_path,server_pid,session_id`; the path is what -S wants.
 	if sock, _, _ := strings.Cut(tmuxEnv, ","); sock != "" {
 		args = append([]string{"-S", sock}, args...)
@@ -120,24 +145,76 @@ func newAttachCommand(sessionName, tmuxEnv string, environ []string) *exec.Cmd {
 	return cmd
 }
 
+func tmuxStatusLayout(sessionName, tmuxEnv string, environ []string) (int, statusPosition) {
+	status, err := tmuxShowSessionOption(sessionName, tmuxEnv, environ, "status")
+	if err != nil {
+		log.WarningLog.Printf("termpane: tmux status query for %s failed: %v (assuming one bottom status row)", sessionName, err)
+		return 1, statusBottom
+	}
+	position, err := tmuxShowSessionOption(sessionName, tmuxEnv, environ, "status-position")
+	if err != nil {
+		log.WarningLog.Printf("termpane: tmux status-position query for %s failed: %v (assuming bottom)", sessionName, err)
+		position = "bottom"
+	}
+	return parseTmuxStatusRows(status), parseTmuxStatusPosition(position)
+}
+
+func tmuxShowSessionOption(sessionName, tmuxEnv string, environ []string, option string) (string, error) {
+	cmd := newTmuxCommand(tmuxEnv, environ, "show-options", "-Aqv", "-t", "="+sessionName+":", option)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", option, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func parseTmuxStatusRows(value string) int {
+	switch strings.TrimSpace(value) {
+	case "", "on":
+		return 1
+	case "off":
+		return 0
+	}
+	rows, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 1
+	}
+	return clampStatusRows(rows)
+}
+
+func parseTmuxStatusPosition(value string) statusPosition {
+	if strings.TrimSpace(value) == "top" {
+		return statusTop
+	}
+	return statusBottom
+}
+
 // NewWithCommand is New with a caller-built command on the PTY instead of the
 // default tmux attach argv. Tests use it to run scripted shells (no tmux
 // server) and to point a real attach at a private `-L` socket.
 func NewWithCommand(cmd *exec.Cmd, width, height int) (*TermPane, error) {
+	return newWithCommand(cmd, width, height, 0, statusBottom)
+}
+
+func newWithCommand(cmd *exec.Cmd, width, height, statusRows int, pos statusPosition) (*TermPane, error) {
 	width, height = clampSize(width, height)
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(height), Cols: uint16(width)}) //nolint:gosec // clampSize bounds to [1, 4096]
+	statusRows = clampStatusRows(statusRows)
+	ptyHeight := ptyHeightForVisibleRows(height, statusRows)
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(ptyHeight), Cols: uint16(width)}) //nolint:gosec // clampSize bounds to [1, 4096]
 	if err != nil {
 		return nil, fmt.Errorf("termpane: starting %q on a PTY: %w", cmd.Path, err)
 	}
 
 	t := &TermPane{
-		cmd:           cmd,
-		ptmx:          ptmx,
-		emu:           vt.NewEmulator(width, height),
-		cursorVisible: true,
-		width:         width,
-		height:        height,
-		done:          make(chan struct{}),
+		cmd:            cmd,
+		ptmx:           ptmx,
+		emu:            vt.NewEmulator(width, ptyHeight),
+		cursorVisible:  true,
+		width:          width,
+		height:         height,
+		statusRows:     statusRows,
+		statusPosition: pos,
+		done:           make(chan struct{}),
 	}
 	// The callback fires from emu.Write — always under gridMu's write lock —
 	// so the field write is ordered against Render's locked reads.
@@ -241,11 +318,12 @@ func (t *TermPane) Resize(width, height int) {
 		return
 	}
 	t.width, t.height = width, height
-	if err := pty.Setsize(t.ptmx, &pty.Winsize{Rows: uint16(height), Cols: uint16(width)}); err != nil { //nolint:gosec // clampSize bounds to [1, 4096]
+	ptyHeight := ptyHeightForVisibleRows(height, t.statusRows)
+	if err := pty.Setsize(t.ptmx, &pty.Winsize{Rows: uint16(ptyHeight), Cols: uint16(width)}); err != nil { //nolint:gosec // clampSize bounds to [1, 4096]
 		log.WarningLog.Printf("termpane: pty resize to %dx%d failed: %v", width, height, err)
 	}
 	t.gridMu.Lock()
-	t.emu.Resize(width, height)
+	t.emu.Resize(width, ptyHeight)
 	t.gridMu.Unlock()
 }
 
@@ -266,7 +344,13 @@ func (t *TermPane) Render(width, height int, showCursor bool) string {
 		pos := t.emu.CursorPosition()
 		cursor = cursorAt{x: pos.X, y: pos.Y, show: true}
 	}
-	return renderGrid(t.emu, width, height, cursor)
+	visibleHeight := min(height, t.height)
+	sourceY := 0
+	if t.statusPosition == statusTop {
+		sourceY = t.statusRows
+	}
+	grid := renderGridWindow(t.emu, width, visibleHeight, sourceY, cursor)
+	return padRenderedRows(grid, width, height-visibleHeight)
 }
 
 // Done reports attach-client death: the channel is closed once the PTY
@@ -332,4 +416,22 @@ func clampSize(width, height int) (int, int) {
 		height = 4096
 	}
 	return width, height
+}
+
+func clampStatusRows(rows int) int {
+	if rows < 0 {
+		return 0
+	}
+	if rows > maxTmuxStatusRows {
+		return maxTmuxStatusRows
+	}
+	return rows
+}
+
+func ptyHeightForVisibleRows(height, statusRows int) int {
+	ptyHeight := height + statusRows
+	if ptyHeight > 4096 {
+		return 4096
+	}
+	return ptyHeight
 }
