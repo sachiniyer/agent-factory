@@ -62,6 +62,107 @@ func TestEventQueue_EnqueuePeekAdvanceRoundTrip(t *testing.T) {
 	}
 }
 
+// TestEventQueue_RemoveFailureDoesNotLoseLaterEnqueue covers #1433: if the
+// final queue-file remove fails, advance must leave the delivered-prefix state
+// intact. A later enqueue appends behind that prefix; the next peek must see
+// the later event, not re-read the already delivered record and then unlink
+// the file containing both records.
+func TestEventQueue_RemoveFailureDoesNotLoseLaterEnqueue(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "ab120009")
+	if err := q.enqueue("delivered-before-remove-failure"); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	_, cursor, ok, err := q.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek first: ok=%v err=%v", ok, err)
+	}
+
+	removeErr := errors.New("simulated remove failure")
+	failNextRemove := true
+	q.remove = func(path string) error {
+		if path == q.path && failNextRemove {
+			failNextRemove = false
+			return removeErr
+		}
+		return os.Remove(path)
+	}
+	advanced, err := q.advance(cursor)
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("advance error = %v, want %v", err, removeErr)
+	}
+	if advanced {
+		t.Fatal("advance reported success after queue-file removal failed")
+	}
+
+	if err := q.enqueue("new-after-remove-failure"); err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+	ev, cursor, ok, err := q.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek second: ok=%v err=%v", ok, err)
+	}
+	if ev.Line != "new-after-remove-failure" {
+		t.Fatalf("head after failed remove = %q, want the later event", ev.Line)
+	}
+	advanceEventQueue(t, q, cursor)
+	if got := q.pendingCount(); got != 0 {
+		t.Fatalf("pending after second advance = %d, want 0", got)
+	}
+	if _, err := os.Stat(q.path); !os.IsNotExist(err) {
+		t.Fatalf("queue file after drain = %v, want removed", err)
+	}
+}
+
+func TestEventQueue_CursorRemoveFailureResetsBeforeFreshEnqueue(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "ab120010")
+	for _, line := range []string{"first", "second"} {
+		if err := q.enqueue(line); err != nil {
+			t.Fatalf("enqueue %q: %v", line, err)
+		}
+	}
+	_, cursor, ok, err := q.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek first: ok=%v err=%v", ok, err)
+	}
+	advanceEventQueue(t, q, cursor)
+
+	failCursorRemove := true
+	q.remove = func(path string) error {
+		if path == q.curPath && failCursorRemove {
+			failCursorRemove = false
+			return errors.New("simulated cursor remove failure")
+		}
+		return os.Remove(path)
+	}
+	_, cursor, ok, err = q.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek second: ok=%v err=%v", ok, err)
+	}
+	advanceEventQueue(t, q, cursor)
+
+	raw, err := os.ReadFile(q.curPath)
+	if err != nil {
+		t.Fatalf("read reset cursor: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "0" {
+		t.Fatalf("cursor after failed remove = %q, want 0", got)
+	}
+	if err := q.enqueue("after-drain"); err != nil {
+		t.Fatalf("enqueue after drain: %v", err)
+	}
+
+	reopened := newEventQueue(dir, "ab120010")
+	if got := reopened.pendingCount(); got != 1 {
+		t.Fatalf("reopened pending = %d, want 1", got)
+	}
+	ev, _, ok, err := reopened.peek()
+	if err != nil || !ok || ev.Line != "after-drain" {
+		t.Fatalf("reopened head = %q ok=%v err=%v, want after-drain", ev.Line, ok, err)
+	}
+}
+
 // TestEventQueue_RecoversAcrossReopen: a partially drained backlog written by
 // one eventQueue is recovered by a fresh one over the same files — the daemon
 // restart / reload shape. The cursor keeps delivered events delivered.
