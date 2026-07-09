@@ -179,6 +179,8 @@ compose across `docker exec` invocations.
 
 `AF_DRIVER_SESSION` (`drive`), `AF_DRIVER_COLS`/`ROWS` (`100`/`30`),
 `AF_DRIVER_REPO` (`$HOME/sandbox/mock-repo`), `AGENT_FACTORY_HOME`,
+`AGENT_FACTORY_AUTO_UPDATE` (driver sets to `false` to prevent mid-test
+self-updates that would timeout instance creation),
 `AF_DRIVER_TIMEOUT` (`25`s), `AF_DRIVER_POLL` (`0.25`s),
 `AF_DRIVER_DETACH_KEY` (`C-w`), `AF_DRIVER_BIN` (auto-resolved).
 
