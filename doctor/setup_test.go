@@ -49,7 +49,7 @@ func TestSetupDoctorReportsMissingDefaultProgram(t *testing.T) {
 	t.Setenv("PATH", binDir)
 	require.NoError(t, os.MkdirAll(home, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
-		[]byte("default_program = \"claude\"\n"), 0o644))
+		[]byte("default_program = \"claude\"\n\n[program_overrides]\nclaude = \"/missing/claude\"\n"), 0o644))
 
 	report, err := Run(Options{
 		Setup:     true,

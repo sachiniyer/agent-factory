@@ -109,6 +109,58 @@ func LoadConfig() (*Config, error) {
 	return convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath)
 }
 
+// ReadOnlyConfigLoad is a no-write config snapshot for diagnostics.
+type ReadOnlyConfigLoad struct {
+	Config       *Config
+	Path         string
+	Missing      bool
+	LegacyJSON   bool
+	ShadowedJSON bool
+}
+
+// LoadConfigReadOnly reads and validates the active global config without
+// materializing defaults, converting config.json, removing empty stubs, or
+// writing any file. It is intended for diagnostics such as `af doctor`.
+func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
+	configDir, err := GetConfigDir()
+	if err != nil {
+		return ReadOnlyConfigLoad{}, fmt.Errorf("failed to get config directory: %w", err)
+	}
+
+	configPath := filepath.Join(configDir, ConfigFileName)
+	prettyConfigPath := prettyHomePath(configPath)
+	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+	prettyTomlPath := prettyHomePath(tomlPath)
+
+	tomlData, tomlErr := os.ReadFile(tomlPath)
+	if tomlErr == nil {
+		cfg, err := parseConfigTOML(tomlData, prettyTomlPath)
+		return ReadOnlyConfigLoad{
+			Config:       cfg,
+			Path:         tomlPath,
+			ShadowedJSON: fileExists(configPath),
+		}, err
+	}
+	if !os.IsNotExist(tomlErr) {
+		return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, tomlErr)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err == nil {
+		cfg, parseErr := parseConfig(data, prettyConfigPath)
+		return ReadOnlyConfigLoad{
+			Config:     cfg,
+			Path:       configPath,
+			LegacyJSON: true,
+		}, parseErr
+	}
+	if !os.IsNotExist(err) {
+		return ReadOnlyConfigLoad{Path: configPath}, fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
+	}
+
+	return ReadOnlyConfigLoad{Path: tomlPath, Missing: true}, nil
+}
+
 // fileExists reports whether path exists (any stat error other than
 // not-exist — e.g. permission denied — counts as "exists" so a shadowed
 // config.json is still flagged rather than silently assumed gone).

@@ -23,7 +23,6 @@ package doctor
 
 import (
 	"fmt"
-	"io"
 	"sort"
 	"time"
 
@@ -46,10 +45,46 @@ type Finding struct {
 	// Fixed / FixErr record the outcome when a fix was attempted.
 	Fixed  bool
 	FixErr error
+	// Section, Severity, and Remediation drive the grouped doctor renderer.
+	// Empty values are filled from the Check slug so existing detectors stay
+	// compact while new checks can be explicit.
+	Section     string
+	Severity    CheckStatus
+	Remediation string
+}
+
+// CheckStatus is the user-facing status for one doctor row.
+type CheckStatus string
+
+const (
+	StatusPass  CheckStatus = "PASS"
+	StatusWarn  CheckStatus = "WARN"
+	StatusFail  CheckStatus = "FAIL"
+	StatusFixed CheckStatus = "FIXED"
+)
+
+// HeaderItem is one key-value fact printed before grouped checks.
+type HeaderItem struct {
+	Label string
+	Value string
+}
+
+// CheckResult is one grouped doctor row that is not backed by a Finding.
+type CheckResult struct {
+	Section     string
+	Name        string
+	Status      CheckStatus
+	Detail      string
+	Remediation string
+	Problem     bool
 }
 
 // Report is the result of a doctor run.
 type Report struct {
+	// Header holds the key environment facts printed before the sections.
+	Header []HeaderItem
+	// Checks holds sectioned PASS/WARN/FAIL rows that are not Finding-backed.
+	Checks []CheckResult
 	// OK holds informational healthy lines, grouped by section.
 	OK []string
 	// Findings holds detected problems in detection order.
@@ -60,6 +95,11 @@ type Report struct {
 // report-only, fix not requested, or fix failed).
 func (r *Report) UnresolvedCount() int {
 	n := 0
+	for _, c := range r.Checks {
+		if c.Problem && c.Status != StatusPass && c.Status != StatusFixed {
+			n++
+		}
+	}
 	for _, f := range r.Findings {
 		if !f.Fixed {
 			n++
@@ -71,6 +111,8 @@ func (r *Report) UnresolvedCount() int {
 // Options configures a doctor run. Zero values resolve to production
 // defaults; tests override ConfigDir/TempDir/Exec to stay hermetic.
 type Options struct {
+	// Version is the af version stamped into the root command.
+	Version string
 	// Fix applies the safe remediations instead of only reporting.
 	Fix bool
 	// Setup runs the onboarding profile only: local prerequisites, writable
@@ -154,6 +196,9 @@ func Run(opts Options) (*Report, error) {
 		return report, nil
 	}
 
+	cfg := checkConfigAndStorage(ctx, report)
+	checkEnvironment(ctx, report, cfg)
+
 	if opts.snapshot == nil {
 		opts.snapshot = proctree.Snapshot
 	}
@@ -209,52 +254,6 @@ func selfAndAncestors(snap map[int]proctree.Process) map[int]bool {
 		pid = p.PPID
 	}
 	return out
-}
-
-// Render writes the human-readable report. fixMode changes the trailing
-// hints (no "--fix would..." when fixes were just applied).
-func Render(w io.Writer, r *Report, fixMode bool) {
-	if len(r.OK) > 0 {
-		for _, line := range r.OK {
-			fmt.Fprintf(w, "ok: %s\n", line)
-		}
-	}
-	if len(r.Findings) == 0 {
-		fmt.Fprintf(w, "\nNo problems found.\n")
-		return
-	}
-	fmt.Fprintln(w)
-	for _, f := range r.Findings {
-		switch {
-		case f.Fixed:
-			fmt.Fprintf(w, "fixed: [%s] %s (%s)\n", f.Check, f.Detail, f.FixAction)
-		case f.FixErr != nil:
-			fmt.Fprintf(w, "fix-failed: [%s] %s (%s: %v)\n", f.Check, f.Detail, f.FixAction, f.FixErr)
-		case f.FixAction != "" && !fixMode:
-			fmt.Fprintf(w, "issue: [%s] %s (--fix will %s)\n", f.Check, f.Detail, f.FixAction)
-		default:
-			fmt.Fprintf(w, "issue: [%s] %s\n", f.Check, f.Detail)
-		}
-	}
-	unresolved := r.UnresolvedCount()
-	fixed := len(r.Findings) - unresolved
-	switch {
-	case fixMode && fixed > 0:
-		fmt.Fprintf(w, "\n%d issue(s) found, %d fixed, %d remaining.\n", len(r.Findings), fixed, unresolved)
-	case !fixMode && hasFixable(r):
-		fmt.Fprintf(w, "\n%d issue(s) found. Re-run with --fix to apply the safe remediations.\n", len(r.Findings))
-	default:
-		fmt.Fprintf(w, "\n%d issue(s) found.\n", len(r.Findings))
-	}
-}
-
-func hasFixable(r *Report) bool {
-	for _, f := range r.Findings {
-		if f.FixAction != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // sortedKeys returns m's keys in stable order so report output is

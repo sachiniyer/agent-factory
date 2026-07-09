@@ -100,41 +100,32 @@ func killFix(ctx *scanContext, p proctree.Process) func() error {
 func checkDaemonHealth(ctx *scanContext, report *Report) {
 	h := daemon.Health()
 	if h.SocketErr != nil {
-		report.Findings = append(report.Findings, Finding{
-			Check:  "daemon-health",
-			Detail: fmt.Sprintf("cannot resolve daemon socket path: %v", h.SocketErr),
-		})
+		report.Fail(sectionDaemon, "daemon", fmt.Sprintf("cannot resolve daemon socket path: %v", h.SocketErr),
+			"fix AGENT_FACTORY_HOME and rerun `af doctor`")
 		return
-	}
-	unit := "ad-hoc (no autostart unit; `af daemon install` sets one up)"
-	if h.AutostartUnit {
-		unit = "autostart unit installed"
 	}
 	switch {
 	case h.PingErr == nil:
-		report.OK = append(report.OK, fmt.Sprintf("daemon: responding on %s; %s", h.SocketPath, unit))
+		report.Pass(sectionDaemon, "daemon", "responding on "+h.SocketPath)
 	case !h.SocketExists:
-		report.OK = append(report.OK, "daemon: not running (starts on demand); "+unit)
+		report.Pass(sectionDaemon, "daemon", "not running; starts on demand")
 	default:
-		report.Findings = append(report.Findings, Finding{
-			Check: "daemon-health",
-			Detail: fmt.Sprintf("socket %s exists but the daemon is not responding (%v) — "+
-				"likely a stale socket from a crashed daemon", h.SocketPath, h.PingErr),
-		})
+		report.Fail(sectionDaemon, "daemon", fmt.Sprintf("socket %s exists but the daemon is not responding (%v)", h.SocketPath, h.PingErr),
+			"run `af daemon restart`; if it still fails, remove the stale socket after verifying no daemon is running")
+	}
+	if h.AutostartUnit {
+		report.Pass(sectionDaemon, "autostart", "installed")
+	} else {
+		report.Warn(sectionDaemon, "autostart", "not installed",
+			"run `af daemon install` to keep scheduled tasks running across reboots", false)
 	}
 	if h.PIDFilePID > 0 && !h.PIDVerified && h.PingErr != nil {
-		report.Findings = append(report.Findings, Finding{
-			Check: "daemon-health",
-			Detail: fmt.Sprintf("daemon.pid records pid %d but no agent-factory daemon is running under it "+
-				"(stale pid file)", h.PIDFilePID),
-		})
+		report.Warn(sectionDaemon, "daemon.pid", fmt.Sprintf("records pid %d but no agent-factory daemon is running under it", h.PIDFilePID),
+			"remove the stale daemon.pid after verifying the pid is not an af daemon", true)
 	}
 	if h.BinaryDeleted {
-		report.Findings = append(report.Findings, Finding{
-			Check: "daemon-health",
-			Detail: fmt.Sprintf("daemon pid %d is running a binary that was since replaced on disk — "+
-				"it will keep running the old version until restarted", h.PIDFilePID),
-		})
+		report.Warn(sectionDaemon, "daemon binary", fmt.Sprintf("pid %d is running a binary that was replaced on disk", h.PIDFilePID),
+			"run `af daemon restart` to pick up the current binary", true)
 	}
 }
 
@@ -412,7 +403,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 			continue
 		}
 		if reason := tempHomeInUseReason(dir, homesInUse, tmuxHomesInUse); reason != "" {
-			report.OK = append(report.OK, fmt.Sprintf("temp home %s is in use (%s)", dir, reason))
+			report.Pass(sectionProcesses, "temp home", fmt.Sprintf("%s is in use (%s)", dir, reason))
 			continue
 		}
 		age := timeSince(newestMtime(dir))
