@@ -128,6 +128,7 @@ func (m *home) handleWheel(msg tea.MouseMsg) tea.Cmd {
 		} else {
 			m.sidebar.Down()
 		}
+		m.focusTreeForNav()
 		return m.selectionChanged()
 	case strings.HasPrefix(id, "auto:"):
 		if up {
