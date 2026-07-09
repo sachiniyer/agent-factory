@@ -4,13 +4,31 @@ const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
 const GREPTILE_RE = /greptile/i;
 
 async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
+  try {
+    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs });
+  } catch (error) {
+    const message = formatError(error);
+    core.warning(error && error.stack ? error.stack : message);
+    return finish(core, setOutputs, {
+      prNumber: prNumber ? String(prNumber) : "",
+      shouldMerge: false,
+      docsChanged: false,
+      reasons: [`auto-gate evaluation error: ${message}`],
+      notes: [],
+    });
+  }
+}
+
+async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true }) {
   const number = prNumber || (await findPullRequestNumber({ github, context, core }));
 
   if (!number) {
     return finish(core, setOutputs, {
       prNumber: "",
       shouldMerge: false,
+      docsChanged: false,
       reasons: ["No open pull request found for this event."],
+      notes: [],
     });
   }
 
@@ -232,12 +250,12 @@ async function listPullRequestFiles({ github, context, number }) {
 }
 
 async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
-  const required = await getRequiredCheckContexts({ github, context, branch, core });
-  const contexts = required.contexts;
+  const required = await getRequiredCheckSpecs({ github, context, branch, core });
+  const specs = required.specs;
   const notes = [];
   const reasons = [...required.errors];
 
-  if (contexts.length === 0) {
+  if (specs.length === 0) {
     if (reasons.length > 0) {
       return { ok: false, reasons, notes };
     }
@@ -245,7 +263,7 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
     return { ok: true, reasons, notes };
   }
 
-  notes.push(`Required status checks: ${contexts.join(", ")}`);
+  notes.push(`Required status checks: ${specs.map(formatCheckSpec).join(", ")}`);
 
   const { owner, repo } = context.repo;
   const checkRuns = await github.paginate(github.rest.checks.listForRef, {
@@ -261,25 +279,25 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
     per_page: 100,
   });
 
-  for (const contextName of contexts) {
-    const state = latestRequiredState(contextName, checkRuns, statuses);
+  for (const spec of specs) {
+    const state = latestRequiredState(spec, checkRuns, statuses);
     if (!state) {
-      reasons.push(`required check ${contextName} is missing on ${sha}`);
+      reasons.push(`required check ${formatCheckSpec(spec)} is missing on ${sha}`);
       continue;
     }
 
-    notes.push(`${contextName}: ${state.description}`);
+    notes.push(`${formatCheckSpec(spec)}: ${state.description}`);
     if (!state.ok) {
-      reasons.push(`required check ${contextName} is not completed successfully (${state.description})`);
+      reasons.push(`required check ${formatCheckSpec(spec)} is not completed successfully (${state.description})`);
     }
   }
 
   return { ok: reasons.length === 0, reasons, notes };
 }
 
-async function getRequiredCheckContexts({ github, context, branch, core }) {
+async function getRequiredCheckSpecs({ github, context, branch, core }) {
   const { owner, repo } = context.repo;
-  const contexts = new Set();
+  const specs = new Map();
   const errors = [];
 
   try {
@@ -295,7 +313,7 @@ async function getRequiredCheckContexts({ github, context, branch, core }) {
       }
       for (const check of rule.parameters?.required_status_checks || []) {
         if (check.context) {
-          contexts.add(check.context);
+          addCheckSpec(specs, check.context, check.integration_id);
         }
       }
     }
@@ -307,8 +325,8 @@ async function getRequiredCheckContexts({ github, context, branch, core }) {
     }
   }
 
-  if (contexts.size > 0) {
-    return { contexts: [...contexts].sort(), errors: [] };
+  if (specs.size > 0) {
+    return { specs: sortedCheckSpecs(specs), errors: [] };
   }
 
   try {
@@ -318,11 +336,11 @@ async function getRequiredCheckContexts({ github, context, branch, core }) {
     );
 
     for (const contextName of response.data.contexts || []) {
-      contexts.add(contextName);
+      addCheckSpec(specs, contextName, null);
     }
     for (const check of response.data.checks || []) {
       if (check.context) {
-        contexts.add(check.context);
+        addCheckSpec(specs, check.context, check.app_id);
       }
     }
   } catch (error) {
@@ -333,42 +351,75 @@ async function getRequiredCheckContexts({ github, context, branch, core }) {
     }
   }
 
-  return { contexts: [...contexts].sort(), errors };
+  return { specs: sortedCheckSpecs(specs), errors };
 }
 
-function latestRequiredState(contextName, checkRuns, statuses) {
+function addCheckSpec(specs, contextName, sourceAppId) {
+  const parsedAppId = Number(sourceAppId);
+  const normalizedAppId = Number.isInteger(parsedAppId) && parsedAppId > 0 ? parsedAppId : null;
+  const key = `${contextName}\0${normalizedAppId || ""}`;
+  specs.set(key, { context: contextName, sourceAppId: normalizedAppId });
+}
+
+function sortedCheckSpecs(specs) {
+  return [...specs.values()].sort((a, b) => formatCheckSpec(a).localeCompare(formatCheckSpec(b)));
+}
+
+function formatCheckSpec(spec) {
+  return spec.sourceAppId ? `${spec.context} (app ${spec.sourceAppId})` : spec.context;
+}
+
+function latestRequiredState(spec, checkRuns, statuses) {
   const candidates = [];
 
   for (const run of checkRuns) {
-    if (run.name !== contextName) {
+    if (run.name !== spec.context) {
+      continue;
+    }
+    if (spec.sourceAppId && Number(run.app?.id) !== spec.sourceAppId) {
       continue;
     }
     candidates.push({
-      date: Date.parse(run.completed_at || run.started_at || run.created_at || 0),
+      date: parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0,
       ok: run.status === "completed" && run.conclusion === "success",
-      description: `check run ${run.status}/${run.conclusion || "no conclusion"}`,
+      description: `check run ${run.status}/${run.conclusion || "no conclusion"} from ${formatRunSource(run)}`,
     });
   }
 
-  for (const status of statuses) {
-    if (status.context !== contextName) {
-      continue;
+  if (!spec.sourceAppId) {
+    for (const status of statuses) {
+      if (status.context !== spec.context) {
+        continue;
+      }
+      candidates.push({
+        date: parseTimestamp(status.created_at) || 0,
+        ok: status.state === "success",
+        description: `commit status ${status.state}`,
+      });
     }
-    candidates.push({
-      date: Date.parse(status.created_at || 0),
-      ok: status.state === "success",
-      description: `commit status ${status.state}`,
-    });
   }
 
   candidates.sort((a, b) => b.date - a.date);
   return candidates[0] || null;
 }
 
+function formatRunSource(run) {
+  if (!run.app) {
+    return "unknown source";
+  }
+  const name = run.app.slug || run.app.name || "app";
+  return `${name} (${run.app.id || "unknown app id"})`;
+}
+
 async function evaluateGreptile({ github, context, number, sha, lastCommitDate, core }) {
   const notes = [];
   const reasons = [];
   const { owner, repo } = context.repo;
+  const lastPushTime = parseTimestamp(lastCommitDate);
+
+  if (lastPushTime == null) {
+    reasons.push("last commit timestamp was unavailable, so Greptile freshness cannot be verified");
+  }
 
   const checkRuns = await github.paginate(github.rest.checks.listForRef, {
     owner,
@@ -398,11 +449,20 @@ async function evaluateGreptile({ github, context, number, sha, lastCommitDate, 
   });
   const latestGreptileComment = comments
     .filter((comment) => GREPTILE_RE.test(comment.user?.login || ""))
-    .sort((a, b) => Date.parse(b.updated_at || b.created_at || 0) - Date.parse(a.updated_at || a.created_at || 0))[0];
+    .sort((a, b) => {
+      const bTime = parseTimestamp(b.updated_at || b.created_at) || 0;
+      const aTime = parseTimestamp(a.updated_at || a.created_at) || 0;
+      return bTime - aTime;
+    })[0];
 
   if (!latestGreptileComment) {
     reasons.push("latest greptile-apps summary comment was not found");
   } else {
+    const summaryTime = parseTimestamp(latestGreptileComment.updated_at || latestGreptileComment.created_at);
+    if (lastPushTime == null || summaryTime == null || summaryTime <= lastPushTime) {
+      reasons.push("latest greptile-apps summary comment is older than the head commit");
+    }
+
     const score = parseConfidenceScore(latestGreptileComment.body || "");
     if (score == null) {
       reasons.push("latest greptile-apps summary comment did not include a Confidence Score");
@@ -419,9 +479,10 @@ async function evaluateGreptile({ github, context, number, sha, lastCommitDate, 
     pull_number: number,
     per_page: 100,
   });
-  const lastPushTime = Date.parse(lastCommitDate || 0);
-  const repliedTo = new Set(
-    reviewComments.filter((comment) => comment.in_reply_to_id).map((comment) => comment.in_reply_to_id),
+  const resolvedByAllowedReply = new Set(
+    reviewComments
+      .filter((comment) => comment.in_reply_to_id && ALLOWED_AUTHORS.has(comment.user?.login || ""))
+      .map((comment) => comment.in_reply_to_id),
   );
   const unresolvedFindings = reviewComments.filter((comment) => {
     if (!GREPTILE_RE.test(comment.user?.login || "")) {
@@ -430,10 +491,16 @@ async function evaluateGreptile({ github, context, number, sha, lastCommitDate, 
     if (comment.in_reply_to_id) {
       return false;
     }
-    if (Date.parse(comment.created_at || 0) <= lastPushTime) {
+    if (lastPushTime == null || parseTimestamp(comment.created_at) == null || parseTimestamp(comment.created_at) <= lastPushTime) {
       return false;
     }
-    return /\bP[12]\b/i.test(comment.body || "") && !repliedTo.has(comment.id);
+    if (!/\bP[12]\b/i.test(comment.body || "")) {
+      return false;
+    }
+    if (comment.position == null) {
+      return false;
+    }
+    return !resolvedByAllowedReply.has(comment.id);
   });
 
   if (unresolvedFindings.length > 0) {
@@ -464,7 +531,12 @@ function parseConfidenceScore(body) {
 }
 
 function latestRunTime(run) {
-  return Date.parse(run.completed_at || run.started_at || run.created_at || 0);
+  return parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0;
+}
+
+function parseTimestamp(value) {
+  const parsed = Date.parse(value || "");
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function finish(core, setOutputs, result) {
@@ -500,4 +572,12 @@ function formatError(error) {
   return `${error.status || "error"} ${error.message || error}`;
 }
 
-module.exports = { evaluate, merge };
+module.exports = {
+  evaluate,
+  merge,
+  __test: {
+    evaluateGreptile,
+    latestRequiredState,
+    parseConfidenceScore,
+  },
+};
