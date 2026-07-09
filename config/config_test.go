@@ -337,6 +337,7 @@ func TestDefaultConfig(t *testing.T) {
 		require.NotNil(t, cfg)
 		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
 		assert.False(t, cfg.AutoYes)
+		assert.True(t, cfg.AutoUpdate)
 		assert.Equal(t, 1000, cfg.DaemonPollInterval)
 		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
 		assert.NotEmpty(t, cfg.BranchPrefix)
@@ -896,6 +897,7 @@ func TestLoadConfig(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join(configDir, TomlConfigFileName))
 		require.NoError(t, err)
 		assert.Contains(t, string(data), `update_channel = 'stable'`)
+		assert.Contains(t, string(data), `auto_update = true`)
 		assert.Contains(t, string(data), `worktree_root = 'sibling'`)
 
 		// The materialized file must reload cleanly through the TOML path.

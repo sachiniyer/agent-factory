@@ -24,8 +24,9 @@ Run `af doctor --setup` after install to verify tmux, git, your configured
 agent command, git identity, config/state/log storage, and daemon health.
 
 To update later, re-run the script or run `af upgrade`. Installed binaries also
-auto-update along the **stable** channel; set `"update_channel": "preview"` in
-your global config to track preview builds instead (see the
+auto-update on launch along the **stable** channel by default; set
+`update_channel = "preview"` in your global config to track preview builds
+instead, or set `auto_update = false` to opt out (see the
 [release process](release-process.md)).
 
 Building from source instead? Clone the repo and run `./dev-install.sh` (this

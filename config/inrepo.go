@@ -90,6 +90,7 @@ var inRepoAllowedKeys = []string{
 // so an in-repo value would either silently do nothing or, worse, let a repo
 // flip host-level behavior like autoyes.
 var inRepoGlobalOnlyKeys = map[string]bool{
+	"auto_update":          true,
 	"auto_yes":             true,
 	"branch_prefix":        true,
 	"daemon_poll_interval": true,

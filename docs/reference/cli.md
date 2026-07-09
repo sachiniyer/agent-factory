@@ -314,7 +314,7 @@ af config
 Print the value of a single global config key
 
 Print the effective global value of one config key (e.g. default_program,
-auto_yes, update_channel). Run "af config list" to see every key. Scalar values
+auto_yes, auto_update, update_channel). Run "af config list" to see every key. Scalar values
 print bare; composite values (program_overrides, root_agents, limit_patterns,
 keys) print as JSON.
 
@@ -356,6 +356,7 @@ Settable keys:
   default_program            agent enum (claude, codex, aider, gemini)
   program_overrides.<agent>  full command string for an agent
   auto_yes                   true | false
+  auto_update                true | false
   daemon_poll_interval       positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
@@ -371,6 +372,7 @@ edit config.toml directly. Changes apply on the next af / daemon start.
 Examples:
   af config set default_program codex
   af config set auto_yes true
+  af config set auto_update false
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
 
 ```

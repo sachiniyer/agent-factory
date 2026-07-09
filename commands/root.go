@@ -72,6 +72,10 @@ var (
 			if err != nil {
 				return err
 			}
+			// Start the self-update check as soon as the configured startup
+			// channel and opt-out are known. The work stays in the background;
+			// the TUI continues initializing while the check/download runs.
+			autoUpdateInBackground(&cfg.Config)
 
 			// Apply [keys] rebinds before the TUI starts (#1026): the maps
 			// are read concurrently once bubbletea runs, and the config was
@@ -107,8 +111,6 @@ var (
 			// it is up whenever an enabled task exists. In the background:
 			// daemon launch can take a few seconds and must not delay the TUI.
 			go ensureDaemonForTasks()
-			// Check for updates in the background (non-blocking).
-			autoUpdateInBackground()
 
 			app.Version = version
 			return app.Run(ctx, program, autoYes, repo)
