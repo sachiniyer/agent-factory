@@ -157,6 +157,16 @@ func findByCheck(r *Report, check string) []Finding {
 	return out
 }
 
+func findCheckRows(r *Report, name string) []CheckResult {
+	var out []CheckResult
+	for _, c := range r.Checks {
+		if c.Name == name {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // TestOrphanedProcessDetectedAndFixed is the doctor half of the #1104
 // regression: a process whose AF_SESSION marker names a dead session is a
 // verified orphan — reported without --fix, killed with it.
@@ -403,8 +413,9 @@ func TestCleanRunHasNoFindings(t *testing.T) {
 	require.Zero(t, report.UnresolvedCount())
 
 	var buf bytes.Buffer
-	Render(&buf, report, false)
-	require.Contains(t, buf.String(), "No problems found")
+	Render(&buf, report, false, false)
+	require.Contains(t, buf.String(), "Summary:")
+	require.Contains(t, buf.String(), "no issues require action")
 }
 
 // TestRenderShapes covers the three finding render states.
@@ -418,13 +429,20 @@ func TestRenderShapes(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	Render(&buf, r, false)
+	Render(&buf, r, false, false)
 	out := buf.String()
-	require.Contains(t, out, "ok: daemon: not running")
-	require.Contains(t, out, "--fix will kill pid 1234")
-	require.Contains(t, out, "issue: [leaked-tmux-session]")
-	require.Contains(t, out, "fixed: [stale-temp-home]")
-	require.Contains(t, out, "Re-run with --fix")
+	require.Contains(t, out, "Agent Factory Doctor")
+	require.Contains(t, out, "orphaned-processes")
+	require.Contains(t, out, "1 safe to clean")
+	require.Contains(t, out, "leaked-tmux-session")
+	require.Contains(t, out, "FIXED stale-temp-home")
+	require.Contains(t, out, "1 fixable with `af doctor --fix`")
+
+	buf.Reset()
+	Render(&buf, r, false, true)
+	out = buf.String()
+	require.Contains(t, out, "orphaned-process")
+	require.Contains(t, out, "run `af doctor --fix` to kill pid 1234")
 }
 
 // TestTmuxServerDeadParsing pins the conservative TMUX-env heuristics.
@@ -505,7 +523,7 @@ func TestRemoteChecksSkippedWhenNoRemote(t *testing.T) {
 	require.Empty(t, findByCheck(report, "remote-config"))
 	require.Empty(t, findByCheck(report, "remote-hook-script"))
 	require.Empty(t, findByCheck(report, "remote-connectivity"))
-	require.True(t, okContains(report, "no remote backend configured"),
+	require.True(t, okContains(report, "remote hooks: not configured"),
 		"a clean n/a line must be shown for local-only users")
 }
 
@@ -520,11 +538,12 @@ func TestRemoteConfigMissingRequiredField(t *testing.T) {
 
 	report, err := Run(withRemote(testOptions(t, false), hooks))
 	require.NoError(t, err)
-	findings := findByCheck(report, "remote-config")
-	require.Len(t, findings, 1)
-	require.Contains(t, findings[0].Detail, "launch_cmd is required")
-	require.Contains(t, findings[0].Detail, "remote_hooks")
-	require.Empty(t, findings[0].FixAction, "config findings are report-only")
+	checks := findCheckRows(report, "remote config")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusWarn, checks[0].Status)
+	require.Contains(t, checks[0].Detail, "launch_cmd is required")
+	require.Contains(t, checks[0].Detail, "remote_hooks")
+	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
 }
 
 // TestRemoteHookScriptNotExecutable: a hook path that exists but lacks the
@@ -539,10 +558,12 @@ func TestRemoteHookScriptNotExecutable(t *testing.T) {
 
 	report, err := Run(withRemote(testOptions(t, false), hooks))
 	require.NoError(t, err)
-	findings := findByCheck(report, "remote-hook-script")
-	require.Len(t, findings, 1)
-	require.Contains(t, findings[0].Detail, "not executable")
-	require.Contains(t, findings[0].Detail, "chmod +x")
+	checks := findCheckRows(report, "remote hook")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusWarn, checks[0].Status)
+	require.Contains(t, checks[0].Detail, "not executable")
+	require.Contains(t, checks[0].Detail, "chmod +x")
+	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
 }
 
 // TestRemoteHookScriptMissing: a hook path that does not exist is flagged.
@@ -555,10 +576,12 @@ func TestRemoteHookScriptMissing(t *testing.T) {
 
 	report, err := Run(withRemote(testOptions(t, false), hooks))
 	require.NoError(t, err)
-	findings := findByCheck(report, "remote-hook-script")
-	require.Len(t, findings, 1)
-	require.Contains(t, findings[0].Detail, "does not exist")
-	require.Contains(t, findings[0].Detail, "launch_cmd")
+	checks := findCheckRows(report, "remote hook")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusWarn, checks[0].Status)
+	require.Contains(t, checks[0].Detail, "does not exist")
+	require.Contains(t, checks[0].Detail, "launch_cmd")
+	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
 }
 
 // TestRemoteConnectivityProbeSucceeds: a healthy list_cmd (exit 0, JSON array)
@@ -575,7 +598,7 @@ func TestRemoteConnectivityProbeSucceeds(t *testing.T) {
 	require.Empty(t, findByCheck(report, "remote-connectivity"))
 	require.Empty(t, findByCheck(report, "remote-config"))
 	require.Empty(t, findByCheck(report, "remote-hook-script"))
-	require.True(t, okContains(report, "connectivity probe succeeded"))
+	require.True(t, okContains(report, "remote connectivity: list_cmd responded"))
 }
 
 // TestRemoteConnectivityProbeFails: a list_cmd that exits non-zero surfaces an
@@ -589,9 +612,31 @@ func TestRemoteConnectivityProbeFails(t *testing.T) {
 
 	report, err := Run(withRemote(testOptions(t, false), hooks))
 	require.NoError(t, err)
-	findings := findByCheck(report, "remote-connectivity")
-	require.Len(t, findings, 1)
-	require.Contains(t, findings[0].Detail, "Connection refused")
+	checks := findCheckRows(report, "remote connectivity")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusWarn, checks[0].Status)
+	require.Contains(t, checks[0].Detail, "Connection refused")
+	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
+}
+
+func TestRemoteCoderWhoamiWarnsWithoutFailingDoctor(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "coder", "#!/bin/sh\nif [ \"$1\" = \"whoami\" ]; then echo 'not logged in' >&2; exit 1; fi\nexit 0\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
+	hooks := &config.RemoteHooks{LaunchCmd: hook, ListCmd: hook, AttachCmd: hook, DeleteCmd: hook}
+
+	report, err := Run(withRemote(testOptions(t, false), hooks))
+	require.NoError(t, err)
+	checks := findCheckRows(report, "coder")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusWarn, checks[0].Status)
+	require.Contains(t, checks[0].Detail, "not logged in")
+	require.Equal(t, "run `coder login`", checks[0].Remediation)
+	require.Zero(t, report.UnresolvedCount(), "coder auth warnings must not fail doctor")
 }
 
 // TestRemoteConnectivityProbeSucceedsDespiteBenignError: a list_cmd that
@@ -615,7 +660,7 @@ func TestRemoteConnectivityProbeSucceedsDespiteBenignError(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, findByCheck(report, "remote-connectivity"),
 		"a benign ErrWaitDelay on a successful exit-0 list_cmd must not be a failure")
-	require.True(t, okContains(report, "connectivity probe succeeded"))
+	require.True(t, okContains(report, "remote connectivity: list_cmd responded"))
 }
 
 // TestRemoteConnectivityProbeTimesOut: a hanging list_cmd is bounded by the
@@ -631,9 +676,11 @@ func TestRemoteConnectivityProbeTimesOut(t *testing.T) {
 	opts.remoteProbeTimeout = 200 * time.Millisecond
 	report, err := Run(opts)
 	require.NoError(t, err)
-	findings := findByCheck(report, "remote-connectivity")
-	require.Len(t, findings, 1)
-	require.Contains(t, findings[0].Detail, "did not respond")
+	checks := findCheckRows(report, "remote connectivity")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusWarn, checks[0].Status)
+	require.Contains(t, checks[0].Detail, "did not respond")
+	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
 }
 
 // TestRemoteProbeSkippedWithoutListCmd: with no list_cmd, the probe and
@@ -649,5 +696,9 @@ func TestRemoteProbeSkippedWithoutListCmd(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, findByCheck(report, "remote-connectivity"))
 	require.Empty(t, findByCheck(report, "remote-config"))
-	require.True(t, okContains(report, "connectivity probe skipped"))
+	checks := findCheckRows(report, "remote connectivity")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusWarn, checks[0].Status)
+	require.Contains(t, checks[0].Detail, "probe skipped")
+	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
 }

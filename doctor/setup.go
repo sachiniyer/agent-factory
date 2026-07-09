@@ -43,7 +43,7 @@ func checkAFHome(ctx *scanContext, report *Report) {
 		})
 		return
 	}
-	report.OK = append(report.OK, fmt.Sprintf("agent-factory home: writable at %s", ctx.opts.ConfigDir))
+	report.Pass(sectionConfig, "agent-factory home", fmt.Sprintf("writable at %s", ctx.opts.ConfigDir))
 }
 
 func checkStateDirs(ctx *scanContext, report *Report) {
@@ -61,7 +61,7 @@ func checkStateDirs(ctx *scanContext, report *Report) {
 				Detail: fmt.Sprintf("%s directory %s is not writable — fix directory permissions: %v", d.label, d.dir, err),
 			})
 		} else {
-			report.OK = append(report.OK, fmt.Sprintf("%s: writable at %s", d.label, d.dir))
+			report.Pass(sectionConfig, d.label, fmt.Sprintf("writable at %s", d.dir))
 		}
 	}
 }
@@ -83,7 +83,7 @@ func checkLogStorage(report *Report) {
 		})
 		return
 	}
-	report.OK = append(report.OK, fmt.Sprintf("log storage: writable at %s", dir))
+	report.Pass(sectionConfig, "log storage", fmt.Sprintf("writable at %s", dir))
 }
 
 func checkConfig(_ *scanContext, report *Report) *config.Config {
@@ -110,8 +110,8 @@ func checkConfig(_ *scanContext, report *Report) *config.Config {
 		})
 		return cfg
 	}
-	report.OK = append(report.OK,
-		fmt.Sprintf("config: loaded %s (default_program = %q)", path, cfg.DefaultProgram))
+	report.Pass(sectionConfig, "config",
+		fmt.Sprintf("loaded %s (default_program = %q)", path, cfg.DefaultProgram))
 	return cfg
 }
 
@@ -124,7 +124,7 @@ func checkGit(report *Report) {
 		})
 		return
 	}
-	report.OK = append(report.OK, fmt.Sprintf("git: available at %s", gitPath))
+	report.Pass(sectionEnvironment, "git", fmt.Sprintf("available at %s", gitPath))
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -142,7 +142,7 @@ func checkGit(report *Report) {
 		})
 		return
 	}
-	report.OK = append(report.OK, fmt.Sprintf("git repo: %s", strings.TrimSpace(string(out))))
+	report.Pass(sectionConfig, "git repo", strings.TrimSpace(string(out)))
 	checkGitIdentity(gitPath, cwd, report)
 }
 
@@ -163,7 +163,7 @@ func checkGitIdentity(gitPath, cwd string, report *Report) {
 		})
 		return
 	}
-	report.OK = append(report.OK, "git identity: user.name and user.email are configured")
+	report.Pass(sectionEnvironment, "git identity", "user.name and user.email are configured")
 }
 
 func checkTmux(report *Report) {
@@ -172,7 +172,7 @@ func checkTmux(report *Report) {
 		report.Findings = append(report.Findings, Finding{Check: "tmux", Detail: err.Error()})
 		return
 	}
-	report.OK = append(report.OK, fmt.Sprintf("tmux: %s", version))
+	report.Pass(sectionEnvironment, "tmux", version)
 }
 
 func checkAgentPrograms(cfg *config.Config, report *Report) {
@@ -202,8 +202,7 @@ func checkOneProgram(field, agent, command string, report *Report) {
 		})
 		return
 	}
-	report.OK = append(report.OK,
-		fmt.Sprintf("%s: %q uses %s", field, command, check.Path))
+	report.Pass(sectionEnvironment, field, fmt.Sprintf("%q uses %s", command, check.Path))
 }
 
 func writableDir(dir string) error {

@@ -59,17 +59,15 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 	}
 	hooks, repoRoot, err := resolve()
 	if err != nil {
-		report.Findings = append(report.Findings, Finding{
-			Check:  "remote-config",
-			Detail: fmt.Sprintf("could not resolve remote-hook config for this repo: %v", err),
-		})
+		report.Warn(sectionRemote, "remote config", fmt.Sprintf("could not resolve remote-hook config for this repo: %v", err),
+			"fix the repo .agent-factory config and rerun `af doctor`", false)
 		return
 	}
 	if hooks == nil {
-		report.OK = append(report.OK,
-			"remote hooks: n/a — no remote backend configured for this repo")
+		report.Pass(sectionRemote, "remote hooks", "not configured for this repo")
 		return
 	}
+	checkCoderStatus(hooks, report)
 
 	configHint := "in [remote_hooks]"
 	if repoRoot != "" {
@@ -80,13 +78,10 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 	// running any hook, surfaced here as a diagnosable finding instead of an
 	// operation-time failure.
 	if err := hooks.Validate(); err != nil {
-		report.Findings = append(report.Findings, Finding{
-			Check:  "remote-config",
-			Detail: fmt.Sprintf("%v — set it %s", err, configHint),
-		})
+		report.Warn(sectionRemote, "remote config", fmt.Sprintf("%v; set it %s", err, configHint),
+			"edit the repo .agent-factory config and rerun `af doctor`", false)
 	} else {
-		report.OK = append(report.OK,
-			"remote hooks: configured with the required launch/attach/delete commands")
+		report.Pass(sectionRemote, "remote config", "required launch/attach/delete commands configured")
 	}
 
 	// 2. Hook-script presence + executability, for every configured command.
@@ -105,10 +100,8 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 			continue // required-field emptiness is handled by Validate above.
 		}
 		if detail := hookExecIssue(h.field, h.cmd, configHint); detail != "" {
-			report.Findings = append(report.Findings, Finding{
-				Check:  "remote-hook-script",
-				Detail: detail,
-			})
+			report.Warn(sectionRemote, "remote hook", detail,
+				"fix the hook path or executable bit and rerun `af doctor`", false)
 		}
 	}
 
@@ -117,9 +110,9 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 	// When list_cmd is absent, restore and this probe are both unavailable —
 	// noted as informational, not a failure, since list_cmd is optional.
 	if strings.TrimSpace(hooks.ListCmd) == "" {
-		report.OK = append(report.OK,
-			"remote hooks: connectivity probe skipped — no list_cmd configured "+
-				"(set list_cmd to enable restore across restarts and the round-trip probe)")
+		report.Warn(sectionRemote, "remote connectivity",
+			"probe skipped because no list_cmd is configured",
+			"set remote_hooks.list_cmd to enable restore and the round-trip probe", false)
 		return
 	}
 	// Skip the probe if list_cmd itself is not runnable — the executability
@@ -133,14 +126,68 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 		timeout = remoteProbeTimeoutDefault
 	}
 	if detail := probeListCmd(hooks.ListCmd, timeout); detail != "" {
-		report.Findings = append(report.Findings, Finding{
-			Check:  "remote-connectivity",
-			Detail: detail,
-		})
+		report.Warn(sectionRemote, "remote connectivity", detail,
+			"run the list_cmd by hand, fix connectivity, then rerun `af doctor`", false)
 	} else {
-		report.OK = append(report.OK,
-			"remote hooks: connectivity probe succeeded (list_cmd responded with valid JSON)")
+		report.Pass(sectionRemote, "remote connectivity", "list_cmd responded with valid JSON")
 	}
+}
+
+func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
+	mentionsCoder := remoteHooksMentionCoder(hooks)
+	coderPath, lookErr := exec.LookPath("coder")
+	if lookErr != nil {
+		if mentionsCoder {
+			report.Warn(sectionRemote, "coder", "coder CLI is not on PATH",
+				"install coder or update the remote hook scripts", false)
+		} else {
+			report.Pass(sectionRemote, "coder", "not detected; hook commands do not directly reference coder")
+		}
+		return
+	}
+	if !mentionsCoder {
+		report.Pass(sectionRemote, "coder", "available at "+coderPath)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, coderPath, "whoami")
+	cmd.WaitDelay = 500 * time.Millisecond
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := "coder whoami failed"
+		if ctx.Err() == context.DeadlineExceeded {
+			detail = "coder whoami timed out"
+		} else if line := firstLine(string(out)); line != "" {
+			detail += ": " + line
+		}
+		report.Warn(sectionRemote, "coder", detail, "run `coder login`", false)
+		return
+	}
+	who := firstLine(string(out))
+	if who == "" {
+		who = "authenticated"
+	}
+	report.Pass(sectionRemote, "coder", who)
+}
+
+func remoteHooksMentionCoder(hooks *config.RemoteHooks) bool {
+	if hooks == nil {
+		return false
+	}
+	for _, command := range []string{
+		hooks.LaunchCmd,
+		hooks.ListCmd,
+		hooks.AttachCmd,
+		hooks.DeleteCmd,
+		hooks.TerminalCmd,
+	} {
+		if strings.Contains(strings.ToLower(command), "coder") {
+			return true
+		}
+	}
+	return false
 }
 
 // hookExecIssue returns an actionable message when the hook command cannot be

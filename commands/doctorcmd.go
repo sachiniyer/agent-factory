@@ -10,6 +10,7 @@ import (
 
 var doctorFixFlag bool
 var doctorSetupFlag bool
+var doctorVerboseFlag bool
 
 // doctorCmd is `af doctor` (#1044, #1104): detect orphaned session
 // processes, runaway CPU children, leaked af_ tmux sessions, stale temp
@@ -43,6 +44,10 @@ accumulate silently on a machine running agent-factory:
     presence/executability, and a bounded list_cmd connectivity probe
     (skipped cleanly when no remote backend is configured)
 
+High-volume process findings are summarized by default so the actionable
+problem is visible first. Use --verbose to show each process behind those
+summaries.
+
 Read-only by default. With --fix, applies the safe remediations — killing
 orphans whose ancestry markers prove they came from a dead af session, and
 removing stale temp homes — logging each action. Ambiguous cases are always
@@ -53,11 +58,11 @@ Exits 1 when unresolved issues remain, 0 when healthy.`,
 		log.Initialize(false)
 		defer log.Close()
 
-		report, err := doctor.Run(doctor.Options{Fix: doctorFixFlag, Setup: doctorSetupFlag})
+		report, err := doctor.Run(doctor.Options{Fix: doctorFixFlag, Setup: doctorSetupFlag, Version: version})
 		if err != nil {
 			return err
 		}
-		doctor.Render(os.Stdout, report, doctorFixFlag)
+		doctor.Render(os.Stdout, report, doctorFixFlag, doctorVerboseFlag)
 		if report.UnresolvedCount() > 0 {
 			// Distinguish "problems found" from cobra usage errors without
 			// printing a redundant error line.
@@ -74,5 +79,7 @@ func init() {
 		"run the first-run setup profile (prerequisites, config, agent commands)")
 	doctorCmd.Flags().BoolVar(&doctorFixFlag, "fix", false,
 		"apply safe remediations (kill verified orphans, remove stale temp homes)")
+	doctorCmd.Flags().BoolVar(&doctorVerboseFlag, "verbose", false,
+		"show per-process doctor findings instead of collapsed summaries")
 	rootCmd.AddCommand(doctorCmd)
 }

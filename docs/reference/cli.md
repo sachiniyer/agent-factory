@@ -499,6 +499,10 @@ accumulate silently on a machine running agent-factory:
     presence/executability, and a bounded list_cmd connectivity probe
     (skipped cleanly when no remote backend is configured)
 
+High-volume process findings are summarized by default so the actionable
+problem is visible first. Use --verbose to show each process behind those
+summaries.
+
 Read-only by default. With --fix, applies the safe remediations — killing
 orphans whose ancestry markers prove they came from a dead af session, and
 removing stale temp homes — logging each action. Ambiguous cases are always
@@ -516,6 +520,7 @@ af doctor [flags]
 |------|------|-------------|
 | `--fix` |  | apply safe remediations (kill verified orphans, remove stale temp homes) |
 | `--setup` |  | run the first-run setup profile (prerequisites, config, agent commands) |
+| `--verbose` |  | show per-process doctor findings instead of collapsed summaries |
 
 ## af keys
 
