@@ -86,6 +86,39 @@ func TestInstanceStartHelpMentionsFullScreenDetach(t *testing.T) {
 	}
 }
 
+func TestInstanceStartHelpShowsFirstRunActionsAndGenericAgentCopy(t *testing.T) {
+	local := newStartedInstance(t, "local")
+	content := helpStart(local).toContent()
+
+	for _, want := range []string{
+		"Agent process running in background tmux session",
+		"enter continue",
+		"esc close",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("instance-start help missing %q; got:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "claude running in background tmux session") {
+		t.Errorf("instance-start help must not hard-code the selected program as the running process; got:\n%s", content)
+	}
+}
+
+func TestInstanceAttachHelpShowsProceedCancelAndDetach(t *testing.T) {
+	content := helpTypeInstanceAttach{}.toContent()
+
+	for _, want := range []string{
+		"enter attach full-screen",
+		"esc cancel",
+		"Detach later with",
+		"ctrl-w",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("attach help missing %q; got:\n%s", want, content)
+		}
+	}
+}
+
 func TestGeneralHelpOverlayFitsAndMarksScrollAt80x24(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)

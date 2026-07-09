@@ -351,8 +351,8 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	// While naming a new instance the menu only shows the submit-name (enter)
-	// and change-program (tab) options, so those two keys are the only ones
+	// While naming a new instance the menu only shows the submit-name (enter),
+	// change-program (tab), and cancel (esc) options, so those keys are the only ones
 	// that should drive the highlight animation. Every other key is naming
 	// text and must pass through untouched — matching on msg.String() rather
 	// than GlobalKeyStringsMap also keeps "o" (a KeyEnter alias) usable as a
@@ -365,6 +365,8 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			name = keys.KeySubmitName
 		case "tab":
 			name = keys.KeyChangeProgram
+		case "esc":
+			name = keys.KeyCancelName
 		default:
 			return nil, false
 		}
