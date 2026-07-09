@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -65,6 +66,8 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 	assert.Contains(t, out, "└ 2 Terminal", "terminal tab child with └ terminator")
 	assert.Contains(t, out, "▾", "selected instance shows the expanded arrow")
 	assert.Contains(t, out, "▸", "non-selected instance stays collapsed")
+	assert.NotRegexp(t, regexp.MustCompile(`\b\d+\.\s+t-\d\d`), out,
+		"instance rows must not render their position number")
 	assert.Equal(t, 2, tabRowCount(s), "only the selected instance contributes tab rows")
 
 	// The active-tab marker follows the store's active tab.

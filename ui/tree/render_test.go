@@ -28,11 +28,8 @@ func effectiveWidth(width int) int {
 
 // prLineIndent renders an instance at the given 1-based display index and
 // returns the number of leading whitespace cells in front of the "PR #" text.
-// The PR line is indented by the prefix's cell width plus a constant style
-// padding, so any idx-dependent change in the indent reflects a change in the
-// numbered prefix width (#871). indexWidth is pinned to 5 to model a list
-// large enough to contain idx=10000: every row in that list pads to 5 digits,
-// so all indices must share one indent (#923).
+// Instance indices are no longer rendered (#1494), so secondary-row indentation
+// must not change as idx crosses power-of-10 boundaries.
 func prLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{
@@ -44,8 +41,7 @@ func prLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
 	inst.SetPRInfo(&git.PRInfo{Number: 42, Title: "do a thing", State: "OPEN"})
 
 	r := NewInstanceRenderer(spin)
-	r.SetWidth(60)     // wide enough to render the full PR line
-	r.SetIndexWidth(5) // model a list whose largest index is 10000 (5 digits)
+	r.SetWidth(60) // wide enough to render the full PR line
 
 	out := r.Render(inst, idx, false, false, false)
 	for _, line := range strings.Split(out, "\n") {
@@ -58,18 +54,42 @@ func prLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
 	return -1
 }
 
-// TestInstanceRendererPrefixAlignment guards against the regression in #871:
-// the numbered prefix width must stay constant as the index grows so adjacent
-// visible rows keep the same branch/PR indentation. Before the fix the prefix
-// grew by a cell at the 99→100 boundary (and the 9→10 boundary already worked).
-func TestInstanceRendererPrefixAlignment(t *testing.T) {
+// TestInstanceRendererOmitsInstanceIndex guards #1494: the sidebar row may
+// still carry tree arrows and state glyphs, but it must not render a leading
+// "1. title" / "42. title" instance index.
+func TestInstanceRendererOmitsInstanceIndex(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "feature",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+
+	r := NewInstanceRenderer(&spin)
+	r.SetWidth(60)
+	indexPrefix := regexp.MustCompile(`\b\d+\.\s+feature`)
+	for _, idx := range []int{1, 9, 10, 99, 100, 10000} {
+		out := r.Render(inst, idx, false, false, false)
+		lines := strings.Split(ansiEscape.ReplaceAllString(out, ""), "\n")
+		require.GreaterOrEqual(t, len(lines), 2)
+		assert.Contains(t, lines[1], "feature")
+		assert.NotRegexp(t, indexPrefix, lines[1],
+			"instance row rendered the display index at idx=%d", idx)
+	}
+}
+
+// TestInstanceRendererSecondaryIndentIgnoresIndex keeps the branch/PR
+// indentation stable now that idx is display-only input rather than a rendered
+// prefix component.
+func TestInstanceRendererSecondaryIndentIgnoresIndex(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
 	base := prLineIndent(t, 1, &spin)
 	for _, idx := range []int{9, 10, 11, 99, 100, 101, 999, 1000, 1001, 9999, 10000} {
 		got := prLineIndent(t, idx, &spin)
 		require.Equalf(t, base, got,
-			"PR line indent at idx=%d (%d) must match idx=1 (%d); prefix width drifted",
+			"PR line indent at idx=%d (%d) must match idx=1 (%d); idx leaked into display",
 			idx, got, base)
 	}
 }
@@ -190,10 +210,10 @@ func TestInstanceRendererNarrowTerminalPRNoTail(t *testing.T) {
 		State:  "OPEN",
 	})
 
-	// terminalW=28..32 produces prMaxWidth in {1, 2}, which is the bug
+	// terminalW=14..18 produces prMaxWidth in {1, 2}, which is the bug
 	// range where the pre-fix code passed a negative width to
 	// runewidth.Truncate and got back "..." (wider than prMaxWidth).
-	for _, terminalW := range []int{28, 30, 32} {
+	for _, terminalW := range []int{14, 16, 18} {
 		_, prLine, _ := renderForTerminal(t, terminalW, inst, &spin)
 		trimmed := strings.TrimRight(prLine, " ")
 		assert.Falsef(t, strings.HasSuffix(trimmed, "..."),
@@ -366,8 +386,9 @@ func TestInstanceRendererTreeArrow(t *testing.T) {
 	transient := strings.Split(r.Render(inst, 1, false, false, false), "\n")[1]
 	assert.NotContains(t, transient, collapsedArrow, "transient rows are not expandable")
 	assert.NotContains(t, transient, expandedArrow, "transient rows are not expandable")
-	// The blank arrow cell keeps the numbered prefix aligned with siblings.
-	assert.Contains(t, ansiEscape.ReplaceAllString(transient, ""), "   1. ")
+	clean := ansiEscape.ReplaceAllString(transient, "")
+	assert.Contains(t, clean, "arrowed")
+	assert.NotRegexp(t, regexp.MustCompile(`\b\d+\.\s+arrowed`), clean)
 }
 
 // TestRenderTabRows pins the tab child row shape: ├/└ connectors, the 1-based
@@ -377,7 +398,6 @@ func TestRenderTabRows(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	r := NewInstanceRenderer(&spin)
 	r.SetWidth(30)
-	r.SetIndexWidth(1)
 
 	mid := ansiEscape.ReplaceAllString(r.RenderTab("Agent", 1, false, false, true), "")
 	assert.Contains(t, mid, "├ 1 Agent *", "active non-last tab: ├ connector + slot number + * marker")

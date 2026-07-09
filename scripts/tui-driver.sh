@@ -388,15 +388,16 @@ af_new_instance() {
 # GetSelectedInstance()), so requiring it forces `j` past the header until the
 # cursor truly lands on the row.
 af_select() {
-    local name="$1" _ screen
+    local name="$1" _ screen name_re
     [ -n "$name" ] || { _af_fail "af_select: name required"; return 1; }
+    name_re="$(_af_regex_escape "$name")"
     af_ensure_nav
     af_focus_tree || return 1
     for _ in $(seq 1 30); do af_send k; done
     sleep "$AF_DRIVER_POLL"
     for _ in $(seq 1 40); do
         screen="$(af_capture)"
-        if printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+[0-9]+\.[[:space:]]+${name}([[:space:]]|\$)" \
+        if printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)" \
            && printf '%s\n' "$screen" | grep -qE -- 'D kill'; then
             return 0
         fi
@@ -557,8 +558,9 @@ af_click() {
 
 # af_click_instance <name> — find <name>'s row on screen and click it.
 af_click_instance() {
-    local name="$1" line
-    line="$(af_capture | grep -nE "[0-9]+\.[[:space:]]+${name}([[:space:]]|\$)" | head -1 | cut -d: -f1)"
+    local name="$1" line name_re
+    name_re="$(_af_regex_escape "$name")"
+    line="$(af_capture | grep -nE "[▾▸][[:space:]]+${name_re}([[:space:]]|\$)" | head -1 | cut -d: -f1)"
     [ -n "$line" ] || { _af_fail "instance '$name' not visible to click"; return 1; }
     af_click 14 "$line"
 }
@@ -641,8 +643,9 @@ af_refute_screen() {
 # (its row carries the ▾ arrow). This is the two-line answer to the #1156
 # failure: af_select + af_expect_selected.
 af_expect_selected() {
-    local name="$1"
-    af_assert_screen "▾[[:space:]]+[0-9]+\.[[:space:]]+${name}([[:space:]]|\$)" \
+    local name="$1" name_re
+    name_re="$(_af_regex_escape "$name")"
+    af_assert_screen "▾[[:space:]]+${name_re}([[:space:]]|\$)" \
         "instance '${name}' selected"
 }
 

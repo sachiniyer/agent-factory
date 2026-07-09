@@ -17,7 +17,6 @@ func renderClean(t *testing.T, inst *session.Instance) string {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	r := NewInstanceRenderer(&spin)
 	r.SetWidth(80)
-	r.SetIndexWidth(2)
 	out := r.Render(inst, 1, false, false, false)
 	return ansiEscape.ReplaceAllString(out, "")
 }
