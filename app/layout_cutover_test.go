@@ -124,6 +124,30 @@ func TestLayoutCutover_AutomationsEscReturnsFocusToTree(t *testing.T) {
 	assert.False(t, h.automations.Focused())
 }
 
+func TestLayoutCutover_AutomationsFocusConsumesHiddenPaneVerbs(t *testing.T) {
+	h := newTestHome(t)
+	alpha := addTreeInstance(t, h, "alpha")
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	resizeHome(h, 100, 30)
+
+	h.focusRegion(layout.RegionAutomations)
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	require.Equal(t, 0, h.store.NumOpenPanes(),
+		"hidden s must not open a workspace pane while Automations has focus")
+	assert.Equal(t, layout.RegionAutomations, h.ring.Active(),
+		"hidden s must not move focus away from Automations")
+
+	p := openTestPane(t, h, alpha, 0)
+	h.focusRegion(layout.RegionAutomations)
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	require.Equal(t, 1, h.store.NumOpenPanes(),
+		"hidden s must not create another pane while Automations has focus")
+	assert.Same(t, p, h.store.OpenPanes()[0])
+	assert.Equal(t, layout.RegionAutomations, h.ring.Active(),
+		"hidden s must not focus the existing workspace pane")
+}
+
 // TestLayoutCutover_EnterOpensTasksOverlay: Enter on the focused in-rail
 // section opens the task manager as a centered modal (#1096 play-test fix 1),
 // preselecting the section cursor's task; Esc closes it and saving runs.
