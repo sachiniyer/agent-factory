@@ -379,20 +379,21 @@ func centerStart(box, content int) int {
 // (that row is short).
 var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyShiftUp, keys.KeyShiftDown},
-	{keys.KeyAttach},
-	{keys.KeySearch},
-	{keys.KeyNewRemote},
-	{keys.KeyHooks},
-	{keys.KeyArchive},
-	{keys.KeyKill},
-	{keys.KeyNew},
-	{keys.KeyEnter},
-	{keys.KeyPanePrev, keys.KeyPaneNext},
-	{keys.KeyOpenPane, keys.KeySplitPane, keys.KeyHidePane},
 	{keys.KeyJumpTab},
 	{keys.KeyCloseTab},
 	{keys.KeyNewTab},
+	{keys.KeyPanePrev, keys.KeyPaneNext},
+	{keys.KeyOpenPane, keys.KeySplitPane},
+	{keys.KeySearch},
+	{keys.KeyNewRemote},
+	{keys.KeyHooks},
+	{keys.KeyHidePane},
 	{keys.KeyTab},
+	{keys.KeyEnter},
+	{keys.KeyAttach},
+	{keys.KeyKill},
+	{keys.KeyNew},
+	{keys.KeyArchive},
 }
 
 func (m *Menu) String() string {
