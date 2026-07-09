@@ -79,10 +79,11 @@ type TaskPane struct {
 	formScroll int
 
 	// Create mode
-	creating       bool
-	createPath     string
-	pendingCreate  bool
-	pendingTrigger bool
+	creating         bool
+	createPath       string
+	pendingCreate    bool
+	pendingTrigger   bool
+	pendingTriggerID string
 
 	width, height int
 	dirty         bool
@@ -271,7 +272,22 @@ func (s *TaskPane) HasPendingTrigger() bool {
 
 // ConsumePendingTrigger returns the triggered task and clears the flag.
 func (s *TaskPane) ConsumePendingTrigger() *task.Task {
+	id := s.pendingTriggerID
+	hadPending := s.pendingTrigger
 	s.pendingTrigger = false
+	s.pendingTriggerID = ""
+	if id != "" {
+		for i := range s.tasks {
+			if s.tasks[i].ID == id {
+				tsk := s.tasks[i]
+				return &tsk
+			}
+		}
+		return nil
+	}
+	if hadPending {
+		return nil
+	}
 	if s.selectedIdx >= 0 && s.selectedIdx < len(s.tasks) {
 		tsk := s.tasks[s.selectedIdx]
 		return &tsk
@@ -386,6 +402,7 @@ func (s *TaskPane) runSelectedTask() {
 		return
 	}
 	s.pendingTrigger = true
+	s.pendingTriggerID = s.tasks[s.selectedIdx].ID
 }
 
 func (s *TaskPane) enterEditMode() {

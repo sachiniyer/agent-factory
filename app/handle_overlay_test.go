@@ -278,6 +278,69 @@ func TestHandleStateTasks_ValidationFailureLeavesTaskPaneStale(t *testing.T) {
 		"reloading from disk clears dirty; the dropped edit is communicated via the error, not a dangling dirty flag")
 }
 
+// TestHandleStateTasks_PendingTriggerSurvivesDeleteFailureReloadByID covers
+// #1474: after a delete fails, saveContentPaneState reloads the task pane from
+// disk. A pending run-now intent must still target the task selected when `r`
+// was pressed, not whatever task lands at the old selected index after reload.
+func TestHandleStateTasks_PendingTriggerSurvivesDeleteFailureReloadByID(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(500, 1)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	taskA := task.Task{
+		ID: "task-a-1474", Name: "Task A", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	taskB := task.Task{
+		ID: "task-b-1474", Name: "Task B", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(taskA))
+	require.NoError(t, task.AddTask(taskB))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	_, _ = h.showTasksOverlay()
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	require.Len(t, tp.GetTasks(), 1)
+	require.Equal(t, "task-b-1474", tp.GetTasks()[0].ID)
+
+	t.Cleanup(SetTaskRemoverForTest(func(string) error {
+		return fmt.Errorf("daemon RPC failure")
+	}))
+
+	_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	require.NotNil(t, cmd)
+	assert.Contains(t, h.errBox.String(), "failed to remove task")
+	require.True(t, tp.HasPendingTrigger())
+	require.Len(t, tp.GetTasks(), 2)
+	require.Equal(t, "task-a-1474", tp.GetTasks()[0].ID)
+	require.Equal(t, "task-b-1474", tp.GetTasks()[1].ID)
+
+	var triggeredID string
+	t.Cleanup(SetTaskTriggerForTest(func(id string) error {
+		triggeredID = id
+		return nil
+	}))
+
+	_, cmd = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd)
+	drainCmd(t, cmd, 500*time.Millisecond)
+
+	assert.Equal(t, "task-b-1474", triggeredID,
+		"pending trigger must resolve by task ID after the failed-delete reload")
+}
+
 // TestHandleTaskCreate_RoutesThroughDaemonRPC is the #1029 PR 6 guard for the
 // create path: the TUI inline create form must persist the new task through the
 // daemon RPC — the sole writer of tasks.json among clients (#960) — not by
