@@ -27,7 +27,7 @@ var legacyDeprecationLogged sync.Map
 type ResolvedConfig struct {
 	// Config carries the effective app-level fields. DefaultProgram and
 	// ProgramOverrides may have been overridden/merged from the in-repo
-	// file; the global-only fields (AutoYes, DaemonPollInterval,
+	// file; the global-only fields (AutoYes, AutoUpdate, DaemonPollInterval,
 	// BranchPrefix, DetachKeys) always come from the global config because
 	// LoadInRepoConfig rejects them per-repo.
 	Config

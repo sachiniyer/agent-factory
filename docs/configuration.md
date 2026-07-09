@@ -9,7 +9,7 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
 
 Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you are upgrading from a version that used `config.json`, see [Migrating from JSON](#migrating-from-json) below; the change is automatic.
 
-You can also read and write the global config from the CLI: `af config get <key>` / `af config list` print the effective values, and `af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_yes`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`; structural keys (`root_agents`, `[keys]`) are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+You can also read and write the global config from the CLI: `af config get <key>` / `af config list` print the effective values, and `af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`; structural keys (`root_agents`, `[keys]`) are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
 
 ## Global config
 
@@ -18,6 +18,7 @@ You can also read and write the global config from the CLI: `af config get <key>
 ```toml
 default_program = "claude"
 auto_yes = false
+auto_update = true
 daemon_poll_interval = 1000
 branch_prefix = "username/"
 worktree_root = "sibling"
@@ -37,6 +38,7 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`. |
 | `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`. Agent-specific launch flags (claude's `--plugin-dir`, codex's `developer_instructions`) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
 | `auto_yes` | Auto-accept agent prompts (experimental). |
+| `auto_update` | Startup self-update check. Defaults to `true`: `af` checks the configured `update_channel` on launch and automatically applies newer releases. Set to `false`, or set `AGENT_FACTORY_AUTO_UPDATE=0`, to opt out. |
 | `daemon_poll_interval` | Daemon polling interval in ms. |
 | `branch_prefix` | Prefix for worktree branches (defaults to `username/`). |
 | `worktree_root` | Where new worktrees are created: `sibling` (default, next to the repo as `<repo>-<session>`) or `subdirectory` (under `~/.agent-factory/worktrees/<branch>`). |
@@ -193,7 +195,7 @@ terminal_cmd = "./infra/terminal.sh"
 |-------|-------|
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
-| `auto_yes`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `root_agents`, `limit_auto_resume`, `limit_retry_interval` | Global only. Setting them in-repo is rejected with an error naming the key. |
+| `auto_yes`, `auto_update`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `root_agents`, `limit_auto_resume`, `limit_retry_interval` | Global only. Setting them in-repo is rejected with an error naming the key. |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 

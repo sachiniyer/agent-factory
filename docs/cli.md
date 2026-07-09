@@ -93,7 +93,7 @@ af config get <key>                # one key (scalars print bare; maps as JSON)
 af config set <key> <value>        # write one settable key, preserving comments/ordering
 ```
 
-`get`/`list` report effective global values (defaults applied). `set` edits only the target value's bytes — every comment, blank line, and key ordering is preserved (the file is not regenerated) — and validates the value with the loader's own rules before writing, so it can never produce a config that fails to load. Settable keys: `default_program`, `program_overrides.<agent>`, `auto_yes`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`. Structural keys (`root_agents`, `[keys]`) stay hand-edited. A change applies on the next `af`/daemon start, exactly like a hand-edit (`set` prints this reminder). Full key reference: [configuration.md](configuration.md).
+`get`/`list` report effective global values (defaults applied). `set` edits only the target value's bytes — every comment, blank line, and key ordering is preserved (the file is not regenerated) — and validates the value with the loader's own rules before writing, so it can never produce a config that fails to load. Settable keys: `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`. Structural keys (`root_agents`, `[keys]`) stay hand-edited. A change applies on the next `af`/daemon start, exactly like a hand-edit (`set` prints this reminder). Full key reference: [configuration.md](configuration.md).
 
 ## Maintenance commands
 

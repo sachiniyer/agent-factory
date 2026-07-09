@@ -32,6 +32,7 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 	configDir := seedJSONHome(t, `{
 		"default_program": "codex",
 		"auto_yes": true,
+		"auto_update": false,
 		"daemon_poll_interval": 2500,
 		"program_overrides": {"claude": "/opt/claude --dsp", "codex": "/opt/codex --quiet"},
 		"log_max_size_mb": 12,
@@ -55,6 +56,7 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 	// Settings are preserved through the conversion.
 	assert.Equal(t, "codex", cfg.DefaultProgram)
 	assert.True(t, cfg.AutoYes)
+	assert.False(t, cfg.AutoUpdate)
 	assert.Equal(t, 2500, cfg.DaemonPollInterval)
 	assert.Equal(t, "/opt/claude --dsp", cfg.ProgramOverrides["claude"])
 	assert.Equal(t, "/opt/codex --quiet", cfg.ProgramOverrides["codex"])

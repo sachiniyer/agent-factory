@@ -98,6 +98,10 @@ type Config struct {
 	ProgramOverrides map[string]string `json:"program_overrides,omitempty" toml:"program_overrides,omitempty"`
 	// AutoYes is a flag to automatically accept all prompts.
 	AutoYes bool `json:"auto_yes" toml:"auto_yes"`
+	// AutoUpdate controls the startup self-update check. It defaults to true:
+	// af checks the configured release channel on launch and applies newer
+	// releases automatically. Set false to opt out on this machine.
+	AutoUpdate bool `json:"auto_update" toml:"auto_update"`
 	// DaemonPollInterval is the interval (ms) at which the daemon polls sessions for autoyes mode.
 	DaemonPollInterval int `json:"daemon_poll_interval" toml:"daemon_poll_interval"`
 	// LogMaxSizeMB is the size cap (MB) for agent-factory.log. When the log
@@ -267,6 +271,7 @@ func DefaultConfig() *Config {
 		SchemaVersion:      GlobalConfigSchemaVersion,
 		DefaultProgram:     defaultProgram,
 		AutoYes:            false,
+		AutoUpdate:         true,
 		DaemonPollInterval: defaultDaemonPollInterval,
 		LimitAutoResume:    false,
 		LimitRetryInterval: defaultLimitRetryInterval,
