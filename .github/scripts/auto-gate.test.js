@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { __test } = require("./auto-gate.js");
+const autoGate = require("./auto-gate.js");
+const { __test } = autoGate;
 
 test("required check matching respects the required source app", () => {
   const spec = { context: "Build", sourceAppId: 15368 };
@@ -79,7 +80,7 @@ test("external replies do not resolve Greptile P1/P2 findings", async () => {
   assert.match(result.reasons.join("\n"), /1 unresolved Greptile P1\/P2 inline finding/);
 });
 
-test("maintainer replies resolve Greptile P1/P2 findings", async () => {
+test("maintainer discussion replies do not resolve Greptile P1/P2 findings without a marker", async () => {
   const result = await __test.evaluateGreptile({
     github: fakeGithub({
       checkRuns: [greptileRun()],
@@ -90,7 +91,34 @@ test("maintainer replies resolve Greptile P1/P2 findings", async () => {
           id: 11,
           in_reply_to_id: 10,
           user: { login: "sachiniyer" },
-          body: "Documented tradeoff accepted.",
+          body: "I see the tradeoff and will think about it.",
+          created_at: "2026-07-09T01:03:00Z",
+        },
+      ],
+    }),
+    context: fakeContext(),
+    number: 1465,
+    sha: "abc123",
+    lastCommitDate: "2026-07-09T01:00:00Z",
+    core: fakeCore(),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reasons.join("\n"), /1 unresolved Greptile P1\/P2 inline finding/);
+});
+
+test("maintainer replies resolve Greptile P1/P2 findings only with an explicit marker", async () => {
+  const result = await __test.evaluateGreptile({
+    github: fakeGithub({
+      checkRuns: [greptileRun()],
+      issueComments: [freshGreptileSummary()],
+      reviewComments: [
+        greptileFinding({ id: 10 }),
+        {
+          id: 11,
+          in_reply_to_id: 10,
+          user: { login: "sachiniyer" },
+          body: "Documented tradeoff ACCEPTED.",
           created_at: "2026-07-09T01:03:00Z",
         },
       ],
@@ -103,6 +131,11 @@ test("maintainer replies resolve Greptile P1/P2 findings", async () => {
   });
 
   assert.equal(result.ok, true);
+});
+
+test("gate-ack token is an explicit Greptile finding resolution marker", () => {
+  assert.equal(__test.hasResolutionMarker("Root accepts this [gate-ack]."), true);
+  assert.equal(__test.hasResolutionMarker("accepted in discussion, not marked"), false);
 });
 
 test("outdated Greptile findings are not counted as unresolved", async () => {
@@ -120,6 +153,19 @@ test("outdated Greptile findings are not counted as unresolved", async () => {
   });
 
   assert.equal(result.ok, true);
+});
+
+test("merge pins the squash merge to the evaluated head SHA", async () => {
+  const github = fakeMergeGithub({ headSha: "sha-that-passed" });
+
+  await autoGate.merge({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+  });
+
+  assert.equal(github.mergedWith.sha, "sha-that-passed");
 });
 
 function fakeGithub({ checkRuns, issueComments, reviewComments }) {
@@ -140,6 +186,73 @@ function fakeGithub({ checkRuns, issueComments, reviewComments }) {
     },
     paginate: async (fn) => responses.get(fn) || [],
   };
+}
+
+function fakeMergeGithub({ headSha }) {
+  const listFiles = function listFiles() {};
+  const listForRef = function listForRef() {};
+  const listComments = function listComments() {};
+  const listReviewComments = function listReviewComments() {};
+  const merge = async function merge(options) {
+    github.mergedWith = options;
+    return { data: { sha: "merge-sha" } };
+  };
+  const responses = new Map([
+    [listFiles, []],
+    [listForRef, [greptileRun()]],
+    [listComments, [freshGreptileSummary()]],
+    [listReviewComments, []],
+  ]);
+
+  const github = {
+    mergedWith: null,
+    rest: {
+      actions: {
+        createWorkflowDispatch: async () => {},
+      },
+      checks: { listForRef },
+      issues: { listComments },
+      pulls: { listFiles, listReviewComments, merge },
+    },
+    graphql: async () => {
+      return {
+        repository: {
+          pullRequest: {
+            number: 1465,
+            title: "Gate test",
+            url: "https://example.invalid/pr/1465",
+            baseRefName: "master",
+            headRefOid: headSha,
+            isDraft: false,
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+            author: { login: "sachiniyer" },
+            labels: { nodes: [] },
+            commits: {
+              nodes: [
+                {
+                  commit: {
+                    committedDate: "2026-07-09T01:00:00Z",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      };
+    },
+    paginate: async (fn) => responses.get(fn) || [],
+    request: async (route) => {
+      if (route.includes("/rules/branches/")) {
+        return { data: [] };
+      }
+      const error = new Error("not protected");
+      error.status = 404;
+      throw error;
+    },
+  };
+
+  return github;
 }
 
 function fakeContext() {

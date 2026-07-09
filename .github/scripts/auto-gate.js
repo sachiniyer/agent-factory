@@ -2,6 +2,7 @@ const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
 const GREPTILE_RE = /greptile/i;
+const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
 
 async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
   try {
@@ -107,6 +108,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
     shouldMerge: reasons.length === 0,
+    headSha: pr.headRefOid,
     docsChanged,
     reasons,
     notes,
@@ -122,6 +124,9 @@ async function merge({ github, context, core, prNumber }) {
   if (!gate.shouldMerge) {
     throw new Error(`Refusing to merge PR #${prNumber}; gate no longer passes: ${gate.summary}`);
   }
+  if (!gate.headSha) {
+    throw new Error(`Refusing to merge PR #${prNumber}; evaluated head SHA is missing`);
+  }
 
   const { owner, repo } = context.repo;
   const response = await github.rest.pulls.merge({
@@ -129,6 +134,7 @@ async function merge({ github, context, core, prNumber }) {
     repo,
     pull_number: prNumber,
     merge_method: "squash",
+    sha: gate.headSha,
   });
 
   core.notice(`Squash-merged PR #${prNumber}: ${response.data.sha}`);
@@ -481,7 +487,13 @@ async function evaluateGreptile({ github, context, number, sha, lastCommitDate, 
   });
   const resolvedByAllowedReply = new Set(
     reviewComments
-      .filter((comment) => comment.in_reply_to_id && ALLOWED_AUTHORS.has(comment.user?.login || ""))
+      .filter((comment) => {
+        return (
+          comment.in_reply_to_id &&
+          ALLOWED_AUTHORS.has(comment.user?.login || "") &&
+          hasResolutionMarker(comment.body || "")
+        );
+      })
       .map((comment) => comment.in_reply_to_id),
   );
   const unresolvedFindings = reviewComments.filter((comment) => {
@@ -530,6 +542,10 @@ function parseConfidenceScore(body) {
   return null;
 }
 
+function hasResolutionMarker(body) {
+  return RESOLUTION_MARKER_RE.test(body) || body.includes("[gate-ack]");
+}
+
 function latestRunTime(run) {
   return parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0;
 }
@@ -561,6 +577,7 @@ function finish(core, setOutputs, result) {
   if (setOutputs) {
     core.setOutput("pr_number", result.prNumber);
     core.setOutput("should_merge", result.shouldMerge ? "true" : "false");
+    core.setOutput("head_sha", result.headSha || "");
     core.setOutput("docs_changed", result.docsChanged ? "true" : "false");
     core.setOutput("summary", summary);
   }
@@ -577,6 +594,7 @@ module.exports = {
   merge,
   __test: {
     evaluateGreptile,
+    hasResolutionMarker,
     latestRequiredState,
     parseConfidenceScore,
   },
