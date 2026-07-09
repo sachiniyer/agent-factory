@@ -13,6 +13,13 @@ import (
 
 func (m *home) handleError(err error) tea.Cmd {
 	log.ErrorLog.Printf("%v", err)
+	return m.showTransientError(err)
+}
+
+func (m *home) showTransientError(err error) tea.Cmd {
+	if err == nil {
+		return nil
+	}
 	m.errBox.SetError(err)
 	return func() tea.Msg {
 		select {

@@ -960,6 +960,25 @@ func TestPane_OpenBeyondCapacityAutoHidesLRU(t *testing.T) {
 	assert.Equal(t, layout.PaneRegion(gamma.ID()), h.ring.Active(), "the new pane is focused")
 }
 
+func TestPane_AutoHideShowsTransientStatus(t *testing.T) {
+	h := paneTestHome(t)
+	resizeHome(h, layout.MultiPaneMinWidth-1, 40) // one pane fits
+
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+	require.Equal(t, []string{"alpha"}, visibleTitles(h))
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+
+	require.Equal(t, 2, h.store.NumOpenPanes(), "the second pane still opens")
+	assert.Equal(t, []string{"beta"}, visibleTitles(h), "width pressure hides alpha and shows beta")
+	assert.Equal(t, "alpha hidden: terminal too narrow for 2 panes; resize wider or use `s` open pane",
+		h.errBox.FullError())
+}
+
 // TestPane_DegradationLadderWithNPanes drives the resize ladder with panes
 // open: minimal mode keeps exactly one pane, fallback renders the banner, and
 // growing back restores all bindings.
