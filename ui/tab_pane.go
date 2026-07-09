@@ -462,6 +462,11 @@ func (p *TabPane) ScrollDown(instance *session.Instance, activeTab int) error {
 // + tab index, never a cached title, so the wrong view can never be captured
 // (#746/#384).
 func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab int) error {
+	if instance.IsTearingDown() {
+		p.setFallbackState("Tearing down session...")
+		return nil
+	}
+
 	var content string
 	var err error
 	if activeTab == 0 {

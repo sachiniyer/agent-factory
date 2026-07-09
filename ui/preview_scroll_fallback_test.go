@@ -136,6 +136,33 @@ func TestPreviewScrollModeThenLoadingFallback(t *testing.T) {
 	require.NotContains(t, rendered, staleScrollMarker)
 }
 
+func TestPreviewScrollEntryDeletingShowsTeardownFallback(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "deleting", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStatusForTest(session.Deleting)
+
+	p := NewTabPane()
+	p.SetSize(80, 30)
+
+	require.NoError(t, p.ScrollUp(inst, 0))
+
+	require.False(t, p.isScrolling,
+		"deleting agent tab must not enter empty scroll mode")
+	require.True(t, p.content.fallback,
+		"deleting agent tab must enter fallback state when scrolling starts")
+	require.Contains(t, p.content.text, "Tearing down session...")
+	require.NotContains(t, p.viewport.View(), scrollFooter(),
+		"scroll footer must not be the only visible content")
+	require.Contains(t, p.String(), "Tearing down session...",
+		"rendered frame must show the teardown fallback")
+}
+
 // TestPreviewScrollModeViewportContentCleared focuses on the viewport-clearing
 // half of the invariant: after entering any fallback, viewport.View() must no
 // longer contain the captured scroll content. Without the fix the viewport is
