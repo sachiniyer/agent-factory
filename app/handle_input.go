@@ -183,6 +183,15 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}
+	if remote {
+		configured, err := session.RemoteHooksConfiguredForPath(".")
+		if err != nil {
+			return m, m.handleError(err)
+		}
+		if !configured {
+			return m, nil
+		}
+	}
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:       "",
 		Path:        ".",

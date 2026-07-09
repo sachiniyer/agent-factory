@@ -167,6 +167,48 @@ func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
 		"the #1350 BeginCreate chokepoint still fires exactly once when naming starts")
 }
 
+func TestStartNewRemoteWithoutHooksNoops(t *testing.T) {
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+
+	h := newTestHome(t)
+	h.errBox.SetSize(120, 1)
+
+	model, cmd := h.startNewInstance(true)
+
+	require.Same(t, h, model)
+	require.Nil(t, cmd)
+	assert.Equal(t, stateDefault, h.state)
+	assert.Nil(t, h.namingInstance)
+	assert.Equal(t, 0, h.store.NumInstances())
+	assert.Empty(t, h.errBox.FullError())
+}
+
+func TestStartNewRemoteInvalidHooksStillErrors(t *testing.T) {
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+
+	h := newTestHome(t)
+	h.errBox.SetSize(120, 1)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoConfig(repo.ID, &config.RepoConfig{
+		RemoteHooks: &config.RemoteHooks{
+			AttachCmd: "/bin/echo",
+			DeleteCmd: "/bin/echo",
+		},
+	}))
+
+	model, cmd := h.startNewInstance(true)
+
+	require.Same(t, h, model)
+	require.NotNil(t, cmd)
+	assert.Equal(t, stateDefault, h.state)
+	assert.Nil(t, h.namingInstance)
+	assert.Equal(t, 0, h.store.NumInstances())
+	assert.Contains(t, h.errBox.FullError(), "remote_hooks.launch_cmd")
+}
+
 // TestCancelNamingRemovesZombieAfterSelectionDrift is the regression guard for
 // issue #717. While the user is naming a new instance, a background sidebar
 // mutation can remove a *preceding* instance, which rebuilds the sidebar's
