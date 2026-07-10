@@ -175,6 +175,13 @@ type home struct {
 	// pane is auto-hidden by width pressure. Callers that can return a tea.Cmd
 	// consume it to start the same transient clear timer normal errors use.
 	pendingPaneAutoHideStatus string
+	// paneAutoHideNoticeID is the transient-notice generation of the currently
+	// displayed "N hidden: terminal too narrow" status, or 0 when none is shown.
+	// relayout clears the notice the moment a resize fits every open pane again,
+	// so the guidance never lingers on screen contradicting the visible panes
+	// (#1557). Tracked by id (not content) so a newer, unrelated notice that
+	// superseded it is never wiped.
+	paneAutoHideNoticeID uint64
 	// restoredPaneBaseline holds the panes reopened from persisted TUI state so
 	// the first real (non-fallback) relayout after launch can detect panes the
 	// terminal is too narrow to fit. The restore-time relayout runs at term
@@ -476,6 +483,7 @@ func (m *home) relayout() {
 		m.setPaneAutoHideStatus(hidden, m.store.NumOpenPanes())
 	}
 	m.visiblePanes = nextVisible
+	m.clearStaleAutoHideStatus()
 
 	// Rebuild the ring's pane entries to the visible set (auto-hidden panes
 	// leave the ring; the focused pane is most-recently-focused, so it is
@@ -553,7 +561,25 @@ func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
 	msg := fmt.Sprintf("%s hidden: terminal too narrow for %d panes; resize wider%s",
 		paneStatusTitle(p), paneCount, paneRecoveryStatusHint())
 	m.pendingPaneAutoHideStatus = msg
-	m.setTransientNotice(errors.New(msg))
+	m.paneAutoHideNoticeID = m.setTransientNotice(errors.New(msg))
+}
+
+// clearStaleAutoHideStatus drops the "N hidden: terminal too narrow" guidance
+// the moment a relayout fits every open pane again — otherwise a resize wide
+// enough to reveal the auto-hidden panes still leaves the narrow-width status
+// on the bar, contradicting the now-visible panes (#1557). Keyed on the notice
+// id so a newer, unrelated status that superseded ours is never wiped; the
+// guidance's own transient timer still handles the case where it is the current
+// notice but the panes never came back.
+func (m *home) clearStaleAutoHideStatus() {
+	if m.paneAutoHideNoticeID == 0 || m.store.NumOpenPanes() > len(m.visiblePanes) {
+		return
+	}
+	if m.transientNoticeID == m.paneAutoHideNoticeID {
+		m.errBox.Clear()
+	}
+	m.paneAutoHideNoticeID = 0
+	m.pendingPaneAutoHideStatus = ""
 }
 
 func paneStatusTitle(p *store.OpenPane) string {
@@ -592,7 +618,8 @@ func (m *home) consumePaneAutoHideStatus() tea.Cmd {
 	}
 	status := m.pendingPaneAutoHideStatus
 	m.pendingPaneAutoHideStatus = ""
-	return m.showTransientError(errors.New(status))
+	m.paneAutoHideNoticeID = m.setTransientNotice(errors.New(status))
+	return m.clearTransientMessageAfterDelay(m.paneAutoHideNoticeID)
 }
 
 // syncFocus applies the focus ring's active region to the panes and the
