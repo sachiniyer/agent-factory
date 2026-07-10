@@ -220,6 +220,82 @@ func (m *home) reconcileLiveTermPane() {
 	w.SetLive(tp)
 }
 
+// interactivePollPauseCmd holds (and renews) the #1160 capture-poll pause lease
+// for the session the user is typing into through the FOCUSED embedded
+// interactive pane, and releases it once that stops (#1586). Holding the lease
+// makes the daemon treat the session as attached and DEFER automated task
+// deliveries (cron/watch) into it, so a scheduled prompt can't paste into and
+// submit the user's in-progress input — extending the guarantee full-screen
+// attach already had (attachOverlayCallback) to the common in-pane flow.
+//
+// It runs from the preview tick, AFTER syncLiveTermPane has settled interactive
+// mode, and returns a best-effort RPC cmd (or nil) rather than dialing the
+// daemon on the event loop. Full-screen attach owns its own heartbeat and closes
+// the embedded attachment (which drops interactive mode), so this yields to it
+// while m.attached is set. Event-loop only.
+func (m *home) interactivePollPauseCmd() tea.Cmd {
+	// The session the user is actively typing into in-pane, if any. Interactive
+	// mode is only ever true while liveTerm is bound to the focused pane, whose
+	// instance is a local, started session (remote/dead panes can't be entered),
+	// so its title keys the same daemon pause map full-screen attach uses.
+	want := ""
+	if m.interactive && !m.attached.Load() && m.livePane != nil {
+		if inst := m.livePane.Instance(); inst != nil {
+			want = inst.Title
+		}
+	}
+
+	// Capture the seams + repoID on the event loop before any goroutine reads
+	// them (the #964 per-home-field discipline: they are per-home fields swapped
+	// by tests, never package globals a sibling parallel test could reassign).
+	repoID := m.repoID
+	pause := m.pauseStatusPoll
+	resume := m.resumeStatusPoll
+
+	if want == "" {
+		if m.interactivePauseTitle == "" {
+			return nil
+		}
+		// Interactive ended (or focus left the pane): release the lease now so the
+		// daemon resumes delivering into the session immediately on the next tick
+		// rather than waiting out the lease.
+		release := m.interactivePauseTitle
+		m.interactivePauseTitle = ""
+		m.interactivePauseAt = time.Time{}
+		return func() tea.Msg {
+			_ = resume(release, repoID)
+			return nil
+		}
+	}
+
+	if want != m.interactivePauseTitle {
+		// Newly interactive on this session (or the focused session changed):
+		// release any previous hold and pause the new target.
+		prev := m.interactivePauseTitle
+		m.interactivePauseTitle = want
+		m.interactivePauseAt = time.Now()
+		return func() tea.Msg {
+			if prev != "" {
+				_ = resume(prev, repoID)
+			}
+			_ = pause(want, repoID)
+			return nil
+		}
+	}
+
+	// Still interactive on the same session: renew the lease, throttled to the
+	// same cadence full-screen attach uses (statusPollRenewInterval) so the
+	// daemon is not spammed with a pause RPC every 100ms tick.
+	if time.Since(m.interactivePauseAt) < statusPollRenewInterval {
+		return nil
+	}
+	m.interactivePauseAt = time.Now()
+	return func() tea.Msg {
+		_ = pause(want, repoID)
+		return nil
+	}
+}
+
 // enforceInteractiveInvariant drops back to nav mode whenever interactive
 // mode's premise breaks: the mode means "keystrokes forward into the FOCUSED
 // pane's live attachment", so a dead client, a closed/hidden pane, or focus

@@ -786,7 +786,19 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	err := w.sup.deliver(w.taskID, line)
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
-		log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
+		if errors.Is(err, errTargetBusy) {
+			// Not a failure: a TUI is attached to the target, so the event is
+			// held and retried after detach rather than pasted into live typing
+			// (#1586). A deferral delivers nothing, so refund the rate slot it
+			// reserved above — otherwise the live attempt AND the drainer's replay
+			// would each spend one, double-charging the target's per-minute budget
+			// and eventually dropping events. Queue it (preserving FIFO) and log
+			// quietly.
+			w.releaseEventSlot()
+			log.InfoLog.Printf("watch task %s: target session attached; deferring event until detach (#1586)", w.taskID)
+		} else {
+			log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
+		}
 		w.enqueueEvent(line, tail)
 	}
 }
@@ -810,6 +822,21 @@ func (w *taskWatcher) tryReserveEventSlot() bool {
 	}
 	w.eventTimes = append(w.eventTimes, now)
 	return true
+}
+
+// releaseEventSlot refunds a rate slot reserved by tryReserveEventSlot when the
+// attempt did not actually deliver — a deferral (errTargetBusy, #1586) sends
+// nothing, so it must not spend the target's per-minute budget. It drops the
+// newest reservation; the live path and the drainer share the window, but the
+// limiter counts reservations rather than tracking identity, so removing one
+// per refunded attempt keeps the count exactly right regardless of which
+// goroutine's timestamp is dropped.
+func (w *taskWatcher) releaseEventSlot() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if n := len(w.eventTimes); n > 0 {
+		w.eventTimes = w.eventTimes[:n-1]
+	}
 }
 
 // enqueueEvent appends the line to the durable backlog and wakes the drainer.
@@ -866,9 +893,18 @@ func deliverWatchEvent(taskID, line string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return fmt.Errorf("event rendered an empty prompt (line %q)", line)
 	}
-	status, err := deliverTaskPrompt(t, prompt)
+	status, err := deliverTaskPrompt(t, prompt, true)
 	if err != nil {
 		return err
+	}
+	if status == StatusDeferredAttached {
+		// A TUI is attached full-screen to the target session; the delivery was
+		// held so it can't paste into and submit the user's in-progress input
+		// (#1586). Signal the caller (handleEvent / drainLoop) to re-queue and
+		// retry after detach — the event is neither lost nor delivered into live
+		// typing. errTargetBusy is exempt from the delivery-failure alarm and
+		// logged quietly, since a deferral is expected, not an outage.
+		return errTargetBusy
 	}
 	now := time.Now()
 	if err := task.UpdateTaskStatus(taskID, &now, status); err != nil {

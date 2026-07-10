@@ -32,6 +32,10 @@ var (
 	deliverPromptForTask = DeliverPrompt
 )
 
+// cronDeferPollInterval is how often a held cron fire re-checks whether the
+// target has detached (#1586). Var so tests can shrink it.
+var cronDeferPollInterval = 1 * time.Second
+
 // deliverTaskPrompt delivers one rendered prompt for a task and returns the
 // status string to record on it. With TargetSession empty it creates a fresh
 // session per run (the historical task behavior, status "started"). With
@@ -40,7 +44,13 @@ var (
 // not exist yet (Sachin-approved in #782, mirroring `af sessions send-prompt
 // --create`). The target session is looked up in the task's own repo so a
 // same-titled session in an unrelated repo can never receive the prompt.
-func deliverTaskPrompt(t *task.Task, prompt string) (string, error) {
+//
+// deferWhileAttached asks the daemon to hold the send while a TUI is attached
+// full-screen to (or interactively focused on) the target, returning
+// StatusDeferredAttached instead of pasting into the user's in-progress input
+// (#1586). Callers that can catch up a held delivery pass true; a forced final
+// attempt passes false.
+func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (string, error) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return "", fmt.Errorf("failed to load config: %w", err)
@@ -79,12 +89,40 @@ func deliverTaskPrompt(t *task.Task, prompt string) (string, error) {
 		Program:  t.Program,
 		Prompt:   prompt,
 		AutoYes:  cfg.AutoYes,
+		// An automated delivery (cron fire or watch event): hold it while a TUI is
+		// attached to the target so it never pastes into and submits the user's
+		// in-progress input (#1586). The caller decides how a hold is handled.
+		DeferWhileAttached: deferWhileAttached,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to deliver prompt to target session %q: %w", t.TargetSession, err)
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, t.TargetSession, status)
 	return status, nil
+}
+
+// deliverCronTaskPrompt delivers a cron task's prompt, waiting out a #1586
+// deferral (a TUI is attached to the target) so the occurrence is caught up on
+// detach rather than silently skipped — cron has no durable event queue the way
+// watch does. It re-attempts on cronDeferPollInterval with the deferral ALWAYS
+// on, so a prompt is pasted ONLY once the target is unattached — never forced
+// into an attached pane, which would be the exact in-progress-input collision
+// this whole path exists to prevent. There is no timeout override: "never
+// dropped" is satisfied by delivering on detach, however long the attach lasts.
+//
+// Unbounded parking is safe: overlapping fires of the same task are coalesced by
+// RunTask's per-task flock, so at most one fire is ever parked here; and the
+// daemon's pause lease auto-expires if the TUI dies (statusPollLease), so a
+// crashed/stale client can never wedge the delivery — it lands on the next poll
+// once the lease lapses.
+func deliverCronTaskPrompt(t *task.Task, prompt string) (string, error) {
+	for {
+		status, err := deliverTaskPrompt(t, prompt, true)
+		if err != nil || status != StatusDeferredAttached {
+			return status, err
+		}
+		time.Sleep(cronDeferPollInterval)
+	}
 }
 
 // repoHasSessionTitle reports whether a persisted session with the given
@@ -162,6 +200,19 @@ func RunTask(taskID string) (err error) {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
+	// This NON-blocking lock is what makes overlapping same-task fires during a
+	// #1586 delivery defer INTENTIONALLY coalesce to a single delivery. While the
+	// user is attached to the target, the holding fire parks in
+	// deliverCronTaskPrompt waiting for detach; every other fire that lands during
+	// that wait hits LOCK_NB, returns "another run is already active", and exits
+	// without queuing. So a cron firing more often than the attach lasts delivers
+	// exactly ONE prompt on detach, not one per skipped occurrence. This is
+	// deliberate and desirable: a cron prompt is a fixed, idempotent string (the
+	// task's Prompt), so N identical "run nightly" prompts arriving in a burst the
+	// instant the user detaches would be pure duplicate noise — one catch-up is
+	// the right behavior. (Watch events, which carry distinct per-event {{line}}
+	// payloads, are NOT coalesced: they each queue durably and replay in order.)
+
 	// Once this fire holds the lock it owns the task's run status: every
 	// failure from here on — git missing, project path not a repo, or a
 	// delivery error — must be recorded so a cron task's LastRunStatus
@@ -190,7 +241,7 @@ func RunTask(taskID string) (err error) {
 		return fmt.Errorf("project path %s is not a valid git repository", t.ProjectPath)
 	}
 
-	status, err := deliverTaskPrompt(t, t.Prompt)
+	status, err := deliverCronTaskPrompt(t, t.Prompt)
 	if err != nil {
 		return err
 	}

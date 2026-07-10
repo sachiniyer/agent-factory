@@ -20,7 +20,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
 | `POST` | `/v1/RestoreSession` | `title`, `repo_id` | Restore an archived, Lost, or Dead session. |
 | `POST` | `/v1/SendPrompt` | `title`, `repo_id`, `prompt` | Send a prompt to an existing session's agent. |
-| `POST` | `/v1/DeliverPrompt` | `title`, `repo_path`, `program`, `prompt`, `auto_yes` | Deliver a prompt to a session, auto-creating it if it does not exist yet. |
+| `POST` | `/v1/DeliverPrompt` | `title`, `repo_path`, `program`, `prompt`, `auto_yes`, `defer_while_attached` | Deliver a prompt to a session, auto-creating it if it does not exist yet. |
 | `POST` | `/v1/CreateTab` | `title`, `repo_id`, `command`, `name`, `shell` | Spawn a tab (process or shell) in a session's worktree. |
 | `POST` | `/v1/CloseTab` | `title`, `repo_id`, `tab_name`, `tab_index` | Close a non-agent tab of a session (the agent tab cannot be closed). |
 | `POST` | `/v1/SetPRInfo` | `title`, `repo_id`, `pr_info` | Record or clear the GitHub PR info for a session. |
