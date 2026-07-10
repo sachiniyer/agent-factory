@@ -175,6 +175,14 @@ type home struct {
 	// pane is auto-hidden by width pressure. Callers that can return a tea.Cmd
 	// consume it to start the same transient clear timer normal errors use.
 	pendingPaneAutoHideStatus string
+	// restoredPaneBaseline holds the panes reopened from persisted TUI state so
+	// the first real (non-fallback) relayout after launch can detect panes the
+	// terminal is too narrow to fit. The restore-time relayout runs at term
+	// (0,0) → fallback → visiblePanes=nil, so without a baseline the first
+	// WindowSizeMsg sees an empty previousVisible and newlyAutoHiddenPane never
+	// surfaces the "N hidden: terminal too narrow" status (#1535). Consumed once
+	// on the first non-fallback relayout.
+	restoredPaneBaseline []*store.OpenPane
 	// lastPaneCapture is when each pane's capture was last dispatched, keyed
 	// by pane id; the paneCaptureMinInterval throttle reads it (RFC §5.2).
 	lastPaneCapture map[int]time.Time
@@ -445,6 +453,22 @@ func (m *home) relayout() {
 		m.visiblePanes = nil
 		m.syncFocus()
 		return
+	}
+
+	// First real relayout after a restore: the restore-time relayout ran at
+	// (0,0) and fell through to fallback with visiblePanes=nil, so the restored
+	// panes are the visibility baseline this pass uses to detect a pane the
+	// terminal can't fit (#1535). Clear it ONLY when it is actually consumed
+	// (previousVisible empty): an intermediate relayout that reaches here with a
+	// real previousVisible already established leaves nothing to consume, and one
+	// that falls through to fallback returned above — so the baseline survives
+	// every relayout until the first sized one uses it, instead of being cleared
+	// out from under that resize (#1551 review). Since visiblePanes is nil until
+	// the first non-fallback relayout, that first sized relayout is exactly the
+	// one that consumes it.
+	if len(previousVisible) == 0 && len(m.restoredPaneBaseline) > 0 {
+		previousVisible = m.restoredPaneBaseline
+		m.restoredPaneBaseline = nil
 	}
 
 	nextVisible := m.store.VisibleOpenPanes(lay.PaneCount())
