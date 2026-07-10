@@ -96,11 +96,23 @@ fix_cache_perms() {
 # start_playtest_detached — run the play-test sandbox container detached, so a
 # driver can work it over `docker exec`. Shared by `playtest -d`, `selftest`,
 # and `drive`.
+#
+# AGENT_FACTORY_AUTO_UPDATE=false is passed at the CONTAINER level (not just
+# exported in a driver shell) so it reaches EVERY process in the container —
+# the tmux server, the `af` TUI it launches, and the daemon `af` spawns —
+# exactly like AGENT_FACTORY_HOME does. `docker exec` inherits `docker run -e`
+# vars but NOT a transient exec shell's exports, so a driver-shell-only export
+# reaches `af` only when the tmux server happens to fork from that shell —
+# flaky. Without this, a container binary built behind the latest release
+# self-updates and restarts the daemon mid-selftest, racing instance creation
+# (#1596, regression of the #1498 opt-out). Override to `true` to exercise the
+# real auto-update path in the sandbox.
 start_playtest_detached() {
     "$ENGINE" run -d \
         "${RUN_FLAGS[@]}" \
         --name "$PLAYTEST_NAME" \
         -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
+        -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
         "$IMAGE" bash /src/scripts/container/playtest-entry.sh hold >/dev/null
 }
 
@@ -147,6 +159,7 @@ playtest)
             "${RUN_FLAGS[@]}" \
             --name "$PLAYTEST_NAME" \
             -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
+            -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
             "$IMAGE" bash /src/scripts/container/playtest-entry.sh
     fi
     ;;

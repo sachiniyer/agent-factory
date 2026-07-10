@@ -172,6 +172,78 @@ func TestAutoUpdateWindowsSkipsNetworkRegardlessOfVersion(t *testing.T) {
 	}
 }
 
+// TestAutoUpdateEnvOffSwitchShortCircuits guards #1596: an explicit
+// AGENT_FACTORY_AUTO_UPDATE off-switch must short-circuit autoUpdate() before
+// any release fetch — no network, no download, no daemon restart. This is the
+// contract the selftest/playtest containers depend on (#1471/#1498): a
+// container binary built behind the latest release must NOT self-update and
+// restart the daemon mid-run, racing instance creation. The fetch seam is a
+// tripwire: if it is called, the off-switch is not being honored.
+//
+// A later refactor (the testbox containerization) dropped the propagation of
+// this env into the container, so the opt-out silently stopped taking effect;
+// this test locks the code-side contract so it can't rot again.
+func TestAutoUpdateEnvOffSwitchShortCircuits(t *testing.T) {
+	withTestHome(t) // unsets AGENT_FACTORY_AUTO_UPDATE; subtests set it explicitly
+	captureLogs(t)
+
+	prevGOOS := runtimeGOOS
+	prevFetch := fetchLatestReleaseTagFn
+	prevVersion := version
+	t.Cleanup(func() {
+		runtimeGOOS = prevGOOS
+		fetchLatestReleaseTagFn = prevFetch
+		version = prevVersion
+	})
+
+	// Non-Windows platform (Windows has its own early-return) and a version far
+	// behind any real release: without the off-switch this would fetch, see a
+	// much newer tag, download, and restart the daemon.
+	runtimeGOOS = "linux"
+	version = "0.0.1"
+	fetchCalls := 0
+	fetchLatestReleaseTagFn = func(string) (string, error) {
+		fetchCalls++
+		return "v99.0.0", nil
+	}
+
+	// Every accepted "off" spelling must short-circuit before the fetch.
+	for _, val := range []string{"false", "0", "no", "off", "n", "f"} {
+		t.Run("off_"+val, func(t *testing.T) {
+			t.Setenv(autoUpdateEnv, val)
+			fetchCalls = 0
+			if err := autoUpdate(); err != nil {
+				t.Fatalf("autoUpdate returned error with %s=%q: %v", autoUpdateEnv, val, err)
+			}
+			if fetchCalls != 0 {
+				t.Fatalf("fetchLatestReleaseTagFn called %d times with %s=%q; expected 0 — the env off-switch must short-circuit before any release fetch (#1596)", fetchCalls, autoUpdateEnv, val)
+			}
+		})
+	}
+
+	// Positive control: with the switch unset the fetch seam MUST fire, proving
+	// the tripwire above is meaningful and not passing because the code never
+	// reaches the network. A not-newer tag keeps this off the download/restart
+	// path, so the test needs no downloadBinaryFn/restart seams.
+	t.Run("unset_still_fetches", func(t *testing.T) {
+		if err := os.Unsetenv(autoUpdateEnv); err != nil {
+			t.Fatalf("unsetenv %s: %v", autoUpdateEnv, err)
+		}
+		version = "99.0.0"
+		fetchLatestReleaseTagFn = func(string) (string, error) {
+			fetchCalls++
+			return "v1.0.0", nil // not newer than 99.0.0 → records + returns, no download
+		}
+		fetchCalls = 0
+		if err := autoUpdate(); err != nil {
+			t.Fatalf("autoUpdate returned error with %s unset: %v", autoUpdateEnv, err)
+		}
+		if fetchCalls == 0 {
+			t.Fatalf("fetchLatestReleaseTagFn was not called with %s unset; the off-switch tripwire above would be vacuous", autoUpdateEnv)
+		}
+	})
+}
+
 // TestAutoUpdateDoesNotRecordCheckOnFetchFailure guards #1466: when
 // fetchLatestReleaseTag fails (blocked API, DNS, proxy, rate limit), the
 // 24-hour success throttle must not hide the failure for a full day.
