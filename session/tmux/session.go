@@ -19,9 +19,15 @@ const ProgramClaude = "claude"
 const ProgramCodex = "codex"
 const ProgramAider = "aider"
 const ProgramGemini = "gemini"
+const ProgramAmp = "amp"
 
 // SupportedPrograms is the canonical list of known agent programs.
-var SupportedPrograms = []string{ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini}
+var SupportedPrograms = []string{ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini, ProgramAmp}
+
+// SupportedProgramsString returns the canonical user-facing agent enum list.
+func SupportedProgramsString() string {
+	return strings.Join(SupportedPrograms, ", ")
+}
 
 // TmuxSession represents a managed tmux session
 type TmuxSession struct {

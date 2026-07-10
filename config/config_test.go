@@ -426,7 +426,7 @@ func TestValidateProgramEnum(t *testing.T) {
 		in   string
 	}{
 		{"path with flag", "/home/siyer/.local/bin/claude --dangerously-skip-permissions"},
-		{"unknown agent", "amp"},
+		{"unknown agent", "notanagent"},
 		{"agent with flags", "claude --model opus"},
 		{"empty", ""},
 		{"random word", "foo"},
@@ -446,7 +446,7 @@ func TestValidateProgramEnum(t *testing.T) {
 			assert.Contains(t, err.Error(), "program_overrides")
 			// Enum must render comma-separated so the message is readable
 			// when Cobra prefixes it with "Error: " (see #661).
-			assert.Contains(t, err.Error(), "[claude, codex, aider, gemini]")
+			assert.Contains(t, err.Error(), "[claude, codex, aider, gemini, amp]")
 			// Leading "\n\n" + trailing "\n" pair with Cobra's "Error: "
 			// prefix and Println-added newline to produce a blank line on
 			// both sides of the message body.
@@ -469,7 +469,7 @@ func TestValidateProgramEnum(t *testing.T) {
 	// the user's command, not echo the invalid key (#675).
 	t.Run("program_overrides preserves user command in example", func(t *testing.T) {
 		const (
-			key     = "amp"
+			key     = "notanagent"
 			command = "/opt/amp --some-flag"
 		)
 		err := ValidateProgramEnum(
@@ -666,7 +666,7 @@ func TestLoadConfig(t *testing.T) {
 
 		configPath := filepath.Join(configDir, ConfigFileName)
 		configContent := `{
-			"default_program": "codex",
+			"default_program": "amp",
 			"auto_yes": true,
 			"daemon_poll_interval": 2000,
 			"branch_prefix": "test/",
@@ -677,7 +677,7 @@ func TestLoadConfig(t *testing.T) {
 		cfg, err := LoadConfig()
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
-		assert.Equal(t, "codex", cfg.DefaultProgram)
+		assert.Equal(t, tmux.ProgramAmp, cfg.DefaultProgram)
 		assert.True(t, cfg.AutoYes)
 		assert.Equal(t, 2000, cfg.DaemonPollInterval)
 		assert.Equal(t, "test/", cfg.BranchPrefix)
@@ -695,7 +695,8 @@ func TestLoadConfig(t *testing.T) {
 			"default_program": "claude",
 			"program_overrides": {
 				"claude": "/home/me/.local/bin/claude --dangerously-skip-permissions",
-				"codex": "/opt/codex/bin/codex --quiet"
+				"codex": "/opt/codex/bin/codex --quiet",
+				"amp": "/opt/amp/bin/amp --no-ide"
 			}
 		}`
 		require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
@@ -707,6 +708,8 @@ func TestLoadConfig(t *testing.T) {
 			cfg.ProgramOverrides[tmux.ProgramClaude])
 		assert.Equal(t, "/opt/codex/bin/codex --quiet",
 			cfg.ProgramOverrides[tmux.ProgramCodex])
+		assert.Equal(t, "/opt/amp/bin/amp --no-ide",
+			cfg.ProgramOverrides[tmux.ProgramAmp])
 	})
 
 	t.Run("rejects legacy default_program with path-and-flags", func(t *testing.T) {
@@ -743,7 +746,7 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, os.MkdirAll(configDir, 0755))
 
 		configPath := filepath.Join(configDir, ConfigFileName)
-		require.NoError(t, os.WriteFile(configPath, []byte(`{"default_program": "amp"}`), 0644))
+		require.NoError(t, os.WriteFile(configPath, []byte(`{"default_program": "/opt/amp --some-flag"}`), 0644))
 
 		cfg, err := LoadConfig()
 		require.Error(t, err)
@@ -761,12 +764,12 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, os.MkdirAll(configDir, 0755))
 
 		configPath := filepath.Join(configDir, ConfigFileName)
-		require.NoError(t, os.WriteFile(configPath, []byte(`{"default_program": "amp"}`), 0644))
+		require.NoError(t, os.WriteFile(configPath, []byte(`{"default_program": "notanagent"}`), 0644))
 
 		cfg, err := LoadConfig()
 		require.Error(t, err)
 		assert.Nil(t, cfg)
-		assert.Contains(t, err.Error(), `"amp"`)
+		assert.Contains(t, err.Error(), `"notanagent"`)
 	})
 
 	t.Run("rejects unknown agent key in program_overrides", func(t *testing.T) {
@@ -779,7 +782,7 @@ func TestLoadConfig(t *testing.T) {
 		content := `{
 			"default_program": "claude",
 			"program_overrides": {
-				"amp": "/opt/amp"
+				"notanagent": "/opt/notanagent"
 			}
 		}`
 		require.NoError(t, os.WriteFile(configPath, []byte(content), 0644))
@@ -1200,15 +1203,27 @@ quit = "q"
 		assert.Equal(t, "codex", cfg.DefaultProgram)
 	})
 
-	t.Run("shares enum validation with the JSON path", func(t *testing.T) {
+	t.Run("accepts amp default program", func(t *testing.T) {
 		writeToml(t, `default_program = "amp"`+"\n")
 
 		cfg, err := LoadConfig()
-		require.Error(t, err)
-		assert.Nil(t, cfg)
-		assert.Contains(t, err.Error(), `"amp"`)
-		assert.Contains(t, err.Error(), "program_overrides")
-		assert.Contains(t, err.Error(), TomlConfigFileName)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, tmux.ProgramAmp, cfg.DefaultProgram)
+	})
+
+	t.Run("accepts amp key in program_overrides", func(t *testing.T) {
+		writeToml(t, `
+default_program = "amp"
+
+[program_overrides]
+amp = "/opt/amp"
+`)
+
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "/opt/amp", cfg.ProgramOverrides[tmux.ProgramAmp])
 	})
 
 	t.Run("rejects unknown agent key in program_overrides", func(t *testing.T) {
@@ -1216,7 +1231,7 @@ quit = "q"
 default_program = "claude"
 
 [program_overrides]
-amp = "/opt/amp"
+notanagent = "/opt/notanagent"
 `)
 
 		cfg, err := LoadConfig()

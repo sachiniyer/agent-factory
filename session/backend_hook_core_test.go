@@ -650,6 +650,7 @@ func TestLocalBackendCheckAndHandleTrustPromptDispatch(t *testing.T) {
 		{"codex dispatches (#729)", tmux.ProgramCodex, true},
 		{"aider dispatches", tmux.ProgramAider, true},
 		{"gemini dispatches", tmux.ProgramGemini, true},
+		{"amp dispatches", tmux.ProgramAmp, true},
 		{"legacy codex path dispatches (#729)", "/usr/local/bin/codex", true},
 		{"unknown program does not dispatch", "some-other-tool", false},
 	}

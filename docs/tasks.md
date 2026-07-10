@@ -26,7 +26,7 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `watch_cmd` | Event trigger — long-running command; each stdout line fires the task (exactly one of `cron_expr` / `watch_cmd`) |
 | `target_session` | Deliver into this session by title (auto-created if missing). Empty = create a new session per fire |
 | `project_path` | Repo the task operates on; also the watch script's working directory |
-| `program` | Agent to run (`claude`, `aider`, …). Empty = configured `default_program` |
+| `program` | Agent to run (`claude`, `codex`, `aider`, `gemini`, `amp`). Empty = configured `default_program` |
 | `enabled` | Disabled tasks never fire; their watch script is stopped |
 | `last_run_at` / `last_run_status` | Set by the daemon: `started` (session created), `sent` (prompt delivered into a session), `parked: usage limit` (the session hit a plan usage-limit wall at startup and is parked, not failed — see [usage-limits.md](usage-limits.md#task-runs-park-dont-fail)), and for watch tasks `stopped` / `errored` (see below) |
 

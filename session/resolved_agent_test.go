@@ -25,11 +25,13 @@ func TestResolvedAgent(t *testing.T) {
 		{"override to bash (#1131)", withTmuxProgram("bash"), ""},
 		{"override to unknown tool (#1116)", withTmuxProgram("/usr/bin/some-other-tool --foo"), ""},
 		{"override to codex", withTmuxProgram("/usr/local/bin/codex --full-auto"), tmux.ProgramCodex},
+		{"override to amp", withTmuxProgram("/home/me/.amp/bin/amp --no-ide"), tmux.ProgramAmp},
 		{"claude with injected flags", withTmuxProgram("claude --plugin-dir '/x/plugin'"), tmux.ProgramClaude},
 
 		// No tmux session yet: fall back to the Program value, including
 		// legacy free-form persisted shapes (#677).
 		{"no tmux, bare enum", &Instance{Program: tmux.ProgramGemini}, tmux.ProgramGemini},
+		{"no tmux, amp enum", &Instance{Program: tmux.ProgramAmp}, tmux.ProgramAmp},
 		{"no tmux, legacy claude path", &Instance{Program: "/home/foo/bin/claude --plugin-dir x"}, tmux.ProgramClaude},
 		{"no tmux, unknown program", &Instance{Program: "some-other-tool"}, ""},
 	}

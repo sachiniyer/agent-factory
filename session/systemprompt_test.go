@@ -124,6 +124,14 @@ func TestInjectSystemPrompt_Gemini(t *testing.T) {
 	}
 }
 
+func TestInjectSystemPrompt_Amp(t *testing.T) {
+	result := injectSystemPrompt("amp")
+
+	if result != "amp" {
+		t.Errorf("expected amp unchanged (no system-prompt flag), got %q", result)
+	}
+}
+
 // TestInjectSystemPrompt_ResolvedCommandMatrix pins #1116/#1131: which flags
 // get injected is decided by the agent the RESOLVED command actually runs —
 // through every override shape (bare name, absolute path, path+flags,
@@ -139,11 +147,12 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		resolved string
 		want     string // "" = resolved must come back unchanged
 	}{
-		// name→name (no override) for all four agents.
+		// name→name (no override) for all supported agents.
 		{"claude bare", "claude", "--plugin-dir"},
 		{"codex bare", "codex", "developer_instructions="},
 		{"aider bare", "aider", ""},
 		{"gemini bare", "gemini", ""},
+		{"amp bare", "amp", ""},
 
 		// name→path and name→path+flags overrides.
 		{"claude override path", "/opt/claude-next/bin/claude", "--plugin-dir"},
@@ -151,6 +160,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		{"codex override path with flags", "/usr/local/bin/codex --full-auto", "developer_instructions="},
 		{"aider override path", "/usr/local/bin/aider --no-auto-commits", ""},
 		{"gemini override path", "/usr/local/bin/gemini", ""},
+		{"amp override path", "/home/me/.amp/bin/amp --no-ide", ""},
 
 		// name→other-agent: the RESOLVED agent's flags, not the key's.
 		{"claude key resolved to codex gets codex flags", "codex --full-auto", "developer_instructions="},

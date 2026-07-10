@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // Shared flags
@@ -442,13 +443,13 @@ func init() {
 	// Sessions
 	sessionsCreateCmd.Flags().StringVar(&createNameFlag, "name", "", "Session name (required)")
 	sessionsCreateCmd.Flags().StringVar(&createPromptFlag, "prompt", "", "Initial prompt to send")
-	sessionsCreateCmd.Flags().StringVar(&createProgramFlag, "program", "", "Program to run (defaults to config default)")
+	sessionsCreateCmd.Flags().StringVar(&createProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	sessionsCreateCmd.Flags().BoolVar(&createHereFlag, "here", false, "Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both)")
 	sessionsCreateCmd.Flags().BoolVar(&createInPlaceFlag, "in-place", false, "Alias for --here")
 	sessionsCreateCmd.MarkFlagRequired("name")
 
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptCreateFlag, "create", false, "Auto-create the session if it doesn't exist")
-	sessionsSendPromptCmd.Flags().StringVar(&sendPromptProgramFlag, "program", "", "Program to run when creating a new session (defaults to config default)")
+	sessionsSendPromptCmd.Flags().StringVar(&sendPromptProgramFlag, "program", "", "Program to run when creating a new session (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllFlag, "all", false, "Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllReposFlag, "all-repos", false, "With --all, broadcast across every repo instead of only the current/--repo one")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptIncludeRootFlag, "include-root", false, "With --all, also deliver to the reserved root session (excluded by default)")
@@ -484,7 +485,7 @@ func init() {
 	tasksAddCmd.Flags().StringVar(&taskAddCronFlag, "cron", "", "Cron expression (exactly one of --cron / --watch-cmd)")
 	tasksAddCmd.Flags().StringVar(&taskAddWatchCmdFlag, "watch-cmd", "", "Long-running watch command; each stdout line triggers the task (exactly one of --cron / --watch-cmd)")
 	tasksAddCmd.Flags().StringVar(&taskAddTargetSessionFlag, "target-session", "", "Deliver the prompt into this session (auto-created if missing); empty creates a new session per run")
-	tasksAddCmd.Flags().StringVar(&taskAddProgramFlag, "program", "", "Program to run (defaults to config default)")
+	tasksAddCmd.Flags().StringVar(&taskAddProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	tasksAddCmd.MarkFlagRequired("name")
 
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateNameFlag, "name", "", "New task name")
@@ -493,7 +494,7 @@ func init() {
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateWatchCmdFlag, "watch-cmd", "", "New watch command (clears cron)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateTargetSessionFlag, "target-session", "", "New target session; pass an empty value to revert to a new session per run")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateEnabledFlag, "enabled", "", "Enable or disable the task (true/false)")
-	tasksUpdateCmd.Flags().StringVar(&taskUpdateProgramFlag, "program", "", "New program to run (leave unset to keep the current one)")
+	tasksUpdateCmd.Flags().StringVar(&taskUpdateProgramFlag, "program", "", "New program to run (one of: "+tmux.SupportedProgramsString()+"; leave unset to keep the current one)")
 
 	TasksCmd.AddCommand(tasksListCmd)
 	TasksCmd.AddCommand(tasksGetCmd)

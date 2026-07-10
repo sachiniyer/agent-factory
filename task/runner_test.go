@@ -112,6 +112,15 @@ func TestIsReadyContent(t *testing.T) {
 		},
 		{"gemini not ready", "gemini", "starting gemini-cli…", false},
 
+		// amp
+		{"amp welcome before prompt", "amp", "Welcome to Amp\nctrl+o for commands", false},
+		{"amp input box", "amp", "╭──────── medium ────────╮\n│  \n╰──────── /tmp/repo ─────╯", true},
+		{"amp high-mode input box", "amp", "╭──────── high ────────╮\n│ > \n╰──────── /tmp/repo ─────╯", true},
+		{"amp box without prompt anchor", "amp", "╭ downloading tools ╮\n╰ please wait ─────╯", false},
+		{"amp prompt top without input line", "amp", "╭──────── medium ────────╮\nloading plugins", false},
+		{"amp doc trust prompt", "amp", "Open documentation url for more info.\n(D)on't ask again", true},
+		{"amp not ready on arbitrary output", "amp", "loading settings", false},
+
 		// shared doc-trust guard: both substrings required.
 		{"only open documentation url without confirm", "claude", "See Open documentation url for details.", false},
 		{"only dont ask again without doc url", "aider", "Some prompt asking (D)on't ask again", false},
@@ -469,9 +478,9 @@ func TestWaitForReadyParksOnUsageLimit(t *testing.T) {
 }
 
 // TestWaitForReadyDoesNotParkNonLimitAgent guards the scope boundary (#1146): a
-// gemini/aider pane has no usage-limit matcher, so even a limit-looking banner
-// must NOT park — WaitForReady keeps polling and times out as before. gemini's
-// readiness glyph never appears here, so it hits the (shortened) timeout.
+// A non-limit-matched agent pane must not park on a limit-looking banner —
+// WaitForReady keeps polling and times out as before. gemini's readiness glyph
+// never appears here, so it hits the (shortened) timeout.
 func TestWaitForReadyDoesNotParkNonLimitAgent(t *testing.T) {
 	defer setWaitForReadyTimingForTest(200*time.Millisecond, time.Millisecond)()
 	defer setWaitLimitForTest(NewLimitDetector(nil), time.Now)()

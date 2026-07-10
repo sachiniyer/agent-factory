@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func checkSetup(ctx *scanContext, report *Report) {
@@ -179,7 +180,7 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 	if cfg.DefaultProgram == "" {
 		report.Findings = append(report.Findings, Finding{
 			Check:  "agent-program",
-			Detail: "default_program is empty — set it to one of claude, codex, aider, or gemini in ~/.agent-factory/config.toml",
+			Detail: fmt.Sprintf("default_program is empty — set it to one of %s in ~/.agent-factory/config.toml", tmux.SupportedProgramsString()),
 		})
 		return
 	}

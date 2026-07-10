@@ -641,7 +641,7 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	// here, so a codex trust/confirmation dialog was never dismissed even
 	// though isReadyContent could surface it.
 	switch i.ResolvedAgent() {
-	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini:
+	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, tmux.ProgramAmp:
 		return ts.CheckAndHandleTrustPrompt()
 	}
 	return false

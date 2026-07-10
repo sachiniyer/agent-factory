@@ -18,7 +18,7 @@ Sessions (one agent per isolated worktree):
   af sessions whoami                                   Identify your own session
   af sessions list                                     List sessions
   af sessions get <title>                              Fetch one session
-  af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini]
+  af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini|amp]
   af sessions send-prompt <title> <prompt> [--create]  Send a prompt (--create makes the session first if missing)
   af sessions preview <title>                          Snapshot another session's terminal output
   af sessions attach <title>                           Attach interactively (foreground)
@@ -66,7 +66,7 @@ func shellQuote(s string) string {
 //   - Claude Code: --plugin-dir flag only (a single "af" skill carrying afUsageReference)
 //   - Codex: -c developer_instructions="..." flag carrying the same afUsageReference
 //     (no custom-skills-folder mechanism exists in the Codex CLI; see #1043)
-//   - aider, gemini, and commands running no known agent: no injection.
+//   - aider, gemini, amp, and commands running no known agent: no injection.
 func injectSystemPrompt(resolved string) string {
 	agent := tmux.DetectAgentFromCommand(resolved)
 	if agent == tmux.ProgramClaude {

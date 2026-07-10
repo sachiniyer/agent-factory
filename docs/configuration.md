@@ -56,8 +56,8 @@ pane_border_preview = "#DC8CC3"
 
 | Field | Description |
 |-------|-------------|
-| `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`. |
-| `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`. Agent-specific launch flags (claude's `--plugin-dir`, codex's `developer_instructions`) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
+| `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`, `amp`. |
+| `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`, `amp`. Agent-specific launch flags (claude's `--plugin-dir`, codex's `developer_instructions`) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
 | `auto_yes` | Auto-accept agent prompts (experimental). |
 | `auto_update` | Startup self-update check. Defaults to `true`: `af` checks the configured `update_channel` on launch and automatically applies newer releases. Set to `false`, or set `AGENT_FACTORY_AUTO_UPDATE=0`, to opt out. |
 | `daemon_poll_interval` | Daemon polling interval in ms. |
@@ -158,7 +158,7 @@ claude = "Claude usage limit reached\\."
 codex  = "You've hit your usage limit"
 ```
 
-- Keys must be a supported agent enum (`claude`, `codex`, `aider`, `gemini`).
+- Keys must be a supported agent enum (`claude`, `codex`, `aider`, `gemini`, `amp`).
 - An override for an agent with no built-in matcher (`aider`/`gemini` today — they are API-key-metered and have no plan reset window) is ignored with a warning.
 - An uncompilable regex warns and falls back to the built-in default, so a typo can never disable detection.
 - `limit_patterns` is a detection tweak, not a behavior switch: it is honored everywhere the built-in detector runs (the daemon status poll, and the task-run startup park path).
@@ -210,7 +210,7 @@ Override the agent for new sessions with `-p`:
 af -p aider
 ```
 
-`-p` and the per-task `program` field both accept a bare agent enum only (`claude`, `codex`, `aider`, `gemini`). To pass a custom path or flags for an agent, set `program_overrides.<agent>` in your config — every session that launches that agent will use the override.
+`-p` and the per-task `program` field both accept a bare agent enum only (`claude`, `codex`, `aider`, `gemini`, `amp`). To pass a custom path or flags for an agent, set `program_overrides.<agent>` in your config — every session that launches that agent will use the override.
 
 ## In-repo config
 

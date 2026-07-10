@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/spf13/cobra"
 )
@@ -182,14 +183,14 @@ var configListCmd = &cobra.Command{
 var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
 	Short: "Set a single settable global config key",
-	Long: `Write one key into the global config.toml, editing only that value in place —
+	Long: fmt.Sprintf(`Write one key into the global config.toml, editing only that value in place —
 every comment, blank line, section header, and key ordering is preserved (the
 file is not regenerated). Only a curated set of scalar keys is settable; the
 value is validated with the same rules the config loader uses before anything is
 written, so set can never leave a config that fails to load.
 
 Settable keys:
-  default_program            agent enum (claude, codex, aider, gemini)
+  default_program            agent enum (%s)
   program_overrides.<agent>  full command string for an agent
   auto_yes                   true | false
   auto_update                true | false
@@ -209,7 +210,7 @@ Examples:
   af config set default_program codex
   af config set auto_yes true
   af config set auto_update false
-  af config set program_overrides.claude "/usr/local/bin/claude --verbose"`,
+  af config set program_overrides.claude "/usr/local/bin/claude --verbose"`, tmux.SupportedProgramsString()),
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)

@@ -2,7 +2,6 @@ package config
 
 import (
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -68,7 +67,7 @@ func sanitizeLimitPatterns(config *Config) {
 	for agent, pattern := range config.LimitPatterns {
 		if !isSupportedProgram(agent) {
 			log.WarningLog.Printf("limit_patterns key %q is not one of [%s]; ignoring this override",
-				agent, strings.Join(tmux.SupportedPrograms, ", "))
+				agent, tmux.SupportedProgramsString())
 			delete(config.LimitPatterns, agent)
 			continue
 		}

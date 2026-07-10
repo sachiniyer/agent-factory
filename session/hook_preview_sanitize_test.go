@@ -197,8 +197,9 @@ func TestSanitizeHookPreview(t *testing.T) {
 
 // TestSanitizeHookPreviewKeepsReadySignals pins the contract that
 // task.WaitForReady depends on: the per-agent ready glyphs that
-// isReadyContent matches (codex "›", claude "❯", aider "\n> ", gemini "╰")
-// must survive sanitization of a realistic raw remote capture.
+// isReadyContent matches (codex "›", claude "❯", aider "\n> ", gemini "╰",
+// amp's mode-labeled input frame) must survive sanitization of a realistic raw
+// remote capture.
 func TestSanitizeHookPreviewKeepsReadySignals(t *testing.T) {
 	cases := []struct {
 		name string
@@ -224,6 +225,11 @@ func TestSanitizeHookPreviewKeepsReadySignals(t *testing.T) {
 			name: "gemini frame corner",
 			raw:  "\x1b[2J╭───╮\r\n╰───╯\r\n",
 			want: "╰",
+		},
+		{
+			name: "amp input frame",
+			raw:  "\x1b[2JWelcome to Amp\r\n╭──────── medium ────────╮\r\n│ > \x1b[?25h",
+			want: "╭",
 		},
 	}
 	for _, tc := range cases {

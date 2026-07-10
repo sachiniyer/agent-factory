@@ -3,6 +3,7 @@ package task
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 var (
 	waitForReadyTimeout      = 60 * time.Second
 	waitForReadyPollInterval = 500 * time.Millisecond
+	ampPromptFrameTop        = regexp.MustCompile(`(?m)^\s*╭[─ ]+(low|medium|high|deep)[─ ]+╮\s*\n\s*│`)
 )
 
 // LimitReachedError is what WaitForReady returns when the agent shows a
@@ -99,6 +101,13 @@ func isReadyContent(content, agent string) bool {
 		// TODO(#714): replace with a confirmed gemini-specific ready string.
 		return strings.Contains(content, "╰") ||
 			isDocTrustPrompt(content)
+	case tmux.ProgramAmp:
+		// Amp is ready when its input-prompt frame is visible. A bare
+		// box-drawing character is too broad: loading frames, banners, and
+		// stale scrollback can all contain the same glyphs before the prompt is
+		// accepting input.
+		return isAmpPromptFrame(content) ||
+			isDocTrustPrompt(content)
 	case tmux.ProgramClaude:
 		if strings.Contains(content, "❯") ||
 			strings.Contains(content, "Do you trust") ||
@@ -111,6 +120,10 @@ func isReadyContent(content, agent string) bool {
 		// the pane rendered any non-blank output.
 		return strings.TrimSpace(content) != ""
 	}
+}
+
+func isAmpPromptFrame(content string) bool {
+	return ampPromptFrameTop.MatchString(content)
 }
 
 // isDocTrustPrompt reports whether content shows the documentation-link trust

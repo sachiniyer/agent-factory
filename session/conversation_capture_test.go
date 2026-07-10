@@ -49,7 +49,9 @@ func TestCaptureAgentConversation_CodexAmbiguousConcurrentRollouts(t *testing.T)
 
 func TestCaptureAgentConversation_UnsupportedAgentGracefullyNoID(t *testing.T) {
 	snap := BeginConversationCapture()
-	conv, err := CaptureAgentConversation(tmux.ProgramGemini, snap, 0)
-	require.NoError(t, err)
-	require.False(t, conv.HasID())
+	for _, agent := range []string{tmux.ProgramGemini, tmux.ProgramAmp} {
+		conv, err := CaptureAgentConversation(agent, snap, 0)
+		require.NoError(t, err)
+		require.False(t, conv.HasID())
+	}
 }

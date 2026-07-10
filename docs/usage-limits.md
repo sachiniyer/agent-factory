@@ -109,10 +109,12 @@ failure even though nothing was actually wrong — you'd just hit your plan limi
 | `codex` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `gemini` | — | — | — | — | — |
 | `aider` | — | — | — | — | — |
+| `amp` | — | — | — | — | — |
 
 Auto-resume covers `claude`/`codex` because their banners carry a parseable
-reset window; `gemini`/`aider` are API-key-metered (transient 429s the CLI
-retries) with no plan window to schedule against.
+reset window; other supported agents either do not expose a known plan-reset
+banner or are API-key-metered (transient 429s the CLI retries) with no plan
+window to schedule against.
 
 ## Custom detection patterns
 
@@ -125,7 +127,8 @@ claude = "Claude usage limit reached\\."
 codex  = "You've hit your usage limit"
 ```
 
-Keys must be a supported agent (`claude`, `codex`, `aider`, `gemini`); an
-override for an agent with no built-in matcher (`aider`/`gemini` today) is
-ignored, and an uncompilable regex warns and falls back to the built-in default.
+Keys must be a supported agent (`claude`, `codex`, `aider`, `gemini`, `amp`);
+an override for an agent with no built-in matcher (`aider`/`gemini`/`amp`
+today) is ignored, and an uncompilable regex warns and falls back to the
+built-in default.
 See [configuration.md](configuration.md#custom-usage-limit-detection-limit_patterns).

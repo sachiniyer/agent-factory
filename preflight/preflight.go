@@ -125,6 +125,8 @@ func agentDisplayName(agent string) string {
 		return "Aider"
 	case tmux.ProgramGemini:
 		return "Gemini"
+	case tmux.ProgramAmp:
+		return "Amp"
 	default:
 		if agent == "" {
 			return "the configured agent"
