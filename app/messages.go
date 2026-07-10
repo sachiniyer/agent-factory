@@ -4,7 +4,9 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-type hideErrMsg struct{}
+type hideErrMsg struct {
+	noticeID uint64
+}
 type previewTickMsg struct{}
 type instanceChangedMsg struct{}
 

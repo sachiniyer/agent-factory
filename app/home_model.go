@@ -246,6 +246,10 @@ type home struct {
 	menu *ui.Menu
 	// errBox displays error messages inside the status bar (shared handle)
 	errBox *ui.ErrBox
+	// transientNoticeID is a generation token for the status-bar notice timer.
+	// Each new error/success notice increments it; a stale hideErrMsg from an
+	// older timer must not clear a newer notice.
+	transientNoticeID uint64
 	// alarmBanner is the top-of-screen delivery-failure alarm (#1238): a
 	// persistent red bar raised while the daemon snapshot reports a watch task
 	// whose events are failing to reach their target session. Fed each poll by
@@ -516,7 +520,7 @@ func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
 	msg := fmt.Sprintf("%s hidden: terminal too narrow for %d panes; resize wider%s",
 		paneStatusTitle(p), paneCount, paneRecoveryStatusHint())
 	m.pendingPaneAutoHideStatus = msg
-	m.errBox.SetError(errors.New(msg))
+	m.setTransientNotice(errors.New(msg))
 }
 
 func paneStatusTitle(p *store.OpenPane) string {

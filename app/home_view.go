@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -20,13 +21,29 @@ func (m *home) showTransientError(err error) tea.Cmd {
 	if err == nil {
 		return nil
 	}
+	return m.clearTransientMessageAfterDelay(m.setTransientNotice(err))
+}
+
+func (m *home) showTransientMessage(message string) tea.Cmd {
+	if strings.TrimSpace(message) == "" {
+		return nil
+	}
+	return m.clearTransientMessageAfterDelay(m.setTransientNotice(errors.New(message)))
+}
+
+func (m *home) setTransientNotice(err error) uint64 {
+	m.transientNoticeID++
 	m.errBox.SetError(err)
+	return m.transientNoticeID
+}
+
+func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case <-m.ctx.Done():
 		case <-time.After(3 * time.Second):
 		}
-		return hideErrMsg{}
+		return hideErrMsg{noticeID: noticeID}
 	}
 }
 
@@ -56,7 +73,7 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 			if msg := action(); msg != nil {
 				if err, ok := msg.(error); ok {
 					log.ErrorLog.Printf("confirmation action failed: %v", err)
-					m.errBox.SetError(err)
+					m.setTransientNotice(err)
 				} else {
 					// Stash non-error messages so handleStateConfirm can
 					// forward them into the Bubble Tea event loop.

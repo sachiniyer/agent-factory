@@ -17,7 +17,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	defer m.persistTUIViewStateAfter(msg)
 	switch msg := msg.(type) {
 	case hideErrMsg:
-		m.errBox.Clear()
+		if msg.noticeID == m.transientNoticeID {
+			m.errBox.Clear()
+		}
 	case previewTickMsg:
 		// While the user is attached to an instance, the preview/terminal
 		// panes are hidden behind the tmux client they detached into. Running
@@ -148,12 +150,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	case taskTriggeredMsg:
-		// The daemon-side run (#1169) failed — surface it. Success needs no
-		// action: the resulting session and updated task status live-project in.
+		// The daemon-side run (#1169) failed — surface it. On success, give a
+		// short positive acknowledgement while the resulting session and updated
+		// task status live-project in from the daemon snapshot.
 		if msg.err != nil {
 			return m, m.handleError(fmt.Errorf("failed to trigger task %q: %w", msg.title, msg.err))
 		}
-		return m, nil
+		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
 	case tea.MouseMsg:
 		// First-class mouse (#1024 R4, closes #1025): every event is
 		// resolved through the zone registry the last View() rebuilt and
