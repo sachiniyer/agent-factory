@@ -67,7 +67,15 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 	}
 	if existing := m.store.FindOpenPane(target.instance, target.tab); existing != nil && existing != owner {
 		m.cancelPanePreview(false)
-		m.focusOpenPane(existing)
+		// Landing on an already-open tab focuses its pane — the open-or-focus
+		// contract (#1493). But NEVER from the idle 100ms preview tick: doing so
+		// would keep yanking focus back onto the selected instance's pane after
+		// the user Tabbed to another pane, so the focus ring could never traverse
+		// the other panes or rest on the tree (#1558). On the tick the tab being
+		// open elsewhere just means "no preview to show" — leave focus put.
+		if !m.inPreviewTick {
+			m.focusOpenPane(existing)
+		}
 		return
 	}
 	if m.isPanePreviewSuppressed(original, target) {
