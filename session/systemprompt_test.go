@@ -125,10 +125,36 @@ func TestInjectSystemPrompt_Gemini(t *testing.T) {
 }
 
 func TestInjectSystemPrompt_Amp(t *testing.T) {
+	// Amp's seam is a file, not a flag: point HOME at a temp dir so the write
+	// lands there instead of the real ~/.config/amp (amp discovers skills under
+	// $HOME/.config, ignoring XDG_CONFIG_HOME).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	result := injectSystemPrompt("amp")
 
+	// The launch command must come back byte-identical — that is what keeps the
+	// amp spawn safe (#1582), since amp dies on unknown flags (#1116/#1131).
 	if result != "amp" {
-		t.Errorf("expected amp unchanged (no system-prompt flag), got %q", result)
+		t.Errorf("expected amp command unchanged (file seam, no flag), got %q", result)
+	}
+
+	// The af skill must have been written where amp discovers it, in the
+	// af-owned "agent-factory" namespace, carrying the same afUsageReference the
+	// other agents receive plus the af-managed marker.
+	skillPath := filepath.Join(home, ".config", "amp", "skills", "agent-factory", "SKILL.md")
+	content, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("expected af skill written to %s: %v", skillPath, err)
+	}
+	if !strings.Contains(string(content), "af sessions whoami") {
+		t.Errorf("expected afUsageReference in amp SKILL.md, got %q", content)
+	}
+	if !strings.HasPrefix(string(content), "---\nname: agent-factory\n") {
+		t.Errorf("expected amp SKILL.md to start with name frontmatter, got %q", content)
+	}
+	if !strings.Contains(string(content), ampSkillMarker) {
+		t.Errorf("expected amp SKILL.md to carry the af-managed marker, got %q", content)
 	}
 }
 
@@ -141,6 +167,9 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 // instantly and the spawn dies as an opaque timeout.
 func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// The amp rows write their file seam under $HOME/.config/amp; keep it off
+	// the real home.
+	t.Setenv("HOME", t.TempDir())
 
 	tests := []struct {
 		name     string
@@ -213,6 +242,122 @@ func TestAfUsageReference_CoversFullSurface(t *testing.T) {
 		if !strings.Contains(afUsageReference, want) {
 			t.Errorf("afUsageReference must document %q", want)
 		}
+	}
+}
+
+func TestEnsureAmpSkillDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	skillDir, err := ensureAmpSkillDir()
+	if err != nil {
+		t.Fatalf("ensureAmpSkillDir() failed: %v", err)
+	}
+
+	// Must land exactly where amp searches, in the af-owned namespace:
+	// $HOME/.config/amp/skills/agent-factory.
+	expected := filepath.Join(home, ".config", "amp", "skills", "agent-factory")
+	if skillDir != expected {
+		t.Errorf("expected amp skill dir %q, got %q", expected, skillDir)
+	}
+
+	content, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("expected SKILL.md written: %v", err)
+	}
+	// name + description frontmatter (amp requires both), the af-managed marker,
+	// then the shared body.
+	for _, want := range []string{
+		"name: agent-factory",
+		"description: Manage Agent Factory (af) sessions",
+		ampSkillMarker,
+		"af sessions whoami",
+		"af sessions archive --self",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("expected amp SKILL.md to contain %q, got %q", want, content)
+		}
+	}
+}
+
+// ensureAmpSkillDir must never clobber a SKILL.md it does not own. amp's skills
+// dir is the user's global amp config; a file there without the af-managed
+// marker belongs to the user (or another tool) and must survive untouched
+// (#1585 review, finding 1). A file WITH the marker is af-owned and regenerates.
+func TestEnsureAmpSkillDir_NonDestructive(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	skillDir := filepath.Join(home, ".config", "amp", "skills", "agent-factory")
+	path := filepath.Join(skillDir, "SKILL.md")
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatalf("seed mkdir: %v", err)
+	}
+	userSkill := "---\nname: agent-factory\ndescription: my own skill\n---\nhand-written, keep me\n"
+	if err := os.WriteFile(path, []byte(userSkill), 0644); err != nil {
+		t.Fatalf("seed user skill: %v", err)
+	}
+
+	if _, err := ensureAmpSkillDir(); err != nil {
+		t.Fatalf("ensureAmpSkillDir() must not error on a foreign skill: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != userSkill {
+		t.Errorf("expected the user's un-marked skill left untouched, got %q", got)
+	}
+
+	// A file that DOES carry the marker is af-owned and gets regenerated in place.
+	if err := os.WriteFile(path, []byte("stale\n<!-- "+ampSkillMarker+" -->\n"), 0644); err != nil {
+		t.Fatalf("seed af-owned skill: %v", err)
+	}
+	if _, err := ensureAmpSkillDir(); err != nil {
+		t.Fatalf("ensureAmpSkillDir() on af-owned file: %v", err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != ampSkillDoc {
+		t.Errorf("expected af-owned skill regenerated to ampSkillDoc, got %q", got)
+	}
+}
+
+// ensureAmpSkillDir must resolve under $HOME/.config REGARDLESS of
+// XDG_CONFIG_HOME. amp honors XDG for settings.json but NOT for skills discovery
+// (verified against the amp CLI), so honoring XDG here would write the skill
+// where amp never looks for a user who has XDG_CONFIG_HOME set.
+func TestEnsureAmpSkillDir_IgnoresXDG(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // a DIFFERENT dir; must be ignored
+
+	skillDir, err := ensureAmpSkillDir()
+	if err != nil {
+		t.Fatalf("ensureAmpSkillDir() failed: %v", err)
+	}
+	expected := filepath.Join(home, ".config", "amp", "skills", "agent-factory")
+	if skillDir != expected {
+		t.Errorf("expected skill dir under HOME %q, got %q", expected, skillDir)
+	}
+}
+
+func TestEnsureAmpSkillDir_Idempotent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	dir1, err := ensureAmpSkillDir()
+	if err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+	dir2, err := ensureAmpSkillDir()
+	if err != nil {
+		t.Fatalf("second call failed: %v", err)
+	}
+	if dir1 != dir2 {
+		t.Errorf("expected same dir on repeated calls, got %q and %q", dir1, dir2)
 	}
 }
 
