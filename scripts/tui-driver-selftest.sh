@@ -107,6 +107,43 @@ _enter_interactive_and_probe_literal_send() {
     sleep "$AF_DRIVER_POLL"
 }
 
+# _expect_pane_text_not_counted_as_tabs — regression proof for the #1561
+# review finding. _af_tab_count must count sidebar tab rows (including
+# custom-named ones) but MUST NOT count tree-like text a shell prints inside a
+# workspace pane — otherwise af_close_tab regains a false timeout from the
+# opposite direction. Drive this off a synthetic capture (stub af_capture in a
+# subshell) so it is deterministic and does not depend on a live pane happening
+# to print the right thing: two real sidebar tab rows on the left (one built-in
+# `Preview`, one CUSTOM `cli-check`), and a bordered pane on the right whose
+# `tree` output prints `├ 1 foo` / `└ 2 bar`. Exactly the two sidebar rows must
+# count.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_pane_text_not_counted_as_tabs() {
+    local screen count
+    # Two dangerous pane rows are represented: one where the pane's `├ 1 foo`
+    # shares a line with a sidebar tab row, and one where the sidebar column is
+    # BLANK so only the pane's `│` border precedes the pane's `└ 2 bar`.
+    screen="$(cat <<'SCREEN'
+ ▾ beta                        │ ╭─ 2 cli-check ──────────────╮
+   ├ 1 Preview                 │ │ $ tree                     │
+   └ 2 cli-check               │ │ ├ 1 foo                    │
+ ▸ alpha                       │ │   subdir                   │
+                               │ │ └ 2 bar                    │
+                               │ ╰────────────────────────────╯
+SCREEN
+)"
+    # Override af_capture only inside this command substitution's subshell.
+    count="$(af_capture() { printf '%s\n' "$screen"; }; _af_tab_count)"
+    if [ "$count" != "2" ]; then
+        _af_log "pane text inflated the tab count: got '$count', want 2 (the two sidebar rows)"
+        _af_log "----- synthetic screen -----"
+        printf '%s\n' "$screen" >&2
+        _af_log "----------------------------"
+        return 1
+    fi
+    return 0
+}
+
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
@@ -164,6 +201,7 @@ step "detach (and prove the attach client was reaped)"      af_detach
 
 step "assert selection survived attach/detach"              af_expect_selected beta
 step "assert no orphan tmux attach clients"                 af_assert_no_orphan_clients
+step "pane text must not inflate the tab count (#1561 review)" _expect_pane_text_not_counted_as_tabs
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"
 printf 'the #1156 mis-drive is now a deterministic scenario.\n'
