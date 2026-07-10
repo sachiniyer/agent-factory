@@ -586,13 +586,23 @@ uncommitted changes. The session is not deleted — it becomes a quiescent
 "archived" row that survives restarts and can be brought back later with
 'af sessions restore <title>'.
 
+With --self, archive the current session (resolved via whoami) instead of a
+named one — use it from inside a session when your work is done. --self and a
+<title> argument are mutually exclusive.
+
 Not available for remote or in-place (--here) sessions: archive relocates the
 worktree, which those don't own. The relocated worktree path is printed on
 success.
 
 ```
-af sessions archive <title>
+af sessions archive [title] [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--self` |  | Archive the current session (resolved via whoami); use from inside a session when your work is done |
 
 **Global flags**
 

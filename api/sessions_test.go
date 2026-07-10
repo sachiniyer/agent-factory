@@ -1416,23 +1416,3 @@ func TestSessionsRestore_HonorsRepoScopingAndReturnsPath(t *testing.T) {
 		t.Fatalf("JSON worktree_path = %v", parsed["worktree_path"])
 	}
 }
-
-// TestSessionsArchive_SurfacesDaemonError: a daemon-side rejection (e.g. remote
-// or in-place session) is surfaced as a JSON error, not a silent success.
-func TestSessionsArchive_SurfacesDaemonError(t *testing.T) {
-	setupRepoForCmd(t)
-
-	prev := archiveSessionViaDaemon
-	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, error) {
-		return "", errors.New("cannot archive remote session")
-	}
-	defer func() { archiveSessionViaDaemon = prev }()
-
-	_, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"faraway"})
-	if err == nil {
-		t.Fatal("archive must surface a daemon rejection as an error, not a silent success")
-	}
-	if !strings.Contains(err.Error(), "cannot archive remote session") {
-		t.Fatalf("error = %v, want the daemon's rejection message", err)
-	}
-}

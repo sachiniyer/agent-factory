@@ -201,6 +201,7 @@ func TestAfUsageReference_CoversFullSurface(t *testing.T) {
 		"af sessions whoami", "af sessions list", "af sessions get",
 		"af sessions create", "af sessions send-prompt", "af sessions preview",
 		"af sessions attach", "af sessions kill",
+		"af sessions archive --self",
 		"af sessions tab-create", "af sessions tab-delete",
 		"af tasks list", "af tasks get", "af tasks add", "af tasks update",
 		"af tasks trigger", "af tasks remove",

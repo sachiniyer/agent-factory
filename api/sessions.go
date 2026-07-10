@@ -30,6 +30,7 @@ var (
 	archiveSessionViaDaemon = daemon.ArchiveSession
 	restoreSessionViaDaemon = daemon.RestoreSession
 	sessionsKillForce       bool
+	sessionsArchiveSelf     bool
 	sendPromptViaDaemon     = daemon.SendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPrompt
 	createTabViaDaemon      = daemon.CreateTab
@@ -85,6 +86,33 @@ func whoamiSession(tmuxName string) (*session.InstanceData, error) {
 		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
 	}
 	return diskWhoami(tmuxName)
+}
+
+// currentTmuxName returns the tmux session name of the calling process. Held in
+// a var so `whoami`/`archive --self` tests can resolve a session without a real
+// tmux server.
+var currentTmuxName = func() (string, error) {
+	out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
+	if err != nil {
+		return "", fmt.Errorf("not running inside a tmux session: %w", err)
+	}
+	name := strings.TrimSpace(string(out))
+	if name == "" {
+		return "", fmt.Errorf("could not determine tmux session name")
+	}
+	return name, nil
+}
+
+// resolveSelfSession identifies the caller's own af session the same way
+// `af sessions whoami` does: match the current tmux session name against the
+// stored instances. Shared by the whoami command and `sessions archive --self`
+// so the two cannot drift.
+func resolveSelfSession() (*session.InstanceData, error) {
+	tmuxName, err := currentTmuxName()
+	if err != nil {
+		return nil, err
+	}
+	return whoamiSession(tmuxName)
 }
 
 var sessionsListCmd = &cobra.Command{
@@ -733,7 +761,7 @@ to skip that guard and destroy the session anyway.`,
 }
 
 var sessionsArchiveCmd = &cobra.Command{
-	Use:   "archive <title>",
+	Use:   "archive [title]",
 	Short: "Finish with a session by archiving it for later restore",
 	Long: `Archive is the default way to finish with a session: tear down its tmux
 and move its git worktree out to the global archive directory
@@ -742,28 +770,75 @@ uncommitted changes. The session is not deleted — it becomes a quiescent
 "archived" row that survives restarts and can be brought back later with
 'af sessions restore <title>'.
 
+With --self, archive the current session (resolved via whoami) instead of a
+named one — use it from inside a session when your work is done. --self and a
+<title> argument are mutually exclusive.
+
 Not available for remote or in-place (--here) sessions: archive relocates the
 worktree, which those don't own. The relocated worktree path is printed on
 success.`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		// Honor --repo scoping (#761 class), mirroring kill: an empty repoID
-		// preserves the all-repo search; a non-empty one confines the archive to
-		// that repo so a same-titled session in another repo is never touched.
-		repoID, err := resolveRepoID()
+		title := ""
+		if len(args) == 1 {
+			title = args[0]
+		}
+
+		// --self resolves the caller's own session the way whoami does; it is
+		// mutually exclusive with a positional <title>. The remote/in-place
+		// guard needs no special handling here: --self routes through the same
+		// daemon RPC as the title path, so the daemon still rejects a
+		// non-relocatable worktree.
+		var repoID string
+		if sessionsArchiveSelf {
+			if title != "" {
+				return jsonError(fmt.Errorf("cannot combine --self with a <title> argument; --self archives the current session"))
+			}
+			data, err := resolveSelfSession()
+			if err != nil {
+				return jsonError(fmt.Errorf("--self must be run from inside an af session: %w", err))
+			}
+			title = data.Title
+			// Scope by the RESOLVED session's OWN repo, never cwd/--repo. An
+			// agent that cd'd into another repo must still archive ITS OWN
+			// session — scoping by cwd would archive a same-titled namesake in
+			// the wrong repo, or fail "instance not found" while leaving the
+			// caller's real session alive. Mirror Storage's root→repoID
+			// derivation (#667): fall back to Path when no worktree RepoPath.
+			// A worktree-less session (remote backend) leaves repoID empty so
+			// the resolved title is matched all-repo and the daemon's remote
+			// guard still fires with its own clear message.
+			root := data.Worktree.RepoPath
+			if root == "" {
+				root = data.Path
+			}
+			if root != "" {
+				repoID = config.RepoIDFromRoot(root)
+			}
+		} else {
+			if title == "" {
+				return jsonError(fmt.Errorf("a session <title> is required (or pass --self to archive the current session)"))
+			}
+			// Honor --repo scoping (#761 class), mirroring kill: an empty repoID
+			// preserves the all-repo search; a non-empty one confines the archive
+			// to that repo so a same-titled session in another repo is never
+			// touched.
+			var err error
+			repoID, err = resolveRepoID()
+			if err != nil {
+				return jsonError(err)
+			}
+		}
+
+		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{Title: title, RepoID: repoID})
 		if err != nil {
 			return jsonError(err)
 		}
 
-		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{Title: args[0], RepoID: repoID})
-		if err != nil {
-			return jsonError(err)
-		}
-
-		return jsonOut(map[string]any{"ok": true, "title": args[0], "archived_path": archivedPath})
+		return jsonOut(map[string]any{"ok": true, "title": title, "archived_path": archivedPath})
 	},
 }
 
@@ -838,20 +913,10 @@ var sessionsWhoamiCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
-		// Get the current tmux session name
-		out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
-		if err != nil {
-			return jsonError(fmt.Errorf("not running inside a tmux session: %w", err))
-		}
-		tmuxName := strings.TrimSpace(string(out))
-		if tmuxName == "" {
-			return jsonError(fmt.Errorf("could not determine tmux session name"))
-		}
-
-		// Match the tmux session against the daemon's authoritative in-memory
-		// state when a daemon is running, falling back to a disk scan otherwise
-		// (#1029 PR 2). Never spawns a daemon.
-		data, err := whoamiSession(tmuxName)
+		// Match the current tmux session against the daemon's authoritative
+		// in-memory state when a daemon is running, falling back to a disk scan
+		// otherwise (#1029 PR 2). Never spawns a daemon.
+		data, err := resolveSelfSession()
 		if err != nil {
 			return jsonError(err)
 		}
