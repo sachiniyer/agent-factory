@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -31,28 +30,7 @@ const (
 	// hidden entirely when no session is archived, so the folder only appears
 	// once there is something in it.
 	SectionArchived
-	// SectionProjects lists the projects af has seen (#1547 sidebar surface) in
-	// a folder pinned at the very bottom of the rail, below Archived, collapsed
-	// by default. Its rows are NOT instance rows: ItemIndex indexes the sidebar's
-	// pushed project list (SetProjects), each row carrying a repo's display name,
-	// session count, and whether it is the active (scoped-to) project. Selecting
-	// a row re-scopes the rail to that project via the #1547 switch path. The
-	// header is hidden only when no project list has been pushed; in the running
-	// TUI the active project is always present, so it always shows.
-	SectionProjects
 )
-
-// SidebarProject is one row of the Projects section: a repo af has seen, with
-// its display name (repo basename), absolute main-worktree root, tracked
-// session count, and whether it is the project the rail is currently scoped to.
-// The app derives these from the same discovery the ctrl+p picker uses and
-// pushes them via SetProjects.
-type SidebarProject struct {
-	Name         string
-	Root         string
-	SessionCount int
-	Active       bool
-}
 
 // SidebarItem represents one visible row in the sidebar. Within the Instances
 // section a non-header row is either an instance row or — the tree dimension
@@ -118,20 +96,6 @@ var blurredTitle = lipgloss.NewStyle().
 	Foreground(activeTheme.ForegroundStrong)
 
 var autoYesStyle = lipgloss.NewStyle().
-	Background(activeTheme.SelectionBackground).
-	Foreground(activeTheme.SelectionForeground)
-
-// projectRowStyle / projectRowActiveStyle / projectRowSelectedStyle render the
-// Projects section rows: the plain row, the active (scoped-to) project's accent
-// marker, and the cursor-selected row (selection background wins over active).
-var projectRowStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.Foreground)
-
-var projectRowActiveStyle = lipgloss.NewStyle().
-	Bold(true).
-	Foreground(activeTheme.Accent)
-
-var projectRowSelectedStyle = lipgloss.NewStyle().
 	Background(activeTheme.SelectionBackground).
 	Foreground(activeTheme.SelectionForeground)
 
@@ -203,13 +167,6 @@ type Sidebar struct {
 	// an in-place project switch (#1461). Empty falls back to "Agent Factory".
 	projectName string
 
-	// projects backs the Projects section's rows (SetProjects). projectsSig is a
-	// fingerprint of that list folded into structureSig so a pushed change (new
-	// project, changed count, active flip) re-derives the row list on the next
-	// read, matching the lazy sync every other structural input uses.
-	projects    []SidebarProject
-	projectsSig string
-
 	// rect is the pane's screen rect (SetRect); zone registration needs the
 	// absolute origin, not just the size.
 	rect layout.Rect
@@ -225,14 +182,10 @@ func NewSidebar(spin *spinner.Model, autoYes bool, proj *store.Projection) *Side
 		proj: proj,
 		sections: []SidebarSection{
 			{Kind: SectionInstances, Title: "Instances", Expanded: true},
-			// Archived (#1028): pinned below the live instances, collapsed by
-			// default. Rendered only when it holds archived sessions
-			// (rebuildVisibleItems skips the empty folder).
+			// Archived (#1028): pinned last, collapsed by default. Rendered only
+			// when it holds archived sessions (rebuildVisibleItems skips the empty
+			// folder).
 			{Kind: SectionArchived, Title: "Archived", Expanded: false},
-			// Projects: pinned at the very bottom of the rail, collapsed by
-			// default. Rendered only once a project list is pushed
-			// (rebuildVisibleItems skips it while empty).
-			{Kind: SectionProjects, Title: "Projects", Expanded: false},
 		},
 		renderer:      tree.NewInstanceRenderer(spin),
 		autoyes:       autoYes,
@@ -286,20 +239,6 @@ func (s *Sidebar) Blur() { s.focused = false }
 // (#1461). Empty restores the default "Agent Factory" label.
 func (s *Sidebar) SetProjectName(name string) { s.projectName = name }
 
-// SetProjects replaces the Projects section's row list. The app pushes it from
-// the same cross-repo discovery the ctrl+p picker uses, whenever the list can
-// change (launch, project switch, section expand). The row list is re-derived
-// lazily on the next read: the pushed list is fingerprinted into projectsSig so
-// structureSig moves and syncFromStore rebuilds — no eager rebuild here.
-func (s *Sidebar) SetProjects(projects []SidebarProject) {
-	s.projects = projects
-	var b strings.Builder
-	for _, p := range projects {
-		fmt.Fprintf(&b, "%s\x1f%d\x1f%t\x1e", p.Root, p.SessionCount, p.Active)
-	}
-	s.projectsSig = b.String()
-}
-
 // HandleKey implements layout.Pane. Tree navigation stays routed through the
 // root model's global bindings in PR 4 (the keys also work when the workspace
 // pane has focus); per-pane routing arrives with the split (#1024 PR 5).
@@ -336,11 +275,8 @@ func (s *Sidebar) structureSig() string {
 	// identifies the partition, so it catches both a single archive/restore and
 	// a same-count swap.
 	_, archived := partitionByArchived(s.proj.GetInstances())
-	// Fold in the pushed Projects list (SetProjects): it is independent of the
-	// projection, so without projectsSig a project add/count/active change would
-	// not re-derive the row list until the next structural change.
-	return fmt.Sprintf("%d|%s|%d|%t|%s|%v|%s",
-		s.proj.Version(), selTitle, slots, expandable, s.treeCollapsed, archived, s.projectsSig)
+	return fmt.Sprintf("%d|%s|%d|%t|%s|%v",
+		s.proj.Version(), selTitle, slots, expandable, s.treeCollapsed, archived)
 }
 
 // instanceExpanded reports whether inst's tab children are currently shown:

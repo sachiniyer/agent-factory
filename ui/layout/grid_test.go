@@ -428,21 +428,24 @@ func TestGridVisibleRegionsMatchLayout(t *testing.T) {
 	l := layout.Grid{Panes: 2}.Solve(160, 48)
 	require.Equal(t, 2, l.PaneCount())
 	require.True(t, l.AutomationsVisible)
+	require.True(t, l.ProjectsVisible)
 	regions := l.VisibleRegions()
-	assert.Len(t, regions, 7)
+	assert.Len(t, regions, 9)
 	assert.Equal(t, l.Tree, regions[layout.RegionTree])
 	assert.Equal(t, l.Panes[0], regions[layout.PaneRegion(0)])
 	assert.Equal(t, l.Panes[1], regions[layout.PaneRegion(1)])
 	assert.Equal(t, l.Dividers[0], regions[layout.DividerRegion(0)])
 	assert.Equal(t, l.RailRule, regions[layout.RegionRailRule])
 	assert.Equal(t, l.Automations, regions[layout.RegionAutomations])
+	assert.Equal(t, l.ProjectsRule, regions[layout.RegionProjectsRule])
+	assert.Equal(t, l.Projects, regions[layout.RegionProjects])
 	assert.Equal(t, l.StatusBar, regions[layout.RegionStatusBar])
 	assert.NotContains(t, regions, layout.RegionWorkspace,
 		"the bare workspace region only exists with no panes open")
 
 	single := layout.Grid{Panes: 1}.Solve(160, 48)
 	regions = single.VisibleRegions()
-	assert.Len(t, regions, 5)
+	assert.Len(t, regions, 7)
 	assert.NotContains(t, regions, layout.PaneRegion(1))
 	assert.NotContains(t, regions, layout.DividerRegion(0))
 
@@ -456,12 +459,15 @@ func TestGridVisibleRegionsMatchLayout(t *testing.T) {
 	assert.Len(t, regions, 3)
 	assert.NotContains(t, regions, layout.RegionAutomations)
 	assert.NotContains(t, regions, layout.RegionRailRule)
+	assert.NotContains(t, regions, layout.RegionProjects)
+	assert.NotContains(t, regions, layout.RegionProjectsRule)
 }
 
-// TestGridSolveAutomationsInRail pins the #1087/#1090 geometry: the
-// automations section lives INSIDE the left rail, bottom-aligned against the
-// status bar, separated from the tree by a 1-row full-rail-width rule — and
-// the workspace panes run the full height above the status bar.
+// TestGridSolveAutomationsInRail pins the #1087/#1090 geometry as revised by the
+// #1588 follow-up: the rail stacks tree, rule, automations, projects-rule, and
+// the bottom-most Projects section — the Projects section (not automations) is
+// now pinned against the status bar — and the workspace panes run the full
+// height above the status bar.
 func TestGridSolveAutomationsInRail(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -478,18 +484,27 @@ func TestGridSolveAutomationsInRail(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			l := tc.grid.Solve(tc.w, tc.h)
 			require.True(t, l.AutomationsVisible)
+			require.True(t, l.ProjectsVisible)
 			require.Equal(t, tc.panes, l.PaneCount())
 
-			// Rail column: tree, rule, automations share X and W and stack
-			// exactly, with automations pinned to the status bar.
+			// Rail column: tree, rule, automations, projects-rule, projects share
+			// X and W and stack exactly, with the Projects section (not
+			// automations) pinned to the status bar (#1588 follow-up).
 			assert.Equal(t, l.Tree.X, l.RailRule.X)
 			assert.Equal(t, l.Tree.X, l.Automations.X)
+			assert.Equal(t, l.Tree.X, l.ProjectsRule.X)
+			assert.Equal(t, l.Tree.X, l.Projects.X)
 			assert.Equal(t, l.Tree.W, l.RailRule.W, "the rule spans the full rail width")
 			assert.Equal(t, l.Tree.W, l.Automations.W, "automations span the full rail width")
+			assert.Equal(t, l.Tree.W, l.ProjectsRule.W, "the projects rule spans the full rail width")
+			assert.Equal(t, l.Tree.W, l.Projects.W, "projects span the full rail width")
 			assert.Equal(t, layout.RailRuleRows, l.RailRule.H)
+			assert.Equal(t, layout.RailRuleRows, l.ProjectsRule.H)
 			assert.Equal(t, l.Tree.Bottom(), l.RailRule.Y, "the rule sits directly under the tree")
 			assert.Equal(t, l.RailRule.Bottom(), l.Automations.Y, "automations sit directly under the rule")
-			assert.Equal(t, l.StatusBar.Y, l.Automations.Bottom(), "automations are bottom-aligned in the rail")
+			assert.Equal(t, l.Automations.Bottom(), l.ProjectsRule.Y, "the projects rule sits directly under automations")
+			assert.Equal(t, l.ProjectsRule.Bottom(), l.Projects.Y, "projects sit directly under the projects rule")
+			assert.Equal(t, l.StatusBar.Y, l.Projects.Bottom(), "the Projects section is bottom-aligned in the rail")
 
 			// Workspace: full height above the status bar (#1090), every
 			// pane and divider full-height too.

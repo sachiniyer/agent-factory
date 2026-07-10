@@ -398,8 +398,9 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 	if m.state != stateDefault {
 		return nil, false
 	}
-	// Don't highlight when the automations strip has the keyboard
-	if m.ring.Active() == layout.RegionAutomations {
+	// Don't highlight when a focused bottom rail section (automations or
+	// projects) has the keyboard — its own cursor keys own the input.
+	if active := m.ring.Active(); active == layout.RegionAutomations || active == layout.RegionProjects {
 		return nil, false
 	}
 	name, ok := keys.GlobalKeyStringsMap[msg.String()]
@@ -463,6 +464,14 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// route here too (open the manager overlay / return to the tree), while
 	// Tab/Shift-Tab, quit, and the global overlay keys (S/H/?) fall through.
 	if mod, cmd, consumed := m.handleAutomationsFocus(msg); consumed {
+		return mod, cmd
+	}
+
+	// The focused bottom Projects section owns its cursor keys; Enter switches
+	// the rail to the cursor's project and Esc returns to the tree, while
+	// Tab/Shift-Tab, quit, and the global overlay keys fall through (#1588
+	// follow-up).
+	if mod, cmd, consumed := m.handleProjectsFocus(msg); consumed {
 		return mod, cmd
 	}
 

@@ -200,3 +200,14 @@ func (m *home) renderRailRule() string {
 	}
 	return splitDividerStyle.Render(strings.Repeat("─", r.W))
 }
+
+// renderProjectsRule renders the full-rail-width horizontal rule separating the
+// automations section from the bottom-most Projects section (#1588 follow-up),
+// in the same receded style as the rail rule above it.
+func (m *home) renderProjectsRule() string {
+	r := m.lastLayout.ProjectsRule
+	if r.Empty() {
+		return ""
+	}
+	return splitDividerStyle.Render(strings.Repeat("─", r.W))
+}

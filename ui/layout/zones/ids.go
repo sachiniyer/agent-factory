@@ -22,15 +22,16 @@ const (
 	// zone from TreeHeader so clicking each toggles its own section instead of
 	// colliding on one id.
 	TreeHeaderArchived = "tree:header:archived"
-	// TreeHeaderProjects is the Projects section header row — a DISTINCT zone
-	// from the other headers so clicking it toggles the Projects section only.
-	TreeHeaderProjects = "tree:header:projects"
 	// TreeBG is the tree pane's background: any click inside the rail's tree
 	// region that lands on no finer zone (focuses the tree).
 	TreeBG = "tree:bg"
 	// AutoBG is the rail's automations-section background (focuses the
 	// section).
 	AutoBG = "auto:bg"
+	// ProjectsBG is the rail's Projects-section background (#1588 follow-up):
+	// any click inside the bottom-most Projects region that lands on no project
+	// row focuses the section.
+	ProjectsBG = "projects:bg"
 	// OverlayConfirmYes / OverlayConfirmNo are the confirmation dialog's
 	// clickable y/n words.
 	OverlayConfirmYes = "overlay:confirm:yes"
@@ -45,13 +46,14 @@ func TreeInstanceTitle(id string) (title string, ok bool) {
 	return strings.CutPrefix(id, "tree:instance:")
 }
 
-// TreeProject is the zone id of a Projects-section row, keyed by the project's
-// absolute repo root (unique per project, so a click resolves the right one).
-func TreeProject(root string) string { return "tree:project:" + root }
+// Project is the zone id of a row in the bottom Projects section (#1588
+// follow-up), keyed by the project's absolute repo root (unique per project, so
+// a click resolves the right one).
+func Project(root string) string { return "projects:row:" + root }
 
-// TreeProjectRoot parses a TreeProject id back to its repo root.
-func TreeProjectRoot(id string) (root string, ok bool) {
-	return strings.CutPrefix(id, "tree:project:")
+// ProjectRoot parses a Project id back to its repo root.
+func ProjectRoot(id string) (root string, ok bool) {
+	return strings.CutPrefix(id, "projects:row:")
 }
 
 // TreeArrow is the zone id of an instance row's expand/collapse arrow glyph.

@@ -47,8 +47,6 @@ func (s *Sidebar) String() string {
 			case SectionArchived:
 				// Archived rows are flat instance rows (#1028) — no tab children.
 				rows[i] = s.renderInstance(item.ItemIndex, isSelected)
-			case SectionProjects:
-				rows[i] = s.renderProject(item.ItemIndex, isSelected)
 			}
 		}
 		heights[i] = lipgloss.Height(rows[i])
@@ -302,8 +300,6 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 		label = fmt.Sprintf("Instances (%d)", len(live))
 	case SectionArchived:
 		label = fmt.Sprintf("Archived (%d)", len(archived))
-	case SectionProjects:
-		label = fmt.Sprintf("Projects (%d)", len(s.projects))
 	}
 
 	style := sectionHeaderStyle
@@ -350,41 +346,4 @@ func (s *Sidebar) renderTabRow(item SidebarItem, selected bool) string {
 	}
 	return s.renderer.RenderTab(labels[item.TabIndex], item.TabIndex+1,
 		item.TabIndex == len(labels)-1, selected, s.proj.ActiveTab() == item.TabIndex)
-}
-
-// renderProject renders one Projects-section row: "● name (N)" for the active
-// (scoped-to) project, "  name (N)" otherwise, where N is the tracked session
-// count. The cursor-selected row takes the selection background; a non-selected
-// active row takes the accent marker style. Width handling mirrors the section
-// header and window indicator (truncate with a "…" tail that itself drops when
-// the rail is too narrow, since lipgloss.Place pads but never clips).
-func (s *Sidebar) renderProject(idx int, selected bool) string {
-	if idx < 0 || idx >= len(s.projects) {
-		return ""
-	}
-	p := s.projects[idx]
-	w := s.contentWidth()
-
-	marker := "  "
-	if p.Active {
-		marker = "● "
-	}
-	text := fmt.Sprintf("%s%s (%d)", marker, p.Name, p.SessionCount)
-	if w > 0 && runewidth.StringWidth(text) > w {
-		tail := "..."
-		if w < runewidth.StringWidth(tail) {
-			tail = ""
-		}
-		text = runewidth.Truncate(text, w, tail)
-	}
-
-	style := projectRowStyle
-	switch {
-	case selected:
-		style = projectRowSelectedStyle
-	case p.Active:
-		style = projectRowActiveStyle
-	}
-	return style.Padding(0, narrowAwarePad(w)).Render(
-		lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))
 }

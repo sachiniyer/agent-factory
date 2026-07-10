@@ -123,6 +123,9 @@ func (m *home) View() string {
 	if m.lastLayout.AutomationsVisible {
 		railParts = append(railParts, m.renderRailRule(), m.automations.View())
 	}
+	if m.lastLayout.ProjectsVisible {
+		railParts = append(railParts, m.renderProjectsRule(), m.projects.View())
+	}
 	rail := lipgloss.JoinVertical(lipgloss.Left, railParts...)
 	cols := []string{rail}
 	if len(m.visiblePanes) == 0 {

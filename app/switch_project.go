@@ -84,11 +84,11 @@ func (m *home) buildProjectList() []overlay.Project {
 	return projects
 }
 
-// refreshSidebarProjects rebuilds the sidebar's Projects-section list from the
-// same cross-repo discovery the ctrl+p picker uses (buildProjectList), marking
-// the active project so the section highlights where the rail is scoped. Pushed
-// at launch, on project switch, and when the section is toggled, so its counts
-// track the picker without a per-frame daemon round-trip.
+// refreshSidebarProjects rebuilds the bottom Projects section's row list from
+// the same cross-repo discovery the ctrl+p picker uses (buildProjectList),
+// marking the active project so the section highlights where the rail is
+// scoped. Pushed at launch and on project switch, so its counts track the
+// picker without a per-frame daemon round-trip.
 func (m *home) refreshSidebarProjects() {
 	projects := m.buildProjectList()
 	rows := make([]ui.SidebarProject, 0, len(projects))
@@ -100,7 +100,7 @@ func (m *home) refreshSidebarProjects() {
 			Active:       p.Root == m.repoRoot,
 		})
 	}
-	m.sidebar.SetProjects(rows)
+	m.projects.SetProjects(rows)
 }
 
 // switchToProjectRoot resolves a Projects-section row's repo root and switches

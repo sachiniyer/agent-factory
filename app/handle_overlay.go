@@ -112,6 +112,39 @@ func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 	return m, nil, false
 }
 
+// handleProjectsFocus routes key events for the focused bottom Projects section
+// (#1588 follow-up) — a peer of the automations section that the Tab focus ring
+// cycles into. Cursor keys move the section's selection, Enter switches the rail
+// to the cursor's project (reusing the #1547 switchProject path via
+// switchToProjectRoot), Esc returns focus to the tree. Advertised global
+// bindings (Tab/Shift-Tab focus ring, ctrl+p picker, ? help, q quit) keep
+// working, while pane-management verbs are consumed here so hidden `s`/`S`/`x`/
+// pane-switch keys cannot mutate workspace panes from Projects focus (mirrors
+// the #1417 automations guard).
+func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	if m.ring.Active() != layout.RegionProjects {
+		return m, nil, false
+	}
+	if _, consumed := m.projects.HandleKey(msg); consumed {
+		return m, nil, true
+	}
+	switch msg.String() {
+	case "enter":
+		if proj, ok := m.projects.SelectedProject(); ok {
+			mod, cmd := m.switchToProjectRoot(proj.Root)
+			return mod, cmd, true
+		}
+		return m, nil, true
+	case "esc":
+		m.focusRegion(layout.RegionTree)
+		return m, nil, true
+	}
+	if automationsConsumesPaneVerb(msg) {
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
 func automationsConsumesPaneVerb(msg tea.KeyMsg) bool {
 	for _, name := range []keys.KeyName{
 		keys.KeyOpenPane,

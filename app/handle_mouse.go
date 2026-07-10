@@ -61,6 +61,7 @@ type tabDragState struct {
 func (m *home) wireZoneRegistry() {
 	m.sidebar.SetZoneRegistry(m.zones)
 	m.automations.SetZoneRegistry(m.zones)
+	m.projects.SetZoneRegistry(m.zones)
 	m.menu.SetZoneRegistry(m.zones)
 }
 
@@ -349,18 +350,16 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.sidebar.ClickHeaderKind(ui.SectionArchived)
 		m.focusRegionClick(layout.RegionTree)
 		return m, m.selectionChanged()
-	case zones.TreeHeaderProjects:
-		// Click the Projects section header: toggle it specifically and refresh
-		// its counts.
-		m.sidebar.ClickHeaderKind(ui.SectionProjects)
-		m.refreshSidebarProjects()
-		m.focusRegionClick(layout.RegionTree)
-		return m, m.selectionChanged()
 	case zones.TreeBG:
 		m.focusRegionClick(layout.RegionTree)
 		return m, nil
 	case zones.AutoBG:
 		m.focusRegionClick(layout.RegionAutomations)
+		return m, nil
+	case zones.ProjectsBG:
+		// Click the Projects section background (not a row): focus the section,
+		// like Tabbing into it.
+		m.focusRegionClick(layout.RegionProjects)
 		return m, nil
 	}
 
@@ -387,10 +386,11 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if title, idx, ok := zones.TreeTabParts(id); ok {
 		return m, m.handleTreeTabClick(title, idx, double)
 	}
-	if root, ok := zones.TreeProjectRoot(id); ok {
-		// Click a Projects-section row: switch the rail to that project (the
-		// row's primary action, like Enter on it).
-		m.focusRegionClick(layout.RegionTree)
+	if root, ok := zones.ProjectRoot(id); ok {
+		// Click a Projects-section row: focus the section and switch the rail to
+		// that project (the row's primary action, like Enter on it).
+		m.focusRegionClick(layout.RegionProjects)
+		m.projects.SelectByRoot(root)
 		return m.switchToProjectRoot(root)
 	}
 	if region, kind, ok := zones.PaneZone(id); ok {

@@ -13,15 +13,16 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestSelectProjectRowSwitchesProject: with the cursor on a Projects-section row,
-// Enter reuses the #1461 switchProject path to re-scope the rail to that
-// project. This is the sidebar surface for #1547's switch, additive to the
-// ctrl+p picker.
+// TestSelectProjectRowSwitchesProject: with the bottom Projects section focused
+// and the cursor on a project row, Enter reuses the #1461 switchProject path to
+// re-scope the rail to that project. This is the Tab-focusable Projects surface
+// (#1588 follow-up), additive to the ctrl+p picker.
 func TestSelectProjectRowSwitchesProject(t *testing.T) {
 	h := newTestHome(t)
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
@@ -30,55 +31,55 @@ func TestSelectProjectRowSwitchesProject(t *testing.T) {
 	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
+	resizeHome(h, 100, 30)
 
 	// A real git repo the row resolves to (switchToProjectRoot runs RepoFromPath).
 	repoBRoot := initTestGitRepo(t)
 	require.NotEqual(t, h.repoRoot, repoBRoot)
 
-	// Push a Projects list holding the active project and repo B, then expand the
-	// section and move the cursor onto repo B's row.
-	h.sidebar.SetSize(40, 40)
-	h.sidebar.SetProjects([]ui.SidebarProject{
+	// Push a Projects list holding repo B (first) and the active project, focus
+	// the Projects section, and rest the cursor on repo B's row (the first).
+	h.projects.SetProjects([]ui.SidebarProject{
 		{Name: filepath.Base(repoBRoot), Root: repoBRoot, SessionCount: 0},
 		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 1, Active: true},
 	})
-	h.sidebar.ClickHeaderKind(ui.SectionProjects) // expand; cursor on the header
-	h.sidebar.Down()                              // step onto the first project row (repo B)
+	h.focusRegion(layout.RegionProjects)
+	require.Equal(t, layout.RegionProjects, h.ring.Active())
 
-	proj, ok := h.sidebar.GetSelectedProject()
+	proj, ok := h.projects.SelectedProject()
 	require.True(t, ok, "cursor must rest on a project row")
 	require.Equal(t, repoBRoot, proj.Root)
 
-	mod, _ := h.handleEnter()
+	// Enter is routed through the focused Projects section.
+	mod, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, consumed, "Enter must be consumed by the focused Projects section")
 	require.NotNil(t, mod)
 
 	assert.Equal(t, config.RepoIDFromRoot(repoBRoot), h.repoID, "Enter on a project row must switch to it")
 	assert.Equal(t, repoBRoot, h.repoRoot)
 }
 
-// TestToggleProjectsHeaderExpands: Enter on the Projects header toggles the
-// section (it does not switch), exactly like the Instances/Archived headers.
-func TestToggleProjectsHeaderExpands(t *testing.T) {
+// TestProjectsSectionEscReturnsToTree: Esc on the focused Projects section moves
+// the ring back to the tree (mirrors the Automations Esc flow), without touching
+// the active project.
+func TestProjectsSectionEscReturnsToTree(t *testing.T) {
 	h := newTestHome(t)
 	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
 		return nil, nil
 	}))
-	h.sidebar.SetSize(40, 40)
-	h.sidebar.SetProjects([]ui.SidebarProject{
+	resizeHome(h, 100, 30)
+	h.projects.SetProjects([]ui.SidebarProject{
 		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 0, Active: true},
 	})
+	h.focusRegion(layout.RegionProjects)
+	require.True(t, h.projects.Focused())
 
-	// Move the cursor onto the Projects header.
-	h.sidebar.ClickHeaderKind(ui.SectionProjects) // expands and lands on header
-	require.True(t, h.sidebar.GetSelection().IsHeader)
-	require.Equal(t, ui.SectionProjects, h.sidebar.GetSelection().Kind)
-
-	// Enter on the header toggles (collapses) it; the active project is unchanged.
 	before := h.repoID
-	mod, _ := h.handleEnter()
-	require.NotNil(t, mod)
-	assert.Equal(t, before, h.repoID, "toggling the Projects header must not switch projects")
-	assert.True(t, h.sidebar.GetSelection().IsHeader, "cursor stays on the Projects header after toggle")
+	_, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEsc})
+	require.True(t, consumed)
+	assert.Equal(t, layout.RegionTree, h.ring.Active(), "Esc returns focus to the tree")
+	assert.False(t, h.projects.Focused())
+	assert.Equal(t, before, h.repoID, "Esc must not switch projects")
 }
 
 // TestSwitchProjectRescopesSidebar is the core #1461 guarantee: switching to
