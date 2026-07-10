@@ -160,6 +160,15 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	}
 
 	if err := inst.Recover(); err != nil {
+		// Persist the instance even on failure, matching the manual restore path
+		// (restore.go): Recover can mutate durable worktree state before it fails
+		// — a rebuild reconstructs the worktree+branch and flips branchCreatedByUs
+		// true, then a later tmux spawn fails (#1532). Without this write the flag
+		// is lost, so after a daemon restart the instance reloads with a stale
+		// branchCreatedByUs=false; the next recovery skips the rebuild (the worktree
+		// now exists) and the flag stays wrong, so kill never deletes the branch and
+		// it is orphaned. persistInstance is best-effort (logs on write failure).
+		m.persistInstance(repoID, inst)
 		m.logVanishedWorktreeOnce(key, repoID, st, inst, err)
 		m.lostRestoreFailed(key, st, inst.Title, err)
 		return
