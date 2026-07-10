@@ -437,6 +437,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateConfirm(msg)
 	case stateSearch:
 		return m.handleStateSearch(msg)
+	case stateSwitchProject:
+		return m.handleStateSwitchProject(msg)
 	case stateSelectProgram:
 		return m.handleStateSelectProgram(msg)
 	case stateHooks:

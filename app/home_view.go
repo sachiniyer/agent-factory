@@ -174,6 +174,11 @@ func (m *home) View() string {
 		fg := m.searchOverlay.Render()
 		m.searchOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
 		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
+	} else if m.state == stateSwitchProject {
+		if m.projectPickerOverlay == nil {
+			log.ErrorLog.Printf("project picker overlay is nil")
+		}
+		return overlay.PlaceOverlay(0, 0, m.projectPickerOverlay.Render(), mainView, true)
 	} else if m.state == stateSelectProgram {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")

@@ -1264,7 +1264,7 @@ default_program = "claude"
 
 [keys]
 quit = "Q"
-up = ["u", "ctrl+p"]
+up = ["u", "ctrl+g"]
 `)
 
 		cfg, err := LoadConfig()
@@ -1272,7 +1272,7 @@ up = ["u", "ctrl+p"]
 		require.NotNil(t, cfg)
 		overrides := cfg.KeymapOverrides()
 		assert.Equal(t, []string{"Q"}, overrides["quit"])
-		assert.Equal(t, []string{"u", "ctrl+p"}, overrides["up"])
+		assert.Equal(t, []string{"u", "ctrl+g"}, overrides["up"])
 	})
 
 	t.Run("keys table: absent means nil overrides", func(t *testing.T) {

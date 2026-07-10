@@ -45,6 +45,13 @@ const (
 	KeyCopyPR // Key for copying PR URL to clipboard
 	KeyHooks  // Key for editing post-worktree hooks
 
+	// KeySwitchProject opens the searchable project-picker overlay to switch the
+	// TUI's active project/repo in place (#1461). ctrl+p rather than P: the
+	// capital keys are deliberately left free so a user can pin the old
+	// ergonomic bindings (copy_pr/archive/hooks) to them via [keys], and a new
+	// default on P would collide with such a pin at startup.
+	KeySwitchProject
+
 	KeyChangeProgram // Key for changing the program during new instance naming
 	KeyCancelName    // Display-only cancel hint during new instance naming
 
@@ -147,6 +154,7 @@ var specs = []spec{
 	{name: KeyOpenPR, configKey: "open_pr", keys: []string{"p"}, desc: "open PR", dispatch: true},
 	{name: KeyCopyPR, configKey: "copy_pr", keys: []string{"y"}, desc: "copy PR URL", dispatch: true},
 	{name: KeyHooks, configKey: "hooks", keys: []string{"e"}, desc: "worktree hooks", dispatch: true},
+	{name: KeySwitchProject, configKey: "switch_project", keys: []string{"ctrl+p"}, desc: "switch project", dispatch: true},
 	{name: KeyLeft, configKey: "collapse", keys: []string{"h", "left"}, desc: "collapse", dispatch: true},
 	{name: KeyRight, configKey: "expand", keys: []string{"l", "right"}, desc: "expand", dispatch: true},
 	{name: KeyNextSection, configKey: "next_section", keys: []string{"]"}, desc: "next section", dispatch: true},

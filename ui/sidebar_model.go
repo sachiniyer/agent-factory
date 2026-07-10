@@ -162,6 +162,11 @@ type Sidebar struct {
 	width    int
 	focused  bool
 
+	// projectName is the active project's display name (repo basename), shown
+	// in the title chip so the rail always names which project is in view after
+	// an in-place project switch (#1461). Empty falls back to "Agent Factory".
+	projectName string
+
 	// rect is the pane's screen rect (SetRect); zone registration needs the
 	// absolute origin, not just the size.
 	rect layout.Rect
@@ -229,6 +234,10 @@ func (s *Sidebar) Focus() { s.focused = true }
 
 // Blur implements layout.Pane.
 func (s *Sidebar) Blur() { s.focused = false }
+
+// SetProjectName sets the active project's display name shown in the title chip
+// (#1461). Empty restores the default "Agent Factory" label.
+func (s *Sidebar) SetProjectName(name string) { s.projectName = name }
 
 // HandleKey implements layout.Pane. Tree navigation stays routed through the
 // root model's global bindings in PR 4 (the keys also work when the workspace

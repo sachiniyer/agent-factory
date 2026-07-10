@@ -36,6 +36,9 @@ const (
 	stateConfirm
 	// stateSearch is the state when the user is searching sessions.
 	stateSearch
+	// stateSwitchProject is the state when the project-picker overlay is open
+	// (#1461): pick another repo af has seen and switch the TUI to it in place.
+	stateSwitchProject
 	// stateSelectProgram is the state when the user is selecting a program during naming.
 	stateSelectProgram
 	// stateHooks is the state when the post-worktree hooks editor overlay is
@@ -286,6 +289,8 @@ type home struct {
 	selectionOverlay *overlay.SelectionOverlay
 	// searchOverlay handles session search
 	searchOverlay *overlay.SearchOverlay
+	// projectPickerOverlay handles switching the active project (#1461)
+	projectPickerOverlay *overlay.ProjectPickerOverlay
 	// pendingProgram tracks the program selected during new instance naming
 	pendingProgram string
 

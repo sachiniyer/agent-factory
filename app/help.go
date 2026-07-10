@@ -116,6 +116,7 @@ func (h helpTypeGeneral) toContent() string {
 		{title: "Managing:", rows: []helpRow{
 			{helpKey(keys.KeyNew), "Create a new session"},
 			{helpKey(keys.KeyNewRemote), "Create a new remote session (requires remote_hooks config)"},
+			{helpKey(keys.KeySwitchProject), "Switch to another project (repo) in place"},
 			{helpKey(keys.KeyTaskList), "Manage tasks (n inside the manager creates one)"},
 			{"r", "Run selected task now"},
 			{helpKey(keys.KeyKill), "Kill (delete) the selected session"},

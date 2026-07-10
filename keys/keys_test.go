@@ -51,6 +51,7 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		"p":         KeyOpenPR,
 		"y":         KeyCopyPR,
 		"e":         KeyHooks,
+		"ctrl+p":    KeySwitchProject,
 		"h":         KeyLeft,
 		"left":      KeyLeft,
 		"l":         KeyRight,
@@ -89,6 +90,7 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		KeyPaneNext:          "→",
 		KeyQuit:              "q",
 		KeyErrorDetails:      "E",
+		KeySwitchProject:     "ctrl+p",
 	}
 	for name, want := range helpChecks {
 		if got := GlobalKeyBindings[name].Help().Key; got != want {
@@ -173,7 +175,7 @@ func TestApplyOverridesRebindsDispatchAndHelp(t *testing.T) {
 	resetAfter(t)
 	err := ApplyOverrides(map[string][]string{
 		"quit": {"Q"},
-		"up":   {"u", "ctrl+p"},
+		"up":   {"u", "ctrl+g"},
 	})
 	if err != nil {
 		t.Fatalf("ApplyOverrides: %v", err)
@@ -185,8 +187,8 @@ func TestApplyOverridesRebindsDispatchAndHelp(t *testing.T) {
 	if _, still := GlobalKeyStringsMap["q"]; still {
 		t.Fatalf("an override replaces the default binding entirely; q must be unbound")
 	}
-	if got := GlobalKeyStringsMap["ctrl+p"]; got != KeyUp {
-		t.Fatalf("ctrl+p should dispatch KeyUp, got %v", got)
+	if got := GlobalKeyStringsMap["ctrl+g"]; got != KeyUp {
+		t.Fatalf("ctrl+g should dispatch KeyUp, got %v", got)
 	}
 	if _, still := GlobalKeyStringsMap["k"]; still {
 		t.Fatalf("k must be unbound after the up override")
@@ -195,8 +197,8 @@ func TestApplyOverridesRebindsDispatchAndHelp(t *testing.T) {
 	if got := GlobalKeyBindings[KeyQuit].Help().Key; got != "Q" {
 		t.Fatalf("help label must reflect the rebind, got %q", got)
 	}
-	if got := GlobalKeyBindings[KeyUp].Help().Key; got != "u/ctrl+p" {
-		t.Fatalf("multi-key help label = %q, want u/ctrl+p", got)
+	if got := GlobalKeyBindings[KeyUp].Help().Key; got != "u/ctrl+g" {
+		t.Fatalf("multi-key help label = %q, want u/ctrl+g", got)
 	}
 	// Unlisted actions keep their defaults.
 	if got := GlobalKeyStringsMap["D"]; got != KeyKill {

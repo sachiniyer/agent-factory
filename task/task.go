@@ -307,13 +307,21 @@ func LoadTasksForCurrentRepo() ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	return LoadTasksForRepo(repo.Root)
+}
+
+// LoadTasksForRepo returns only tasks whose ProjectPath matches repoRoot (the
+// repo's main-worktree root). It is the repo-scoped loader the in-place project
+// switch (#1461) uses to repopulate the automations strip for the newly active
+// project, without re-deriving the repo from cwd.
+func LoadTasksForRepo(repoRoot string) ([]Task, error) {
 	all, err := LoadTasks()
 	if err != nil {
 		return nil, err
 	}
 	var filtered []Task
 	for _, t := range all {
-		if t.ProjectPath == repo.Root {
+		if t.ProjectPath == repoRoot {
 			filtered = append(filtered, t)
 		}
 	}

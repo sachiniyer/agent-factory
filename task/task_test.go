@@ -131,6 +131,25 @@ func TestAddTask(t *testing.T) {
 	assert.Equal(t, "s2", loaded[1].ID)
 }
 
+func TestLoadTasksForRepo(t *testing.T) {
+	setupTestTasks(t, []Task{
+		{ID: "a", Name: "A", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: "/repos/one", Program: "claude", Enabled: true, CreatedAt: time.Now()},
+		{ID: "b", Name: "B", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: "/repos/two", Program: "claude", Enabled: true, CreatedAt: time.Now()},
+		{ID: "c", Name: "C", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: "/repos/one", Program: "claude", Enabled: true, CreatedAt: time.Now()},
+	})
+
+	one, err := LoadTasksForRepo("/repos/one")
+	require.NoError(t, err)
+	require.Len(t, one, 2)
+	for _, tk := range one {
+		assert.Equal(t, "/repos/one", tk.ProjectPath)
+	}
+
+	none, err := LoadTasksForRepo("/repos/absent")
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}
+
 func TestRemoveTask(t *testing.T) {
 	tasks := []Task{
 		{ID: "keep", Name: "Keep", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: "/tmp", Program: "claude", Enabled: true},

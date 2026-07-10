@@ -179,6 +179,25 @@ func (p *Projection) AddInstance(instance *session.Instance) (finalize func()) {
 	return func() { p.RegisterRepoForInstance(instance) }
 }
 
+// ResetInstances clears every instance, the repo bookkeeping, and the sticky
+// selection so the projection can be re-primed from a different repo's snapshot.
+// It is the store half of the in-place project switch (#1461): the daemon is
+// filtered by repoID, so after the switch coldStartFromSnapshot re-adds only the
+// new project's instances into this now-empty list — no cross-repo bleed.
+//
+// Open panes are NOT touched here: the app owns pane windows (and their live
+// termpane attachments) via its paneWindows map, so it must close every pane
+// through closePaneWindow BEFORE calling this, or the pane windows and their
+// PTYs would leak. Callers relayout afterwards.
+func (p *Projection) ResetInstances() {
+	p.instances = nil
+	p.repos = make(map[string]int)
+	p.selected = nil
+	p.activeTab.Store(0)
+	p.selectionSeq++
+	p.bump()
+}
+
 // sortInstances re-establishes the deterministic sidebar/tree order on the
 // instance list: root-first by reserved identity, then oldest-first by
 // CreatedAt (see LessInstanceOrder, #1144). Keeping GetInstances() sorted at
