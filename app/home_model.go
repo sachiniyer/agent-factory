@@ -257,6 +257,20 @@ type home struct {
 	// only; the pane's green frame and the status bar mirror it.
 	interactive bool
 
+	// interactivePauseTitle is the session whose #1160 capture-poll pause lease
+	// this TUI currently holds because the user is typing into it through the
+	// FOCUSED embedded interactive pane (#1586). Empty when not interactively
+	// focused on a local session. Holding the lease makes the daemon treat the
+	// session as attached and DEFER automated task deliveries (cron/watch) into
+	// it, so a scheduled prompt can't paste into and submit the user's
+	// in-progress input — the same guarantee full-screen attach already had
+	// (attachOverlayCallback), extended to the common in-pane flow. Renewed on
+	// the preview tick and released when interactive mode ends;
+	// interactivePauseAt throttles the renew to statusPollRenewInterval.
+	// Event-loop only.
+	interactivePauseTitle string
+	interactivePauseAt    time.Time
+
 	// initialPaneOpened latches the one-time startup auto-open: the first
 	// instance selection opens its pane so the workspace isn't empty on
 	// launch. Never reset — once the user has hidden every pane, the

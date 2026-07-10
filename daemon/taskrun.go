@@ -32,6 +32,16 @@ var (
 	deliverPromptForTask = DeliverPrompt
 )
 
+// cronDeferPollInterval / cronDeferMaxWait bound how a cron fire waits out a
+// #1586 deferral (target attached). Cron has no durable event queue the way
+// watch does, so a deferred occurrence is caught up by re-attempting on this
+// cadence until the user detaches, then force-delivered at the bound so it is
+// never silently dropped. Vars so tests can shrink them.
+var (
+	cronDeferPollInterval = 1 * time.Second
+	cronDeferMaxWait      = 5 * time.Minute
+)
+
 // deliverTaskPrompt delivers one rendered prompt for a task and returns the
 // status string to record on it. With TargetSession empty it creates a fresh
 // session per run (the historical task behavior, status "started"). With
@@ -40,7 +50,13 @@ var (
 // not exist yet (Sachin-approved in #782, mirroring `af sessions send-prompt
 // --create`). The target session is looked up in the task's own repo so a
 // same-titled session in an unrelated repo can never receive the prompt.
-func deliverTaskPrompt(t *task.Task, prompt string) (string, error) {
+//
+// deferWhileAttached asks the daemon to hold the send while a TUI is attached
+// full-screen to (or interactively focused on) the target, returning
+// StatusDeferredAttached instead of pasting into the user's in-progress input
+// (#1586). Callers that can catch up a held delivery pass true; a forced final
+// attempt passes false.
+func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (string, error) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return "", fmt.Errorf("failed to load config: %w", err)
@@ -79,16 +95,43 @@ func deliverTaskPrompt(t *task.Task, prompt string) (string, error) {
 		Program:  t.Program,
 		Prompt:   prompt,
 		AutoYes:  cfg.AutoYes,
-		// This is an automated delivery (cron fire or watch event): hold it
-		// while a TUI is attached full-screen to the target so it never pastes
-		// into and submits the user's in-progress input (#1586).
-		DeferWhileAttached: true,
+		// An automated delivery (cron fire or watch event): hold it while a TUI is
+		// attached to the target so it never pastes into and submits the user's
+		// in-progress input (#1586). The caller decides how a hold is handled.
+		DeferWhileAttached: deferWhileAttached,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to deliver prompt to target session %q: %w", t.TargetSession, err)
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, t.TargetSession, status)
 	return status, nil
+}
+
+// deliverCronTaskPrompt delivers a cron task's prompt, waiting out a #1586
+// deferral (a TUI is attached to the target) so the occurrence is caught up on
+// detach rather than silently skipped — cron has no durable event queue the way
+// watch does. It re-attempts on cronDeferPollInterval until the user detaches,
+// bounded by cronDeferMaxWait so a session left attached indefinitely can't park
+// the fire forever; at the bound it delivers once with deferral OFF so the
+// occurrence is never dropped. Overlapping fires of the same task are coalesced
+// by RunTask's per-task flock, so a long attach yields exactly one catch-up
+// delivery, not a stacked burst.
+func deliverCronTaskPrompt(t *task.Task, prompt string) (string, error) {
+	status, err := deliverTaskPrompt(t, prompt, true)
+	if err != nil || status != StatusDeferredAttached {
+		return status, err
+	}
+	deadline := time.Now().Add(cronDeferMaxWait)
+	for {
+		time.Sleep(cronDeferPollInterval)
+		// Once past the bound, force the delivery (deferral off) so an
+		// indefinitely-attached target never drops the occurrence.
+		deferWhileAttached := time.Now().Before(deadline)
+		status, err = deliverTaskPrompt(t, prompt, deferWhileAttached)
+		if err != nil || status != StatusDeferredAttached {
+			return status, err
+		}
+	}
 }
 
 // repoHasSessionTitle reports whether a persisted session with the given
@@ -194,7 +237,7 @@ func RunTask(taskID string) (err error) {
 		return fmt.Errorf("project path %s is not a valid git repository", t.ProjectPath)
 	}
 
-	status, err := deliverTaskPrompt(t, t.Prompt)
+	status, err := deliverCronTaskPrompt(t, t.Prompt)
 	if err != nil {
 		return err
 	}

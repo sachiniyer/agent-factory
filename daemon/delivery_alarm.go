@@ -37,14 +37,14 @@ var watcherDeliveryAlarmThreshold = 3 * time.Minute
 func (w *taskWatcher) recordDeliveryResult(now time.Time, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if errors.Is(err, errTargetBusy) {
-		// A deferred delivery (target attached, #1586) is neither a success nor a
-		// pipeline failure: leave the consecutive-failure clock untouched so a
-		// long attach never trips the delivery-failure alarm (#1238), and don't
-		// clear a genuine prior failure run either.
-		return
-	}
-	if err == nil {
+	if err == nil || errors.Is(err, errTargetBusy) {
+		// A success clears the failure run. A deferral (target attached, #1586)
+		// clears it too: it is not a delivery failure, and the pipeline is now
+		// intentionally paused, not broken — so the delivery-failure alarm (#1238)
+		// must go quiet rather than keep showing a stale earlier failure that
+		// would never clear while the target stays attached (deferrals never
+		// deliver, so nothing else would reset it). If delivery is genuinely still
+		// broken, the drainer's next real attempt after detach re-stamps the run.
 		w.deliverFailSince = time.Time{}
 		w.deliverFailCount = 0
 		w.deliverFailErr = ""

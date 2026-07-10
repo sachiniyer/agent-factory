@@ -192,7 +192,7 @@ func TestDeliverTaskPrompt_CreatesSessionWithoutTarget(t *testing.T) {
 	creates, delivers := stubTaskDelivery(t)
 
 	tsk := &task.Task{ID: "ffff0002", Name: "nightly", Prompt: "do it", CronExpr: "0 3 * * *", ProjectPath: repo, Enabled: true}
-	status, err := deliverTaskPrompt(tsk, tsk.Prompt)
+	status, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestDeliverTaskPrompt_SendsIntoExistingTargetSession(t *testing.T) {
 	seedTargetSession(t, repo, "captain")
 
 	tsk := &task.Task{ID: "ffff0003", Name: "gh-issues", Prompt: "Triage: {{line}}", WatchCmd: "watch.sh", TargetSession: "captain", ProjectPath: repo, Enabled: true}
-	status, err := deliverTaskPrompt(tsk, "Triage: new issue")
+	status, err := deliverTaskPrompt(tsk, "Triage: new issue", true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestDeliverTaskPrompt_AutoCreatesMissingTargetSession(t *testing.T) {
 	creates, delivers := stubTaskDelivery(t)
 
 	tsk := &task.Task{ID: "ffff0004", Name: "gh-issues", WatchCmd: "watch.sh", TargetSession: "captain", ProjectPath: repo, Program: "claude", Enabled: true}
-	status, err := deliverTaskPrompt(tsk, "new issue #9")
+	status, err := deliverTaskPrompt(tsk, "new issue #9", true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}

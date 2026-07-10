@@ -34,6 +34,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// pulled by this existing cadence, never by a termpane-owned loop
 		// (#1089 perf guard).
 		m.syncLiveTermPane()
+		// Hold/renew the daemon delivery-defer lease for the session the user is
+		// typing into via the focused embedded interactive pane (#1586). Runs
+		// after syncLiveTermPane has settled interactive mode; the RPC is
+		// dispatched off the event loop.
+		pausePollCmd := m.interactivePollPauseCmd()
 		var cmd tea.Cmd
 		if !m.attached.Load() {
 			// Mark this selectionChanged as the idle refresh tick so the preview
@@ -45,6 +50,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(
 			cmd,
+			pausePollCmd,
 			func() tea.Msg {
 				time.Sleep(100 * time.Millisecond)
 				return previewTickMsg{}

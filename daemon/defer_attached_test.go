@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // TestDeliverPrompt_DefersWhileTargetAttached is the #1586 core: an automated
@@ -93,11 +94,13 @@ func TestDeliverPrompt_ManualSendDeliversWhileTargetAttached(t *testing.T) {
 	}
 }
 
-// TestRecordDeliveryResult_TargetBusyDoesNotAlarm pins that a deferral is
-// neither a success nor a pipeline failure: it must not start the
-// consecutive-failure clock (so a long attach never trips the delivery-failure
-// alarm, #1238) and must not clear a genuine prior failure run.
-func TestRecordDeliveryResult_TargetBusyDoesNotAlarm(t *testing.T) {
+// TestRecordDeliveryResult_TargetBusyClearsFailureAlarm pins that a deferral is
+// not a delivery failure: it never starts the consecutive-failure clock, and it
+// CLEARS a stale earlier failure run (Greptile). Otherwise a real failure that
+// stamped deliverFailSince, followed by the target staying attached (only
+// deferrals from then on), would leave the delivery-failure alarm (#1238) stuck
+// on a stale timestamp that nothing ever resets.
+func TestRecordDeliveryResult_TargetBusyClearsFailureAlarm(t *testing.T) {
 	w := &taskWatcher{}
 
 	// A deferral on its own leaves the failure clock unset.
@@ -108,21 +111,143 @@ func TestRecordDeliveryResult_TargetBusyDoesNotAlarm(t *testing.T) {
 
 	// A real failure starts the clock.
 	w.recordDeliveryResult(time.Now(), errors.New("target unreachable (outage)"))
-	since := w.deliverFailSince
-	if since.IsZero() {
+	if w.deliverFailSince.IsZero() {
 		t.Fatal("a real delivery failure must start the failure clock")
 	}
 
-	// A subsequent deferral must leave that real failure run untouched.
+	// A subsequent deferral must CLEAR that stale failure run so the alarm goes
+	// quiet while the target is attached (a real problem re-stamps on the next
+	// live attempt after detach).
 	w.recordDeliveryResult(time.Now(), errTargetBusy)
-	if w.deliverFailSince != since {
-		t.Fatalf("a deferral must not disturb a prior failure run: since %v -> %v", since, w.deliverFailSince)
+	if !w.deliverFailSince.IsZero() {
+		t.Fatalf("a deferral must clear a stale failure run; deliverFailSince=%v", w.deliverFailSince)
+	}
+	if w.deliverFailCount != 0 || w.deliverFailErr != "" {
+		t.Fatalf("a deferral must reset the failure count/error; count=%d err=%q", w.deliverFailCount, w.deliverFailErr)
+	}
+}
+
+// TestReleaseEventSlot_RefundsDeferredRateSlot pins Greptile #3: a deferral
+// delivers nothing, so refunding its reserved rate slot must leave the target's
+// per-minute budget exactly as it was — otherwise the live attempt and the
+// drainer's replay would each spend a slot and could starve real deliveries.
+func TestReleaseEventSlot_RefundsDeferredRateSlot(t *testing.T) {
+	s := newWatcherSupervisor()
+	s.eventsPerMinute = 10
+	w := &taskWatcher{sup: s}
+
+	if !w.tryReserveEventSlot() {
+		t.Fatal("first reservation should succeed")
+	}
+	if got := len(w.eventTimes); got != 1 {
+		t.Fatalf("reserved slots = %d, want 1", got)
+	}
+	// A deferral refunds the slot it reserved.
+	w.releaseEventSlot()
+	if got := len(w.eventTimes); got != 0 {
+		t.Fatalf("a refunded deferral must leave 0 slots spent, got %d", got)
+	}
+	// Refund is safe to over-call (never panics / goes negative).
+	w.releaseEventSlot()
+	if got := len(w.eventTimes); got != 0 {
+		t.Fatalf("refunding an empty window must stay at 0, got %d", got)
+	}
+}
+
+// TestDeliverCronTaskPrompt_CatchesUpOnDetach pins Greptile #1: cron has no
+// durable queue, so a deferred occurrence must be caught up when the target
+// detaches rather than silently skipped. The delivery is held while attached
+// and lands ("sent") on the first attempt after detach.
+func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
+	origPoll, origWait := cronDeferPollInterval, cronDeferMaxWait
+	cronDeferPollInterval = 5 * time.Millisecond
+	cronDeferMaxWait = 10 * time.Second
+	t.Cleanup(func() { cronDeferPollInterval, cronDeferMaxWait = origPoll, origWait })
+
+	var attached atomic.Bool
+	attached.Store(true)
+	var attempts atomic.Int32
+	origDeliver := deliverPromptForTask
+	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+		attempts.Add(1)
+		if req.DeferWhileAttached && attached.Load() {
+			return StatusDeferredAttached, nil
+		}
+		return "sent", nil
+	}
+	t.Cleanup(func() { deliverPromptForTask = origDeliver })
+
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	tsk := &task.Task{ID: "aa158601", TargetSession: "captain", ProjectPath: t.TempDir(), Prompt: "cron-event"}
+
+	done := make(chan struct{})
+	var status string
+	var err error
+	go func() {
+		status, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
+		close(done)
+	}()
+
+	// It must NOT resolve while attached — the occurrence is held, not skipped.
+	select {
+	case <-done:
+		t.Fatalf("cron delivery resolved (%q) while the target was still attached; it must wait, not skip", status)
+	case <-time.After(50 * time.Millisecond):
 	}
 
-	// A success still clears the run.
-	w.recordDeliveryResult(time.Now(), nil)
-	if !w.deliverFailSince.IsZero() {
-		t.Fatalf("a success must clear the failure clock; deliverFailSince=%v", w.deliverFailSince)
+	// On detach the very next attempt delivers.
+	attached.Store(false)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cron delivery did not catch up after detach")
+	}
+	if err != nil {
+		t.Fatalf("cron catch-up: %v", err)
+	}
+	if status != "sent" {
+		t.Fatalf("post-detach cron status = %q, want \"sent\"", status)
+	}
+	if attempts.Load() < 2 {
+		t.Fatalf("expected at least one held attempt then a catch-up, got %d attempts", attempts.Load())
+	}
+}
+
+// TestDeliverCronTaskPrompt_ForceDeliversAtBound pins the safety valve: a target
+// left attached past cronDeferMaxWait must not park the fire forever — at the
+// bound the delivery is forced (deferral off) so the occurrence is never
+// dropped.
+func TestDeliverCronTaskPrompt_ForceDeliversAtBound(t *testing.T) {
+	origPoll, origWait := cronDeferPollInterval, cronDeferMaxWait
+	cronDeferPollInterval = 5 * time.Millisecond
+	cronDeferMaxWait = 20 * time.Millisecond
+	t.Cleanup(func() { cronDeferPollInterval, cronDeferMaxWait = origPoll, origWait })
+
+	// The target stays attached the whole time; only a forced (defer-off) attempt
+	// gets through.
+	var forced atomic.Bool
+	origDeliver := deliverPromptForTask
+	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+		if req.DeferWhileAttached {
+			return StatusDeferredAttached, nil
+		}
+		forced.Store(true)
+		return "sent", nil
+	}
+	t.Cleanup(func() { deliverPromptForTask = origDeliver })
+
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	tsk := &task.Task{ID: "aa158602", TargetSession: "captain", ProjectPath: t.TempDir(), Prompt: "cron-event"}
+
+	status, err := deliverCronTaskPrompt(tsk, tsk.Prompt)
+	if err != nil {
+		t.Fatalf("force-at-bound: %v", err)
+	}
+	if status != "sent" {
+		t.Fatalf("status = %q, want \"sent\" (forced delivery at the bound)", status)
+	}
+	if !forced.Load() {
+		t.Fatal("the occurrence must be force-delivered at the bound, never dropped")
 	}
 }
 

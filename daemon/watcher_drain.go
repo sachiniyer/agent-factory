@@ -88,9 +88,13 @@ func (w *taskWatcher) drainLoop() {
 			if errors.Is(err, errTargetBusy) {
 				// Not a delivery failure: a TUI is attached to the target, so the
 				// backlog is held until detach rather than pasted into live typing
-				// (#1586). Poll at the base cadence (never the growing failure
-				// backoff) so delivery resumes promptly once the user detaches, and
-				// log quietly since a deferral is expected, not an outage.
+				// (#1586). A deferral sends nothing, so refund the rate slot this
+				// attempt reserved above — otherwise every retry during the attach
+				// would burn the target's per-minute budget and could starve real
+				// deliveries once the user detaches. Poll at the base cadence (never
+				// the growing failure backoff) so delivery resumes promptly on
+				// detach, and log quietly since a deferral is expected, not an outage.
+				w.releaseEventSlot()
 				log.InfoLog.Printf("watch task %s: target session attached; holding %d queued event(s) until detach (#1586)", w.taskID, w.queue.pendingCount())
 				if !w.sleepStopAware(w.sup.drainBaseBackoff) {
 					w.stopDraining()
