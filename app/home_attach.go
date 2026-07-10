@@ -52,6 +52,17 @@ type beginAttachMsg struct {
 // the callback are too late for the renderer-owned status/footer diff; the final
 // TUI frame itself must contain no AF chrome (#1448).
 func (m *home) beginAttachTransition(run func() tea.Cmd) tea.Cmd {
+	// Re-entry guard (#1530): every full-screen attach entry point funnels
+	// through here, so this is the reliable place to block a second attach from
+	// starting while one is already in flight. Without it, repeated Enter/`o`
+	// presses during the transition window each schedule an independent attach
+	// flow — duplicate heartbeat/resume goroutines, racing m.attached.Store,
+	// doubled post-detach side effects, and possible terminal corruption. The
+	// flags clear on detach (attachTransitioning here, attached via its defer in
+	// attachOverlayCallback), so this only ignores presses until then.
+	if m.attachTransitioning || m.attached.Load() {
+		return nil
+	}
 	m.attachTransitioning = true
 	return tea.Tick(20*time.Millisecond, func(time.Time) tea.Msg {
 		return beginAttachMsg{run: run}
