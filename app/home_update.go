@@ -36,7 +36,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLiveTermPane()
 		var cmd tea.Cmd
 		if !m.attached.Load() {
+			// Mark this selectionChanged as the idle refresh tick so the preview
+			// path does not steal focus onto the selected instance's open pane
+			// while the user drives the focus ring (#1558).
+			m.inPreviewTick = true
 			cmd = m.selectionChanged()
+			m.inPreviewTick = false
 		}
 		return m, tea.Batch(
 			cmd,
