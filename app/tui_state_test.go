@@ -260,6 +260,79 @@ func TestTUIViewStateRestoreArchivedSelectionFollowsLivePane(t *testing.T) {
 		"Down moves back down through the live tree")
 }
 
+// TestTUIViewStateRestoreSelectionFollowsRestoredFocusPane pins the preferred
+// half of the #1559 reconcile: when the archived/absent persisted selection
+// forces the fallback AND multiple live panes are restored, the launch selection
+// must follow the pane the persisted FOCUS points at — not merely the
+// most-recently-focused pane. Here focus is pinned on feature's pane while qa's
+// pane carries the higher focus-recency stamp (restored last), so the
+// most-recently-focused fallback would pick qa; asserting feature proves the
+// restoredFocusPane path wins.
+func TestTUIViewStateRestoreSelectionFollowsRestoredFocusPane(t *testing.T) {
+	h := newTestHome(t)
+	h.initialPaneOpened = false
+	feature := tuiStateTestInstance(t, "feature")
+	qa := tuiStateTestInstance(t, "qa")
+	docs := tuiStateTestInstance(t, "docs")
+	docs.SetArchived() // archived before quit; persisted as the selection
+	h.store.AddInstance(feature)
+	h.store.AddInstance(qa)
+	h.store.AddInstance(docs)
+
+	state := config.TUIRepoViewState{
+		Selected: &config.TUIStateTarget{
+			InstanceID: docs.ID,
+			Title:      docs.Title,
+			TabName:    "agent",
+		},
+		// Focus rests on feature's pane, even though qa's pane restores last and
+		// therefore carries the higher focus-recency stamp (the fallback's pick).
+		Focus: &config.TUIStateFocus{
+			Region:  tuiFocusRegionPane,
+			PaneKey: tuiPaneKeyForInstance(feature, "agent"),
+		},
+		OpenPanes: []config.TUIStateOpenPane{
+			{
+				Key:        tuiPaneKeyForInstance(feature, "agent"),
+				InstanceID: feature.ID,
+				Title:      feature.Title,
+				TabName:    "agent",
+				FocusRank:  1,
+			},
+			{
+				Key:        tuiPaneKeyForInstance(qa, "shell"),
+				InstanceID: qa.ID,
+				Title:      qa.Title,
+				TabName:    "shell",
+				FocusRank:  2, // restored last → highest LastFocus → the fallback pick
+			},
+		},
+	}
+	require.NoError(t, config.SaveTUIRepoViewState(h.repoID, state))
+
+	require.Equal(t, 2, h.restoreTUIViewStateOnLaunch())
+
+	// Assert the fallback premise BEFORE the first sized relayout: the launch
+	// focus is only applied to feature's pane once the terminal has real dims, so
+	// until then qa's pane (restored last) still carries the higher focus-recency
+	// stamp — i.e. the most-recently-focused fallback would pick qa. The reconcile
+	// runs inside restoreTUIViewStateOnLaunch above and must have picked feature.
+	require.Same(t, qa, h.mostRecentlyFocusedOpenPane().Instance(),
+		"premise: qa's pane carries the higher focus-recency stamp (the fallback pick)")
+	require.Same(t, feature, h.store.GetSelectedInstance(),
+		"launch selects the FOCUSED pane's session, not the most-recently-focused fallback")
+	require.Same(t, feature, h.sidebar.GetSelectedInstance(),
+		"the sidebar cursor follows the focused pane's session")
+	assert.Equal(t, 0, h.store.ActiveTab(),
+		"the active tab follows the focused pane's tab (feature/agent)")
+
+	// The coherence survives the first real relayout (which applies the restored
+	// pane focus): the selection stays on the focused session.
+	resizeHome(h, 200, 40)
+	require.Same(t, feature, h.store.GetSelectedInstance(),
+		"the focused-pane selection remains coherent after layout")
+}
+
 func tuiStateTestInstance(t *testing.T, title string) *session.Instance {
 	t.Helper()
 	inst := instanceWithFakeBackend(t, title)
