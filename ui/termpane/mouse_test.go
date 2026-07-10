@@ -74,6 +74,24 @@ func TestMouseForwardingSuppressedWithoutInnerMouseMode(t *testing.T) {
 	assert.Empty(t, got, "no mouse mode set → no bytes reach the PTY")
 }
 
+// TestMouseGridYOffsetsForTopStatusOnly pins #1534: with the status bar at the
+// top, Render hides the first statusRows rows (sourceY=statusRows), so a
+// forwarded click's zone-local y must shift down by statusRows to land on the
+// visible row the user clicked. With the status bar at the bottom the hidden
+// rows are off the end of the visible window, so no shift applies.
+func TestMouseGridYOffsetsForTopStatusOnly(t *testing.T) {
+	top := &TermPane{statusPosition: statusTop, statusRows: 2}
+	assert.Equal(t, 2, top.mouseGridY(0), "top status: click on visible row 0 maps past the hidden status rows")
+	assert.Equal(t, 5, top.mouseGridY(3), "top status: every content row shifts down by statusRows")
+
+	bottom := &TermPane{statusPosition: statusBottom, statusRows: 2}
+	assert.Equal(t, 0, bottom.mouseGridY(0), "bottom status: no hidden rows above content, no shift")
+	assert.Equal(t, 3, bottom.mouseGridY(3), "bottom status: content row maps 1:1")
+
+	none := &TermPane{statusPosition: statusTop, statusRows: 0}
+	assert.Equal(t, 4, none.mouseGridY(4), "zero hidden rows: top status is a no-op")
+}
+
 // TestTranslateMouseUnknownButton: buttons with no encoding are refused, not
 // guessed — SendKey's ignore contract, extended to the mouse.
 func TestTranslateMouseUnknownButton(t *testing.T) {
