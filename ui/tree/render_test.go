@@ -287,7 +287,7 @@ func TestInstanceRendererArchivedShowsName(t *testing.T) {
 	}
 }
 
-func TestInstanceRendererCreatingRowLabelsNamePrompt(t *testing.T) {
+func TestInstanceRendererCreatingRowShowsBareName(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "alpha",
@@ -301,7 +301,8 @@ func TestInstanceRendererCreatingRowLabelsNamePrompt(t *testing.T) {
 	r.SetWidth(40)
 
 	title := strings.Split(ansiEscape.ReplaceAllString(r.Render(inst, 1, true, false, false), ""), "\n")[1]
-	assert.Contains(t, title, "Session name: alpha", "creating rows must label the active name target")
+	assert.Contains(t, title, "alpha", "creating rows must show the typed name")
+	assert.NotContains(t, title, "Session name:", "creating rows must not prefix the input label")
 }
 
 // TestInstanceRendererDeletingDimsSelectedRow pins the #853 fix: a SELECTED

@@ -303,9 +303,6 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	// Cut the title if it's too long
 	titleText := i.Title
-	if op == session.OpCreating {
-		titleText = "Session name: " + titleText
-	}
 	if i.IsRemote() {
 		titleText = "[remote] " + titleText
 	}
