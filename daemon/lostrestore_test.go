@@ -185,6 +185,54 @@ func TestRestoreLostSessions_BacksOffBetweenFailures(t *testing.T) {
 	}
 }
 
+// TestRestoreLostSessions_PersistsAfterFailedRecover is the regression for
+// #1532: when Recover fails after partial success (worktree+branch rebuilt,
+// branchCreatedByUs flipped true, then the tmux spawn fails), the loop must
+// persist the instance so that durable state survives a daemon restart —
+// mirroring the manual restore path. Before the fix the failure branch returned
+// without persisting, so a rebuilt-but-not-persisted branchCreatedByUs was lost
+// and the branch was later orphaned on kill.
+func TestRestoreLostSessions_PersistsAfterFailedRecover(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	zeroRestoreBackoff(t)
+
+	// A real registered worktree whose in-memory record already carries the
+	// rebuild's branchCreatedByUs=true (the state Recover leaves behind before its
+	// tmux spawn fails). The seeded disk record (seedDiskInstance) has no worktree
+	// data, so it loads branchCreatedByUs=false — the stale value the bug leaves.
+	wtPath := filepath.Join(filepath.Dir(repoPath), "repo-1532")
+	branch := "af/persist-1532"
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, wtPath, "persist-1532", branch, "", false, true)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend(), failWith: errors.New("tmux spawn failed after rebuild")}
+	inst := registerStarted(t, manager, repoID, repoPath, "persist-1532", backend, true, session.Lost)
+	inst.SetGitWorktreeForTest(gw)
+
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("recover calls = %d, want 1", got)
+	}
+	// The failed-recover branch must have persisted the in-memory instance: the
+	// on-disk record now reflects its Lost status and its rebuilt worktree state.
+	rec := recordFor(t, repoID, "persist-1532")
+	if rec == nil {
+		t.Fatal("record must still exist after a failed recover")
+	}
+	if rec.Status != session.Lost {
+		t.Fatalf("persisted status = %v, want Lost (a failed recover must persist the instance)", rec.Status)
+	}
+	if rec.Worktree.BranchCreatedByUs == nil || !*rec.Worktree.BranchCreatedByUs {
+		t.Fatalf("persisted branchCreatedByUs = %v, want true (the rebuild's flag must survive a failed recover)", rec.Worktree.BranchCreatedByUs)
+	}
+}
+
 type failPtyFactory struct{}
 
 func (failPtyFactory) Start(*exec.Cmd) (*os.File, error) {
