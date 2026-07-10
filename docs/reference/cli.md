@@ -768,10 +768,11 @@ With --all, broadcast a single prompt to every live session in scope:
 
 Broadcast scope defaults to the current repo (honoring --repo). Pass --all-repos
 to broadcast across every repo. The reserved root session is excluded unless
---include-root is given. Delivery is best-effort per session: unreachable (Lost)
-sessions are reported, and one failure never aborts the rest. The command prints
-a JSON summary (delivered / failed / skipped) and exits 0 even when some
-sessions fail, so scripts can inspect per-session results.
+--include-root is given. Delivery is best-effort per session: unreachable (Lost,
+Dead) and Archived sessions are skipped and reported, and one failure never
+aborts the rest. The command prints a JSON summary (delivered / failed / skipped)
+and exits 0 even when some sessions fail, so scripts can inspect per-session
+results.
 
 ```
 af sessions send-prompt <title> <prompt> [flags]
