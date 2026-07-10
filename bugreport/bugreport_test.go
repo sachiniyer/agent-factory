@@ -117,17 +117,19 @@ func TestScrubRedactsPEMPrivateKey(t *testing.T) {
 
 func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	d := session.InstanceData{
-		ID:      "abc123",
-		Title:   "proprietary session name",
-		Prompt:  "confidential task instructions with internal codename Bluebird",
-		Path:    "/home/alice/Desktop/proj",
-		Branch:  "alice/fix",
-		Status:  session.Status(1),
-		Program: "claude",
+		ID:       "abc123",
+		Title:    "proprietary session name",
+		Prompt:   "confidential task instructions with internal codename Bluebird",
+		Path:     "/home/alice/Desktop/proj",
+		Branch:   "alice/fix",
+		Status:   session.Status(1),
+		Program:  "claude",
+		TmuxName: "af_proprietarysessionname",
 		Tabs: []session.TabData{
 			{
-				Name:    "agent",
-				Command: "claude --token sk-SUPERSECRETTOKEN0123456",
+				Name:     "agent",
+				Command:  "claude --token sk-SUPERSECRETTOKEN0123456",
+				TmuxName: "af_proprietarysessionname",
 				Conversation: &session.AgentConversationData{
 					Agent: "claude",
 					ID:    "019f386f-7206-7fc2-803b-f7045e07a242",
@@ -158,6 +160,14 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	}
 	if d.Tabs[0].Command != redactedMarker {
 		t.Errorf("tab command not redacted: %q", d.Tabs[0].Command)
+	}
+	// TmuxName is derived from the session title, so it leaks the same
+	// confidential name and must be redacted at both the instance and tab level.
+	if d.TmuxName != redactedMarker {
+		t.Errorf("instance tmux name not redacted: %q", d.TmuxName)
+	}
+	if d.Tabs[0].TmuxName != redactedMarker {
+		t.Errorf("tab tmux name not redacted: %q", d.Tabs[0].TmuxName)
 	}
 	if d.Tabs[0].Conversation.ID != "" || d.AgentConversation.ID != "" {
 		t.Errorf("conversation ids not redacted: tab=%q instance=%q", d.Tabs[0].Conversation.ID, d.AgentConversation.ID)
