@@ -24,6 +24,7 @@ Sessions (one agent per isolated worktree):
   af sessions attach <title>                           Attach interactively (foreground)
   af sessions kill <title>                             Kill a session and clean up its worktree
   af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
+  af sessions archive --self                            Archive your OWN session (resolved via whoami); no title needed
   af sessions restore <title>                          Restore an archived, lost, or dead session
 
 Tabs (extra processes in a session's worktree; max 9 per session; not available for remote sessions):
@@ -41,6 +42,8 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
 Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, and --target-session "" reverts to session-per-run. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
+
+Finishing up: when the user confirms your work is complete and asks you to wrap up, self-archive with "af sessions archive --self". It's non-destructive — tmux is torn down and the worktree is moved out, but nothing is deleted, and the session is restorable later with "af sessions restore <title>".
 
 Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes ALL linked worktrees and their branches across repos.`
 
