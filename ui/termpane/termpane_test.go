@@ -137,6 +137,44 @@ func TestResizePropagatesPTYWinsize(t *testing.T) {
 	waitForRender(t, tp, 100, 30, "30 100")
 }
 
+// TestResizeBlanksStaleGrid pins the #1556 fix: the pinned x/vt emulator
+// resizes by re-windowing the cell buffer, not by reflowing it, so a wrapped
+// line is truncated to the new width and its continuation row is left behind —
+// which renders as a command's tail merging straight into the next prompt.
+// Real attachments self-heal on tmux's redraw, but until it lands the grid must
+// not show that corrupted transcript. Resize therefore blanks the visible grid;
+// here a scripted PTY (no tmux, so nothing ever redraws) makes that guarantee
+// observable: after the resize the pane is empty, not merged.
+func TestResizeBlanksStaleGrid(t *testing.T) {
+	// "dev@host$ chmod +x todo.sh test.sh" is 34 cols, so it wraps at width 20:
+	// row 0 is the prompt+command head, row 1 the "odo.sh test.sh" tail.
+	tp := startScript(t, "printf 'dev@host$ chmod +x todo.sh test.sh\\r\\nnext-marker-1556\\r\\n'; sleep 30", 20, 6)
+	waitForRender(t, tp, 20, 6, "next-marker-1556")
+	require.Contains(t, plainRender(tp, 20, 6), "odo.sh test.sh", "setup: the command must wrap so a continuation row exists")
+
+	// Shrink the pane. With no tmux behind the PTY nothing repaints, so whatever
+	// the grid holds now is exactly what a pre-redraw frame would show.
+	tp.Resize(14, 6)
+	got := plainRender(tp, 14, 6)
+	assert.Emptyf(t, strings.TrimSpace(got), "resize must blank the truncated, un-reflowed grid (#1556); got:\n%s", got)
+}
+
+// TestResizeBlanksStaleAltScreenGrid extends the #1556 fix to a full-screen
+// program (vim/less/...) occupying the alternate screen when the resize lands.
+// The blank must follow the ACTIVE screen: x/vt's ED 2 clears whichever screen
+// is current (e.scr), so entering the alternate screen (?1049h) and resizing
+// must leave that screen blank, not the stale, truncated alt grid — otherwise
+// the pane would show a merged full-screen buffer until tmux repaints.
+func TestResizeBlanksStaleAltScreenGrid(t *testing.T) {
+	// Switch to the alternate screen, then draw a line there that wraps at 20.
+	tp := startScript(t, "printf '\\033[?1049h'; printf 'ALT chmod +x todo.sh test.sh\\r\\nalt-marker-1556\\r\\n'; sleep 30", 20, 6)
+	waitForRender(t, tp, 20, 6, "alt-marker-1556")
+
+	tp.Resize(14, 6)
+	got := plainRender(tp, 14, 6)
+	assert.Emptyf(t, strings.TrimSpace(got), "resize must blank the ACTIVE (alternate) screen (#1556); got:\n%s", got)
+}
+
 func TestHiddenStatusRowsAreNotRendered(t *testing.T) {
 	tp := startScriptWithStatusLayout(t, "printf 'VISIBLE-1425\\033[7;1HSTATUS-1425-A\\033[8;1HSTATUS-1425-B'; sleep 30", 30, 6, 2, statusBottom)
 	waitForRender(t, tp, 30, 6, "VISIBLE-1425")

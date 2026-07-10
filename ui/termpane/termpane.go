@@ -324,8 +324,28 @@ func (t *TermPane) Resize(width, height int) {
 	}
 	t.gridMu.Lock()
 	t.emu.Resize(width, ptyHeight)
+	// The pinned x/vt emulator resizes by re-windowing the cell buffer, not by
+	// reflowing it: a wrapped line is truncated to the new width and loses its
+	// overflow, while the stale continuation row it wrapped onto stays behind
+	// (#1556). Until tmux's SIGWINCH-driven full redraw lands, the grid can
+	// therefore show a command's tail running straight into the next prompt —
+	// prompts and commands visually merged. Blank the visible grid now so that
+	// unavoidable transient reads as an empty pane filling in rather than a
+	// corrupted transcript; tmux always full-redraws a resized client, so no
+	// legitimate content is lost. The write goes through the same parser as
+	// tmux's output and under the same lock, so it can never interleave with a
+	// redraw mid-parse.
+	_, _ = t.emu.Write(resizeBlank)
 	t.gridMu.Unlock()
 }
+
+// resizeBlank erases the whole display (ED 2) and homes the cursor — the
+// standard way a program clears a terminal. Written to the emulator after a
+// resize to drop the truncated, un-reflowed grid the pinned x/vt leaves behind
+// (#1556) before tmux repaints. x/vt's ED 2 is screen-aware — it clears the
+// active screen (e.scr) — so this also blanks the alternate screen when a
+// full-screen program (vim/less/...) is what the resize caught mid-frame.
+var resizeBlank = []byte("\x1b[2J\x1b[H")
 
 // Render returns the emulator's current grid as exactly height ANSI-styled
 // lines of exactly width cells. It only reads the grid — safe to call at any
