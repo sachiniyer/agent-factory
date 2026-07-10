@@ -76,6 +76,20 @@ type GitWorktree struct {
 	// outlive the worktree itself.
 	hooksCtx    context.Context
 	hooksCancel context.CancelFunc
+	// hooksDone is closed when the most recent post-worktree hook run finishes
+	// (completion or cancellation). Set by Setup/Rebuild* right before they
+	// return, read by the readiness wait after Start returns — a strict
+	// happens-before, so it is accessed lock-free like branchCreatedByUs. Nil
+	// until the first hook run is launched (e.g. external worktrees that skip
+	// hooks entirely), which HooksDone reports as "no hooks in flight".
+	hooksDone <-chan struct{}
+}
+
+// HooksDone returns a channel that is closed once the worktree's post-worktree
+// hooks have finished (completion or cancellation), or nil if no hook run has
+// been launched for this worktree. Callers treat nil as "nothing in flight".
+func (g *GitWorktree) HooksDone() <-chan struct{} {
+	return g.hooksDone
 }
 
 // IsExternalWorktree returns true if this worktree was not created by agent-factory

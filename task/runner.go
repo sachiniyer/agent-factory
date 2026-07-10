@@ -16,8 +16,20 @@ import (
 var (
 	waitForReadyTimeout      = 60 * time.Second
 	waitForReadyPollInterval = 500 * time.Millisecond
-	ampPromptFrameTop        = regexp.MustCompile(`(?m)^\s*╭[─ ]+(low|medium|high|deep)[─ ]+╮\s*\n\s*│`)
+	// waitForReadyHookGrace bounds how long in-flight post-worktree hooks may
+	// hold the readiness deadline open (see WaitForReady). It only matters for a
+	// misconfigured non-terminating hook; real provisioning builds finish far
+	// inside it, so it is generous rather than tight.
+	waitForReadyHookGrace = 10 * time.Minute
+	ampPromptFrameTop     = regexp.MustCompile(`(?m)^\s*╭[─ ]+(low|medium|high|deep)[─ ]+╮\s*\n\s*│`)
 )
+
+// postWorktreeHooksDoneForWait resolves the instance's post-worktree hook
+// completion channel. Indirected so tests can drive the hook-aware readiness
+// timing without standing up a real worktree and hook run.
+var postWorktreeHooksDoneForWait = func(instance *session.Instance) <-chan struct{} {
+	return instance.PostWorktreeHooksDone()
+}
 
 // LimitReachedError is what WaitForReady returns when the agent shows a
 // usage-limit banner during startup instead of its input prompt (#1146 PR4):
@@ -148,12 +160,45 @@ func WaitForReady(instance *session.Instance) error {
 	// limit banner mid-startup is recognized and PARKED, not spun into a failure
 	// (#1146 PR4). Only claude/codex ever match; other agents never park here.
 	detector := newLimitDetectorForWait()
-	timeout := time.After(waitForReadyTimeout)
+
+	// The readiness budget measures the AGENT's startup. Post-worktree hooks
+	// (e.g. a `make dev_install` build in post_worktree_commands) run
+	// concurrently with the agent and can saturate the machine, starving the
+	// agent's process so it renders its ready prompt late. That hook runtime must
+	// not be charged against readiness, or a perfectly healthy agent looks like
+	// it failed to start — the amp "does-amp-work" timeout. So the timeout stays
+	// disarmed while provisioning is in flight and starts fresh only once the
+	// hooks drain. A fast agent that becomes ready mid-hook still returns
+	// immediately from the ticker branch below, and when no hooks are in flight
+	// (hooksDone == nil — no worktree, external worktree, or no hooks configured)
+	// the timeout is armed right away, exactly as before.
+	hooksDone := postWorktreeHooksDoneForWait(instance)
+	var timeout <-chan time.Time
+	var hookGrace <-chan time.Time
+	if hooksDone == nil {
+		timeout = time.After(waitForReadyTimeout)
+	} else {
+		// Safety valve: a misconfigured non-terminating post_worktree_command
+		// (e.g. a foreground server) would otherwise hold the deadline open
+		// forever and wedge session startup. Cap how long hooks may defer the
+		// readiness clock; normal provisioning builds finish well within it.
+		hookGrace = time.After(waitForReadyHookGrace)
+	}
 	ticker := time.NewTicker(waitForReadyPollInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-hooksDone:
+			// Provisioning finished: arm the full readiness budget from here and
+			// stop watching the hooks channels.
+			hooksDone, hookGrace = nil, nil
+			timeout = time.After(waitForReadyTimeout)
+		case <-hookGrace:
+			// Hooks ran too long to be normal provisioning; stop deferring to
+			// them and enforce the readiness budget so startup can't hang forever.
+			hooksDone, hookGrace = nil, nil
+			timeout = time.After(waitForReadyTimeout)
 		case <-timeout:
 			content, err := instance.Preview()
 			if err != nil {

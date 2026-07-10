@@ -99,6 +99,22 @@ func (i *Instance) GetRepoPath() string {
 	return gw.GetRepoPath()
 }
 
+// PostWorktreeHooksDone returns a channel that is closed once the instance's
+// post-worktree hooks (post_worktree_commands) have finished running, or nil
+// when no hook run is in flight — no worktree yet, an external worktree that
+// skips hooks, or a repo with no hooks configured. The readiness wait uses it
+// so a slow build hook running concurrently with the agent is not charged
+// against the agent's startup budget (see task.WaitForReady).
+func (i *Instance) PostWorktreeHooksDone() <-chan struct{} {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return nil
+	}
+	return gw.HooksDone()
+}
+
 func (i *Instance) Started() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
