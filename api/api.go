@@ -225,13 +225,9 @@ func diskWhoami(tmuxName string) (*session.InstanceData, error) {
 }
 
 func repoHasInstanceTitle(repoID, title string) (bool, error) {
-	raw, err := config.LoadRepoInstances(repoID)
+	instances, err := loadRepoInstanceData(repoID)
 	if err != nil {
-		return false, fmt.Errorf("failed to load instances for repo %s: %w", repoID, err)
-	}
-	var instances []session.InstanceData
-	if err := json.Unmarshal(raw, &instances); err != nil {
-		return false, fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+		return false, err
 	}
 	for i := range instances {
 		if instances[i].Title == title {
@@ -239,6 +235,18 @@ func repoHasInstanceTitle(repoID, title string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load instances for repo %s: %w", repoID, err)
+	}
+	var instances []session.InstanceData
+	if err := json.Unmarshal(raw, &instances); err != nil {
+		return nil, fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+	}
+	return instances, nil
 }
 
 // findLiveInstanceByTitle finds an instance by title and restores it as a live *Instance.
@@ -263,13 +271,9 @@ func findInstanceByTitleInScope(repoID, title string) (*session.InstanceData, st
 	if repoID == "" {
 		return findInstanceByTitle(title)
 	}
-	raw, err := config.LoadRepoInstances(repoID)
+	instances, err := loadRepoInstanceData(repoID)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to load instances for repo %s: %w", repoID, err)
-	}
-	var instances []session.InstanceData
-	if err := json.Unmarshal(raw, &instances); err != nil {
-		return nil, "", fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+		return nil, "", err
 	}
 	for i := range instances {
 		if instances[i].Title == title {
@@ -340,13 +344,9 @@ type scopedInstance struct {
 // current/--repo scope's targets. Mirrors repoHasInstanceTitle's load+parse but
 // returns every entry rather than a single existence bit.
 func scopedInstancesForRepo(repoID string) ([]scopedInstance, error) {
-	raw, err := config.LoadRepoInstances(repoID)
+	instances, err := loadRepoInstanceData(repoID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load instances for repo %s: %w", repoID, err)
-	}
-	var instances []session.InstanceData
-	if err := json.Unmarshal(raw, &instances); err != nil {
-		return nil, fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+		return nil, err
 	}
 	out := make([]scopedInstance, 0, len(instances))
 	for i := range instances {
