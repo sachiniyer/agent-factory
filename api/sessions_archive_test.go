@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -40,13 +41,19 @@ func stubCurrentTmuxName(t *testing.T, fn func() (string, error)) {
 }
 
 // TestSessionsArchiveSelf_ResolvesAndArchivesCurrentSession: `archive --self`
-// resolves the caller's own session via whoami and archives that title.
+// resolves the caller's own session via whoami and archives that title, scoped
+// by the resolved session's OWN repo.
 func TestSessionsArchiveSelf_ResolvesAndArchivesCurrentSession(t *testing.T) {
-	repoID := setupRepoForCmd(t)
+	setupRepoForCmd(t)
 
+	const sessionRoot = "/home/agent/src/myrepo"
 	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
 	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
-		return []session.InstanceData{{Title: "me", TmuxName: "af_me_agent"}}, nil
+		return []session.InstanceData{{
+			Title:    "me",
+			TmuxName: "af_me_agent",
+			Worktree: session.GitWorktreeData{RepoPath: sessionRoot},
+		}}, nil
 	})
 
 	var gotReq daemon.ArchiveSessionRequest
@@ -67,8 +74,8 @@ func TestSessionsArchiveSelf_ResolvesAndArchivesCurrentSession(t *testing.T) {
 	if gotReq.Title != "me" {
 		t.Fatalf("archive --self resolved Title = %q, want %q (whoami's title)", gotReq.Title, "me")
 	}
-	if gotReq.RepoID != repoID {
-		t.Fatalf("archive --self RepoID = %q, want %q", gotReq.RepoID, repoID)
+	if want := config.RepoIDFromRoot(sessionRoot); gotReq.RepoID != want {
+		t.Fatalf("archive --self RepoID = %q, want resolved-session repo %q", gotReq.RepoID, want)
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(out, &parsed); err != nil {
@@ -93,6 +100,52 @@ func TestSessionsArchiveSelf_RejectsTitleArg(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot combine --self with a <title>") {
 		t.Fatalf("error = %v, want the mutual-exclusion message", err)
+	}
+}
+
+// TestSessionsArchiveSelf_ScopesByResolvedRepoNotCwd: an agent that has cd'd
+// into a DIFFERENT repo must still archive ITS OWN session — scoped by the
+// resolved session's repo, never the cwd/--repo repo. Otherwise --self would
+// hit a same-titled namesake in the wrong repo or fail "not found" while
+// leaving the caller's real session alive.
+func TestSessionsArchiveSelf_ScopesByResolvedRepoNotCwd(t *testing.T) {
+	cwdRepoID := setupRepoForCmd(t) // repoFlag points at the cwd repo (repo-a)
+
+	// The caller's real session lives in a DIFFERENT repo than the cwd.
+	const sessionRoot = "/home/agent/src/other-repo"
+	sessionRepoID := config.RepoIDFromRoot(sessionRoot)
+	if sessionRepoID == cwdRepoID {
+		t.Fatal("test setup: resolved-session repo must differ from cwd repo")
+	}
+
+	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{
+			Title:    "me",
+			TmuxName: "af_me_agent",
+			Worktree: session.GitWorktreeData{RepoPath: sessionRoot},
+		}}, nil
+	})
+
+	var gotReq daemon.ArchiveSessionRequest
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, error) {
+		gotReq = req
+		return "/archived/me", nil
+	}
+	defer func() { archiveSessionViaDaemon = prev }()
+
+	sessionsArchiveSelf = true
+	defer func() { sessionsArchiveSelf = false }()
+
+	if _, err := runCmdCaptureStdout(t, sessionsArchiveCmd, nil); err != nil {
+		t.Fatalf("archive --self returned error: %v", err)
+	}
+	if gotReq.RepoID != sessionRepoID {
+		t.Fatalf("archive --self RepoID = %q, want resolved-session repo %q (NOT cwd repo %q)", gotReq.RepoID, sessionRepoID, cwdRepoID)
+	}
+	if gotReq.Title != "me" {
+		t.Fatalf("archive --self Title = %q, want %q", gotReq.Title, "me")
 	}
 }
 

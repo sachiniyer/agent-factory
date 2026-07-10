@@ -792,6 +792,7 @@ success.`,
 		// guard needs no special handling here: --self routes through the same
 		// daemon RPC as the title path, so the daemon still rejects a
 		// non-relocatable worktree.
+		var repoID string
 		if sessionsArchiveSelf {
 			if title != "" {
 				return jsonError(fmt.Errorf("cannot combine --self with a <title> argument; --self archives the current session"))
@@ -801,16 +802,35 @@ success.`,
 				return jsonError(fmt.Errorf("--self must be run from inside an af session: %w", err))
 			}
 			title = data.Title
-		} else if title == "" {
-			return jsonError(fmt.Errorf("a session <title> is required (or pass --self to archive the current session)"))
-		}
-
-		// Honor --repo scoping (#761 class), mirroring kill: an empty repoID
-		// preserves the all-repo search; a non-empty one confines the archive to
-		// that repo so a same-titled session in another repo is never touched.
-		repoID, err := resolveRepoID()
-		if err != nil {
-			return jsonError(err)
+			// Scope by the RESOLVED session's OWN repo, never cwd/--repo. An
+			// agent that cd'd into another repo must still archive ITS OWN
+			// session — scoping by cwd would archive a same-titled namesake in
+			// the wrong repo, or fail "instance not found" while leaving the
+			// caller's real session alive. Mirror Storage's root→repoID
+			// derivation (#667): fall back to Path when no worktree RepoPath.
+			// A worktree-less session (remote backend) leaves repoID empty so
+			// the resolved title is matched all-repo and the daemon's remote
+			// guard still fires with its own clear message.
+			root := data.Worktree.RepoPath
+			if root == "" {
+				root = data.Path
+			}
+			if root != "" {
+				repoID = config.RepoIDFromRoot(root)
+			}
+		} else {
+			if title == "" {
+				return jsonError(fmt.Errorf("a session <title> is required (or pass --self to archive the current session)"))
+			}
+			// Honor --repo scoping (#761 class), mirroring kill: an empty repoID
+			// preserves the all-repo search; a non-empty one confines the archive
+			// to that repo so a same-titled session in another repo is never
+			// touched.
+			var err error
+			repoID, err = resolveRepoID()
+			if err != nil {
+				return jsonError(err)
+			}
 		}
 
 		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{Title: title, RepoID: repoID})
