@@ -14,6 +14,15 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 	s.dirtyIDs = nil
 	s.deleted = nil
 	s.editing = false
+	// A reload replaces the create-form buffers a pending create was captured
+	// against, so a create left un-consumed by a failed save must be dropped —
+	// otherwise the next keypress after reopen fires it against the wrong
+	// (reloaded) buffers and duplicates the now-selected task (#1531). Only
+	// pendingCreate is cleared here: pendingTrigger is deliberately left intact
+	// because saveContentPaneState reloads via SetTasks mid-flush and a pending
+	// run-now must survive that reload to resolve by task ID (#1474). The
+	// overlay-close path clears pendingTrigger instead (SetFocus(false)).
+	s.pendingCreate = false
 	if len(s.tasks) == 0 {
 		s.selectedIdx = 0
 	} else if s.selectedIdx >= len(s.tasks) {
@@ -102,6 +111,13 @@ func (s *TaskPane) SetFocus(focus bool) {
 	if !focus {
 		s.editing = false
 		s.creating = false
+		// Closing the overlay (Esc drops focus) must also drop any pending
+		// create/trigger whose save failed and left it un-consumed: otherwise
+		// it survives the close and fires on the next keypress after reopen,
+		// against the reloaded buffers, duplicating a task (#1531).
+		s.pendingCreate = false
+		s.pendingTrigger = false
+		s.pendingTriggerID = ""
 	}
 }
 
