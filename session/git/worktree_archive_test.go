@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -253,35 +254,71 @@ func TestRestoreWorktreeTo_SubmoduleRepairFailureIsBestEffort(t *testing.T) {
 	assert.Contains(t, warnings.String(), "git -C \""+restoreDest+"\" submodule update --init --recursive")
 }
 
-// TestSiblingWorktreePath_DefaultCollisionAndSanitize: the restore-side path
-// computation returns {repoParent}/{repoName}-{safeTitle}, appends a numeric
-// suffix when that path is occupied, and sanitizes the title into a single safe
-// segment — mirroring NewGitWorktree's layout so restore lands the worktree
-// where a fresh session's would live (#1028).
-func TestSiblingWorktreePath_DefaultCollisionAndSanitize(t *testing.T) {
+// TestRestoreWorktreePath_SiblingCollisionAndSanitize: in the default sibling
+// mode the restore-side path computation returns {repoParent}/{repoName}-
+// {safeTitle}, appends a numeric suffix when that path is occupied, and
+// sanitizes the title into a single safe segment — mirroring NewGitWorktree's
+// layout so restore lands the worktree where a fresh session's would live (#1028).
+// The branch name is ignored in sibling mode.
+func TestRestoreWorktreePath_SiblingCollisionAndSanitize(t *testing.T) {
 	sandboxHome(t)
 	repoRoot := createGitRepo(t) // {tmp}/repo
 	parent := filepath.Dir(repoRoot)
 
-	p, err := SiblingWorktreePath(repoRoot, "feature-x")
+	p, err := RestoreWorktreePath(repoRoot, "feature-x", "af/feature-x")
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(parent, "repo-feature-x"), p)
 
 	// Collision: occupy the default path, expect the "-2" suffix.
 	require.NoError(t, os.MkdirAll(p, 0755))
-	p2, err := SiblingWorktreePath(repoRoot, "feature-x")
+	p2, err := RestoreWorktreePath(repoRoot, "feature-x", "af/feature-x")
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(parent, "repo-feature-x-2"), p2)
 
 	// Sanitize: "/" -> "-", ".." stripped.
-	ps, err := SiblingWorktreePath(repoRoot, "a/b..c")
+	ps, err := RestoreWorktreePath(repoRoot, "a/b..c", "af/ab..c")
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(parent, "repo-a-bc"), ps)
 
-	spaced, err := SiblingWorktreePath(repoRoot, "Review Threads")
+	spaced, err := RestoreWorktreePath(repoRoot, "Review Threads", "af/review")
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(parent, "repo-Review-Threads"), spaced)
 	assert.NotContains(t, filepath.Base(spaced), " ")
+}
+
+// TestRestoreWorktreePath_SubdirectoryHonorsWorktreeRoot is the #1540 regression:
+// for a user with worktree_root=subdirectory, the restore destination must live
+// under $AF_HOME/worktrees/<branch> — exactly where NewGitWorktree creates it —
+// not stranded beside the repo. A collision still suffixes.
+func TestRestoreWorktreePath_SubdirectoryHonorsWorktreeRoot(t *testing.T) {
+	sandboxHome(t)
+	cfg := config.DefaultConfig()
+	cfg.WorktreeRoot = config.WorktreeRootSubdirectory
+	require.NoError(t, config.SaveConfig(cfg))
+
+	repoRoot := createGitRepo(t)
+
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	worktreesDir := filepath.Join(configDir, "worktrees")
+
+	// Restore must match NewGitWorktree's subdirectory layout: {worktrees}/{branch}.
+	created, _, err := NewGitWorktree(repoRoot, "feature-x")
+	require.NoError(t, err)
+	branch := created.GetBranchName()
+	assert.Equal(t, filepath.Join(worktreesDir, branch), created.GetWorktreePath(),
+		"sanity: creation places the worktree under the subdirectory root")
+
+	p, err := RestoreWorktreePath(repoRoot, "feature-x", branch)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(worktreesDir, branch), p,
+		"restore must land the worktree under the subdirectory root, honoring worktree_root")
+
+	// Collision under the subdirectory root suffixes, not falls back to sibling.
+	require.NoError(t, os.MkdirAll(p, 0755))
+	p2, err := RestoreWorktreePath(repoRoot, "feature-x", branch)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(worktreesDir, branch+"-2"), p2)
 }
 
 // TestMoveWorktree_RepairFailureStillCommitsLocation (#1028 Greptile P1): in the

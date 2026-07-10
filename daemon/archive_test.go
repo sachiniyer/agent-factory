@@ -241,10 +241,10 @@ func TestRestoreArchived_MovesWorktreeBackAndRespawns(t *testing.T) {
 	require.Equal(t, session.Archived, inst.GetStatus())
 	archivedPath := inst.GetWorktreePath()
 
-	// Compute the expected sibling path BEFORE restore, while it is still free
-	// (afterwards the restored worktree occupies it, and SiblingWorktreePath
+	// Compute the expected restore path BEFORE restore, while it is still free
+	// (afterwards the restored worktree occupies it, and RestoreWorktreePath
 	// would return the "-2" suffix).
-	expected, perr := sessiongit.SiblingWorktreePath(repoPath, "worker")
+	expected, perr := sessiongit.RestoreWorktreePath(repoPath, "worker", inst.GetBranch())
 	require.NoError(t, perr)
 
 	worktreePath, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
@@ -314,7 +314,7 @@ func TestRestoreArchived_CollisionSuffixesPath(t *testing.T) {
 	require.NoError(t, err)
 
 	// Occupy the default sibling location so restore must suffix.
-	base, perr := sessiongit.SiblingWorktreePath(repoPath, "worker")
+	base, perr := sessiongit.RestoreWorktreePath(repoPath, "worker", inst.GetBranch())
 	require.NoError(t, perr)
 	require.NoError(t, os.MkdirAll(base, 0755))
 
