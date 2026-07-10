@@ -181,8 +181,7 @@ func TestSidebar_NavCrossesBetweenLiveTabsAndArchivedRows(t *testing.T) {
 	addTestInstance(s, archivedInst)
 	s.SetSize(40, 40)
 
-	s.expandSectionKind(SectionArchived)
-	require.True(t, archivedRowVisible(s), "archived row must be visible for the boundary walk")
+	require.False(t, archivedRowVisible(s), "Archived starts collapsed before the boundary walk")
 	s.SetSelectedInstance(0)
 
 	s.Down() // live Agent tab
@@ -194,8 +193,10 @@ func TestSidebar_NavCrossesBetweenLiveTabsAndArchivedRows(t *testing.T) {
 
 	s.Down()
 	sel = s.GetSelection()
-	require.Equal(t, SectionArchived, sel.Kind, "Down after the last live tab reaches archived rows")
+	require.Equal(t, SectionArchived, sel.Kind,
+		"Down after the last live tab auto-opens Archived and reaches archived rows")
 	require.False(t, sel.IsHeader)
+	require.True(t, archivedRowVisible(s), "Down at the live boundary must expand Archived")
 	require.Same(t, archivedInst, s.GetSelectedInstance())
 
 	s.Up()
@@ -218,7 +219,7 @@ func TestSidebar_NavSkipsNonExpandableLiveRowsBeforeArchived(t *testing.T) {
 	addTestInstance(s, deletingInst)
 	addTestInstance(s, archivedInst)
 	s.SetSize(40, 40)
-	s.expandSectionKind(SectionArchived)
+	require.False(t, archivedRowVisible(s), "Archived starts collapsed before the boundary walk")
 
 	s.SetSelectedInstance(0)
 	s.Down() // live Agent tab
@@ -228,8 +229,9 @@ func TestSidebar_NavSkipsNonExpandableLiveRowsBeforeArchived(t *testing.T) {
 	s.Down()
 	sel := s.GetSelection()
 	require.Equal(t, SectionArchived, sel.Kind,
-		"Down after the last live tab skips non-expandable live rows and reaches archived rows")
+		"Down after the last live tab skips non-expandable live rows, auto-opens Archived, and reaches archived rows")
 	require.False(t, sel.IsHeader)
+	require.True(t, archivedRowVisible(s), "Down at the live boundary must expand Archived")
 	require.Same(t, archivedInst, s.GetSelectedInstance())
 
 	s.Up()
@@ -246,11 +248,21 @@ func TestSidebar_NavSkipsNonExpandableLiveRowsBeforeArchived(t *testing.T) {
 	require.False(t, sel.IsTab, "precondition: explicit selection can rest on the deleting live title")
 	require.Same(t, deletingInst, s.GetSelectedInstance())
 
+	for i, sec := range s.sections {
+		if sec.Kind == SectionArchived {
+			s.sections[i].Expanded = false
+			break
+		}
+	}
+	s.rebuildVisibleItems()
+	require.False(t, archivedRowVisible(s), "Archived can be collapsed again before walking from the live tail")
+
 	s.Down()
 	sel = s.GetSelection()
 	require.Equal(t, SectionArchived, sel.Kind,
-		"Down from a non-expandable live title reaches the next selectable row")
+		"Down from a non-expandable live title auto-opens Archived and reaches the next selectable row")
 	require.False(t, sel.IsHeader)
+	require.True(t, archivedRowVisible(s), "Down from the non-expandable live tail must expand Archived")
 	require.Same(t, archivedInst, s.GetSelectedInstance())
 
 	s.Up()

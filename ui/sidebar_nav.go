@@ -376,10 +376,10 @@ func (s *Sidebar) selectNavStop(stop sidebarNavStop) bool {
 	return true
 }
 
-func (s *Sidebar) moveVerticalNavStop(dir int) {
+func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 	stops := s.verticalNavStops()
 	if len(stops) == 0 {
-		return
+		return false
 	}
 
 	sel := s.rawSelection()
@@ -387,27 +387,25 @@ func (s *Sidebar) moveVerticalNavStop(dir int) {
 		switch sel.Kind {
 		case SectionInstances:
 			if dir > 0 {
-				s.selectNavStop(stops[0])
+				return s.selectNavStop(stops[0])
 			}
-			return
+			return false
 		case SectionArchived:
 			if dir < 0 {
 				for i := len(stops) - 1; i >= 0; i-- {
 					if stops[i].isTab {
-						s.selectNavStop(stops[i])
-						return
+						return s.selectNavStop(stops[i])
 					}
 				}
 			} else {
 				for _, stop := range stops {
 					if !stop.isTab && stop.visibleIdx > s.selectedIdx {
-						s.selectNavStop(stop)
-						return
+						return s.selectNavStop(stop)
 					}
 				}
 			}
 		}
-		return
+		return false
 	}
 
 	target := -1
@@ -422,9 +420,44 @@ func (s *Sidebar) moveVerticalNavStop(dir int) {
 	}
 
 	if target < 0 || target >= len(stops) {
+		return false
+	}
+	return s.selectNavStop(stops[target])
+}
+
+func (s *Sidebar) moveVerticalNavStop(dir int) {
+	if s.tryMoveVerticalNavStop(dir) {
 		return
 	}
-	s.selectNavStop(stops[target])
+	// Archived rows are selectable stops only after the Archived section renders
+	// them. At the live-list tail, Down should reveal that folder and retry.
+	if dir <= 0 || !s.downNavCanRevealArchived() || !s.expandArchivedSectionForNav() {
+		return
+	}
+	_ = s.tryMoveVerticalNavStop(dir)
+}
+
+func (s *Sidebar) downNavCanRevealArchived() bool {
+	return s.rawSelection().Kind == SectionInstances
+}
+
+func (s *Sidebar) expandArchivedSectionForNav() bool {
+	_, archived := partitionByArchived(s.proj.GetInstances())
+	if len(archived) == 0 {
+		return false
+	}
+	for i, sec := range s.sections {
+		if sec.Kind != SectionArchived {
+			continue
+		}
+		if sec.Expanded {
+			return false
+		}
+		s.sections[i].Expanded = true
+		s.rebuildVisibleItems()
+		return true
+	}
+	return false
 }
 
 // Down moves the cursor down through live tab stops, skipping instance titles.

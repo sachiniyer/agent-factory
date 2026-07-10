@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 )
 
 // pressNav drives handleDefaultKeyPress with a mapped nav key, the way
@@ -93,6 +94,40 @@ func TestTreeNav_JKWalksTabChildren(t *testing.T) {
 	pressNav(t, h, "l")
 	pressNav(t, h, "j")
 	assert.True(t, h.sidebar.GetSelection().IsTab)
+}
+
+func TestTreeNav_DownAutoOpensArchivedAtLiveBoundary(t *testing.T) {
+	h := newTestHome(t)
+	live := startedLocalInstance(t, "live-one")
+	archived := archiveActionInstance(t, "put-away", session.Ready)
+	archived.SetArchived()
+
+	h.store.AddInstance(live)
+	h.store.AddInstance(archived)
+	resizeHome(h, 120, 40)
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	require.Same(t, live, h.sidebar.GetSelectedInstance())
+	require.NotContains(t, h.sidebar.View(), "put-away", "Archived starts collapsed")
+
+	pressNav(t, h, "j") // live Agent tab
+	pressNav(t, h, "j") // live Terminal tab
+	require.True(t, h.sidebar.GetSelection().IsTab)
+
+	pressNav(t, h, "j")
+	sel := h.sidebar.GetSelection()
+	require.Equal(t, ui.SectionArchived, sel.Kind,
+		"Down after the last live tab must auto-open Archived and select the first archived row")
+	require.False(t, sel.IsHeader)
+	require.Same(t, archived, h.sidebar.GetSelectedInstance())
+	assert.Contains(t, h.sidebar.View(), "put-away", "auto-opened Archived must render archived rows")
+
+	pressNav(t, h, "k")
+	sel = h.sidebar.GetSelection()
+	require.Equal(t, ui.SectionInstances, sel.Kind)
+	require.True(t, sel.IsTab)
+	require.Equal(t, 1, sel.TabIndex)
+	require.Same(t, live, h.sidebar.GetSelectedInstance())
 }
 
 func TestTreeNav_TabStopAcrossInstancePreservesParentForActions(t *testing.T) {
