@@ -17,11 +17,14 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 		return err
 	}
 	targetID := killTargetStableID(instance, data)
-	if !req.Force {
-		if err := guardKillRecoverableWork(req.Title, instance, data); err != nil {
-			return err
-		}
-	}
+	// Kill destroys the session unconditionally (#1579). The old unmerged-work
+	// guard that refused kills with commits-not-on-base / a dirty worktree / a
+	// branch mismatch was dropped by owner decision: it over-refused ordinary
+	// cases — most notably squash-merged branches (whose landed commits aren't
+	// ancestors of base) and worktrees checked out on a different branch than the
+	// stored session branch — blocking routine cleanup. `af sessions archive`
+	// remains the non-destructive, restorable default; kill just kills. req.Force
+	// is now a no-op accepted for backward compatibility.
 
 	key := daemonInstanceKey(repoID, req.Title)
 	m.mu.Lock()

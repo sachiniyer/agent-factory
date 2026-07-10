@@ -41,7 +41,10 @@ type CreateSessionResponse struct {
 type KillSessionRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
-	Force  bool   `json:"force,omitempty"`
+	// Force is retained for backward compatibility with existing
+	// `af sessions kill --force` invocations but is now a no-op: kill always
+	// destroys the session since the unmerged-work guard was dropped (#1579).
+	Force bool `json:"force,omitempty"`
 }
 
 type KillSessionResponse struct {
