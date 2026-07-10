@@ -58,9 +58,10 @@ agent in the current checkout.
 ## 3. Watch Work From One Terminal
 
 The TUI sidebar shows every session for the active project. Press **`Ctrl-p`**
-(from TUI navigation, not while attached to a pane) to switch projects without
-restarting. The Agent tab shows a snapshot of the selected agent's terminal, so
-you can scan progress without attaching:
+to switch projects without restarting — from TUI navigation, not while attached
+to a pane (there `Ctrl-p` goes to the running program, so press `Ctrl-]` to
+detach first). The Agent tab shows a snapshot of the selected agent's terminal,
+so you can scan progress without attaching:
 
 <div class="af-visual-example" markdown>
 
