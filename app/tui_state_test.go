@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -180,6 +181,156 @@ func TestTUIViewStatePreviewTickDoesNotWriteUnchangedState(t *testing.T) {
 	require.NoError(t, err, "a structural pane-open action must save TUI state")
 	assert.Contains(t, string(raw), `"schema_version"`)
 	assert.Contains(t, string(raw), `"open_panes"`)
+}
+
+// TestTUIViewStateRestoreArchivedSelectionFollowsLivePane is the #1559 repro:
+// on relaunch the persisted selection pointed at a session that was archived
+// before quit, while a LIVE session's pane was left open. restoreTUISelection
+// refuses to bind the archived row, so pre-fix the store was left with no live
+// selection while the workspace still rendered the live pane — an incoherent
+// mix (sidebar highlights nothing/an archived row over a live workspace) whose
+// archived-tail cursor stalled keyboard nav. The launch selection must instead
+// follow the live pane that is actually shown, and stay keyboard-navigable.
+func TestTUIViewStateRestoreArchivedSelectionFollowsLivePane(t *testing.T) {
+	h := newTestHome(t)
+	h.initialPaneOpened = false
+	feature := tuiStateTestInstance(t, "feature")
+	qa := tuiStateTestInstance(t, "qa")
+	docs := tuiStateTestInstance(t, "docs")
+	docs.SetArchived() // archived before quit; persisted as the selection
+	h.store.AddInstance(feature)
+	h.store.AddInstance(qa)
+	h.store.AddInstance(docs)
+
+	state := config.TUIRepoViewState{
+		Selected: &config.TUIStateTarget{
+			InstanceID: docs.ID,
+			Title:      docs.Title,
+			TabName:    "agent",
+		},
+		ActiveTab: &config.TUIStateTarget{
+			InstanceID: docs.ID,
+			Title:      docs.Title,
+			TabName:    "agent",
+		},
+		OpenPanes: []config.TUIStateOpenPane{{
+			Key:        tuiPaneKeyForInstance(qa, "shell"),
+			InstanceID: qa.ID,
+			Title:      qa.Title,
+			TabName:    "shell",
+			FocusRank:  1,
+		}},
+	}
+	require.NoError(t, config.SaveTUIRepoViewState(h.repoID, state))
+
+	require.Equal(t, 1, h.restoreTUIViewStateOnLaunch())
+	resizeHome(h, 200, 40)
+
+	// The live pane is shown, so the live session it belongs to is selected —
+	// never the stale archived docs row.
+	require.Same(t, qa, h.store.GetSelectedInstance(),
+		"launch selects the live session whose pane is shown, not the archived one")
+	require.Same(t, qa, h.sidebar.GetSelectedInstance(),
+		"the sidebar cursor and the workspace pane refer to the same live session")
+	assert.Equal(t, 1, h.store.ActiveTab(), "the active tab follows the restored pane's tab")
+
+	// The restored selection rests on a live tab row (not an archived row), so
+	// keyboard nav moves through the live tree instead of stalling on the
+	// archived tail. qa sits below feature, so walking Up eventually reaches
+	// feature and never gets stuck on the same row.
+	sel := h.sidebar.GetSelection()
+	assert.Equal(t, ui.SectionInstances, sel.Kind)
+	assert.False(t, sel.IsHeader)
+	require.True(t, sel.IsTab, "the restored live selection rests on a tab row")
+
+	reachedFeature := false
+	for i := 0; i < 4 && !reachedFeature; i++ {
+		before := h.sidebar.GetSelection()
+		h.sidebar.Up()
+		after := h.sidebar.GetSelection()
+		require.NotEqual(t, before, after, "Up must move the cursor — keyboard nav is not stuck")
+		if h.sidebar.GetSelectedInstance() == feature {
+			reachedFeature = true
+		}
+	}
+	assert.True(t, reachedFeature, "Up walks up through the live tree to feature")
+
+	h.sidebar.Down()
+	assert.NotSame(t, feature, h.sidebar.GetSelectedInstance(),
+		"Down moves back down through the live tree")
+}
+
+// TestTUIViewStateRestoreSelectionFollowsRestoredFocusPane pins the preferred
+// half of the #1559 reconcile: when the archived/absent persisted selection
+// forces the fallback AND multiple live panes are restored, the launch selection
+// must follow the pane the persisted FOCUS points at — not merely the
+// most-recently-focused pane. Here focus is pinned on feature's pane while qa's
+// pane carries the higher focus-recency stamp (restored last), so the
+// most-recently-focused fallback would pick qa; asserting feature proves the
+// restoredFocusPane path wins.
+func TestTUIViewStateRestoreSelectionFollowsRestoredFocusPane(t *testing.T) {
+	h := newTestHome(t)
+	h.initialPaneOpened = false
+	feature := tuiStateTestInstance(t, "feature")
+	qa := tuiStateTestInstance(t, "qa")
+	docs := tuiStateTestInstance(t, "docs")
+	docs.SetArchived() // archived before quit; persisted as the selection
+	h.store.AddInstance(feature)
+	h.store.AddInstance(qa)
+	h.store.AddInstance(docs)
+
+	state := config.TUIRepoViewState{
+		Selected: &config.TUIStateTarget{
+			InstanceID: docs.ID,
+			Title:      docs.Title,
+			TabName:    "agent",
+		},
+		// Focus rests on feature's pane, even though qa's pane restores last and
+		// therefore carries the higher focus-recency stamp (the fallback's pick).
+		Focus: &config.TUIStateFocus{
+			Region:  tuiFocusRegionPane,
+			PaneKey: tuiPaneKeyForInstance(feature, "agent"),
+		},
+		OpenPanes: []config.TUIStateOpenPane{
+			{
+				Key:        tuiPaneKeyForInstance(feature, "agent"),
+				InstanceID: feature.ID,
+				Title:      feature.Title,
+				TabName:    "agent",
+				FocusRank:  1,
+			},
+			{
+				Key:        tuiPaneKeyForInstance(qa, "shell"),
+				InstanceID: qa.ID,
+				Title:      qa.Title,
+				TabName:    "shell",
+				FocusRank:  2, // restored last → highest LastFocus → the fallback pick
+			},
+		},
+	}
+	require.NoError(t, config.SaveTUIRepoViewState(h.repoID, state))
+
+	require.Equal(t, 2, h.restoreTUIViewStateOnLaunch())
+
+	// Assert the fallback premise BEFORE the first sized relayout: the launch
+	// focus is only applied to feature's pane once the terminal has real dims, so
+	// until then qa's pane (restored last) still carries the higher focus-recency
+	// stamp — i.e. the most-recently-focused fallback would pick qa. The reconcile
+	// runs inside restoreTUIViewStateOnLaunch above and must have picked feature.
+	require.Same(t, qa, h.mostRecentlyFocusedOpenPane().Instance(),
+		"premise: qa's pane carries the higher focus-recency stamp (the fallback pick)")
+	require.Same(t, feature, h.store.GetSelectedInstance(),
+		"launch selects the FOCUSED pane's session, not the most-recently-focused fallback")
+	require.Same(t, feature, h.sidebar.GetSelectedInstance(),
+		"the sidebar cursor follows the focused pane's session")
+	assert.Equal(t, 0, h.store.ActiveTab(),
+		"the active tab follows the focused pane's tab (feature/agent)")
+
+	// The coherence survives the first real relayout (which applies the restored
+	// pane focus): the selection stays on the focused session.
+	resizeHome(h, 200, 40)
+	require.Same(t, feature, h.store.GetSelectedInstance(),
+		"the focused-pane selection remains coherent after layout")
 }
 
 func tuiStateTestInstance(t *testing.T, title string) *session.Instance {
