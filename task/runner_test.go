@@ -273,6 +273,95 @@ func setWaitForReadyTimingForTest(timeout, poll time.Duration) func() {
 	}
 }
 
+// setWaitForReadyHookGraceForTest shrinks the hook-grace valve so a
+// non-terminating hook is bounded in milliseconds, and returns a restore func.
+func setWaitForReadyHookGraceForTest(grace time.Duration) func() {
+	prev := waitForReadyHookGrace
+	waitForReadyHookGrace = grace
+	return func() { waitForReadyHookGrace = prev }
+}
+
+// setPostWorktreeHooksDoneForWait injects the hook-completion channel
+// WaitForReady observes, so a test can drive hook-aware readiness timing
+// without standing up a real worktree and hook run. Returns a restore func.
+func setPostWorktreeHooksDoneForWait(fn func(*session.Instance) <-chan struct{}) func() {
+	prev := postWorktreeHooksDoneForWait
+	postWorktreeHooksDoneForWait = fn
+	return func() { postWorktreeHooksDoneForWait = prev }
+}
+
+// TestWaitForReadySlowHookDoesNotTimeOutHealthyAgent is the core fix for the
+// amp "does-amp-work" timeout: a slow post-worktree hook (e.g. a `make`
+// build) runs concurrently with the agent and its runtime must NOT be charged
+// against the agent's readiness budget. Here the agent stays not-ready for far
+// longer than the (tiny) base timeout while the hook runs; readiness must be
+// deferred until the hook drains, so the healthy agent is not spuriously failed.
+func TestWaitForReadySlowHookDoesNotTimeOutHealthyAgent(t *testing.T) {
+	defer setWaitForReadyTimingForTest(30*time.Millisecond, time.Millisecond)()
+
+	hookDone := make(chan struct{})
+	defer setPostWorktreeHooksDoneForWait(func(*session.Instance) <-chan struct{} { return hookDone })()
+
+	var ready atomic.Bool
+	inst := newPreviewInstance(t, func() (string, error) {
+		if ready.Load() {
+			return "ready now\n❯ ", nil
+		}
+		return "still building the worktree...\n", nil
+	})
+
+	// The agent only renders its prompt well after the 30ms base timeout would
+	// have fired — but while the hook is in flight, so readiness must be held.
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		ready.Store(true)
+		close(hookDone)
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(inst) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a slow post-worktree hook must not time out a healthy agent, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady never returned while a slow hook was in flight")
+	}
+}
+
+// TestWaitForReadyHookGraceBoundsNonTerminatingHook guards the safety valve: a
+// misconfigured post_worktree_command that never terminates (so its completion
+// channel never closes) must not hang startup forever. Once the hook grace
+// elapses the readiness budget is armed, so a never-ready agent still times out.
+func TestWaitForReadyHookGraceBoundsNonTerminatingHook(t *testing.T) {
+	defer setWaitForReadyTimingForTest(20*time.Millisecond, time.Millisecond)()
+	defer setWaitForReadyHookGraceForTest(30 * time.Millisecond)()
+
+	neverDone := make(chan struct{}) // never closed: models a stuck hook
+	defer setPostWorktreeHooksDoneForWait(func(*session.Instance) <-chan struct{} { return neverDone })()
+
+	inst := newPreviewInstance(t, func() (string, error) {
+		return "still building forever...\n", nil
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(inst) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a timeout error once the hook grace elapses, got nil")
+		}
+		if !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("expected a timeout error after the grace valve fires, got %q", err.Error())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady hung on a non-terminating hook; grace valve did not fire")
+	}
+}
+
 // TestWaitForReadyFailsFastWhenSessionGone is the core #976 fix: when
 // Preview() reports tmux.ErrSessionGone (a definitive, non-retryable death),
 // WaitForReady must return immediately with a clear "session died" error —

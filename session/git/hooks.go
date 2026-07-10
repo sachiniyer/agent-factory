@@ -31,18 +31,29 @@ const hookWaitDelay = 2 * time.Second
 // completion or cancellation. Backgrounded grandchildren therefore never
 // outlive their parent hook.
 // Errors are logged but do not propagate.
-func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath string) {
+//
+// The returned channel is closed once every hook has finished — whether by
+// normal completion, failure, or ctx cancellation. It is closed immediately
+// when there are no hooks to run (or the repo config can't be resolved). It
+// lets callers tell whether provisioning is still in flight; in particular the
+// readiness wait uses it so a slow build hook running concurrently with the
+// agent is not charged against the agent's startup budget (see task.WaitForReady).
+func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath string) <-chan struct{} {
+	done := make(chan struct{})
 	repoCfg, err := config.ResolveConfig(repoPath)
 	if err != nil {
 		log.WarningLog.Printf("failed to resolve repo config for hooks: %v", err)
-		return
+		close(done)
+		return done
 	}
 	if len(repoCfg.PostWorktreeCommands) == 0 {
-		return
+		close(done)
+		return done
 	}
 
 	cmds := repoCfg.PostWorktreeCommands
 	go func() {
+		defer close(done)
 		for _, cmdStr := range cmds {
 			select {
 			case <-ctx.Done():
@@ -117,4 +128,5 @@ func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath strin
 			}
 		}
 	}()
+	return done
 }
