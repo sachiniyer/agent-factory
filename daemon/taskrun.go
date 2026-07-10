@@ -209,6 +209,19 @@ func RunTask(taskID string) (err error) {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
+	// This NON-blocking lock is what makes overlapping same-task fires during a
+	// #1586 delivery defer INTENTIONALLY coalesce to a single delivery. While the
+	// user is attached to the target, the holding fire parks in
+	// deliverCronTaskPrompt waiting for detach; every other fire that lands during
+	// that wait hits LOCK_NB, returns "another run is already active", and exits
+	// without queuing. So a cron firing more often than the attach lasts delivers
+	// exactly ONE prompt on detach, not one per skipped occurrence. This is
+	// deliberate and desirable: a cron prompt is a fixed, idempotent string (the
+	// task's Prompt), so N identical "run nightly" prompts arriving in a burst the
+	// instant the user detaches would be pure duplicate noise — one catch-up is
+	// the right behavior. (Watch events, which carry distinct per-event {{line}}
+	// payloads, are NOT coalesced: they each queue durably and replay in order.)
+
 	// Once this fire holds the lock it owns the task's run status: every
 	// failure from here on — git missing, project path not a repo, or a
 	// delivery error — must be recorded so a cron task's LastRunStatus

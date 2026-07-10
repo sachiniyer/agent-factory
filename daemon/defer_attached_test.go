@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -167,10 +168,13 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 	var attached atomic.Bool
 	attached.Store(true)
 	var attempts atomic.Int32
+	firstAttempt := make(chan struct{})
+	var once sync.Once
 	origDeliver := deliverPromptForTask
 	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
 		attempts.Add(1)
 		if req.DeferWhileAttached && attached.Load() {
+			once.Do(func() { close(firstAttempt) })
 			return StatusDeferredAttached, nil
 		}
 		return "sent", nil
@@ -188,14 +192,20 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 		close(done)
 	}()
 
-	// It must NOT resolve while attached — the occurrence is held, not skipped.
+	// Wait until it has actually made a deferred attempt while attached (avoids a
+	// goroutine-start race), then confirm it is parked — held, not skipped.
+	select {
+	case <-firstAttempt:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cron delivery never made its first (deferred) attempt")
+	}
 	select {
 	case <-done:
 		t.Fatalf("cron delivery resolved (%q) while the target was still attached; it must wait, not skip", status)
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(30 * time.Millisecond):
 	}
 
-	// On detach the very next attempt delivers.
+	// On detach the next attempt delivers the caught-up occurrence.
 	attached.Store(false)
 	select {
 	case <-done:
@@ -210,6 +220,88 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 	}
 	if attempts.Load() < 2 {
 		t.Fatalf("expected at least one held attempt then a catch-up, got %d attempts", attempts.Load())
+	}
+}
+
+// TestRunTask_CronFiresCoalesceDuringDefer pins the DOCUMENTED design choice at
+// taskrun.go's non-blocking flock: a cron firing more often than an attach lasts
+// delivers exactly ONE prompt on detach, not one per skipped occurrence. While
+// the first fire is parked waiting for detach (holding the per-task lock), every
+// overlapping fire hits LOCK_NB, is rejected, and exits without queuing — so the
+// idempotent, fixed cron prompt is delivered once on detach rather than as a
+// duplicate burst. (Watch events, which carry distinct payloads, are NOT
+// coalesced — they queue durably and replay in order.)
+func TestRunTask_CronFiresCoalesceDuringDefer(t *testing.T) {
+	origPoll, origWait := cronDeferPollInterval, cronDeferMaxWait
+	cronDeferPollInterval = 5 * time.Millisecond
+	cronDeferMaxWait = 10 * time.Second
+	t.Cleanup(func() { cronDeferPollInterval, cronDeferMaxWait = origPoll, origWait })
+
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupTaskRepo(t)
+	if err := task.AddTask(task.Task{
+		ID:            "cccc1586",
+		CronExpr:      "* * * * *",
+		Enabled:       true,
+		TargetSession: "captain",
+		ProjectPath:   repo,
+		Program:       "claude",
+		Prompt:        "run nightly",
+		CreatedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+
+	var attached atomic.Bool
+	attached.Store(true)
+	var delivered atomic.Int32
+	firstAttempt := make(chan struct{})
+	var once sync.Once
+	origDeliver := deliverPromptForTask
+	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+		if req.DeferWhileAttached && attached.Load() {
+			// The first held attempt proves the parked fire now owns the lock.
+			once.Do(func() { close(firstAttempt) })
+			return StatusDeferredAttached, nil
+		}
+		delivered.Add(1)
+		return "sent", nil
+	}
+	t.Cleanup(func() { deliverPromptForTask = origDeliver })
+
+	// Fire #1 parks in the defer wait, holding the per-task flock.
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- RunTask("cccc1586") }()
+	select {
+	case <-firstAttempt:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first cron fire never reached its (deferred) delivery attempt")
+	}
+
+	// Subsequent cron ticks during the attach are coalesced away by LOCK_NB.
+	const overlaps = 5
+	for i := 0; i < overlaps; i++ {
+		err := RunTask("cccc1586")
+		if err == nil || !strings.Contains(err.Error(), "another run is already active") {
+			t.Fatalf("overlapping fire %d must be rejected while one is parked, got err=%v", i, err)
+		}
+	}
+	if got := delivered.Load(); got != 0 {
+		t.Fatalf("nothing may deliver while the target is attached, got %d", got)
+	}
+
+	// Detach: the single parked fire delivers exactly once — the coalesce.
+	attached.Store(false)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("parked cron fire: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the parked cron fire did not deliver after detach")
+	}
+	if got := delivered.Load(); got != 1 {
+		t.Fatalf("frequent cron + long attach must coalesce to exactly ONE delivery on detach, got %d", got)
 	}
 }
 
