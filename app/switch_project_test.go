@@ -132,6 +132,50 @@ func TestBackgroundRefreshFollowsActiveProject(t *testing.T) {
 	assert.Equal(t, "b1", msg.tasks[0].ID)
 }
 
+// TestSwitchProjectWithArchivedSection: switching away from a project that has
+// an archived session (and an expanded/navigated archived folder, #1516/#1518/
+// #1527) must fully swap to the target project — the previous project's archived
+// row is gone and the sidebar renders coherently, without the archived-section
+// state interfering with the scope swap (#1461).
+func TestSwitchProjectWithArchivedSection(t *testing.T) {
+	h := newTestHome(t)
+	h.sidebar.SetSize(40, 20)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+
+	// Repo A: a live session plus an archived one, with the archived folder
+	// expanded and the cursor driven into it.
+	h.store.AddInstance(newSnapshotTestInstance(t, "repoA-live"))
+	h.store.AddInstance(archiveActionInstance(t, "repoA-archived", session.Archived))
+	h.sidebar.ExpandSection()
+	h.sidebar.JumpNextSection() // move toward the archived folder
+	_ = h.sidebar.String()      // exercises the archived render + auto-collapse path
+	require.NotNil(t, findSidebarInstance(h, "repoA-archived"))
+
+	repoBRoot := t.TempDir()
+	repoB := &config.RepoContext{Root: repoBRoot, ID: config.RepoIDFromRoot(repoBRoot)}
+	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+		if repoID == repoB.ID {
+			return daemon.SnapshotResponse{Instances: []session.InstanceData{
+				{Title: "repoB-live", CreatedAt: time.Now()},
+			}}, nil
+		}
+		return daemon.SnapshotResponse{}, nil
+	}
+
+	h.switchProject(repoB)
+
+	assert.Nil(t, findSidebarInstance(h, "repoA-live"), "previous project's live row must be gone")
+	assert.Nil(t, findSidebarInstance(h, "repoA-archived"), "previous project's archived row must be gone")
+	require.NotNil(t, findSidebarInstance(h, "repoB-live"), "target project's session must appear")
+
+	// The sidebar renders the new scope without stale archived rows or a panic.
+	out := h.sidebar.String()
+	assert.Contains(t, out, filepath.Base(repoBRoot))
+	assert.NotContains(t, out, "repoA-archived")
+}
+
 // TestSwitchProjectSameRepoIsNoop: switching to the already-active project is a
 // no-op that leaves the sidebar untouched.
 func TestSwitchProjectSameRepoIsNoop(t *testing.T) {
