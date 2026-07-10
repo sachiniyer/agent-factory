@@ -205,6 +205,41 @@ func TestSidebar_NavCrossesBetweenLiveTabsAndArchivedRows(t *testing.T) {
 	require.True(t, sel.IsTab)
 	require.Equal(t, 1, sel.TabIndex)
 	require.Same(t, liveInst, s.GetSelectedInstance())
+	require.False(t, archivedRowVisible(s),
+		"Up back into the live instances must auto-collapse the Archived section (#1518 symmetry)")
+}
+
+// TestSidebar_NavUpFromArchivedAutoCollapses is the focused mirror of the #1518
+// auto-open: Down at the live tail auto-expands the Archived folder, and Up back
+// into the live instances auto-collapses it again.
+func TestSidebar_NavUpFromArchivedAutoCollapses(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false, store.NewProjection())
+
+	liveInst := archTestInstance(t, "live-one", session.Ready)
+	addAgentShellTabs(liveInst)
+	archivedInst := archTestInstance(t, "put-away", session.Archived)
+	addTestInstance(s, liveInst)
+	addTestInstance(s, archivedInst)
+	s.SetSize(40, 40)
+
+	require.False(t, archivedRowVisible(s), "Archived starts collapsed")
+	s.SetSelectedInstance(0)
+
+	// Nav down to the tail auto-expands Archived and lands on the archived row.
+	s.Down() // live Agent tab
+	s.Down() // live Terminal tab, the last live tab stop
+	s.Down()
+	require.Equal(t, SectionArchived, s.GetSelection().Kind, "Down at the tail enters Archived")
+	require.True(t, archivedRowVisible(s), "Down at the live boundary auto-expands Archived")
+
+	// Nav back up into the live instances auto-collapses Archived again.
+	s.Up()
+	sel := s.GetSelection()
+	require.Equal(t, SectionInstances, sel.Kind, "Up returns to the live instances")
+	require.True(t, sel.IsTab)
+	require.Same(t, liveInst, s.GetSelectedInstance())
+	require.False(t, archivedRowVisible(s), "Up back into live must auto-collapse Archived")
 }
 
 func TestSidebar_NavSkipsNonExpandableLiveRowsBeforeArchived(t *testing.T) {

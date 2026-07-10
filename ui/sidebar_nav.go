@@ -426,7 +426,14 @@ func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 }
 
 func (s *Sidebar) moveVerticalNavStop(dir int) {
+	before := s.rawSelection()
 	if s.tryMoveVerticalNavStop(dir) {
+		// Symmetric to the auto-open at the live tail (#1518): when Up carries the
+		// cursor out of an archived row back into the live instances, fold the
+		// Archived section again so it collapses as the user leaves it.
+		if dir < 0 && before.Kind == SectionArchived && s.rawSelection().Kind == SectionInstances {
+			s.collapseArchivedSectionForNav()
+		}
 		return
 	}
 	// Archived rows are selectable stops only after the Archived section renders
@@ -439,6 +446,25 @@ func (s *Sidebar) moveVerticalNavStop(dir int) {
 
 func (s *Sidebar) downNavCanRevealArchived() bool {
 	return s.rawSelection().Kind == SectionInstances
+}
+
+// collapseArchivedSectionForNav folds the Archived section back up — the mirror
+// of expandArchivedSectionForNav — after Up navigation carries the cursor out of
+// an archived row and back into the live instances (#1518 symmetry). The cursor
+// already rests on the live tab stop; rebuildPreservingCursor keeps it pinned
+// there as the trailing archived rows disappear.
+func (s *Sidebar) collapseArchivedSectionForNav() {
+	for i, sec := range s.sections {
+		if sec.Kind != SectionArchived {
+			continue
+		}
+		if !sec.Expanded {
+			return
+		}
+		s.sections[i].Expanded = false
+		s.rebuildPreservingCursor()
+		return
+	}
 }
 
 func (s *Sidebar) expandArchivedSectionForNav() bool {
