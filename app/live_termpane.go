@@ -186,14 +186,22 @@ func (m *home) reconcileLiveTermPane() {
 
 	w := m.paneWindows[target.ID()]
 	if w == nil {
-		m.liveBindKey = ""
+		// No window for this pane: record the failure so the passive 5s backoff
+		// applies. liveBindKey stays set (not reset to "") so the backoff
+		// key-match engages next tick instead of re-attempting every tick
+		// (#1526 review).
+		m.liveBindFailedAt = time.Now()
 		return
 	}
 	width, height := w.GetPreviewSize()
 	if width < 2 || height < 2 {
-		// Not laid out yet (or degenerate): retry next tick rather than
-		// attach a client at a size that would shrink the tmux session.
-		m.liveBindKey = ""
+		// Not laid out yet (or degenerate): don't attach at a size that would
+		// shrink the tmux session. Record the failure so the passive 5s backoff
+		// applies too — without it, an interactive retry that clears the backoff
+		// between attempts (bindLiveTermPaneWithRetry) would leave the tick
+		// re-attempting this unavailable pane every 100ms. liveBindKey stays set
+		// so the backoff key-match engages (#1526 review).
+		m.liveBindFailedAt = time.Now()
 		return
 	}
 	if !target.Instance().TabAlive(target.Tab()) {

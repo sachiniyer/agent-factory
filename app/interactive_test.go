@@ -494,3 +494,38 @@ func TestInteractivePersistentBindFailureSurfacesError(t *testing.T) {
 	assert.Contains(t, h.errBox.FullError(), inst.Title, "the error names the session")
 	assert.Contains(t, h.errBox.FullError(), "press o", "the error keeps the full-screen fallback guidance")
 }
+
+// TestInteractiveRetryZeroSizeExitStillSetsBackoff pins the #1526 review
+// finding: a bind retry that exits at the pre-bind zero-size guard must still
+// record the passive 5s backoff. Otherwise, after surfacing the interactive
+// error, the preview tick would re-attempt the same unavailable pane every
+// 100ms with no backoff (a busy loop that defeats the backoff).
+func TestInteractiveRetryZeroSizeExitStillSetsBackoff(t *testing.T) {
+	h, _ := liveTestHome(t)
+	zeroInteractiveBindRetryDelay(t)
+
+	var calls int
+	orig := newLiveTermPaneFn
+	newLiveTermPaneFn = func(string, int, int) (liveTermAttachment, error) {
+		calls++
+		return newFakeLiveTerm(), nil
+	}
+	t.Cleanup(func() { newLiveTermPaneFn = orig })
+
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	// Force every bind attempt to exit at the pre-bind zero-size guard.
+	h.paneWindows[p.ID()].SetRect(layout.Rect{})
+
+	require.False(t, h.bindLiveTermPaneWithRetry(p), "a zero-size pane cannot bind")
+	require.Zero(t, calls, "the zero-size guard exits before spawning an attachment")
+	require.False(t, h.liveBindFailedAt.IsZero(),
+		"a retry that exits at the zero-size guard must record a failure time for the passive backoff")
+
+	// The pane becomes laid out again, but the passive tick must honor the 5s
+	// backoff the failed retry set — no immediate re-attempt every tick.
+	resizeHome(h, 120, 40)
+	h.reconcileLiveTermPane()
+	assert.Nil(t, h.liveTerm, "the passive backoff must hold: no immediate re-attempt after a zero-size retry")
+	assert.Zero(t, calls, "no attachment spawned while the backoff is active")
+}
