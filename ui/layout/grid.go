@@ -10,11 +10,13 @@ import (
 // panes get dynamic ids from PaneRegion — the N-pane model (#1088) has no
 // fixed pane regions.
 const (
-	RegionTree        = "tree"
-	RegionWorkspace   = "workspace"
-	RegionRailRule    = "railRule"
-	RegionAutomations = "automations"
-	RegionStatusBar   = "status"
+	RegionTree         = "tree"
+	RegionWorkspace    = "workspace"
+	RegionRailRule     = "railRule"
+	RegionAutomations  = "automations"
+	RegionProjectsRule = "projectsRule"
+	RegionProjects     = "projects"
+	RegionStatusBar    = "status"
 )
 
 // PaneRegion returns the region/focus-ring id for a workspace pane. The app
@@ -37,6 +39,13 @@ const (
 	// more columns.
 	TreeMinWidth = 22
 	TreeMaxWidth = 36
+
+	// TreeMinHeight is the floor the instances tree keeps inside the rail once
+	// any bottom sections render (#1590). The tree is in the focus ring, so it
+	// must stay usable — enough rows for its leading blank chrome, the Instances
+	// header, and a few rows. The fixed bottom sections (automations, projects)
+	// yield space to hold this floor rather than squeezing the tree to nothing.
+	TreeMinHeight = 6
 
 	// StatusBarRows is the fixed status-bar height.
 	StatusBarRows = 2
@@ -68,6 +77,20 @@ const (
 	// row, so the bottom-aligned section can never render text on the same line
 	// as the workspace frame's `╰──╯` (#1560).
 	automationsBottomMargin = 1
+
+	// ProjectsRows / ProjectsCompactRows size the Projects section pinned at the
+	// very bottom of the rail, below the automations section (#1588 follow-up).
+	// The floor is 3 (title + one project row + the reserved bottom margin) and
+	// the compact 1-line summary is 2 (summary + margin), mirroring the
+	// automations floors one section up.
+	ProjectsRows        = 3
+	ProjectsCompactRows = 2
+
+	// projectsBottomMargin is the Projects section's blank bottom row. The
+	// Projects section is now the bottom-most rail region, so it — not the
+	// automations section above it — carries the #1560 margin that keeps the
+	// workspace frame's bottom border off the rail's last text row.
+	projectsBottomMargin = 1
 
 	// PaneMinWidth is the minimum usable width of one workspace pane (#1088,
 	// §2.6). The pane-count fitting divides the workspace evenly with 1-col
@@ -116,6 +139,12 @@ type Grid struct {
 	// (#1126); zero keeps the section at its AutomationsRows floor.
 	Automations int
 
+	// Projects is the number of projects the rail's bottom-most section holds
+	// (#1588 follow-up). Like Automations, the section grows to show one row per
+	// project when the rail has the vertical room, capped so the tree keeps
+	// priority; zero keeps it at the ProjectsRows floor.
+	Projects int
+
 	// Banner reserves the top-of-screen delivery-failure alarm row (#1238) when
 	// set. It is cut before every other region so the alarm sits above the rail,
 	// workspace, and status bar, and it survives the degradation ladder — an
@@ -150,7 +179,12 @@ type Layout struct {
 	// exactly when Automations is.
 	RailRule    Rect
 	Automations Rect
-	StatusBar   Rect
+	// ProjectsRule is the 1-row horizontal rule separating the automations
+	// section from the bottom-most Projects section (#1588 follow-up). Visible
+	// exactly when Projects is.
+	ProjectsRule Rect
+	Projects     Rect
+	StatusBar    Rect
 	// Banner is the top-of-screen delivery-failure alarm row (#1238), non-empty
 	// exactly when Grid.Banner was set and the layout is not a fallback.
 	Banner Rect
@@ -165,6 +199,12 @@ type Layout struct {
 	// section is always the compact summary.)
 	AutomationsVisible bool
 	AutomationsCompact bool
+	// ProjectsVisible reports whether the bottom Projects section is shown at
+	// all (#1588 follow-up); ProjectsCompact whether it is the 1-line summary.
+	// It shares the automations degradation thresholds, so the two bottom
+	// sections appear and compact together.
+	ProjectsVisible bool
+	ProjectsCompact bool
 }
 
 // PaneCount returns how many panes this layout shows.
@@ -200,29 +240,96 @@ func (g Grid) Solve(width, height int) Layout {
 	rail, workspace := rem.CutLeft(treeWidth)
 
 	if !minimal {
-		l.AutomationsVisible = true
-		l.AutomationsCompact = width < AutomationsFullMinWidth || height < AutomationsFullMinHeight
-		rows := AutomationsRows
-		if l.AutomationsCompact {
-			rows = AutomationsCompactRows
+		railH := rail.H
+		compact := width < AutomationsFullMinWidth || height < AutomationsFullMinHeight
+
+		// Projects section: pinned at the VERY bottom of the rail, below the
+		// automations section (#1588 follow-up). Cut bottom-up so it lands at the
+		// rail's floor; automations and the tree stack above it.
+		l.ProjectsVisible = true
+		l.ProjectsCompact = compact
+		projRows := ProjectsRows
+		if !compact {
+			// Grow to show every project (title + one row each + bottom margin);
+			// the ProjectsRows floor keeps a recognizable strip. Cap the section
+			// at a third of the rail so the tree + automations stay the priority —
+			// beyond that projects scroll rather than crowd them out.
+			if want := 2 + projectsBottomMargin + g.Projects; want > projRows {
+				projRows = want
+			}
+			if third := (railH - RailRuleRows) / 3; third >= ProjectsRows && projRows > third {
+				projRows = third
+			}
 		} else {
+			projRows = ProjectsCompactRows
+		}
+
+		// Automations section, one section up. Its half-rail cap is measured
+		// against the rail the Projects section leaves behind, preserving the
+		// #1087/#1126 "tree keeps at least half" behavior around the new section.
+		l.AutomationsVisible = true
+		l.AutomationsCompact = compact
+		autoRows := AutomationsRows
+		if !compact {
 			// Grow the section to show every automation when the rail has the
 			// room: the title line, one row per automation, one line held for
-			// the focused row's expansion detail so expanding never has to
-			// scroll (#1126), plus the reserved bottom margin (#1560). The
-			// AutomationsRows floor keeps a recognizable strip when there are
-			// few automations; the half-rail cap keeps the instances tree the
-			// priority — automations only collapse into a scrollable strip once
-			// the tree + automations together can't fit, at which point the tree
-			// keeps at least half the rail.
-			if want := 2 + automationsBottomMargin + g.Automations; want > rows {
-				rows = want
+			// the focused row's expansion detail (#1126), plus the reserved
+			// bottom margin (#1560).
+			if want := 2 + automationsBottomMargin + g.Automations; want > autoRows {
+				autoRows = want
 			}
-			if half := (rail.H - RailRuleRows) / 2; half >= AutomationsRows && rows > half {
-				rows = half
+			railAfterProjects := railH - (projRows + RailRuleRows)
+			if half := (railAfterProjects - RailRuleRows) / 2; half >= AutomationsRows && autoRows > half {
+				autoRows = half
 			}
+		} else {
+			autoRows = AutomationsCompactRows
 		}
-		rail, l.Automations = rail.CutBottom(rows)
+
+		// Tree-priority guard (#1590): the instances tree is in the focus ring and
+		// must never be squeezed to nothing by the fixed bottom sections. Enforce a
+		// minimum tree height explicitly instead of leaning on the minimal-mode
+		// cutoff: the Projects section yields first — shrinking toward its compact
+		// summary, then hiding entirely (returning its rows AND its rule to the
+		// tree) — and only then does automations give ground down to its own
+		// compact floor. This keeps the tree usable at any rail height a
+		// non-minimal layout can produce, the same "tree wins the squeeze" contract
+		// #1560 gave the automations overlap.
+		treeH := func() int {
+			h := railH - autoRows - RailRuleRows
+			if l.ProjectsVisible {
+				h -= projRows + RailRuleRows
+			}
+			return h
+		}
+		for l.ProjectsVisible && treeH() < TreeMinHeight {
+			if projRows > ProjectsCompactRows {
+				projRows--
+				continue
+			}
+			// Even the compact section won't fit: hide it so the tree reclaims the
+			// section and its rule.
+			l.ProjectsVisible = false
+			l.ProjectsCompact = false
+			projRows = 0
+		}
+		for treeH() < TreeMinHeight && autoRows > AutomationsCompactRows {
+			autoRows--
+		}
+		// A guard-shrunk section renders its 1-line summary so it keeps the #1560
+		// bottom margin (full mode only reserves the margin at its floor height).
+		if l.ProjectsVisible && projRows < ProjectsRows {
+			l.ProjectsCompact = true
+		}
+		if autoRows < AutomationsRows {
+			l.AutomationsCompact = true
+		}
+
+		if l.ProjectsVisible {
+			rail, l.Projects = rail.CutBottom(projRows)
+			rail, l.ProjectsRule = rail.CutBottom(RailRuleRows)
+		}
+		rail, l.Automations = rail.CutBottom(autoRows)
 		rail, l.RailRule = rail.CutBottom(RailRuleRows)
 	}
 	l.Tree = rail
@@ -288,6 +395,10 @@ func (l Layout) VisibleRegions() map[string]Rect {
 	if l.AutomationsVisible {
 		regions[RegionRailRule] = l.RailRule
 		regions[RegionAutomations] = l.Automations
+	}
+	if l.ProjectsVisible {
+		regions[RegionProjectsRule] = l.ProjectsRule
+		regions[RegionProjects] = l.Projects
 	}
 	return regions
 }

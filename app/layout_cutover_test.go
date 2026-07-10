@@ -77,8 +77,8 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 }
 
 // TestLayoutCutover_FocusRingCycles pins the focus model: Tab cycles
-// tree → pane A → automations and back around; Shift-Tab reverses; the
-// focused in-rail automations section shows its cursor but never hosts the
+// tree → pane A → automations → projects and back around; Shift-Tab reverses;
+// the focused in-rail automations section shows its cursor but never hosts the
 // task manager (that is the tasks overlay — #1096 play-test); the status-bar
 // hints follow.
 func TestLayoutCutover_FocusRingCycles(t *testing.T) {
@@ -106,10 +106,15 @@ func TestLayoutCutover_FocusRingCycles(t *testing.T) {
 		"the focused section keeps its compact allocation — no in-rail expansion")
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
-	assert.Equal(t, layout.RegionTree, h.ring.Active(), "the ring wraps around")
+	assert.Equal(t, layout.RegionProjects, h.ring.Active(),
+		"Tab continues past automations into the Projects section (#1588 follow-up)")
+	assert.True(t, h.projects.Focused())
+
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
+	assert.Equal(t, layout.RegionTree, h.ring.Active(), "the ring wraps around past Projects to the tree")
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyShiftTab}, keys.KeyShiftTab)
-	assert.Equal(t, layout.RegionAutomations, h.ring.Active(), "Shift-Tab cycles backwards")
+	assert.Equal(t, layout.RegionProjects, h.ring.Active(), "Shift-Tab cycles backwards into Projects")
 }
 
 // TestLayoutCutover_AutomationsEscReturnsFocusToTree: Esc on the focused

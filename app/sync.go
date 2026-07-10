@@ -53,6 +53,14 @@ type snapshotFetchedMsg struct {
 	// it is a field of the one authoritative Snapshot response, not a separate
 	// subsystem; handleSnapshot mirrors it into the alarm banner state.
 	alarms []daemon.DeliveryAlarm
+	// allRepos is the daemon's cross-repo session list (RepoID:"") fetched on the
+	// same poll, off-loop, so the always-visible bottom Projects section can
+	// refresh its per-repo counts live when sessions change in ANOTHER repo
+	// (#1590). allReposErr is carried separately (like tasksErr) so a failed
+	// cross-repo read leaves the last-known project rows intact rather than
+	// blanking the section on a hiccup.
+	allRepos    []session.InstanceData
+	allReposErr error
 }
 
 // prInfoUpdatedMsg is returned by an async PR info fetch.
@@ -107,6 +115,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	repoID := m.repoID
 	repoRoot := m.repoRoot
 	fetch := m.snapshotFetcher
+	allRepos := allReposSnapshotFetcher
 	return func() tea.Msg {
 		resp, err := fetch(repoID)
 		// Re-read the ACTIVE repo's tasks on the same poll so an out-of-band task
@@ -116,7 +125,16 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// error is carried separately so a warming-daemon RPC failure never
 		// suppresses a successful disk task read.
 		tasks, tasksErr := task.LoadTasksForRepo(repoRoot)
-		return snapshotFetchedMsg{data: resp.Instances, alarms: resp.DeliveryAlarms, err: err, tasks: tasks, tasksErr: tasksErr, repoID: repoID}
+		// Fetch the cross-repo session list on the same off-loop poll so the
+		// always-visible Projects section's per-repo counts stay live (#1590).
+		// Read here (not in the handler) to keep the daemon RPC off the event
+		// loop; its error is carried separately so a hiccup keeps the last rows.
+		allReposData, allReposErr := allRepos()
+		return snapshotFetchedMsg{
+			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
+			tasks: tasks, tasksErr: tasksErr, repoID: repoID,
+			allRepos: allReposData, allReposErr: allReposErr,
+		}
 	}
 }
 

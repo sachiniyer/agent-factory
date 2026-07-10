@@ -558,8 +558,8 @@ func TestMouse_ClickStatusHintRunsAction(t *testing.T) {
 	h.focusRegion(layout.RegionAutomations)
 
 	clickZone(t, h, zones.StatusHint("tab"))
-	assert.Equal(t, layout.RegionTree, h.ring.Active(),
-		"clicking the 'tab focus' hint cycles the focus ring, like the key")
+	assert.Equal(t, layout.RegionProjects, h.ring.Active(),
+		"clicking the 'tab focus' hint cycles the focus ring, like the key (automations → projects)")
 }
 
 // TestMouse_WheelScrollsRegionUnderCursor: the wheel drives whatever region

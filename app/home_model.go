@@ -138,9 +138,9 @@ type home struct {
 	lastLayout            layout.Layout
 	termWidth, termHeight int
 	// ring is the focus ring: tree → open panes (in workspace order) →
-	// automations (#1088). Tab/Shift-Tab cycle it; its pane entries are
-	// rebuilt by relayout as panes open, close, and auto-hide, and regions
-	// hidden by the degradation ladder are skipped.
+	// automations → projects (#1088, #1588 follow-up). Tab/Shift-Tab cycle it;
+	// its pane entries are rebuilt by relayout as panes open, close, and
+	// auto-hide, and regions hidden by the degradation ladder are skipped.
 	ring *layout.Ring
 	// zones is the mouse hit-test registry (#1024 R4, RFC §2.5): View()
 	// resets it every frame and each pane re-registers its interactive rects
@@ -266,6 +266,12 @@ type home struct {
 	// task rows only — S/Enter open its full task manager as the stateTasks
 	// overlay
 	automations *ui.AutomationsPane
+	// projects is the bottom-most section of the left rail (#1588 follow-up): a
+	// peer of the automations section, BELOW it, that the focus ring Tabs into
+	// (tree → panes → automations → projects → tree). Its rows list the projects
+	// af has seen; Enter on the cursor row switches the rail to that project via
+	// the #1547 switchProject path.
+	projects *ui.ProjectsPane
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay
@@ -369,9 +375,10 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		paneWindows:      make(map[int]*ui.TabbedWindow),
 		lastPaneCapture:  make(map[int]time.Time),
 		automations:      ui.NewAutomationsPane(proj),
+		projects:         ui.NewProjectsPane(),
 		statusBar:        ui.NewStatusBar(menu, errBox),
 		hooksPane:        ui.NewHooksPane(),
-		ring:             layout.NewRing(layout.RegionTree, layout.RegionAutomations),
+		ring:             layout.NewRing(layout.RegionTree, layout.RegionAutomations, layout.RegionProjects),
 		zones:            zones.NewRegistry(),
 		mouseClock:       time.Now,
 		snapshotFetcher:  snapshotThroughDaemon,
@@ -387,9 +394,9 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	}
 	h.sidebar = ui.NewSidebar(&h.spinner, autoYes, proj)
 	h.wireZoneRegistry()
-	// No panes are open at startup: the focus ring is tree → automations
-	// until the first pane opens (relayout rebuilds the ring's pane entries
-	// thereafter; the first instance selection auto-opens its pane).
+	// No panes are open at startup: the focus ring is tree → automations →
+	// projects until the first pane opens (relayout rebuilds the ring's pane
+	// entries thereafter; the first instance selection auto-opens its pane).
 	h.syncFocus()
 
 	// Cold-start the projection from the daemon's authoritative Snapshot (#960 PR 6).
@@ -459,6 +466,9 @@ func (m *home) relayout() {
 	// every automation when the rail has the room, collapsing only when the
 	// tree + automations can't both fit (#1126).
 	m.grid.Automations = m.store.NumTasks()
+	// Size the Projects section to its content the same way (#1588 follow-up):
+	// the grid grows it to show every project the rail has room for.
+	m.grid.Projects = len(m.projects.Projects())
 	// Reserve the alarm banner row exactly when a delivery-failure alarm is
 	// raised (#1238), so the row appears/disappears with the alarm and never
 	// steals space in the healthy steady state.
@@ -500,14 +510,17 @@ func (m *home) relayout() {
 	// leave the ring; the focused pane is most-recently-focused, so it is
 	// never the one auto-hidden). SetIDs keeps the active id when it
 	// survives; a vanished active falls back to the tree.
-	ids := make([]string, 0, len(m.visiblePanes)+2)
+	ids := make([]string, 0, len(m.visiblePanes)+3)
 	ids = append(ids, layout.RegionTree)
 	for _, p := range m.visiblePanes {
 		ids = append(ids, layout.PaneRegion(p.ID()))
 	}
-	ids = append(ids, layout.RegionAutomations)
+	// Projects follows automations so forward Tab is tree → panes → automations
+	// → projects → (wrap) tree (#1588 follow-up).
+	ids = append(ids, layout.RegionAutomations, layout.RegionProjects)
 	m.ring.SetIDs(ids...)
 	m.ring.SetHidden(layout.RegionAutomations, !lay.AutomationsVisible)
+	m.ring.SetHidden(layout.RegionProjects, !lay.ProjectsVisible)
 	m.applyPendingTUIViewFocus()
 	m.syncFocus()
 
@@ -527,6 +540,8 @@ func (m *home) relayout() {
 	}
 	m.automations.SetRect(lay.Automations)
 	m.automations.SetCompact(lay.AutomationsCompact)
+	m.projects.SetRect(lay.Projects)
+	m.projects.SetCompact(lay.ProjectsCompact)
 	m.statusBar.SetRect(lay.StatusBar)
 	m.alarmBanner.SetRect(lay.Banner)
 
@@ -641,6 +656,7 @@ func (m *home) syncFocus() {
 	panes := map[string]layout.Pane{
 		layout.RegionTree:        m.sidebar,
 		layout.RegionAutomations: m.automations,
+		layout.RegionProjects:    m.projects,
 	}
 	for _, p := range m.visiblePanes {
 		if w := m.paneWindows[p.ID()]; w != nil {

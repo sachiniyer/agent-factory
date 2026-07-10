@@ -552,6 +552,8 @@ func TestPanePreviewSplitHideDoesNotStickInPanePreview(t *testing.T) {
 	pressTab(t, h, false)
 	assert.Equal(t, layout.RegionAutomations, h.ring.Active(), "Tab must cycle out of pane context")
 	pressTab(t, h, false)
+	assert.Equal(t, layout.RegionProjects, h.ring.Active(), "Tab continues into the Projects section")
+	pressTab(t, h, false)
 	assert.Equal(t, layout.RegionTree, h.ring.Active(), "the focus ring must remain able to reach the tree")
 }
 
@@ -814,15 +816,15 @@ func TestPane_NumberJumpAnnotatesSelectedTabDivergence(t *testing.T) {
 }
 
 // TestPane_FocusRingCyclesNPanes: with three panes open, Tab cycles
-// tree → pane 1 → pane 2 → pane 3 → automations and wraps; Shift-Tab
-// reverses; with no panes the ring is tree → automations.
+// tree → pane 1 → pane 2 → pane 3 → automations → projects and wraps; Shift-Tab
+// reverses; with no panes the ring is tree → automations → projects.
 func TestPane_FocusRingCyclesNPanes(t *testing.T) {
 	h := paneTestHome(t)
 
-	// No panes: the ring is tree → automations → tree.
-	for _, want := range []string{layout.RegionAutomations, layout.RegionTree} {
+	// No panes: the ring is tree → automations → projects → tree.
+	for _, want := range []string{layout.RegionAutomations, layout.RegionProjects, layout.RegionTree} {
 		pressTab(t, h, false)
-		require.Equal(t, want, h.ring.Active(), "without panes the ring is tree → automations")
+		require.Equal(t, want, h.ring.Active(), "without panes the ring is tree → automations → projects")
 	}
 
 	for i := 0; i < 3; i++ {
@@ -840,13 +842,15 @@ func TestPane_FocusRingCyclesNPanes(t *testing.T) {
 		layout.PaneRegion(panes[1].ID()),
 		layout.PaneRegion(panes[2].ID()),
 		layout.RegionAutomations,
+		layout.RegionProjects,
 		layout.RegionTree,
 	}
 	for _, want := range forward {
 		pressTab(t, h, false)
-		require.Equal(t, want, h.ring.Active(), "Tab must cycle tree → panes in order → automations")
+		require.Equal(t, want, h.ring.Active(), "Tab must cycle tree → panes in order → automations → projects")
 	}
 	backward := []string{
+		layout.RegionProjects,
 		layout.RegionAutomations,
 		layout.PaneRegion(panes[2].ID()),
 		layout.PaneRegion(panes[1].ID()),
@@ -1411,8 +1415,9 @@ func TestE2E_PaneFlow(t *testing.T) {
 	assert.Contains(t, view, "alpha · Agent", "pane 1 header shows its binding")
 	assert.Contains(t, view, "beta · ", "pane 2 header shows its binding")
 
-	// Tab from the beta pane wraps via automations/tree back around to the
-	// alpha pane; assert the ring visits a pane region again.
+	// Tab from the beta pane wraps via automations/projects/tree back around to
+	// the alpha pane; assert the ring visits a pane region again.
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyTab})

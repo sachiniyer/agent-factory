@@ -15,11 +15,11 @@ func fireIdlePreviewTick(h *home) {
 
 // TestPane_ForwardTabVisitsAllPanesDespiteIdleTick is the #1558 regression. In
 // a three-pane workspace the forward focus ring must cycle
-// tree → pane → pane → pane → automations → tree, visiting every pane and
-// resting on the tree — even though the 100ms preview tick keeps firing between
-// keystrokes. Before the fix, that idle tick yanked focus back onto the
-// selected instance's already-open pane the moment the user Tabbed off it, so
-// the ring never reached the other panes or settled on the tree.
+// tree → pane → pane → pane → automations → projects → tree, visiting every
+// pane and resting on the tree — even though the 100ms preview tick keeps
+// firing between keystrokes. Before the fix, that idle tick yanked focus back
+// onto the selected instance's already-open pane the moment the user Tabbed off
+// it, so the ring never reached the other panes or settled on the tree.
 func TestPane_ForwardTabVisitsAllPanesDespiteIdleTick(t *testing.T) {
 	h := paneTestHome(t)
 	for i := 0; i < 3; i++ {
@@ -38,6 +38,7 @@ func TestPane_ForwardTabVisitsAllPanesDespiteIdleTick(t *testing.T) {
 		layout.PaneRegion(panes[1].ID()),
 		layout.PaneRegion(panes[2].ID()),
 		layout.RegionAutomations,
+		layout.RegionProjects,
 		layout.RegionTree,
 	}
 	for _, want := range forward {
@@ -49,6 +50,7 @@ func TestPane_ForwardTabVisitsAllPanesDespiteIdleTick(t *testing.T) {
 
 	// Reverse mirrors it and is likewise immune to the idle tick.
 	backward := []string{
+		layout.RegionProjects,
 		layout.RegionAutomations,
 		layout.PaneRegion(panes[2].ID()),
 		layout.PaneRegion(panes[1].ID()),

@@ -128,9 +128,10 @@ func wireTestPanes(h *home, proj *store.Projection) {
 	// verbs explicitly, so latch it off for determinism.
 	h.initialPaneOpened = true
 	h.automations = ui.NewAutomationsPane(proj)
+	h.projects = ui.NewProjectsPane()
 	h.statusBar = ui.NewStatusBar(h.menu, h.errBox)
 	h.hooksPane = ui.NewHooksPane()
-	h.ring = layout.NewRing(layout.RegionTree, layout.RegionAutomations)
+	h.ring = layout.NewRing(layout.RegionTree, layout.RegionAutomations, layout.RegionProjects)
 	h.zones = zones.NewRegistry()
 	h.mouseClock = time.Now
 	h.wireZoneRegistry()
