@@ -457,6 +457,64 @@ func TestEventQueue_CompactsDeliveredPrefix(t *testing.T) {
 	}
 }
 
+// TestEventQueue_RecoversFromStaleCursorAfterCompactionCrash (#1537): a daemon
+// crash AFTER compaction's rename but BEFORE the cursor write used to pair the
+// small compacted file with a PRE-compaction offset pointing into the middle of
+// a record. load()'s old off<=size check passed it, every subsequent read then
+// failed with "corrupt event record", and the drainer parked forever. The queue
+// must instead recover by replaying the pending suffix from the start.
+func TestEventQueue_RecoversFromStaleCursorAfterCompactionCrash(t *testing.T) {
+	dir := t.TempDir()
+
+	// Hand-build the exact on-disk state a crash between compaction's rename and
+	// its cursor write leaves behind: the queue file holds ONLY the pending
+	// suffix (events 5..9, as if the delivered prefix was already compacted
+	// away), while the cursor file still holds a stale PRE-compaction offset that
+	// lands mid-record within the now-smaller file. Enqueueing the suffix into a
+	// fresh queue produces that compacted file without depending on real
+	// compaction's byte-threshold timing.
+	q0 := newEventQueue(dir, "ab153701")
+	for i := 5; i < 10; i++ {
+		if err := q0.enqueue(fmt.Sprintf("event-%d", i)); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+	q0.mu.Lock()
+	size := q0.size
+	q0.mu.Unlock()
+
+	// Offset 3 sits inside event-5's record: 0 < 3 < size, and the byte before
+	// it is not '\n', so it clears off<=size but is not a record boundary.
+	staleOffset := int64(3)
+	if staleOffset >= size {
+		t.Fatalf("test bug: stale offset %d must be < compacted size %d", staleOffset, size)
+	}
+	curPath := filepath.Join(dir, "ab153701.cursor")
+	if err := os.WriteFile(curPath, []byte(fmt.Sprintf("%d", staleOffset)), 0644); err != nil {
+		t.Fatalf("write stale cursor: %v", err)
+	}
+
+	// Reopen: the queue must recover and redeliver events 5..9 in order rather
+	// than parking the drainer on an unreadable head.
+	reopened := newEventQueue(dir, "ab153701")
+	if got := reopened.pendingCount(); got != 5 {
+		t.Fatalf("recovered pending = %d, want 5", got)
+	}
+	for i := 5; i < 10; i++ {
+		ev, cursor, ok, err := reopened.peek()
+		if err != nil || !ok {
+			t.Fatalf("recovered peek %d: ok=%v err=%v", i, ok, err)
+		}
+		if want := fmt.Sprintf("event-%d", i); ev.Line != want {
+			t.Fatalf("recovery reordered/corrupted: got %q, want %q", ev.Line, want)
+		}
+		advanceEventQueue(t, reopened, cursor)
+	}
+	if got := reopened.pendingCount(); got != 0 {
+		t.Fatalf("pending after recovery drain = %d, want 0", got)
+	}
+}
+
 // TestWatcherDrainExpiresAgedEvents (#1129 PR 4): queued events older than
 // the retention bound are expired at drain time — never delivered — and a
 // fresh event still replays. Expiry empties the queue files like a normal
