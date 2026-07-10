@@ -40,6 +40,13 @@ func (m *home) applyTUIViewState(state config.TUIRepoViewState) int {
 		focusCopy := *state.Focus
 		m.pendingTUIViewFocus = &focusCopy
 	}
+	// A persisted selection that resolved to an archived row (or to nothing)
+	// leaves the store with no display selection, yet a live pane may have been
+	// restored above — an incoherent mix where the sidebar highlights nothing (or
+	// a stale archived row) while the workspace renders a live session, with
+	// keyboard nav stuck (#1559). Reconcile now, before the relayout, so launch
+	// selects the live session whose pane is actually shown.
+	m.reconcileRestoredSelectionWithWorkspace()
 	// The relayout below runs at term (0,0) → fallback → visiblePanes=nil, so
 	// capture the restored panes as the baseline the first real relayout uses to
 	// surface an auto-hide status for a pane the terminal can't fit (#1535).
@@ -110,6 +117,65 @@ func (m *home) restoreTUISelection(state config.TUIRepoViewState) {
 	m.menu.SetInstance(inst)
 	m.menu.SetActiveTab(tab)
 	m.sidebar.SelectTabRow(inst.Title, tab)
+}
+
+// reconcileRestoredSelectionWithWorkspace keeps the restored sidebar selection
+// coherent with the panes brought back on launch (#1559). restoreTUISelection
+// deliberately refuses to bind an archived (or vanished) persisted selection, so
+// the store can be left with no live display selection while restoreTUIViewPanes
+// still put a live pane on screen. That mismatch is the #1559 bug: the workspace
+// shows a live session but the sidebar highlights nothing (or an archived row),
+// and Down from the archived tail row has nowhere to go so keyboard nav stalls.
+// When the store has no live selection but a live pane is displayed, select that
+// live session — preferring the pane the restored focus points at, else the
+// most-recently-focused open pane — so the selected row and the shown pane always
+// refer to the same instance and the tree is immediately navigable.
+func (m *home) reconcileRestoredSelectionWithWorkspace() {
+	if sel := m.store.GetSelectedInstance(); sel != nil && !sel.ShownArchived() {
+		return // a live selection was restored — already coherent
+	}
+	pane := m.restoredFocusPane()
+	if pane == nil {
+		pane = m.mostRecentlyFocusedOpenPane()
+	}
+	if pane == nil {
+		return // no pane on screen — leave the ordinary cold-start selection
+	}
+	inst := pane.Instance()
+	if inst == nil || inst.ShownArchived() {
+		return
+	}
+	tab := pane.Tab()
+	m.sidebar.SelectInstance(inst)
+	m.store.SetActiveTab(tab)
+	m.menu.SetInstance(inst)
+	m.menu.SetActiveTab(tab)
+	m.sidebar.SelectTabRow(inst.Title, tab)
+}
+
+// restoredFocusPane resolves the open pane the persisted focus (loaded into
+// pendingTUIViewFocus by applyTUIViewState) points at, or nil when the focus is
+// not on a pane / the pane was not restored. Used to pick which live session the
+// launch selection should follow when the persisted selection can't be honored.
+func (m *home) restoredFocusPane() *store.OpenPane {
+	if m.pendingTUIViewFocus == nil || m.pendingTUIViewFocus.Region != tuiFocusRegionPane {
+		return nil
+	}
+	return m.openPaneByKey(m.pendingTUIViewFocus.PaneKey)
+}
+
+// mostRecentlyFocusedOpenPane returns the open pane with the highest focus-
+// recency stamp — the pane most likely to be the one the user was last looking
+// at, and the best proxy for "the shown workspace" when no explicit focus pane
+// survives the restore.
+func (m *home) mostRecentlyFocusedOpenPane() *store.OpenPane {
+	var best *store.OpenPane
+	for _, p := range m.store.OpenPanes() {
+		if best == nil || p.LastFocus() > best.LastFocus() {
+			best = p
+		}
+	}
+	return best
 }
 
 func (m *home) applyPendingTUIViewFocus() {

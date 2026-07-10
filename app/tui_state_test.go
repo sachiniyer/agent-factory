@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -180,6 +181,83 @@ func TestTUIViewStatePreviewTickDoesNotWriteUnchangedState(t *testing.T) {
 	require.NoError(t, err, "a structural pane-open action must save TUI state")
 	assert.Contains(t, string(raw), `"schema_version"`)
 	assert.Contains(t, string(raw), `"open_panes"`)
+}
+
+// TestTUIViewStateRestoreArchivedSelectionFollowsLivePane is the #1559 repro:
+// on relaunch the persisted selection pointed at a session that was archived
+// before quit, while a LIVE session's pane was left open. restoreTUISelection
+// refuses to bind the archived row, so pre-fix the store was left with no live
+// selection while the workspace still rendered the live pane — an incoherent
+// mix (sidebar highlights nothing/an archived row over a live workspace) whose
+// archived-tail cursor stalled keyboard nav. The launch selection must instead
+// follow the live pane that is actually shown, and stay keyboard-navigable.
+func TestTUIViewStateRestoreArchivedSelectionFollowsLivePane(t *testing.T) {
+	h := newTestHome(t)
+	h.initialPaneOpened = false
+	feature := tuiStateTestInstance(t, "feature")
+	qa := tuiStateTestInstance(t, "qa")
+	docs := tuiStateTestInstance(t, "docs")
+	docs.SetArchived() // archived before quit; persisted as the selection
+	h.store.AddInstance(feature)
+	h.store.AddInstance(qa)
+	h.store.AddInstance(docs)
+
+	state := config.TUIRepoViewState{
+		Selected: &config.TUIStateTarget{
+			InstanceID: docs.ID,
+			Title:      docs.Title,
+			TabName:    "agent",
+		},
+		ActiveTab: &config.TUIStateTarget{
+			InstanceID: docs.ID,
+			Title:      docs.Title,
+			TabName:    "agent",
+		},
+		OpenPanes: []config.TUIStateOpenPane{{
+			Key:        tuiPaneKeyForInstance(qa, "shell"),
+			InstanceID: qa.ID,
+			Title:      qa.Title,
+			TabName:    "shell",
+			FocusRank:  1,
+		}},
+	}
+	require.NoError(t, config.SaveTUIRepoViewState(h.repoID, state))
+
+	require.Equal(t, 1, h.restoreTUIViewStateOnLaunch())
+	resizeHome(h, 200, 40)
+
+	// The live pane is shown, so the live session it belongs to is selected —
+	// never the stale archived docs row.
+	require.Same(t, qa, h.store.GetSelectedInstance(),
+		"launch selects the live session whose pane is shown, not the archived one")
+	require.Same(t, qa, h.sidebar.GetSelectedInstance(),
+		"the sidebar cursor and the workspace pane refer to the same live session")
+	assert.Equal(t, 1, h.store.ActiveTab(), "the active tab follows the restored pane's tab")
+
+	// The restored selection rests on a live tab row (not an archived row), so
+	// keyboard nav moves through the live tree instead of stalling on the
+	// archived tail. qa sits below feature, so walking Up eventually reaches
+	// feature and never gets stuck on the same row.
+	sel := h.sidebar.GetSelection()
+	assert.Equal(t, ui.SectionInstances, sel.Kind)
+	assert.False(t, sel.IsHeader)
+	require.True(t, sel.IsTab, "the restored live selection rests on a tab row")
+
+	reachedFeature := false
+	for i := 0; i < 4 && !reachedFeature; i++ {
+		before := h.sidebar.GetSelection()
+		h.sidebar.Up()
+		after := h.sidebar.GetSelection()
+		require.NotEqual(t, before, after, "Up must move the cursor — keyboard nav is not stuck")
+		if h.sidebar.GetSelectedInstance() == feature {
+			reachedFeature = true
+		}
+	}
+	assert.True(t, reachedFeature, "Up walks up through the live tree to feature")
+
+	h.sidebar.Down()
+	assert.NotSame(t, feature, h.sidebar.GetSelectedInstance(),
+		"Down moves back down through the live tree")
 }
 
 func tuiStateTestInstance(t *testing.T, title string) *session.Instance {
