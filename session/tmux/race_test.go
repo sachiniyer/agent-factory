@@ -542,16 +542,20 @@ func TestHasUpdatedRestoreRace(t *testing.T) {
 	}()
 
 	// Restore goroutine: swaps the monitor pointer out from under the poll.
+	// defer close(stop) so the poll goroutine is released on BOTH the normal
+	// finish and an early error return — otherwise a transient mock-PTY failure
+	// would leave the poll goroutine spinning and wg.Wait() would hang into a
+	// test timeout instead of failing cleanly.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer close(stop)
 		for i := 0; i < 500; i++ {
 			if err := session.Restore(""); err != nil {
 				t.Errorf("Restore: %v", err)
 				return
 			}
 		}
-		close(stop)
 	}()
 
 	wg.Wait()
