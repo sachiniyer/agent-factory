@@ -106,12 +106,6 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 		return m.handleError(fmt.Errorf("no task selected"))
 	}
 
-	// Watch tasks fire from their watch command's stdout; a manual trigger
-	// has no event line to render the prompt with. Mirrors daemon.RunTask.
-	if tsk.IsWatch() {
-		return m.handleError(fmt.Errorf("task %q is a watch task; it fires when its watch command emits output", task.TaskRunBaseTitle(*tsk)))
-	}
-
 	// The trigger fires from inside the tasks overlay: close it and move focus to
 	// the tree so the user is looking at the sessions, where the run lands (a
 	// fresh per-run session, or the delivered-into target_session).

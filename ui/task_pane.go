@@ -399,6 +399,8 @@ func (s *TaskPane) deleteSelectedTask() {
 
 func (s *TaskPane) runSelectedTask() {
 	if !s.selectedTaskInRange() {
+		s.pendingTrigger = true
+		s.pendingTriggerID = ""
 		return
 	}
 	s.pendingTrigger = true
@@ -562,7 +564,7 @@ func (s *TaskPane) renderListMode() string {
 	if s.hasFocus {
 		hint := "↑/↓ select • n new • enter edit • r run now • x toggle • D delete • esc back"
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = "↑/↓ • n new • enter • esc back"
+			hint = "r run now • ↑/↓ • n new • enter • esc"
 		}
 		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 	} else {

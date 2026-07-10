@@ -170,6 +170,37 @@ func TestTaskPaneConsumePendingTriggerResolvesByIDAfterReload(t *testing.T) {
 	assert.Empty(t, tp.pendingTriggerID)
 }
 
+// TestTaskPaneListModeRunNowKeyQueuesSelectedTask pins the documented task
+// manager list affordance from #1503: `r` runs the selected task now without
+// requiring Enter to open the edit form first.
+func TestTaskPaneListModeRunNowKeyQueuesSelectedTask(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{
+		{ID: "a", Name: "A"},
+		{ID: "b", Name: "B"},
+	})
+	tp.SetFocus(true)
+	tp.SelectTask(1)
+
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}))
+	require.True(t, tp.HasPendingTrigger(), "r must queue a run-now request from list mode")
+	pending := tp.ConsumePendingTrigger()
+	require.NotNil(t, pending)
+	assert.Equal(t, "b", pending.ID)
+}
+
+// TestTaskPaneListModeRunNowWithoutSelectionQueuesNoTask lets the app layer
+// turn an empty-list `r` press into the visible "no task selected" feedback.
+func TestTaskPaneListModeRunNowWithoutSelectionQueuesNoTask(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks(nil)
+	tp.SetFocus(true)
+
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}))
+	require.True(t, tp.HasPendingTrigger(), "empty-list r must still surface through the app layer")
+	assert.Nil(t, tp.ConsumePendingTrigger())
+}
+
 func TestTaskPaneNormalModeAllowsQuitKeysToPropagate(t *testing.T) {
 	tp := NewTaskPane()
 	tp.SetFocus(true)
@@ -1151,6 +1182,24 @@ func TestTaskPaneCreateModeFooterUsesReboundQuitKey(t *testing.T) {
 	lines := strings.Split(tp.String(), "\n")
 	assert.Contains(t, lines[len(lines)-1], "Q quit", "form footer must derive the quit hint from the keymap")
 	assert.NotContains(t, lines[len(lines)-1], "q quit", "the old default quit key must not be advertised after rebinding")
+}
+
+func TestTaskPaneListCompactFooterShowsRunNow(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetSize(40, 10)
+	tp.SetFocus(true)
+	tp.SetTasks([]task.Task{{
+		ID:       "abc",
+		Name:     "nightly",
+		Prompt:   "do it",
+		CronExpr: "0 0 * * *",
+		Program:  "claude",
+		Enabled:  true,
+	}})
+
+	lines := strings.Split(tp.String(), "\n")
+	assert.Contains(t, lines[len(lines)-1], "r run now",
+		"compact task-list footer must keep the documented run-now affordance discoverable")
 }
 
 func TestTaskPaneEditModeCompactActionFooterShowsQuitKey(t *testing.T) {
