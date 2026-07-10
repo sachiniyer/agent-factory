@@ -544,12 +544,31 @@ af_close_tab() {
 
 # _af_tab_count — number of tab-child rows the selected instance shows. Only
 # the selected instance auto-expands, so this counts its tabs. Matches the
-# tab-child shape — tree connector, tab index, then a non-empty name — for ANY
-# name, so CLI-created custom-named tabs count too (#1561), not just the
-# built-in Preview/Terminal/Diff. The leading index keeps this from matching
-# instance rows, which carry no `<connector> <number> <name>` prefix.
+# sidebar tab-child shape — tree connector, tab index, then a non-empty name —
+# for ANY name, so CLI-created custom-named tabs count too (#1561), not just the
+# built-in Preview/Terminal/Diff.
+#
+# The match is ANCHORED to the sidebar: the connector must sit at the sidebar's
+# left column, preceded only by the row's leading indentation (whitespace). The
+# sidebar is the leftmost block and has no left border, and tab rows render as
+# `<indent><connector> <n> <label>`, so a real tab row always has only
+# whitespace before its connector. A workspace pane, by contrast, is a
+# rounded-border box to the RIGHT of the sidebar, so tree-like text INSIDE a
+# pane (e.g. a shell printing `├ 1 foo`) is always preceded on its line by the
+# sidebar columns and the pane's own `│` border — never only whitespace — so it
+# is NOT counted. Without the `^[[:space:]]*` anchor such pane output would
+# re-introduce af_close_tab false timeouts from the opposite direction (#1561
+# review). The `[0-9]+` index additionally keeps this off instance rows, which
+# carry no `<n> <name>` prefix.
+#
+# The connectors are matched with an alternation `(├|└)`, not a bracket
+# expression `[├└]`: the sandbox container runs a C/POSIX locale where GNU
+# grep matches a bracket expression byte-by-byte, so `[├└]` would only match
+# the first byte of the 3-byte glyph and the following `[[:space:]]` could
+# never line up — the count silently stayed 0. Alternation matches each
+# connector's literal byte sequence regardless of locale.
 _af_tab_count() {
-    af_capture | grep -cE '[├└][[:space:]]+[0-9]+[[:space:]]+[^[:space:]]' || true
+    af_capture | grep -cE '^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]' || true
 }
 
 # af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
