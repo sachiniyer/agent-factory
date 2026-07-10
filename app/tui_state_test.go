@@ -110,6 +110,15 @@ func TestTUIViewStateRestoredPanesAutoHideShowsStatus(t *testing.T) {
 	// fallback → visiblePanes stays nil.
 	require.Equal(t, 2, h.restoreTUIViewStateOnLaunch())
 	require.Empty(t, h.visiblePanes, "the restore-time relayout falls through at (0,0)")
+	require.Len(t, h.restoredPaneBaseline, 2, "restore seeds the auto-hide baseline")
+
+	// A snapshot-driven relayout can land between restore and the first
+	// WindowSizeMsg (sync.go relays out on reconcile). It must NOT consume the
+	// baseline out from under the pending resize (#1551): the baseline survives
+	// until the first sized relayout actually uses it.
+	h.relayout()
+	require.Len(t, h.restoredPaneBaseline, 2,
+		"an intermediate no-dims relayout must not clear the restore baseline")
 
 	// First real relayout at a width that fits only one pane: the other restored
 	// pane auto-hides and the status must surface.
@@ -117,6 +126,7 @@ func TestTUIViewStateRestoredPanesAutoHideShowsStatus(t *testing.T) {
 
 	require.Equal(t, 1, h.lastLayout.PaneCount())
 	require.Equal(t, 2, h.store.NumOpenPanes(), "auto-hide retains both bindings")
+	assert.Empty(t, h.restoredPaneBaseline, "the sized relayout consumes the baseline")
 	assert.Contains(t, h.errBox.FullError(), "hidden: terminal too narrow for 2 panes",
 		"a pane hidden on the first post-restore relayout must still surface the status (#1535)")
 }

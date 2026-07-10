@@ -458,12 +458,18 @@ func (m *home) relayout() {
 	// First real relayout after a restore: the restore-time relayout ran at
 	// (0,0) and fell through to fallback with visiblePanes=nil, so the restored
 	// panes are the visibility baseline this pass uses to detect a pane the
-	// terminal can't fit (#1535). Consumed once; every later relayout carries a
-	// real previousVisible.
+	// terminal can't fit (#1535). Clear it ONLY when it is actually consumed
+	// (previousVisible empty): an intermediate relayout that reaches here with a
+	// real previousVisible already established leaves nothing to consume, and one
+	// that falls through to fallback returned above — so the baseline survives
+	// every relayout until the first sized one uses it, instead of being cleared
+	// out from under that resize (#1551 review). Since visiblePanes is nil until
+	// the first non-fallback relayout, that first sized relayout is exactly the
+	// one that consumes it.
 	if len(previousVisible) == 0 && len(m.restoredPaneBaseline) > 0 {
 		previousVisible = m.restoredPaneBaseline
+		m.restoredPaneBaseline = nil
 	}
-	m.restoredPaneBaseline = nil
 
 	nextVisible := m.store.VisibleOpenPanes(lay.PaneCount())
 	if hidden := newlyAutoHiddenPane(previousVisible, nextVisible, m.store.OpenPanes()); hidden != nil {
