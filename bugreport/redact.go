@@ -233,9 +233,17 @@ func redactInstanceData(d *session.InstanceData) {
 	if d.Worktree.SessionName != "" {
 		d.Worktree.SessionName = redactedMarker
 	}
+	// TmuxName is derived from the session title (e.g. "af_ConfidentialDeal"),
+	// so it leaks the same free-text name Title carries and must be redacted too.
+	if d.TmuxName != "" {
+		d.TmuxName = redactedMarker
+	}
 	for i := range d.Tabs {
 		if d.Tabs[i].Command != "" {
 			d.Tabs[i].Command = redactedMarker
+		}
+		if d.Tabs[i].TmuxName != "" {
+			d.Tabs[i].TmuxName = redactedMarker
 		}
 		if d.Tabs[i].Conversation != nil {
 			d.Tabs[i].Conversation.ID = ""
