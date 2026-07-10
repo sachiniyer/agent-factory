@@ -24,9 +24,19 @@ import (
 // an explicit (instance, tab) binding in the store's open-pane list.
 
 // openPaneWindow appends a pane bound to (instance, tab) to the store's
-// open-pane list and creates its content window. Callers dedupe via
-// FindOpenPane first and relayout afterwards.
+// open-pane list and creates its content window. Callers relayout afterwards.
+//
+// The (instance, tab) → at-most-one-pane invariant is enforced HERE, at the
+// single pane-creation chokepoint: opening a tab that already has a pane
+// (visible or auto-hidden) returns the existing pane instead of appending a
+// duplicate — the open-or-focus contract (#1493), now unconditional so the
+// callers that skip the FindOpenPane pre-check (the startup auto-open, the
+// started-session auto-open, the restore path) can never split one tab across
+// two panes and render it twice (#1557).
 func (m *home) openPaneWindow(instance *session.Instance, tab int) *store.OpenPane {
+	if existing := m.store.FindOpenPane(instance, tab); existing != nil {
+		return existing
+	}
 	p := m.store.AddOpenPane(instance, tab)
 	if p == nil {
 		return nil
