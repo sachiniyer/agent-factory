@@ -163,6 +163,18 @@ func (q *eventQueue) load() {
 		return
 	}
 	defer func() { _ = f.Close() }()
+
+	// Defense-in-depth (#1537): a cursor that clears the off<=size bound can
+	// still point into the MIDDLE of a record — e.g. a crash during compaction
+	// that shrank the file but left a pre-compaction offset behind. Records
+	// always end in '\n', so a real interior boundary has '\n' immediately
+	// before it; if q.offset isn't one, replay from the start rather than
+	// parking the drainer forever on an unreadable head (redelivering a few
+	// already-delivered events is at-least-once, a wedged queue is not).
+	if !q.offsetIsRecordBoundaryLocked(f) {
+		log.WarningLog.Printf("watch task %s: event-queue cursor %d is not on a record boundary; replaying the queue from the start", q.taskID, q.offset)
+		q.offset = 0
+	}
 	if _, err := f.Seek(q.offset, 0); err != nil {
 		return
 	}
@@ -365,14 +377,14 @@ func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
 }
 
 // compactLocked rewrites the queue file to just its pending suffix, dropping
-// the delivered prefix: copy suffix → temp file → rename over the original,
-// then reset the in-memory offset (the caller persists the cursor). Crash
-// safety is rename-based: a crash before the rename leaves the old
-// consistent (file, cursor) pair; a crash after the rename but before the
-// cursor write leaves a stale cursor pointing past the smaller new file,
-// which load()'s off<=size validation rejects — resetting to 0 and
-// redelivering the pending suffix (at-least-once, never loss). Callers hold
-// q.mu.
+// the delivered prefix: copy suffix → temp file → persist cursor 0 → rename
+// over the original → reset the in-memory offset. Crash safety comes from the
+// cursor-before-rename ordering (#1537): the post-compaction cursor is 0, and
+// it is made durable BEFORE the rename shrinks the file, so no crash can leave
+// the small compacted file beside a stale offset that points mid-record. Every
+// crash point leaves a record-aligned (file, cursor) pair; the worst case
+// redelivers an already-delivered prefix (at-least-once, never loss). Callers
+// hold q.mu.
 func (q *eventQueue) compactLocked() error {
 	src, err := os.Open(q.path)
 	if err != nil {
@@ -395,12 +407,45 @@ func (q *eventQueue) compactLocked() error {
 		_ = os.Remove(tmpName)
 		return err
 	}
+	// Persist the post-compaction cursor (0) durably BEFORE the rename shrinks
+	// the file, closing the crash window that used to wedge the queue (#1537).
+	// The old ordering renamed first and left the caller to persist the cursor
+	// after, so a crash in between paired the small compacted file with a stale
+	// pre-compaction offset pointing mid-record. Cursor-before-rename makes every
+	// crash point consistent and record-aligned: before this write, old file +
+	// old offset; after it but before the rename, old file + cursor 0 (redelivers
+	// the delivered prefix); after the rename, compacted file + cursor 0.
+	if err := q.persistCursorValueLocked(0); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
 	if err := os.Rename(tmpName, q.path); err != nil {
 		_ = os.Remove(tmpName)
+		// The file is still the old (large) one but the cursor is now 0; restore
+		// the real offset so the on-disk pair stays consistent (a crash before
+		// this restore just redelivers the delivered prefix — at-least-once).
+		if rerr := q.persistCursorLocked(); rerr != nil {
+			return fmt.Errorf("compaction rename failed (%v); cursor restore also failed: %w", err, rerr)
+		}
 		return err
 	}
 	q.offset, q.size = 0, n
 	return nil
+}
+
+// offsetIsRecordBoundaryLocked reports whether q.offset begins a record in the
+// open queue file f. Offset 0 and offset>=size are boundaries by definition;
+// any interior offset is a boundary iff the byte before it is the record
+// terminator '\n'. ReadAt leaves f's seek position untouched. Callers hold q.mu.
+func (q *eventQueue) offsetIsRecordBoundaryLocked(f *os.File) bool {
+	if q.offset <= 0 || q.offset >= q.size {
+		return true
+	}
+	var b [1]byte
+	if _, err := f.ReadAt(b[:], q.offset-1); err != nil {
+		return false
+	}
+	return b[0] == '\n'
 }
 
 // readEventAtLocked reads and parses one JSONL record at the given offset,
@@ -428,8 +473,16 @@ func (q *eventQueue) readEventAtLocked(off int64) (queuedEvent, int64, error) {
 	return ev, int64(len(raw)), nil
 }
 
-// persistCursorLocked writes the cursor file. Atomic (write+rename) so a torn
-// write can never yield a cursor pointing mid-record. Callers hold q.mu.
+// persistCursorLocked writes the current cursor (q.offset). Atomic
+// (write+rename) so a torn write can never yield a cursor pointing mid-record.
+// Callers hold q.mu.
 func (q *eventQueue) persistCursorLocked() error {
-	return config.AtomicWriteFile(q.curPath, []byte(strconv.FormatInt(q.offset, 10)), 0644)
+	return q.persistCursorValueLocked(q.offset)
+}
+
+// persistCursorValueLocked durably writes an explicit cursor value. Compaction
+// uses it to record the post-rewrite offset (0) BEFORE the rename that shrinks
+// the file (#1537). Callers hold q.mu.
+func (q *eventQueue) persistCursorValueLocked(off int64) error {
+	return config.AtomicWriteFile(q.curPath, []byte(strconv.FormatInt(off, 10)), 0644)
 }
