@@ -368,6 +368,98 @@ func TestHandleStateTasks_PendingTriggerSurvivesDeleteFailureReloadByID(t *testi
 		"pending trigger must resolve by task ID after the failed-delete reload")
 }
 
+// TestHandleStateTasks_FailedCreateDoesNotDuplicateOnReopen covers #1531: when
+// a create is submitted but its pre-create flush (saveContentPaneState) fails,
+// handleTaskCreate never runs and pendingCreate is left set. Pre-fix, that flag
+// survived the overlay close, so reopening the manager (which drops straight
+// into the selected task's edit form, #1249) and pressing any key fired
+// HasPendingCreate() → handleTaskCreate() against the reloaded buffers,
+// duplicating the selected task. The fix clears the stuck pending create on the
+// failed-flush reload (SetTasks) and on overlay close (SetFocus(false)), so no
+// phantom task is created.
+func TestHandleStateTasks_FailedCreateDoesNotDuplicateOnReopen(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(500, 1)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	existing := task.Task{
+		ID: "existing-1531", Name: "nightly", Prompt: "do something",
+		CronExpr: "* * * * *", ProjectPath: repo.Root, Program: "claude",
+		Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(existing))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+
+	// Record every create routed through the daemon RPC seam.
+	var creates []task.Task
+	t.Cleanup(SetTaskAdderForTest(func(tk task.Task) error {
+		creates = append(creates, tk)
+		return task.AddTask(tk)
+	}))
+
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc}) // edit form -> list
+
+	// Toggle the task so the pre-create flush has dirty state to persist.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	require.True(t, tp.IsDirty(), "toggle must mark the pane dirty")
+
+	// Force the pre-create flush to fail, so the create is submitted but
+	// handleTaskCreate never runs and pendingCreate is stranded.
+	restoreUpdater := SetTaskUpdaterForTest(func(task.Task) error {
+		return fmt.Errorf("daemon RPC failure")
+	})
+
+	// Fill and submit the inline create form.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	require.True(t, tp.IsCreating(), "'n' must open the inline create form")
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("dup-task")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> cron value
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("dup prompt")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> path
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> program
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> save button
+	_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd, "the failed pre-create flush must surface an error")
+	require.Empty(t, creates, "the create must not have persisted — its flush failed")
+
+	// The transient failure clears; a later flush would succeed.
+	restoreUpdater()
+
+	// Esc closes the overlay.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "Esc must close the tasks overlay")
+
+	// Reopen (drops into the selected task's edit form) and press a key that
+	// keeps focus so the HasPendingCreate branch is reached. Pre-fix this fired
+	// handleTaskCreate against the reloaded buffers and duplicated the task.
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+
+	assert.Empty(t, creates,
+		"reopening after a failed create must NOT create a duplicate task (#1531)")
+	disk, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	assert.Len(t, disk, 1, "only the original task remains — no phantom duplicate")
+}
+
 // TestHandleTaskCreate_RoutesThroughDaemonRPC is the #1029 PR 6 guard for the
 // create path: the TUI inline create form must persist the new task through the
 // daemon RPC — the sole writer of tasks.json among clients (#960) — not by

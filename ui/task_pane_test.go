@@ -1120,6 +1120,46 @@ func TestTaskPaneCreateModeEnterSubmitsFromAnyField(t *testing.T) {
 	assert.False(t, tp.creating)
 }
 
+// TestTaskPaneCloseClearsPendingCreateAndTrigger pins #1531: when a create/run
+// is submitted but its save fails, the pending request is left un-consumed. Esc
+// then closes the overlay (SetFocus(false)); the pending flag must be dropped
+// there, or on reopen the next keypress fires it against the reloaded buffers
+// and duplicates the selected task.
+func TestTaskPaneCloseClearsPendingCreateAndTrigger(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{ID: "a", Name: "A", Enabled: true}})
+	tp.SetFocus(true)
+	tp.pendingCreate = true
+	tp.pendingTrigger = true
+	tp.pendingTriggerID = "a"
+
+	tp.SetFocus(false)
+
+	assert.False(t, tp.HasPendingCreate(), "closing the overlay must drop a pending create")
+	assert.False(t, tp.HasPendingTrigger(), "closing the overlay must drop a pending trigger")
+	assert.Empty(t, tp.pendingTriggerID)
+}
+
+// TestTaskPaneSetTasksClearsPendingCreateButKeepsPendingTrigger pins the
+// asymmetry the #1531 fix must preserve: a reload (SetTasks) replaces the
+// create-form buffers, so a stale pending create is dropped — but a pending
+// run-now must SURVIVE the reload so it can resolve by task ID after
+// saveContentPaneState's mid-flush failure reload (#1474).
+func TestTaskPaneSetTasksClearsPendingCreateButKeepsPendingTrigger(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{ID: "a", Name: "A", Enabled: true}})
+	tp.pendingCreate = true
+	tp.pendingTrigger = true
+	tp.pendingTriggerID = "a"
+
+	tp.SetTasks([]task.Task{{ID: "a", Name: "A", Enabled: true}})
+
+	assert.False(t, tp.HasPendingCreate(), "a reload must drop a stale pending create (#1531)")
+	assert.True(t, tp.HasPendingTrigger(),
+		"a reload must NOT drop a pending run-now — it resolves by ID after a failed-save reload (#1474)")
+	assert.Equal(t, "a", tp.pendingTriggerID)
+}
+
 // TestTaskPaneCreateModeEnterMovesFocusToInvalidField: submitting an invalid
 // form from any field surfaces the inline error AND moves focus to the
 // offending field, so the error is in view even when the clamped form has it
