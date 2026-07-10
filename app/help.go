@@ -341,6 +341,16 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if runOnDismiss {
 		dismissCmd, shouldClose = m.textOverlay.HandleKeyPress(msg)
 	} else {
+		// The overlay was canceled (Esc/Ctrl+C on the attach help,
+		// attachHelpDismissPolicy → runOnDismiss=false): its OnDismiss — the
+		// attach flow — will NOT run. Clear the re-entrant-attach guard here so a
+		// canceled attach can never leave attachTransitioning armed and turn every
+		// later Enter into a no-op (#1530). Today the flag isn't set until
+		// beginAttachTransition runs inside OnDismiss (which this path skips), so
+		// this is defense-in-depth that keeps the now-load-bearing guard invariant
+		// robust if arming ever moves earlier. Harmless for non-attach overlays,
+		// whose guard is already clear.
+		m.attachTransitioning = false
 		m.textOverlay.Dismissed = true
 		shouldClose = true
 	}

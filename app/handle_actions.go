@@ -551,6 +551,15 @@ func killConfirmationWarning(wt string) string {
 // the full-screen hook PTY — fall back to the full-screen attach Enter used to
 // do; dead/transitional sessions keep their guard errors.
 func (m *home) handleEnter() (tea.Model, tea.Cmd) {
+	// Ignore Enter entirely while a full-screen attach is starting or live
+	// (#1530): the transition hands stdout/stdin to tmux, so any Enter that
+	// arrives in that window must not kick off a second attach flow (or any
+	// other pane action). beginAttachTransition guards the attach funnel too;
+	// this stops the re-entry one step earlier, at the key handler. Both flags
+	// clear on detach.
+	if m.attachTransitioning || m.attached.Load() {
+		return m, nil
+	}
 	if m.panePreviewTxn != nil {
 		p, commitCmd := m.commitPanePreviewReplace()
 		if p == nil || liveSessionName(p.Instance(), p.Tab()) == "" {
