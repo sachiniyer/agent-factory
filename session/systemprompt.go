@@ -103,13 +103,23 @@ func injectSystemPrompt(resolved string) string {
 		return resolved + " -c " + shellQuote("developer_instructions="+afUsageReference)
 	}
 	if agent == tmux.ProgramAmp {
-		// Amp gets a file seam, not a flag: writing the "af" skill into amp's
-		// home skills dir injects afUsageReference with ZERO change to the
+		// Amp gets a file seam, not a flag: writing the af-managed skill into
+		// amp's home skills dir injects afUsageReference with ZERO change to the
 		// launch command, so the spawn stays byte-identical to the working
 		// no-injection amp launch. A write failure just means amp loses the af
 		// guidance for this launch — it must never affect the spawn, so we log
 		// and return the command unchanged regardless (unlike claude, there is
 		// no flag whose absence to guard).
+		//
+		// Accepted tradeoff (#1585 review, finding 2): DetectAgentFromCommand is
+		// a shared basename heuristic, so a program_overrides entry pointing a
+		// NON-amp binary named "amp" reaches here and writes the skill file.
+		// We deliberately do NOT re-derive amp-ness with a second heuristic — the
+		// #1132 rule is that agent detection has exactly one choke-point, and a
+		// mis-detected "amp" is already mishandled everywhere else (resume
+		// rewrite, ready detection, trust prompts). The write itself is benign:
+		// ensureAmpSkillDir is af-owned, idempotent, and non-destructive, so the
+		// worst case is a dormant af-owned docs skill in ~/.config/amp/skills.
 		if _, err := ensureAmpSkillDir(); err != nil {
 			log.WarningLog.Printf("failed to set up amp af skill, af guidance unavailable to amp: %v", err)
 		}
