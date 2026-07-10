@@ -414,11 +414,24 @@ func (i *Instance) AttachShellTab(name string) (*Tab, error) {
 // errors on idx 0 or any out-of-range index, mirroring CloseTab.
 func (i *Instance) DropClosedTab(idx int) error {
 	i.mu.Lock()
-	defer i.mu.Unlock()
 	if idx <= 0 || idx >= len(i.Tabs) {
+		i.mu.Unlock()
 		return fmt.Errorf("tab cannot be closed")
 	}
+	tab := i.Tabs[idx]
 	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
+	i.mu.Unlock()
+
+	// Release the TUI-side attach PTY (ptmx fd + blocked cmd.Wait goroutine) the
+	// dropped tab held, matching CloseTab. No kill: the daemon's CloseTab RPC
+	// already tore the tmux session down (#960 PR 2), so CloseAttachOnly only
+	// releases this client's attach resources. Done outside the lock so the tmux
+	// teardown never runs while holding i.mu.
+	if tab.tmux != nil {
+		if err := tab.tmux.CloseAttachOnly(); err != nil {
+			log.WarningLog.Printf("DropClosedTab: releasing attach client for tab %q: %v", tab.Name, err)
+		}
+	}
 	return nil
 }
 
@@ -526,14 +539,29 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 // dropped.
 func (i *Instance) dropTabByName(name string) bool {
 	i.mu.Lock()
-	defer i.mu.Unlock()
+	var dropped *Tab
 	for idx := 1; idx < len(i.Tabs); idx++ {
 		if i.Tabs[idx].Name == name {
+			dropped = i.Tabs[idx]
 			i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
-			return true
+			break
 		}
 	}
-	return false
+	i.mu.Unlock()
+	if dropped == nil {
+		return false
+	}
+	// Release the TUI-side attach PTY the dropped tab held — its ptmx fd and the
+	// blocked cmd.Wait goroutine — mirroring CloseTab/AttachShellTab. No kill: the
+	// daemon already tore the tmux session down (#960 PR 3), so this only releases
+	// this client's attach resources. Done outside the lock so the tmux teardown
+	// never runs while holding i.mu.
+	if dropped.tmux != nil {
+		if err := dropped.tmux.CloseAttachOnly(); err != nil {
+			log.WarningLog.Printf("dropTabByName %q: releasing attach client: %v", name, err)
+		}
+	}
+	return true
 }
 
 // setTmuxLocked stores ts as the agent tab's tmux session, materializing the
