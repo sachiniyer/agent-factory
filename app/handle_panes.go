@@ -398,8 +398,12 @@ func (m *home) focusTreeForNav() {
 // Enter still resolves through the sidebar selection; callers that already have
 // a pane binding enter that pane directly. Remote/non-embeddable panes fall
 // back to the full-screen attach of the pane's tab, mirroring handleEnter's
-// remote branch; guard errors surface the same way.
-func (m *home) enterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
+// remote branch; guard errors surface the same way. A non-nil replayKey is the
+// keystroke that triggered the entry and is forwarded into the pane once
+// interactive mode is live (#1576) — the keyboard focused-pane Enter passes it
+// so the first Enter reaches the agent; the mouse click passes nil (no
+// keystroke to forward).
+func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, nil
 	}
@@ -413,7 +417,7 @@ func (m *home) enterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 		// Not embeddable (remote): the full-screen attach of this pane's tab.
 		return m.handleEnterPane(p)
 	}
-	return m.requestInteractive(p)
+	return m.requestInteractive(p, replayKey)
 }
 
 // handleEnterPane attaches the focused pane's (instance, tab) full-screen:

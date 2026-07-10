@@ -61,11 +61,17 @@ func runHermeticCmd(t *testing.T, h *home, cmd tea.Cmd, depth int) {
 }
 
 // enterInteractive presses Enter on the focused pane and drives the deferred
-// activation to completion.
+// activation to completion. That entry Enter is itself forwarded into the pane
+// (#1576) — TestFirstEnterOnFocusedPaneForwardsIntoPane pins that behavior. The
+// recorded keys are reset here so callers can assert on the keystrokes they
+// send NEXT without the entry Enter sitting in front of them.
 func enterInteractive(t *testing.T, h *home) {
 	t.Helper()
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 	runHermeticCmd(t, h, cmd, 0)
+	if lt, ok := h.liveTerm.(*fakeLiveTerm); ok {
+		lt.keys = nil
+	}
 }
 
 func TestEnterOnFocusedLivePaneEntersInteractive(t *testing.T) {
@@ -80,6 +86,55 @@ func TestEnterOnFocusedLivePaneEntersInteractive(t *testing.T) {
 	assert.Equal(t, p, h.livePane)
 	assert.True(t, h.paneWindows[p.ID()].Interactive(), "the pane must carry the interactive visual cue")
 	assert.Contains(t, h.menu.String(), "ctrl+]", "the status bar must show the escape hatch")
+}
+
+// TestFirstEnterOnFocusedPaneForwardsIntoPane is the #1576 regression: with the
+// interactive help already seen (every established user), pressing Enter on an
+// already-focused pane must both enter interactive mode AND forward that first
+// Enter into the pane — the transition key is the pane's first in-pane
+// keystroke and must not be swallowed. Before the fix only the once-ever
+// first-run help path replayed the entry key, so every later entry dropped it.
+func TestFirstEnterOnFocusedPaneForwardsIntoPane(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+
+	// Drive the entry WITHOUT the key-resetting enterInteractive helper so the
+	// forwarded entry keystroke is observable.
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	runHermeticCmd(t, h, cmd, 0)
+
+	require.True(t, h.interactive, "Enter on a focused pane must enter interactive mode")
+	require.Len(t, *fakes, 1)
+	assert.Equal(t, []string{"enter"}, (*fakes)[0].keys,
+		"the Enter that enters a focused pane must forward into the pane, not be swallowed (#1576)")
+
+	// And the pane keeps forwarding normally afterwards.
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	assert.Equal(t, []string{"enter", "z"}, (*fakes)[0].keys,
+		"subsequent keystrokes must forward on top of the entry Enter")
+}
+
+// TestEnterFromTreeDoesNotForwardIntoPane guards the other half of #1576: a
+// navigation Enter (tree/sidebar selection) opens+enters the pane but must NOT
+// type into the agent — only an already-focused-pane Enter forwards.
+func TestEnterFromTreeDoesNotForwardIntoPane(t *testing.T) {
+	h := newTestHome(t)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	inst := startedLocalInstance(t, "tree-noforward")
+	selectInstance(h, inst)
+	resizeHome(h, 120, 40)
+	fakes, _ := stubLiveTermFactory(t)
+	require.Zero(t, h.store.NumOpenPanes())
+
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	p := h.store.FindOpenPane(inst, 0)
+	require.NotNil(t, p, "Enter from the tree must open the selection's pane")
+	_, cmd := h.Update(enterInteractiveMsg{pane: p})
+	runHermeticCmd(t, h, cmd, 0)
+
+	require.True(t, h.interactive)
+	require.Len(t, *fakes, 1)
+	assert.Empty(t, (*fakes)[0].keys,
+		"a tree/nav select Enter opens the pane but must not type into the agent (#1576)")
 }
 
 func TestFirstRunInteractiveHelpForwardsDismissKey(t *testing.T) {
@@ -348,7 +403,9 @@ func TestEnterWithFocusedPaneTargetsFocusNotSidebarSelection(t *testing.T) {
 	assert.Equal(t, instB, h.sidebar.GetSelectedInstance(), "sidebar selection is unchanged")
 	require.Len(t, *fakes, 1)
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
-	assert.Equal(t, []string{"Z"}, (*fakes)[0].keys)
+	// The entry Enter forwards into focused pane A (#1576), then Z on top —
+	// both land on A's attachment, never sidebar-selected B's.
+	assert.Equal(t, []string{"enter", "Z"}, (*fakes)[0].keys)
 }
 
 func TestEnterOnRemotePaneFallsBackToFullScreenAttach(t *testing.T) {
