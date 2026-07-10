@@ -75,6 +75,44 @@ func (m *home) syncLiveTermPane() {
 	m.enforceInteractiveInvariant()
 }
 
+// interactiveBindAttempts bounds how hard activateInteractive tries to bind the
+// live attachment before surfacing the open error. The embedded terminal can
+// miss on the FIRST attempt when the tmux pane isn't ready yet — a first-render
+// race that self-heals on the next tick (#1526). A few short retries make that
+// common transient miss invisible; the hard, non-retryable cases (remote, dead,
+// lost, transitional instances) are already fenced off by interactiveGuard
+// before we get here, so what remains at the bind is the transient class.
+const interactiveBindAttempts = 4
+
+// interactiveBindRetryDelay is the pause between bind attempts. attempts × delay
+// (≈120ms) bounds the worst-case event-loop block below what reads as a stall,
+// so a genuine failure still surfaces promptly and the loop never spins. A var
+// so tests can zero it; event-loop only, never read/written concurrently.
+var interactiveBindRetryDelay = 40 * time.Millisecond
+
+// bindLiveTermPaneWithRetry forces the live attachment for pane p, retrying the
+// transient "tmux pane not ready" miss (#1526) a bounded number of times before
+// giving up. reconcileLiveTermPane records a failed bind with a 5s backoff meant
+// for the passive preview tick; between attempts we clear that backoff so the
+// next attempt actually re-tries the bind instead of short-circuiting on it. The
+// final failure leaves the backoff intact so the passive tick keeps its
+// anti-respawn behavior. Returns true once the pane is bound. Event-loop only.
+func (m *home) bindLiveTermPaneWithRetry(p *store.OpenPane) bool {
+	for attempt := 0; attempt < interactiveBindAttempts; attempt++ {
+		m.syncLiveTermPane()
+		if m.liveTerm != nil && m.livePane == p {
+			return true
+		}
+		if attempt == interactiveBindAttempts-1 {
+			break
+		}
+		m.liveBindKey = ""
+		m.liveBindFailedAt = time.Time{}
+		time.Sleep(interactiveBindRetryDelay)
+	}
+	return false
+}
+
 func (m *home) reconcileLiveTermPane() {
 	// While the user is inside a full-screen attach our render client must
 	// not hold the same session (size fight) or generate tmux traffic

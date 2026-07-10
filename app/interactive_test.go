@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -424,4 +425,72 @@ func TestWheelIsInertWhileInteractive(t *testing.T) {
 
 	assert.False(t, h.paneWindows[p.ID()].IsInScrollMode(),
 		"host wheel-scroll must not flip the live pane into capture scroll mode mid-typing")
+}
+
+// zeroInteractiveBindRetryDelay removes the inter-attempt sleep so the retry
+// tests don't burn wall-clock. Event-loop-only var, restored on cleanup.
+func zeroInteractiveBindRetryDelay(t *testing.T) {
+	t.Helper()
+	orig := interactiveBindRetryDelay
+	interactiveBindRetryDelay = 0
+	t.Cleanup(func() { interactiveBindRetryDelay = orig })
+}
+
+// TestInteractiveRetriesTransientBindThenSucceeds pins #1526: the embedded
+// terminal can miss the FIRST bind when the tmux pane isn't ready yet (a
+// first-render race). Entering interactive must retry that transient miss and
+// succeed without ever surfacing the "couldn't open an embedded terminal" line.
+func TestInteractiveRetriesTransientBindThenSucceeds(t *testing.T) {
+	h, _ := liveTestHome(t)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	zeroInteractiveBindRetryDelay(t)
+
+	var calls int
+	orig := newLiveTermPaneFn
+	newLiveTermPaneFn = func(sessionName string, width, height int) (liveTermAttachment, error) {
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("tmux pane not ready")
+		}
+		return newFakeLiveTerm(), nil
+	}
+	t.Cleanup(func() { newLiveTermPaneFn = orig })
+
+	enterInteractive(t, h)
+
+	assert.True(t, h.interactive, "a transient first-attempt miss must be retried into interactive mode")
+	assert.GreaterOrEqual(t, calls, 2, "the failed first bind must be retried")
+	assert.Empty(t, h.errBox.FullError(), "a recovered transient miss must not surface the open error")
+	assert.NotNil(t, h.liveTerm, "the retried bind must leave a live attachment")
+}
+
+// TestInteractivePersistentBindFailureSurfacesError is the other half of #1526:
+// once the bounded retries are exhausted, a genuine failure must still surface
+// the "press o to attach full-screen" guidance and stay in nav mode.
+func TestInteractivePersistentBindFailureSurfacesError(t *testing.T) {
+	h, inst := liveTestHome(t)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	zeroInteractiveBindRetryDelay(t)
+
+	var calls int
+	orig := newLiveTermPaneFn
+	newLiveTermPaneFn = func(sessionName string, width, height int) (liveTermAttachment, error) {
+		calls++
+		return nil, fmt.Errorf("attach failed")
+	}
+	t.Cleanup(func() { newLiveTermPaneFn = orig })
+
+	// Drive the activation by hand (help is marked seen, so Enter yields the
+	// deferred enterInteractiveMsg directly) and stop before running the
+	// returned transient-clear timer, so the surfaced error is still in the box
+	// when we assert.
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	require.NotNil(t, cmd)
+	_, _ = h.Update(cmd())
+
+	assert.False(t, h.interactive, "a persistent bind failure must not enter interactive mode")
+	assert.Equal(t, interactiveBindAttempts, calls, "all bounded attempts run before surfacing the error")
+	assert.Contains(t, h.errBox.FullError(), "couldn't open an embedded terminal")
+	assert.Contains(t, h.errBox.FullError(), inst.Title, "the error names the session")
+	assert.Contains(t, h.errBox.FullError(), "press o", "the error keeps the full-screen fallback guidance")
 }
