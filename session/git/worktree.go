@@ -145,37 +145,9 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		return nil, "", err
 	}
 
-	safeSessionName := sanitizeWorktreePathSegment(sessionName)
-
-	var basePath string
-	if cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
-		basePath = filepath.Join(worktreeDir, branchName)
-	} else {
-		// Sibling mode: {repoParent}/{repoName}-{sessionName}
-		repoName := filepath.Base(repoPath)
-		basePath = filepath.Join(worktreeDir, repoName+"-"+safeSessionName)
-	}
-
-	// Ensure the worktree path is strictly nested inside worktreeDir. We use
-	// filepath.Rel instead of a HasPrefix check so the validation is correct
-	// when worktreeDir is the filesystem root ("/"): the naive prefix check
-	// produces "//" and rejects every valid child path. See #461.
-	absBase, _ := filepath.Abs(basePath)
-	absDir, _ := filepath.Abs(worktreeDir)
-	if !pathutil.IsStrictlyInside(absBase, absDir) {
-		return nil, "", fmt.Errorf("invalid session name: would create worktree outside expected directory")
-	}
-
-	worktreePath := basePath
-	for i := 2; ; i++ {
-		_, err := os.Stat(worktreePath)
-		if os.IsNotExist(err) {
-			break
-		}
-		if err != nil {
-			return nil, "", fmt.Errorf("cannot check worktree path %q: %w", worktreePath, err)
-		}
-		worktreePath = fmt.Sprintf("%s-%d", basePath, i)
+	worktreePath, err := resolveWorktreePlacement(cfg, repoPath, worktreeDir, sessionName, branchName)
+	if err != nil {
+		return nil, "", err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -188,6 +160,62 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		hooksCtx:     ctx,
 		hooksCancel:  cancel,
 	}, branchName, nil
+}
+
+// resolveWorktreePlacement computes a session's worktree path under the
+// configured placement mode — the single source of truth NewGitWorktree (create)
+// and RestoreWorktreePath (archive restore, #1540) share, so both honor
+// worktree_root identically. Subdirectory mode nests the branch name under
+// $AF_HOME/worktrees; sibling mode nests {repoName}-{safeSessionName} beside the
+// repo. The base path is validated to sit strictly inside worktreeDir (#461) and
+// a numeric suffix is appended when it is already occupied.
+func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
+	var basePath string
+	if cfg != nil && cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
+		// Subdirectory mode nests the branch name under the worktrees root. A
+		// record with no persisted branch (an old/edge archive) would otherwise
+		// resolve to worktreeDir itself, fail the strict-inside guard below, and
+		// block a restore the title-based path could still complete — so fall back
+		// to the sanitized session name as the leaf. A freshly created session
+		// always has a branch, so this fallback only ever engages on restore.
+		leaf := branchName
+		if strings.TrimSpace(leaf) == "" {
+			leaf = sanitizeWorktreePathSegment(sessionName)
+		}
+		basePath = filepath.Join(worktreeDir, leaf)
+	} else {
+		// Sibling mode: {repoParent}/{repoName}-{sessionName}
+		basePath = filepath.Join(worktreeDir, filepath.Base(repoRoot)+"-"+sanitizeWorktreePathSegment(sessionName))
+	}
+
+	// Ensure the worktree path is strictly nested inside worktreeDir. We use
+	// IsStrictlyInside instead of a HasPrefix check so the validation is correct
+	// when worktreeDir is the filesystem root ("/"): the naive prefix check
+	// produces "//" and rejects every valid child path. See #461.
+	absBase, _ := filepath.Abs(basePath)
+	absDir, _ := filepath.Abs(worktreeDir)
+	if !pathutil.IsStrictlyInside(absBase, absDir) {
+		return "", fmt.Errorf("invalid session name %q: would place worktree outside %s", sessionName, worktreeDir)
+	}
+	return firstFreeWorktreePath(basePath)
+}
+
+// firstFreeWorktreePath returns basePath, or basePath with the lowest "-N"
+// (N>=2) suffix that does not yet exist on disk — the collision discipline both
+// worktree creation and archive restore use so a session never clobbers an
+// occupied path.
+func firstFreeWorktreePath(basePath string) (string, error) {
+	p := basePath
+	for i := 2; ; i++ {
+		_, err := os.Stat(p)
+		if os.IsNotExist(err) {
+			return p, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("cannot check worktree path %q: %w", p, err)
+		}
+		p = fmt.Sprintf("%s-%d", basePath, i)
+	}
 }
 
 // NewGitWorktreeInPlace creates a GitWorktree attached to the repo's own

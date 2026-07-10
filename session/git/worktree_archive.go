@@ -8,44 +8,33 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// SiblingWorktreePath returns the standard sibling worktree location for a
-// session in the repo at repoPath — {repoParent}/{repoName}-{safeTitle} — with a
-// numeric suffix appended if that path is already occupied. It mirrors the
-// layout NewGitWorktree uses when creating a worktree, so RestoreWorktreeTo can
-// move an archived worktree back to where a fresh session's worktree would live
-// (#1028). The title is sanitized for filesystem safety and the result is
-// validated to sit strictly inside the worktree parent dir (the #461 guard).
-func SiblingWorktreePath(repoPath, title string) (string, error) {
+// RestoreWorktreePath returns where an archived session's worktree should be
+// restored, honoring the configured worktree_root placement (#1540) exactly as
+// NewGitWorktree does at creation — routing through the shared
+// resolveWorktreePlacement. Sibling mode returns {repoParent}/{repoName}-
+// {safeTitle}; subdirectory mode returns {AF_HOME}/worktrees/{branchName}, so a
+// subdirectory user gets the worktree back where it belongs instead of stranded
+// beside the repo. branchName is the session's persisted branch (used only for
+// subdirectory placement). A numeric suffix is appended if the path is occupied,
+// and the result is validated to sit strictly inside the worktree parent (#461).
+func RestoreWorktreePath(repoPath, title, branchName string) (string, error) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load config: %w", err)
+	}
 	repoRoot, err := findGitRepoRoot(repoPath)
 	if err != nil {
 		return "", err
 	}
-	worktreeDir := filepath.Dir(repoRoot)
-	repoName := filepath.Base(repoRoot)
-
-	safe := sanitizeWorktreePathSegment(title)
-
-	base := filepath.Join(worktreeDir, repoName+"-"+safe)
-	absBase, _ := filepath.Abs(base)
-	absDir, _ := filepath.Abs(worktreeDir)
-	if !pathutil.IsStrictlyInside(absBase, absDir) {
-		return "", fmt.Errorf("invalid session title %q: would place worktree outside %s", title, worktreeDir)
+	worktreeDir, err := getWorktreeDirectoryForRepoWithConfig(cfg, repoRoot)
+	if err != nil {
+		return "", err
 	}
-
-	p := base
-	for i := 2; ; i++ {
-		if _, statErr := os.Stat(p); os.IsNotExist(statErr) {
-			break
-		} else if statErr != nil {
-			return "", fmt.Errorf("cannot check worktree path %q: %w", p, statErr)
-		}
-		p = fmt.Sprintf("%s-%d", base, i)
-	}
-	return p, nil
+	return resolveWorktreePlacement(cfg, repoRoot, worktreeDir, title, branchName)
 }
 
 // ErrRepoGone is returned by RestoreWorktreeTo when the origin repository this

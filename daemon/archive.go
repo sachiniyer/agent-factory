@@ -175,10 +175,11 @@ func (m *Manager) undoCommittedArchive(repoID string, instance *session.Instance
 }
 
 // RestoreArchived restores an archived session (#1028): it moves the worktree
-// back next to the repo (a free sibling path), re-registers it, re-spawns the
-// agent, and marks the instance Running. Only the agent session is brought back
-// — shell/process tabs were dropped at archive time. Returns the restored
-// worktree path.
+// back to where session creation would place it under the configured
+// worktree_root (a free sibling path, or under $AF_HOME/worktrees for
+// subdirectory users — #1540), re-registers it, re-spawns the agent, and marks
+// the instance Running. Only the agent session is brought back — shell/process
+// tabs were dropped at archive time. Returns the restored worktree path.
 //
 // Concurrency mirrors ArchiveSession/KillSession (killsInFlight + op-lock). On a
 // repo-gone failure the archive is left intact with an actionable error; on a
@@ -232,7 +233,11 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
 	if _, statErr := os.Stat(repoPath); statErr != nil {
 		return "", fmt.Errorf("cannot restore session %q: its origin repo %s is gone; the archived worktree is intact at %s — recover it manually with git", req.Title, repoPath, instance.GetWorktreePath())
 	}
-	dest, err := sessiongit.SiblingWorktreePath(repoPath, req.Title)
+	// Honor the configured worktree_root placement, exactly as session creation
+	// does (#1540): a subdirectory user's worktree is restored under
+	// $AF_HOME/worktrees/<branch>, not stranded beside the repo. The branch is
+	// needed only for subdirectory placement.
+	dest, err := sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
 	if err != nil {
 		return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)
 	}
