@@ -160,10 +160,9 @@ func TestReleaseEventSlot_RefundsDeferredRateSlot(t *testing.T) {
 // detaches rather than silently skipped. The delivery is held while attached
 // and lands ("sent") on the first attempt after detach.
 func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
-	origPoll, origWait := cronDeferPollInterval, cronDeferMaxWait
+	origPoll := cronDeferPollInterval
 	cronDeferPollInterval = 5 * time.Millisecond
-	cronDeferMaxWait = 10 * time.Second
-	t.Cleanup(func() { cronDeferPollInterval, cronDeferMaxWait = origPoll, origWait })
+	t.Cleanup(func() { cronDeferPollInterval = origPoll })
 
 	var attached atomic.Bool
 	attached.Store(true)
@@ -232,10 +231,9 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 // duplicate burst. (Watch events, which carry distinct payloads, are NOT
 // coalesced — they queue durably and replay in order.)
 func TestRunTask_CronFiresCoalesceDuringDefer(t *testing.T) {
-	origPoll, origWait := cronDeferPollInterval, cronDeferMaxWait
+	origPoll := cronDeferPollInterval
 	cronDeferPollInterval = 5 * time.Millisecond
-	cronDeferMaxWait = 10 * time.Second
-	t.Cleanup(func() { cronDeferPollInterval, cronDeferMaxWait = origPoll, origWait })
+	t.Cleanup(func() { cronDeferPollInterval = origPoll })
 
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupTaskRepo(t)
@@ -305,25 +303,38 @@ func TestRunTask_CronFiresCoalesceDuringDefer(t *testing.T) {
 	}
 }
 
-// TestDeliverCronTaskPrompt_ForceDeliversAtBound pins the safety valve: a target
-// left attached past cronDeferMaxWait must not park the fire forever — at the
-// bound the delivery is forced (deferral off) so the occurrence is never
-// dropped.
-func TestDeliverCronTaskPrompt_ForceDeliversAtBound(t *testing.T) {
-	origPoll, origWait := cronDeferPollInterval, cronDeferMaxWait
-	cronDeferPollInterval = 5 * time.Millisecond
-	cronDeferMaxWait = 20 * time.Millisecond
-	t.Cleanup(func() { cronDeferPollInterval, cronDeferMaxWait = origPoll, origWait })
+// TestDeliverCronTaskPrompt_NeverPastesWhileAttached pins the core #1586
+// invariant on the catch-up valve: a cron target that stays attached — however
+// long, well past any prior bound — is NEVER pasted into while attached (that
+// would be the exact in-progress-input collision this path prevents). The held
+// fire keeps deferring and delivers ONLY once the target detaches. Every attempt
+// while attached carries the deferral ON (never a forced defer-off delivery).
+func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
+	origPoll := cronDeferPollInterval
+	cronDeferPollInterval = 2 * time.Millisecond
+	t.Cleanup(func() { cronDeferPollInterval = origPoll })
 
-	// The target stays attached the whole time; only a forced (defer-off) attempt
-	// gets through.
-	var forced atomic.Bool
+	var attached atomic.Bool
+	attached.Store(true)
+	var attempts atomic.Int32
+	var pasted atomic.Int32
+	var forcedWhileAttached atomic.Bool
+	firstAttempt := make(chan struct{})
+	var once sync.Once
 	origDeliver := deliverPromptForTask
 	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
-		if req.DeferWhileAttached {
+		attempts.Add(1)
+		once.Do(func() { close(firstAttempt) })
+		if attached.Load() {
+			// A forced (defer-off) attempt while still attached would paste into
+			// the user's pane — the bug. Flag it; the deferral must always be on
+			// while attached.
+			if !req.DeferWhileAttached {
+				forcedWhileAttached.Store(true)
+			}
 			return StatusDeferredAttached, nil
 		}
-		forced.Store(true)
+		pasted.Add(1)
 		return "sent", nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
@@ -331,15 +342,47 @@ func TestDeliverCronTaskPrompt_ForceDeliversAtBound(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	tsk := &task.Task{ID: "aa158602", TargetSession: "captain", ProjectPath: t.TempDir(), Prompt: "cron-event"}
 
-	status, err := deliverCronTaskPrompt(tsk, tsk.Prompt)
+	done := make(chan struct{})
+	var status string
+	var err error
+	go func() {
+		status, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
+		close(done)
+	}()
+
+	<-firstAttempt
+	// Let it poll MANY times while attached — well past any old bound — and prove
+	// nothing is ever pasted and no forced defer-off attempt slips through.
+	waitUntil(t, 5*time.Second, "the held fire to poll well past any prior bound", func() bool {
+		return attempts.Load() >= 50
+	})
+	if got := pasted.Load(); got != 0 {
+		t.Fatalf("a cron prompt must NEVER be pasted while the target is attached, pasted=%d", got)
+	}
+	if forcedWhileAttached.Load() {
+		t.Fatal("the held fire must never send a forced (defer-off) attempt while attached")
+	}
+	select {
+	case <-done:
+		t.Fatalf("delivery resolved (%q) while still attached — it must keep deferring until detach", status)
+	default:
+	}
+
+	// Detach → it delivers exactly once, now that the pane is unattended.
+	attached.Store(false)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery did not land after detach")
+	}
 	if err != nil {
-		t.Fatalf("force-at-bound: %v", err)
+		t.Fatalf("post-detach delivery: %v", err)
 	}
 	if status != "sent" {
-		t.Fatalf("status = %q, want \"sent\" (forced delivery at the bound)", status)
+		t.Fatalf("post-detach status = %q, want \"sent\"", status)
 	}
-	if !forced.Load() {
-		t.Fatal("the occurrence must be force-delivered at the bound, never dropped")
+	if got := pasted.Load(); got != 1 {
+		t.Fatalf("exactly one delivery on detach, got %d", got)
 	}
 }
 

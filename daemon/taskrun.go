@@ -32,15 +32,9 @@ var (
 	deliverPromptForTask = DeliverPrompt
 )
 
-// cronDeferPollInterval / cronDeferMaxWait bound how a cron fire waits out a
-// #1586 deferral (target attached). Cron has no durable event queue the way
-// watch does, so a deferred occurrence is caught up by re-attempting on this
-// cadence until the user detaches, then force-delivered at the bound so it is
-// never silently dropped. Vars so tests can shrink them.
-var (
-	cronDeferPollInterval = 1 * time.Second
-	cronDeferMaxWait      = 5 * time.Minute
-)
+// cronDeferPollInterval is how often a held cron fire re-checks whether the
+// target has detached (#1586). Var so tests can shrink it.
+var cronDeferPollInterval = 1 * time.Second
 
 // deliverTaskPrompt delivers one rendered prompt for a task and returns the
 // status string to record on it. With TargetSession empty it creates a fresh
@@ -110,27 +104,24 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 // deliverCronTaskPrompt delivers a cron task's prompt, waiting out a #1586
 // deferral (a TUI is attached to the target) so the occurrence is caught up on
 // detach rather than silently skipped — cron has no durable event queue the way
-// watch does. It re-attempts on cronDeferPollInterval until the user detaches,
-// bounded by cronDeferMaxWait so a session left attached indefinitely can't park
-// the fire forever; at the bound it delivers once with deferral OFF so the
-// occurrence is never dropped. Overlapping fires of the same task are coalesced
-// by RunTask's per-task flock, so a long attach yields exactly one catch-up
-// delivery, not a stacked burst.
+// watch does. It re-attempts on cronDeferPollInterval with the deferral ALWAYS
+// on, so a prompt is pasted ONLY once the target is unattached — never forced
+// into an attached pane, which would be the exact in-progress-input collision
+// this whole path exists to prevent. There is no timeout override: "never
+// dropped" is satisfied by delivering on detach, however long the attach lasts.
+//
+// Unbounded parking is safe: overlapping fires of the same task are coalesced by
+// RunTask's per-task flock, so at most one fire is ever parked here; and the
+// daemon's pause lease auto-expires if the TUI dies (statusPollLease), so a
+// crashed/stale client can never wedge the delivery — it lands on the next poll
+// once the lease lapses.
 func deliverCronTaskPrompt(t *task.Task, prompt string) (string, error) {
-	status, err := deliverTaskPrompt(t, prompt, true)
-	if err != nil || status != StatusDeferredAttached {
-		return status, err
-	}
-	deadline := time.Now().Add(cronDeferMaxWait)
 	for {
-		time.Sleep(cronDeferPollInterval)
-		// Once past the bound, force the delivery (deferral off) so an
-		// indefinitely-attached target never drops the occurrence.
-		deferWhileAttached := time.Now().Before(deadline)
-		status, err = deliverTaskPrompt(t, prompt, deferWhileAttached)
+		status, err := deliverTaskPrompt(t, prompt, true)
 		if err != nil || status != StatusDeferredAttached {
 			return status, err
 		}
+		time.Sleep(cronDeferPollInterval)
 	}
 }
 
