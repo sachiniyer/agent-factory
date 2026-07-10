@@ -34,10 +34,25 @@ type enterInteractiveMsg struct {
 
 // requestInteractive routes Enter-on-a-live-eligible-pane through the
 // first-time interactive help screen (seen-bitmask, like the attach help)
-// into activation.
-func (m *home) requestInteractive(p *store.OpenPane) (tea.Model, tea.Cmd) {
+// into activation. A non-nil replayKey is the keystroke that triggered the
+// entry (an already-focused pane's Enter): it is forwarded into the pane on
+// activation so the transition key is not swallowed (#1576) — the same
+// contract the first-run help path already honors by replaying its dismiss
+// key. The tree/nav select path and the mouse click pass nil: a navigation
+// Enter opens the pane without also typing into the agent, and a click has no
+// keystroke to forward. When the first-run help IS shown, the dismiss key
+// replay (replayKeyAfterInteractiveHelpDismiss) overrides this key, so the
+// entry key that only surfaced the overlay is never double-forwarded.
+func (m *home) requestInteractive(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.showHelpScreen(helpTypeInteractive{}, func() tea.Cmd {
-		return func() tea.Msg { return enterInteractiveMsg{pane: p} }
+		return func() tea.Msg {
+			msg := enterInteractiveMsg{pane: p}
+			if replayKey != nil {
+				msg.replay = true
+				msg.replayKey = *replayKey
+			}
+			return msg
+		}
 	})
 }
 

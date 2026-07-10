@@ -561,15 +561,24 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.panePreviewTxn != nil {
+		// Committing a sidebar tab-row preview is a tree-navigation action (the
+		// preview only exists while the tree cursor sits on a tab row), so this
+		// Enter selects/commits — it must NOT type into the agent (nil replay),
+		// exactly like the tree select path below (#1576).
 		p, commitCmd := m.commitPanePreviewReplace()
 		if p == nil || liveSessionName(p.Instance(), p.Tab()) == "" {
 			return m, commitCmd
 		}
-		mod, interactCmd := m.enterPane(p)
+		mod, interactCmd := m.enterPane(p, nil)
 		return mod, tea.Batch(commitCmd, interactCmd)
 	}
 	if p := m.focusedOpenPane(); p != nil {
-		return m.enterPane(p)
+		// Enter on an already-focused pane: from the pane's point of view this
+		// is the first in-pane keystroke, so forward it into the agent on entry
+		// rather than swallowing it (#1576). Only this branch replays — the
+		// preview-commit above and the tree select below are navigation Enters.
+		enterKey := tea.KeyMsg{Type: tea.KeyEnter}
+		return m.enterPane(p, &enterKey)
 	}
 
 	sel := m.sidebar.GetSelection()
@@ -606,7 +615,7 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, cmd
 	}
-	mod, interactCmd := m.requestInteractive(p)
+	mod, interactCmd := m.requestInteractive(p, nil)
 	return mod, tea.Batch(cmd, interactCmd)
 }
 
