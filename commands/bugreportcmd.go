@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
@@ -17,6 +18,7 @@ import (
 var (
 	bugReportJSON   bool
 	bugReportOutput string
+	bugReportFile   bool
 )
 
 // bugReportCmd is `af bug-report` (#1048): bundle the daemon log tail,
@@ -43,8 +45,15 @@ var bugReportCmd = &cobra.Command{
   - the daemon health snapshot (same no-spawn probe as af daemon status)
   - the global config file, if any (redacted)
 
-Everything is written to a single text file (default ~/af-bug-report-<ts>.txt)
-so you can read the whole thing in one scroll before attaching it.
+By default the redacted bundle is written to a single text file
+(~/af-bug-report-<ts>.txt) and a pre-filled GitHub issue DRAFT is opened in your
+browser for this repo — with a templated title and body. The draft is never
+submitted for you: review it, drag the bundle file onto the issue, and click
+Submit yourself. If this repo has no github.com remote, or no browser/gh is
+available, the command falls back to just writing the bundle file and printing
+where it is so you can attach it to an issue by hand.
+
+Use -o/--output <path> or --file to skip GitHub and only write the bundle file.
 
 REDACTION IS BEST-EFFORT. Free-text and secret-bearing fields (session titles,
 session prompts, task prompts, tab commands, remote metadata) are dropped; $HOME and your
@@ -53,7 +62,7 @@ wherever they appear. Perfect redaction is impossible — open the file and
 review it before sharing it publicly.
 
 Use --json to emit the structured manifest (wrapped in the shared {data,error}
-envelope) to stdout instead of writing a file.`,
+envelope) to stdout instead of writing a file or opening a draft.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -79,6 +88,9 @@ envelope) to stdout instead of writing a file.`,
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(json.RawMessage(result.JSON)))
 		}
 
+		// The redacted bundle is always written to disk — in the default flow it
+		// is the file the user drags onto the GitHub draft; in file-only mode it
+		// is the whole output.
 		outPath, err := resolveBugReportPath(bugReportOutput)
 		if err != nil {
 			return err
@@ -88,9 +100,31 @@ envelope) to stdout instead of writing a file.`,
 		}
 
 		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "Wrote bug report to %s\n", outPath)
-		fmt.Fprintln(w, "Attach this file to your bug report.")
-		fmt.Fprintln(w, "Review it first — redaction is best-effort and cannot catch everything.")
+
+		// File-only: an explicit --output path or --file skips GitHub entirely.
+		if bugReportFile || bugReportOutput != "" {
+			fmt.Fprintf(w, "Wrote bug report to %s\n", outPath)
+			fmt.Fprintln(w, "Attach this file to your bug report.")
+			fmt.Fprintln(w, "Review it first — redaction is best-effort and cannot catch everything.")
+			return nil
+		}
+
+		// Default: open a pre-filled GitHub issue DRAFT for this repo. The bundle
+		// is attached by the user; nothing is submitted automatically. The path is
+		// redacted ($HOME→~ / username→[user]) before it goes into the draft body
+		// so the public draft can't leak it, while stdout still prints the real
+		// local path.
+		body := strings.Replace(result.Body, bugreport.BundlePathPlaceholder, bugreport.RedactPath(outPath), 1)
+		opened, reason := openGitHubIssueDraft(".", result.Title, body)
+		if !opened {
+			fmt.Fprintf(w, "Couldn't open a GitHub issue draft (%s).\n", reason)
+			fmt.Fprintf(w, "Wrote the redacted bug-report bundle to %s\n", outPath)
+			fmt.Fprintln(w, "Attach it to a new issue manually. Review it first — redaction is best-effort.")
+			return nil
+		}
+		fmt.Fprintf(w, "Wrote the redacted bug-report bundle to %s\n", outPath)
+		fmt.Fprintln(w, "Opened a pre-filled GitHub issue draft in your browser — it is NOT submitted.")
+		fmt.Fprintln(w, "Attach the bundle file above to the draft (drag-and-drop), review both, then click Submit.")
 		return nil
 	},
 }
@@ -114,8 +148,10 @@ func resolveBugReportPath(override string) (string, error) {
 
 func init() {
 	bugReportCmd.Flags().BoolVar(&bugReportJSON, "json", false,
-		"Emit the structured manifest to stdout (in the {data,error} envelope) instead of writing a file")
+		"Emit the structured manifest to stdout (in the {data,error} envelope) instead of writing a file or opening a draft")
 	bugReportCmd.Flags().StringVarP(&bugReportOutput, "output", "o", "",
-		"Write the bundle to this path instead of the default ~/af-bug-report-<ts>.txt")
+		"Write the bundle to this path and skip opening a GitHub draft (implies --file)")
+	bugReportCmd.Flags().BoolVar(&bugReportFile, "file", false,
+		"Only write the bundle file (to ~/af-bug-report-<ts>.txt); do not open a GitHub issue draft")
 	rootCmd.AddCommand(bugReportCmd)
 }

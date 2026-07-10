@@ -49,6 +49,20 @@ var keyValueSecret = regexp.MustCompile(
 // privateKeyBlock matches a PEM private-key block in its entirety.
 var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 
+// afTmuxSessionName matches a repo-scoped af tmux session name
+// (af_<8 hex>_<title>, incl. any __tab / _paste suffix). The <title> segment is
+// the sanitized, whitespace-stripped session title, so it leaks the same
+// free-text name the structured redactor already drops from InstanceData.TmuxName
+// — but the daemon log tail is bundled verbatim and prints these names on nearly
+// every line (e.g. "af_0f8fc14c_fix-1436"), reintroducing the #1533 leak class
+// through the log blob (#1584). The title segment is a run of non-whitespace,
+// non-':' characters: titles never contain whitespace (stripped at
+// sanitization) and never contain ':' (rewritten to '_'), so ':' — a tmux
+// window/pane ref or log delimiter — cleanly bounds the name without ever
+// truncating a real title mid-way and leaving a fragment behind. Keys on the
+// name *shape*, so it scrubs archived/killed sessions no live set still knows.
+var afTmuxSessionName = regexp.MustCompile(`af_[0-9a-f]{8}_[^\s:]+`)
+
 // redactor holds the per-run redaction context — the home directory to
 // collapse to "~" and the username token(s) to blank to "[user]" — resolved
 // once so every section scrubs against the same values. Constructed with
@@ -57,6 +71,13 @@ var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY--
 type redactor struct {
 	home  string
 	users []string
+	// tmuxNames and titles are the known session tmux names and raw session
+	// titles gathered while redacting instances (see noteSession). scrubLog uses
+	// them to redact bare titles and non-repo-scoped names (af_<title>, no hash,
+	// which the afTmuxSessionName shape can't match) out of the verbatim log
+	// tail — closing the #1584 leak the structured sections don't reach.
+	tmuxNames map[string]struct{}
+	titles    map[string]struct{}
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
@@ -72,6 +93,15 @@ func newRedactor() *redactor {
 		users = appendUserToken(users, filepath.Base(home))
 	}
 	return &redactor{home: home, users: users}
+}
+
+// RedactPath collapses $HOME to ~ and the username to [user] in a single path,
+// using the same rules as the bundle redactor. The command layer runs the
+// written bundle's path through it before inlining the path into the GitHub
+// issue-draft body, so the (public) draft can't leak $HOME/username even though
+// the bundle itself is redacted.
+func RedactPath(p string) string {
+	return newRedactor().scrub(p)
 }
 
 // appendUserToken adds a username token to the scrub list, skipping empties,
@@ -109,6 +139,89 @@ func (r *redactor) scrub(s string) string {
 		s = re.ReplaceAllString(s, userMarker)
 	}
 	return s
+}
+
+// scrubLog scrubs the daemon log tail. On top of the standard scrub() pass it
+// redacts the free-text <title> in every af_<hash>_<title> tmux session name and
+// any bare session title the log prints, so the verbatim log blob can't leak the
+// session titles the structured sections already drop (#1584 — the exact #1533
+// class, reintroduced through the bundled log). Call this instead of scrub() for
+// the log section; it ends by delegating to scrub() for the usual
+// $HOME/username/secret pass.
+func (r *redactor) scrubLog(s string) string {
+	// Redact the title in every af_<hash>_<title> name. Keys on the name shape,
+	// so it catches current AND historical (archived/killed) sessions the live
+	// instance set no longer references.
+	s = afTmuxSessionName.ReplaceAllStringFunc(s, redactAFTmuxTitle)
+	// Non-repo-scoped names (af_<title>, no hash) don't match the shape above;
+	// redact those known names exactly.
+	for name := range r.tmuxNames {
+		if !afTmuxSessionName.MatchString(name) {
+			s = strings.ReplaceAll(s, name, tmuxPrefixMarker)
+		}
+	}
+	// Bare raw titles the log prints verbatim (e.g. via a %q-formatted Title).
+	// Best-effort: only titles long enough to redact without mangling unrelated
+	// words, matched on word boundaries.
+	for title := range r.titles {
+		if re := bareTitleRegexp(title); re != nil {
+			s = re.ReplaceAllString(s, redactedMarker)
+		}
+	}
+	return r.scrub(s)
+}
+
+// tmuxPrefixMarker is the redaction of an af tmux session name whose title
+// segment is removed but whose "af_" prefix is kept so the line still reads as
+// referring to an af session.
+const tmuxPrefixMarker = "af_" + redactedMarker
+
+// redactAFTmuxTitle redacts the <title> of a matched af_<8 hex>_<title> name,
+// keeping the fixed, user-text-free "af_<hash>_" prefix (3 + 8 + 1 = 12 chars).
+func redactAFTmuxTitle(match string) string {
+	return match[:12] + redactedMarker
+}
+
+// bareTitleRegexp compiles a word-boundary matcher for a bare session title, or
+// nil when the title is too short (< 4 chars) to redact without risking mangling
+// unrelated log text. Best-effort by design — the tmux-name redaction above is
+// the primary defense; this catches raw titles the log prints outside a name.
+func bareTitleRegexp(title string) *regexp.Regexp {
+	title = strings.TrimSpace(title)
+	if len(title) < 4 {
+		return nil
+	}
+	re, err := regexp.Compile(`\b` + regexp.QuoteMeta(title) + `\b`)
+	if err != nil {
+		return nil
+	}
+	return re
+}
+
+// noteSession records a session's tmux name(s) and raw title(s) before they are
+// redacted, so scrubLog can strip them from the log tail. Called on each record
+// while collecting instances, i.e. before collectLog runs.
+func (r *redactor) noteSession(d *session.InstanceData) {
+	if r.tmuxNames == nil {
+		r.tmuxNames = make(map[string]struct{})
+	}
+	if r.titles == nil {
+		r.titles = make(map[string]struct{})
+	}
+	if d.TmuxName != "" {
+		r.tmuxNames[d.TmuxName] = struct{}{}
+	}
+	if strings.TrimSpace(d.Title) != "" {
+		r.titles[d.Title] = struct{}{}
+	}
+	if strings.TrimSpace(d.Worktree.SessionName) != "" {
+		r.titles[d.Worktree.SessionName] = struct{}{}
+	}
+	for _, tab := range d.Tabs {
+		if tab.TmuxName != "" {
+			r.tmuxNames[tab.TmuxName] = struct{}{}
+		}
+	}
 }
 
 func redactKeyValueSecret(match string) string {
@@ -151,6 +264,7 @@ func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 	var datas []session.InstanceData
 	if err := json.Unmarshal(raw, &datas); err == nil {
 		for i := range datas {
+			r.noteSession(&datas[i])
 			redactInstanceData(&datas[i])
 		}
 		if out, marshalErr := json.MarshalIndent(datas, "", "  "); marshalErr == nil {

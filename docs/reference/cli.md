@@ -124,8 +124,15 @@ Collect a single, shareable diagnostics bundle for triage:
   - the daemon health snapshot (same no-spawn probe as af daemon status)
   - the global config file, if any (redacted)
 
-Everything is written to a single text file (default ~/af-bug-report-<ts>.txt)
-so you can read the whole thing in one scroll before attaching it.
+By default the redacted bundle is written to a single text file
+(~/af-bug-report-<ts>.txt) and a pre-filled GitHub issue DRAFT is opened in your
+browser for this repo — with a templated title and body. The draft is never
+submitted for you: review it, drag the bundle file onto the issue, and click
+Submit yourself. If this repo has no github.com remote, or no browser/gh is
+available, the command falls back to just writing the bundle file and printing
+where it is so you can attach it to an issue by hand.
+
+Use -o/--output <path> or --file to skip GitHub and only write the bundle file.
 
 REDACTION IS BEST-EFFORT. Free-text and secret-bearing fields (session titles,
 session prompts, task prompts, tab commands, remote metadata) are dropped; $HOME and your
@@ -134,7 +141,7 @@ wherever they appear. Perfect redaction is impossible — open the file and
 review it before sharing it publicly.
 
 Use --json to emit the structured manifest (wrapped in the shared {data,error}
-envelope) to stdout instead of writing a file.
+envelope) to stdout instead of writing a file or opening a draft.
 
 ```
 af bug-report [flags]
@@ -144,8 +151,9 @@ af bug-report [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--json` |  | Emit the structured manifest to stdout (in the {data,error} envelope) instead of writing a file |
-| `-o`, `--output` | `string` | Write the bundle to this path instead of the default ~/af-bug-report-<ts>.txt |
+| `--file` |  | Only write the bundle file (to ~/af-bug-report-<ts>.txt); do not open a GitHub issue draft |
+| `--json` |  | Emit the structured manifest to stdout (in the {data,error} envelope) instead of writing a file or opening a draft |
+| `-o`, `--output` | `string` | Write the bundle to this path and skip opening a GitHub draft (implies --file) |
 
 ## af completion
 

@@ -108,12 +108,24 @@ type Bundle struct {
 	daemonHuman string
 }
 
-// Result is what Build returns: a rendered text bundle (the default output the
-// user attaches) and the JSON manifest payload (the `--json` data member).
+// Result is what Build returns: a rendered text bundle (the file the user
+// attaches), the JSON manifest payload (the `--json` data member), and the
+// pre-filled GitHub issue-draft title/body the default flow opens in the
+// browser. Title/Body are short, already-redacted (built only from redacted
+// Bundle facts + a static template), and safe to inline in an issues/new URL —
+// the full bundle never rides in the URL; it reaches the issue as the attached
+// file. Body carries BundlePathPlaceholder for the command layer to replace with
+// the written bundle's path.
 type Result struct {
-	Text string
-	JSON []byte
+	Text  string
+	JSON  []byte
+	Title string
+	Body  string
 }
+
+// BundlePathPlaceholder marks where in the issue-draft body the command layer
+// substitutes the written bundle's path (known only once the file is written).
+const BundlePathPlaceholder = "{{BUNDLE_PATH}}"
 
 // Build collects, redacts, and renders the bundle. It never fails on a missing
 // or unreadable section — those are recorded in Bundle.Errors and rendering
@@ -149,8 +161,57 @@ func Build(in Inputs) (Result, error) {
 	jsonBytes = []byte(r.scrub(string(jsonBytes)))
 
 	text := r.scrub(renderText(b))
+	title, body := buildIssueDraft(b)
 
-	return Result{Text: text, JSON: jsonBytes}, nil
+	return Result{Text: text, JSON: jsonBytes, Title: title, Body: body}, nil
+}
+
+// buildIssueDraft renders the pre-filled GitHub issue-draft title and body from
+// the already-redacted Bundle. It is deliberately short (the full 2MiB bundle
+// cannot inline in an issues/new URL — it reaches the issue as the attached
+// file) and carries only redacted, structural facts plus a bug-report template
+// stub. BundlePathPlaceholder marks the attach-path the command layer fills in.
+func buildIssueDraft(b Bundle) (title, body string) {
+	title = fmt.Sprintf("af bug-report: %s on %s/%s", b.Versions.AF, b.Versions.OS, b.Versions.Arch)
+
+	daemon := "running"
+	if strings.Contains(strings.ToLower(b.daemonHuman), "not running") {
+		daemon = "not running"
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "<!-- Opened by `af bug-report`. This is a DRAFT — review it, attach the bundle below, then submit. -->\n\n")
+	fmt.Fprintf(&sb, "## Environment\n")
+	fmt.Fprintf(&sb, "- af: %s\n", b.Versions.AF)
+	fmt.Fprintf(&sb, "- go: %s\n", b.Versions.Go)
+	fmt.Fprintf(&sb, "- os/arch: %s/%s\n", b.Versions.OS, b.Versions.Arch)
+	fmt.Fprintf(&sb, "- daemon: %s\n", daemon)
+	fmt.Fprintf(&sb, "- sessions: %d across %d repo(s)\n", countInstances(b.Instances), len(b.Instances))
+	fmt.Fprintf(&sb, "- tasks: %d\n\n", len(b.Tasks))
+	fmt.Fprintf(&sb, "## What happened\n<!-- Describe the bug. -->\n\n")
+	fmt.Fprintf(&sb, "## What you expected\n\n")
+	fmt.Fprintf(&sb, "## Steps to reproduce\n\n")
+	fmt.Fprintf(&sb, "---\n")
+	fmt.Fprintf(&sb, "A best-effort **redacted** diagnostics bundle was written to:\n\n")
+	fmt.Fprintf(&sb, "    %s\n\n", BundlePathPlaceholder)
+	fmt.Fprintf(&sb, "**Attach that file to this issue** (drag-and-drop) before submitting. "+
+		"Open and review it first — redaction is best-effort and cannot catch everything.\n")
+	return title, sb.String()
+}
+
+// countInstances totals the session records across every repo's redacted
+// instances payload, for the issue-draft environment summary. A payload that
+// does not decode as an array contributes zero — the count is a best-effort
+// triage hint, never load-bearing.
+func countInstances(repos []repoInstances) int {
+	total := 0
+	for _, ri := range repos {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(ri.Instances, &arr); err == nil {
+			total += len(arr)
+		}
+	}
+	return total
 }
 
 // collectTasks loads and redacts the configured tasks.
@@ -235,7 +296,7 @@ func collectLog(r *redactor, errs []string) (logSection, []string) {
 	}
 	text, lineTruncated := lastLines(string(data), logTailMaxLines)
 	sec.Truncated = truncated || lineTruncated
-	sec.Contents = r.scrub(text)
+	sec.Contents = r.scrubLog(text)
 	sec.Bytes = len(sec.Contents)
 	return sec, errs
 }
