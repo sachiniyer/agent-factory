@@ -157,6 +157,11 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 		return fmt.Errorf("target session %q is Lost; prompt not delivered; recover it first", title)
 	case session.LiveDead:
 		return fmt.Errorf("target session %q is Dead; prompt not delivered; recover it first", title)
+	case session.LiveArchived:
+		// Archived sessions have no live tmux to deliver into (#1529): without
+		// this case the prompt falls through to a confusing backend error. Point
+		// at the off-ramp, mirroring the TUI's interactiveGuard message.
+		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (af sessions restore %s)", title, title)
 	}
 	return nil
 }

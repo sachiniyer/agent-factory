@@ -354,6 +354,37 @@ func TestDeliverPrompt_RefusesLostTargetBeforeTmuxSend(t *testing.T) {
 	}
 }
 
+// TestDeliverPrompt_RefusesArchivedTargetBeforeTmuxSend is the #1529
+// regression: an archived target has no live tmux to deliver into, so the
+// prompt must be rejected with an actionable "restore it first" error instead
+// of falling through to a confusing raw backend error, and it must never reach
+// SendPromptCommand.
+func TestDeliverPrompt_RefusesArchivedTargetBeforeTmuxSend(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &failingPromptBackend{readyFakeBackend: readyFakeBackend{session.NewFakeBackend()}}
+	registerStarted(t, manager, repoID, repoPath, "captain", backend, true, session.Archived)
+
+	_, err := manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    "captain",
+		RepoPath: repoPath,
+		Program:  "claude",
+		Prompt:   "while-archived",
+	})
+	if err == nil {
+		t.Fatal("expected Archived target delivery to fail")
+	}
+	want := `target session "captain" is Archived; prompt not delivered; restore it first (af sessions restore captain)`
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected actionable Archived error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "tmux") || strings.Contains(err.Error(), "session not found") {
+		t.Fatalf("Archived delivery must not leak raw tmux errors, got: %v", err)
+	}
+	if backend.sent != 0 {
+		t.Fatalf("Archived delivery reached SendPromptCommand %d time(s); want 0", backend.sent)
+	}
+}
+
 func TestSendPrompt_RefusesLostAndDeadTargetsBeforeBackendSend(t *testing.T) {
 	tests := []struct {
 		name       string
