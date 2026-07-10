@@ -42,7 +42,9 @@ af doctor --setup  # optional but recommended on first run
 af                 # launch the TUI
 ```
 
-Press **`Ctrl-p`** at any time to switch projects without restarting.
+Press **`Ctrl-p`** from the TUI (when you're not attached to a session pane) to
+switch projects without restarting. If you're attached to a pane, `Ctrl-p` goes
+to the running program — press `Ctrl-]` to detach first.
 
 The TUI opens with an empty sidebar. From here:
 
