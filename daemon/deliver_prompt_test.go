@@ -385,6 +385,39 @@ func TestDeliverPrompt_RefusesArchivedTargetBeforeTmuxSend(t *testing.T) {
 	}
 }
 
+// TestPromptTargetLivenessError_ArchivedQuotesRestoreCommand pins that the
+// suggested `af sessions restore <title>` command is shell-safe (#1529): a
+// title with a space or shell metacharacter must be single-quoted so a
+// copy-pasted command restores the intended session and cannot smuggle a second
+// shell command. A plain title stays unquoted so the common case reads cleanly.
+func TestPromptTargetLivenessError_ArchivedQuotesRestoreCommand(t *testing.T) {
+	cases := []struct {
+		name     string
+		title    string
+		wantCmd  string
+		unwanted string // a raw, unquoted form that must NOT appear
+	}{
+		{"plain title unquoted", "captain", "af sessions restore captain", ""},
+		{"space quoted", "my session", "af sessions restore 'my session'", "restore my session)"},
+		{"semicolon quoted", "a;rm -rf ~", "af sessions restore 'a;rm -rf ~'", "restore a;rm -rf ~"},
+		{"embedded quote escaped", "it's", `af sessions restore 'it'"'"'s'`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := promptTargetLivenessError(tc.title, session.LiveArchived)
+			if err == nil {
+				t.Fatalf("expected an Archived liveness error for %q", tc.title)
+			}
+			if !strings.Contains(err.Error(), tc.wantCmd) {
+				t.Fatalf("expected restore command %q in error, got: %v", tc.wantCmd, err)
+			}
+			if tc.unwanted != "" && strings.Contains(err.Error(), tc.unwanted) {
+				t.Fatalf("error must not contain the unquoted command %q (shell-injection risk), got: %v", tc.unwanted, err)
+			}
+		})
+	}
+}
+
 func TestSendPrompt_RefusesLostAndDeadTargetsBeforeBackendSend(t *testing.T) {
 	tests := []struct {
 		name       string
