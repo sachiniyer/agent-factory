@@ -403,6 +403,9 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 
 	h.importRemoteHookSessions()
 	h.restoreTUIViewStateOnLaunch()
+	// Populate the sidebar's Projects section from the cross-repo discovery so it
+	// renders (collapsed) at launch with the active project marked.
+	h.refreshSidebarProjects()
 
 	// Load tasks for sidebar display
 	tasks, err := task.LoadTasksForCurrentRepo()

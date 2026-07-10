@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
@@ -81,6 +82,38 @@ func (m *home) buildProjectList() []overlay.Project {
 		return projects[i].Root < projects[j].Root
 	})
 	return projects
+}
+
+// refreshSidebarProjects rebuilds the sidebar's Projects-section list from the
+// same cross-repo discovery the ctrl+p picker uses (buildProjectList), marking
+// the active project so the section highlights where the rail is scoped. Pushed
+// at launch, on project switch, and when the section is toggled, so its counts
+// track the picker without a per-frame daemon round-trip.
+func (m *home) refreshSidebarProjects() {
+	projects := m.buildProjectList()
+	rows := make([]ui.SidebarProject, 0, len(projects))
+	for _, p := range projects {
+		rows = append(rows, ui.SidebarProject{
+			Name:         p.Name,
+			Root:         p.Root,
+			SessionCount: p.SessionCount,
+			Active:       p.Root == m.repoRoot,
+		})
+	}
+	m.sidebar.SetProjects(rows)
+}
+
+// switchToProjectRoot resolves a Projects-section row's repo root and switches
+// the rail to it, reusing the #1461 switchProject path. A root that no longer
+// resolves (repo moved/removed) surfaces an error rather than silently doing
+// nothing. Switching to the already-active project is a no-op inside
+// switchProject.
+func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
+	repo, err := config.RepoFromPath(root)
+	if err != nil {
+		return m, m.handleError(fmt.Errorf("cannot open project %q: %w", filepath.Base(root), err))
+	}
+	return m.switchProject(repo)
 }
 
 // handleStateSwitchProject routes key events to the project picker overlay and
@@ -208,6 +241,9 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	}
 
 	m.restoreTUIViewStateOnLaunch()
+	// Re-derive the Projects section for the new scope so its active marker and
+	// counts follow the switch.
+	m.refreshSidebarProjects()
 	m.focusTreeForNav()
 	m.relayout()
 	return m, tea.Sequence(tea.WindowSize(), m.selectionChanged())

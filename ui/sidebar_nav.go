@@ -191,6 +191,12 @@ func (s *Sidebar) rebuildVisibleItems() {
 		if sec.Kind == SectionArchived && len(archived) == 0 {
 			continue
 		}
+		// The Projects folder only appears once a project list is pushed. In the
+		// running TUI the active project is always present, so it always shows;
+		// unit tests that never call SetProjects keep the pre-Projects layout.
+		if sec.Kind == SectionProjects && len(s.projects) == 0 {
+			continue
+		}
 		items = append(items, SidebarItem{Kind: sec.Kind, IsHeader: true})
 		if !sec.Expanded {
 			continue
@@ -212,6 +218,11 @@ func (s *Sidebar) rebuildVisibleItems() {
 			// Flat rows — archived sessions have no live tabs.
 			for _, idx := range archived {
 				items = append(items, SidebarItem{Kind: SectionArchived, ItemIndex: idx})
+			}
+		case SectionProjects:
+			// Flat rows — one per pushed project; ItemIndex indexes s.projects.
+			for idx := range s.projects {
+				items = append(items, SidebarItem{Kind: SectionProjects, ItemIndex: idx})
 			}
 		}
 	}
@@ -287,7 +298,8 @@ func (s *Sidebar) verticalNavStops() []sidebarNavStop {
 }
 
 func isSelectableNonTabNavStop(item SidebarItem) bool {
-	return !item.IsHeader && !item.IsTab && item.Kind == SectionArchived
+	return !item.IsHeader && !item.IsTab &&
+		(item.Kind == SectionArchived || item.Kind == SectionProjects)
 }
 
 func indexOfNavStop(stops []sidebarNavStop, selectedIdx int, sel SidebarItem) int {
@@ -390,20 +402,14 @@ func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 				return s.selectNavStop(stops[0])
 			}
 			return false
-		case SectionArchived:
+		case SectionArchived, SectionProjects:
+			// A trailing-section header (#1028 Archived, Projects): Down enters
+			// the section's first row; Up leaves to the row above — the last row
+			// of the section above (Archived) or the last live tab.
 			if dir < 0 {
-				for i := len(stops) - 1; i >= 0; i-- {
-					if stops[i].isTab {
-						return s.selectNavStop(stops[i])
-					}
-				}
-			} else {
-				for _, stop := range stops {
-					if !stop.isTab && stop.visibleIdx > s.selectedIdx {
-						return s.selectNavStop(stop)
-					}
-				}
+				return s.selectPrevNavStopBeforeHeader(stops)
 			}
+			return s.selectFirstNavStopAfterHeader(stops)
 		}
 		return false
 	}
@@ -425,37 +431,100 @@ func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 	return s.selectNavStop(stops[target])
 }
 
+// selectPrevNavStopBeforeHeader selects the nav stop immediately above a
+// trailing-section header (Archived/Projects): the last row of the section
+// above — a non-tab stop with a smaller visible index (an Archived row above a
+// Projects header) — or, when none is above, the last live tab stop.
+func (s *Sidebar) selectPrevNavStopBeforeHeader(stops []sidebarNavStop) bool {
+	for i := len(stops) - 1; i >= 0; i-- {
+		if stops[i].isTab {
+			return s.selectNavStop(stops[i])
+		}
+		if stops[i].visibleIdx < s.selectedIdx {
+			return s.selectNavStop(stops[i])
+		}
+	}
+	return false
+}
+
+// selectFirstNavStopAfterHeader selects the first row of the trailing section
+// whose header the cursor rests on: the first non-tab stop below it.
+func (s *Sidebar) selectFirstNavStopAfterHeader(stops []sidebarNavStop) bool {
+	for _, stop := range stops {
+		if !stop.isTab && stop.visibleIdx > s.selectedIdx {
+			return s.selectNavStop(stop)
+		}
+	}
+	return false
+}
+
 func (s *Sidebar) moveVerticalNavStop(dir int) {
 	before := s.rawSelection()
 	if s.tryMoveVerticalNavStop(dir) {
-		// Symmetric to the auto-open at the live tail (#1518): when Up carries the
-		// cursor out of an archived row back into the live instances, fold the
-		// Archived section again so it collapses as the user leaves it.
-		if dir < 0 && before.Kind == SectionArchived && s.rawSelection().Kind == SectionInstances {
-			s.collapseArchivedSectionForNav()
+		// Symmetric to the auto-open at the tail (#1518): when Up carries the
+		// cursor out of a trailing section (Archived/Projects) into a higher one,
+		// fold the section it just left so it collapses behind the cursor.
+		if dir < 0 {
+			s.autoCollapseTrailingSectionAfterUp(before)
 		}
 		return
 	}
-	// Archived rows are selectable stops only after the Archived section renders
-	// them. At the live-list tail, Down should reveal that folder and retry.
-	if dir <= 0 || !s.downNavCanRevealArchived() || !s.expandArchivedSectionForNav() {
+	// A trailing section's rows are selectable stops only once it renders them.
+	// At the tail, Down should reveal the next collapsed trailing section (the
+	// Archived folder, then Projects) and retry.
+	if dir <= 0 || !s.revealNextTrailingSectionForNav(before) {
 		return
 	}
 	_ = s.tryMoveVerticalNavStop(dir)
 }
 
-func (s *Sidebar) downNavCanRevealArchived() bool {
-	return s.rawSelection().Kind == SectionInstances
+// revealNextTrailingSectionForNav expands the next collapsed trailing section
+// below the cursor so Down can continue into it (#1518 auto-open, extended to
+// Projects). From the live instances it tries the Archived folder first, then
+// Projects; from an archived row it tries Projects. A collapsed trailing header
+// itself is left alone (Down on it is a no-op, matching the pre-Projects
+// Archived behavior). Returns whether a section was expanded so the caller
+// retries the move.
+func (s *Sidebar) revealNextTrailingSectionForNav(from SidebarItem) bool {
+	switch from.Kind {
+	case SectionInstances:
+		if s.expandArchivedSectionForNav() {
+			return true
+		}
+		return s.expandProjectsSectionForNav()
+	case SectionArchived:
+		if from.IsHeader {
+			return false
+		}
+		return s.expandProjectsSectionForNav()
+	}
+	return false
 }
 
-// collapseArchivedSectionForNav folds the Archived section back up — the mirror
-// of expandArchivedSectionForNav — after Up navigation carries the cursor out of
-// an archived row and back into the live instances (#1518 symmetry). The cursor
-// already rests on the live tab stop; rebuildPreservingCursor keeps it pinned
-// there as the trailing archived rows disappear.
-func (s *Sidebar) collapseArchivedSectionForNav() {
+// autoCollapseTrailingSectionAfterUp folds a trailing section back up after Up
+// navigation carries the cursor out of it into a higher section (#1518
+// symmetry): the Archived folder or the Projects section. The cursor already
+// rests on the higher row; rebuildPreservingCursor keeps it pinned as the
+// trailing rows disappear.
+func (s *Sidebar) autoCollapseTrailingSectionAfterUp(before SidebarItem) {
+	if before.IsHeader {
+		return
+	}
+	if before.Kind != SectionArchived && before.Kind != SectionProjects {
+		return
+	}
+	if s.rawSelection().Kind == before.Kind {
+		return
+	}
+	s.collapseSectionForNav(before.Kind)
+}
+
+// collapseSectionForNav folds the given trailing section back up — the mirror of
+// the expand-for-nav helpers. rebuildPreservingCursor keeps the cursor pinned on
+// its current row as the section's trailing rows disappear.
+func (s *Sidebar) collapseSectionForNav(kind SidebarSectionKind) {
 	for i, sec := range s.sections {
-		if sec.Kind != SectionArchived {
+		if sec.Kind != kind {
 			continue
 		}
 		if !sec.Expanded {
@@ -465,6 +534,27 @@ func (s *Sidebar) collapseArchivedSectionForNav() {
 		s.rebuildPreservingCursor()
 		return
 	}
+}
+
+// expandProjectsSectionForNav expands the Projects section for Down navigation
+// when it is collapsed and a project list is present. No-op (false) when it is
+// already expanded or empty (nothing to reveal).
+func (s *Sidebar) expandProjectsSectionForNav() bool {
+	if len(s.projects) == 0 {
+		return false
+	}
+	for i, sec := range s.sections {
+		if sec.Kind != SectionProjects {
+			continue
+		}
+		if sec.Expanded {
+			return false
+		}
+		s.sections[i].Expanded = true
+		s.rebuildVisibleItems()
+		return true
+	}
+	return false
 }
 
 func (s *Sidebar) expandArchivedSectionForNav() bool {
@@ -653,6 +743,21 @@ func (s *Sidebar) GetSelectedInstance() *session.Instance {
 		return nil
 	}
 	return instances[sel.ItemIndex]
+}
+
+// GetSelectedProject returns the Projects-section row under the cursor, or
+// false when the cursor rests anywhere else. The app reads it to switch the
+// rail to that project (reusing the #1547 switch path).
+func (s *Sidebar) GetSelectedProject() (SidebarProject, bool) {
+	s.syncFromStore()
+	sel := s.rawSelection()
+	if sel.Kind != SectionProjects || sel.IsHeader {
+		return SidebarProject{}, false
+	}
+	if sel.ItemIndex < 0 || sel.ItemIndex >= len(s.projects) {
+		return SidebarProject{}, false
+	}
+	return s.projects[sel.ItemIndex], true
 }
 
 // SetSelectedInstance sets the cursor to point at the given instance index.
