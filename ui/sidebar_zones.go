@@ -35,11 +35,17 @@ func (s *Sidebar) registerZones(heights []int, start, end int, topIndicator bool
 		switch {
 		case item.IsHeader:
 			// Distinct zone per folder so a click toggles the right one (#1028).
-			if item.Kind == SectionArchived {
+			switch item.Kind {
+			case SectionArchived:
 				s.zones.Register(zones.TreeHeaderArchived, row)
-			} else {
+			case SectionProjects:
+				s.zones.Register(zones.TreeHeaderProjects, row)
+			default:
 				s.zones.Register(zones.TreeHeader, row)
 			}
+		case item.Kind == SectionProjects && item.ItemIndex >= 0 && item.ItemIndex < len(s.projects):
+			// Project row: a root-keyed zone; a click switches to that project.
+			s.zones.Register(zones.TreeProject(s.projects[item.ItemIndex].Root), row)
 		case isInstanceRow(item) && item.ItemIndex >= 0 && item.ItemIndex < len(instances):
 			inst := instances[item.ItemIndex]
 			switch {

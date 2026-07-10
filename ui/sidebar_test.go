@@ -21,21 +21,26 @@ func TestSidebarInitialState(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false, store.NewProjection())
 
-	// The rail holds the Instances tree plus the Archived folder (#1028). The
-	// Archived section always exists so its collapse state persists, but it is
-	// rendered only when it holds archived sessions (see the assertion below).
-	assert.Equal(t, 2, len(s.sections))
+	// The rail holds the Instances tree, the Archived folder (#1028), and the
+	// Projects section. Archived and Projects always exist so their collapse
+	// state persists, but each renders only when it has content (an archived
+	// session / a pushed project list — see the assertions below).
+	assert.Equal(t, 3, len(s.sections))
 	assert.Equal(t, SectionInstances, s.sections[0].Kind)
 	assert.Equal(t, SectionArchived, s.sections[1].Kind)
+	assert.Equal(t, SectionProjects, s.sections[2].Kind)
 
-	// Instances is expanded by default; the Archived folder is collapsed.
+	// Instances is expanded by default; the Archived folder and Projects section
+	// start collapsed.
 	assert.True(t, s.sections[0].Expanded)
 	assert.False(t, s.sections[1].Expanded, "the Archived folder starts collapsed")
+	assert.False(t, s.sections[2].Expanded, "the Projects section starts collapsed")
 
-	// With nothing archived, no Archived header is rendered — only the
-	// Instances header is visible.
+	// With nothing archived and no project list pushed, neither the Archived nor
+	// the Projects header is rendered — only the Instances header is visible.
 	for _, it := range s.visibleItems {
 		assert.NotEqual(t, SectionArchived, it.Kind, "the empty Archived folder must not render")
+		assert.NotEqual(t, SectionProjects, it.Kind, "the empty Projects section must not render")
 	}
 
 	// Initial selection should be on Instances header

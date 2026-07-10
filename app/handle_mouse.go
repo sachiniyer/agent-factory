@@ -349,6 +349,13 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.sidebar.ClickHeaderKind(ui.SectionArchived)
 		m.focusRegionClick(layout.RegionTree)
 		return m, m.selectionChanged()
+	case zones.TreeHeaderProjects:
+		// Click the Projects section header: toggle it specifically and refresh
+		// its counts.
+		m.sidebar.ClickHeaderKind(ui.SectionProjects)
+		m.refreshSidebarProjects()
+		m.focusRegionClick(layout.RegionTree)
+		return m, m.selectionChanged()
 	case zones.TreeBG:
 		m.focusRegionClick(layout.RegionTree)
 		return m, nil
@@ -379,6 +386,12 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	if title, idx, ok := zones.TreeTabParts(id); ok {
 		return m, m.handleTreeTabClick(title, idx, double)
+	}
+	if root, ok := zones.TreeProjectRoot(id); ok {
+		// Click a Projects-section row: switch the rail to that project (the
+		// row's primary action, like Enter on it).
+		m.focusRegionClick(layout.RegionTree)
+		return m.switchToProjectRoot(root)
 	}
 	if region, kind, ok := zones.PaneZone(id); ok {
 		// Click a pane header (or an unfocused pane's body): focus that pane

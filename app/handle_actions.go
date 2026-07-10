@@ -583,10 +583,22 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 
 	sel := m.sidebar.GetSelection()
 
-	// Toggle expandable section headers (Instances and the Archived folder).
-	if sel.IsHeader && (sel.Kind == ui.SectionInstances || sel.Kind == ui.SectionArchived) {
+	// Toggle expandable section headers (Instances, the Archived folder, and the
+	// Projects section). Expanding Projects refreshes its counts.
+	if sel.IsHeader && (sel.Kind == ui.SectionInstances || sel.Kind == ui.SectionArchived || sel.Kind == ui.SectionProjects) {
 		m.sidebar.ToggleSection()
+		if sel.Kind == ui.SectionProjects {
+			m.refreshSidebarProjects()
+		}
 		return m, m.selectionChanged()
+	}
+	// A Projects-section row switches the rail to that project, reusing the
+	// #1547 switch path (a no-op when it is already the active project).
+	if sel.Kind == ui.SectionProjects {
+		if proj, ok := m.sidebar.GetSelectedProject(); ok {
+			return m.switchToProjectRoot(proj.Root)
+		}
+		return m, nil
 	}
 	// Only instance/tab rows enter a pane; anything else (e.g. an automations
 	// row) is a no-op, as before.

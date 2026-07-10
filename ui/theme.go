@@ -138,6 +138,14 @@ func applyThemeStyles() {
 	autoYesStyle = lipgloss.NewStyle().
 		Background(activeTheme.SelectionBackground).
 		Foreground(activeTheme.SelectionForeground)
+	projectRowStyle = lipgloss.NewStyle().
+		Foreground(activeTheme.Foreground)
+	projectRowActiveStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(activeTheme.Accent)
+	projectRowSelectedStyle = lipgloss.NewStyle().
+		Background(activeTheme.SelectionBackground).
+		Foreground(activeTheme.SelectionForeground)
 
 	automationsTitleStyle = lipgloss.NewStyle().
 		Bold(true).
