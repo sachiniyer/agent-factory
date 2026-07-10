@@ -87,6 +87,48 @@ func TestProjectsPaneCursorNavAndSelection(t *testing.T) {
 	assert.Equal(t, "/repos/website", sel.Root, "Up steps back to the second row")
 }
 
+// TestProjectsPaneCursorTracksIdentityAcrossRefresh: a refresh that reorders /
+// inserts rows must keep the cursor on the SAME project (by repo root), not the
+// same row index — otherwise a background snapshot could slide the cursor onto a
+// different project and Enter would switch to the wrong one (#1590 review).
+func TestProjectsPaneCursorTracksIdentityAcrossRefresh(t *testing.T) {
+	p := newTestProjects(testProjectRows()) // agent-factory, website, infra
+	p.SetRect(layout.Rect{X: 0, Y: 0, W: 30, H: 8})
+	p.Focus()
+
+	// Cursor onto "website" (row 1).
+	require.True(t, p.SelectByRoot("/repos/website"))
+	sel, _ := p.SelectedProject()
+	require.Equal(t, "/repos/website", sel.Root)
+
+	// A refresh inserts a project that sorts BEFORE website and bumps its index;
+	// the cursor must follow website, not stay on the old row.
+	p.SetProjects([]SidebarProject{
+		{Name: "aardvark", Root: "/repos/aardvark", SessionCount: 0},
+		{Name: "agent-factory", Root: "/repos/agent-factory", SessionCount: 3, Active: true},
+		{Name: "beehive", Root: "/repos/beehive", SessionCount: 2},
+		{Name: "website", Root: "/repos/website", SessionCount: 1},
+		{Name: "infra", Root: "/repos/infra", SessionCount: 0},
+	})
+	sel, ok := p.SelectedProject()
+	require.True(t, ok)
+	assert.Equal(t, "/repos/website", sel.Root, "cursor follows the project by identity across a reorder")
+
+	// Removing the selected project clamps to the neighbor at its old row, not
+	// the top of the list.
+	p.SetProjects([]SidebarProject{
+		{Name: "aardvark", Root: "/repos/aardvark", SessionCount: 0},
+		{Name: "agent-factory", Root: "/repos/agent-factory", SessionCount: 3, Active: true},
+		{Name: "beehive", Root: "/repos/beehive", SessionCount: 2},
+		{Name: "infra", Root: "/repos/infra", SessionCount: 0},
+	})
+	sel, ok = p.SelectedProject()
+	require.True(t, ok)
+	assert.NotEqual(t, "/repos/aardvark", sel.Root,
+		"a removed selection clamps to its old-row neighbor, not an arbitrary jump to the top")
+	assert.Equal(t, "/repos/infra", sel.Root, "the row that took website's slot (index 3) is selected")
+}
+
 // TestProjectsPaneBlurredHasNoCursor: an unfocused section consumes no cursor
 // keys — they must bubble to the root's global bindings.
 func TestProjectsPaneBlurredHasNoCursor(t *testing.T) {

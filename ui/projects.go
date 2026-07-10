@@ -87,12 +87,43 @@ func NewProjectsPane() *ProjectsPane {
 // SetProjects replaces the section's row list. The app pushes it from the same
 // cross-repo discovery the ctrl+p picker uses, whenever the list can change
 // (launch, project switch, and the background daemon-snapshot poll so the
-// always-visible counts stay live). The cursor is clamped into the new range so
-// a shorter list never leaves it dangling past the end. Reports whether the row
-// list actually changed, so a background refresh only repaints on a real diff.
+// always-visible counts stay live). Reports whether the row list actually
+// changed, so a background refresh only repaints on a real diff.
+//
+// The cursor tracks the selected project by IDENTITY (repo root), not by row
+// index: the list is re-sorted by name on every rebuild, so a poll that inserts
+// or removes a project ahead of the cursor would otherwise slide it onto a
+// different project (and Enter would switch to the wrong one). After the swap we
+// re-locate the previously-selected root; if it is gone (project removed), the
+// cursor clamps to the row that took its place — the nearest sensible neighbor.
 func (p *ProjectsPane) SetProjects(projects []SidebarProject) bool {
 	changed := !reflect.DeepEqual(p.projects, projects)
+
+	// Remember which project the cursor pointed at (by root), plus its old row,
+	// before the swap.
+	oldIndex := p.selected
+	var selectedRoot string
+	if oldIndex >= 0 && oldIndex < len(p.projects) {
+		selectedRoot = p.projects[oldIndex].Root
+	}
+
 	p.projects = projects
+
+	// Re-locate the same project by identity. If it is gone (removed), fall back
+	// to the old row index clamped into the new list — the nearest name-neighbor
+	// in the re-sorted list, not an arbitrary jump to the top.
+	p.selected = -1
+	if selectedRoot != "" {
+		for i, proj := range projects {
+			if proj.Root == selectedRoot {
+				p.selected = i
+				break
+			}
+		}
+	}
+	if p.selected < 0 {
+		p.selected = oldIndex
+	}
 	if p.selected >= len(projects) {
 		p.selected = len(projects) - 1
 	}

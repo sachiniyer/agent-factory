@@ -105,6 +105,53 @@ func TestProjectsSection_FocusedSelectSwitches(t *testing.T) {
 	assert.Equal(t, repoBRoot, h.repoRoot)
 }
 
+// TestProjectsSection_CursorSurvivesRefreshReorder is the #1590 review fix: with
+// the cursor on project B, a background refresh that inserts/reorders projects
+// ahead of B must NOT slide the cursor onto a different project — Enter still
+// switches to B, tracked by identity (repo root) rather than row index.
+func TestProjectsSection_CursorSurvivesRefreshReorder(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	resizeHome(h, 100, 30)
+
+	repoBRoot := initTestGitRepo(t)
+	require.NotEqual(t, h.repoRoot, repoBRoot)
+
+	// Rows sorted so B is the second row; move the cursor onto B by identity.
+	h.projects.SetProjects([]ui.SidebarProject{
+		{Name: "aaa-active", Root: h.repoRoot, SessionCount: 1, Active: true},
+		{Name: filepath.Base(repoBRoot), Root: repoBRoot, SessionCount: 0},
+	})
+	h.focusRegion(layout.RegionProjects)
+	require.True(t, h.projects.SelectByRoot(repoBRoot))
+	sel, _ := h.projects.SelectedProject()
+	require.Equal(t, repoBRoot, sel.Root)
+
+	// A refresh inserts two projects that sort BEFORE B, shifting its row index.
+	h.projects.SetProjects([]ui.SidebarProject{
+		{Name: "aaa-active", Root: h.repoRoot, SessionCount: 1, Active: true},
+		{Name: "aab-inserted", Root: "/repos/inserted-1", SessionCount: 4},
+		{Name: "aac-inserted", Root: "/repos/inserted-2", SessionCount: 2},
+		{Name: filepath.Base(repoBRoot), Root: repoBRoot, SessionCount: 0},
+	})
+
+	// The cursor must still be on B (not whatever now occupies B's old row).
+	sel, ok := h.projects.SelectedProject()
+	require.True(t, ok)
+	require.Equal(t, repoBRoot, sel.Root, "cursor tracks B by identity across the reorder")
+
+	// Enter switches to B — not the project that slid into B's former index.
+	_, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, consumed)
+	assert.Equal(t, config.RepoIDFromRoot(repoBRoot), h.repoID, "Enter still switches to B after the reorder")
+	assert.Equal(t, repoBRoot, h.repoRoot)
+}
+
 // TestProjectsSection_SnapshotRefreshUpdatesRowsLive is the #1590 finding-2 fix:
 // the always-visible Projects section refreshes its per-repo counts from the
 // cross-repo snapshot the background poll fetches, so a session created/removed
