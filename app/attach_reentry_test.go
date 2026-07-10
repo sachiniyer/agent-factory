@@ -89,3 +89,89 @@ func TestHandleEnter_SecondEnterDuringAttachDoesNotScheduleSecondAttach(t *testi
 
 	require.Equal(t, 1, attaches, "exactly one attach flow must be scheduled despite two Enter presses")
 }
+
+// TestHandleEnter_CanceledAttachHelpDoesNotWedgeGuard is the #1530 follow-up
+// regression: opening the first-time attach help overlay and dismissing it with
+// Esc (a cancel — the attach callback never runs) must NOT leave the re-entry
+// guard armed. A subsequent Enter must still attach. Before the defensive clear,
+// any attach-abort path that armed attachTransitioning without reaching the
+// callback's cleanup would make every later Enter a no-op until restart.
+func TestHandleEnter_CanceledAttachHelpDoesNotWedgeGuard(t *testing.T) {
+	resetDetachWatchdog(t)
+
+	h := newTestHome(t)
+	// Do NOT mark the help seen — the first-time attach overlay must appear so
+	// the Esc-cancel path is exercised.
+
+	inst := instanceWithFakeBackend(t, "inst")
+	inst.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
+	inst.SetStatusForTest(session.Running)
+	require.True(t, inst.IsRemote(), "precondition: instance must be remote for the full-screen attach path")
+	require.True(t, inst.TmuxAlive(), "precondition: instance must be attachable")
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	var out bytes.Buffer
+	swapRemoteDetachResetWriter(t, &out)
+	attaches := 0
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
+		attaches++
+		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
+			ch := make(chan struct{})
+			close(ch)
+			return ch, nil
+		})
+	})
+
+	// Enter → first-time attach help overlay shown; attach not started yet.
+	model, _ := h.handleEnter()
+	h = model.(*home)
+	require.NotNil(t, h.textOverlay, "first-time attach must show the help overlay")
+	require.Equal(t, stateHelp, h.state, "attach help overlay must put the model in stateHelp")
+	require.False(t, h.attachTransitioning, "the help overlay alone must not arm the attach guard")
+	require.Equal(t, 0, attaches, "the overlay must not start an attach")
+
+	// Esc dismisses the overlay WITHOUT running the attach callback (cancel).
+	model, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	h = model.(*home)
+	require.Equal(t, stateDefault, h.state, "Esc must close the attach help overlay (back to stateDefault)")
+	require.False(t, h.attachTransitioning, "a canceled attach must not leave the re-entry guard armed")
+	require.Equal(t, 0, attaches, "Esc must not start an attach")
+
+	// A subsequent Enter must STILL attach — the guard was cleared. The help was
+	// marked seen on the first show, so this Enter runs the attach synchronously.
+	_, cmd := h.handleEnter()
+	runAttachTransitionCmd(t, h, cmd)
+	endDetachWatchdog()
+	require.Equal(t, 1, attaches, "a canceled attach must not block a subsequent attach")
+}
+
+// TestHandleHelpState_AttachCancelClearsTransitionGuard directly exercises the
+// #1530 defensive clear: if the re-entrant-attach guard is armed while the
+// attach help overlay is up (simulating any current or future path that arms
+// attachTransitioning before the overlay resolves), canceling the overlay with
+// Esc must clear it — otherwise every later Enter would be a permanent no-op.
+// This fails without the clear in handleHelpState's cancel branch.
+func TestHandleHelpState_AttachCancelClearsTransitionGuard(t *testing.T) {
+	h := newTestHome(t)
+
+	inst := instanceWithFakeBackend(t, "inst")
+	inst.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
+	inst.SetStatusForTest(session.Running)
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	// Enter → first-time attach help overlay shown.
+	model, _ := h.handleEnter()
+	h = model.(*home)
+	require.Equal(t, stateHelp, h.state, "precondition: attach help overlay must be up")
+
+	// Simulate the guard having been armed before the overlay resolves.
+	h.attachTransitioning = true
+
+	// Esc cancels the overlay (attachHelpDismissPolicy → runOnDismiss=false).
+	model, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	h = model.(*home)
+	require.Equal(t, stateDefault, h.state, "Esc must close the attach help overlay")
+	require.False(t, h.attachTransitioning, "canceling the attach help must clear the re-entry guard")
+}
