@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
@@ -67,6 +69,14 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string, bracketed bool) error {
 	args = append(args, "-b", buf, "-t", exactTarget(t.sanitizedName))
 	pasteCmd := exec.Command("tmux", args...)
 	if err := t.cmdExec.Run(pasteCmd); err != nil {
+		// `-d` only deletes the buffer once the paste succeeds; a failed paste
+		// would otherwise strand the named buffer, and tmux buffers are
+		// server-scoped (they outlive the session), so each failed submit would
+		// leak one buffer unbounded. Best-effort delete it before returning.
+		delCmd := exec.Command("tmux", "delete-buffer", "-b", buf)
+		if derr := t.cmdExec.Run(delCmd); derr != nil {
+			log.ErrorLog.Printf("failed to delete paste buffer %q after paste error: %v", buf, derr)
+		}
 		return fmt.Errorf("error pasting buffer: %w", err)
 	}
 
