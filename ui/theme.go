@@ -103,6 +103,8 @@ func applyThemeStyles() {
 		BorderForeground(activeTheme.PaneBorderInteractive)
 	previewWindowStyle = windowStyle.
 		BorderForeground(activeTheme.PaneBorderPreview)
+	dropTargetWindowStyle = windowStyle.
+		BorderForeground(activeTheme.Warning)
 
 	paneHeaderStyle = lipgloss.NewStyle().
 		Bold(true).

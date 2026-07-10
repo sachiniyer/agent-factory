@@ -65,6 +65,10 @@ type Menu struct {
 	// `S` can commit as another pane. Without that preview the key no-ops, so
 	// the footer must not advertise it (#1419).
 	splitPaneAvailable bool
+	// statusText temporarily replaces key hints with a plain status row. Used
+	// for pointer gestures that need feedback but should not advertise
+	// clickable key zones while the gesture is in flight.
+	statusText string
 
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
@@ -162,6 +166,12 @@ func (m *Menu) SetInteractive(on bool) {
 func (m *Menu) SetSplitPaneAvailable(available bool) {
 	m.splitPaneAvailable = available
 	m.updateOptions()
+}
+
+// SetStatusText temporarily replaces the hint row with a centered status
+// message. Empty restores the normal context-sensitive key hints.
+func (m *Menu) SetStatusText(text string) {
+	m.statusText = text
 }
 
 // updateOptions updates the menu options based on current state, focus
@@ -390,6 +400,10 @@ var hintDropOrder = [][]keys.KeyName{
 func (m *Menu) String() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
+	}
+	if m.statusText != "" {
+		line := menuStyle.Render(fitLine(m.statusText, m.width))
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, line)
 	}
 
 	// Render the full hint row; while it exceeds the bar width, drop options

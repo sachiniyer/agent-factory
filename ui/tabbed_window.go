@@ -40,6 +40,10 @@ var interactiveWindowStyle = windowStyle.
 var previewWindowStyle = windowStyle.
 	BorderForeground(activeTheme.PaneBorderPreview)
 
+// dropTargetWindowStyle marks the pane currently under an active tab drag.
+var dropTargetWindowStyle = windowStyle.
+	BorderForeground(activeTheme.Warning)
+
 var paneHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
 	Foreground(activeTheme.Foreground)
@@ -119,6 +123,9 @@ type TabbedWindow struct {
 	// current sidebar selection. It colors selected-but-not-focused panes blue
 	// without moving focus or mutating the pane binding.
 	sidebarSelected bool
+	// dropTarget marks this pane as the current drop target while a sidebar
+	// tab drag is active. It is render-only and never changes pane focus.
+	dropTarget bool
 
 	// preview is a transient render binding for #1321. While set, the window
 	// still owns its committed store.OpenPane binding, but capture/render uses
@@ -412,6 +419,11 @@ func (w *TabbedWindow) SetSidebarSelected(on bool) {
 	w.sidebarSelected = on
 }
 
+// SetDropTarget marks whether this pane is the current tab-drag drop target.
+func (w *TabbedWindow) SetDropTarget(on bool) {
+	w.dropTarget = on
+}
+
 // registerZones records this frame's hit-test rects: the whole pane as the
 // body (click focuses; click focused interacts; wheel scrolls), the one-line
 // `title · tab` header inside the frame on top of it, and — exactly while the
@@ -561,6 +573,8 @@ func (w *TabbedWindow) frameStyle() lipgloss.Style {
 		return previewWindowStyle
 	case w.interactive:
 		return interactiveWindowStyle
+	case w.dropTarget:
+		return dropTargetWindowStyle
 	case w.sidebarSelected && !w.focused:
 		return selectedWindowStyle
 	default:

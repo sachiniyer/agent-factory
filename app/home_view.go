@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
@@ -138,6 +139,7 @@ func (m *home) View() string {
 		if w := m.paneWindows[p.ID()]; w != nil {
 			w.SetSidebarSelected(m.paneMatchesSelection(p))
 			w.SetSelectionHint(m.paneSelectionHint(p))
+			w.SetDropTarget(m.tabDragDropTargetRegion() == layout.PaneRegion(p.ID()))
 			cols = append(cols, w.View())
 		}
 	}
@@ -149,6 +151,7 @@ func (m *home) View() string {
 	if banner := m.alarmBanner.View(); banner != "" {
 		viewParts = append(viewParts, banner)
 	}
+	m.menu.SetStatusText(m.dragStatusText())
 	viewParts = append(viewParts, top, m.statusBar.View())
 	mainView := lipgloss.JoinVertical(lipgloss.Left, viewParts...)
 

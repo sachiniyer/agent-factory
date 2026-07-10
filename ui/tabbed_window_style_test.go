@@ -17,6 +17,7 @@ func TestTabbedWindowFrameStyleUsesPaneBorderThemeSlots(t *testing.T) {
 	custom.PaneBorderSelected = "#222222"
 	custom.PaneBorderInteractive = "#333333"
 	custom.PaneBorderPreview = "#444444"
+	custom.Warning = "#555555"
 	ApplyTheme(custom)
 
 	assertFrameColor := func(name string, w *TabbedWindow, want string) {
@@ -42,4 +43,8 @@ func TestTabbedWindowFrameStyleUsesPaneBorderThemeSlots(t *testing.T) {
 	w.SetInteractive(false)
 	w.SetPreview(nil, 0, "original")
 	assertFrameColor("preview", w, "#444444")
+
+	w.ClearPreview()
+	w.SetDropTarget(true)
+	assertFrameColor("drop target", w, "#555555")
 }
