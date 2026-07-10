@@ -175,6 +175,14 @@ type home struct {
 	// pane is auto-hidden by width pressure. Callers that can return a tea.Cmd
 	// consume it to start the same transient clear timer normal errors use.
 	pendingPaneAutoHideStatus string
+	// restoredPaneBaseline holds the panes reopened from persisted TUI state so
+	// the first real (non-fallback) relayout after launch can detect panes the
+	// terminal is too narrow to fit. The restore-time relayout runs at term
+	// (0,0) → fallback → visiblePanes=nil, so without a baseline the first
+	// WindowSizeMsg sees an empty previousVisible and newlyAutoHiddenPane never
+	// surfaces the "N hidden: terminal too narrow" status (#1535). Consumed once
+	// on the first non-fallback relayout.
+	restoredPaneBaseline []*store.OpenPane
 	// lastPaneCapture is when each pane's capture was last dispatched, keyed
 	// by pane id; the paneCaptureMinInterval throttle reads it (RFC §5.2).
 	lastPaneCapture map[int]time.Time
@@ -446,6 +454,16 @@ func (m *home) relayout() {
 		m.syncFocus()
 		return
 	}
+
+	// First real relayout after a restore: the restore-time relayout ran at
+	// (0,0) and fell through to fallback with visiblePanes=nil, so the restored
+	// panes are the visibility baseline this pass uses to detect a pane the
+	// terminal can't fit (#1535). Consumed once; every later relayout carries a
+	// real previousVisible.
+	if len(previousVisible) == 0 && len(m.restoredPaneBaseline) > 0 {
+		previousVisible = m.restoredPaneBaseline
+	}
+	m.restoredPaneBaseline = nil
 
 	nextVisible := m.store.VisibleOpenPanes(lay.PaneCount())
 	if hidden := newlyAutoHiddenPane(previousVisible, nextVisible, m.store.OpenPanes()); hidden != nil {

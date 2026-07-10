@@ -40,6 +40,12 @@ func (m *home) applyTUIViewState(state config.TUIRepoViewState) int {
 		focusCopy := *state.Focus
 		m.pendingTUIViewFocus = &focusCopy
 	}
+	// The relayout below runs at term (0,0) → fallback → visiblePanes=nil, so
+	// capture the restored panes as the baseline the first real relayout uses to
+	// surface an auto-hide status for a pane the terminal can't fit (#1535).
+	if restored > 0 {
+		m.restoredPaneBaseline = append([]*store.OpenPane(nil), m.store.OpenPanes()...)
+	}
 	m.relayout()
 	return restored
 }
