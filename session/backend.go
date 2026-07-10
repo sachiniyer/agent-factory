@@ -1,5 +1,49 @@
 package session
 
+// WorkspaceKind describes where a backend's workspace physically lives, so
+// callers reason about locality without asking "is this the remote type"
+// (#1592 Phase 1). New runtimes (ssh/container) pick the kind that matches
+// where the git worktree lands.
+type WorkspaceKind int
+
+const (
+	// WorkspaceLocalWorktree: a git worktree on the daemon's own machine, driven
+	// by tmux (today's LocalBackend). Zero value — matches the historical
+	// nil-backend default of IsRemote()==false.
+	WorkspaceLocalWorktree WorkspaceKind = iota
+	// WorkspaceRemote: the workspace lives off-box; there is no local worktree or
+	// tmux to drive (today's HookBackend; tomorrow's ssh/container runtimes).
+	WorkspaceRemote
+)
+
+// Capabilities is a backend's self-description: which optional session
+// operations it can service. The daemon and UI branch on these instead of on
+// Type()=="remote" (#1592 Phase 1), so a NEW backend declares what it supports
+// rather than every call-site learning its name. The end state is full parity —
+// every backend implements every capability — but the descriptor stays so a
+// surface can gray out an op a given runtime hasn't wired up yet.
+type Capabilities struct {
+	// Workspace records where the workspace lives (local worktree vs off-box).
+	Workspace WorkspaceKind
+
+	// Attach: an interactive controller can attach to the agent session.
+	Attach bool
+	// Archive: the session can be archived/restored (local-worktree relocation
+	// today; push/pull the branch once every backend clones from GitHub).
+	Archive bool
+	// Recover: a Lost session can be reconnected / re-spawned in place.
+	Recover bool
+	// TabManagement: the user can add/close arbitrary tabs (new process tab).
+	TabManagement bool
+	// TerminalTab: an interactive terminal tab is available. May depend on
+	// per-session config (remote_hooks.terminal_cmd), so it is computed per
+	// instance rather than being a static per-type constant.
+	TerminalTab bool
+	// InteractiveInput: raw key / prompt injection works — SendKeys/TapEnter/
+	// SendPrompt drive a live PTY rather than returning "not supported".
+	InteractiveInput bool
+}
+
 // Backend abstracts the session lifecycle so that instances can be backed
 // by local tmux+git worktrees (the default) or by user-provided remote
 // hook scripts.
@@ -80,6 +124,15 @@ type Backend interface {
 	// precondition. Remote backends return ErrRecoverUnsupported.
 	Respawn(instance *Instance) error
 
-	// Type returns the backend type identifier ("local" or "remote").
+	// Type returns the backend type identifier ("local" or "remote"). Since
+	// #1592 Phase 1 this is the persisted serialization discriminator only (the
+	// load-time factory in instance_data.go) — runtime branching goes through
+	// Capabilities, never Type().
 	Type() string
+
+	// Capabilities reports which optional operations this backend can service,
+	// replacing Type()-based special-casing (#1592 Phase 1). Computed per
+	// instance because some capabilities (TerminalTab) depend on per-session
+	// config.
+	Capabilities() Capabilities
 }

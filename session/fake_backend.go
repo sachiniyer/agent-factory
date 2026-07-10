@@ -110,3 +110,19 @@ func (b *FakeBackend) TapEnter(*Instance)                        {}
 func (b *FakeBackend) Recover(*Instance) error                   { return nil }
 func (b *FakeBackend) Respawn(*Instance) error                   { return nil }
 func (b *FakeBackend) Type() string                              { return "local" }
+
+// Capabilities reports local full parity by default, mirroring LocalBackend so
+// the fake stands in for a local session (#1592 Phase 1). Test doubles that
+// impersonate a remote backend override this to return a WorkspaceRemote
+// descriptor.
+func (b *FakeBackend) Capabilities() Capabilities {
+	return Capabilities{
+		Workspace:        WorkspaceLocalWorktree,
+		Attach:           true,
+		Archive:          true,
+		Recover:          true,
+		TabManagement:    true,
+		TerminalTab:      true,
+		InteractiveInput: true,
+	}
+}

@@ -330,6 +330,10 @@ type fakeRemoteBackend struct {
 
 func (fakeRemoteBackend) Type() string { return "remote" }
 
+func (fakeRemoteBackend) Capabilities() session.Capabilities {
+	return session.Capabilities{Workspace: session.WorkspaceRemote}
+}
+
 // TestArchiveSession_RejectsRemote: a remote session has no local worktree to
 // relocate, so archiving it is rejected up front.
 func TestArchiveSession_RejectsRemote(t *testing.T) {

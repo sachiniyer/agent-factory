@@ -177,12 +177,23 @@ func (i *Instance) IsRemote() bool {
 	return i.backend.Type() == "remote"
 }
 
+// Capabilities returns the backing runtime's capability descriptor (#1592
+// Phase 1). A nil backend reports the zero value (local workspace, nothing
+// supported), matching the historical nil-backend defaults.
+func (i *Instance) Capabilities() Capabilities {
+	if i.backend == nil {
+		return Capabilities{}
+	}
+	return i.backend.Capabilities()
+}
+
 // SupportsRemoteTerminal reports whether this instance can open an interactive
-// terminal on its remote machine — i.e. it uses the remote hook backend and
-// the optional terminal_cmd hook is configured (#843).
+// terminal on its remote machine — a remote-workspace runtime that advertises a
+// terminal tab (the optional terminal_cmd hook, #843). Reads the capability
+// descriptor rather than type-asserting the concrete backend (#1592 Phase 1).
 func (i *Instance) SupportsRemoteTerminal() bool {
-	hb, ok := i.backend.(*HookBackend)
-	return ok && hb.HasTerminalCmd()
+	caps := i.Capabilities()
+	return caps.Workspace == WorkspaceRemote && caps.TerminalTab
 }
 
 // AttachRemoteTerminal opens an interactive terminal on the remote machine via

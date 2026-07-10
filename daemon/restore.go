@@ -35,7 +35,7 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 	if session.IsReservedTitle(instance.Title) {
 		return "", fmt.Errorf("cannot manually restore reserved session %q", req.Title)
 	}
-	if instance.IsRemote() {
+	if !instance.Capabilities().Recover {
 		return "", fmt.Errorf("cannot restore remote session %q: reconnect is not supported", req.Title)
 	}
 	if !instance.Started() {

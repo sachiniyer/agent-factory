@@ -33,7 +33,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	if instance == nil {
 		return "", fmt.Errorf("failed to restore instance %q", req.Title)
 	}
-	if instance.IsRemote() {
+	if !instance.Capabilities().TabManagement {
 		return "", fmt.Errorf("cannot create a tab on remote session %q: remote sessions have no local worktree and the hook protocol can't run arbitrary commands; their terminal tab comes from remote_hooks.terminal_cmd", req.Title)
 	}
 
@@ -107,7 +107,7 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	if instance == nil {
 		return "", fmt.Errorf("failed to restore instance %q", req.Title)
 	}
-	if instance.IsRemote() {
+	if !instance.Capabilities().TabManagement {
 		return "", fmt.Errorf("cannot close a tab on remote session %q: its tabs are fixed by remote_hooks config, not user-managed", req.Title)
 	}
 
