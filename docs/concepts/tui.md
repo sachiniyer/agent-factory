@@ -65,6 +65,7 @@ Tabs persist across restarts, and each is a real process the daemon tracks.
 - **`Left`** / **`Right`** move focus between open workspace panes when a pane
   has focus.
 - **`Ctrl-u`** / **`Ctrl-d`** scroll the current tab up and down.
+- **`Ctrl-p`** switches the active project without restarting the TUI.
 
 ## Key bindings are yours
 

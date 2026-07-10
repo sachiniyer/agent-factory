@@ -96,7 +96,8 @@ it.
 | `D` | kill instance | | `/` | search |
 | `a` | archive/restore | | `q` | quit |
 | `p`/`y` | open/copy PR | | `e` | hooks editor |
-| `Ctrl-U`/`Ctrl-D` | scroll tab | | `Ctrl-W` | detach (full-screen) |
+| `Ctrl-P` | switch project | | `Ctrl-U`/`Ctrl-D` | scroll tab |
+| `Ctrl-W` | detach (full-screen) |
 
 `Enter`, `Tab`, `Shift-Tab`, `Esc`, `Ctrl-]`, and `1`–`9` are **reserved** and
 cannot be rebound (`[keys]` config). `Ctrl-W` is the configurable detach key
