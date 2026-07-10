@@ -285,6 +285,57 @@ func TestRedactInstancesInvalidJSONOmitted(t *testing.T) {
 	}
 }
 
+// TestScrubLogRedactsSessionTitles is the #1584 regression guard: the daemon
+// log tail is bundled verbatim and prints af_<hash>_<title> tmux session names
+// on nearly every line, leaking the exact session titles the structured
+// sections already drop. scrubLog must redact the <title> segment while keeping
+// the line readable and structural fields (the hash prefix, git SHAs) intact.
+func TestScrubLogRedactsSessionTitles(t *testing.T) {
+	r := &redactor{}
+	// Seed the known-session set the way collectInstances does, so the bare-title
+	// and non-hashed-name paths are exercised alongside the shape regex.
+	r.noteSession(&session.InstanceData{
+		Title:    "design-1029-httpcli",
+		TmuxName: "af_0f8fc14c_design-1029-httpcli",
+		Tabs:     []session.TabData{{TmuxName: "af_0f8fc14c_design-1029-httpcli__shell"}},
+	})
+
+	in := strings.Join([]string{
+		`tmux session af_0f8fc14c_design-1029-httpcli is gone; status monitor going silent`,
+		`tmux session "af_0f8fc14c_fix-1436" missing on Restore; re-spawning`,
+		`window ref af_0f8fc14c_design-1029-httpcli:0.1 captured`,
+		`recover: rebuilt session "design-1029-httpcli" at /path from ` + testSHA,
+		`shell tab af_0f8fc14c_design-1029-httpcli__shell exited`,
+	}, "\n")
+
+	out := r.scrubLog(in)
+
+	// No real title survives, in either the tmux-name or bare form.
+	for _, leaked := range []string{
+		"design-1029-httpcli", // seeded session's title + name
+		"fix-1436",            // a historical session only present in the log
+	} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("session title leaked through log scrub: %q\n%s", leaked, out)
+		}
+	}
+	// Every af_<hash>_ name is redacted to the stable, user-text-free prefix —
+	// the only text following the hash is the marker, never a real title.
+	if !strings.Contains(out, "af_0f8fc14c_"+redactedMarker) {
+		t.Errorf("expected the redacted af_<hash>_ prefix to be kept:\n%s", out)
+	}
+	// Structural context around the names survives so the log stays triageable.
+	if !strings.Contains(out, "status monitor going silent") ||
+		!strings.Contains(out, "missing on Restore") ||
+		!strings.Contains(out, testSHA) {
+		t.Errorf("structural log context should survive:\n%s", out)
+	}
+	// The ':' tmux window/pane ref bounds the name and is not eaten.
+	if !strings.Contains(out, ":0.1 captured") {
+		t.Errorf("expected the ':0.1' window ref to be preserved:\n%s", out)
+	}
+}
+
 // TestBuildEndToEnd plants a full temp home with a secret and a home path in
 // every collected surface (instances, tasks, config, log, daemon status) and
 // asserts the produced bundle scrubs them while keeping the structural fields.
@@ -314,6 +365,7 @@ func TestBuildEndToEnd(t *testing.T) {
 		Liveness:  session.LiveLimitReached,
 		Program:   "claude",
 		CreatedAt: createdAt,
+		TmuxName:  "af_0f8fc14c_myproprietarysession",
 		Worktree: session.GitWorktreeData{
 			RepoPath:      filepath.Join(home, "Desktop/proj"),
 			WorktreePath:  filepath.Join(home, "Desktop/proj-fix"),
@@ -342,8 +394,10 @@ func TestBuildEndToEnd(t *testing.T) {
 		"# note path " + home + "/Desktop\n"
 	writeFile(t, filepath.Join(afHome, "config.toml"), cfg)
 
-	// log tail with a home path and a secret.
-	logLine := "2026-01-01 boot at " + home + "/Desktop key sk-LOGSECRET0123456789ABCDEF sha " + testSHA + "\n"
+	// log tail with a home path, a secret, and a verbatim tmux session name
+	// (the #1584 leak vector: the session title rides in on the log blob).
+	logLine := "2026-01-01 boot at " + home + "/Desktop key sk-LOGSECRET0123456789ABCDEF sha " + testSHA + "\n" +
+		"2026-01-01 tmux session af_0f8fc14c_myproprietarysession is gone\n"
 	writeFile(t, filepath.Join(afHome, "agent-factory.log"), logLine)
 
 	res, err := Build(Inputs{
@@ -381,9 +435,21 @@ func TestBuildEndToEnd(t *testing.T) {
 		"Project Nightingale",
 		"customer launch details",
 		"secret pr",
-		home, // raw home path (username-revealing) must never appear verbatim
+		"myproprietarysession",             // session title, leaked via the log tmux name (#1584)
+		"af_0f8fc14c_myproprietarysession", // the verbatim tmux name itself
+		home,                               // raw home path (username-revealing) must never appear verbatim
 	}
 	mustNotContain(t, "text", text, planted...)
+
+	// --- GitHub issue-draft assertions ---
+	// The title is a short, templated, redacted summary line.
+	mustContain(t, "draft title", res.Title, "af bug-report:", "9.9.9", "/")
+	// The body carries the environment summary + the attach-path placeholder the
+	// command layer fills in, and never inlines a secret or a session title.
+	mustContain(t, "draft body", res.Body,
+		"## Environment", "af: 9.9.9", "sessions:", "tasks:", BundlePathPlaceholder,
+		"Attach that file")
+	mustNotContain(t, "draft body", res.Body, planted...)
 
 	// --- json manifest assertions ---
 	var manifest map[string]any
