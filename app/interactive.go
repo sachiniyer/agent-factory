@@ -65,12 +65,15 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	}
 
 	// Focus (and, via the recency touch, un-auto-hide) the pane, then force
-	// the live bind for it now.
+	// the live bind for it now. The first bind after a preview opens can lose a
+	// race with tmux finishing the pane, so retry the transient miss a bounded
+	// number of times before surfacing the error (#1526) — the common
+	// first-render race stays invisible; a genuine failure still surfaces the
+	// "press o" guidance promptly.
 	m.store.TouchOpenPane(p)
 	m.focusRegion(layout.PaneRegion(p.ID()))
-	m.syncLiveTermPane()
 
-	if m.liveTerm == nil || m.livePane != p {
+	if !m.bindLiveTermPaneWithRetry(p) {
 		inst := p.Instance()
 		title := ""
 		if inst != nil {
