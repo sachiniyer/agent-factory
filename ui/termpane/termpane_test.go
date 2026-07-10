@@ -159,6 +159,22 @@ func TestResizeBlanksStaleGrid(t *testing.T) {
 	assert.Emptyf(t, strings.TrimSpace(got), "resize must blank the truncated, un-reflowed grid (#1556); got:\n%s", got)
 }
 
+// TestResizeBlanksStaleAltScreenGrid extends the #1556 fix to a full-screen
+// program (vim/less/...) occupying the alternate screen when the resize lands.
+// The blank must follow the ACTIVE screen: x/vt's ED 2 clears whichever screen
+// is current (e.scr), so entering the alternate screen (?1049h) and resizing
+// must leave that screen blank, not the stale, truncated alt grid — otherwise
+// the pane would show a merged full-screen buffer until tmux repaints.
+func TestResizeBlanksStaleAltScreenGrid(t *testing.T) {
+	// Switch to the alternate screen, then draw a line there that wraps at 20.
+	tp := startScript(t, "printf '\\033[?1049h'; printf 'ALT chmod +x todo.sh test.sh\\r\\nalt-marker-1556\\r\\n'; sleep 30", 20, 6)
+	waitForRender(t, tp, 20, 6, "alt-marker-1556")
+
+	tp.Resize(14, 6)
+	got := plainRender(tp, 14, 6)
+	assert.Emptyf(t, strings.TrimSpace(got), "resize must blank the ACTIVE (alternate) screen (#1556); got:\n%s", got)
+}
+
 func TestHiddenStatusRowsAreNotRendered(t *testing.T) {
 	tp := startScriptWithStatusLayout(t, "printf 'VISIBLE-1425\\033[7;1HSTATUS-1425-A\\033[8;1HSTATUS-1425-B'; sleep 30", 30, 6, 2, statusBottom)
 	waitForRender(t, tp, 30, 6, "VISIBLE-1425")

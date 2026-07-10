@@ -342,7 +342,9 @@ func (t *TermPane) Resize(width, height int) {
 // resizeBlank erases the whole display (ED 2) and homes the cursor — the
 // standard way a program clears a terminal. Written to the emulator after a
 // resize to drop the truncated, un-reflowed grid the pinned x/vt leaves behind
-// (#1556) before tmux repaints.
+// (#1556) before tmux repaints. x/vt's ED 2 is screen-aware — it clears the
+// active screen (e.scr) — so this also blanks the alternate screen when a
+// full-screen program (vim/less/...) is what the resize caught mid-frame.
 var resizeBlank = []byte("\x1b[2J\x1b[H")
 
 // Render returns the emulator's current grid as exactly height ANSI-styled
