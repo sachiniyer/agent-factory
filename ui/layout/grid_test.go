@@ -157,9 +157,10 @@ func TestGridSolveAutomationsThresholds(t *testing.T) {
 
 // TestGridSolveAutomationsGrowsToContent pins #1126: with vertical room the
 // automations section grows to show every automation (title + one row each +
-// one reserved expansion line) instead of the old fixed 3-row cap, and only
-// collapses once the tree + automations can't both fit — at which point the
-// half-rail cap keeps the tree the priority. The rail still tiles exactly.
+// one reserved expansion line + one reserved bottom-margin row, #1560)
+// instead of the old fixed 3-row cap, and only collapses once the tree +
+// automations can't both fit — at which point the half-rail cap keeps the
+// tree the priority. The rail still tiles exactly.
 func TestGridSolveAutomationsGrowsToContent(t *testing.T) {
 	// Zero automations keeps the AutomationsRows floor (a recognizable strip).
 	none := layout.Grid{Automations: 0}.Solve(120, 60)
