@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -157,8 +158,33 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 		return fmt.Errorf("target session %q is Lost; prompt not delivered; recover it first", title)
 	case session.LiveDead:
 		return fmt.Errorf("target session %q is Dead; prompt not delivered; recover it first", title)
+	case session.LiveArchived:
+		// Archived sessions have no live tmux to deliver into (#1529): without
+		// this case the prompt falls through to a confusing backend error. Point
+		// at the off-ramp, mirroring the TUI's interactiveGuard message. The
+		// restore command embeds the title, so shell-quote it — a title with
+		// spaces or shell metacharacters must not turn a copy-pasted
+		// `af sessions restore ...` into the wrong target or a second command.
+		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (af sessions restore %s)", title, shellQuoteArg(title))
 	}
 	return nil
+}
+
+// shellQuoteArg makes s safe to paste as a single shell argument: already-safe
+// strings pass through unquoted (so the common `restore captain` stays clean),
+// and anything with whitespace/metacharacters is single-quoted with embedded
+// quotes escaped. Mirrors the sibling copies in session/tmux/resume.go and
+// api/apicmd.go (a shared util is a separate consolidation, #1529).
+func shellQuoteArg(s string) string {
+	if s != "" && strings.IndexFunc(s, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			strings.ContainsRune("_@%+=:,./-", r))
+	}) == -1 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 func (m *Manager) findSession(title, repoID string) (*session.Instance, string, *session.InstanceData, error) {
