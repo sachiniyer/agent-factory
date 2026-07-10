@@ -321,6 +321,29 @@ func TestRestoreWorktreePath_SubdirectoryHonorsWorktreeRoot(t *testing.T) {
 	assert.Equal(t, filepath.Join(worktreesDir, branch+"-2"), p2)
 }
 
+// TestRestoreWorktreePath_SubdirectoryEmptyBranchFallsBackToTitle is the
+// Greptile P1 on #1540: a legacy/edge archived record with an EMPTY persisted
+// branch must still restore under subdirectory mode. With no branch, branch-based
+// placement would resolve to the worktrees root itself and fail the strict-inside
+// guard — a regression, since the old title-based sibling path restored such
+// records fine. The destination must fall back to the sanitized title leaf.
+func TestRestoreWorktreePath_SubdirectoryEmptyBranchFallsBackToTitle(t *testing.T) {
+	sandboxHome(t)
+	cfg := config.DefaultConfig()
+	cfg.WorktreeRoot = config.WorktreeRootSubdirectory
+	require.NoError(t, config.SaveConfig(cfg))
+
+	repoRoot := createGitRepo(t)
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	worktreesDir := filepath.Join(configDir, "worktrees")
+
+	p, err := RestoreWorktreePath(repoRoot, "feature-x", "")
+	require.NoError(t, err, "an empty-branch archive must still resolve a valid restore path")
+	assert.Equal(t, filepath.Join(worktreesDir, "feature-x"), p,
+		"an empty branch must fall back to the sanitized title leaf under the subdirectory root")
+}
+
 // TestMoveWorktree_RepairFailureStillCommitsLocation (#1028 Greptile P1): in the
 // cross-filesystem fallback, when the byte-move succeeds but `git worktree
 // repair` fails, the worktree object must already point at dest — where the

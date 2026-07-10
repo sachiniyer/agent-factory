@@ -172,7 +172,17 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
 	var basePath string
 	if cfg != nil && cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
-		basePath = filepath.Join(worktreeDir, branchName)
+		// Subdirectory mode nests the branch name under the worktrees root. A
+		// record with no persisted branch (an old/edge archive) would otherwise
+		// resolve to worktreeDir itself, fail the strict-inside guard below, and
+		// block a restore the title-based path could still complete — so fall back
+		// to the sanitized session name as the leaf. A freshly created session
+		// always has a branch, so this fallback only ever engages on restore.
+		leaf := branchName
+		if strings.TrimSpace(leaf) == "" {
+			leaf = sanitizeWorktreePathSegment(sessionName)
+		}
+		basePath = filepath.Join(worktreeDir, leaf)
 	} else {
 		// Sibling mode: {repoParent}/{repoName}-{sessionName}
 		basePath = filepath.Join(worktreeDir, filepath.Base(repoRoot)+"-"+sanitizeWorktreePathSegment(sessionName))
