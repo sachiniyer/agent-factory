@@ -92,6 +92,30 @@ func TestMouseGridYOffsetsForTopStatusOnly(t *testing.T) {
 	assert.Equal(t, 4, none.mouseGridY(4), "zero hidden rows: top status is a no-op")
 }
 
+// TestMouseResizeGapDropsEventPastGrid pins the #1534 review finding: during a
+// resize gap the pane zone can grow before the embedded terminal is resized to
+// match, so a click below the emulator's current grid — pushed further by the
+// status-top offset — must be DROPPED, not forwarded as a bogus row the inner
+// app never drew.
+func TestMouseResizeGapDropsEventPastGrid(t *testing.T) {
+	// Visible height 6, 2 hidden top status rows → emulator grid height 8;
+	// visible content occupies rows [2, 8), i.e. zone-local y in [0, 6).
+	tp := startScriptWithStatusLayout(t, "sleep 30", 30, 6, 2, statusTop)
+	require.Equal(t, 8, tp.emu.Height(), "grid height is visible rows + hidden status rows")
+	require.Equal(t, 30, tp.emu.Width())
+
+	click := mouseMsg(tea.MouseActionPress, tea.MouseButtonLeft, 0, 0)
+
+	assert.True(t, tp.SendMouse(click, 3, 5),
+		"a click on the last visible row (grid row 7) maps in-bounds and forwards")
+	assert.False(t, tp.SendMouse(click, 3, 6),
+		"a click one row into the resize gap lands at grid row 8, past the grid, and is dropped")
+	assert.False(t, tp.SendMouse(click, 3, 20),
+		"a click well past the grid is dropped, not forwarded as a bogus row")
+	assert.False(t, tp.SendMouse(click, 30, 5),
+		"a click past the last column is dropped too")
+}
+
 // TestTranslateMouseUnknownButton: buttons with no encoding are refused, not
 // guessed — SendKey's ignore contract, extended to the mouse.
 func TestTranslateMouseUnknownButton(t *testing.T) {

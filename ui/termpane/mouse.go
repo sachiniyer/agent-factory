@@ -15,20 +15,30 @@ import (
 
 // SendMouse forwards one mouse event to the embedded terminal at grid cell
 // (x, y) — pane-content-local coordinates, which the zone registry's local
-// point already is. It reports whether the event had a translation; false
-// means the event type has no encoding and was ignored (never a guessed
-// sequence), mirroring SendKey's contract. Whether a translated event
-// actually reaches the inner app is the emulator's mode-aware call. The lock
-// is required even though this only writes input: the encoder reads terminal
-// modes (mouse tracking, SGR encoding) that the PTY reader pump mutates
-// through emu.Write.
+// point already is. It reports whether the event was forwarded; false means it
+// was ignored — either the event type has no encoding (never a guessed
+// sequence, mirroring SendKey's contract) or it fell outside the live grid
+// during a resize gap. Whether a forwarded event actually reaches the inner app
+// is the emulator's mode-aware call. The lock is required even though this only
+// writes input: the encoder reads terminal modes (mouse tracking, SGR encoding)
+// that the PTY reader pump mutates through emu.Write.
 func (t *TermPane) SendMouse(msg tea.MouseMsg, x, y int) bool {
-	ev, ok := translateMouse(msg, x, t.mouseGridY(y))
+	gridY := t.mouseGridY(y)
+	ev, ok := translateMouse(msg, x, gridY)
 	if !ok {
 		return false
 	}
 	t.gridMu.RLock()
 	defer t.gridMu.RUnlock()
+	// During a resize gap the pane zone can grow before the embedded terminal
+	// is resized to match, so a click in the not-yet-propagated region — pushed
+	// further down by the status-top offset above — can land past the current
+	// emulator grid. Forwarding it would encode a bogus row/col the inner app
+	// never drew, so drop any event outside the live grid instead (#1534). The
+	// bounds read the emulator under the same lock SendMouse already holds.
+	if gridY < 0 || gridY >= t.emu.Height() || x < 0 || x >= t.emu.Width() {
+		return false
+	}
 	t.emu.SendMouse(ev)
 	return true
 }
