@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -85,9 +86,12 @@ func NewProjectsPane() *ProjectsPane {
 
 // SetProjects replaces the section's row list. The app pushes it from the same
 // cross-repo discovery the ctrl+p picker uses, whenever the list can change
-// (launch, project switch). The cursor is clamped into the new range so a
-// shorter list never leaves it dangling past the end.
-func (p *ProjectsPane) SetProjects(projects []SidebarProject) {
+// (launch, project switch, and the background daemon-snapshot poll so the
+// always-visible counts stay live). The cursor is clamped into the new range so
+// a shorter list never leaves it dangling past the end. Reports whether the row
+// list actually changed, so a background refresh only repaints on a real diff.
+func (p *ProjectsPane) SetProjects(projects []SidebarProject) bool {
+	changed := !reflect.DeepEqual(p.projects, projects)
 	p.projects = projects
 	if p.selected >= len(projects) {
 		p.selected = len(projects) - 1
@@ -95,6 +99,7 @@ func (p *ProjectsPane) SetProjects(projects []SidebarProject) {
 	if p.selected < 0 {
 		p.selected = 0
 	}
+	return changed
 }
 
 // Projects returns the current row list (test/inspection helper).

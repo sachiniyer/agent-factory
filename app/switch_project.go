@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -28,11 +29,28 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// buildProjectList derives the picker's project list with zero config: it groups
-// the daemon's cross-repo session snapshot by repo root for the session counts,
-// then unions in the root_agents opt-ins and the active project so repos with no
-// live session still appear. Names are the repo basename; ties break by root.
+// buildProjectList derives the picker's project list with zero config: it fetches
+// the daemon's cross-repo session snapshot and groups it by repo root for the
+// session counts, then unions in the root_agents opt-ins and the active project.
+// Used by the on-demand ctrl+p picker, which fetches synchronously; the always-
+// visible Projects section rebuilds from buildProjectListFrom on the background
+// poll instead (no second on-loop RPC).
 func (m *home) buildProjectList() []overlay.Project {
+	data, err := allReposSnapshotFetcher()
+	if err != nil {
+		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
+		data = nil
+	}
+	return m.buildProjectListFrom(data)
+}
+
+// buildProjectListFrom derives the project list from an already-fetched cross-repo
+// session snapshot: it groups the sessions by repo root for the counts, then
+// unions in the root_agents opt-ins and the active project so repos with no live
+// session still appear. Names are the repo basename; ties break by root. Split
+// out from buildProjectList so the background poll can reuse the all-repos data
+// it already fetched off-loop rather than issuing a second daemon RPC.
+func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Project {
 	counts := map[string]int{}
 	var order []string
 	seen := func(root string) {
@@ -45,17 +63,13 @@ func (m *home) buildProjectList() []overlay.Project {
 		}
 	}
 
-	if data, err := allReposSnapshotFetcher(); err != nil {
-		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
-	} else {
-		for _, d := range data {
-			root := d.Worktree.RepoPath
-			if root == "" {
-				continue
-			}
-			seen(root)
-			counts[root]++
+	for _, d := range data {
+		root := d.Worktree.RepoPath
+		if root == "" {
+			continue
 		}
+		seen(root)
+		counts[root]++
 	}
 
 	if m.appConfig != nil {
@@ -84,13 +98,9 @@ func (m *home) buildProjectList() []overlay.Project {
 	return projects
 }
 
-// refreshSidebarProjects rebuilds the bottom Projects section's row list from
-// the same cross-repo discovery the ctrl+p picker uses (buildProjectList),
-// marking the active project so the section highlights where the rail is
-// scoped. Pushed at launch and on project switch, so its counts track the
-// picker without a per-frame daemon round-trip.
-func (m *home) refreshSidebarProjects() {
-	projects := m.buildProjectList()
+// projectRows maps the discovered project list into Projects-section rows,
+// marking the active project so the section highlights where the rail is scoped.
+func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 	rows := make([]ui.SidebarProject, 0, len(projects))
 	for _, p := range projects {
 		rows = append(rows, ui.SidebarProject{
@@ -100,7 +110,27 @@ func (m *home) refreshSidebarProjects() {
 			Active:       p.Root == m.repoRoot,
 		})
 	}
-	m.projects.SetProjects(rows)
+	return rows
+}
+
+// refreshSidebarProjects rebuilds the bottom Projects section from the same
+// cross-repo discovery the ctrl+p picker uses (buildProjectList). Pushed at
+// launch and on project switch (paths that fetch synchronously).
+func (m *home) refreshSidebarProjects() {
+	m.projects.SetProjects(m.projectRows(m.buildProjectList()))
+}
+
+// refreshSidebarProjectsFromSnapshot rebuilds the Projects rows from the all-repos
+// session snapshot the background poll already fetched off-loop, so the always-
+// visible counts stay live when sessions change in ANOTHER repo — without a
+// second on-loop daemon RPC. A fetch error leaves the last-known rows intact
+// (like handleSnapshot/refreshTasks). Returns whether the visible rows changed.
+func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, fetchErr error) bool {
+	if fetchErr != nil {
+		log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
+		return false
+	}
+	return m.projects.SetProjects(m.projectRows(m.buildProjectListFrom(data)))
 }
 
 // switchToProjectRoot resolves a Projects-section row's repo root and switches

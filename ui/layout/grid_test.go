@@ -519,3 +519,38 @@ func TestGridSolveAutomationsInRail(t *testing.T) {
 		})
 	}
 }
+
+// TestGridTreePriorityAtSmallHeights is the #1590 guard: the instances tree is
+// in the focus ring, so the fixed bottom rail sections (automations + projects
+// and their rules) must never squeeze it to zero. Across every non-fallback
+// size — including the pathological "lots of projects AND tasks in a short
+// terminal" — the tree keeps at least one row, and once the bottom sections
+// render it keeps the TreeMinHeight floor (the Projects section yields first —
+// shrinking, then hiding — to hold that floor).
+func TestGridTreePriorityAtSmallHeights(t *testing.T) {
+	// The exact case root flagged: a short terminal whose rail cannot host the
+	// tree plus both fully-expanded bottom sections. The tree must survive.
+	small := layout.Grid{Projects: 20, Automations: 20}.Solve(80, 10)
+	require.False(t, small.Fallback)
+	assert.Greater(t, small.Tree.H, 0, "the tree must never vanish at 80x10")
+
+	// Sweep the whole non-fallback space with heavy section content; the tree
+	// stays positive everywhere and holds its floor wherever a bottom section is
+	// laid out.
+	for _, banner := range []bool{false, true} {
+		for h := layout.HardMinHeight; h <= 60; h++ {
+			for w := layout.HardMinWidth; w <= 220; w += 3 {
+				l := layout.Grid{Projects: 20, Automations: 20, Banner: banner}.Solve(w, h)
+				if l.Fallback {
+					continue
+				}
+				require.Greater(t, l.Tree.H, 0,
+					"tree must never vanish (w=%d h=%d banner=%v)", w, h, banner)
+				if l.AutomationsVisible {
+					require.GreaterOrEqual(t, l.Tree.H, layout.TreeMinHeight,
+						"tree keeps its floor once bottom sections render (w=%d h=%d banner=%v)", w, h, banner)
+				}
+			}
+		}
+	}
+}

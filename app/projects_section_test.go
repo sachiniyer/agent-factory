@@ -3,6 +3,7 @@ package app
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -102,4 +103,61 @@ func TestProjectsSection_FocusedSelectSwitches(t *testing.T) {
 	require.True(t, consumed)
 	assert.Equal(t, config.RepoIDFromRoot(repoBRoot), h.repoID, "Enter switches to the cursor's project")
 	assert.Equal(t, repoBRoot, h.repoRoot)
+}
+
+// TestProjectsSection_SnapshotRefreshUpdatesRowsLive is the #1590 finding-2 fix:
+// the always-visible Projects section refreshes its per-repo counts from the
+// cross-repo snapshot the background poll fetches, so a session created/removed
+// in ANOTHER repo updates the rows WITHOUT a project switch. Before the fix the
+// pane's counts only refreshed at startup + after a switch, so they went stale.
+func TestProjectsSection_SnapshotRefreshUpdatesRowsLive(t *testing.T) {
+	h := newTestHome(t)
+	// The pane's rows come from the poll's carried all-repos data, not this
+	// fetcher — keep it inert so a stray call can't interfere.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+	h.repoRoot = "/repos/active"
+
+	mk := func(root string) session.InstanceData {
+		d := session.InstanceData{Title: "s", CreatedAt: time.Now()}
+		d.Worktree.RepoPath = root
+		return d
+	}
+	repoB := "/repos/other"
+	rowByRoot := func() map[string]ui.SidebarProject {
+		out := map[string]ui.SidebarProject{}
+		for _, r := range h.projects.Projects() {
+			out[r.Root] = r
+		}
+		return out
+	}
+
+	// A poll whose cross-repo list has two sessions in repo B updates the rows.
+	h.Update(snapshotFetchedMsg{
+		repoID:   h.repoID,
+		allRepos: []session.InstanceData{mk(repoB), mk(repoB)},
+	})
+	rows := rowByRoot()
+	require.Contains(t, rows, repoB, "a session in another repo appears without a switch")
+	assert.Equal(t, 2, rows[repoB].SessionCount, "counts reflect the cross-repo snapshot")
+	require.Contains(t, rows, h.repoRoot, "the active project is always listed")
+	assert.True(t, rows[h.repoRoot].Active, "the active project stays marked")
+
+	// A later poll with a changed count updates the visible rows live.
+	h.Update(snapshotFetchedMsg{
+		repoID:   h.repoID,
+		allRepos: []session.InstanceData{mk(repoB), mk(repoB), mk(repoB)},
+	})
+	assert.Equal(t, 3, rowByRoot()[repoB].SessionCount,
+		"the count updates on the next poll — no project switch needed")
+
+	// A poll error leaves the last-known rows intact (no blanking on a hiccup).
+	h.Update(snapshotFetchedMsg{
+		repoID:      h.repoID,
+		allReposErr: assert.AnError,
+	})
+	assert.Equal(t, 3, rowByRoot()[repoB].SessionCount,
+		"a failed cross-repo read keeps the last-known counts")
 }

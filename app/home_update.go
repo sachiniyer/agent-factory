@@ -155,6 +155,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.refreshTasks(msg.tasks, msg.tasksErr) {
 			changed = true
 		}
+		// Keep the always-visible Projects section's per-repo counts live from the
+		// cross-repo snapshot fetched on the same poll (#1590), so a session
+		// created/removed in another repo updates the rows without a project
+		// switch. Its own error path leaves the last-known rows intact.
+		if m.refreshSidebarProjectsFromSnapshot(msg.allRepos, msg.allReposErr) {
+			changed = true
+		}
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
 		if changed {
