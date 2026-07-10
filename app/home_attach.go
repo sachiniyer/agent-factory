@@ -75,7 +75,8 @@ func (m *home) beginAttachTransition(run func() tea.Cmd) tea.Cmd {
 // terminal_cmd PTY) while preserving the real `remote` argument the call site
 // computed. That keeps the call-site decision exercised end to end — the #889
 // regression is that the terminal-tab site passed a hardcoded false instead of
-// selected.IsRemote(), which can only be caught by a test that drives the real
+// the instance's real remote-ness (now Capabilities().Workspace ==
+// WorkspaceRemote), which can only be caught by a test that drives the real
 // handleEnter and observes the post-detach reset keyed off that argument.
 var attachOverlayCallbackFn = (*home).attachOverlayCallback
 

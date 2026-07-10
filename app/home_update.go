@@ -339,7 +339,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		_ = started.Transition(session.ConfirmLive())
-		if !swapped && !started.IsRemote() {
+		if !swapped && started.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 			m.store.RegisterRepoForInstance(started)
 		}
 		started.SetAutoYes(m.autoYes)

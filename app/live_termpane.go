@@ -349,7 +349,9 @@ func (m *home) liveBindCandidate(target *store.OpenPane) (key, sessionName strin
 // dead/lost/transitional instances are fenced off earlier by
 // interactiveGuard's explicit errors.
 func liveSessionName(inst *session.Instance, tab int) string {
-	if inst == nil || inst.IsRemote() || !inst.Started() {
+	// Only a local-worktree backend has a local tmux session to embed; other
+	// workspaces (remote hook) fall back to the full-screen attach path.
+	if inst == nil || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree || !inst.Started() {
 		return ""
 	}
 	// No live session name for a row with an in-flight op (create/kill/archive)

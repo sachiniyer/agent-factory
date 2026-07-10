@@ -16,6 +16,36 @@ import (
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
+// TestInstanceRendererRemoteBadge pins the sidebar "[remote]" title badge to the
+// backend's WorkspaceRemote capability rather than a Type()=="remote" check
+// (#1592 Phase 1 PR2): a hook-backed (remote-workspace) instance is prefixed,
+// a local one is not.
+func TestInstanceRendererRemoteBadge(t *testing.T) {
+	spin := spinner.New()
+	r := NewInstanceRenderer(&spin)
+	r.SetWidth(60)
+
+	render := func(t *testing.T, remote bool) string {
+		t.Helper()
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title:   "feature",
+			Path:    t.TempDir(),
+			Program: "test",
+		})
+		require.NoError(t, err)
+		if remote {
+			inst.SetBackend(&session.HookBackend{})
+			require.Equal(t, session.WorkspaceRemote, inst.Capabilities().Workspace)
+		}
+		return ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
+	}
+
+	assert.Contains(t, render(t, true), "[remote] feature",
+		"a remote-workspace instance must carry the [remote] title badge")
+	assert.NotContains(t, render(t, false), "[remote]",
+		"a local instance must not carry the [remote] badge")
+}
+
 // effectiveWidth models a sidebar-style content buffer (narrower than the
 // allocation) so the renderer tests exercise an effective content width the
 // way the sidebar passes one to SetWidth in production. Inlined rather than

@@ -267,11 +267,12 @@ func (m *Menu) addInstanceOptions() {
 
 	// Tab group: create, close, and number-jump (#930 PR 4). The tab CYCLE key
 	// is gone — Tab now cycles the focus ring (#1024 PR 4); tabs are reached
-	// via the tree and the 1-9 jump keys. Remote instances block `t` (new tab)
-	// and `w` (close tab) — those handlers reject IsRemote() with an error — so
-	// only advertise the tab keys that actually work: number-jump (#988).
+	// via the tree and the 1-9 jump keys. Backends without tab management block
+	// `t` (new tab) and `w` (close tab) — those handlers reject them with an
+	// error — so only advertise the tab keys that actually work: number-jump
+	// (#988).
 	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab, keys.KeyJumpTab}
-	if m.instance != nil && m.instance.IsRemote() {
+	if m.instance != nil && !m.instance.Capabilities().TabManagement {
 		tabGroup = []keys.KeyName{keys.KeyJumpTab}
 	}
 

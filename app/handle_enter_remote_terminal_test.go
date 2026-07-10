@@ -21,6 +21,13 @@ type remoteFakeBackend struct {
 
 func (remoteFakeBackend) Type() string { return "remote" }
 
+// Capabilities mirrors a bare remote hook backend (WorkspaceRemote, attachable,
+// no terminal_cmd) so the delocalized client gates that read Capabilities()
+// see this double as remote (#1592 Phase 1 PR2).
+func (remoteFakeBackend) Capabilities() session.Capabilities {
+	return (&session.HookBackend{}).Capabilities()
+}
+
 // swapAttachOverlayCallbackFn redirects the handleEnter -> attachOverlayCallback
 // indirection for the duration of a test. The substitute forwards the real
 // `remote` flag the call site computed but replaces the attach closure with one

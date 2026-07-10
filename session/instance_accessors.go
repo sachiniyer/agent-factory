@@ -9,7 +9,7 @@ import (
 )
 
 func (i *Instance) RepoName() (string, error) {
-	if i.IsRemote() {
+	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
 		return "", fmt.Errorf("remote instances do not have a local repo")
 	}
 	i.mu.RLock()

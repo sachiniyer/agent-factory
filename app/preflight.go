@@ -11,7 +11,9 @@ import (
 var localSessionPreflight = preflight.LocalSessionPrereqs
 
 func (m *home) preflightSessionCreate(instance *session.Instance) error {
-	if instance == nil || instance.IsRemote() {
+	// Local-session prerequisites (the agent binary, etc.) only apply to a
+	// backend that runs the agent on a local worktree.
+	if instance == nil || instance.Capabilities().Workspace != session.WorkspaceLocalWorktree {
 		return nil
 	}
 	cfg, err := m.preflightConfig()

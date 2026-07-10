@@ -516,8 +516,8 @@ func AttachTerminalTab(instance *session.Instance, tabIdx int) (chan struct{}, e
 	if instance == nil {
 		return nil, fmt.Errorf("no terminal session to attach to")
 	}
-	if instance.IsRemote() {
-		if !instance.SupportsRemoteTerminal() {
+	if caps := instance.Capabilities(); caps.Workspace == session.WorkspaceRemote {
+		if !caps.TerminalTab {
 			return nil, fmt.Errorf("remote terminal is not configured: add a terminal_cmd to remote_hooks to enable the Terminal tab for remote sessions")
 		}
 		return instance.AttachRemoteTerminal()
