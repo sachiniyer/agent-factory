@@ -380,12 +380,28 @@ func (a *AutomationsPane) String() string {
 			fitLine(fmt.Sprintf("  no tasks — press %s, then n to create one", automationHelpKey(keys.KeyTaskList)), a.rect.W)))
 	}
 
+	// Reserve the last rail row as a blank bottom margin so the workspace
+	// frame's bottom border never abuts the section's last row (#1560), the way
+	// the sidebar's leading blank row keeps the frame's TOP border off the
+	// rail. The grid sizes every full-mode section at least layout.AutomationsRows
+	// tall (floor / grow-to-content / half-cap all include this margin), so
+	// reserving one row costs no visible capacity in the app. Guard the
+	// reservation on the section being at least that floor tall: a direct caller
+	// that hands the pane a tighter, content-exact rect (below any size the grid
+	// ever produces) keeps every content row rather than silently losing one —
+	// the margin only matters where a workspace frame is actually drawn beside
+	// the section, which is always at the grid's real (>= floor) sizes.
+	contentH := a.rect.H
+	if a.rect.H >= layout.AutomationsRows {
+		contentH = a.rect.H - 1
+	}
+
 	// Window the rows around the cursor so a focused selection below the fold
 	// scrolls into view instead of moving invisibly. The focused selection
 	// expands to a 2-line row (title + detail), so reserve a line for the
 	// detail when scrolling the selection to the bottom keeps it fully visible
 	// rather than clipping its detail off the fold.
-	visible := a.rect.H - 1
+	visible := contentH - 1
 	if visible < 0 {
 		visible = 0
 	}
@@ -406,13 +422,13 @@ func (a *AutomationsPane) String() string {
 		a.offset = 0
 	}
 	for i := a.offset; i < len(tasks); i++ {
-		if len(lines) >= a.rect.H {
+		if len(lines) >= contentH {
 			break
 		}
 		expanded := a.focused && i == a.selected
 		rowStart := len(lines)
 		lines = append(lines, a.titleRow(tasks[i], expanded))
-		if expanded && len(lines) < a.rect.H {
+		if expanded && len(lines) < contentH {
 			if detail := a.detailRow(tasks[i]); detail != "" {
 				lines = append(lines, detail)
 			}
