@@ -379,6 +379,7 @@ af_new_instance() {
     af_focus_tree || return 1
     af_send n
     af_wait_for 'submit name' "$AF_DRIVER_TIMEOUT" 'name prompt' || return 1
+    af_wait_gone '[Ss]ession [Nn]ame:' 1 'old name prompt label' || return 1
     af_send_literal "$name"
     af_send Enter
     af_wait_for "${name}.*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
