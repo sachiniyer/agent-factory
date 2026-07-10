@@ -89,6 +89,9 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The pre-archive worktree location, captured before the move, so a persist
+	// failure after the commit can roll the worktree back home (#1538).
+	origPath := instance.GetWorktreePath()
 
 	// Raise the archive fence through the chokepoint (#1195 Phase 2d): BeginArchive
 	// sets OpArchiving (I4) so the status poll skips this instance (and the
@@ -119,13 +122,56 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	}
 
 	// Success: worktree relocated, tmux down. Commit the inert Archived state
-	// (started=false, op cleared) — reachable only from the fence (I2) — and
-	// persist the new path + status.
+	// (started=false, op cleared) — reachable only from the fence (I2) — then
+	// persist the new path + status DURABLY.
+	//
+	// Unlike the best-effort status poll, a swallowed persist failure here is
+	// unsafe (#1538): the on-disk record would still point at the pre-archive
+	// worktree with started=true, so after a daemon restart the Lost-restore loop
+	// would try to rebuild the worktree at the old path and hit "branch already
+	// checked out at <archivedPath>", orphaning the archive — the user can no
+	// longer reach it via af. So on a persist failure, undo the physical archive:
+	// move the worktree back home and drop the session to Lost, leaving the
+	// on-disk record and reality consistent again and letting the #1108 loop heal
+	// it in place. (The tiny window between the move and this persist completing —
+	// a crash there — is inherent without a write-ahead journal; the reproducible
+	// persist-error cause this issue reports is fully closed.)
 	_ = instance.Transition(session.CommitArchive())
 	archivedPath := instance.GetWorktreePath()
-	m.persistInstance(repoID, instance)
+	if perr := archivePersist(m, repoID, instance); perr != nil {
+		log.ErrorLog.Printf("archive of session %q: failed to durably record the Archived state (%v); rolling back to keep the on-disk record consistent", req.Title, perr)
+		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
+			// Could not move the worktree home: the committed archive is the
+			// safest remaining state. Persist it best-effort and surface both
+			// failures so the operator can recover it manually.
+			m.persistInstance(repoID, instance)
+			return "", fmt.Errorf("archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery", req.Title, archivedPath, perr, rbErr)
+		}
+		return "", fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
+	}
 	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
 	return archivedPath, nil
+}
+
+// undoCommittedArchive rolls a committed-but-unpersisted archive back to a
+// self-healing live state (#1538). It moves the worktree back to its pre-archive
+// location (origPath) and returns the instance to a plain Lost with started=true,
+// via the only legal edge path out of the committed Archived state: BeginRestore
+// (Archived -> Lost + OpRestoring, started=true) then AbortRestoreToLost (op
+// cleared). With the worktree home and the record dropped to Lost, the on-disk
+// record — still the pre-archive one, since the archive persist failed — matches
+// reality, so a daemon restart re-spawns at the right path and the #1108 restore
+// loop heals the agent in place. The rolled-back state is persisted best-effort;
+// even if that write also fails, the worktree being home already keeps disk and
+// reality consistent. Returns an error only when the move home itself fails.
+func (m *Manager) undoCommittedArchive(repoID string, instance *session.Instance, origPath string) error {
+	if err := instance.RestoreArchivedWorktree(origPath); err != nil {
+		return err
+	}
+	_ = instance.Transition(session.BeginRestore())
+	_ = instance.Transition(session.AbortRestoreToLost())
+	m.persistInstance(repoID, instance)
+	return nil
 }
 
 // RestoreArchived restores an archived session (#1028): it moves the worktree
@@ -243,18 +289,32 @@ func (m *Manager) archiveExclusiveTabLock(key string, instance *session.Instance
 	return opLock, nil
 }
 
-// persistInstance writes one instance's authoritative data through the targeted
-// per-repo writer under the repo start lock, mirroring refreshInstanceStatus's
-// persist. Best-effort: a failed write only logs.
-func (m *Manager) persistInstance(repoID string, instance *session.Instance) {
+// persistInstanceErr writes one instance's authoritative data through the
+// targeted per-repo writer under the repo start lock, mirroring
+// refreshInstanceStatus's persist, and returns any write error. persistInstance
+// wraps it for the best-effort callers; the archive commit uses this variant to
+// make the persist durable (#1538).
+func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) error {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
-	err := persistInstanceData(repoID, instance.ToInstanceData())
-	repoStartLock.Unlock()
-	if err != nil {
+	defer repoStartLock.Unlock()
+	return persistInstanceData(repoID, instance.ToInstanceData())
+}
+
+// persistInstance is the best-effort form of persistInstanceErr: a failed write
+// only logs. Used everywhere the persist is a checkpoint that the next poll/tick
+// will re-attempt, never where the write's durability gates correctness.
+func (m *Manager) persistInstance(repoID string, instance *session.Instance) {
+	if err := m.persistInstanceErr(repoID, instance); err != nil {
 		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, err)
 	}
 }
+
+// archivePersist is the durable persist ArchiveSession runs at its commit. A
+// package var so tests can force a persist failure in isolation (exercising the
+// rollback in #1538) without disturbing any other persist. Production points it
+// at persistInstanceErr.
+var archivePersist = (*Manager).persistInstanceErr
 
 // archivedWorktreePath returns the global archive location for a session's
 // relocated worktree: <AGENT_FACTORY_HOME>/archived/<repoID>/<safeTitle>/. The

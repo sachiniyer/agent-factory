@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,6 +110,48 @@ func TestArchiveSession_MoveFailureMarksLost(t *testing.T) {
 	assert.True(t, inst.Started(), "started stays true so the Lost-restore loop re-spawns the agent")
 	assert.True(t, exists(srcPath), "the worktree must remain at its original path on a failed archive")
 	assert.Equal(t, session.Lost, persistedStatus(t, repoID, "worker"))
+}
+
+// TestArchiveSession_PersistFailureRollsBack is the #1538 regression: when the
+// durable persist of the committed Archived state fails, the archive must NOT be
+// left half-recorded (a stale on-disk record pointing at the vacated pre-archive
+// worktree, which would orphan the worktree after a daemon restart). Instead the
+// worktree is moved back to its original location and the session dropped to
+// Lost, so the #1108 restore loop heals it and the on-disk record matches
+// reality.
+func TestArchiveSession_PersistFailureRollsBack(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+
+	prev := archivePersist
+	archivePersist = func(*Manager, string, *session.Instance) error {
+		return errors.New("forced persist failure")
+	}
+	t.Cleanup(func() { archivePersist = prev })
+
+	dest, derr := archivedWorktreePath(repoID, "worker")
+	require.NoError(t, derr)
+
+	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err, "a persist failure must surface an error, not a silent half-archive")
+
+	assert.Equal(t, session.Lost, inst.GetStatus(), "a persist failure rolls the archive back to Lost for self-heal")
+	assert.True(t, inst.Started(), "started stays true so the Lost-restore loop re-spawns the agent")
+	assert.Equal(t, srcPath, inst.GetWorktreePath(), "the worktree must be moved back to its original location")
+	assert.True(t, exists(srcPath), "the worktree must exist at its original location again")
+	assert.False(t, exists(dest), "the archive directory must be vacated by the rollback")
+
+	// The rolled-back Lost state is persisted (via the real writer in
+	// undoCommittedArchive), so a restart sees a record consistent with reality.
+	assert.Equal(t, session.Lost, persistedStatus(t, repoID, "worker"))
+	rec := recordFor(t, repoID, "worker")
+	require.NotNil(t, rec)
+	assert.Equal(t, srcPath, rec.Worktree.WorktreePath, "the persisted record must point back at the original worktree")
+
+	// The worktree is a valid, registered git worktree back at the original path.
+	list, lerr := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain").CombinedOutput()
+	require.NoError(t, lerr, string(list))
+	assert.Contains(t, string(list), srcPath, "git must register the worktree back at the original path")
 }
 
 // TestArchiveSession_RejectsReservedRoot: the always-ensured root session cannot
