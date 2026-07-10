@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -17,6 +18,25 @@ import (
 // path releases the instance lock before these tmux calls, so it must not
 // assume serialization.
 var pasteBufferSeq atomic.Uint64
+
+// pasteBufferProcessToken uniquely identifies THIS process within a tmux server.
+// tmux buffers are server-scoped, and the seq counter above is process-local, so
+// two af processes sharing a server and a session name would otherwise mint the
+// SAME buffer name — letting one process's load-buffer clobber the other's
+// pending buffer, or (with the #1536 failure cleanup) one process's delete-buffer
+// remove the other's buffer and lose its prompt. The PID is unique among
+// concurrently-live processes, which is exactly the collision window, so keying
+// the name on it makes cross-process collision impossible. Resolved once at
+// startup.
+var pasteBufferProcessToken = fmt.Sprintf("%d", os.Getpid())
+
+// pasteBufferName builds the per-call unique tmux paste-buffer name. It is keyed
+// on the process token (cross-process uniqueness on a shared, server-scoped tmux
+// buffer namespace), the sanitized session name, and a process-local sequence
+// (intra-process uniqueness across concurrent deliveries to the same session).
+func pasteBufferName(processToken, sanitizedName string, seq uint64) string {
+	return fmt.Sprintf("af_paste_%s_%s_%d", processToken, sanitizedName, seq)
+}
 
 // SendKeysCommand sends text to the tmux pane using tmux commands instead of
 // writing to the PTY. This is more reliable for headless/scheduled runs where
@@ -43,9 +63,11 @@ func (t *TmuxSession) SendKeysCommand(text string) error {
 func (t *TmuxSession) sendKeysPasteBuffer(text string, bracketed bool) error {
 	// A per-call unique buffer name: two concurrent deliveries to the same
 	// session must not share a buffer, or one call's load-buffer could overwrite
-	// the other's content between its load and paste and corrupt the submit.
-	// `-d` clears the buffer after pasting so buffers never accumulate.
-	buf := fmt.Sprintf("af_paste_%s_%d", t.sanitizedName, pasteBufferSeq.Add(1))
+	// the other's content between its load and paste and corrupt the submit. The
+	// process token additionally keeps two af processes on a shared tmux server
+	// from colliding on the same server-scoped buffer name. `-d` clears the buffer
+	// after pasting so buffers never accumulate.
+	buf := pasteBufferName(pasteBufferProcessToken, t.sanitizedName, pasteBufferSeq.Add(1))
 
 	loadCmd := exec.Command("tmux", "load-buffer", "-b", buf, "-")
 	loadCmd.Stdin = strings.NewReader(text)

@@ -285,6 +285,33 @@ func TestSubmitDeletesBufferWhenPasteFails(t *testing.T) {
 		"a failed paste must delete-buffer the same buffer it loaded, not leak it (#1536)")
 }
 
+// TestPasteBufferNameProcessTokenPreventsCrossProcessCollision is the #1536
+// Greptile guard: tmux buffers are server-scoped and the seq counter is
+// process-local, so two af processes sharing a tmux server and a session name
+// must NOT mint the same buffer name. If they did, one process's load-buffer
+// would clobber — or its failure-cleanup delete-buffer would remove — the other's
+// pending buffer and lose its prompt. The per-process token makes that
+// impossible while the seq still keeps one process's concurrent deliveries apart.
+func TestPasteBufferNameProcessTokenPreventsCrossProcessCollision(t *testing.T) {
+	const session = "af_proj"
+
+	// Same session + same seq, two different process tokens → distinct names.
+	a := pasteBufferName("1234", session, 1)
+	b := pasteBufferName("5678", session, 1)
+	require.NotEqual(t, a, b,
+		"different process tokens must not collide on the same session/seq (#1536)")
+	require.Contains(t, a, "1234", "the buffer name must carry the process token")
+	require.Contains(t, b, "5678", "the buffer name must carry the process token")
+
+	// Within one process, the seq still keeps concurrent same-session deliveries
+	// distinct.
+	require.NotEqual(t, pasteBufferName("1234", session, 1), pasteBufferName("1234", session, 2),
+		"the process-local seq must still disambiguate concurrent deliveries")
+
+	// The live process token is non-empty, so real submits are always namespaced.
+	require.NotEmpty(t, pasteBufferProcessToken, "the process token must be resolved at startup")
+}
+
 func captureRawPane(session *TmuxSession) (string, error) {
 	cmd := exec.Command("tmux", "capture-pane", "-p", "-t", exactTarget(session.sanitizedName))
 	out, err := session.cmdExec.Output(cmd)
