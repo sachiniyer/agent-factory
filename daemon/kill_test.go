@@ -177,6 +177,76 @@ func TestKillSessionCleanBranchProceedsWithoutForce(t *testing.T) {
 	assertNoSessionRecord(t, repo.ID, data.Title)
 }
 
+// TestKillSessionInPlaceDoesNotDeleteRepoRoot pins the worktree-OWNERSHIP
+// safety that survives the #1579 guard drop: killing an in-place (`--here`) /
+// external-worktree session must NEVER delete the user's real checkout. That
+// protection lives in GitWorktree.Cleanup() (externalWorktree → no-op; branch
+// deletion gated on branchCreatedByUs), independent of the removed unmerged-work
+// refusal — so dropping the guard must not endanger the user's repo root.
+func TestKillSessionInPlaceDoesNotDeleteRepoRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{"claude": "sh -c 'echo agent-ready; exec sleep 600'"}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	manager, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// A committed sentinel in the user's real checkout, plus the current branch.
+	sentinel := filepath.Join(repoPath, "user-file.txt")
+	if err := os.WriteFile(sentinel, []byte("precious\n"), 0644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+	runGitTest(t, repoPath, "add", "user-file.txt")
+	runGitTest(t, repoPath, "commit", "-m", "user work")
+	branch := strings.TrimSpace(runGitTest(t, repoPath, "rev-parse", "--abbrev-ref", "HEAD"))
+
+	data, err := manager.CreateSession(CreateSessionRequest{
+		Title:    "inplace",
+		RepoPath: repoPath,
+		Program:  "claude",
+		InPlace:  true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession --here: %v", err)
+	}
+	if !data.Worktree.ExternalWorktree {
+		t.Fatalf("in-place session must record ExternalWorktree=true, got %+v", data.Worktree)
+	}
+	// Leave uncommitted work in the tree: the exact state the old guard would
+	// have refused. Ownership safety, not the guard, must protect it.
+	if err := os.WriteFile(filepath.Join(repoPath, "scratch.txt"), []byte("wip\n"), 0644); err != nil {
+		t.Fatalf("write scratch: %v", err)
+	}
+
+	if err := manager.KillSession(KillSessionRequest{Title: "inplace", RepoID: repo.ID}); err != nil {
+		t.Fatalf("kill of in-place session: %v", err)
+	}
+
+	// The user's real checkout must be entirely intact.
+	if _, err := os.Stat(repoPath); err != nil {
+		t.Fatalf("kill must not remove the repo root %s: %v", repoPath, err)
+	}
+	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "precious\n" {
+		t.Fatalf("kill must not touch the user's committed file (got %q, err %v)", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(repoPath, "scratch.txt")); err != nil {
+		t.Fatalf("kill must not delete the user's uncommitted work: %v", err)
+	}
+	// The user's branch must survive — the session never created it.
+	runGitTest(t, repoPath, "rev-parse", "--verify", "refs/heads/"+branch)
+	assertNoSessionRecord(t, repo.ID, "inplace")
+}
+
 func TestKillSessionForceStillDestroys(t *testing.T) {
 	// --force is now a no-op but must remain accepted so existing
 	// `af sessions kill --force` invocations keep working (#1579).
