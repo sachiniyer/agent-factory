@@ -110,8 +110,11 @@ envelope) to stdout instead of writing a file or opening a draft.`,
 		}
 
 		// Default: open a pre-filled GitHub issue DRAFT for this repo. The bundle
-		// is attached by the user; nothing is submitted automatically.
-		body := strings.Replace(result.Body, bugreport.BundlePathPlaceholder, outPath, 1)
+		// is attached by the user; nothing is submitted automatically. The path is
+		// redacted ($HOME→~ / username→[user]) before it goes into the draft body
+		// so the public draft can't leak it, while stdout still prints the real
+		// local path.
+		body := strings.Replace(result.Body, bugreport.BundlePathPlaceholder, bugreport.RedactPath(outPath), 1)
 		opened, reason := openGitHubIssueDraft(".", result.Title, body)
 		if !opened {
 			fmt.Fprintf(w, "Couldn't open a GitHub issue draft (%s).\n", reason)

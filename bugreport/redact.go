@@ -95,6 +95,15 @@ func newRedactor() *redactor {
 	return &redactor{home: home, users: users}
 }
 
+// RedactPath collapses $HOME to ~ and the username to [user] in a single path,
+// using the same rules as the bundle redactor. The command layer runs the
+// written bundle's path through it before inlining the path into the GitHub
+// issue-draft body, so the (public) draft can't leak $HOME/username even though
+// the bundle itself is redacted.
+func RedactPath(p string) string {
+	return newRedactor().scrub(p)
+}
+
 // appendUserToken adds a username token to the scrub list, skipping empties,
 // path-ish junk, and tokens under 3 chars (too short to replace safely without
 // mangling unrelated substrings).

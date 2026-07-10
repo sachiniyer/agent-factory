@@ -336,6 +336,22 @@ func TestScrubLogRedactsSessionTitles(t *testing.T) {
 	}
 }
 
+// TestRedactPathCollapsesHome guards the fix for the raw-home-path leak: the
+// bundle path inlined into the (public) GitHub issue-draft body must have $HOME
+// collapsed to ~ so it never leaks the user's home/username.
+func TestRedactPathCollapsesHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	p := filepath.Join(home, "af-bug-report-20260710-120000.txt")
+	out := RedactPath(p)
+	if strings.Contains(out, home) {
+		t.Errorf("home path not collapsed in draft-body path: %q -> %q", p, out)
+	}
+	if !strings.HasPrefix(out, "~/") {
+		t.Errorf("expected the redacted path to start with ~/: %q", out)
+	}
+}
+
 // TestBuildEndToEnd plants a full temp home with a secret and a home path in
 // every collected surface (instances, tasks, config, log, daemon status) and
 // asserts the produced bundle scrubs them while keeping the structural fields.

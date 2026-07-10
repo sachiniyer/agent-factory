@@ -1,12 +1,15 @@
 package commands
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"net/url"
 	"os/exec"
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // The GitHub issue-draft flow for `af bug-report`: after the redacted bundle is
@@ -70,11 +73,13 @@ func githubIssueNewURL(owner, repo, title, body string) string {
 }
 
 // ghIssueCreateWebArgs builds the `gh` arguments that open a pre-filled browser
-// draft. `--web` is what keeps this draft-only: gh constructs the issues/new URL
-// and opens the browser instead of creating the issue over the API, so there is
-// no auto-submit and no confirmation flag.
-func ghIssueCreateWebArgs(title, body string) []string {
-	return []string{"issue", "create", "--web", "--title", title, "--body", body}
+// draft. `--repo <owner/repo>` pins the target so gh cannot resolve to the wrong
+// repo via GH_REPO / a stray gh remote config; `--web` is what keeps this
+// draft-only: gh constructs the issues/new URL and opens the browser instead of
+// creating the issue over the API, so there is no auto-submit and no
+// confirmation flag.
+func ghIssueCreateWebArgs(repoSlug, title, body string) []string {
+	return []string{"issue", "create", "--repo", repoSlug, "--web", "--title", title, "--body", body}
 }
 
 // openGitHubIssueDraft opens a pre-filled, DRAFT-ONLY GitHub issue for the repo
@@ -93,21 +98,54 @@ func openGitHubIssueDraft(repoPath, title, body string) (opened bool, reason str
 		return false, "origin remote is not a github.com repository"
 	}
 
-	// Prefer gh when present — it opens a clean pre-filled browser draft.
+	// Prefer gh when present — it opens a clean, repo-pinned browser draft.
 	if _, err := exec.LookPath("gh"); err == nil {
-		c := exec.Command("gh", ghIssueCreateWebArgs(title, body)...)
-		c.Dir = repoPath
-		if err := c.Start(); err == nil {
-			reap(c)
-			return true, ""
-		}
+		return openViaGh(repoPath, owner+"/"+repo, title, body)
 	}
 
-	// Fallback: open the pre-filled issues/new URL in the browser.
+	// gh absent: open the pre-filled issues/new URL in the browser directly.
 	if err := openInBrowser(githubIssueNewURL(owner, repo, title, body)); err != nil {
 		return false, fmt.Sprintf("no browser opener available (%v)", err)
 	}
 	return true, ""
+}
+
+// openViaGh runs `gh issue create --web` and reports success ONLY when gh
+// actually exits 0. `--web` builds the issues/new URL and launches the browser
+// without waiting, so gh returns promptly; we wait (not fire-and-forget) so an
+// auth/remote/browser failure surfaces as opened=false — letting the caller fall
+// back to the file path — instead of a false "draft opened". A timeout guards
+// the (unexpected) case where gh blocks, and nil stdin means any prompt EOFs out
+// rather than hanging.
+func openViaGh(repoPath, repoSlug, title, body string) (opened bool, reason string) {
+	ctx, cancel := context.WithTimeout(context.Background(), ghDraftTimeout)
+	defer cancel()
+
+	c := exec.CommandContext(ctx, "gh", ghIssueCreateWebArgs(repoSlug, title, body)...)
+	c.Dir = repoPath
+	var errBuf bytes.Buffer
+	c.Stderr = &errBuf
+	if err := c.Run(); err != nil {
+		detail := firstLine(strings.TrimSpace(errBuf.String()))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return false, "gh could not open a draft: " + detail
+	}
+	return true, ""
+}
+
+// ghDraftTimeout bounds openViaGh so a wedged gh can never hang `af bug-report`;
+// gh --web normally returns in well under a second.
+const ghDraftTimeout = 20 * time.Second
+
+// firstLine returns s up to (not including) the first newline, so a multi-line
+// gh error collapses to a single readable reason.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // gitRemoteURL returns the configured URL of the named remote in repoPath.

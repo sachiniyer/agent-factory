@@ -147,7 +147,7 @@ func TestGithubIssueNewURL(t *testing.T) {
 // with the templated title/body, and must NOT carry any non-interactive submit
 // flag.
 func TestGhIssueCreateWebArgs(t *testing.T) {
-	args := ghIssueCreateWebArgs("my title", "my body")
+	args := ghIssueCreateWebArgs("sachiniyer/agent-factory", "my title", "my body")
 	joined := strings.Join(args, " ")
 
 	if args[0] != "issue" || args[1] != "create" {
@@ -155,6 +155,10 @@ func TestGhIssueCreateWebArgs(t *testing.T) {
 	}
 	if !containsArg(args, "--web") {
 		t.Errorf("draft flow must use --web (browser draft, no auto-submit): %v", args)
+	}
+	// The target repo must be pinned so gh can't resolve to the wrong repo.
+	if !containsArgValue(args, "--repo", "sachiniyer/agent-factory") {
+		t.Errorf("gh target not pinned to the parsed repo: %v", args)
 	}
 	if !containsArgValue(args, "--title", "my title") || !containsArgValue(args, "--body", "my body") {
 		t.Errorf("title/body not templated into gh args: %v", args)
