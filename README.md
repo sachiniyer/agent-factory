@@ -91,6 +91,7 @@ Common TUI keys:
 | `y` | Copy the selected session's PR URL |
 | `e` | Open the worktree hooks editor |
 | `Ctrl-u` / `Ctrl-d` | Scroll the selected tab up/down |
+| `Ctrl-p` | Switch the active project/repo without restarting |
 
 Previous default keys are not built-in aliases. To restore the old visible
 keymap, pin those bindings in `~/.agent-factory/config.toml`:

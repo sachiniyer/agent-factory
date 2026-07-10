@@ -42,6 +42,8 @@ af doctor --setup  # optional but recommended on first run
 af                 # launch the TUI
 ```
 
+Press **`Ctrl-p`** at any time to switch projects without restarting.
+
 The TUI opens with an empty sidebar. From here:
 
 1. Press **`n`** to create a new session. Give it a name and, optionally,

@@ -176,11 +176,11 @@ tasks = "ctrl+t"
 ```
 
 - Key strings are the forms the terminal reports: a single character (`Q`, `/`, `?`), a named key (`up`, `enter`, `f5`, `space`), or a `ctrl+`/`alt+`/`shift+` combination (`ctrl+t`, `shift+up`).
-- **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `tasks`, `search`, `open_pr`, `copy_pr`, `hooks`, `open_pane`, `split_pane`, `hide_pane`, `pane_prev`, `pane_next`, `collapse`, `expand`, `next_section`, `prev_section`. (Run `af keys` to print the full effective table.)
+- **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `tasks`, `search`, `open_pr`, `copy_pr`, `hooks`, `open_pane`, `split_pane`, `hide_pane`, `pane_prev`, `pane_next`, `collapse`, `expand`, `next_section`, `prev_section`, `archive`, `limit_retry`, `error_details`, `switch_project`. (Run `af keys` to print the full effective table.)
 - `pane_prev` / `pane_next` are contextual: their default `left` / `right` bindings switch panes only while a workspace pane has focus. With tree focus, the same arrows keep the tree's collapse/expand behavior.
 - **Reserved keys** are rejected: binding any action to `enter`, `tab`, `shift+tab`, `esc`, `ctrl+]`, or a digit `1`–`9` is a startup error naming the key and why it's reserved (they drive interaction, the focus ring, overlay cancel, the interactive-mode exit, and the 1–9 tab jump respectively).
 - **`ctrl+c` is a fixed hard exit, not a reserved key.** Validation does *not* reject it — you can write `quit = "ctrl+c"` (or point any action at it) with no error — but `ctrl+c` always quits and is handled before the keymap ever sees the keypress, so binding an action to it has no effect: the hard exit wins. It is therefore not *effectively* rebindable, which is different from the reserved keys above that are outright rejected at load.
-- Any problem — an unknown action, an unparseable or reserved key, or two actions bound to the same key — is a **hard error at startup** that names the file and the offending action, so a typo can't silently leave you with a dead key. The bottom menu and the `?` help overlay both reflect your rebinds.
+- Any problem — an unknown action, an unparseable or reserved key, or two user overrides bound to the same key — is a **hard error at startup** that names the file and the offending action, so a typo can't silently leave you with a dead key. A user override on a key *suppresses* any default binding for that key rather than erroring, so an upgrade that ships a new default binding never breaks an existing config — the user's binding wins and the new action is simply unbound by default. The bottom menu and the `?` help overlay both reflect your rebinds.
 - **Global-only.** `keys` is rejected in in-repo configs — a cloned repository can never rebind your terminal.
 - **TOML-only.** The keymap exists only in `config.toml`; a `keys` block in a legacy `config.json` is ignored with a warning.
 
@@ -272,7 +272,7 @@ The **in-repo** file is not auto-converted — see [In-repo file name](#in-repo-
 
 ## Where state lives
 
-All data (sessions, tasks) is scoped to the current git repository — the TUI shows only what's relevant to the repo you're in.
+All data (sessions, tasks) is scoped to the current git repository — the TUI shows only what's relevant to the active project. Press `Ctrl-p` to switch projects without restarting.
 
 | Path | Contents |
 |------|----------|
