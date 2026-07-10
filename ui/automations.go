@@ -381,13 +381,19 @@ func (a *AutomationsPane) String() string {
 	}
 
 	// Reserve the last rail row as a blank bottom margin so the workspace
-	// frame's bottom border never abuts the section's last row (#1560). The
-	// grid sizes the region one row taller to keep the visible capacity, so
-	// content is rendered into contentH = rect.H-1 and the final ClampToRect
-	// leaves the reserved row blank.
-	contentH := a.rect.H - 1
-	if contentH < 1 {
-		contentH = 1
+	// frame's bottom border never abuts the section's last row (#1560), the way
+	// the sidebar's leading blank row keeps the frame's TOP border off the
+	// rail. The grid sizes every full-mode section at least layout.AutomationsRows
+	// tall (floor / grow-to-content / half-cap all include this margin), so
+	// reserving one row costs no visible capacity in the app. Guard the
+	// reservation on the section being at least that floor tall: a direct caller
+	// that hands the pane a tighter, content-exact rect (below any size the grid
+	// ever produces) keeps every content row rather than silently losing one —
+	// the margin only matters where a workspace frame is actually drawn beside
+	// the section, which is always at the grid's real (>= floor) sizes.
+	contentH := a.rect.H
+	if a.rect.H >= layout.AutomationsRows {
+		contentH = a.rect.H - 1
 	}
 
 	// Window the rows around the cursor so a focused selection below the fold

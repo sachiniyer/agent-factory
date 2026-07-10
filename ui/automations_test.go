@@ -40,8 +40,7 @@ func stripTasks() []task.Task {
 // trailing cron/next/last text.
 func TestAutomationsCollapsedRowsAreTitleOnly(t *testing.T) {
 	a := newTestAutomations(stripTasks())
-	// H is title + 2 task rows + the reserved bottom-margin row (#1560).
-	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.SetRect(layout.Rect{W: 100, H: 3})
 
 	out := a.View()
 	require.Contains(t, out, "Automations")
@@ -57,8 +56,9 @@ func TestAutomationsCollapsedRowsAreTitleOnly(t *testing.T) {
 // the title, and no other row does.
 func TestAutomationsExpandedRowRevealsDetail(t *testing.T) {
 	a := newTestAutomations(stripTasks())
-	// H is title + the expanded row (title + detail) + a collapsed row + the
-	// reserved bottom-margin row (#1560).
+	// title + the expanded row (title + detail) + a collapsed row + the reserved
+	// bottom-margin row (#1560) — the size the grid grows the section to for two
+	// tasks (2 + margin + 2).
 	a.SetRect(layout.Rect{W: 100, H: 5})
 	a.Focus()
 
@@ -125,6 +125,18 @@ func TestAutomationsReservesBottomMargin(t *testing.T) {
 		"tasks render in the rows above the reserved margin")
 	assert.True(t, lastBlank(flines),
 		"the last row stays blank so the workspace border can't abut a task row")
+
+	// No capacity regression below the grid's floor: a direct caller that hands
+	// the pane a tighter, content-exact full-mode rect than the grid ever
+	// produces keeps every task row rather than losing one to the margin. The
+	// grid always sizes the real section >= AutomationsRows tall, so this is a
+	// direct-caller-only path — the margin only matters at the grid's real sizes.
+	tight := newTestAutomations(stripTasks())
+	require.Less(t, 3, layout.AutomationsRows, "H:3 must be below the margin floor for this to test the tight path")
+	tight.SetRect(layout.Rect{W: 100, H: 3})
+	out := tight.View()
+	assert.Contains(t, out, "nightly-sweep", "H:3 full mode keeps the first task row")
+	assert.Contains(t, out, "ci-watch", "H:3 full mode keeps the second task row (no capacity regression)")
 }
 
 // TestAutomationsFocusShowsCursorNotManager: focusing the section adds a

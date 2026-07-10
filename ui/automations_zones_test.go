@@ -19,8 +19,7 @@ func TestAutomationsRegistersRowZones(t *testing.T) {
 	a := newTestAutomations(tasks)
 	reg := zones.NewRegistry()
 	a.SetZoneRegistry(reg)
-	// H is title + 2 task rows + the reserved bottom-margin row (#1560).
-	rect := layout.Rect{X: 2, Y: 40, W: 90, H: 4}
+	rect := layout.Rect{X: 2, Y: 40, W: 90, H: 3}
 	a.SetRect(rect)
 
 	reg.Reset()
