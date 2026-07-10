@@ -558,6 +558,17 @@ af_open_tasks() {
 
 # af_close_tasks — dismiss the tasks overlay (Escape).
 af_close_tasks() {
+    local deadline screen
+    af_send Escape
+    deadline=$(( $(_af_now) + 4 ))
+    while :; do
+        screen="$(af_capture)"
+        if ! printf '%s\n' "$screen" | grep -qE -- 'run now'; then
+            return 0
+        fi
+        [ "$(_af_now)" -ge "$deadline" ] && break
+        sleep "$AF_DRIVER_POLL"
+    done
     af_send Escape
     af_wait_gone 'run now' 8 'tasks overlay closed' || return 1
 }

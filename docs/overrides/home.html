@@ -13,25 +13,37 @@
     <div class="af-hero__inner">
       <div class="af-hero__copy">
         <span class="af-hero__eyebrow">Terminal-native agent orchestration</span>
-        <h1 class="af-hero__title">Run a swarm of coding agents — <code>af</code> keeps them from stepping on each other.</h1>
+        <h1 class="af-hero__title">Run many coding agents without losing control of your repo.</h1>
         <p class="af-hero__tagline">
-          Agent Factory runs many AI coding agents at once — Claude Code, Codex,
-          Aider, Gemini — each in its own isolated git worktree. Spin up a session
-          per task, watch every agent stream live in one pane, and attach
-          full-screen when one is ready to hand off.
+          Agent Factory gives every task its own git worktree and branch, keeps
+          every agent visible from one terminal, and lets you jump in only when a
+          session needs judgment. The TUI, JSON CLI, and local HTTP API all share
+          one daemon-owned state model.
         </p>
         <div class="af-hero__cta">
           <a href="{{ 'getting-started/' | url }}" class="md-button md-button--primary">Get started</a>
-          <a href="{{ config.repo_url }}" class="md-button">View on GitHub</a>
+          <a href="{{ 'how-it-works/' | url }}" class="md-button">See how it works</a>
         </div>
         <div class="af-hero__badges">
-          <span>{% include ".icons/octicons/check-16.svg" %} Linux · macOS · WSL</span>
+          <span>{% include ".icons/octicons/check-16.svg" %} Claude Code · Codex · Aider · Gemini · Amp</span>
           <span>{% include ".icons/octicons/check-16.svg" %} Needs only tmux + git</span>
-          <span>{% include ".icons/octicons/check-16.svg" %} No Go, no babysitting</span>
+          <span>{% include ".icons/octicons/check-16.svg" %} Linux · macOS · WSL</span>
         </div>
       </div>
       <div class="af-hero__media">
-        <img src="{{ 'assets/demo.gif' | url }}" alt="Agent Factory managing several coding agents from one terminal">
+        <video
+          autoplay
+          muted
+          loop
+          playsinline
+          preload="metadata"
+          poster="{{ 'assets/demo-poster.png' | url }}"
+          aria-label="Agent Factory managing several coding agents from one terminal"
+        >
+          <source src="{{ 'assets/demo.webm' | url }}" type="video/webm">
+          <source src="{{ 'assets/demo.mp4' | url }}" type="video/mp4">
+          <img src="{{ 'assets/demo.gif' | url }}" alt="Agent Factory managing several coding agents from one terminal">
+        </video>
       </div>
     </div>
   </section>

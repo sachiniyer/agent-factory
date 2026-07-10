@@ -149,11 +149,17 @@
   position: relative;
 }
 
-.af-hero__media img {
+.af-hero__media :is(video, img) {
+  display: block;
   width: 100%;
   border-radius: 0.6rem;
   border: 1px solid var(--md-default-fg-color--lightest);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.22);
+}
+
+.af-hero__media video {
+  aspect-ratio: 2.2 / 1;
+  background: #282a36;
 }
 
 .af-hero__badges {
@@ -254,6 +260,77 @@
 .af-section-title {
   text-align: center;
   margin-top: 0.2rem !important;
+}
+
+/* ==========================================================================
+   Diagrams
+   ========================================================================== */
+
+.md-typeset .mermaid {
+  margin: 1.4rem auto;
+  max-width: 44rem;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.md-typeset .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ==========================================================================
+   Wide tables
+   ========================================================================== */
+
+.md-typeset .af-table-wide {
+  margin: 1rem 0 1.6rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.md-typeset .af-table-wide table {
+  margin: 0;
+  width: 100%;
+}
+
+.md-typeset .af-table-wide :is(th, td) {
+  vertical-align: top;
+}
+
+/* ==========================================================================
+   Visual examples
+   ========================================================================== */
+
+.md-typeset .af-visual-example {
+  margin: 1rem 0 1.6rem;
+}
+
+.md-typeset .af-visual-example > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset .af-visual-example > :last-child {
+  margin-bottom: 0;
+}
+
+.md-typeset .af-visual-example figure {
+  margin: 0.8rem 0 0;
+  width: 100%;
+}
+
+.md-typeset .af-visual-example figure p {
+  margin: 0;
+  width: 100%;
+}
+
+.md-typeset .af-visual-example img {
+  display: block;
+  height: auto;
+  max-width: 100%;
+  width: 100%;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.16);
 }
 
 /* Buttons: rounder, product-flavored */

@@ -133,7 +133,7 @@ Do not cut or publish a release if any of these are true:
 - There is an open issue or PR marked as a release blocker.
 
 Non-blocking, known limits:
-- Real Claude/Aider/Codex/Gemini interactive behavior is not fully automated;
+- Real Claude/Aider/Codex/Gemini/Amp interactive behavior is not fully automated;
   tests use a fake wrapper script (routed via `program_overrides`) and fake backends for deterministic runs.
 - The `af daemon install` autostart unit (systemd user service / launchd
   agent) should be manually smoke-tested on its native OS before a release

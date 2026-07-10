@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# record-demo.sh — regenerate the README demo GIF (docs/assets/demo.gif, #1032)
+# record-demo.sh — regenerate the site/README demo assets (docs/assets/demo.*).
 # entirely inside a throwaway container. Never runs af, tmux, or a recorder on
 # the host.
 #
-#   Regenerate the GIF (one command):
+#   Regenerate the demo assets (one command):
 #       scripts/container/record-demo.sh
 #
 # What it does, all inside an `agent-factory-demo` container (built from
@@ -15,17 +15,17 @@
 #      so it never mis-drives af's stateful focus model the way blind key-timing
 #      would (that is why this uses the driver, not a blind vhs .tape);
 #   4. record a read-only tmux mirror of the driven session with asciinema, at a
-#      pinned 140x36 geometry, so the .cast is exactly what the TUI showed;
-#   5. render the .cast to GIF with agg, optimize with gifsicle, and pull sample
-#      frames with ffmpeg.
+#      pinned wide geometry, so the .cast is exactly what the TUI showed;
+#   5. render the .cast to GIF with agg, optimize with gifsicle, derive WebM/MP4
+#      video assets, and pull sample frames with ffmpeg.
 #
-# The GIF and frames are copied back to the host under docs/assets/ (and, if
-# DEMO_FRAMES_DIR is set, sample PNG frames there too).
+# The demo assets and frames are copied back to the host under docs/assets/
+# (and, if DEMO_FRAMES_DIR is set, sample PNG frames there too).
 set -euo pipefail
 
 # ---- geometry / render knobs (override via env) ----------------------------
-COLS="${DEMO_COLS:-140}"
-ROWS="${DEMO_ROWS:-36}"
+COLS="${DEMO_COLS:-168}"
+ROWS="${DEMO_ROWS:-32}"
 AGG_FONT_SIZE="${DEMO_FONT_SIZE:-14}"
 AGG_THEME="${DEMO_THEME:-dracula}"
 AGG_FPS="${DEMO_FPS:-15}"
@@ -49,6 +49,10 @@ if [ "${AF_DEMO_INNER:-}" = "1" ]; then
     OUT=/home/dev/out
     CAST=/tmp/demo.cast
     RAW_GIF=/tmp/demo-raw.gif
+    OUT_GIF="$OUT/demo.gif"
+    OUT_WEBM="$OUT/demo.webm"
+    OUT_MP4="$OUT/demo.mp4"
+    OUT_POSTER="$OUT/demo-poster.png"
     mkdir -p "$OUT/frames"
 
     # Fake coding-agent transcript in place of a bare shell (see demo-agent.sh).
@@ -56,10 +60,12 @@ if [ "${AF_DEMO_INNER:-}" = "1" ]; then
     chmod +x "$SANDBOX/demo-agent.sh"
     cat >"$AGENT_FACTORY_HOME/config.toml" <<EOF
 default_program = "claude"
+update_channel = "stable"
 
 [program_overrides]
 claude = "$SANDBOX/demo-agent.sh"
 EOF
+    date -u +"%Y-%m-%dT%H:%M:%SZ" >"$AGENT_FACTORY_HOME/last_update_check"
 
     # A tab is a real process in the agent's worktree, not another agent. Put a
     # fake dev-server (demo-tab.sh) on PATH as `dev` so the demo can open a
@@ -99,8 +105,15 @@ EOF
     # a leaking green tmux bar. Global default -> new instance sessions inherit.
     tmux set-option -g status off
 
+    beat() { sleep "$1"; }
+
+    # Seed the first session before recording starts. The site hero's poster and
+    # first video frame should show the real populated TUI, not an empty shell.
+    af_new_instance fix-auth-timeout
+    beat 1.0
+
     # ---- start the recorder: a read-only mirror of 'drive' inside a pinned
-    # ---- 140x36 'rec' session, so asciinema's pty matches the TUI exactly.
+    # ---- wide 'rec' session, so asciinema's pty matches the TUI exactly.
     tmux kill-session -t rec 2>/dev/null || true
     tmux new-session -d -s rec -x "$COLS" -y "$ROWS"
     tmux set-option -t rec window-size manual >/dev/null 2>&1 || true
@@ -112,9 +125,7 @@ EOF
         tmux list-clients -t drive 2>/dev/null | grep -q read-only && break
         sleep 0.2
     done
-    sleep 0.8                                  # a beat of empty TUI on screen
-
-    beat() { sleep "$1"; }
+    sleep 0.6                                  # a beat of populated TUI on screen
 
     # ---- the demo scenario -------------------------------------------------
     # Surface-width note: an agent's transcript is pre-streamed at native
@@ -124,9 +135,8 @@ EOF
     # split (Act 4) for a *tab* whose content (the dev-server) is generated
     # live at the pane's current width, so it renders clean.
     #
-    # Act 1 — create one agent and watch it work (the hero streaming shot).
-    af_new_instance fix-auth-timeout
-    beat 2.2
+    # Act 1 — start from the real, populated supervision view.
+    beat 1.2
     # Act 2 — spin up the fleet; the sidebar fills with agents, a running
     # spinner on the newest and ● ready dots on the rest, while the live
     # preview keeps streaming. The Automations rail sits seeded below.
@@ -164,7 +174,9 @@ EOF
     af_select fix-auth-timeout
     af_new_tab                                  # auto-opens the tiled Terminal split
     af_enter_interactive
-    af_send_to_pane "dev"
+    af_send_literal "clear; dev"
+    af_send Enter
+    af_wait_for 'VITE' 8 'dev-server output' || return 1
     beat 3.6                                     # dev-server boots + serves requests
     af_exit_interactive                          # both panes back to the calm single border
     beat 1.6
@@ -188,24 +200,37 @@ EOF
         --speed "$AGG_SPEED" \
         "$CAST" "$RAW_GIF"
     gifsicle -O3 --lossy="$GIFSICLE_LOSSY" --colors "$GIFSICLE_COLORS" \
-        "$RAW_GIF" -o "$OUT/demo.gif"
+        "$RAW_GIF" -o "$OUT_GIF"
+
+    # Site hero video variants. GIF remains the README/fallback asset; WebM and
+    # MP4 give browsers a real autoplaying video path with better decode costs.
+    ffmpeg -y -loglevel error -i "$OUT_GIF" \
+        -vf "fps=$AGG_FPS,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+        -c:v libvpx-vp9 -b:v 0 -crf 34 -an "$OUT_WEBM"
+    ffmpeg -y -loglevel error -i "$OUT_GIF" \
+        -vf "fps=$AGG_FPS,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+        -movflags +faststart -pix_fmt yuv420p -c:v libx264 -crf 28 -an "$OUT_MP4"
+    ffmpeg -y -loglevel error -ss 4.0 -i "$OUT_GIF" -frames:v 1 "$OUT_POSTER"
 
     # ---- sample frames for review -----------------------------------------
-    ffmpeg -y -loglevel error -i "$OUT/demo.gif" \
+    ffmpeg -y -loglevel error -i "$OUT_GIF" \
         -vf "select='not(mod(n\,(max(1\,floor(t/1))+0)))'" -vsync vfr /dev/null 2>/dev/null || true
     # 6 evenly spaced frames.
-    total="$(ffmpeg -i "$OUT/demo.gif" -map 0:v:0 -c copy -f null /dev/null 2>&1 | grep -oE 'frame= *[0-9]+' | tail -1 | grep -oE '[0-9]+')"
+    total="$(ffmpeg -i "$OUT_GIF" -map 0:v:0 -c copy -f null /dev/null 2>&1 | grep -oE 'frame= *[0-9]+' | tail -1 | grep -oE '[0-9]+')"
     total="${total:-60}"
     i=1
     for f in $(seq 1 9); do
         n=$(( (total * f) / 10 ))
         [ "$n" -lt 1 ] && n=1
-        ffmpeg -y -loglevel error -i "$OUT/demo.gif" -vf "select=eq(n\,$n)" -vframes 1 \
+        ffmpeg -y -loglevel error -i "$OUT_GIF" -vf "select=eq(n\,$n)" -vframes 1 \
             "$(printf "%s/frames/frame-%02d.png" "$OUT" "$i")"
         i=$((i+1))
     done
+    if [ -s "$OUT/frames/frame-04.png" ]; then
+        cp "$OUT/frames/frame-04.png" "$OUT_POSTER"
+    fi
 
-    ls -l "$OUT/demo.gif"
+    ls -l "$OUT_GIF" "$OUT_WEBM" "$OUT_MP4" "$OUT_POSTER"
     echo "record-demo(inner): done"
     exit 0
 fi
@@ -217,6 +242,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE="${AF_DEMO_IMAGE:-agent-factory-demo}"
 NAME="${AF_DEMO_NAME:-af-demo-$$}"
 OUT_GIF="$REPO_ROOT/docs/assets/demo.gif"
+OUT_WEBM="$REPO_ROOT/docs/assets/demo.webm"
+OUT_MP4="$REPO_ROOT/docs/assets/demo.mp4"
+OUT_POSTER="$REPO_ROOT/docs/assets/demo-poster.png"
 FRAMES_DIR="${DEMO_FRAMES_DIR:-}"
 
 engine() { docker "$@"; }
@@ -249,10 +277,13 @@ engine exec \
 echo ">>> copying artifacts out ..."
 mkdir -p "$(dirname "$OUT_GIF")"
 engine cp "$NAME:/home/dev/out/demo.gif" "$OUT_GIF"
+engine cp "$NAME:/home/dev/out/demo.webm" "$OUT_WEBM"
+engine cp "$NAME:/home/dev/out/demo.mp4" "$OUT_MP4"
+engine cp "$NAME:/home/dev/out/demo-poster.png" "$OUT_POSTER"
 if [ -n "$FRAMES_DIR" ]; then
     mkdir -p "$FRAMES_DIR"
     engine cp "$NAME:/home/dev/out/frames/." "$FRAMES_DIR/"
 fi
 
-ls -lh "$OUT_GIF"
-echo ">>> done: $OUT_GIF"
+ls -lh "$OUT_GIF" "$OUT_WEBM" "$OUT_MP4" "$OUT_POSTER"
+echo ">>> done: $OUT_GIF $OUT_WEBM $OUT_MP4 $OUT_POSTER"
