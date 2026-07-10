@@ -63,6 +63,20 @@ type LocalBackend struct{}
 
 func (b *LocalBackend) Type() string { return "local" }
 
+// Capabilities reports the local runtime's full-parity descriptor: a local git
+// worktree driven by tmux, supporting every optional operation (#1592 Phase 1).
+func (b *LocalBackend) Capabilities() Capabilities {
+	return Capabilities{
+		Workspace:        WorkspaceLocalWorktree,
+		Attach:           true,
+		Archive:          true,
+		Recover:          true,
+		TabManagement:    true,
+		TerminalTab:      true,
+		InteractiveInput: true,
+	}
+}
+
 // WorktreeUnavailableError marks a recover/respawn failure caused by the
 // persisted worktree path being unavailable before tmux is touched. The daemon
 // uses the typed shape to add one-shot diagnostics for vanished live worktrees

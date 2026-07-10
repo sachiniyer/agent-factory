@@ -177,18 +177,40 @@ func (i *Instance) IsRemote() bool {
 	return i.backend.Type() == "remote"
 }
 
+// Capabilities returns the backing runtime's capability descriptor (#1592
+// Phase 1). A nil backend reports the zero value (local workspace, nothing
+// supported), matching the historical nil-backend defaults.
+func (i *Instance) Capabilities() Capabilities {
+	if i.backend == nil {
+		return Capabilities{}
+	}
+	return i.backend.Capabilities()
+}
+
 // SupportsRemoteTerminal reports whether this instance can open an interactive
-// terminal on its remote machine — i.e. it uses the remote hook backend and
-// the optional terminal_cmd hook is configured (#843).
+// terminal on its remote machine — a remote-workspace runtime that advertises a
+// terminal tab (the optional terminal_cmd hook, #843). Reads the capability
+// descriptor rather than type-asserting the concrete backend (#1592 Phase 1).
 func (i *Instance) SupportsRemoteTerminal() bool {
-	hb, ok := i.backend.(*HookBackend)
-	return ok && hb.HasTerminalCmd()
+	caps := i.Capabilities()
+	return caps.Workspace == WorkspaceRemote && caps.TerminalTab
 }
 
 // AttachRemoteTerminal opens an interactive terminal on the remote machine via
 // the terminal_cmd hook. The returned channel is closed when the user detaches
 // or the terminal_cmd process exits. Errors when the instance is not backed by
 // remote hooks or terminal_cmd is not configured.
+//
+// RESIDUAL COUPLING (#1592 Phase 1): the gate SupportsRemoteTerminal() above now
+// reads the capability descriptor, but this attach path still type-asserts the
+// concrete *HookBackend because AttachTerminal (and its tmux-shaped chan struct{}
+// return) is not on the Backend interface. Gate and attach agree ONLY because
+// HookBackend is the sole WorkspaceRemote backend today — a future non-hook
+// remote backend would pass the capability gate and then fail this assertion.
+// This assertion is deliberately left for PR5 (attach → PTYStream, io.ReadWriteCloser
+// + Resize): when attach is unified through the interface, the terminal-tab attach
+// routes through the same stream and this *HookBackend special-case is deleted.
+// See the #1592 Phase 1 plan (5-PR sequence).
 func (i *Instance) AttachRemoteTerminal() (chan struct{}, error) {
 	hb, ok := i.backend.(*HookBackend)
 	if !ok {

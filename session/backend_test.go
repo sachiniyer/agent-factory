@@ -63,6 +63,95 @@ func TestHookBackendType(t *testing.T) {
 	assert.Equal(t, "remote", b.Type())
 }
 
+// TestBackendCapabilities pins each backend's capability descriptor (#1592
+// Phase 1). This is the interface-compliance / parity contract: the daemon and
+// UI branch on these bits instead of Type()=="remote", so a regression that
+// silently flips a capability (e.g. a new backend forgetting Archive) is caught
+// here rather than in a lifecycle gate. HookBackend.TerminalTab is asserted to
+// track the terminal_cmd hook, the one config-dependent capability.
+func TestBackendCapabilities(t *testing.T) {
+	localCaps := Capabilities{
+		Workspace:        WorkspaceLocalWorktree,
+		Attach:           true,
+		Archive:          true,
+		Recover:          true,
+		TabManagement:    true,
+		TerminalTab:      true,
+		InteractiveInput: true,
+	}
+
+	tests := []struct {
+		name string
+		b    Backend
+		want Capabilities
+	}{
+		{
+			name: "local worktree runtime — full parity",
+			b:    &LocalBackend{},
+			want: localCaps,
+		},
+		{
+			name: "fake backend mirrors local parity",
+			b:    NewFakeBackend(),
+			want: localCaps,
+		},
+		{
+			name: "remote hook without terminal_cmd",
+			b:    &HookBackend{Hooks: config.RemoteHooks{}},
+			want: Capabilities{
+				Workspace:        WorkspaceRemote,
+				Attach:           true,
+				Archive:          false,
+				Recover:          false,
+				TabManagement:    false,
+				TerminalTab:      false,
+				InteractiveInput: false,
+			},
+		},
+		{
+			name: "remote hook with terminal_cmd flips TerminalTab on",
+			b:    &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: "/bin/ssh host"}},
+			want: Capabilities{
+				Workspace:        WorkspaceRemote,
+				Attach:           true,
+				Archive:          false,
+				Recover:          false,
+				TabManagement:    false,
+				TerminalTab:      true,
+				InteractiveInput: false,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.b.Capabilities())
+		})
+	}
+}
+
+// TestSupportsRemoteTerminal_TracksCapability confirms the Instance predicate is
+// driven by the descriptor (WorkspaceRemote + TerminalTab), not a concrete-type
+// assertion — the #1592 Phase 1 delocalization of SupportsRemoteTerminal.
+func TestSupportsRemoteTerminal_TracksCapability(t *testing.T) {
+	t.Run("local backend has no remote terminal", func(t *testing.T) {
+		i := &Instance{backend: &LocalBackend{}}
+		assert.False(t, i.SupportsRemoteTerminal())
+	})
+	t.Run("remote hook without terminal_cmd", func(t *testing.T) {
+		i := &Instance{backend: &HookBackend{Hooks: config.RemoteHooks{}}}
+		assert.False(t, i.SupportsRemoteTerminal())
+	})
+	t.Run("remote hook with terminal_cmd", func(t *testing.T) {
+		i := &Instance{backend: &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: "/bin/ssh host"}}}
+		assert.True(t, i.SupportsRemoteTerminal())
+	})
+	t.Run("nil backend", func(t *testing.T) {
+		i := &Instance{}
+		assert.False(t, i.SupportsRemoteTerminal())
+	})
+}
+
 // TestLocalBackendKillBestEffort_TmuxFails is a regression test for issue
 // #478. When the tmux teardown fails, Kill must still clear in-memory state
 // and return nil so the caller can finish removing the session from the

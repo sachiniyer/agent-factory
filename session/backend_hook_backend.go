@@ -23,6 +23,22 @@ type HookBackend struct {
 
 func (b *HookBackend) Type() string { return "remote" }
 
+// Capabilities reports the remote hook runtime's descriptor (#1592 Phase 1): an
+// off-box workspace reachable via attach_cmd, with no local worktree/tmux, so
+// archive/recover/tab-management/raw-input are unsupported in v1. TerminalTab is
+// dynamic — it tracks whether the optional terminal_cmd hook is configured.
+func (b *HookBackend) Capabilities() Capabilities {
+	return Capabilities{
+		Workspace:        WorkspaceRemote,
+		Attach:           true,
+		Archive:          false,
+		Recover:          false,
+		TabManagement:    false,
+		TerminalTab:      b.HasTerminalCmd(),
+		InteractiveInput: false,
+	}
+}
+
 func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	if strings.TrimSpace(i.Title) == "" {
 		return fmt.Errorf("instance title cannot be empty")

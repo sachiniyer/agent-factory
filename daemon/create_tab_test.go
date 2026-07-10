@@ -93,6 +93,10 @@ type remoteTypeBackend struct {
 
 func (remoteTypeBackend) Type() string { return "remote" }
 
+func (remoteTypeBackend) Capabilities() session.Capabilities {
+	return session.Capabilities{Workspace: session.WorkspaceRemote}
+}
+
 // startedLocalTabInstance builds a started local instance whose agent tab is a
 // mock-backed tmux session, registers it in the manager, and seeds a matching
 // on-disk record so the manager's refresh keeps the live in-memory instance.

@@ -128,7 +128,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		return
 	}
 
-	if inst.IsRemote() {
+	if !inst.Capabilities().Recover {
 		m.mu.Lock()
 		logIt := !st.remoteLogged
 		st.remoteLogged = true

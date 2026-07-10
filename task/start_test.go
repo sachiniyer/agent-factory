@@ -61,6 +61,17 @@ func (b *startBackend) TapEnter(*session.Instance)      {}
 func (b *startBackend) Recover(*session.Instance) error { return nil }
 func (b *startBackend) Respawn(*session.Instance) error { return nil }
 func (b *startBackend) Type() string                    { return "local" }
+func (b *startBackend) Capabilities() session.Capabilities {
+	return session.Capabilities{
+		Workspace:        session.WorkspaceLocalWorktree,
+		Attach:           true,
+		Archive:          true,
+		Recover:          true,
+		TabManagement:    true,
+		TerminalTab:      true,
+		InteractiveInput: true,
+	}
+}
 
 func newStartTestInstance(t *testing.T, backend *startBackend) *session.Instance {
 	t.Helper()

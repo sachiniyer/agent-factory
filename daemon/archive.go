@@ -38,7 +38,7 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 		// relocate; there is nothing coherent to archive.
 		return "", fmt.Errorf("cannot archive session %q: it is not currently active", req.Title)
 	}
-	if instance.IsRemote() {
+	if !instance.Capabilities().Archive {
 		return "", fmt.Errorf("cannot archive remote session %q: it has no local worktree to relocate", req.Title)
 	}
 	if instance.IsExternalWorktree() {

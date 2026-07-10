@@ -55,6 +55,16 @@ func (b *recoverFakeBackend) Type() string {
 	return "local"
 }
 
+// Capabilities mirrors the Type override: a "remote" double reports a
+// WorkspaceRemote descriptor (Recover=false) so the lost-restore remote-skip
+// rule fires; otherwise it inherits FakeBackend's local parity (#1592 Phase 1).
+func (b *recoverFakeBackend) Capabilities() session.Capabilities {
+	if b.typeName == "remote" {
+		return session.Capabilities{Workspace: session.WorkspaceRemote}
+	}
+	return b.FakeBackend.Capabilities()
+}
+
 // zeroRestoreBackoff makes every RestoreLostSessions pass an attempt.
 func zeroRestoreBackoff(t *testing.T) {
 	t.Helper()
