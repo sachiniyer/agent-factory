@@ -256,6 +256,68 @@
   margin-top: 0.2rem !important;
 }
 
+/* ==========================================================================
+   Diagrams
+   ========================================================================== */
+
+.md-typeset .mermaid {
+  margin: 1.4rem auto;
+  max-width: 44rem;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.md-typeset .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ==========================================================================
+   Visual examples
+   ========================================================================== */
+
+.md-typeset .af-visual-example {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.45fr) minmax(26rem, 1.55fr);
+  gap: 1.1rem;
+  align-items: start;
+  margin: 1rem 0 1.4rem;
+}
+
+.md-typeset .af-visual-example > .highlight {
+  margin: 0;
+}
+
+.md-typeset .af-visual-example figure {
+  margin: 0;
+}
+
+.md-typeset .af-visual-example figure p {
+  margin: 0;
+}
+
+.md-typeset .af-visual-example img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.16);
+}
+
+.md-typeset .af-visual-example figcaption {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.68rem;
+  line-height: 1.4;
+  margin-top: 0.45rem;
+  text-align: left;
+}
+
+@media screen and (max-width: 54.9375em) {
+  .md-typeset .af-visual-example {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Buttons: rounder, product-flavored */
 .md-typeset .md-button {
   border-radius: 0.5rem;

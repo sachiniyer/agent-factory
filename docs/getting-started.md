@@ -67,10 +67,12 @@ The TUI opens with an empty sidebar. From here:
 Because each session is a real git branch, reviewing and merging an agent's work
 is just your normal git/PR flow.
 
-## Doing the same thing from the CLI
+## Optional CLI equivalents
 
-Everything the TUI does is scriptable. The `af sessions` and `af tasks` command
-groups print JSON to stdout, so they compose with `jq` and shell:
+Everything the TUI does is also scriptable. Use these commands when you want
+shell automation, repeatable setup, or agent-to-agent workflows. The
+`af sessions` and `af tasks` command groups print JSON to stdout, so they
+compose with `jq` and shell:
 
 ```bash
 af sessions create --name fix-auth-bug --prompt "Fix the login redirect loop"

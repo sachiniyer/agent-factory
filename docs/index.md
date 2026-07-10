@@ -5,128 +5,122 @@ hide:
   - toc
 ---
 
-<p class="af-section-label">Core capabilities</p>
-<h2 class="af-section-title">Everything you need to run agents at scale</h2>
+<p class="af-section-label">Core workflow</p>
+<h2 class="af-section-title">One task, one agent, one reviewable branch</h2>
+
+Agent Factory is built for the moment after "ask an agent" becomes "supervise
+several agents." It gives each normal session an isolated git worktree, keeps
+the agent running under daemon supervision, and brings every session back to a
+normal git review path.
 
 <div class="grid cards" markdown>
 
--   :material-source-branch:{ .lg .middle } __Parallel agents, in isolation__
+-   :material-source-branch:{ .lg .middle } __Create isolated work__
 
     ---
 
-    Each session is a dedicated git worktree on its own branch. Five agents can
-    refactor five corners of the same repo at once and never collide — every
-    session is a real branch you review and merge like any other.
+    Start a session for a task. Agent Factory creates a branch and git worktree,
+    then launches your chosen agent inside it.
 
-    [:octicons-arrow-right-24: Worktree-isolated agents](concepts/worktree-agents.md)
+    [:octicons-arrow-right-24: Sessions and worktrees](concepts/worktree-agents.md)
 
--   :material-view-dashboard-outline:{ .lg .middle } __One-screen workflow__
+-   :material-view-dashboard-outline:{ .lg .middle } __Watch every agent__
 
     ---
 
-    A sidebar lists every session with live status; the Agent tab snapshots
-    any agent without attaching; `↵` takes you full-screen. Extra tabs run a
-    shell or dev server alongside the agent in the same worktree.
+    The TUI shows each session, status, and Agent tab from one terminal. Scan
+    progress without attaching to every running process.
 
     [:octicons-arrow-right-24: The TUI](concepts/tui.md)
 
--   :material-cog-sync-outline:{ .lg .middle } __A daemon that never sleeps__
+-   :material-keyboard-outline:{ .lg .middle } __Jump in when needed__
 
     ---
 
-    A background daemon owns all state: it re-spawns dead sessions, runs
-    scheduled and event-driven tasks, and can auto-accept prompts so work
-    proceeds while you're away — surviving restarts.
+    Interact in-pane, attach full-screen, or open helper tabs for shells, dev
+    servers, and test watchers in the same worktree.
 
-    [:octicons-arrow-right-24: The daemon](concepts/daemon.md)
+    [:octicons-arrow-right-24: How it works](how-it-works.md)
 
--   :material-console:{ .lg .middle } __Scriptable, CLI + HTTP__
-
-    ---
-
-    Everything the TUI does, the `af` CLI does too — as JSON on stdout, so it
-    composes with `jq`. The same operations are a local HTTP/JSON API over a
-    Unix socket for calling `af` from any language.
-
-    [:octicons-arrow-right-24: CLI reference](reference/cli.md)
-
--   :material-cloud-outline:{ .lg .middle } __Reaches beyond your laptop__
+-   :material-call-merge:{ .lg .middle } __Review and merge normally__
 
     ---
 
-    With remote hooks, sessions run on a backend you define — your own
-    launch/list/attach/delete scripts — and appear in the same sidebar with the
-    same Agent tab, attach, and kill experience.
+    The result is a real branch. Use your existing `git diff`, pull request,
+    CI, and merge flow instead of trusting a hidden agent workspace.
 
-    [:octicons-arrow-right-24: Remote hooks](remote-hooks.md)
+    [:octicons-arrow-right-24: Why Agent Factory](why-agent-factory.md)
 
--   :material-timer-sand:{ .lg .middle } __Handles usage limits__
+-   :material-timer-cog-outline:{ .lg .middle } __Automate recurring work__
 
     ---
 
-    When Claude or Codex hits a usage limit, `af` marks the session and
-    auto-resumes it once the window elapses. Task runs that hit a limit are
-    parked and resumed — never counted as failures.
+    Cron tasks and watch scripts can create sessions or deliver prompts into
+    existing ones, hosted by the same daemon that keeps sessions alive.
 
-    [:octicons-arrow-right-24: Usage limits](usage-limits.md)
+    [:octicons-arrow-right-24: Tasks and automation](tasks.md)
+
+-   :material-console-network-outline:{ .lg .middle } __Script the control plane__
+
+    ---
+
+    Every session and task operation is available through JSON CLI commands and
+    a local owner-only HTTP API over a Unix socket.
+
+    [:octicons-arrow-right-24: CLI guide](cli.md)
 
 </div>
 
-## How it fits together
+## How Agent Factory Fits
 
-The TUI and the CLI are both thin front-ends; the **daemon** is the single
-source of truth that owns every write. That is why the TUI, the CLI, and the
-HTTP API can never show you three different worlds.
+Agent Factory is not a chat UI and it is not just tmux with a README. The TUI,
+CLI, and HTTP API are thin clients over a daemon that owns all session state,
+task schedules, worktree operations, and usage-limit recovery.
 
-```
-        ┌──────────────────────────────────────────────┐
-        │  af TUI  (sidebar · agent · attach · tabs)    │
-        └──────────────────────┬───────────────────────┘
-                               │ read-only projection + RPC
-        ┌──────────────────────┴───────────────────────┐
-        │  daemon  — single writer of all state         │
-        │  · re-spawns dead sessions                    │
-        │  · runs cron + watch tasks                    │
-        │  · autoyes / usage-limit auto-resume          │
-        │  · serves the HTTP/JSON API                   │
-        └──────────────────────┬───────────────────────┘
-                               │ owns
-        ┌──────────────────────┴───────────────────────┐
-        │  sessions = git worktrees, one agent each     │
-        │  local  ·  or remote (via remote hooks)       │
-        └───────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    tui["af TUI<br/>sidebar · Agent tab · attach · tabs"]
+    cli["CLI + HTTP API<br/>JSON commands · local Unix socket"]
+    daemon["daemon<br/>single writer of all state<br/>sessions · tasks · usage limits"]
+    sessions["sessions<br/>one git worktree + branch per agent<br/>local or remote hooks"]
+
+    tui -->|"read projection + RPC"| daemon
+    cli -->|"RPC"| daemon
+    daemon -->|"owns"| sessions
 ```
 
-Read [The daemon](concepts/daemon.md) for why that design matters.
+That design is what lets you close the TUI, reboot, script a task, or call the
+API without splitting the world into different sources of truth.
 
-## Where to go next
+## Start Here
 
 <div class="grid cards" markdown>
 
--   :material-rocket-launch-outline:{ .lg .middle } __New here?__
+-   :material-rocket-launch-outline:{ .lg .middle } __Install and try it__
 
     ---
 
-    Install `af`, create your first session, attach and detach.
+    Install `af`, create a first worktree-backed session, attach, detach, and
+    archive it.
 
     [:octicons-arrow-right-24: Getting started](getting-started.md)
 
--   :material-lightbulb-on-outline:{ .lg .middle } __Want the model in your head?__
+-   :material-map-outline:{ .lg .middle } __Understand the workflow__
 
     ---
 
-    The concepts: worktree-isolated agents, the daemon, the TUI, tasks, and
-    remote hooks.
+    Follow the path from prompt to worktree, supervision, interaction, review,
+    and cleanup.
 
-    [:octicons-arrow-right-24: Concepts](concepts/worktree-agents.md)
+    [:octicons-arrow-right-24: How it works](how-it-works.md)
 
--   :material-code-braces:{ .lg .middle } __Scripting or integrating?__
+-   :material-compare-horizontal:{ .lg .middle } __Compare alternatives__
 
     ---
 
-    The CLI and HTTP API references — both generated from the code, so they
-    never drift.
+    See where Agent Factory sits relative to Herdr, GUI worktree apps, kanban
+    dashboards, Claude Agent View, and plain tmux.
 
-    [:octicons-arrow-right-24: CLI reference](reference/cli.md)
+    [:octicons-arrow-right-24: Comparison](comparison.md)
 
 </div>
