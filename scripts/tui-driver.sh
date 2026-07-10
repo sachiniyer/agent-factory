@@ -384,11 +384,12 @@ af_new_instance() {
     af_wait_for "${name}.*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
 }
 
-# af_select <name> — put the tree cursor ON <name>'s row (so it is the *real*
-# GetSelectedInstance(), not merely display-selected). Robust to any starting
-# cursor position: anchor at the top (k is idempotent there), then step down
-# until BOTH conditions hold — <name>'s row carries the ▾ selected/expanded
-# arrow AND the menu advertises a row-scoped verb (`D kill`).
+# af_select <name> — put the tree cursor on one of <name>'s TAB rows (so it is
+# the *real* GetSelectedInstance(), not merely display-selected). Robust to any
+# starting cursor position: anchor at the first live tab stop (k is idempotent
+# there), then step down until BOTH conditions hold — <name>'s parent row
+# carries the ▾ selected/expanded arrow AND the menu advertises an
+# instance-scoped verb (`D kill`).
 #
 # The two-part success condition is the #1174-item-1 / #1199 fix. The sticky
 # ▾ is a DISPLAY-selection: a SINGLE auto-selected instance renders ▾ while the
@@ -398,8 +399,8 @@ af_new_instance() {
 # check returns on iteration 0 in that case — a false positive that can make a
 # play-test wrongly "pass" a nav action that never fired. `D kill` appears in
 # the menu ONLY when an instance is actually under the cursor (non-nil
-# GetSelectedInstance()), so requiring it forces `j` past the header until the
-# cursor truly lands on the row.
+# GetSelectedInstance()), so requiring it forces `j` past the header/title rows
+# until the cursor truly lands on an actionable tab row.
 af_select() {
     local name="$1" _ screen name_re
     [ -n "$name" ] || { _af_fail "af_select: name required"; return 1; }
@@ -417,7 +418,7 @@ af_select() {
         af_send j
         sleep "$AF_DRIVER_POLL"
     done
-    _af_log "could not select '${name}' (need ▾ on its row AND cursor-on-row, i.e. 'D kill' in the menu)"
+    _af_log "could not select '${name}' (need ▾ on its parent row AND cursor-on-tab, i.e. 'D kill' in the menu)"
     printf '%s\n' "$screen" >&2
     return 1
 }

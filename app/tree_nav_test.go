@@ -36,10 +36,11 @@ func addTreeInstance(t *testing.T, h *home, title string) *session.Instance {
 	return inst
 }
 
-// TestTreeNav_JKWalksTabChildren pins the #1024 PR 3 nav model at the app
-// layer: j/k walk from an instance row into its expanded tab children and out
-// to the next instance, with each tab row driving the store's active tab (the
-// content pane binding), and h folding back to the parent.
+// TestTreeNav_JKWalksTabChildren pins the #1024 PR 3 / #1515 nav model at the
+// app layer: j/k walk tab-to-tab, crossing instance boundaries directly from
+// the last tab of one instance to the first tab of the next. Each tab row
+// drives the store's active tab (the content pane binding), and h folds back
+// to the parent title row.
 func TestTreeNav_JKWalksTabChildren(t *testing.T) {
 	h := newTestHome(t)
 	a := addTreeInstance(t, h, "alpha")
@@ -64,17 +65,24 @@ func TestTreeNav_JKWalksTabChildren(t *testing.T) {
 	assert.Equal(t, 1, h.store.ActiveTab(),
 		"Enter on this row would attach the terminal tab — the tab dimension routes attach")
 
-	// j past the last child lands on beta; alpha folds (collapse-by-default).
+	// j past the last child lands on beta's first tab; alpha folds
+	// (collapse-by-default), and the cursor never stops on beta's title row.
 	pressNav(t, h, "j")
 	require.Same(t, b, h.sidebar.GetSelectedInstance())
 	assert.Same(t, b, h.store.GetSelectedInstance(), "tree selection retargets the store selection")
+	sel = h.sidebar.GetSelection()
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 0, sel.TabIndex)
+	assert.Equal(t, 0, h.store.ActiveTab())
 
-	// k back up: beta's row was preceded by alpha's (now folded) row.
+	// k back up lands on alpha's last tab, not alpha's title row.
 	pressNav(t, h, "k")
 	require.Same(t, a, h.sidebar.GetSelectedInstance())
+	sel = h.sidebar.GetSelection()
+	assert.True(t, sel.IsTab)
+	assert.Equal(t, 1, sel.TabIndex)
 
 	// h on a tab row folds to the parent instance row.
-	pressNav(t, h, "j")
 	require.True(t, h.sidebar.GetSelection().IsTab)
 	pressNav(t, h, "h")
 	sel = h.sidebar.GetSelection()
@@ -85,6 +93,37 @@ func TestTreeNav_JKWalksTabChildren(t *testing.T) {
 	pressNav(t, h, "l")
 	pressNav(t, h, "j")
 	assert.True(t, h.sidebar.GetSelection().IsTab)
+}
+
+func TestTreeNav_TabStopAcrossInstancePreservesParentForActions(t *testing.T) {
+	h := newTestHome(t)
+	alpha := startedLocalInstance(t, "alpha")
+	beta := startedLocalInstance(t, "beta")
+	h.store.AddInstance(alpha)
+	h.store.AddInstance(beta)
+	h.sidebar.SetSelectedInstance(0)
+	h.store.SetSelectedInstance(alpha)
+	_ = h.selectionChanged()
+
+	pressNav(t, h, "j") // alpha tab 0
+	pressNav(t, h, "j") // alpha tab 1
+	pressNav(t, h, "j") // beta tab 0, with no beta title stop
+
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab)
+	require.Equal(t, 1, sel.ItemIndex, "tab row keeps the parent instance index")
+	require.Same(t, beta, h.sidebar.GetSelectedInstance(),
+		"instance actions resolve the selected tab's parent instance")
+
+	var createdFor string
+	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
+		createdFor = title
+		return spawnDaemonTab(beta), nil
+	}))
+
+	_, _ = h.handleNewTab()
+	assert.Equal(t, beta.Title, createdFor,
+		"new-tab action must target the parent session of the selected tab")
 }
 
 // TestTreeNav_NumberJumpMovesCursorOnTabRows pins the 1-9 muscle-memory rule:

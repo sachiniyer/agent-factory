@@ -66,21 +66,14 @@ func TestSidebarNavigation(t *testing.T) {
 	assert.True(t, sel.IsHeader)
 	assert.Equal(t, SectionInstances, sel.Kind)
 
-	// Move down onto the first instance row: it becomes the selected instance
-	// and auto-expands its tab children (#1024 PR 3).
+	// Move down onto the first instance's first tab row: instance title rows
+	// remain rendered, but vertical nav stops on tabs only (#1515).
 	s.Down()
 	sel = s.GetSelection()
 	assert.False(t, sel.IsHeader)
 	assert.Equal(t, SectionInstances, sel.Kind)
 	assert.Equal(t, 0, sel.ItemIndex)
-	assert.False(t, sel.IsTab)
-
-	// j walks INTO the expanded tab children; landing on a tab row drives the
-	// store's active tab.
-	s.Down()
-	sel = s.GetSelection()
 	assert.True(t, sel.IsTab)
-	assert.Equal(t, 0, sel.ItemIndex)
 	assert.Equal(t, 0, sel.TabIndex)
 	assert.Equal(t, 0, s.proj.ActiveTab())
 
@@ -90,18 +83,18 @@ func TestSidebarNavigation(t *testing.T) {
 	assert.Equal(t, 1, sel.TabIndex)
 	assert.Equal(t, 1, s.proj.ActiveTab())
 
-	// Past the last child: the second instance. Selecting it collapses inst1
-	// (collapse-by-default for non-selected) and expands inst2.
+	// Past the last child: the second instance's first tab. Selecting it
+	// collapses inst1 (collapse-by-default for non-selected) and expands inst2.
 	s.Down()
 	sel = s.GetSelection()
-	assert.False(t, sel.IsTab)
+	assert.True(t, sel.IsTab)
 	assert.Equal(t, 1, sel.ItemIndex)
+	assert.Equal(t, 0, sel.TabIndex)
 	require.NotNil(t, s.GetSelectedInstance())
 	assert.Equal(t, "inst2", s.GetSelectedInstance().Title)
 
 	// Through inst2's children to the last row; the rail ends there (no more
 	// Tasks/Hooks headers since #1024 PR 4), so further Down is a no-op.
-	s.Down()
 	s.Down()
 	sel = s.GetSelection()
 	assert.True(t, sel.IsTab)
@@ -111,7 +104,7 @@ func TestSidebarNavigation(t *testing.T) {
 	s.Down()
 	assert.Equal(t, sel, s.GetSelection(), "Down past the last row is a no-op")
 
-	// Move back up onto inst2's first tab row
+	// Move back up onto inst2's first tab row.
 	s.Up()
 	sel = s.GetSelection()
 	assert.True(t, sel.IsTab)
@@ -170,11 +163,11 @@ func TestSidebarJumpSections(t *testing.T) {
 	assert.Equal(t, SectionInstances, sel.Kind)
 
 	// With Instances the only section (#1024 PR 4), the section-jump keys
-	// no-op forward and return the cursor to the header from a child row.
+	// no-op forward and return the cursor to the header from a tab row.
 	s.JumpNextSection()
 	assert.Equal(t, sel, s.GetSelection(), "no next section to jump to")
 
-	s.Down() // onto the instance row
+	s.Down() // onto the instance's Agent tab
 	s.JumpPrevSection()
 	sel = s.GetSelection()
 	assert.True(t, sel.IsHeader)
@@ -190,14 +183,14 @@ func TestSidebarCollapseFromChild(t *testing.T) {
 	})
 	addTestInstance(s, inst)
 
-	// Navigate to instance child (auto-expanded: it is now selected)
+	// Navigate to the instance's Agent tab (auto-expanded: it is now selected).
 	s.Down()
 	sel := s.GetSelection()
 	assert.False(t, sel.IsHeader)
 	assert.Equal(t, SectionInstances, sel.Kind)
 
 	// First collapse folds the instance's own tab children in place (#1024
-	// PR 3); the cursor stays on the instance row.
+	// PR 3); the cursor lands on the instance row.
 	s.CollapseSection()
 	sel = s.GetSelection()
 	assert.False(t, sel.IsHeader)
@@ -458,10 +451,10 @@ func TestSidebarWindowScrollsWithSelection(t *testing.T) {
 	check("initial")
 	for i := 0; ; i++ {
 		require.Less(t, i, 500, "down-walk must terminate")
-		before := s.selectedIdx
+		before := s.rowIdentityAt(s.rawSelection())
 		s.Down()
 		check(fmt.Sprintf("down %d", i))
-		if s.selectedIdx == before {
+		if s.rowIdentityAt(s.rawSelection()) == before {
 			break
 		}
 	}
@@ -470,12 +463,13 @@ func TestSidebarWindowScrollsWithSelection(t *testing.T) {
 	assert.True(t, up, "rows above must be indicated at the bottom")
 	assert.False(t, down, "nothing is hidden below at the bottom")
 
-	// Walk back up to the top.
+	// Walk back up to the first live tab stop.
 	for i := 0; ; i++ {
 		require.Less(t, i, 500, "up-walk must terminate")
+		before := s.rowIdentityAt(s.rawSelection())
 		s.Up()
 		check(fmt.Sprintf("up %d", i))
-		if sel := s.GetSelection(); sel.IsHeader && sel.Kind == SectionInstances {
+		if s.rowIdentityAt(s.rawSelection()) == before {
 			break
 		}
 	}

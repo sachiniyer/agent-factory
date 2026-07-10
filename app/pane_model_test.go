@@ -512,7 +512,8 @@ func TestPanePreviewSplitHideDoesNotStickInPanePreview(t *testing.T) {
 	paneA := h.store.OpenPanes()[0]
 	require.Same(t, alpha, paneA.Instance())
 
-	for i := 0; i < 3; i++ {
+	// alpha tab 0 -> alpha tab 1 -> beta tab 0 -> beta tab 1.
+	for i := 0; i < 4; i++ {
 		pressNav(t, h, "j")
 	}
 	require.Same(t, beta, h.store.GetSelectedInstance())

@@ -85,8 +85,8 @@ func TestColdStartFromSnapshot_WaitsOutWarmingDaemon(t *testing.T) {
 // startup), so no instance is bound to the workspace panes — the pre-store
 // TabbedWindow.instance also started nil — and the active tab starts at 0.
 // The panes bind on the first cursor move: Down lands on the first restored
-// instance and selectionChanged binds it, exactly the old
-// selectionChanged→TabbedWindow.SetInstance first-keypress behavior.
+// instance's Agent tab and selectionChanged binds its parent instance, exactly
+// the old selectionChanged→TabbedWindow.SetInstance first-keypress behavior.
 func TestColdStartFromSnapshot_LaunchSelectionParity(t *testing.T) {
 	h := newTestHome(t)
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
@@ -108,11 +108,13 @@ func TestColdStartFromSnapshot_LaunchSelectionParity(t *testing.T) {
 		"no instance bound to the workspace panes at launch (TabbedWindow.instance started nil pre-store)")
 	require.Equal(t, 0, h.store.ActiveTab(), "active tab starts on the agent tab")
 
-	// First keypress: Down moves onto the first restored instance and binds it.
+	// First keypress: Down moves onto the first restored instance's Agent tab
+	// and binds its parent instance.
 	h.sidebar.Down()
 	_ = h.selectionChanged()
 	first := h.store.GetInstances()[0]
 	require.Equal(t, "first", first.Title)
+	require.True(t, h.sidebar.GetSelection().IsTab, "the first Down must land on a tab row")
 	require.Same(t, first, h.sidebar.GetSelectedInstance(),
 		"the first Down must land on the first restored instance")
 	require.Same(t, first, h.store.GetSelectedInstance(),
