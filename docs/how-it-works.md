@@ -25,7 +25,6 @@ Agent Factory creates the isolated workspace and starts the agent for you.
 
 <figure markdown>
 ![TUI screenshot showing multiple Agent Factory sessions and an Agent tab preview](assets/tui-sessions.svg)
-<figcaption>Captured from the real TUI: create a task, watch it become a row, then inspect the Agent tab without leaving the dashboard.</figcaption>
 </figure>
 
 </div>
@@ -67,7 +66,6 @@ attaching:
 
 <figure markdown>
 ![TUI screenshot showing multiple Agent Factory sessions and an Agent tab preview](assets/tui-sessions.svg)
-<figcaption>Captured from the real TUI: session status on the left, the selected Agent tab on the right, and row-level actions in the footer.</figcaption>
 </figure>
 
 </div>
@@ -112,7 +110,6 @@ deliver prompts automatically:
 
 <figure markdown>
 ![TUI screenshot showing the Agent Factory task manager](assets/tui-tasks.svg)
-<figcaption>Captured from the real TUI: cron tasks, watch scripts, targets, and latest run state in the task manager.</figcaption>
 </figure>
 
 </div>

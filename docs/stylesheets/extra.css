@@ -279,49 +279,58 @@
 }
 
 /* ==========================================================================
+   Wide tables
+   ========================================================================== */
+
+.md-typeset .af-table-wide {
+  margin: 1rem 0 1.6rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.md-typeset .af-table-wide table {
+  margin: 0;
+  width: 100%;
+}
+
+.md-typeset .af-table-wide :is(th, td) {
+  vertical-align: top;
+}
+
+/* ==========================================================================
    Visual examples
    ========================================================================== */
 
 .md-typeset .af-visual-example {
-  display: grid;
-  grid-template-columns: minmax(7rem, 0.35fr) minmax(34rem, 1.85fr);
-  gap: 1.1rem;
-  align-items: start;
-  margin: 1rem 0 1.4rem;
+  margin: 1rem 0 1.6rem;
 }
 
-.md-typeset .af-visual-example > .highlight {
-  margin: 0;
+.md-typeset .af-visual-example > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset .af-visual-example > :last-child {
+  margin-bottom: 0;
 }
 
 .md-typeset .af-visual-example figure {
-  margin: 0;
+  margin: 0.8rem 0 0;
+  width: 100%;
 }
 
 .md-typeset .af-visual-example figure p {
   margin: 0;
+  width: 100%;
 }
 
 .md-typeset .af-visual-example img {
   display: block;
+  height: auto;
+  max-width: 100%;
   width: 100%;
   border: 1px solid var(--md-default-fg-color--lightest);
   border-radius: 8px;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.16);
-}
-
-.md-typeset .af-visual-example figcaption {
-  color: var(--md-default-fg-color--light);
-  font-size: 0.68rem;
-  line-height: 1.4;
-  margin-top: 0.45rem;
-  text-align: left;
-}
-
-@media screen and (max-width: 54.9375em) {
-  .md-typeset .af-visual-example {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* Buttons: rounder, product-flavored */

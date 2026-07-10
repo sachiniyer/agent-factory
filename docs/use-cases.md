@@ -17,7 +17,6 @@ the first session, then repeat for the next bug.
 
 <figure markdown>
 ![TUI screenshot showing parallel Agent Factory sessions](assets/tui-sessions.svg)
-<figcaption>Captured from the real TUI: scan session status, preview output, and jump into whichever task needs attention.</figcaption>
 </figure>
 
 </div>
@@ -85,7 +84,6 @@ choose the cron trigger, and leave it enabled for the daemon to run.
 
 <figure markdown>
 ![TUI screenshot showing Agent Factory task automation state](assets/tui-tasks.svg)
-<figcaption>Captured from the real TUI: cron tasks are configured in the task manager and hosted by the daemon.</figcaption>
 </figure>
 
 </div>
@@ -114,7 +112,6 @@ watch task and point it at the script that emits one event per stdout line.
 
 <figure markdown>
 ![TUI screenshot showing Agent Factory task automation state](assets/tui-tasks.svg)
-<figcaption>Captured from the real TUI: watch tasks show their supervision state in the task manager.</figcaption>
 </figure>
 
 </div>

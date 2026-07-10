@@ -1,3 +1,8 @@
+---
+hide:
+  - toc
+---
+
 # Comparison
 
 The agent-orchestration space is splitting into several shapes: terminal
@@ -12,6 +17,8 @@ team board, a hosted cloud agent, or a manual shell setup.
 
 ## Big Picture
 
+<div class="af-table-wide" markdown>
+
 | Tool family | Examples | Best center of gravity | Agent Factory contrast |
 |---|---|---|---|
 | **Agent Factory** | `af` | One task becomes one branch/worktree, supervised from a TUI, CLI, daemon, and local API. | Git review, cron/watch automation, remote hooks, usage-limit recovery, and recoverable lifecycle are the core product. Supports Claude Code, Codex, Aider, Gemini, and Amp through named agent choices. |
@@ -23,7 +30,11 @@ team board, a hosted cloud agent, or a manual shell setup.
 | **Single-agent CLIs** | Claude Code, Codex CLI, OpenCode, Aider, Gemini CLI, Amp, Crush | One focused coding loop in a terminal or editor. | Agent Factory runs and supervises those tools as fleet members rather than replacing their agent loop. |
 | **Manual stack** | tmux/Zellij, git worktree, cron, shell scripts | Maximum control with the fewest product assumptions. | Flexible but self-managed: naming, scheduling, cleanup, restore, and safety checks are yours. |
 
+</div>
+
 ## Tool-By-Tool Table
+
+<div class="af-table-wide" markdown>
 
 | Tool | Category | Primary interface | Isolation and review model | Best fit | Agent Factory contrast |
 |---|---|---|---|---|---|
@@ -52,7 +63,11 @@ team board, a hosted cloud agent, or a manual shell setup.
 | **tmux/Zellij + manual worktrees** | Manual terminal stack | Terminal multiplexer and shell | You create worktrees, panes, prompts, logs, cleanup, and review paths yourself. | Teams with strong shell discipline and custom scripts. | Agent Factory packages the common policy: repo-scoped sessions, daemon state, scheduling, JSON output, and safe cleanup. |
 | **Plain git worktrees + scripts** | Manual git workflow | Shell scripts, cron, CI | Worktrees provide isolation; scripts provide launch/schedule/cleanup if you build them. | Maximum control and minimal dependency surface. | Agent Factory is the prebuilt version of the operational scaffolding. |
 
+</div>
+
 ## Capability Matrix
+
+<div class="af-table-wide" markdown>
 
 | Capability | Agent Factory | Herdr | Desktop worktree apps | Kanban/review boards | Built-in dashboards | Cloud agents | Manual stack |
 |---|---|---|---|---|---|---|---|
@@ -65,6 +80,8 @@ team board, a hosted cloud agent, or a manual shell setup.
 | Built-in diff/review UI | No, use git/PR tools | No, terminal-first | Usually | Usually | Usually | Usually | No |
 | Remote/cloud execution | Remote hooks | SSH/remote attach | Varies | Often hosted | Product-specific | Native | SSH/manual |
 | Archive/restore session lifecycle | Yes | Persistence-focused | Varies | Workspace lifecycle | Product-specific | Product-specific | Manual |
+
+</div>
 
 ## When To Choose Agent Factory
 
