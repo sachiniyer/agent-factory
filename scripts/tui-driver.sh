@@ -543,9 +543,13 @@ af_close_tab() {
 }
 
 # _af_tab_count — number of tab-child rows the selected instance shows. Only
-# the selected instance auto-expands, so this counts its tabs.
+# the selected instance auto-expands, so this counts its tabs. Matches the
+# tab-child shape — tree connector, tab index, then a non-empty name — for ANY
+# name, so CLI-created custom-named tabs count too (#1561), not just the
+# built-in Preview/Terminal/Diff. The leading index keeps this from matching
+# instance rows, which carry no `<connector> <number> <name>` prefix.
 _af_tab_count() {
-    af_capture | grep -cE '[├└][[:space:]]+[0-9]+[[:space:]]+(Preview|Terminal|Diff)' || true
+    af_capture | grep -cE '[├└][[:space:]]+[0-9]+[[:space:]]+[^[:space:]]' || true
 }
 
 # af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
