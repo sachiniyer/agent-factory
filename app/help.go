@@ -165,7 +165,7 @@ func (h helpTypeInstanceStart) toContent() string {
 	// tabs also live in the left-rail tree since the layout cutover (#1024 PR 4).
 	openPane, newTab, closeTab := helpKey(keys.KeyOpenPane), helpKey(keys.KeyNewTab), helpKey(keys.KeyCloseTab)
 	tabHelp := keyStyle.Render("1-9 jump") + descStyle.Render(fmt.Sprintf(" - Select a tab (%s opens it; %s new tab, %s close; tabs live in the tree)", openPane, newTab, closeTab))
-	if h.instance.IsRemote() {
+	if !h.instance.Capabilities().TabManagement {
 		tabHelp = keyStyle.Render("1-9 jump") + descStyle.Render(fmt.Sprintf(" - Select a tab (%s opens it; tabs live in the tree)", openPane))
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left,

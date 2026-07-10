@@ -303,7 +303,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	// Cut the title if it's too long
 	titleText := i.Title
-	if i.IsRemote() {
+	if i.Capabilities().Workspace == session.WorkspaceRemote {
 		titleText = "[remote] " + titleText
 	}
 	// A deleting row keeps spinning but is explicitly marked and dimmed so it

@@ -66,10 +66,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.handleError(fmt.Errorf("a session titled %q conflicts with existing session %q", instance.Title, other.Title))
 			}
 		}
-		if instance.IsRemote() {
+		if instance.Capabilities().Workspace == session.WorkspaceRemote {
 			existing := make([]*session.Instance, 0, m.store.NumInstances())
 			for _, other := range m.store.GetInstances() {
-				if other == instance || !other.IsRemote() {
+				if other == instance || other.Capabilities().Workspace != session.WorkspaceRemote {
 					continue
 				}
 				existing = append(existing, other)
@@ -105,7 +105,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				RepoPath:    instance.Path,
 				Program:     instance.Program,
 				AutoYes:     m.autoYes,
-				ForceRemote: instance.IsRemote(),
+				ForceRemote: instance.Capabilities().Workspace == session.WorkspaceRemote,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{

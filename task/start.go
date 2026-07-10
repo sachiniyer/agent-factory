@@ -26,8 +26,10 @@ func StartAndSendPrompt(instance *session.Instance, prompt string) error {
 		return err
 	}
 
-	// Remote sessions handle readiness and prompts on the remote host.
-	if instance.IsRemote() {
+	// Readiness polling, trust-prompt dismissal and prompt delivery below all
+	// drive the agent's PTY locally; a backend without interactive input (remote
+	// hook) handles readiness and prompts on its own host, so skip them.
+	if !instance.Capabilities().InteractiveInput {
 		return nil
 	}
 

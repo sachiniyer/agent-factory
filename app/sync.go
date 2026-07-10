@@ -228,7 +228,9 @@ func SetPRInfoFetcherForTest(f func(repoPath, branch string) (*git.PRInfo, error
 // fresh / fetch already in flight). Using force=true ignores the freshness
 // check — for tick-driven refreshes of the selected instance.
 func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
-	if inst == nil || inst.IsRemote() {
+	// PR info comes from a local git branch (`gh pr view`), so it only applies to
+	// a backend with a local worktree.
+	if inst == nil || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree {
 		return nil
 	}
 	if !force && inst.PRInfoAge() < prInfoStaleAfter {
@@ -611,9 +613,10 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 			changed = true
 		}
 	}
-	// Remote instances' tabs come from hook config (terminal_cmd), not the
-	// snapshot, so the backend owns them — skip the tab reconcile.
-	if !inst.IsRemote() {
+	// Backends without user-managed tabs (remote hook sessions) derive their tabs
+	// from config (terminal_cmd), not the snapshot, so the backend owns them —
+	// skip the tab reconcile.
+	if inst.Capabilities().TabManagement {
 		// Capture the slot→name list before the tab reconcile mutates it: an
 		// out-of-band tab removal (another client, `af sessions tab-delete`,
 		// daemon-side) must apply the SAME pane close/rebind semantics as the
@@ -773,7 +776,7 @@ func (m *home) importRemoteHookSessions() int {
 	existingTitles := m.store.GetInstanceTitles()
 	existingHookNames := make(map[string]bool)
 	for _, inst := range m.store.GetInstances() {
-		if !inst.IsRemote() {
+		if inst.Capabilities().Workspace != session.WorkspaceRemote {
 			continue
 		}
 		data := inst.ToInstanceData()

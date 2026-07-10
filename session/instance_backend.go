@@ -178,11 +178,15 @@ func (i *Instance) IsRemote() bool {
 }
 
 // Capabilities returns the backing runtime's capability descriptor (#1592
-// Phase 1). A nil backend reports the zero value (local workspace, nothing
-// supported), matching the historical nil-backend defaults.
+// Phase 1). A nil backend (a not-yet-initialised instance) reports local
+// full parity, matching the historical nil-backend contract the delocalized
+// client gates replace: IsRemote() has always nil-guarded to false (local), so
+// the UI treated a backend-less instance as a capable local session. Returning
+// the zero value instead would be an incoherent descriptor (local workspace but
+// every capability off) and would regress e.g. the tab-management footer.
 func (i *Instance) Capabilities() Capabilities {
 	if i.backend == nil {
-		return Capabilities{}
+		return (&LocalBackend{}).Capabilities()
 	}
 	return i.backend.Capabilities()
 }

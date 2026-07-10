@@ -174,10 +174,10 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		return nil
 	}
 
-	// Check for uncommitted changes in the worktree (skip for remote sessions
-	// which have no local worktree).
+	// Check for uncommitted changes in the worktree (skip for backends without a
+	// local worktree, e.g. remote hook sessions).
 	warning := ""
-	if !selected.IsRemote() {
+	if selected.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 		if wt := selected.GetWorktreePath(); wt != "" {
 			warning = killConfirmationWarning(wt)
 		}
@@ -327,7 +327,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 
 	// Live row → archive. Fail fast on the unarchivable session kinds for a
 	// snappy message (the daemon rejects them too).
-	if selected.IsRemote() {
+	if !selected.Capabilities().Archive {
 		return m, m.handleError(fmt.Errorf("cannot archive remote session '%s': it has no local worktree to relocate", title))
 	}
 	if selected.IsExternalWorktree() {
@@ -709,10 +709,14 @@ func (m *home) attachSelected(selected *session.Instance) (tea.Model, tea.Cmd) {
 // remote-ness (#889). Callers pass the tab index captured at keypress time
 // (#716), before help-overlay deferral can let selection or active tab drift.
 func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLabel, terminalLabel string) (tea.Model, tea.Cmd) {
+	// The post-detach terminal reset+reassert (#845/#848) keys off whether the
+	// workspace is remote: a remote instance's terminal tab is its terminal_cmd
+	// PTY, a local one's is a tmux session (#843/#889).
+	remote := instance.Capabilities().Workspace == session.WorkspaceRemote
 	if tabIdx != 0 {
 		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 			return m.beginAttachTransition(func() tea.Cmd {
-				return attachOverlayCallbackFn(m, instance.Title, terminalLabel, "", instance.IsRemote(), func() (chan struct{}, error) {
+				return attachOverlayCallbackFn(m, instance.Title, terminalLabel, "", remote, func() (chan struct{}, error) {
 					return ui.AttachTerminalTab(instance, tabIdx)
 				})
 			})
@@ -720,7 +724,7 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	}
 	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {
-			return attachOverlayCallbackFn(m, instance.Title, agentLabel, "", instance.IsRemote(), func() (chan struct{}, error) {
+			return attachOverlayCallbackFn(m, instance.Title, agentLabel, "", remote, func() (chan struct{}, error) {
 				return m.store.AttachInstance(instance)
 			})
 		})
@@ -748,7 +752,7 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 	if selected.HasInFlightOp() {
 		return m, nil
 	}
-	if selected.IsRemote() {
+	if !selected.Capabilities().TabManagement {
 		return m, m.handleError(fmt.Errorf("remote sessions don't support new process tabs; their terminal tab comes from remote_hooks.terminal_cmd and arbitrary remote processes aren't supported"))
 	}
 
@@ -796,7 +800,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if idx <= 0 {
 		return m, m.handleError(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
 	}
-	if selected.IsRemote() {
+	if !selected.Capabilities().TabManagement {
 		return m, m.handleError(fmt.Errorf("remote session tabs can't be closed"))
 	}
 	tabs := selected.GetTabs()
