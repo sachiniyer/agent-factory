@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -26,11 +25,11 @@ func effectiveWidth(width int) int {
 	return int(float64(width) * 0.9)
 }
 
-// prLineIndent renders an instance at the given 1-based display index and
-// returns the number of leading whitespace cells in front of the "PR #" text.
+// branchLineIndent renders an instance at the given 1-based display index and
+// returns the number of leading whitespace cells in front of the branch icon.
 // Instance indices are no longer rendered (#1494), so secondary-row indentation
 // must not change as idx crosses power-of-10 boundaries.
-func prLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
+func branchLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "feature",
@@ -38,19 +37,18 @@ func prLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
 		Program: "test",
 	})
 	require.NoError(t, err)
-	inst.SetPRInfo(&git.PRInfo{Number: 42, Title: "do a thing", State: "OPEN"})
 
 	r := NewInstanceRenderer(spin)
-	r.SetWidth(60) // wide enough to render the full PR line
+	r.SetWidth(60) // wide enough to render the full branch line
 
 	out := r.Render(inst, idx, false, false, false)
 	for _, line := range strings.Split(out, "\n") {
 		clean := ansiEscape.ReplaceAllString(line, "")
-		if pos := strings.Index(clean, "PR #"); pos >= 0 {
+		if pos := strings.Index(clean, branchIcon); pos >= 0 {
 			return len([]rune(clean[:pos]))
 		}
 	}
-	t.Fatalf("no PR line found in rendered output for idx=%d:\n%s", idx, out)
+	t.Fatalf("no branch line found in rendered output for idx=%d:\n%s", idx, out)
 	return -1
 }
 
@@ -79,27 +77,26 @@ func TestInstanceRendererOmitsInstanceIndex(t *testing.T) {
 	}
 }
 
-// TestInstanceRendererSecondaryIndentIgnoresIndex keeps the branch/PR
+// TestInstanceRendererSecondaryIndentIgnoresIndex keeps the branch-line
 // indentation stable now that idx is display-only input rather than a rendered
 // prefix component.
 func TestInstanceRendererSecondaryIndentIgnoresIndex(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
-	base := prLineIndent(t, 1, &spin)
+	base := branchLineIndent(t, 1, &spin)
 	for _, idx := range []int{9, 10, 11, 99, 100, 101, 999, 1000, 1001, 9999, 10000} {
-		got := prLineIndent(t, idx, &spin)
+		got := branchLineIndent(t, idx, &spin)
 		require.Equalf(t, base, got,
-			"PR line indent at idx=%d (%d) must match idx=1 (%d); idx leaked into display",
+			"branch line indent at idx=%d (%d) must match idx=1 (%d); idx leaked into display",
 			idx, got, base)
 	}
 }
 
 // renderForTerminal renders an instance at the sidebar width app.go derives
-// from the given terminal width, and returns the rendered title and PR lines.
-// The renderer wraps each section in lipgloss padding, so the visible title
-// content sits on line 1 (after the top-padding line) and the PR content
-// sits on line 4 (title content + branch + branch-pad + pr content).
-func renderForTerminal(t *testing.T, terminalW int, inst *session.Instance, spin *spinner.Model) (titleLine string, prLine string, sidebarW int) {
+// from the given terminal width, and returns the rendered title line. The
+// renderer wraps each section in lipgloss padding, so the visible title
+// content sits on line 1 (after the top-padding line).
+func renderForTerminal(t *testing.T, terminalW int, inst *session.Instance, spin *spinner.Model) (titleLine string, sidebarW int) {
 	t.Helper()
 	sidebarW = int(float32(terminalW) * 0.3)
 	r := NewInstanceRenderer(spin)
@@ -108,10 +105,7 @@ func renderForTerminal(t *testing.T, terminalW int, inst *session.Instance, spin
 	lines := strings.Split(out, "\n")
 	require.GreaterOrEqual(t, len(lines), 2, "renderer should emit at least a title row")
 	titleLine = lines[1]
-	if len(lines) >= 5 {
-		prLine = lines[4]
-	}
-	return titleLine, prLine, sidebarW
+	return titleLine, sidebarW
 }
 
 // TestInstanceRendererNarrowTerminalNoOverflow guards against the regression
@@ -165,7 +159,7 @@ func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			titleLine, _, sidebarW := renderForTerminal(t, tc.terminalW, inst, &spin)
+			titleLine, sidebarW := renderForTerminal(t, tc.terminalW, inst, &spin)
 			w := lipgloss.Width(titleLine)
 
 			if tc.expectFullTitle {
@@ -192,36 +186,6 @@ func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
 	}
 }
 
-// TestInstanceRendererNarrowTerminalPRNoTail exercises the parallel
-// truncation site for PR text: when prMaxWidth drops below the 3-cell
-// ellipsis the row must drop the tail rather than render a "..." that
-// overflows the sidebar.
-func TestInstanceRendererNarrowTerminalPRNoTail(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	inst, err := session.NewInstance(session.InstanceOptions{
-		Title:   "feat",
-		Path:    t.TempDir(),
-		Program: "test",
-	})
-	require.NoError(t, err)
-	inst.SetPRInfo(&git.PRInfo{
-		Number: 1234,
-		Title:  "long pull request title needing truncation",
-		State:  "OPEN",
-	})
-
-	// terminalW=14..18 produces prMaxWidth in {1, 2}, which is the bug
-	// range where the pre-fix code passed a negative width to
-	// runewidth.Truncate and got back "..." (wider than prMaxWidth).
-	for _, terminalW := range []int{14, 16, 18} {
-		_, prLine, _ := renderForTerminal(t, terminalW, inst, &spin)
-		trimmed := strings.TrimRight(prLine, " ")
-		assert.Falsef(t, strings.HasSuffix(trimmed, "..."),
-			"PR line must not produce a '...' artifact at terminal=%d; got %q",
-			terminalW, prLine)
-	}
-}
-
 // TestInstanceRendererDeletingMarker pins the #844 sidebar treatment: a row
 // whose teardown is running in the background must carry an explicit
 // "[deleting]" marker (the spinner alone reads as "busy working").
@@ -235,11 +199,11 @@ func TestInstanceRendererDeletingMarker(t *testing.T) {
 	require.NoError(t, err)
 
 	inst.SetStatusForTest(session.Ready)
-	before, _, _ := renderForTerminal(t, 120, inst, &spin)
+	before, _ := renderForTerminal(t, 120, inst, &spin)
 	assert.NotContains(t, before, "[deleting]")
 
 	inst.SetStatusForTest(session.Deleting)
-	after, _, _ := renderForTerminal(t, 120, inst, &spin)
+	after, _ := renderForTerminal(t, 120, inst, &spin)
 	assert.Contains(t, after, "[deleting]", "deleting rows must be explicitly marked")
 	assert.Contains(t, after, "going-away", "the title must remain visible while deleting")
 }
@@ -257,7 +221,7 @@ func TestInstanceRendererLimitReachedMarker(t *testing.T) {
 	require.NoError(t, err)
 
 	_ = inst.Transition(session.ObserveLiveness(session.LiveLimitReached))
-	out, _, _ := renderForTerminal(t, 120, inst, &spin)
+	out, _ := renderForTerminal(t, 120, inst, &spin)
 	assert.Contains(t, out, "[limit]", "a usage-limit-reached row must be explicitly marked (#1146)")
 	assert.Contains(t, out, "throttled", "the title must remain visible")
 }
@@ -278,7 +242,7 @@ func TestInstanceRendererArchivedShowsName(t *testing.T) {
 	inst.SetArchived()
 
 	for _, terminalW := range []int{100, 80} {
-		title, _, _ := renderForTerminal(t, terminalW, inst, &spin)
+		title, _ := renderForTerminal(t, terminalW, inst, &spin)
 		clean := ansiEscape.ReplaceAllString(title, "")
 		assert.Containsf(t, clean, "one",
 			"archived row must show its name at %d cols; got %q", terminalW, clean)
@@ -306,9 +270,9 @@ func TestInstanceRendererCreatingRowShowsBareName(t *testing.T) {
 }
 
 // TestInstanceRendererDeletingDimsSelectedRow pins the #853 fix: a SELECTED
-// deleting row must dim its branch and PR lines along with the title. Before
-// the fix only titleS picked up deletingTitleColor, so the high-contrast
-// selectedDescStyle left the secondary lines brighter than the dimmed title.
+// deleting row must dim its branch line along with the title. Before the fix
+// only titleS picked up deletingTitleColor, so the high-contrast
+// selectedDescStyle left the secondary line brighter than the dimmed title.
 // (Unselected rows never showed the bug: listDescStyle is already the same
 // gray as deletingTitleColor.)
 func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
@@ -331,7 +295,6 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 		Program: "test",
 	})
 	require.NoError(t, err)
-	inst.SetPRInfo(&git.PRInfo{Number: 7, Title: "teardown", State: "OPEN"})
 
 	// SGR foreground params of the default Zenburn deleting gray.
 	dimFG := termenv.RGBColor("#989890").Sequence(false)
@@ -343,8 +306,8 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 		out := r.Render(inst, 1, true, false, false)
 		lines := strings.Split(out, "\n")
 		// [0] title top padding, [1] title, [2] branch line, [3] branch
-		// bottom padding, [4] PR line, [5] PR bottom padding.
-		require.GreaterOrEqual(t, len(lines), 5, "expected title, branch, and PR rows")
+		// bottom padding.
+		require.GreaterOrEqual(t, len(lines), 3, "expected title and branch rows")
 		return lines
 	}
 
@@ -352,13 +315,11 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 	before := renderLines()
 	require.NotContains(t, before[1], dimFG, "selected title must not be dimmed before deletion")
 	require.NotContains(t, before[2], dimFG, "selected branch line must not be dimmed before deletion")
-	require.NotContains(t, before[4], dimFG, "selected PR line must not be dimmed before deletion")
 
 	inst.SetStatusForTest(session.Deleting)
 	after := renderLines()
 	assert.Contains(t, after[1], dimFG, "selected deleting title must be dimmed")
 	assert.Contains(t, after[2], dimFG, "selected deleting branch line must be dimmed")
-	assert.Contains(t, after[4], dimFG, "selected deleting PR line must be dimmed")
 }
 
 // TestInstanceRendererTreeArrow pins the tree affordance on instance rows

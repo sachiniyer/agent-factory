@@ -160,7 +160,7 @@ var tabRowSelectedStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#4F4F4F")).
 	Foreground(lipgloss.Color("#FFFFEF"))
 
-// deletingTitleColor dims a mid-deletion row — title and branch/PR lines —
+// deletingTitleColor dims a mid-deletion row — title and branch line —
 // to the description gray so it visually recedes while its teardown runs in
 // the background (#844, #853).
 var deletingTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
@@ -318,9 +318,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if op == session.OpKilling || op == session.OpArchiving {
 		titleText = "[deleting] " + titleText
 		titleS = titleS.Foreground(deletingTitleColor)
-		// Dim the branch/PR lines too: on a selected row descS is the
+		// Dim the branch line too: on a selected row descS is the
 		// high-contrast selectedDescStyle, and leaving it bright makes the
-		// secondary lines stand out more than the dimmed title (#853).
+		// secondary line stand out more than the dimmed title (#853).
 		descS = descS.Foreground(deletingTitleColor)
 	}
 	// An archived row (#1028) is dimmed and carries the ▧ archived glyph so it
@@ -426,27 +426,8 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, branch, spaces)
 
-	// Build PR info line if available
-	var prLine string
-	if prInfo := i.GetPRInfo(); prInfo != nil {
-		prText := fmt.Sprintf("PR #%d: %s", prInfo.Number, prInfo.Title)
-		prMaxWidth := r.width - prefixWidth - 2
-		if prMaxWidth > 0 && runewidth.StringWidth(prText) > prMaxWidth {
-			tail := "..."
-			if prMaxWidth < runewidth.StringWidth(tail) {
-				tail = ""
-			}
-			prText = runewidth.Truncate(prText, prMaxWidth, tail)
-		}
-		prLine = fmt.Sprintf("%s %s", strings.Repeat(" ", prefixWidth), prText)
-	}
-
 	// join title and subtitle
-	lines := []string{title, descS.Render(branchLine)}
-	if prLine != "" {
-		lines = append(lines, descS.Render(prLine))
-	}
-	text := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	text := lipgloss.JoinVertical(lipgloss.Left, title, descS.Render(branchLine))
 
 	return text
 }
