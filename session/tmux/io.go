@@ -83,7 +83,22 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	//
 	// Once the underlying tmux session has been confirmed gone, stay silent
 	// instead of relogging capture-pane failures every daemon tick (#489).
-	if t.monitor == nil || t.monitor.dead {
+	//
+	// monitorMu guards the monitor pointer (swapped by Restore) and its
+	// dead/prevOutputHash fields (mutated here) against the data race #1528
+	// fixes. The lock is deliberately NOT held across CapturePaneContent: that
+	// runs an unbounded `tmux capture-pane`, and blocking Restore's setMonitor
+	// on a slow/hung tmux server would freeze detach/restore — worse than the
+	// race. So snapshot the live monitor under the lock, release it, run the
+	// tmux command lock-free, then re-acquire only to update the monitor's
+	// fields. Field writes land on the snapshotted monitor: if Restore swaps in
+	// a fresh one meanwhile, the stale monitor is discarded and updating it is a
+	// harmless no-op.
+	t.monitorMu.Lock()
+	mon := t.monitor
+	alive := mon != nil && !mon.dead
+	t.monitorMu.Unlock()
+	if !alive {
 		return false, false, ""
 	}
 
@@ -97,7 +112,9 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 		// error path, so use the wrapped sentinel rather than re-probing.
 		if errors.Is(err, ErrSessionGone) {
 			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
-			t.monitor.dead = true
+			t.monitorMu.Lock()
+			mon.dead = true
+			t.monitorMu.Unlock()
 			return false, false, ""
 		}
 		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
@@ -116,12 +133,16 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 		hasPrompt = strings.Contains(content, "Yes, allow once")
 	}
 
-	newHash := t.monitor.hash(content)
-	if !bytes.Equal(newHash, t.monitor.prevOutputHash) {
-		t.monitor.prevOutputHash = newHash
-		return true, hasPrompt, content
+	// hash() is pure (no shared state), so compute it lock-free; only the
+	// compare-and-store against prevOutputHash needs the lock.
+	newHash := mon.hash(content)
+	t.monitorMu.Lock()
+	changed := !bytes.Equal(newHash, mon.prevOutputHash)
+	if changed {
+		mon.prevOutputHash = newHash
 	}
-	return false, hasPrompt, content
+	t.monitorMu.Unlock()
+	return changed, hasPrompt, content
 }
 
 // SetDetachedSize set the width and height of the session while detached. This makes the

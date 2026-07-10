@@ -496,3 +496,67 @@ func TestCloseAttachOnly_DoesNotKillSession(t *testing.T) {
 		t.Fatalf("PTY file should already be closed by CloseAttachOnly")
 	}
 }
+
+// TestHasUpdatedRestoreRace is a regression test for issue #1528.
+//
+// TmuxSession.monitor is swapped by Restore() (t.setMonitor(newStatusMonitor()))
+// on the restore/RPC/event-loop goroutines while the daemon's per-second poll
+// reads the pointer — and mutates its dead/prevOutputHash fields — inside
+// HasUpdated(). Before #1528 neither side took a lock, so the pointer write in
+// Restore raced the read+field-mutations in HasUpdated (undefined behavior per
+// Go's memory model). Both paths now serialize on monitorMu.
+//
+// Run under `go test -race` (bounded parallelism on shared boxes, see
+// docs/container-testing.md): the poll goroutine hammers HasUpdated while the
+// restore goroutine repeatedly swaps the monitor. Without the lock the race
+// detector flags the t.monitor read/write.
+func TestHasUpdatedRestoreRace(t *testing.T) {
+	ptyFactory := NewMockPtyFactory(t)
+	cmdExec := cmd_test.MockCmdExec{
+		// has-session succeeds so Restore attaches (never re-spawns), and
+		// capture-pane returns content so HasUpdated exercises the hash compare.
+		RunFunc:    func(cmd *exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("pane content"), nil },
+	}
+
+	session := newTmuxSession(toTmuxName("monitor-race", ""), "claude", ptyFactory, cmdExec)
+	if err := session.Restore(""); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Poll goroutine: reads t.monitor and mutates its fields on every tick.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				session.HasUpdated()
+			}
+		}
+	}()
+
+	// Restore goroutine: swaps the monitor pointer out from under the poll.
+	// defer close(stop) so the poll goroutine is released on BOTH the normal
+	// finish and an early error return — otherwise a transient mock-PTY failure
+	// would leave the poll goroutine spinning and wg.Wait() would hang into a
+	// test timeout instead of failing cleanly.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(stop)
+		for i := 0; i < 500; i++ {
+			if err := session.Restore(""); err != nil {
+				t.Errorf("Restore: %v", err)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+}
