@@ -95,7 +95,33 @@ func (e *WorktreeUnavailableError) Unwrap() error {
 	return e.Err
 }
 
+// Start brings a local session up in two explicit phases (#1592 Phase 1 PR4):
+// provision establishes WHERE the agent will run (the tmux session handle bound
+// to the instance, plus — for a fresh create — the git worktree record and its
+// branch), then launch starts WHAT runs in it (materializing the worktree on
+// disk and spawning/reconnecting the agent process and its tabs). The split is
+// behavior-preserving: Start = provision then launch is exactly the monolithic
+// Start it replaced (same order, side effects, and errors), and it prepares the
+// backend for the future agent-server "provision-and-expose" model, where
+// provision spins up an off-box workspace and launch exposes the agent stream.
 func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
+	if err := b.provision(i, firstTimeSetup); err != nil {
+		return err
+	}
+	return b.launch(i, firstTimeSetup)
+}
+
+// provision establishes the local workspace a session will run in WITHOUT
+// starting any agent process (#1592 Phase 1 PR4): it binds the instance's tmux
+// session handle and, on a first-time create, computes the git worktree record +
+// branch name. Nothing here spawns a tmux server session, materializes the
+// worktree on disk, or launches the agent program — those are launch's job.
+// NewGitWorktree is purely in-memory (the disk-mutating `git worktree add` runs
+// in worktree.Setup(), which launch owns), so a provision failure leaves nothing
+// on disk to clean up and returns before launch's cleanup scope is ever entered
+// — exactly as the pre-split Start did (its NewGitWorktree failure returned
+// before the deferred cleanup handler was registered).
+func (b *LocalBackend) provision(i *Instance, firstTimeSetup bool) error {
 	if strings.TrimSpace(i.Title) == "" {
 		return fmt.Errorf("instance title cannot be empty")
 	}
@@ -142,6 +168,24 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 		i.Branch = branchName
 		i.mu.Unlock()
 	}
+
+	return nil
+}
+
+// launch starts (or restores) the agent PROCESS in the workspace provision
+// established (#1592 Phase 1 PR4): it materializes the worktree on disk
+// (worktree.Setup on a fresh create), spawns or reconnects the tmux session, and
+// brings up the non-agent tabs. It owns the failure-cleanup scope — a launch
+// failure tears down provision's worktree via i.Kill on a fresh create, or
+// releases only the attach PTY on a restore. worktree.Setup deliberately stays
+// here rather than in provision: it is the first on-disk mutation, and its
+// failure needs the same teardown as any other launch failure, so it belongs
+// inside this cleanup scope. Behavior is identical to the pre-split Start — this
+// is exactly the code that followed provision's work in the monolithic form.
+func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool) error {
+	i.mu.RLock()
+	tmuxSession := i.tmuxLocked()
+	i.mu.RUnlock()
 
 	// Setup error handler to cleanup resources on any error.
 	// Kill() acquires its own lock, so we must not hold i.mu here.
