@@ -166,7 +166,9 @@ func (t *TmuxSession) Restore(workDir string) error {
 		return fmt.Errorf("error opening PTY: %w", err)
 	}
 	t.ptmx = ptmx
-	t.monitor = newStatusMonitor()
+	// Swap in a fresh monitor under monitorMu: the daemon poll may be inside
+	// HasUpdated() reading the old pointer and mutating its fields right now (#1528).
+	t.setMonitor(newStatusMonitor())
 	// Save a closure that SIGKILLs the attach-session child so Detach() can
 	// force io.Copy(os.Stdout, t.ptmx) to unblock when the tmux server is
 	// too contended to let the client exit on its own. Closing ptmx (the

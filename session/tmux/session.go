@@ -51,8 +51,13 @@ type TmuxSession struct {
 	// stdout dimensions of the tmux pane. On detach, we close it and set a new one.
 	// This should never be nil.
 	ptmx *os.File
-	// monitor monitors the tmux pane content and sends signals to the UI when it's status changes
-	monitor *statusMonitor
+	// monitor monitors the tmux pane content and sends signals to the UI when it's status changes.
+	// The pointer is swapped by Restore() (a fresh monitor on every (re)attach) on the
+	// restore/RPC/event-loop goroutines while the daemon's per-second poll reads it — and mutates
+	// its dead/prevOutputHash fields — inside HasUpdated(). Every access therefore goes through the
+	// monitorMu-guarded helpers in monitor.go; never touch these two fields directly (#1528).
+	monitor   *statusMonitor
+	monitorMu sync.Mutex
 
 	// Initialized by Attach
 	// Deinitilaized by Detach

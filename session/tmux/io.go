@@ -83,6 +83,14 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	//
 	// Once the underlying tmux session has been confirmed gone, stay silent
 	// instead of relogging capture-pane failures every daemon tick (#489).
+	//
+	// monitorMu is held across the whole body: the nil/dead read, the
+	// prevOutputHash compare-and-store, and the dead latch must be atomic with
+	// respect to Restore()'s pointer swap, which runs on a different goroutine
+	// (#1528). Restore is infrequent (attach/detach/respawn), so serializing it
+	// against this poll for one capture-pane is acceptable.
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
 	if t.monitor == nil || t.monitor.dead {
 		return false, false, ""
 	}
