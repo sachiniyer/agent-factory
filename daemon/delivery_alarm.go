@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"sort"
 	"time"
 )
@@ -36,6 +37,13 @@ var watcherDeliveryAlarmThreshold = 3 * time.Minute
 func (w *taskWatcher) recordDeliveryResult(now time.Time, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if errors.Is(err, errTargetBusy) {
+		// A deferred delivery (target attached, #1586) is neither a success nor a
+		// pipeline failure: leave the consecutive-failure clock untouched so a
+		// long attach never trips the delivery-failure alarm (#1238), and don't
+		// clear a genuine prior failure run either.
+		return
+	}
 	if err == nil {
 		w.deliverFailSince = time.Time{}
 		w.deliverFailCount = 0

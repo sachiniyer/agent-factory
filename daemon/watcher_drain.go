@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -84,6 +85,19 @@ func (w *taskWatcher) drainLoop() {
 		}
 		if err := w.sup.deliver(w.taskID, ev.Line); err != nil {
 			w.recordDeliveryResult(time.Now(), err)
+			if errors.Is(err, errTargetBusy) {
+				// Not a delivery failure: a TUI is attached to the target, so the
+				// backlog is held until detach rather than pasted into live typing
+				// (#1586). Poll at the base cadence (never the growing failure
+				// backoff) so delivery resumes promptly once the user detaches, and
+				// log quietly since a deferral is expected, not an outage.
+				log.InfoLog.Printf("watch task %s: target session attached; holding %d queued event(s) until detach (#1586)", w.taskID, w.queue.pendingCount())
+				if !w.sleepStopAware(w.sup.drainBaseBackoff) {
+					w.stopDraining()
+					return
+				}
+				continue
+			}
 			log.WarningLog.Printf("watch task %s: replay delivery failed (%d event(s) pending); retrying in %s: %v", w.taskID, w.queue.pendingCount(), backoff, err)
 			if !w.sleepStopAware(backoff) {
 				w.stopDraining()

@@ -116,6 +116,14 @@ type DeliverPromptRequest struct {
 	Program  string `json:"program"`
 	Prompt   string `json:"prompt"`
 	AutoYes  bool   `json:"auto_yes"`
+	// DeferWhileAttached is set by the automated task-delivery path (cron +
+	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
+	// to an existing target session, rather than pasting a prompt + Enter into a
+	// pane the user is actively typing in — which would append to and submit
+	// their half-typed message (#1586). Manual sends (af sessions send-prompt)
+	// leave it false so an explicit, user-initiated send always lands
+	// immediately.
+	DeferWhileAttached bool `json:"defer_while_attached,omitempty"`
 }
 
 // DeliverPromptResponse reports how the prompt was delivered. Status is

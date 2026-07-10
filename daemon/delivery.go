@@ -26,6 +26,22 @@ var (
 	targetDeliverPoll = 100 * time.Millisecond
 )
 
+// StatusDeferredAttached is the delivery status returned when an automated task
+// delivery (DeferWhileAttached) targets a session a TUI is attached full-screen
+// to (#1586). It extends the "started"/"sent" status vocabulary. It is
+// deliberately NOT "errored:"-prefixed, so a cron task records a benign
+// deferred run (not a failure) and re-fires on its next tick; the watch path
+// converts it into errTargetBusy to re-queue and retry after detach.
+const StatusDeferredAttached = "deferred: target attached"
+
+// errTargetBusy signals that an automated task delivery was deferred because a
+// TUI is attached full-screen to the target session (#1586). It never crosses
+// the control socket — DeliverPrompt reports the deferral via the
+// StatusDeferredAttached status string instead — so this sentinel is minted and
+// matched entirely daemon-side, by the watch delivery path, to drive the
+// durable re-queue/retry without tripping the delivery-failure alarm (#1238).
+var errTargetBusy = errors.New("target session is attached; delivery deferred until detach")
+
 // DeliverPrompt delivers a prompt to a target session, auto-creating that
 // session when it does not exist. The whole create-or-send decision runs under
 // a per-(repo, title) lock, so concurrent deliveries to the same shared target
@@ -60,6 +76,17 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 		return "", err
 	}
 	if exists {
+		// A TUI is attached full-screen to this session (#1160 pause lease), so
+		// the user is typing directly into its pane. Pasting an automated task
+		// prompt + Enter now would append to and submit their half-typed line
+		// (#1586). Defer instead of delivering: the caller holds the event (watch
+		// re-queues and retries after detach; cron records the benign deferred
+		// status and re-fires next tick) rather than corrupting live input. Only
+		// automated deliveries set DeferWhileAttached — a manual send-prompt is an
+		// explicit user action and still lands immediately.
+		if req.DeferWhileAttached && m.isPollPaused(repo.ID, req.Title) {
+			return StatusDeferredAttached, nil
+		}
 		if err := m.SendPrompt(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt}); err != nil {
 			return "", err
 		}

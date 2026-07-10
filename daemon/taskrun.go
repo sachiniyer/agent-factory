@@ -79,6 +79,10 @@ func deliverTaskPrompt(t *task.Task, prompt string) (string, error) {
 		Program:  t.Program,
 		Prompt:   prompt,
 		AutoYes:  cfg.AutoYes,
+		// This is an automated delivery (cron fire or watch event): hold it
+		// while a TUI is attached full-screen to the target so it never pastes
+		// into and submits the user's in-progress input (#1586).
+		DeferWhileAttached: true,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to deliver prompt to target session %q: %w", t.TargetSession, err)

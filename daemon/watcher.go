@@ -786,7 +786,14 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	err := w.sup.deliver(w.taskID, line)
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
-		log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
+		if errors.Is(err, errTargetBusy) {
+			// Not a failure: a TUI is attached to the target, so the event is
+			// held and retried after detach rather than pasted into live typing
+			// (#1586). Queue it (preserving FIFO) and log quietly.
+			log.InfoLog.Printf("watch task %s: target session attached; deferring event until detach (#1586)", w.taskID)
+		} else {
+			log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
+		}
 		w.enqueueEvent(line, tail)
 	}
 }
@@ -869,6 +876,15 @@ func deliverWatchEvent(taskID, line string) error {
 	status, err := deliverTaskPrompt(t, prompt)
 	if err != nil {
 		return err
+	}
+	if status == StatusDeferredAttached {
+		// A TUI is attached full-screen to the target session; the delivery was
+		// held so it can't paste into and submit the user's in-progress input
+		// (#1586). Signal the caller (handleEvent / drainLoop) to re-queue and
+		// retry after detach — the event is neither lost nor delivered into live
+		// typing. errTargetBusy is exempt from the delivery-failure alarm and
+		// logged quietly, since a deferral is expected, not an outage.
+		return errTargetBusy
 	}
 	now := time.Now()
 	if err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
