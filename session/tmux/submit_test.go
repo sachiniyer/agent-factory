@@ -115,13 +115,14 @@ func TestCodexSubmitUsesBracketedPaste(t *testing.T) {
 }
 
 // TestNonCodexSubmitUsesPlainPasteBuffer guards against regressing the agents
-// that do not need bracketed-paste submit semantics (claude/aider/gemini and
-// unknown/override panes): they use tmux's plain paste-buffer path plus Enter.
+// that do not need bracketed-paste submit semantics
+// (claude/aider/gemini/amp and unknown/override panes): they use tmux's plain
+// paste-buffer path plus Enter.
 // This keeps codex's #1256 bracketed-paste behavior scoped to codex while
 // avoiding the literal `send-keys -l` wrapped-redraw issue seen in bash-backed
 // sessions (#1292).
 func TestNonCodexSubmitUsesPlainPasteBuffer(t *testing.T) {
-	for _, program := range []string{"claude", "aider", "gemini", "some-custom-shell"} {
+	for _, program := range []string{"claude", "aider", "gemini", "amp", "some-custom-shell"} {
 		t.Run(program, func(t *testing.T) {
 			const prompt = "hello"
 			cmds := recordTmuxCommands(t, program, prompt)

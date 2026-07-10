@@ -18,17 +18,20 @@ func TestDetectAgentFromCommand(t *testing.T) {
 		{"bare codex", "codex", ProgramCodex},
 		{"bare aider", "aider", ProgramAider},
 		{"bare gemini", "gemini", ProgramGemini},
+		{"bare amp", "amp", ProgramAmp},
 
 		// Override / legacy shapes: absolute paths, flags, quoting.
 		{"claude abs path", "/home/foo/bin/claude", ProgramClaude},
 		{"claude path with flags", "/home/foo/bin/claude --plugin-dir x", ProgramClaude},
 		{"codex path with flags", "/usr/local/bin/codex --full-auto", ProgramCodex},
+		{"amp path with flags", "/home/user/.amp/bin/amp --no-ide", ProgramAmp},
 		{"quoted claude path", "'/opt/my tools/claude' --model opus", ProgramClaude},
 		{"uppercase base matches", "/opt/bin/Claude", ProgramClaude},
 
 		// Wrapper prefixes still match (#742 precedent from resumeProgram).
 		{"ionice wrapper", "ionice -c 3 claude", ProgramClaude},
 		{"env wrapper", "env FOO=1 gemini --resume latest", ProgramGemini},
+		{"amp env wrapper", "env AMP_URL=https://ampcode.com amp --no-notifications", ProgramAmp},
 
 		// Non-agent commands: no agent behavior may attach to these.
 		{"bare shell (#1131)", "bash", ""},

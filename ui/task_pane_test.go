@@ -323,7 +323,7 @@ func TestTaskPaneEditModePresetFromExistingProgram(t *testing.T) {
 		Prompt:      "do it",
 		CronExpr:    "* * * * *",
 		ProjectPath: newGitRepo(t),
-		Program:     "aider",
+		Program:     "amp",
 		Enabled:     true,
 	}})
 	tp.SetFocus(true)
@@ -337,7 +337,7 @@ func TestTaskPaneEditModePresetFromExistingProgram(t *testing.T) {
 	assert.False(t, tp.IsEditing(), "save should exit edit mode")
 	tasks := tp.GetTasks()
 	if assert.Len(t, tasks, 1) {
-		assert.Equal(t, "aider", tasks[0].Program,
+		assert.Equal(t, "amp", tasks[0].Program,
 			"pre-selected canonical option must round-trip the original value")
 	}
 }

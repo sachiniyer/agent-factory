@@ -21,11 +21,12 @@ import (
 //
 // Scope of what we schedule against: only the subscription-plan agents
 // (claude, codex) stall at a dead prompt with a parseable reset window, so
-// only they get a matcher here. gemini/aider are API-key-metered — a "limit"
-// there is a transient 429 the CLI already retries, with no plan-reset
-// timestamp to schedule against — so isLimitContent returns hit=false for
-// them in v1. The matcher map is structured so a surface-only entry for them
-// (detect set, parseReset nil) drops in later without touching the core.
+// only they get a matcher here. Other agents are API-key-metered or have no
+// known plan-reset banner — a "limit" there is a transient CLI/API failure
+// with no reset timestamp to schedule against — so isLimitContent returns
+// hit=false for them in v1. The matcher map is structured so a surface-only
+// entry for them (detect set, parseReset nil) drops in later without touching
+// the core.
 
 // agentLimitMatcher is the per-agent recipe for recognizing a usage-limit
 // banner and, when present, extracting its reset time.
@@ -78,8 +79,8 @@ func builtinLimitMatchers() map[string]agentLimitMatcher {
 // built-in matchers: for each entry in overrides (agent name -> regexp
 // string), it replaces that agent's detect pattern while keeping the built-in
 // reset-time parser. An override for an agent with no built-in matcher
-// (gemini/aider in v1) is ignored — there is no reset parser to pair it with
-// yet, and detection-only surfacing lands in a later PR. An uncompilable
+// is ignored — there is no reset parser to pair it with yet, and
+// detection-only surfacing lands in a later PR. An uncompilable
 // pattern is logged and skipped so the built-in default stands; validateConfig
 // already drops such entries, so this is defense in depth for hand-built
 // configs and non-config callers.
@@ -148,7 +149,7 @@ func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, re
 //
 // Return contract:
 //   - hit=false: no banner for this agent (or an agent with no matcher, e.g.
-//     gemini/aider in v1). resetAt/hasResetTime are zero.
+//     any non-claude/codex agent in v1). resetAt/hasResetTime are zero.
 //   - hit=true, hasResetTime=true: banner detected and a reset time parsed;
 //     resetAt is that time in UTC.
 //   - hit=true, hasResetTime=false: banner detected but the reset time was

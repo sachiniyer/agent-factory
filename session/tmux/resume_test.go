@@ -249,6 +249,35 @@ func TestResumeProgram(t *testing.T) {
 			"gemini --model x -r5",
 		},
 
+		// Amp: insert the resume subcommand after any leading Amp global
+		// options. Explicit user subcommands are left unchanged so af does not
+		// rewrite e.g. "amp review" into a different command.
+		{"amp bare", "amp", "amp threads continue --last"},
+		{"amp with global flag", "amp --no-ide", "amp --no-ide threads continue --last"},
+		{"amp with global flag value", "amp --settings-file ~/.config/amp/test.json", "amp --settings-file ~/.config/amp/test.json threads continue --last"},
+		{"amp with mode", "amp -m high --no-notifications", "amp -m high --no-notifications threads continue --last"},
+		{"amp with optional global flag value", "amp --plugin-ready-timeout 30 --no-color", "amp --plugin-ready-timeout 30 --no-color threads continue --last"},
+		{"amp with optional global flag attached value", "amp --plugin-ready-timeout=30", "amp --plugin-ready-timeout=30 threads continue --last"},
+		{"amp with unknown value-taking global flag", "amp --future-setting workspace --no-ide", "amp --future-setting workspace --no-ide threads continue --last"},
+		{"amp with unknown attached global flag value", "amp --future-setting=workspace --no-ide", "amp --future-setting=workspace --no-ide threads continue --last"},
+		{
+			"amp absolute path",
+			"/home/user/.amp/bin/amp --no-ide",
+			"/home/user/.amp/bin/amp --no-ide threads continue --last",
+		},
+		{
+			"amp quoted path with spaces",
+			"'/path with space/amp' --no-ide",
+			"'/path with space/amp' --no-ide threads continue --last",
+		},
+		{"amp already last", "amp last", "amp last"},
+		{"amp already l", "amp l", "amp l"},
+		{"amp already threads continue", "amp threads continue --last", "amp threads continue --last"},
+		{"amp already threads c", "amp threads c --last", "amp threads c --last"},
+		{"amp explicit subcommand", "amp review", "amp review"},
+		{"amp explicit subcommand after unknown boolean", "amp --future-bool review", "amp --future-bool review"},
+		{"amp explicit threads list", "amp threads list --json", "amp threads list --json"},
+
 		// Wrapper-command flags must not be mistaken for agent resume flags
 		// (#742). The already-has-resume scan is position-aware: only tokens
 		// AFTER the agent token are inspected, so a wrapper flag like
@@ -316,6 +345,11 @@ func TestResumeProgram(t *testing.T) {
 			"gemini wrapper with agent attached resume",
 			"ionice -c 3 gemini -r5",
 			"ionice -c 3 gemini -r5",
+		},
+		{
+			"amp ionice wrapper",
+			"ionice -c 3 amp --no-ide",
+			"ionice -c 3 amp --no-ide threads continue --last",
 		},
 
 		// Unknown programs are passed through unchanged so unrelated CLIs
@@ -392,6 +426,11 @@ func TestResumeProgramWithConversationID(t *testing.T) {
 		{"codex exec", ProgramCodex, "codex exec --foo bar", "codex exec resume " + id + " --foo bar", true},
 		{"codex quoted path", ProgramCodex, "'/path with spaces/codex' --model gpt-5", "'/path with spaces/codex' resume " + id + " --model gpt-5", true},
 		{"codex already resume", ProgramCodex, "codex resume --last", "codex resume --last", false},
+		{"amp bare", ProgramAmp, "amp", "amp threads continue " + id, true},
+		{"amp with global flag", ProgramAmp, "amp --no-ide", "amp --no-ide threads continue " + id, true},
+		{"amp quoted path", ProgramAmp, "'/path with spaces/amp' --no-ide", "'/path with spaces/amp' --no-ide threads continue " + id, true},
+		{"amp already resume latest", ProgramAmp, "amp threads continue --last", "amp threads continue --last", false},
+		{"amp explicit command", ProgramAmp, "amp review", "amp review", false},
 		{"provider mismatch", ProgramClaude, "codex --model gpt-5", "codex --model gpt-5", false},
 		{"unsupported provider", ProgramGemini, "gemini", "gemini", false},
 		{"empty id", ProgramCodex, "codex", "codex", false},
@@ -408,6 +447,34 @@ func TestResumeProgramWithConversationID(t *testing.T) {
 			require.Equal(t, tc.wantRewritten, rewritten)
 		})
 	}
+}
+
+func TestResumeProgramWithConversationIDQuotesUnsafeID(t *testing.T) {
+	const id = "thread id?x=1&y=2"
+	cases := []struct {
+		name  string
+		agent string
+		in    string
+		want  string
+	}{
+		{"claude", ProgramClaude, "claude", "claude --resume 'thread id?x=1&y=2'"},
+		{"codex", ProgramCodex, "codex", "codex resume 'thread id?x=1&y=2'"},
+		{"amp", ProgramAmp, "amp", "amp threads continue 'thread id?x=1&y=2'"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, rewritten := ResumeProgramWithConversationID(tc.in, tc.agent, id)
+			require.True(t, rewritten)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestShellQuoteArg(t *testing.T) {
+	require.Equal(t, "abc-123_./:@%+=", shellQuoteArg("abc-123_./:@%+="))
+	require.Equal(t, "'thread id?x=1&y=2'", shellQuoteArg("thread id?x=1&y=2"))
+	require.Equal(t, `'it'"'"'s'`, shellQuoteArg("it's"))
 }
 
 // TestResumeProgram_CodexProfileResumeFalsePositive guards #632: the codex
@@ -462,6 +529,12 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"ionice -c 3 aider",
 		"ionice -c 3 gemini",
 		"taskset -c 0-3 gemini",
+		"amp",
+		"amp --no-ide",
+		"amp --settings-file ~/.config/amp/test.json",
+		"ionice -c 3 amp --no-ide",
+		"amp threads continue --last",
+		"amp review",
 	} {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)

@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // silenceStdio redirects stdout/stderr to /dev/null for the duration of the
@@ -97,6 +98,40 @@ func TestSessionsCreate_HereSetsInPlace(t *testing.T) {
 				t.Fatalf("--here must compose with --prompt; got prompt %q", got.Prompt)
 			}
 		})
+	}
+}
+
+func TestSessionsCreateAcceptsAmpProgram(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	silenceStdio(t)
+
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+
+	var got *daemon.CreateSessionRequest
+	prevCreate := createSessionViaDaemon
+	createSessionViaDaemon = func(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
+		got = &req
+		return &session.InstanceData{Title: req.Title}, nil
+	}
+	t.Cleanup(func() { createSessionViaDaemon = prevCreate })
+
+	setSessionsCreateFlags(t, "amp-test", repoRoot, false, false)
+	createProgramFlag = tmux.ProgramAmp
+
+	if err := sessionsCreateCmd.RunE(sessionsCreateCmd, nil); err != nil {
+		t.Fatalf("sessions create: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("daemon create was never called")
+	}
+	if got.Program != tmux.ProgramAmp {
+		t.Fatalf("CreateSessionRequest.Program = %q, want %q", got.Program, tmux.ProgramAmp)
 	}
 }
 

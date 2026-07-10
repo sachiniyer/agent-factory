@@ -8,7 +8,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 
 ## Commands
 
-- [`af`](#af) — Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, and Gemini.
+- [`af`](#af) — Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
@@ -57,7 +57,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 
 ## af
 
-Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, and Gemini.
+Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.
 
 ```
 af [flags]
@@ -84,7 +84,7 @@ af [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `-y`, `--autoyes` |  | [experimental] If enabled, all instances will automatically accept prompts |
-| `-p`, `--program` | `string` | Program to run in new instances (one of: claude, codex, aider, gemini) |
+| `-p`, `--program` | `string` | Program to run in new instances (one of: claude, codex, aider, gemini, amp) |
 
 ## af api
 
@@ -353,7 +353,7 @@ value is validated with the same rules the config loader uses before anything is
 written, so set can never leave a config that fails to load.
 
 Settable keys:
-  default_program            agent enum (claude, codex, aider, gemini)
+  default_program            agent enum (claude, codex, aider, gemini, amp)
   program_overrides.<agent>  full command string for an agent
   auto_yes                   true | false
   auto_update                true | false
@@ -641,7 +641,7 @@ af sessions create [flags]
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
 | `--in-place` |  | Alias for --here |
 | `--name` | `string` | Session name (required) |
-| `--program` | `string` | Program to run (defaults to config default) |
+| `--program` | `string` | Program to run (one of: claude, codex, aider, gemini, amp; defaults to config default) |
 | `--prompt` | `string` | Initial prompt to send |
 
 **Global flags**
@@ -785,7 +785,7 @@ af sessions send-prompt <title> <prompt> [flags]
 | `--all-repos` |  | With --all, broadcast across every repo instead of only the current/--repo one |
 | `--create` |  | Auto-create the session if it doesn't exist |
 | `--include-root` |  | With --all, also deliver to the reserved root session (excluded by default) |
-| `--program` | `string` | Program to run when creating a new session (defaults to config default) |
+| `--program` | `string` | Program to run when creating a new session (one of: claude, codex, aider, gemini, amp; defaults to config default) |
 
 **Global flags**
 
@@ -988,7 +988,7 @@ af tasks add [flags]
 |------|------|-------------|
 | `--cron` | `string` | Cron expression (exactly one of --cron / --watch-cmd) |
 | `--name` | `string` | Task name (required) |
-| `--program` | `string` | Program to run (defaults to config default) |
+| `--program` | `string` | Program to run (one of: claude, codex, aider, gemini, amp; defaults to config default) |
 | `--prompt` | `string` | Prompt to send (required for --cron tasks; --watch-cmd tasks default to the emitted line, with {{line}} substituted when present) |
 | `--target-session` | `string` | Deliver the prompt into this session (auto-created if missing); empty creates a new session per run |
 | `--watch-cmd` | `string` | Long-running watch command; each stdout line triggers the task (exactly one of --cron / --watch-cmd) |
@@ -1075,7 +1075,7 @@ af tasks update <id> [flags]
 | `--cron` | `string` | New cron expression (clears watch-cmd) |
 | `--enabled` | `string` | Enable or disable the task (true/false) |
 | `--name` | `string` | New task name |
-| `--program` | `string` | New program to run (leave unset to keep the current one) |
+| `--program` | `string` | New program to run (one of: claude, codex, aider, gemini, amp; leave unset to keep the current one) |
 | `--prompt` | `string` | New prompt |
 | `--target-session` | `string` | New target session; pass an empty value to revert to a new session per run |
 | `--watch-cmd` | `string` | New watch command (clears cron) |

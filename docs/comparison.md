@@ -19,7 +19,7 @@ the table as a map of tradeoffs, not a scorecard.
 | CLI + HTTP API | `af` prints JSON for sessions/tasks, and the daemon exposes a local owner-only HTTP/JSON API over a Unix socket. | tmux itself is scriptable; an HTTP API is not part of the tmux/manual stack. | CLI plus a local socket API for workspaces, panes, agents, events, and worktrees; not an HTTP API. |
 | Remote execution | Remote hooks let a repo define launch/list/attach/delete/terminal scripts for sessions elsewhere, shown in the same TUI. | SSH + tmux is a proven remote pattern, but agent/session metadata is manual. | First-class remote attach over SSH/direct remote client is a core feature. |
 | Open source / license | Open source, GNU AGPL v3. | tmux is open source under the ISC-style tmux license; your glue scripts and chosen agents vary. | Open source AGPL-3.0-or-later, with commercial licensing offered. |
-| Supported agents | Named agent choices are `claude`, `codex`, `aider`, and `gemini`; configure paths/flags with `program_overrides`. | Anything you can run in a shell. | Broad terminal-agent support, with richer integrations for many listed agents and fallback terminal support for others. |
+| Supported agents | Named agent choices are `claude`, `codex`, `aider`, `gemini`, and `amp`; configure paths/flags with `program_overrides`. | Anything you can run in a shell. | Broad terminal-agent support, with richer integrations for many listed agents and fallback terminal support for others. |
 
 ## When To Choose What
 

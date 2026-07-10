@@ -66,6 +66,29 @@ func TestSetupDoctorReportsMissingDefaultProgram(t *testing.T) {
 	require.Contains(t, findings[0].Detail, "program_overrides.claude")
 }
 
+func TestDoctorAgentBinaryScanIncludesAmp(t *testing.T) {
+	binDir := t.TempDir()
+	fakeAmp := writeExecutable(t, binDir, "amp", "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", binDir)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramAmp,
+		ProgramOverrides: map[string]string{tmux.ProgramAmp: fakeAmp},
+	}
+	report := &Report{}
+	checkAgentBinaries(cfg, report)
+
+	var agentsHeader string
+	for _, h := range report.Header {
+		if h.Label == "agents" {
+			agentsHeader = h.Value
+			break
+		}
+	}
+	require.Contains(t, agentsHeader, "amp=present")
+	require.True(t, okContains(report, "amp"), "amp pass row should be recorded")
+}
+
 func setupDoctorRepo(t *testing.T) string {
 	t.Helper()
 	repo := filepath.Join(t.TempDir(), "repo")

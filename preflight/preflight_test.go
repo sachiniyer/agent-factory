@@ -1,9 +1,13 @@
 package preflight
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestShellWords(t *testing.T) {
@@ -67,5 +71,12 @@ func TestCheckCommandRejectsNonExecutablePath(t *testing.T) {
 	}
 	if _, err := CheckCommand(path); err == nil {
 		t.Fatal("expected non-executable path to fail")
+	}
+}
+
+func TestProgramErrorDisplaysAmp(t *testing.T) {
+	err := ProgramError(tmux.ProgramAmp, "amp", errors.New("missing"))
+	if !strings.Contains(err.Error(), "Amp is not installed") {
+		t.Fatalf("ProgramError() = %q, want Amp display name", err.Error())
 	}
 }

@@ -32,7 +32,7 @@ var (
 	daemonFlag  bool
 	rootCmd     = &cobra.Command{
 		Use:   "af",
-		Short: "Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, and Gemini.",
+		Short: "Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			log.Initialize(daemonFlag)
@@ -278,7 +278,7 @@ func init() {
 	// tmux.SupportedPrograms, so advertise exactly those accepted values.
 	rootCmd.Flags().StringVarP(&programFlag, "program", "p", "",
 		fmt.Sprintf("Program to run in new instances (one of: %s)",
-			strings.Join(tmux.SupportedPrograms, ", ")))
+			tmux.SupportedProgramsString()))
 	rootCmd.Flags().BoolVarP(&autoYesFlag, "autoyes", "y", false,
 		"[experimental] If enabled, all instances will automatically accept prompts")
 	rootCmd.Flags().BoolVar(&daemonFlag, "daemon", false, "Run the background daemon that schedules"+

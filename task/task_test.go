@@ -305,12 +305,12 @@ func TestUpdateTaskPersistsProgram(t *testing.T) {
 	setupTestTasks(t, tasks)
 
 	updated := tasks[0]
-	updated.Program = "aider"
+	updated.Program = "amp"
 	require.NoError(t, UpdateTask(updated))
 
 	got, err := GetTask("p1")
 	require.NoError(t, err)
-	assert.Equal(t, "aider", got.Program)
+	assert.Equal(t, "amp", got.Program)
 }
 
 // TestValidateTaskID_PathTraversalRejected covers the CLI path-traversal

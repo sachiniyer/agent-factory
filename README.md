@@ -7,7 +7,7 @@
 ![Agent Factory demo: multiple AI coding agents running in isolated git worktrees, with live Agent tabs, scheduled automations, helper tabs, and full-screen attach](docs/assets/demo.gif)
 
 Agent Factory (`af`) is a terminal UI for running many AI coding agents at once:
-Claude Code, Codex, Aider, and Gemini. Each normal session gets its own git
+Claude Code, Codex, Aider, Gemini, and Amp. Each normal session gets its own git
 worktree and branch, so parallel agents do not trample the same checkout. A
 daemon keeps sessions and automations alive, while the TUI, JSON CLI, and local
 HTTP API all read the same state.

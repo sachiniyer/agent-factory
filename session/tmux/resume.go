@@ -10,7 +10,7 @@ import (
 // #595). For agents without a resume-most-recent flag, programs that already
 // include one, and unknown programs, returns program unchanged.
 //
-// Agent-specific rewrites — all four paths preserve the original program
+// Agent-specific rewrites preserve the original program
 // string verbatim (modulo the inserted resume tokens) so user shell quoting,
 // $VAR / ~ / glob metacharacters survive respawn unchanged (#640):
 //
@@ -31,9 +31,13 @@ import (
 //   - gemini: append --resume latest at the end. The "latest" keyword
 //     resumes the most recent session in cwd and silently falls back
 //     to a fresh session if none exists.
+//   - amp: insert "threads continue --last" after any leading Amp global
+//     options. Amp's resume path is a subcommand; explicit user subcommands
+//     like "amp review" are left unchanged.
 //
-// All four CLIs silently fall back to a fresh session when no prior session
-// exists in cwd, so the rewrite is safe to apply unconditionally.
+// The latest-session paths above either fall back to a fresh session when no
+// prior session exists or are left unchanged when af cannot identify a safe
+// provider resume command.
 func resumeProgram(program string) string {
 	tokens, ends := splitShellTokens(program)
 	agentIdx, agent := findAgentToken(tokens)
@@ -97,6 +101,13 @@ func resumeProgram(program string) string {
 			}
 		}
 		return program + " --resume latest"
+	case ProgramAmp:
+		insertAt, alreadyResume := ampResumeInsertIndex(tokens, agentIdx)
+		if alreadyResume || insertAt < 0 {
+			return program
+		}
+		off := ends[insertAt-1]
+		return program[:off] + " threads continue --last" + program[off:]
 	}
 	return program
 }
@@ -128,7 +139,7 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 				return program, false
 			}
 		}
-		return program + " --resume " + id, true
+		return program + " --resume " + shellQuoteArg(id), true
 	case ProgramCodex:
 		insertAt := agentIdx + 1
 		if insertAt < len(tokens) && tokens[insertAt] == "exec" {
@@ -138,9 +149,28 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 			return program, false
 		}
 		off := ends[insertAt-1]
-		return program[:off] + " resume " + id + program[off:], true
+		return program[:off] + " resume " + shellQuoteArg(id) + program[off:], true
+	case ProgramAmp:
+		insertAt, alreadyResume := ampResumeInsertIndex(tokens, agentIdx)
+		if alreadyResume || insertAt < 0 {
+			return program, false
+		}
+		off := ends[insertAt-1]
+		return program[:off] + " threads continue " + shellQuoteArg(id) + program[off:], true
 	}
 	return program, false
+}
+
+func shellQuoteArg(arg string) string {
+	if arg != "" && strings.IndexFunc(arg, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			strings.ContainsRune("_@%+=:,./-", r))
+	}) == -1 {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'"'"'`) + "'"
 }
 
 // ClaudeProgramWithSessionID appends Claude Code's explicit conversation id flag
@@ -201,6 +231,130 @@ func findAgentToken(tokens []string) (int, string) {
 		}
 	}
 	return -1, ""
+}
+
+// ampResumeInsertIndex returns the token index before which Amp's resume
+// subcommand should be inserted. Amp global options may appear before the
+// subcommand ("amp --no-ide threads continue --last"), while an explicit user
+// subcommand ("amp review", "amp threads list") should not be rewritten.
+func ampResumeInsertIndex(tokens []string, agentIdx int) (insertAt int, alreadyResume bool) {
+	i := agentIdx + 1
+	for i < len(tokens) {
+		tok := tokens[i]
+		switch {
+		case tok == "--":
+			return -1, false
+		case tok == "-x" || strings.HasPrefix(tok, "-x") || tok == "--execute" || strings.HasPrefix(tok, "--execute="):
+			return -1, false
+		case tok == "-h" || tok == "--help" || tok == "-V" || tok == "--version" || tok == "-v":
+			return -1, false
+		case ampFlagHasAttachedValue(tok):
+			i++
+		case ampFlagTakesValue(tok):
+			i++
+			if i < len(tokens) {
+				i++
+			}
+		case tok == "--plugin-ready-timeout":
+			i++
+			if i < len(tokens) && !strings.HasPrefix(tokens[i], "-") {
+				i++
+			}
+		case ampKnownBooleanFlag(tok):
+			i++
+		case strings.HasPrefix(tok, "-"):
+			i = ampConsumeUnknownFlag(tokens, i)
+		default:
+			goto command
+		}
+	}
+	return i, false
+
+command:
+	switch tokens[i] {
+	case "last", "l":
+		return i, true
+	case "threads", "thread", "t":
+		if i+1 < len(tokens) && (tokens[i+1] == "continue" || tokens[i+1] == "c") {
+			return i, true
+		}
+		return -1, false
+	default:
+		return -1, false
+	}
+}
+
+func ampFlagTakesValue(tok string) bool {
+	switch tok {
+	case "--visibility", "--settings-file", "--log-level", "--log-file",
+		"--mcp-config", "-m", "--mode", "--effort", "-l", "--label":
+		return true
+	default:
+		return false
+	}
+}
+
+func ampFlagHasAttachedValue(tok string) bool {
+	for _, prefix := range []string{
+		"--visibility=", "--settings-file=", "--log-level=", "--log-file=",
+		"--mcp-config=", "--mode=", "--effort=", "--label=",
+		"--plugin-ready-timeout=",
+	} {
+		if strings.HasPrefix(tok, prefix) {
+			return true
+		}
+	}
+	return strings.HasPrefix(tok, "-m") && len(tok) > 2 ||
+		strings.HasPrefix(tok, "-l") && len(tok) > 2
+}
+
+func ampKnownBooleanFlag(tok string) bool {
+	switch tok {
+	case "--notifications", "--no-notifications",
+		"--color", "--no-color",
+		"--ide", "--no-ide",
+		"--stream-json", "--stream-json-thinking", "--stream-json-input",
+		"--no-archive-after-execute":
+		return true
+	default:
+		return false
+	}
+}
+
+func ampConsumeUnknownFlag(tokens []string, i int) int {
+	tok := tokens[i]
+	i++
+	if strings.Contains(tok, "=") {
+		return i
+	}
+	// Accepted forward-compat limitation: for an unknown Amp option, we cannot
+	// know whether `amp --foo threads` means boolean --foo plus the `threads`
+	// subcommand, or value-taking --foo whose value is "threads". All current
+	// value-taking global options from `amp --help` are enumerated above; if
+	// Amp ships another one, add it to ampFlagTakesValue so resume insertion
+	// can consume its value unambiguously.
+	if i < len(tokens) && !strings.HasPrefix(tokens[i], "-") && !ampKnownTopLevelCommand(tokens[i]) {
+		i++
+	}
+	return i
+}
+
+func ampKnownTopLevelCommand(tok string) bool {
+	switch tok {
+	case "version", "logout", "login", "orb", "clone", "top",
+		"last", "l",
+		"threads", "thread", "t",
+		"tools", "tool",
+		"review",
+		"skill", "skills",
+		"permissions", "permission",
+		"mcp", "config",
+		"projects", "usage",
+		"update", "up":
+		return true
+	default:
+		return false
+	}
 }
 
 // isShortResumeWithAttachedValue reports whether tok is the POSIX

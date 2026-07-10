@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/stretchr/testify/assert"
@@ -186,7 +187,7 @@ func TestTasksAdd_PersistsTaskViaDaemon(t *testing.T) {
 	taskAddNameFlag = "nightly"
 	taskAddPromptFlag = "do the nightly sweep"
 	taskAddCronFlag = "0 3 * * *"
-	taskAddProgramFlag = "claude"
+	taskAddProgramFlag = tmux.ProgramAmp
 
 	err := tasksAddCmd.RunE(tasksAddCmd, nil)
 	require.NoError(t, err)
@@ -196,6 +197,7 @@ func TestTasksAdd_PersistsTaskViaDaemon(t *testing.T) {
 	require.Len(t, tasks, 1)
 	assert.Equal(t, "nightly", tasks[0].Name)
 	assert.True(t, tasks[0].Enabled)
+	assert.Equal(t, tmux.ProgramAmp, tasks[0].Program)
 	resolvedRepo, err := filepath.EvalSymlinks(repo)
 	require.NoError(t, err)
 	resolvedProject, err := filepath.EvalSymlinks(tasks[0].ProjectPath)

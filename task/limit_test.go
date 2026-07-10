@@ -225,12 +225,19 @@ func TestResolveLimitMatchers(t *testing.T) {
 	if _, ok := base[tmux.ProgramAider]; ok {
 		t.Fatalf("aider should have no matcher in v1")
 	}
+	if _, ok := base[tmux.ProgramAmp]; ok {
+		t.Fatalf("amp should have no matcher in v1")
+	}
 
 	// An override for an agent with no built-in matcher is ignored (there is
 	// no reset parser to pair a detection-only override with yet).
 	withGemini := resolveLimitMatchers(map[string]string{tmux.ProgramGemini: `whatever`})
 	if _, ok := withGemini[tmux.ProgramGemini]; ok {
 		t.Fatalf("override for unmatched agent should be ignored")
+	}
+	withAmp := resolveLimitMatchers(map[string]string{tmux.ProgramAmp: `whatever`})
+	if _, ok := withAmp[tmux.ProgramAmp]; ok {
+		t.Fatalf("override for amp should be ignored until amp has a built-in matcher")
 	}
 
 	// An uncompilable regex is dropped and the built-in default stands: the

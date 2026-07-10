@@ -88,7 +88,7 @@ func GetConfigDir() (string, error) {
 type Config struct {
 	SchemaVersion int `json:"schema_version" toml:"schema_version"`
 	// DefaultProgram is the default agent program name. Must be one of
-	// tmux.SupportedPrograms (e.g. "claude", "codex", "aider", "gemini").
+	// tmux.SupportedPrograms (e.g. "claude", "codex", "aider", "gemini", "amp").
 	DefaultProgram string `json:"default_program" toml:"default_program"`
 	// ProgramOverrides maps an agent name (key) to the full command string
 	// (value) used when invoking that agent under tmux. Keys must be in
@@ -245,7 +245,7 @@ func ValidateProgramEnum(lead, referent, name, exampleValue string) error {
 	}
 	return fmt.Errorf(
 		"\n\n%s must be one of [%s], got %q. To preserve a custom path or flags, set %s to the agent name and move the full command into program_overrides. Example: \"default_program\": \"claude\", \"program_overrides\": { \"claude\": %q }\n",
-		lead, strings.Join(tmux.SupportedPrograms, ", "), name,
+		lead, tmux.SupportedProgramsString(), name,
 		referent,
 		exampleValue,
 	)
