@@ -12,6 +12,14 @@ set -euo pipefail
 
 SANDBOX="$HOME/sandbox"
 export AGENT_FACTORY_HOME="${AGENT_FACTORY_HOME:-$SANDBOX/home}"
+# Disable startup auto-update inside the sandbox (#1596). A container binary is
+# built at the branch's main.go version, which is typically behind the latest
+# release, so on boot it would download a new binary and RESTART THE DAEMON —
+# racing selftest/playtest instance creation. testbox.sh already passes this at
+# the container level (reaching the tmux server + daemon via `docker run -e`);
+# this export defends the direct-`af`-child interactive flow and honors an
+# explicit override. Real users are unaffected — the switch is unset for them.
+export AGENT_FACTORY_AUTO_UPDATE="${AGENT_FACTORY_AUTO_UPDATE:-false}"
 mkdir -p "$AGENT_FACTORY_HOME" "$HOME/bin"
 
 echo ">>> building af from /src ..."
