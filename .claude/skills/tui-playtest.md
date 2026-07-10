@@ -244,14 +244,15 @@ to cross-check the help view against reality):
    go where you expect? Is it obvious how to get back out?
 3. **Tabs** — `t` new tab, `1`–`9` jump, `w` close. Also
    `"$AF" sessions tab-create` from the CLI and confirm the TUI reflects it.
-4. **Panes** — `s` split, `s` swap, `x` close split.
+4. **Panes** — `s` open the selected tab as a pane (or focus its pane), `S`
+   commit the current preview as another pane, `x` hide the focused pane.
 5. **Search** — `/`, find an instance by name, clear the search. Try a
    query with no matches.
 6. **Task flows** — create a task via `"$AF" tasks` (a bounded script,
    e.g. `echo hello`), open the task list with `m`, trigger with `r`,
    check the output landed. Manage automations from the rail.
 7. **Navigation & help** — `[`/`]` sections, `h`/`l` collapse/expand,
-   `?` help overlay, scroll with `shift+up/down`.
+   `?` help overlay, scroll with `ctrl+u`/`ctrl+d`.
 8. **Resize** — `tmux -L "$SOCK" resize-window -t drive -x 80 -y 24`,
    then smaller (`-x 60 -y 20`), then large (`-x 200 -y 50`). Look for
    overlap, truncation, panics, layout garbage at every size.
