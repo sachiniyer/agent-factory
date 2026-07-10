@@ -31,7 +31,19 @@
         </div>
       </div>
       <div class="af-hero__media">
-        <img src="{{ 'assets/demo.gif' | url }}" alt="Agent Factory managing several coding agents from one terminal">
+        <video
+          autoplay
+          muted
+          loop
+          playsinline
+          preload="metadata"
+          poster="{{ 'assets/demo-poster.png' | url }}"
+          aria-label="Agent Factory managing several coding agents from one terminal"
+        >
+          <source src="{{ 'assets/demo.webm' | url }}" type="video/webm">
+          <source src="{{ 'assets/demo.mp4' | url }}" type="video/mp4">
+          <img src="{{ 'assets/demo.gif' | url }}" alt="Agent Factory managing several coding agents from one terminal">
+        </video>
       </div>
     </div>
   </section>

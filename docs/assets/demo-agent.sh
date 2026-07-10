@@ -84,5 +84,6 @@ esac
 printf '\n%s✓ Done — ready for review%s\n\n' "$c_green$c_bold" "$c_reset"
 
 # Drop to a live shell so the instance stays ready (a program that exits marks
-# the instance dead). The pane keeps the transcript above the prompt.
-exec bash
+# the instance dead). The pane keeps the transcript above a neutral docs prompt
+# instead of leaking a container hostname into recorded site assets.
+exec env PS1='docs@agent-factory:\W$ ' bash --noprofile --norc -i

@@ -64,4 +64,4 @@ while [ "$i" -lt 4 ]; do
     i=$((i + 1))
 done
 
-exec bash
+exec env PS1='docs@agent-factory:\W$ ' bash --noprofile --norc -i

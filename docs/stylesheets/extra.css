@@ -149,11 +149,17 @@
   position: relative;
 }
 
-.af-hero__media img {
+.af-hero__media :is(video, img) {
+  display: block;
   width: 100%;
   border-radius: 0.6rem;
   border: 1px solid var(--md-default-fg-color--lightest);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.22);
+}
+
+.af-hero__media video {
+  aspect-ratio: 2.2 / 1;
+  background: #282a36;
 }
 
 .af-hero__badges {
@@ -278,7 +284,7 @@
 
 .md-typeset .af-visual-example {
   display: grid;
-  grid-template-columns: minmax(9rem, 0.45fr) minmax(26rem, 1.55fr);
+  grid-template-columns: minmax(7rem, 0.35fr) minmax(34rem, 1.85fr);
   gap: 1.1rem;
   align-items: start;
   margin: 1rem 0 1.4rem;
