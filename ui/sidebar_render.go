@@ -130,8 +130,10 @@ func (s *Sidebar) String() string {
 }
 
 // scrollToSelection clamps scrollOffset and moves it minimally so the selected
-// row is fully inside the rendered window. Only called when the list overflows
-// the allocation.
+// row is fully inside the rendered window. For tab rows, the parent instance
+// title is treated as the top anchor when it fits, preserving the rendered
+// group header even though vertical nav stops on tabs only. Only called when
+// the list overflows the allocation.
 func (s *Sidebar) scrollToSelection(heights []int, avail int) {
 	n := len(heights)
 	if s.scrollOffset > n-1 {
@@ -140,8 +142,9 @@ func (s *Sidebar) scrollToSelection(heights []int, avail int) {
 	if s.scrollOffset < 0 {
 		s.scrollOffset = 0
 	}
-	if s.selectedIdx < s.scrollOffset {
-		s.scrollOffset = s.selectedIdx
+	anchor := s.scrollAnchorIndex()
+	if anchor < s.scrollOffset {
+		s.scrollOffset = anchor
 	}
 	for s.scrollOffset < s.selectedIdx {
 		end, _, _ := fitWindow(heights, s.scrollOffset, avail)
@@ -159,6 +162,31 @@ func (s *Sidebar) scrollToSelection(heights []int, avail int) {
 		}
 		s.scrollOffset--
 	}
+}
+
+func (s *Sidebar) scrollAnchorIndex() int {
+	if s.selectedIdx < 0 || s.selectedIdx >= len(s.visibleItems) {
+		return s.selectedIdx
+	}
+	sel := s.visibleItems[s.selectedIdx]
+	if sel.Kind != SectionInstances || !sel.IsTab {
+		return s.selectedIdx
+	}
+	for i := s.selectedIdx - 1; i >= 0; i-- {
+		item := s.visibleItems[i]
+		if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab &&
+			item.ItemIndex == sel.ItemIndex {
+			if i > 0 && s.visibleItems[i-1].IsHeader &&
+				s.visibleItems[i-1].Kind == SectionInstances {
+				return i - 1
+			}
+			return i
+		}
+		if isInstanceRow(item) && item.ItemIndex != sel.ItemIndex {
+			break
+		}
+	}
+	return s.selectedIdx
 }
 
 // fitWindow returns the exclusive end index of the rows that fit when

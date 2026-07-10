@@ -241,21 +241,203 @@ func (s *Sidebar) GetSelection() SidebarItem {
 	return s.rawSelection()
 }
 
-// Down moves the cursor down, walking through expanded tab children.
+type sidebarTabStop struct {
+	itemIndex int
+	tabIndex  int
+}
+
+type sidebarNavStop struct {
+	isTab      bool
+	tab        sidebarTabStop
+	visibleIdx int
+}
+
+// liveTabStops returns the logical vertical-nav stops for the live Instances
+// tree. Instance title rows remain visible structural rows, but j/k/up/down
+// stop only on tab rows; archived rows are a separate flat section and keep
+// their existing selection behavior.
+func (s *Sidebar) liveTabStops() []sidebarTabStop {
+	instances := s.proj.GetInstances()
+	live, _ := partitionByArchived(instances)
+	stops := make([]sidebarTabStop, 0, len(live))
+	for _, idx := range live {
+		inst := instances[idx]
+		if !tree.Expandable(inst) {
+			continue
+		}
+		for tab := range tree.TabLabels(inst) {
+			stops = append(stops, sidebarTabStop{itemIndex: idx, tabIndex: tab})
+		}
+	}
+	return stops
+}
+
+func (s *Sidebar) verticalNavStops() []sidebarNavStop {
+	tabStops := s.liveTabStops()
+	stops := make([]sidebarNavStop, 0, len(tabStops))
+	for _, stop := range tabStops {
+		stops = append(stops, sidebarNavStop{isTab: true, tab: stop})
+	}
+	for i, item := range s.visibleItems {
+		if isSelectableNonTabNavStop(item) {
+			stops = append(stops, sidebarNavStop{visibleIdx: i})
+		}
+	}
+	return stops
+}
+
+func isSelectableNonTabNavStop(item SidebarItem) bool {
+	return !item.IsHeader && !item.IsTab && item.Kind == SectionArchived
+}
+
+func indexOfNavStop(stops []sidebarNavStop, selectedIdx int, sel SidebarItem) int {
+	for i, stop := range stops {
+		if stop.isTab {
+			if sel.Kind == SectionInstances && sel.IsTab &&
+				stop.tab.itemIndex == sel.ItemIndex && stop.tab.tabIndex == sel.TabIndex {
+				return i
+			}
+			continue
+		}
+		if stop.visibleIdx == selectedIdx && isSelectableNonTabNavStop(sel) {
+			return i
+		}
+	}
+	return -1
+}
+
+func firstNavStopAtOrAfterInstance(stops []sidebarNavStop, itemIndex int) int {
+	for i, stop := range stops {
+		if !stop.isTab || stop.tab.itemIndex >= itemIndex {
+			return i
+		}
+	}
+	return -1
+}
+
+func lastTabStopBeforeInstance(stops []sidebarNavStop, itemIndex int) int {
+	last := -1
+	for i, stop := range stops {
+		if !stop.isTab {
+			break
+		}
+		if stop.tab.itemIndex < itemIndex {
+			last = i
+		}
+	}
+	return last
+}
+
+func (s *Sidebar) selectTabStop(stop sidebarTabStop) bool {
+	instances := s.proj.GetInstances()
+	if stop.itemIndex < 0 || stop.itemIndex >= len(instances) {
+		return false
+	}
+	inst := instances[stop.itemIndex]
+	if !tree.Expandable(inst) {
+		return false
+	}
+	labels := tree.TabLabels(inst)
+	if stop.tabIndex < 0 || stop.tabIndex >= len(labels) {
+		return false
+	}
+
+	s.proj.SetSelectedInstance(inst)
+	s.proj.SetActiveTab(stop.tabIndex)
+	s.treeCollapsed = ""
+	for i, sec := range s.sections {
+		if sec.Kind == SectionInstances {
+			s.sections[i].Expanded = true
+			break
+		}
+	}
+	s.rebuildVisibleItems()
+	for j, item := range s.visibleItems {
+		if item.Kind == SectionInstances && !item.IsHeader && item.IsTab &&
+			item.ItemIndex == stop.itemIndex && item.TabIndex == stop.tabIndex {
+			s.selectedIdx = j
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Sidebar) selectNavStop(stop sidebarNavStop) bool {
+	if stop.isTab {
+		return s.selectTabStop(stop.tab)
+	}
+	if stop.visibleIdx < 0 || stop.visibleIdx >= len(s.visibleItems) {
+		return false
+	}
+	if !isSelectableNonTabNavStop(s.visibleItems[stop.visibleIdx]) {
+		return false
+	}
+	s.selectedIdx = stop.visibleIdx
+	return true
+}
+
+func (s *Sidebar) moveVerticalNavStop(dir int) {
+	stops := s.verticalNavStops()
+	if len(stops) == 0 {
+		return
+	}
+
+	sel := s.rawSelection()
+	if sel.IsHeader {
+		switch sel.Kind {
+		case SectionInstances:
+			if dir > 0 {
+				s.selectNavStop(stops[0])
+			}
+			return
+		case SectionArchived:
+			if dir < 0 {
+				for i := len(stops) - 1; i >= 0; i-- {
+					if stops[i].isTab {
+						s.selectNavStop(stops[i])
+						return
+					}
+				}
+			} else {
+				for _, stop := range stops {
+					if !stop.isTab && stop.visibleIdx > s.selectedIdx {
+						s.selectNavStop(stop)
+						return
+					}
+				}
+			}
+		}
+		return
+	}
+
+	target := -1
+	if cur := indexOfNavStop(stops, s.selectedIdx, sel); cur >= 0 {
+		target = cur + dir
+	} else if sel.Kind == SectionInstances && !sel.IsTab {
+		if dir > 0 {
+			target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex)
+		} else {
+			target = lastTabStopBeforeInstance(stops, sel.ItemIndex)
+		}
+	}
+
+	if target < 0 || target >= len(stops) {
+		return
+	}
+	s.selectNavStop(stops[target])
+}
+
+// Down moves the cursor down through live tab stops, skipping instance titles.
 func (s *Sidebar) Down() {
 	s.syncFromStore()
-	if s.selectedIdx < len(s.visibleItems)-1 {
-		s.selectedIdx++
-	}
+	s.moveVerticalNavStop(1)
 	s.afterCursorMove()
 }
 
-// Up moves the cursor up, walking through expanded tab children.
+// Up moves the cursor up through live tab stops, skipping instance titles.
 func (s *Sidebar) Up() {
 	s.syncFromStore()
-	if s.selectedIdx > 0 {
-		s.selectedIdx--
-	}
+	s.moveVerticalNavStop(-1)
 	s.afterCursorMove()
 }
 

@@ -170,6 +170,97 @@ func TestSidebar_MoveCursorToArchivedInstance(t *testing.T) {
 		"sync must not reassert the previous live cursor row over the archived selection")
 }
 
+func TestSidebar_NavCrossesBetweenLiveTabsAndArchivedRows(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false, store.NewProjection())
+
+	liveInst := archTestInstance(t, "live-one", session.Ready)
+	addAgentShellTabs(liveInst)
+	archivedInst := archTestInstance(t, "put-away", session.Archived)
+	addTestInstance(s, liveInst)
+	addTestInstance(s, archivedInst)
+	s.SetSize(40, 40)
+
+	s.expandSectionKind(SectionArchived)
+	require.True(t, archivedRowVisible(s), "archived row must be visible for the boundary walk")
+	s.SetSelectedInstance(0)
+
+	s.Down() // live Agent tab
+	s.Down() // live Terminal tab, the last live tab stop
+	sel := s.GetSelection()
+	require.True(t, sel.IsTab)
+	require.Equal(t, SectionInstances, sel.Kind)
+	require.Equal(t, 1, sel.TabIndex)
+
+	s.Down()
+	sel = s.GetSelection()
+	require.Equal(t, SectionArchived, sel.Kind, "Down after the last live tab reaches archived rows")
+	require.False(t, sel.IsHeader)
+	require.Same(t, archivedInst, s.GetSelectedInstance())
+
+	s.Up()
+	sel = s.GetSelection()
+	require.Equal(t, SectionInstances, sel.Kind, "Up from the first archived row returns to live tabs")
+	require.True(t, sel.IsTab)
+	require.Equal(t, 1, sel.TabIndex)
+	require.Same(t, liveInst, s.GetSelectedInstance())
+}
+
+func TestSidebar_NavSkipsNonExpandableLiveRowsBeforeArchived(t *testing.T) {
+	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	s := NewSidebar(&spin, false, store.NewProjection())
+
+	liveInst := archTestInstance(t, "live-one", session.Ready)
+	addAgentShellTabs(liveInst)
+	deletingInst := archTestInstance(t, "going-away", session.Deleting)
+	archivedInst := archTestInstance(t, "put-away", session.Archived)
+	addTestInstance(s, liveInst)
+	addTestInstance(s, deletingInst)
+	addTestInstance(s, archivedInst)
+	s.SetSize(40, 40)
+	s.expandSectionKind(SectionArchived)
+
+	s.SetSelectedInstance(0)
+	s.Down() // live Agent tab
+	s.Down() // live Terminal tab, the last live tab stop
+	require.True(t, s.GetSelection().IsTab)
+
+	s.Down()
+	sel := s.GetSelection()
+	require.Equal(t, SectionArchived, sel.Kind,
+		"Down after the last live tab skips non-expandable live rows and reaches archived rows")
+	require.False(t, sel.IsHeader)
+	require.Same(t, archivedInst, s.GetSelectedInstance())
+
+	s.Up()
+	sel = s.GetSelection()
+	require.Equal(t, SectionInstances, sel.Kind,
+		"Up from archived skips non-expandable live rows and returns to the last live tab")
+	require.True(t, sel.IsTab)
+	require.Equal(t, 1, sel.TabIndex)
+	require.Same(t, liveInst, s.GetSelectedInstance())
+
+	s.SetSelectedInstance(1)
+	sel = s.GetSelection()
+	require.Equal(t, SectionInstances, sel.Kind)
+	require.False(t, sel.IsTab, "precondition: explicit selection can rest on the deleting live title")
+	require.Same(t, deletingInst, s.GetSelectedInstance())
+
+	s.Down()
+	sel = s.GetSelection()
+	require.Equal(t, SectionArchived, sel.Kind,
+		"Down from a non-expandable live title reaches the next selectable row")
+	require.False(t, sel.IsHeader)
+	require.Same(t, archivedInst, s.GetSelectedInstance())
+
+	s.Up()
+	sel = s.GetSelection()
+	require.Equal(t, SectionInstances, sel.Kind)
+	require.True(t, sel.IsTab)
+	require.Equal(t, 1, sel.TabIndex)
+	require.Same(t, liveInst, s.GetSelectedInstance())
+}
+
 func archivedRowVisible(s *Sidebar) bool {
 	for _, it := range s.visibleItems {
 		if it.Kind == SectionArchived && !it.IsHeader && it.ItemIndex >= 0 {

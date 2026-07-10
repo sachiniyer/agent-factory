@@ -126,9 +126,10 @@ step "create instance 'alpha'"                              af_new_instance alph
 # tree cursor still sits on the section header — so GetSelectedInstance() is
 # nil and cursor-driven verbs (o/D) silently NO-OP even though the row LOOKS
 # selected. The old af_select returned on iteration 0 (▾ present) and a
-# play-test could wrongly "pass". af_select now lands the cursor ON the row, so
-# `o attach` MUST actually fire here. If the bug returns, either af_select
-# fails (no 'D kill') or af_attach times out waiting for the chrome to vanish.
+# play-test could wrongly "pass". af_select now lands the cursor on an
+# actionable tab row, so `o attach` MUST actually fire here. If the bug returns,
+# either af_select fails (no 'D kill') or af_attach times out waiting for the
+# chrome to vanish.
 step "select the SOLE instance alpha"                       af_select alpha
 step "assert alpha display-selected (sole instance)"        af_expect_selected alpha
 step "attach the SOLE instance (proves 'o' is NOT a no-op)" af_attach
