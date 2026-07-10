@@ -150,6 +150,10 @@ type home struct {
 	lastClickZone string
 	lastClickAt   time.Time
 	mouseClock    func() time.Time
+	// tabDrag tracks a possible/active sidebar-tab drag. The candidate starts
+	// on tree tab press; motion promotes it to an active drag; release either
+	// replays the ordinary tab click or drops onto a visible pane.
+	tabDrag *tabDragState
 
 	// sidebar is the left-rail instances+tabs tree
 	sidebar *ui.Sidebar

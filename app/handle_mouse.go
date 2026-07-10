@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -32,6 +34,26 @@ import (
 // rows).
 const doubleClickInterval = 400 * time.Millisecond
 
+// tabDragThresholdCells is the approved drag-start threshold: a tab-row press
+// becomes a drag once motion moves at least this many terminal cells by
+// Manhattan distance. Smaller movement replays a normal click on release.
+const tabDragThresholdCells = 2
+
+type tabDragState struct {
+	title string
+	tab   int
+	label string
+	zone  string
+
+	startX int
+	startY int
+	x      int
+	y      int
+
+	active       bool
+	targetRegion string
+}
+
 // wireZoneRegistry hands the shared registry to every long-lived
 // zone-producing pane. Called once at construction (newHome / test wiring);
 // pane windows are wired at creation (openPaneWindow) instead, since they
@@ -43,11 +65,17 @@ func (m *home) wireZoneRegistry() {
 }
 
 // handleMouse routes a mouse event: wheel scrolls the region under the
-// cursor, a left press clicks the zone under it, and interactive mode
-// forwards in-pane events to the embedded terminal. Release/motion events
-// matter only to the forwarding path (drags, button-up); host gestures all
-// act on the press.
+// cursor, left press/candidate/release handles sidebar tab drag-drop before
+// interactive forwarding, and the remaining left presses click the zone under
+// them. Release/motion events matter to tab drags and to interactive terminal
+// forwarding; other host gestures act on press.
 func (m *home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if handled, cmd := m.handleTabDragMouse(msg); handled {
+		if m.interactive && m.state == stateDefault {
+			m.enforceInteractiveInvariant()
+		}
+		return m, cmd
+	}
 	if m.interactive && m.state == stateDefault {
 		if done := m.forwardInteractiveMouse(msg); done {
 			return m, nil
@@ -67,6 +95,161 @@ func (m *home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.handleClick(msg)
 	}
 	return m, nil
+}
+
+func (m *home) handleTabDragMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		if m.tabDrag != nil {
+			m.clearDragState()
+		}
+		return false, nil
+	}
+	if msg.Button != tea.MouseButtonLeft {
+		if msg.Action == tea.MouseActionPress && m.tabDrag != nil {
+			m.clearDragState()
+		}
+		return false, nil
+	}
+
+	switch msg.Action {
+	case tea.MouseActionPress:
+		return m.handleTabDragPress(msg), nil
+	case tea.MouseActionMotion:
+		return m.handleTabDragMotion(msg), nil
+	case tea.MouseActionRelease:
+		return m.handleTabDragRelease(msg)
+	default:
+		return false, nil
+	}
+}
+
+func (m *home) handleTabDragPress(msg tea.MouseMsg) bool {
+	if m.tabDrag != nil {
+		m.clearDragState()
+	}
+	if m.state != stateDefault {
+		return false
+	}
+	id, _, ok := m.zones.Resolve(msg.X, msg.Y)
+	if !ok {
+		return false
+	}
+	title, idx, ok := zones.TreeTabParts(id)
+	if !ok {
+		return false
+	}
+	inst := m.store.GetInstanceByTitle(title)
+	if inst == nil || idx < 0 || idx >= len(tree.TabLabels(inst)) {
+		return false
+	}
+	m.tabDrag = &tabDragState{
+		title:  title,
+		tab:    idx,
+		label:  paneBindingLabel(paneBinding{instance: inst, tab: idx}),
+		zone:   id,
+		startX: msg.X,
+		startY: msg.Y,
+		x:      msg.X,
+		y:      msg.Y,
+	}
+	return true
+}
+
+func (m *home) handleTabDragMotion(msg tea.MouseMsg) bool {
+	drag := m.tabDrag
+	if drag == nil {
+		return false
+	}
+	drag.x = msg.X
+	drag.y = msg.Y
+	if !drag.active && manhattanDistance(drag.startX, drag.startY, msg.X, msg.Y) >= tabDragThresholdCells {
+		drag.active = true
+	}
+	if drag.active {
+		drag.targetRegion = m.tabDragDropRegion(msg.X, msg.Y)
+	}
+	return true
+}
+
+func (m *home) handleTabDragRelease(msg tea.MouseMsg) (bool, tea.Cmd) {
+	drag := m.tabDrag
+	if drag == nil {
+		return false, nil
+	}
+	if !drag.active {
+		now := m.mouseClock()
+		double := drag.zone == m.lastClickZone && now.Sub(m.lastClickAt) <= doubleClickInterval
+		m.clearDragState()
+		if !double {
+			m.lastClickZone = drag.zone
+			m.lastClickAt = now
+		}
+		return true, m.handleTreeTabClick(drag.title, drag.tab, double)
+	}
+	drag = m.clearDragState()
+	region := m.tabDragDropRegion(msg.X, msg.Y)
+	if region == "" {
+		return true, nil
+	}
+	return true, m.dropTabOnPane(drag)
+}
+
+func (m *home) tabDragDropRegion(x, y int) string {
+	id, _, ok := m.zones.Resolve(x, y)
+	if !ok {
+		return ""
+	}
+	region, _, isPane := zones.PaneZone(id)
+	if !isPane {
+		return ""
+	}
+	p, _ := m.paneByRegion(region)
+	if p == nil {
+		return ""
+	}
+	return region
+}
+
+func (m *home) tabDragDropTargetRegion() string {
+	if m.tabDrag == nil || !m.tabDrag.active {
+		return ""
+	}
+	return m.tabDrag.targetRegion
+}
+
+func (m *home) dropTabOnPane(drag *tabDragState) tea.Cmd {
+	if drag == nil {
+		return nil
+	}
+	inst := m.store.GetInstanceByTitle(drag.title)
+	if inst == nil || drag.tab < 0 || drag.tab >= len(tree.TabLabels(inst)) {
+		return nil
+	}
+	m.focusRegionClick(layout.RegionTree)
+	m.sidebar.SelectTabRow(drag.title, drag.tab)
+	_, openCmd := m.openOrFocusPane(inst, drag.tab)
+	return openCmd
+}
+
+func (m *home) clearDragState() *tabDragState {
+	drag := m.tabDrag
+	m.tabDrag = nil
+	m.lastClickZone = ""
+	m.lastClickAt = time.Time{}
+	return drag
+}
+
+func manhattanDistance(x1, y1, x2, y2 int) int {
+	dx := x1 - x2
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := y1 - y2
+	if dy < 0 {
+		dy = -dy
+	}
+	return dx + dy
 }
 
 // forwardInteractiveMouse implements the RFC §2.5 in-pane ownership rule
@@ -195,16 +378,7 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, m.selectionChanged()
 	}
 	if title, idx, ok := zones.TreeTabParts(id); ok {
-		// Click a tab row: select it (drives the active tab); double-click
-		// interacts with that tab.
-		m.focusRegionClick(layout.RegionTree)
-		m.sidebar.SelectTabRow(title, idx)
-		if double {
-			selCmd := m.selectionChanged()
-			_, enterCmd := m.handleEnter()
-			return m, tea.Batch(selCmd, enterCmd)
-		}
-		return m, m.selectionChanged()
+		return m, m.handleTreeTabClick(title, idx, double)
 	}
 	if region, kind, ok := zones.PaneZone(id); ok {
 		// Click a pane header (or an unfocused pane's body): focus that pane
@@ -238,6 +412,33 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.handleHintClick(key)
 	}
 	return m, nil
+}
+
+func (m *home) handleTreeTabClick(title string, idx int, double bool) tea.Cmd {
+	// Click a tab row: select it (drives the active tab); double-click
+	// interacts with that tab.
+	m.focusRegionClick(layout.RegionTree)
+	m.sidebar.SelectTabRow(title, idx)
+	if double {
+		selCmd := m.selectionChanged()
+		_, enterCmd := m.handleEnter()
+		return tea.Batch(selCmd, enterCmd)
+	}
+	return m.selectionChanged()
+}
+
+func (m *home) dragStatusText() string {
+	if m.tabDrag == nil || !m.tabDrag.active {
+		return ""
+	}
+	label := m.tabDrag.label
+	if label == "" {
+		label = fmt.Sprintf("%s tab %d", m.tabDrag.title, m.tabDrag.tab+1)
+	}
+	if m.tabDrag.targetRegion == "" {
+		return "Dragging… " + label
+	}
+	return "Dragging… " + label + " - drop to open pane"
 }
 
 // handleModalClick handles clicks while an overlay owns the screen: overlay

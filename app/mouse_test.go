@@ -71,11 +71,38 @@ func press(h *home, x, y int) tea.Cmd {
 	return cmd
 }
 
+// release injects a left release at (x, y) through the root mouse router.
+func release(h *home, x, y int) tea.Cmd {
+	_, cmd := h.handleMouse(tea.MouseMsg{
+		X: x, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft,
+	})
+	return cmd
+}
+
+// motion injects left-button motion at (x, y).
+func motion(h *home, x, y int) tea.Cmd {
+	_, cmd := h.handleMouse(tea.MouseMsg{
+		X: x, Y: y, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft,
+	})
+	return cmd
+}
+
+func combineCmds(a, b tea.Cmd) tea.Cmd {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	default:
+		return tea.Batch(a, b)
+	}
+}
+
 // clickZone renders, resolves id's rect, and clicks its top-left cell.
 func clickZone(t *testing.T, h *home, id string) tea.Cmd {
 	t.Helper()
 	r := zoneRect(t, h, id)
-	return press(h, r.X, r.Y)
+	return combineCmds(press(h, r.X, r.Y), release(h, r.X, r.Y))
 }
 
 // wheel injects a wheel event at (x, y).
@@ -115,6 +142,268 @@ func TestMouse_ClickTreeTabRowSelectsTab(t *testing.T) {
 	require.True(t, sel.IsTab, "the cursor lands on the tab row")
 	assert.Equal(t, 1, sel.TabIndex)
 	assert.Equal(t, 1, h.store.ActiveTab(), "the click drives the active tab")
+}
+
+func TestMouse_DoubleClickTreeTabRowEntersInteractive(t *testing.T) {
+	h, alpha, _ := mouseTestHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	fakes, _ := stubLiveTermFactory(t)
+
+	clickZone(t, h, zones.TreeTab(alpha.Title, 1))
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.TreeTab(alpha.Title, 1))
+
+	p := h.store.FindOpenPane(alpha, 1)
+	require.NotNil(t, p, "double-clicking a tab row must enter that tab's pane target")
+	assert.Equal(t, p, h.focusedOpenPane())
+	_, cmd := h.Update(enterInteractiveMsg{pane: p})
+	runHermeticCmd(t, h, cmd, 0)
+	assert.True(t, h.interactive, "tab-row double-click still replays the Enter path")
+	require.Len(t, *fakes, 1)
+}
+
+func TestMouse_SubThresholdTabJitterSelectsPressedTab(t *testing.T) {
+	h, alpha, _ := mouseTestHome(t)
+	newFakeClock(h)
+	require.Equal(t, 0, h.store.ActiveTab())
+
+	pressTab := zoneRect(t, h, zones.TreeTab(alpha.Title, 1))
+	neighbor := zoneRect(t, h, zones.TreeTab(alpha.Title, 0))
+	require.Less(t,
+		manhattanDistance(pressTab.X, pressTab.Y, neighbor.X, neighbor.Y),
+		tabDragThresholdCells,
+		"test must release below the drag promotion threshold")
+
+	press(h, pressTab.X, pressTab.Y)
+	motion(h, neighbor.X, neighbor.Y)
+	require.NotNil(t, h.tabDrag)
+	require.False(t, h.tabDrag.active, "one-cell neighboring-row jitter is still a click")
+	release(h, neighbor.X, neighbor.Y)
+
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab)
+	assert.Equal(t, 1, sel.TabIndex, "sub-threshold jitter selects the press-origin tab")
+	assert.Equal(t, 1, h.store.ActiveTab())
+}
+
+func TestMouse_DragTreeTabToPaneOpensSplitAppend(t *testing.T) {
+	h, alpha, _ := mouseTestHome(t)
+	newFakeClock(h)
+	paneAgent := openTestPane(t, h, alpha, 0)
+	regionAgent := layout.PaneRegion(paneAgent.ID())
+	require.Equal(t, 1, h.store.NumOpenPanes())
+
+	tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 1))
+	body := zoneRect(t, h, zones.PaneBody(regionAgent))
+
+	press(h, tab.X, tab.Y)
+	motion(h, body.X+3, body.Y+4)
+	require.NotNil(t, h.tabDrag)
+	assert.True(t, h.tabDrag.active, ">=2-cell motion promotes the candidate to a drag")
+	assert.Equal(t, regionAgent, h.tabDragDropTargetRegion(), "pane under cursor is the drop target")
+	assert.Contains(t, h.View(), "Dragging", "active drag renders a status affordance")
+
+	release(h, body.X+3, body.Y+4)
+
+	require.Nil(t, h.tabDrag)
+	require.Equal(t, 2, h.store.NumOpenPanes(), "drop opens a split pane")
+	panes := h.store.OpenPanes()
+	require.Len(t, panes, 2)
+	assert.Same(t, paneAgent, panes[0], "drop uses s/S append order, not adjacent replacement")
+	paneTerminal := panes[1]
+	assert.Same(t, alpha, paneTerminal.Instance())
+	assert.Equal(t, 1, paneTerminal.Tab())
+	assert.Equal(t, layout.PaneRegion(paneTerminal.ID()), h.ring.Active(), "the dropped tab's pane takes focus")
+	assert.Equal(t, 1, h.store.ActiveTab(), "drop selects the dragged tab in the sidebar")
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab)
+	assert.Equal(t, 1, sel.TabIndex)
+}
+
+func TestMouse_DragDropReresolvesInstanceAfterProjectionSwap(t *testing.T) {
+	h, alpha, _ := mouseTestHome(t)
+	newFakeClock(h)
+	paneAgent := openTestPane(t, h, alpha, 0)
+	regionAgent := layout.PaneRegion(paneAgent.ID())
+
+	tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 1))
+	body := zoneRect(t, h, zones.PaneBody(regionAgent))
+	press(h, tab.X, tab.Y)
+	motion(h, body.X+3, body.Y+4)
+	require.NotNil(t, h.tabDrag)
+	require.True(t, h.tabDrag.active)
+
+	rebuilt := instanceWithFakeBackend(t, alpha.Title)
+	rebuilt.AddTabForTest("agent", session.TabKindAgent)
+	rebuilt.AddTabForTest("shell", session.TabKindShell)
+	require.True(t, h.store.ReplaceInstanceByTitle(alpha.Title, rebuilt))
+	require.False(t, h.store.ContainsInstance(alpha), "the press-time pointer is now orphaned")
+	require.Same(t, rebuilt, h.store.GetInstanceByTitle(alpha.Title))
+	require.Same(t, rebuilt, paneAgent.Instance(), "existing open panes follow the projection swap")
+
+	release(h, body.X+3, body.Y+4)
+
+	require.Equal(t, 2, h.store.NumOpenPanes())
+	dropped := h.store.FindOpenPane(rebuilt, 1)
+	require.NotNil(t, dropped, "drop must bind to the current same-title instance")
+	assert.Nil(t, h.store.FindOpenPane(alpha, 1), "drop must not bind an orphaned press-time pointer")
+	assert.Same(t, rebuilt, dropped.Instance())
+	assert.Equal(t, layout.PaneRegion(dropped.ID()), h.ring.Active())
+}
+
+func TestMouse_DragTreeTabOutsidePaneCancels(t *testing.T) {
+	h, alpha, _ := mouseTestHome(t)
+	newFakeClock(h)
+	openTestPane(t, h, alpha, 0)
+	require.False(t, h.sidebar.GetSelection().IsTab)
+	require.Equal(t, 0, h.store.ActiveTab())
+
+	tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 1))
+	auto := zoneRect(t, h, zones.AutoBG)
+
+	press(h, tab.X, tab.Y)
+	motion(h, auto.X+1, auto.Y)
+	require.NotNil(t, h.tabDrag)
+	require.True(t, h.tabDrag.active)
+	assert.Empty(t, h.tabDragDropTargetRegion(), "non-pane regions are not valid drop targets")
+
+	release(h, auto.X+1, auto.Y)
+
+	assert.Nil(t, h.tabDrag)
+	assert.Equal(t, 1, h.store.NumOpenPanes(), "invalid drop must not open a pane")
+	assert.Equal(t, 0, h.store.ActiveTab(), "invalid drop must not select the dragged tab")
+	assert.False(t, h.sidebar.GetSelection().IsTab, "invalid drop is a no-op for selection")
+	assert.Nil(t, h.panePreviewTxn, "invalid drop must not create a preview")
+}
+
+func TestMouse_DragTerminationsResetDoubleClickTracker(t *testing.T) {
+	cases := []struct {
+		name      string
+		terminate func(t *testing.T, h *home, alpha *session.Instance, tab layout.Rect)
+		wantPanes int
+	}{
+		{
+			name: "active invalid drop cancel",
+			terminate: func(t *testing.T, h *home, _ *session.Instance, tab layout.Rect) {
+				t.Helper()
+				auto := zoneRect(t, h, zones.AutoBG)
+				press(h, tab.X, tab.Y)
+				motion(h, auto.X+1, auto.Y)
+				require.NotNil(t, h.tabDrag)
+				require.True(t, h.tabDrag.active)
+				release(h, auto.X+1, auto.Y)
+			},
+			wantPanes: 0,
+		},
+		{
+			name: "valid drop complete",
+			terminate: func(t *testing.T, h *home, alpha *session.Instance, tab layout.Rect) {
+				t.Helper()
+				paneAgent := openTestPane(t, h, alpha, 0)
+				body := zoneRect(t, h, zones.PaneBody(layout.PaneRegion(paneAgent.ID())))
+				press(h, tab.X, tab.Y)
+				motion(h, body.X+3, body.Y+4)
+				require.NotNil(t, h.tabDrag)
+				require.True(t, h.tabDrag.active)
+				release(h, body.X+3, body.Y+4)
+			},
+			wantPanes: 2,
+		},
+		{
+			name: "inactive wheel cancel",
+			terminate: func(t *testing.T, h *home, _ *session.Instance, tab layout.Rect) {
+				t.Helper()
+				auto := zoneRect(t, h, zones.AutoBG)
+				press(h, tab.X, tab.Y)
+				require.NotNil(t, h.tabDrag)
+				require.False(t, h.tabDrag.active)
+				wheel(h, auto.X+1, auto.Y, false)
+			},
+			wantPanes: 0,
+		},
+		{
+			name: "inactive other-button cancel",
+			terminate: func(t *testing.T, h *home, _ *session.Instance, tab layout.Rect) {
+				t.Helper()
+				press(h, tab.X, tab.Y)
+				require.NotNil(t, h.tabDrag)
+				require.False(t, h.tabDrag.active)
+				_, _ = h.handleMouse(tea.MouseMsg{
+					X: tab.X, Y: tab.Y, Action: tea.MouseActionPress, Button: tea.MouseButtonRight,
+				})
+			},
+			wantPanes: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, alpha, _ := mouseTestHome(t)
+			newFakeClock(h)
+			require.Zero(t, h.store.NumOpenPanes())
+
+			clickZone(t, h, zones.TreeTab(alpha.Title, 1))
+			require.Equal(t, zones.TreeTab(alpha.Title, 1), h.lastClickZone,
+				"precondition: first click seeds tracker")
+
+			tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 1))
+			tc.terminate(t, h, alpha, tab)
+			require.Nil(t, h.tabDrag)
+			require.Empty(t, h.lastClickZone, "drag termination clears stale click state")
+			require.Equal(t, tc.wantPanes, h.store.NumOpenPanes())
+			require.Equal(t, stateDefault, h.state)
+
+			clickZone(t, h, zones.TreeTab(alpha.Title, 1))
+
+			assert.Equal(t, stateDefault, h.state,
+				"single click after drag termination must not reuse stale double-click state and enter")
+			assert.Equal(t, tc.wantPanes, h.store.NumOpenPanes())
+			assert.False(t, h.interactive)
+			sel := h.sidebar.GetSelection()
+			require.True(t, sel.IsTab)
+			assert.Equal(t, 1, sel.TabIndex)
+		})
+	}
+}
+
+func TestMouse_DragAlreadyOpenTabFocusesExistingPane(t *testing.T) {
+	h, alpha, _ := mouseTestHome(t)
+	newFakeClock(h)
+	paneAgent := openTestPane(t, h, alpha, 0)
+	paneTerminal := openTestPane(t, h, alpha, 1)
+	h.focusRegion(layout.PaneRegion(paneAgent.ID()))
+	require.Equal(t, 2, h.store.NumOpenPanes())
+
+	tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 1))
+	body := zoneRect(t, h, zones.PaneBody(layout.PaneRegion(paneAgent.ID())))
+
+	press(h, tab.X, tab.Y)
+	motion(h, body.X+3, body.Y+4)
+	release(h, body.X+3, body.Y+4)
+
+	assert.Equal(t, 2, h.store.NumOpenPanes(), "already-open dragged tab must not duplicate panes")
+	assert.Same(t, paneTerminal, h.store.FindOpenPane(alpha, 1))
+	assert.Equal(t, layout.PaneRegion(paneTerminal.ID()), h.ring.Active(),
+		"drop reuses the existing #1493 focus path")
+}
+
+func TestMouse_TabDragThresholdAndWheelCancel(t *testing.T) {
+	h, alpha, _ := mouseTestHome(t)
+	newFakeClock(h)
+	openTestPane(t, h, alpha, 0)
+
+	tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 1))
+
+	press(h, tab.X, tab.Y)
+	motion(h, tab.X+1, tab.Y)
+	require.NotNil(t, h.tabDrag)
+	assert.False(t, h.tabDrag.active, "one-cell jitter stays a click candidate")
+
+	wheel(h, tab.X, tab.Y, false)
+
+	assert.Nil(t, h.tabDrag, "wheel cancels a pending drag candidate")
+	assert.Equal(t, 0, h.store.ActiveTab(), "wheel-cancelled drag must not replay the dragged tab click")
 }
 
 // TestMouse_ClickArrowTogglesExpansion: the ▸/▾ arrow collapses/expands the
@@ -480,6 +769,29 @@ func TestMouse_InteractiveForwardsGridEvents(t *testing.T) {
 		X: term.X + 5, Y: term.Y + 3, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft,
 	})
 	require.Len(t, fake.mice, 3, "releases forward so the inner app sees complete clicks")
+}
+
+func TestMouse_InteractiveTabDragConsumesTerminalMotionAndDrop(t *testing.T) {
+	h, fake, region := interactiveMouseHome(t)
+	inst := h.store.GetSelectedInstance()
+	require.NotNil(t, inst)
+
+	tab := zoneRect(t, h, zones.TreeTab(inst.Title, 1))
+	term := zoneRect(t, h, zones.PaneTerm(region))
+
+	press(h, tab.X, tab.Y)
+	motion(h, term.X+5, term.Y+3)
+	require.NotNil(t, h.tabDrag)
+	require.True(t, h.tabDrag.active)
+	assert.Equal(t, region, h.tabDragDropTargetRegion())
+
+	release(h, term.X+5, term.Y+3)
+
+	assert.Empty(t, fake.mice, "active tab drag must run before interactive terminal mouse forwarding")
+	assert.False(t, h.interactive, "dropping onto a new pane moves focus and leaves interactive mode")
+	p := h.store.FindOpenPane(inst, 1)
+	require.NotNil(t, p, "drop over the live pane still opens the dragged tab")
+	assert.Equal(t, layout.PaneRegion(p.ID()), h.ring.Active())
 }
 
 // TestMouse_InteractiveSuppressesPaneChrome: clicks on the live pane's header
