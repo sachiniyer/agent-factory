@@ -299,10 +299,11 @@ func TestValidateOverridesErrors(t *testing.T) {
 		{"reserved enter", map[string][]string{"quit": {"enter"}}, "reserved"},
 		{"reserved tab-jump digit", map[string][]string{"quit": {"3"}}, "reserved"},
 		{"reserved interactive exit", map[string][]string{"quit": {"ctrl+]"}}, "reserved"},
-		{"conflict with another default", map[string][]string{"kill": {"q"}}, "bound to both"},
+		// A user binding vs a DEFAULT is no longer a conflict — the default yields
+		// (#1461); those cases are covered by TestUserOverrideSuppressesDefault.
+		// Two USER bindings on one key remain a hard conflict.
 		{"conflict between two overrides", map[string][]string{"kill": {"z"}, "quit": {"z"}}, "bound to both"},
 		{"canonicalized conflict between overrides", map[string][]string{"up": {"shift+ctrl+up"}, "down": {"ctrl+shift+up"}}, "bound to both"},
-		{"contextual pane key conflicts with unrelated action", map[string][]string{"pane_prev": {"q"}}, "bound to both"},
 		{"contextual pane keys conflict with each other", map[string][]string{"pane_prev": {"z"}, "pane_next": {"z"}}, "bound to both"},
 	}
 	for _, tc := range cases {
@@ -324,6 +325,43 @@ func TestValidateOverridesErrors(t *testing.T) {
 	}
 	if err := ValidateOverrides(map[string][]string{"pane_prev": {"h"}, "pane_next": {"l"}}); err != nil {
 		t.Fatalf("pane switch keys may share tree-horizontal keys by context, got: %v", err)
+	}
+}
+
+// TestUserOverrideSuppressesDefault covers the #1461 boot-safety rule: a [keys]
+// override that binds a key which is ALSO some action's default must not break
+// boot — the default yields (is suppressed) and the user binding wins.
+func TestUserOverrideSuppressesDefault(t *testing.T) {
+	resetAfter(t)
+
+	// The upgrade scenario: a config already binds ctrl+p (the new switch_project
+	// default) to another action. It must still boot; switch_project simply gets
+	// no default key here.
+	if err := ApplyOverrides(map[string][]string{"up": {"u", "ctrl+p"}}); err != nil {
+		t.Fatalf("a config binding ctrl+p to another action must still boot: %v", err)
+	}
+	if got := GlobalKeyStringsMap["ctrl+p"]; got != KeyUp {
+		t.Fatalf("ctrl+p should dispatch the user's KeyUp binding, got %v", got)
+	}
+	for k, name := range GlobalKeyStringsMap {
+		if name == KeySwitchProject {
+			t.Fatalf("switch_project must be unbound after the user took ctrl+p; still bound to %q", k)
+		}
+	}
+	if got := GlobalKeyBindings[KeySwitchProject].Help().Key; got != "" {
+		t.Fatalf("suppressed switch_project should render no key, got %q", got)
+	}
+
+	// The general rule: a user binding beats a plain default on the same key —
+	// kill=q wins, quit's default q is suppressed, and boot succeeds.
+	if err := ApplyOverrides(map[string][]string{"kill": {"q"}}); err != nil {
+		t.Fatalf("kill=q must boot with quit yielding q: %v", err)
+	}
+	if got := GlobalKeyStringsMap["q"]; got != KeyKill {
+		t.Fatalf("q should dispatch the user's KeyKill binding, got %v", got)
+	}
+	if got := GlobalKeyBindings[KeyQuit].Help().Key; got != "" {
+		t.Fatalf("quit should be unbound after the user took q, got %q", got)
 	}
 }
 
@@ -397,9 +435,11 @@ func TestEffectiveBindings(t *testing.T) {
 		t.Fatalf("pane_prev info = %+v, want default left not rebound", panePrev)
 	}
 
-	// A broken table reports the same error the TUI would refuse to start
-	// with, instead of printing a keymap that is not in effect.
-	if _, err := EffectiveBindings(map[string][]string{"kill": {"q"}}); err == nil {
+	// A broken table (two USER bindings on one key) reports the same error the
+	// TUI would refuse to start with, instead of printing a keymap that is not in
+	// effect. (A user binding vs a mere default is not a conflict — the default
+	// yields, #1461 — so the conflict must be override-vs-override.)
+	if _, err := EffectiveBindings(map[string][]string{"kill": {"z"}, "quit": {"z"}}); err == nil {
 		t.Fatal("EffectiveBindings must reject a conflicting table")
 	}
 

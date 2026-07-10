@@ -1291,7 +1291,7 @@ up = ["u", "ctrl+g"]
 		}{
 			{"unknown action", "[keys]\nwarp = \"z\"\n", "unknown action"},
 			{"reserved key", "[keys]\nquit = \"enter\"\n", "reserved"},
-			{"conflict", "[keys]\nkill = \"q\"\n", "bound to both"},
+			{"conflict", "[keys]\nkill = \"z\"\nquit = \"z\"\n", "bound to both"},
 			{"invalid key string", "[keys]\nquit = \"space bar\"\n", "not a valid key"},
 			{"non-string value", "[keys]\nquit = 5\n", "expected a key string"},
 			{"non-string list item", "[keys]\nquit = [5]\n", "expected a key string"},

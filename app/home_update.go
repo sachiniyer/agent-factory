@@ -136,6 +136,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// write back — and writing its whole-list view back is exactly the clobber
 		// the single-writer model retires (#959/#960).
 		detachTraceMark("snapshotFetchedMsg-handler-entry")
+		// Drop a snapshot fetched for a repo we have since switched away from
+		// (#1461): applying its old-repo sessions/tasks would bleed the previous
+		// project into the new view. Still re-arm the pacing tick so polling of
+		// the now-active repo continues.
+		if msg.repoID != m.repoID {
+			return m, tickRefreshExternalCmd
+		}
 		tickStart := time.Now()
 		changed := m.handleSnapshot(msg)
 		// Live-project out-of-band task changes on the same poll (#1168),

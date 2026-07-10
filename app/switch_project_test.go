@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,6 +64,72 @@ func TestSwitchProjectRescopesSidebar(t *testing.T) {
 	h.startNewInstance(false)
 	require.NotNil(t, h.namingInstance)
 	assert.Equal(t, repoBRoot, h.namingInstance.Path, "new sessions must target the switched-to project root")
+}
+
+// TestSwitchProjectDropsStaleSnapshot: a background snapshot fetched for the
+// previous project (in flight across the switch) must be dropped, not
+// reconciled into the new project's view (#1461 cross-repo bleed).
+func TestSwitchProjectDropsStaleSnapshot(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	oldRepoID := h.repoID
+
+	repoBRoot := t.TempDir()
+	repoB := &config.RepoContext{Root: repoBRoot, ID: config.RepoIDFromRoot(repoBRoot)}
+	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+		if repoID == repoB.ID {
+			return daemon.SnapshotResponse{Instances: []session.InstanceData{
+				{Title: "repoB-session", CreatedAt: time.Now()},
+			}}, nil
+		}
+		return daemon.SnapshotResponse{}, nil
+	}
+	h.switchProject(repoB)
+	require.NotNil(t, findSidebarInstance(h, "repoB-session"))
+
+	// A stale snapshot for the OLD repo lands after the switch. The repoID guard
+	// must drop it so the old project's session does not reappear.
+	h.Update(snapshotFetchedMsg{
+		repoID: oldRepoID,
+		data:   []session.InstanceData{{Title: "repoA-ghost", CreatedAt: time.Now()}},
+	})
+	assert.Nil(t, findSidebarInstance(h, "repoA-ghost"), "a snapshot for the previous project must be dropped")
+	require.NotNil(t, findSidebarInstance(h, "repoB-session"), "the active project's session must remain")
+}
+
+// TestBackgroundRefreshFollowsActiveProject: after a switch the background
+// snapshot poll reads the ACTIVE project's tasks (m.repoRoot), not the launch
+// repo's, and tags the response with the active repoID (#1461).
+func TestBackgroundRefreshFollowsActiveProject(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+
+	repoBRoot := t.TempDir()
+	repoB := &config.RepoContext{Root: repoBRoot, ID: config.RepoIDFromRoot(repoBRoot)}
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "b1", Name: "B", Prompt: "p", CronExpr: "0 * * * *",
+		ProjectPath: repoBRoot, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}))
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "other", Name: "Other", Prompt: "p", CronExpr: "0 * * * *",
+		ProjectPath: "/some/other/repo", Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}))
+
+	h.switchProject(repoB)
+
+	msg, ok := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
+	require.True(t, ok)
+	assert.Equal(t, repoB.ID, msg.repoID, "the poll response must be tagged with the active repoID")
+	require.NoError(t, msg.tasksErr)
+	require.Len(t, msg.tasks, 1, "the poll must read only the active project's tasks")
+	assert.Equal(t, "b1", msg.tasks[0].ID)
 }
 
 // TestSwitchProjectSameRepoIsNoop: switching to the already-active project is a
