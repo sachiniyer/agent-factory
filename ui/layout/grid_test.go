@@ -166,11 +166,12 @@ func TestGridSolveAutomationsGrowsToContent(t *testing.T) {
 	assert.Equal(t, layout.AutomationsRows, none.Automations.H, "no automations keeps the floor")
 
 	// A handful of automations on a tall rail: the section is exactly title +
-	// one row per automation + the reserved expansion line, and the tree gets
-	// the rest of the rail (not the reverse).
+	// one row per automation + the reserved expansion line + the reserved
+	// bottom-margin row (#1560), and the tree gets the rest of the rail (not the
+	// reverse).
 	tall := layout.Grid{Automations: 4}.Solve(120, 60)
 	require.False(t, tall.AutomationsCompact, "a tall rail is not compact")
-	assert.Equal(t, 2+4, tall.Automations.H, "the section grows to fit all automations")
+	assert.Equal(t, 2+1+4, tall.Automations.H, "the section grows to fit all automations plus the bottom margin")
 	assert.Greater(t, tall.Tree.H, tall.Automations.H, "the tree keeps the larger share")
 
 	// More automations than half the rail: the section collapses to (at most)

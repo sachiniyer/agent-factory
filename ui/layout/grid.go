@@ -53,9 +53,21 @@ const (
 
 	// AutomationsRows is the full automations-section height (bottom of the
 	// left rail, #1087); AutomationsCompactRows is its 1-line-summary height
-	// when the terminal is tight.
-	AutomationsRows        = 3
-	AutomationsCompactRows = 1
+	// when the terminal is tight. Both include automationsBottomMargin: the
+	// section reserves its last row as a blank bottom margin so the workspace
+	// frame's bottom border never abuts the rail's text (#1560) — the floor is
+	// therefore 4 (title + one row + margin) and the compact summary is 2
+	// (summary + margin).
+	AutomationsRows        = 4
+	AutomationsCompactRows = 2
+
+	// automationsBottomMargin is the blank row the automations section keeps at
+	// the very bottom of the rail. It mirrors the sidebar's leading blank row
+	// (sidebar chromeLines): that keeps the workspace's TOP border off the
+	// rail's first row, and this keeps the BOTTOM border off the rail's last
+	// row, so the bottom-aligned section can never render text on the same line
+	// as the workspace frame's `╰──╯` (#1560).
+	automationsBottomMargin = 1
 
 	// PaneMinWidth is the minimum usable width of one workspace pane (#1088,
 	// §2.6). The pane-count fitting divides the workspace evenly with 1-col
@@ -195,14 +207,15 @@ func (g Grid) Solve(width, height int) Layout {
 			rows = AutomationsCompactRows
 		} else {
 			// Grow the section to show every automation when the rail has the
-			// room: the title line, one row per automation, plus one line held
-			// for the focused row's expansion detail so expanding never has to
-			// scroll (#1126). The AutomationsRows floor keeps a recognizable
-			// strip when there are few automations; the half-rail cap keeps the
-			// instances tree the priority — automations only collapse into a
-			// scrollable strip once the tree + automations together can't fit,
-			// at which point the tree keeps at least half the rail.
-			if want := 2 + g.Automations; want > rows {
+			// room: the title line, one row per automation, one line held for
+			// the focused row's expansion detail so expanding never has to
+			// scroll (#1126), plus the reserved bottom margin (#1560). The
+			// AutomationsRows floor keeps a recognizable strip when there are
+			// few automations; the half-rail cap keeps the instances tree the
+			// priority — automations only collapse into a scrollable strip once
+			// the tree + automations together can't fit, at which point the tree
+			// keeps at least half the rail.
+			if want := 2 + automationsBottomMargin + g.Automations; want > rows {
 				rows = want
 			}
 			if half := (rail.H - RailRuleRows) / 2; half >= AutomationsRows && rows > half {

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,8 @@ func stripTasks() []task.Task {
 // trailing cron/next/last text.
 func TestAutomationsCollapsedRowsAreTitleOnly(t *testing.T) {
 	a := newTestAutomations(stripTasks())
-	a.SetRect(layout.Rect{W: 100, H: 3})
+	// H is title + 2 task rows + the reserved bottom-margin row (#1560).
+	a.SetRect(layout.Rect{W: 100, H: 4})
 
 	out := a.View()
 	require.Contains(t, out, "Automations")
@@ -55,7 +57,9 @@ func TestAutomationsCollapsedRowsAreTitleOnly(t *testing.T) {
 // the title, and no other row does.
 func TestAutomationsExpandedRowRevealsDetail(t *testing.T) {
 	a := newTestAutomations(stripTasks())
-	a.SetRect(layout.Rect{W: 100, H: 4})
+	// H is title + the expanded row (title + detail) + a collapsed row + the
+	// reserved bottom-margin row (#1560).
+	a.SetRect(layout.Rect{W: 100, H: 5})
 	a.Focus()
 
 	out := a.View()
@@ -83,6 +87,44 @@ func TestAutomationsStripOneLineSummary(t *testing.T) {
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 70, H: 1}, "compact strip")
 	assert.Contains(t, out, "Automations: 2 (1 on)")
+}
+
+// TestAutomationsReservesBottomMargin pins #1560: the section always keeps its
+// last row blank so the workspace frame's bottom border can never land on the
+// same line as a task row (or the compact summary). It mirrors the sidebar's
+// leading blank row, which keeps the workspace's TOP border off the rail.
+func TestAutomationsReservesBottomMargin(t *testing.T) {
+	tasks := make([]task.Task, 8)
+	for i := range tasks {
+		tasks[i] = task.Task{
+			ID: fmt.Sprintf("%d", i), Name: fmt.Sprintf("task-%d", i),
+			CronExpr: "0 3 * * *", Enabled: true,
+		}
+	}
+	lastBlank := func(lines []string) bool {
+		return strings.TrimRight(lines[len(lines)-1], " ") == ""
+	}
+
+	// Compact summary: the region is 2 rows (summary + reserved margin).
+	compact := newTestAutomations(tasks)
+	compact.SetRect(layout.Rect{W: 40, H: layout.AutomationsCompactRows})
+	compact.SetCompact(true)
+	clines := plainLines(compact.View())
+	require.Len(t, clines, layout.AutomationsCompactRows)
+	assert.Contains(t, clines[0], "Automations")
+	assert.True(t, lastBlank(clines), "the compact summary reserves a blank bottom-margin row")
+
+	// Full mode, focused, with more tasks than fit: content wants every row, but
+	// the last row still stays blank.
+	full := newTestAutomations(tasks)
+	full.SetRect(layout.Rect{W: 40, H: 5})
+	full.Focus()
+	flines := plainLines(full.View())
+	require.Len(t, flines, 5)
+	assert.Contains(t, strings.Join(flines[:len(flines)-1], "\n"), "task-",
+		"tasks render in the rows above the reserved margin")
+	assert.True(t, lastBlank(flines),
+		"the last row stays blank so the workspace border can't abut a task row")
 }
 
 // TestAutomationsFocusShowsCursorNotManager: focusing the section adds a

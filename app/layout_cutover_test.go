@@ -216,7 +216,8 @@ func TestLayoutCutover_DegradationLadder(t *testing.T) {
 	resizeHome(h, 79, 24)
 	require.True(t, h.lastLayout.AutomationsVisible)
 	assert.True(t, h.lastLayout.AutomationsCompact, "<80 cols: 1-line automations summary")
-	assert.Equal(t, 1, h.lastLayout.Automations.H)
+	assert.Equal(t, layout.AutomationsCompactRows, h.lastLayout.Automations.H,
+		"compact strip is the summary plus its reserved bottom-margin row (#1560)")
 
 	resizeHome(h, 59, 14)
 	assert.False(t, h.lastLayout.AutomationsVisible, "minimal mode drops the strip")
