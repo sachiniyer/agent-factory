@@ -32,6 +32,12 @@ type tickRefreshExternalMessage struct{}
 type snapshotFetchedMsg struct {
 	data []session.InstanceData
 	err  error
+	// repoID is the repo the fetch was scoped to, captured at spawn. The handler
+	// drops the whole message when it no longer matches m.repoID: an in-place
+	// project switch (#1461) can change the active repo while a fetch launched
+	// for the previous repo is still in flight, and applying its old-repo
+	// sessions/tasks would bleed the previous project into the new view.
+	repoID string
 	// tasks is the repo's task list re-read from disk on the same poll (#1168).
 	// Tasks are a disk-backed store shared between the TUI and the daemon — not
 	// solely daemon-owned like sessions (#960) — so an out-of-band `af tasks
@@ -99,15 +105,18 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	// here rather than inside the closure keeps the off-loop goroutine free of any
 	// field access that could race a concurrent reassignment (#960 PR 4 race fix).
 	repoID := m.repoID
+	repoRoot := m.repoRoot
 	fetch := m.snapshotFetcher
 	return func() tea.Msg {
 		resp, err := fetch(repoID)
-		// Re-read the repo's tasks on the same poll so an out-of-band task
-		// change live-projects into the TUI (#1168). Independent of the session
-		// snapshot: its own error is carried separately so a warming-daemon RPC
-		// failure never suppresses a successful disk task read.
-		tasks, tasksErr := task.LoadTasksForCurrentRepo()
-		return snapshotFetchedMsg{data: resp.Instances, alarms: resp.DeliveryAlarms, err: err, tasks: tasks, tasksErr: tasksErr}
+		// Re-read the ACTIVE repo's tasks on the same poll so an out-of-band task
+		// change live-projects into the TUI (#1168). Scoped to the captured
+		// repoRoot, not cwd, so a poll after an in-place project switch (#1461)
+		// reads the switched-to project's tasks — not the launch repo's. Its own
+		// error is carried separately so a warming-daemon RPC failure never
+		// suppresses a successful disk task read.
+		tasks, tasksErr := task.LoadTasksForRepo(repoRoot)
+		return snapshotFetchedMsg{data: resp.Instances, alarms: resp.DeliveryAlarms, err: err, tasks: tasks, tasksErr: tasksErr, repoID: repoID}
 	}
 }
 

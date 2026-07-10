@@ -85,14 +85,15 @@ func (s *Sidebar) String() string {
 	if !s.focused {
 		titleChip = blurredTitle
 	}
+	titleText := s.titleText()
 	if !s.autoyes {
 		b.WriteString(lipgloss.Place(
 			titleWidth, 1, lipgloss.Left, lipgloss.Bottom,
-			titleChip.Render(fitTitleText(" Agent Factory ", titleWidth))))
+			titleChip.Render(fitTitleText(titleText, titleWidth))))
 	} else {
 		title := lipgloss.Place(
 			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom,
-			titleChip.Render(fitTitleText(" Agent Factory ", titleWidth/2)))
+			titleChip.Render(fitTitleText(titleText, titleWidth/2)))
 		autoYes := lipgloss.Place(
 			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom,
 			autoYesStyle.Render(fitTitleText(" auto-yes ", titleWidth-(titleWidth/2))))
@@ -255,6 +256,16 @@ func narrowAwarePad(w int) int {
 		return 0
 	}
 	return 1
+}
+
+// titleText is the title-chip label: the active project's name (#1461) when one
+// is set, otherwise the default " Agent Factory " brand. Both are wrapped in the
+// same single-space padding the chip has always rendered.
+func (s *Sidebar) titleText() string {
+	if s.projectName != "" {
+		return " " + s.projectName + " "
+	}
+	return " Agent Factory "
 }
 
 // fitTitleText truncates a title-bar chip's text to w cells so lipgloss.Place

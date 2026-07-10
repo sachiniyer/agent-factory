@@ -45,6 +45,13 @@ const (
 	KeyCopyPR // Key for copying PR URL to clipboard
 	KeyHooks  // Key for editing post-worktree hooks
 
+	// KeySwitchProject opens the searchable project-picker overlay to switch the
+	// TUI's active project/repo in place (#1461). ctrl+p rather than P: the
+	// capital keys are deliberately left free so a user can pin the old
+	// ergonomic bindings (copy_pr/archive/hooks) to them via [keys], and a new
+	// default on P would collide with such a pin at startup.
+	KeySwitchProject
+
 	KeyChangeProgram // Key for changing the program during new instance naming
 	KeyCancelName    // Display-only cancel hint during new instance naming
 
@@ -147,6 +154,7 @@ var specs = []spec{
 	{name: KeyOpenPR, configKey: "open_pr", keys: []string{"p"}, desc: "open PR", dispatch: true},
 	{name: KeyCopyPR, configKey: "copy_pr", keys: []string{"y"}, desc: "copy PR URL", dispatch: true},
 	{name: KeyHooks, configKey: "hooks", keys: []string{"e"}, desc: "worktree hooks", dispatch: true},
+	{name: KeySwitchProject, configKey: "switch_project", keys: []string{"ctrl+p"}, desc: "switch project", dispatch: true},
 	{name: KeyLeft, configKey: "collapse", keys: []string{"h", "left"}, desc: "collapse", dispatch: true},
 	{name: KeyRight, configKey: "expand", keys: []string{"l", "right"}, desc: "expand", dispatch: true},
 	{name: KeyNextSection, configKey: "next_section", keys: []string{"]"}, desc: "next section", dispatch: true},
@@ -313,8 +321,27 @@ func RebindableActions() []string {
 	return names
 }
 
+// keyClaim is one action's claim on a key string while buildMaps resolves the
+// effective binding table: the action, whether a [keys] override placed it
+// there, and whether it dispatches (contextual claims participate in conflict
+// resolution but never enter GlobalKeyStringsMap).
+type keyClaim struct {
+	name       KeyName
+	action     string
+	overridden bool
+	dispatch   bool
+}
+
 // buildMaps generates the strings and bindings maps from specs with
 // overrides applied, validating as it goes.
+//
+// Conflict resolution distinguishes provenance so an UPGRADE never breaks boot
+// (#1461): a USER binding ([keys] override) of a key SUPPRESSES any DEFAULT
+// claim of the same key — a newly-shipped default binding yields to a key the
+// user already bound, rather than hard-erroring the whole config. Two USER
+// bindings on one key, or two DEFAULTS (a specs-table bug), are still a real
+// conflict, except for the sanctioned pane/tree contextual overlap. A suppressed
+// default simply loses that key (the user can rebind the action via [keys]).
 func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]key.Binding, error) {
 	byConfigKey := specsByConfigKey()
 	normalizedOverrides, err := normalizeOverrides(overrides, byConfigKey)
@@ -322,55 +349,110 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 		return nil, nil, err
 	}
 
-	stringsMap := make(map[string]KeyName, 64)
-	bindings := make(map[KeyName]key.Binding, len(specs))
-	// boundBy tracks which action owns each dispatch/contextual key, to name
-	// both sides of a conflict. Fixed dispatch specs (enter/tab/shift+tab)
-	// participate, so an override cannot silently shadow them either (they
-	// are also in reservedKeys, which reports the clearer error first).
-	boundBy := map[string]bindingOwner{}
-	for _, sp := range specs {
-		effective := sp.keys
-		overridden := false
+	// Effective keys per spec, and whether an override replaced the default,
+	// plus a claim list per key (dispatch/contextual specs only).
+	effectiveKeys := make([][]string, len(specs))
+	overridden := make([]bool, len(specs))
+	claims := map[string][]keyClaim{}
+	for i, sp := range specs {
+		eff := sp.keys
 		if sp.configKey != "" {
 			if o, ok := normalizedOverrides[sp.configKey]; ok {
-				effective = o
-				overridden = true
+				eff = o
+				overridden[i] = true
+			}
+		}
+		effectiveKeys[i] = eff
+		if sp.dispatch || sp.contextual {
+			for _, k := range eff {
+				claims[k] = append(claims[k], keyClaim{
+					name: sp.name, action: ownerAction(sp), overridden: overridden[i], dispatch: sp.dispatch,
+				})
+			}
+		}
+	}
+
+	// suppressed[name][key] marks a default claim dropped because a user binding
+	// took the key. Iterate keys in sorted order so a table with multiple genuine
+	// conflicts reports the same one deterministically.
+	suppressed := map[KeyName]map[string]bool{}
+	keyStrings := make([]string, 0, len(claims))
+	for k := range claims {
+		keyStrings = append(keyStrings, k)
+	}
+	sort.Strings(keyStrings)
+	for _, k := range keyStrings {
+		cs := claims[k]
+		for i := 0; i < len(cs); i++ {
+			for j := i + 1; j < len(cs); j++ {
+				a, b := cs[i], cs[j]
+				if contextualKeyOverlapAllowed(a.name, b.name) {
+					continue // sanctioned pane/tree overlap: both keep the key
+				}
+				if a.overridden != b.overridden {
+					continue // user-vs-default: the default yields (suppressed below)
+				}
+				return nil, nil, fmt.Errorf("keys: %q is bound to both %q and %q; each key can trigger only one action", k, a.action, b.action)
+			}
+		}
+		for _, c := range cs {
+			if c.overridden || !overrideSuppressesDefault(k, c, cs) {
+				continue
+			}
+			if suppressed[c.name] == nil {
+				suppressed[c.name] = map[string]bool{}
+			}
+			suppressed[c.name][k] = true
+		}
+	}
+
+	stringsMap := make(map[string]KeyName, 64)
+	bindings := make(map[KeyName]key.Binding, len(specs))
+	for i, sp := range specs {
+		effective := effectiveKeys[i]
+		active := effective
+		if sup := suppressed[sp.name]; len(sup) > 0 {
+			active = make([]string, 0, len(effective))
+			for _, k := range effective {
+				if !sup[k] {
+					active = append(active, k)
+				}
 			}
 		}
 
-		if sp.dispatch || sp.contextual {
-			for _, k := range effective {
-				owner := bindingOwner{name: sp.name, action: ownerAction(sp)}
-				if prev, taken := boundBy[k]; taken {
-					if !contextualKeyOverlapAllowed(prev.name, owner.name) {
-						return nil, nil, fmt.Errorf("keys: %q is bound to both %q and %q; each key can trigger only one action", k, prev.action, owner.action)
-					}
-				} else {
-					boundBy[k] = owner
-				}
-				if !sp.dispatch {
-					continue
-				}
+		if sp.dispatch {
+			for _, k := range active {
 				stringsMap[k] = sp.name
 			}
 		}
 
 		label := sp.helpLabel
-		if label == "" || overridden {
-			label = helpLabelFor(effective)
+		if label == "" || overridden[i] || len(active) != len(effective) {
+			label = helpLabelFor(active)
 		}
 		bindings[sp.name] = key.NewBinding(
-			key.WithKeys(effective...),
+			key.WithKeys(active...),
 			key.WithHelp(label, sp.desc),
 		)
 	}
 	return stringsMap, bindings, nil
 }
 
-type bindingOwner struct {
-	name   KeyName
-	action string
+// overrideSuppressesDefault reports whether the default claim c on key k must
+// yield: some OTHER action bound k via a [keys] override and is not a sanctioned
+// contextual overlap with c. When true, c loses k rather than the config being
+// rejected (#1461).
+func overrideSuppressesDefault(k string, c keyClaim, cs []keyClaim) bool {
+	for _, o := range cs {
+		if !o.overridden || o.name == c.name {
+			continue
+		}
+		if contextualKeyOverlapAllowed(c.name, o.name) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func ownerAction(sp spec) string {

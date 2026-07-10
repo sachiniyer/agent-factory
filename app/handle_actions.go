@@ -79,6 +79,9 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeySearch:
 		return m.showSearchOverlay()
 
+	case keys.KeySwitchProject:
+		return m.showProjectPickerOverlay()
+
 	// Hooks configuration (#1024 PR 4: an overlay, not a sidebar slot)
 	case keys.KeyHooks:
 		return m.showHooksOverlay()

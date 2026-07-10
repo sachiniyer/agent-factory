@@ -78,6 +78,7 @@ func (m *home) layoutModalOverlays() {
 	m.layoutSelectionOverlay()
 	m.layoutConfirmationOverlay()
 	m.layoutSearchOverlay()
+	m.layoutProjectPickerOverlay()
 	m.layoutPaneOverlays()
 }
 
@@ -98,6 +99,12 @@ func (m *home) layoutConfirmationOverlay() {
 func (m *home) layoutSearchOverlay() {
 	if m.searchOverlay != nil {
 		m.searchOverlay.SetMaxSize(m.termWidth, m.termHeight)
+	}
+}
+
+func (m *home) layoutProjectPickerOverlay() {
+	if m.projectPickerOverlay != nil {
+		m.projectPickerOverlay.SetMaxSize(m.termWidth, m.termHeight)
 	}
 }
 

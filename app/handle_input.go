@@ -183,8 +183,16 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}
+	// Target the ACTIVE project's repo root, not the process cwd: after an
+	// in-place project switch (#1461) the active repo is m.repoRoot, which may no
+	// longer be where af was launched. At launch m.repoRoot is the cwd's repo, so
+	// this is equivalent for the unswitched case.
+	repoPath := m.repoRoot
+	if repoPath == "" {
+		repoPath = "."
+	}
 	if remote {
-		configured, err := session.RemoteHooksConfiguredForPath(".")
+		configured, err := session.RemoteHooksConfiguredForPath(repoPath)
 		if err != nil {
 			return m, m.handleError(err)
 		}
@@ -194,7 +202,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	}
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:       "",
-		Path:        ".",
+		Path:        repoPath,
 		Program:     m.pendingProgram,
 		ForceRemote: remote,
 	})

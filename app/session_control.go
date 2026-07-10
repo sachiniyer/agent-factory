@@ -155,6 +155,27 @@ func snapshotThroughDaemon(repoID string) (daemon.SnapshotResponse, error) {
 	return daemon.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: repoID})
 }
 
+// allReposSnapshotFetcher returns the daemon's session list across EVERY repo
+// (RepoID:"" = all repos), used only to build the project-picker's list with a
+// per-project session count (#1461). A package var so the project-switch tests
+// can inject a fake multi-repo snapshot. It is a plain read — the switch itself
+// still re-scopes through home.snapshotFetcher(m.repoID).
+var allReposSnapshotFetcher = func() ([]session.InstanceData, error) {
+	resp, err := daemon.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: ""})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Instances, nil
+}
+
+// SetAllReposSnapshotFetcherForTest swaps the all-repos discovery fetcher and
+// returns a restore func. Test-only.
+func SetAllReposSnapshotFetcherForTest(f func() ([]session.InstanceData, error)) func() {
+	prev := allReposSnapshotFetcher
+	allReposSnapshotFetcher = f
+	return func() { allReposSnapshotFetcher = prev }
+}
+
 // buildInstanceFromSnapshot materializes a live, tab-reconnected *session.Instance
 // from a snapshot record — the same restore FromInstanceData performs, reconnecting
 // every tab to its persisted tmux session by name so a snapshot-discovered session
