@@ -752,7 +752,10 @@ its branch — there is no undo. To keep a session restorable instead, archive i
 			return jsonError(err)
 		}
 
-		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID, Force: sessionsKillForce}); err != nil {
+		// --force (sessionsKillForce) is accepted for backward compatibility but
+		// is a no-op: it is intentionally NOT forwarded to the daemon, whose
+		// KillSessionRequest no longer carries a force field (#1579).
+		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID}); err != nil {
 			return jsonError(err)
 		}
 

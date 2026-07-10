@@ -23,8 +23,10 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	// cases — most notably squash-merged branches (whose landed commits aren't
 	// ancestors of base) and worktrees checked out on a different branch than the
 	// stored session branch — blocking routine cleanup. `af sessions archive`
-	// remains the non-destructive, restorable default; kill just kills. req.Force
-	// is now a no-op accepted for backward compatibility.
+	// remains the non-destructive, restorable default; kill just kills. The
+	// worktree-ownership safety (never delete a checkout af doesn't own) is
+	// unaffected — it lives in GitWorktree.Cleanup() (external/in-place worktrees
+	// are a no-op there), independent of this dropped guard.
 
 	key := daemonInstanceKey(repoID, req.Title)
 	m.mu.Lock()

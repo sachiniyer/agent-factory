@@ -246,17 +246,3 @@ func TestKillSessionInPlaceDoesNotDeleteRepoRoot(t *testing.T) {
 	runGitTest(t, repoPath, "rev-parse", "--verify", "refs/heads/"+branch)
 	assertNoSessionRecord(t, repo.ID, "inplace")
 }
-
-func TestKillSessionForceStillDestroys(t *testing.T) {
-	// --force is now a no-op but must remain accepted so existing
-	// `af sessions kill --force` invocations keep working (#1579).
-	manager, repo, data := createRealKillSession(t, "force-destroys")
-	commitInWorktree(t, data.Worktree.WorktreePath, "work.txt")
-
-	if err := manager.KillSession(KillSessionRequest{Title: data.Title, RepoID: repo.ID, Force: true}); err != nil {
-		t.Fatalf("KillSession --force: %v", err)
-	}
-	assertWorktreeGone(t, data.Worktree.WorktreePath)
-	assertBranchGone(t, data.Worktree.RepoPath, data.Worktree.BranchName)
-	assertNoSessionRecord(t, repo.ID, data.Title)
-}

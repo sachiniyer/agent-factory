@@ -41,12 +41,11 @@ type CreateSessionResponse struct {
 type KillSessionRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
-	// Deprecated: Force is IGNORED by the server and retained only so existing
-	// `af sessions kill --force` invocations keep parsing. Kill always destroys
-	// the session since the unmerged-work guard was dropped (#1579); there is no
-	// "safer" kill — sending force:false does NOT make the server preserve work.
-	// Use ArchiveSession to keep a session restorable instead.
-	Force bool `json:"force,omitempty"`
+	// No force field: kill always destroys the session since the unmerged-work
+	// guard was dropped (#1579). The CLI `--force` flag is accepted as a no-op
+	// but is never sent to the daemon, so the request shape exposes no
+	// misleading "safer kill" knob. Use ArchiveSession to keep a session
+	// restorable instead.
 }
 
 type KillSessionResponse struct {
