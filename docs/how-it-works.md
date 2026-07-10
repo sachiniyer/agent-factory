@@ -17,8 +17,9 @@ From the empty sidebar, press **`n`** to create a local session. Name it for the
 task, choose the agent if you want something other than the default, and submit.
 Agent Factory creates the isolated workspace and starts the agent for you.
 
-Press **`Ctrl-p`** at any time to switch to a different project without leaving
-the TUI.
+Press **`Ctrl-p`** from normal TUI navigation to switch to a different project
+without leaving the TUI. (While you're attached to a live pane, `Ctrl-p` is
+forwarded to the running program instead — press `Ctrl-]` to detach first.)
 
 <div class="af-visual-example" markdown>
 
@@ -56,9 +57,10 @@ agent in the current checkout.
 
 ## 3. Watch Work From One Terminal
 
-The TUI sidebar shows every session for the active project. Press **`Ctrl-p`** to
-switch projects without restarting. The Agent tab shows a snapshot of the
-selected agent's terminal, so you can scan progress without attaching:
+The TUI sidebar shows every session for the active project. Press **`Ctrl-p`**
+(from TUI navigation, not while attached to a pane) to switch projects without
+restarting. The Agent tab shows a snapshot of the selected agent's terminal, so
+you can scan progress without attaching:
 
 <div class="af-visual-example" markdown>
 
