@@ -735,9 +735,9 @@ Factory owns it.
 For normal "done with this session" cleanup, prefer:
   af sessions archive <title>
 
-Kill refuses by default unless it can confirm the worktree is clean and HEAD
-has no commits unreachable from the session's base/default branch. Use --force
-to skip that guard and destroy the session anyway.`,
+Kill always destroys the session, including any uncommitted or unmerged work on
+its branch — there is no undo. To keep a session restorable instead, archive it.
+--force is accepted but has no effect (kept for backward compatibility).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -752,7 +752,10 @@ to skip that guard and destroy the session anyway.`,
 			return jsonError(err)
 		}
 
-		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID, Force: sessionsKillForce}); err != nil {
+		// --force (sessionsKillForce) is accepted for backward compatibility but
+		// is a no-op: it is intentionally NOT forwarded to the daemon, whose
+		// KillSessionRequest no longer carries a force field (#1579).
+		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID}); err != nil {
 			return jsonError(err)
 		}
 

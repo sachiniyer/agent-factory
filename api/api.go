@@ -453,7 +453,7 @@ func init() {
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllFlag, "all", false, "Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllReposFlag, "all-repos", false, "With --all, broadcast across every repo instead of only the current/--repo one")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptIncludeRootFlag, "include-root", false, "With --all, also deliver to the reserved root session (excluded by default)")
-	sessionsKillCmd.Flags().BoolVar(&sessionsKillForce, "force", false, "Destroy even when the session has unmerged commits or uncommitted work")
+	sessionsKillCmd.Flags().BoolVar(&sessionsKillForce, "force", false, "Deprecated no-op, accepted for compatibility: kill always destroys the session (use 'af sessions archive' to keep it restorable)")
 	sessionsArchiveCmd.Flags().BoolVar(&sessionsArchiveSelf, "self", false, "Archive the current session (resolved via whoami); use from inside a session when your work is done")
 
 	// tab-create/tab-delete and their tabs {create,delete} aliases (#1192)

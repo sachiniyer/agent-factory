@@ -211,7 +211,12 @@ func TestSessionsKill_HonorsRepoScoping(t *testing.T) {
 	}
 }
 
-func TestSessionsKill_ForceFlagPassedToDaemon(t *testing.T) {
+// TestSessionsKill_ForceFlagAcceptedButNotForwarded pins the #1579 contract for
+// the deprecated `--force` flag: it must still PARSE (so existing
+// `af sessions kill --force` scripts don't error), but it is a no-op — the CLI
+// never forwards a force field to the daemon (KillSessionRequest no longer has
+// one), so no misleading "safer kill" knob reaches the API.
+func TestSessionsKill_ForceFlagAcceptedButNotForwarded(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	prevRepoFlag := repoFlag
@@ -228,21 +233,24 @@ func TestSessionsKill_ForceFlagPassedToDaemon(t *testing.T) {
 	})
 
 	var gotReq daemon.KillSessionRequest
+	called := false
 	prevKill := killSessionViaDaemon
 	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {
 		gotReq = req
+		called = true
 		return nil
 	}
 	t.Cleanup(func() { killSessionViaDaemon = prevKill })
 
+	// `--force` parses without error and the kill is still dispatched.
 	if _, err := runCmdCaptureStdout(t, sessionsKillCmd, []string{"worker"}); err != nil {
-		t.Fatalf("sessionsKillCmd returned error: %v", err)
+		t.Fatalf("sessionsKillCmd with --force returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("kill was not dispatched to the daemon")
 	}
 	if gotReq.Title != "worker" {
 		t.Fatalf("kill request Title = %q, want worker", gotReq.Title)
-	}
-	if !gotReq.Force {
-		t.Fatal("kill request Force = false, want true")
 	}
 }
 

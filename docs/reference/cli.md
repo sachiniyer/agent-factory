@@ -687,9 +687,9 @@ Factory owns it.
 For normal "done with this session" cleanup, prefer:
   af sessions archive <title>
 
-Kill refuses by default unless it can confirm the worktree is clean and HEAD
-has no commits unreachable from the session's base/default branch. Use --force
-to skip that guard and destroy the session anyway.
+Kill always destroys the session, including any uncommitted or unmerged work on
+its branch — there is no undo. To keep a session restorable instead, archive it.
+--force is accepted but has no effect (kept for backward compatibility).
 
 ```
 af sessions kill <title> [flags]
@@ -699,7 +699,7 @@ af sessions kill <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--force` |  | Destroy even when the session has unmerged commits or uncommitted work |
+| `--force` |  | Deprecated no-op, accepted for compatibility: kill always destroys the session (use 'af sessions archive' to keep it restorable) |
 
 **Global flags**
 
