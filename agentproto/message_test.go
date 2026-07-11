@@ -1,0 +1,114 @@
+package agentproto
+
+import (
+	"encoding/json"
+	"testing"
+)
+
+// TestControlMessageWireShapes pins the exact JSON each control frame serializes
+// to — these are a public client-API contract (§4.2), so the bytes are load-bearing.
+func TestControlMessageWireShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  any
+		want string
+	}{
+		{"resize", NewResizeMessage(24, 80), `{"type":"resize","rows":24,"cols":80}`},
+		{"exit", NewExitMessage(0), `{"type":"exit","code":0}`},
+		{"exit_nonzero", NewExitMessage(137), `{"type":"exit","code":137}`},
+		{"detach", NewDetachMessage(), `{"type":"detach"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := json.Marshal(tc.msg)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("wire shape mismatch:\n got  = %s\n want = %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMessageTypeOf(t *testing.T) {
+	raw, _ := json.Marshal(NewDetachMessage())
+	got, err := MessageTypeOf(raw)
+	if err != nil {
+		t.Fatalf("MessageTypeOf: %v", err)
+	}
+	if got != MsgDetach {
+		t.Fatalf("MessageTypeOf = %q, want %q", got, MsgDetach)
+	}
+
+	// A reader discriminates then unmarshals into the concrete type.
+	rawResize, _ := json.Marshal(NewResizeMessage(40, 120))
+	if tp, _ := MessageTypeOf(rawResize); tp != MsgResize {
+		t.Fatalf("type = %q, want %q", tp, MsgResize)
+	}
+	var rm ResizeMessage
+	if err := json.Unmarshal(rawResize, &rm); err != nil {
+		t.Fatalf("unmarshal resize: %v", err)
+	}
+	if rm.Rows != 40 || rm.Cols != 120 {
+		t.Fatalf("resize decoded to %dx%d, want 40x120", rm.Rows, rm.Cols)
+	}
+}
+
+func TestMessageTypeOfErrors(t *testing.T) {
+	if _, err := MessageTypeOf([]byte(`not json`)); err == nil {
+		t.Error("MessageTypeOf(bad json) = nil error, want error")
+	}
+	if _, err := MessageTypeOf([]byte(`{"rows":24}`)); err == nil {
+		t.Error("MessageTypeOf(no type) = nil error, want error")
+	}
+}
+
+func TestEventRoundTrip(t *testing.T) {
+	// A session.* event carries an opaque projection payload (a marshaled
+	// session.InstanceData by contract); agentproto stays a leaf and treats it as
+	// raw JSON. Use a stand-in payload to prove the envelope round-trips.
+	type projection struct {
+		Title    string `json:"title"`
+		Liveness string `json:"liveness"`
+	}
+	in := projection{Title: "root", Liveness: "running"}
+	ev, err := NewEvent(EventSessionUpdated, in)
+	if err != nil {
+		t.Fatalf("NewEvent: %v", err)
+	}
+
+	wire, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+
+	var decoded Event
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatalf("unmarshal event: %v", err)
+	}
+	if decoded.Type != EventSessionUpdated {
+		t.Fatalf("event type = %q, want %q", decoded.Type, EventSessionUpdated)
+	}
+	var out projection
+	if err := json.Unmarshal(decoded.Data, &out); err != nil {
+		t.Fatalf("unmarshal event data: %v", err)
+	}
+	if out != in {
+		t.Fatalf("payload round-trip: got %+v, want %+v", out, in)
+	}
+}
+
+func TestNewEventNilPayload(t *testing.T) {
+	ev, err := NewEvent(EventTaskRemoved, nil)
+	if err != nil {
+		t.Fatalf("NewEvent(nil): %v", err)
+	}
+	if ev.Data != nil {
+		t.Fatalf("nil payload should omit data, got %s", ev.Data)
+	}
+	got, _ := json.Marshal(ev)
+	if string(got) != `{"type":"task.removed"}` {
+		t.Fatalf("nil-payload event = %s", got)
+	}
+}
