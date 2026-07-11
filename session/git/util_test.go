@@ -176,6 +176,16 @@ func TestBranchForTitle(t *testing.T) {
 	if got := BranchForTitle("", "feature"); got != "feature" {
 		t.Errorf("BranchForTitle(\"\", \"feature\") = %q, want %q", got, "feature")
 	}
+	// A Unicode-only title under a non-empty prefix must not collapse to the
+	// bare sanitized prefix; it gets a random suffix so distinct such titles
+	// stay distinct (#1640).
+	jp := BranchForTitle("af-", "日本語")
+	if !strings.HasPrefix(jp, "af-") || jp == "af" {
+		t.Errorf("BranchForTitle(\"af-\", \"日本語\") = %q, want an \"af-\"-prefixed name with a random suffix", jp)
+	}
+	if ar := BranchForTitle("af-", "مرحبا"); jp == ar {
+		t.Errorf("distinct unicode-only titles produced the same branch %q", jp)
+	}
 }
 
 // TestTitlesCollide pins the shared collision rule used by both the daemon's
@@ -202,6 +212,13 @@ func TestTitlesCollide(t *testing.T) {
 		// and keeps two different ones from colliding by accident.
 		{name: "identical unsafe-only titles collide via EqualFold guard", a: "!!!", b: "!!!", prefix: "", want: true},
 		{name: "distinct unsafe-only titles do not collide via random fallback", a: "!!!", b: "???", prefix: "", want: false},
+		// A non-empty prefix keeps "<prefix><unsafe-only title>" non-empty, so
+		// SanitizeBranchName's random fallback never fires and every unsafe-only
+		// title would otherwise collapse to the sanitized prefix. BranchForTitle
+		// appends a random suffix in that case so distinct Unicode-only titles
+		// still get distinct branches (#1640).
+		{name: "distinct unicode-only titles do not collide under a prefix (#1640)", a: "日本語", b: "مرحبا", prefix: "af-", want: false},
+		{name: "identical unicode-only titles still collide under a prefix", a: "日本語", b: "日本語", prefix: "af-", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
