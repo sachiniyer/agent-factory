@@ -41,7 +41,20 @@ type e2eHarness struct {
 	prFetchResp *git.PRInfo
 }
 
-const e2eAsyncTimeout = 5 * time.Second
+// e2eAsyncTimeout is the ceiling every E2E poll-until-condition waits before
+// failing. It is deliberately generous: these waits round-trip through the real
+// tea.Program goroutine, and on a slow/contended CI runner (the darwin matrix in
+// particular, see #1610) a single step transition can take several seconds of
+// wall time under load. The happy path returns the instant the condition holds
+// — the poll fires every 10ms — so a large ceiling costs nothing when the test
+// passes and only widens the margin against false-failing on a slow runner.
+const e2eAsyncTimeout = 30 * time.Second
+
+// e2eQueryTimeout bounds a single query() round-trip onto the tea goroutine. It
+// is the same generous budget as e2eAsyncTimeout — query() is called from inside
+// the waitUntil poll loops, so it must not false-fail before the outer wait does
+// when the event loop is merely slow rather than wedged.
+const e2eQueryTimeout = e2eAsyncTimeout
 
 type prFetchCall struct {
 	repoPath string
@@ -257,7 +270,7 @@ func (eh *e2eHarness) query(f func(h *home)) {
 	eh.tm.Send(runOnEventLoopMsg{fn: f, done: done})
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(e2eQueryTimeout):
 		eh.t.Fatal("timed out waiting for e2e query to run on tea goroutine")
 	}
 }
