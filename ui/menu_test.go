@@ -318,6 +318,48 @@ func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	}
 }
 
+// TestMenuProjectsFocusFooterIsHonest pins the #1620 fix: with the bottom
+// Projects section focused, the footer advertises exactly the section's live
+// affordances — Enter switch and `/` search — plus the cross-region
+// focus/help/quit. It must NOT fall through to the instance verbs (n new,
+// D kill, s open pane), which are all no-ops there now, so the footer never
+// advertises a key that does nothing.
+func TestMenuProjectsFocusFooterIsHonest(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetFocusRegion(layout.RegionProjects)
+
+	has := func(want keys.KeyName) bool {
+		for _, k := range m.options {
+			if k == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !has(keys.KeySwitchProjectRow) || !has(keys.KeySearch) {
+		t.Errorf("Projects focus must advertise switch + search; options=%v", m.options)
+	}
+	if !has(keys.KeyTab) || !has(keys.KeyHelp) || !has(keys.KeyQuit) {
+		t.Errorf("Projects focus keeps the focus/help/quit chrome; options=%v", m.options)
+	}
+	for _, leak := range []keys.KeyName{keys.KeyNew, keys.KeyKill, keys.KeyOpenPane, keys.KeyNewTab} {
+		if has(leak) {
+			t.Errorf("Projects focus must not advertise instance verb %v (it is a no-op there); options=%v", leak, m.options)
+		}
+	}
+
+	m.SetSize(120, 1)
+	out := m.String()
+	if !strings.Contains(out, "search") || !strings.Contains(out, "switch") {
+		t.Fatalf("Projects footer must render switch + search:\n%s", out)
+	}
+	if strings.Contains(out, "new") {
+		t.Fatalf("Projects footer must not render the instance 'new' verb:\n%s", out)
+	}
+}
+
 func TestMenuNarrowPaneFocusDoesNotShowHideWithoutOpen(t *testing.T) {
 	m := NewMenu()
 	m.SetInstance(readyUIInstance())

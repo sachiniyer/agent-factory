@@ -79,6 +79,12 @@ const (
 	// this name never appears in GlobalKeyStringsMap.
 	KeyManageAutomations
 
+	// KeySwitchProjectRow is the Projects-section display alias of Enter
+	// (menu/help only): with the bottom Projects section focused, Enter switches
+	// the rail to the cursor's project (#1620). Dispatch is root-routed
+	// (handleProjectsFocus), so this name never appears in GlobalKeyStringsMap.
+	KeySwitchProjectRow
+
 	// Interactive mode (#1089, RFC §2.3): Enter on a live pane enters it —
 	// every subsequent keystroke (including Tab) forwards to the agent/shell
 	// in-pane, no full-screen takeover. KeyAttach keeps the full-screen tmux
@@ -147,6 +153,7 @@ var specs = []spec{
 	{name: KeyJumpTab, keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}, helpLabel: "1-9", desc: "jump"},
 	{name: KeyTaskList, configKey: "tasks", keys: []string{"m"}, desc: "tasks", dispatch: true},
 	{name: KeyManageAutomations, keys: []string{"enter"}, desc: "manage"},
+	{name: KeySwitchProjectRow, keys: []string{"enter"}, desc: "switch"},
 	{name: KeyOpenPane, configKey: "open_pane", keys: []string{"s"}, desc: "open pane", dispatch: true},
 	{name: KeySplitPane, configKey: "split_pane", keys: []string{"S"}, desc: "split pane", dispatch: true},
 	{name: KeyHidePane, configKey: "hide_pane", keys: []string{"x"}, desc: "hide pane", dispatch: true},

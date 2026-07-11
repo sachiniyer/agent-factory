@@ -114,17 +114,22 @@ func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 
 // handleProjectsFocus routes key events for the focused bottom Projects section
 // (#1588 follow-up) — a peer of the automations section that the Tab focus ring
-// cycles into. Cursor keys move the section's selection, Enter switches the rail
-// to the cursor's project (reusing the #1547 switchProject path via
-// switchToProjectRoot), Esc returns focus to the tree. Advertised global
-// bindings (Tab/Shift-Tab focus ring, ctrl+p picker, ? help, q quit) keep
-// working, while pane-management verbs are consumed here so hidden `s`/`S`/`x`/
-// pane-switch keys cannot mutate workspace panes from Projects focus (mirrors
-// the #1417 automations guard).
+// cycles into. It is a captive vim-style list (#1620): cursor keys (j/k/up/down)
+// move the section's selection, Enter switches the rail to the cursor's project
+// (reusing the #1547 switchProject path via switchToProjectRoot), and Esc returns
+// focus to the tree. Search is entered ONLY on `/` (keys.KeySearch); every OTHER
+// key is a no-op here (consumed, never fired) so nothing can START a search or
+// filter from the section — notably the ctrl+p project-picker filter and the
+// session-create/tasks/collapse verbs that used to leak through when this handler
+// fell through to the global key map. Only the focus-ring and hard-exit chrome
+// (Tab/Shift-Tab, ? help, q quit, ctrl+c) is allowed to fall through, so the user
+// is never trapped in the section. Scoped to Projects focus; the Instances tree
+// and Automations section are untouched.
 func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.ring.Active() != layout.RegionProjects {
 		return m, nil, false
 	}
+	// The section owns its vim/cursor nav (j/k/up/down).
 	if _, consumed := m.projects.HandleKey(msg); consumed {
 		return m, nil, true
 	}
@@ -139,10 +144,46 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		m.focusRegion(layout.RegionTree)
 		return m, nil, true
 	}
-	if automationsConsumesPaneVerb(msg) {
-		return m, nil, true
+	// `/` is the ONLY key that enters search from the Projects section (#1620),
+	// vim-style. Route it explicitly rather than letting it fall through, so the
+	// blanket no-op below can suppress every other key without also swallowing
+	// the one search affordance.
+	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeySearch]) {
+		mod, cmd := m.showSearchOverlay()
+		return mod, cmd, true
 	}
-	return m, nil, false
+	// The focus ring and hard-exit chrome must keep working so the user can
+	// always leave the section; let only those fall through to the root handler.
+	if projectsChromeFallthroughKey(msg) {
+		return m, nil, false
+	}
+	// Everything else is inert while Projects holds focus (#1620): no
+	// session-create, no tasks overlay, no collapse/expand, and no ctrl+p
+	// project-filter — so no key other than `/` can begin a search/filter from
+	// the section.
+	return m, nil, true
+}
+
+// projectsChromeFallthroughKey reports whether a key pressed with the Projects
+// section focused must still reach the global handler — the focus ring
+// (Tab/Shift-Tab), help (?), quit (q), and the always-on ctrl+c hard exit. Every
+// other key is consumed as a no-op by handleProjectsFocus (#1620), so these are
+// the only escape hatches out of the captive section.
+func projectsChromeFallthroughKey(msg tea.KeyMsg) bool {
+	if msg.String() == "ctrl+c" {
+		return true
+	}
+	for _, name := range []keys.KeyName{
+		keys.KeyTab,
+		keys.KeyShiftTab,
+		keys.KeyHelp,
+		keys.KeyQuit,
+	} {
+		if key.Matches(msg, keys.GlobalKeyBindings[name]) {
+			return true
+		}
+	}
+	return false
 }
 
 func automationsConsumesPaneVerb(msg tea.KeyMsg) bool {
