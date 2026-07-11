@@ -63,7 +63,12 @@ func (b *HookBackend) Attach(i *Instance) (chan struct{}, error) {
 // Unlike Attach, the background preview process is left running: it captures
 // the agent's attach_cmd stream over its own pipe, while terminal_cmd talks to
 // a separate shell over its own PTY, so the two cannot compete for output.
-func (b *HookBackend) AttachTerminal(i *Instance) (chan struct{}, error) {
+//
+// tabIdx is ignored: a remote session's tabs are fixed by hook config, so the
+// Terminal tab always maps to the single terminal_cmd shell (#843). The
+// parameter exists to satisfy the uniform Backend.AttachTerminal signature
+// (#1592 Phase 1 PR5), which the local runtime uses to pick a shell tab.
+func (b *HookBackend) AttachTerminal(i *Instance, _ int) (chan struct{}, error) {
 	if !b.HasTerminalCmd() {
 		return nil, fmt.Errorf("remote terminal is not configured: add a terminal_cmd to remote_hooks to enable the Terminal tab for remote sessions")
 	}
@@ -138,7 +143,20 @@ func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.W
 	if err != nil {
 		return err
 	}
-	defer ptmx.Close()
+	// The remote hook attach runs the child under a PTY master and proxies it to
+	// the local terminal — its PTYStream is exactly that master (#1592 Phase 1
+	// PR5). driveHookPTYStream owns closing the stream on every exit path.
+	return driveHookPTYStream(ptyFileStream{ptmx}, cmd, stdin, stdout, stderr)
+}
+
+// driveHookPTYStream copies a hook attach PTYStream to/from the local terminal,
+// forwarding the detach key and emitting the #845 terminal restore on exit. It
+// is the shared driver behind both HookBackend.Attach (attach_cmd, the agent
+// session) and HookBackend.AttachTerminal (terminal_cmd, the Terminal tab): both
+// open a PTYStream over their command and hand it here, so the detach/#912-drain/
+// #845-restore behavior lives in one place regardless of which hook ran.
+func driveHookPTYStream(stream PTYStream, cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer) error {
+	defer stream.Close()
 
 	waitDone := make(chan error, 1)
 	go func() {
@@ -147,7 +165,7 @@ func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.W
 
 	copyDone := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(stdout, ptmx)
+		_, _ = io.Copy(stdout, stream)
 		close(copyDone)
 	}()
 
@@ -159,7 +177,7 @@ func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.W
 			if cmd.Process != nil {
 				_ = cmd.Process.Kill()
 			}
-			_ = ptmx.Close()
+			_ = stream.Close()
 		})
 	}
 
@@ -177,14 +195,14 @@ func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.W
 				// write-error handling.
 				if buf[n-1] == tmux.DetachKeyByte {
 					if n > 1 {
-						if _, writeErr := ptmx.Write(buf[:n-1]); writeErr != nil {
+						if _, writeErr := stream.Write(buf[:n-1]); writeErr != nil {
 							return
 						}
 					}
 					detach()
 					return
 				}
-				if _, writeErr := ptmx.Write(buf[:n]); writeErr != nil {
+				if _, writeErr := stream.Write(buf[:n]); writeErr != nil {
 					return
 				}
 			}
@@ -194,23 +212,23 @@ func runHookAttachWithDetach(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.W
 		}
 	}()
 
-	err = <-waitDone
+	err := <-waitDone
 
 	// Drain before closing. Now that the child (slave) has exited, io.Copy
 	// reads the master's remaining buffered output and then sees EIO, so it
-	// terminates on its own. Closing ptmx here — before copyDone — would race
-	// that final read and truncate the remote's last bytes (#912). The detach
-	// path already closed ptmx in detach(), so copyDone closes promptly there
-	// and this drain is a harmless no-op. Bound the wait in case a grandchild
-	// inherited the slave and is holding the master open: on timeout, force the
-	// close to unblock io.Copy, then still wait for copyDone.
+	// terminates on its own. Closing the stream here — before copyDone — would
+	// race that final read and truncate the remote's last bytes (#912). The
+	// detach path already closed the stream in detach(), so copyDone closes
+	// promptly there and this drain is a harmless no-op. Bound the wait in case a
+	// grandchild inherited the slave and is holding the master open: on timeout,
+	// force the close to unblock io.Copy, then still wait for copyDone.
 	select {
 	case <-copyDone:
 	case <-time.After(hookAttachDrainTimeout):
-		_ = ptmx.Close() // grandchild holding slave open; stop waiting
+		_ = stream.Close() // grandchild holding slave open; stop waiting
 		<-copyDone
 	}
-	_ = ptmx.Close() // idempotent; no-op if already closed
+	_ = stream.Close() // idempotent; no-op if already closed
 
 	// Every byte of the remote stream has been flushed (copyDone), so this
 	// lands strictly after any modes the remote set. Emitted on every exit

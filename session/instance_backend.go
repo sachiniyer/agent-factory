@@ -143,6 +143,15 @@ func (i *Instance) Attach() (chan struct{}, error) {
 	return i.backend.Attach(i)
 }
 
+// AttachTerminal opens an interactive terminal tab (a local shell tab at tabIdx,
+// or the remote terminal_cmd shell) through the uniform Backend interface — no
+// concrete-backend type assertion (#1592 Phase 1 PR5, replacing the former
+// AttachRemoteTerminal *HookBackend special-case). The returned channel is
+// closed when the user detaches.
+func (i *Instance) AttachTerminal(tabIdx int) (chan struct{}, error) {
+	return i.backend.AttachTerminal(i, tabIdx)
+}
+
 func (i *Instance) SetPreviewSize(width, height int) error {
 	return i.backend.SetPreviewSize(i, width, height)
 }
@@ -180,29 +189,6 @@ func (i *Instance) Capabilities() Capabilities {
 		return (&LocalBackend{}).Capabilities()
 	}
 	return i.backend.Capabilities()
-}
-
-// AttachRemoteTerminal opens an interactive terminal on the remote machine via
-// the terminal_cmd hook. The returned channel is closed when the user detaches
-// or the terminal_cmd process exits. Errors when the instance is not backed by
-// remote hooks or terminal_cmd is not configured.
-//
-// RESIDUAL COUPLING (#1592 Phase 1): callers gate on the capability descriptor
-// (Workspace==WorkspaceRemote && TerminalTab), but this attach path still
-// type-asserts the concrete *HookBackend because AttachTerminal (and its
-// tmux-shaped chan struct{} return) is not on the Backend interface. Gate and
-// attach agree ONLY because HookBackend is the sole WorkspaceRemote backend
-// today — a future non-hook remote backend would pass the capability gate and
-// then fail this assertion. This assertion is deliberately left for PR5 (attach
-// → PTYStream, io.ReadWriteCloser + Resize): when attach is unified through the
-// interface, the terminal-tab attach routes through the same stream and this
-// *HookBackend special-case is deleted. See the #1592 Phase 1 plan.
-func (i *Instance) AttachRemoteTerminal() (chan struct{}, error) {
-	hb, ok := i.backend.(*HookBackend)
-	if !ok {
-		return nil, fmt.Errorf("remote terminal is only available for remote sessions")
-	}
-	return hb.AttachTerminal(i)
 }
 
 // GetBackend returns the backend for the instance (mainly for testing).

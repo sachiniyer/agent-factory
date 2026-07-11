@@ -79,9 +79,18 @@ type Backend interface {
 	// PreviewFullHistory returns the full scrollback history.
 	PreviewFullHistory(instance *Instance) (string, error)
 
-	// Attach gives the user interactive terminal access. The returned channel
-	// is closed when the user detaches.
+	// Attach gives the user interactive terminal access to the AGENT session
+	// (tab 0). The returned channel is closed when the user detaches.
 	Attach(instance *Instance) (chan struct{}, error)
+
+	// AttachTerminal gives interactive access to a NON-agent terminal tab
+	// (#1592 Phase 1 PR5): a local shell tab at tabIdx for the local runtime, or
+	// the single terminal_cmd shell for the remote hook runtime (which ignores
+	// tabIdx). Both attach over a PTYStream; the returned channel is closed on
+	// detach. Errors when no such terminal exists (e.g. remote_hooks.terminal_cmd
+	// unset). This is on the interface so callers never type-assert a concrete
+	// backend to reach a remote terminal.
+	AttachTerminal(instance *Instance, tabIdx int) (chan struct{}, error)
 
 	// HasUpdated reports whether the session output changed since the last
 	// check and whether the program is showing a prompt, and returns the raw

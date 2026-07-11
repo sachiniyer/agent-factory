@@ -113,7 +113,7 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 func TestHookBackendAttachTerminalNotStarted(t *testing.T) {
 	b := &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: "/bin/true"}}
 	i := &Instance{backend: b, started: false}
-	_, err := b.AttachTerminal(i)
+	_, err := b.AttachTerminal(i, 0)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not been started")
 }
@@ -124,7 +124,7 @@ func TestHookBackendAttachTerminalNotConfigured(t *testing.T) {
 			b := &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: terminalCmd}}
 			i := &Instance{backend: b}
 			i.started = true
-			_, err := b.AttachTerminal(i)
+			_, err := b.AttachTerminal(i, 0)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "terminal_cmd",
 				"error must name the missing field so the fix is actionable")
@@ -161,7 +161,7 @@ sleep 5`)
 	require.NotNil(t, b.getPTY(i.Title))
 	defer b.closePTY(i.Title)
 
-	done, err := b.AttachTerminal(i)
+	done, err := b.AttachTerminal(i, 0)
 	require.NoError(t, err)
 	select {
 	case <-done:
@@ -196,7 +196,7 @@ func TestHookBackendAttachTerminalUsesRemoteMetaName(t *testing.T) {
 	i.started = true
 	i.remoteMeta = map[string]interface{}{"name": "imported-name"}
 
-	done, err := b.AttachTerminal(i)
+	done, err := b.AttachTerminal(i, 0)
 	require.NoError(t, err)
 	select {
 	case <-done:
@@ -220,13 +220,17 @@ func TestInstanceRemoteTerminalCapability(t *testing.T) {
 		assert.False(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
 	})
 
-	t.Run("non-hook backend rejects AttachRemoteTerminal", func(t *testing.T) {
+	t.Run("local backend AttachTerminal routes to a shell tab", func(t *testing.T) {
+		// The uniform Instance.AttachTerminal (#1592 Phase 1 PR5) dispatches to the
+		// backend: a local instance attaches the shell tab at tabIdx, so with no
+		// live tab it surfaces the tab error — not the former AttachRemoteTerminal
+		// "remote sessions only" type-assertion rejection.
 		i := &Instance{backend: &LocalBackend{}}
 		caps := i.Capabilities()
 		assert.False(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
-		_, err := i.AttachRemoteTerminal()
+		_, err := i.AttachTerminal(1)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "remote sessions")
+		assert.Contains(t, err.Error(), "no terminal session to attach to")
 	})
 }
 

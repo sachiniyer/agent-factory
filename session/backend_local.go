@@ -592,6 +592,15 @@ func (b *LocalBackend) Attach(i *Instance) (chan struct{}, error) {
 	return ts.Attach()
 }
 
+// AttachTerminal attaches to a local shell/process tab (#1592 Phase 1 PR5): the
+// tab's tmux session is the local runtime's PTYStream, driven by tmux's own
+// server-mediated attach/detach (TmuxSession.Attach). It is the local peer of
+// HookBackend.AttachTerminal, so callers reach a terminal tab through the
+// uniform Backend interface without type-asserting the concrete backend.
+func (b *LocalBackend) AttachTerminal(i *Instance, tabIdx int) (chan struct{}, error) {
+	return i.AttachTab(tabIdx)
+}
+
 func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
 	i.mu.RLock()
 	s := i.started
