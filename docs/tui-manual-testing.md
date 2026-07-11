@@ -42,12 +42,13 @@ one-line fix for the entire #1156 class.
 ### The focus ring
 
 In nav mode, `Tab`/`Shift-Tab` cycle **ring focus** across regions: the
-**instances tree** → each open **pane** → the **automations** strip → back.
+**instances tree** → each open **pane** → the **automations** strip → the **projects** section → back.
 The menu bar is context-sensitive and follows focus:
 
 - **tree** focused → `n new • …` (plus instance verbs when a row is selected)
 - **pane** focused → `↵ interact • o attach • ← prev pane • → next pane • … • s open pane • x hide pane`
 - **automations** focused → `enter manage • …`
+- **projects** focused → `↵ switch · / search │ tab focus · ? help · q quit`
 
 `af_focus_tree` walks the ring (checking *before* it presses, so it never
 Tabs off the tree) until the `n new` hint proves the tree has focus.

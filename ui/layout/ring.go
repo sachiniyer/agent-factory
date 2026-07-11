@@ -2,7 +2,7 @@ package layout
 
 // Ring is the focus ring (RFC §2.3): an ordered list of focusable ids with
 // one active entry. The canonical order is tree → pane A → pane B (if
-// split) → automations; regions hidden by the degradation ladder are marked
+// split) → automations → projects; regions hidden by the degradation ladder are marked
 // hidden and skipped when cycling.
 type Ring struct {
 	ids    []string
