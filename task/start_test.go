@@ -39,6 +39,11 @@ func (b *startBackend) Attach(*session.Instance) (chan struct{}, error) {
 	close(ch)
 	return ch, nil
 }
+func (b *startBackend) AttachTerminal(*session.Instance, int) (chan struct{}, error) {
+	ch := make(chan struct{})
+	close(ch)
+	return ch, nil
+}
 
 func (b *startBackend) HasUpdated(*session.Instance) (bool, bool, string) { return false, false, "" }
 func (b *startBackend) SendPrompt(*session.Instance, string) error        { return nil }

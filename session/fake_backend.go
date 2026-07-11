@@ -99,6 +99,11 @@ func (b *FakeBackend) Attach(*Instance) (chan struct{}, error) {
 	close(ch)
 	return ch, nil
 }
+func (b *FakeBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
+	ch := make(chan struct{})
+	close(ch)
+	return ch, nil
+}
 func (b *FakeBackend) HasUpdated(*Instance) (bool, bool, string) { return false, false, "" }
 func (b *FakeBackend) SendPrompt(*Instance, string) error        { return nil }
 func (b *FakeBackend) SendPromptCommand(*Instance, string) error { return nil }
