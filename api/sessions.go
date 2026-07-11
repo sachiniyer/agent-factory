@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
@@ -41,7 +42,14 @@ var (
 	// a daemon is already running, and returns daemon.ErrDaemonUnavailable
 	// (never spawning one) when it is not, so callers fall back to disk. Held in
 	// a var so tests can inject a snapshot without a live daemon.
-	snapshotViaDaemon = daemon.SnapshotNoSpawn
+	//
+	// #1592 Phase 2 PR2: this read now flows over the daemon's HTTP/JSON API
+	// (apiclient) instead of net/rpc. The response is byte-identical — apiclient
+	// decodes the same {data,error} envelope back into the same
+	// session.InstanceData structs the RPC returned — so list/get/whoami output,
+	// scoping, and disk-fallback behavior are unchanged; only the transport
+	// moved. Every write/control path stays on net/rpc for now.
+	snapshotViaDaemon = apiclient.SnapshotNoSpawn
 )
 
 // listSessions returns the session list for repoID (empty = all repos),
