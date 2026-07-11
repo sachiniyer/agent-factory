@@ -84,9 +84,9 @@ type tabNoSessionErr struct{}
 
 func (*tabNoSessionErr) Error() string { return "session does not exist" }
 
-// remoteTypeBackend is a FakeBackend that reports the "remote" type so
-// Instance.IsRemote() returns true, letting CreateTab's remote-rejection branch
-// be exercised without a real hook backend.
+// remoteTypeBackend is a FakeBackend that reports a WorkspaceRemote capability
+// descriptor, letting CreateTab's remote-rejection branch (no TabManagement) be
+// exercised without a real hook backend.
 type remoteTypeBackend struct {
 	*session.FakeBackend
 }

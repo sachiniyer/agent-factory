@@ -12,9 +12,9 @@ import (
 )
 
 // remoteFakeBackend is a FakeBackend that reports itself as the remote hook
-// backend, so Instance.IsRemote() returns true without standing up a real
-// HookBackend (and its terminal_cmd PTY). Everything else — IsAlive() true so
-// the instance is attachable — is inherited.
+// backend, so its Capabilities().Workspace is WorkspaceRemote without standing
+// up a real HookBackend (and its terminal_cmd PTY). Everything else — IsAlive()
+// true so the instance is attachable — is inherited.
 type remoteFakeBackend struct {
 	*session.FakeBackend
 }
@@ -65,7 +65,7 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 		inst.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
 		inst.SetStatusForTest(session.Running)
 	}
-	require.Equal(t, remote, inst.IsRemote(),
+	require.Equal(t, remote, inst.Capabilities().Workspace == session.WorkspaceRemote,
 		"precondition: instance remote-ness must match the case under test")
 	require.True(t, inst.TmuxAlive(),
 		"precondition: instance must be attachable so handleEnter reaches the attach path")

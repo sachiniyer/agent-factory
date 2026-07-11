@@ -72,7 +72,7 @@ func TestFetchPRInfoCmd_NilInstance_ReturnsNil(t *testing.T) {
 func TestFetchPRInfoCmd_RemoteInstance_ReturnsNil(t *testing.T) {
 	inst := newStartedInstance(t, "remote")
 	inst.SetBackend(&session.HookBackend{})
-	require.True(t, inst.IsRemote(), "sanity: instance should report as remote")
+	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote, "sanity: instance should report as remote")
 
 	assert.Nil(t, fetchPRInfoCmd(inst, false))
 	assert.Nil(t, fetchPRInfoCmd(inst, true), "force must not override the remote guard")

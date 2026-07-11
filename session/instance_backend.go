@@ -169,21 +169,12 @@ func (i *Instance) SendKeys(keys string) error {
 	return i.backend.SendKeys(i, keys)
 }
 
-// IsRemote returns true if this instance uses the remote hook backend.
-func (i *Instance) IsRemote() bool {
-	if i.backend == nil {
-		return false
-	}
-	return i.backend.Type() == "remote"
-}
-
 // Capabilities returns the backing runtime's capability descriptor (#1592
 // Phase 1). A nil backend (a not-yet-initialised instance) reports local
-// full parity, matching the historical nil-backend contract the delocalized
-// client gates replace: IsRemote() has always nil-guarded to false (local), so
-// the UI treated a backend-less instance as a capable local session. Returning
-// the zero value instead would be an incoherent descriptor (local workspace but
-// every capability off) and would regress e.g. the tab-management footer.
+// full parity: the UI treats a backend-less instance as a capable local
+// session, so returning the zero value instead would be an incoherent
+// descriptor (local workspace but every capability off) and would regress
+// e.g. the tab-management footer.
 func (i *Instance) Capabilities() Capabilities {
 	if i.backend == nil {
 		return (&LocalBackend{}).Capabilities()
@@ -191,30 +182,21 @@ func (i *Instance) Capabilities() Capabilities {
 	return i.backend.Capabilities()
 }
 
-// SupportsRemoteTerminal reports whether this instance can open an interactive
-// terminal on its remote machine — a remote-workspace runtime that advertises a
-// terminal tab (the optional terminal_cmd hook, #843). Reads the capability
-// descriptor rather than type-asserting the concrete backend (#1592 Phase 1).
-func (i *Instance) SupportsRemoteTerminal() bool {
-	caps := i.Capabilities()
-	return caps.Workspace == WorkspaceRemote && caps.TerminalTab
-}
-
 // AttachRemoteTerminal opens an interactive terminal on the remote machine via
 // the terminal_cmd hook. The returned channel is closed when the user detaches
 // or the terminal_cmd process exits. Errors when the instance is not backed by
 // remote hooks or terminal_cmd is not configured.
 //
-// RESIDUAL COUPLING (#1592 Phase 1): the gate SupportsRemoteTerminal() above now
-// reads the capability descriptor, but this attach path still type-asserts the
-// concrete *HookBackend because AttachTerminal (and its tmux-shaped chan struct{}
-// return) is not on the Backend interface. Gate and attach agree ONLY because
-// HookBackend is the sole WorkspaceRemote backend today — a future non-hook
-// remote backend would pass the capability gate and then fail this assertion.
-// This assertion is deliberately left for PR5 (attach → PTYStream, io.ReadWriteCloser
-// + Resize): when attach is unified through the interface, the terminal-tab attach
-// routes through the same stream and this *HookBackend special-case is deleted.
-// See the #1592 Phase 1 plan (5-PR sequence).
+// RESIDUAL COUPLING (#1592 Phase 1): callers gate on the capability descriptor
+// (Workspace==WorkspaceRemote && TerminalTab), but this attach path still
+// type-asserts the concrete *HookBackend because AttachTerminal (and its
+// tmux-shaped chan struct{} return) is not on the Backend interface. Gate and
+// attach agree ONLY because HookBackend is the sole WorkspaceRemote backend
+// today — a future non-hook remote backend would pass the capability gate and
+// then fail this assertion. This assertion is deliberately left for PR5 (attach
+// → PTYStream, io.ReadWriteCloser + Resize): when attach is unified through the
+// interface, the terminal-tab attach routes through the same stream and this
+// *HookBackend special-case is deleted. See the #1592 Phase 1 plan.
 func (i *Instance) AttachRemoteTerminal() (chan struct{}, error) {
 	hb, ok := i.backend.(*HookBackend)
 	if !ok {

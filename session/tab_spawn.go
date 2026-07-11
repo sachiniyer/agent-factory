@@ -9,8 +9,9 @@ import (
 
 // AddShellTab spawns a new Shell-kind tab running $SHELL in the instance's
 // worktree, appends it to Tabs, and returns it. Local instances only — remote
-// instances have no local worktree, so callers must reject IsRemote() before
-// calling. The new tab's display name is unique within the instance ("shell",
+// instances have no local worktree, so callers must reject backends without the
+// TabManagement capability before calling. The new tab's display name is unique
+// within the instance ("shell",
 // then "shell-2", "shell-3", …) and its tmux session name is derived from it so
 // it is collision-free and restorable by exact name across a restart (#930 PR
 // 4). Errors when the instance is not started, has no agent session/worktree, or
@@ -83,7 +84,8 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 // CLI/agent-driven counterpart of AddShellTab: instead of $SHELL it runs an
 // arbitrary command, so an agent can prompt-spawn a tab hosting a data explorer,
 // test watcher, etc. Local instances only — remote instances have no local
-// worktree, so callers must reject IsRemote() before calling. The display name is
+// worktree, so callers must reject backends without the TabManagement capability
+// before calling. The display name is
 // requestedName when non-empty, otherwise derived from the command's basename;
 // it is sanitized and made unique within the instance ("btop", "btop-2", …) so
 // its derived tmux session name is collision-free and restorable by exact name

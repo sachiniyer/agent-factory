@@ -209,20 +209,21 @@ func TestHookBackendAttachTerminalUsesRemoteMetaName(t *testing.T) {
 	assert.Equal(t, "imported-name", strings.TrimSpace(string(raw)))
 }
 
-func TestInstanceSupportsRemoteTerminal(t *testing.T) {
-	t.Run("remote with terminal_cmd", func(t *testing.T) {
-		i := &Instance{backend: &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: "/bin/true"}}}
-		assert.True(t, i.SupportsRemoteTerminal())
+func TestInstanceRemoteTerminalCapability(t *testing.T) {
+	t.Run("remote with terminal_cmd advertises the terminal tab", func(t *testing.T) {
+		caps := (&Instance{backend: &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: "/bin/true"}}}).Capabilities()
+		assert.True(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
 	})
 
-	t.Run("remote without terminal_cmd", func(t *testing.T) {
-		i := &Instance{backend: &HookBackend{}}
-		assert.False(t, i.SupportsRemoteTerminal())
+	t.Run("remote without terminal_cmd does not", func(t *testing.T) {
+		caps := (&Instance{backend: &HookBackend{}}).Capabilities()
+		assert.False(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
 	})
 
-	t.Run("non-hook backend", func(t *testing.T) {
+	t.Run("non-hook backend rejects AttachRemoteTerminal", func(t *testing.T) {
 		i := &Instance{backend: &LocalBackend{}}
-		assert.False(t, i.SupportsRemoteTerminal())
+		caps := i.Capabilities()
+		assert.False(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
 		_, err := i.AttachRemoteTerminal()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "remote sessions")

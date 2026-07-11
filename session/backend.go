@@ -8,8 +8,8 @@ type WorkspaceKind int
 
 const (
 	// WorkspaceLocalWorktree: a git worktree on the daemon's own machine, driven
-	// by tmux (today's LocalBackend). Zero value — matches the historical
-	// nil-backend default of IsRemote()==false.
+	// by tmux (today's LocalBackend). Zero value — a backend-less instance reads
+	// as a local workspace.
 	WorkspaceLocalWorktree WorkspaceKind = iota
 	// WorkspaceRemote: the workspace lives off-box; there is no local worktree or
 	// tmux to drive (today's HookBackend; tomorrow's ssh/container runtimes).

@@ -158,7 +158,7 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 		ForceRemote: true,
 	})
 	require.NoError(t, err)
-	assert.True(t, instance.IsRemote(), "NewInstance with ForceRemote should pick HookBackend")
+	assert.True(t, instance.Capabilities().Workspace == WorkspaceRemote, "NewInstance with ForceRemote should pick HookBackend")
 	assert.Equal(t, "remote", instance.GetBackend().Type())
 	assert.False(t, instance.Started())
 	assert.True(t, instance.AutoYes, "NewInstance should preserve AutoYes from options")
@@ -260,11 +260,11 @@ func TestE2ERemoteHooksMultipleSessions(t *testing.T) {
 	// Create and start two sessions.
 	inst1, err := NewInstance(InstanceOptions{Title: "session-alpha", Path: repoDir, Program: "claude", ForceRemote: true})
 	require.NoError(t, err)
-	require.True(t, inst1.IsRemote())
+	require.True(t, inst1.Capabilities().Workspace == WorkspaceRemote)
 
 	inst2, err := NewInstance(InstanceOptions{Title: "session-beta", Path: repoDir, Program: "claude", ForceRemote: true})
 	require.NoError(t, err)
-	require.True(t, inst2.IsRemote())
+	require.True(t, inst2.Capabilities().Workspace == WorkspaceRemote)
 
 	require.NoError(t, inst1.Start(true))
 	require.NoError(t, inst2.Start(true))
@@ -316,7 +316,7 @@ func TestE2ELocalBackendStillWorks(t *testing.T) {
 		Program: "bash",
 	})
 	require.NoError(t, err)
-	assert.False(t, instance.IsRemote(), "should default to LocalBackend")
+	assert.False(t, instance.Capabilities().Workspace == WorkspaceRemote, "should default to LocalBackend")
 	assert.Equal(t, "local", instance.GetBackend().Type())
 }
 
@@ -551,7 +551,7 @@ func TestE2ERemoteHooksRelativePaths(t *testing.T) {
 		ForceRemote: true,
 	})
 	require.NoError(t, err)
-	require.True(t, instance.IsRemote())
+	require.True(t, instance.Capabilities().Workspace == WorkspaceRemote)
 
 	require.NoError(t, instance.Start(true))
 	assert.Equal(t, []string{Slugify("rel-hooks")}, readLineStateFile(t, stateFile), "launch_cmd must have run")
@@ -598,7 +598,7 @@ func TestE2ERemoteHooksRelativePathsLinkedWorktree(t *testing.T) {
 		ForceRemote: true,
 	})
 	require.NoError(t, err)
-	require.True(t, instance.IsRemote())
+	require.True(t, instance.Capabilities().Workspace == WorkspaceRemote)
 
 	require.NoError(t, instance.Start(true))
 	assert.Equal(t, []string{Slugify("wt-session")}, readLineStateFile(t, stateFile))

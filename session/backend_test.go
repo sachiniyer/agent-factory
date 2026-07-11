@@ -130,28 +130,6 @@ func TestBackendCapabilities(t *testing.T) {
 	}
 }
 
-// TestSupportsRemoteTerminal_TracksCapability confirms the Instance predicate is
-// driven by the descriptor (WorkspaceRemote + TerminalTab), not a concrete-type
-// assertion — the #1592 Phase 1 delocalization of SupportsRemoteTerminal.
-func TestSupportsRemoteTerminal_TracksCapability(t *testing.T) {
-	t.Run("local backend has no remote terminal", func(t *testing.T) {
-		i := &Instance{backend: &LocalBackend{}}
-		assert.False(t, i.SupportsRemoteTerminal())
-	})
-	t.Run("remote hook without terminal_cmd", func(t *testing.T) {
-		i := &Instance{backend: &HookBackend{Hooks: config.RemoteHooks{}}}
-		assert.False(t, i.SupportsRemoteTerminal())
-	})
-	t.Run("remote hook with terminal_cmd", func(t *testing.T) {
-		i := &Instance{backend: &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: "/bin/ssh host"}}}
-		assert.True(t, i.SupportsRemoteTerminal())
-	})
-	t.Run("nil backend", func(t *testing.T) {
-		i := &Instance{}
-		assert.False(t, i.SupportsRemoteTerminal())
-	})
-}
-
 // TestLocalBackendKillBestEffort_TmuxFails is a regression test for issue
 // #478. When the tmux teardown fails, Kill must still clear in-memory state
 // and return nil so the caller can finish removing the session from the
@@ -342,20 +320,24 @@ func initTempGitRepo(t *testing.T) string {
 	return repoRoot
 }
 
-// --- IsRemote helper ---
+// --- Instance workspace capability ---
 
-func TestIsRemote(t *testing.T) {
+// TestInstanceCapabilitiesWorkspace pins Instance.Capabilities().Workspace,
+// including the nil-backend contract (a backend-less instance reads as local
+// full parity, not the zero value) that the deleted IsRemote() helper used to
+// nil-guard (#1592 Phase 1 PR3).
+func TestInstanceCapabilitiesWorkspace(t *testing.T) {
 	t.Run("local backend", func(t *testing.T) {
 		i := &Instance{backend: &LocalBackend{}}
-		assert.False(t, i.IsRemote())
+		assert.Equal(t, WorkspaceLocalWorktree, i.Capabilities().Workspace)
 	})
 	t.Run("hook backend", func(t *testing.T) {
 		i := &Instance{backend: &HookBackend{Hooks: config.RemoteHooks{}}}
-		assert.True(t, i.IsRemote())
+		assert.Equal(t, WorkspaceRemote, i.Capabilities().Workspace)
 	})
-	t.Run("nil backend", func(t *testing.T) {
+	t.Run("nil backend reports local parity", func(t *testing.T) {
 		i := &Instance{}
-		assert.False(t, i.IsRemote())
+		assert.Equal(t, (&LocalBackend{}).Capabilities(), i.Capabilities())
 	})
 }
 
