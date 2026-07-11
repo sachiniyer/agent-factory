@@ -92,6 +92,17 @@ var automationsMenuOptions = []keys.KeyName{
 	keys.KeyManageAutomations, keys.KeyTab, keys.KeyHooks, keys.KeyHelp, keys.KeyQuit,
 }
 
+// projectsMenuOptions are the status-bar hints while the bottom Projects section
+// has focus (#1620): the section is a captive vim-style list, so the bar
+// advertises exactly the keys that DO something there — Enter switches to the
+// cursor's project and `/` opens search — plus the cross-region focus/help/quit.
+// Every other key is a no-op in handleProjectsFocus, so listing the instance
+// verbs here (as the pre-#1620 fall-through footer did) would advertise keys that
+// do nothing.
+var projectsMenuOptions = []keys.KeyName{
+	keys.KeySwitchProjectRow, keys.KeySearch, keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
+}
+
 // interactiveMenuOptions is the whole bar while interactive (#1089, RFC
 // §2.3): every other key — including these hints' own letters — forwards to
 // the pane's terminal, so advertising anything else would be a lie.
@@ -194,6 +205,17 @@ func (m *Menu) updateOptions() {
 		m.groups = []menuGroup{
 			{start: 0, end: 1, isAction: true},
 			{start: 1, end: len(automationsMenuOptions), isAction: false},
+		}
+		return
+	}
+	// The bottom Projects section owns the hints while focused (#1620), mirroring
+	// the automations branch: Enter switch / `/` search are its actions, the rest
+	// is cross-region chrome. Naming's submit/change-program hints still win.
+	if m.focusRegion == layout.RegionProjects && m.state != StateNewInstance {
+		m.options = projectsMenuOptions
+		m.groups = []menuGroup{
+			{start: 0, end: 2, isAction: true},
+			{start: 2, end: len(projectsMenuOptions), isAction: false},
 		}
 		return
 	}
