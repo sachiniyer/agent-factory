@@ -88,6 +88,13 @@ type eventQueue struct {
 	curPath string // <dir>/<taskID>.cursor
 	remove  func(string) error
 
+	// appendRecord/truncate are the append and truncate seams. Production wires
+	// them to os.Truncate and a real O_APPEND write; tests inject them to
+	// simulate the partial-write + truncate-failure path that #1634 wedged on
+	// (a real short write is otherwise impossible to force on a local FS).
+	appendRecord func(path string, rec []byte) (int, error)
+	truncate     func(path string, size int64) error
+
 	mu      sync.Mutex
 	offset  int64 // byte offset of the first undelivered event
 	size    int64 // total bytes in the jsonl file
@@ -121,11 +128,13 @@ func eventQueueDir() (string, error) {
 // which is what lets a backlog survive a daemon restart or reload.
 func newEventQueue(dir, taskID string) *eventQueue {
 	q := &eventQueue{
-		taskID:  taskID,
-		path:    filepath.Join(dir, taskID+".jsonl"),
-		curPath: filepath.Join(dir, taskID+".cursor"),
-		remove:  os.Remove,
-		now:     time.Now,
+		taskID:       taskID,
+		path:         filepath.Join(dir, taskID+".jsonl"),
+		curPath:      filepath.Join(dir, taskID+".cursor"),
+		remove:       os.Remove,
+		appendRecord: appendRecordToFile,
+		truncate:     os.Truncate,
+		now:          time.Now,
 	}
 	q.load()
 	return q
@@ -227,24 +236,17 @@ func (q *eventQueue) enqueue(line string) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(q.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return err
-	}
 	rec = append(rec, '\n')
-	n, err := f.Write(rec)
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
+	n, err := q.appendRecord(q.path, rec)
 	if err != nil {
-		// A short write would leave a torn record that corrupts the NEXT
-		// append; truncate back to the last record boundary so the file stays
-		// record-aligned (the caller drops this event — same degradation as
-		// enqueue failing outright).
+		// A short write leaves a torn record that would corrupt the NEXT append:
+		// O_APPEND writes at the real end of file, so the next record glues onto
+		// the torn bytes into one invalid line. Truncate back to the last record
+		// boundary so the file stays record-aligned (the caller drops this event
+		// — same degradation as enqueue failing outright).
 		if n > 0 {
-			if terr := os.Truncate(q.path, q.size); terr != nil {
-				log.WarningLog.Printf("watch task %s: failed to truncate short-written event record: %v", q.taskID, terr)
-				q.size += int64(n)
+			if terr := q.truncate(q.path, q.size); terr != nil {
+				q.recoverTornRecordLocked(n, terr)
 			}
 		}
 		return err
@@ -253,6 +255,52 @@ func (q *eventQueue) enqueue(line string) error {
 	q.pending++
 
 	return q.dropOldestOverCapsLocked()
+}
+
+// appendRecordToFile is the production append seam: one O_APPEND write of the
+// whole record, returning the byte count written so a short write can be
+// recovered by the caller.
+func appendRecordToFile(path string, rec []byte) (int, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return 0, err
+	}
+	n, err := f.Write(rec)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return n, err
+}
+
+// recoverTornRecordLocked salvages a short write whose truncate ALSO failed, so
+// the torn bytes (n of them, no trailing newline) are stuck on disk. Left as-is
+// they would permanently wedge the queue (#1634): the next O_APPEND merges its
+// record onto the torn bytes into one invalid line that no restart could clear.
+// Best-effort recovery: append a single newline to force a record boundary, so
+// the torn fragment becomes its own (unparseable) line that peek() drops and
+// skips past instead of merging into the next event. The fragment is counted as
+// pending to keep the in-memory count equal to the on-disk line count — else a
+// later good event would be miscounted and silently lost when the head is
+// skipped. If even the newline append fails, the reader's skip path is the final
+// backstop (a merged line is skippable too, only losing the following event).
+// Callers hold q.mu.
+func (q *eventQueue) recoverTornRecordLocked(n int, truncErr error) {
+	f, ferr := os.OpenFile(q.path, os.O_WRONLY|os.O_APPEND, 0644)
+	if ferr != nil {
+		log.WarningLog.Printf("watch task %s: failed to truncate short-written event record (%v); could not reopen to re-align it: %v", q.taskID, truncErr, ferr)
+		return
+	}
+	_, werr := f.Write([]byte{'\n'})
+	if closeErr := f.Close(); werr == nil {
+		werr = closeErr
+	}
+	if werr != nil {
+		log.WarningLog.Printf("watch task %s: failed to truncate short-written event record (%v); could not re-align it with a newline: %v", q.taskID, truncErr, werr)
+		return
+	}
+	q.size += int64(n) + 1
+	q.pending++
+	log.WarningLog.Printf("watch task %s: failed to truncate short-written event record (%v); re-aligned the torn %d bytes with a trailing newline so the queue stays readable", q.taskID, truncErr, n)
 }
 
 // resetCursorBeforeFreshAppendLocked removes or zeroes any leftover cursor
@@ -305,17 +353,42 @@ func (q *eventQueue) dropOldestOverCapsLocked() error {
 
 // peek returns the oldest undelivered event and an advance cursor without
 // consuming it. ok is false when the queue is empty.
+//
+// Self-heal (#1634): an unreadable head record that is nonetheless record-
+// aligned (a corrupt line with a terminating newline — e.g. a torn fragment
+// re-aligned by recoverTornRecordLocked, or a merged line from a truncate
+// failure) is DROPPED and skipped rather than parking the drainer forever. On-
+// disk corruption survives every daemon restart, so parking is a permanent
+// wedge; dropping the one bad record and advancing keeps the valid events after
+// it reachable. Only a record with no boundary to skip to (an unterminated torn
+// tail) is surfaced as an error for the drainer to park on.
 func (q *eventQueue) peek() (ev queuedEvent, cursor eventQueueCursor, ok bool, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.pending == 0 {
-		return queuedEvent{}, eventQueueCursor{}, false, nil
+	for q.pending > 0 {
+		ev, n, rerr := q.readEventAtLocked(q.offset)
+		if rerr == nil {
+			return ev, eventQueueCursor{offset: q.offset, length: n, seq: ev.Seq}, true, nil
+		}
+		if n <= 0 {
+			// No record boundary found (unterminated torn tail): nothing safe to
+			// skip to. Surface the error; the drainer parks until the next reload.
+			return queuedEvent{}, eventQueueCursor{}, false, rerr
+		}
+		log.WarningLog.Printf("watch task %s: dropping unreadable queued event at offset %d (%d bytes): %v", q.taskID, q.offset, n, rerr)
+		q.offset += n
+		q.pending--
+		if q.pending == 0 {
+			if _, derr := q.removeDrainedFilesLocked(); derr != nil {
+				return queuedEvent{}, eventQueueCursor{}, false, derr
+			}
+			return queuedEvent{}, eventQueueCursor{}, false, nil
+		}
+		if perr := q.persistCursorLocked(); perr != nil {
+			return queuedEvent{}, eventQueueCursor{}, false, perr
+		}
 	}
-	ev, n, err := q.readEventAtLocked(q.offset)
-	if err != nil {
-		return queuedEvent{}, eventQueueCursor{}, false, err
-	}
-	return ev, eventQueueCursor{offset: q.offset, length: n, seq: ev.Seq}, true, nil
+	return queuedEvent{}, eventQueueCursor{}, false, nil
 }
 
 // advance consumes the oldest event AFTER its successful delivery: cursor
@@ -449,9 +522,12 @@ func (q *eventQueue) offsetIsRecordBoundaryLocked(f *os.File) bool {
 }
 
 // readEventAtLocked reads and parses one JSONL record at the given offset,
-// returning the record and its length including the newline. Callers hold
-// q.mu. A corrupt or truncated record is an error — the drainer logs and
-// parks rather than guessing at boundaries.
+// returning the record and its length including the newline. Callers hold q.mu.
+//
+// The returned length distinguishes the two failure modes so peek can self-heal
+// (#1634): a CORRUPT but newline-terminated record returns its byte length with
+// the error (there is a boundary to skip past), while a TRUNCATED record with no
+// terminating newline returns length 0 (no boundary — the drainer parks).
 func (q *eventQueue) readEventAtLocked(off int64) (queuedEvent, int64, error) {
 	f, err := os.Open(q.path)
 	if err != nil {
@@ -468,7 +544,7 @@ func (q *eventQueue) readEventAtLocked(off int64) (queuedEvent, int64, error) {
 	}
 	var ev queuedEvent
 	if err := json.Unmarshal(raw, &ev); err != nil {
-		return queuedEvent{}, 0, fmt.Errorf("corrupt event record at offset %d: %w", off, err)
+		return queuedEvent{}, int64(len(raw)), fmt.Errorf("corrupt event record at offset %d: %w", off, err)
 	}
 	return ev, int64(len(raw)), nil
 }

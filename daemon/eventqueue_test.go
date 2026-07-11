@@ -313,6 +313,120 @@ func TestEventQueue_TornTrailingRecordTruncated(t *testing.T) {
 	}
 }
 
+// drainAllEvents peeks+advances until the queue is empty, returning the lines
+// of every event delivered in order. peek self-heals corrupt head records
+// (#1634), so a wedged queue would surface here as a peek error, not a hang.
+func drainAllEvents(t *testing.T, q *eventQueue) []string {
+	t.Helper()
+	var got []string
+	for {
+		ev, cursor, ok, err := q.peek()
+		if err != nil {
+			t.Fatalf("peek during drain: %v", err)
+		}
+		if !ok {
+			return got
+		}
+		got = append(got, ev.Line)
+		advanceEventQueue(t, q, cursor)
+	}
+}
+
+// enqueueTornWithTruncateFailure reproduces the #1634 failure mode: a partial
+// (torn, no-newline) write to the real file whose truncate ALSO fails, driven
+// through the appendRecord/truncate seams. It returns the enqueue error so the
+// caller can assert it, and restores the production seams before returning.
+func enqueueTornWithTruncateFailure(q *eventQueue, line string) error {
+	shortWrite := errors.New("simulated short write")
+	q.appendRecord = func(path string, rec []byte) (int, error) {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return 0, err
+		}
+		half := len(rec) / 2 // < len(rec), so the trailing newline is never written
+		n, _ := f.Write(rec[:half])
+		_ = f.Close()
+		return n, shortWrite
+	}
+	q.truncate = func(string, int64) error { return errors.New("simulated truncate failure") }
+	defer func() {
+		q.appendRecord = appendRecordToFile
+		q.truncate = os.Truncate
+	}()
+	return q.enqueue(line)
+}
+
+// TestEventQueue_PartialWriteTruncateFailureStaysReadable is the #1634
+// regression: a partial write whose truncate fails must NOT wedge the queue.
+// The torn fragment is re-aligned with a newline and later dropped, and every
+// well-formed event — including one enqueued AFTER the failure — still drains in
+// order rather than being glued onto the torn bytes into an unparseable line.
+func TestEventQueue_PartialWriteTruncateFailureStaysReadable(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "ab160034")
+	for _, line := range []string{"good-1", "good-2"} {
+		if err := q.enqueue(line); err != nil {
+			t.Fatalf("enqueue %s: %v", line, err)
+		}
+	}
+
+	if err := enqueueTornWithTruncateFailure(q, "torn"); err == nil {
+		t.Fatal("enqueue with short write + truncate failure returned nil, want an error")
+	}
+	// The follow-on append (production seams) must land on a record boundary,
+	// not merge onto the torn bytes.
+	if err := q.enqueue("good-3"); err != nil {
+		t.Fatalf("enqueue good-3 after failure: %v", err)
+	}
+
+	got := drainAllEvents(t, q)
+	want := []string{"good-1", "good-2", "good-3"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("drained %v, want %v (torn fragment dropped, all real events intact)", got, want)
+	}
+	if n := q.pendingCount(); n != 0 {
+		t.Fatalf("pending after drain = %d, want 0", n)
+	}
+	for _, p := range []string{q.path, q.curPath} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("drained queue must remove %s", filepath.Base(p))
+		}
+	}
+}
+
+// TestEventQueue_PartialWriteTruncateFailureRecoversAcrossRestart pins the other
+// half of #1634: the original bug survived a daemon restart. After the partial
+// write + truncate failure, reopening the queue (as a restarted daemon would)
+// and draining must recover — the torn record is dropped and the valid events
+// after it stay reachable — instead of the reload re-wedging on the corrupt head.
+func TestEventQueue_PartialWriteTruncateFailureRecoversAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "ab160035"
+	q := newEventQueue(dir, taskID)
+	for _, line := range []string{"good-1", "good-2"} {
+		if err := q.enqueue(line); err != nil {
+			t.Fatalf("enqueue %s: %v", line, err)
+		}
+	}
+	if err := enqueueTornWithTruncateFailure(q, "torn"); err == nil {
+		t.Fatal("enqueue with short write + truncate failure returned nil, want an error")
+	}
+	if err := q.enqueue("good-3"); err != nil {
+		t.Fatalf("enqueue good-3 after failure: %v", err)
+	}
+
+	// Simulate a daemon restart: a fresh queue recovers state purely from disk.
+	reopened := newEventQueue(dir, taskID)
+	got := drainAllEvents(t, reopened)
+	want := []string{"good-1", "good-2", "good-3"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("drained after restart %v, want %v (restart must heal the corruption)", got, want)
+	}
+	if n := reopened.pendingCount(); n != 0 {
+		t.Fatalf("pending after restart drain = %d, want 0", n)
+	}
+}
+
 // TestEventQueue_DropsOldestOverEventCap: the backlog is bounded; overflow
 // drops the OLDEST pending events (newest are the actionable ones after an
 // outage) and counts the drops.
