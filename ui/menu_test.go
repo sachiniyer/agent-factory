@@ -72,18 +72,23 @@ func TestMenuAgentTabShowsBothScrollKeys(t *testing.T) {
 	}
 }
 
+// TestMenuArchiveRestoreActionByRowState pins WHICH mgmt verb the footer offers
+// per row state (#1605): a live row offers KeyArchive, a resting row offers
+// KeyRestore, and a creating row offers neither. The two are mutually exclusive —
+// exactly one is ever present.
 func TestMenuArchiveRestoreActionByRowState(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		status     session.Status
-		wantAction bool
+		name        string
+		status      session.Status
+		wantArchive bool
+		wantRestore bool
 	}{
-		{name: "running archives", status: session.Running, wantAction: true},
-		{name: "ready archives", status: session.Ready, wantAction: true},
-		{name: "lost restores", status: session.Lost, wantAction: true},
-		{name: "dead restores", status: session.Dead, wantAction: true},
-		{name: "archived restores", status: session.Archived, wantAction: true},
-		{name: "creating omits archive restore", status: session.Loading, wantAction: false},
+		{name: "running archives", status: session.Running, wantArchive: true},
+		{name: "ready archives", status: session.Ready, wantArchive: true},
+		{name: "lost restores", status: session.Lost, wantRestore: true},
+		{name: "dead restores", status: session.Dead, wantRestore: true},
+		{name: "archived restores", status: session.Archived, wantRestore: true},
+		{name: "creating omits both", status: session.Loading, wantArchive: false, wantRestore: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := &session.Instance{}
@@ -91,8 +96,46 @@ func TestMenuArchiveRestoreActionByRowState(t *testing.T) {
 			m := NewMenu()
 			m.SetInstance(inst)
 
-			if got := menuHasOption(m, keys.KeyArchive); got != tc.wantAction {
-				t.Fatalf("KeyArchive present = %v, want %v", got, tc.wantAction)
+			if got := menuHasOption(m, keys.KeyArchive); got != tc.wantArchive {
+				t.Fatalf("KeyArchive present = %v, want %v", got, tc.wantArchive)
+			}
+			if got := menuHasOption(m, keys.KeyRestore); got != tc.wantRestore {
+				t.Fatalf("KeyRestore present = %v, want %v", got, tc.wantRestore)
+			}
+		})
+	}
+}
+
+// TestMenuArchiveRestoreHintByRowState verifies the mgmt-group footer hint
+// (#1605): a live row advertises `a archive`; a resting (archived/lost/dead) row
+// advertises the dedicated `r restore` key instead. The two verbs live on
+// separate keys — the footer shows exactly the one the selected row supports.
+func TestMenuArchiveRestoreHintByRowState(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+		want   string
+		reject string
+	}{
+		{name: "running shows archive", status: session.Running, want: "a archive", reject: "r restore"},
+		{name: "ready shows archive", status: session.Ready, want: "a archive", reject: "r restore"},
+		{name: "lost shows restore", status: session.Lost, want: "r restore", reject: "a archive"},
+		{name: "dead shows restore", status: session.Dead, want: "r restore", reject: "a archive"},
+		{name: "archived shows restore", status: session.Archived, want: "r restore", reject: "a archive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &session.Instance{}
+			inst.SetStatusForTest(tc.status)
+			m := NewMenu()
+			m.SetInstance(inst)
+			m.SetSize(120, 1)
+
+			out := m.String()
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("footer missing %q for %s row:\n%s", tc.want, tc.name, out)
+			}
+			if strings.Contains(out, tc.reject) {
+				t.Fatalf("footer unexpectedly shows %q for %s row:\n%s", tc.reject, tc.name, out)
 			}
 		})
 	}

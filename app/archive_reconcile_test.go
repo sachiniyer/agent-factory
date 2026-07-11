@@ -333,7 +333,7 @@ func TestRestore_EagerRehomeDoesNotBypassRebuild(t *testing.T) {
 	h.store.AddInstance(archived)
 	require.True(t, archived.ShownArchived(), "precondition: row sits in the Archived section")
 
-	// Restore dispatched: handleArchive raises OpRestoring. The row must re-home
+	// Restore dispatched: handleRestore raises OpRestoring. The row must re-home
 	// into the live Instances section IMMEDIATELY (a) — but its liveness must stay
 	// Archived so the reconcile can still see the Archived→live transition.
 	archived.SetInFlightOpForTest(session.OpRestoring)

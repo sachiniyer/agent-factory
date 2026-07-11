@@ -104,8 +104,9 @@ func firstRunActionLine(actions string) string {
 func (h helpTypeGeneral) toContent() string {
 	// Every key glyph below is pulled from the generated binding table via
 	// helpKey, so [keys] rebinds appear here identically to the bottom menu
-	// (#1026). The two entries with no rebindable action — the run-task
-	// shortcut and the tmux detach key — stay literal.
+	// (#1026). The tmux detach key is the one entry with no rebindable action
+	// and stays literal; the task-manager run shortcut is folded into the
+	// tasks row (its `r` is overlay-local, not the global restore key #1605).
 	navKeys := helpKey(keys.KeyUp) + ", " + helpKey(keys.KeyDown)
 	header := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render(fmt.Sprintf("Agent Factory v%s", Version)),
@@ -117,9 +118,10 @@ func (h helpTypeGeneral) toContent() string {
 			{helpKey(keys.KeyNew), "Create a new session"},
 			{helpKey(keys.KeyNewRemote), "Create a new remote session (requires remote_hooks config)"},
 			{helpKey(keys.KeySwitchProject), "Switch to another project (repo) in place"},
-			{helpKey(keys.KeyTaskList), "Manage tasks (n inside the manager creates one)"},
-			{"r", "Run selected task now"},
+			{helpKey(keys.KeyTaskList), "Manage tasks (n inside the manager creates one, r runs one)"},
 			{helpKey(keys.KeyKill), "Kill (delete) the selected session"},
+			{helpKey(keys.KeyArchive), "Archive the selected live session"},
+			{helpKey(keys.KeyRestore), "Restore the selected archived / lost / dead session"},
 			{helpKey(keys.KeyLimitRetry), "Retry a session blocked at a usage limit (re-spawn + resume)"},
 			{navKeys, "Navigate between sessions"},
 			{helpKey(keys.KeyEnter), "Interact with the session in its pane (all keys go to it)"},

@@ -74,7 +74,16 @@ func (m *home) selectionChanged() tea.Cmd {
 		m.maybeAutoOpenInitialPane(nil)
 		m.cancelPanePreview(false)
 		m.panePreviewSuppression = nil
-		m.menu.SetInstance(nil)
+		// An archived row still drives the footer menu so the dedicated restore
+		// key (`r`) is discoverable on it (#1605); a section header clears the
+		// menu as before. Archived sessions own no live tmux, so the pane
+		// preview/auto-open path above deliberately stays in its nil-instance
+		// form — only the menu learns the selection.
+		if sel.Kind == ui.SectionArchived && !sel.IsHeader {
+			m.menu.SetInstance(m.sidebar.GetSelectedInstance())
+		} else {
+			m.menu.SetInstance(nil)
+		}
 		if selected := m.store.GetSelectedInstance(); selected != nil && !m.store.ContainsInstance(selected) {
 			// The sticky binding dangles — its instance was removed (e.g. the
 			// last instance killed while attached). Drop it so the pane verbs

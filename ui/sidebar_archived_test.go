@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/stretchr/testify/assert"
@@ -22,6 +23,65 @@ func archTestInstance(t *testing.T, title string, status session.Status) *sessio
 	inst.SetStartedForTest(status != session.Archived)
 	inst.SetStatusForTest(status)
 	return inst
+}
+
+// TestPartitionByArchived_ArchivedSortedNewestFirst (#1605): the archived group
+// is re-sorted newest-created first (the inverse of the oldest-first live order),
+// while the live partition keeps the projection order it arrives in. Instances
+// come in oldest-first (LessInstanceOrder), so the archived indices must return
+// reversed and the live indices in place.
+func TestPartitionByArchived_ArchivedSortedNewestFirst(t *testing.T) {
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mk := func(title string, status session.Status, ageMin int) *session.Instance {
+		inst := archTestInstance(t, title, status)
+		inst.CreatedAt = base.Add(time.Duration(ageMin) * time.Minute)
+		return inst
+	}
+
+	// Oldest-first order, as the projection hands them over: two live, three
+	// archived interleaved by creation time.
+	instances := []*session.Instance{
+		mk("live-old", session.Ready, 0),
+		mk("arch-old", session.Archived, 1),
+		mk("arch-mid", session.Archived, 2),
+		mk("live-new", session.Ready, 3),
+		mk("arch-new", session.Archived, 4),
+	}
+
+	live, archived := partitionByArchived(instances)
+
+	// Live partition keeps the incoming (oldest-first) order untouched.
+	require.Equal(t, []int{0, 3}, live, "live rows keep projection order")
+
+	// Archived indices come back newest-created first: arch-new (4), arch-mid (2),
+	// arch-old (1).
+	gotTitles := make([]string, len(archived))
+	for i, idx := range archived {
+		gotTitles[i] = instances[idx].Title
+	}
+	require.Equal(t, []string{"arch-new", "arch-mid", "arch-old"}, gotTitles,
+		"archived rows sort newest-created first")
+}
+
+// TestPartitionByArchived_EqualCreatedAtTieBreaksByTitle (#1605): identical
+// CreatedAt values fall back to a Title order so the sort is total and never
+// jitters between identical snapshots.
+func TestPartitionByArchived_EqualCreatedAtTieBreaksByTitle(t *testing.T) {
+	same := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mk := func(title string) *session.Instance {
+		inst := archTestInstance(t, title, session.Archived)
+		inst.CreatedAt = same
+		return inst
+	}
+	instances := []*session.Instance{mk("bravo"), mk("alpha"), mk("charlie")}
+
+	_, archived := partitionByArchived(instances)
+	gotTitles := make([]string, len(archived))
+	for i, idx := range archived {
+		gotTitles[i] = instances[idx].Title
+	}
+	require.Equal(t, []string{"alpha", "bravo", "charlie"}, gotTitles,
+		"equal CreatedAt breaks the tie by Title ascending")
 }
 
 // TestSidebar_ArchivedPartitionedIntoFolder (#1028): a live session renders under

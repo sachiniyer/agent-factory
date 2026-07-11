@@ -125,6 +125,8 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.handleKill()
 	case keys.KeyArchive:
 		return m.handleArchive()
+	case keys.KeyRestore:
+		return m.handleRestore()
 	case keys.KeyLimitRetry:
 		return m.handleLimitRetry()
 	case keys.KeyEnter:
@@ -291,12 +293,13 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 	return m, m.selectionChanged()
 }
 
-// handleArchive is the archive/restore verb (`a`): on an archived row it restores
-// the session (non-destructive — no confirm); on a Lost/Dead row it runs recovery
-// through the daemon; on a live row it archives behind a confirmation, since
-// archive tears down tmux and relocates the worktree. Remote and in-place
-// sessions can't be archived (no relocatable worktree) and are rejected up front
-// with an immediate message; the daemon enforces the same rules authoritatively.
+// handleArchive is the archive verb (`a`): on a LIVE row it archives behind a
+// confirmation, since archive tears down tmux and relocates the worktree. On an
+// Archived/Lost/Dead row there is nothing to archive, so `a` is a no-op — the
+// dedicated `r` restore key (handleRestore) owns that transition (#1605). Remote
+// and in-place sessions can't be archived (no relocatable worktree) and are
+// rejected up front with an immediate message; the daemon enforces the same
+// rules authoritatively.
 func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil || selected.IsCreating() {
@@ -307,22 +310,12 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	}
 	title := selected.Title
 
-	// Archived row → restore. No confirmation: restore only moves the worktree
-	// back and re-spawns the agent. Raise the optimistic OpRestoring op (mirroring
-	// how archive raises OpArchiving): it re-homes the row into the live Instances
-	// section AT ONCE via ShownArchived (#1210) and fences a double-restore, while
-	// leaving liveness LiveArchived so the snapshot reconcile still observes the
-	// Archived→live transition and runs its rebuild/re-Start (#1203). The reconcile
-	// rebuild clears the op by replacing the row; a restore failure clears it in
-	// handleInstanceRestored.
+	// A resting (Archived/Lost/Dead) row has no live worktree/tmux to tear down;
+	// `a` does nothing. Restore is on its own key now (`r`).
 	if selected.GetLiveness() == session.LiveArchived ||
 		selected.GetLiveness() == session.LiveLost ||
 		selected.GetLiveness() == session.LiveDead {
-		if selected.GetInFlightOp() == session.OpRestoring {
-			return m, m.handleError(fmt.Errorf("session '%s' is already being restored", title))
-		}
-		_ = selected.Transition(session.MarkRestoring())
-		return m, m.restoreInstanceCmd(title)
+		return m, nil
 	}
 
 	// Live row → archive. Fail fast on the unarchivable session kinds for a
@@ -334,8 +327,8 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("cannot archive in-place session '%s': archive relocates the worktree, which it doesn't own", title))
 	}
 
-	archiveKey := keys.GlobalKeyBindings[keys.KeyArchive].Help().Key
-	message := fmt.Sprintf("[!] Archive session '%s'?\n\nIts tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with %s.", title, archiveKey)
+	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
+	message := fmt.Sprintf("[!] Archive session '%s'?\n\nIts tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with %s (or `af sessions restore`).", title, restoreKey)
 	return m, m.confirmAction(message, func() tea.Msg {
 		// Raise the optimistic OpArchiving op so the row visibly shows archiving
 		// while the RPC runs (#1195). It composes to Deleting for rendering; the
@@ -349,6 +342,41 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		}
 		return startArchiveMsg{title: title}
 	})
+}
+
+// handleRestore is the restore verb (`r`, #1605): on an Archived/Lost/Dead row it
+// restores the session (non-destructive — no confirm). On a live row there is
+// nothing to restore, so `r` is a no-op — archive stays on `a` (handleArchive).
+//
+// No confirmation: restore only moves the worktree back and re-spawns the agent.
+// Raise the optimistic OpRestoring op (mirroring how archive raises OpArchiving):
+// it re-homes the row into the live Instances section AT ONCE via ShownArchived
+// (#1210) and fences a double-restore, while leaving liveness LiveArchived so the
+// snapshot reconcile still observes the Archived→live transition and runs its
+// rebuild/re-Start (#1203). The reconcile rebuild clears the op by replacing the
+// row; a restore failure clears it in handleInstanceRestored.
+func (m *home) handleRestore() (tea.Model, tea.Cmd) {
+	selected := m.sidebar.GetSelectedInstance()
+	if selected == nil || selected.IsCreating() {
+		return m, nil
+	}
+	if selected.IsTearingDown() {
+		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
+	}
+	title := selected.Title
+
+	// Only a resting (Archived/Lost/Dead) row can be restored; on a live row `r`
+	// does nothing (archive is on `a`).
+	if selected.GetLiveness() != session.LiveArchived &&
+		selected.GetLiveness() != session.LiveLost &&
+		selected.GetLiveness() != session.LiveDead {
+		return m, nil
+	}
+	if selected.GetInFlightOp() == session.OpRestoring {
+		return m, m.handleError(fmt.Errorf("session '%s' is already being restored", title))
+	}
+	_ = selected.Transition(session.MarkRestoring())
+	return m, m.restoreInstanceCmd(title)
 }
 
 // archiveInstanceCmd runs the daemon archive (tmux teardown + worktree move) off
