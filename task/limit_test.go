@@ -54,6 +54,21 @@ func TestIsLimitContent(t *testing.T) {
 			wantResetUTC: time.Date(2026, 7, 4, 19, 0, 0, 0, loc).UTC(), // 23:00 UTC
 		},
 		{
+			// Two GENUINE banners in the pane (user tripped the limit, hit the
+			// retry key, tripped it again). Reset must come from the LAST/most
+			// recent banner (7pm), not the stale first one (2pm) — see #1602.
+			name:  "claude two real banners: uses last banner's later reset time",
+			agent: tmux.ProgramClaude,
+			content: strings.Join([]string{
+				"Claude usage limit reached. Your limit will reset at 2pm (America/New_York)",
+				"c",
+				"Claude usage limit reached. Your limit will reset at 7pm (America/New_York)",
+			}, "\n"),
+			wantHit:      true,
+			wantReset:    true,
+			wantResetUTC: time.Date(2026, 7, 4, 19, 0, 0, 0, loc).UTC(), // 23:00 UTC, not 18:00
+		},
+		{
 			name:         "claude weekly: explicit date + year + tz",
 			agent:        tmux.ProgramClaude,
 			content:      "Claude usage limit reached. Your limit will reset at Nov 6, 2026 9am (America/New_York)",

@@ -163,14 +163,19 @@ func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher
 	if !ok || matcher.detect == nil {
 		return false, time.Time{}, false
 	}
-	match := matcher.detect.FindStringIndex(content)
-	if match == nil {
+	// The captured pane can legitimately contain multiple genuine usage-limit
+	// banners (e.g. the user hits the retry key and trips the limit again before
+	// the first banner scrolls off). Anchor reset parsing to the LAST match so
+	// resetAt reflects the most recent banner, not a stale earlier one (#1602).
+	matches := matcher.detect.FindAllStringIndex(content, -1)
+	if len(matches) == 0 {
 		return false, time.Time{}, false
 	}
+	last := matches[len(matches)-1]
 	if matcher.parseReset == nil {
 		return true, time.Time{}, false
 	}
-	if reset, parsed := matcher.parseReset(content[match[0]:], now); parsed {
+	if reset, parsed := matcher.parseReset(content[last[0]:], now); parsed {
 		return true, reset.UTC(), true
 	}
 	return true, time.Time{}, false
