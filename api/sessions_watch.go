@@ -165,6 +165,21 @@ func describeWatchState(d *session.InstanceData) string {
 	return "not idle"
 }
 
+// validateWatchFlags rejects nonsensical --interval/--timeout values with an
+// actionable message (public CLI standard). The duration parser accepts negative
+// durations, so guard them here: a negative interval is meaningless, and a
+// negative timeout would otherwise slip past the `timeout > 0` check in
+// watchForReady and silently wait forever (only 0 means "wait forever").
+func validateWatchFlags(interval, timeout time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("--interval must be positive, got %s", interval)
+	}
+	if timeout < 0 {
+		return fmt.Errorf("--timeout cannot be negative, got %s (use 0 to wait forever)", timeout)
+	}
+	return nil
+}
+
 // getSessionByTitleInScope resolves a single session by title, honoring --repo
 // scoping (unlike the all-repo `sessions get`). An empty repoID preserves the
 // all-repo lookup; a non-empty one confines the lookup to that repo so a
@@ -219,8 +234,8 @@ session record. Honors --repo to scope the title lookup to one repository.`,
 
 		title := args[0]
 
-		if watchIntervalFlag <= 0 {
-			return jsonError(fmt.Errorf("--interval must be positive, got %s", watchIntervalFlag))
+		if err := validateWatchFlags(watchIntervalFlag, watchTimeoutFlag); err != nil {
+			return jsonError(err)
 		}
 
 		repoID, err := resolveRepoID()

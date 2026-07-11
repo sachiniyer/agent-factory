@@ -81,6 +81,32 @@ func TestClassifyWatch(t *testing.T) {
 	}
 }
 
+// TestValidateWatchFlags guards the duration-flag edge cases the parser accepts
+// but the command must reject: a non-positive interval, and a negative timeout
+// that would otherwise be indistinguishable from 0 ("wait forever") in the loop.
+func TestValidateWatchFlags(t *testing.T) {
+	cases := []struct {
+		name     string
+		interval time.Duration
+		timeout  time.Duration
+		wantErr  bool
+	}{
+		{"ok", 2 * time.Second, 30 * time.Minute, false},
+		{"zero-timeout-waits-forever", 2 * time.Second, 0, false},
+		{"zero-interval", 0, 30 * time.Minute, true},
+		{"negative-interval", -1 * time.Second, 30 * time.Minute, true},
+		{"negative-timeout", 2 * time.Second, -1 * time.Minute, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateWatchFlags(tc.interval, tc.timeout)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("validateWatchFlags(%s, %s) err=%v, wantErr=%v", tc.interval, tc.timeout, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestWatchForReady_GreenTransition: a session that works for several polls then
 // goes idle exits 0 and returns the final ready snapshot.
 func TestWatchForReady_GreenTransition(t *testing.T) {
