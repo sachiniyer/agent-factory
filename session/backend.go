@@ -51,14 +51,26 @@ type Backend interface {
 	// Start initialises the session. When firstTimeSetup is true a brand-new
 	// session is created; otherwise an existing one is restored from storage.
 	//
-	// Each backend implements Start as two internal phases (#1592 Phase 1 PR4):
-	// a PROVISION step that establishes WHERE the agent runs (the local git
-	// worktree, or the remote workspace via launch_cmd) and a LAUNCH step that
-	// starts WHAT runs in it (the tmux/PTY/agent process and its tabs). The
-	// boundary is kept internal for now — Start is still the only interface
-	// entry point — but it prepares the backend for the future agent-server
-	// "provision-and-expose" model, where the two halves are driven separately.
+	// Each backend implements Start as two phases (#1592 Phase 1 PR4): a PROVISION
+	// step that establishes WHERE the agent runs (the local git worktree, or the
+	// remote workspace via launch_cmd) and a LAUNCH step that starts WHAT runs in
+	// it (the tmux/PTY/agent process and its tabs). Start is Provision then Launch.
+	// The two halves are on the interface (#1592 Phase 2 PR4) so the local
+	// agent-server's provision-and-expose model can drive them separately; Start
+	// stays as the combined lifecycle entry point its existing callers use.
 	Start(instance *Instance, firstTimeSetup bool) error
+
+	// Provision establishes WHERE the session runs without starting the agent
+	// process — the local git worktree + tmux binding, or a remote/off-box
+	// workspace. The first half of Start. See each backend's implementation for the
+	// precise on-disk vs in-memory boundary.
+	Provision(instance *Instance, firstTimeSetup bool) error
+
+	// Launch starts (or restores) WHAT runs in the workspace Provision established
+	// — the agent process and its tabs. The second half of Start; it owns the
+	// failure-cleanup scope (a launch failure tears down Provision's worktree on a
+	// fresh create).
+	Launch(instance *Instance, firstTimeSetup bool) error
 
 	// Kill terminates the session and cleans up all associated resources.
 	Kill(instance *Instance) error

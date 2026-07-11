@@ -190,10 +190,11 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	// --- Step 5: IsAlive should return true (session is in state file with status=running) ---
 	assert.True(t, instance.TmuxAlive(), "TmuxAlive (delegates to IsAlive) should return true")
 
-	// --- Step 6: HasUpdated should always return (false, false) for remote ---
-	updated, hasPrompt, _ := instance.HasUpdated()
-	assert.False(t, updated)
-	assert.False(t, hasPrompt)
+	// --- Step 6: Snapshot should always report (false, false) for remote ---
+	obs, err := instance.AgentServer().Snapshot()
+	assert.NoError(t, err)
+	assert.False(t, obs.Updated)
+	assert.False(t, obs.HasPrompt)
 
 	// --- Step 7: SendPrompt/SendPromptCommand should return errors ---
 	assert.Error(t, instance.SendPrompt("hello"))

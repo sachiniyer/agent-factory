@@ -59,7 +59,7 @@ func TestAutoYesDataRace(t *testing.T) {
 				return
 			default:
 			}
-			inst.TapEnter()
+			inst.AgentServer().TapEnter()
 		}
 	}()
 

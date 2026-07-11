@@ -125,18 +125,9 @@ func (i *Instance) Preview() (string, error) {
 	return i.backend.Preview(i)
 }
 
-func (i *Instance) HasUpdated() (updated bool, hasPrompt bool, content string) {
-	return i.backend.HasUpdated(i)
-}
-
 // CheckAndHandleTrustPrompt checks for and dismisses the trust prompt for supported programs.
 func (i *Instance) CheckAndHandleTrustPrompt() bool {
 	return i.backend.CheckAndHandleTrustPrompt(i)
-}
-
-// TapEnter sends an enter key press to the tmux session if AutoYes is enabled.
-func (i *Instance) TapEnter() {
-	i.backend.TapEnter(i)
 }
 
 func (i *Instance) Attach() (chan struct{}, error) {

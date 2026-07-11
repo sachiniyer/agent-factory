@@ -148,21 +148,35 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		return
 	}
 
-	instance.CheckAndHandleTrustPrompt()
+	// The daemon observes and drives the session ONLY through its agent-server
+	// (#1592 Phase 2 PR4) — never the tmux-shaped Backend probes directly, so this
+	// poll makes no assumption that the session is local tmux. For the local
+	// runtime the agent-server drives tmux in-process.
+	as := instance.AgentServer()
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
-	// HasUpdated hands back the captured pane content so the idle branch can run
-	// the usage-limit detector (#1146) without a second capture-pane.
-	updated, hasPrompt, content := instance.HasUpdated()
+	// Snapshot dismisses a pending trust prompt then reads the pane in one probe
+	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
+	// HasUpdated). Content is the capture handed back so the idle branch runs the
+	// usage-limit detector (#1146) without a second capture-pane.
+	obs, err := as.Snapshot()
+	if err != nil {
+		// A future remote runtime's observation channel failed: leave the status
+		// for the next tick rather than misreading it. The local agent-server
+		// never errors here, so this is inert today — it mirrors the paused /
+		// in-flight-op early returns above (never mark Lost on a failed probe).
+		return
+	}
+	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
 	if hasPrompt {
 		// Tap enter whenever a prompt is waiting (TapEnter is a no-op unless
 		// AutoYes is on), independent of `updated` — exactly as the pre-#965
-		// AutoYes loop did with `if _, hasPrompt := instance.HasUpdated(); …`.
-		// A prompt's text is itself fresh output, so a just-appeared prompt
-		// commonly reports (updated, hasPrompt) == (true, true); folding the tap
-		// into the switch below `case updated` swallowed it on that first tick
-		// and only tapped on the next poll — a one-interval AutoYes delay (#992).
-		instance.TapEnter()
+		// AutoYes loop did with `if _, hasPrompt := ...Snapshot(); …`. A prompt's
+		// text is itself fresh output, so a just-appeared prompt commonly reports
+		// (updated, hasPrompt) == (true, true); folding the tap into the switch
+		// below `case updated` swallowed it on that first tick and only tapped on
+		// the next poll — a one-interval AutoYes delay (#992).
+		as.TapEnter()
 	}
 	switch {
 	case updated:
@@ -171,8 +185,8 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// A waiting prompt with otherwise-unchanged output: leave the status for
 		// the next tick to resolve, exactly as runMetadataTick did. The
 		// prompt-tap already fired above regardless of `updated`.
-	case !instance.TmuxAlive():
-		// HasUpdated returned (false,false), which a healthy idle session and a
+	case !as.Alive():
+		// Snapshot returned (false,false), which a healthy idle session and a
 		// dead one both produce — indistinguishable on their own. Probe liveness
 		// only on this idle branch so a vanished session is marked Lost and
 		// rendered distinctly rather than repainted as a green Ready dot it can

@@ -48,14 +48,14 @@ func TestHookBackendProvisionLaunchSeam(t *testing.T) {
 	}
 
 	// PROVISION: remote workspace allocated, but nothing launched locally yet.
-	require.NoError(t, b.provision(i, true))
+	require.NoError(t, b.Provision(i, true))
 	assert.NotNil(t, i.remoteMeta, "provision records the remote workspace metadata")
 	assert.Equal(t, Slugify("test-session"), i.Branch)
 	assert.False(t, i.Started(), "provision must not mark the instance started")
 	assert.Empty(t, i.Tabs, "provision must not build the tab model")
 
 	// LAUNCH: local machinery comes up and the instance goes live.
-	require.NoError(t, b.launch(i, true))
+	require.NoError(t, b.Launch(i, true))
 	assert.True(t, i.Started(), "launch marks the instance started")
 	assert.NotEmpty(t, i.Tabs, "launch syncs the remote tab model")
 

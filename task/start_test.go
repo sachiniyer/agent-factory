@@ -19,6 +19,13 @@ func (b *startBackend) Start(instance *session.Instance, _ bool) error {
 	return nil
 }
 
+func (b *startBackend) Provision(*session.Instance, bool) error { return nil }
+
+func (b *startBackend) Launch(instance *session.Instance, _ bool) error {
+	instance.SetStartedForTest(true)
+	return nil
+}
+
 func (b *startBackend) Kill(instance *session.Instance) error {
 	instance.SetStartedForTest(false)
 	return nil

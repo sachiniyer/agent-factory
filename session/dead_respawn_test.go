@@ -204,9 +204,9 @@ func TestTombstonedInstance_NotRespawnedOnLoad(t *testing.T) {
 // the #1108 rollforward) with started=true but LocalBackend.Start returns
 // before TmuxSession.Restore (the only place the tmux monitor is initialized)
 // so the session is not re-spawned (#970). The daemon's refreshInstanceStatus
-// still polls every started instance via instance.HasUpdated(); before the fix
-// that dereferenced a nil monitor and panicked, killing the refresh goroutine
-// and zombifying the daemon. HasUpdated must instead return (false,false) — a
+// still polls every started instance via its agent-server Snapshot; before the
+// fix that dereferenced a nil monitor and panicked, killing the refresh goroutine
+// and zombifying the daemon. Snapshot must instead report (false,false) — a
 // session with no live monitor has nothing to report.
 func TestDeadInstance_HasUpdatedNilMonitor(t *testing.T) {
 	log.Initialize(false)
@@ -235,9 +235,10 @@ func TestDeadInstance_HasUpdatedNilMonitor(t *testing.T) {
 
 	// This is the exact call refreshInstanceStatus makes every daemon tick.
 	// Before the nil-monitor guard it panicked here.
-	updated, hasPrompt, _ := restored.HasUpdated()
-	assert.False(t, updated, "a restored Dead instance has nothing to report")
-	assert.False(t, hasPrompt)
+	obs, err := restored.AgentServer().Snapshot()
+	require.NoError(t, err)
+	assert.False(t, obs.Updated, "a restored Dead instance has nothing to report")
+	assert.False(t, obs.HasPrompt)
 }
 
 // failFirstNewSessionPty is a PtyFactory that fails the first `tmux new-session`
