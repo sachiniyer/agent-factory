@@ -39,8 +39,8 @@ type Capabilities struct {
 	// per-session config (remote_hooks.terminal_cmd), so it is computed per
 	// instance rather than being a static per-type constant.
 	TerminalTab bool
-	// InteractiveInput: raw key / prompt injection works — SendKeys/TapEnter/
-	// SendPrompt drive a live PTY rather than returning "not supported".
+	// InteractiveInput: raw key injection and prompt acceptance work —
+	// SendKeys/TapEnter drive a live PTY rather than returning "not supported".
 	InteractiveInput bool
 }
 
@@ -110,9 +110,6 @@ type Backend interface {
 	// inspect it without a second capture. content is "" for backends with no
 	// live pane (remote/hook) or when the capture is unavailable.
 	HasUpdated(instance *Instance) (updated bool, hasPrompt bool, content string)
-
-	// SendPrompt sends a prompt string via PTY writes.
-	SendPrompt(instance *Instance, prompt string) error
 
 	// SendPromptCommand sends a prompt using a more reliable command-based
 	// approach (e.g. tmux send-keys).

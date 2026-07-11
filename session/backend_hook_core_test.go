@@ -553,14 +553,6 @@ func TestHookBackendHasUpdated(t *testing.T) {
 	assert.False(t, hasPrompt)
 }
 
-func TestHookBackendSendPromptReturnsError(t *testing.T) {
-	b := &HookBackend{Hooks: config.RemoteHooks{}}
-	i := &Instance{backend: b}
-	err := b.SendPrompt(i, "test")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not supported")
-}
-
 func TestHookBackendSendPromptCommandReturnsError(t *testing.T) {
 	b := &HookBackend{Hooks: config.RemoteHooks{}}
 	i := &Instance{backend: b}

@@ -324,10 +324,6 @@ func (b *HookBackend) HasUpdated(_ *Instance) (updated bool, hasPrompt bool, con
 	return false, false, ""
 }
 
-func (b *HookBackend) SendPrompt(_ *Instance, _ string) error {
-	return fmt.Errorf("SendPrompt not supported for remote sessions")
-}
-
 func (b *HookBackend) SendPromptCommand(_ *Instance, _ string) error {
 	return fmt.Errorf("SendPromptCommand not supported for remote sessions")
 }

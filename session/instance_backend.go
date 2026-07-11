@@ -147,11 +147,6 @@ func (i *Instance) SetPreviewSize(width, height int) error {
 	return i.backend.SetPreviewSize(i, width, height)
 }
 
-// SendPrompt sends a prompt to the session
-func (i *Instance) SendPrompt(prompt string) error {
-	return i.backend.SendPrompt(i, prompt)
-}
-
 // SendPromptCommand sends a prompt using a more reliable command-based approach.
 // This is more reliable for headless/scheduled runs where the PTY may not persist.
 func (i *Instance) SendPromptCommand(prompt string) error {

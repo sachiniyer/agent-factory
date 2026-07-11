@@ -196,8 +196,8 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	assert.False(t, obs.Updated)
 	assert.False(t, obs.HasPrompt)
 
-	// --- Step 7: SendPrompt/SendPromptCommand should return errors ---
-	assert.Error(t, instance.SendPrompt("hello"))
+	// --- Step 7: delivery should return errors ---
+	assert.Error(t, instance.AgentServer().SendPrompt("hello"))
 	assert.Error(t, instance.SendPromptCommand("hello"))
 
 	// --- Step 8: SetPreviewSize should be a no-op (no error) ---

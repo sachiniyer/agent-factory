@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -611,30 +610,6 @@ func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, co
 		return false, false, ""
 	}
 	return ts.HasUpdated()
-}
-
-func (b *LocalBackend) SendPrompt(i *Instance, prompt string) error {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxLocked()
-	i.mu.RUnlock()
-
-	if !s {
-		return fmt.Errorf("instance not started")
-	}
-	if ts == nil {
-		return fmt.Errorf("tmux session not initialized")
-	}
-	if err := ts.SendKeys(prompt); err != nil {
-		return fmt.Errorf("error sending keys to tmux session: %w", err)
-	}
-
-	time.Sleep(100 * time.Millisecond)
-	if err := ts.TapEnter(); err != nil {
-		return fmt.Errorf("error tapping enter: %w", err)
-	}
-
-	return nil
 }
 
 func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
