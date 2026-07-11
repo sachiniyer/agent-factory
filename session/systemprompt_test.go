@@ -58,69 +58,97 @@ func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 	}
 }
 
+// Codex now gets a FILE seam (its skills folder, 0.144.1+), not the old
+// -c developer_instructions= blob (#1043 retired): the launch command comes back
+// UNCHANGED and the af skill is written where codex auto-discovers it.
 func TestInjectSystemPrompt_Codex(t *testing.T) {
-	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "") // force the ~/.codex fallback under the temp HOME
+
 	result := injectSystemPrompt("codex")
 
-	if !strings.Contains(result, "-c") {
-		t.Errorf("expected -c flag for codex, got %q", result)
+	if result != "codex" {
+		t.Errorf("expected codex command unchanged (file seam, no flag), got %q", result)
 	}
-	if !strings.Contains(result, "developer_instructions=") {
-		t.Errorf("expected developer_instructions= in flag, got %q", result)
-	}
-	if !strings.Contains(result, "af sessions whoami") {
-		t.Errorf("expected whoami command in codex prompt, got %q", result)
-	}
-	if !strings.HasPrefix(result, "codex") {
-		t.Errorf("expected result to start with 'codex', got %q", result)
+	if strings.Contains(result, "developer_instructions=") {
+		t.Errorf("developer_instructions must no longer be injected, got %q", result)
 	}
 
-	// Should NOT write any files in the worktree dir
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		t.Errorf("unexpected file written for codex: %s", e.Name())
+	skillPath := filepath.Join(home, ".codex", "skills", "agent-factory", "SKILL.md")
+	content, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("expected af skill written to %s: %v", skillPath, err)
+	}
+	if !strings.Contains(string(content), "af sessions whoami") {
+		t.Errorf("expected afUsageReference in codex SKILL.md, got %q", content)
+	}
+	if !strings.Contains(string(content), afSkillMarker) {
+		t.Errorf("expected codex SKILL.md to carry the af-managed marker, got %q", content)
 	}
 }
 
 func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "")
+
 	result := injectSystemPrompt("codex --full-auto")
 
-	if !strings.HasPrefix(result, "codex --full-auto") {
-		t.Errorf("expected resolved form preserved, got %q", result)
-	}
-	if !strings.Contains(result, "developer_instructions=") {
-		t.Errorf("expected developer_instructions flag, got %q", result)
+	if result != "codex --full-auto" {
+		t.Errorf("expected resolved form unchanged (file seam), got %q", result)
 	}
 }
 
-// Regression for #820: a user who deliberately sets developer_instructions in
-// their program_overrides must keep their value — codex's -c is last-wins per
-// key, so appending ours would clobber it.
-func TestInjectSystemPrompt_CodexExistingDeveloperInstructions(t *testing.T) {
-	resolved := `codex -c 'developer_instructions=my custom prompt'`
-	result := injectSystemPrompt(resolved)
-
-	if result != resolved {
-		t.Errorf("expected resolved form unchanged, got %q", result)
-	}
-	if got := strings.Count(result, "developer_instructions="); got != 1 {
-		t.Errorf("expected exactly one developer_instructions flag, got %d in %q", got, result)
-	}
-}
-
+// Aider has no auto-discovered skills folder, so it keeps a FLAG seam: af points a
+// --read at an af-owned context file carrying afUsageReference.
 func TestInjectSystemPrompt_Aider(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
 	result := injectSystemPrompt("aider")
 
-	if result != "aider" {
-		t.Errorf("expected aider unchanged (no system-prompt flag), got %q", result)
+	if !strings.HasPrefix(result, "aider --read ") {
+		t.Errorf("expected aider to gain a --read flag, got %q", result)
+	}
+	readPath := filepath.Join(dir, "aider", "af-skill.md")
+	if !strings.Contains(result, readPath) {
+		t.Errorf("expected --read to point at %q, got %q", readPath, result)
+	}
+	content, err := os.ReadFile(readPath)
+	if err != nil {
+		t.Fatalf("expected af context file written to %s: %v", readPath, err)
+	}
+	if !strings.Contains(string(content), "af sessions whoami") {
+		t.Errorf("expected afUsageReference in aider context file, got %q", content)
+	}
+	if !strings.Contains(string(content), afSkillMarker) {
+		t.Errorf("expected aider context file to carry the af-managed marker, got %q", content)
 	}
 }
 
+// Gemini gets a FILE seam (its user skills folder, 0.42.0+): launch command
+// UNCHANGED, af skill written where gemini auto-discovers and enables it.
 func TestInjectSystemPrompt_Gemini(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GEMINI_CLI_HOME", "") // force the ~/.gemini fallback under the temp HOME
+
 	result := injectSystemPrompt("gemini")
 
 	if result != "gemini" {
-		t.Errorf("expected gemini unchanged (no system-prompt flag), got %q", result)
+		t.Errorf("expected gemini command unchanged (file seam, no flag), got %q", result)
+	}
+
+	skillPath := filepath.Join(home, ".gemini", "skills", "agent-factory", "SKILL.md")
+	content, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("expected af skill written to %s: %v", skillPath, err)
+	}
+	if !strings.Contains(string(content), "af sessions whoami") {
+		t.Errorf("expected afUsageReference in gemini SKILL.md, got %q", content)
+	}
+	if !strings.Contains(string(content), afSkillMarker) {
+		t.Errorf("expected gemini SKILL.md to carry the af-managed marker, got %q", content)
 	}
 }
 
@@ -153,47 +181,50 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 	if !strings.HasPrefix(string(content), "---\nname: agent-factory\n") {
 		t.Errorf("expected amp SKILL.md to start with name frontmatter, got %q", content)
 	}
-	if !strings.Contains(string(content), ampSkillMarker) {
+	if !strings.Contains(string(content), afSkillMarker) {
 		t.Errorf("expected amp SKILL.md to carry the af-managed marker, got %q", content)
 	}
 }
 
-// TestInjectSystemPrompt_ResolvedCommandMatrix pins #1116/#1131: which flags
-// get injected is decided by the agent the RESOLVED command actually runs —
-// through every override shape (bare name, absolute path, path+flags,
-// redirect to a different agent, redirect to a non-agent binary) — never by
-// the config-name key the command was resolved from. The non-agent rows are
-// the class fix: injecting claude's --plugin-dir into e.g. bash makes it exit
-// instantly and the spawn dies as an opaque timeout.
+// TestInjectSystemPrompt_ResolvedCommandMatrix pins #1116/#1131: which seam is
+// used is decided by the agent the RESOLVED command actually runs — through every
+// override shape (bare name, absolute path, path+flags, redirect to a different
+// agent, redirect to a non-agent binary) — never by the config-name key the
+// command was resolved from. Flag agents (claude → --plugin-dir, aider → --read)
+// gain a flag; file-seam agents (codex, gemini, amp) come back UNCHANGED; non-agent
+// binaries get nothing (the class fix: injecting a flag into e.g. bash makes it
+// exit instantly and the spawn dies as an opaque timeout).
 func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	// The amp rows write their file seam under $HOME/.config/amp; keep it off
-	// the real home.
+	// The file-seam rows write under $HOME (~/.config/amp, ~/.codex, ~/.gemini);
+	// keep them off the real home, and force the HOME fallbacks.
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("GEMINI_CLI_HOME", "")
 
 	tests := []struct {
 		name     string
 		resolved string
-		want     string // "" = resolved must come back unchanged
+		want     string // "" = resolved must come back unchanged (file seam / no agent)
 	}{
 		// name→name (no override) for all supported agents.
 		{"claude bare", "claude", "--plugin-dir"},
-		{"codex bare", "codex", "developer_instructions="},
-		{"aider bare", "aider", ""},
+		{"codex bare", "codex", ""},
+		{"aider bare", "aider", "--read"},
 		{"gemini bare", "gemini", ""},
 		{"amp bare", "amp", ""},
 
 		// name→path and name→path+flags overrides.
 		{"claude override path", "/opt/claude-next/bin/claude", "--plugin-dir"},
 		{"claude override path with flags", "/opt/claude-next/bin/claude --model opus", "--plugin-dir"},
-		{"codex override path with flags", "/usr/local/bin/codex --full-auto", "developer_instructions="},
-		{"aider override path", "/usr/local/bin/aider --no-auto-commits", ""},
+		{"codex override path with flags", "/usr/local/bin/codex --full-auto", ""},
+		{"aider override path", "/usr/local/bin/aider --no-auto-commits", "--read"},
 		{"gemini override path", "/usr/local/bin/gemini", ""},
 		{"amp override path", "/home/me/.amp/bin/amp --no-ide", ""},
 
-		// name→other-agent: the RESOLVED agent's flags, not the key's.
-		{"claude key resolved to codex gets codex flags", "codex --full-auto", "developer_instructions="},
-		{"codex key resolved to claude gets claude flags", "/usr/bin/claude", "--plugin-dir"},
+		// name→other-agent: the RESOLVED agent's seam, not the key's.
+		{"claude key resolved to codex is file seam", "codex --full-auto", ""},
+		{"codex key resolved to claude gets claude flag", "/usr/bin/claude", "--plugin-dir"},
 
 		// name→non-agent binary: no injection at all (#1116, #1131).
 		{"claude key resolved to bash (#1131)", "bash", ""},
@@ -214,9 +245,9 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 			if !strings.Contains(got, tt.want) {
 				t.Errorf("expected %q injected into %q, got %q", tt.want, tt.resolved, got)
 			}
-			// Exactly one agent's flags: claude's and codex's must never
-			// both appear.
-			if strings.Contains(got, "--plugin-dir") && strings.Contains(got, "developer_instructions=") {
+			// Never more than one agent's flag: --plugin-dir and --read must
+			// never both appear.
+			if strings.Contains(got, "--plugin-dir") && strings.Contains(got, "--read") {
 				t.Errorf("both agents' flags injected: %q", got)
 			}
 		})
@@ -270,7 +301,7 @@ func TestEnsureAmpSkillDir(t *testing.T) {
 	for _, want := range []string{
 		"name: agent-factory",
 		"description: Manage Agent Factory (af) sessions",
-		ampSkillMarker,
+		afSkillMarker,
 		"af sessions whoami",
 		"af sessions archive --self",
 	} {
@@ -311,7 +342,7 @@ func TestEnsureAmpSkillDir_NonDestructive(t *testing.T) {
 	}
 
 	// A file that DOES carry the marker is af-owned and gets regenerated in place.
-	if err := os.WriteFile(path, []byte("stale\n<!-- "+ampSkillMarker+" -->\n"), 0644); err != nil {
+	if err := os.WriteFile(path, []byte("stale\n<!-- "+afSkillMarker+" -->\n"), 0644); err != nil {
 		t.Fatalf("seed af-owned skill: %v", err)
 	}
 	if _, err := ensureAmpSkillDir(); err != nil {
@@ -321,8 +352,8 @@ func TestEnsureAmpSkillDir_NonDestructive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if string(got) != ampSkillDoc {
-		t.Errorf("expected af-owned skill regenerated to ampSkillDoc, got %q", got)
+	if string(got) != afSkillDoc {
+		t.Errorf("expected af-owned skill regenerated to afSkillDoc, got %q", got)
 	}
 }
 
@@ -358,6 +389,178 @@ func TestEnsureAmpSkillDir_Idempotent(t *testing.T) {
 	}
 	if dir1 != dir2 {
 		t.Errorf("expected same dir on repeated calls, got %q and %q", dir1, dir2)
+	}
+}
+
+// Codex skills base resolves under $CODEX_HOME when set, else $HOME/.codex.
+func TestEnsureCodexSkillDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+
+	skillDir, err := ensureCodexSkillDir()
+	if err != nil {
+		t.Fatalf("ensureCodexSkillDir() failed: %v", err)
+	}
+	expected := filepath.Join(home, ".codex", "skills", "agent-factory")
+	if skillDir != expected {
+		t.Errorf("expected codex skill dir %q, got %q", expected, skillDir)
+	}
+	content, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("expected SKILL.md written: %v", err)
+	}
+	for _, want := range []string{"name: agent-factory", afSkillMarker, "af sessions whoami"} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("expected codex SKILL.md to contain %q, got %q", want, content)
+		}
+	}
+}
+
+func TestEnsureCodexSkillDir_HonorsCodexHome(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", codexHome)
+
+	skillDir, err := ensureCodexSkillDir()
+	if err != nil {
+		t.Fatalf("ensureCodexSkillDir() failed: %v", err)
+	}
+	expected := filepath.Join(codexHome, "skills", "agent-factory")
+	if skillDir != expected {
+		t.Errorf("expected codex skill dir under CODEX_HOME %q, got %q", expected, skillDir)
+	}
+}
+
+// Gemini skills base resolves under $GEMINI_CLI_HOME/.gemini when set, else
+// $HOME/.gemini.
+func TestEnsureGeminiSkillDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GEMINI_CLI_HOME", "")
+
+	skillDir, err := ensureGeminiSkillDir()
+	if err != nil {
+		t.Fatalf("ensureGeminiSkillDir() failed: %v", err)
+	}
+	expected := filepath.Join(home, ".gemini", "skills", "agent-factory")
+	if skillDir != expected {
+		t.Errorf("expected gemini skill dir %q, got %q", expected, skillDir)
+	}
+	content, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("expected SKILL.md written: %v", err)
+	}
+	for _, want := range []string{"name: agent-factory", afSkillMarker, "af sessions whoami"} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("expected gemini SKILL.md to contain %q, got %q", want, content)
+		}
+	}
+}
+
+func TestEnsureGeminiSkillDir_HonorsGeminiCliHome(t *testing.T) {
+	geminiHome := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GEMINI_CLI_HOME", geminiHome)
+
+	skillDir, err := ensureGeminiSkillDir()
+	if err != nil {
+		t.Fatalf("ensureGeminiSkillDir() failed: %v", err)
+	}
+	expected := filepath.Join(geminiHome, ".gemini", "skills", "agent-factory")
+	if skillDir != expected {
+		t.Errorf("expected gemini skill dir under GEMINI_CLI_HOME %q, got %q", expected, skillDir)
+	}
+}
+
+// The shared writer must never clobber a file it does not own — the acceptance
+// non-clobber guarantee, exercised through the codex skills path (the same guard
+// protects gemini, amp, and the aider context file).
+func TestWriteAfMarkedFile_NonDestructive(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+
+	skillDir := filepath.Join(home, ".codex", "skills", "agent-factory")
+	path := filepath.Join(skillDir, "SKILL.md")
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatalf("seed mkdir: %v", err)
+	}
+	userSkill := "---\nname: agent-factory\ndescription: my own codex skill\n---\nhand-written, keep me\n"
+	if err := os.WriteFile(path, []byte(userSkill), 0644); err != nil {
+		t.Fatalf("seed user skill: %v", err)
+	}
+
+	if _, err := ensureCodexSkillDir(); err != nil {
+		t.Fatalf("ensureCodexSkillDir() must not error on a foreign skill: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != userSkill {
+		t.Errorf("expected the user's un-marked skill left untouched, got %q", got)
+	}
+
+	// A file carrying the marker is af-owned and regenerates in place.
+	if err := os.WriteFile(path, []byte("stale\n<!-- "+afSkillMarker+" -->\n"), 0644); err != nil {
+		t.Fatalf("seed af-owned skill: %v", err)
+	}
+	if _, err := ensureCodexSkillDir(); err != nil {
+		t.Fatalf("ensureCodexSkillDir() on af-owned file: %v", err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != afSkillDoc {
+		t.Errorf("expected af-owned skill regenerated to afSkillDoc, got %q", got)
+	}
+}
+
+// The aider context file is written under the af config dir and carries the
+// marker; a user's un-marked file at that path is preserved and --read is skipped.
+func TestEnsureAiderReadFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	path, err := ensureAiderReadFile()
+	if err != nil {
+		t.Fatalf("ensureAiderReadFile() failed: %v", err)
+	}
+	expected := filepath.Join(dir, "aider", "af-skill.md")
+	if path != expected {
+		t.Errorf("expected aider context file %q, got %q", expected, path)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected context file written: %v", err)
+	}
+	for _, want := range []string{afSkillMarker, "af sessions whoami", "af sessions list"} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("expected aider context file to contain %q, got %q", want, content)
+		}
+	}
+
+	// A user's un-marked file at our path is preserved, and ensureAiderReadFile
+	// returns an empty path so the caller skips injecting --read.
+	userFile := "my own aider read file\n"
+	if err := os.WriteFile(path, []byte(userFile), 0644); err != nil {
+		t.Fatalf("seed user file: %v", err)
+	}
+	got, err := ensureAiderReadFile()
+	if err != nil {
+		t.Fatalf("ensureAiderReadFile() on foreign file: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty path (skip --read) for un-marked user file, got %q", got)
+	}
+	back, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(back) != userFile {
+		t.Errorf("expected user's aider read file untouched, got %q", back)
 	}
 }
 

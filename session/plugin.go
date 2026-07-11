@@ -24,8 +24,9 @@ const pluginManifest = `{
 // way on existing installs).
 //
 // Since #1043 there is exactly one entry: the "af" skill, whose body is
-// afUsageReference (systemprompt.go) — the same text Codex sessions receive via
-// developer_instructions — so the two agents' af knowledge cannot drift.
+// afUsageReference (systemprompt.go) — the same text every other agent receives
+// via its own skill/context file (agentskill.go) — so no agent's af knowledge can
+// drift.
 var pluginCommands = map[string]string{
 	"af.md": "---\n" +
 		"allowed-tools: Bash(af:*)\n" +

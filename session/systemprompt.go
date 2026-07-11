@@ -8,10 +8,11 @@ import (
 )
 
 // afUsageReference is the single source of truth for teaching an agent the af
-// CLI. It is the body of the consolidated "af" plugin skill for Claude Code
-// (see plugin.go) and the developer_instructions text for Codex, so the two
-// surfaces cannot drift (#1043). Keep it complete but terse: every user-facing
-// command group (sessions, tabs, tasks, daemon, maintenance), no boilerplate.
+// CLI. It is the body of the consolidated "af" skill delivered to every agent —
+// the Claude Code plugin skill (plugin.go), the amp/codex/gemini SKILL.md
+// (agentskill.go), and the aider --read context file — so no surface can drift
+// (#1043). Keep it complete but terse: every user-facing command group (sessions,
+// tabs, tasks, daemon, maintenance), no boilerplate.
 const afUsageReference = `You are running inside Agent Factory (af), a terminal multiplexer that runs each AI coding agent in an isolated git worktree. Manage sessions, tasks, and the daemon with the "af" CLI. Commands print JSON on stdout; run "af <command> --help" for full flag lists. To target another repository, pass --repo <path>: honored by sessions create/list/send-prompt/kill/attach/tab-create/tab-delete/archive/restore and tasks list/add. Two commands accept --repo but SILENTLY IGNORE it — "sessions get" and "sessions preview" always resolve the title across ALL repos, so with the same title in two repos you may get the wrong one regardless of --repo; disambiguate by using unique titles. tasks get/update/trigger/remove take a globally unique id (no --repo needed).
 
 Sessions (one agent per isolated worktree):
@@ -65,21 +66,36 @@ func shellQuote(s string) string {
 // makes the program exit on the unknown option, so the spawn dies as an
 // opaque timeout (#1116, #1131).
 //
+// Every agent gets the SAME afUsageReference; only the delivery seam differs.
+// Prefer a file seam (a skill/context file the agent auto-discovers, launch
+// command UNCHANGED) over a flag whenever the agent has a native skills folder,
+// because an unknown flag kills the spawn as an opaque readiness timeout (the
+// #1116/#1131 class) and the file seam keeps the launch byte-identical.
+//
 // Strategy per tool:
-//   - Claude Code: --plugin-dir flag only (a single "af" skill carrying afUsageReference)
-//   - Codex: -c developer_instructions="..." flag carrying the same afUsageReference
-//     (no custom-skills-folder mechanism exists in the Codex CLI; see #1043)
-//   - Amp: an "af" skill written to amp's home skills dir carrying the same
-//     afUsageReference (#1582). Amp has NO flag-based system-prompt seam (no
-//     --plugin-dir / developer_instructions equivalent), so injection is done
-//     purely by writing a file amp auto-discovers; the launch command is
-//     returned UNCHANGED, keeping the spawn byte-identical to the working
-//     no-injection amp launch (an unknown flag would kill it as an opaque
-//     readiness timeout — the #1116/#1131 class).
-//   - aider, gemini, and commands running no known agent: no injection.
+//   - Claude Code: --plugin-dir flag (a single "af" skill carrying afUsageReference).
+//   - Codex: file seam — the af skill written to codex's skills folder
+//     ($CODEX_HOME/skills, 0.144.1+). This RETIRES #1043 and the old
+//     -c developer_instructions= blob: codex now auto-discovers user skills, so
+//     the launch command is returned UNCHANGED and the big prompt is gone.
+//   - Gemini: file seam — the af skill written to gemini's user skills folder
+//     (~/.gemini/skills, 0.42.0+), auto-discovered and enabled at session start.
+//   - Amp: file seam — the af skill written to amp's home skills dir (#1582).
+//   - Aider: --read flag pointing at an af-owned context file. Aider has NO
+//     auto-discovered global skills folder, so it takes a flag (like claude);
+//     --read is a known, repeatable, additive aider flag.
+//   - Commands running no known agent: no injection.
+//
+// Accepted tradeoff (#1585 review, finding 2): DetectAgentFromCommand is a shared
+// basename heuristic, so a program_overrides entry pointing a NON-<agent> binary
+// named "codex"/"gemini"/"amp"/"aider" reaches the matching branch. For the file
+// seams this is benign (the launch command is unchanged; the worst case is a
+// dormant af-owned skill dir). For the flag seams (claude, aider) it carries the
+// same pre-existing #1116/#1131 exposure claude already has; we do NOT re-derive
+// agent-ness with a second heuristic — the #1132 rule is one detection choke-point.
 func injectSystemPrompt(resolved string) string {
-	agent := tmux.DetectAgentFromCommand(resolved)
-	if agent == tmux.ProgramClaude {
+	switch tmux.DetectAgentFromCommand(resolved) {
+	case tmux.ProgramClaude:
 		pluginDir, err := ensurePluginDir()
 		if err != nil {
 			log.WarningLog.Printf("failed to set up plugin directory, slash commands unavailable: %v", err)
@@ -91,39 +107,35 @@ func injectSystemPrompt(resolved string) string {
 		// and claude's --plugin-dir is repeatable, so one in a user's
 		// program_overrides is additive rather than a conflict.
 		return resolved + " --plugin-dir " + shellQuote(pluginDir)
-	}
-	if agent == tmux.ProgramCodex {
-		// Skip when the resolved command already carries a
-		// developer_instructions override — e.g. a deliberate
-		// program_overrides entry (#820). codex's -c is last-wins for the
-		// same key, so appending ours would silently clobber the user's.
-		if strings.Contains(resolved, "developer_instructions=") {
-			return resolved
+	case tmux.ProgramCodex:
+		if _, err := ensureCodexSkillDir(); err != nil {
+			log.WarningLog.Printf("failed to set up codex af skill, af guidance unavailable to codex: %v", err)
 		}
-		return resolved + " -c " + shellQuote("developer_instructions="+afUsageReference)
-	}
-	if agent == tmux.ProgramAmp {
-		// Amp gets a file seam, not a flag: writing the af-managed skill into
-		// amp's home skills dir injects afUsageReference with ZERO change to the
-		// launch command, so the spawn stays byte-identical to the working
-		// no-injection amp launch. A write failure just means amp loses the af
-		// guidance for this launch — it must never affect the spawn, so we log
-		// and return the command unchanged regardless (unlike claude, there is
-		// no flag whose absence to guard).
-		//
-		// Accepted tradeoff (#1585 review, finding 2): DetectAgentFromCommand is
-		// a shared basename heuristic, so a program_overrides entry pointing a
-		// NON-amp binary named "amp" reaches here and writes the skill file.
-		// We deliberately do NOT re-derive amp-ness with a second heuristic — the
-		// #1132 rule is that agent detection has exactly one choke-point, and a
-		// mis-detected "amp" is already mishandled everywhere else (resume
-		// rewrite, ready detection, trust prompts). The write itself is benign:
-		// ensureAmpSkillDir is af-owned, idempotent, and non-destructive, so the
-		// worst case is a dormant af-owned docs skill in ~/.config/amp/skills.
+		return resolved
+	case tmux.ProgramGemini:
+		if _, err := ensureGeminiSkillDir(); err != nil {
+			log.WarningLog.Printf("failed to set up gemini af skill, af guidance unavailable to gemini: %v", err)
+		}
+		return resolved
+	case tmux.ProgramAmp:
 		if _, err := ensureAmpSkillDir(); err != nil {
 			log.WarningLog.Printf("failed to set up amp af skill, af guidance unavailable to amp: %v", err)
 		}
 		return resolved
+	case tmux.ProgramAider:
+		// Aider takes a flag, not a file drop: it has no auto-discovered global
+		// skills folder. A write failure (or a non-af file at our path) yields an
+		// empty path, in which case we must NOT append --read pointing at a file
+		// we do not own — return the launch command unchanged.
+		path, err := ensureAiderReadFile()
+		if err != nil {
+			log.WarningLog.Printf("failed to set up aider af skill, af guidance unavailable to aider: %v", err)
+			return resolved
+		}
+		if path == "" {
+			return resolved
+		}
+		return resolved + " --read " + shellQuote(path)
 	}
 	return resolved
 }
