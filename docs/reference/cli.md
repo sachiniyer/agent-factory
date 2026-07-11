@@ -44,6 +44,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's process tabs (create/delete)
 - [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab running a command in a session's worktree
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
+- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af tasks add`](#af-tasks-add) — Add a new task
@@ -574,6 +575,7 @@ af sessions
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab running a command in a session's worktree
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's process tabs (create/delete)
+- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 
 **Flags**
@@ -944,6 +946,43 @@ af sessions tabs delete <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--name` | `string` | Name of the tab to delete (required) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to git repository |
+
+## af sessions watch
+
+Block until a session goes idle (ready for review)
+
+Watch a session and return when its agent finishes working: exit 0 the moment
+the session goes IDLE (the agent stopped working and is awaiting input), so an
+operator or root agent can dispatch a session and be notified on completion
+instead of polling 'af sessions preview'.
+
+Polls the daemon's snapshot (the same read path as 'af sessions get') every
+--interval (default 2s). Exits non-zero if the session reaches a terminal state
+it can't leave on its own (lost, dead, or archived), if it disappears (killed),
+or if --timeout elapses first (default 30m). A session that is still working, a
+usage-limit block that auto-resumes, or a create/archive/restore in progress all
+keep the watch waiting.
+
+By default prints a concise line on transition; with --json emits the final
+session record. Honors --repo to scope the title lookup to one repository.
+
+```
+af sessions watch <title> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--interval` | `duration` | How often to poll the session's status (default `2s`) |
+| `--timeout` | `duration` | Give up and exit non-zero if the session is not idle within this window (0 = wait forever) (default `30m0s`) |
 
 **Global flags**
 
