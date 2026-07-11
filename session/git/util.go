@@ -93,7 +93,19 @@ func trimBranchNameEdges(s string) string {
 // SanitizeBranchName). Exported so both the daemon's authoritative create-time
 // validation and the TUI's pre-submit naming check derive branches identically.
 func BranchForTitle(branchPrefix, title string) string {
-	return SanitizeBranchName(branchPrefix + title)
+	result := SanitizeBranchName(branchPrefix + title)
+	// When the title portion sanitizes away entirely (e.g. a Unicode- or
+	// punctuation-only title), a non-empty prefix keeps the combined result
+	// non-empty, so SanitizeBranchName's empty-result random fallback never
+	// fires and every such title collapses to the sanitized-prefix string.
+	// That falsely collides distinct titles like "日本語" and "مرحبا" under a
+	// prefix (#1640). Detect the prefix-only outcome and append a random
+	// suffix so those titles still get distinct branches, matching the
+	// empty-prefix behavior.
+	if prefixOnly := SanitizeBranchName(branchPrefix); result == prefixOnly && result != "" {
+		result = result + "-" + randomHex(4)
+	}
+	return result
 }
 
 // sanitizeWorktreePathSegment turns a display title into one filesystem path
