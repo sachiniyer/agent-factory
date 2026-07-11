@@ -44,15 +44,19 @@ func TestHandleArchive_LiveRowConfirms(t *testing.T) {
 	require.False(t, called, "the archive RPC must not fire before confirmation")
 }
 
-func TestHandleArchive_ConfirmationUsesEffectiveArchiveKey(t *testing.T) {
+// TestHandleArchive_ConfirmationUsesEffectiveRestoreKey: the archive confirmation
+// tells the user how to bring the session back, so it must name the effective
+// RESTORE key (#1605), not the archive key — and it must track a [keys] rebind of
+// `restore`.
+func TestHandleArchive_ConfirmationUsesEffectiveRestoreKey(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		overrides map[string][]string
 		wantKey   string
 		notKey    string
 	}{
-		{name: "default", wantKey: "with a.", notKey: "with A."},
-		{name: "pinned old archive key", overrides: map[string][]string{"archive": {"A"}}, wantKey: "with A.", notKey: "with a."},
+		{name: "default", wantKey: "with r ", notKey: "with R "},
+		{name: "pinned restore key", overrides: map[string][]string{"restore": {"R"}}, wantKey: "with R ", notKey: "with r "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, keys.ApplyOverrides(tc.overrides))
@@ -76,7 +80,9 @@ func TestHandleArchive_ConfirmationUsesEffectiveArchiveKey(t *testing.T) {
 	}
 }
 
-func TestHandleArchive_LostRowRestoresWithoutConfirmation(t *testing.T) {
+// TestHandleRestore_LostRowRestoresWithoutConfirmation: `r` on a Lost row
+// restores it directly (no confirmation) via the dedicated restore verb (#1605).
+func TestHandleRestore_LostRowRestoresWithoutConfirmation(t *testing.T) {
 	h := newTestHome(t)
 	inst := archiveActionInstance(t, "worker", session.Lost)
 	h.store.AddInstance(inst)
@@ -90,10 +96,10 @@ func TestHandleArchive_LostRowRestoresWithoutConfirmation(t *testing.T) {
 	}
 	defer func() { restoreSessionThroughDaemon = prev }()
 
-	model, cmd := h.handleArchive()
+	model, cmd := h.handleRestore()
 	h = model.(*home)
 
-	require.Equal(t, stateDefault, h.state, "restoring a Lost session must not open the archive confirmation")
+	require.Equal(t, stateDefault, h.state, "restoring a Lost session must not open a confirmation")
 	require.Equal(t, session.OpRestoring, inst.GetInFlightOp(), "Lost restore should show an in-flight restore state")
 	require.NotNil(t, cmd, "Lost restore must dispatch the restore command")
 
@@ -102,6 +108,62 @@ func TestHandleArchive_LostRowRestoresWithoutConfirmation(t *testing.T) {
 	done, ok := msg.(instanceRestoredMsg)
 	require.True(t, ok, "the command must emit instanceRestoredMsg")
 	require.NoError(t, done.err)
+}
+
+// TestHandleArchive_RestingRowIsNoOp: after the #1605 clean break, `a` on an
+// archived/lost/dead row does nothing — restore moved to `r`. It must not open a
+// confirmation, mark a restore op, or dispatch anything.
+func TestHandleArchive_RestingRowIsNoOp(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{"archived", session.Archived},
+		{"lost", session.Lost},
+		{"dead", session.Dead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := tc.status
+			h := newTestHome(t)
+			inst := archiveActionInstance(t, "worker", status)
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(0)
+
+			model, cmd := h.handleArchive()
+			h = model.(*home)
+
+			require.Equal(t, stateDefault, h.state, "`a` on a resting row must not open any overlay")
+			require.Equal(t, session.OpNone, inst.GetInFlightOp(), "`a` on a resting row must not start a restore")
+			require.Nil(t, cmd, "`a` on a resting row must dispatch nothing")
+		})
+	}
+}
+
+// TestHandleRestore_LiveRowIsNoOp: `r` on a live row does nothing — archive stays
+// on `a` (#1605).
+func TestHandleRestore_LiveRowIsNoOp(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{"ready", session.Ready},
+		{"running", session.Running},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := tc.status
+			h := newTestHome(t)
+			inst := archiveActionInstance(t, "worker", status)
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(0)
+
+			model, cmd := h.handleRestore()
+			h = model.(*home)
+
+			require.Equal(t, stateDefault, h.state, "`r` on a live row must not open any overlay")
+			require.Equal(t, session.OpNone, inst.GetInFlightOp(), "`r` on a live row must not start a restore")
+			require.Nil(t, cmd, "`r` on a live row must dispatch nothing")
+		})
+	}
 }
 
 // TestArchiveInstanceCmd_CallsDaemon: the archive command invokes the daemon

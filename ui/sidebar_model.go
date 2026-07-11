@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -60,8 +61,13 @@ func isInstanceRow(item SidebarItem) bool {
 	return !item.IsHeader && (item.Kind == SectionInstances || item.Kind == SectionArchived)
 }
 
-// partitionByArchived splits projection indices into live and archived, in the
-// projection's stable order (#1028).
+// partitionByArchived splits projection indices into live and archived (#1028).
+// Live rows keep the projection's stable order (root-first, then oldest-first by
+// CreatedAt — see LessInstanceOrder). Archived rows are re-sorted NEWEST-created
+// first (#1605): the archive folder reads as a most-recent-on-top history, the
+// inverse of the live tree, rather than inheriting the oldest-first projection
+// order. Only the archived group is reordered; the live partition is untouched.
+// Title breaks a CreatedAt tie so the order is total and never jitters.
 func partitionByArchived(instances []*session.Instance) (live, archived []int) {
 	for i, inst := range instances {
 		if inst != nil && inst.ShownArchived() {
@@ -70,6 +76,13 @@ func partitionByArchived(instances []*session.Instance) (live, archived []int) {
 			live = append(live, i)
 		}
 	}
+	sort.SliceStable(archived, func(a, b int) bool {
+		ia, ib := instances[archived[a]], instances[archived[b]]
+		if !ia.CreatedAt.Equal(ib.CreatedAt) {
+			return ia.CreatedAt.After(ib.CreatedAt)
+		}
+		return ia.Title < ib.Title
+	})
 	return live, archived
 }
 

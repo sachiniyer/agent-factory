@@ -244,9 +244,18 @@ func (m *Menu) addInstanceOptions() {
 		return
 	}
 
-	// Instance management group. The `a` verb is archive for live rows and
-	// restore for Archived/Lost/Dead rows.
-	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyKill, keys.KeyArchive}
+	// Instance management group. `a` archives a LIVE row; a resting
+	// (Archived/Lost/Dead) row instead advertises the dedicated `r` restore key
+	// (#1605) — the two verbs no longer share the `a` binding, so the footer
+	// shows exactly the one action the selected row supports.
+	mgmtVerb := keys.KeyArchive
+	if m.instance != nil {
+		switch m.instance.GetLiveness() {
+		case session.LiveArchived, session.LiveLost, session.LiveDead:
+			mgmtVerb = keys.KeyRestore
+		}
+	}
+	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyKill, mgmtVerb}
 
 	// Action group: enter interacts in-pane, o attaches full-screen (#1089).
 	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach}
@@ -389,6 +398,7 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyNewRemote},
 	{keys.KeyHooks},
 	{keys.KeyArchive},
+	{keys.KeyRestore},
 	{keys.KeyEnter},
 	{keys.KeyTab},
 	{keys.KeyPanePrev, keys.KeyPaneNext},

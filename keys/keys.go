@@ -17,7 +17,8 @@ const (
 	KeyEnter
 	KeyNew
 	KeyKill
-	KeyArchive    // Archive a live session / restore an archived, Lost, or Dead one (#1028, #1300)
+	KeyArchive    // Archive a live session (#1028, #1300)
+	KeyRestore    // Restore an archived, Lost, or Dead session (#1605)
 	KeyLimitRetry // Retry a session blocked at a usage-limit wall (#1146)
 	KeyQuit
 	KeyErrorDetails // Show the full last error when the status line is truncated (#1423).
@@ -132,7 +133,8 @@ var specs = []spec{
 	{name: KeyExitInteractive, keys: []string{"ctrl+]"}, desc: "nav mode"},
 	{name: KeyNew, configKey: "new", keys: []string{"n"}, desc: "new", dispatch: true},
 	{name: KeyKill, configKey: "kill", keys: []string{"D"}, desc: "kill", dispatch: true},
-	{name: KeyArchive, configKey: "archive", keys: []string{"a"}, desc: "archive/restore", dispatch: true},
+	{name: KeyArchive, configKey: "archive", keys: []string{"a"}, desc: "archive", dispatch: true},
+	{name: KeyRestore, configKey: "restore", keys: []string{"r"}, desc: "restore", dispatch: true},
 	{name: KeyLimitRetry, configKey: "limit_retry", keys: []string{"c"}, desc: "retry limit", dispatch: true},
 	{name: KeyHelp, configKey: "help", keys: []string{"?"}, desc: "help", dispatch: true},
 	{name: KeyQuit, configKey: "quit", keys: []string{"q"}, desc: "quit", dispatch: true},
