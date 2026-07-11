@@ -415,7 +415,7 @@ func TestEnterOnRemotePaneFallsBackToFullScreenAttach(t *testing.T) {
 	inst := instanceWithFakeBackend(t, "remote-inst")
 	inst.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
 	inst.SetStatusForTest(session.Running)
-	require.True(t, inst.IsRemote())
+	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote)
 	selectInstance(h, inst)
 	resizeHome(h, 120, 40)
 	openTestPane(t, h, inst, 0)

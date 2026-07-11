@@ -294,8 +294,9 @@ func (b *HookBackend) PreviewFullHistory(i *Instance) (string, error) {
 }
 
 // HasTerminalCmd reports whether the optional terminal_cmd hook is configured.
-// When false, a remote instance carries only its agent tab and AttachTerminal /
-// SupportsRemoteTerminal report the "not available" guidance (#843).
+// It backs the Capabilities().TerminalTab bit — when false, a remote instance
+// carries only its agent tab and AttachTerminal reports the "not available"
+// guidance (#843).
 func (b *HookBackend) HasTerminalCmd() bool {
 	return strings.TrimSpace(b.Hooks.TerminalCmd) != ""
 }

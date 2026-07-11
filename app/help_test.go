@@ -52,13 +52,14 @@ func TestGeneralHelpNavigationMatchesBindings(t *testing.T) {
 
 // TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys guards against regressing
 // #988: remote instances block `t` (new tab) and `w` (close tab) — those
-// handlers reject IsRemote() with an error — so the instance-start help must
+// handlers reject backends without the TabManagement capability with an error —
+// so the instance-start help must
 // only advertise the tab keys that actually work (cycle / 1-9 jump). Local
 // instances keep the full hint.
 func TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys(t *testing.T) {
 	remote := newStartedInstance(t, "remote")
 	remote.SetBackend(&session.HookBackend{})
-	require.True(t, remote.IsRemote(), "sanity: instance should report as remote")
+	require.True(t, remote.Capabilities().Workspace == session.WorkspaceRemote, "sanity: instance should report as remote")
 
 	remoteContent := helpStart(remote).toContent()
 	if strings.Contains(remoteContent, "t new tab") || strings.Contains(remoteContent, "w close") {
@@ -69,7 +70,7 @@ func TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys(t *testing.T) {
 	}
 
 	local := newStartedInstance(t, "local")
-	require.False(t, local.IsRemote(), "sanity: instance should report as local")
+	require.False(t, local.Capabilities().Workspace == session.WorkspaceRemote, "sanity: instance should report as local")
 
 	localContent := helpStart(local).toContent()
 	if !strings.Contains(localContent, "t new tab") || !strings.Contains(localContent, "w close") {

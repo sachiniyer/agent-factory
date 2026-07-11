@@ -122,13 +122,14 @@ func TestMenuNewInstanceShowsSubmitProgramAndCancel(t *testing.T) {
 
 // TestMenuRemoteInstanceOmitsUnsupportedTabKeys guards against regressing #988:
 // remote instances block `t` (new tab) and `w` (close tab) — those handlers
-// reject IsRemote() with an error — so the footer menu must only surface the
-// tab keys that actually work (cycle / 1-9 jump), while local instances keep
+// reject backends without the TabManagement capability with an error — so the
+// footer menu must only surface the tab keys that actually work (cycle / 1-9
+// jump), while local instances keep
 // the full set.
 func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
 	remote := readyUIInstance()
 	remote.SetBackend(&session.HookBackend{})
-	if !remote.IsRemote() {
+	if remote.Capabilities().Workspace != session.WorkspaceRemote {
 		t.Fatal("sanity: instance should report as remote")
 	}
 
@@ -156,7 +157,7 @@ func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
 	}
 
 	local := readyUIInstance()
-	if local.IsRemote() {
+	if local.Capabilities().Workspace == session.WorkspaceRemote {
 		t.Fatal("sanity: instance should report as local")
 	}
 	m.SetInstance(local)

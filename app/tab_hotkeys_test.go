@@ -272,7 +272,7 @@ func TestHandleNewTabRemoteShowsMessage(t *testing.T) {
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "remote", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 	inst.SetBackend(&session.HookBackend{})
-	require.True(t, inst.IsRemote())
+	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote)
 	selectInstance(h, inst)
 
 	_, _ = h.handleNewTab()

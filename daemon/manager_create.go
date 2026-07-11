@@ -199,7 +199,7 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 			return fmt.Errorf("remote hook name %q is already reserved", candidate)
 		}
 		for _, data := range diskData {
-			if data.BackendType != "remote" {
+			if !data.IsRemoteHook() {
 				continue
 			}
 			if session.RemoteHookName(data.Title, data.RemoteMeta) == candidate {

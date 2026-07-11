@@ -120,7 +120,7 @@ func makeRemoteInstance(t *testing.T, title string, hooks config.RemoteHooks) *s
 	require.NoError(t, err)
 	instance.SetBackend(&session.HookBackend{Hooks: hooks})
 	instance.SetStartedForTest(true)
-	require.True(t, instance.IsRemote(), "precondition: instance must report as remote")
+	require.True(t, instance.Capabilities().Workspace == session.WorkspaceRemote, "precondition: instance must report as remote")
 	return instance
 }
 

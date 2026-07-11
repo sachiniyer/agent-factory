@@ -337,7 +337,8 @@ func (i *Instance) CloseTab(idx int) error {
 // previewable/attachable without a second spawn that would collide on the name.
 //
 // name is the resolved tab name returned by the daemon. Local instances only —
-// callers reject IsRemote() first. If a tab with that name is already present
+// callers reject backends without TabManagement first. If a tab with that name
+// is already present
 // (e.g. a refresh raced ahead) this is a no-op returning the existing tab.
 // Errors when the instance is not started or has no agent session/worktree.
 func (i *Instance) AttachShellTab(name string) (*Tab, error) {
@@ -447,8 +448,8 @@ func (i *Instance) DropClosedTab(idx int) error {
 // session). The agent tab (index 0) is never added or dropped: it is the
 // instance's own session and is always present. Returns whether the local list
 // changed. A no-op for a not-started instance, one without an agent session, or
-// a remote instance (callers skip IsRemote() — remote tabs come from hook
-// config, not the snapshot). Per-tab reconnect failures are collected into the
+// a remote instance (callers skip backends without TabManagement — remote tabs
+// come from hook config, not the snapshot). Per-tab reconnect failures are collected into the
 // returned error after every other change is applied, so one bad tab can't wedge
 // the reconcile.
 func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {

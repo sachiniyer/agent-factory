@@ -40,7 +40,7 @@ func startedRemoteInstance(t *testing.T, withTerminal bool) *session.Instance {
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "remote-tabbar", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 	inst.SetBackend(&session.HookBackend{Hooks: hooks})
-	require.True(t, inst.IsRemote())
+	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote)
 	require.NoError(t, inst.Start(true))
 	t.Cleanup(func() { _ = inst.CloseAttachOnly() })
 	return inst

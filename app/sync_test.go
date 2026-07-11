@@ -265,7 +265,7 @@ func TestImportRemoteHookSessionsAddsListCmdSessions(t *testing.T) {
 	require.Equal(t, 1, h.store.NumInstances())
 
 	inst := h.store.GetInstances()[0]
-	require.True(t, inst.IsRemote())
+	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote)
 	require.Equal(t, "remote-one", inst.Title)
 
 	stored, err := config.LoadRepoInstances(repo.ID)

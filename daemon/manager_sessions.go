@@ -287,7 +287,7 @@ func (m *Manager) ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest) 
 		existingHookNames := make(map[string]bool)
 		for _, data := range existing {
 			existingTitles[data.Title] = true
-			if data.BackendType == "remote" {
+			if data.IsRemoteHook() {
 				existingHookNames[session.RemoteHookName(data.Title, data.RemoteMeta)] = true
 			}
 		}

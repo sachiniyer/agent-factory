@@ -145,7 +145,7 @@ func TestRemoteTabsPersistRoundTrip(t *testing.T) {
 
 	inst, err := NewInstance(InstanceOptions{Title: "remote-persist", Path: repoDir, Program: "claude", ForceRemote: true})
 	require.NoError(t, err)
-	require.True(t, inst.IsRemote())
+	require.True(t, inst.Capabilities().Workspace == WorkspaceRemote)
 	require.NoError(t, inst.Start(true))
 	if hb, ok := inst.GetBackend().(*HookBackend); ok {
 		defer hb.closePTY(inst.Title)
@@ -161,7 +161,7 @@ func TestRemoteTabsPersistRoundTrip(t *testing.T) {
 	if hb, ok := rebuilt.GetBackend().(*HookBackend); ok {
 		defer hb.closePTY(rebuilt.Title)
 	}
-	require.True(t, rebuilt.IsRemote())
+	require.True(t, rebuilt.Capabilities().Workspace == WorkspaceRemote)
 	assertRemoteTabs(t, rebuilt, true)
 }
 

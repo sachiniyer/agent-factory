@@ -55,7 +55,7 @@ func TestHandleEnter_SecondEnterDuringAttachDoesNotScheduleSecondAttach(t *testi
 	inst := instanceWithFakeBackend(t, "inst")
 	inst.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
 	inst.SetStatusForTest(session.Running)
-	require.True(t, inst.IsRemote(), "precondition: instance must be remote for the full-screen attach path")
+	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote, "precondition: instance must be remote for the full-screen attach path")
 	require.True(t, inst.TmuxAlive(), "precondition: instance must be attachable")
 
 	h.store.AddInstance(inst)
@@ -106,7 +106,7 @@ func TestHandleEnter_CanceledAttachHelpDoesNotWedgeGuard(t *testing.T) {
 	inst := instanceWithFakeBackend(t, "inst")
 	inst.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
 	inst.SetStatusForTest(session.Running)
-	require.True(t, inst.IsRemote(), "precondition: instance must be remote for the full-screen attach path")
+	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote, "precondition: instance must be remote for the full-screen attach path")
 	require.True(t, inst.TmuxAlive(), "precondition: instance must be attachable")
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
