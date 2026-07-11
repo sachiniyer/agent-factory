@@ -252,6 +252,14 @@ func TestGetClaudeCommand(t *testing.T) {
 			// the arrow alternative and capture garbage; the real alias line
 			// that follows must win instead.
 			{"mid-line arrow noise before alias", "Type help -> for assistance\nclaude: aliased to /usr/local/bin/claude", "/usr/local/bin/claude"},
+			// #1641: an rc-file noise line containing a mid-line "aliased to"
+			// (e.g. a shell tip about another command) must NOT capture that
+			// command's path; the real "claude: aliased to …" line must win.
+			{"mid-line aliased-to noise before alias", "Tip: git is aliased to /usr/bin/git\nclaude: aliased to /usr/local/bin/claude", "/usr/local/bin/claude"},
+			// A noise line with a mid-line "aliased to" and no real alias
+			// anywhere must fall through to "" so GetClaudeCommand uses the PATH
+			// fallback rather than the noise line's path (#1641).
+			{"mid-line aliased-to noise only", "Tip: git is aliased to /usr/bin/git", ""},
 			// A noise line with a mid-line "->" and no real alias anywhere must
 			// fall through to "" so GetClaudeCommand uses the PATH fallback.
 			{"mid-line arrow noise only", "Type help -> for assistance", ""},
