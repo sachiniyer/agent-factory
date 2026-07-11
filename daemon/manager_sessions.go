@@ -151,7 +151,10 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 	if err := promptTargetLivenessError(req.Title, instance.GetLiveness()); err != nil {
 		return err
 	}
-	if err := instance.SendPromptCommand(req.Prompt); err != nil {
+	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
+	// Backend method — the daemon's delivery path is runtime-agnostic. SendPrompt
+	// is the reliable command path automated deliveries need.
+	if err := instance.AgentServer().SendPrompt(req.Prompt); err != nil {
 		return fmt.Errorf("failed to send prompt: %w", err)
 	}
 	return nil

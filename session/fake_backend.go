@@ -63,6 +63,19 @@ func (b *FakeBackend) FailStart(err error) {
 // -- Backend interface implementation --
 
 func (b *FakeBackend) Start(instance *Instance, firstTimeSetup bool) error {
+	if err := b.Provision(instance, firstTimeSetup); err != nil {
+		return err
+	}
+	return b.Launch(instance, firstTimeSetup)
+}
+
+// Provision is a no-op for the fake backend: it holds no workspace. The blocking
+// start semantics (startCalled/startBlock, startErr, SetStartedForTest) live in
+// Launch so Start = Provision then Launch matches the real backends (#1592 Phase
+// 2 PR4).
+func (b *FakeBackend) Provision(*Instance, bool) error { return nil }
+
+func (b *FakeBackend) Launch(instance *Instance, _ bool) error {
 	b.mu.Lock()
 	b.startCount++
 	first := b.startCount == 1

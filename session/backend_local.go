@@ -105,13 +105,13 @@ func (e *WorktreeUnavailableError) Unwrap() error {
 // backend for the future agent-server "provision-and-expose" model, where
 // provision spins up an off-box workspace and launch exposes the agent stream.
 func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
-	if err := b.provision(i, firstTimeSetup); err != nil {
+	if err := b.Provision(i, firstTimeSetup); err != nil {
 		return err
 	}
-	return b.launch(i, firstTimeSetup)
+	return b.Launch(i, firstTimeSetup)
 }
 
-// provision establishes the local workspace a session will run in WITHOUT
+// Provision establishes the local workspace a session will run in WITHOUT
 // starting any agent process (#1592 Phase 1 PR4): it binds the instance's tmux
 // session handle and, on a first-time create, computes the git worktree record +
 // branch name. Nothing here spawns a tmux server session, materializes the
@@ -121,7 +121,7 @@ func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 // on disk to clean up and returns before launch's cleanup scope is ever entered
 // — exactly as the pre-split Start did (its NewGitWorktree failure returned
 // before the deferred cleanup handler was registered).
-func (b *LocalBackend) provision(i *Instance, firstTimeSetup bool) error {
+func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 	if strings.TrimSpace(i.Title) == "" {
 		return fmt.Errorf("instance title cannot be empty")
 	}
@@ -172,7 +172,7 @@ func (b *LocalBackend) provision(i *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
-// launch starts (or restores) the agent PROCESS in the workspace provision
+// Launch starts (or restores) the agent PROCESS in the workspace Provision
 // established (#1592 Phase 1 PR4): it materializes the worktree on disk
 // (worktree.Setup on a fresh create), spawns or reconnects the tmux session, and
 // brings up the non-agent tabs. It owns the failure-cleanup scope — a launch
@@ -182,7 +182,7 @@ func (b *LocalBackend) provision(i *Instance, firstTimeSetup bool) error {
 // failure needs the same teardown as any other launch failure, so it belongs
 // inside this cleanup scope. Behavior is identical to the pre-split Start — this
 // is exactly the code that followed provision's work in the monolithic form.
-func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool) error {
+func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
 	i.mu.RLock()
 	tmuxSession := i.tmuxLocked()
 	i.mu.RUnlock()

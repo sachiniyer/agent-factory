@@ -246,7 +246,8 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 	// (same resumeProgram path: claude --continue, codex resume --last); the
 	// LimitReached/no-tombstone precondition is enforced above under the target
 	// lock.
-	if !instance.TmuxAlive() {
+	as := instance.AgentServer()
+	if !as.Alive() {
 		if rerr := instance.Respawn(); rerr != nil {
 			return fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
@@ -258,7 +259,7 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"
 	}
-	if serr := instance.SendPromptCommand(prompt); serr != nil {
+	if serr := as.SendPrompt(prompt); serr != nil {
 		return fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 	}
 	instance.ClearLimitReached()
