@@ -272,7 +272,7 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 		// won't rebind while an overlay is open, and re-establishes the
 		// attachment after the eventual detach. Interactive mode (if a stray
 		// path ever got here in it) cannot survive its attachment.
-		m.closeLiveTermPane()
+		m.closeAllLiveTermPanes()
 		m.enforceInteractiveInvariant()
 	}
 

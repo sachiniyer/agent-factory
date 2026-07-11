@@ -57,7 +57,7 @@ func TestPreviewFallbackWrappedArtMatchesAllocatedHeight(t *testing.T) {
 		{48, 60},
 		{80, 30}, // wide enough that the art does not wrap
 	} {
-		p := NewTabPane()
+		p := NewTabPane(previewFromInstance)
 		p.SetSize(tc.w, tc.h)
 		p.setFallbackState("msg")
 
@@ -75,7 +75,7 @@ func TestPreviewFallbackCentersWrappedLineCount(t *testing.T) {
 		{48, 60}, // art wraps at this width
 		{80, 30}, // art does not wrap
 	} {
-		p := NewTabPane()
+		p := NewTabPane(previewFromInstance)
 		p.SetSize(tc.w, tc.h)
 		p.setFallbackState("msg")
 		require.Contains(t, p.String(), "msg",
@@ -100,13 +100,13 @@ func TestPreviewFallbackCentersWrappedLineCount(t *testing.T) {
 // the same allocation. PreviewPane had the identical bug, fixed for #616.
 func TestTerminalFallbackMatchesNormalModeHeight(t *testing.T) {
 	for _, h := range []int{20, 25, 30, 50} {
-		fb := NewTabPane()
+		fb := NewTabPane(previewFromInstance)
 		fb.SetSize(80, h)
 		fb.setFallbackState("Select an instance to open a terminal")
 		require.Equal(t, h, renderedLineCount(fb.String()),
 			"height=%d: fallback must render exactly the allocated height", h)
 
-		normal := NewTabPane()
+		normal := NewTabPane(previewFromInstance)
 		normal.SetSize(80, h)
 		normal.content = tabContentState{fallback: false, text: "line1\nline2"}
 		require.Equal(t, h, renderedLineCount(normal.String()),
@@ -123,7 +123,7 @@ func TestTerminalFallbackWrappedArtMatchesAllocatedHeight(t *testing.T) {
 		{48, 30},
 		{80, 30},
 	} {
-		tp := NewTabPane()
+		tp := NewTabPane(previewFromInstance)
 		tp.SetSize(tc.w, tc.h)
 		tp.setFallbackState("msg")
 		require.Equal(t, tc.h, renderedLineCount(tp.String()),
@@ -151,7 +151,7 @@ func newTestWorkspace() (*Sidebar, *TabbedWindow, *AutomationsPane, *StatusBar) 
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
 	sidebar := NewSidebar(&spin, false, proj)
-	paneA := NewTabbedWindow(NewTabPane(), nil)
+	paneA := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	automations := NewAutomationsPane(proj)
 	statusBar := NewStatusBar(NewMenu(), NewErrBox())
 	return sidebar, paneA, automations, statusBar

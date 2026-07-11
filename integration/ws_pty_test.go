@@ -77,12 +77,21 @@ func TestWSPTYBrokerRoundTrip(t *testing.T) {
 	a2.waitOutput(t, "after-a-dropped")
 
 	// --- keepalive drops a dead subscriber without killing the session ---
-	// A "dead" subscriber never reads, so it never pongs; the server's ping times
-	// out and drops it. It must NOT take the session or the live subscriber down.
+	// A "dead" subscriber never reads after connecting, so it never pongs; the
+	// server's ping times out and drops it. It must NOT take the session or the live
+	// subscriber down.
 	dead := h.dialWSRaw(t, streamPath)
+	// A fresh subscriber receives a one-shot initial screen repaint (#1592 PR6).
+	// Drain that single frame first, otherwise the keepalive diagnostic below would
+	// read the buffered repaint (a non-error) instead of the eventual close. After
+	// this one read the client stops reading, so the next ping goes unanswered and
+	// the server drops it.
+	if err := dead.readErrWithin(2 * time.Second); err != nil {
+		t.Fatalf("dead subscriber never received its initial repaint: %v", err)
+	}
 	// Wait out several keepalive cycles (300ms ping + 300ms pong timeout).
 	time.Sleep(1500 * time.Millisecond)
-	// The server closed the dead subscriber: its first read now errors.
+	// The server closed the dead subscriber: its next read now errors.
 	if err := dead.readErrWithin(2 * time.Second); err == nil {
 		t.Fatal("dead subscriber was not dropped by keepalive")
 	}
@@ -92,6 +101,35 @@ func TestWSPTYBrokerRoundTrip(t *testing.T) {
 	// ...and it is still a live, listed session.
 	if !hasTitle(h.listSessions(), "wsstream") {
 		t.Fatal("session vanished after a dead subscriber was dropped")
+	}
+}
+
+// TestWSPTYStreamTabRouting pins the tab-aware routing added in #1592 Phase 2 PR6:
+// the ?tab= selector resolves a per-tab broker rather than always streaming the
+// agent tab. An explicit ?tab=0 streams the agent pane (which echoes input), and a
+// tab with no session is REJECTED at the handshake — never silently falling back
+// to tab 0, which would stream the wrong pane's output into a shell-tab pane.
+func TestWSPTYStreamTabRouting(t *testing.T) {
+	h := newHarness(t)
+	h.startDaemon()
+	h.createSession("tabroute")
+
+	// Explicit ?tab=0 streams the agent pane and accepts input (multi-writer).
+	a := h.dialWS(t, "/v1/sessions/tabroute/stream?tab=0")
+	defer a.close()
+	a.sendInput(t, []byte("tab0-marker\n"))
+	a.waitOutput(t, "tab0-marker")
+
+	// A tab index with no tmux session must be refused at dial (the per-tab broker
+	// can't resolve it), not accepted-then-silent. websocket.Dial returns an error
+	// on the non-101 response the handler writes before the upgrade.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws://unix/v1/sessions/tabroute/stream?tab=7",
+		&websocket.DialOptions{HTTPClient: h.httpClient()})
+	if err == nil {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("dialing a nonexistent tab must be rejected, not silently routed to tab 0")
 	}
 }
 

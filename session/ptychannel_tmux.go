@@ -88,6 +88,20 @@ func (c *tmuxClientlessChannel) SendRaw(b []byte) error {
 	return c.ts.SendRawKeys(b)
 }
 
+// Snapshot returns the pane's current visible screen with escape sequences
+// (`capture-pane -p -e -J`) — the repaint the broker injects so a fresh subscriber
+// (and every subscriber after a resize) sees the actual screen. `pipe-pane` only
+// streams FUTURE output, and — unlike a `tmux attach` client — never receives
+// tmux's screen redraw, so without this a just-opened or just-resized pane would
+// render blank until the next byte of output (#1592 Phase 2 PR6).
+func (c *tmuxClientlessChannel) Snapshot() ([]byte, error) {
+	content, err := c.ts.CapturePaneContent()
+	if err != nil {
+		return nil, err
+	}
+	return []byte(content), nil
+}
+
 // Resize applies the winning size to the window (clientless resize-window). tmux
 // takes cols (x) then rows (y); the broker's rows/cols argument order is flipped
 // to match here.

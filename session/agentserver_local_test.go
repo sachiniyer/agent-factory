@@ -101,10 +101,10 @@ func TestLocalAgentServerAlive(t *testing.T) {
 func TestLocalAgentServerPreview(t *testing.T) {
 	inst, _ := newProbeInstance(t)
 	as := inst.AgentServer()
-	if got, _ := as.Preview(false); got != "short" {
+	if got, _ := as.Preview(0, false); got != "short" {
 		t.Errorf("Preview(false) = %q, want the visible-pane capture", got)
 	}
-	if got, _ := as.Preview(true); got != "full" {
+	if got, _ := as.Preview(0, true); got != "full" {
 		t.Errorf("Preview(true) = %q, want the full scrollback", got)
 	}
 }
@@ -161,13 +161,13 @@ func TestLocalAgentServerExpose(t *testing.T) {
 func TestLocalAgentServerDataPlaneNoLocalPTY(t *testing.T) {
 	inst, _ := newProbeInstance(t)
 	as := inst.AgentServer()
-	if _, err := as.Subscribe(0); err == nil || !strings.Contains(err.Error(), "no local PTY") {
+	if _, err := as.Subscribe(0, 0); err == nil || !strings.Contains(err.Error(), "no local PTY") {
 		t.Errorf("Subscribe err = %v, want a no-local-PTY error", err)
 	}
-	if err := as.Input([]byte("x")); err == nil || !strings.Contains(err.Error(), "no local PTY") {
+	if err := as.Input(0, []byte("x")); err == nil || !strings.Contains(err.Error(), "no local PTY") {
 		t.Errorf("Input err = %v, want a no-local-PTY error", err)
 	}
-	if err := as.Resize(24, 80); err == nil || !strings.Contains(err.Error(), "no local PTY") {
+	if err := as.Resize(0, 24, 80); err == nil || !strings.Contains(err.Error(), "no local PTY") {
 		t.Errorf("Resize err = %v, want a no-local-PTY error", err)
 	}
 }

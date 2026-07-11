@@ -23,6 +23,14 @@ const (
 	// resizePayloadLen) from any connected client; the server applies
 	// last-resize-wins and echoes the authoritative size back as a ResizeMessage.
 	OpResize Opcode = 0x02
+	// OpRepaint (server → client) prefixes a one-shot screen repaint (clear + the
+	// current pane content) sent to a FRESH subscriber before any live output —
+	// pipe-pane carries no history, so without it a just-opened pane renders blank
+	// (#1592 Phase 2 PR6). The client feeds it to the emulator exactly like OpPTYOut
+	// but must NOT count it toward its replay cursor: a repaint is per-subscriber and
+	// is not part of the shared ring's monotonic seq, so counting it would desync the
+	// ?since arithmetic.
+	OpRepaint Opcode = 0x03
 )
 
 // resizePayloadLen is the fixed body size of an OpResize frame: two big-endian
@@ -38,6 +46,8 @@ func (o Opcode) String() string {
 		return "INPUT"
 	case OpResize:
 		return "RESIZE"
+	case OpRepaint:
+		return "REPAINT"
 	default:
 		return fmt.Sprintf("Opcode(0x%02x)", byte(o))
 	}
@@ -56,6 +66,10 @@ type Frame struct {
 
 // PTYOutFrame wraps verbatim PTY output bytes (server → client).
 func PTYOutFrame(b []byte) Frame { return Frame{Op: OpPTYOut, Data: b} }
+
+// RepaintFrame wraps a one-shot screen repaint (server → client): rendered like
+// PTY_OUT but NOT counted toward the client's replay cursor (§ OpRepaint).
+func RepaintFrame(b []byte) Frame { return Frame{Op: OpRepaint, Data: b} }
 
 // InputFrame wraps raw key bytes (client → server, accepted from any client).
 func InputFrame(b []byte) Frame { return Frame{Op: OpInput, Data: b} }
@@ -92,7 +106,7 @@ func DecodeFrame(raw []byte) (Frame, error) {
 	op := Opcode(raw[0])
 	body := raw[1:]
 	switch op {
-	case OpPTYOut, OpInput:
+	case OpPTYOut, OpInput, OpRepaint:
 		return Frame{Op: op, Data: body}, nil
 	case OpResize:
 		if len(body) != resizePayloadLen {

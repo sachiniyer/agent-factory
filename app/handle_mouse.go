@@ -261,7 +261,8 @@ func manhattanDistance(x1, y1, x2, y2 int) int {
 // stray click can never trigger a host action under the user's typing.
 // Reports whether the event was consumed (forwarded or suppressed).
 func (m *home) forwardInteractiveMouse(msg tea.MouseMsg) bool {
-	if m.liveTerm == nil || m.livePane == nil {
+	lt, p := m.focusedLiveTerm()
+	if lt == nil || p == nil {
 		return false
 	}
 	id, local, ok := m.zones.Resolve(msg.X, msg.Y)
@@ -270,11 +271,11 @@ func (m *home) forwardInteractiveMouse(msg tea.MouseMsg) bool {
 		return true
 	}
 	region, kind, isPane := zones.PaneZone(id)
-	if !isPane || region != layout.PaneRegion(m.livePane.ID()) {
+	if !isPane || region != layout.PaneRegion(p.ID()) {
 		return false
 	}
 	if kind == zones.PaneKindTerm {
-		m.liveTerm.SendMouse(msg, local.X, local.Y)
+		lt.SendMouse(msg, local.X, local.Y)
 	}
 	return true
 }

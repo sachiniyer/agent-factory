@@ -19,7 +19,7 @@ import (
 // per line instead.
 func TestTabPaneWideProcessOutputTruncatesToPaneWidth(t *testing.T) {
 	const w, h = 60, 10
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(w, h)
 
 	wide := strings.Repeat("0123456789", 30) // 300 cells, 5x the pane width

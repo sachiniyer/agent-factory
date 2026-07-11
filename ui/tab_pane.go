@@ -75,11 +75,28 @@ type TabPane struct {
 	// pane is resized.
 	currentInstance *session.Instance
 	currentTab      int
+
+	// previewSrc captures a tab's content. Since #1592 Phase 2 PR6 the TUI no
+	// longer shells out to `tmux capture-pane` itself — the daemon is the sole
+	// capturer — so this is injected by the app (backed by the daemon Preview RPC)
+	// rather than calling instance.Preview*() directly. It returns
+	// tmux.ErrSessionGone when the session vanished mid-capture so the pane shows
+	// its session-gone fallback exactly as before.
+	previewSrc PreviewSource
 }
 
-func NewTabPane() *TabPane {
+// PreviewSource captures a session tab's content for a TabPane. tab 0 is the agent
+// tab (formatted by the backend preview); tab>0 is a shell/process tab. full=true
+// returns the entire scrollback history (the scroll-mode source). It returns
+// tmux.ErrSessionGone when the session's tmux vanished mid-capture.
+type PreviewSource func(instance *session.Instance, tab int, full bool) (string, error)
+
+// NewTabPane creates a TabPane whose content is captured through src — the
+// daemon-backed capture in production (#1592 Phase 2 PR6).
+func NewTabPane(src PreviewSource) *TabPane {
 	return &TabPane{
-		viewport: viewport.New(0, 0),
+		viewport:   viewport.New(0, 0),
+		previewSrc: src,
 	}
 }
 
@@ -98,12 +115,9 @@ func (p *TabPane) SetSize(width, maxHeight int) {
 	p.height = maxHeight
 	p.viewport.Width = width
 	p.viewport.Height = maxHeight
-	// Keep the active shell tab's detached session sized to the pane so its
-	// capture matches what the agent preview shows (the old TerminalPane.SetSize
-	// behavior, generalized onto the Instance's tab index).
-	if p.currentInstance != nil && p.currentTab != 0 {
-		_ = p.currentInstance.SetTabDetachedSize(p.currentTab, width, maxHeight)
-	}
+	// Local session sizing is the WS stream's job now (last-resize-wins
+	// resize-window, #1592 Phase 2 PR6): the pane geometry rides the RESIZE frame,
+	// so the TabPane no longer resizes a detached tmux session itself.
 }
 
 // dropStaleView clears scroll-mode viewport content captured from a previously
@@ -234,7 +248,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	// full scrollback now (the agent slot fills lazily here; see ScrollUp).
 	if p.isScrolling && p.viewport.Height > 0 && len(p.viewport.View()) == 0 {
 		p.mu.Unlock()
-		content, err := instance.PreviewFullHistory()
+		content, err := p.previewSrc(instance, 0, true)
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if !guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
@@ -261,7 +275,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	}
 	p.mu.Unlock()
 
-	content, err := instance.Preview()
+	content, err := p.previewSrc(instance, 0, false)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
@@ -351,7 +365,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 	}
 	p.mu.Unlock()
 
-	content, err := instance.PreviewTab(activeTab)
+	content, err := p.previewSrc(instance, activeTab, false)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
@@ -470,7 +484,7 @@ func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab in
 	var content string
 	var err error
 	if activeTab == 0 {
-		content, err = instance.PreviewFullHistory()
+		content, err = p.previewSrc(instance, 0, true)
 	} else {
 		// An already-dead shell tab must transition to the fallback, not bare
 		// return: a bare return leaves p.content (fallback==false) holding the
@@ -483,7 +497,7 @@ func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab in
 			p.setFallbackState("Terminal session not available.")
 			return nil
 		}
-		content, err = instance.PreviewTabFullHistory(activeTab)
+		content, err = p.previewSrc(instance, activeTab, true)
 	}
 	if err != nil {
 		if errors.Is(err, tmux.ErrSessionGone) {
@@ -547,7 +561,7 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	}
 	// LimitReached (#1146) falls through to the live Preview() — its screen shows
 	// the limit message, more useful than a fallback.
-	content, err := instance.Preview()
+	content, err := p.previewSrc(instance, 0, false)
 	if err != nil {
 		if errors.Is(err, tmux.ErrSessionGone) {
 			p.setFallbackState("Session no longer running.")

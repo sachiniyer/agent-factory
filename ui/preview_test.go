@@ -234,7 +234,7 @@ func TestPreviewScrolling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create the preview pane
-	previewPane := NewTabPane()
+	previewPane := NewTabPane(previewFromInstance)
 	previewPane.SetSize(80, 30) // Set reasonable size for testing
 
 	// Step 1: Check initial content - should show normal preview mode
@@ -368,7 +368,7 @@ func TestPreviewContentWithoutScrolling(t *testing.T) {
 	defer setup.cleanupFn()
 
 	// Create the preview pane
-	previewPane := NewTabPane()
+	previewPane := NewTabPane(previewFromInstance)
 	previewPane.SetSize(80, 30) // Set reasonable size for testing
 
 	// Update the preview content (this should display the content without scrolling)
@@ -390,7 +390,7 @@ func TestPreviewContentWithoutScrolling(t *testing.T) {
 }
 
 func TestPreviewExactFitDoesNotTruncate(t *testing.T) {
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 3)
 	p.content = tabContentState{
 		fallback: false,
@@ -417,7 +417,7 @@ func TestPreviewBottomTruncateShowsNewestLines(t *testing.T) {
 	}
 	text := strings.Join(lines, "\n")
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, paneHeight)
 	p.content = tabContentState{fallback: false, text: text}
 
@@ -444,7 +444,7 @@ func TestPreviewBottomTruncateShowsNewestLines(t *testing.T) {
 // content fits the pane. Before the fix, this took the truncation branch
 // and dropped a line.
 func TestPreviewTrailingNewlineDoesNotTriggerTruncation(t *testing.T) {
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 10)
 	// Five lines of content + trailing newline. Total visible content is 5
 	// lines, well below the 10-line budget; the trailing "\n" must not cause
@@ -471,7 +471,7 @@ func TestPreviewTrailingNewlineAtExactHeight(t *testing.T) {
 	contentLines := []string{"a", "b", "c", "d", "e"}
 	text := strings.Join(contentLines, "\n") + "\n"
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, paneHeight)
 	p.content = tabContentState{fallback: false, text: text}
 
@@ -502,7 +502,7 @@ func TestPreviewResetToNormalModeNilInstance(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Simulate being in scroll mode with stale viewport content.
@@ -545,7 +545,7 @@ func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatusForTest(session.Loading)
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 	require.NoError(t, p.UpdateContent(inst, 0))
 	require.True(t, p.content.fallback,
@@ -591,7 +591,7 @@ func TestPreviewUpdateContentDeletingShowsTeardownFallback(t *testing.T) {
 	require.False(t, inst.Started(),
 		"precondition: a Deleting instance reports Started()==false")
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 	require.NoError(t, p.UpdateContent(inst, 0))
 
@@ -622,7 +622,7 @@ func TestPreviewFallbackHeightNoDoubleCounting(t *testing.T) {
 	))
 
 	t.Run("renders full content at comfortable height", func(t *testing.T) {
-		p := NewTabPane()
+		p := NewTabPane(previewFromInstance)
 		p.SetSize(80, 30)
 		p.setFallbackState("hello world")
 
@@ -641,7 +641,7 @@ func TestPreviewFallbackHeightNoDoubleCounting(t *testing.T) {
 		// as normal mode (p.height), so the rendered output fills the same
 		// number of lines.
 		for _, h := range []int{20, 25, 30, 50} {
-			p := NewTabPane()
+			p := NewTabPane(previewFromInstance)
 			p.SetSize(80, h)
 			p.setFallbackState("msg")
 
@@ -678,7 +678,7 @@ func TestPreviewFallbackMatchesNormalModeHeight(t *testing.T) {
 	// overflows the budget and the two modes are not comparable.
 	for _, h := range []int{20, 25, 30, 50} {
 		// Normal mode: short content padded to full height.
-		normal := NewTabPane()
+		normal := NewTabPane(previewFromInstance)
 		normal.SetSize(80, h)
 		normal.content = tabContentState{
 			fallback: false,
@@ -687,7 +687,7 @@ func TestPreviewFallbackMatchesNormalModeHeight(t *testing.T) {
 		normalLines := len(strings.Split(normal.String(), "\n"))
 
 		// Fallback mode at the same height with a short message.
-		fb := NewTabPane()
+		fb := NewTabPane(previewFromInstance)
 		fb.SetSize(80, h)
 		fb.setFallbackState("msg")
 		fbLines := len(strings.Split(fb.String(), "\n"))
@@ -830,7 +830,7 @@ func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
 	setup := setupTestEnvironment(t, cmdExec)
 	defer setup.cleanupFn()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Happy path first: session alive, normal content renders.
@@ -897,7 +897,7 @@ func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 	setup := setupTestEnvironment(t, cmdExec)
 	defer setup.cleanupFn()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Simulate the precondition: pane is in a fallback state (e.g. Loading)
@@ -946,7 +946,7 @@ func TestPreviewSwitchInstanceResetsScroll(t *testing.T) {
 	instA, instB, cleanup := setupTwoInstances(t, previewA, previewB)
 	defer cleanup()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Render A normally, then enter scroll mode on A.
@@ -986,7 +986,7 @@ func TestScrollMouseDifferentInstanceResetsScrollMode(t *testing.T) {
 	instA, instB, cleanup := setupTwoInstances(t, previewA, previewB)
 	defer cleanup()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Enter scroll mode on A via the mouse path (no prior UpdateContent).

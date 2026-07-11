@@ -21,6 +21,10 @@ type fakeClientlessChannel struct {
 	sent     [][]byte
 	resizes  [][2]uint16
 	startErr error
+	// snapshot is the canned current-screen the broker injects as the repaint on
+	// subscribe and after a resize; snapshots counts how many times it was read.
+	snapshot  []byte
+	snapshots int
 }
 
 func (f *fakeClientlessChannel) StartCapture() (io.ReadCloser, error) {
@@ -58,6 +62,13 @@ func (f *fakeClientlessChannel) Resize(rows, cols uint16) error {
 	return nil
 }
 
+func (f *fakeClientlessChannel) Snapshot() ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapshots++
+	return append([]byte(nil), f.snapshot...), nil
+}
+
 // emit writes pane output into the capture pipe. Write blocks until the broker's
 // read loop consumes it, so on return the bytes are in flight to the ring.
 func (f *fakeClientlessChannel) emit(t *testing.T, b []byte) {
@@ -90,6 +101,57 @@ func mustData(t *testing.T, sub PTYSubscription, want string) {
 	if ev.Kind != PTYData || string(ev.Data) != want {
 		t.Fatalf("event = %+v, want data %q", ev, want)
 	}
+}
+
+// TestPTYBrokerInitialRepaint pins the #1592 PR6 initial-repaint injection: a fresh
+// subscriber's FIRST event is a clean repaint of the current screen (pipe-pane
+// carries no history, so without it a just-opened pane is blank), delivered as a
+// PTYRepaint so the client renders it WITHOUT advancing its replay cursor. A resize
+// deliberately injects NO repaint (it would race the SIGWINCH redraw), and a
+// reconnecting subscriber (since > 0) gets no repaint either — it resumes via replay.
+func TestPTYBrokerInitialRepaint(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-A\nline2")}
+	br := newPTYBroker(ch)
+
+	sub, err := br.subscribe(0) // fresh live-tail subscriber
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	// First event is the initial repaint: ED2 + home + the screen with CRLF line
+	// breaks so columns reset. It is a PTYRepaint (not counted toward the cursor).
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("initial NextEvent: %v", err)
+	}
+	want := "\x1b[2J\x1b[HSCREEN-A\r\nline2"
+	if ev.Kind != PTYRepaint || string(ev.Data) != want {
+		t.Fatalf("initial event = %+v, want PTYRepaint %q", ev, want)
+	}
+
+	// A resize broadcasts the authoritative echo but NO repaint (the process redraws
+	// itself on SIGWINCH through the stream; a repaint here would race it).
+	if err := br.resize(40, 100); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	ev, err = nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("resize NextEvent: %v", err)
+	}
+	if ev.Kind != PTYResize || ev.Rows != 40 || ev.Cols != 100 {
+		t.Fatalf("first post-resize event = %+v, want the authoritative resize echo", ev)
+	}
+	// The next event is live output, NOT a resize repaint.
+	ch.emit(t, []byte("live-after-resize"))
+	mustData(t, sub, "live-after-resize")
+
+	// A reconnecting subscriber (since > 0) gets NO repaint — it resumes seamlessly
+	// via replay. A since past the head clamps to the live tail.
+	re, err := br.subscribe(1 << 40)
+	if err != nil {
+		t.Fatalf("reconnect subscribe: %v", err)
+	}
+	ch.emit(t, []byte("live"))
+	mustData(t, re, "live")
 }
 
 func TestPTYBrokerFanout(t *testing.T) {

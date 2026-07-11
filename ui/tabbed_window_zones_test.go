@@ -14,7 +14,7 @@ import (
 // its whole rect as the body and the one-line header on top of it, with the
 // header zone sitting on the row that actually renders the header text.
 func TestTabbedWindowRegistersBodyAndHeaderZones(t *testing.T) {
-	w := NewTabbedWindow(NewTabPane(), nil)
+	w := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	region := layout.PaneRegion(3)
 	w.SetRegion(region)
 	reg := zones.NewRegistry()
@@ -58,7 +58,7 @@ func TestTabbedWindowRegistersBodyAndHeaderZones(t *testing.T) {
 // forwarding target). Scroll mode swaps back to the capture viewport and the
 // term zone must vanish with it.
 func TestTabbedWindowRegistersTermZoneWhileLive(t *testing.T) {
-	w := NewTabbedWindow(NewTabPane(), nil)
+	w := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	region := layout.PaneRegion(0)
 	w.SetRegion(region)
 	reg := zones.NewRegistry()
@@ -95,7 +95,7 @@ func TestTabbedWindowRegistersTermZoneWhileLive(t *testing.T) {
 // registers nothing, and a window never given a region (defensive) skips
 // registration rather than emitting unparseable ids.
 func TestTabbedWindowNoZonesWhenHiddenOrUnwired(t *testing.T) {
-	w := NewTabbedWindow(NewTabPane(), nil)
+	w := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	w.SetRegion(layout.PaneRegion(1))
 	reg := zones.NewRegistry()
 	w.SetZoneRegistry(reg)
@@ -104,7 +104,7 @@ func TestTabbedWindowNoZonesWhenHiddenOrUnwired(t *testing.T) {
 	_ = w.String()
 	assert.Empty(t, reg.IDs(), "a hidden pane must not register hit zones")
 
-	w2 := NewTabbedWindow(NewTabPane(), nil)
+	w2 := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	w2.SetZoneRegistry(reg)
 	w2.SetRect(layout.Rect{W: 40, H: 12})
 	reg.Reset()

@@ -5,10 +5,28 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
+// previewFromInstance is the test-only PreviewSource that captures straight from
+// the instance — exactly what the daemon Preview RPC does server-side — so the
+// TabPane state-machine tests exercise the same content path they did before the
+// daemon became the sole capturer (#1592 Phase 2 PR6). Production injects the
+// daemon-backed source instead.
+func previewFromInstance(instance *session.Instance, tab int, full bool) (string, error) {
+	if tab == 0 {
+		if full {
+			return instance.PreviewFullHistory()
+		}
+		return instance.Preview()
+	}
+	if full {
+		return instance.PreviewTabFullHistory(tab)
+	}
+	return instance.PreviewTab(tab)
+}
+
 // newTestTabbedWindow builds an unbound TabbedWindow; tests bind an instance
 // via setWindowInstance.
 func newTestTabbedWindow() *TabbedWindow {
-	return NewTabbedWindow(NewTabPane(), nil)
+	return NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 }
 
 // setWindowInstance is the test wiring for binding a window: give it an open

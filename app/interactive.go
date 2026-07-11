@@ -79,22 +79,22 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 		return m.handleError(err)
 	}
 
-	// Focus (and, via the recency touch, un-auto-hide) the pane, then force
-	// the live bind for it now. The first bind after a preview opens can lose a
-	// race with tmux finishing the pane, so retry the transient miss a bounded
-	// number of times before surfacing the error (#1526) — the common
-	// first-render race stays invisible; a genuine failure still surfaces the
-	// "press o" guidance promptly.
+	// Focus (and, via the recency touch, un-auto-hide) the pane, then bind its live
+	// attachment now (no waiting for the 100ms tick). Unlike the old tmux attach
+	// client, the WS subscription is created immediately and self-heals via
+	// reconnect if the session's pane isn't ready yet (#1526 is structurally gone),
+	// so a single sync binds it — no retry loop.
 	m.store.TouchOpenPane(p)
 	m.focusRegion(layout.PaneRegion(p.ID()))
 
-	if !m.bindLiveTermPaneWithRetry(p) {
+	m.syncLiveTermPane()
+	if m.liveTerms[p.ID()] == nil {
 		inst := p.Instance()
 		title := ""
 		if inst != nil {
 			title = inst.Title
 		}
-		return m.handleError(fmt.Errorf("couldn't open an embedded terminal for '%s' — try again, or press o to attach full-screen", title))
+		return m.handleError(fmt.Errorf("couldn't open an embedded terminal for '%s' — press o to attach full-screen", title))
 	}
 	m.setInteractive(true)
 	return nil
@@ -117,6 +117,8 @@ func (m *home) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !m.interactive {
 		return m, nil
 	}
-	m.liveTerm.SendKey(msg)
+	if lt, _ := m.focusedLiveTerm(); lt != nil {
+		lt.SendKey(msg)
+	}
 	return m, nil
 }

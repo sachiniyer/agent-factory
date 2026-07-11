@@ -28,7 +28,7 @@ func (f *fakeLiveView) Resize(width, height int) {
 }
 
 func TestTabbedWindowRendersLiveViewWhenBound(t *testing.T) {
-	w := NewTabbedWindow(NewTabPane(), nil)
+	w := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	w.SetRect(layout.Rect{W: 40, H: 12})
 
 	fake := &fakeLiveView{content: "LIVE-EMBEDDED-TERMINAL"}
@@ -48,7 +48,7 @@ func TestTabbedWindowRendersLiveViewWhenBound(t *testing.T) {
 }
 
 func TestTabbedWindowResizesLiveViewWithRect(t *testing.T) {
-	w := NewTabbedWindow(NewTabPane(), nil)
+	w := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	w.SetRect(layout.Rect{W: 40, H: 12})
 	fake := &fakeLiveView{content: "LIVE"}
 	w.SetLive(fake)
@@ -65,7 +65,7 @@ func TestTabbedWindowResizesLiveViewWithRect(t *testing.T) {
 }
 
 func TestTabbedWindowInteractiveCue(t *testing.T) {
-	w := NewTabbedWindow(NewTabPane(), nil)
+	w := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	w.SetRect(layout.Rect{W: 40, H: 12})
 	fake := &fakeLiveView{content: "LIVE"}
 	w.SetLive(fake)

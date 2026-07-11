@@ -88,8 +88,8 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		!samePaneBinding(m.panePreviewTxn.original, original) ||
 		!samePaneBinding(m.panePreviewTxn.target, target)
 
-	if owner == m.livePane {
-		m.closeLiveTermPane()
+	if m.liveTerms[owner.ID()] != nil {
+		m.closeLiveTermPaneFor(owner.ID())
 		m.enforceInteractiveInvariant()
 	}
 

@@ -41,7 +41,7 @@ func (m *home) openPaneWindow(instance *session.Instance, tab int) *store.OpenPa
 	if p == nil {
 		return nil
 	}
-	w := ui.NewTabbedWindow(ui.NewTabPane(), p)
+	w := ui.NewTabbedWindow(ui.NewTabPane(m.newTabPaneSource()), p)
 	// Wire the pane's mouse identity (#1024 R4): its zone ids are keyed by
 	// the same region id the focus ring and layout use, stable for the
 	// window's life.
@@ -281,14 +281,12 @@ func (m *home) closePaneWindow(p *store.OpenPane) {
 	if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID == p.ID() {
 		m.cancelPanePreview(false)
 	}
-	// Release the live termpane attachment before its window goes away —
-	// its (pane, window) binding is about to dangle (#1089).
-	if p == m.livePane {
-		m.closeLiveTermPane()
-		// If the user was typing INTO that pane, the mode's premise just
-		// left with it: drop to nav now rather than a tick later.
-		m.enforceInteractiveInvariant()
-	}
+	// Release the pane's live attachment before its window goes away — its (pane,
+	// window) binding is about to dangle (#1089).
+	m.closeLiveTermPaneFor(p.ID())
+	// If the user was typing INTO that pane, the mode's premise just left with it:
+	// drop to nav now rather than a tick later.
+	m.enforceInteractiveInvariant()
 	m.store.CloseOpenPane(p)
 	delete(m.paneWindows, p.ID())
 	delete(m.lastPaneCapture, p.ID())

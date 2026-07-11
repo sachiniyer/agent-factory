@@ -12,17 +12,17 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// fakeLiveTerm drives the live-termpane state machine (#1089 PR 1) and the
-// interactive-mode key forwarding (#1089 PR 2) without spawning tmux attach
-// clients.
+// fakeLiveTerm drives the per-pane live-attachment state machine (#1592 Phase 2
+// PR6) and the interactive-mode key/mouse forwarding without dialing real WS
+// streams. It has no death signal: the real attachment self-heals via
+// reconnect+replay, so the app never observes a "client died" event.
 type fakeLiveTerm struct {
 	closed bool
-	done   chan struct{}
 	// keys records every message forwarded through SendKey, as
 	// tea.KeyMsg.String() values.
 	keys []string
-	// mice records every event forwarded through SendMouse with its
-	// grid-local coordinates (#1024 R4 interactive forwarding).
+	// mice records every event forwarded through SendMouse with its grid-local
+	// coordinates (#1024 R4 interactive forwarding).
 	mice []forwardedMouse
 }
 
@@ -32,14 +32,11 @@ type forwardedMouse struct {
 	x, y int
 }
 
-func newFakeLiveTerm() *fakeLiveTerm {
-	return &fakeLiveTerm{done: make(chan struct{})}
-}
+func newFakeLiveTerm() *fakeLiveTerm { return &fakeLiveTerm{} }
 
 func (f *fakeLiveTerm) Render(width, height int, showCursor bool) string { return "FAKE-LIVE-GRID" }
 func (f *fakeLiveTerm) Resize(width, height int)                         {}
 func (f *fakeLiveTerm) Close() error                                     { f.closed = true; return nil }
-func (f *fakeLiveTerm) Done() <-chan struct{}                            { return f.done }
 func (f *fakeLiveTerm) SendKey(msg tea.KeyMsg) bool {
 	f.keys = append(f.keys, msg.String())
 	return true
@@ -50,21 +47,29 @@ func (f *fakeLiveTerm) SendMouse(msg tea.MouseMsg, x, y int) bool {
 	return true
 }
 
-// stubLiveTermFactory points the bind seam at fake attachments and returns
-// the created fakes + attempted session names.
-func stubLiveTermFactory(t *testing.T) (created *[]*fakeLiveTerm, sessions *[]string) {
+// stubLiveTermFactory points the attachment seam at fake attachments and returns
+// the created fakes + the session titles they were created for.
+func stubLiveTermFactory(t *testing.T) (created *[]*fakeLiveTerm, titles *[]string) {
 	t.Helper()
 	var fakes []*fakeLiveTerm
 	var names []string
 	orig := newLiveTermPaneFn
-	newLiveTermPaneFn = func(sessionName string, width, height int) (liveTermAttachment, error) {
+	newLiveTermPaneFn = func(title, repoID string, tab, width, height int) liveTermAttachment {
 		f := newFakeLiveTerm()
 		fakes = append(fakes, f)
-		names = append(names, sessionName)
-		return f, nil
+		names = append(names, title)
+		return f
 	}
 	t.Cleanup(func() { newLiveTermPaneFn = orig })
 	return &fakes, &names
+}
+
+// focusedFake returns the fakeLiveTerm bound to the focused pane, or nil. It is
+// the per-pane replacement for the old single h.liveTerm cast.
+func focusedFake(h *home) *fakeLiveTerm {
+	lt, _ := h.focusedLiveTerm()
+	f, _ := lt.(*fakeLiveTerm)
+	return f
 }
 
 // liveTestHome is a home with one started (mock tmux) instance opened as the
@@ -81,24 +86,23 @@ func liveTestHome(t *testing.T) (*home, *session.Instance) {
 
 func TestSyncLiveTermPaneBindsFocusedPane(t *testing.T) {
 	h, inst := liveTestHome(t)
-	fakes, sessions := stubLiveTermFactory(t)
+	fakes, titles := stubLiveTermFactory(t)
 
 	h.syncLiveTermPane()
 
-	require.Len(t, *fakes, 1, "focused eligible pane must bind a live attachment")
-	assert.Equal(t, inst.TabTmuxName(0), (*sessions)[0], "attachment targets the pane tab's session")
-	require.NotNil(t, h.liveTerm)
+	require.Len(t, *fakes, 1, "the visible eligible pane must bind a live attachment")
+	assert.Equal(t, inst.Title, (*titles)[0], "attachment targets the pane's session title")
 	p := h.focusedOpenPane()
 	require.NotNil(t, p)
-	assert.Equal(t, p, h.livePane)
+	require.NotNil(t, h.liveTerms[p.ID()])
 	assert.True(t, h.paneWindows[p.ID()].HasLive(), "the window renders through the attachment")
 
 	// Steady state: same binding, no rebind churn.
 	h.syncLiveTermPane()
 	assert.Len(t, *fakes, 1)
 
-	// A live pane's capture polling is skipped (#1089): panesRefresh must
-	// not dispatch a capture for it.
+	// A live pane's capture polling is skipped: panesRefresh must not dispatch a
+	// daemon-Preview fetch for it.
 	h.lastPaneCapture = map[int]time.Time{}
 	_ = h.panesRefresh(false)
 	assert.NotContains(t, h.lastPaneCapture, p.ID(), "live pane must not capture-poll")
@@ -110,13 +114,12 @@ func TestSyncLiveTermPaneSurvivesFocusOnTree(t *testing.T) {
 	h.syncLiveTermPane()
 	require.Len(t, *fakes, 1)
 
-	// Focus moving to the tree must NOT churn the attachment while the pane
-	// stays visible.
+	// Focus moving to the tree must NOT churn the attachment: every VISIBLE pane
+	// stays bound regardless of where the focus ring points.
 	h.focusRegion("tree")
 	h.syncLiveTermPane()
 	assert.Len(t, *fakes, 1)
 	assert.False(t, (*fakes)[0].closed)
-	require.NotNil(t, h.liveTerm)
 }
 
 func TestHidePaneClosesLiveAttachment(t *testing.T) {
@@ -128,8 +131,7 @@ func TestHidePaneClosesLiveAttachment(t *testing.T) {
 	_, _ = h.handleHidePane()
 
 	assert.True(t, (*fakes)[0].closed, "hiding the pane must close its attachment")
-	assert.Nil(t, h.liveTerm)
-	assert.Nil(t, h.livePane)
+	assert.Empty(t, h.liveTerms)
 }
 
 func TestSyncLiveTermPaneSkipsIneligiblePanes(t *testing.T) {
@@ -144,7 +146,7 @@ func TestSyncLiveTermPaneSkipsIneligiblePanes(t *testing.T) {
 	h.syncLiveTermPane()
 
 	assert.Empty(t, *fakes, "an unstarted instance must not bind")
-	assert.Nil(t, h.liveTerm)
+	assert.Empty(t, h.liveTerms)
 }
 
 func TestSyncLiveTermPaneClosesWhileAttached(t *testing.T) {
@@ -156,8 +158,8 @@ func TestSyncLiveTermPaneClosesWhileAttached(t *testing.T) {
 	h.attached.Store(true)
 	h.syncLiveTermPane()
 
-	assert.True(t, (*fakes)[0].closed, "a full-screen attach must close the render client (#598 class)")
-	assert.Nil(t, h.liveTerm)
+	assert.True(t, (*fakes)[0].closed, "a full-screen attach must close every live attachment (#598 class)")
+	assert.Empty(t, h.liveTerms)
 
 	// And nothing rebinds while attached.
 	h.syncLiveTermPane()
@@ -170,36 +172,13 @@ func TestAttachHelpScreenClosesLiveAttachment(t *testing.T) {
 	h.syncLiveTermPane()
 	require.Len(t, *fakes, 1)
 
-	// The full-screen attach dispatch path (all four call sites funnel
-	// through showHelpScreen with helpTypeInstanceAttach) must release the
-	// attachment before the attach starts — even when the help overlay
-	// defers it.
+	// The full-screen attach dispatch path (all four call sites funnel through
+	// showHelpScreen with helpTypeInstanceAttach) must release the attachments
+	// before the attach starts — even when the help overlay defers it.
 	_, _ = h.showHelpScreen(helpTypeInstanceAttach{}, nil)
 
 	assert.True(t, (*fakes)[0].closed)
-	assert.Nil(t, h.liveTerm)
-}
-
-func TestClientDeathFallsBackWithBackoff(t *testing.T) {
-	h, _ := liveTestHome(t)
-	fakes, _ := stubLiveTermFactory(t)
-	h.syncLiveTermPane()
-	require.Len(t, *fakes, 1)
-
-	// The attach client dies out from under us (session killed externally).
-	close((*fakes)[0].done)
-	h.syncLiveTermPane()
-	assert.True(t, (*fakes)[0].closed)
-	assert.Nil(t, h.liveTerm, "death must drop the binding so capture rendering resumes")
-
-	// No immediate respawn-die loop: the retry backs off...
-	h.syncLiveTermPane()
-	assert.Len(t, *fakes, 1)
-
-	// ...and rebinds once the backoff elapses.
-	h.liveBindFailedAt = time.Now().Add(-2 * liveBindRetryInterval)
-	h.syncLiveTermPane()
-	assert.Len(t, *fakes, 2)
+	assert.Empty(t, h.liveTerms)
 }
 
 func TestQuitClosesLiveAttachment(t *testing.T) {
@@ -210,6 +189,6 @@ func TestQuitClosesLiveAttachment(t *testing.T) {
 
 	_, _ = h.handleQuit()
 
-	assert.True(t, (*fakes)[0].closed, "quit must not orphan the attach client")
-	assert.Nil(t, h.liveTerm)
+	assert.True(t, (*fakes)[0].closed, "quit must not orphan a stream goroutine")
+	assert.Empty(t, h.liveTerms)
 }

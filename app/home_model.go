@@ -75,6 +75,15 @@ type home struct {
 	// delivery-failure alarms (#1238) arrive from one authoritative RPC — the
 	// alarm is a field on the snapshot, not a side channel.
 	snapshotFetcher func(repoID string) (daemon.SnapshotResponse, error)
+	// previewFetcher captures a session tab's content through the daemon — the sole
+	// capturer since #1592 Phase 2 PR6 (the TUI no longer shells out to tmux
+	// capture-pane). It backs TabPane's render path for content not streamed live
+	// over WS (remote/hook, scroll-mode scrollback, the transient preview target).
+	// A PER-home field for the same off-loop-race reason as snapshotFetcher:
+	// TabPane's capture runs on the refreshPaneBindingCmd goroutine, so a package
+	// global swapped by a test would race under `go test -parallel`. Defaults to
+	// previewThroughDaemon; tests assign a fake directly.
+	previewFetcher func(req daemon.PreviewRequest) (content string, gone bool, err error)
 	// pauseStatusPoll / resumeStatusPoll are the daemon poll-pause seams for the
 	// attach heartbeat (#1160). PER-home fields, not package globals, for the
 	// same reason as snapshotFetcher: the heartbeat reads the seam from an
@@ -214,34 +223,22 @@ type home struct {
 	// (#1603). User-driven selectionChanged calls (nav, the open-or-focus verb)
 	// leave it false and keep the focus-steal behavior.
 	inPreviewTick bool
-	// -- Live embedded terminal (#1089 PR 1, read-only proof path) --
+	// -- Live embedded terminals (#1592 Phase 2 PR6, WS PTY stream) --
 	//
-	// At most ONE pane holds a live termpane attachment: the focused pane
-	// (or the pane that already holds it while focus visits the rail). Its
-	// window renders the termpane grid instead of the capture, and its
-	// capture polling is skipped. Lifecycle in live_termpane.go; all four
-	// fields are event-loop only.
+	// EVERY visible, eligible pane holds its own live termpane attachment: a
+	// reconnecting WebSocket subscription to that pane's (session, tab) PTY
+	// stream, fanned from the daemon's clientless capture (§6). The window
+	// renders the termpane grid instead of a daemon-Preview capture; a WS drop
+	// reconnects and replays via ?since, so there is NO capture fallback and no
+	// rebind-retry loop (the reliability payoff over the old tmux attach client).
+	// Lifecycle in live_termpane.go; both maps are event-loop only.
 
-	// liveTerm is the live attachment (a *termpane.TermPane in production,
-	// behind the seam interface); nil when every pane renders captures.
-	liveTerm liveTermAttachment
-	// livePane is the open pane liveTerm is bound to; nil iff liveTerm is.
-	livePane *store.OpenPane
-	// liveBindKey identifies the (pane, tab, session) binding last attempted,
-	// so the tick-driven sync only rebinds when the binding actually changed.
-	liveBindKey string
-	// liveBindFailedAt is when the last bind attempt failed, for the
-	// liveBindRetryInterval backoff.
-	liveBindFailedAt time.Time
-	// liveBoundAt is when liveTerm was bound, so the client-died warning can
-	// report the client's lifetime (instant death reads very differently
-	// from a session killed hours in).
-	liveBoundAt time.Time
-	// liveDeathLogKey/liveDeathLogAt rate-limit the client-died warning: one
-	// line per binding, refreshed every liveDeathLogInterval while a
-	// respawn-die loop persists, instead of a line per 5s retry.
-	liveDeathLogKey string
-	liveDeathLogAt  time.Time
+	// liveTerms maps an open pane's id to its live attachment (a *termpane.TermPane
+	// in production, behind the seam interface).
+	liveTerms map[int]liveTermAttachment
+	// liveKeys maps a pane id to the (id/tab/session) binding key its attachment
+	// was created for, so the sync only rebinds when the binding actually changed.
+	liveKeys map[int]string
 	// pendingTUIViewFocus is loaded before Bubble Tea reports the terminal size.
 	// The pane bindings can restore immediately, but a pane focus target is only
 	// focusable after the first non-fallback relayout has rebuilt the ring.
@@ -252,7 +249,7 @@ type home struct {
 	// overlays, exactly as before. Interactive mode (true): EVERY keystroke
 	// (including Tab) forwards down the focused pane's live attachment; the
 	// only host-reserved key is Ctrl-], which returns to nav. The mode is
-	// only ever true while liveTerm is bound to the focused pane —
+	// only ever true while the focused pane has a live attachment —
 	// enforceInteractiveInvariant drops it the moment that premise breaks.
 	// Orthogonal to `state`: overlays opened by async events still own the
 	// keyboard (handleKeyPress checks state alongside this flag). Event-loop
@@ -390,6 +387,8 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		errBox:           errBox,
 		paneWindows:      make(map[int]*ui.TabbedWindow),
 		lastPaneCapture:  make(map[int]time.Time),
+		liveTerms:        make(map[int]liveTermAttachment),
+		liveKeys:         make(map[int]string),
 		automations:      ui.NewAutomationsPane(proj),
 		projects:         ui.NewProjectsPane(),
 		statusBar:        ui.NewStatusBar(menu, errBox),
@@ -398,6 +397,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		zones:            zones.NewRegistry(),
 		mouseClock:       time.Now,
 		snapshotFetcher:  snapshotThroughDaemon,
+		previewFetcher:   previewThroughDaemon,
 		pauseStatusPoll:  pauseStatusPollThroughDaemon,
 		resumeStatusPoll: resumeStatusPollThroughDaemon,
 		appConfig:        appConfig,
@@ -563,17 +563,10 @@ func (m *home) relayout() {
 
 	m.layoutModalOverlays()
 
-	// tmux sessions render at the pane content size. Panes divide the
-	// workspace evenly, so the first visible pane's inner size stands for all
-	// of them; with no panes open the last size is kept (nothing renders).
-	if len(m.visiblePanes) > 0 {
-		if w := m.paneWindows[m.visiblePanes[0].ID()]; w != nil {
-			previewWidth, previewHeight := w.GetPreviewSize()
-			if err := m.store.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
-				log.ErrorLog.Print(err)
-			}
-		}
-	}
+	// Live panes size their sessions over the WS stream (last-resize-wins
+	// resize-window, #1592 Phase 2 PR6): each attachment's Resize rides the pane
+	// geometry through SetRect → w.live.Resize, so the TUI no longer resizes local
+	// tmux sessions from the relayout.
 }
 
 func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPane) *store.OpenPane {

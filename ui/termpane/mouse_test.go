@@ -74,42 +74,22 @@ func TestMouseForwardingSuppressedWithoutInnerMouseMode(t *testing.T) {
 	assert.Empty(t, got, "no mouse mode set → no bytes reach the PTY")
 }
 
-// TestMouseGridYOffsetsForTopStatusOnly pins #1534: with the status bar at the
-// top, Render hides the first statusRows rows (sourceY=statusRows), so a
-// forwarded click's zone-local y must shift down by statusRows to land on the
-// visible row the user clicked. With the status bar at the bottom the hidden
-// rows are off the end of the visible window, so no shift applies.
-func TestMouseGridYOffsetsForTopStatusOnly(t *testing.T) {
-	top := &TermPane{statusPosition: statusTop, statusRows: 2}
-	assert.Equal(t, 2, top.mouseGridY(0), "top status: click on visible row 0 maps past the hidden status rows")
-	assert.Equal(t, 5, top.mouseGridY(3), "top status: every content row shifts down by statusRows")
-
-	bottom := &TermPane{statusPosition: statusBottom, statusRows: 2}
-	assert.Equal(t, 0, bottom.mouseGridY(0), "bottom status: no hidden rows above content, no shift")
-	assert.Equal(t, 3, bottom.mouseGridY(3), "bottom status: content row maps 1:1")
-
-	none := &TermPane{statusPosition: statusTop, statusRows: 0}
-	assert.Equal(t, 4, none.mouseGridY(4), "zero hidden rows: top status is a no-op")
-}
-
-// TestMouseResizeGapDropsEventPastGrid pins the #1534 review finding: during a
-// resize gap the pane zone can grow before the embedded terminal is resized to
-// match, so a click below the emulator's current grid — pushed further by the
-// status-top offset — must be DROPPED, not forwarded as a bogus row the inner
-// app never drew.
+// TestMouseResizeGapDropsEventPastGrid pins the #1534 finding: during a resize gap
+// the pane zone can grow before the emulator is resized to match, so a click below
+// or right of the current grid must be DROPPED, not forwarded as a bogus row the
+// inner app never drew. The streamed bytes are the pane itself, so grid row equals
+// content row (no status offset).
 func TestMouseResizeGapDropsEventPastGrid(t *testing.T) {
-	// Visible height 6, 2 hidden top status rows → emulator grid height 8;
-	// visible content occupies rows [2, 8), i.e. zone-local y in [0, 6).
-	tp := startScriptWithStatusLayout(t, "sleep 30", 30, 6, 2, statusTop)
-	require.Equal(t, 8, tp.emu.Height(), "grid height is visible rows + hidden status rows")
+	tp, _ := newSingleStreamPane(t, 30, 6)
+	require.Equal(t, 6, tp.emu.Height())
 	require.Equal(t, 30, tp.emu.Width())
 
 	click := mouseMsg(tea.MouseActionPress, tea.MouseButtonLeft, 0, 0)
 
 	assert.True(t, tp.SendMouse(click, 3, 5),
-		"a click on the last visible row (grid row 7) maps in-bounds and forwards")
+		"a click on the last visible row (grid row 5) maps in-bounds and forwards")
 	assert.False(t, tp.SendMouse(click, 3, 6),
-		"a click one row into the resize gap lands at grid row 8, past the grid, and is dropped")
+		"a click one row into the resize gap lands at grid row 6, past the grid, and is dropped")
 	assert.False(t, tp.SendMouse(click, 3, 20),
 		"a click well past the grid is dropped, not forwarded as a bogus row")
 	assert.False(t, tp.SendMouse(click, 30, 5),

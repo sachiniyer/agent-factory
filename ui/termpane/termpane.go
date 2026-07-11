@@ -1,296 +1,312 @@
-// Package termpane renders a live tmux session inside a workspace pane
-// (#1089, RFC §2.4 — architecture A, proven by the spike on branch
-// spike/1089-embedded-terminal).
+// Package termpane renders a live terminal inside a workspace pane by consuming
+// the daemon's WebSocket PTY stream (#1592 Phase 2 PR6, replacing the #1089
+// tmux-attach render client).
 //
-// A TermPane owns one attach client: a PTY running `tmux attach-session -t
-// =<name>`, whose output is fed through a charmbracelet/x/vt terminal
-// emulator into a cell grid. Production tmux attachments are taller than the
-// pane rect by the nested session's configured status height (0-5 rows) so
-// tmux can draw its status line outside the rendered content window; Render
-// turns only the visible grid area into an ANSI-styled block the TUI places
-// inside a pane rect — no full-screen takeover, the rail stays visible. Resize
-// propagates the pane geometry to the PTY (tmux reflows on the SIGWINCH) and
-// to the emulator grid in step. Close kills the attach CLIENT only; the tmux
-// session keeps running server-side, exactly like a detach.
+// A TermPane owns one live subscription to a session tab's PTY stream: a Dialer
+// opens a Stream against the daemon (GET /v1/sessions/{id}/stream), raw PTY_OUT
+// bytes are fed through a charmbracelet/x/vt terminal emulator into a cell grid,
+// and the authoritative resize echo reflows that grid. Render turns the grid into
+// an ANSI-styled block the TUI places inside a pane rect — no full-screen takeover.
+// Interactive keystrokes and mouse events are encoded by the same emulator and
+// sent back as INPUT frames; Resize sends a RESIZE frame (last-resize-wins,
+// server-side). Close ends the subscription only; the session keeps running.
 //
-// This package is deliberately a pure projection: it never creates, kills, or
-// mutates tmux sessions — the daemon stays the sole session owner (#960).
-// tmux is also the flow limiter: the attach client receives visible-screen
-// redraws, not the raw output firehose, so sustained streaming costs ~0.6% of
-// one core (spike §2). Rendering is pulled by the TUI's existing tick/update
-// cycle — this package runs no repaint loop of its own.
+// The structural reliability win over the old tmux attach client (§6): the stream
+// is fanned from the daemon's clientless capture through a bounded ring buffer, so
+// a dropped subscriber does NOT take output down — the run loop reconnects and
+// replays the gap it missed with ?since=<cursor>. There is therefore NO
+// capture-pane fallback and no rebind-retry loop; a WS drop repaints from replay,
+// not from a capture snapshot. This package is a pure projection: it never
+// creates, kills, or mutates sessions — the daemon stays the sole owner (#960).
 //
-// Interactive mode (#1089 PR 2) forwards focused keystrokes down the same
-// PTY: SendKey translates each bubbletea key message (keymap.go) and hands it
-// to the emulator's mode-aware encoder — or, for the modifier+navigation
-// family the pinned x/vt cannot encode, writes the pre-encoded xterm sequence
-// to the same input pipe — so keystrokes and terminal-query replies (DA, DSR,
-// ...) reach tmux in order through one channel.
+// The pane is MULTI-WRITER (no lease): every subscriber is read-write and the PTY
+// size is last-resize-wins with an authoritative echo. Because the daemon streams
+// the pane's own output (pipe-pane) there is no status line to crop — the emulator
+// grid is exactly the pane, unlike the tmux attach client which allocated status
+// rows outside the rendered window.
 package termpane
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/vt"
-	"github.com/creack/pty"
-
-	"github.com/sachiniyer/agent-factory/log"
 )
 
-// closeDrainDeadline bounds how long Close waits for the PTY reader goroutine
-// to drain after the attach client is SIGKILLed. Killing the client closes
-// the PTY slave end, which is what actually wakes a blocked master-side Read
-// (closing the master alone does not — the #598 lesson in session/tmux), so
-// the drain completes in milliseconds in practice. If it doesn't, Close
-// returns anyway and leaks the goroutine: a leaked goroutine is strictly
-// better than freezing the event loop, the same trade waitForAttachDrain
-// makes.
 const (
+	// closeDrainDeadline bounds how long Close waits for the run/send goroutines to
+	// drain after the context is cancelled and the emulator pipe closed. They exit
+	// in milliseconds in practice; if they don't, Close returns anyway rather than
+	// freezing the event loop (a leaked goroutine beats a wedged UI).
 	closeDrainDeadline = 2 * time.Second
 
-	// tmux clamps the status option to off/on or 2-5 rows. Embedded panes are
-	// already framed by af, so production attachments allocate those rows but
-	// crop them out of the rendered pane.
-	maxTmuxStatusRows = 5
+	// writeTimeout bounds a single INPUT/RESIZE frame write to the stream, so a
+	// wedged connection cannot block the event loop or the send pump forever.
+	writeTimeout = 5 * time.Second
+
+	// reconnectMinBackoff/reconnectMaxBackoff bound the exponential backoff between
+	// dial attempts. The first reconnect is near-immediate (a dropped WS usually
+	// reconnects at once and replays via ?since); a session that is genuinely gone
+	// backs off so a doomed pane does not hammer the daemon. The owner closes the
+	// pane when its binding disappears, so this loop never needs its own give-up.
+	reconnectMinBackoff = 50 * time.Millisecond
+	reconnectMaxBackoff = 3 * time.Second
 )
 
-type statusPosition int
+// EventKind discriminates a stream Event between output bytes and a resize echo.
+type EventKind int
 
 const (
-	statusBottom statusPosition = iota
-	statusTop
+	// EventData carries verbatim PTY output bytes (fed to the emulator, advances the
+	// replay cursor).
+	EventData EventKind = iota
+	// EventResize carries the authoritative last-resize-wins size the emulator
+	// reflows to.
+	EventResize
+	// EventRepaint carries a one-shot screen repaint (fed to the emulator like
+	// output) that must NOT advance the replay cursor — it is per-subscriber and not
+	// part of the server's ring seq, so counting it would desync ?since.
+	EventRepaint
 )
 
-// TermPane is one live embedded terminal: PTY + attach client + vt emulator.
-//
-// Concurrency: New, Resize, Render, and Close are called on the bubbletea
-// event loop; the PTY reader and emulator-response pumps run on their own
-// goroutines. gridMu is the synchronization point between them: the reader
-// pump mutates the grid under the write lock, Render/Resize take it on the
-// event loop. Deliberately NOT vt.SafeEmulator — its CellAt returns a
-// pointer into the live buffer after releasing its per-call lock, so grid
-// reads would still race the write pump (caught by -race); a pane-level
-// RWMutex held across the whole frame is the correct scope anyway. Close is
-// safe to call more than once.
-type TermPane struct {
-	cmd  *exec.Cmd
-	ptmx *os.File
+// Event is one inbound stream event: output bytes (Data, when Kind==EventData) or
+// the authoritative size echo (Rows/Cols, when Kind==EventResize).
+type Event struct {
+	Kind EventKind
+	Data []byte
+	Rows uint16
+	Cols uint16
+}
 
+// Stream is one open connection to a session tab's PTY stream. The concrete
+// implementation (in the app layer) wraps the apiclient WS dial and agentproto's
+// codec; keeping it an interface keeps this package transport-agnostic and lets
+// tests drive the emulator/reconnect logic with an in-memory fake.
+type Stream interface {
+	// StartSeq is the absolute output cursor the server begins sending from — the
+	// server may have clamped the requested ?since into its retained ring window.
+	StartSeq() uint64
+	// Recv blocks for the next inbound event, ctx cancellation, or the connection
+	// dropping (returns an error).
+	Recv(ctx context.Context) (Event, error)
+	// SendInput writes raw key bytes as an INPUT frame (multi-writer).
+	SendInput(ctx context.Context, b []byte) error
+	// SendResize writes a RESIZE frame (last-resize-wins, server-side).
+	SendResize(ctx context.Context, rows, cols uint16) error
+	io.Closer
+}
+
+// Dialer opens a Stream starting at output cursor `since` (0 = the live tail). The
+// run loop calls it with the cursor to replay from after a drop.
+type Dialer func(ctx context.Context, since uint64) (Stream, error)
+
+// TermPane is one live embedded terminal: a reconnecting WS subscription + vt
+// emulator.
+//
+// Concurrency: New, Resize, Render, SendKey, SendMouse, and Close are called on
+// the bubbletea event loop; the run loop (inbound) and send pump (outbound) run on
+// their own goroutines. gridMu guards the emulator grid between the run loop's
+// writes and Render's reads; connMu guards the current stream + cursor + desired
+// size between the loops and the event-loop mutators. Close is safe to call more
+// than once.
+type TermPane struct {
 	gridMu sync.RWMutex
 	emu    *vt.Emulator
 	// cursorVisible mirrors the terminal's DECTCM state, maintained by the
-	// emulator's CursorVisibility callback — which fires inside emu.Write,
-	// i.e. under gridMu's write lock; Render reads it under the read lock.
-	// Starts true (terminals boot with the cursor shown).
+	// emulator's CursorVisibility callback (fired inside emu.Write, under gridMu's
+	// write lock); Render reads it under the read lock. Starts true.
 	cursorVisible bool
+	width, height int
 
-	width, height  int
-	statusRows     int
-	statusPosition statusPosition
+	dial Dialer
 
-	// done is closed when the PTY reader pump exits — on Close, or when the
-	// attach client dies on its own (session killed, tmux server gone, or an
-	// external detach). Owners poll Done to fall back to capture rendering.
+	connMu             sync.Mutex
+	stream             Stream // current live stream; nil while (re)connecting
+	wantRows, wantCols uint16 // desired size, (re)asserted on each connect
+	cursor             uint64 // absolute output cursor for ?since replay
+
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 	done      chan struct{}
 	closeOnce sync.Once
 }
 
-// New opens a PTY running `tmux attach-session -t =<sessionName>` at the
-// given grid size and starts pumping its output through the emulator. The
-// `=` forces an exact session-name match, mirroring session/tmux's Restore
-// (#1006) so a sibling session can never be prefix-matched instead.
-func New(sessionName string, width, height int) (*TermPane, error) {
-	tmuxEnv, environ := os.Getenv("TMUX"), os.Environ()
-	rows, pos := tmuxStatusLayout(sessionName, tmuxEnv, environ)
-	return newWithCommand(newAttachCommand(sessionName, tmuxEnv, environ), width, height, rows, pos)
-}
-
-// newAttachCommand builds the attach client's argv and env. The TUI itself
-// may be running inside tmux; strip $TMUX so the embedded client doesn't
-// refuse to nest — but $TMUX is also where the server's socket path lives,
-// so hand it back explicitly as `-S <path>`. Without that the child resolves
-// TMUX_TMPDIR/default and, on a non-default socket (`tmux -L`/`-S`), attaches
-// to the wrong server: it dies instantly while auto-starting a transient
-// default-socket server as a side effect. With af outside tmux ($TMUX unset)
-// the child's default resolution already matches every other af tmux call,
-// so no -S is added. TERM is pinned to what the vt emulator implements so
-// tmux emits escape sequences the grid understands.
-func newAttachCommand(sessionName, tmuxEnv string, environ []string) *exec.Cmd {
-	args := []string{"attach-session", "-t", "=" + sessionName}
-	return newTmuxCommand(tmuxEnv, environ, args...)
-}
-
-func newTmuxCommand(tmuxEnv string, environ []string, args ...string) *exec.Cmd {
-	// $TMUX is `socket_path,server_pid,session_id`; the path is what -S wants.
-	if sock, _, _ := strings.Cut(tmuxEnv, ","); sock != "" {
-		args = append([]string{"-S", sock}, args...)
-	}
-	cmd := exec.Command("tmux", args...)
-	env := []string{"TERM=xterm-256color"}
-	for _, e := range environ {
-		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_PANE=") || strings.HasPrefix(e, "TERM=") {
-			continue
-		}
-		env = append(env, e)
-	}
-	cmd.Env = env
-	return cmd
-}
-
-func tmuxStatusLayout(sessionName, tmuxEnv string, environ []string) (int, statusPosition) {
-	status, err := tmuxShowSessionOption(sessionName, tmuxEnv, environ, "status")
-	if err != nil {
-		log.WarningLog.Printf("termpane: tmux status query for %s failed: %v (assuming one bottom status row)", sessionName, err)
-		return 1, statusBottom
-	}
-	position, err := tmuxShowSessionOption(sessionName, tmuxEnv, environ, "status-position")
-	if err != nil {
-		log.WarningLog.Printf("termpane: tmux status-position query for %s failed: %v (assuming bottom)", sessionName, err)
-		position = "bottom"
-	}
-	return parseTmuxStatusRows(status), parseTmuxStatusPosition(position)
-}
-
-func tmuxShowSessionOption(sessionName, tmuxEnv string, environ []string, option string) (string, error) {
-	cmd := newTmuxCommand(tmuxEnv, environ, "show-options", "-Aqv", "-t", "="+sessionName+":", option)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", option, err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func parseTmuxStatusRows(value string) int {
-	switch strings.TrimSpace(value) {
-	case "", "on":
-		return 1
-	case "off":
-		return 0
-	}
-	rows, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil {
-		return 1
-	}
-	return clampStatusRows(rows)
-}
-
-func parseTmuxStatusPosition(value string) statusPosition {
-	if strings.TrimSpace(value) == "top" {
-		return statusTop
-	}
-	return statusBottom
-}
-
-// NewWithCommand is New with a caller-built command on the PTY instead of the
-// default tmux attach argv. Tests use it to run scripted shells (no tmux
-// server) and to point a real attach at a private `-L` socket.
-func NewWithCommand(cmd *exec.Cmd, width, height int) (*TermPane, error) {
-	return newWithCommand(cmd, width, height, 0, statusBottom)
-}
-
-func newWithCommand(cmd *exec.Cmd, width, height, statusRows int, pos statusPosition) (*TermPane, error) {
+// New starts a live pane at the given grid size, dialing the stream through dial.
+// It returns immediately — the first dial (and any reconnect) happens on the run
+// goroutine, so a not-yet-ready session self-heals via reconnect rather than
+// failing construction.
+func New(dial Dialer, width, height int) *TermPane {
 	width, height = clampSize(width, height)
-	statusRows = clampStatusRows(statusRows)
-	ptyHeight := ptyHeightForVisibleRows(height, statusRows)
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(ptyHeight), Cols: uint16(width)}) //nolint:gosec // clampSize bounds to [1, 4096]
-	if err != nil {
-		return nil, fmt.Errorf("termpane: starting %q on a PTY: %w", cmd.Path, err)
-	}
-
+	ctx, cancel := context.WithCancel(context.Background())
 	t := &TermPane{
-		cmd:            cmd,
-		ptmx:           ptmx,
-		emu:            vt.NewEmulator(width, ptyHeight),
-		cursorVisible:  true,
-		width:          width,
-		height:         height,
-		statusRows:     statusRows,
-		statusPosition: pos,
-		done:           make(chan struct{}),
+		emu:           vt.NewEmulator(width, height),
+		cursorVisible: true,
+		width:         width,
+		height:        height,
+		dial:          dial,
+		wantRows:      uint16(height), //nolint:gosec // clampSize bounds to [1, 4096]
+		wantCols:      uint16(width),  //nolint:gosec // clampSize bounds to [1, 4096]
+		ctx:           ctx,
+		cancel:        cancel,
+		done:          make(chan struct{}),
 	}
-	// The callback fires from emu.Write — always under gridMu's write lock —
-	// so the field write is ordered against Render's locked reads.
+	// The callback fires from emu.Write — always under gridMu's write lock — so the
+	// field write is ordered against Render's locked reads.
 	t.emu.SetCallbacks(vt.Callbacks{
 		CursorVisibility: func(visible bool) { t.cursorVisible = visible },
 	})
 
-	// Reap the client when it exits so it never lingers as a zombie. The
-	// pump goroutines detect exit through the PTY, not through Wait.
-	go func() { _ = cmd.Wait() }()
-
-	// PTY → emulator. Exits when the client dies (slave end closes, Read
-	// returns) or Close closes the master.
-	go func() {
-		defer close(t.done)
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := ptmx.Read(buf)
-			if n > 0 {
-				t.gridMu.Lock()
-				_, _ = t.emu.Write(buf[:n])
-				t.gridMu.Unlock()
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	// Emulator → PTY: replies to terminal queries from tmux (DA, DSR, ...)
-	// and the encoded keystrokes SendKey injects. This pump must keep
-	// DRAINING the emulator's pipe even after the PTY write side dies (the
-	// attach client exiting makes the next ptmx.Write fail): the pipe is
-	// unbuffered and synchronous, so a pump that exited on write error would
-	// leave the next SendKey — called on the bubbletea event loop — blocked
-	// on it forever. Discard-once-dead instead; the pump exits when Close
-	// closes the pipe (Read returns an error).
-	go func() {
-		buf := make([]byte, 4096)
-		ptyAlive := true
-		for {
-			n, rerr := t.emu.Read(buf)
-			if n > 0 && ptyAlive {
-				if _, werr := ptmx.Write(buf[:n]); werr != nil {
-					ptyAlive = false
-				}
-			}
-			if rerr != nil {
-				return
-			}
-		}
-	}()
-
-	return t, nil
+	t.wg.Add(2)
+	go func() { defer t.wg.Done(); t.sendPump() }()
+	go func() { defer t.wg.Done(); t.run() }()
+	go func() { t.wg.Wait(); close(t.done) }()
+	return t
 }
 
-// SendKey forwards one focused keystroke to the embedded terminal (#1089
-// PR 2, interactive mode): pastes go through the emulator's bracketed-paste-
-// aware Paste, everything else through the keymap.go translation. It reports
-// whether the key was forwarded — false means the key has no safe encoding
-// and was IGNORED (never a guessed byte sequence). Event-loop only; the
-// enclosed pipe write is synchronous but the pump above always drains it.
-//
-// The lock is required even though this only WRITES input: the emulator's
-// encoder reads terminal modes (DECCKM, bracketed paste) that the PTY reader
-// pump mutates through emu.Write.
+// run is the reconnect loop: dial the stream (replaying from the tracked cursor),
+// pump its inbound events into the emulator until it drops, then reconnect. This
+// loop IS the reliability guarantee — a dropped subscriber repaints from ?since
+// replay, never from a capture fallback (§6.3).
+func (t *TermPane) run() {
+	backoff := reconnectMinBackoff
+	for {
+		if t.ctx.Err() != nil {
+			return
+		}
+		t.connMu.Lock()
+		since := t.cursor
+		t.connMu.Unlock()
+
+		stream, err := t.dial(t.ctx, since)
+		if err != nil {
+			if t.sleep(backoff) {
+				return
+			}
+			backoff = min(backoff*2, reconnectMaxBackoff)
+			continue
+		}
+		backoff = reconnectMinBackoff
+
+		t.connMu.Lock()
+		// Adopt the server's starting cursor: it may have clamped our `since` into
+		// the retained ring window, in which case we lost a gap the next full
+		// repaint re-synchronises.
+		t.cursor = stream.StartSeq()
+		t.stream = stream
+		rows, cols := t.wantRows, t.wantCols
+		t.connMu.Unlock()
+
+		// (Re)assert our desired size so the server sizes this tab's window to us —
+		// the pane may have resized while we were disconnected (last-resize-wins).
+		wctx, cancelW := context.WithTimeout(t.ctx, writeTimeout)
+		_ = stream.SendResize(wctx, rows, cols)
+		cancelW()
+
+		t.readStream(stream)
+
+		t.connMu.Lock()
+		if t.stream == stream {
+			t.stream = nil
+		}
+		t.connMu.Unlock()
+		_ = stream.Close()
+	}
+}
+
+// readStream pumps one connection's inbound events into the emulator until it
+// errors (drop) or the context is cancelled (Close).
+func (t *TermPane) readStream(stream Stream) {
+	for {
+		ev, err := stream.Recv(t.ctx)
+		if err != nil {
+			return
+		}
+		switch ev.Kind {
+		case EventData:
+			t.gridMu.Lock()
+			_, _ = t.emu.Write(ev.Data)
+			t.gridMu.Unlock()
+			t.connMu.Lock()
+			t.cursor += uint64(len(ev.Data))
+			t.connMu.Unlock()
+		case EventRepaint:
+			// Render like output, but do NOT advance the cursor: the repaint is
+			// per-subscriber and not part of the server's ring seq (§ EventRepaint).
+			t.gridMu.Lock()
+			_, _ = t.emu.Write(ev.Data)
+			t.gridMu.Unlock()
+		case EventResize:
+			// Authoritative echo: reflow the emulator to the server's size. We drive
+			// the size, so this normally matches wantCols/wantRows; applying it
+			// anyway honors a size the server clamped (e.g. an old tmux).
+			t.gridMu.Lock()
+			t.emu.Resize(int(ev.Cols), int(ev.Rows))
+			t.gridMu.Unlock()
+		}
+	}
+}
+
+// sendPump is the persistent outbound pump: it drains the emulator's input pipe
+// (the encoded keystrokes SendKey/SendMouse inject, plus terminal-query replies)
+// and writes them as INPUT frames to the CURRENT stream. It must ALWAYS drain the
+// pipe even while disconnected — the pipe is unbuffered and synchronous, so a
+// pump that stopped reading would block the next SendKey on the event loop forever
+// (the #1089 lesson). While disconnected it drops the bytes; reconnect is fast and
+// input to a disconnected pane is not meaningful.
+func (t *TermPane) sendPump() {
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := t.emu.Read(buf)
+		if n > 0 {
+			t.connMu.Lock()
+			stream := t.stream
+			t.connMu.Unlock()
+			if stream != nil {
+				wctx, cancel := context.WithTimeout(t.ctx, writeTimeout)
+				_ = stream.SendInput(wctx, buf[:n])
+				cancel()
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
+
+// sleep blocks for d or until the context is cancelled; it reports true if the
+// context was cancelled (the caller should stop).
+func (t *TermPane) sleep(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-t.ctx.Done():
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// SendKey forwards one focused keystroke to the terminal (interactive mode): a
+// paste through the emulator's bracketed-paste-aware Paste, everything else
+// through the keymap translation. It reports whether the key was forwarded — false
+// means the key has no safe encoding and was IGNORED (never a guessed sequence).
+// Event-loop only; the enclosed pipe write is synchronous but sendPump always
+// drains it. The lock guards the emulator's mode state (DECCKM, bracketed paste)
+// the run loop mutates through emu.Write.
 func (t *TermPane) SendKey(msg tea.KeyMsg) bool {
 	t.gridMu.RLock()
 	defer t.gridMu.RUnlock()
 	return forwardKey(t.emu, msg)
 }
 
-// forwardKey is SendKey without the pane: translate one key message and emit
-// its bytes into the emulator's input pipe. Factored out so the translation
-// table can be pinned against a bare emulator in tests. The caller holds the
-// lock that guards the emulator's mode state.
+// forwardKey translates one key message and emits its bytes into the emulator's
+// input pipe. Factored out so the translation table can be pinned against a bare
+// emulator in tests. The caller holds the lock guarding the emulator's mode state.
 func forwardKey(emu *vt.Emulator, msg tea.KeyMsg) bool {
 	if msg.Paste {
 		emu.Paste(string(msg.Runes))
@@ -310,52 +326,44 @@ func forwardKey(emu *vt.Emulator, msg tea.KeyMsg) bool {
 	return true
 }
 
-// Resize propagates a new pane geometry: PTY winsize first (tmux reflows on
-// the SIGWINCH), then the emulator grid in step. Event-loop only.
+// Resize propagates a new pane geometry: the emulator grid immediately (for
+// responsiveness) and a RESIZE frame to the server (last-resize-wins). Event-loop
+// only.
 func (t *TermPane) Resize(width, height int) {
 	width, height = clampSize(width, height)
+	t.gridMu.Lock()
 	if width == t.width && height == t.height {
+		t.gridMu.Unlock()
 		return
 	}
 	t.width, t.height = width, height
-	ptyHeight := ptyHeightForVisibleRows(height, t.statusRows)
-	if err := pty.Setsize(t.ptmx, &pty.Winsize{Rows: uint16(ptyHeight), Cols: uint16(width)}); err != nil { //nolint:gosec // clampSize bounds to [1, 4096]
-		log.WarningLog.Printf("termpane: pty resize to %dx%d failed: %v", width, height, err)
-	}
-	t.gridMu.Lock()
-	t.emu.Resize(width, ptyHeight)
-	// The pinned x/vt emulator resizes by re-windowing the cell buffer, not by
-	// reflowing it: a wrapped line is truncated to the new width and loses its
-	// overflow, while the stale continuation row it wrapped onto stays behind
-	// (#1556). Until tmux's SIGWINCH-driven full redraw lands, the grid can
-	// therefore show a command's tail running straight into the next prompt —
-	// prompts and commands visually merged. Blank the visible grid now so that
-	// unavoidable transient reads as an empty pane filling in rather than a
-	// corrupted transcript; tmux always full-redraws a resized client, so no
-	// legitimate content is lost. The write goes through the same parser as
-	// tmux's output and under the same lock, so it can never interleave with a
-	// redraw mid-parse.
-	_, _ = t.emu.Write(resizeBlank)
+	// Re-window the emulator grid to the new size. The pinned x/vt emulator
+	// truncates rather than reflows (#1556), so the grid may transiently show a
+	// stale continuation row — but the daemon injects a clean capture-pane repaint
+	// on every resize (the broker's Snapshot-on-resize), which clears and redraws
+	// the reflowed screen a round-trip later. So the client does NOT blank here:
+	// blanking would leave the pane empty until the repaint arrives, whereas
+	// keeping the re-windowed grid shows content continuously.
+	t.emu.Resize(width, height)
 	t.gridMu.Unlock()
+
+	t.connMu.Lock()
+	t.wantRows, t.wantCols = uint16(height), uint16(width) //nolint:gosec // clampSize bounds to [1, 4096]
+	stream := t.stream
+	rows, cols := t.wantRows, t.wantCols
+	t.connMu.Unlock()
+	if stream != nil {
+		wctx, cancel := context.WithTimeout(t.ctx, writeTimeout)
+		_ = stream.SendResize(wctx, rows, cols)
+		cancel()
+	}
 }
 
-// resizeBlank erases the whole display (ED 2) and homes the cursor — the
-// standard way a program clears a terminal. Written to the emulator after a
-// resize to drop the truncated, un-reflowed grid the pinned x/vt leaves behind
-// (#1556) before tmux repaints. x/vt's ED 2 is screen-aware — it clears the
-// active screen (e.scr) — so this also blanks the alternate screen when a
-// full-screen program (vim/less/...) is what the resize caught mid-frame.
-var resizeBlank = []byte("\x1b[2J\x1b[H")
-
-// Render returns the emulator's current grid as exactly height ANSI-styled
-// lines of exactly width cells. It only reads the grid — safe to call at any
-// cadence; the TUI's existing tick drives it (no repaint loop here). After
-// the attach client dies the last grid keeps rendering, so a pane shows its
-// final frame until the owner notices Done and swaps render sources.
-//
-// showCursor overlays the terminal cursor (reverse-video on its cell) when
-// the inner application has it visible — the interactive-mode typing cue
-// (#1089 PR 2). Nav-mode panes render without it, exactly like PR 1.
+// Render returns the emulator's grid as exactly height ANSI-styled lines of
+// exactly width cells. It only reads the grid — safe at any cadence; the TUI's
+// tick drives it. showCursor overlays the terminal cursor (reverse-video) when the
+// inner app has it visible — the interactive-mode typing cue. There is no status
+// offset: the streamed bytes are the pane itself (§ package doc).
 func (t *TermPane) Render(width, height int, showCursor bool) string {
 	t.gridMu.RLock()
 	defer t.gridMu.RUnlock()
@@ -365,63 +373,47 @@ func (t *TermPane) Render(width, height int, showCursor bool) string {
 		cursor = cursorAt{x: pos.X, y: pos.Y, show: true}
 	}
 	visibleHeight := min(height, t.height)
-	sourceY := 0
-	if t.statusPosition == statusTop {
-		sourceY = t.statusRows
-	}
-	grid := renderGridWindow(t.emu, width, visibleHeight, sourceY, cursor)
+	grid := renderGridWindow(t.emu, width, visibleHeight, 0, cursor)
 	return padRenderedRows(grid, width, height-visibleHeight)
 }
 
-// Done reports attach-client death: the channel is closed once the PTY
-// reader pump exits — after Close, or on its own when the tmux session is
-// killed, the server dies, or the client is detached externally.
-func (t *TermPane) Done() <-chan struct{} {
-	return t.done
-}
-
-// Close tears down the attach CLIENT only — SIGKILL the tmux client child,
-// close the PTY, close the emulator's response pipe — and waits (bounded) for
-// the pumps to drain. The tmux session itself keeps running server-side;
-// closing a pane must never kill the user's agent. SIGKILL rather than a
-// graceful detach is deliberate: it is how session/tmux's hardened detach
-// path ends every attach client too (#601/#602), and it guarantees the slave
-// end closes so the reader pump wakes.
+// Close ends the subscription only — cancel the run loop, drop and close the
+// current stream, close the emulator's input pipe to release the send pump — and
+// waits (bounded) for both goroutines to drain. The session keeps running
+// server-side; closing a pane must never kill the user's agent. Safe to call more
+// than once.
 func (t *TermPane) Close() error {
 	var err error
 	t.closeOnce.Do(func() {
-		if t.cmd.Process != nil {
-			_ = t.cmd.Process.Kill()
+		t.cancel()
+		t.connMu.Lock()
+		stream := t.stream
+		t.stream = nil
+		t.connMu.Unlock()
+		if stream != nil {
+			_ = stream.Close() // unblock readStream's Recv
 		}
-		// Wait for the reader pump BEFORE touching the emulator's pipes: the
-		// pump may still be flushing the client's death throes through
-		// emu.Write, and the emulator can block writing a query response
-		// into its unbuffered response pipe mid-parse.
-		select {
-		case <-t.done:
-		case <-time.After(closeDrainDeadline):
-			err = fmt.Errorf("termpane: PTY reader did not drain within %v after kill; abandoning it", closeDrainDeadline)
-		}
-		_ = t.ptmx.Close()
-		// Unblock the emulator→PTY pump. Deliberately NOT emu.Close(): the
-		// pinned x/vt version sets an unsynchronized `closed` flag there
-		// that races the pump's concurrent Read (caught by -race). The
-		// response pipe's writer end is internally synchronized and closing
-		// it never blocks; the pump's Read returns EOF and io.Copy exits.
+		// Unblock the send pump. Deliberately NOT emu.Close(): the pinned x/vt sets
+		// an unsynchronized `closed` flag there that races the pump's Read (-race).
+		// Closing the pipe's writer end is internally synchronized; the pump's Read
+		// returns EOF.
 		if pw, ok := t.emu.InputPipe().(*io.PipeWriter); ok {
 			_ = pw.CloseWithError(io.EOF)
 		} else {
-			// Upstream changed the pipe plumbing: fall back to the racy-but-
-			// functional Close rather than leaking the pump forever.
 			_ = t.emu.Close()
+		}
+		select {
+		case <-t.done:
+		case <-time.After(closeDrainDeadline):
+			err = fmt.Errorf("termpane: goroutines did not drain within %v after close", closeDrainDeadline)
 		}
 	})
 	return err
 }
 
-// clampSize bounds a pane geometry to what a PTY winsize can hold and tmux
-// will accept: at least 1x1 (a zero-rected auto-hidden pane must not produce
-// a zero winsize), at most 4096 per axis (also keeps the uint16 casts safe).
+// clampSize bounds a pane geometry to what the emulator and a tmux window accept:
+// at least 1x1 (a zero-rected auto-hidden pane must not produce a zero size), at
+// most 4096 per axis (also keeps the uint16 casts safe).
 func clampSize(width, height int) (int, int) {
 	if width < 1 {
 		width = 1
@@ -436,22 +428,4 @@ func clampSize(width, height int) (int, int) {
 		height = 4096
 	}
 	return width, height
-}
-
-func clampStatusRows(rows int) int {
-	if rows < 0 {
-		return 0
-	}
-	if rows > maxTmuxStatusRows {
-		return maxTmuxStatusRows
-	}
-	return rows
-}
-
-func ptyHeightForVisibleRows(height, statusRows int) int {
-	ptyHeight := height + statusRows
-	if ptyHeight > 4096 {
-		return 4096
-	}
-	return ptyHeight
 }

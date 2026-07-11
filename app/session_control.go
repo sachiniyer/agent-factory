@@ -272,6 +272,26 @@ func snapshotThroughDaemon(repoID string) (daemon.SnapshotResponse, error) {
 	return resp, err
 }
 
+// previewThroughDaemon captures a session tab's content through the daemon — the
+// sole capturer since #1592 Phase 2 PR6. It backs the TUI's render path for
+// content it can't stream live over WS (remote/hook sessions, scroll-mode
+// scrollback, the transient preview target). gone=true means the session's tmux
+// vanished mid-capture (the caller maps it to the session-gone fallback).
+//
+// This is the PRODUCTION default for home.previewFetcher — a plain function, NOT a
+// swappable package global. TabPane's capture runs on an off-loop goroutine
+// (refreshPaneBindingCmd), so a mutable global would race a test seam swap under
+// `go test -parallel`; the fetcher lives per-home instead, and tests assign a fake
+// to home.previewFetcher directly (the #960 PR4 / snapshot-fetcher race lesson).
+func previewThroughDaemon(req daemon.PreviewRequest) (content string, gone bool, err error) {
+	err = withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		content, gone, e = c.Preview(req)
+		return e
+	})
+	return content, gone, err
+}
+
 // allReposSnapshotFetcher returns the daemon's session list across EVERY repo
 // (RepoID:"" = all repos), used only to build the project-picker's list with a
 // per-project session count (#1461). A package var so the project-switch tests
