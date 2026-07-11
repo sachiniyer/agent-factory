@@ -178,7 +178,7 @@ func (m *home) coldStartFromSnapshot() error {
 }
 
 // fetchColdStartSnapshot fetches the cold-start snapshot, tolerating a warming
-// daemon (#829) exactly like create/kill: callDaemon already waits out one
+// daemon (#829) exactly like create/kill: withDaemonHTTP already waits out one
 // warm-up window internally, and this retries the whole fetch while the daemon
 // reports the typed "starting" error so a minutes-long restore yields the real
 // session list rather than an empty sidebar that looks like a fresh install
@@ -271,7 +271,7 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 // handleSnapshot applies a fetched daemon snapshot to the projection store and reports
 // whether anything changed (the caller repaints only on a diff). On a fetch
 // error it degrades rather than dropping the sidebar: a warming daemon (#829) is
-// retried on the next tick (callDaemon already waited out the warm-up window),
+// retried on the next tick (withDaemonHTTP already waited out the warm-up window),
 // and any other error is logged and skipped, leaving the last-known sidebar
 // intact. The Snapshot RPC is the TUI's ONLY sync path (#960 PR 4): the daemon is
 // the sole owner/writer of session state, so there is no disk-based reconcile to

@@ -124,7 +124,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		saveStart := time.Now()
 		if err := setPRInfoThroughDaemon(target.Title, m.repoID, prData); err != nil {
 			// In-memory update already applied for the UI; surface the persist
-			// failure but don't drop the badge. callDaemon already waited out the
+			// failure but don't drop the badge. withDaemonHTTP already waited out the
 			// daemon warm-up window (#829), so a residual error is a real failure,
 			// not version skew — there is no TUI write path to fall back to.
 			log.WarningLog.Printf("failed to persist PR info for %q via daemon: %v", target.Title, err)

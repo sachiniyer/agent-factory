@@ -71,7 +71,8 @@ where its sockets are.
 ## Sockets
 
 The daemon listens on two local Unix sockets under `$AGENT_FACTORY_HOME`
-(default `~/.agent-factory`): an internal control socket the TUI and CLI use, and
-the HTTP/JSON socket (`daemon-http.sock`) for the public API. Both are
+(default `~/.agent-factory`): an internal `net/rpc` control socket
+(`daemon.sock`) for CLI/internal use, and an HTTP/JSON socket
+(`daemon-http.sock`) for the public API and TUI (#1592 Phase 2 PR3). Both are
 owner-only (`0600`) and local — never a TCP port, never the network. See the
 [HTTP API guide](../http-api.md) for the transport and auth details.

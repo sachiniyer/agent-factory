@@ -6,18 +6,17 @@ import (
 	"strings"
 )
 
-// The HTTP surface catalog (#1029 PR 5). httpRoutes is the SINGLE SOURCE OF
-// TRUTH describing every route the daemon-hosted HTTP/JSON server serves. Two
-// consumers read it and only it:
+// The HTTP surface catalog (#1029 PR 5). httpRoutes describes the PUBLIC routes
+// exposed via `af api` and the HTTP API docs. Internal routes (TUI-only verbs not
+// intended for external callers) live in internalHTTPRoutes below. Two consumers:
 //
-//   - newHTTPMux (daemon/httpserver.go) registers exactly these routes, so the
-//     server serves the catalog and nothing else.
-//   - HTTPRoutes() exports the same list to the `af api` discovery command, so
-//     the printed/JSON catalog can never drift from what the server registers.
+//   - newHTTPMux (daemon/httpserver.go) registers servedHTTPRoutes() — the public
+//     httpRoutes plus internalHTTPRoutes — so the server serves both sets.
+//   - HTTPRoutes() exports only the public httpRoutes to the `af api` discovery
+//     command, so internal coordination verbs stay out of the advertised surface.
 //
-// A drift guard test (httproutes_test.go) proves the mux serves precisely this
-// set, so adding a route means adding one entry here — the server and the
-// catalog move together by construction.
+// A drift guard test (httproutes_test.go) proves the mux serves precisely
+// servedHTTPRoutes() and that internal routes are served but absent from HTTPRoutes().
 
 // HTTPRoute describes one route of the daemon HTTP/JSON API: its verb, path, a
 // one-line description, and the JSON request-body field names (derived from the

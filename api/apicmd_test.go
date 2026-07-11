@@ -30,11 +30,11 @@ func runAPICmd(t *testing.T, jsonMode bool) string {
 }
 
 // TestAPICmd_ListsEveryRegisteredEndpoint is the command-side drift guard: the
-// human catalog must name EVERY route the HTTP server registers
-// (daemon.HTTPRoutes), so the discovery command can never fall behind the
-// server. The daemon-side TestHTTPRoutes_MatchRegisteredMux proves that same
-// catalog equals the served mux, so the chain is: `af api` == HTTPRoutes ==
-// served routes.
+// human catalog must name every PUBLIC route (daemon.HTTPRoutes). Internal
+// routes (daemon.internalHTTPRoutes) are intentionally excluded from the catalog.
+// The daemon-side TestHTTPRoutes_MatchRegisteredMux proves the mux serves
+// servedHTTPRoutes() (public + internal), and TestHTTPRoutes_InternalRoutesAbsentFromCatalog
+// proves internal routes are not in HTTPRoutes().
 func TestAPICmd_ListsEveryRegisteredEndpoint(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	out := runAPICmd(t, false)

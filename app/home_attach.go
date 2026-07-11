@@ -144,9 +144,9 @@ func (m *home) attachOverlayCallback(title, label, traceSuffix string, remote bo
 	// before the heartbeat's last pause() and leave the instance paused until the
 	// lease expires (Greptile P). runStatusPollResume waits for heartbeatExited
 	// (the heartbeat closes it after its final synchronous pause() returns — and
-	// callDaemon blocks until the daemon has applied that pause) so the resume
+	// the HTTP call blocks until the daemon has applied that pause) so the resume
 	// strictly follows it. This runs on its OWN goroutine so the detach hot path
-	// never blocks on the wait or the RPC — attach/detach responsiveness is the
+	// never blocks on the wait or the HTTP call — attach/detach responsiveness is the
 	// whole point of #1160.
 	close(pauseDone)
 	go runStatusPollResume(resume, title, repoID, heartbeatExited)

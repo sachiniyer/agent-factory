@@ -3,8 +3,9 @@
 The Agent Factory daemon exposes a small JSON API — a 1:1 mirror of the session
 and task operations the `af` CLI performs — over a **local Unix socket**. It is
 the same daemon core (`#960` single-writer model) the TUI and `af sessions` /
-`af tasks` commands already drive, reached over HTTP instead of the internal
-`net/rpc` control socket, so the two surfaces can never diverge.
+`af tasks` commands drive via HTTP. The `net/rpc` control socket (`daemon.sock`)
+remains for internal CLI callers; the TUI uses the HTTP API exclusively
+(#1592 Phase 2 PR3).
 
 This page is a hand-written guide to the transport, auth, and envelope; the
 enumerated endpoint table is generated from the route catalog (see
@@ -18,9 +19,9 @@ af api --json   # the same catalog as JSON, wrapped in the shared {data,error} e
 ```
 
 `af api` is read-only and local: it prints the catalog and the resolved socket
-path but never dials the socket or starts the daemon. Its catalog is derived
-from the daemon's actual route table, so it always matches what the server
-serves.
+path but never dials the socket or starts the daemon. Its catalog lists the
+public routes; the daemon also serves internal routes (e.g., for TUI attach
+coordination) that are intentionally excluded from discovery.
 
 ## Transport & socket path
 
@@ -116,9 +117,9 @@ can take minutes on repos with remote-hook sessions. During that window:
 ## Endpoints
 
 The full, enumerated route table — every method, path, and request-body field —
-is generated from the daemon's route catalog and lives in the
-**[HTTP API reference](reference/api.md)**. It cannot drift from the server:
-the same catalog backs the mux, the `af api` command, and that page. Request-body
+is generated from the daemon's public route catalog and lives in the
+**[HTTP API reference](reference/api.md)**. The table shows the public API;
+the daemon also serves internal routes (not shown) for TUI-only operations. Request-body
 fields are the JSON keys of each RPC request struct; a route with no listed
 fields accepts an empty body (`-d '{}'` or no `-d` at all).
 
