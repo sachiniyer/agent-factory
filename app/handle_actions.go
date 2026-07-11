@@ -231,12 +231,13 @@ func killConfirmMessage(title, warning string, reserved bool) string {
 }
 
 // killInstanceCmd returns a tea.Cmd that performs the actual session teardown
-// off the event loop. The daemon RPC blocks for the whole teardown — for
+// off the event loop. The daemon call blocks for the whole teardown — for
 // remote instances delete_cmd often runs over ssh and takes tens of seconds —
 // which is exactly why this must not run on the Update goroutine (#844). The
 // teardown itself (delete_cmd → tmux kill → worktree removal, #802 ordering)
-// is unchanged: it still goes through daemon.KillSession, which also keeps
-// the title blocked against reuse until the teardown completes.
+// is unchanged: it goes through the killSessionThroughDaemon seam — now the HTTP
+// apiclient's KillSession (#1592 Phase 2 PR3) — which keeps the title blocked
+// against reuse until the teardown completes.
 func (m *home) killInstanceCmd(title string) tea.Cmd {
 	repoID := m.repoID
 	// Capture the kill seam on the event loop, before the goroutine: it is a

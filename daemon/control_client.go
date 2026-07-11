@@ -176,18 +176,14 @@ func CloseTab(req CloseTabRequest) (string, error) {
 	return resp.Name, nil
 }
 
-// SetPRInfo asks the daemon to record (or clear) a session's GitHub PR info.
-func SetPRInfo(req SetPRInfoRequest) error {
-	var resp SetPRInfoResponse
-	if err := callDaemon("SetPRInfo", req, &resp); err != nil {
-		return err
-	}
-	return nil
-}
-
-// The TUI read path is SnapshotWithAlarms (snapshot.go): it carries the session
-// list plus the delivery-failure alarms in one authoritative response (#1238).
-// SnapshotNoSpawn below is the CLI's non-spawning, instances-only read.
+// The TUI's control + read path moved onto the HTTP apiclient in #1592 Phase 2
+// PR3, so the net/rpc client wrappers only the TUI called — SetPRInfo,
+// ImportRemoteHookSessions, PauseStatusPoll, ResumeStatusPoll (here) and
+// ResumeFromLimit / SnapshotWithAlarms (in limit.go / snapshot.go) — are gone.
+// The controlServer handlers stay: the gob control socket still SERVES every
+// verb for CLI/internal callers; only the TUI-only Go client wrappers were
+// removed. SnapshotNoSpawn below remains the CLI's non-spawning, instances-only
+// read.
 
 // ErrDaemonUnavailable signals that a non-spawning daemon read (SnapshotNoSpawn)
 // found no reachable, ready daemon: the control socket is absent/refused or the
@@ -242,30 +238,6 @@ func RestoreSession(req RestoreSessionRequest) (string, error) {
 		return "", err
 	}
 	return resp.WorktreePath, nil
-}
-
-// PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
-// one attached session (#1160). Best-effort from the caller's side: the pause
-// is lease-bounded server-side, so the worst case of a failed call is the
-// daemon keeps polling — exactly the pre-#1160 behavior — never a broken
-// attach or a permanently-blinded daemon.
-func PauseStatusPoll(req PauseStatusPollRequest) error {
-	var resp PauseStatusPollResponse
-	if err := callDaemon("PauseStatusPoll", req, &resp); err != nil {
-		return err
-	}
-	return nil
-}
-
-// ResumeStatusPoll asks the daemon to resume polling a session on a clean
-// detach so its status refreshes on the next tick instead of after the lease
-// expires (#1160).
-func ResumeStatusPoll(req ResumeStatusPollRequest) error {
-	var resp ResumeStatusPollResponse
-	if err := callDaemon("ResumeStatusPoll", req, &resp); err != nil {
-		return err
-	}
-	return nil
 }
 
 // SendPrompt asks the daemon to send a prompt to an existing session.
@@ -333,14 +305,4 @@ func RemoveTask(id string) error {
 func TriggerTask(id string) error {
 	var resp TriggerTaskResponse
 	return callDaemon("TriggerTask", TriggerTaskRequest{ID: id}, &resp)
-}
-
-// ImportRemoteHookSessions asks the daemon to reconcile remote sessions
-// reported by list_cmd into persisted storage.
-func ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest) ([]session.InstanceData, error) {
-	var resp ImportRemoteHookSessionsResponse
-	if err := callDaemon("ImportRemoteHookSessions", req, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Instances, nil
 }

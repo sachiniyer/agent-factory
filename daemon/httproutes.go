@@ -174,10 +174,59 @@ var httpRoutes = []HTTPRoute{
 	},
 }
 
-// HTTPRoutes returns a copy of the HTTP/JSON API catalog for discovery
-// (`af api`). It is a pure, read-only description of the registered routes: it
-// does NOT dial the socket or spawn the daemon. The copy protects the internal
-// table from mutation by callers.
+// internalHTTPRoutes are routes the daemon SERVES over HTTP but deliberately
+// keeps OUT of the public `af api` catalog (#1592 Phase 2 PR3). They exist so
+// the TUI can drop net/rpc entirely and reach every verb it drives over HTTP,
+// without advertising daemon-internal coordination as public API. newHTTPMux
+// registers these alongside httpRoutes, but HTTPRoutes() (the `af api` catalog)
+// returns only httpRoutes, so the discovery surface stays exactly the
+// client-facing session/task ops it promised.
+//
+// ResumeFromLimit is a genuine client-facing session verb (the TUI `c` key); it
+// lands here rather than the public catalog only to hold the catalog steady in
+// this PR — promoting it to httpRoutes is a one-line follow-up. Pause/Resume
+// StatusPoll are attach-coordination infra (best-effort poll leases, #1160)
+// that no CLI user should call, so they belong here permanently.
+var internalHTTPRoutes = []HTTPRoute{
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/ResumeFromLimit",
+		Description:   "Resume a usage-limit-blocked session: re-spawn if needed, re-deliver the pending prompt, clear the limit.",
+		RequestFields: jsonFields(reflect.TypeOf(ResumeFromLimitRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
+	},
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/PauseStatusPoll",
+		Description:   "Pause the daemon's liveness poll for one attached session (best-effort attach coordination).",
+		RequestFields: jsonFields(reflect.TypeOf(PauseStatusPollRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PauseStatusPoll) },
+	},
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/ResumeStatusPoll",
+		Description:   "Resume the daemon's liveness poll for a session on a clean detach.",
+		RequestFields: jsonFields(reflect.TypeOf(ResumeStatusPollRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeStatusPoll) },
+	},
+}
+
+// servedHTTPRoutes is every route newHTTPMux registers: the public catalog plus
+// the internal routes. The mux serves this union; HTTPRoutes() exposes only the
+// public half. Keeping them as one concatenation here means "what is served" has
+// a single definition the drift-guard test locks against.
+func servedHTTPRoutes() []HTTPRoute {
+	out := make([]HTTPRoute, 0, len(httpRoutes)+len(internalHTTPRoutes))
+	out = append(out, httpRoutes...)
+	out = append(out, internalHTTPRoutes...)
+	return out
+}
+
+// HTTPRoutes returns a copy of the PUBLIC HTTP/JSON API catalog for discovery
+// (`af api`). It is a pure, read-only description of the client-facing routes:
+// it does NOT dial the socket or spawn the daemon, and it deliberately excludes
+// internalHTTPRoutes so the advertised surface stays client-facing-only. The
+// copy protects the internal table from mutation by callers.
 func HTTPRoutes() []HTTPRoute {
 	out := make([]HTTPRoute, len(httpRoutes))
 	copy(out, httpRoutes)

@@ -1,10 +1,70 @@
 package app
 
 import (
+	"time"
+
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
+
+// The TUI drives every daemon control + read call over the HTTP API client
+// (#1592 Phase 2 PR3): it no longer touches the net/rpc control client at all.
+// The gob control socket stays for CLI/internal callers; the TUI is now a thin
+// HTTP client. Each seam below builds a fresh apiclient.Client per call — the
+// same per-call dial the net/rpc callDaemon did — and only daemon.EnsureDaemon
+// (a lifecycle concern, transport-agnostic) survives from the old path, to spawn
+// the daemon at cold start exactly as callDaemon's implicit ensure used to.
+
+// daemonHTTPWarmup{Wait,Poll} bound the retry the TUI's HTTP calls tolerate
+// while a freshly-ensured daemon finishes coming up. Two transient conditions
+// need it and both clear inside this window: (1) the daemon reports the #829
+// "still restoring sessions" starting error, and (2) its HTTP socket has not
+// finished binding — the daemon binds daemon-http.sock microseconds AFTER the
+// control socket EnsureDaemon waits for (daemon boot order), so a call fired in
+// that sliver sees a transport refusal. The values mirror the net/rpc callDaemon
+// warm-up (daemonReadyTimeout / a 100ms cadence) so the switch is behavior-
+// preserving.
+const (
+	daemonHTTPWarmupWait = 5 * time.Second
+	daemonHTTPWarmupPoll = 100 * time.Millisecond
+)
+
+// withDaemonHTTP ensures a daemon is running, then invokes fn against a fresh
+// HTTP client, retrying while the daemon is warming (starting error) or its
+// HTTP socket has not yet bound (transport error). It is the HTTP twin of the
+// net/rpc callDaemon: EnsureDaemon spawns the daemon if absent (the TUI relied
+// on callDaemon's implicit ensure to boot the daemon at cold start — spawning is
+// a lifecycle concern, independent of which transport the control calls take),
+// then the call rides daemon-http.sock. A package var so a future integration
+// test can point it at a fake without a real daemon; the unit suite stubs the
+// higher-level *ThroughDaemon seams instead, so this runs only in production.
+var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
+	if err := daemon.EnsureDaemon(); err != nil {
+		return err
+	}
+	c, err := apiclient.New()
+	if err != nil {
+		return err
+	}
+	err = fn(c)
+	deadline := time.Now().Add(daemonHTTPWarmupWait)
+	for httpCallWarming(err) && time.Now().Before(deadline) {
+		time.Sleep(daemonHTTPWarmupPoll)
+		err = fn(c)
+	}
+	return err
+}
+
+// httpCallWarming reports whether an HTTP control error is a transient warm-up
+// condition worth retrying: the daemon's #829 starting error, or a transport
+// failure while its HTTP socket finishes binding. A daemon application error
+// (session not found, invalid repo) comes back as an envelope message — never a
+// TransportError — so it is never retried and surfaces to the caller at once.
+func httpCallWarming(err error) bool {
+	return daemon.IsDaemonStartingErr(err) || apiclient.IsTransportError(err)
+}
 
 type sessionStartRequest struct {
 	Title       string
@@ -17,14 +77,19 @@ type sessionStartRequest struct {
 }
 
 var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartRequest) (*session.Instance, error) {
-	data, err := daemon.CreateSession(daemon.CreateSessionRequest{
-		Title:       req.Title,
-		TitleBase:   req.TitleBase,
-		RepoPath:    req.RepoPath,
-		Program:     req.Program,
-		Prompt:      req.Prompt,
-		AutoYes:     req.AutoYes,
-		ForceRemote: req.ForceRemote,
+	var data *session.InstanceData
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		data, e = c.CreateSession(daemon.CreateSessionRequest{
+			Title:       req.Title,
+			TitleBase:   req.TitleBase,
+			RepoPath:    req.RepoPath,
+			Program:     req.Program,
+			Prompt:      req.Prompt,
+			AutoYes:     req.AutoYes,
+			ForceRemote: req.ForceRemote,
+		})
+		return e
 	})
 	if err != nil {
 		return nil, err
@@ -33,18 +98,32 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 }
 
 var killSessionThroughDaemon = func(title, repoID string) error {
-	return daemon.KillSession(daemon.KillSessionRequest{Title: title, RepoID: repoID})
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		return c.KillSession(daemon.KillSessionRequest{Title: title, RepoID: repoID})
+	})
 }
 
 // archiveSessionThroughDaemon / restoreSessionThroughDaemon route archive and
 // restore verbs through the daemon (the single writer). Package vars so the app
 // test suite can stub them without dialing a real daemon.
 var archiveSessionThroughDaemon = func(title, repoID string) (string, error) {
-	return daemon.ArchiveSession(daemon.ArchiveSessionRequest{Title: title, RepoID: repoID})
+	var path string
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		path, e = c.ArchiveSession(daemon.ArchiveSessionRequest{Title: title, RepoID: repoID})
+		return e
+	})
+	return path, err
 }
 
 var restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
-	return daemon.RestoreSession(daemon.RestoreSessionRequest{Title: title, RepoID: repoID})
+	var path string
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		path, e = c.RestoreSession(daemon.RestoreSessionRequest{Title: title, RepoID: repoID})
+		return e
+	})
+	return path, err
 }
 
 // resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)
@@ -53,7 +132,9 @@ var restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
 // state. A package var so the app test suite can stub it without dialing a real
 // daemon.
 var resumeFromLimitThroughDaemon = func(title, repoID string) error {
-	return daemon.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID})
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		return c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID})
+	})
 }
 
 // triggerTaskThroughDaemon runs a task by ID through the daemon's single shared
@@ -66,7 +147,11 @@ var resumeFromLimitThroughDaemon = func(title, repoID string) error {
 // unconditionally spawned a new session and orphaned the target (#1169). It is a
 // package var so the app test suite can stub the trigger without dialing a real
 // daemon.
-var triggerTaskThroughDaemon = daemon.TriggerTask
+var triggerTaskThroughDaemon = func(taskID string) error {
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		return c.TriggerTask(taskID)
+	})
+}
 
 // addTaskThroughDaemon / updateTaskThroughDaemon / removeTaskThroughDaemon route
 // the TUI's own task CRUD (create in the inline form, edit/toggle/delete in the
@@ -89,9 +174,15 @@ var triggerTaskThroughDaemon = daemon.TriggerTask
 // package globals are race-safe here (no off-loop goroutine reads them, unlike
 // the snapshot fetcher / poll-pause seams).
 var (
-	addTaskThroughDaemon    = daemon.AddTask
-	updateTaskThroughDaemon = daemon.UpdateTask
-	removeTaskThroughDaemon = daemon.RemoveTask
+	addTaskThroughDaemon = func(t task.Task) error {
+		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t) })
+	}
+	updateTaskThroughDaemon = func(t task.Task) error {
+		return withDaemonHTTP(func(c *apiclient.Client) error { return c.UpdateTask(t) })
+	}
+	removeTaskThroughDaemon = func(id string) error {
+		return withDaemonHTTP(func(c *apiclient.Client) error { return c.RemoveTask(id) })
+	}
 )
 
 // pauseStatusPollThroughDaemon / resumeStatusPollThroughDaemon route the TUI's
@@ -107,15 +198,25 @@ var (
 // race). The seams live per-home instead; tests assign a fake to
 // h.pauseStatusPoll / h.resumeStatusPoll directly.
 func pauseStatusPollThroughDaemon(title, repoID string) error {
-	return daemon.PauseStatusPoll(daemon.PauseStatusPollRequest{Title: title, RepoID: repoID})
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		return c.PauseStatusPoll(daemon.PauseStatusPollRequest{Title: title, RepoID: repoID})
+	})
 }
 
 func resumeStatusPollThroughDaemon(title, repoID string) error {
-	return daemon.ResumeStatusPoll(daemon.ResumeStatusPollRequest{Title: title, RepoID: repoID})
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		return c.ResumeStatusPoll(daemon.ResumeStatusPollRequest{Title: title, RepoID: repoID})
+	})
 }
 
 var importRemoteSessionsThroughDaemon = func(repoPath string) ([]session.InstanceData, error) {
-	return daemon.ImportRemoteHookSessions(daemon.ImportRemoteHookSessionsRequest{RepoPath: repoPath})
+	var listed []session.InstanceData
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		listed, e = c.ImportRemoteHookSessions(daemon.ImportRemoteHookSessionsRequest{RepoPath: repoPath})
+		return e
+	})
+	return listed, err
 }
 
 // createShellTabThroughDaemon routes the TUI's `t` (new shell tab) mutation to
@@ -123,15 +224,23 @@ var importRemoteSessionsThroughDaemon = func(repoPath string) ([]session.Instanc
 // persist, returning the resolved tab name. The TUI reflects the new tab locally
 // for instant display via Instance.AttachShellTab.
 var createShellTabThroughDaemon = func(title, repoID string) (string, error) {
-	return daemon.CreateTab(daemon.CreateTabRequest{Title: title, RepoID: repoID, Shell: true})
+	var name string
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		name, e = c.CreateTab(daemon.CreateTabRequest{Title: title, RepoID: repoID, Shell: true})
+		return e
+	})
+	return name, err
 }
 
 // closeTabThroughDaemon routes the TUI's `w` (close tab) mutation to the daemon,
 // which kills the tab's tmux session and persists the shrunk list. The TUI drops
 // the now-dead tab locally via Instance.DropClosedTab.
 var closeTabThroughDaemon = func(title, repoID, tabName string) error {
-	_, err := daemon.CloseTab(daemon.CloseTabRequest{Title: title, RepoID: repoID, TabName: tabName})
-	return err
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		_, e := c.CloseTab(daemon.CloseTabRequest{Title: title, RepoID: repoID, TabName: tabName})
+		return e
+	})
 }
 
 // setPRInfoThroughDaemon routes the TUI's PR-info write (prInfoUpdatedMsg) to the
@@ -139,7 +248,9 @@ var closeTabThroughDaemon = func(title, repoID, tabName string) error {
 // stays TUI-side; only the persisted write moves. The TUI keeps its in-memory
 // SetPRInfo for instant UI feedback.
 var setPRInfoThroughDaemon = func(title, repoID string, info session.PRInfoData) error {
-	return daemon.SetPRInfo(daemon.SetPRInfoRequest{Title: title, RepoID: repoID, PRInfo: info})
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		return c.SetPRInfo(daemon.SetPRInfoRequest{Title: title, RepoID: repoID, PRInfo: info})
+	})
 }
 
 // snapshotThroughDaemon fetches the daemon's authoritative session list for a
@@ -152,7 +263,13 @@ var setPRInfoThroughDaemon = func(title, repoID string, info session.PRInfoData)
 // `go test -parallel`; the fetcher lives per-home instead, and tests assign a
 // fake to home.snapshotFetcher directly (#960 PR 4 race fix).
 func snapshotThroughDaemon(repoID string) (daemon.SnapshotResponse, error) {
-	return daemon.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: repoID})
+	var resp daemon.SnapshotResponse
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		resp, e = c.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: repoID})
+		return e
+	})
+	return resp, err
 }
 
 // allReposSnapshotFetcher returns the daemon's session list across EVERY repo
@@ -161,7 +278,12 @@ func snapshotThroughDaemon(repoID string) (daemon.SnapshotResponse, error) {
 // can inject a fake multi-repo snapshot. It is a plain read — the switch itself
 // still re-scopes through home.snapshotFetcher(m.repoID).
 var allReposSnapshotFetcher = func() ([]session.InstanceData, error) {
-	resp, err := daemon.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: ""})
+	var resp daemon.SnapshotResponse
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		resp, e = c.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: ""})
+		return e
+	})
 	if err != nil {
 		return nil, err
 	}
