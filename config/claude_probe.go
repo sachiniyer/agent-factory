@@ -16,14 +16,19 @@ import (
 )
 
 // aliasOutputRegex extracts the command value from a shell alias-probe line.
-// Each alternative is anchored to a real alias shape so that interactive rc
-// files printing unrelated text cannot poison first-run config (#1003):
-//   - "aliased to ..."    — zsh `which` / bash `type` alias output
+// Every alternative is anchored to a real alias shape at the line start so that
+// interactive rc files printing unrelated text cannot poison first-run config
+// (#1003, #1641):
+//   - "^\S+:\s*aliased to ..."     — zsh `which` builtin ("claude: aliased to …")
+//   - "^\S+\s+is\s+aliased to ..." — bash `type` builtin ("claude is aliased to …")
+//     Both are anchored, so noise like "Tip: git is aliased to /usr/bin/git"
+//     printed before the real alias line no longer captures the wrong path
+//     (#1641).
 //   - "^\S+\s*-> ..."     — a "name -> value" alias line (command name at the
 //     line start before the arrow); the `->` is NOT matched mid-line, so noise
-//     like "Type help -> for assistance" no longer captures garbage
+//     like "Type help -> for assistance" no longer captures garbage (#1003)
 //   - "^[^/=\s]+\s*= ..." — a "name=value" alias assignment at the line start
-var aliasOutputRegex = regexp.MustCompile(`(?:aliased to|^\S+\s*->|^[^/=\s]+\s*=)\s*(.+)`)
+var aliasOutputRegex = regexp.MustCompile(`(?:^\S+:\s*aliased to|^\S+\s+is\s+aliased to|^\S+\s*->|^[^/=\s]+\s*=)\s*(.+)`)
 
 // probeWaitDelay bounds how long the claude shell probe's Output() call keeps
 // waiting for stdout/stderr EOF after the probe shell has exited (or the
