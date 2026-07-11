@@ -116,16 +116,32 @@ func resolveLogPath() string {
 	return filepath.Join(dir, "agent-factory.log")
 }
 
-// LogFilePath returns the production agent-factory.log path — the file the
-// daemon and TUI write to — resolved from $AGENT_FACTORY_HOME then the
-// os.UserConfigDir default, exactly like resolveLogPath's env/default branches
-// but WITHOUT the test-scratch branch, the test-only override, and any
-// directory-creating side effect. It is read-only tooling support (e.g. `af
-// bug-report` locating the log to tail); it deliberately never returns the
-// temp test log so a bug report always names the real log even when built by a
-// test binary. Returns "" only when neither a home override nor UserConfigDir
-// can be resolved.
+// LogFilePath returns the agent-factory.log path for read-only tooling (e.g.
+// `af bug-report` locating the log to tail, `af doctor` checking the log
+// directory).
+//
+// Once Initialize has run, it returns the exact path logging resolved and is
+// writing to — resolveLogPath's cached result in logFileName. This is the
+// single source of truth: LogFilePath cannot diverge from where logs actually
+// land, no matter which resolveLogPath branch won (#1604). Before #1604 this
+// function re-derived the path from $AGENT_FACTORY_HOME without repeating
+// resolveLogPath's MkdirAll success check, so when the home override resolved
+// but could not be created — resolveLogPath falling back to the UserConfigDir
+// default — a bug report tailed the dead override path and collected no logs.
+//
+// Before Initialize (logFileName still ""), it resolves statically from
+// $AGENT_FACTORY_HOME then the os.UserConfigDir default, with no test-scratch
+// branch, no test-only override, and no directory-creating side effect — so a
+// pre-init bug report still names the real log even when built by a test
+// binary. Returns "" only when neither a home override nor UserConfigDir can be
+// resolved.
 func LogFilePath() string {
+	mu.Lock()
+	actual := logFileName
+	mu.Unlock()
+	if actual != "" {
+		return actual
+	}
 	if home := os.Getenv("AGENT_FACTORY_HOME"); home != "" {
 		if dir, ok := expandTilde(home); ok {
 			return filepath.Join(dir, "agent-factory.log")
