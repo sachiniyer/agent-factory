@@ -1,7 +1,7 @@
 package session
 
 import (
-	"errors"
+	"context"
 	"io"
 )
 
@@ -65,16 +65,21 @@ type AgentServer interface {
 	// underlying channel as SendPrompt.
 	TapEnter()
 
-	// Subscribe returns a fan-out read of the raw PTY byte stream from cursor
-	// `since` (0 = from the buffer tail), so a reconnecting client replays the gap.
-	// Data plane — wired by the WS PTY broker in PR5; the local agent-server returns
-	// ErrDataPlaneUnwired until then.
+	// Subscribe returns a fan-out read of the session's PTY stream from cursor
+	// `since` (0 = from the ring-buffer tail / live), so a reconnecting client
+	// replays the gap it missed. The local agent-server (PR5) drives a clientless
+	// tmux channel — pipe-pane for output capture — and fans the bytes to every
+	// subscriber through a bounded ring buffer; a subscriber that falls behind or
+	// dies is dropped without touching the PTY (§6). Read-write: Input/Resize below
+	// are accepted from every subscriber (multi-writer, no lease).
 	Subscribe(since Seq) (PTYSubscription, error)
 	// Input writes raw bytes to the PTY (the multi-writer input path that subsumes
-	// the old tmux-shaped SendKeys). Data plane — wired in PR5.
+	// the old tmux-shaped SendKeys). For the local runtime it is a clientless tmux
+	// send-keys, accepted from any subscriber.
 	Input(b []byte) error
-	// Resize sets the PTY size; last-resize-wins across subscribers. Data plane —
-	// wired in PR5.
+	// Resize sets the PTY size; last-resize-wins across subscribers. The local
+	// runtime drives a clientless tmux resize-window and broadcasts an
+	// authoritative size echo to every subscriber so their emulators reflow (§6.2).
 	Resize(rows, cols uint16) error
 
 	// Kill terminates the session and releases its backing resources.
@@ -117,21 +122,43 @@ type Observation struct {
 	Content string
 }
 
-// PTYSubscription is the read side of a session's raw PTY byte stream plus a
-// sequence cursor for replay (#1592 Phase 2). The WS PTY broker (PR5) implements
-// it; the local agent-server returns ErrDataPlaneUnwired from Subscribe until
-// then, so there is no concrete implementer in this PR.
+// PTYSubscription is one subscriber's read side of a session's PTY stream
+// (#1592 Phase 2 PR5), fanned out from the local agent-server's per-session ring
+// buffer. It is event-oriented rather than a bare byte reader so a single
+// consumer goroutine (the daemon's WS writer) can multiplex the two things that
+// travel to a client on one connection — raw output bytes and the authoritative
+// resize echo — without a second concurrent writer on the socket.
 type PTYSubscription interface {
-	io.ReadCloser
-	// Seq reports the cursor of the next byte to be read, so a client that
-	// reconnects can resume with Subscribe(since).
+	// NextEvent blocks until the next stream event (output bytes or a resize
+	// echo), ctx cancellation, or Close. It returns io.EOF once the stream ends
+	// (the session's PTY vanished or the broker closed). A client that reconnects
+	// resumes from Seq() via Subscribe(since).
+	NextEvent(ctx context.Context) (PTYEvent, error)
+	// Seq reports the cursor of the next output byte this subscriber will read, so
+	// a client that reconnects can resume the gap with Subscribe(since).
 	Seq() Seq
+	io.Closer
 }
 
-// ErrDataPlaneUnwired is returned by the local agent-server's data-plane methods
-// (Subscribe/Input/Resize) in Phase 2 PR4: the interface is defined and the
-// observation/delivery paths route through it, but the raw-PTY streaming plane is
-// built on top in PR5 (the WS broker + clientless tmux fan-out). It is a distinct
-// sentinel so PR5 can assert callers handle it and delete it once the plane is
-// wired.
-var ErrDataPlaneUnwired = errors.New("agent-server data plane not wired yet (Phase 2 PR5)")
+// PTYEventKind discriminates a PTYEvent between output bytes and a resize echo.
+type PTYEventKind int
+
+const (
+	// PTYData carries verbatim PTY output bytes (Data), mapped to an OpPTYOut wire
+	// frame by the WS broker.
+	PTYData PTYEventKind = iota
+	// PTYResize carries the authoritative last-resize-wins size (Rows/Cols),
+	// mapped to a resize control frame so every subscriber's emulator reflows.
+	PTYResize
+)
+
+// PTYEvent is one event delivered to a subscriber: either output bytes or the
+// authoritative resize echo, selected by Kind.
+type PTYEvent struct {
+	Kind PTYEventKind
+	// Data is the verbatim PTY output, valid only when Kind == PTYData.
+	Data []byte
+	// Rows/Cols are the authoritative size, valid only when Kind == PTYResize.
+	Rows uint16
+	Cols uint16
+}

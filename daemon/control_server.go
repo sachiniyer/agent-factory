@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -116,6 +118,7 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 		return err
 	}
 	resp.OK = true
+	s.manager.publishEvent(agentproto.EventTaskCreated, req.Task)
 	return nil
 }
 
@@ -127,6 +130,7 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 		return err
 	}
 	resp.OK = true
+	s.manager.publishEvent(agentproto.EventTaskUpdated, req.Task)
 	return nil
 }
 
@@ -138,6 +142,7 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 		return err
 	}
 	resp.OK = true
+	s.manager.publishEvent(agentproto.EventTaskRemoved, task.Task{ID: req.ID})
 	return nil
 }
 
@@ -194,6 +199,7 @@ func (s *controlServer) CreateSession(req CreateSessionRequest, resp *CreateSess
 		return err
 	}
 	resp.Instance = data
+	s.manager.publishEvent(agentproto.EventSessionCreated, data)
 	return nil
 }
 
@@ -264,6 +270,7 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 		return err
 	}
 	resp.OK = true
+	s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{Title: req.Title})
 	return nil
 }
 
@@ -280,6 +287,7 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
+	s.manager.publishEvent(agentproto.EventSessionArchived, session.InstanceData{Title: req.Title})
 	return nil
 }
 
@@ -296,6 +304,7 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
+	s.manager.publishEvent(agentproto.EventSessionRestored, session.InstanceData{Title: req.Title})
 	return nil
 }
 
@@ -312,6 +321,7 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
+	s.manager.publishEvent(agentproto.EventSessionRestored, session.InstanceData{Title: req.Title})
 	return nil
 }
 

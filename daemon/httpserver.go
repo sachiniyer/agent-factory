@@ -85,7 +85,10 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 
 	cs := &controlServer{manager: manager, scheduler: scheduler, watchers: watchers}
 	srv := &http.Server{
-		Handler:           newHTTPMux(cs),
+		// The mux is wrapped in the auth/CORS seam (#1592 Phase 2 PR5): a no-op
+		// token extraction + permissive CORS today, the drop-in point for Phase 3's
+		// TCP+TLS+token enforcement without reshaping any route.
+		Handler:           withAuth(newHTTPMux(cs)),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 
@@ -121,6 +124,17 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	for _, rt := range servedHTTPRoutes() {
 		mux.HandleFunc(rt.Path, rt.handler(cs))
 	}
+
+	// WS data plane (#1592 Phase 2 PR5): the PTY stream broker + its stream-info
+	// indirection, and the events-plane fan-out. These are NOT REST/RPC mirrors —
+	// they upgrade to WebSockets — so they live outside servedHTTPRoutes (the `af
+	// api` RPC catalog) and register here with method+path patterns (a non-GET to
+	// a stream path is a 405 from the mux). They are DARK in Phase 2: nothing in
+	// the TUI consumes them yet (PR6 wires the TUI), but the routes exist and ride
+	// the same auth/CORS seam startHTTPServer wraps the mux in.
+	mux.HandleFunc("GET /v1/sessions/{id}/stream", cs.streamHandler)
+	mux.HandleFunc("GET /v1/sessions/{id}/stream-info", cs.streamInfoHandler)
+	mux.HandleFunc("GET /v1/events", cs.eventsHandler)
 
 	// Catch-all: any other path is an unknown route → 404 with the envelope.
 	// ServeMux routes the longest prefix match, so a real route above always

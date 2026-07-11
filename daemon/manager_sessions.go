@@ -195,6 +195,22 @@ func shellQuoteArg(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
+// agentServerForStream resolves a session (by title, with optional repoID) to
+// its cached agent-server for the WS PTY broker (#1592 Phase 2 PR5). It reuses
+// findSession — the same lookup SendPrompt uses — so a session absent from memory
+// is restored and tracked exactly once, and the returned server is the tracked
+// instance's cached singleton whose ring buffer/subscribers persist.
+func (m *Manager) agentServerForStream(title, repoID string) (session.AgentServer, error) {
+	instance, _, _, err := m.findSession(title, repoID)
+	if err != nil {
+		return nil, err
+	}
+	if instance == nil {
+		return nil, fmt.Errorf("session %q not found", title)
+	}
+	return instance.AgentServer(), nil
+}
+
 func (m *Manager) findSession(title, repoID string) (*session.Instance, string, *session.InstanceData, error) {
 	if title == "" {
 		return nil, "", nil, fmt.Errorf("session title is required")

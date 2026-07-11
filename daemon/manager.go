@@ -83,6 +83,13 @@ type Manager struct {
 	// can never permanently blind the daemon.
 	pausedMu    sync.Mutex
 	pausedPolls map[string]time.Time
+
+	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/
+	// task mutation the daemon owns publishes here, and GET /v1/events streams it
+	// to clients. On the Manager (not a controlServer) because both transports
+	// mutate through this one Manager, so a single hub captures every change.
+	// Immutable after construction; the hub is internally synchronized.
+	events *eventsHub
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -126,6 +133,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		limitResumeStates:   make(map[string]*limitResumeState),
 		instanceOpLocks:     make(map[string]*sync.Mutex),
 		pausedPolls:         make(map[string]time.Time),
+		events:              newEventsHub(),
 	}, nil
 }
 

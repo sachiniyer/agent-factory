@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -105,11 +106,16 @@ func (m *Manager) persistPollChange(repoID string, instance *session.Instance, b
 	}
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
-	err := persistInstanceData(repoID, instance.ToInstanceData())
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
 	repoStartLock.Unlock()
 	if err != nil {
 		log.WarningLog.Printf("daemon failed to persist status for %q: %v", instance.Title, err)
 	}
+	// Push the change onto the events plane (#1592 PR5): this is the single choke
+	// point every liveness/limit transition already flows through, so one publish
+	// here covers session.updated without threading it through each caller.
+	m.publishEvent(agentproto.EventSessionUpdated, data)
 }
 
 // This file is the daemon side of the usage-limit manual-retry action (#1146

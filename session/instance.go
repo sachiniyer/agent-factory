@@ -166,6 +166,25 @@ type Instance struct {
 	Tabs []*Tab
 	// gitWorktree is the git worktree for the instance.
 	gitWorktree *git.GitWorktree
+
+	// agentSrv is the cached per-instance AgentServer (#1592 Phase 2 PR5). Cached
+	// rather than reconstructed per call because its data plane holds stateful
+	// pieces — the PTY output ring buffer and the fan-out subscriber set — that
+	// must persist across calls; a fresh server each call would drop subscribers
+	// and lose the replay buffer. Lazily built by AgentServer(), guarded by
+	// agentSrvMu (a dedicated mutex, not i.mu, so building the server never
+	// contends with the session-state fields i.mu guards).
+	agentSrv   *localAgentServer
+	agentSrvMu sync.Mutex
+}
+
+// agentTmuxSession returns the instance's agent-tab tmux session, or nil when the
+// instance is not started or is remote. It is the clientless data plane's binding
+// point (#1592 PR5); it takes i.mu, so callers must not already hold it.
+func (i *Instance) agentTmuxSession() *tmux.TmuxSession {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.tmuxLocked()
 }
 
 // tmuxLocked returns the agent tab's tmux session, or nil when the instance has

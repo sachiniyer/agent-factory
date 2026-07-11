@@ -1,5 +1,10 @@
 package session
 
+import (
+	"fmt"
+	"sync"
+)
+
 // localAgentServer is the in-process AgentServer for the local runtime (#1592
 // Phase 2 PR4): the agent runs as a tmux session on the daemon's own machine, so
 // this "server" is a thin in-process facade that drives that tmux session
@@ -12,20 +17,30 @@ package session
 // HasUpdated/TapEnter) could be deleted with the daemon routed here — the seam is
 // the AgentServer interface, not a second set of pass-through methods.
 //
-// It is stateless (holds only the instance) and constructed on demand by
-// Instance.AgentServer(); the stateful pieces — the PTY ring buffer and the
-// fan-out subscriber set — arrive with the WS broker in PR5, at which point the
-// agent-server becomes a cached per-instance singleton.
+// As of PR5 it is a CACHED per-instance singleton (Instance.AgentServer memoizes
+// it): its data plane owns the stateful pieces — the PTY output ring buffer and
+// the fan-out subscriber set (ptyBroker) — which a per-call throwaway would drop.
+// The broker is itself lazy: it is built (and its clientless tmux capture
+// started) on the first Subscribe/Input/Resize and torn down on Kill.
 type localAgentServer struct {
 	inst *Instance
+
+	mu     sync.Mutex
+	broker *ptyBroker
 }
 
-// AgentServer returns the agent-server for this instance's runtime (#1592 Phase
-// 2). The daemon speaks to a session ONLY through this interface, so its
-// observation/delivery paths never assume the session is local tmux. Local today;
-// a per-runtime factory selects container/ssh agent-servers in Phase 4.
+// AgentServer returns the cached agent-server for this instance's runtime (#1592
+// Phase 2). The daemon speaks to a session ONLY through this interface, so its
+// observation/delivery paths never assume the session is local tmux. Cached so
+// the data-plane ring buffer and subscribers persist across calls. Local today; a
+// per-runtime factory selects container/ssh agent-servers in Phase 4.
 func (i *Instance) AgentServer() AgentServer {
-	return &localAgentServer{inst: i}
+	i.agentSrvMu.Lock()
+	defer i.agentSrvMu.Unlock()
+	if i.agentSrv == nil {
+		i.agentSrv = &localAgentServer{inst: i}
+	}
+	return i.agentSrv
 }
 
 var _ AgentServer = (*localAgentServer)(nil)
@@ -75,20 +90,58 @@ func (s *localAgentServer) TapEnter() {
 	s.inst.backend.TapEnter(s.inst)
 }
 
-// --- data plane: wired in PR5 (WS PTY broker + clientless tmux fan-out) ---
+// --- data plane: WS PTY broker + clientless tmux fan-out (#1592 PR5) ---
 
-func (s *localAgentServer) Subscribe(Seq) (PTYSubscription, error) {
-	return nil, ErrDataPlaneUnwired
+// ensureBroker lazily builds the per-session ptyBroker bound to the instance's
+// clientless tmux channel. It errors when the instance has no local PTY (not
+// started, or a remote runtime with no agent tmux session) rather than panicking.
+func (s *localAgentServer) ensureBroker() (*ptyBroker, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.broker != nil {
+		return s.broker, nil
+	}
+	ts := s.inst.agentTmuxSession()
+	if ts == nil {
+		return nil, fmt.Errorf("session %q has no local PTY to stream", s.inst.Title)
+	}
+	s.broker = newPTYBroker(newTmuxClientlessChannel(ts))
+	return s.broker, nil
 }
 
-func (s *localAgentServer) Input([]byte) error {
-	return ErrDataPlaneUnwired
+func (s *localAgentServer) Subscribe(since Seq) (PTYSubscription, error) {
+	br, err := s.ensureBroker()
+	if err != nil {
+		return nil, err
+	}
+	return br.subscribe(since)
 }
 
-func (s *localAgentServer) Resize(uint16, uint16) error {
-	return ErrDataPlaneUnwired
+func (s *localAgentServer) Input(b []byte) error {
+	br, err := s.ensureBroker()
+	if err != nil {
+		return err
+	}
+	return br.input(b)
+}
+
+func (s *localAgentServer) Resize(rows, cols uint16) error {
+	br, err := s.ensureBroker()
+	if err != nil {
+		return err
+	}
+	return br.resize(rows, cols)
 }
 
 func (s *localAgentServer) Kill() error {
+	// Tear the data plane down first so the clientless capture stops and every
+	// subscriber's NextEvent returns io.EOF, then kill the underlying session.
+	s.mu.Lock()
+	br := s.broker
+	s.broker = nil
+	s.mu.Unlock()
+	if br != nil {
+		br.close()
+	}
 	return s.inst.backend.Kill(s.inst)
 }
