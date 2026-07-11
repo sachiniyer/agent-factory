@@ -321,44 +321,6 @@ func TestE2ELocalBackendStillWorks(t *testing.T) {
 	assert.Equal(t, "local", instance.GetBackend().Type())
 }
 
-// TestE2EBackendResolutionWithConfig verifies that backendForPath reads
-// the repo config and returns the correct backend type.
-func TestE2EBackendResolutionWithConfig(t *testing.T) {
-	afHome := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", afHome)
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	runGit(t, repoDir, "config", "--local", "user.email", "test@res.com")
-	runGit(t, repoDir, "config", "--local", "user.name", "Res Test")
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "f.txt"), []byte("x"), 0644))
-	runGit(t, repoDir, "add", "f.txt")
-	runGit(t, repoDir, "commit", "-m", "init")
-
-	// Without config → local
-	b, err := backendForPath(repoDir)
-	require.NoError(t, err)
-	assert.Equal(t, "local", b.Type())
-
-	// Add remote_hooks config
-	repo, err := config.RepoFromPath(repoDir)
-	require.NoError(t, err)
-	cfg := &config.RepoConfig{
-		RemoteHooks: &config.RemoteHooks{
-			LaunchCmd: "/bin/echo",
-			ListCmd:   "/bin/echo",
-			AttachCmd: "/bin/echo",
-			DeleteCmd: "/bin/echo",
-		},
-	}
-	require.NoError(t, config.SaveRepoConfig(repo.ID, cfg))
-
-	// With config → remote
-	b, err = backendForPath(repoDir)
-	require.NoError(t, err)
-	assert.Equal(t, "remote", b.Type())
-}
-
 // TestE2EBackendResolutionRejectsEmptyHookCommands is the resolution-layer
 // regression test for #738: a remote_hooks config with an empty required
 // command string must fail fast at backend resolution with an actionable error
@@ -389,12 +351,7 @@ func TestE2EBackendResolutionRejectsEmptyHookCommands(t *testing.T) {
 	}
 	require.NoError(t, config.SaveRepoConfig(repo.ID, cfg))
 
-	_, err = backendForPath(repoDir)
-	require.Error(t, err, "resolution must reject an empty launch_cmd")
-	assert.Contains(t, err.Error(), "launch_cmd",
-		"error must name the offending field so the user can fix the config")
-
-	// loadHookBackendForPath shares the same guard.
+	// loadHookBackendForPath must reject an empty launch_cmd.
 	_, err = loadHookBackendForPath(repoDir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "launch_cmd")
@@ -607,8 +564,8 @@ func TestE2ERemoteHooksRelativePathsLinkedWorktree(t *testing.T) {
 	assert.Empty(t, readLineStateFile(t, stateFile))
 }
 
-// TestE2EBackendResolutionWithInRepoConfig verifies that backendForPath reads
-// the in-repo .agent-factory/config.json (#800) and that it shadows the
+// TestE2EBackendResolutionWithInRepoConfig verifies that loadHookBackendForPath
+// reads the in-repo .agent-factory/config.json (#800) and that it shadows the
 // legacy per-repo location.
 func TestE2EBackendResolutionWithInRepoConfig(t *testing.T) {
 	afHome := t.TempDir()
@@ -626,10 +583,6 @@ func TestE2EBackendResolutionWithInRepoConfig(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, config.InRepoConfigDirName), 0755))
 	require.NoError(t, os.WriteFile(config.InRepoConfigPath(repoDir),
 		[]byte(`{"remote_hooks": {"launch_cmd": "/bin/echo in-repo", "list_cmd": "/bin/echo", "attach_cmd": "/bin/echo", "delete_cmd": "/bin/echo"}}`), 0644))
-
-	b, err := backendForPath(repoDir)
-	require.NoError(t, err)
-	require.Equal(t, "remote", b.Type())
 
 	// A conflicting legacy config is shadowed by the in-repo file.
 	repo, err := config.RepoFromPath(repoDir)
