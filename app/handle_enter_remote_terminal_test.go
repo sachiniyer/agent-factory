@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -152,4 +153,91 @@ func TestHandleEnter_TerminalTabRemoteDetachEmitsReset(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHandleEnter_RemotePanePreviewTriggersFullScreenAttach is the regression
+// guard for issue #1601. Enter that commits a sidebar tab-row PREVIEW whose
+// target is a remote (non-embeddable) session must, on the FIRST press, both
+// commit the preview AND fire the full-screen attach — mirroring the
+// focused-pane and tree Enter paths.
+//
+// The bug: handleEnter's panePreviewTxn branch short-circuited with `||
+// liveSessionName(...) == ""`, returning after only committing the preview for
+// a remote target. enterPane already routes non-embeddable panes to
+// handleEnterPane's full-screen attach, so the short-circuit skipped it and
+// forced the user to press Enter (or `o`) a second time. Dropping the clause
+// lets enterPane run: an embeddable tab enters interactive mode in place, a
+// remote one attaches full-screen on the first Enter.
+//
+// This drives the real key dispatch and observes the strongest side effect of a
+// remote full-screen attach+detach: the #845 terminal mode re-assert. On the
+// pre-fix code the branch returns before enterPane, no attach starts, the reset
+// writer stays empty, and runAttachTransitionCmd returns nil — so this test
+// fails without the fix.
+func TestHandleEnter_RemotePanePreviewTriggersFullScreenAttach(t *testing.T) {
+	resetDetachWatchdog(t)
+
+	h := newTestHome(t)
+	// Skip the first-time attach help overlay so the deferred attach callback
+	// runs synchronously inside handleEnter (see showHelpScreen, app/help.go).
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInstanceAttach{}.mask()))
+
+	// Owner pane: a plain local instance whose pane hosts the preview.
+	owner := instanceWithFakeBackend(t, "owner")
+	owner.AddTabForTest("agent", session.TabKindAgent)
+	h.store.AddInstance(owner)
+
+	// Preview target: a REMOTE (non-embeddable) instance — liveSessionName == ""
+	// for its active tab, so committing the preview must fall through to the
+	// full-screen attach rather than an in-place interactive embed.
+	remote := instanceWithFakeBackend(t, "remote-inst")
+	remote.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
+	remote.SetStatusForTest(session.Running)
+	remote.AddTabForTest("agent", session.TabKindAgent)
+	h.store.AddInstance(remote)
+
+	resizeHome(h, 200, 40)
+
+	// Open (and focus) the owner instance's pane, then move the sidebar cursor
+	// onto the remote instance so its row becomes a live preview in the owner
+	// pane — the pane preview transaction Enter will commit.
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	pressKey(t, h, "s")
+	require.Equal(t, 1, h.store.NumOpenPanes(), "precondition: the owner pane must be open")
+
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn, "precondition: selecting the remote instance must open a preview")
+	require.Same(t, remote, h.panePreviewTxn.target.instance, "precondition: the preview must target the remote instance")
+	require.Equal(t, "", liveSessionName(remote, h.panePreviewTxn.target.tab),
+		"precondition: the remote target must be non-embeddable (liveSessionName == \"\")")
+
+	// Drive the attach lifecycle hermetically: the swapped callback forwards the
+	// real `remote` flag but detaches immediately (a pre-closed channel), and the
+	// remote mode re-assert lands in a buffer instead of the test's terminal.
+	var out bytes.Buffer
+	swapRemoteDetachResetWriter(t, &out)
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
+		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
+			ch := make(chan struct{})
+			close(ch) // detach immediately, synchronously, no real PTY
+			return ch, nil
+		})
+	})
+
+	// FIRST Enter, via the real key dispatch.
+	model, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	require.Nil(t, model.(*home).panePreviewTxn,
+		"Enter must commit (clear) the pane preview transaction")
+
+	cmd = runAttachTransitionCmd(t, h, cmd)
+	endDetachWatchdog()
+
+	require.NotNil(t, cmd,
+		"the FIRST Enter must fire the full-screen attach — not require a second Enter/`o` (#1601)")
+	require.Equal(t, remoteDetachTerminalReassert, out.String(),
+		"the first Enter must run the remote full-screen attach+detach lifecycle, "+
+			"which re-asserts the TUI's terminal modes (#845); an empty buffer means "+
+			"the attach never fired (the pre-#1601 early return)")
 }

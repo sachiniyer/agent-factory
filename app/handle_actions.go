@@ -593,8 +593,16 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		// preview only exists while the tree cursor sits on a tab row), so this
 		// Enter selects/commits — it must NOT type into the agent (nil replay),
 		// exactly like the tree select path below (#1576).
+		//
+		// enterPane routes the committed target correctly for either kind: an
+		// embeddable tab enters interactive mode in place, while a remote /
+		// non-embeddable tab (liveSessionName == "") falls back to
+		// handleEnterPane's full-screen attach. Don't short-circuit the remote
+		// case here — that skipped the attach and forced a second Enter/`o`
+		// (#1601); letting enterPane run makes the first Enter attach, matching
+		// the focused-pane and tree paths.
 		p, commitCmd := m.commitPanePreviewReplace()
-		if p == nil || liveSessionName(p.Instance(), p.Tab()) == "" {
+		if p == nil {
 			return m, commitCmd
 		}
 		mod, interactCmd := m.enterPane(p, nil)
