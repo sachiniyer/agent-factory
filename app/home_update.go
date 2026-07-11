@@ -171,7 +171,15 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
 		if changed {
+			// A snapshot poll is a background refresh, not a user action, so its
+			// selectionChanged must NOT steal focus onto the selected instance's
+			// already-open pane — the same guard previewTickMsg uses (#1558). The
+			// pane close/rebind for out-of-band tab/session removals already ran in
+			// handleSnapshot above; this selectionChanged only re-derives the
+			// preview, which is exactly the focus-steal we gate here (#1603).
+			m.inPreviewTick = true
 			cmds = append(cmds, m.selectionChanged())
+			m.inPreviewTick = false
 		}
 		return m, tea.Batch(cmds...)
 	case taskTriggeredMsg:

@@ -204,13 +204,15 @@ type home struct {
 	// panePreviewSuppression remembers a user-dismissed preview target so the
 	// 100ms preview tick does not recreate it until the sidebar target changes.
 	panePreviewSuppression *panePreviewSuppression
-	// inPreviewTick is set only while the idle 100ms preview tick drives
-	// selectionChanged. It gates the one side effect that must never fire from a
-	// background refresh: pulling focus onto the selected instance's already-open
-	// pane. Without the gate the tick yanked focus back to that pane the moment
-	// the user Tabbed off it, so the focus ring could never traverse the other
-	// panes or rest on the tree (#1558). User-driven selectionChanged calls (nav,
-	// the open-or-focus verb, reconcile) leave it false and keep that behavior.
+	// inPreviewTick is set while a BACKGROUND REFRESH drives selectionChanged —
+	// the idle 100ms preview tick (#1558) or a daemon snapshot poll (#1603). It
+	// gates the one side effect that must never fire from a background refresh:
+	// pulling focus onto the selected instance's already-open pane. Without the
+	// gate the tick yanked focus back to that pane the moment the user Tabbed off
+	// it, so the focus ring could never traverse the other panes or rest on the
+	// tree (#1558); a snapshot poll did the same on any out-of-band change
+	// (#1603). User-driven selectionChanged calls (nav, the open-or-focus verb)
+	// leave it false and keep the focus-steal behavior.
 	inPreviewTick bool
 	// -- Live embedded terminal (#1089 PR 1, read-only proof path) --
 	//

@@ -2,7 +2,9 @@ package app
 
 import (
 	"testing"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/require"
 )
@@ -86,4 +88,63 @@ func TestPane_IdleTickDoesNotStealFocusFromTree(t *testing.T) {
 		require.Equal(t, layout.RegionTree, h.ring.Active(),
 			"the idle preview tick must leave focus on the tree, not steal it to the selected pane")
 	}
+}
+
+// TestPane_SnapshotFetchDoesNotStealFocusFromOtherPane is the snapshot-poll twin
+// of #1558 (#1603): a background daemon snapshot poll is a background refresh too,
+// so the selectionChanged it fires on any out-of-band change (new/removed session,
+// tab set changed) must NOT steal focus onto the selected instance's already-open
+// pane. Before the fix, snapshotFetchedMsg ran selectionChanged ungated, so a
+// snapshot arriving while the user was focused in another pane yanked focus back
+// onto the selected instance's open pane.
+//
+// The message is driven through Update (not handleSnapshot directly) so the real
+// snapshotFetchedMsg wiring runs exactly once — a second handleSnapshot on the
+// same data would report changed==false and never reach the gated branch.
+func TestPane_SnapshotFetchDoesNotStealFocusFromOtherPane(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+	gamma := h.store.GetInstanceByTitle("gamma")
+
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+
+	// Open alpha's agent tab in pane1.
+	_ = openTestPane(t, h, alpha, 0)
+	// Open beta's agent tab in pane2.
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	pane2 := openTestPane(t, h, beta, 0)
+
+	// Select alpha (already open in pane1) — a user-driven selectionChanged, so
+	// the open-or-focus verb (#1493) focuses pane1.
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+
+	// The user then manually focuses pane2 (beta), away from the selection.
+	h.focusRegion(layout.PaneRegion(pane2.ID()))
+	require.Equal(t, layout.PaneRegion(pane2.ID()), h.ring.Active(),
+		"user manually focused pane2 (beta)")
+	require.Equal(t, "alpha", h.sidebar.GetSelectedInstance().Title,
+		"selection rests on alpha (open in pane1)")
+
+	// A background snapshot poll reports a new session "delta" — an out-of-band
+	// change that reconciles to changed==true and fires selectionChanged.
+	snap := snapshotFetchedMsg{
+		data: []session.InstanceData{
+			alpha.ToInstanceData(),
+			beta.ToInstanceData(),
+			gamma.ToInstanceData(),
+			{Title: "delta", CreatedAt: time.Now()},
+		},
+		repoID: h.repoID,
+	}
+	_, _ = h.Update(snap)
+
+	require.NotNil(t, h.store.GetInstanceByTitle("delta"),
+		"the snapshot reconciled the new session (changed==true, gated branch taken)")
+	require.Equal(t, layout.PaneRegion(pane2.ID()), h.ring.Active(),
+		"background snapshot reconciliation must not steal focus from pane2 (beta) to pane1 (alpha)")
 }
