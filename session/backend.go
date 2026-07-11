@@ -50,6 +50,14 @@ type Capabilities struct {
 type Backend interface {
 	// Start initialises the session. When firstTimeSetup is true a brand-new
 	// session is created; otherwise an existing one is restored from storage.
+	//
+	// Each backend implements Start as two internal phases (#1592 Phase 1 PR4):
+	// a PROVISION step that establishes WHERE the agent runs (the local git
+	// worktree, or the remote workspace via launch_cmd) and a LAUNCH step that
+	// starts WHAT runs in it (the tmux/PTY/agent process and its tabs). The
+	// boundary is kept internal for now — Start is still the only interface
+	// entry point — but it prepares the backend for the future agent-server
+	// "provision-and-expose" model, where the two halves are driven separately.
 	Start(instance *Instance, firstTimeSetup bool) error
 
 	// Kill terminates the session and cleans up all associated resources.

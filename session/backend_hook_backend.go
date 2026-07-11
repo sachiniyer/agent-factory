@@ -39,7 +39,31 @@ func (b *HookBackend) Capabilities() Capabilities {
 	}
 }
 
+// Start brings a remote hook session up in two explicit phases (#1592 Phase 1
+// PR4): provision establishes the remote WORKSPACE (a fresh create runs
+// launch_cmd to allocate the remote session and records its metadata; a restore
+// verifies via list_cmd that the previously-allocated remote session still
+// exists), then launch starts WHAT drives it locally (the attach/preview process
+// via ensurePTY, the tab model, and the started flag). The split is
+// behavior-preserving: Start = provision then launch reproduces the pre-split
+// Start exactly (same order, side effects, and errors), and it mirrors the local
+// backend's provision/launch seam so the future agent-server model can swap the
+// provision half (spin up an off-box workspace) without touching launch.
 func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
+	if err := b.provision(i, firstTimeSetup); err != nil {
+		return err
+	}
+	return b.launch(i, firstTimeSetup)
+}
+
+// provision establishes the remote workspace WITHOUT starting the local
+// preview/attach process (#1592 Phase 1 PR4). A fresh create runs launch_cmd to
+// allocate the remote session and records its metadata (remoteMeta + Branch); a
+// restore only verifies that the previously-allocated remote session is still
+// alive. It sets neither the started flag nor the tab model — those belong to
+// launch — so a provision failure returns before any of launch's work, exactly
+// as the pre-split Start's early error returns did.
+func (b *HookBackend) provision(i *Instance, firstTimeSetup bool) error {
 	if strings.TrimSpace(i.Title) == "" {
 		return fmt.Errorf("instance title cannot be empty")
 	}
@@ -72,13 +96,6 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 		if !alive {
 			return fmt.Errorf("remote session %q no longer exists in list_cmd output%s", i.Title, formatListedNames(listed))
 		}
-		if err := b.ensurePTY(i); err != nil {
-			return fmt.Errorf("failed to start preview process: %w", err)
-		}
-		i.mu.Lock()
-		i.started = true
-		i.mu.Unlock()
-		b.syncRemoteTabs(i)
 		return nil
 	}
 
@@ -120,6 +137,32 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	if name, ok := meta["name"].(string); ok && i.Branch == "" {
 		i.Branch = name
 	}
+	i.mu.Unlock()
+
+	return nil
+}
+
+// launch starts the local machinery that drives the remote workspace provision
+// established (#1592 Phase 1 PR4): the attach/preview process (ensurePTY), the
+// remote tab model (syncRemoteTabs), and the started flag. It preserves each
+// path's exact pre-split ordering and error handling — a restore treats a failed
+// preview process as fatal and only marks the instance started once the PTY is
+// up, while a fresh create marks it started first and logs a failed preview
+// best-effort (launch_cmd already succeeded, so the remote session is alive and
+// still attachable interactively).
+func (b *HookBackend) launch(i *Instance, firstTimeSetup bool) error {
+	if !firstTimeSetup {
+		if err := b.ensurePTY(i); err != nil {
+			return fmt.Errorf("failed to start preview process: %w", err)
+		}
+		i.mu.Lock()
+		i.started = true
+		i.mu.Unlock()
+		b.syncRemoteTabs(i)
+		return nil
+	}
+
+	i.mu.Lock()
 	i.started = true
 	i.mu.Unlock()
 
