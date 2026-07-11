@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
@@ -456,6 +457,9 @@ func init() {
 	sessionsKillCmd.Flags().BoolVar(&sessionsKillForce, "force", false, "Deprecated no-op, accepted for compatibility: kill always destroys the session (use 'af sessions archive' to keep it restorable)")
 	sessionsArchiveCmd.Flags().BoolVar(&sessionsArchiveSelf, "self", false, "Archive the current session (resolved via whoami); use from inside a session when your work is done")
 
+	sessionsWatchCmd.Flags().DurationVar(&watchTimeoutFlag, "timeout", 30*time.Minute, "Give up and exit non-zero if the session is not idle within this window (0 = wait forever)")
+	sessionsWatchCmd.Flags().DurationVar(&watchIntervalFlag, "interval", 2*time.Second, "How often to poll the session's status")
+
 	// tab-create/tab-delete and their tabs {create,delete} aliases (#1192)
 	// share the same flag globals via these binders, so the two spellings stay
 	// in lockstep.
@@ -474,6 +478,7 @@ func init() {
 	SessionsCmd.AddCommand(sessionsTabDeleteCmd)
 	SessionsCmd.AddCommand(sessionsTabsCmd)
 	SessionsCmd.AddCommand(sessionsPreviewCmd)
+	SessionsCmd.AddCommand(sessionsWatchCmd)
 	SessionsCmd.AddCommand(sessionsKillCmd)
 	SessionsCmd.AddCommand(sessionsArchiveCmd)
 	SessionsCmd.AddCommand(sessionsRestoreCmd)
