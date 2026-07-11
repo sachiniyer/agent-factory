@@ -1,7 +1,7 @@
 package session
 
 import (
-	"errors"
+	"strings"
 	"testing"
 )
 
@@ -153,19 +153,31 @@ func TestLocalAgentServerExpose(t *testing.T) {
 	}
 }
 
-// TestLocalAgentServerDataPlaneUnwired pins that the raw-PTY data plane is a stub
-// in PR4 — Subscribe/Input/Resize all report ErrDataPlaneUnwired until the WS
-// broker wires them in PR5.
-func TestLocalAgentServerDataPlaneUnwired(t *testing.T) {
+// TestLocalAgentServerDataPlaneNoLocalPTY pins that the wired data plane
+// (#1592 PR5) degrades gracefully when the instance has no live tmux pane to
+// stream — a probe instance is never started — rather than panicking: every
+// data-plane method returns a "no local PTY" error. The ring/fan-out behaviour
+// with a live channel is covered by TestPTYBroker* in ptybroker_test.go.
+func TestLocalAgentServerDataPlaneNoLocalPTY(t *testing.T) {
 	inst, _ := newProbeInstance(t)
 	as := inst.AgentServer()
-	if _, err := as.Subscribe(0); !errors.Is(err, ErrDataPlaneUnwired) {
-		t.Errorf("Subscribe err = %v, want ErrDataPlaneUnwired", err)
+	if _, err := as.Subscribe(0); err == nil || !strings.Contains(err.Error(), "no local PTY") {
+		t.Errorf("Subscribe err = %v, want a no-local-PTY error", err)
 	}
-	if err := as.Input([]byte("x")); !errors.Is(err, ErrDataPlaneUnwired) {
-		t.Errorf("Input err = %v, want ErrDataPlaneUnwired", err)
+	if err := as.Input([]byte("x")); err == nil || !strings.Contains(err.Error(), "no local PTY") {
+		t.Errorf("Input err = %v, want a no-local-PTY error", err)
 	}
-	if err := as.Resize(24, 80); !errors.Is(err, ErrDataPlaneUnwired) {
-		t.Errorf("Resize err = %v, want ErrDataPlaneUnwired", err)
+	if err := as.Resize(24, 80); err == nil || !strings.Contains(err.Error(), "no local PTY") {
+		t.Errorf("Resize err = %v, want a no-local-PTY error", err)
+	}
+}
+
+// TestLocalAgentServerCached pins the PR5 caching invariant: AgentServer returns
+// the SAME instance each call so the data-plane ring buffer and subscribers
+// persist (a fresh server per call would drop them).
+func TestLocalAgentServerCached(t *testing.T) {
+	inst, _ := newProbeInstance(t)
+	if inst.AgentServer() != inst.AgentServer() {
+		t.Error("AgentServer() must return the cached per-instance singleton")
 	}
 }

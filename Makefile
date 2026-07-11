@@ -4,9 +4,9 @@
 # real ~/.agent-factory, or this repo's worktrees.
 # See docs/container-testing.md.
 
-.PHONY: test-container remote-roundtrip-container playtest-container \
-	playtest-container-detached tui-driver tui-driver-selftest testbox-image \
-	lint-file-length docs
+.PHONY: test-container remote-roundtrip-container ws-pty-roundtrip-container \
+	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
+	testbox-image lint-file-length docs
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
 # (1000 for production code, 1500 for *_test.go) unless grandfathered in
@@ -32,6 +32,13 @@ test-container:
 # round-trip gate inside the same container fence as the full suite.
 remote-roundtrip-container:
 	scripts/testbox.sh test ./integration -run TestRemoteHookRoundTripMockRemote
+
+# Focused WS PTY broker harness (#1592 Phase 2 PR5): connects two subscribers to
+# a real local session's stream, exercises multi-writer input, last-resize-wins +
+# echo, ?since replay, and keepalive dead-subscriber drop — inside the same
+# container fence (a real tmux server) as the full suite.
+ws-pty-roundtrip-container:
+	scripts/testbox.sh test ./integration -run TestWSPTYBrokerRoundTrip
 
 # Interactive TUI play-test sandbox: builds af inside, scaffolds a
 # throwaway AF home + mock project repo, drops you in a shell with a
