@@ -412,7 +412,7 @@ func TestControlServer_CloseTab_GatedAndValidated(t *testing.T) {
 // Manager → persist wire path. It is hermetic: the launch seam is stubbed so a
 // ping race can never fork the real daemon, and the socket lives under the test
 // temp HOME.
-func TestRPCClients_CloseTabAndSetPRInfo_RoundTrip(t *testing.T) {
+func TestRPCClients_CloseTab_RoundTrip(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	prevLaunch := launchDaemonProcessFn
@@ -453,16 +453,8 @@ func TestRPCClients_CloseTabAndSetPRInfo_RoundTrip(t *testing.T) {
 	if inst.TabCount() != 1 {
 		t.Fatalf("expected 1 tab after client CloseTab, got %d", inst.TabCount())
 	}
-
-	if err := SetPRInfo(SetPRInfoRequest{
-		Title:  title,
-		RepoID: repo.ID,
-		PRInfo: session.PRInfoData{Number: 7, Title: "feat", URL: "https://example/pr/7", State: "OPEN"},
-	}); err != nil {
-		t.Fatalf("SetPRInfo client: %v", err)
-	}
-	got := inst.GetPRInfo()
-	if got == nil || got.Number != 7 || got.State != "OPEN" {
-		t.Fatalf("PR info after client SetPRInfo = %+v, want Number 7 / OPEN", got)
-	}
+	// The SetPRInfo net/rpc client wrapper moved onto the HTTP apiclient in #1592
+	// Phase 2 PR3 (the TUI was its only caller), so this round-trip now covers
+	// CloseTab alone. The controlServer.SetPRInfo handler stays covered by
+	// set_prinfo_test.go.
 }

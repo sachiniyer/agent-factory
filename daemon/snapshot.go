@@ -8,9 +8,14 @@ import (
 
 // Snapshot RPC types and the delivery-failure alarm projection (#960 PR 3,
 // #1238). Extracted from control.go so that file stays under its length ceiling
-// (#1145). The client entry points (Snapshot / SnapshotNoSpawn / SnapshotWithAlarms)
+// (#1145). The remaining net/rpc client entry points (Snapshot / SnapshotNoSpawn)
 // and the controlServer.Snapshot handler live in control.go alongside the other
 // RPCs; this file owns the wire shapes and the alarm assembly.
+//
+// The TUI's SnapshotWithAlarms read moved onto the HTTP apiclient in #1592 Phase
+// 2 PR3 (apiclient.Client.SnapshotWithAlarms), so the net/rpc SnapshotWithAlarms
+// client wrapper that used to live here is gone — the TUI was its only caller.
+// CLI/API callers use the instances-only Snapshot/SnapshotNoSpawn read.
 
 // SnapshotRequest asks the daemon for the authoritative session list of a repo
 // (#960 PR 3). RepoID scopes the read like the other sessions verbs (empty =
@@ -53,20 +58,6 @@ type DeliveryAlarm struct {
 	Since time.Time `json:"since"`
 	// LastError is the most recent delivery error, for the banner detail.
 	LastError string `json:"last_error,omitempty"`
-}
-
-// SnapshotWithAlarms is Snapshot plus the persistent delivery-failure alarms
-// carried on the same authoritative response (#1238). The TUI reconcile path
-// uses it so the session list and the alarm projection arrive from one RPC —
-// the alarm is a field on the snapshot, not a side channel. Plain Snapshot
-// (which drops the alarms) stays the read path for CLI/API callers that only
-// need the session list.
-func SnapshotWithAlarms(req SnapshotRequest) (SnapshotResponse, error) {
-	var resp SnapshotResponse
-	if err := callDaemon("Snapshot", req, &resp); err != nil {
-		return SnapshotResponse{}, err
-	}
-	return resp, nil
 }
 
 // deliveryAlarms assembles the persistent delivery-failure alarms for a repo

@@ -106,17 +106,19 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	}, nil
 }
 
-// newHTTPMux builds the route table by iterating the httpRoutes catalog — the
-// SAME list `af api` prints — so the served routes and the documented catalog
-// cannot diverge (#1029 PR 5). Every client-facing RPC has a POST /v1/<Method>
-// route dispatching to the matching controlServer method; GET /v1/health is a
-// liveness alias for Ping. Pure-infra RPCs (Shutdown, Pause/ResumeStatusPoll,
-// ReloadTasks, and bare Ping) are intentionally absent from the catalog — the
-// HTTP surface mirrors only client-facing session and task ops.
+// newHTTPMux builds the route table by iterating servedHTTPRoutes() — the public
+// `af api` catalog (httpRoutes) plus the internal, non-cataloged routes
+// (internalHTTPRoutes). Every route has a POST /v1/<Method> handler dispatching
+// to the matching controlServer method; GET /v1/health is a liveness alias for
+// Ping. The public catalog (#1029 PR 5) still mirrors only client-facing session
+// and task ops; the internal routes (#1592 Phase 2 PR3) let the TUI drop net/rpc
+// and reach ResumeFromLimit and the Pause/ResumeStatusPoll attach-coordination
+// over HTTP without advertising them in `af api`. Shutdown, ReloadTasks, and
+// bare Ping remain absent from both — daemon lifecycle, not a client verb.
 func newHTTPMux(cs *controlServer) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	for _, rt := range httpRoutes {
+	for _, rt := range servedHTTPRoutes() {
 		mux.HandleFunc(rt.Path, rt.handler(cs))
 	}
 

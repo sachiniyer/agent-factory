@@ -9,33 +9,59 @@ import (
 )
 
 // TestHTTPRoutes_MatchRegisteredMux is the drift guard: it proves the mux the
-// daemon actually serves registers PRECISELY the routes HTTPRoutes() reports —
-// no more, no less. Since both newHTTPMux and HTTPRoutes read the same
-// httpRoutes table this holds by construction; the test locks it so a future
-// change that hand-registers a route (or drops one) fails loudly instead of
-// letting the `af api` catalog silently drift from the server.
+// daemon actually serves registers PRECISELY servedHTTPRoutes() — the public
+// `af api` catalog (HTTPRoutes) PLUS the internal, non-cataloged routes — and
+// nothing beyond it. Since both newHTTPMux and servedHTTPRoutes read the same
+// tables this holds by construction; the test locks it so a future change that
+// hand-registers a route (or drops one) fails loudly. The catalog invariant is
+// checked separately below: the internal routes must NOT leak into HTTPRoutes().
 func TestHTTPRoutes_MatchRegisteredMux(t *testing.T) {
 	cs := &controlServer{}
 	mux := newHTTPMux(cs)
 
-	routes := HTTPRoutes()
-	require.NotEmpty(t, routes)
+	served := servedHTTPRoutes()
+	require.NotEmpty(t, served)
 
-	// Every cataloged route must be registered: the mux resolves it to a real
+	// Every served route must be registered: the mux resolves it to a real
 	// handler, not the catch-all. An unknown path hits the catch-all (404 with
 	// an "unknown route" envelope), so a registered path is one whose handler
 	// pattern is NOT "/".
-	for _, rt := range routes {
+	for _, rt := range served {
 		_, pattern := mux.Handler(mustRequest(t, rt.Method, rt.Path))
 		assert.Equalf(t, rt.Path, pattern,
-			"route %s %s is in the catalog but not registered on the served mux", rt.Method, rt.Path)
+			"route %s %s is served but not registered on the mux", rt.Method, rt.Path)
 	}
 
-	// Conversely, a path NOT in the catalog must fall through to the catch-all,
-	// proving the mux serves nothing beyond the catalog.
-	_, pattern := mux.Handler(mustRequest(t, http.MethodPost, "/v1/NotACatalogRoute"))
+	// Conversely, a path in NEITHER table must fall through to the catch-all,
+	// proving the mux serves nothing beyond servedHTTPRoutes().
+	_, pattern := mux.Handler(mustRequest(t, http.MethodPost, "/v1/NotAServedRoute"))
 	assert.Equal(t, "/", pattern,
-		"an off-catalog path must hit the catch-all, i.e. the mux serves only the catalog")
+		"an off-table path must hit the catch-all, i.e. the mux serves only servedHTTPRoutes()")
+}
+
+// TestHTTPRoutes_InternalRoutesAbsentFromCatalog locks the #1592 PR3 invariant:
+// the internal routes are SERVED (registered on the mux, checked above) but must
+// stay OUT of the public `af api` catalog. A regression that appends an internal
+// route to httpRoutes — leaking Pause/ResumeStatusPoll into discovery — fails
+// here.
+func TestHTTPRoutes_InternalRoutesAbsentFromCatalog(t *testing.T) {
+	require.NotEmpty(t, internalHTTPRoutes)
+
+	catalogPaths := make(map[string]bool)
+	for _, rt := range HTTPRoutes() {
+		catalogPaths[rt.Path] = true
+	}
+
+	cs := &controlServer{}
+	mux := newHTTPMux(cs)
+	for _, rt := range internalHTTPRoutes {
+		assert.Falsef(t, catalogPaths[rt.Path],
+			"internal route %s must NOT appear in the public HTTPRoutes() catalog", rt.Path)
+		// But it MUST be served, or the TUI cannot reach it over HTTP.
+		_, pattern := mux.Handler(mustRequest(t, rt.Method, rt.Path))
+		assert.Equalf(t, rt.Path, pattern,
+			"internal route %s must be registered on the served mux", rt.Path)
+	}
 }
 
 // TestHTTPRoutes_HealthShape pins the two structural invariants the catalog

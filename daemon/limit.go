@@ -133,17 +133,10 @@ type ResumeFromLimitResponse struct {
 	OK bool `json:"ok"`
 }
 
-// ResumeFromLimit asks the daemon to resume a usage-limit-blocked session
-// (#1146): re-spawn if the agent exited, re-deliver the pending prompt, and
-// clear the limit state. Surfaces the daemon's error (e.g. the session is not
-// limit-blocked) verbatim so the TUI can show it.
-func ResumeFromLimit(req ResumeFromLimitRequest) error {
-	var resp ResumeFromLimitResponse
-	if err := callDaemon("ResumeFromLimit", req, &resp); err != nil {
-		return err
-	}
-	return nil
-}
+// The net/rpc ResumeFromLimit client wrapper moved onto the HTTP apiclient in
+// #1592 Phase 2 PR3 (apiclient.Client.ResumeFromLimit, an internal non-cataloged
+// route) — the TUI's `c` key was its only caller. The controlServer handler
+// below still serves the verb over both transports.
 
 func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
 	if err := s.requireManagerReady(); err != nil {

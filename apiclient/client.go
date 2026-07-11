@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,6 +29,30 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
 )
+
+// TransportError wraps a failure to REACH the daemon HTTP socket — a refused
+// dial, a missing socket file, a read error mid-response — as opposed to an
+// application error the daemon returned inside the envelope. The two are
+// categorically different: an envelope error is a real, deterministic failure
+// (session not found, repo invalid) that will recur, while a transport error on
+// a just-spawned daemon is a transient bind race — the daemon binds its HTTP
+// socket microseconds AFTER the control socket EnsureDaemon waits for (see the
+// daemon boot order), so a call fired in that window sees connection-refused.
+// Callers distinguish the two with IsTransportError so they can retry a bind
+// race without ever masking a real daemon error by retrying it.
+type TransportError struct{ Err error }
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// IsTransportError reports whether err (or anything it wraps) is a TransportError
+// — a failure to reach the daemon socket rather than an error the daemon
+// returned. Envelope/application errors are never TransportErrors, so a caller
+// retrying on this signal can never spin on a deterministic failure.
+func IsTransportError(err error) bool {
+	var te *TransportError
+	return errors.As(err, &te)
+}
 
 // dialTimeout bounds how long the client waits to connect to the daemon HTTP
 // socket. It mirrors the net/rpc control client's dial timeout so the two read
@@ -98,13 +123,15 @@ func (c *Client) call(method string, req any, resp any) error {
 
 	httpResp, err := c.httpClient.Post(httpBaseURL+"/v1/"+method, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
-		return err
+		// The round-trip never reached a daemon handler — refused dial, missing
+		// socket, etc. Tag it so a caller can tell a bind race from a real error.
+		return &TransportError{Err: err}
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	raw, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return fmt.Errorf("apiclient: read response body: %w", err)
+		return &TransportError{Err: fmt.Errorf("apiclient: read response body: %w", err)}
 	}
 
 	// Decode into a RawMessage-backed envelope so the typed response is decoded
