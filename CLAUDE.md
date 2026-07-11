@@ -126,6 +126,9 @@ new files to dodge the limit — split them. See `docs/file-length-lint.md`.
 - `session/tmux/` — tmux PTY integration
 - `config/` — configuration and state management
 - `api/` — REST/JSON API for sessions and tasks
+- `apiproto/` — API envelope types (leaf package, no daemon/client imports)
+- `apiclient/` — HTTP API client used by TUI/CLI to talk to daemon
+- `agentproto/` — WebSocket wire protocol for PTY stream and events
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, autoyes mode, control-socket RPCs, autostart unit
 - `cmd/` — CLI command utilities
