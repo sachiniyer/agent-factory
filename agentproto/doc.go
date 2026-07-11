@@ -41,7 +41,4 @@
 //     only; Phase 2 enforces nothing (the unix-socket peer is trusted, #1029).
 //   - wsconn.go  — thin read/write adapters that move the above over a
 //     github.com/coder/websocket connection.
-//
-// Nothing in production imports this package yet; Phase 2 PR1 is purely additive
-// scaffolding, unit-tested in isolation.
 package agentproto
