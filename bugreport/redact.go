@@ -182,20 +182,46 @@ func redactAFTmuxTitle(match string) string {
 	return match[:12] + redactedMarker
 }
 
-// bareTitleRegexp compiles a word-boundary matcher for a bare session title, or
-// nil when the title is too short (< 4 chars) to redact without risking mangling
-// unrelated log text. Best-effort by design — the tmux-name redaction above is
-// the primary defense; this catches raw titles the log prints outside a name.
+// bareTitleRegexp compiles a boundary-anchored matcher for a bare session title,
+// or nil when the title is too short (< 4 chars) to redact without risking
+// mangling unrelated log text. Best-effort by design — the tmux-name redaction
+// above is the primary defense; this catches raw titles the log prints outside a
+// name.
+//
+// A `\b` anchor is only emitted on the edge where the title's own boundary
+// character is a word char ([A-Za-z0-9_]); `\b` matches only at a word↔non-word
+// transition, so anchoring an edge whose title char is itself non-word (e.g. the
+// trailing `]` of "client[prod]") never matches and the title leaks (#1639). The
+// per-edge anchor still guards word-char edges against partial-word mangling
+// (title "test" won't match inside "testing") while a non-word edge is already
+// self-delimiting and needs no anchor.
 func bareTitleRegexp(title string) *regexp.Regexp {
 	title = strings.TrimSpace(title)
 	if len(title) < 4 {
 		return nil
 	}
-	re, err := regexp.Compile(`\b` + regexp.QuoteMeta(title) + `\b`)
+	var left, right string
+	if isWordByte(title[0]) {
+		left = `\b`
+	}
+	if isWordByte(title[len(title)-1]) {
+		right = `\b`
+	}
+	re, err := regexp.Compile(left + regexp.QuoteMeta(title) + right)
 	if err != nil {
 		return nil
 	}
 	return re
+}
+
+// isWordByte reports whether b is a regex word character ([A-Za-z0-9_]), i.e. a
+// byte across which `\b` forms a boundary. ASCII-only, matching RE2's default
+// `\b` semantics.
+func isWordByte(b byte) bool {
+	return b == '_' ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9')
 }
 
 // noteSession records a session's tmux name(s) and raw title(s) before they are

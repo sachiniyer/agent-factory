@@ -336,6 +336,52 @@ func TestScrubLogRedactsSessionTitles(t *testing.T) {
 	}
 }
 
+// TestScrubLogRedactsTitlesEndingInNonWordChars is the #1639 regression guard:
+// bareTitleRegexp used `\b` on both edges, but `\b` matches only at a
+// word↔non-word transition, so a title ending (or starting) with a non-word
+// character (brackets, punctuation) has no boundary there and leaked through the
+// log scrub unredacted (e.g. the bare `%s`-formatted title in
+// "task ... started successfully as instance client[prod]").
+func TestScrubLogRedactsTitlesEndingInNonWordChars(t *testing.T) {
+	r := &redactor{}
+	// Titles the daemon may print bare, each ending/starting with a non-word char
+	// that defeats a naive `\b` anchor.
+	titles := []string{
+		"client[prod]", // trailing ']'
+		"deploy!",      // trailing '!'
+		"[staging]env", // leading '['
+	}
+	r.noteSession(&session.InstanceData{
+		Title: titles[0],
+		Tabs: []session.TabData{
+			{Name: "b", TmuxName: ""},
+		},
+	})
+	for _, ttl := range titles[1:] {
+		r.noteSession(&session.InstanceData{Title: ttl})
+	}
+
+	in := strings.Join([]string{
+		`task cron-123 started successfully as instance client[prod]`,
+		`task cron-456 started successfully as instance deploy!`,
+		`watcher fired for [staging]env at boot`,
+	}, "\n")
+
+	out := r.scrubLog(in)
+
+	for _, leaked := range titles {
+		if strings.Contains(out, leaked) {
+			t.Errorf("title ending/starting in a non-word char leaked through log scrub: %q\n%s", leaked, out)
+		}
+	}
+	// Structural context around the redacted titles survives so the log stays
+	// triageable.
+	if !strings.Contains(out, "started successfully as instance") ||
+		!strings.Contains(out, "cron-123") {
+		t.Errorf("structural log context should survive:\n%s", out)
+	}
+}
+
 // TestRedactPathCollapsesHome guards the fix for the raw-home-path leak: the
 // bundle path inlined into the (public) GitHub issue-draft body must have $HOME
 // collapsed to ~ so it never leaks the user's home/username.
