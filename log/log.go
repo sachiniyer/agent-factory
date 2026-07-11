@@ -95,25 +95,69 @@ func resolveLogPath() string {
 	if logPathOverride != "" {
 		return logPathOverride
 	}
-	if home := os.Getenv("AGENT_FACTORY_HOME"); home != "" {
-		if dir, ok := expandTilde(home); ok {
-			if err := os.MkdirAll(dir, 0700); err == nil {
-				return filepath.Join(dir, "agent-factory.log")
-			}
-		}
-		// Unresolvable or uncreatable override: fall through to the defaults
-		// below rather than not logging at all.
+	// A set-and-creatable AGENT_FACTORY_HOME wins; an unresolvable or
+	// uncreatable override yields "" and falls through to the defaults below
+	// rather than not logging at all.
+	if p := homeLogPath(true); p != "" {
+		return p
 	}
 	if testing.Testing() {
 		return filepath.Join(os.TempDir(), "agent-factory-test.log")
 	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
+	p := defaultLogPath()
+	if p == "" {
 		return filepath.Join(os.TempDir(), "agent-factory.log")
 	}
-	dir := filepath.Join(configDir, "agent-factory")
-	os.MkdirAll(dir, 0700)
+	os.MkdirAll(filepath.Dir(p), 0700)
+	return p
+}
+
+// homeLogPath returns "$AGENT_FACTORY_HOME/agent-factory.log" when the home
+// override is set, expands, and its directory is usable, else "". It is the
+// single home-override gate shared by resolveLogPath and LogFilePath so the two
+// can never disagree on whether the override wins (#1604): before this, the
+// resolver validated the directory with MkdirAll and fell through when that
+// failed, while LogFilePath returned the override path unconditionally — so a
+// set-but-uncreatable AGENT_FACTORY_HOME made `af bug-report` tail a dead path
+// that was never written to.
+//
+// create selects how "usable" is checked and is the ONLY behavioral difference
+// between the two callers: resolveLogPath passes true to create the directory
+// (and thereby validate it); LogFilePath passes false to probe it read-only, so
+// the diagnostics query keeps no filesystem side effect. The read-only probe is
+// conservative — a not-yet-created but creatable home reads as unusable before
+// Initialize — but it never yields a path the app cannot write to, which is the
+// property #1604 needs. Post-Initialize LogFilePath does not reach here at all;
+// it returns the cached, exact logFileName.
+func homeLogPath(create bool) string {
+	home := os.Getenv("AGENT_FACTORY_HOME")
+	if home == "" {
+		return ""
+	}
+	dir, ok := expandTilde(home)
+	if !ok {
+		return ""
+	}
+	if create {
+		if os.MkdirAll(dir, 0700) != nil {
+			return ""
+		}
+	} else if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return ""
+	}
 	return filepath.Join(dir, "agent-factory.log")
+}
+
+// defaultLogPath returns the historical default, os.UserConfigDir()/
+// agent-factory/agent-factory.log, with no side effect, and "" when
+// UserConfigDir cannot be resolved. Shared by resolveLogPath (which
+// additionally creates the directory) and LogFilePath.
+func defaultLogPath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(configDir, "agent-factory", "agent-factory.log")
 }
 
 // LogFilePath returns the agent-factory.log path for read-only tooling (e.g.
@@ -129,11 +173,14 @@ func resolveLogPath() string {
 // but could not be created — resolveLogPath falling back to the UserConfigDir
 // default — a bug report tailed the dead override path and collected no logs.
 //
-// Before Initialize (logFileName still ""), it resolves statically from
-// $AGENT_FACTORY_HOME then the os.UserConfigDir default, with no test-scratch
-// branch, no test-only override, and no directory-creating side effect — so a
-// pre-init bug report still names the real log even when built by a test
-// binary. Returns "" only when neither a home override nor UserConfigDir can be
+// Before Initialize (logFileName still ""), it resolves statically through the
+// SAME homeLogPath / defaultLogPath helpers resolveLogPath uses — read-only, so
+// no directory-creating side effect, no test-scratch branch, no test-only
+// override. Routing both functions through one computation is what keeps them
+// from diverging in the pre-Initialize state too: an unusable
+// $AGENT_FACTORY_HOME falls through to the UserConfigDir default here exactly as
+// it does in the resolver, instead of returning a dead override path (#1604).
+// Returns "" only when neither a home override nor UserConfigDir can be
 // resolved.
 func LogFilePath() string {
 	mu.Lock()
@@ -142,16 +189,10 @@ func LogFilePath() string {
 	if actual != "" {
 		return actual
 	}
-	if home := os.Getenv("AGENT_FACTORY_HOME"); home != "" {
-		if dir, ok := expandTilde(home); ok {
-			return filepath.Join(dir, "agent-factory.log")
-		}
+	if p := homeLogPath(false); p != "" {
+		return p
 	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(configDir, "agent-factory", "agent-factory.log")
+	return defaultLogPath()
 }
 
 // rotationPolicy resolves the log-rotation cap and backup count from the

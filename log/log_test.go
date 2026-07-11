@@ -74,6 +74,45 @@ func TestLogFilePathMatchesResolvedFallback(t *testing.T) {
 	}
 }
 
+// TestLogFilePathPreInitFallsBackFromUncreatableHome covers the OTHER divergence
+// state #1604 can hit: LogFilePath called before Initialize (logFileName still
+// "") with a set-but-uncreatable AGENT_FACTORY_HOME. Because both the resolver
+// and LogFilePath now share the homeLogPath gate, the query must fall through to
+// the UserConfigDir default here too — not return the dead override path — even
+// though no Initialize has run to cache the resolved path.
+func TestLogFilePathPreInitFallsBackFromUncreatableHome(t *testing.T) {
+	mu.Lock()
+	saved := logFileName
+	logFileName = ""
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		logFileName = saved
+		mu.Unlock()
+	})
+
+	// Deterministic UserConfigDir under a temp dir so the fallback path is
+	// predictable and the test never touches the developer's real config.
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	blocker := filepath.Join(t.TempDir(), "blockdir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker file: %v", err)
+	}
+	afHome := filepath.Join(blocker, "subdir") // uncreatable: blocker is a file
+	afHomeLog := filepath.Join(afHome, "agent-factory.log")
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+
+	got := LogFilePath()
+	if got == afHomeLog {
+		t.Fatalf("pre-Initialize LogFilePath returned the uncreatable home path %q instead of the fallback", afHomeLog)
+	}
+	if want := filepath.Join(xdg, "agent-factory", "agent-factory.log"); got != want {
+		t.Fatalf("pre-Initialize LogFilePath=%q, want resolved fallback %q", got, want)
+	}
+}
+
 // TestInitializeRace spins multiple goroutines concurrently calling
 // Initialize to make sure the package-level mutex prevents data races on
 // globalLogFile and the exported logger pointers. Run with `go test -race`.
