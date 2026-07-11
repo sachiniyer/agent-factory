@@ -198,6 +198,31 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		if _, ok := m.reservedRemoteNames[candidate]; ok {
 			return fmt.Errorf("remote hook name %q is already reserved", candidate)
 		}
+		// Guard against in-memory remote sessions that are not (yet) on disk.
+		// refreshDaemonInstances preserves a running remote instance in
+		// m.instances even after its repo directory is deleted externally (a
+		// recoverable inconsistency), yet loadRepoInstanceData returns nothing
+		// for it — so a disk-only slug check would let a second title that
+		// slugifies to the same hook name through. The branch-collision check
+		// above misses this pair because Slugify drops underscores while branch
+		// sanitization keeps them as dashes ("My_App"->branch "my-app"/slug
+		// "myapp" vs "MyApp"->branch "myapp"/slug "myapp"). The TUI pre-check
+		// (FindSlugCollision over Snapshot()) catches it, but the HTTP
+		// CreateSession path bypasses that, so the daemon-side check must be
+		// complete (#1636).
+		for key, inst := range m.instances {
+			rid, _ := splitDaemonInstanceKey(key)
+			if rid != repoID || inst == nil {
+				continue
+			}
+			data := inst.ToInstanceData()
+			if !data.IsRemoteHook() {
+				continue
+			}
+			if session.RemoteHookName(data.Title, data.RemoteMeta) == candidate {
+				return fmt.Errorf("remote session titled %q already maps to hook name %q", data.Title, candidate)
+			}
+		}
 		for _, data := range diskData {
 			if !data.IsRemoteHook() {
 				continue
