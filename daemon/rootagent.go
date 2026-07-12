@@ -206,6 +206,12 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 	if err := m.waitForTargetSession(repo.ID, req.Title); err != nil {
 		return "", true, fmt.Errorf("root agent for %q is being recreated (tmux momentarily absent); event not delivered this attempt: %w", repo.Root, err)
 	}
+	// A TUI can attach to root during the wait above, so re-check the defer lease
+	// before sending — otherwise this path pastes into an attached pane the
+	// "exists" path would have deferred (#1638).
+	if m.deferWhileAttached(repo.ID, req) {
+		return StatusDeferredAttached, true, nil
+	}
 	if err := m.SendPrompt(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt}); err != nil {
 		return "", true, err
 	}
