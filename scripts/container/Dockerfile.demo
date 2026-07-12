@@ -13,7 +13,7 @@
 # way blind key-timing would); asciinema records a read-only mirror of that
 # session; agg renders the .cast to GIF; gifsicle optimizes it; ffmpeg pulls
 # sample frames.
-FROM golang:1.24-bookworm
+FROM golang:1.25-bookworm
 
 # tmux + git drive af; procps provides pgrep; asciinema records the session;
 # ffmpeg + gifsicle render/optimize; a monospace font shapes the text.

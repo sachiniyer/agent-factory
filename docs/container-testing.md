@@ -12,7 +12,7 @@ podman) with **no access to the host tmux server, the real
 `~/.agent-factory`, or the repo checkout** (mounted read-only).
 
 Requirements: docker or podman on `PATH`. Everything else lives in the
-image (`scripts/container/Dockerfile.test`: golang 1.24 + tmux + git).
+image (`scripts/container/Dockerfile.test`: golang 1.25 + tmux + git).
 
 ## `make test-container` — the full suite
 

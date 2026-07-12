@@ -22,11 +22,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.24"
+          go-version: "1.25"
 
       - name: golangci-lint
         env:
-          GOTOOLCHAIN: go1.24.2
+          GOTOOLCHAIN: go1.25.0
         run: go run github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8 run --timeout=3m --out-format=line-number --fast --max-issues-per-linter=0 --max-same-issues=0
 
       - name: Check formatting
@@ -41,9 +41,9 @@ jobs:
 
       - name: Check for dead code
         run: |
-          # Pin to a release compatible with the project's Go 1.24 toolchain.
-          # Newer x/tools (v0.45.0+) requires Go 1.25+.
-          go install golang.org/x/tools/cmd/deadcode@v0.36.0
+          # Pinned for reproducibility; v0.48.0 supports the Go 1.25 language version
+          # (older x/tools cannot analyze go1.25 source).
+          go install golang.org/x/tools/cmd/deadcode@v0.48.0
           out=$("$(go env GOPATH)/bin/deadcode" -test ./...)
           if [ -n "$out" ]; then
             echo "::error::Dead code detected. Remove the following or refactor so it's reachable:"
@@ -63,7 +63,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.24"
+          go-version: "1.25"
           cache: true
 
       - name: Run tests
@@ -79,7 +79,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.24"
+          go-version: "1.25"
           cache: true
 
       - name: Verify compilation
