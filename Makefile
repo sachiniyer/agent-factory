@@ -5,7 +5,7 @@
 # See docs/container-testing.md.
 
 .PHONY: test-container remote-roundtrip-container ws-pty-roundtrip-container \
-	agent-server-roundtrip-container \
+	agent-server-roundtrip-container remote-agent-server-roundtrip-container \
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
 	testbox-image lint-file-length docs
 
@@ -47,6 +47,14 @@ ws-pty-roundtrip-container:
 # same container fence (a real tmux server) as the full suite.
 agent-server-roundtrip-container:
 	scripts/testbox.sh test ./integration -run TestAgentServerRoundTrip
+
+# Focused remote agent-server harness (#1592 Phase 4 PR2 — the de-risk): starts a
+# REAL out-of-process `af agent-server` on a loopback TLS+token listener and drives
+# it through the daemon-side session.remoteAgentServer HTTP/WS client — the full
+# AgentServer surface (provision/launch/subscribe/input/snapshot/preview/kill)
+# across the process boundary — inside the same container fence as the full suite.
+remote-agent-server-roundtrip-container:
+	scripts/testbox.sh test ./integration -run TestRemoteAgentServerRoundTrip
 
 # Interactive TUI play-test sandbox: builds af inside, scaffolds a
 # throwaway AF home + mock project repo, drops you in a shell with a

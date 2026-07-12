@@ -40,13 +40,22 @@ type localAgentServer struct {
 // AgentServer returns the cached agent-server for this instance's runtime (#1592
 // Phase 2). The daemon speaks to a session ONLY through this interface, so its
 // observation/delivery paths never assume the session is local tmux. Cached so
-// the data-plane ring buffer and subscribers persist across calls. Local today; a
-// per-runtime factory selects container/ssh agent-servers in Phase 4.
+// the data-plane ring buffer and subscribers persist across calls.
+//
+// This is the per-runtime factory (#1592 Phase 4 PR2): a session whose runtime
+// exposes a remote agent-server (i.remoteClient, set at NewInstance from
+// InstanceOptions.RemoteAgentServer) gets a remoteAgentServer HTTP/WS client;
+// every other session gets the local in-process impl over tmux — the default,
+// unchanged. The client was validated at construction, so this stays infallible.
 func (i *Instance) AgentServer() AgentServer {
 	i.agentSrvMu.Lock()
 	defer i.agentSrvMu.Unlock()
 	if i.agentSrv == nil {
-		i.agentSrv = &localAgentServer{inst: i}
+		if i.remoteClient != nil {
+			i.agentSrv = &remoteAgentServer{rc: i.remoteClient}
+		} else {
+			i.agentSrv = &localAgentServer{inst: i}
+		}
 	}
 	return i.agentSrv
 }

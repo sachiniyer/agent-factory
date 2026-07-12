@@ -173,9 +173,19 @@ type Instance struct {
 	// must persist across calls; a fresh server each call would drop subscribers
 	// and lose the replay buffer. Lazily built by AgentServer(), guarded by
 	// agentSrvMu (a dedicated mutex, not i.mu, so building the server never
-	// contends with the session-state fields i.mu guards).
-	agentSrv   *localAgentServer
+	// contends with the session-state fields i.mu guards). Interface-typed since
+	// #1592 Phase 4 PR2: AgentServer() returns the local in-process impl by
+	// default, or a remoteAgentServer when remoteClient is set.
+	agentSrv   AgentServer
 	agentSrvMu sync.Mutex
+	// remoteClient is the runtime handle selecting the REMOTE agent-server impl
+	// (#1592 Phase 4 PR2): when non-nil, AgentServer() returns a remoteAgentServer
+	// driving the `af agent-server` this points at, instead of the local in-process
+	// runtime. Built once at NewInstance from InstanceOptions.RemoteAgentServer (so
+	// a bad endpoint fails there, keeping AgentServer() infallible) and nil for
+	// every local session — the default path is provably unchanged. DARK in PR2: no
+	// runtime sets it yet (PR3-PR5).
+	remoteClient *remoteAgentClient
 }
 
 // tabTmuxSession returns the tmux session backing the tab at idx (0 is the agent
