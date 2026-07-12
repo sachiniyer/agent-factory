@@ -47,6 +47,17 @@ type InRepoConfig struct {
 	// RemoteHooks configures the remote hook backend for this repo.
 	RemoteHooks *RemoteHooks `json:"remote_hooks,omitempty" toml:"remote_hooks,omitempty"`
 
+	// Backend selects the runtime a repo's sessions run on (#1592 Phase 4 PR3):
+	// one of local|docker|ssh|hook (empty means local, the default). The value
+	// is validated when a session's runtime is resolved (session package), not
+	// at config load — the same "validate at resolution, not load" contract the
+	// remote-hook commands follow.
+	Backend string `json:"backend,omitempty" toml:"backend,omitempty"`
+	// Docker parameterizes the docker runtime (used when Backend == "docker").
+	Docker *DockerConfig `json:"docker,omitempty" toml:"docker,omitempty"`
+	// SSH parameterizes the ssh runtime (used when Backend == "ssh").
+	SSH *SSHConfig `json:"ssh,omitempty" toml:"ssh,omitempty"`
+
 	// setKeys records which top-level keys were present in the JSON file so
 	// the resolver can distinguish "set to an empty value" (overrides) from
 	// "absent" (falls through to the legacy/global value).
@@ -80,10 +91,13 @@ func (c *InRepoConfig) CommandBearingFields() []string {
 // contain. Anything else is rejected so typos fail loudly instead of being
 // silently ignored in a file that can execute shell commands.
 var inRepoAllowedKeys = []string{
+	"backend",
 	"default_program",
+	"docker",
 	"post_worktree_commands",
 	"program_overrides",
 	"remote_hooks",
+	"ssh",
 }
 
 // inRepoGlobalOnlyKeys maps keys that configure the host or daemon — not the

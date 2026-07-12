@@ -42,6 +42,16 @@ type ResolvedConfig struct {
 	// absolute paths under repoRoot (#834); consumers can exec them without
 	// caring about the process cwd.
 	RemoteHooks *RemoteHooks
+
+	// Backend is the effective `backend` runtime selector (#1592 Phase 4 PR3):
+	// one of local|docker|ssh|hook, empty meaning local. In-repo only — there
+	// is no legacy per-repo location for it. Validated by the session package
+	// when it resolves the runtime, not here.
+	Backend string
+	// Docker/SSH parameterize the docker/ssh runtimes; non-nil only when the
+	// repo's in-repo config declares the corresponding section.
+	Docker *DockerConfig
+	SSH    *SSHConfig
 }
 
 // ResolveConfig returns the effective configuration for the repository
@@ -94,6 +104,17 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 		}
 		if inRepo.IsSet("remote_hooks") {
 			res.RemoteHooks = inRepo.RemoteHooks
+		}
+		// backend/docker/ssh are in-repo only (no legacy location), so they
+		// take the in-repo value directly whenever present.
+		if inRepo.Backend != "" {
+			res.Backend = inRepo.Backend
+		}
+		if inRepo.IsSet("docker") {
+			res.Docker = inRepo.Docker
+		}
+		if inRepo.IsSet("ssh") {
+			res.SSH = inRepo.SSH
 		}
 		logInRepoConfigLoaded(repoID, repoRoot, inRepo, raw)
 	}

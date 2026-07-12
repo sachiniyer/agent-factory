@@ -184,6 +184,7 @@ var (
 	createProgramFlag string
 	createHereFlag    bool
 	createInPlaceFlag bool
+	createBackendFlag string
 )
 
 var sessionsCreateCmd = &cobra.Command{
@@ -252,6 +253,16 @@ pointing at one).`,
 			return jsonError(err)
 		}
 
+		// Validate --backend up front so a typo fails on the client with a clear
+		// message rather than after a daemon round trip (#1592 Phase 4 PR3). An
+		// empty flag defers to the repo's `backend` config key.
+		if _, err := session.ParseBackendKind(createBackendFlag); err != nil {
+			return jsonError(err)
+		}
+		if inPlace && createBackendFlag != "" && createBackendFlag != config.BackendLocal {
+			return jsonError(fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag))
+		}
+
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
 			Title:    createNameFlag,
 			RepoPath: repo.Root,
@@ -259,6 +270,7 @@ pointing at one).`,
 			Prompt:   createPromptFlag,
 			AutoYes:  cfg.AutoYes,
 			InPlace:  inPlace,
+			Backend:  createBackendFlag,
 		})
 		if err != nil {
 			return jsonError(err)

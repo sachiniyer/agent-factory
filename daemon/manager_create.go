@@ -44,6 +44,7 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 		AutoYes:     req.AutoYes,
 		InPlace:     req.InPlace,
 		ForceRemote: req.ForceRemote,
+		Backend:     session.BackendKind(req.Backend),
 	})
 	if err != nil {
 		return session.InstanceData{}, err

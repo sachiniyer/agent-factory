@@ -18,8 +18,16 @@ type InstanceOptions struct {
 	// If AutoYes is true, then
 	AutoYes bool
 	// ForceRemote forces the instance to use the remote hook backend,
-	// even if the repo config would default to local.
+	// even if the repo config would default to local. It is the pre-Phase-4
+	// hook selector, equivalent to Backend == BackendHook, and takes precedence
+	// over a config-declared backend (it is set by the TUI's "new remote
+	// session" action, which means "hook now" regardless of config).
 	ForceRemote bool
+	// Backend, when set, selects the session's runtime explicitly (the
+	// `--backend` create flag, #1592 Phase 4 PR3), overriding the repo's
+	// `backend` config key. Empty means "resolve from config" — which defaults
+	// to local, so an unset Backend keeps the local default byte-identical.
+	Backend BackendKind
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch. The worktree is marked external so kill/cleanup
@@ -40,15 +48,56 @@ type InstanceOptions struct {
 // code paths. Defaults to the real local/remote branching.
 var backendFactory = defaultBackendFactory
 
+// defaultBackendFactory resolves the session's runtime from the requested
+// backend kind (the `--backend` flag / repo `backend` config, or ForceRemote for
+// the legacy hook path) and provisions it, returning the in-process Backend. It
+// is the production path behind the backendFactory test seam; a test that
+// replaces backendFactory injects a FakeBackend directly and never reaches here.
+//
+// The remote-endpoint half of a runtime's provision result (ProvisionResult.
+// Endpoint) is intentionally not consumed on this path in PR3: local/hook
+// provision in-process (nil endpoint) and docker/ssh error out, so no non-nil
+// endpoint is ever produced yet. PR4/PR5 wire the endpoint through when the
+// sandboxed runtimes start producing one.
 func defaultBackendFactory(opts InstanceOptions, absPath string) (Backend, error) {
-	if opts.ForceRemote {
-		hook, err := loadHookBackendForPath(absPath)
-		if err != nil {
-			return nil, fmt.Errorf("remote hooks not configured for this repo: %w", err)
-		}
-		return hook, nil
+	kind, err := resolveBackendKind(opts, absPath)
+	if err != nil {
+		return nil, err
 	}
-	return &LocalBackend{}, nil
+	rt, err := ResolveRuntime(kind)
+	if err != nil {
+		return nil, err
+	}
+	res, err := rt.Provision(ProvisionSpec{RepoRoot: absPath})
+	if err != nil {
+		return nil, err
+	}
+	return res.Backend, nil
+}
+
+// resolveBackendKind decides which runtime a new session uses, in precedence
+// order: an explicit --backend flag (opts.Backend) wins; then the legacy
+// ForceRemote hook selector; otherwise the repo's `backend` config key, which
+// defaults to local.
+//
+// The config read is best-effort for the DEFAULT (no explicit selection) path:
+// a path that is not a git repo, or a repo with no readable config, falls back
+// to local so a local session is never blocked by config resolution here (the
+// same posture as before Phase 4, where this factory read no config for a local
+// session). A config that loads but declares an invalid backend value surfaces
+// that error — misconfiguration should fail the create, not silently run local.
+func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, error) {
+	if opts.Backend != "" {
+		return ParseBackendKind(string(opts.Backend))
+	}
+	if opts.ForceRemote {
+		return BackendHook, nil
+	}
+	cfg, err := resolveRepoConfig(absPath)
+	if err != nil {
+		return BackendLocal, nil
+	}
+	return ParseBackendKind(cfg.Backend)
 }
 
 // SetBackendFactoryForTest replaces the backend factory with f and returns a
@@ -80,8 +129,10 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	t := time.Now()
 
 	// An in-place session runs in the repo's local working tree; a remote
-	// session has no local worktree at all — the two are contradictory.
-	if opts.InPlace && opts.ForceRemote {
+	// session has no local worktree at all — the two are contradictory. This
+	// covers both the legacy ForceRemote hook selector and an explicit
+	// non-local --backend (#1592 Phase 4 PR3).
+	if opts.InPlace && (opts.ForceRemote || (opts.Backend != "" && opts.Backend != BackendLocal)) {
 		return nil, fmt.Errorf("remote sessions cannot run in-place in the local repo working tree")
 	}
 

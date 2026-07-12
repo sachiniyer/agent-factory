@@ -238,9 +238,39 @@ terminal_cmd = "./infra/terminal.sh"
 |-------|-------|
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
+| `backend`, `docker`, `ssh` | **In-repo only.** Select the runtime a repo's sessions run on. |
 | `auto_yes`, `auto_update`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `root_agents`, `limit_auto_resume`, `limit_retry_interval` | Global only. Setting them in-repo is rejected with an error naming the key. |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
+
+### Backend runtime (`backend`, `docker`, `ssh`)
+
+`backend` selects the runtime a repo's sessions run on, and `--backend` overrides
+it per `af sessions create`:
+
+| Value | Runtime |
+|-------|---------|
+| `local` (default, or unset) | Today's in-process runtime: the agent runs as a tmux session in a git worktree on the machine running the daemon. |
+| `hook` | The remote-hook backend — a bring-your-own provisioner driven by the `[remote_hooks]` scripts (equivalent to the TUI's "new remote session"). |
+| `docker` | Run the workspace + agent in a container started from `[docker].image`. *Not yet implemented — selecting it fails create with a clear error (arrives in a later Phase 4 PR).* |
+| `ssh` | Run the workspace + agent on `[ssh].host` over ssh. *Not yet implemented — selecting it fails create with a clear error (arrives in a later Phase 4 PR).* |
+
+```toml
+backend = "docker"
+
+[docker]
+image = "af-runtime:latest"
+run_args = ["--memory", "2g"]
+
+[ssh]
+host = "build-box"
+user = "ci"
+port = 2222
+identity_file = "~/.ssh/id_ed25519"
+```
+
+An unknown `backend` value (or `--backend`) is reported when the session's
+runtime is resolved at create time, naming the valid options.
 
 ### In-repo file name: `config.toml` or `config.json`
 

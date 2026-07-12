@@ -53,6 +53,44 @@ func TestLoadInRepoConfigFields(t *testing.T) {
 	assert.Equal(t, []string{"post_worktree_commands", "program_overrides", "remote_hooks"}, cfg.CommandBearingFields())
 }
 
+// TestLoadInRepoConfigBackendKeys covers the Phase 4 PR3 config surface: the
+// `backend` selector and the `docker`/`ssh` sections load, are marked set, and
+// resolve through ResolveConfig — while an unknown value is not rejected at load
+// (validation runs when the runtime is resolved, like remote_hooks).
+func TestLoadInRepoConfigBackendKeys(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	writeInRepoConfig(t, repoRoot, `{
+		"backend": "docker",
+		"docker": {"image": "af-runtime:latest", "run_args": ["--memory", "2g"]},
+		"ssh": {"host": "build-box", "user": "ci", "port": 2222, "identity_file": "/keys/id"}
+	}`)
+
+	cfg, _, err := LoadInRepoConfig(repoRoot)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "docker", cfg.Backend)
+	require.NotNil(t, cfg.Docker)
+	assert.Equal(t, "af-runtime:latest", cfg.Docker.Image)
+	assert.Equal(t, []string{"--memory", "2g"}, cfg.Docker.RunArgs)
+	require.NotNil(t, cfg.SSH)
+	assert.Equal(t, "build-box", cfg.SSH.Host)
+	assert.Equal(t, "ci", cfg.SSH.User)
+	assert.Equal(t, 2222, cfg.SSH.Port)
+	assert.Equal(t, "/keys/id", cfg.SSH.IdentityFile)
+	for _, key := range []string{"backend", "docker", "ssh"} {
+		assert.True(t, cfg.IsSet(key), "expected %s to be marked set", key)
+	}
+
+	res, err := ResolveConfig(repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, "docker", res.Backend)
+	require.NotNil(t, res.Docker)
+	assert.Equal(t, "af-runtime:latest", res.Docker.Image)
+	require.NotNil(t, res.SSH)
+	assert.Equal(t, "build-box", res.SSH.Host)
+}
+
 func TestLoadInRepoConfigEmptyValueIsSet(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoRoot := t.TempDir()
