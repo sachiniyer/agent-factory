@@ -25,6 +25,13 @@ type InstanceOptions struct {
 	// git worktree+branch. The worktree is marked external so kill/cleanup
 	// never removes the user's tree or branch. Local backend only.
 	InPlace bool
+	// RemoteAgentServer, when set, points the instance's AgentServer() at a REMOTE
+	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4 PR2)
+	// instead of the local in-process runtime. Validated at NewInstance (a bad URL
+	// or fingerprint fails there). DARK in PR2: no runtime provisions a sandbox to
+	// fill this in yet (PR3-PR5); it is exercised by the out-of-process round-trip
+	// test.
+	RemoteAgentServer *AgentServerEndpoint
 }
 
 // backendFactory constructs the Backend used by a new Instance. It is a
@@ -89,18 +96,31 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, err
 	}
 
+	// A remote-runtime session builds its agent-server transport up front so the
+	// endpoint (URL, TLS pin) is validated here rather than on first AgentServer()
+	// use — which is what keeps the AgentServer() factory infallible (#1592 Phase 4
+	// PR2). nil for every local session, so the default path is untouched.
+	var remoteClient *remoteAgentClient
+	if opts.RemoteAgentServer != nil {
+		remoteClient, err = newRemoteAgentClient(*opts.RemoteAgentServer, opts.Title)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build remote agent-server client: %w", err)
+		}
+	}
+
 	return &Instance{
-		ID:        newSessionID(),
-		Title:     opts.Title,
-		liveness:  LiveReady,
-		Path:      absPath,
-		Program:   opts.Program,
-		Height:    0,
-		Width:     0,
-		CreatedAt: t,
-		UpdatedAt: t,
-		AutoYes:   opts.AutoYes,
-		inPlace:   opts.InPlace,
-		backend:   backend,
+		ID:           newSessionID(),
+		Title:        opts.Title,
+		liveness:     LiveReady,
+		Path:         absPath,
+		Program:      opts.Program,
+		Height:       0,
+		Width:        0,
+		CreatedAt:    t,
+		UpdatedAt:    t,
+		AutoYes:      opts.AutoYes,
+		inPlace:      opts.InPlace,
+		backend:      backend,
+		remoteClient: remoteClient,
 	}, nil
 }

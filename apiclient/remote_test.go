@@ -44,33 +44,6 @@ func TestParseDaemonURL_AcceptsTLSSchemesRejectsPlaintext(t *testing.T) {
 	}
 }
 
-// TestNormalizeFingerprint_AcceptsFormsRejectsGarbage proves the pin accepts the
-// sha256:-prefixed form `af token show` prints, plain hex, and colon-separated
-// hex, and rejects wrong-length / non-hex input up front (before any dial).
-func TestNormalizeFingerprint_AcceptsFormsRejectsGarbage(t *testing.T) {
-	const bare = "aa11bb22cc33dd44ee55ff66007788990011223344556677889900aabbccddee"
-	forms := []string{bare, "sha256:" + bare, strings.ToUpper(bare), "SHA256:" + bare}
-	for _, f := range forms {
-		got, err := normalizeFingerprint(f)
-		if err != nil {
-			t.Fatalf("normalizeFingerprint(%q): %v", f, err)
-		}
-		if got != bare {
-			t.Fatalf("normalizeFingerprint(%q) = %q, want %q", f, got, bare)
-		}
-	}
-	// Colon-separated hex (openssl's default form) normalizes to the same bare hex.
-	colon := "aa:11:bb:22:cc:33:dd:44:ee:55:ff:66:00:77:88:99:00:11:22:33:44:55:66:77:88:99:00:aa:bb:cc:dd:ee"
-	if got, err := normalizeFingerprint(colon); err != nil || got != bare {
-		t.Fatalf("normalizeFingerprint(colon) = (%q,%v), want (%q,nil)", got, err, bare)
-	}
-	for _, f := range []string{"", "abcd", bare + "ff", "zz11" + bare[4:]} {
-		if _, err := normalizeFingerprint(f); err == nil {
-			t.Fatalf("normalizeFingerprint(%q): want error, got nil", f)
-		}
-	}
-}
-
 // clearTargetEnv unsets every AF_DAEMON_* env var (and any bound flag) so a test's
 // remote-target resolution starts from a known-empty state, then restores the flag
 // vars on cleanup. Env vars are cleared via t.Setenv, which auto-restores.
@@ -126,7 +99,7 @@ func tlsSnapshotServer(t *testing.T, wantToken string) (*httptest.Server, string
 	})
 	srv := httptest.NewTLSServer(mux)
 	t.Cleanup(srv.Close)
-	return srv, certFingerprint(srv.Certificate().Raw)
+	return srv, agentproto.CertFingerprint(srv.Certificate().Raw)
 }
 
 // TestNewRemote_RESTRoundTripWithPinAndToken is the core remote proof: a Client
@@ -218,7 +191,7 @@ func TestDialStream_RemoteThreadsTokenHeaderAndQuery(t *testing.T) {
 	})
 	srv := httptest.NewTLSServer(mux)
 	t.Cleanup(srv.Close)
-	pin := certFingerprint(srv.Certificate().Raw)
+	pin := agentproto.CertFingerprint(srv.Certificate().Raw)
 
 	c, err := NewRemote(srv.URL, "secret-token", pin)
 	if err != nil {
