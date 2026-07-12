@@ -163,7 +163,7 @@ func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode, "the shell must load without a token")
 	require.Contains(t, string(body), `id="app"`)
-	require.Equal(t, "default-src 'self'", resp.Header.Get("Content-Security-Policy"))
+	require.Equal(t, "default-src 'self'; style-src 'self' 'unsafe-inline'", resp.Header.Get("Content-Security-Policy"))
 
 	// The JS bundle is likewise reachable unauthenticated.
 	resp, err = client.Get(baseURL + "/af-web.js")

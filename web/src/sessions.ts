@@ -5,9 +5,12 @@
 // sidebar depends on are unit-tested (sessions.test.ts) independently of the DOM
 // wiring in index.ts.
 //
-// Identity is the session title: titles are unique in af (one worktree, one row),
-// and the killed/archived/restored events carry ONLY the title (see
-// daemon/control_server.go), so the title is the one key every event shares.
+// Identity for the LIST reducer is the session title: the killed/archived/restored
+// events carry ONLY the title (see daemon/control_server.go), so the title is the
+// one key every event shares — upsert/remove key off it. SELECTION, by contrast,
+// keys off the stable session id (pickSelection), because the attach terminal
+// (PR4) dials `/v1/sessions/{id}/stream` and titles collide across repos; the id
+// is the stable, per-session handle the stream needs (design §4, PR4).
 
 import type { SessionData, WireEvent } from "./types.js";
 
@@ -69,12 +72,13 @@ export function applyEvent(list: SessionData[], ev: WireEvent): ApplyResult {
   }
 }
 
-/** Keeps a valid selection: preserves the current one if it still exists, else
- *  null. Never auto-selects, so selection stays a deliberate user act — matching
- *  the read-only, no-surprise projection model. */
-export function pickSelection(list: SessionData[], current: string | null): string | null {
-  if (current && list.some((s) => s.title === current)) {
-    return current;
+/** Keeps a valid selection keyed by session id: preserves the current id if a row
+ *  with it still exists (e.g. after an in-place update), else null (e.g. after the
+ *  selected session is killed). Never auto-selects, so selection stays a deliberate
+ *  user act — matching the read-only, no-surprise projection model. */
+export function pickSelection(list: SessionData[], currentId: string | null): string | null {
+  if (currentId && list.some((s) => s.id === currentId)) {
+    return currentId;
   }
   return null;
 }
