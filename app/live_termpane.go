@@ -72,7 +72,19 @@ func (m *home) reconcileLiveTermPanes() {
 	// fight over size, and our stream would generate tmux traffic in an interactive
 	// client's way (#598 class). The attach dispatch path already closed them; this
 	// covers any path that flips the flag without going through showHelpScreen.
-	if m.attached.Load() {
+	//
+	// attachTransitioning is checked alongside attached to close the #1661 window:
+	// when the one-time attach help is already seen, showHelpScreen closes the panes
+	// and then dispatches the attach through a 20ms tea.Tick (beginAttachTransition).
+	// For those ~20ms attached is still false and m.state is still stateDefault, so
+	// without this a previewTick reconcile RE-CREATES an embedded attachment that then
+	// lives THROUGH the full-screen attach — where the attach client's full-screen
+	// resize reflows its emulator to garbage — and is kept (same bind key) after
+	// detach, rendering a blank/stale grid that never recovers because the stream
+	// never dropped. Treating the whole transition as "no WS panes" means the pane is
+	// instead freshly rebuilt after detach with a clean repaint. attachTransitioning
+	// is written and read only on the event loop, so no atomic is needed.
+	if m.attached.Load() || m.attachTransitioning {
 		m.closeAllLiveTermPanes()
 		return
 	}

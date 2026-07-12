@@ -166,6 +166,43 @@ func TestSyncLiveTermPaneClosesWhileAttached(t *testing.T) {
 	assert.Len(t, *fakes, 1)
 }
 
+// TestSyncLiveTermPaneClosesWhileAttachTransitioning is the #1661 regression: the
+// window between the attach dispatch (which closes the panes) and the attach
+// actually starting. When the one-time attach help is already seen, showHelpScreen
+// closes the panes and dispatches the attach through a 20ms tea.Tick, during which
+// attached is still false and m.state is still stateDefault. A reconcile in that
+// window must NOT rebuild an attachment — one rebuilt here would live through the
+// full-screen attach, be reflowed to garbage by the attach client's resize, and be
+// kept (stale/blank) after detach because its stream never dropped.
+func TestSyncLiveTermPaneClosesWhileAttachTransitioning(t *testing.T) {
+	h, _ := liveTestHome(t)
+	fakes, _ := stubLiveTermFactory(t)
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 1)
+
+	// The attach is dispatched but not yet started: attached is false, state is
+	// still default — only attachTransitioning marks the in-flight attach.
+	h.attachTransitioning = true
+	require.False(t, h.attached.Load())
+	require.Equal(t, stateDefault, h.state)
+
+	h.syncLiveTermPane()
+	assert.True(t, (*fakes)[0].closed, "the pending attach must release every live attachment")
+	assert.Empty(t, h.liveTerms)
+
+	// And nothing rebinds during the transition — otherwise a pane created here
+	// survives into the attach and renders stale after detach (#1661).
+	h.syncLiveTermPane()
+	assert.Len(t, *fakes, 1, "no attachment may be rebuilt while the attach is in flight")
+
+	// Once the attach fully unwinds (detach clears both flags), a fresh attachment
+	// is rebuilt — with a clean emulator, not the corrupted one.
+	h.attachTransitioning = false
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 2, "detach must rebuild a fresh attachment")
+	assert.False(t, (*fakes)[1].closed)
+}
+
 func TestAttachHelpScreenClosesLiveAttachment(t *testing.T) {
 	h, _ := liveTestHome(t)
 	fakes, _ := stubLiveTermFactory(t)
