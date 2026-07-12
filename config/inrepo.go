@@ -91,11 +91,16 @@ var inRepoAllowedKeys = []string{
 // so an in-repo value would either silently do nothing or, worse, let a repo
 // flip host-level behavior like autoyes.
 var inRepoGlobalOnlyKeys = map[string]bool{
-	"auto_update":          true,
-	"auto_yes":             true,
-	"branch_prefix":        true,
+	"auto_update":   true,
+	"auto_yes":      true,
+	"branch_prefix": true,
+	// TCP/TLS auth material configures the daemon's network surface, never a
+	// repository — a cloned repo must never be able to open a port, swap the
+	// server cert, or widen the CORS allow-list (#1592 Phase 3).
+	"cors_allowed_origins": true,
 	"daemon_poll_interval": true,
 	"detach_keys":          true,
+	"listen_addr":          true,
 	// The [keys] keymap is a user/host preference: a cloned repo must never
 	// be able to rebind someone's terminal (#1026).
 	"keys":                 true,
@@ -107,6 +112,8 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	// The [theme] table is a user/host visual preference; repositories must
 	// not be able to recolor a cloned user's TUI (#1389).
 	"theme":          true,
+	"tls_cert":       true,
+	"tls_key":        true,
 	"update_channel": true,
 	"worktree_root":  true,
 }

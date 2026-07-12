@@ -53,6 +53,9 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af tasks remove`](#af-tasks-remove) — Remove a task
 - [`af tasks trigger`](#af-tasks-trigger) — Trigger a task to run immediately
 - [`af tasks update`](#af-tasks-update) — Update a task's properties
+- [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
+- [`af token rotate`](#af-token-rotate) — Replace the bearer token with a fresh one and print it
+- [`af token show`](#af-token-show) — Print the bearer token and TLS fingerprint (generating them if absent)
 - [`af upgrade`](#af-upgrade) — Upgrade agent-factory to the latest release on the configured channel
 - [`af version`](#af-version) — Print the version number of agent-factory
 
@@ -77,6 +80,7 @@ af [flags]
 - [`af reset`](#af-reset) — Reset all stored instances
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af tasks`](#af-tasks) — Manage tasks
+- [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
 - [`af upgrade`](#af-upgrade) — Upgrade agent-factory to the latest release on the configured channel
 - [`af version`](#af-version) — Print the version number of agent-factory
 
@@ -1144,6 +1148,70 @@ af tasks update <id> [flags]
 |------|------|-------------|
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+
+## af token
+
+Manage the daemon's bearer token for the direct-TCP API
+
+Manage the bearer token that authenticates the daemon's direct-TCP/TLS API.
+
+The token grants full access under the single-owner auth model. It is only used
+by the TCP listener (enabled with the listen_addr config key); the local unix
+socket stays unauthenticated (its 0600 filesystem perms are the local auth).
+The token and the self-signed TLS cert are stored in the af home
+(~/.agent-factory) with 0600 permissions on the secret files.
+
+```
+af token
+```
+
+**Subcommands**
+
+- [`af token rotate`](#af-token-rotate) — Replace the bearer token with a fresh one and print it
+- [`af token show`](#af-token-show) — Print the bearer token and TLS fingerprint (generating them if absent)
+
+## af token rotate
+
+Replace the bearer token with a fresh one and print it
+
+Generate a new bearer token, persist it (overwriting the old one), and print it.
+
+Rotation takes effect for new connections immediately — the auth gate re-reads
+the token file per request — while any in-flight streams keep running until they
+reconnect. The TLS fingerprint is unaffected (it depends on the certificate, not
+the token).
+
+```
+af token rotate [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Emit the result as JSON wrapped in the {data,error} envelope |
+
+## af token show
+
+Print the bearer token and TLS fingerprint (generating them if absent)
+
+Print the daemon's bearer token and its TLS certificate fingerprint.
+
+Both are generated on first access if they do not yet exist, so this is safe to
+run before the TCP listener is ever enabled. The fingerprint is the SHA-256 a
+remote client pins (TOFU) when the daemon uses its self-signed certificate; when
+a CA-issued certificate is configured via tls_cert/tls_key it is that
+certificate's fingerprint (clients verify it against system roots instead).
+
+```
+af token show [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Emit the result as JSON wrapped in the {data,error} envelope |
 
 ## af upgrade
 
