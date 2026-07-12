@@ -740,7 +740,7 @@ func interactiveMouseHome(t *testing.T) (*home, *fakeLiveTerm, string) {
 	enterInteractive(t, h)
 	require.True(t, h.interactive)
 	require.Len(t, *fakes, 1)
-	region := layout.PaneRegion(h.livePane.ID())
+	region := layout.PaneRegion(h.focusedOpenPane().ID())
 	newFakeClock(h)
 	return h, (*fakes)[0], region
 }
@@ -762,7 +762,7 @@ func TestMouse_InteractiveForwardsGridEvents(t *testing.T) {
 	wheel(h, term.X+5, term.Y+3, true)
 	require.Len(t, fake.mice, 2, "the wheel forwards too — the inner app owns scroll (§2.5)")
 	assert.Equal(t, tea.MouseButtonWheelUp, fake.mice[1].msg.Button)
-	assert.False(t, h.paneWindows[h.livePane.ID()].IsInScrollMode(),
+	assert.False(t, h.paneWindows[h.focusedOpenPane().ID()].IsInScrollMode(),
 		"a forwarded wheel must not flip the live pane into host capture scroll")
 
 	_, _ = h.handleMouse(tea.MouseMsg{

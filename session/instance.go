@@ -178,13 +178,17 @@ type Instance struct {
 	agentSrvMu sync.Mutex
 }
 
-// agentTmuxSession returns the instance's agent-tab tmux session, or nil when the
-// instance is not started or is remote. It is the clientless data plane's binding
-// point (#1592 PR5); it takes i.mu, so callers must not already hold it.
-func (i *Instance) agentTmuxSession() *tmux.TmuxSession {
+// tabTmuxSession returns the tmux session backing the tab at idx (0 is the agent
+// tab), or nil when the instance is not started, is remote, or idx is out of
+// range. It is the tab-aware binding point the clientless data plane subscribes
+// per pane (#1592 Phase 2 PR6). Takes i.mu, so callers must not already hold it.
+func (i *Instance) tabTmuxSession(idx int) *tmux.TmuxSession {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return i.tmuxLocked()
+	if !i.started {
+		return nil
+	}
+	return i.tabTmuxAtLocked(idx)
 }
 
 // tmuxLocked returns the agent tab's tmux session, or nil when the instance has

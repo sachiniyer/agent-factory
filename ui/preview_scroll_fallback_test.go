@@ -57,7 +57,7 @@ func TestPreviewScrollModeThenDeletingFallback(t *testing.T) {
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatusForTest(session.Deleting)
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 	enterScrollWithStaleViewport(p, inst)
 
@@ -83,7 +83,7 @@ func TestPreviewScrollModeThenNilInstanceFallback(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 	// currentInstance stays nil and we adopt the agent slot so dropStaleView
 	// (nil==nil, tab unchanged) does not reset scroll itself — setFallbackState
@@ -119,7 +119,7 @@ func TestPreviewScrollModeThenLoadingFallback(t *testing.T) {
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatusForTest(session.Loading)
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 	enterScrollWithStaleViewport(p, inst)
 
@@ -147,7 +147,7 @@ func TestPreviewScrollEntryDeletingShowsTeardownFallback(t *testing.T) {
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatusForTest(session.Deleting)
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	require.NoError(t, p.ScrollUp(inst, 0))
@@ -178,7 +178,7 @@ func TestPreviewScrollModeViewportContentCleared(t *testing.T) {
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatusForTest(session.Deleting)
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 	enterScrollWithStaleViewport(p, inst)
 	require.Contains(t, p.viewport.View(), staleScrollMarker,
@@ -232,7 +232,7 @@ func TestPreviewScrollModeThenSessionGoneFallback(t *testing.T) {
 	setup := setupTestEnvironment(t, cmdExec)
 	defer setup.cleanupFn()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Register currentInstance via a live render so ScrollUp's dropStaleScrollState

@@ -46,9 +46,12 @@ type AgentServer interface {
 	// Observation. The local implementation never errors; the error is for a future
 	// remote runtime whose observation channel can fail.
 	Snapshot() (Observation, error)
-	// Preview returns the session's visible output; full=true returns the entire
-	// scrollback history.
-	Preview(full bool) (string, error)
+	// Preview returns tab `tab`'s visible output; full=true returns the entire
+	// scrollback history. tab 0 is the agent tab (the backend preview); tab>0 is a
+	// shell/process tab. This is the daemon's SOLE capture path for content the TUI
+	// can't stream live (remote/hook sessions, scroll-mode scrollback, the transient
+	// preview target) — the TUI no longer captures tmux itself (#1592 Phase 2 PR6).
+	Preview(tab int, full bool) (string, error)
 	// Alive reports whether the underlying session process is still running. Kept
 	// separate from Snapshot (rather than folded into Observation) so the daemon
 	// probes liveness ONLY on the idle branch, exactly as before — folding it in
@@ -65,22 +68,24 @@ type AgentServer interface {
 	// underlying channel as SendPrompt.
 	TapEnter()
 
-	// Subscribe returns a fan-out read of the session's PTY stream from cursor
+	// Subscribe returns a fan-out read of tab `tab`'s PTY stream from cursor
 	// `since` (0 = from the ring-buffer tail / live), so a reconnecting client
-	// replays the gap it missed. The local agent-server (PR5) drives a clientless
-	// tmux channel — pipe-pane for output capture — and fans the bytes to every
-	// subscriber through a bounded ring buffer; a subscriber that falls behind or
-	// dies is dropped without touching the PTY (§6). Read-write: Input/Resize below
-	// are accepted from every subscriber (multi-writer, no lease).
-	Subscribe(since Seq) (PTYSubscription, error)
-	// Input writes raw bytes to the PTY (the multi-writer input path that subsumes
-	// the old tmux-shaped SendKeys). For the local runtime it is a clientless tmux
-	// send-keys, accepted from any subscriber.
-	Input(b []byte) error
-	// Resize sets the PTY size; last-resize-wins across subscribers. The local
-	// runtime drives a clientless tmux resize-window and broadcasts an
+	// replays the gap it missed. tab 0 is the agent tab; tab>0 is a shell/process
+	// tab — each tab has its own bounded ring buffer and clientless capture (#1592
+	// Phase 2 PR6, tab-aware). The local agent-server drives a clientless tmux
+	// channel — pipe-pane for output capture — and fans the bytes to every
+	// subscriber; a subscriber that falls behind or dies is dropped without touching
+	// the PTY (§6). Read-write: Input/Resize below are accepted from every
+	// subscriber (multi-writer, no lease).
+	Subscribe(tab int, since Seq) (PTYSubscription, error)
+	// Input writes raw bytes to tab `tab`'s PTY (the multi-writer input path that
+	// subsumes the old tmux-shaped SendKeys). For the local runtime it is a
+	// clientless tmux send-keys, accepted from any subscriber.
+	Input(tab int, b []byte) error
+	// Resize sets tab `tab`'s PTY size; last-resize-wins across subscribers. The
+	// local runtime drives a clientless tmux resize-window and broadcasts an
 	// authoritative size echo to every subscriber so their emulators reflow (§6.2).
-	Resize(rows, cols uint16) error
+	Resize(tab int, rows, cols uint16) error
 
 	// Kill terminates the session and releases its backing resources.
 	Kill() error
@@ -150,6 +155,10 @@ const (
 	// PTYResize carries the authoritative last-resize-wins size (Rows/Cols),
 	// mapped to a resize control frame so every subscriber's emulator reflows.
 	PTYResize
+	// PTYRepaint carries a one-shot initial screen repaint (Data) for a fresh
+	// subscriber, mapped to an OpRepaint frame — rendered like output but NOT
+	// counted toward the client's replay cursor (it is not part of the ring seq).
+	PTYRepaint
 )
 
 // PTYEvent is one event delivered to a subscriber: either output bytes or the

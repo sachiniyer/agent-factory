@@ -28,7 +28,7 @@ func TestTabbedWindowFrameStyleUsesPaneBorderThemeSlots(t *testing.T) {
 		}
 	}
 
-	w := NewTabbedWindow(NewTabPane(), nil)
+	w := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	assertFrameColor("default", w, "#111111")
 
 	w.SetSidebarSelected(true)

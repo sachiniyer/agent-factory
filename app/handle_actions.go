@@ -891,9 +891,8 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 		if w == nil || !w.JumpToTab(idx) {
 			return m, nil
 		}
-		if p == m.livePane {
-			m.syncLiveTermPane()
-		}
+		// The pane's tab changed, so its live binding key changed — rebind it.
+		m.syncLiveTermPane()
 		return m, m.selectionChanged()
 	}
 	if idx < 0 || idx >= len(tree.TabLabels(m.store.GetSelectedInstance())) {

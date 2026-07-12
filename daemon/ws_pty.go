@@ -81,12 +81,17 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, http.StatusBadRequest, err)
 		return
 	}
+	tab, err := parseTab(r.URL.Query().Get("tab"))
+	if err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err)
+		return
+	}
 	as, err := cs.manager.agentServerForStream(id, repoID)
 	if err != nil {
 		writeHTTPError(w, http.StatusNotFound, err)
 		return
 	}
-	sub, err := as.Subscribe(since)
+	sub, err := as.Subscribe(tab, since)
 	if err != nil {
 		writeHTTPError(w, http.StatusInternalServerError, err)
 		return
@@ -103,21 +108,21 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		_ = sub.Close()
 		return // Accept already wrote the error response.
 	}
-	servePTYStream(as, sub, conn)
+	servePTYStream(as, tab, sub, conn)
 }
 
 // servePTYStream runs the three loops of one subscriber's connection until any of
 // them ends: the writer (ring → PTY_OUT / resize-echo), the reader (INPUT/RESIZE/
 // detach → agent-server), and the keepalive pinger. It owns closing the
 // subscription and the socket.
-func servePTYStream(as session.AgentServer, sub session.PTYSubscription, conn *websocket.Conn) {
+func servePTYStream(as session.AgentServer, tab int, sub session.PTYSubscription, conn *websocket.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	defer func() { _ = sub.Close() }()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); defer cancel(); readPTYClient(ctx, as, conn) }()
+	go func() { defer wg.Done(); defer cancel(); readPTYClient(ctx, as, tab, conn) }()
 	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn) }()
 
 	writePTYStream(ctx, sub, conn)
@@ -140,6 +145,8 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 		switch ev.Kind {
 		case session.PTYData:
 			err = agentproto.WriteFrame(wctx, conn, agentproto.PTYOutFrame(ev.Data))
+		case session.PTYRepaint:
+			err = agentproto.WriteFrame(wctx, conn, agentproto.RepaintFrame(ev.Data))
 		case session.PTYResize:
 			err = agentproto.WriteControl(wctx, conn, agentproto.NewResizeMessage(ev.Rows, ev.Cols))
 		}
@@ -153,7 +160,7 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 // readPTYClient handles client → server frames: INPUT and RESIZE are applied to
 // the agent-server (multi-writer, from any subscriber); a detach control frame or
 // any read error ends the connection.
-func readPTYClient(ctx context.Context, as session.AgentServer, conn *websocket.Conn) {
+func readPTYClient(ctx context.Context, as session.AgentServer, tab int, conn *websocket.Conn) {
 	for {
 		msg, err := agentproto.ReadMessage(ctx, conn)
 		if err != nil {
@@ -162,9 +169,9 @@ func readPTYClient(ctx context.Context, as session.AgentServer, conn *websocket.
 		if msg.Binary {
 			switch msg.Frame.Op {
 			case agentproto.OpInput:
-				_ = as.Input(msg.Frame.Data)
+				_ = as.Input(tab, msg.Frame.Data)
 			case agentproto.OpResize:
-				_ = as.Resize(msg.Frame.Rows, msg.Frame.Cols)
+				_ = as.Resize(tab, msg.Frame.Rows, msg.Frame.Cols)
 			}
 			continue
 		}
@@ -255,4 +262,17 @@ func parseSince(raw string) (session.Seq, error) {
 		return 0, fmt.Errorf("invalid since cursor %q: %w", raw, err)
 	}
 	return session.Seq(v), nil
+}
+
+// parseTab parses the ?tab=<idx> tab selector (#1592 Phase 2 PR6). Empty means 0
+// (the agent tab); a non-negative integer selects a shell/process tab.
+func parseTab(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		return 0, fmt.Errorf("invalid tab index %q", raw)
+	}
+	return v, nil
 }

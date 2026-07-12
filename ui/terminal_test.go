@@ -132,7 +132,7 @@ func TestTabPaneShellUpdateContent(t *testing.T) {
 	inst := makeShellInstance(t, "update", expected)
 	defer func() { _ = inst.Kill() }()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	require.NoError(t, p.UpdateContent(inst, 1))
@@ -149,7 +149,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	t.Run("nil instance", func(t *testing.T) {
@@ -205,7 +205,7 @@ func TestTabPaneShellScrolling(t *testing.T) {
 	inst := makeShellInstance(t, "scroll", strings.Join(lines, "\n"))
 	defer func() { _ = inst.Kill() }()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	require.False(t, p.IsScrolling(), "should not be scrolling initially")
@@ -234,7 +234,7 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 	defer func() { _ = prior.Kill() }()
 
 	t.Run("nil instance", func(t *testing.T) {
-		p := NewTabPane()
+		p := NewTabPane(previewFromInstance)
 		p.SetSize(80, 30)
 		require.NoError(t, p.ScrollUp(prior, 1))
 		require.True(t, p.IsScrolling(), "precondition: in scroll mode")
@@ -253,7 +253,7 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 	})
 
 	t.Run("not started instance", func(t *testing.T) {
-		p := NewTabPane()
+		p := NewTabPane(previewFromInstance)
 		p.SetSize(80, 30)
 		require.NoError(t, p.ScrollUp(prior, 1))
 		require.True(t, p.IsScrolling())
@@ -292,7 +292,7 @@ func TestTabPaneShellScrollUsesSelectedView(t *testing.T) {
 	instB := makeShellInstance(t, "B", contentB)
 	defer func() { _ = instB.Kill() }()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// A is rendered first, so it becomes the current view.
@@ -323,7 +323,7 @@ func TestTabPaneSwitchTabResetsScroll(t *testing.T) {
 	inst := makeShellInstance(t, "switch", "agent-and-shell-content")
 	defer func() { _ = inst.Kill() }()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Scroll on the agent slot.
@@ -388,7 +388,7 @@ func TestTabPaneShellSessionGoneFallback(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = inst.Kill() }()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Happy path: shell content renders.
@@ -472,7 +472,7 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = inst.Kill() }()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Enter scroll mode on the live shell tab: the viewport fills with scrollback.
@@ -561,7 +561,7 @@ func TestTabPaneShellScrollModeAlreadyDead(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = inst.Kill() }()
 
-	p := NewTabPane()
+	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
 	// Render the live shell tab so p.content holds the last capture (stale content
@@ -605,7 +605,7 @@ func TestTabPaneRemoteFallbackStates(t *testing.T) {
 
 	t.Run("terminal_cmd configured shows attach prompt", func(t *testing.T) {
 		inst := makeRemoteInstance(t, "remote-843-on", config.RemoteHooks{TerminalCmd: "/bin/true"})
-		p := NewTabPane()
+		p := NewTabPane(previewFromInstance)
 		p.SetSize(80, 30)
 		require.NoError(t, p.UpdateContent(inst, 1))
 		p.mu.Lock()
@@ -616,7 +616,7 @@ func TestTabPaneRemoteFallbackStates(t *testing.T) {
 
 	t.Run("terminal_cmd absent keeps not-available fallback", func(t *testing.T) {
 		inst := makeRemoteInstance(t, "remote-843-off", config.RemoteHooks{})
-		p := NewTabPane()
+		p := NewTabPane(previewFromInstance)
 		p.SetSize(80, 30)
 		require.NoError(t, p.UpdateContent(inst, 1))
 		p.mu.Lock()

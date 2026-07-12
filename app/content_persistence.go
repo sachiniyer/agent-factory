@@ -29,10 +29,10 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	// requirement). Killing an instance still tears its tabs down via
 	// LocalBackend.Kill.
 	//
-	// The live termpane attachment is the one exception: release its attach
-	// CLIENT (the session survives, exactly like a detach) so no orphaned
-	// `tmux attach-session` child outlives the TUI (#1089).
-	m.closeLiveTermPane()
+	// The live termpane attachments are the one exception: close every WS
+	// subscription (the sessions survive, exactly like a detach) so no stream
+	// goroutine outlives the TUI (#1089/#1592).
+	m.closeAllLiveTermPanes()
 	m.quitting = true
 	return m, cleanQuitCmd()
 }

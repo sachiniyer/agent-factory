@@ -197,6 +197,13 @@ var internalHTTPRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/Preview",
+		Description:   "Capture a session tab's content (daemon-sole-capturer render path for the TUI: remote/scroll/preview).",
+		RequestFields: jsonFields(reflect.TypeOf(PreviewRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.Preview) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/PauseStatusPoll",
 		Description:   "Pause the daemon's liveness poll for one attached session (best-effort attach coordination).",
 		RequestFields: jsonFields(reflect.TypeOf(PauseStatusPollRequest{})),

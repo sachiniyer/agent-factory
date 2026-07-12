@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -55,6 +56,10 @@ type clientlessChannel interface {
 	// Resize sets the pane/window size (clientless resize-window). Last-resize-wins
 	// is enforced by the broker; this just applies the winning size.
 	Resize(rows, cols uint16) error
+	// Snapshot returns the pane's current visible screen (with escapes) — the
+	// repaint the broker injects on subscribe and after a resize, since pipe-pane
+	// never delivers tmux's screen redraw (#1592 Phase 2 PR6).
+	Snapshot() ([]byte, error)
 }
 
 // ptyBroker is the per-session data plane. Guarded by mu; the ring buffer, the
@@ -125,7 +130,34 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	}
 	b.subs[sub.id] = sub
 	b.mu.Unlock()
+
+	// A fresh subscriber (since == 0, the live tail) gets an initial repaint of the
+	// current screen — pipe-pane only streams future output, so without this a
+	// just-opened pane renders blank until the next byte. A reconnecting client
+	// (since > 0) resumes via ?since replay instead, so it is left seamless.
+	// Captured AFTER registration (register-first) so no output can slip in between
+	// the snapshot and the cursor: bytes in that tiny window are simply in both the
+	// snapshot and the replayed tail (a harmless double-render), never dropped.
+	if since == 0 {
+		if snap, err := b.ch.Snapshot(); err == nil && len(snap) > 0 {
+			rp := buildRepaint(snap)
+			b.mu.Lock()
+			sub.pendingRepaint = rp
+			b.mu.Unlock()
+			sub.wake()
+		}
+	}
 	return sub, nil
+}
+
+// buildRepaint turns a capture-pane snapshot into bytes that reconstruct the
+// screen when written to the emulator: clear + home, then the captured lines with
+// CR before each LF so every line starts at column 0 (capture-pane joins lines
+// with bare "\n", which would otherwise leave the column where the previous line
+// ended).
+func buildRepaint(snapshot []byte) []byte {
+	body := strings.ReplaceAll(string(snapshot), "\n", "\r\n")
+	return append([]byte("\x1b[2J\x1b[H"), body...)
 }
 
 // startCaptureLocked spins up the clientless output capture and the goroutine
@@ -207,6 +239,14 @@ func (b *ptyBroker) resize(rows, cols uint16) error {
 		log.WarningLog.Printf("pty broker: apply resize %dx%d to pane: %v", rows, cols, err)
 		return err
 	}
+	// Deliberately NO capture-pane repaint on resize: resize-window sends the pane's
+	// process a SIGWINCH, and both full-screen programs and the shell's readline
+	// redraw themselves at the new size through pipe-pane, so the reflowed screen
+	// already streams. Injecting an ED-2 repaint here instead RACES that live
+	// redraw — its clear can wipe output typed right after the resize (it broke the
+	// wrapped-command self-test). The emulator re-windows the existing grid until the
+	// SIGWINCH redraw lands, so the pane never blanks. The initial-subscribe repaint
+	// (which has no concurrent output to race) remains the fix for a fresh pane.
 	return nil
 }
 
@@ -272,8 +312,20 @@ type ptySub struct {
 	id         uint64
 	cursor     Seq    // next output byte to deliver
 	resizeSeen uint64 // last resizeGen echoed to this subscriber
-	notify     chan struct{}
-	closeOnce  sync.Once
+	// pendingRepaint is a one-shot initial screen repaint delivered before any
+	// other event to a fresh subscriber (set by subscribe). Read/written under br.mu.
+	pendingRepaint []byte
+	notify         chan struct{}
+	closeOnce      sync.Once
+}
+
+// wake signals this subscriber's doorbell (coalescing, cap-1). Safe to call
+// without br.mu held.
+func (s *ptySub) wake() {
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
 }
 
 var _ PTYSubscription = (*ptySub)(nil)
@@ -288,6 +340,16 @@ func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
 		if s.br.closed {
 			s.br.mu.Unlock()
 			return PTYEvent{}, io.EOF
+		}
+		// The initial screen repaint is delivered before anything else, so a fresh
+		// subscriber paints the current screen before the first live byte lands. It
+		// is a PTYRepaint (not PTYData) so the client renders it without advancing its
+		// replay cursor — the repaint is per-subscriber and not part of the ring seq.
+		if len(s.pendingRepaint) > 0 {
+			data := s.pendingRepaint
+			s.pendingRepaint = nil
+			s.br.mu.Unlock()
+			return PTYEvent{Kind: PTYRepaint, Data: data}, nil
 		}
 		if s.br.hasSize && s.resizeSeen != s.br.resizeGen {
 			s.resizeSeen = s.br.resizeGen

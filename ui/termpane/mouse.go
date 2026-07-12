@@ -23,40 +23,23 @@ import (
 // writes input: the encoder reads terminal modes (mouse tracking, SGR encoding)
 // that the PTY reader pump mutates through emu.Write.
 func (t *TermPane) SendMouse(msg tea.MouseMsg, x, y int) bool {
-	gridY := t.mouseGridY(y)
-	ev, ok := translateMouse(msg, x, gridY)
+	ev, ok := translateMouse(msg, x, y)
 	if !ok {
 		return false
 	}
 	t.gridMu.RLock()
 	defer t.gridMu.RUnlock()
-	// During a resize gap the pane zone can grow before the embedded terminal
-	// is resized to match, so a click in the not-yet-propagated region — pushed
-	// further down by the status-top offset above — can land past the current
-	// emulator grid. Forwarding it would encode a bogus row/col the inner app
-	// never drew, so drop any event outside the live grid instead (#1534). The
-	// bounds read the emulator under the same lock SendMouse already holds.
-	if gridY < 0 || gridY >= t.emu.Height() || x < 0 || x >= t.emu.Width() {
+	// During a resize gap the pane zone can grow before the emulator is resized to
+	// match, so a click in the not-yet-propagated region can land past the current
+	// grid. Forwarding it would encode a bogus row/col the inner app never drew, so
+	// drop any event outside the live grid instead (#1534). The bounds read the
+	// emulator under the same lock SendMouse already holds. The streamed bytes are
+	// the pane itself, so grid row == content row (no status offset).
+	if y < 0 || y >= t.emu.Height() || x < 0 || x >= t.emu.Width() {
 		return false
 	}
 	t.emu.SendMouse(ev)
 	return true
-}
-
-// mouseGridY maps a zone-local content row to the emulator grid row. With the
-// status bar at the top, Render draws the visible window starting at
-// sourceY=statusRows so the status rows stay hidden; a forwarded click's y must
-// shift down by that same hidden-row count, or the first statusRows visible
-// rows would send events into the hidden status area instead of the row the
-// user actually clicked (#1534). With the status bar at the bottom the hidden
-// rows are past the visible window, so no shift applies. statusPosition and
-// statusRows are set once at construction, so this needs no grid lock. Mirrors
-// Render's sourceY.
-func (t *TermPane) mouseGridY(y int) int {
-	if t.statusPosition == statusTop {
-		return y + t.statusRows
-	}
-	return y
 }
 
 // translateMouse maps a bubbletea v1 mouse message to the emulator's event

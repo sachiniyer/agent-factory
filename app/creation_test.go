@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -58,14 +59,13 @@ func newTestHome(t *testing.T) *home {
 		return nil
 	}))
 
-	// The live-termpane bind spawns a real `tmux attach-session` client
-	// (#1089). Default the factory to an error so a test that incidentally
-	// reaches a bind (mock-backed instances answer has-session) fails the
-	// bind quietly and falls back to capture instead of exec-ing tmux.
-	// Tests exercising the live path swap in a fake.
+	// The live-termpane bind would dial a real WS PTY stream (#1592 PR6). Default
+	// the factory to an inert fake so a test that incidentally reaches a bind
+	// (mock-backed instances answer has-session) binds harmlessly instead of
+	// dialing the daemon. Tests exercising the live path swap in a recording fake.
 	origLiveTerm := newLiveTermPaneFn
-	newLiveTermPaneFn = func(string, int, int) (liveTermAttachment, error) {
-		return nil, fmt.Errorf("newLiveTermPaneFn not stubbed in test")
+	newLiveTermPaneFn = func(title, repoID string, tab, width, height int) liveTermAttachment {
+		return newFakeLiveTerm()
 	}
 	t.Cleanup(func() { newLiveTermPaneFn = origLiveTerm })
 
@@ -103,9 +103,44 @@ func newTestHome(t *testing.T) *home {
 		spinner:          spin,
 		repoID:           repoID,
 	}
+	// Content capture routes through the daemon Preview RPC since #1592 PR6.
+	// Resolve the title back to the in-store instance and read it directly, so the
+	// TabPane state-machine tests exercise the same content path (previewTextBackend
+	// etc.) without dialing a real daemon. Per-home field; set before any pane opens
+	// so the source captures it.
+	h.previewFetcher = testPreviewFetcher(h)
+
 	h.sidebar = ui.NewSidebar(&h.spinner, false, proj)
 	wireTestPanes(h, proj)
 	return h
+}
+
+// testPreviewFetcher resolves a Preview request's title back to the in-store
+// instance and captures from it, the test stand-in for the daemon's server-side
+// capture. tmux.ErrSessionGone maps to gone=true, mirroring the daemon handler.
+func testPreviewFetcher(h *home) func(daemon.PreviewRequest) (string, bool, error) {
+	return func(req daemon.PreviewRequest) (string, bool, error) {
+		inst := h.store.GetInstanceByTitle(req.Title)
+		if inst == nil {
+			return "", false, nil
+		}
+		var content string
+		var err error
+		switch {
+		case req.Tab == 0 && req.Full:
+			content, err = inst.PreviewFullHistory()
+		case req.Tab == 0:
+			content, err = inst.Preview()
+		case req.Full:
+			content, err = inst.PreviewTabFullHistory(req.Tab)
+		default:
+			content, err = inst.PreviewTab(req.Tab)
+		}
+		if errors.Is(err, tmux.ErrSessionGone) {
+			return "", true, nil
+		}
+		return content, false, err
+	}
 }
 
 // wireTestPanes installs the workspace panes + focus ring on a hand-built
@@ -124,6 +159,8 @@ func wireTestPanes(h *home, proj *store.Projection) {
 	}
 	h.paneWindows = make(map[int]*ui.TabbedWindow)
 	h.lastPaneCapture = make(map[int]time.Time)
+	h.liveTerms = make(map[int]liveTermAttachment)
+	h.liveKeys = make(map[int]string)
 	// The startup auto-open is production-launch sugar; tests drive the pane
 	// verbs explicitly, so latch it off for determinism.
 	h.initialPaneOpened = true

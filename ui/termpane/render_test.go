@@ -122,12 +122,14 @@ func TestTermPaneCursorVisibilityTracksDECTCM(t *testing.T) {
 	// The inner application hides the cursor (\x1b[?25l — htop, spinners):
 	// the interactive overlay must follow, or a phantom block cursor floats
 	// over the pane.
-	tp := startScript(t, "printf 'hide\\033[?25l'; sleep 30", 20, 4)
+	tp, s := newSingleStreamPane(t, 20, 4)
+	s.feed("hide\x1b[?25l")
 	waitForRender(t, tp, 20, 4, "hide")
 	assert.NotContains(t, tp.Render(20, 4, true), "\x1b[7m",
 		"hidden cursor must not render even when the pane asks for it")
 
-	tp2 := startScript(t, "printf shown; sleep 30", 20, 4)
+	tp2, s2 := newSingleStreamPane(t, 20, 4)
+	s2.feed("shown")
 	waitForRender(t, tp2, 20, 4, "shown")
 	assert.Contains(t, tp2.Render(20, 4, true), "\x1b[7m",
 		"visible cursor must overlay while interactive")

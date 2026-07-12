@@ -23,7 +23,7 @@ func TestTerminalTrailingNewlineAtExactHeight(t *testing.T) {
 	contentLines := []string{"a", "b", "c", "d", "e"}
 	text := strings.Join(contentLines, "\n") + "\n"
 
-	tp := NewTabPane()
+	tp := NewTabPane(previewFromInstance)
 	tp.SetSize(80, paneHeight)
 	tp.content = tabContentState{text: text}
 
@@ -47,7 +47,7 @@ func TestTerminalBottomTruncateShowsNewestLines(t *testing.T) {
 	}
 	text := strings.Join(lines, "\n")
 
-	tp := NewTabPane()
+	tp := NewTabPane(previewFromInstance)
 	tp.SetSize(80, paneHeight)
 	tp.content = tabContentState{text: text}
 
@@ -76,7 +76,7 @@ func TestTerminalTrailingNewlineWithMoreContentThanHeight(t *testing.T) {
 	// slices [c d e f ""], wrongly dropping "b" as well.
 	text := "a\nb\nc\nd\ne\nf\n"
 
-	tp := NewTabPane()
+	tp := NewTabPane(previewFromInstance)
 	tp.SetSize(80, paneHeight)
 	tp.content = tabContentState{text: text}
 
@@ -92,7 +92,7 @@ func TestTerminalTrailingNewlineWithMoreContentThanHeight(t *testing.T) {
 // TestTerminalNoTrailingNewlineUnchanged guards that content without a trailing
 // newline behaves exactly as before: all lines that fit remain visible.
 func TestTerminalNoTrailingNewlineUnchanged(t *testing.T) {
-	tp := NewTabPane()
+	tp := NewTabPane(previewFromInstance)
 	tp.SetSize(80, 10)
 	tp.content = tabContentState{text: "one\ntwo\nthree\nfour\nfive"}
 

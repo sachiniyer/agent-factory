@@ -25,8 +25,11 @@ import (
 type localAgentServer struct {
 	inst *Instance
 
-	mu     sync.Mutex
-	broker *ptyBroker
+	mu sync.Mutex
+	// brokers holds one lazy ptyBroker per tab index (#1592 Phase 2 PR6, tab-aware
+	// streaming): the agent tab (0) and each shell/process tab (>0) have their own
+	// clientless capture + ring buffer so a pane bound to any tab streams over WS.
+	brokers map[int]*ptyBroker
 }
 
 // AgentServer returns the cached agent-server for this instance's runtime (#1592
@@ -69,11 +72,21 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 	return Observation{Updated: updated, HasPrompt: hasPrompt, Content: content}, nil
 }
 
-func (s *localAgentServer) Preview(full bool) (string, error) {
-	if full {
-		return s.inst.backend.PreviewFullHistory(s.inst)
+func (s *localAgentServer) Preview(tab int, full bool) (string, error) {
+	// The agent tab (0) keeps the backend preview path — a backend may format its
+	// agent output specially (e.g. the remote hook's sanitized stream). Shell/process
+	// tabs (>0) capture their own tmux session, mirroring TabPane's former
+	// updateAgent/updateShell split now that the daemon is the sole capturer.
+	if tab == 0 {
+		if full {
+			return s.inst.backend.PreviewFullHistory(s.inst)
+		}
+		return s.inst.backend.Preview(s.inst)
 	}
-	return s.inst.backend.Preview(s.inst)
+	if full {
+		return s.inst.PreviewTabFullHistory(tab)
+	}
+	return s.inst.PreviewTab(tab)
 }
 
 func (s *localAgentServer) Alive() bool {
@@ -92,41 +105,46 @@ func (s *localAgentServer) TapEnter() {
 
 // --- data plane: WS PTY broker + clientless tmux fan-out (#1592 PR5) ---
 
-// ensureBroker lazily builds the per-session ptyBroker bound to the instance's
-// clientless tmux channel. It errors when the instance has no local PTY (not
-// started, or a remote runtime with no agent tmux session) rather than panicking.
-func (s *localAgentServer) ensureBroker() (*ptyBroker, error) {
+// ensureBroker lazily builds the ptyBroker for tab `tab`, bound to that tab's
+// clientless tmux channel. It errors when the tab has no local PTY (not started,
+// a remote runtime with no tmux session, or an out-of-range tab) rather than
+// panicking.
+func (s *localAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.broker != nil {
-		return s.broker, nil
+	if br := s.brokers[tab]; br != nil {
+		return br, nil
 	}
-	ts := s.inst.agentTmuxSession()
+	ts := s.inst.tabTmuxSession(tab)
 	if ts == nil {
-		return nil, fmt.Errorf("session %q has no local PTY to stream", s.inst.Title)
+		return nil, fmt.Errorf("session %q tab %d has no local PTY to stream", s.inst.Title, tab)
 	}
-	s.broker = newPTYBroker(newTmuxClientlessChannel(ts))
-	return s.broker, nil
+	if s.brokers == nil {
+		s.brokers = make(map[int]*ptyBroker)
+	}
+	br := newPTYBroker(newTmuxClientlessChannel(ts))
+	s.brokers[tab] = br
+	return br, nil
 }
 
-func (s *localAgentServer) Subscribe(since Seq) (PTYSubscription, error) {
-	br, err := s.ensureBroker()
+func (s *localAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error) {
+	br, err := s.ensureBroker(tab)
 	if err != nil {
 		return nil, err
 	}
 	return br.subscribe(since)
 }
 
-func (s *localAgentServer) Input(b []byte) error {
-	br, err := s.ensureBroker()
+func (s *localAgentServer) Input(tab int, b []byte) error {
+	br, err := s.ensureBroker(tab)
 	if err != nil {
 		return err
 	}
 	return br.input(b)
 }
 
-func (s *localAgentServer) Resize(rows, cols uint16) error {
-	br, err := s.ensureBroker()
+func (s *localAgentServer) Resize(tab int, rows, cols uint16) error {
+	br, err := s.ensureBroker(tab)
 	if err != nil {
 		return err
 	}
@@ -134,13 +152,13 @@ func (s *localAgentServer) Resize(rows, cols uint16) error {
 }
 
 func (s *localAgentServer) Kill() error {
-	// Tear the data plane down first so the clientless capture stops and every
-	// subscriber's NextEvent returns io.EOF, then kill the underlying session.
+	// Tear every tab's data plane down first so the clientless captures stop and
+	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.
 	s.mu.Lock()
-	br := s.broker
-	s.broker = nil
+	brokers := s.brokers
+	s.brokers = nil
 	s.mu.Unlock()
-	if br != nil {
+	for _, br := range brokers {
 		br.close()
 	}
 	return s.inst.backend.Kill(s.inst)

@@ -21,7 +21,7 @@ func TestInteractivePollPause_HoldsLeaseForFocusedInteractivePane(t *testing.T) 
 	h, inst := liveTestHome(t)
 	stubLiveTermFactory(t)
 	h.syncLiveTermPane()
-	require.NotNil(t, h.livePane, "the focused eligible pane must bind so it can be entered")
+	require.NotNil(t, focusedFake(h), "the focused eligible pane must bind so it can be entered")
 
 	var mu sync.Mutex
 	var paused, resumed []string

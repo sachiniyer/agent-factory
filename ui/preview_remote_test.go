@@ -45,7 +45,7 @@ func TestPreviewRemoteHookStripsControlSequences(t *testing.T) {
 	raw := "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l\x1b[31mhello\x1b[0m\r\nworld\r\n\x1b[5;1H"
 	hook.SetPreviewBufferForTest("remote-810", []byte(raw))
 
-	pane := NewTabPane()
+	pane := NewTabPane(previewFromInstance)
 	pane.SetSize(80, 24)
 	require.NoError(t, pane.UpdateContent(instance, 0))
 	out := pane.String()

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 
@@ -69,7 +68,7 @@ func enterInteractive(t *testing.T, h *home) {
 	t.Helper()
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 	runHermeticCmd(t, h, cmd, 0)
-	if lt, ok := h.liveTerm.(*fakeLiveTerm); ok {
+	if lt := focusedFake(h); lt != nil {
 		lt.keys = nil
 	}
 }
@@ -83,7 +82,7 @@ func TestEnterOnFocusedLivePaneEntersInteractive(t *testing.T) {
 	require.Len(t, *fakes, 1, "activation must bind the live attachment immediately, not on the next tick")
 	p := h.focusedOpenPane()
 	require.NotNil(t, p)
-	assert.Equal(t, p, h.livePane)
+	assert.Equal(t, p, h.focusedOpenPane())
 	assert.True(t, h.paneWindows[p.ID()].Interactive(), "the pane must carry the interactive visual cue")
 	assert.Contains(t, h.menu.String(), "ctrl+]", "the status bar must show the escape hatch")
 }
@@ -208,28 +207,23 @@ func TestCtrlCloseBracketReturnsToNav(t *testing.T) {
 	assert.Empty(t, fake.keys)
 }
 
-func TestInteractiveEndsWhenClientDies(t *testing.T) {
+// TestInteractiveEndsWhenFocusLeavesPane pins the invariant that interactive mode
+// cannot outlive its premise (the focused pane owns the attachment). Unlike the
+// old tmux client there is no "client died" event — a WS drop self-heals — so the
+// premise breaks instead when focus leaves the pane. The very next keystroke must
+// detect the breakage, drop to nav, and be swallowed rather than mistyped.
+func TestInteractiveEndsWhenFocusLeavesPane(t *testing.T) {
 	h, _, fakes := interactiveTestHome(t)
 	enterInteractive(t, h)
 	fake := (*fakes)[0]
 
-	close(fake.done)
-	h.syncLiveTermPane()
-
-	assert.False(t, h.interactive, "a dead attach client must drop the TUI back to nav mode")
-
-	// A keystroke racing the death (before the next tick) is swallowed, not
-	// mistyped: re-enter interactive, kill the client, then type.
-	h.liveBindFailedAt = h.liveBindFailedAt.Add(-2 * liveBindRetryInterval)
-	enterInteractive(t, h)
-	require.Len(t, *fakes, 2)
-	second := (*fakes)[1]
-	close(second.done)
-	// The tick hasn't run yet — the very next key must detect the breakage.
-	h.reconcileLiveTermPane()
+	// Focus moves off the pane (to the tree). The tick hasn't run yet, so the
+	// next key funnels through enforceInteractiveInvariant, which drops the mode.
+	h.focusRegion("tree")
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
-	assert.False(t, h.interactive)
-	assert.Empty(t, second.keys, "keys must never forward into a dead attachment")
+
+	assert.False(t, h.interactive, "focus leaving the interactive pane must drop back to nav mode")
+	assert.Empty(t, fake.keys, "the racing keystroke must be swallowed, not forwarded off-pane")
 }
 
 func TestInteractiveEndsWhenPaneCloses(t *testing.T) {
@@ -294,9 +288,9 @@ func TestEnterOnPreviewedTabRowCommitsAndEntersInteractive(t *testing.T) {
 	runHermeticCmd(t, h, cmd, 0)
 
 	require.True(t, h.interactive, "the same Enter must enter the committed tab")
-	require.Equal(t, pane, h.livePane)
+	require.Equal(t, pane, h.focusedOpenPane())
 	require.Len(t, *fakes, 1)
-	require.Equal(t, inst.TabTmuxName(1), (*sessions)[0])
+	require.Equal(t, inst.Title, (*sessions)[0])
 
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
 	assert.Equal(t, []string{"Z"}, (*fakes)[0].keys, "typing after one Enter must route into the tab")
@@ -330,8 +324,8 @@ func TestSecondEnterTargetsCurrentSelectionNotStalePane(t *testing.T) {
 	_, cmd := h.Update(enterInteractiveMsg{pane: paneA})
 	runHermeticCmd(t, h, cmd, 0)
 	require.True(t, h.interactive, "first Enter must enter interactive mode")
-	require.Equal(t, instA, h.livePane.Instance(), "first Enter binds A")
-	aFake := h.liveTerm.(*fakeLiveTerm)
+	require.Equal(t, instA, h.focusedOpenPane().Instance(), "first Enter binds A")
+	aFake := focusedFake(h)
 
 	// 2. Ctrl-] back to nav. Focus stays on A's pane — the bug precondition.
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
@@ -355,12 +349,12 @@ func TestSecondEnterTargetsCurrentSelectionNotStalePane(t *testing.T) {
 	runHermeticCmd(t, h, cmd, 0)
 
 	require.True(t, h.interactive, "second Enter must enter interactive mode on committed B")
-	assert.Equal(t, instB, h.livePane.Instance(),
+	assert.Equal(t, instB, h.focusedOpenPane().Instance(),
 		"input must bind to the committed instance B, not the previously-interacted A")
-	assert.Equal(t, paneB, h.livePane, "the live pane must be B's pane")
+	assert.Equal(t, paneB, h.focusedOpenPane(), "the live pane must be B's pane")
 
 	// A forwarded keystroke must land in B's attachment, never A's stale one.
-	bFake := h.liveTerm.(*fakeLiveTerm)
+	bFake := focusedFake(h)
 	require.NotSame(t, aFake, bFake, "B must have its own attachment")
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
 	assert.Equal(t, []string{"Z"}, bFake.keys, "keystrokes must forward to the selected instance B")
@@ -398,14 +392,17 @@ func TestEnterWithFocusedPaneTargetsFocusNotSidebarSelection(t *testing.T) {
 
 	require.True(t, h.interactive, "Enter must enter interactive mode")
 	require.Equal(t, paneA, h.focusedOpenPane(), "Enter must keep focus on pane A")
-	require.Equal(t, paneA, h.livePane, "input must bind to focused pane A")
-	assert.Equal(t, instA, h.livePane.Instance(), "input must target A, not sidebar-selected B")
+	require.Equal(t, paneA, h.focusedOpenPane(), "input must bind to focused pane A")
+	assert.Equal(t, instA, h.focusedOpenPane().Instance(), "input must target A, not sidebar-selected B")
 	assert.Equal(t, instB, h.sidebar.GetSelectedInstance(), "sidebar selection is unchanged")
-	require.Len(t, *fakes, 1)
+	// Both visible panes bind their own stream (per-pane, #1592 PR6), but only the
+	// FOCUSED pane routes keystrokes.
+	require.Len(t, *fakes, 2)
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
-	// The entry Enter forwards into focused pane A (#1576), then Z on top —
-	// both land on A's attachment, never sidebar-selected B's.
-	assert.Equal(t, []string{"enter", "Z"}, (*fakes)[0].keys)
+	// The entry Enter forwards into focused pane A (#1576), then Z on top — both
+	// land on A's attachment, never sidebar-selected B's.
+	assert.Equal(t, []string{"enter", "Z"}, focusedFake(h).keys,
+		"keystrokes route to the focused pane's attachment")
 }
 
 func TestEnterOnRemotePaneFallsBackToFullScreenAttach(t *testing.T) {
@@ -484,105 +481,9 @@ func TestWheelIsInertWhileInteractive(t *testing.T) {
 		"host wheel-scroll must not flip the live pane into capture scroll mode mid-typing")
 }
 
-// zeroInteractiveBindRetryDelay removes the inter-attempt sleep so the retry
-// tests don't burn wall-clock. Event-loop-only var, restored on cleanup.
-func zeroInteractiveBindRetryDelay(t *testing.T) {
-	t.Helper()
-	orig := interactiveBindRetryDelay
-	interactiveBindRetryDelay = 0
-	t.Cleanup(func() { interactiveBindRetryDelay = orig })
-}
-
-// TestInteractiveRetriesTransientBindThenSucceeds pins #1526: the embedded
-// terminal can miss the FIRST bind when the tmux pane isn't ready yet (a
-// first-render race). Entering interactive must retry that transient miss and
-// succeed without ever surfacing the "couldn't open an embedded terminal" line.
-func TestInteractiveRetriesTransientBindThenSucceeds(t *testing.T) {
-	h, _ := liveTestHome(t)
-	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
-	zeroInteractiveBindRetryDelay(t)
-
-	var calls int
-	orig := newLiveTermPaneFn
-	newLiveTermPaneFn = func(sessionName string, width, height int) (liveTermAttachment, error) {
-		calls++
-		if calls == 1 {
-			return nil, fmt.Errorf("tmux pane not ready")
-		}
-		return newFakeLiveTerm(), nil
-	}
-	t.Cleanup(func() { newLiveTermPaneFn = orig })
-
-	enterInteractive(t, h)
-
-	assert.True(t, h.interactive, "a transient first-attempt miss must be retried into interactive mode")
-	assert.GreaterOrEqual(t, calls, 2, "the failed first bind must be retried")
-	assert.Empty(t, h.errBox.FullError(), "a recovered transient miss must not surface the open error")
-	assert.NotNil(t, h.liveTerm, "the retried bind must leave a live attachment")
-}
-
-// TestInteractivePersistentBindFailureSurfacesError is the other half of #1526:
-// once the bounded retries are exhausted, a genuine failure must still surface
-// the "press o to attach full-screen" guidance and stay in nav mode.
-func TestInteractivePersistentBindFailureSurfacesError(t *testing.T) {
-	h, inst := liveTestHome(t)
-	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
-	zeroInteractiveBindRetryDelay(t)
-
-	var calls int
-	orig := newLiveTermPaneFn
-	newLiveTermPaneFn = func(sessionName string, width, height int) (liveTermAttachment, error) {
-		calls++
-		return nil, fmt.Errorf("attach failed")
-	}
-	t.Cleanup(func() { newLiveTermPaneFn = orig })
-
-	// Drive the activation by hand (help is marked seen, so Enter yields the
-	// deferred enterInteractiveMsg directly) and stop before running the
-	// returned transient-clear timer, so the surfaced error is still in the box
-	// when we assert.
-	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
-	require.NotNil(t, cmd)
-	_, _ = h.Update(cmd())
-
-	assert.False(t, h.interactive, "a persistent bind failure must not enter interactive mode")
-	assert.Equal(t, interactiveBindAttempts, calls, "all bounded attempts run before surfacing the error")
-	assert.Contains(t, h.errBox.FullError(), "couldn't open an embedded terminal")
-	assert.Contains(t, h.errBox.FullError(), inst.Title, "the error names the session")
-	assert.Contains(t, h.errBox.FullError(), "press o", "the error keeps the full-screen fallback guidance")
-}
-
-// TestInteractiveRetryZeroSizeExitStillSetsBackoff pins the #1526 review
-// finding: a bind retry that exits at the pre-bind zero-size guard must still
-// record the passive 5s backoff. Otherwise, after surfacing the interactive
-// error, the preview tick would re-attempt the same unavailable pane every
-// 100ms with no backoff (a busy loop that defeats the backoff).
-func TestInteractiveRetryZeroSizeExitStillSetsBackoff(t *testing.T) {
-	h, _ := liveTestHome(t)
-	zeroInteractiveBindRetryDelay(t)
-
-	var calls int
-	orig := newLiveTermPaneFn
-	newLiveTermPaneFn = func(string, int, int) (liveTermAttachment, error) {
-		calls++
-		return newFakeLiveTerm(), nil
-	}
-	t.Cleanup(func() { newLiveTermPaneFn = orig })
-
-	p := h.focusedOpenPane()
-	require.NotNil(t, p)
-	// Force every bind attempt to exit at the pre-bind zero-size guard.
-	h.paneWindows[p.ID()].SetRect(layout.Rect{})
-
-	require.False(t, h.bindLiveTermPaneWithRetry(p), "a zero-size pane cannot bind")
-	require.Zero(t, calls, "the zero-size guard exits before spawning an attachment")
-	require.False(t, h.liveBindFailedAt.IsZero(),
-		"a retry that exits at the zero-size guard must record a failure time for the passive backoff")
-
-	// The pane becomes laid out again, but the passive tick must honor the 5s
-	// backoff the failed retry set — no immediate re-attempt every tick.
-	resizeHome(h, 120, 40)
-	h.reconcileLiveTermPane()
-	assert.Nil(t, h.liveTerm, "the passive backoff must hold: no immediate re-attempt after a zero-size retry")
-	assert.Zero(t, calls, "no attachment spawned while the backoff is active")
-}
+// Note: the old #1526 transient-bind-retry tests are gone. The WS attachment is
+// created immediately and self-heals via reconnect+replay, so there is no
+// first-render bind race to retry — the whole "couldn't open an embedded terminal,
+// try again" class is structurally eliminated. The genuine non-embeddable case
+// (remote/dead panes) still falls back to full-screen attach; that is covered by
+// TestEnterOnRemotePaneFallsBackToFullScreenAttach.
