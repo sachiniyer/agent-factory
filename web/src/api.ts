@@ -8,8 +8,10 @@
 // knows the credential: it is kept in sessionStorage (survives reload within the
 // tab, gone on tab-close — design §1.2, a deliberate "don't persist a full-access
 // credential to disk" posture) and attached as `Authorization: Bearer` on every
-// request. The WS `?access_token=` fallback (browsers cannot set WS headers) lands
-// with the terminal in PR4.
+// request. The WS `?access_token=` fallback (browsers cannot set WS headers) is
+// used by the /v1/events subscriber (events.ts) and, in PR4, the PTY stream.
+
+import type { SessionData, SnapshotResponse } from "./types.js";
 
 const TOKEN_KEY = "af.token";
 
@@ -88,19 +90,25 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
   return env?.data as T;
 }
 
-/** The Snapshot response shape the login probe reads (daemon/snapshot.go). Only
- *  the fields the shell needs are declared; PR3 grows the session projection. */
-export interface SnapshotResponse {
-  instances: unknown[];
-  delivery_alarms?: unknown[];
+/**
+ * Fetches the authoritative session projection for all repos (design §2.1). This
+ * is the read side of the single-writer model (#960): the daemon owns the state
+ * and the web mirrors this Snapshot exactly like the TUI does, seeding the rail on
+ * login and re-seeding it after an events-stream reconnect. Returns the instances
+ * (never null — an empty daemon yields []); throws ApiError on transport/auth
+ * failure so callers share one error path.
+ */
+export async function fetchSnapshot(token: string): Promise<SessionData[]> {
+  const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
+  return resp.instances ?? [];
 }
 
 /**
  * Validates a token by probing an authed endpoint with it. Snapshot is the auth
  * check (design §1.2): a 200 means the token is accepted; a 401 means it is not.
- * Returns the snapshot on success so the caller can seed the app; throws ApiError
- * otherwise.
+ * Returns the snapshot's instances on success so the caller can seed the rail in
+ * the same round-trip as the login probe; throws ApiError otherwise.
  */
-export function probeToken(token: string): Promise<SnapshotResponse> {
-  return af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
+export function probeToken(token: string): Promise<SessionData[]> {
+  return fetchSnapshot(token);
 }
