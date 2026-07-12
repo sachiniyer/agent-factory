@@ -261,14 +261,37 @@ func (p *dockerProvisioner) configureGit() error {
 
 // cloneWorkspace clones the repo's origin into /workspace inside the container.
 // A fresh create clones the default branch; the in-container agent-server's LOCAL
-// backend then creates the session's git worktree + branch off it. Restore to a
-// pushed branch is PR6.
+// backend then creates the session's git worktree + branch off it. On a RESTORE
+// (spec.RestoreBranch set, #1592 Phase 4 PR6) it additionally materializes the
+// pushed session branch as a local ref so the in-container Setup checks it out.
 func (p *dockerProvisioner) cloneWorkspace() error {
 	script := fmt.Sprintf("git clone %s %s", shellQuote(p.spec.CloneURL), shellQuote(dockerWorkspaceDir))
 	out, err := p.execSh(dockerProvisionStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: cloning %q into the container failed (is git in the image, and the URL reachable from inside the container?): %s: %w",
 			p.spec.CloneURL, strings.TrimSpace(string(out)), err)
+	}
+	if branch := strings.TrimSpace(p.spec.RestoreBranch); branch != "" {
+		return p.fetchRestoreBranch(branch)
+	}
+	return nil
+}
+
+// fetchRestoreBranch materializes the archived session branch (pushed to origin
+// at archive time) as a LOCAL ref in the fresh clone, WITHOUT checking it out in
+// /workspace's main tree (#1592 Phase 4 PR6). The `<branch>:<branch>` refspec
+// creates refs/heads/<branch> from origin/<branch>; the in-container local
+// backend's Setup then finds that local ref and adds the session worktree from
+// it (setupFromExistingBranch), bringing the pushed commits back. It stays on the
+// main tree's default branch so the later `git worktree add <path> <branch>` does
+// not collide with a checked-out branch.
+func (p *dockerProvisioner) fetchRestoreBranch(branch string) error {
+	script := fmt.Sprintf("git -C %s fetch origin %s:%s",
+		shellQuote(dockerWorkspaceDir), shellQuote(branch), shellQuote(branch))
+	out, err := p.execSh(dockerProvisionStepTimeout, script)
+	if err != nil {
+		return fmt.Errorf("backend=docker: restoring archived branch %q into the container failed (was it pushed to origin?): %s: %w",
+			branch, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
@@ -449,16 +472,17 @@ var _ Backend = (*dockerBackend)(nil)
 
 func (b *dockerBackend) Type() string { return "docker" }
 
-// Capabilities advertises full interactive parity for docker (#1592 Phase 4 PR4,
-// epic §5): the workspace is off-box, but attach/preview/liveness/prompt/tabs all
-// work through the in-container agent-server. Archive/Recover (push/pull the
-// branch) land in PR6, so they are off here.
+// Capabilities advertises FULL parity for docker (#1592 Phase 4 PR6, epic §5):
+// the workspace is off-box, but attach/preview/liveness/prompt/tabs work through
+// the in-container agent-server, and Archive/Recover work by pushing the branch
+// to GitHub and re-provisioning a fresh container that clones it back (§5.1) — so
+// every capability is true, no ErrRecoverUnsupported and no locality special-case.
 func (b *dockerBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
 		Attach:           true,
-		Archive:          false,
-		Recover:          false,
+		Archive:          true,
+		Recover:          true,
 		TabManagement:    true,
 		TerminalTab:      true,
 		InteractiveInput: true,
@@ -569,8 +593,12 @@ func (b *dockerBackend) CheckAndHandleTrustPrompt(*Instance) bool { return false
 
 func (b *dockerBackend) TapEnter(i *Instance) { i.AgentServer().TapEnter() }
 
-// Recover/Respawn are unsupported until PR6 wires archive/restore (push/pull the
-// branch, re-provision the container). A Lost docker session is flagged but not
-// auto-reconnected yet.
-func (b *dockerBackend) Recover(*Instance) error { return ErrRecoverUnsupported }
-func (b *dockerBackend) Respawn(*Instance) error { return ErrRecoverUnsupported }
+// Recover/Respawn re-establish a docker session by RE-PROVISIONING a fresh
+// container that clones the session's branch back from origin, then relaunching
+// the agent (#1592 Phase 4 PR6). Both share recoverSandbox with the ssh runtime
+// (written once against the Runtime interface): a disposable container has no
+// in-place session to reconnect, so recovery is always a fresh provision + clone
+// of the durable branch on GitHub. Only the pushed state survives — a session
+// that went Lost without ever pushing recovers to whatever origin last held.
+func (b *dockerBackend) Recover(i *Instance) error { return recoverSandbox(i) }
+func (b *dockerBackend) Respawn(i *Instance) error { return recoverSandbox(i) }

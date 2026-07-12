@@ -171,6 +171,15 @@ func (s *localAgentServer) Resize(tab int, rows, cols uint16) error {
 	return br.resize(rows, cols)
 }
 
+// Archive commits any uncommitted work and pushes this session's branch to
+// origin (#1592 Phase 4 PR6). Running INSIDE a sandbox as the in-process
+// agent-server, this is where a docker/ssh session's push actually happens — it
+// owns the git worktree, so it can snapshot the working tree and push the branch
+// GitHub will hold as the durable workspace. Returns the pushed branch name.
+func (s *localAgentServer) Archive() (string, error) {
+	return s.inst.pushBranchForArchive()
+}
+
 func (s *localAgentServer) Kill() error {
 	// Tear every tab's data plane down first so the clientless captures stop and
 	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.

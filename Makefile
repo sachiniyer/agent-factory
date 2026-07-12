@@ -57,28 +57,35 @@ agent-server-roundtrip-container:
 remote-agent-server-roundtrip-container:
 	scripts/testbox.sh test ./integration -run TestRemoteAgentServerRoundTrip
 
-# Flagship docker backend round-trip (#1592 Phase 4 PR4): runs a session in a
+# Flagship docker backend round-trip (#1592 Phase 4 PR4/PR6): runs a session in a
 # REAL container to parity — build a slim git+tmux+bash image, create a session
 # on backend=docker, drive the in-container `af agent-server` over wss://+token
 # (Provision/Launch → PTY input echo → preview/snapshot/alive), then Kill and
-# assert the container is reaped. Runs ON THE HOST (needs a real docker daemon);
-# it is NOT inside the testbox fence, which has no docker. SKIPS cleanly where
-# docker is unavailable. See docs/backends.md.
+# assert the container is reaped. The PR6 archive/restore case additionally
+# commits real work on the session branch, ARCHIVES it (branch pushed to origin,
+# container reaped), RESTORES it (fresh container clones the branch back, the
+# commit is present, the session is drivable again) — proving state survives via
+# GitHub. Runs ON THE HOST (needs a real docker daemon); it is NOT inside the
+# testbox fence, which has no docker. SKIPS cleanly where docker is unavailable.
+# See docs/backends.md.
 backend-docker-roundtrip:
-	go test ./integration -run TestDockerBackendRoundTrip -v -count=1 -timeout 15m
+	go test ./integration -run 'TestDockerBackend(RoundTrip|ArchiveRestore)' -v -count=1 -timeout 20m
 
-# SSH remote-machine backend round-trip (#1592 Phase 4 PR5): runs a session on a
-# REAL remote host over ssh to parity — stand up a throwaway sshd+git+tmux
+# SSH remote-machine backend round-trip (#1592 Phase 4 PR5/PR6): runs a session on
+# a REAL remote host over ssh to parity — stand up a throwaway sshd+git+tmux
 # container as the ssh target, create a session on backend=ssh pointing at it, and
 # drive the remote `af agent-server` over the ssh-tunneled wss://+token
 # (Provision/Launch → PTY input echo → preview/snapshot/alive), then Kill and
 # assert the remote agent-server process is reaped + the session dir removed + the
-# tunnel closed. Uses the Go x/crypto/ssh client for a real ssh clone + tunnel with
-# no external host or the box's own sshd. Runs ON THE HOST (needs a real docker
-# daemon to host the sshd target); SKIPS cleanly where docker is unavailable. See
-# docs/backends.md.
+# tunnel closed. The PR6 archive/restore case additionally commits real work,
+# ARCHIVES it (branch pushed to origin, remote sandbox reaped), RESTORES it (fresh
+# remote clones the branch back, the commit is present, the session is drivable)
+# — the identical push/pull-branch flow, over ssh. Uses the Go x/crypto/ssh client
+# for a real ssh clone + tunnel with no external host or the box's own sshd. Runs
+# ON THE HOST (needs a real docker daemon to host the sshd target); SKIPS cleanly
+# where docker is unavailable. See docs/backends.md.
 backend-ssh-roundtrip:
-	go test ./integration -run TestSSHBackendRoundTrip -v -count=1 -timeout 15m
+	go test ./integration -run 'TestSSHBackend(RoundTrip|ArchiveRestore)' -v -count=1 -timeout 20m
 
 # Interactive TUI play-test sandbox: builds af inside, scaffolds a
 # throwaway AF home + mock project repo, drops you in a shell with a

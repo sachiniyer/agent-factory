@@ -51,6 +51,7 @@ func (f *fakeHeadlessAgentServer) Snapshot() (session.Observation, error) {
 }
 func (f *fakeHeadlessAgentServer) Preview(int, bool) (string, error) { return "preview-body", nil }
 func (f *fakeHeadlessAgentServer) Alive() bool                       { return true }
+func (f *fakeHeadlessAgentServer) Archive() (string, error)          { return "session/fake", nil }
 func (f *fakeHeadlessAgentServer) SendPrompt(p string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -203,6 +204,13 @@ func TestHeadlessAgentServer_TLSTokenRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	decodeData(resp, nil)
 	require.Equal(t, "hello world", fake.lastPrompt)
+
+	// --- control REST: archive returns the pushed branch (#1592 Phase 4 PR6) --
+	resp, err = post("/v1/agent/archive", ``)
+	require.NoError(t, err)
+	var archived agentArchiveResponse
+	decodeData(resp, &archived)
+	require.Equal(t, "session/fake", archived.Branch)
 
 	// --- REST: missing token → 401 ------------------------------------------
 	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/agent/snapshot", nil)

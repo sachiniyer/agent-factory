@@ -215,6 +215,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/alive", rpcHandler(hs.Alive))
 	mux.HandleFunc("/v1/agent/send-prompt", rpcHandler(hs.SendPrompt))
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.TapEnter))
+	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
 
 	// WS data plane — same paths, same broker, same wire as the daemon (§1.1: all
@@ -344,6 +345,23 @@ func (hs *headlessServer) SendPrompt(req agentSendPromptRequest, resp *agentOKRe
 func (hs *headlessServer) TapEnter(_ struct{}, resp *agentOKResponse) error {
 	hs.as.TapEnter()
 	resp.OK = true
+	return nil
+}
+
+// agentArchiveResponse carries the pushed branch back to the driving daemon so
+// it can record which branch to clone on a later restore (#1592 Phase 4 PR6).
+type agentArchiveResponse struct {
+	Branch string `json:"branch"`
+}
+
+// Archive commits + pushes the workspace's branch to origin, making it durable
+// on GitHub before the daemon reaps this sandbox (#1592 Phase 4 PR6).
+func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error {
+	branch, err := hs.as.Archive()
+	if err != nil {
+		return err
+	}
+	resp.Branch = branch
 	return nil
 }
 
