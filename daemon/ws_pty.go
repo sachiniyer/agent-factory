@@ -135,6 +135,20 @@ func servePTYStream(as session.AgentServer, tab int, sub session.PTYSubscription
 // output bytes and resize echoes onto the one connection. Keeping it single means
 // no concurrent data writes race on the socket.
 func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *websocket.Conn) {
+	// Emit the start-seq hello as the VERY FIRST frame, before any PTY_OUT/repaint,
+	// so a browser client — which cannot read the X-Af-Stream-Seq handshake header
+	// off a WS upgrade (#1592 Phase 5 PR1, §4.3) — learns its absolute cursor in-band
+	// to seed ?since replay. sub.Seq() here is still the subscription's start cursor
+	// (no PTYData consumed yet, and repaint/resize don't advance it), so it is
+	// byte-identical to the streamSeqHeader value set at handshake. Additive: Go
+	// stream consumers (TUI/apiclient) decode the frame cleanly and skip it — no
+	// behavior change (see agentproto OpHello).
+	hctx, hcancel := context.WithTimeout(ctx, wsWriteTimeout)
+	err := agentproto.WriteFrame(hctx, conn, agentproto.HelloFrame(uint64(sub.Seq())))
+	hcancel()
+	if err != nil {
+		return // wedged/dead client before the first byte: drop it (session untouched)
+	}
 	for {
 		ev, err := sub.NextEvent(ctx)
 		if err != nil {

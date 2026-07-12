@@ -1,0 +1,22 @@
+{
+  "note": "Shared golden vectors for the agentproto PTY frame codec (#1592 Phase 5 PR1). Both the Go codec (agentproto/frame_test.go: TestFrameGoldenVectors) and the TypeScript port (web/src/frame.test.ts) validate against THIS file, pinning the browser and daemon to byte-identical framing. wireHex is the exact opcode-prefixed wire encoding, lowercase hex. seq is a decimal string (uint64) so a JS number's 53-bit mantissa never truncates it — the TS codec parses it with BigInt. To regenerate the expected bytes, run the Go test; on a mismatch it prints the actual encoding.",
+  "opcodes": { "PTY_OUT": 0, "INPUT": 1, "RESIZE": 2, "REPAINT": 3, "HELLO": 4 },
+  "vectors": [
+    { "name": "pty_out_ascii", "op": "PTY_OUT", "dataHex": "6869", "wireHex": "006869" },
+    { "name": "pty_out_empty", "op": "PTY_OUT", "dataHex": "", "wireHex": "00" },
+    { "name": "pty_out_ansi", "op": "PTY_OUT", "dataHex": "1b5b33316d780a", "wireHex": "001b5b33316d780a" },
+    { "name": "pty_out_binary", "op": "PTY_OUT", "dataHex": "000102fffe", "wireHex": "00000102fffe" },
+    { "name": "input_line", "op": "INPUT", "dataHex": "6c730a", "wireHex": "016c730a" },
+    { "name": "input_ctrl_c", "op": "INPUT", "dataHex": "03", "wireHex": "0103" },
+    { "name": "input_empty", "op": "INPUT", "dataHex": "", "wireHex": "01" },
+    { "name": "repaint", "op": "REPAINT", "dataHex": "1b5b324a58", "wireHex": "031b5b324a58" },
+    { "name": "resize_24x80", "op": "RESIZE", "rows": 24, "cols": 80, "wireHex": "0200180050" },
+    { "name": "resize_258x259", "op": "RESIZE", "rows": 258, "cols": 259, "wireHex": "0201020103" },
+    { "name": "resize_zero", "op": "RESIZE", "rows": 0, "cols": 0, "wireHex": "0200000000" },
+    { "name": "resize_max", "op": "RESIZE", "rows": 65535, "cols": 65535, "wireHex": "02ffffffff" },
+    { "name": "hello_zero", "op": "HELLO", "seq": "0", "wireHex": "040000000000000000" },
+    { "name": "hello_one", "op": "HELLO", "seq": "1", "wireHex": "040000000000000001" },
+    { "name": "hello_over_u32", "op": "HELLO", "seq": "4294967297", "wireHex": "040000000100000001" },
+    { "name": "hello_max_u64", "op": "HELLO", "seq": "18446744073709551615", "wireHex": "04ffffffffffffffff" }
+  ]
+}

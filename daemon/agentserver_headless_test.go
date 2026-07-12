@@ -229,12 +229,27 @@ func TestHeadlessAgentServer_TLSTokenRoundTrip(t *testing.T) {
 	require.NoError(t, err, "authorized WS handshake must upgrade")
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
-	require.NoError(t, agentproto.WriteFrame(ctx, conn, agentproto.InputFrame([]byte("typed\n"))))
-	msg, err := agentproto.ReadMessage(ctx, conn)
+	// The very first frame on a fresh subscription is the OpHello start-seq (#1592
+	// Phase 5 PR1): the in-band cursor seed a browser needs because it cannot read the
+	// X-Af-Stream-Seq handshake header off the WS upgrade. Assert it here on the real
+	// TLS/WSS transport this test drives.
+	first, err := agentproto.ReadMessage(ctx, conn)
 	require.NoError(t, err)
-	require.True(t, msg.Binary)
-	require.Equal(t, agentproto.OpPTYOut, msg.Frame.Op)
-	require.Equal(t, "echo:typed\n", string(msg.Frame.Data))
+	require.True(t, first.Binary)
+	require.Equal(t, agentproto.OpHello, first.Frame.Op, "first stream frame must be the start-seq hello")
+
+	// Then type input and assert it echoes back as PTY output, skipping any initial
+	// repaint/resize frames exactly as a real stream consumer (app/live_stream
+	// apiStream) does — it collects OpPTYOut and ignores everything else.
+	require.NoError(t, agentproto.WriteFrame(ctx, conn, agentproto.InputFrame([]byte("typed\n"))))
+	var echoed []byte
+	for !strings.Contains(string(echoed), "echo:typed\n") {
+		msg, rerr := agentproto.ReadMessage(ctx, conn)
+		require.NoError(t, rerr) // ctx deadline bounds the loop if the echo never lands
+		if msg.Binary && msg.Frame.Op == agentproto.OpPTYOut {
+			echoed = append(echoed, msg.Frame.Data...)
+		}
+	}
 
 	// --- WS PTY stream: no token → handshake rejected -----------------------
 	badCtx, badCancel := context.WithTimeout(context.Background(), 5*time.Second)
