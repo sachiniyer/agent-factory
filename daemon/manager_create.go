@@ -220,7 +220,7 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 			if !data.IsRemoteHook() {
 				continue
 			}
-			if session.RemoteHookName(data.Title, data.RemoteMeta) == candidate {
+			if session.Slugify(data.Title) == candidate {
 				return fmt.Errorf("remote session titled %q already maps to hook name %q", data.Title, candidate)
 			}
 		}
@@ -228,7 +228,7 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 			if !data.IsRemoteHook() {
 				continue
 			}
-			if session.RemoteHookName(data.Title, data.RemoteMeta) == candidate {
+			if session.Slugify(data.Title) == candidate {
 				return fmt.Errorf("remote session titled %q already maps to hook name %q", data.Title, candidate)
 			}
 		}

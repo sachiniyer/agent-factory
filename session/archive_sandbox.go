@@ -200,28 +200,35 @@ func isSandboxBackendType(t string) bool {
 }
 
 // newInertSandboxBackend rebuilds a sandbox backend with NO live sandbox handle,
-// for a docker/ssh session loaded from disk (#1592 Phase 4 PR6). Its Type() and
-// Capabilities() keep the session classified as its runtime so archive/restore
-// route correctly; its reap is nil (nothing live to tear down), and restore
-// replaces it wholesale via a fresh Provision. Only ever called for a sandbox
-// backend type (the FromInstanceData switch guards it).
+// for a docker/ssh/hook session loaded from disk (#1592 Phase 4 PR6/PR7). Its
+// Type() and Capabilities() keep the session classified as its runtime so
+// archive/restore route correctly; its reap is nil (nothing live to tear down),
+// and restore replaces it wholesale via a fresh Provision. Only ever called for a
+// sandbox backend type (the FromInstanceData switch guards it).
 func newInertSandboxBackend(t string) Backend {
-	if t == "ssh" {
+	switch t {
+	case "ssh":
 		return &sshBackend{}
+	case "remote":
+		return &HookBackend{}
+	default:
+		return &dockerBackend{}
 	}
-	return &dockerBackend{}
 }
 
 // backendKindForType maps a persisted backend Type() discriminator to the
-// BackendKind whose Runtime re-provisions it (#1592 Phase 4 PR6). Only the
-// sandbox runtimes are re-provisionable; local/hook never route here (they don't
-// push/re-clone), so their types are rejected with an actionable error.
+// BackendKind whose Runtime re-provisions it (#1592 Phase 4 PR6/PR7). Only the
+// off-box runtimes are re-provisionable (they push/re-clone the durable branch);
+// the local runtime never routes here (it relocates a worktree instead), so its
+// type is rejected with an actionable error.
 func backendKindForType(t string) (BackendKind, error) {
 	switch t {
 	case "docker":
 		return BackendDocker, nil
 	case "ssh":
 		return BackendSSH, nil
+	case "remote":
+		return BackendHook, nil
 	default:
 		return "", fmt.Errorf("backend %q is not a re-provisionable sandbox runtime", t)
 	}

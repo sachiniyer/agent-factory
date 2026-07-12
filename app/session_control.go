@@ -214,16 +214,6 @@ func resumeStatusPollThroughDaemon(title, repoID string) error {
 	})
 }
 
-var importRemoteSessionsThroughDaemon = func(repoPath string) ([]session.InstanceData, error) {
-	var listed []session.InstanceData
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
-		var e error
-		listed, e = c.ImportRemoteHookSessions(daemon.ImportRemoteHookSessionsRequest{RepoPath: repoPath})
-		return e
-	})
-	return listed, err
-}
-
 // createShellTabThroughDaemon routes the TUI's `t` (new shell tab) mutation to
 // the daemon so the daemon — the single writer (#960) — owns the spawn and the
 // persist, returning the resolved tab name. The TUI reflects the new tab locally
@@ -372,12 +362,6 @@ func SetLimitResumerForTest(f func(title, repoID string) error) func() {
 	prev := resumeFromLimitThroughDaemon
 	resumeFromLimitThroughDaemon = f
 	return func() { resumeFromLimitThroughDaemon = prev }
-}
-
-func SetRemoteImporterForTest(f func(repoPath string) ([]session.InstanceData, error)) func() {
-	prev := importRemoteSessionsThroughDaemon
-	importRemoteSessionsThroughDaemon = f
-	return func() { importRemoteSessionsThroughDaemon = prev }
 }
 
 func SetTabCreatorForTest(f func(title, repoID string) (string, error)) func() {

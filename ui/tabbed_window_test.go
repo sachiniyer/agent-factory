@@ -119,7 +119,7 @@ func TestTabbedWindowHeaderEllipsizesAtNarrowWidth(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	inst := startedRemoteInstance(t, false)
+	inst := startedRemoteInstance(t)
 	w := newTestTabbedWindow()
 	setWindowInstance(w, inst)
 

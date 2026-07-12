@@ -1,13 +1,9 @@
 package app
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -215,65 +211,7 @@ func TestReconcileSnapshot_IdentityUsesStableID(t *testing.T) {
 	}
 }
 
-func TestImportRemoteHookSessionsAddsListCmdSessions(t *testing.T) {
-	repoDir := setupRealRepo(t)
-	t.Chdir(repoDir)
-
-	h := newTestHome(t)
-	repo, err := config.CurrentRepo()
-	require.NoError(t, err)
-	h.repoID = repo.ID
-
-	scriptDir := t.TempDir()
-	write := func(name, body string) string {
-		t.Helper()
-		path := filepath.Join(scriptDir, name)
-		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0755))
-		return path
-	}
-
-	listCmd := write("list.sh", `echo '[{"name": "remote-one", "status": "running", "host": "h1"}, {"name": "remote-two", "status": "stopped"}]'`)
-	attachCmd := write("attach.sh", `echo "attached $1"`)
-	noopCmd := write("noop.sh", `echo '{"ok": true}'`)
-	require.NoError(t, config.SaveRepoConfig(repo.ID, &config.RepoConfig{
-		RemoteHooks: &config.RemoteHooks{
-			LaunchCmd: noopCmd,
-			ListCmd:   listCmd,
-			AttachCmd: attachCmd,
-			DeleteCmd: noopCmd,
-		},
-	}))
-
-	restoreImporter := SetRemoteImporterForTest(func(repoPath string) ([]session.InstanceData, error) {
-		listed, err := session.ListRemoteHookInstanceData(repoPath, config.RemoteHooks{ListCmd: listCmd}, time.Now())
-		if err != nil {
-			return nil, err
-		}
-		raw, err := json.Marshal(listed)
-		if err != nil {
-			return nil, err
-		}
-		if err := config.SaveRepoInstances(repo.ID, raw); err != nil {
-			return nil, err
-		}
-		return listed, nil
-	})
-	t.Cleanup(restoreImporter)
-
-	imported := h.importRemoteHookSessions()
-	require.Equal(t, 1, imported)
-	require.Equal(t, 1, h.store.NumInstances())
-
-	inst := h.store.GetInstances()[0]
-	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote)
-	require.Equal(t, "remote-one", inst.Title)
-
-	stored, err := config.LoadRepoInstances(repo.ID)
-	require.NoError(t, err)
-	var data []session.InstanceData
-	require.NoError(t, json.Unmarshal(stored, &data))
-	require.Len(t, data, 1)
-	require.Equal(t, "remote-one", data[0].Title)
-	require.Equal(t, "remote-one", data[0].RemoteMeta["name"])
-	require.Equal(t, "h1", data[0].RemoteMeta["host"])
-}
+// TestImportRemoteHookSessionsAddsListCmdSessions removed — the remote-hook
+// enumeration/import path (list_cmd, SetRemoteImporterForTest,
+// ListRemoteHookInstanceData, importRemoteHookSessions, RemoteMeta) was deleted
+// in the provision-and-expose migration. // #1592 Phase 4 PR7

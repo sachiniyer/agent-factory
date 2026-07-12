@@ -147,7 +147,6 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 			ExternalWorktree:  true,
 			BranchCreatedByUs: boolPtr(true),
 		},
-		RemoteMeta: map[string]interface{}{"api_secret": "topsecretvalue"},
 	}
 
 	redactInstanceData(&d)
@@ -175,10 +174,6 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	if d.PRInfo.Title != redactedMarker || d.PRInfo.URL != redactedMarker {
 		t.Errorf("PR free-text not redacted: %+v", d.PRInfo)
 	}
-	if v, ok := d.RemoteMeta["api_secret"]; ok {
-		t.Errorf("remote_meta secret survived: %v", v)
-	}
-
 	// Structural fields intact.
 	if d.ID != "abc123" || d.Program != "claude" || d.Status != session.Status(1) {
 		t.Errorf("structural fields mutated: %+v", d)
@@ -437,8 +432,7 @@ func TestBuildEndToEnd(t *testing.T) {
 			Name:    "agent",
 			Command: "claude --token sk-INSTANCESECRET0123456789",
 		}},
-		PRInfo:     session.PRInfoData{Number: 42, State: "open", Title: "secret pr", URL: "https://x/pr/42"},
-		RemoteMeta: map[string]interface{}{"key": "topsecretremote"},
+		PRInfo: session.PRInfoData{Number: 42, State: "open", Title: "secret pr", URL: "https://x/pr/42"},
 	}})
 	if err != nil {
 		t.Fatalf("marshal instances: %v", err)
@@ -484,7 +478,6 @@ func TestBuildEndToEnd(t *testing.T) {
 		"has_prompt", // task prompt presence signal
 		"~/Desktop",  // home collapsed, structural path kept
 		testSHA,      // git SHA survives
-		"_redacted",  // remote_meta signal preserved
 	)
 	planted := []string{
 		"sk-INSTANCESECRET0123456789",
@@ -492,7 +485,6 @@ func TestBuildEndToEnd(t *testing.T) {
 		"sk-LOGSECRET0123456789ABCDEF",
 		"ghp_PLANTEDCONFIGSECRET0123456789ABCD",
 		"company-internal-credential-value",
-		"topsecretremote",
 		"my proprietary session",
 		"Project Nightingale",
 		"customer launch details",

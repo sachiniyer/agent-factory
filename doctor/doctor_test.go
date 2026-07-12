@@ -527,6 +527,22 @@ func TestRemoteChecksSkippedWhenNoRemote(t *testing.T) {
 		"a clean n/a line must be shown for local-only users")
 }
 
+// TestRemoteConfigValidLaunchDelete: a config with executable launch_cmd +
+// delete_cmd validates cleanly and emits the success OK line with no findings.
+func TestRemoteConfigValidLaunchDelete(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
+	hooks := &config.RemoteHooks{LaunchCmd: good, DeleteCmd: good}
+
+	report, err := Run(withRemote(testOptions(t, false), hooks))
+	require.NoError(t, err)
+	require.Empty(t, findByCheck(report, "remote-config"))
+	require.Empty(t, findByCheck(report, "remote-hook-script"))
+	require.True(t, okContains(report, "remote config: launch_cmd + delete_cmd configured"))
+	require.Zero(t, report.UnresolvedCount())
+}
+
 // TestRemoteConfigMissingRequiredField: a remote config missing a required
 // command (launch_cmd) is reported with the exact field name and where to fix
 // it, mirroring the backend's own validation.
@@ -534,7 +550,7 @@ func TestRemoteConfigMissingRequiredField(t *testing.T) {
 	testguard.IsolateTmux(t)
 	dir := t.TempDir()
 	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
-	hooks := &config.RemoteHooks{LaunchCmd: "", AttachCmd: good, DeleteCmd: good}
+	hooks := &config.RemoteHooks{LaunchCmd: "", DeleteCmd: good}
 
 	report, err := Run(withRemote(testOptions(t, false), hooks))
 	require.NoError(t, err)
@@ -546,6 +562,25 @@ func TestRemoteConfigMissingRequiredField(t *testing.T) {
 	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
 }
 
+// TestRemoteConfigMigrationKeyRejected: a config still carrying a removed
+// pre-PR7 key (attach_cmd) fails the Validate guard with the provision-and-expose
+// migration message, so `af doctor` names the exact stale key after an upgrade.
+func TestRemoteConfigMigrationKeyRejected(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
+	hooks := &config.RemoteHooks{LaunchCmd: good, DeleteCmd: good, RemovedAttachCmd: "/bin/attach"}
+
+	report, err := Run(withRemote(testOptions(t, false), hooks))
+	require.NoError(t, err)
+	checks := findCheckRows(report, "remote config")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusWarn, checks[0].Status)
+	require.Contains(t, checks[0].Detail, "attach_cmd")
+	require.Contains(t, checks[0].Detail, "was removed in the provision-and-expose migration")
+	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
+}
+
 // TestRemoteHookScriptNotExecutable: a hook path that exists but lacks the
 // execute bit is flagged with the exact chmod fix.
 func TestRemoteHookScriptNotExecutable(t *testing.T) {
@@ -554,7 +589,7 @@ func TestRemoteHookScriptNotExecutable(t *testing.T) {
 	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
 	noexec := filepath.Join(dir, "launch.sh")
 	require.NoError(t, os.WriteFile(noexec, []byte("#!/bin/sh\n"), 0o644))
-	hooks := &config.RemoteHooks{LaunchCmd: noexec, AttachCmd: good, DeleteCmd: good}
+	hooks := &config.RemoteHooks{LaunchCmd: noexec, DeleteCmd: good}
 
 	report, err := Run(withRemote(testOptions(t, false), hooks))
 	require.NoError(t, err)
@@ -572,7 +607,7 @@ func TestRemoteHookScriptMissing(t *testing.T) {
 	dir := t.TempDir()
 	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
 	missing := filepath.Join(dir, "does-not-exist.sh")
-	hooks := &config.RemoteHooks{LaunchCmd: missing, AttachCmd: good, DeleteCmd: good}
+	hooks := &config.RemoteHooks{LaunchCmd: missing, DeleteCmd: good}
 
 	report, err := Run(withRemote(testOptions(t, false), hooks))
 	require.NoError(t, err)
@@ -584,41 +619,6 @@ func TestRemoteHookScriptMissing(t *testing.T) {
 	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
 }
 
-// TestRemoteConnectivityProbeSucceeds: a healthy list_cmd (exit 0, JSON array)
-// yields no findings and a success OK line.
-func TestRemoteConnectivityProbeSucceeds(t *testing.T) {
-	testguard.IsolateTmux(t)
-	dir := t.TempDir()
-	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
-	list := writeHookScript(t, dir, "list.sh", "#!/bin/sh\necho '[{\"name\":\"a\",\"status\":\"running\"}]'\n")
-	hooks := &config.RemoteHooks{LaunchCmd: good, ListCmd: list, AttachCmd: good, DeleteCmd: good}
-
-	report, err := Run(withRemote(testOptions(t, false), hooks))
-	require.NoError(t, err)
-	require.Empty(t, findByCheck(report, "remote-connectivity"))
-	require.Empty(t, findByCheck(report, "remote-config"))
-	require.Empty(t, findByCheck(report, "remote-hook-script"))
-	require.True(t, okContains(report, "remote connectivity: list_cmd responded"))
-}
-
-// TestRemoteConnectivityProbeFails: a list_cmd that exits non-zero surfaces an
-// actionable finding quoting the script's stderr.
-func TestRemoteConnectivityProbeFails(t *testing.T) {
-	testguard.IsolateTmux(t)
-	dir := t.TempDir()
-	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
-	list := writeHookScript(t, dir, "list.sh", "#!/bin/sh\necho 'ssh: connect to host: Connection refused' >&2\nexit 1\n")
-	hooks := &config.RemoteHooks{LaunchCmd: good, ListCmd: list, AttachCmd: good, DeleteCmd: good}
-
-	report, err := Run(withRemote(testOptions(t, false), hooks))
-	require.NoError(t, err)
-	checks := findCheckRows(report, "remote connectivity")
-	require.Len(t, checks, 1)
-	require.Equal(t, StatusWarn, checks[0].Status)
-	require.Contains(t, checks[0].Detail, "Connection refused")
-	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
-}
-
 func TestRemoteCoderWhoamiWarnsWithoutFailingDoctor(t *testing.T) {
 	testguard.IsolateTmux(t)
 	dir := t.TempDir()
@@ -627,7 +627,7 @@ func TestRemoteCoderWhoamiWarnsWithoutFailingDoctor(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
-	hooks := &config.RemoteHooks{LaunchCmd: hook, ListCmd: hook, AttachCmd: hook, DeleteCmd: hook}
+	hooks := &config.RemoteHooks{LaunchCmd: hook, DeleteCmd: hook}
 
 	report, err := Run(withRemote(testOptions(t, false), hooks))
 	require.NoError(t, err)
@@ -637,68 +637,4 @@ func TestRemoteCoderWhoamiWarnsWithoutFailingDoctor(t *testing.T) {
 	require.Contains(t, checks[0].Detail, "not logged in")
 	require.Equal(t, "run `coder login`", checks[0].Remediation)
 	require.Zero(t, report.UnresolvedCount(), "coder auth warnings must not fail doctor")
-}
-
-// TestRemoteConnectivityProbeSucceedsDespiteBenignError: a list_cmd that
-// exits 0 with valid JSON but leaves a background grandchild holding the
-// stdout pipe makes cmd.Run return exec.ErrWaitDelay (a benign non-nil error).
-// The probe must judge by the exit status, not the error, and report NO
-// connectivity failure — a false failure is the worst outcome for a doctor
-// check (#1234 review).
-func TestRemoteConnectivityProbeSucceedsDespiteBenignError(t *testing.T) {
-	testguard.IsolateTmux(t)
-	dir := t.TempDir()
-	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
-	// The script writes its full JSON, then backgrounds a `sleep` that inherits
-	// the stdout pipe and outlives WaitDelay (500ms), then exits 0. Run() sees a
-	// clean exit-0 but returns ErrWaitDelay because the pipe stayed open.
-	list := writeHookScript(t, dir, "list.sh",
-		"#!/bin/sh\necho '[{\"name\":\"a\",\"status\":\"running\"}]'\nsleep 2 &\nexit 0\n")
-	hooks := &config.RemoteHooks{LaunchCmd: good, ListCmd: list, AttachCmd: good, DeleteCmd: good}
-
-	report, err := Run(withRemote(testOptions(t, false), hooks))
-	require.NoError(t, err)
-	require.Empty(t, findByCheck(report, "remote-connectivity"),
-		"a benign ErrWaitDelay on a successful exit-0 list_cmd must not be a failure")
-	require.True(t, okContains(report, "remote connectivity: list_cmd responded"))
-}
-
-// TestRemoteConnectivityProbeTimesOut: a hanging list_cmd is bounded by the
-// probe timeout and reported as unresponsive.
-func TestRemoteConnectivityProbeTimesOut(t *testing.T) {
-	testguard.IsolateTmux(t)
-	dir := t.TempDir()
-	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
-	list := writeHookScript(t, dir, "list.sh", "#!/bin/sh\nsleep 30\n")
-	hooks := &config.RemoteHooks{LaunchCmd: good, ListCmd: list, AttachCmd: good, DeleteCmd: good}
-
-	opts := withRemote(testOptions(t, false), hooks)
-	opts.remoteProbeTimeout = 200 * time.Millisecond
-	report, err := Run(opts)
-	require.NoError(t, err)
-	checks := findCheckRows(report, "remote connectivity")
-	require.Len(t, checks, 1)
-	require.Equal(t, StatusWarn, checks[0].Status)
-	require.Contains(t, checks[0].Detail, "did not respond")
-	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
-}
-
-// TestRemoteProbeSkippedWithoutListCmd: with no list_cmd, the probe and
-// restore are unavailable but this is informational, not a failure — a minimal
-// launch/attach/delete-only remote setup must not fail doctor.
-func TestRemoteProbeSkippedWithoutListCmd(t *testing.T) {
-	testguard.IsolateTmux(t)
-	dir := t.TempDir()
-	good := writeHookScript(t, dir, "hook.sh", "#!/bin/sh\necho '[]'\n")
-	hooks := &config.RemoteHooks{LaunchCmd: good, AttachCmd: good, DeleteCmd: good}
-
-	report, err := Run(withRemote(testOptions(t, false), hooks))
-	require.NoError(t, err)
-	require.Empty(t, findByCheck(report, "remote-connectivity"))
-	require.Empty(t, findByCheck(report, "remote-config"))
-	checks := findCheckRows(report, "remote connectivity")
-	require.Len(t, checks, 1)
-	require.Equal(t, StatusWarn, checks[0].Status)
-	require.Contains(t, checks[0].Detail, "probe skipped")
-	require.Zero(t, report.UnresolvedCount(), "remote warnings must not fail doctor")
 }

@@ -194,7 +194,6 @@ func TestStartNewRemoteInvalidHooksStillErrors(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, config.SaveRepoConfig(repo.ID, &config.RepoConfig{
 		RemoteHooks: &config.RemoteHooks{
-			AttachCmd: "/bin/echo",
 			DeleteCmd: "/bin/echo",
 		},
 	}))
@@ -420,7 +419,7 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
 		if opts.ForceRemote {
-			return &session.HookBackend{Hooks: config.RemoteHooks{}}, nil
+			return &session.HookBackend{}, nil
 		}
 		return &session.LocalBackend{}, nil
 	})

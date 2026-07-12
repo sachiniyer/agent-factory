@@ -81,16 +81,6 @@ func (c *Client) SetPRInfo(req daemon.SetPRInfoRequest) error {
 	return c.call("SetPRInfo", req, &daemon.SetPRInfoResponse{})
 }
 
-// ImportRemoteHookSessions asks the daemon to reconcile remote sessions
-// reported by list_cmd into persisted storage.
-func (c *Client) ImportRemoteHookSessions(req daemon.ImportRemoteHookSessionsRequest) ([]session.InstanceData, error) {
-	var resp daemon.ImportRemoteHookSessionsResponse
-	if err := c.call("ImportRemoteHookSessions", req, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Instances, nil
-}
-
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
 // one attached session (#1160). Best-effort attach coordination; it rides an
 // internal (non-cataloged) route because it is daemon infra, not a public verb.

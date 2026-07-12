@@ -1,37 +1,26 @@
 #!/usr/bin/env bash
-# Skeleton delete script for Agent Factory remote hooks.
-# Tears down a remote session and cleans up resources.
+# Skeleton delete_cmd for the Agent Factory remote-hook backend. Tears down
+# whatever launch_cmd provisioned (the af agent-server + its workspace).
 #
-# Required args: --name <name> --json
-# stdout: JSON {"name": "...", "deleted": true}
+# Args:   --name <slug>
+# stdout: anything (a {"deleted": true} ack is conventional, not required)
 # stderr: progress logs
 
 set -euo pipefail
 
 NAME=""
-JSON_OUTPUT=false
-
 while [[ $# -gt 0 ]]; do
   case $1 in
     --name) NAME="$2"; shift 2 ;;
-    --json) JSON_OUTPUT=true; shift ;;
     *) shift ;;
   esac
 done
+[[ -n "$NAME" ]] || { echo "Error: --name is required" >&2; exit 1; }
 
-if [[ -z "$NAME" ]]; then
-  echo "Error: --name is required" >&2
-  exit 1
-fi
+echo "Tearing down session $NAME..." >&2
 
-# TODO: Replace with your cleanup logic
-# Examples:
-#   - Kill the remote tmux session and remove the machine
-#   - Stop and delete the cloud container
-#   - Delete the Kubernetes pod
+# TODO: Replace with your cleanup logic — the inverse of launch.sh:
+#   - kill the af agent-server you started (e.g. by a recorded PID)
+#   - remove the workspace / stop the container / delete the pod / close the tunnel
 
-echo "Deleting session $NAME..." >&2
-
-if [[ "$JSON_OUTPUT" == true ]]; then
-  echo "{\"name\": \"$NAME\", \"deleted\": true}"
-fi
+echo "{\"deleted\": true}"

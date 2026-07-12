@@ -10,41 +10,43 @@ import (
 // remote hook backend configured. A repo with no remote hooks is a normal empty
 // state, so it returns false, nil rather than an error.
 func RemoteHooksConfiguredForPath(absPath string) (bool, error) {
-	_, configured, err := loadHookBackendForPathIfConfigured(absPath)
+	_, configured, err := loadRemoteHooksForPathIfConfigured(absPath)
 	return configured, err
 }
 
-// loadHookBackendForPath loads a HookBackend for the given workspace path.
-// Returns an error if no remote hooks are configured.
-func loadHookBackendForPath(absPath string) (*HookBackend, error) {
-	hook, configured, err := loadHookBackendForPathIfConfigured(absPath)
+// loadRemoteHooksForPath loads the validated RemoteHooks for the given workspace
+// path (#1592 Phase 4 PR7). Returns an error if no remote hooks are configured
+// or if the config still carries the removed pre-PR7 keys (RemoteHooks.Validate
+// surfaces the migration message). The hookRuntime provisions from this config.
+func loadRemoteHooksForPath(absPath string) (config.RemoteHooks, error) {
+	hooks, configured, err := loadRemoteHooksForPathIfConfigured(absPath)
 	if err != nil {
-		return nil, err
+		return config.RemoteHooks{}, err
 	}
 	if configured {
-		return hook, nil
+		return hooks, nil
 	}
 	repo, err := config.RepoFromPath(absPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve repo: %w", err)
+		return config.RemoteHooks{}, fmt.Errorf("failed to resolve repo: %w", err)
 	}
-	return nil, fmt.Errorf("no remote hooks configured for repo %s", repo.ID)
+	return config.RemoteHooks{}, fmt.Errorf("no remote hooks configured for repo %s", repo.ID)
 }
 
-func loadHookBackendForPathIfConfigured(absPath string) (*HookBackend, bool, error) {
+func loadRemoteHooksForPathIfConfigured(absPath string) (config.RemoteHooks, bool, error) {
 	repo, err := config.RepoFromPath(absPath)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to resolve repo: %w", err)
+		return config.RemoteHooks{}, false, fmt.Errorf("failed to resolve repo: %w", err)
 	}
 	cfg, err := config.ResolveConfig(repo.Root)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to resolve repo config: %w", err)
+		return config.RemoteHooks{}, false, fmt.Errorf("failed to resolve repo config: %w", err)
 	}
 	if cfg.RemoteHooks == nil {
-		return nil, false, nil
+		return config.RemoteHooks{}, false, nil
 	}
 	if err := cfg.RemoteHooks.Validate(); err != nil {
-		return nil, false, err
+		return config.RemoteHooks{}, false, err
 	}
-	return &HookBackend{Hooks: *cfg.RemoteHooks}, true, nil
+	return *cfg.RemoteHooks, true, nil
 }

@@ -398,11 +398,6 @@ func redactInstanceData(d *session.InstanceData) {
 	if d.PRInfo.URL != "" {
 		d.PRInfo.URL = redactedMarker
 	}
-	if len(d.RemoteMeta) > 0 {
-		// Preserve the *signal* that remote metadata existed without emitting
-		// any of its (arbitrary, possibly secret) contents.
-		d.RemoteMeta = map[string]interface{}{"_redacted": true}
-	}
 }
 
 // redactedTask is the structural, secret-free projection of a task.Task. The

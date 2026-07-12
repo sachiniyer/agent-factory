@@ -178,8 +178,8 @@ func CloseTab(req CloseTabRequest) (string, error) {
 
 // The TUI's control + read path moved onto the HTTP apiclient in #1592 Phase 2
 // PR3, so the net/rpc client wrappers only the TUI called — SetPRInfo,
-// ImportRemoteHookSessions, PauseStatusPoll, ResumeStatusPoll (here) and
-// ResumeFromLimit / SnapshotWithAlarms (in limit.go / snapshot.go) — are gone.
+// PauseStatusPoll, ResumeStatusPoll (here) and ResumeFromLimit /
+// SnapshotWithAlarms (in limit.go / snapshot.go) — are gone.
 // The controlServer handlers stay: the gob control socket still SERVES every
 // verb for CLI/internal callers; only the TUI-only Go client wrappers were
 // removed. SnapshotNoSpawn below remains the CLI's non-spawning, instances-only

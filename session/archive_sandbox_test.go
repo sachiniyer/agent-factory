@@ -8,8 +8,9 @@ import (
 )
 
 // TestBackendKindForType pins the persisted-type → runtime-kind mapping the
-// re-provision path keys on: only the sandbox runtimes are re-provisionable
-// (#1592 Phase 4 PR6); local/hook are rejected.
+// re-provision path keys on: the off-box runtimes are re-provisionable
+// (#1592 Phase 4 PR6/PR7 — docker/ssh/hook push+re-clone the durable branch);
+// only local is rejected (it relocates a worktree instead).
 func TestBackendKindForType(t *testing.T) {
 	got, err := backendKindForType("docker")
 	require.NoError(t, err)
@@ -19,7 +20,11 @@ func TestBackendKindForType(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, BackendSSH, got)
 
-	for _, bad := range []string{"local", "remote", "", "nope"} {
+	got, err = backendKindForType("remote")
+	require.NoError(t, err)
+	assert.Equal(t, BackendHook, got)
+
+	for _, bad := range []string{"local", "", "nope"} {
 		if _, err := backendKindForType(bad); err == nil {
 			t.Fatalf("backendKindForType(%q): want error", bad)
 		}
@@ -27,18 +32,18 @@ func TestBackendKindForType(t *testing.T) {
 
 	assert.True(t, isSandboxBackendType("docker"))
 	assert.True(t, isSandboxBackendType("ssh"))
+	assert.True(t, isSandboxBackendType("remote"))
 	assert.False(t, isSandboxBackendType("local"))
-	assert.False(t, isSandboxBackendType("remote"))
 }
 
 // TestNewInertSandboxBackend pins that a loaded sandbox backend classifies the
 // session correctly (Type + full remote parity) with no live handle, so archive/
-// restore route on it and Kill is a safe no-op (#1592 Phase 4 PR6).
+// restore route on it and Kill is a safe no-op (#1592 Phase 4 PR6/PR7).
 func TestNewInertSandboxBackend(t *testing.T) {
 	for _, tc := range []struct {
 		typ  string
 		want string
-	}{{"docker", "docker"}, {"ssh", "ssh"}} {
+	}{{"docker", "docker"}, {"ssh", "ssh"}, {"remote", "remote"}} {
 		b := newInertSandboxBackend(tc.typ)
 		assert.Equal(t, tc.want, b.Type())
 		caps := b.Capabilities()
@@ -50,13 +55,15 @@ func TestNewInertSandboxBackend(t *testing.T) {
 	}
 }
 
-// TestFromInstanceData_SandboxBackends pins how a docker/ssh session loads from
-// disk (#1592 Phase 4 PR6): an ARCHIVED record loads inert + Archived (restore
-// re-provisions), and a non-archived one loads inert + Lost with started=false
-// (so the poll + Lost-restore loop skip it — no dead endpoint driven, no
-// infinite backend recursion). Both keep their sandbox Type/Capabilities.
+// TestFromInstanceData_SandboxBackends pins how a docker/ssh/hook session loads
+// from disk (#1592 Phase 4 PR6/PR7): an ARCHIVED record loads inert + Archived
+// (restore re-provisions), and a non-archived one loads inert + Lost with
+// started=false (so the poll + Lost-restore loop skip it — no dead endpoint
+// driven, no infinite backend recursion). Both keep their sandbox
+// Type/Capabilities. The hook ("remote") backend now loads the same way, since
+// its provision-and-expose migration made it re-provisionable like docker/ssh.
 func TestFromInstanceData_SandboxBackends(t *testing.T) {
-	for _, typ := range []string{"docker", "ssh"} {
+	for _, typ := range []string{"docker", "ssh", "remote"} {
 		t.Run(typ+" archived loads inert + Archived", func(t *testing.T) {
 			inst, err := FromInstanceData(InstanceData{
 				ID:          "id1",

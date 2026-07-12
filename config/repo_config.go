@@ -10,52 +10,89 @@ import (
 
 const RepoConfigFileName = "config.json"
 
-// RemoteHooks configures user-provided shell scripts for managing remote
-// sessions. When present in a repo config, sessions for that repo use the
-// remote hook backend instead of local tmux+git worktrees.
+// RemoteHooks configures user-provided shell scripts for the bring-your-own-
+// provisioner remote backend. When present in a repo config, sessions for that
+// repo run on infrastructure the hooks provision instead of local tmux+git
+// worktrees.
+//
+// As of #1592 Phase 4 PR7 the hook contract is provision-and-expose, identical
+// downstream to the docker/ssh runtimes (BREAKING change):
+//   - launch_cmd clones repo@branch on the user's infra, starts an
+//     `af agent-server --listen :PORT` there, and echoes that server's authed
+//     endpoint as JSON: {"url":"wss://…","token":"…","tls_fingerprint":"…"}.
+//     The daemon then drives the session over that wss:// stream exactly as it
+//     drives a docker/ssh session — no terminal/attach/preview scripting.
+//   - delete_cmd tears the provisioned sandbox back down (the runtime teardown).
+//
+// See docs/remote-hooks.md for the copy-pasteable launch_cmd recipe.
 type RemoteHooks struct {
+	// LaunchCmd provisions the remote workspace and echoes the af agent-server
+	// endpoint JSON (see the type doc). Invoked with --name/--repo/--branch and
+	// optional --program/--auto-yes flags (see docs/remote-hooks.md).
 	LaunchCmd string `json:"launch_cmd" toml:"launch_cmd"`
-	ListCmd   string `json:"list_cmd" toml:"list_cmd"`
-	AttachCmd string `json:"attach_cmd" toml:"attach_cmd"`
+	// DeleteCmd reaps the provisioned sandbox. Invoked with --name <slug>.
 	DeleteCmd string `json:"delete_cmd" toml:"delete_cmd"`
-	// TerminalCmd, when set, powers the Terminal tab for remote sessions: it
-	// is invoked with the session's hook name and should open an interactive
-	// shell in the remote workspace (vs attach_cmd, which attaches to the
-	// agent's own tmux session). Optional — empty means the Terminal tab
-	// keeps its "not available" fallback for remote sessions (#843).
-	TerminalCmd string `json:"terminal_cmd,omitempty" toml:"terminal_cmd,omitempty"`
+
+	// The keys below were REMOVED in #1592 Phase 4 PR7 when the hook backend
+	// migrated to provision-and-expose. They are retained ONLY as tripwire
+	// fields so a stale config fails loudly with an actionable migration message
+	// (Validate) instead of silently ignoring a key the user still depends on.
+	// The terminal/attach/preview contract they configured is now served by the
+	// in-sandbox `af agent-server` over the wss:// stream.
+	RemovedListCmd     string `json:"list_cmd,omitempty" toml:"list_cmd,omitempty"`
+	RemovedAttachCmd   string `json:"attach_cmd,omitempty" toml:"attach_cmd,omitempty"`
+	RemovedTerminalCmd string `json:"terminal_cmd,omitempty" toml:"terminal_cmd,omitempty"`
 }
 
-// Validate checks that the command strings required to operate a remote hook
-// backend are non-empty. It is called at backend-resolution time rather than
-// at config load so that reading or rewriting a partially-configured repo
-// config never fails; the error only surfaces when agent-factory actually
-// needs to run the hooks.
+// Validate checks that the command strings required to operate the remote hook
+// backend are non-empty, and rejects a config still carrying the removed
+// pre-PR7 keys. It is called at backend-resolution time rather than at config
+// load so that reading or rewriting a partially-configured repo config never
+// fails; the error only surfaces when agent-factory actually needs the hooks.
 //
-// Without this guard, an empty command string defers to exec.Command(""),
-// which fails at operation time with Go's cryptic "exec: no command" and, on
-// the attach path, is swallowed in a goroutine so attach silently no-ops
-// (#738). list_cmd is intentionally not required here: import/sync paths treat
-// an empty list_cmd as "no remote sessions to enumerate" (see app/sync.go and
-// daemon/control.go), so requiring it would break that documented behavior.
-// terminal_cmd is likewise optional (#843): it gates a single opt-in feature
-// (the Terminal tab for remote sessions), and when empty that tab shows its
-// "not available" fallback instead of erroring.
+// Without the non-empty guard, an empty command string defers to
+// exec.Command(""), which fails at operation time with Go's cryptic "exec: no
+// command" (#738). launch_cmd (provision + expose) and delete_cmd (teardown)
+// are both required — they are the whole provision-and-expose contract.
+//
+// The removed-key guard makes the BREAKING #1592 Phase 4 PR7 migration
+// self-diagnosing: list_cmd/attach_cmd/terminal_cmd no longer exist, so instead
+// of silently ignoring them (encoding/json drops unknown nested keys) we surface
+// exactly which stale key is present and point at the migration recipe.
 //
 // Callers receive hooks whose relative paths were already rewritten by
 // resolveCommandPaths, but resolution leaves empty values empty, so these
 // errors always reflect the value the user wrote in the config file.
 func (h RemoteHooks) Validate() error {
+	if removed := h.removedKeyInUse(); removed != "" {
+		return fmt.Errorf("remote_hooks.%s was removed in the provision-and-expose migration (#1592 Phase 4): "+
+			"the remote hook backend no longer uses terminal/attach/preview/enumeration scripts. "+
+			"Your launch_cmd must now start an `af agent-server` in the remote workspace and echo its "+
+			"{\"url\",\"token\",\"tls_fingerprint\"}, and delete_cmd reaps it. "+
+			"Delete list_cmd/attach_cmd/terminal_cmd and follow the migration recipe in docs/remote-hooks.md", removed)
+	}
 	if strings.TrimSpace(h.LaunchCmd) == "" {
 		return fmt.Errorf("remote_hooks.launch_cmd is required")
-	}
-	if strings.TrimSpace(h.AttachCmd) == "" {
-		return fmt.Errorf("remote_hooks.attach_cmd is required")
 	}
 	if strings.TrimSpace(h.DeleteCmd) == "" {
 		return fmt.Errorf("remote_hooks.delete_cmd is required")
 	}
 	return nil
+}
+
+// removedKeyInUse returns the name of the first removed pre-PR7 hook key present
+// in the config, or "" if none are. Backs the actionable migration error in
+// Validate.
+func (h RemoteHooks) removedKeyInUse() string {
+	switch {
+	case strings.TrimSpace(h.RemovedListCmd) != "":
+		return "list_cmd"
+	case strings.TrimSpace(h.RemovedAttachCmd) != "":
+		return "attach_cmd"
+	case strings.TrimSpace(h.RemovedTerminalCmd) != "":
+		return "terminal_cmd"
+	}
+	return ""
 }
 
 // resolveCommandPaths returns a copy of h with every command value that is a
@@ -66,10 +103,7 @@ func (h RemoteHooks) Validate() error {
 // mutated.
 func (h RemoteHooks) resolveCommandPaths(repoRoot string) *RemoteHooks {
 	h.LaunchCmd = resolveHookCommandPath(repoRoot, h.LaunchCmd)
-	h.ListCmd = resolveHookCommandPath(repoRoot, h.ListCmd)
-	h.AttachCmd = resolveHookCommandPath(repoRoot, h.AttachCmd)
 	h.DeleteCmd = resolveHookCommandPath(repoRoot, h.DeleteCmd)
-	h.TerminalCmd = resolveHookCommandPath(repoRoot, h.TerminalCmd)
 	return &h
 }
 

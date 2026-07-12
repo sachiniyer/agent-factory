@@ -1,10 +1,8 @@
 package daemon
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -286,60 +284,4 @@ func (m *Manager) findSession(title, repoID string) (*session.Instance, string, 
 	m.instances[key] = instance
 	m.mu.Unlock()
 	return instance, rid, data, nil
-}
-
-func (m *Manager) ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest) ([]session.InstanceData, error) {
-	if req.RepoPath == "" {
-		return nil, fmt.Errorf("repo path is required")
-	}
-	repo, err := config.RepoFromPath(req.RepoPath)
-	if err != nil {
-		return nil, err
-	}
-	repoCfg, err := config.ResolveConfig(repo.Root)
-	if err != nil {
-		return nil, err
-	}
-	if repoCfg.RemoteHooks == nil || repoCfg.RemoteHooks.ListCmd == "" {
-		return nil, nil
-	}
-
-	listed, err := session.ListRemoteHookInstanceData(repo.Root, *repoCfg.RemoteHooks, time.Now())
-	if err != nil {
-		return nil, err
-	}
-
-	imported := make([]session.InstanceData, 0, len(listed))
-	if err := config.UpdateRepoInstances(repo.ID, func(raw json.RawMessage) (json.RawMessage, error) {
-		var existing []session.InstanceData
-		if err := json.Unmarshal(raw, &existing); err != nil {
-			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
-		}
-		existingTitles := make(map[string]bool, len(existing))
-		existingHookNames := make(map[string]bool)
-		for _, data := range existing {
-			existingTitles[data.Title] = true
-			if data.IsRemoteHook() {
-				existingHookNames[session.RemoteHookName(data.Title, data.RemoteMeta)] = true
-			}
-		}
-		for _, data := range listed {
-			name := session.RemoteHookName(data.Title, data.RemoteMeta)
-			if existingTitles[data.Title] || existingHookNames[name] {
-				continue
-			}
-			existing = append(existing, data)
-			imported = append(imported, data)
-			existingTitles[data.Title] = true
-			existingHookNames[name] = true
-		}
-		return json.Marshal(existing)
-	}); err != nil {
-		return nil, err
-	}
-
-	m.mu.Lock()
-	_ = m.refreshLocked()
-	m.mu.Unlock()
-	return imported, nil
 }

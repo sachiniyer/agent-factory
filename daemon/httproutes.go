@@ -128,13 +128,6 @@ var httpRoutes = []HTTPRoute{
 		RequestFields: jsonFields(reflect.TypeOf(SetPRInfoRequest{})),
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetPRInfo) },
 	},
-	{
-		Method:        http.MethodPost,
-		Path:          "/v1/ImportRemoteHookSessions",
-		Description:   "Import sessions discovered via a repo's remote-hook backend.",
-		RequestFields: jsonFields(reflect.TypeOf(ImportRemoteHookSessionsRequest{})),
-		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ImportRemoteHookSessions) },
-	},
 
 	// Tasks.
 	{
