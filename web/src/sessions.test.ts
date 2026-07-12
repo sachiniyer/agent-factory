@@ -68,9 +68,11 @@ test("applyEvent: task.* and dataless events are no-ops", () => {
   assert.deepEqual(applyEvent(list, { type: "session.created" }).sessions, list);
 });
 
-test("pickSelection keeps a still-present selection, else clears it", () => {
-  const list = [sess("x"), sess("y")];
-  assert.equal(pickSelection(list, "y"), "y");
+test("pickSelection keeps a still-present selection by id, else clears it", () => {
+  // Selection keys off the stable session id (not the title) so the attach
+  // terminal dials /v1/sessions/{id}/stream reliably even across repo collisions.
+  const list = [sess("x", { id: "id-x" }), sess("y", { id: "id-y" })];
+  assert.equal(pickSelection(list, "id-y"), "id-y");
   assert.equal(pickSelection(list, "gone"), null);
   assert.equal(pickSelection(list, null), null);
 });

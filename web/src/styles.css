@@ -1,6 +1,8 @@
 /* Web client shell styles (#1592 Phase 5 PR2). Imported by index.ts so esbuild
- * extracts it into dist/af-web.css, which index.html links same-origin — keeping
- * the strict `default-src 'self'` CSP honest (no inline <style>, no CDN fonts).
+ * extracts it — together with xterm's bundled CSS (PR4) — into dist/af-web.css,
+ * which index.html links same-origin: every stylesheet is fetched from the origin,
+ * never a CDN. (xterm's DOM renderer also injects dynamic <style> at runtime, which
+ * the served `style-src 'self' 'unsafe-inline'` permits; see daemon/webserve.go.)
  * The palette leans on the TUI's dark terminal aesthetic (design: "base the
  * website pretty heavily on the TUI"); the full visual pass is a later play-test
  * PR, so this is a clean, restrained baseline. */
@@ -354,7 +356,7 @@ body {
   }
 }
 
-/* Main content area — empty state until PR4 brings the terminal. */
+/* Main content area — an empty state, or the live attach terminal (PR4). */
 .af-main {
   flex: 1;
   min-width: 0;
@@ -379,6 +381,64 @@ body {
   margin: 0;
   color: var(--af-muted);
   font-size: 0.85rem;
+}
+
+/* Terminal pane: a slim header (session title + connection status) over the xterm
+ * host, which fills the remaining height so the FitAddon has real dimensions. */
+.af-main-term {
+  min-height: 0;
+}
+
+.af-term-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.5rem 0.9rem;
+  border-bottom: 1px solid var(--af-border);
+  background: var(--af-surface);
+}
+
+.af-term-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-term-meta {
+  font-size: 0.72rem;
+  color: var(--af-muted);
+  white-space: nowrap;
+}
+
+/* Status tints on the pane header, matching the live-pip vocabulary. */
+.af-term-meta.af-term-open {
+  color: var(--af-dot-ready);
+}
+
+.af-term-meta.af-term-connecting,
+.af-term-meta.af-term-reconnecting {
+  color: var(--af-dot-lost);
+}
+
+.af-term-meta.af-term-exited {
+  color: var(--af-dot-dead);
+}
+
+/* The persistent xterm host: fills the pane, and xterm's own .xterm fills it. The
+ * small padding is inside the terminal background so the scrollback isn't flush to
+ * the edges. */
+.af-term-host {
+  flex: 1;
+  min-height: 0;
+  padding: 0.4rem 0.6rem;
+  background: var(--af-bg);
+  overflow: hidden;
+}
+
+.af-term-host .xterm {
+  height: 100%;
 }
 
 /* Narrow viewport: stack the rail above the main pane (design §7.2 item 7 —

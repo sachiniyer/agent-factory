@@ -38,7 +38,17 @@ import (
 // scripts, no off-origin fetch), so `default-src 'self'` is honest and keeps it
 // that way: any accidental off-origin dependency introduced later fails loudly in
 // the browser instead of silently phoning home.
-const webCSP = "default-src 'self'"
+//
+// `style-src 'self' 'unsafe-inline'` is the ONE relaxation (#1592 Phase 5 PR4):
+// the attach terminal's xterm.js DOM renderer injects dynamic <style> elements at
+// runtime (glyph dimensions + theme colors, computed from the measured font, so
+// they cannot be hashed or moved into a static stylesheet). `default-src 'self'`
+// alone would block them and break the terminal. The relaxation is scoped to
+// STYLES only — every FETCH directive (script-src, connect-src, img-src, font-src)
+// still inherits `default-src 'self'`, so the self-contained / no-off-origin
+// guarantee the CSP exists to enforce is unchanged; only inline styling is
+// permitted, and the app has no untrusted-HTML sink for a style-injection to ride.
+const webCSP = "default-src 'self'; style-src 'self' 'unsafe-inline'"
 
 // webShellHandler wraps the authed API handler so the TCP listener serves the
 // embedded SPA on every non-API path while `/v1/...` keeps flowing through the

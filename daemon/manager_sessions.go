@@ -193,18 +193,22 @@ func shellQuoteArg(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-// agentServerForStream resolves a session (by title, with optional repoID) to
-// its cached agent-server for the WS PTY broker (#1592 Phase 2 PR5). It reuses
-// findSession — the same lookup SendPrompt uses — so a session absent from memory
-// is restored and tracked exactly once, and the returned server is the tracked
-// instance's cached singleton whose ring buffer/subscribers persist.
-func (m *Manager) agentServerForStream(title, repoID string) (session.AgentServer, error) {
-	instance, resolvedRepoID, _, err := m.findSession(title, repoID)
+// agentServerForStream resolves the /v1/sessions/{id}/stream target to its cached
+// agent-server for the WS PTY broker (#1592 Phase 2 PR5). The {id} segment is
+// resolved by the session's STABLE id first, then by title (with optional repoID)
+// as a fallback. The TUI/apiclient pass a title there (no id match → title path,
+// behavior unchanged); the browser web client (Phase 5 PR4) passes the
+// globally-unique session id, which sidesteps the rail's cross-repo title
+// collision — a title alone can name two sessions in two repos, an id names
+// exactly one. Both paths return the tracked instance's cached agent-server
+// singleton whose ring buffer/subscribers persist.
+func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentServer, error) {
+	instance, resolvedRepoID, title, err := m.resolveStreamSession(idOrTitle, repoID)
 	if err != nil {
 		return nil, err
 	}
 	if instance == nil {
-		return nil, fmt.Errorf("session %q not found", title)
+		return nil, fmt.Errorf("session %q not found", idOrTitle)
 	}
 	// Reject a new subscription while a kill is in flight for this session, the
 	// same killsInFlight gate SendPrompt checks (#1632). Streaming previously
@@ -220,6 +224,32 @@ func (m *Manager) agentServerForStream(title, repoID string) (session.AgentServe
 		return nil, fmt.Errorf("session %q is being deleted", title)
 	}
 	return instance.AgentServer(), nil
+}
+
+// resolveStreamSession resolves a stream target by the session's stable id first
+// (the web client's key), else by title (the TUI's key, with optional repoID). It
+// returns the instance, its resolved repoID, and its title — the last so the
+// killsInFlight gate keys off the real title even when the caller addressed the
+// session by id. The id scan only sees in-memory (live) instances, which is all a
+// stream can attach to; an unmatched id falls through to findSession, which also
+// restores an on-disk session the title path may need.
+func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Instance, string, string, error) {
+	m.mu.Lock()
+	if err := m.refreshLocked(); err != nil {
+		m.mu.Unlock()
+		return nil, "", "", err
+	}
+	for key, instance := range m.instances {
+		if instance.ID != "" && instance.ID == idOrTitle {
+			rid, _ := splitDaemonInstanceKey(key)
+			title := instance.Title
+			m.mu.Unlock()
+			return instance, rid, title, nil
+		}
+	}
+	m.mu.Unlock()
+	instance, resolvedRepoID, _, err := m.findSession(idOrTitle, repoID)
+	return instance, resolvedRepoID, idOrTitle, err
 }
 
 func (m *Manager) findSession(title, repoID string) (*session.Instance, string, *session.InstanceData, error) {

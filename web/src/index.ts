@@ -1,20 +1,22 @@
-// Entry point for the Agent Factory web client (#1592 Phase 5). PR3 fills the
-// authed app with the live session rail: on login the app fetches Snapshot to seed
-// the rail, then subscribes to /v1/events and applies deltas so the list stays in
-// lock-step with the daemon — no polling. Creating/killing a session in the TUI or
-// via the CLI shows up in the browser through the push stream (design §2.1).
+// Entry point for the Agent Factory web client (#1592 Phase 5). PR3 filled the
+// authed app with the live session rail; PR4 makes selecting a session open its
+// LIVE TERMINAL — a real xterm.js pane over the daemon's binary WS PTY stream
+// (terminal.ts). Selection keys off the stable session id (not the title, which
+// collides across repos): the rail highlights the id, and the terminal dials
+// /v1/sessions/{id}/stream for it.
 //
-// The bundle is fully self-contained (esbuild output + the imported CSS, no CDN,
-// no off-origin fetch) so the daemon's `Content-Security-Policy: default-src
-// 'self'` holds — the only network calls are same-origin /v1/ requests + the
-// same-origin /v1/events WebSocket.
+// The bundle is fully self-contained (esbuild output + imported CSS incl. xterm's,
+// no CDN, no off-origin fetch) so the daemon's CSP holds — the only network calls
+// are same-origin /v1/ requests, the /v1/events WebSocket, and the per-session
+// /v1/sessions/{id}/stream WebSocket.
 
 import "./styles.css";
 import { ApiError, clearToken, fetchSnapshot, loadToken, probeToken, storeToken } from "./api.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import { applyEvent, pickSelection } from "./sessions.js";
 import { Store } from "./store.js";
-import { orderedSessions, render, type AppState } from "./ui.js";
+import { AttachTerminal, type TerminalStatus } from "./terminal.js";
+import { AppShell, orderedSessions, renderLogin, type AppState } from "./ui.js";
 import type { SessionData, WireEvent } from "./types.js";
 
 const store = new Store<AppState>({
@@ -22,30 +24,45 @@ const store = new Store<AppState>({
   connecting: false,
   loginError: null,
   sessions: [],
-  selectedTitle: null,
+  selectedId: null,
   live: "connecting",
+  termStatus: "connecting",
 });
 
 // The credential and the push stream are process-local singletons: one token
-// drives both the REST resync fetch and the events WS, and one stream is live at a
-// time (started on connect, stopped on disconnect).
+// drives the REST resync fetch, the events WS, and the PTY stream; one events
+// stream is live at a time (started on connect, stopped on disconnect).
 let token: string | null = null;
 let stream: EventStream | null = null;
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
 
+// The app-phase DOM (built once per login) and the persistent terminal host that
+// lives inside it. Keeping the host stable across renders is what lets the focused
+// xterm survive rail updates (see ui.ts AppShell).
+let shell: AppShell | null = null;
+const termHost = document.createElement("div");
+termHost.className = "af-term-host";
+
+// The one live attach terminal and the session id it is bound to. Rebuilt only
+// when the selected id changes; disposed on deselect/logout.
+let terminal: AttachTerminal | null = null;
+let terminalId: string | null = null;
+
+let root: HTMLElement | null = null;
+
 function mount(): void {
-  const root = document.getElementById("app");
+  root = document.getElementById("app");
   if (!root) {
     throw new Error("af-web: #app root element missing from index.html");
   }
-  const rerender = () => render(root, store.get(), { connect, disconnect, select });
   store.subscribe(rerender);
   rerender();
 
   // Keyboard navigation over the rail (arrows / j / k), wired once at the document
-  // level so it works regardless of which row last had focus.
+  // level. The handler ignores keys while a form field OR the terminal textarea has
+  // focus, so typing into the agent never moves the rail selection.
   document.addEventListener("keydown", onKeydown);
 
   // Resume within the tab: sessionStorage keeps the token across a reload, so a
@@ -54,6 +71,29 @@ function mount(): void {
   if (existing) {
     void connect(existing);
   }
+}
+
+/** Reflects the current store state into the DOM: the login view, or the app shell
+ *  (built lazily) patched in place plus the terminal lifecycle synced to selection. */
+function rerender(): void {
+  if (!root) {
+    return;
+  }
+  const state = store.get();
+  if (state.phase === "login") {
+    if (shell) {
+      shell = null; // dropped from the tree by renderLogin below
+    }
+    disposeTerminal();
+    renderLogin(root, state, { connect, disconnect, select });
+    return;
+  }
+  if (!shell) {
+    shell = new AppShell({ connect, disconnect, select }, termHost);
+    root.replaceChildren(shell.el);
+  }
+  shell.update(state);
+  syncTerminal(state);
 }
 
 /** Validates the token (Snapshot probe), and on success persists it, seeds the rail
@@ -76,13 +116,13 @@ async function connect(candidate: string): Promise<void> {
     connecting: false,
     loginError: null,
     sessions,
-    selectedTitle: pickSelection(sessions, store.get().selectedTitle),
+    selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
   });
   startStream(candidate);
 }
 
-/** Forgets the token, tears down the push stream, and returns to the login view. */
+/** Forgets the token, tears down the push stream + terminal, and returns to login. */
 function disconnect(): void {
   stopStream();
   token = null;
@@ -92,14 +132,43 @@ function disconnect(): void {
     connecting: false,
     loginError: null,
     sessions: [],
-    selectedTitle: null,
+    selectedId: null,
     live: "connecting",
   });
 }
 
-/** Selects a session row (click or keyboard). */
-function select(title: string): void {
-  store.set({ selectedTitle: title });
+/** Selects a session row by its stable id (click or keyboard). */
+function select(id: string): void {
+  store.set({ selectedId: id });
+}
+
+// --- attach terminal wiring ------------------------------------------------
+
+/** Opens/closes the attach terminal to match the current selection. Rebuilds only
+ *  when the selected id actually changes, so a live rail event never disturbs an
+ *  open, focused terminal. */
+function syncTerminal(state: AppState): void {
+  const selId = state.selectedId;
+  if (selId === terminalId) {
+    return;
+  }
+  disposeTerminal();
+  terminalId = selId; // set before constructing so the onStatus re-render is a no-op
+  const tok = token;
+  if (selId && tok) {
+    terminal = new AttachTerminal(termHost, selId, tok, {
+      onStatus: (s: TerminalStatus) => store.set({ termStatus: s }),
+    });
+  }
+}
+
+function disposeTerminal(): void {
+  if (terminal) {
+    terminal.dispose();
+    terminal = null;
+  }
+  terminalId = null;
+  termHost.replaceChildren(); // clear any leftover xterm DOM
 }
 
 // --- events plane wiring ---------------------------------------------------
@@ -127,14 +196,14 @@ function stopStream(): void {
 
 /**
  * Applies one events-plane delta to the store via the pure reducer (sessions.ts):
- * created/updated upsert in place (the instant, poll-free path the create/status
- * play-test checks), killed removes the row, and archived/restored request a
- * debounced re-Snapshot because the event can't convey the new liveness. The
- * selection is re-validated against the new list so a killed selected row clears.
+ * created/updated upsert in place, killed removes the row, and archived/restored
+ * request a debounced re-Snapshot. The selection is re-validated (by id) against
+ * the new list so a killed selected row clears — which syncTerminal then tears the
+ * terminal down for.
  */
 function onEvent(ev: WireEvent): void {
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
-  store.set({ sessions, selectedTitle: pickSelection(sessions, store.get().selectedTitle) });
+  store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
   if (needsResync) {
     requestResync();
   }
@@ -155,7 +224,7 @@ function requestResync(): void {
     }
     void fetchSnapshot(tok)
       .then((sessions) => {
-        store.set({ sessions, selectedTitle: pickSelection(sessions, store.get().selectedTitle) });
+        store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
       })
       .catch(() => {
         // Transport/auth failure: the events stream owns reconnection; a later
@@ -171,7 +240,8 @@ function onKeydown(e: KeyboardEvent): void {
   if (state.phase !== "app") {
     return;
   }
-  // Don't hijack typing in a form field (the login input, future modals).
+  // Don't hijack typing in a form field or the terminal (xterm's helper textarea):
+  // j/k and arrows there belong to the agent, not the rail.
   const target = e.target as HTMLElement | null;
   if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
     return;
@@ -189,7 +259,7 @@ function onKeydown(e: KeyboardEvent): void {
     return;
   }
   e.preventDefault();
-  const cur = ordered.findIndex((s) => s.title === state.selectedTitle);
+  const cur = ordered.findIndex((s) => s.id === state.selectedId);
   // From no selection, ArrowDown lands on the first row and ArrowUp on the last.
   let next: number;
   if (cur === -1) {
@@ -198,8 +268,8 @@ function onKeydown(e: KeyboardEvent): void {
     next = Math.min(Math.max(cur + delta, 0), ordered.length - 1);
   }
   const target2 = ordered[next];
-  if (target2) {
-    select(target2.title);
+  if (target2 && target2.id) {
+    select(target2.id);
   }
 }
 
