@@ -3,6 +3,7 @@ package apiclient
 import (
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -85,12 +86,18 @@ func parseDaemonURL(daemonURL string) (httpBase, wsBase string, err error) {
 }
 
 // pinnedTLSConfig builds the client TLS config for a remote daemon. With a
-// fingerprint it pins the leaf cert's SHA-256 (TOFU): default chain/hostname
-// verification is replaced — NOT disabled — by a VerifyConnection callback that
-// requires an exact fingerprint match, so connecting by IP or through a tunnel
-// works despite the self-signed cert's SAN, while a substituted cert is refused.
-// Without a fingerprint the daemon must present a cert that chains to a system
-// root (a real CA cert), verified normally.
+// fingerprint it pins the leaf cert's SHA-256 (TOFU): the default CA-chain +
+// hostname check is REPLACED — not skipped — by a VerifyPeerCertificate callback
+// that requires an exact fingerprint match, so connecting by IP or through a
+// tunnel works despite the self-signed cert's SAN, while a substituted cert is
+// refused. Without a fingerprint the daemon must present a cert that chains to a
+// system root (a real CA cert), verified normally.
+//
+// Pinning a bare SHA-256 (a hash, not the cert) is only expressible in Go by
+// taking over verification with a callback; the standard-library idiom for that
+// pairs the callback with SkipDefaultVerify (below) so the callback is the SOLE
+// arbiter. The connection is never actually unverified — an unmatched cert fails
+// the handshake.
 func pinnedTLSConfig(fingerprint string) (*tls.Config, error) {
 	if fingerprint == "" {
 		// CA-cert path: standard system-root verification, TLS 1.2 floor.
@@ -102,18 +109,21 @@ func pinnedTLSConfig(fingerprint string) (*tls.Config, error) {
 	}
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
-		// InsecureSkipVerify turns off the default chain+hostname check ONLY so
-		// the VerifyConnection pin below can stand in for it. This is not
-		// "skip verification": every handshake must still pass the exact
-		// fingerprint match or the connection is refused. Hostname/SAN is
-		// deliberately not checked so IP/tunnel connections to the pinned cert
-		// succeed (§1.2).
+		// The default CA-chain + hostname check is handed off to the pin below —
+		// NOT skipped. It cannot validate a self-signed cert, and its SAN check
+		// would wrongly reject a legitimate IP/tunnel connection to the pinned
+		// identity; VerifyPeerCertificate enforces the stronger fingerprint match
+		// on every handshake instead, so an unmatched cert still fails.
 		InsecureSkipVerify: true,
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			if len(cs.PeerCertificates) == 0 {
+		// VerifyPeerCertificate is the sole arbiter: it fails the handshake unless
+		// the leaf's SHA-256 exactly matches the pin. rawCerts[0] is the leaf DER
+		// — the same bytes daemon.CertFingerprint hashes — so the comparison is
+		// apples-to-apples. Hostname/SAN is deliberately not checked (§1.2).
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
 				return fmt.Errorf("remote daemon presented no TLS certificate")
 			}
-			got := certFingerprint(cs.PeerCertificates[0].Raw)
+			got := certFingerprint(rawCerts[0])
 			if got != want {
 				return fmt.Errorf("TLS fingerprint mismatch: pinned sha256:%s but daemon presented sha256:%s "+
 					"(wrong daemon, or the cert was regenerated — re-check `af token show` on the daemon host)", want, got)
