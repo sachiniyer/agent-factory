@@ -238,6 +238,8 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 		p.SetSize(80, 30)
 		require.NoError(t, p.ScrollUp(prior, 1))
 		require.True(t, p.IsScrolling(), "precondition: in scroll mode")
+		// Scroll entry is I/O-free (#1637); the off-loop refresh fills the viewport.
+		require.NoError(t, p.UpdateContent(prior, 1))
 		require.Contains(t, p.viewport.View(), priorContent)
 
 		require.NoError(t, p.UpdateContent(nil, 1))
@@ -299,8 +301,12 @@ func TestTabPaneShellScrollUsesSelectedView(t *testing.T) {
 	require.NoError(t, p.UpdateContent(instA, 1))
 
 	// User scrolls while B is the selected instance, before UpdateContent(B) ran.
+	// ScrollUp enters scroll mode keyed to B (dropStaleView adopts B); the
+	// scrollback capture then runs off the event loop on the next UpdateContent
+	// (#1637), which fills the viewport from B — never the previously rendered A.
 	require.NoError(t, p.ScrollUp(instB, 1))
 	require.True(t, p.IsScrolling())
+	require.NoError(t, p.UpdateContent(instB, 1))
 	require.Contains(t, p.viewport.View(), contentB,
 		"scroll must capture the selected instance's (B) shell history")
 	require.NotContains(t, p.viewport.View(), contentA,
@@ -475,9 +481,11 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
-	// Enter scroll mode on the live shell tab: the viewport fills with scrollback.
+	// Enter scroll mode on the live shell tab, then let the off-loop refresh fill
+	// the viewport with scrollback (scroll entry itself is I/O-free — #1637).
 	require.NoError(t, p.ScrollUp(inst, 1))
 	require.True(t, p.IsScrolling(), "precondition: shell tab is in scroll mode")
+	require.NoError(t, p.UpdateContent(inst, 1))
 	require.Contains(t, p.viewport.View(), scrollback,
 		"precondition: viewport holds the live shell's scrollback")
 

@@ -856,14 +856,15 @@ func TestPreviewUpdateContentSessionGoneRendersFallback(t *testing.T) {
 		"no ERROR log line on session-gone fallback path")
 }
 
-// TestResetToNormalModeDoesNotClearFallbackFlag is the #577 regression: when
-// ResetToNormalMode exits scroll mode it fetches fresh preview content and
-// writes it into previewState.text, but previously it left previewState.fallback
-// untouched. If the prior state was a fallback (e.g. Loading or Session no
-// longer running), the pane would then hold real terminal output while still
-// flagged as fallback, and a subsequent UpdateContent that errored before
-// reaching its own `fallback: false` assignment would render the captured
-// terminal output with centered fallback styling.
+// TestResetToNormalModeDoesNotClearFallbackFlag is the #577 regression, updated
+// for the off-loop-scroll refactor (#1637). ResetToNormalMode no longer captures
+// preview content on the event loop; it clears scroll state and leaves p.content
+// untouched (a live restore rides the immediate off-loop refresh the app
+// dispatches after ESC). The #577 mismatch — fallback==true holding real terminal
+// text — is therefore structurally impossible on the exit path: ResetToNormalMode
+// never writes text, so it can never desync the flag from the text. This test
+// pins both halves: exit leaves the content flag/text consistent, and the
+// following refresh restores real content with fallback cleared.
 func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 	const expectedContent = "$ terminal output"
 
@@ -909,17 +910,22 @@ func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 	p.isScrolling = true
 	p.viewport.SetContent("ESC to exit scroll mode")
 
-	// Exit scroll mode. ResetToNormalMode pulls fresh content via Preview()
-	// (our mock returns expectedContent) and must clear the stale fallback
-	// flag at the same time, otherwise String() would render the captured
-	// terminal output with centered fallback styling.
+	// Exit scroll mode. ResetToNormalMode clears scroll state without capturing
+	// (#1637), so it must NOT leave a fallback==true / real-text mismatch — the
+	// #577 bug. A live instance matches none of its synchronous fallback cases, so
+	// p.content is left exactly as it was (the fallback), consistently.
 	require.NoError(t, p.ResetToNormalMode(setup.instance, 0))
-
 	require.False(t, p.isScrolling, "should exit scroll mode")
+	require.False(t, p.content.fallback && p.content.text == expectedContent,
+		"#577: ResetToNormalMode must never leave fallback==true holding real terminal text")
+
+	// The immediate off-loop refresh the app dispatches after ESC restores real
+	// content and clears the fallback flag together.
+	require.NoError(t, p.UpdateContent(setup.instance, 0))
 	require.Equal(t, expectedContent, p.content.text,
-		"text should be set to the captured preview content")
+		"the post-exit refresh sets text to the captured preview content")
 	require.False(t, p.content.fallback,
-		"fallback must be cleared when ResetToNormalMode sets real content (#577)")
+		"the post-exit refresh clears the fallback flag alongside real content (#577)")
 
 	// And the rendered output must use the normal (left-aligned) branch,
 	// not the centered fallback layout — i.e. it must not be padded with
@@ -987,25 +993,35 @@ func TestScrollMouseDifferentInstanceResetsScrollMode(t *testing.T) {
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
 
-	// Enter scroll mode on A via the mouse path (no prior UpdateContent).
+	// Enter scroll mode on A via the mouse path (no prior UpdateContent). Scroll
+	// entry is I/O-free (#1637); the off-loop refresh (UpdateContent) fills the
+	// viewport from A — the two-step flow production drives after a wheel scroll.
 	require.NoError(t, p.ScrollUp(instA, 0))
 	require.True(t, p.isScrolling, "should be scrolling A after ScrollUp(A)")
+	require.NoError(t, p.UpdateContent(instA, 0))
 	require.Contains(t, p.viewport.View(), previewA,
 		"precondition: viewport should hold A's captured content")
 
-	// Selection switches to B, but UpdateContent(B) has not run yet. A
-	// wheel-up arrives for B. Before the fix this scrolled A's stale viewport;
-	// now it must drop scroll state and re-capture B's content.
+	// Selection switches to B, but the refresh for B has not run yet. A wheel-up
+	// arrives for B. Before the fix this scrolled A's stale viewport; now ScrollUp
+	// drops scroll state and re-keys to B (dropStaleView clears the viewport at
+	// once), and the off-loop fill captures B's content — never stale A.
 	require.NoError(t, p.ScrollUp(instB, 0))
 	require.True(t, p.isScrolling,
 		"should re-enter scroll mode for B after the switch")
+	require.NotContains(t, p.viewport.View(), previewA,
+		"stale viewport content from A must be cleared on the scroll path at once")
+	require.NoError(t, p.UpdateContent(instB, 0))
 	require.Contains(t, p.viewport.View(), previewB,
 		"viewport must reflect B after the mouse scroll, not stale A")
 	require.NotContains(t, p.viewport.View(), previewA,
-		"stale viewport content from A must be cleared on the scroll path")
+		"the fill must capture B, never the previously rendered A (#746)")
 
 	// The same must hold for the ScrollDown entry point.
 	require.NoError(t, p.ScrollDown(instA, 0))
+	require.NotContains(t, p.viewport.View(), previewB,
+		"stale viewport content from B must be cleared on ScrollDown path at once")
+	require.NoError(t, p.UpdateContent(instA, 0))
 	require.Contains(t, p.viewport.View(), previewA,
 		"ScrollDown on a switched-to instance must re-capture its content")
 	require.NotContains(t, p.viewport.View(), previewB,

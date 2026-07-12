@@ -525,6 +525,13 @@ func (w *TabbedWindow) IsInScrollMode() bool {
 	return w.tab.IsScrolling()
 }
 
+// NeedsScrollFill reports whether the pane just entered scroll mode and is still
+// waiting for its off-loop scrollback capture — panesRefresh bypasses its
+// throttle for such a pane so the fill is immediate (#1637).
+func (w *TabbedWindow) NeedsScrollFill() bool {
+	return w.tab.NeedsScrollFill()
+}
+
 // renderHeader renders the one-line `title · tab` header. The header is the
 // only place the pane's tab is named inside the pane (the tab bar is gone);
 // the highlight doubles as the pane's focus indicator.
