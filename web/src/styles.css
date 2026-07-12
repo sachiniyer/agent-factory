@@ -1,0 +1,183 @@
+/* Web client shell styles (#1592 Phase 5 PR2). Imported by index.ts so esbuild
+ * extracts it into dist/af-web.css, which index.html links same-origin — keeping
+ * the strict `default-src 'self'` CSP honest (no inline <style>, no CDN fonts).
+ * The palette leans on the TUI's dark terminal aesthetic (design: "base the
+ * website pretty heavily on the TUI"); the full visual pass is a later play-test
+ * PR, so this is a clean, restrained baseline. */
+
+:root {
+  --af-bg: #0d1117;
+  --af-surface: #161b22;
+  --af-border: #30363d;
+  --af-text: #e6edf3;
+  --af-muted: #8b949e;
+  --af-accent: #2f81f7;
+  --af-accent-text: #ffffff;
+  --af-error: #f85149;
+  --af-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--af-bg);
+  color: var(--af-text);
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* Login view */
+.af-login {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.af-card {
+  width: 100%;
+  max-width: 26rem;
+  background: var(--af-surface);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  padding: 2rem;
+}
+
+.af-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+
+.af-subtitle {
+  margin: 0 0 1.5rem;
+  color: var(--af-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.af-subtitle code {
+  color: var(--af-text);
+  background: var(--af-bg);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.af-login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.af-field-label {
+  font-size: 0.75rem;
+  color: var(--af-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.af-login-form input {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  background: var(--af-bg);
+  border: 1px solid var(--af-border);
+  border-radius: 6px;
+  color: var(--af-text);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.af-login-form input:focus {
+  outline: none;
+  border-color: var(--af-accent);
+}
+
+.af-primary {
+  margin-top: 0.4rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--af-accent);
+  color: var(--af-accent-text);
+  border: none;
+  border-radius: 6px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.af-primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.af-error {
+  margin: 1rem 0 0;
+  color: var(--af-error);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+/* Authed app shell (empty until PR3) */
+.af-app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.af-appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  background: var(--af-surface);
+  border-bottom: 1px solid var(--af-border);
+}
+
+.af-brand {
+  font-weight: 600;
+}
+
+.af-ghost {
+  padding: 0.4rem 0.75rem;
+  background: transparent;
+  color: var(--af-muted);
+  border: 1px solid var(--af-border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.af-ghost:hover {
+  color: var(--af-text);
+  border-color: var(--af-muted);
+}
+
+.af-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.af-empty-title {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.af-empty-hint {
+  margin: 0;
+  color: var(--af-muted);
+  font-size: 0.85rem;
+}

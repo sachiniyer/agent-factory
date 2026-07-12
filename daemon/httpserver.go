@@ -164,6 +164,12 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	// Catch-all: any other path is an unknown route → 404 with the envelope.
 	// ServeMux routes the longest prefix match, so a real route above always
 	// wins and only genuinely-unknown paths (e.g. /v1/Nope, /) land here.
+	//
+	// On the unix socket this 404 is the final word — the socket never serves the
+	// web app (#1592 Phase 5 PR2). On the TCP listener, webShellHandler
+	// (tcpserver.go) sits IN FRONT of this mux and intercepts every non-/v1 path
+	// to serve the embedded SPA, so the browser sees index.html here instead of
+	// this 404; only genuinely-unknown /v1/ paths still reach it there.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, http.StatusNotFound, fmt.Errorf("unknown route %q", r.URL.Path))
 	})
