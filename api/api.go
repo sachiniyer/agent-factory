@@ -455,7 +455,10 @@ func init() {
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllFlag, "all", false, "Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllReposFlag, "all-repos", false, "With --all, broadcast across every repo instead of only the current/--repo one")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptIncludeRootFlag, "include-root", false, "With --all, also deliver to the reserved root session (excluded by default)")
-	sessionsKillCmd.Flags().BoolVar(&sessionsKillForce, "force", false, "Deprecated no-op, accepted for compatibility: kill always destroys the session (use 'af sessions archive' to keep it restorable)")
+	// --force is a deprecated no-op. Register it without binding a package
+	// variable: Cobra still accepts existing scripts' flag, but no mutable state
+	// can imply that it affects the always-destructive kill operation.
+	sessionsKillCmd.Flags().Bool("force", false, "Deprecated no-op, accepted for compatibility: kill always destroys the session (use 'af sessions archive' to keep it restorable)")
 	sessionsArchiveCmd.Flags().BoolVar(&sessionsArchiveSelf, "self", false, "Archive the current session (resolved via whoami); use from inside a session when your work is done")
 
 	sessionsWatchCmd.Flags().DurationVar(&watchTimeoutFlag, "timeout", 30*time.Minute, "Give up and exit non-zero if the session is not idle within this window (0 = wait forever)")
