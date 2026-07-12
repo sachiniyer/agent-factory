@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -128,6 +129,61 @@ func TestTCPListener_TLS_TokenRoundTrip(t *testing.T) {
 		_ = badConn.Close(websocket.StatusNormalClosure, "")
 	}
 	require.Error(t, err, "unauthenticated WS handshake must be rejected")
+}
+
+// TestTCPListener_ServesWebShellUnauthed is the PR2 payoff: the TLS TCP listener
+// serves the embedded SPA shell WITHOUT a token (you cannot paste a token into a
+// page that will not load), while the /v1/ data plane stays token-gated on the
+// exact same listener. It also asserts the strict CSP the static handler sets.
+func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+
+	cs := &controlServer{manager: m, scheduler: newTaskScheduler()}
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg)
+	require.NoError(t, err)
+	defer func() { _ = closeTCP() }()
+
+	dir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(t, dir+"/"+daemonTLSCertFileName)},
+	}
+	baseURL := "https://" + info.Addr
+
+	// --- Static shell: NO token → 200 + index.html + strict CSP ------------
+	resp, err := client.Get(baseURL + "/")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the shell must load without a token")
+	require.Contains(t, string(body), `id="app"`)
+	require.Equal(t, "default-src 'self'", resp.Header.Get("Content-Security-Policy"))
+
+	// The JS bundle is likewise reachable unauthenticated.
+	resp, err = client.Get(baseURL + "/af-web.js")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the bundle must load without a token")
+
+	// --- API on the SAME listener: still token-gated -----------------------
+	resp, err = client.Get(baseURL + "/v1/health")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "the data plane stays gated")
+
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/health", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+info.Token)
+	resp, err = client.Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "a valid token still reaches the API")
 }
 
 // TestStartHTTPServer_NoTCPByDefault pins the off-by-default guarantee: with an

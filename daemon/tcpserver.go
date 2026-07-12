@@ -90,8 +90,14 @@ func startTCPListener(mux http.Handler, cfg *config.Config) (func() error, tcpLi
 		return nil, tcpListenerInfo{}, fmt.Errorf("bind TCP listener on %q: %w", cfg.ListenAddr, err)
 	}
 
+	// The TCP listener also serves the embedded browser SPA (#1592 Phase 5 PR2,
+	// design §1). webShellHandler serves the static shell UNAUTHENTICATED on every
+	// non-/v1 path (you cannot paste a token into a page that won't load) while
+	// routing /v1/... through the token gate below exactly as before. This wrapper
+	// is TCP-only: the unix socket keeps its bare mux (whose `/` still 404s), so
+	// the web assets never appear on the socket path.
 	srv := &http.Server{
-		Handler:           withAuth(mux, gate, cfg.CORSAllowedOrigins),
+		Handler:           webShellHandler(withAuth(mux, gate, cfg.CORSAllowedOrigins)),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 	go func() {
