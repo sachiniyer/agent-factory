@@ -84,12 +84,15 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	}
 
 	cs := &controlServer{manager: manager, scheduler: scheduler, watchers: watchers}
+	// One mux, shared by both listeners, so the REST/RPC/WS handler graph is
+	// single-sourced and the two transports can never drift (§1.1).
+	mux := newHTTPMux(cs)
 	srv := &http.Server{
 		// The unix socket is trusted transport (0600 perms are the auth, #1029),
 		// so it passes a NIL gate: no token enforcement (#1592 Phase 3 PR2,
-		// §1.4). The TCP listener (PR3) will pass a real gate over the same mux.
+		// §1.4). The TCP listener below passes a real gate over the same mux.
 		// CORS is config-driven (§1.5): empty allow-list ⇒ no ACAO emitted.
-		Handler:           withAuth(newHTTPMux(cs), nil, manager.cfg.CORSAllowedOrigins),
+		Handler:           withAuth(mux, nil, manager.cfg.CORSAllowedOrigins),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 
@@ -101,12 +104,33 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		}
 	}()
 
+	// Optional TLS TCP listener (#1592 Phase 3 PR3, §1.1). OFF BY DEFAULT: only
+	// bound when listen_addr is set. It serves the same mux behind a
+	// token-enforcing gate. A bind failure is logged but never fatal — the unix
+	// socket and control plane every local client depends on must not regress
+	// because a network port could not open.
+	closeTCP := func() error { return nil }
+	if manager.cfg.ListenAddr != "" {
+		if closer, info, err := startTCPListener(mux, manager.cfg); err != nil {
+			log.WarningLog.Printf("failed to start daemon TLS TCP listener on %q: %v", manager.cfg.ListenAddr, err)
+		} else {
+			closeTCP = closer
+			log.InfoLog.Printf("daemon TLS TCP listener enabled on %s (self-signed=%v)", info.Addr, info.SelfSigned)
+			log.InfoLog.Printf("  cert fingerprint: %s", info.Fingerprint)
+			log.InfoLog.Printf("  bearer token: %s", info.Token)
+		}
+	}
+
 	return func() error {
 		// Close stops the listener (which unlinks the Unix socket file, net's
 		// default for a listener it created) and terminates active connections.
 		// Deliberately no explicit os.Remove: mirrors startControlServer's
 		// #718/#767 reasoning — a Remove could race a freshly bound socket.
-		return srv.Close()
+		tcpErr := closeTCP()
+		if err := srv.Close(); err != nil {
+			return err
+		}
+		return tcpErr
 	}, nil
 }
 
