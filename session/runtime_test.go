@@ -92,22 +92,28 @@ func TestLocalRuntimeProvision_Unchanged(t *testing.T) {
 	assert.Nil(t, res.Endpoint, "an in-process runtime exposes no remote endpoint")
 }
 
-// TestSSHRuntime_NotImplemented proves ssh is registered but fails create with a
-// clear, actionable error naming the PR that implements it — and that the error
-// echoes the configured host (so the ssh config section is genuinely consumed).
-func TestSSHRuntime_NotImplemented(t *testing.T) {
-	repoRoot := initTempGitRepo(t)
+// TestSSHRuntime_ConfigValidation pins the ssh runtime's cheap, hermetic
+// preconditions (no ssh connection needed): ssh.host is required, and a repo with
+// no origin remote fails with the actionable "no origin remote" error — both before
+// any dial. The real ssh round-trip (against a throwaway sshd container) lives in
+// the integration package (docker-gated).
+func TestSSHRuntime_ConfigValidation(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	writeInRepoConfig(t, repoRoot, map[string]any{
-		"backend": "ssh",
-		"ssh":     map[string]any{"host": "build-box:2222"},
-	})
 
-	_, serr := sshRuntime{}.Provision(ProvisionSpec{RepoRoot: repoRoot})
-	require.Error(t, serr)
-	assert.Contains(t, serr.Error(), "ssh backend is not yet implemented")
-	assert.Contains(t, serr.Error(), "PR5")
-	assert.Contains(t, serr.Error(), "build-box:2222")
+	// backend=ssh with no ssh.host → clear "ssh.host required" error.
+	noHost := initTempGitRepo(t)
+	writeInRepoConfig(t, noHost, map[string]any{"backend": "ssh", "ssh": map[string]any{}})
+	_, err := sshRuntime{}.Provision(ProvisionSpec{RepoRoot: noHost, Title: "s", CloneURL: "file:///x"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ssh.host")
+
+	// host set but no origin remote to clone from → actionable error, before any
+	// ssh dial.
+	withHost := initTempGitRepo(t)
+	writeInRepoConfig(t, withHost, map[string]any{"backend": "ssh", "ssh": map[string]any{"host": "build-box:2222"}})
+	_, err = sshRuntime{}.Provision(ProvisionSpec{RepoRoot: withHost, Title: "s", CloneURL: ""})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "origin")
 }
 
 // TestDockerRuntime_ConfigValidation pins the docker runtime's cheap, hermetic

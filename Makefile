@@ -6,7 +6,7 @@
 
 .PHONY: test-container remote-roundtrip-container ws-pty-roundtrip-container \
 	agent-server-roundtrip-container remote-agent-server-roundtrip-container \
-	backend-docker-roundtrip \
+	backend-docker-roundtrip backend-ssh-roundtrip \
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
 	testbox-image lint-file-length docs
 
@@ -66,6 +66,19 @@ remote-agent-server-roundtrip-container:
 # docker is unavailable. See docs/backends.md.
 backend-docker-roundtrip:
 	go test ./integration -run TestDockerBackendRoundTrip -v -count=1 -timeout 15m
+
+# SSH remote-machine backend round-trip (#1592 Phase 4 PR5): runs a session on a
+# REAL remote host over ssh to parity — stand up a throwaway sshd+git+tmux
+# container as the ssh target, create a session on backend=ssh pointing at it, and
+# drive the remote `af agent-server` over the ssh-tunneled wss://+token
+# (Provision/Launch → PTY input echo → preview/snapshot/alive), then Kill and
+# assert the remote agent-server process is reaped + the session dir removed + the
+# tunnel closed. Uses the Go x/crypto/ssh client for a real ssh clone + tunnel with
+# no external host or the box's own sshd. Runs ON THE HOST (needs a real docker
+# daemon to host the sshd target); SKIPS cleanly where docker is unavailable. See
+# docs/backends.md.
+backend-ssh-roundtrip:
+	go test ./integration -run TestSSHBackendRoundTrip -v -count=1 -timeout 15m
 
 # Interactive TUI play-test sandbox: builds af inside, scaffolds a
 # throwaway AF home + mock project repo, drops you in a shell with a
