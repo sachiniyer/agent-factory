@@ -5,7 +5,7 @@
 # toolchain or system packages change — never on code changes. Build it
 # with no context (`docker build - < scripts/container/Dockerfile.test`);
 # there is no COPY.
-FROM golang:1.24-bookworm
+FROM golang:1.25-bookworm
 
 # tmux + git are what the suite drives; procps provides pgrep for the
 # daemon's SIGTERM fallback path.

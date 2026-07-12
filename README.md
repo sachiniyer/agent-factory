@@ -53,7 +53,7 @@ After install, run `af doctor --setup` to verify tmux, git, your configured
 agent command, git identity, config/state/log storage, and daemon health before
 creating your first session.
 
-Build from source with Go 1.24+:
+Build from source with Go 1.25+:
 
 ```bash
 git clone https://github.com/sachiniyer/agent-factory.git

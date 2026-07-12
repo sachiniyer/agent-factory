@@ -171,20 +171,11 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // `af agent-server` on a published port, and expose its authed wss:// URL. The
 // type is declared there.
 
-// sshRuntime is registered so `backend = "ssh"` resolves cleanly; its real
-// provisioning (dial the host, clone repo@branch, start an `af agent-server`,
-// tunnel its port back) lands in PR5. Until then it fails create with an
-// actionable error, echoing the configured ssh.host for the same reason
-// dockerRuntime echoes the image.
-type sshRuntime struct{}
-
-func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
-	host := ""
-	if cfg, err := resolveRepoConfig(spec.RepoRoot); err == nil && cfg.SSH != nil {
-		host = cfg.SSH.Host
-	}
-	return ProvisionResult{}, fmt.Errorf("the ssh backend is not yet implemented (host %q); it lands in #1592 Phase 4 PR5 — use backend=local for now", host)
-}
+// sshRuntime provisions a real remote-machine sandbox (#1592 Phase 4 PR5). Its
+// Provision lives in backend_ssh.go: dial the configured ssh.host, clone the repo
+// into a per-session dir, stream the `af` binary onto the remote, start an `af
+// agent-server` bound to remote loopback, and expose its authed wss:// URL through
+// an ssh local-forward tunnel. The type is declared there.
 
 // resolveRepoConfig loads the resolved config for the repo containing absPath.
 // Shared by the runtime resolver (to read the `backend` key) and the docker/ssh

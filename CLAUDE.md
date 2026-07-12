@@ -106,7 +106,7 @@ deadcode -test ./...   # should produce no output
 scripts/lint-file-length.sh   # or: make lint-file-length
 ```
 
-Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.36.0`; CI pins the same version (`@latest` requires Go 1.25+, above this project's Go floor — see #637).
+Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.48.0`; CI pins the same version. This project's Go floor is 1.25 (raised from 1.24 in #1592 Phase 4 PR5 to pull in the CVE-patched `golang.org/x/crypto` ≥ v0.52.0, which requires Go 1.25); deadcode must be ≥ v0.45.0 to analyze go1.25 source (older x/tools cannot).
 
 **File-length lint (#1145):** `scripts/lint-file-length.sh` fails if any Go
 file exceeds its line limit — 1000 lines for production code, 1500 for

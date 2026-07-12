@@ -51,4 +51,12 @@ type SSHConfig struct {
 	// IdentityFile is the path to the private key used for auth. Optional —
 	// empty defers to the agent/default keys.
 	IdentityFile string `json:"identity_file,omitempty" toml:"identity_file,omitempty"`
+	// KnownHosts is the path to the OpenSSH known_hosts file the runtime verifies
+	// the remote's host key against (#1592 Phase 4 PR5). Optional — empty defers
+	// to the user's ~/.ssh/known_hosts. Host-key verification is always on
+	// (secure by default, mirroring the TLS TOFU pin on the agent-server); an
+	// unknown or changed host key fails the connection with an actionable error.
+	// Point this at a dedicated file for ephemeral/CI hosts whose keys you seed
+	// out of band.
+	KnownHosts string `json:"known_hosts,omitempty" toml:"known_hosts,omitempty"`
 }
