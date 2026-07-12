@@ -371,12 +371,15 @@ func (c *remoteClientlessChannel) Resize(rows, cols uint16) error {
 // repaint the broker injects so a fresh local subscriber sees the screen before
 // the first live byte, mirroring tmux capture-pane. The WS stream carries only
 // future output, so without this a just-opened remote pane would render blank.
-func (c *remoteClientlessChannel) Snapshot() ([]byte, error) {
+func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	content, err := c.rc.preview(c.tab, false)
 	if err != nil {
-		return nil, err
+		return PaneSnapshot{}, err
 	}
-	return []byte(content), nil
+	// REST Preview carries only the screen, not the cursor position, so the repaint
+	// omits cursor restore for remote panes (HasCursor stays false) — the pre-fix
+	// behavior, unchanged over the wire.
+	return PaneSnapshot{Screen: []byte(content)}, nil
 }
 
 // activeConn returns the live capture socket and its context, or an error if

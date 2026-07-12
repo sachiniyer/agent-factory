@@ -56,10 +56,26 @@ type clientlessChannel interface {
 	// Resize sets the pane/window size (clientless resize-window). Last-resize-wins
 	// is enforced by the broker; this just applies the winning size.
 	Resize(rows, cols uint16) error
-	// Snapshot returns the pane's current visible screen (with escapes) — the
-	// repaint the broker injects on subscribe and after a resize, since pipe-pane
-	// never delivers tmux's screen redraw (#1592 Phase 2 PR6).
-	Snapshot() ([]byte, error)
+	// Snapshot returns the pane's current visible screen AND the pane cursor
+	// position — the repaint the broker injects on subscribe, since pipe-pane never
+	// delivers tmux's screen redraw (#1592 Phase 2 PR6). The cursor position lets the
+	// repaint leave the emulator cursor where the pane program's cursor actually is;
+	// without it the snapshot's trailing blank lines strand the emulator cursor at the
+	// bottom, so the pane's next relative-positioned redraw (a shell's SIGWINCH prompt
+	// redraw) lands there and orphans a stale copy at the top (the duplicated-prompt
+	// artifact). HasCursor is false when the channel cannot report a position (the
+	// remote REST-preview snapshot), in which case the repaint omits cursor restore.
+	Snapshot() (PaneSnapshot, error)
+}
+
+// PaneSnapshot is a fresh-subscriber repaint source: the pane's current visible
+// screen (with escapes) plus the pane cursor position. CursorRow/CursorCol are
+// 0-based; they are meaningful only when HasCursor is true.
+type PaneSnapshot struct {
+	Screen    []byte
+	CursorRow int
+	CursorCol int
+	HasCursor bool
 }
 
 // ptyBroker is the per-session data plane. Guarded by mu; the ring buffer, the
@@ -156,7 +172,7 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// the snapshot and the cursor: bytes in that tiny window are simply in both the
 	// snapshot and the replayed tail (a harmless double-render), never dropped.
 	if since == 0 {
-		if snap, err := b.ch.Snapshot(); err == nil && len(snap) > 0 {
+		if snap, err := b.ch.Snapshot(); err == nil && len(snap.Screen) > 0 {
 			rp := buildRepaint(snap)
 			b.mu.Lock()
 			sub.pendingRepaint = rp
@@ -167,14 +183,27 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	return sub, nil
 }
 
-// buildRepaint turns a capture-pane snapshot into bytes that reconstruct the
-// screen when written to the emulator: clear + home, then the captured lines with
-// CR before each LF so every line starts at column 0 (capture-pane joins lines
-// with bare "\n", which would otherwise leave the column where the previous line
-// ended).
-func buildRepaint(snapshot []byte) []byte {
-	body := strings.ReplaceAll(string(snapshot), "\n", "\r\n")
-	return append([]byte("\x1b[2J\x1b[H"), body...)
+// buildRepaint turns a pane snapshot into bytes that reconstruct the screen when
+// written to the emulator: clear + home, then the captured lines with CR before
+// each LF so every line starts at column 0 (capture-pane joins lines with bare
+// "\n", which would otherwise leave the column where the previous line ended).
+//
+// It ends by restoring the cursor to the pane's actual position (1-based CSI H)
+// when the snapshot carries one. Writing the full screen leaves the emulator
+// cursor at the bottom of the captured lines — including the trailing blank rows a
+// fresh shell's snapshot carries — but the pane program's cursor is wherever it
+// really is (row 0 for a just-started shell). Without the restore, the pane's next
+// relative-positioned output (a shell's SIGWINCH prompt redraw, which uses CR to
+// return to the current line) renders at the bottom while the repaint's copy sits
+// stale at the top: the duplicated-prompt artifact. The restore lands the emulator
+// cursor on the real position so that redraw overwrites in place.
+func buildRepaint(snap PaneSnapshot) []byte {
+	body := strings.ReplaceAll(string(snap.Screen), "\n", "\r\n")
+	out := append([]byte("\x1b[2J\x1b[H"), body...)
+	if snap.HasCursor {
+		out = append(out, []byte(fmt.Sprintf("\x1b[%d;%dH", snap.CursorRow+1, snap.CursorCol+1))...)
+	}
+	return out
 }
 
 // ensureCaptureStarted brings the clientless output capture up if it is not
