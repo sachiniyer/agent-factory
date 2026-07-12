@@ -22,9 +22,8 @@ import (
 // follow agentproto's contract: a session.* event carries a marshaled
 // session.InstanceData, a task.* event a marshaled task.Task.
 //
-// DARK in Phase 2: nothing consumes /v1/events yet (the TUI still polls Snapshot
-// until PR6). The route exists, is threaded through the auth/CORS seam, and is
-// covered by the WS harness.
+// The TUI consumes /v1/events for live updates (#1592 Phase 2 PR6). The route is
+// threaded through the auth/CORS seam and covered by the WS harness.
 
 // eventsBufferSize bounds one subscriber's pending-event queue. A subscriber that
 // falls this far behind has an event dropped (non-blocking publish) rather than

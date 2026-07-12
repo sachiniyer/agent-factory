@@ -154,9 +154,9 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	// indirection, and the events-plane fan-out. These are NOT REST/RPC mirrors —
 	// they upgrade to WebSockets — so they live outside servedHTTPRoutes (the `af
 	// api` RPC catalog) and register here with method+path patterns (a non-GET to
-	// a stream path is a 405 from the mux). They are DARK in Phase 2: nothing in
-	// the TUI consumes them yet (PR6 wires the TUI), but the routes exist and ride
-	// the same auth/CORS seam startHTTPServer wraps the mux in.
+	// a stream path is a 405 from the mux). The TUI consumes them for live panes,
+	// attach, and events (#1592 Phase 2 PR6/PR7), and they ride the same auth/CORS
+	// seam startHTTPServer wraps the mux in.
 	mux.HandleFunc("GET /v1/sessions/{id}/stream", cs.streamHandler)
 	mux.HandleFunc("GET /v1/sessions/{id}/stream-info", cs.streamInfoHandler)
 	mux.HandleFunc("GET /v1/events", cs.eventsHandler)

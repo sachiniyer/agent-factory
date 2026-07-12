@@ -59,6 +59,13 @@ single-user, local-only API by design: anyone who can read the socket already
 runs as your user and could drive `af` directly, so no additional secret buys
 anything. Do not proxy this socket to a network interface.
 
+!!! note "Reaching the daemon from another machine"
+
+    To drive the daemon from a **different host** — a remote TUI, or the future
+    browser web client — don't proxy this socket. SSH to the host and run `af`
+    there, or enable the opt-in TLS+token TCP listener. Both are covered in
+    [Remote daemon access](remote-tcp-auth.md).
+
 ## Response envelope
 
 Every response — success or failure, on every endpoint — is the same

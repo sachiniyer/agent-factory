@@ -17,10 +17,10 @@ import (
 	"time"
 )
 
-// The TLS material for the daemon's TCP surface (#1592 Phase 3 PR1, §1.2).
-// TLS is mandatory on the TCP listener — the bearer token must never ride the
-// wire in the clear. This file only produces and resolves the cert/key; it is
-// DARK: no listener uses it yet (Phase 3 PR3 binds the TLS TCP listener).
+// The TLS material for the daemon's TCP surface (#1592 Phase 3, §1.2). TLS is
+// mandatory on the TCP listener — the bearer token must never ride the wire in
+// the clear. This file produces and resolves the cert/key that startTCPListener
+// serves when listen_addr is set.
 //
 // Default (zero-config): a self-generated ECDSA P-256 self-signed cert stored
 // in the af home. The client pins its SHA-256 fingerprint (TOFU), so a
@@ -39,8 +39,8 @@ const (
 	selfSignedValidity = 10 * 365 * 24 * time.Hour
 )
 
-// TLSMaterial is the resolved cert/key the daemon's TCP listener will serve
-// (Phase 3 PR3). SelfSigned distinguishes the pinned self-signed default from
+// TLSMaterial is the resolved cert/key the daemon's TCP listener serves.
+// SelfSigned distinguishes the pinned self-signed default from
 // a user-provided CA cert (which the client verifies against system roots).
 type TLSMaterial struct {
 	// CertPath / KeyPath are the PEM files on disk.

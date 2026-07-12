@@ -12,13 +12,13 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// The bearer-token material for the daemon's TCP/TLS surface (#1592 Phase 3
-// PR1, §1.3). Sachin locked the auth model to a single bearer token = full
-// access, single-owner. This file only produces and compares the material —
-// it is DARK: nothing here binds a socket or enforces a token. Phase 3 PR2
-// fills in the withAuth compare against this token; PR3 lights up the TCP
-// listener. The unix control socket stays unauthenticated (filesystem 0600
-// perms are the local auth, #1029) and never reads this token.
+// The bearer-token material for the daemon's TCP/TLS surface (#1592 Phase 3,
+// §1.3). The auth model is a single bearer token = full access, single-owner.
+// This file produces and compares the material; the withAuth gate enforces it
+// on the TLS TCP listener (startTCPListener), reading it fresh per auth event so
+// `af token rotate` takes effect without a restart. The unix control socket
+// stays unauthenticated (filesystem 0600 perms are the local auth, #1029) and
+// never reads this token.
 
 const (
 	// daemonTokenFileName is the bearer token file in the af home. 0600 —
@@ -123,7 +123,7 @@ func RotateToken(path string) (string, error) {
 
 // ConstantTimeEqual reports whether got equals want without leaking, through
 // timing, how many leading bytes matched. It is the compare the withAuth gate
-// uses in PR2. An empty want denies (fail closed): a daemon with no token must
+// uses. An empty want denies (fail closed): a daemon with no token must
 // never accept the empty string as a valid credential.
 func ConstantTimeEqual(got, want string) bool {
 	if want == "" {

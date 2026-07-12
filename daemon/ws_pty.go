@@ -30,10 +30,9 @@ import (
 // drops a dead subscriber WITHOUT touching the PTY/session — the structural
 // reliability win over a shared tmux render client (§6).
 //
-// This plane is DARK in Phase 2: nothing in the TUI consumes it yet (live panes
-// still render through the tmux attach client until PR6). The routes exist, are
-// threaded through the auth/CORS seam (httpserver.go), and are exercised by the
-// WS integration harness.
+// The TUI consumes this plane for live panes and full-screen attach (#1592
+// Phase 2 PR6/PR7); the routes are threaded through the auth/CORS seam
+// (httpserver.go) and exercised by the WS integration harness.
 
 // wsKeepaliveInterval is how often the broker pings each subscriber and how long
 // it waits for the pong before dropping that (dead) subscriber. A subscriber
