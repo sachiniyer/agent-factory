@@ -180,7 +180,12 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 		if w.HasLive() {
 			continue
 		}
-		if time.Since(m.lastPaneCapture[p.ID()]) < paneCaptureMinInterval {
+		// A pane that just entered scroll mode has an empty scroll viewport
+		// waiting for its off-loop scrollback capture (#1637): bypass the throttle
+		// so the fill lands on this refresh instead of up to a tick later, which
+		// would flash a blank viewport. Scroll-mode entry no longer captures on the
+		// event loop, so this off-loop fill is the only place that populates it.
+		if !w.NeedsScrollFill() && time.Since(m.lastPaneCapture[p.ID()]) < paneCaptureMinInterval {
 			continue
 		}
 		m.lastPaneCapture[p.ID()] = time.Now()

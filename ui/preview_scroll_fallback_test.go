@@ -239,11 +239,14 @@ func TestPreviewScrollModeThenSessionGoneFallback(t *testing.T) {
 	// guard does not reset scroll on the instance-switch path.
 	require.NoError(t, p.UpdateContent(setup.instance, 0))
 
-	// Session vanishes; entering scroll mode now fails the PreviewFullHistory
-	// capture with ErrSessionGone and routes through setFallbackState.
+	// Session vanishes. Entering scroll mode is now I/O-free (#1637): ScrollUp
+	// just marks a pending fill, and the off-loop refresh (UpdateContent) is where
+	// the full-history capture fails with ErrSessionGone and routes through
+	// setFallbackState — so drive that refresh to reach the fallback.
 	sessionGone.Store(true)
 
 	require.NoError(t, p.ScrollUp(setup.instance, 0))
+	require.NoError(t, p.UpdateContent(setup.instance, 0))
 
 	require.False(t, p.isScrolling,
 		"session-gone while entering scroll mode must not leave the pane scrolling")
