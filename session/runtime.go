@@ -44,14 +44,32 @@ func ParseBackendKind(s string) (BackendKind, error) {
 }
 
 // ProvisionSpec is the input a Runtime needs to establish a session's execution
-// environment. It is deliberately small: the local/hook runtimes provision from
-// the repo root alone, and the sandboxed runtimes (docker/ssh) read their own
-// section from the repo's resolved config by RepoRoot. PR4/PR5 extend it with
-// what a sandbox needs (the repo@branch to clone, the agent-server workspace id)
-// when those runtimes start consuming it.
+// environment. The local/hook runtimes provision from the repo root alone; the
+// sandboxed runtimes (docker/ssh) additionally need the session's identity
+// (Title/Program/AutoYes) to start an `af agent-server` for exactly one
+// workspace, and the clone source so the sandbox can pull the repo from GitHub
+// (epic decision 4: GitHub is the durable workspace store). They read their own
+// section (docker.*/ssh.*) from the repo's resolved config by RepoRoot.
 type ProvisionSpec struct {
 	// RepoRoot is the absolute repo root the session is created against.
 	RepoRoot string
+	// Title is the session title. A sandbox runtime uses it as the single
+	// workspace's agent-server title (the /v1/sessions/{title}/stream path id the
+	// daemon's remote client dials) and — inside the sandbox — as the git branch
+	// seed, exactly as the local runtime does.
+	Title string
+	// Program is the agent program to run in the workspace (empty ⇒ the config
+	// default). Passed through to the sandbox's `af agent-server --program`.
+	Program string
+	// AutoYes enables the workspace's AutoYes accept.
+	AutoYes bool
+	// CloneURL is the git remote the sandbox clones the workspace from — the
+	// repo's `origin` for a docker/ssh session (GitHub for a real repo, a
+	// file:// or bind-mounted path for a self-contained test). Empty for the
+	// in-process local/hook runtimes, which never clone. On a fresh create the
+	// sandbox clones its default branch and the in-sandbox worktree derives the
+	// session branch from Title; restore-to-a-pushed-branch is PR6.
+	CloneURL string
 }
 
 // ProvisionResult is what a Runtime hands back: the in-process Backend that
@@ -64,10 +82,18 @@ type ProvisionResult struct {
 	// Endpoint is the authed `af agent-server` URL + token + TLS pin a sandbox
 	// runtime exposes (#1592 Phase 4). nil for an in-process runtime
 	// (local/hook), whose agent-server is the local tmux facade with no network
-	// hop. The docker/ssh runtimes fill this in PR4/PR5; NewInstance threads a
-	// non-nil endpoint into the instance's remote agent-server client. The
+	// hop. The docker/ssh runtimes fill this in (docker: PR4); NewInstance threads
+	// a non-nil endpoint into the instance's remote agent-server client. The
 	// runtime-contract test exercises the non-nil path via a fake runtime.
 	Endpoint *AgentServerEndpoint
+	// Teardown reaps the sandbox this Runtime provisioned — `docker rm -f` the
+	// container (PR4), close the ssh tunnel + remove the remote dir (PR5). nil for
+	// an in-process runtime (nothing off-box to reap). NewInstance stashes it on
+	// the instance so the agent-server Kill path runs it AFTER tearing the remote
+	// workspace down over REST, and NewInstance itself runs it if wiring the
+	// remote client fails, so a provisioned sandbox never leaks. Idempotent (the
+	// docker runtime guards it with a sync.Once).
+	Teardown func() error
 }
 
 // Runtime is the provision-and-expose seam (#1592 Phase 4 PR3): given a session
@@ -139,21 +165,11 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	return ProvisionResult{Backend: hook}, nil
 }
 
-// dockerRuntime is registered so `backend = "docker"` resolves cleanly, but its
-// real provisioning (run a container, clone repo@branch, start an
-// `af agent-server`, expose its published-port URL) lands in PR4. Until then it
-// fails create with an actionable error. It reads the resolved docker.image so a
-// user who has already configured it gets it echoed back — and so the config
-// field is genuinely consumed here, not dead until PR4.
-type dockerRuntime struct{}
-
-func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
-	image := ""
-	if cfg, err := resolveRepoConfig(spec.RepoRoot); err == nil && cfg.Docker != nil {
-		image = cfg.Docker.Image
-	}
-	return ProvisionResult{}, fmt.Errorf("the docker backend is not yet implemented (image %q); it lands in #1592 Phase 4 PR4 — use backend=local for now", image)
-}
+// dockerRuntime provisions a real container sandbox (#1592 Phase 4 PR4). Its
+// Provision lives in backend_docker.go: run a container from the configured
+// docker.image, clone the repo inside it, docker cp the `af` binary in, start an
+// `af agent-server` on a published port, and expose its authed wss:// URL. The
+// type is declared there.
 
 // sshRuntime is registered so `backend = "ssh"` resolves cleanly; its real
 // provisioning (dial the host, clone repo@branch, start an `af agent-server`,

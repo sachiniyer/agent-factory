@@ -42,37 +42,49 @@ type InstanceOptions struct {
 	RemoteAgentServer *AgentServerEndpoint
 }
 
-// backendFactory constructs the Backend used by a new Instance. It is a
-// package-level variable (not a hard-coded branch) so tests can inject a
-// FakeBackend through SetBackendFactoryForTest without touching production
-// code paths. Defaults to the real local/remote branching.
+// backendFactory provisions the runtime for a new Instance, returning the
+// in-process Backend plus (for a sandboxed runtime) the authed remote endpoint
+// and the sandbox-reap teardown. It is a package-level variable (not a
+// hard-coded branch) so tests can inject a FakeBackend through
+// SetBackendFactoryForTest without touching production code paths. Defaults to
+// the real runtime resolution.
 var backendFactory = defaultBackendFactory
 
 // defaultBackendFactory resolves the session's runtime from the requested
 // backend kind (the `--backend` flag / repo `backend` config, or ForceRemote for
-// the legacy hook path) and provisions it, returning the in-process Backend. It
-// is the production path behind the backendFactory test seam; a test that
+// the legacy hook path) and provisions it, returning the whole ProvisionResult.
+// It is the production path behind the backendFactory test seam; a test that
 // replaces backendFactory injects a FakeBackend directly and never reaches here.
 //
-// The remote-endpoint half of a runtime's provision result (ProvisionResult.
-// Endpoint) is intentionally not consumed on this path in PR3: local/hook
-// provision in-process (nil endpoint) and docker/ssh error out, so no non-nil
-// endpoint is ever produced yet. PR4/PR5 wire the endpoint through when the
-// sandboxed runtimes start producing one.
-func defaultBackendFactory(opts InstanceOptions, absPath string) (Backend, error) {
+// The full ProvisionResult flows to NewInstance (#1592 Phase 4 PR4): local/hook
+// provision in-process (nil Endpoint, nil Teardown — the local path is
+// unchanged), while the docker runtime returns the in-container agent-server's
+// authed endpoint + the container-reap teardown, which NewInstance threads into
+// the instance's remote agent-server client and Kill path.
+func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResult, error) {
 	kind, err := resolveBackendKind(opts, absPath)
 	if err != nil {
-		return nil, err
+		return ProvisionResult{}, err
 	}
 	rt, err := ResolveRuntime(kind)
 	if err != nil {
-		return nil, err
+		return ProvisionResult{}, err
 	}
-	res, err := rt.Provision(ProvisionSpec{RepoRoot: absPath})
-	if err != nil {
-		return nil, err
+	spec := ProvisionSpec{
+		RepoRoot: absPath,
+		Title:    opts.Title,
+		Program:  opts.Program,
+		AutoYes:  opts.AutoYes,
 	}
-	return res.Backend, nil
+	// A sandboxed runtime clones the workspace from the repo's origin (epic
+	// decision 4: GitHub is the durable store); resolve it only for those kinds so
+	// a local create never pays for an extra git subprocess. Best-effort — a repo
+	// with no origin yields "", and the docker runtime surfaces the actionable
+	// "no origin remote" error at create.
+	if kind == BackendDocker || kind == BackendSSH {
+		spec.CloneURL = originRemoteURL(absPath)
+	}
+	return rt.Provision(spec)
 }
 
 // resolveBackendKind decides which runtime a new session uses, in precedence
@@ -102,10 +114,19 @@ func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, erro
 
 // SetBackendFactoryForTest replaces the backend factory with f and returns a
 // restore function. Intended for use in tests that need to swap in a
-// FakeBackend so NewInstance-driven creation flows stay on the hot path.
+// FakeBackend so NewInstance-driven creation flows stay on the hot path. f
+// returns just the Backend — the common case for a local FakeBackend — and is
+// adapted to the internal ProvisionResult factory here, so a test that only
+// wants to inject a backend needs no knowledge of the endpoint/teardown seam.
 func SetBackendFactoryForTest(f func(opts InstanceOptions, absPath string) (Backend, error)) func() {
 	prev := backendFactory
-	backendFactory = f
+	backendFactory = func(opts InstanceOptions, absPath string) (ProvisionResult, error) {
+		b, err := f(opts, absPath)
+		if err != nil {
+			return ProvisionResult{}, err
+		}
+		return ProvisionResult{Backend: b}, nil
+	}
 	return func() { backendFactory = prev }
 }
 
@@ -142,36 +163,51 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	backend, err := backendFactory(opts, absPath)
+	res, err := backendFactory(opts, absPath)
 	if err != nil {
 		return nil, err
 	}
+	backend := res.Backend
 
-	// A remote-runtime session builds its agent-server transport up front so the
-	// endpoint (URL, TLS pin) is validated here rather than on first AgentServer()
-	// use — which is what keeps the AgentServer() factory infallible (#1592 Phase 4
-	// PR2). nil for every local session, so the default path is untouched.
+	// A sandboxed runtime (docker) provisions its workspace during backendFactory
+	// and hands back the in-sandbox agent-server's authed endpoint; a caller can
+	// also pass one explicitly (the PR2 out-of-process round-trip). Either way the
+	// session builds its agent-server transport up front so the endpoint (URL, TLS
+	// pin) is validated here rather than on first AgentServer() use — which keeps
+	// the AgentServer() factory infallible (#1592 Phase 4 PR2). nil for every local
+	// session, so the default path is untouched.
+	endpoint := res.Endpoint
+	if endpoint == nil {
+		endpoint = opts.RemoteAgentServer
+	}
 	var remoteClient *remoteAgentClient
-	if opts.RemoteAgentServer != nil {
-		remoteClient, err = newRemoteAgentClient(*opts.RemoteAgentServer, opts.Title)
+	if endpoint != nil {
+		remoteClient, err = newRemoteAgentClient(*endpoint, opts.Title)
 		if err != nil {
+			// The sandbox is already up (backendFactory provisioned it); a bad
+			// endpoint here would strand it, so reap it before failing rather than
+			// leaking a container/remote workspace.
+			if res.Teardown != nil {
+				_ = res.Teardown()
+			}
 			return nil, fmt.Errorf("failed to build remote agent-server client: %w", err)
 		}
 	}
 
 	return &Instance{
-		ID:           newSessionID(),
-		Title:        opts.Title,
-		liveness:     LiveReady,
-		Path:         absPath,
-		Program:      opts.Program,
-		Height:       0,
-		Width:        0,
-		CreatedAt:    t,
-		UpdatedAt:    t,
-		AutoYes:      opts.AutoYes,
-		inPlace:      opts.InPlace,
-		backend:      backend,
-		remoteClient: remoteClient,
+		ID:              newSessionID(),
+		Title:           opts.Title,
+		liveness:        LiveReady,
+		Path:            absPath,
+		Program:         opts.Program,
+		Height:          0,
+		Width:           0,
+		CreatedAt:       t,
+		UpdatedAt:       t,
+		AutoYes:         opts.AutoYes,
+		inPlace:         opts.InPlace,
+		backend:         backend,
+		remoteClient:    remoteClient,
+		runtimeTeardown: res.Teardown,
 	}, nil
 }

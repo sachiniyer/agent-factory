@@ -119,6 +119,7 @@ nav:
           - The TUI: concepts/tui.md
           - The daemon: concepts/daemon.md
           - Tasks & automation: tasks.md
+          - Backends (runtimes): backends.md
           - Remote hooks: remote-hooks.md
           - Remote daemon access: remote-tcp-auth.md
           - Usage limits: usage-limits.md

@@ -183,9 +183,17 @@ type Instance struct {
 	// driving the `af agent-server` this points at, instead of the local in-process
 	// runtime. Built once at NewInstance from InstanceOptions.RemoteAgentServer (so
 	// a bad endpoint fails there, keeping AgentServer() infallible) and nil for
-	// every local session — the default path is provably unchanged. DARK in PR2: no
-	// runtime sets it yet (PR3-PR5).
+	// every local session — the default path is provably unchanged. Set by the
+	// docker runtime (#1592 Phase 4 PR4) from its provisioned container; nil for
+	// local/hook sessions.
 	remoteClient *remoteAgentClient
+	// runtimeTeardown reaps the off-box sandbox a runtime provisioned (#1592
+	// Phase 4 PR4): `docker rm -f` the container. Set at NewInstance from the
+	// runtime's ProvisionResult and run by the remote agent-server's Kill AFTER it
+	// tears the in-sandbox workspace down over REST, so killing the session also
+	// removes the container it ran in. nil for local/hook sessions (nothing
+	// off-box to reap). Idempotent — the runtime guards it with a sync.Once.
+	runtimeTeardown func() error
 }
 
 // tabTmuxSession returns the tmux session backing the tab at idx (0 is the agent
