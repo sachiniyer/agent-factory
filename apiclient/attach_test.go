@@ -70,6 +70,11 @@ func attachWSServer(t *testing.T) (*Client, <-chan *websocket.Conn) {
 // stdio (no TTY: oldState is nil, so the terminal restore is skipped). It returns
 // the server-side conn, the pipe writer standing in for the user's keyboard, the
 // captured stdout, and a channel closed when the driver exits.
+// driverTermSize is the terminal-size seam startDriver installs as attachTermSize.
+// Defaults to a non-TTY (no resize frames); a test sets it before startDriver to
+// exercise the RESIZE writer. Read only on the main (sequential) test goroutine.
+var driverTermSize = func() (uint16, uint16, bool) { return 0, 0, false }
+
 func startDriver(t *testing.T) (srvConn *websocket.Conn, stdinW *io.PipeWriter, stdout *syncBuffer, done <-chan struct{}) {
 	t.Helper()
 	// Fast drain so a detach that the server doesn't promptly close still ends the
@@ -91,9 +96,10 @@ func startDriver(t *testing.T) (srvConn *websocket.Conn, stdinW *io.PipeWriter, 
 	out := &syncBuffer{}
 	prevIn, prevOut := attachStdin, attachStdout
 	attachStdin, attachStdout = inR, out
-	// A non-TTY size seam so the driver sends no spurious resize frames.
+	// driverTermSize defaults to a non-TTY (no resize frames); a test can set it
+	// before startDriver to make the driver's initial sendResize actually fire.
 	prevSize := attachTermSize
-	attachTermSize = func() (uint16, uint16, bool) { return 0, 0, false }
+	attachTermSize = driverTermSize
 	t.Cleanup(func() { attachStdin, attachStdout, attachTermSize = prevIn, prevOut, prevSize })
 
 	d := make(chan struct{})
@@ -184,6 +190,43 @@ func TestAttachStream_InputForwarded(t *testing.T) {
 	in := readServerMsg(t, server)
 	if !in.Binary || in.Frame.Op != agentproto.OpInput || string(in.Frame.Data) != "x" {
 		t.Fatalf("expected INPUT 'x', got %+v", in)
+	}
+	_ = server.Close(websocket.StatusNormalClosure, "")
+	waitClosed(t, done)
+}
+
+// TestAttachStream_ConcurrentWritersSerialized exercises the multi-writer path:
+// the initial RESIZE (sent from the driver's main goroutine when a terminal size
+// is available) can race a stdin INPUT frame (sent from the stdin goroutine) on
+// the one WS conn — which coder/websocket forbids. The driver funnels both
+// through a single write mutex; run under -race this proves they don't collide,
+// and the server must receive BOTH frames intact (order-independent).
+func TestAttachStream_ConcurrentWritersSerialized(t *testing.T) {
+	// Force a real terminal size so the driver's initial sendResize actually
+	// writes a RESIZE frame (the default seam returns ok=false). Set BEFORE
+	// startDriver so driveAttachStream captures it.
+	prevSize := driverTermSize
+	driverTermSize = func() (uint16, uint16, bool) { return 24, 80, true }
+	t.Cleanup(func() { driverTermSize = prevSize })
+
+	server, stdinW, _, done := startDriver(t)
+	// Type immediately so the INPUT write overlaps the initial RESIZE write.
+	if _, err := stdinW.Write([]byte("hi")); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+
+	sawResize, sawInput := false, false
+	for i := 0; i < 2; i++ {
+		msg := readServerMsg(t, server)
+		switch {
+		case msg.Binary && msg.Frame.Op == agentproto.OpResize:
+			sawResize = true
+		case msg.Binary && msg.Frame.Op == agentproto.OpInput && string(msg.Frame.Data) == "hi":
+			sawInput = true
+		}
+	}
+	if !sawResize || !sawInput {
+		t.Fatalf("expected both RESIZE and INPUT('hi') intact from serialized writers; resize=%v input=%v", sawResize, sawInput)
 	}
 	_ = server.Close(websocket.StatusNormalClosure, "")
 	waitClosed(t, done)

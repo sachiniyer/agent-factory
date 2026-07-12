@@ -84,15 +84,55 @@ func (c *Client) AttachStream(ctx context.Context, title, repoID string, tab int
 	return done, nil
 }
 
-// driveAttachStream runs the three loops of a full-screen attach — WS→stdout,
-// stdin→WS (with detach-key detection), and SIGWINCH→RESIZE — until the stream
-// ends, then restores the terminal. It owns the terminal for its lifetime.
+// attachWriteTimeout bounds a single WS write so a wedged server can't pin the
+// write mutex (and thereby every writer goroutine) forever.
+var attachWriteTimeout = 10 * time.Second
+
+// driveAttachStream runs the loops of a full-screen attach — WS→stdout, stdin→WS
+// (with detach-key detection), and SIGWINCH→RESIZE — until the stream ends, then
+// restores the terminal. It owns the terminal for its lifetime.
+//
+// Concurrency: THREE goroutines can write the WS conn (INPUT from stdin, RESIZE
+// from SIGWINCH, the detach control frame), but coder/websocket permits only ONE
+// concurrent writer, so every write funnels through writeMu — a single serialized
+// writer, not one-lock-per-anything. The reader runs independently (one reader +
+// one writer is allowed). conn.Close is idempotent via closeOnce (both the drain
+// timer and the drain-complete path close it). The io seams are captured as
+// locals up front so the (deliberately leaked-until-next-keystroke) stdin
+// goroutine never reads the package-level seam vars a test swaps back in Cleanup.
 func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
-	// The read/write context is deliberately NOT cancelled on detach: after we
-	// send MsgDetach we must keep reading so the server's final PTY_OUT drains to
-	// the terminal before the socket closes (the #912 drain, WS edition). The
-	// bounded force-close in detach() is what guarantees termination.
+	// Snapshot EVERY package-level seam/tunable once, here, before any goroutine
+	// spawns. The goroutines then read only these locals — never the package vars
+	// a test swaps and restores in Cleanup — so a driver goroutine (notably the
+	// stdin reader, which stays blocked on in.Read until the next keystroke) can
+	// never race that restore. This single entry read is sequenced before the
+	// workers and before `done`, so it is ordered against the test's restore.
+	in, out, termSize := attachStdin, attachStdout, attachTermSize
+	drainTimeout, writeTimeout := attachDrainTimeout, attachWriteTimeout
+
+	// The read context is deliberately NOT cancelled on detach: after MsgDetach we
+	// keep reading so the server's final PTY_OUT drains to the terminal before the
+	// socket closes (the #912 drain, WS edition). The bounded closeConn timer is
+	// what guarantees termination.
 	ctx := context.Background()
+
+	// The single serialized WS writer. All three writer goroutines go through it.
+	var writeMu sync.Mutex
+	writeConn := func(write func(context.Context) error) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		wctx, cancel := context.WithTimeout(ctx, writeTimeout)
+		defer cancel()
+		return write(wctx)
+	}
+	writeFrame := func(f agentproto.Frame) error {
+		return writeConn(func(c context.Context) error { return agentproto.WriteFrame(c, conn, f) })
+	}
+
+	var closeOnce sync.Once
+	closeConn := func() {
+		closeOnce.Do(func() { _ = conn.Close(websocket.StatusNormalClosure, "") })
+	}
 
 	var detachOnce sync.Once
 	detach := func() {
@@ -100,16 +140,15 @@ func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
 			// Clean-close signal to the server (pane survives — multi-writer, no
 			// lease). readPTYClient returns on MsgDetach and closes its side, which
 			// ends our reader; the timer is the backstop if it never does.
-			wctx, wcancel := context.WithTimeout(ctx, time.Second)
-			_ = agentproto.WriteControl(wctx, conn, agentproto.NewDetachMessage())
-			wcancel()
-			time.AfterFunc(attachDrainTimeout, func() {
-				_ = conn.Close(websocket.StatusNormalClosure, "")
+			_ = writeConn(func(c context.Context) error {
+				return agentproto.WriteControl(c, conn, agentproto.NewDetachMessage())
 			})
+			time.AfterFunc(drainTimeout, closeConn)
 		})
 	}
 
-	// WS → real stdout, byte-for-byte. Sole writer of stdout.
+	// WS → stdout, byte-for-byte. Sole writer of `out`, ordered before the final
+	// restore write by copyDone.
 	copyDone := make(chan struct{})
 	go func() {
 		defer close(copyDone)
@@ -121,7 +160,7 @@ func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
 			if msg.Binary {
 				switch msg.Frame.Op {
 				case agentproto.OpPTYOut, agentproto.OpRepaint:
-					_, _ = attachStdout.Write(msg.Frame.Data)
+					_, _ = out.Write(msg.Frame.Data)
 				}
 				continue
 			}
@@ -134,23 +173,23 @@ func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
 		}
 	}()
 
-	// real stdin → INPUT, with detach-key detection. stdin.Read can batch the
-	// detach key with preceding bytes in a single read (buffered terminal input),
-	// so check the LAST byte rather than requiring it to be the sole byte,
-	// forwarding any preceding bytes first (#975).
+	// stdin → INPUT, with detach-key detection. stdin.Read can batch the detach
+	// key with preceding bytes in a single read (buffered terminal input), so
+	// check the LAST byte rather than requiring it to be the sole byte, forwarding
+	// any preceding bytes first (#975).
 	go func() {
 		buf := make([]byte, 32)
 		for {
-			n, err := attachStdin.Read(buf)
+			n, err := in.Read(buf)
 			if n > 0 {
 				if buf[n-1] == tmux.DetachKeyByte {
 					if n > 1 {
-						_ = agentproto.WriteFrame(ctx, conn, agentproto.InputFrame(buf[:n-1]))
+						_ = writeFrame(agentproto.InputFrame(buf[:n-1]))
 					}
 					detach()
 					return
 				}
-				if werr := agentproto.WriteFrame(ctx, conn, agentproto.InputFrame(buf[:n])); werr != nil {
+				if werr := writeFrame(agentproto.InputFrame(buf[:n])); werr != nil {
 					return
 				}
 			}
@@ -167,11 +206,11 @@ func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
 	sendResize := func() {
-		rows, cols, ok := attachTermSize()
+		rows, cols, ok := termSize()
 		if !ok {
 			return
 		}
-		_ = agentproto.WriteFrame(ctx, conn, agentproto.ResizeFrame(rows, cols))
+		_ = writeFrame(agentproto.ResizeFrame(rows, cols))
 	}
 	sendResize()
 	go func() {
@@ -186,13 +225,13 @@ func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
 	}()
 
 	<-copyDone
-	_ = conn.Close(websocket.StatusNormalClosure, "")
-	// The stream is fully drained, so this lands strictly after any modes the pane
-	// program set — neutralize the terminal (#845, local edition), then hand the
-	// termios back to whatever owned it before attach (bubbletea for the TUI, the
-	// shell for the CLI). oldState is nil only in tests that drive the proxy
-	// without a real TTY.
-	_, _ = io.WriteString(attachStdout, tmux.NeutralTerminalRestore)
+	closeConn()
+	// The stream is fully drained (copyDone), so this lands strictly after any
+	// modes the pane program set — neutralize the terminal (#845, local edition),
+	// then hand the termios back to whatever owned it before attach (bubbletea for
+	// the TUI, the shell for the CLI). oldState is nil only in tests that drive the
+	// proxy without a real TTY.
+	_, _ = io.WriteString(out, tmux.NeutralTerminalRestore)
 	if oldState != nil {
 		_ = term.Restore(int(os.Stdin.Fd()), oldState)
 	}
