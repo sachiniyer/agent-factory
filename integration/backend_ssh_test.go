@@ -191,6 +191,12 @@ func TestSSHBackendRoundTrip(t *testing.T) {
 	}
 	t.Logf("preview/liveness reflect the remote workspace over the tunnel")
 
+	// --- Capability matrix: the REAL ssh backend services full parity -----------
+	// (#1592 Phase 4 PR8): descriptor parity + attach/input/preview/liveness
+	// serviced over the tunnel. Archive/Recover are exercised live by
+	// TestSSHBackendArchiveRestore.
+	assertLiveCapabilityMatrix(t, "ssh", inst)
+
 	// --- Kill: tear the workspace down AND reap the remote process/dir/tunnel ---
 	if err := inst.Kill(); err != nil {
 		t.Fatalf("Kill: %v", err)

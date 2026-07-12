@@ -316,10 +316,6 @@ func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
-// ErrRecoverUnsupported marks a backend without Lost-session recovery (#1108):
-// remote sessions are flagged Lost but not auto-reconnected in v1.
-var ErrRecoverUnsupported = fmt.Errorf("backend does not support recovery")
-
 // Recover re-establishes a Lost instance's tmux sessions (#1108): re-spawn the
 // agent program in its worktree with the same resolved-program flag injection
 // as a first-time launch (#1132 choke-point — never hand-rolled flag logic),

@@ -133,9 +133,10 @@ type Backend interface {
 	// (#1108) — re-spawning the program in the instance's worktree. It is
 	// invoked by the daemon's restore loop and by user-initiated restore
 	// (af sessions restore), never as a load-time side effect (the #970 guard
-	// in Start stays authoritative for loads). Remote backends return
-	// ErrRecoverUnsupported in v1: a Lost remote session is flagged but
-	// reconnect semantics are their own design.
+	// in Start stays authoritative for loads). Every backend services it at full
+	// parity since #1592 Phase 4: the sandbox runtimes (docker/ssh/hook)
+	// re-provision a fresh sandbox that clones the durable branch back from
+	// origin (recoverSandbox, §5.1) — there is no ErrRecoverUnsupported anymore.
 	Recover(instance *Instance) error
 
 	// Respawn re-establishes an instance's backing session in place — re-spawning
@@ -144,7 +145,9 @@ type Backend interface {
 	// guard-free core Recover wraps with its Lost guard; the usage-limit
 	// manual-retry (#1146) uses it directly because a LimitReached session (which
 	// Recover's !Lost guard rejects) needs the identical re-spawn. Callers own the
-	// precondition. Remote backends return ErrRecoverUnsupported.
+	// precondition. The sandbox runtimes (docker/ssh/hook) service it through the
+	// same recoverSandbox re-provision-and-clone path as Recover — no backend
+	// returns an unsupported sentinel.
 	Respawn(instance *Instance) error
 
 	// Type returns the backend type identifier ("local" or "remote"). Since

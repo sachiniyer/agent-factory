@@ -81,6 +81,10 @@ func TestDockerBackendArchiveRestore(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
+	// The real docker backend services the full capability matrix (#1592 Phase 4
+	// PR8) before we exercise its Archive/Recover below.
+	assertLiveCapabilityMatrix(t, "docker", inst)
+
 	ids := containersForLabel(t, slug)
 	if len(ids) == 0 {
 		t.Fatal("expected a container after provisioning")
@@ -226,6 +230,10 @@ func TestSSHBackendArchiveRestore(t *testing.T) {
 	if err := inst.Start(true); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+
+	// The real ssh backend services the full capability matrix (#1592 Phase 4
+	// PR8) before we exercise its Archive/Recover below.
+	assertLiveCapabilityMatrix(t, "ssh", inst)
 
 	dirs := sshdSessionDirs(t, cname)
 	if len(dirs) == 0 {

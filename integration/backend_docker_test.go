@@ -165,6 +165,12 @@ func TestDockerBackendRoundTrip(t *testing.T) {
 	}
 	t.Logf("preview/liveness reflect the in-container workspace over the wire")
 
+	// --- Capability matrix: the REAL docker backend services full parity --------
+	// (#1592 Phase 4 PR8): descriptor parity + attach/input/preview/liveness
+	// serviced over the wire. Archive/Recover are exercised live by
+	// TestDockerBackendArchiveRestore.
+	assertLiveCapabilityMatrix(t, "docker", inst)
+
 	// --- Kill: tear the workspace down AND reap the container -------------------
 	if err := inst.Kill(); err != nil {
 		t.Fatalf("Kill: %v", err)
