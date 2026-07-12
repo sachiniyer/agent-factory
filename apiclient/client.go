@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
 )
@@ -63,18 +64,37 @@ func IsTransportError(err error) bool {
 // racing an arbitrary deadline.
 const dialTimeout = 250 * time.Millisecond
 
-// httpBaseURL is a syntactic placeholder host. The Unix-socket dialer ignores it
-// (the socket path is the real address), but net/http requires a valid URL, so
-// every request targets http://af/v1/<Method>.
-const httpBaseURL = "http://af"
+// localHTTPBase is a syntactic placeholder host for the LOCAL unix-socket path.
+// The Unix-socket dialer ignores it (the socket path is the real address), but
+// net/http requires a valid URL, so every local request targets
+// http://af/v1/<Method>. A remote Client (NewRemote) carries the real
+// https://host:port authority instead.
+const localHTTPBase = "http://af"
 
-// Client dials the daemon's HTTP/JSON Unix socket and calls its /v1/* routes.
-// It holds a net/http.Client whose transport dials the fixed socket path, so a
-// Client is bound to one daemon home. Construct it with New (resolves the socket
-// from the config dir) or NewWithSocket (explicit path, for tests). A zero
-// Client is not usable.
+// localWSBase is the placeholder WS authority for the LOCAL unix socket: the
+// http.Client's transport dials the socket regardless of host, so ws://unix is
+// purely syntactic. A remote Client carries the real wss://host:port authority.
+const localWSBase = "ws://unix"
+
+// Client dials the daemon's HTTP/JSON API and calls its /v1/* routes. By default
+// it dials the local unix socket (New / NewWithSocket) — the transport ignores
+// the URL host and connects to the fixed socket path, so a Client is bound to one
+// daemon home. NewRemote instead dials a REMOTE daemon over TCP+TLS and threads a
+// bearer token on every call (#1592 Phase 3 PR4); httpBase/wsBase then carry the
+// real https://host:port / wss://host:port authority. A zero Client is not usable.
 type Client struct {
 	httpClient *http.Client
+	// token is the bearer credential threaded on every REST call (Authorization
+	// header) and WS dial (header + ?access_token=) for a REMOTE target. It is
+	// empty for the local unix socket, whose peer is trusted (0600 perms are the
+	// auth, #1029) — so the local path sends no Authorization header, unchanged.
+	token string
+	// httpBase is the REST scheme+authority: localHTTPBase ("http://af") for the
+	// unix socket, "https://host:port" for a remote daemon.
+	httpBase string
+	// wsBase is the WS scheme+authority: localWSBase ("ws://unix") for the unix
+	// socket, "wss://host:port" for a remote daemon.
+	wsBase string
 }
 
 // New returns a Client dialing the daemon HTTP socket resolved from the current
@@ -104,6 +124,8 @@ func NewWithSocket(socketPath string) *Client {
 				},
 			},
 		},
+		httpBase: localHTTPBase,
+		wsBase:   localWSBase,
 	}
 }
 
@@ -121,7 +143,16 @@ func (c *Client) call(method string, req any, resp any) error {
 		return fmt.Errorf("apiclient: marshal request: %w", err)
 	}
 
-	httpResp, err := c.httpClient.Post(httpBaseURL+"/v1/"+method, "application/json", bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequest(http.MethodPost, c.httpBase+"/v1/"+method, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("apiclient: build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	// A remote target authenticates with a bearer token on every REST call; the
+	// local unix socket carries no token (trusted transport) and this is a no-op.
+	c.setAuth(httpReq.Header)
+
+	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		// The round-trip never reached a daemon handler — refused dial, missing
 		// socket, etc. Tag it so a caller can tell a bind race from a real error.
@@ -157,4 +188,15 @@ func (c *Client) call(method string, req any, resp any) error {
 		}
 	}
 	return nil
+}
+
+// setAuth adds the `Authorization: Bearer <token>` header when this Client
+// targets a remote daemon. It is a no-op for the local unix socket (empty token,
+// trusted transport), so the local REST path is byte-identical to before Phase 3.
+// The header name/scheme are agentproto's, shared with the daemon's extractor so
+// the wire contract is single-sourced.
+func (c *Client) setAuth(h http.Header) {
+	if c.token != "" {
+		h.Set(agentproto.AuthHeader, agentproto.BearerScheme+c.token)
+	}
 }

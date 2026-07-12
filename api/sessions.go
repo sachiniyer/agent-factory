@@ -57,8 +57,14 @@ var (
 // is reachable (#1029 PR 2). Both paths return the same shape sorted by
 // (repoID, title), so scripts see a consistent order regardless of source.
 func listSessions(repoID string) ([]session.InstanceData, error) {
-	if data, err := snapshotViaDaemon(daemon.SnapshotRequest{RepoID: repoID}); err == nil {
+	data, err := snapshotViaDaemon(daemon.SnapshotRequest{RepoID: repoID})
+	if err == nil {
 		return data, nil
+	}
+	// A remote daemon has no local disk to fall back to, and a bad token must not
+	// be masked by a same-machine disk read — surface the error (#1592 Phase 3 PR4).
+	if apiclient.IsRemoteTarget() {
+		return nil, err
 	}
 	return diskListSessions(repoID)
 }
@@ -68,7 +74,8 @@ func listSessions(repoID string) ([]session.InstanceData, error) {
 // reachable (#1029 PR 2). When a live snapshot is available the daemon is
 // authoritative: a miss returns not-found without re-reading disk.
 func getSessionByTitle(title string) (*session.InstanceData, error) {
-	if data, err := snapshotViaDaemon(daemon.SnapshotRequest{}); err == nil {
+	data, err := snapshotViaDaemon(daemon.SnapshotRequest{})
+	if err == nil {
 		for i := range data {
 			if data[i].Title == title {
 				return &data[i], nil
@@ -77,8 +84,12 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
 		return nil, fmt.Errorf("instance %q %w", title, errTitleNotFound)
 	}
-	data, _, err := findInstanceByTitle(title)
-	return data, err
+	// Remote target: no local disk fallback; surface the error (see listSessions).
+	if apiclient.IsRemoteTarget() {
+		return nil, err
+	}
+	got, _, err := findInstanceByTitle(title)
+	return got, err
 }
 
 // whoamiSession returns the session whose TmuxName matches tmuxName, preferring
@@ -920,10 +931,16 @@ var sessionsAttachCmd = &cobra.Command{
 			return nil
 		}
 
-		if err := daemon.EnsureDaemon(); err != nil {
-			return jsonError(fmt.Errorf("failed to reach daemon for attach: %w", err))
+		// EnsureDaemon spawns the LOCAL daemon that owns a local session's
+		// clientless broker; a remote target's daemon is already running on the
+		// other machine, so skip the local spawn and dial it directly (#1592
+		// Phase 3 PR4).
+		if !apiclient.IsRemoteTarget() {
+			if err := daemon.EnsureDaemon(); err != nil {
+				return jsonError(fmt.Errorf("failed to reach daemon for attach: %w", err))
+			}
 		}
-		client, err := apiclient.New()
+		client, err := apiclient.NewTargeted()
 		if err != nil {
 			return jsonError(err)
 		}

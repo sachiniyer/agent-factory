@@ -772,7 +772,7 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 			}
 			return m.store.AttachInstance(instance)
 		}
-		c, err := apiclient.New()
+		c, err := apiclient.NewTargeted()
 		if err != nil {
 			return nil, err
 		}

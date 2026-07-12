@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/sachiniyer/agent-factory/api"
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/app"
 	cmdutil "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
@@ -289,6 +290,21 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+
+	// Remote-daemon target (#1592 Phase 3 PR4). Persistent so they apply to the
+	// bare TUI and every `af sessions ...`/`af tasks ...` subcommand. Unset ⇒ the
+	// local unix socket (unchanged); each has an AF_DAEMON_* env fallback resolved
+	// in apiclient. TLS is mandatory on the remote listener, so --daemon-url is a
+	// wss:///https:// URL and verification is never skipped (fingerprint pin or CA).
+	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonURL, "daemon-url", "",
+		"Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket "+
+			"(env: AF_DAEMON_URL). Requires --token.")
+	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonToken, "token", "",
+		"Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). "+
+			"Get it with `af token show` on the daemon host.")
+	rootCmd.PersistentFlags().StringVar(&apiclient.FlagTLSFingerprint, "tls-fingerprint", "",
+		"Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert "+
+			"(env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`.")
 
 	rootCmd.AddCommand(debugCmd)
 	rootCmd.AddCommand(keysCmd)

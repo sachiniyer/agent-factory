@@ -41,10 +41,15 @@ const (
 // test can point it at a fake without a real daemon; the unit suite stubs the
 // higher-level *ThroughDaemon seams instead, so this runs only in production.
 var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
-	if err := daemon.EnsureDaemon(); err != nil {
-		return err
+	// A remote target's daemon runs on another machine — EnsureDaemon would spawn
+	// a superfluous LOCAL daemon we never talk to, so skip it and dial the remote
+	// directly (#1592 Phase 3 PR4). The local default is unchanged: ensure + dial.
+	if !apiclient.IsRemoteTarget() {
+		if err := daemon.EnsureDaemon(); err != nil {
+			return err
+		}
 	}
-	c, err := apiclient.New()
+	c, err := apiclient.NewTargeted()
 	if err != nil {
 		return err
 	}

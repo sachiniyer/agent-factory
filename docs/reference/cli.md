@@ -89,7 +89,10 @@ af [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `-y`, `--autoyes` |  | [experimental] If enabled, all instances will automatically accept prompts |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `-p`, `--program` | `string` | Program to run in new instances (one of: claude, codex, aider, gemini, amp) |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af api
 
@@ -115,6 +118,14 @@ af api [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--json` |  | Emit the catalog as JSON wrapped in the {data,error} envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af bug-report
 
@@ -160,6 +171,14 @@ af bug-report [flags]
 | `--json` |  | Emit the structured manifest to stdout (in the {data,error} envelope) instead of writing a file or opening a draft |
 | `-o`, `--output` | `string` | Write the bundle to this path and skip opening a GitHub draft (implies --file) |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af completion
 
 Generate the autocompletion script for the specified shell
@@ -177,6 +196,14 @@ af completion
 - [`af completion fish`](#af-completion-fish) — Generate the autocompletion script for fish
 - [`af completion powershell`](#af-completion-powershell) — Generate the autocompletion script for powershell
 - [`af completion zsh`](#af-completion-zsh) — Generate the autocompletion script for zsh
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af completion bash
 
@@ -213,6 +240,14 @@ af completion bash
 |------|------|-------------|
 | `--no-descriptions` |  | disable completion descriptions |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af completion fish
 
 Generate the autocompletion script for fish
@@ -239,6 +274,14 @@ af completion fish [flags]
 |------|------|-------------|
 | `--no-descriptions` |  | disable completion descriptions |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af completion powershell
 
 Generate the autocompletion script for powershell
@@ -261,6 +304,14 @@ af completion powershell [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--no-descriptions` |  | disable completion descriptions |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af completion zsh
 
@@ -299,6 +350,14 @@ af completion zsh [flags]
 |------|------|-------------|
 | `--no-descriptions` |  | disable completion descriptions |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af config
 
 Read and write the global agent-factory config
@@ -322,6 +381,14 @@ af config
 - [`af config list`](#af-config-list) — Print every global config key and its effective value
 - [`af config set`](#af-config-set) — Set a single settable global config key
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af config get
 
 Print the value of a single global config key
@@ -341,6 +408,14 @@ af config get <key> [flags]
 |------|------|-------------|
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af config list
 
 Print every global config key and its effective value
@@ -354,6 +429,14 @@ af config list [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af config set
 
@@ -398,6 +481,14 @@ af config set <key> <value> [flags]
 |------|------|-------------|
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af daemon
 
 Manage the background daemon that schedules tasks
@@ -419,6 +510,14 @@ af daemon
 - [`af daemon status`](#af-daemon-status) — Report daemon liveness, sockets, pid, and autostart
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af daemon install
 
 Register the daemon to start automatically at login
@@ -426,6 +525,14 @@ Register the daemon to start automatically at login
 ```
 af daemon install
 ```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af daemon restart
 
@@ -444,6 +551,14 @@ af daemon restart [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--quiet` |  | Suppress output when no daemon is running |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af daemon status
 
@@ -469,6 +584,14 @@ af daemon status [flags]
 |------|------|-------------|
 | `--json` |  | Emit the status as JSON wrapped in the {data,error} envelope |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af daemon uninstall
 
 Remove the daemon autostart unit
@@ -477,6 +600,14 @@ Remove the daemon autostart unit
 af daemon uninstall
 ```
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af debug
 
 Print debug information like config paths
@@ -484,6 +615,14 @@ Print debug information like config paths
 ```
 af debug
 ```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af doctor
 
@@ -535,6 +674,14 @@ af doctor [flags]
 | `--setup` |  | run the first-run setup profile (prerequisites, config, agent commands) |
 | `--verbose` |  | show per-process doctor findings instead of collapsed summaries |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af keys
 
 Show the effective TUI key bindings (defaults plus [keys] rebinds)
@@ -549,6 +696,14 @@ apply only while a workspace pane has focus.
 af keys
 ```
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af reset
 
 Reset all stored instances
@@ -556,6 +711,14 @@ Reset all stored instances
 ```
 af reset
 ```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions
 
@@ -588,6 +751,14 @@ af sessions
 |------|------|-------------|
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions archive
 
@@ -622,8 +793,11 @@ af sessions archive [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions attach
 
@@ -639,8 +813,11 @@ af sessions attach <title>
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions create
 
@@ -672,8 +849,11 @@ af sessions create [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions get
 
@@ -687,8 +867,11 @@ af sessions get <title>
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions kill
 
@@ -719,8 +902,11 @@ af sessions kill <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions list
 
@@ -734,8 +920,11 @@ af sessions list
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions preview
 
@@ -749,8 +938,11 @@ af sessions preview <title>
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions restore
 
@@ -774,8 +966,11 @@ af sessions restore <title>
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions send-prompt
 
@@ -816,8 +1011,11 @@ af sessions send-prompt <title> <prompt> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions tab-create
 
@@ -849,8 +1047,11 @@ af sessions tab-create <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions tab-delete
 
@@ -882,8 +1083,11 @@ af sessions tab-delete <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions tabs
 
@@ -908,8 +1112,11 @@ af sessions tabs
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions tabs create
 
@@ -932,8 +1139,11 @@ af sessions tabs create <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions tabs delete
 
@@ -955,8 +1165,11 @@ af sessions tabs delete <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions watch
 
@@ -992,8 +1205,11 @@ af sessions watch <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af sessions whoami
 
@@ -1009,8 +1225,11 @@ af sessions whoami
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af tasks
 
@@ -1036,6 +1255,14 @@ af tasks
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af tasks add
 
 Add a new task
@@ -1059,8 +1286,11 @@ af tasks add [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af tasks get
 
@@ -1074,8 +1304,11 @@ af tasks get <id>
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af tasks list
 
@@ -1089,8 +1322,11 @@ af tasks list
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af tasks remove
 
@@ -1104,8 +1340,11 @@ af tasks remove <id>
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af tasks trigger
 
@@ -1119,8 +1358,11 @@ af tasks trigger <id>
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af tasks update
 
@@ -1146,8 +1388,11 @@ af tasks update <id> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to git repository |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af token
 
@@ -1170,6 +1415,14 @@ af token
 - [`af token rotate`](#af-token-rotate) — Replace the bearer token with a fresh one and print it
 - [`af token show`](#af-token-show) — Print the bearer token and TLS fingerprint (generating them if absent)
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af token rotate
 
 Replace the bearer token with a fresh one and print it
@@ -1190,6 +1443,14 @@ af token rotate [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--json` |  | Emit the result as JSON wrapped in the {data,error} envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
 ## af token show
 
@@ -1213,6 +1474,14 @@ af token show [flags]
 |------|------|-------------|
 | `--json` |  | Emit the result as JSON wrapped in the {data,error} envelope |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af upgrade
 
 Upgrade agent-factory to the latest release on the configured channel
@@ -1235,6 +1504,14 @@ af upgrade [flags]
 |------|------|-------------|
 | `--allow-downgrade` |  | Install the channel's latest release even if it is older than the current binary (e.g. switching from preview back to stable) |
 
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
 ## af version
 
 Print the version number of agent-factory
@@ -1242,4 +1519,12 @@ Print the version number of agent-factory
 ```
 af version
 ```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
