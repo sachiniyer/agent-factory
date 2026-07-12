@@ -297,6 +297,7 @@ func init() {
 	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(api.SessionsCmd)
 	rootCmd.AddCommand(api.TasksCmd)
 	rootCmd.AddCommand(api.APICmd)

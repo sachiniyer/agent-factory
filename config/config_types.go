@@ -164,6 +164,28 @@ type Config struct {
 	// reset time WAS parsed (that schedules against the reset time + grace).
 	// Global-only, like limit_auto_resume. See LimitRetryIntervalDuration.
 	LimitRetryInterval string `json:"limit_retry_interval" toml:"limit_retry_interval"`
+	// ListenAddr optionally binds the daemon's HTTP/WS API to a TLS TCP
+	// listener in addition to the always-present local unix socket (#1592
+	// Phase 3). Empty ⇒ no TCP listener (today's pure-unix behavior). A value
+	// like "0.0.0.0:8443" or ":8443" enables direct-TCP access gated by the
+	// bearer token (`af token`). DARK until Phase 3 PR3 binds the listener;
+	// declared now so the whole key set lands in one reviewable place.
+	// Global-only (daemon behavior), like daemon_poll_interval — a cloned
+	// repo must never be able to open a network port.
+	ListenAddr string `json:"listen_addr" toml:"listen_addr"`
+	// TLSCert / TLSKey optionally point at a user-provided PEM cert and its
+	// matching key for the TCP listener (#1592 Phase 3, §1.2). Empty ⇒ the
+	// daemon self-generates a pinned self-signed cert. Both must be set
+	// together. Global-only, like listen_addr.
+	TLSCert string `json:"tls_cert" toml:"tls_cert"`
+	TLSKey  string `json:"tls_key" toml:"tls_key"`
+	// CORSAllowedOrigins is the exact-match allow-list of browser origins
+	// permitted to call the API cross-origin (#1592 Phase 3, §1.5), e.g.
+	// ["https://af.example.com"]. Empty ⇒ no Access-Control-Allow-Origin is
+	// emitted, so no cross-origin browser can reach the API (the future web
+	// client's only Phase-3 dependency). Non-browser clients (TUI/CLI, curl)
+	// are unaffected. Global-only, like listen_addr.
+	CORSAllowedOrigins []string `json:"cors_allowed_origins,omitempty" toml:"cors_allowed_origins,omitempty"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
 	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —
