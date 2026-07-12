@@ -45,6 +45,13 @@ type CreateSessionResponse struct {
 type KillSessionRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
+	// ID is the session's stable id (session.InstanceData.ID). When non-empty it
+	// is the PRIMARY lookup key: the daemon resolves the target by id first and
+	// only falls back to {Title, RepoID} when it is empty. Web clients send it so
+	// a duplicate title across repos can't target the wrong session on this
+	// destructive action — the write-path analogue of the id-keyed read/stream
+	// paths (#1592 Phase 5 PR5). TUI/CLI callers omit it and resolve by title.
+	ID string `json:"id"`
 	// No force field: kill always destroys the session since the unmerged-work
 	// guard was dropped (#1579). The CLI `--force` flag is accepted as a no-op
 	// but is never sent to the daemon, so the request shape exposes no
@@ -62,6 +69,11 @@ type KillSessionResponse struct {
 type ArchiveSessionRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
+	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
+	// the daemon resolves the archive target by id first, so a web archive can't
+	// hit the wrong session under a cross-repo title collision (#1592 Phase 5
+	// follow-up). TUI/CLI callers omit it and resolve by {Title, RepoID}.
+	ID string `json:"id"`
 }
 
 type ArchiveSessionResponse struct {
@@ -102,6 +114,11 @@ type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
 	Prompt string `json:"prompt"`
+	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
+	// the daemon resolves the prompt target by id first, so a web send-prompt
+	// can't land on the wrong session under a cross-repo title collision (#1592
+	// Phase 5 follow-up). TUI/CLI/delivery callers omit it and resolve by title.
+	ID string `json:"id"`
 }
 
 type SendPromptResponse struct {

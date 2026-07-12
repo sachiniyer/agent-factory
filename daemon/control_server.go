@@ -268,8 +268,14 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 	}
 	// Resolve the stable id BEFORE the teardown, while the session is still
 	// tracked — the event must carry it so clients key their session list by id,
-	// not the collision-prone title (#1592 Phase 5 PR5).
-	id := s.manager.stableIDFor(req.RepoID, req.Title)
+	// not the collision-prone title (#1592 Phase 5 PR5). A web caller addresses
+	// the session by id, so trust that directly; only a title-only TUI/CLI caller
+	// needs the in-memory title lookup (which is itself collision-prone under an
+	// empty repo, but that is the pre-existing CLI contract, out of scope here).
+	id := req.ID
+	if id == "" {
+		id = s.manager.stableIDFor(req.RepoID, req.Title)
+	}
 	if err := s.manager.KillSession(req); err != nil {
 		return err
 	}
@@ -286,8 +292,13 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 		return err
 	}
 	// Resolve the stable id BEFORE the archive relocates/re-marks the session, so
-	// the event carries the id clients key their rail by (#1592 Phase 5 PR5).
-	id := s.manager.stableIDFor(req.RepoID, req.Title)
+	// the event carries the id clients key their rail by (#1592 Phase 5 PR5). A
+	// web caller supplies the id directly; fall back to the title lookup only for
+	// title-only TUI/CLI callers.
+	id := req.ID
+	if id == "" {
+		id = s.manager.stableIDFor(req.RepoID, req.Title)
+	}
 	archivedPath, err := s.manager.ArchiveSession(req)
 	if err != nil {
 		return err

@@ -6186,14 +6186,14 @@ async function createSession(input, token2) {
   );
   return resp.instance;
 }
-async function sendPrompt(title, prompt, token2) {
-  await af("SendPrompt", { title, repo_id: "", prompt }, token2);
+async function sendPrompt(id, title, prompt, token2) {
+  await af("SendPrompt", { id, title, repo_id: "", prompt }, token2);
 }
-async function killSession(title, token2) {
-  await af("KillSession", { title, repo_id: "" }, token2);
+async function killSession(id, title, token2) {
+  await af("KillSession", { id, title, repo_id: "" }, token2);
 }
-async function archiveSession(title, token2) {
-  await af("ArchiveSession", { title, repo_id: "" }, token2);
+async function archiveSession(id, title, token2) {
+  await af("ArchiveSession", { id, title, repo_id: "" }, token2);
 }
 
 // src/events.ts
@@ -7357,9 +7357,10 @@ function disconnect() {
 function select(id) {
   store.set({ selectedId: id });
 }
-function selectedTitle() {
+function selectedSession2() {
   const { sessions, selectedId } = store.get();
-  return sessions.find((s) => s.id === selectedId)?.title ?? null;
+  const s = sessions.find((x) => x.id === selectedId);
+  return s ? { id: s.id ?? "", title: s.title } : null;
 }
 function closeModal() {
   if (modal) {
@@ -7399,12 +7400,12 @@ function newSession() {
   );
 }
 function openSendPrompt() {
-  const title = selectedTitle();
-  if (!title) {
+  const sel = selectedSession2();
+  if (!sel) {
     return;
   }
   openModal(
-    promptModal(title, {
+    promptModal(sel.title, {
       onSubmit: (text) => {
         const tok = token;
         if (!tok || !modal) {
@@ -7412,7 +7413,7 @@ function openSendPrompt() {
         }
         const m = modal;
         m.setBusy(true);
-        void sendPrompt(title, text, tok).then(closeModal).catch((e) => {
+        void sendPrompt(sel.id, sel.title, text, tok).then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));
         });
@@ -7422,14 +7423,14 @@ function openSendPrompt() {
   );
 }
 function openConfirm(action) {
-  const title = selectedTitle();
-  if (!title) {
+  const sel = selectedSession2();
+  if (!sel) {
     return;
   }
   openModal(
     confirmModal({
       action,
-      sessionTitle: title,
+      sessionTitle: sel.title,
       onConfirm: () => {
         const tok = token;
         if (!tok || !modal) {
@@ -7437,7 +7438,7 @@ function openConfirm(action) {
         }
         const m = modal;
         m.setBusy(true);
-        const run = action === "kill" ? killSession(title, tok) : archiveSession(title, tok);
+        const run = action === "kill" ? killSession(sel.id, sel.title, tok) : archiveSession(sel.id, sel.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));

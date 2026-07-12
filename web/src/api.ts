@@ -156,19 +156,26 @@ export async function createSession(input: CreateSessionInput, token: string): P
   return resp.instance;
 }
 
+// The lifecycle mutations send the session's stable `id` as the primary lookup
+// key alongside the (display) title, with an empty repo_id. The daemon resolves
+// the target by id FIRST, so a duplicate title across repos can never make the
+// web kill/archive/prompt the wrong session — the write-path analogue of the
+// id-keyed read/stream paths (#1592 Phase 5 PR5). The title is still sent so the
+// daemon's lifecycle event and any title-only fallback stay correct.
+
 /** Sends a prompt to an existing session (mirrors `af sessions send-prompt`). */
-export async function sendPrompt(title: string, prompt: string, token: string): Promise<void> {
-  await af("SendPrompt", { title, repo_id: "", prompt }, token);
+export async function sendPrompt(id: string, title: string, prompt: string, token: string): Promise<void> {
+  await af("SendPrompt", { id, title, repo_id: "", prompt }, token);
 }
 
 /** Kills a session (mirrors `af sessions kill`). The session.killed event removes
  *  its row from the rail live. */
-export async function killSession(title: string, token: string): Promise<void> {
-  await af("KillSession", { title, repo_id: "" }, token);
+export async function killSession(id: string, title: string, token: string): Promise<void> {
+  await af("KillSession", { id, title, repo_id: "" }, token);
 }
 
 /** Archives a session (mirrors `af sessions archive`) — non-destructive, keeps it
  *  restorable. The session.archived event triggers a rail resync. */
-export async function archiveSession(title: string, token: string): Promise<void> {
-  await af("ArchiveSession", { title, repo_id: "" }, token);
+export async function archiveSession(id: string, title: string, token: string): Promise<void> {
+  await af("ArchiveSession", { id, title, repo_id: "" }, token);
 }

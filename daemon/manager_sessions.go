@@ -10,10 +10,14 @@ import (
 )
 
 func (m *Manager) KillSession(req KillSessionRequest) error {
-	instance, repoID, data, err := m.findSession(req.Title, req.RepoID)
+	instance, repoID, title, data, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return err
 	}
+	// Canonicalize to the resolved session's title so the killsInFlight key,
+	// storage delete, and event all key off the identity we actually resolved
+	// (by id), not the request's title. req is a value copy, so this is local.
+	req.Title = title
 	targetID := killTargetStableID(instance, data)
 	// Kill destroys the session unconditionally (#1579). The old unmerged-work
 	// guard that refused kills with commits-not-on-base / a dirty worktree / a
@@ -107,10 +111,13 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 	if req.Prompt == "" {
 		return fmt.Errorf("prompt is required")
 	}
-	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+	instance, repoID, title, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return err
 	}
+	// Canonicalize to the resolved session's title so the killsInFlight gate and
+	// delivery target key off the id-resolved identity, not the request's title.
+	req.Title = title
 	if instance == nil {
 		return fmt.Errorf("failed to restore instance %q", req.Title)
 	}
@@ -250,6 +257,43 @@ func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Insta
 	m.mu.Unlock()
 	instance, resolvedRepoID, _, err := m.findSession(idOrTitle, repoID)
 	return instance, resolvedRepoID, idOrTitle, err
+}
+
+// resolveActionSession resolves a write-action target (kill/archive/send-prompt)
+// by the caller-supplied stable id FIRST — the web client's collision-proof key —
+// and falls back to {title, repoID} only when no id is given (TUI/CLI callers).
+// Resolving by id is what stops a duplicate title across repos from targeting the
+// WRONG session on a destructive action: findSession with an empty repoID returns
+// the first title match in nondeterministic map order (#1592 Phase 5 follow-up).
+//
+// It mirrors the stream path's id-first scan (resolveStreamSession): the id scan
+// sees only in-memory (live) instances — all a client's rail ever shows — and an
+// id that isn't tracked in memory falls through to findSession, which also
+// restores a disk-only record the title path may need. It returns the same tuple
+// as findSession plus the resolved canonical title, so the caller keys teardown,
+// storage, and events off the real session identity rather than the request's
+// (possibly stale) title.
+func (m *Manager) resolveActionSession(id, title, repoID string) (*session.Instance, string, string, *session.InstanceData, error) {
+	if id != "" {
+		m.mu.Lock()
+		if err := m.refreshLocked(); err != nil {
+			m.mu.Unlock()
+			return nil, "", "", nil, err
+		}
+		for key, instance := range m.instances {
+			if instance.ID != "" && instance.ID == id {
+				rid, _ := splitDaemonInstanceKey(key)
+				resolvedTitle := instance.Title
+				m.mu.Unlock()
+				return instance, rid, resolvedTitle, nil, nil
+			}
+		}
+		m.mu.Unlock()
+		// id supplied but not tracked in memory: fall through to the title lookup
+		// so a legacy/disk-only record still resolves (the caller sends title too).
+	}
+	instance, resolvedRepoID, data, err := m.findSession(title, repoID)
+	return instance, resolvedRepoID, title, data, err
 }
 
 func (m *Manager) findSession(title, repoID string) (*session.Instance, string, *session.InstanceData, error) {

@@ -26,10 +26,14 @@ import (
 // kill, and Lost-recovery never interleave). Returns the relocated worktree's
 // new path.
 func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
-	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+	instance, repoID, title, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return "", err
 	}
+	// Canonicalize to the resolved session's title so every guard, the
+	// killsInFlight key, and the relocation key off the id-resolved identity,
+	// not the request's title. req is a value copy, so this is local.
+	req.Title = title
 	if session.IsReservedTitle(req.Title) {
 		return "", fmt.Errorf("cannot archive the reserved %q session", req.Title)
 	}
