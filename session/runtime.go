@@ -68,8 +68,16 @@ type ProvisionSpec struct {
 	// file:// or bind-mounted path for a self-contained test). Empty for the
 	// in-process local/hook runtimes, which never clone. On a fresh create the
 	// sandbox clones its default branch and the in-sandbox worktree derives the
-	// session branch from Title; restore-to-a-pushed-branch is PR6.
+	// session branch from Title.
 	CloneURL string
+	// RestoreBranch, when set, makes this a RESTORE provision rather than a fresh
+	// create (#1592 Phase 4 PR6): after cloning, the sandbox materializes this
+	// exact branch (the one archive pushed to origin) as a LOCAL ref so the
+	// in-sandbox local backend's Setup reuses it — bringing the pushed commits
+	// back — instead of branching fresh off the default. Empty on a fresh create.
+	// Only the sandbox runtimes (docker/ssh) honor it; the in-process runtimes
+	// never clone, so it is a no-op for them.
+	RestoreBranch string
 }
 
 // ProvisionResult is what a Runtime hands back: the in-process Backend that

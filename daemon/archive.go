@@ -85,6 +85,14 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 		return "", fmt.Errorf("session %q changed state before archive could start", req.Title)
 	}
 
+	// A sandbox session (docker/ssh) archives by pushing its branch to origin and
+	// reaping the sandbox, not by relocating a worktree it does not have (#1592
+	// Phase 4 PR6). Route it to the remote body, which shares this method's guards,
+	// locks, and archive fence.
+	if instance.Capabilities().Workspace == session.WorkspaceRemote {
+		return m.archiveRemoteSession(repoID, instance, req.Title)
+	}
+
 	dest, err := archivedWorktreePath(repoID, req.Title)
 	if err != nil {
 		return "", err
@@ -174,6 +182,66 @@ func (m *Manager) undoCommittedArchive(repoID string, instance *session.Instance
 	return nil
 }
 
+// archiveRemoteSession archives a sandbox-backed session (docker/ssh) by pushing
+// its branch to origin then reaping the sandbox (#1592 Phase 4 PR6) — the remote
+// analogue of ArchiveSession's worktree-move body, sharing its guards, locks, and
+// archive fence. GitHub holds the durable branch, so unlike the local path there
+// is no worktree to move and no rollback-home on a persist failure: an archived
+// remote record is already recoverable from origin.
+func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance, title string) (string, error) {
+	// Raise the archive fence (OpArchiving) so the status poll skips this instance
+	// while its sandbox is torn down, exactly as the local path does.
+	if err := instance.Transition(session.BeginArchive()); err != nil {
+		return "", fmt.Errorf("cannot archive session %q: %w", title, err)
+	}
+
+	branch, err := instance.ArchiveSandbox()
+	if err != nil {
+		// Push and/or teardown failed. Roll the fence back to Lost so the session
+		// stays recovery-eligible, persist that, and surface the failure.
+		_ = instance.Transition(session.AbortArchiveToLost())
+		m.persistInstance(repoID, instance)
+		return "", fmt.Errorf("failed to archive session %q: %w", title, err)
+	}
+
+	// Success: branch is durable on origin, sandbox reaped. Commit the inert
+	// Archived state (started=false, op cleared) and persist it durably.
+	_ = instance.Transition(session.CommitArchive())
+	if perr := archivePersist(m, repoID, instance); perr != nil {
+		// The sandbox is already reaped and the branch is on origin, so there is
+		// nothing to undo — the Archived record is recoverable from origin either
+		// way. Persist best-effort and surface the durability failure; even a lost
+		// best-effort write leaves the on-disk record naming the pushed branch, so a
+		// restart loads the session Lost and an explicit restore re-provisions it.
+		log.ErrorLog.Printf("archive of remote session %q: failed to durably record the Archived state (%v); branch %q is on origin, so the session stays restorable", title, perr, branch)
+		m.persistInstance(repoID, instance)
+		return "", fmt.Errorf("archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w", title, branch, perr)
+	}
+	log.InfoLog.Printf("archived remote session %q (repo %s): branch %q pushed to origin, sandbox reaped", title, repoID, branch)
+	return branch, nil
+}
+
+// restoreRemoteSession restores an archived sandbox session (docker/ssh) by
+// re-provisioning a fresh sandbox that clones the pushed branch back and
+// relaunching the agent (#1592 Phase 4 PR6) — the remote analogue of
+// RestoreArchived's worktree-move body, sharing its guards + locks. It reuses
+// RestoreFromArchive unchanged: BeginRestore fences the restore, then the
+// backend's Recover (recoverSandbox) re-provisions + relaunches + flips the
+// session live. The code survives via origin; a fresh agent runs on the pushed
+// branch (the pre-archive conversation lived only in the disposed sandbox).
+func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance, title string) (string, error) {
+	if err := instance.RestoreFromArchive(); err != nil {
+		// On a re-provision/relaunch failure RestoreFromArchive left the instance
+		// Lost; persist that and surface the failure (an explicit retry re-provisions
+		// from the still-pushed branch).
+		m.persistInstance(repoID, instance)
+		return "", fmt.Errorf("failed to restore remote session %q (re-provisioning its sandbox): %w", title, err)
+	}
+	m.persistInstance(repoID, instance)
+	log.InfoLog.Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
+	return title, nil
+}
+
 // RestoreArchived restores an archived session (#1028): it moves the worktree
 // back to where session creation would place it under the configured
 // worktree_root (a free sibling path, or under $AF_HOME/worktrees for
@@ -221,6 +289,14 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
 	m.mu.Unlock()
 	if current != instance || instance.GetLiveness() != session.LiveArchived {
 		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
+	}
+
+	// A sandbox session (docker/ssh) restores by re-provisioning a fresh sandbox
+	// that clones the pushed branch back, not by moving a worktree it does not have
+	// (#1592 Phase 4 PR6). Route it to the remote body, which shares this method's
+	// guards + locks.
+	if instance.Capabilities().Workspace == session.WorkspaceRemote {
+		return m.restoreRemoteSession(repoID, instance, req.Title)
 	}
 
 	repoPath := instance.GetRepoPath()

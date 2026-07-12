@@ -121,6 +121,35 @@ func TestBackendCapabilities(t *testing.T) {
 				InteractiveInput: false,
 			},
 		},
+		{
+			// #1592 Phase 4 PR6: the sandbox runtimes reach FULL parity — a remote
+			// workspace, but every capability true (Archive/Recover via
+			// push/pull-branch). No ErrRecoverUnsupported, no locality special-case.
+			name: "docker sandbox runtime — full remote parity",
+			b:    &dockerBackend{},
+			want: Capabilities{
+				Workspace:        WorkspaceRemote,
+				Attach:           true,
+				Archive:          true,
+				Recover:          true,
+				TabManagement:    true,
+				TerminalTab:      true,
+				InteractiveInput: true,
+			},
+		},
+		{
+			name: "ssh sandbox runtime — full remote parity",
+			b:    &sshBackend{},
+			want: Capabilities{
+				Workspace:        WorkspaceRemote,
+				Attach:           true,
+				Archive:          true,
+				Recover:          true,
+				TabManagement:    true,
+				TerminalTab:      true,
+				InteractiveInput: true,
+			},
+		},
 	}
 
 	for _, tt := range tests {

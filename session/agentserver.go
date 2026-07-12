@@ -89,6 +89,18 @@ type AgentServer interface {
 
 	// Kill terminates the session and releases its backing resources.
 	Kill() error
+
+	// Archive makes the workspace durable before its sandbox is torn down (#1592
+	// Phase 4 PR6): it commits any uncommitted work and pushes the session branch
+	// to origin (GitHub is the durable workspace store, epic decision 4),
+	// returning the pushed branch so the orchestrator can clone it back on
+	// restore. It is the primitive the disposable sandbox runtimes (docker/ssh)
+	// archive through — the daemon calls it over the wire, and the in-sandbox
+	// local agent-server pushes the branch it owns. The local in-process runtime
+	// implements it too (a plain commit+push of its worktree), but the daemon
+	// never drives a LOCAL session's archive through here — a local session
+	// archives by relocating its worktree (§5.1), so this stays dormant for it.
+	Archive() (string, error)
 }
 
 // Seq is a monotonic cursor into a session's PTY output ring buffer, used by

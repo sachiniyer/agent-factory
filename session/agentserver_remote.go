@@ -224,6 +224,20 @@ func (s *remoteAgentServer) Kill() error {
 	return killErr
 }
 
+// Archive pushes the sandbox's session branch to origin over the control REST
+// (#1592 Phase 4 PR6): the in-sandbox agent-server owns the worktree, so the
+// push happens THERE (it commits any uncommitted work and pushes), and this
+// returns the branch name the daemon records so a later restore clones it back.
+// No teardown here — the daemon runs Kill (which reaps the sandbox) after the
+// branch is durable, so archive is push-then-teardown.
+func (s *remoteAgentServer) Archive() (string, error) {
+	var resp agentArchiveResp
+	if err := s.rc.call("/v1/agent/archive", struct{}{}, &resp); err != nil {
+		return "", err
+	}
+	return resp.Branch, nil
+}
+
 // --- remote WS clientlessChannel: the sandbox stream as a broker channel ---
 
 // remoteClientlessChannel is the remote runtime's clientlessChannel: it binds ONE
@@ -574,4 +588,8 @@ type agentAliveResp struct {
 
 type agentSendPromptReq struct {
 	Prompt string `json:"prompt"`
+}
+
+type agentArchiveResp struct {
+	Branch string `json:"branch"`
 }

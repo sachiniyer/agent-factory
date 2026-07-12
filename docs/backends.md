@@ -34,8 +34,9 @@ With `backend = "docker"`, a session runs entirely inside a container:
 5. On kill, the container is torn down (`docker rm -f`) — no leaked containers.
 
 The container is **disposable**: durability lives in GitHub (the workspace is a
-clone of `repo@origin`), not in the container filesystem. Archive/restore
-(push the branch, re-provision on restore) lands in a later PR.
+clone of `repo@origin`), not in the container filesystem — so archive pushes the
+branch and reaps the container, and restore re-provisions a fresh container that
+clones the branch back (see [Archive & restore](#archive--restore)).
 
 ### Configuration
 
@@ -96,11 +97,15 @@ RUN apk add --no-cache git tmux bash
 
 ### Testing
 
-`make backend-docker-roundtrip` runs the real end-to-end container round-trip on
+`make backend-docker-roundtrip` runs the real end-to-end container round-trips on
 a host with Docker: it builds a slim git+tmux image, creates a session on the
 docker backend, drives the in-container agent-server over `wss://` (input →
 stream echo → preview/snapshot/liveness), and asserts the container is reaped on
-kill. It skips cleanly where Docker is unavailable.
+kill. A second case commits real work on the session branch, **archives** it
+(asserting the branch is pushed to `origin` and the container reaped), then
+**restores** it (asserting a fresh container clones the branch back, the commit
+is present, and the session is drivable again). It skips cleanly where Docker is
+unavailable.
 
 ---
 
@@ -128,8 +133,9 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
    disposable sandbox).
 
 Like docker, the workspace is **disposable**: durability lives in GitHub (the
-workspace is a clone of `repo@origin`). Archive/restore (push the branch,
-re-provision on restore) lands in a later PR.
+workspace is a clone of `repo@origin`) — archive pushes the branch and reaps the
+remote session, and restore re-provisions a fresh remote that clones the branch
+back (see [Archive & restore](#archive--restore)).
 
 ### Configuration
 
@@ -182,10 +188,59 @@ key first with `ssh-keyscan -H host >> ~/.ssh/known_hosts` (or point
 
 ### Testing
 
-`make backend-ssh-roundtrip` runs the real end-to-end SSH round-trip on a host
+`make backend-ssh-roundtrip` runs the real end-to-end SSH round-trips on a host
 with Docker: it stands up a throwaway `sshd`+git+tmux container as the ssh target
 (no external host, no dependency on the box's own sshd), creates a session on the
 ssh backend pointing at it, drives the remote agent-server over the ssh-tunneled
 `wss://` (input → stream echo → preview/snapshot/liveness), and asserts the remote
-process is reaped + the session dir removed + the tunnel closed on kill. It skips
-cleanly where Docker is unavailable.
+process is reaped + the session dir removed + the tunnel closed on kill. A second
+case commits real work, **archives** it (branch pushed to `origin`, remote
+sandbox reaped), then **restores** it (a fresh remote clones the branch back, the
+commit is present, the session is drivable) — the identical push/pull-branch
+flow, over ssh. It skips cleanly where Docker is unavailable.
+
+---
+
+## Archive & restore
+
+For the disposable sandbox backends (`docker` and `ssh`), archive and restore
+are **push/pull of the session branch** — the durable workspace is the branch on
+GitHub (`origin`), not the sandbox:
+
+- **Archive** (`af sessions archive`) pushes the session branch to `origin`, then
+  tears the sandbox down (reaps the container / removes the remote session dir +
+  closes the tunnel). The session record is preserved as an inert **Archived**
+  row — restorable, but consuming no container or remote process.
+- **Restore** (`af sessions restore`) re-provisions a **fresh** sandbox that
+  clones the pushed branch back, restarts the `af agent-server`, and relaunches
+  the agent. The session resumes from the pushed branch state.
+
+This is the same flow for both backends (it is written once against the runtime
+seam), and it is why `docker`/`ssh` reach full capability parity with `local` —
+`Archive` and `Recover` are both supported. A **Lost** sandbox session (its
+container/remote died) recovers the same way: re-provision + clone the branch
+back.
+
+### What survives, and what doesn't
+
+Because the sandbox is thrown away, **only what reaches `origin` survives** an
+archive:
+
+- **Committed work** on the session branch is pushed, so it is fully preserved.
+- **Uncommitted work** is snapshotted into a WIP commit
+  (`af: pre-archive snapshot (uncommitted work)`) and pushed too, so the working
+  tree is not lost — matching the `local` worktree-move archive's "nothing lost"
+  guarantee as closely as the disposable model allows. If you would rather not
+  carry that WIP commit, commit your work yourself before archiving.
+- **The agent's conversation history** lived only in the disposed sandbox and is
+  **not** restored — a fresh agent runs on the restored branch. (The `local`
+  backend, which relocates the worktree in place, does resume the conversation;
+  this is the one place the disposable model differs.)
+
+### Requirements
+
+The sandbox must be able to **push** to the repo's `origin` — the same remote it
+cloned from. For a real repo that means the container/remote has git credentials
+for `origin` (an HTTPS token or an SSH deploy key); for a self-contained test a
+read-write `file://` remote works. If the push fails, the archive fails and the
+session is left running (nothing is torn down), so no work is lost.

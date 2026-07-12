@@ -408,14 +408,36 @@ func (p *sshProvisioner) configureGit() error {
 
 // cloneWorkspace clones the repo's origin into <sessionDir>/workspace on the
 // remote. A fresh create clones the default branch; the remote agent-server's
-// LOCAL backend then creates the session's git worktree + branch off it. Restore to
-// a pushed branch is PR6.
+// LOCAL backend then creates the session's git worktree + branch off it. On a
+// RESTORE (spec.RestoreBranch set, #1592 Phase 4 PR6) it additionally
+// materializes the pushed session branch as a local ref so the remote Setup
+// checks it out.
 func (p *sshProvisioner) cloneWorkspace() error {
 	script := fmt.Sprintf("git clone %s %s", shellQuote(p.spec.CloneURL), shellQuote(p.workspacePath()))
 	out, err := p.runCombined(sshProvisionStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=ssh: cloning %q on the remote failed (is git installed, and the URL reachable from the remote host?): %s: %w",
 			p.spec.CloneURL, strings.TrimSpace(string(out)), err)
+	}
+	if branch := strings.TrimSpace(p.spec.RestoreBranch); branch != "" {
+		return p.fetchRestoreBranch(branch)
+	}
+	return nil
+}
+
+// fetchRestoreBranch materializes the archived session branch (pushed to origin
+// at archive time) as a LOCAL ref in the fresh remote clone, WITHOUT checking it
+// out in the main tree (#1592 Phase 4 PR6) — the ssh mirror of the docker
+// runtime's fetchRestoreBranch. The `<branch>:<branch>` refspec creates
+// refs/heads/<branch> so the remote local backend's Setup reuses it and brings
+// the pushed commits back.
+func (p *sshProvisioner) fetchRestoreBranch(branch string) error {
+	script := fmt.Sprintf("git -C %s fetch origin %s:%s",
+		shellQuote(p.workspacePath()), shellQuote(branch), shellQuote(branch))
+	out, err := p.runCombined(sshProvisionStepTimeout, script)
+	if err != nil {
+		return fmt.Errorf("backend=ssh: restoring archived branch %q on the remote failed (was it pushed to origin?): %s: %w",
+			branch, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
@@ -683,16 +705,17 @@ var _ Backend = (*sshBackend)(nil)
 
 func (b *sshBackend) Type() string { return "ssh" }
 
-// Capabilities advertises full interactive parity for ssh (#1592 Phase 4 PR5, epic
-// §5): the workspace is off-box, but attach/preview/liveness/prompt/tabs all work
-// through the remote agent-server over the tunnel. Archive/Recover (push/pull the
-// branch) land in PR6, so they are off here.
+// Capabilities advertises FULL parity for ssh (#1592 Phase 4 PR6, epic §5): the
+// workspace is off-box, but attach/preview/liveness/prompt/tabs work through the
+// remote agent-server over the tunnel, and Archive/Recover work by pushing the
+// branch to GitHub and re-provisioning a fresh remote that clones it back (§5.1)
+// — every capability true, no ErrRecoverUnsupported and no locality special-case.
 func (b *sshBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
 		Attach:           true,
-		Archive:          false,
-		Recover:          false,
+		Archive:          true,
+		Recover:          true,
 		TabManagement:    true,
 		TerminalTab:      true,
 		InteractiveInput: true,
@@ -803,8 +826,11 @@ func (b *sshBackend) CheckAndHandleTrustPrompt(*Instance) bool { return false }
 
 func (b *sshBackend) TapEnter(i *Instance) { i.AgentServer().TapEnter() }
 
-// Recover/Respawn are unsupported until PR6 wires archive/restore (push/pull the
-// branch, re-provision the remote). A Lost ssh session is flagged but not
-// auto-reconnected yet.
-func (b *sshBackend) Recover(*Instance) error { return ErrRecoverUnsupported }
-func (b *sshBackend) Respawn(*Instance) error { return ErrRecoverUnsupported }
+// Recover/Respawn re-establish an ssh session by RE-PROVISIONING a fresh remote
+// that clones the session's branch back from origin, then relaunching the agent
+// (#1592 Phase 4 PR6) — the same recoverSandbox the docker runtime uses (written
+// once). A disposable remote dir has no in-place session to reconnect, so
+// recovery is always a fresh provision + clone of the durable branch on GitHub;
+// only the pushed state survives.
+func (b *sshBackend) Recover(i *Instance) error { return recoverSandbox(i) }
+func (b *sshBackend) Respawn(i *Instance) error { return recoverSandbox(i) }

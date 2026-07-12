@@ -146,13 +146,23 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 
 	// Pick backend based on persisted BackendType.
-	if data.BackendType == "remote" {
+	switch {
+	case data.BackendType == "remote":
 		hook, err := loadHookBackendForPath(data.Path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load remote hooks config: %w", err)
 		}
 		instance.backend = hook
-	} else {
+	case isSandboxBackendType(data.BackendType):
+		// A sandbox session (docker/ssh, #1592 Phase 4 PR6) has no daemon-side
+		// worktree or tmux to reconstruct — its workspace lived in a
+		// container/remote that does not survive a daemon restart; only its pushed
+		// branch on origin does. Rebuild only an INERT sandbox backend so the row
+		// still classifies as its runtime (Type/Capabilities) for archive +
+		// restore; the live runtime is re-provisioned on restore, never
+		// reconstructed here.
+		instance.backend = newInertSandboxBackend(data.BackendType)
+	default:
 		instance.backend = &LocalBackend{}
 
 		// Preserve backward compatibility: when the branch_created_by_us
@@ -208,6 +218,18 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// tmux-less for the same reason (its TmuxName entries reference sessions
 	// that no longer exist, and restoreLocalTabs only binds names, never spawns).
 	if liveness == LiveArchived {
+		return instance, nil
+	}
+
+	// A non-archived sandbox session (docker/ssh) cannot be driven on load: its
+	// container/remote is gone after a daemon restart and only its pushed branch
+	// on origin survives (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
+	// false, so the status poll and the Lost-restore loop both pass it by (the
+	// #1028 started=false fence) — and let an explicit restore re-provision a fresh
+	// sandbox from the branch. Skipping Start also avoids driving the recursive
+	// remote backend with no live agent-server client.
+	if isSandboxBackendType(data.BackendType) {
+		instance.liveness = LiveLost
 		return instance, nil
 	}
 
