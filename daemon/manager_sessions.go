@@ -9,15 +9,21 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-func (m *Manager) KillSession(req KillSessionRequest) error {
-	instance, repoID, title, data, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
+// KillSession tears down and deletes the resolved session. It returns the stable
+// identity (id + title) of the session it ACTUALLY resolved and acted on, so the
+// control server publishes the killed event for exactly that session — never the
+// request's own (possibly stale) id under a cross-repo title collision (#1592
+// Phase 5 follow-up).
+func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, error) {
+	instance, repoID, title, resolvedID, data, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
-		return err
+		return session.InstanceData{}, err
 	}
 	// Canonicalize to the resolved session's title so the killsInFlight key,
 	// storage delete, and event all key off the identity we actually resolved
 	// (by id), not the request's title. req is a value copy, so this is local.
 	req.Title = title
+	resolved := session.InstanceData{ID: resolvedID, Title: title}
 	targetID := killTargetStableID(instance, data)
 	// Kill destroys the session unconditionally (#1579). The old unmerged-work
 	// guard that refused kills with commits-not-on-base / a dirty worktree / a
@@ -34,7 +40,7 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	m.mu.Lock()
 	if _, busy := m.killsInFlight[key]; busy {
 		m.mu.Unlock()
-		return fmt.Errorf("kill already in progress for session %q", req.Title)
+		return session.InstanceData{}, fmt.Errorf("kill already in progress for session %q", req.Title)
 	}
 	m.killsInFlight[key] = struct{}{}
 	m.mu.Unlock()
@@ -56,7 +62,7 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 
 	if m.currentInstanceReplaced(key, instance, targetID) {
 		log.InfoLog.Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
-		return nil
+		return resolved, nil
 	}
 
 	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the
@@ -69,7 +75,7 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 
 	if instance != nil {
 		if err := instance.Kill(); err != nil {
-			return fmt.Errorf("failed to kill instance: %w", err)
+			return session.InstanceData{}, fmt.Errorf("failed to kill instance: %w", err)
 		}
 	} else if data != nil {
 		ghostCleanup(data, req.Title)
@@ -78,15 +84,15 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 	state := config.LoadState()
 	storage, err := session.NewStorage(state, repoID)
 	if err != nil {
-		return err
+		return session.InstanceData{}, err
 	}
 	deleted, err := storage.DeleteInstanceByStableID(req.Title, targetID)
 	if err != nil {
-		return fmt.Errorf("failed to delete instance from storage: %w", err)
+		return session.InstanceData{}, fmt.Errorf("failed to delete instance from storage: %w", err)
 	}
 	if !deleted {
 		log.InfoLog.Printf("kill of session %q skipped storage delete: current record has a different instance identity", req.Title)
-		return nil
+		return resolved, nil
 	}
 
 	m.mu.Lock()
@@ -104,14 +110,14 @@ func (m *Manager) KillSession(req KillSessionRequest) error {
 		log.InfoLog.Printf("root agent for repo %s killed by user; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.mu.Unlock()
-	return nil
+	return resolved, nil
 }
 
 func (m *Manager) SendPrompt(req SendPromptRequest) error {
 	if req.Prompt == "" {
 		return fmt.Errorf("prompt is required")
 	}
-	instance, repoID, title, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
+	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return err
 	}
@@ -261,39 +267,55 @@ func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Insta
 
 // resolveActionSession resolves a write-action target (kill/archive/send-prompt)
 // by the caller-supplied stable id FIRST — the web client's collision-proof key —
-// and falls back to {title, repoID} only when no id is given (TUI/CLI callers).
+// and falls back to {title, repoID} only when NO id is given (TUI/CLI callers).
 // Resolving by id is what stops a duplicate title across repos from targeting the
 // WRONG session on a destructive action: findSession with an empty repoID returns
 // the first title match in nondeterministic map order (#1592 Phase 5 follow-up).
 //
+// A supplied id is AUTHORITATIVE — it uniquely names one session. If it is not
+// tracked in memory (the session was killed/archived out from under a stale client
+// rail), this returns a clear "not found" error rather than falling back to a title
+// match: an empty-repoID title lookup could resolve a DIFFERENT same-title session
+// in another repo and operate on it — the exact destructive cross-repo collision
+// this fix closes, just re-entered through a stale id. Erroring keeps a stale id
+// from ever silently retargeting; the id-less title path stays for legacy/CLI.
+//
 // It mirrors the stream path's id-first scan (resolveStreamSession): the id scan
-// sees only in-memory (live) instances — all a client's rail ever shows — and an
-// id that isn't tracked in memory falls through to findSession, which also
-// restores a disk-only record the title path may need. It returns the same tuple
-// as findSession plus the resolved canonical title, so the caller keys teardown,
-// storage, and events off the real session identity rather than the request's
-// (possibly stale) title.
-func (m *Manager) resolveActionSession(id, title, repoID string) (*session.Instance, string, string, *session.InstanceData, error) {
+// sees only in-memory (live) instances — all a client's rail ever shows. It returns
+// the resolved instance, its repoID, its canonical title, its stable id, and (for
+// the title path) its on-disk data — so the caller keys teardown, storage, AND the
+// lifecycle event off the session actually resolved, never the request's own
+// (possibly stale) id/title.
+func (m *Manager) resolveActionSession(id, title, repoID string) (*session.Instance, string, string, string, *session.InstanceData, error) {
 	if id != "" {
 		m.mu.Lock()
 		if err := m.refreshLocked(); err != nil {
 			m.mu.Unlock()
-			return nil, "", "", nil, err
+			return nil, "", "", "", nil, err
 		}
 		for key, instance := range m.instances {
 			if instance.ID != "" && instance.ID == id {
 				rid, _ := splitDaemonInstanceKey(key)
 				resolvedTitle := instance.Title
 				m.mu.Unlock()
-				return instance, rid, resolvedTitle, nil, nil
+				return instance, rid, resolvedTitle, instance.ID, nil, nil
 			}
 		}
 		m.mu.Unlock()
-		// id supplied but not tracked in memory: fall through to the title lookup
-		// so a legacy/disk-only record still resolves (the caller sends title too).
+		return nil, "", "", "", nil, fmt.Errorf("session with id %q not found", id)
 	}
+	// Legacy/CLI path: no id supplied, resolve by {title, repoID}.
 	instance, resolvedRepoID, data, err := m.findSession(title, repoID)
-	return instance, resolvedRepoID, title, data, err
+	if err != nil {
+		return nil, "", "", "", nil, err
+	}
+	resolvedID := ""
+	if instance != nil {
+		resolvedID = instance.ID
+	} else if data != nil {
+		resolvedID = data.ID
+	}
+	return instance, resolvedRepoID, title, resolvedID, data, nil
 }
 
 func (m *Manager) findSession(title, repoID string) (*session.Instance, string, *session.InstanceData, error) {

@@ -63,7 +63,7 @@ func createRealKillSession(t *testing.T, title string) (*Manager, config.RepoCon
 		t.Fatalf("created session missing worktree metadata: %+v", data.Worktree)
 	}
 	t.Cleanup(func() {
-		_ = manager.KillSession(KillSessionRequest{Title: title, RepoID: repo.ID})
+		_, _ = manager.KillSession(KillSessionRequest{Title: title, RepoID: repo.ID})
 	})
 	return manager, *repo, data
 }
@@ -132,7 +132,7 @@ func TestKillSessionDestroysUnmergedBranchWithoutForce(t *testing.T) {
 	// guard refused ("N commits not on master").
 	commitInWorktree(t, data.Worktree.WorktreePath, "work.txt")
 
-	if err := manager.KillSession(KillSessionRequest{Title: data.Title, RepoID: repo.ID}); err != nil {
+	if _, err := manager.KillSession(KillSessionRequest{Title: data.Title, RepoID: repo.ID}); err != nil {
 		t.Fatalf("kill of unmerged branch without --force should succeed, got: %v", err)
 	}
 	assertWorktreeGone(t, data.Worktree.WorktreePath)
@@ -145,7 +145,7 @@ func TestKillSessionDestroysDirtyWorktreeWithoutForce(t *testing.T) {
 		t.Fatalf("write dirty file: %v", err)
 	}
 
-	if err := manager.KillSession(KillSessionRequest{Title: data.Title, RepoID: repo.ID}); err != nil {
+	if _, err := manager.KillSession(KillSessionRequest{Title: data.Title, RepoID: repo.ID}); err != nil {
 		t.Fatalf("kill of dirty worktree without --force should succeed, got: %v", err)
 	}
 	assertWorktreeGone(t, data.Worktree.WorktreePath)
@@ -159,7 +159,7 @@ func TestKillSessionDestroysBranchMismatchWorktreeWithoutForce(t *testing.T) {
 	// "worktree is on branch X but the stored session branch is Y".
 	runGitTest(t, data.Worktree.WorktreePath, "checkout", "-b", "some-other-branch")
 
-	if err := manager.KillSession(KillSessionRequest{Title: data.Title, RepoID: repo.ID}); err != nil {
+	if _, err := manager.KillSession(KillSessionRequest{Title: data.Title, RepoID: repo.ID}); err != nil {
 		t.Fatalf("kill of branch-mismatched worktree without --force should succeed, got: %v", err)
 	}
 	assertWorktreeGone(t, data.Worktree.WorktreePath)
@@ -169,7 +169,7 @@ func TestKillSessionDestroysBranchMismatchWorktreeWithoutForce(t *testing.T) {
 func TestKillSessionCleanBranchProceedsWithoutForce(t *testing.T) {
 	manager, repo, data := createRealKillSession(t, "clean-proceeds")
 
-	if err := manager.KillSession(KillSessionRequest{Title: data.Title, RepoID: repo.ID}); err != nil {
+	if _, err := manager.KillSession(KillSessionRequest{Title: data.Title, RepoID: repo.ID}); err != nil {
 		t.Fatalf("clean KillSession without force: %v", err)
 	}
 	assertWorktreeGone(t, data.Worktree.WorktreePath)
@@ -228,7 +228,7 @@ func TestKillSessionInPlaceDoesNotDeleteRepoRoot(t *testing.T) {
 		t.Fatalf("write scratch: %v", err)
 	}
 
-	if err := manager.KillSession(KillSessionRequest{Title: "inplace", RepoID: repo.ID}); err != nil {
+	if _, err := manager.KillSession(KillSessionRequest{Title: "inplace", RepoID: repo.ID}); err != nil {
 		t.Fatalf("kill of in-place session: %v", err)
 	}
 

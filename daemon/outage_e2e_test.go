@@ -57,7 +57,7 @@ func TestOutageEndToEnd_LostRestoreAndReplay(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = manager.KillSession(KillSessionRequest{Title: "worker", RepoID: repo.ID})
+		_, _ = manager.KillSession(KillSessionRequest{Title: "worker", RepoID: repo.ID})
 	})
 	key := daemonInstanceKey(repo.ID, "worker")
 	manager.mu.Lock()

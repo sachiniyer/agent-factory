@@ -54,8 +54,8 @@ func createDuplicateTitleSessions(t *testing.T, title string) (*Manager, config.
 		t.Fatalf("the two sessions share stable id %q; they must differ", dataA.ID)
 	}
 	t.Cleanup(func() {
-		_ = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoA.ID})
-		_ = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoB.ID})
+		_, _ = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoA.ID})
+		_, _ = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoB.ID})
 	})
 	return manager, repoA, dataA, repoB, dataB
 }
@@ -85,8 +85,8 @@ func assertTracked(t *testing.T, m *Manager, repoID, title, wantID string) {
 func TestResolveActionSessionByIDDisambiguatesCrossRepoTitle(t *testing.T) {
 	manager, repoA, dataA, repoB, dataB := createDuplicateTitleSessions(t, "feature")
 
-	// By id, empty repo → exactly the addressed session, correct repo.
-	inst, rid, title, _, err := manager.resolveActionSession(dataB.ID, "feature", "")
+	// By id, empty repo → exactly the addressed session, correct repo, resolved id.
+	inst, rid, title, id, _, err := manager.resolveActionSession(dataB.ID, "feature", "")
 	if err != nil {
 		t.Fatalf("resolveActionSession by id B: %v", err)
 	}
@@ -96,25 +96,32 @@ func TestResolveActionSessionByIDDisambiguatesCrossRepoTitle(t *testing.T) {
 	if rid != repoB.ID {
 		t.Fatalf("resolved repo = %q, want %q (repo B)", rid, repoB.ID)
 	}
-	if title != "feature" {
-		t.Fatalf("resolved title = %q, want %q", title, "feature")
+	if title != "feature" || id != dataB.ID {
+		t.Fatalf("resolved (title=%q, id=%q), want (%q, %q)", title, id, "feature", dataB.ID)
 	}
 
-	inst, rid, _, _, err = manager.resolveActionSession(dataA.ID, "feature", "")
+	inst, rid, _, id, _, err = manager.resolveActionSession(dataA.ID, "feature", "")
 	if err != nil {
 		t.Fatalf("resolveActionSession by id A: %v", err)
 	}
-	if inst == nil || inst.ID != dataA.ID || rid != repoA.ID {
-		t.Fatalf("resolved (%v, %q), want id %q repo %q", inst, rid, dataA.ID, repoA.ID)
+	if inst == nil || inst.ID != dataA.ID || rid != repoA.ID || id != dataA.ID {
+		t.Fatalf("resolved (%v, repo %q, id %q), want id %q repo %q", inst, rid, id, dataA.ID, repoA.ID)
 	}
 
-	// Id-less title path still works when the repo disambiguates (CLI/TUI contract).
-	inst, _, _, _, err = manager.resolveActionSession("", "feature", repoA.ID)
+	// Id-less title path still works when the repo disambiguates (CLI/TUI contract),
+	// and reports the resolved id (so the title-path event carries it too).
+	inst, _, _, id, _, err = manager.resolveActionSession("", "feature", repoA.ID)
 	if err != nil {
 		t.Fatalf("resolveActionSession by title+repo A: %v", err)
 	}
-	if inst == nil || inst.ID != dataA.ID {
-		t.Fatalf("title+repo resolved id = %v, want %q", inst, dataA.ID)
+	if inst == nil || inst.ID != dataA.ID || id != dataA.ID {
+		t.Fatalf("title+repo resolved (id=%v, reportedID=%q), want %q", inst, id, dataA.ID)
+	}
+
+	// A supplied-but-MISSING id is authoritative and must ERROR — never fall back to
+	// a title match that could hit a different same-title session (the stale-id leg).
+	if _, _, _, _, _, err := manager.resolveActionSession("no-such-id", "feature", ""); err == nil {
+		t.Fatalf("resolveActionSession with a stale id must error, not title-guess")
 	}
 }
 
@@ -207,4 +214,45 @@ func TestSendPromptByIDTargetsRightSession(t *testing.T) {
 	if err := manager.SendPrompt(SendPromptRequest{ID: dataB.ID, Title: "feature", RepoID: "", Prompt: "hello"}); err != nil {
 		t.Fatalf("SendPrompt by id B: %v", err)
 	}
+}
+
+// TestActionWithStaleIDErrorsRatherThanRetargeting is the missing coverage Greptile
+// flagged (the residual stale-id leg): with two same-title/different-id sessions, a
+// web-shaped Kill/Archive/SendPrompt carrying a STALE non-empty id (naming a session
+// that no longer exists) + an empty repo_id must ERROR — never silently fall back to
+// a title match that could operate on the OTHER same-title session, and never publish
+// a stale id. Erroring is the chosen design: a supplied id is authoritative, so a miss
+// is "session not found", not license to title-guess. Both sessions must survive.
+func TestActionWithStaleIDErrorsRatherThanRetargeting(t *testing.T) {
+	manager, repoA, dataA, repoB, dataB := createDuplicateTitleSessions(t, "feature")
+	cs := &controlServer{manager: manager}
+
+	// An id that names no live session (BEFORE the fix, a non-empty id that missed
+	// fell through to the collision-prone empty-repo title match).
+	staleID := "stale-" + dataA.ID
+
+	assertBothSurvive := func(where string) {
+		assertTracked(t, manager, repoA.ID, "feature", dataA.ID)
+		assertTracked(t, manager, repoB.ID, "feature", dataB.ID)
+		if t.Failed() {
+			t.Fatalf("a same-title session was operated on after %s despite the stale id", where)
+		}
+	}
+
+	var kResp KillSessionResponse
+	if err := cs.KillSession(KillSessionRequest{ID: staleID, Title: "feature", RepoID: ""}, &kResp); err == nil {
+		t.Fatalf("KillSession with a stale id must error, not fall back to a title match")
+	}
+	assertBothSurvive("kill")
+
+	var aResp ArchiveSessionResponse
+	if err := cs.ArchiveSession(ArchiveSessionRequest{ID: staleID, Title: "feature", RepoID: ""}, &aResp); err == nil {
+		t.Fatalf("ArchiveSession with a stale id must error, not fall back to a title match")
+	}
+	assertBothSurvive("archive")
+
+	if err := manager.SendPrompt(SendPromptRequest{ID: staleID, Title: "feature", RepoID: "", Prompt: "x"}); err == nil {
+		t.Fatalf("SendPrompt with a stale id must error, not fall back to a title match")
+	}
+	assertBothSurvive("send-prompt")
 }

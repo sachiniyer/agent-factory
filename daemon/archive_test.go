@@ -57,7 +57,7 @@ func TestArchiveSession_MovesWorktreeAndMarksArchived(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
 
-	archivedPath, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	archivedPath, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 
 	expected, perr := archivedWorktreePath(repoID, "worker")
@@ -103,7 +103,7 @@ func TestArchiveSession_MoveFailureMarksLost(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(dest, 0755))
 
-	_, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err, "a failed move must surface an error")
 
 	assert.Equal(t, session.Lost, inst.GetStatus(), "a failed archive marks the session Lost for self-heal")
@@ -132,7 +132,7 @@ func TestArchiveSession_PersistFailureRollsBack(t *testing.T) {
 	dest, derr := archivedWorktreePath(repoID, "worker")
 	require.NoError(t, derr)
 
-	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err, "a persist failure must surface an error, not a silent half-archive")
 
 	assert.Equal(t, session.Lost, inst.GetStatus(), "a persist failure rolls the archive back to Lost for self-heal")
@@ -160,7 +160,7 @@ func TestArchiveSession_RejectsReservedRoot(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerArchivable(t, manager, repoID, repoPath, session.RootSessionTitle)
 
-	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: session.RootSessionTitle, RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: session.RootSessionTitle, RepoID: repoID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reserved")
 }
@@ -172,7 +172,7 @@ func TestArchiveSession_RejectsAlreadyArchived(t *testing.T) {
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
 	inst.SetStatusForTest(session.Archived)
 
-	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already archived")
 }
@@ -188,7 +188,7 @@ func TestArchiveSession_RejectsWhenOperationInFlight(t *testing.T) {
 	manager.killsInFlight[key] = struct{}{}
 	manager.mu.Unlock()
 
-	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "in progress")
 }
@@ -216,7 +216,7 @@ func TestArchiveSession_RejectsExternalWorktree(t *testing.T) {
 	manager.instances[daemonInstanceKey(repoID, "inplace")] = inst
 	manager.mu.Unlock()
 
-	_, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "inplace", RepoID: repoID})
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "inplace", RepoID: repoID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "in-place")
 
@@ -236,7 +236,7 @@ func TestRestoreArchived_MovesWorktreeBackAndRespawns(t *testing.T) {
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst.SetBackend(backend)
 
-	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 	require.Equal(t, session.Archived, inst.GetStatus())
 	archivedPath := inst.GetWorktreePath()
@@ -290,7 +290,7 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
 	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
 
-	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 	archivedPath := inst.GetWorktreePath()
 
@@ -310,7 +310,7 @@ func TestRestoreArchived_CollisionSuffixesPath(t *testing.T) {
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
 	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
 
-	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 
 	// Occupy the default sibling location so restore must suffix.
@@ -348,7 +348,7 @@ func TestArchiveSession_RejectsRemote(t *testing.T) {
 	manager.instances[daemonInstanceKey(repoID, "faraway")] = inst
 	manager.mu.Unlock()
 
-	_, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "faraway", RepoID: repoID})
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "faraway", RepoID: repoID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "remote")
 }
