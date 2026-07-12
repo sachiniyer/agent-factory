@@ -25,6 +25,18 @@ type fakeClientlessChannel struct {
 	// subscribe and after a resize; snapshots counts how many times it was read.
 	snapshot  []byte
 	snapshots int
+	// wClosed reports whether the CURRENT capture writer (f.w) has been closed by a
+	// StopCapture — the test proxy for "the pane pipe was disabled". Reset on each
+	// StartCapture. Used by the #1661 teardown-clobber regression test.
+	wClosed bool
+	// stopEntered/stopRelease gate StopCapture: when both are non-nil, StopCapture
+	// signals stopEntered on entry and then blocks on stopRelease before doing any
+	// teardown, so a test can pin the "teardown runs mid-reconnect" interleaving.
+	stopEntered chan struct{}
+	stopRelease chan struct{}
+	// stopDone, when non-nil, is signaled AFTER StopCapture has closed the writer,
+	// so a test can order an assertion strictly after the teardown's effect.
+	stopDone chan struct{}
 }
 
 func (f *fakeClientlessChannel) StartCapture() (io.ReadCloser, error) {
@@ -35,15 +47,26 @@ func (f *fakeClientlessChannel) StartCapture() (io.ReadCloser, error) {
 	}
 	f.starts++
 	f.r, f.w = io.Pipe()
+	f.wClosed = false
 	return f.r, nil
 }
 
 func (f *fakeClientlessChannel) StopCapture() error {
+	// Gate BEFORE taking f.mu so a concurrent StartCapture can proceed while this
+	// teardown is parked — the interleaving the #1661 regression test forces.
+	if f.stopEntered != nil && f.stopRelease != nil {
+		f.stopEntered <- struct{}{}
+		<-f.stopRelease
+	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.stops++
 	if f.w != nil {
 		_ = f.w.Close()
+		f.wClosed = true
+	}
+	f.mu.Unlock()
+	if f.stopDone != nil {
+		f.stopDone <- struct{}{}
 	}
 	return nil
 }
@@ -82,6 +105,20 @@ func (f *fakeClientlessChannel) emit(t *testing.T, b []byte) {
 	if _, err := w.Write(b); err != nil {
 		t.Fatalf("emit: %v", err)
 	}
+}
+
+// emitErr writes pane output into the current capture pipe and RETURNS any error
+// (rather than fataling) so a test can assert the pipe is still live — a torn-down
+// pipe surfaces as a write error.
+func (f *fakeClientlessChannel) emitErr(b []byte) error {
+	f.mu.Lock()
+	w := f.w
+	f.mu.Unlock()
+	if w == nil {
+		return io.ErrClosedPipe
+	}
+	_, err := w.Write(b)
+	return err
 }
 
 func nextWithin(t *testing.T, sub PTYSubscription, d time.Duration) (PTYEvent, error) {
@@ -268,6 +305,82 @@ func TestPTYBrokerEvictionFastForwards(t *testing.T) {
 	if ev.Kind != PTYData || string(ev.Data) != "efgh" {
 		t.Fatalf("event = %+v, want the retained tail %q", ev, "efgh")
 	}
+}
+
+// TestPTYBrokerTeardownDoesNotClobberReconnect is the #1661 regression: the
+// clientless channel drives a SINGLE pane pipe, so the last-subscriber teardown
+// (StopCapture → `pipe-pane`-disable) must not run AFTER a new subscriber has
+// brought the capture back up — that ordering would disable the fresh pipe and
+// leave the reconnected subscriber (e.g. an embedded pane re-bound after a
+// full-screen attach+detach) with a live ring but no bytes ever arriving.
+//
+// The test pins the hostile interleaving deterministically: subscriber A leaves
+// and its teardown parks inside StopCapture; subscriber B reconnects while the
+// teardown is mid-flight; then the teardown is released. B must end up on a LIVE
+// capture and receive freshly emitted output.
+func TestPTYBrokerTeardownDoesNotClobberReconnect(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		stopEntered: make(chan struct{}, 1),
+		stopRelease: make(chan struct{}),
+		stopDone:    make(chan struct{}, 1),
+	}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0) // brings the capture up (StartCapture #1)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+
+	// A leaves: its last-subscriber teardown parks inside the gated StopCapture.
+	go func() { _ = a.Close() }()
+	select {
+	case <-ch.stopEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("teardown never reached StopCapture")
+	}
+
+	// B reconnects while the teardown is parked. With the fix this blocks on the
+	// capture reconcile until the teardown finishes and then starts a FRESH
+	// capture; without it, B starts a capture the parked teardown then disables.
+	type subResult struct {
+		sub *ptySub
+		err error
+	}
+	bres := make(chan subResult, 1)
+	go func() {
+		s, e := br.subscribe(0)
+		bres <- subResult{s, e}
+	}()
+
+	// Give B time to reach the capture reconcile (blocked) or, in the buggy path,
+	// to start its capture before we release the teardown.
+	time.Sleep(50 * time.Millisecond)
+	close(ch.stopRelease)
+
+	var b subResult
+	select {
+	case b = <-bres:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconnecting subscribe B never returned")
+	}
+	if b.err != nil {
+		t.Fatalf("subscribe B: %v", b.err)
+	}
+
+	// Order the assertion strictly AFTER the parked teardown's writer-close so the
+	// emit below cannot race ahead of a clobber and pass spuriously.
+	select {
+	case <-ch.stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("teardown never completed")
+	}
+
+	// The reconnected subscriber must be on a LIVE pipe: a freshly emitted byte
+	// reaches it. A clobbered pipe surfaces as a write error here (#1661).
+	if err := ch.emitErr([]byte("LIVE-AFTER-RECONNECT")); err != nil {
+		t.Fatalf("capture pipe was torn down under the reconnected subscriber (#1661): %v", err)
+	}
+	mustData(t, b.sub, "LIVE-AFTER-RECONNECT")
 }
 
 func TestPTYBrokerStopsCaptureWhenLastSubscriberLeaves(t *testing.T) {

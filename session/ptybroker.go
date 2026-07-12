@@ -68,6 +68,19 @@ type ptyBroker struct {
 	ch       clientlessChannel
 	maxBytes int
 
+	// captureMu serializes the clientless capture's bring-up and tear-down so a
+	// teardown can NEVER clobber a concurrently-(re)started capture (#1661). The
+	// clientless channel drives a SINGLE pane pipe (`tmux pipe-pane`), so an
+	// out-of-order StopCapture would `pipe-pane`-disable whatever pipe is current —
+	// including a fresh one a new subscriber just enabled — leaving the new
+	// subscriber with a live ring/readLoop but no bytes ever arriving (a stale pane
+	// after a full-screen attach+detach cycle re-binds the embedded pane). Every
+	// start/stop runs through a captureMu-serialized reconcile that re-reads the
+	// live subscriber count, so the last operation to run always converges the
+	// pipe to the true desired state. Lock ordering: captureMu THEN mu, never the
+	// reverse.
+	captureMu sync.Mutex
+
 	mu   sync.Mutex
 	buf  []byte // ring: recent output bytes, buf[0] is at seq `base`
 	base Seq    // seq of buf[0]; head == base + len(buf)
@@ -104,12 +117,6 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 		b.mu.Unlock()
 		return nil, fmt.Errorf("pty broker closed")
 	}
-	if !b.capturing {
-		if err := b.startCaptureLocked(); err != nil {
-			b.mu.Unlock()
-			return nil, err
-		}
-	}
 	head := b.headLocked()
 	cursor := since
 	// since == 0 means "from the live tail" (the documented default); a real
@@ -130,6 +137,16 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	}
 	b.subs[sub.id] = sub
 	b.mu.Unlock()
+
+	// Bring up the clientless capture through the serialized reconcile — NOT inline
+	// under b.mu — so it can never interleave with a teardown that races it (#1661).
+	// Register-first (above) means the reconcile sees this subscriber, so a
+	// concurrent last-leaver teardown re-checking the count won't tear down the
+	// capture this subscriber needs.
+	if err := b.ensureCaptureStarted(); err != nil {
+		b.remove(sub.id)
+		return nil, err
+	}
 
 	// A fresh subscriber (since == 0, the live tail) gets an initial repaint of the
 	// current screen — pipe-pane only streams future output, so without this a
@@ -160,14 +177,33 @@ func buildRepaint(snapshot []byte) []byte {
 	return append([]byte("\x1b[2J\x1b[H"), body...)
 }
 
-// startCaptureLocked spins up the clientless output capture and the goroutine
-// that feeds its bytes into the ring. Caller holds mu.
-func (b *ptyBroker) startCaptureLocked() error {
+// ensureCaptureStarted brings the clientless output capture up if it is not
+// already running, serialized against every other capture transition by
+// captureMu so a concurrent teardown can neither interleave with nor clobber it
+// (#1661). It runs WITHOUT holding b.mu across the tmux exec ch.StartCapture
+// does, and errors (a vanished session) propagate to the caller so the WS dial
+// fails and the client reconnects. Idempotent: a no-op when already capturing.
+func (b *ptyBroker) ensureCaptureStarted() error {
+	b.captureMu.Lock()
+	defer b.captureMu.Unlock()
+
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return fmt.Errorf("pty broker closed")
+	}
+	if b.capturing {
+		b.mu.Unlock()
+		return nil
+	}
+	b.mu.Unlock()
+
 	r, err := b.ch.StartCapture()
 	if err != nil {
 		return fmt.Errorf("start clientless pty capture: %w", err)
 	}
 	done := make(chan struct{})
+	b.mu.Lock()
 	b.capturing = true
 	b.stopCapture = func() {
 		if err := b.ch.StopCapture(); err != nil {
@@ -176,8 +212,36 @@ func (b *ptyBroker) startCaptureLocked() error {
 		_ = r.Close()
 		<-done
 	}
+	b.mu.Unlock()
 	go b.readLoop(r, done)
 	return nil
+}
+
+// maybeStopCapture tears the capture down IFF no subscriber remains — the
+// counterpart to ensureCaptureStarted, and serialized against it by captureMu.
+// It RE-CHECKS the live subscriber count under captureMu (not just at the caller's
+// earlier read) so a subscriber that (re)connected in the meantime keeps its
+// capture: this is the invariant that fixes #1661, where a detach's teardown
+// raced a reconnect's bring-up and disabled the pane pipe out from under it. The
+// blocking teardown runs WITHOUT b.mu held so the read loop (which takes b.mu in
+// feed) can drain and exit.
+func (b *ptyBroker) maybeStopCapture() {
+	b.captureMu.Lock()
+	defer b.captureMu.Unlock()
+
+	b.mu.Lock()
+	if len(b.subs) != 0 || !b.capturing {
+		b.mu.Unlock()
+		return
+	}
+	stop := b.stopCapture
+	b.capturing = false
+	b.stopCapture = nil
+	b.mu.Unlock()
+
+	if stop != nil {
+		stop()
+	}
 }
 
 // readLoop copies the clientless capture reader into the ring until it errors or
@@ -263,7 +327,10 @@ func (b *ptyBroker) wakeAllLocked() {
 }
 
 // remove drops a subscriber and stops the clientless capture once the last one
-// leaves — never touching the PTY/session itself.
+// leaves — never touching the PTY/session itself. The stop goes through
+// maybeStopCapture, which re-checks the subscriber count under captureMu so a
+// subscriber that connects while this teardown is deciding is not stranded on a
+// disabled pipe (#1661).
 func (b *ptyBroker) remove(id uint64) {
 	b.mu.Lock()
 	if _, ok := b.subs[id]; !ok {
@@ -271,21 +338,22 @@ func (b *ptyBroker) remove(id uint64) {
 		return
 	}
 	delete(b.subs, id)
-	var stop func()
-	if len(b.subs) == 0 && b.capturing {
-		stop = b.stopCapture
-		b.capturing = false
-		b.stopCapture = nil
-	}
+	lastLeft := len(b.subs) == 0 && b.capturing
 	b.mu.Unlock()
-	if stop != nil {
-		stop()
+	if lastLeft {
+		b.maybeStopCapture()
 	}
 }
 
 // close tears down the broker: every subscriber's NextEvent returns io.EOF and
-// the clientless capture is stopped. Called when the session is killed.
+// the clientless capture is stopped. Called when the session is killed. Holds
+// captureMu (captureMu-then-mu ordering) so it cannot race a concurrent
+// ensureCaptureStarted into resurrecting a capture on a closed broker (#1661) —
+// a bring-up that lost the race sees b.closed and unwinds.
 func (b *ptyBroker) close() {
+	b.captureMu.Lock()
+	defer b.captureMu.Unlock()
+
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
