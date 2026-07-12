@@ -85,10 +85,11 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 
 	cs := &controlServer{manager: manager, scheduler: scheduler, watchers: watchers}
 	srv := &http.Server{
-		// The mux is wrapped in the auth/CORS seam (#1592 Phase 2 PR5): a no-op
-		// token extraction + permissive CORS today, the drop-in point for Phase 3's
-		// TCP+TLS+token enforcement without reshaping any route.
-		Handler:           withAuth(newHTTPMux(cs)),
+		// The unix socket is trusted transport (0600 perms are the auth, #1029),
+		// so it passes a NIL gate: no token enforcement (#1592 Phase 3 PR2,
+		// §1.4). The TCP listener (PR3) will pass a real gate over the same mux.
+		// CORS is config-driven (§1.5): empty allow-list ⇒ no ACAO emitted.
+		Handler:           withAuth(newHTTPMux(cs), nil, manager.cfg.CORSAllowedOrigins),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 
