@@ -1,0 +1,19 @@
+{
+  "name": "af-web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Agent Factory browser web client (#1592 Phase 5) — a second thin client of the daemon's REST+WS API. PR1 ships only the wire-frame codec + toolchain; UI lands in PR2+.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "22.10.2",
+    "esbuild": "^0.25.10",
+    "tsx": "^4.20.6",
+    "typescript": "5.7.2"
+  }
+}

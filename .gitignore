@@ -35,6 +35,15 @@ vendor/
 *.prof
 __debug_bin*
 
+# Web client toolchain (#1592 Phase 5). node_modules is never committed; the built
+# web/dist/ IS committed (locked decision) so `go build`/Go tests stay Node-free.
+web/node_modules/
+web/*.tsbuildinfo
+# Playwright browser downloads / run artifacts (harness itself lands in PR6).
+web/test-results/
+web/playwright-report/
+web/.playwright/
+
 # MkDocs build output
 site/
 

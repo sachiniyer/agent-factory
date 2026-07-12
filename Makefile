@@ -8,7 +8,7 @@
 	agent-server-roundtrip-container remote-agent-server-roundtrip-container \
 	backend-docker-roundtrip backend-ssh-roundtrip \
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
-	testbox-image lint-file-length docs
+	testbox-image lint-file-length docs web-build web-test
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
 # (1000 for production code, 1500 for *_test.go) unless grandfathered in
@@ -116,3 +116,28 @@ tui-driver-selftest:
 # (Re)build the toolchain image only.
 testbox-image:
 	scripts/testbox.sh build
+
+# Web client toolchain (#1592 Phase 5). The JS build+test are gated ENTIRELY behind
+# these targets: `go build ./...` and `make test-container` never invoke Node — the
+# built web/dist/ is committed so the Go side is self-sufficient. Both targets depend
+# on web/node_modules, an order-only-style file target rebuilt from the lockfile.
+#
+# web/node_modules is a real file target: `npm ci` runs only when the committed
+# package-lock.json (or package.json) is newer than the installed tree, so repeated
+# web-build/web-test don't reinstall. Deleting web/node_modules forces a fresh `npm ci`.
+web/node_modules: web/package-lock.json web/package.json
+	cd web && npm ci
+	@touch web/node_modules
+
+# esbuild the SPA bundle into the committed web/dist/ (design §3.1, §1.3). PR1 bundles
+# only the wire-frame codec; later PRs add the UI and go:embed dist/ into the daemon.
+web-build: web/node_modules
+	cd web && npm run build
+
+# TypeScript unit tests: the frame golden-vector parity (web/src/frame.test.ts)
+# asserting the TS codec is byte-identical to the Go encoder against the SAME fixture
+# (agentproto/testdata/frame_vectors.json). Also typechecks the sources. The
+# Playwright browser harness lands in PR6 (`make web-selftest-container`); the dep is
+# wired now but not invoked here.
+web-test: web/node_modules
+	cd web && npm run typecheck && npm run test
