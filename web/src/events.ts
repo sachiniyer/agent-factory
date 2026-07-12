@@ -12,11 +12,16 @@
 // only; the client sends nothing. Browsers answer the daemon's WS keepalive ping
 // at the protocol layer, so there is no client keepalive to write (design §4.4).
 //
-// On any drop (network blip, daemon restart) the stream reconnects with capped
-// exponential backoff, and on every RE-connect it asks the caller to re-Snapshot —
-// events published during the gap are lost by design (the hub is drop-slow, not
-// replayed), so a fresh Snapshot is how the rail re-synchronises. This mirrors the
-// plan's "reconnect + re-Snapshot" resume for a plain event stream.
+// On EVERY open — including the FIRST — the stream asks the caller to re-Snapshot.
+// The first-open resync closes a login-window race (#1592 Phase 5 PR5): connect()
+// takes the seed Snapshot BEFORE this socket opens, so any create/kill/archive
+// that lands between that Snapshot and the socket's open would otherwise be lost
+// (the socket wasn't yet subscribed to receive it). Re-Snapshotting once the
+// socket is open — after which every subsequent event IS delivered — makes the
+// rail whole regardless of what happened in that gap. Reconnect opens resync for
+// the same reason (events published while the socket was down are dropped by
+// design — the hub is drop-slow, not replayed). The resync is debounced in
+// index.ts, so the extra first-open refetch collapses with any burst.
 
 import type { WireEvent } from "./types.js";
 
@@ -26,8 +31,10 @@ export type EventStreamStatus = "connecting" | "open" | "reconnecting";
 export interface EventStreamCallbacks {
   /** A parsed events-plane message (session.* / task.*). */
   onEvent(ev: WireEvent): void;
-  /** Fired after a RE-connect (not the first connect): the caller should
-   *  re-Snapshot because events may have been missed during the gap. */
+  /** Fired after EVERY open (first connect AND every reconnect): the caller
+   *  should re-Snapshot because events may have been missed before the socket was
+   *  subscribed — on the first open, the login-window race between the seed
+   *  Snapshot and this open; on reconnects, the events dropped while down. */
   onResync(): void;
   /** Fired on every connection-state change, for the header indicator. */
   onStatus(status: EventStreamStatus): void;
@@ -98,14 +105,13 @@ export class EventStream {
 
     ws.onopen = () => {
       this.retry = 0;
-      const wasReconnect = this.everOpened;
       this.everOpened = true;
       this.cb.onStatus("open");
-      // A reconnect may have missed events; re-Snapshot to resynchronise. The
-      // first-ever open needs no resync — the caller already seeded from Snapshot.
-      if (wasReconnect) {
-        this.cb.onResync();
-      }
+      // Re-Snapshot on EVERY open. The FIRST open closes the login-window race:
+      // the seed Snapshot was taken before this socket existed, so a mutation in
+      // that gap would be lost without this refetch. A RE-connect closes the
+      // dropped-while-down gap. Both funnel through the same debounced resync.
+      this.cb.onResync();
     };
 
     ws.onmessage = (e) => {

@@ -69,6 +69,16 @@ export interface SessionData {
   limit_reset_at?: string;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */
   backend_type?: string;
+  /** Worktree metadata; the rail reads `repo_path` (the session's repo root) to
+   *  derive the new-session modal's project picker, exactly as the TUI does from
+   *  InstanceData.Worktree.RepoPath (app/switch_project.go buildProjectListFrom). */
+  worktree?: WorktreeData;
+}
+
+/** The subset of session.GitWorktreeData (session/storage.go) the web reads: the
+ *  repo root the session belongs to, used to group/pick projects. */
+export interface WorktreeData {
+  repo_path?: string;
 }
 
 /** The Snapshot RPC response (daemon/snapshot.go: SnapshotResponse). */
@@ -91,8 +101,10 @@ export type EventType =
 /**
  * agentproto.Event (agentproto/message.go): one message on the /v1/events plane.
  * A session.* event's `data` is a marshaled InstanceData; created/updated carry
- * the full projection, while killed/archived/restored carry only `{title}` (see
- * daemon/control_server.go), so a client keys deletes/refetches off the title.
+ * the full projection, while killed/archived/restored carry `{id, title}` — the
+ * STABLE id plus the title (daemon/control_server.go, #1592 Phase 5 PR5). The
+ * client keys its rail off the id (not the collision-prone title) and only falls
+ * back to the title when a legacy/disk-only record carries no id.
  */
 export interface WireEvent {
   type: EventType;

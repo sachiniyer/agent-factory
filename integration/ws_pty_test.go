@@ -136,6 +136,31 @@ func TestWSPTYStreamTabRouting(t *testing.T) {
 	}
 }
 
+// TestWSPTYSessionKillEmitsExit pins the #1592 Phase 5 PR5 terminal-exit fix: when
+// a session is killed, its attached subscriber receives an explicit MsgExit control
+// frame (the broker's session-ended signal) so a browser terminal settles to an
+// "exited" state and stops reconnecting, rather than reconnect-looping against a
+// gone session. Before the fix the broker only closed the socket, indistinguishable
+// from a droppable network drop.
+func TestWSPTYSessionKillEmitsExit(t *testing.T) {
+	h := newHarness(t)
+	h.startDaemon()
+	h.createSession("wsexit")
+
+	a := h.dialWS(t, "/v1/sessions/wsexit/stream")
+	defer a.close()
+	a.sendInput(t, []byte("alive-marker\n"))
+	a.waitOutput(t, "alive-marker")
+
+	// Kill the session; the broker closes and the writer sends MsgExit before the
+	// socket closes.
+	h.run("sessions", "kill", "wsexit")
+
+	waitUntil(t, 5*time.Second, "subscriber received MsgExit on session kill", func() bool {
+		return a.sawExit()
+	})
+}
+
 // wsClient is a test subscriber: a coder/websocket connection with a read pump
 // accumulating PTY_OUT bytes and resize echoes.
 type wsClient struct {
@@ -147,6 +172,7 @@ type wsClient struct {
 	mu      sync.Mutex
 	out     []byte
 	resizes []agentproto.ResizeMessage
+	exited  bool
 }
 
 // dialWS opens a subscriber and starts its read pump.
@@ -200,6 +226,8 @@ func (c *wsClient) readPump() {
 			if json.Unmarshal(msg.Text, &rm) == nil {
 				c.resizes = append(c.resizes, rm)
 			}
+		} else if typ, _ := agentproto.MessageTypeOf(msg.Text); typ == agentproto.MsgExit {
+			c.exited = true
 		}
 		c.mu.Unlock()
 	}
@@ -227,6 +255,14 @@ func (c *wsClient) output() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return string(c.out)
+}
+
+// sawExit reports whether this client received a MsgExit control frame — the
+// broker's explicit session-ended signal (#1592 Phase 5 PR5).
+func (c *wsClient) sawExit() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.exited
 }
 
 // sinceCursor is the absolute seq this client has consumed: its handshake base

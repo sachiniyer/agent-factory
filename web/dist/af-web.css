@@ -320,11 +320,28 @@ body {
 }
 .af-term-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  justify-content: space-between;
   gap: 0.6rem;
   padding: 0.5rem 0.9rem;
   border-bottom: 1px solid var(--af-border);
   background: var(--af-surface);
+}
+.af-term-head-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.af-term-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+}
+.af-term-action {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.75rem;
 }
 .af-term-title {
   font-size: 0.85rem;
@@ -357,6 +374,138 @@ body {
 }
 .af-term-host .xterm {
   height: 100%;
+}
+.af-rail-new {
+  padding: 0.25rem 0.55rem;
+  background: transparent;
+  color: var(--af-accent);
+  border: 1px solid var(--af-accent);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.af-rail-new:hover {
+  background: rgba(47, 129, 247, 0.12);
+}
+.af-danger {
+  padding: 0.4rem 0.75rem;
+  background: transparent;
+  color: var(--af-error);
+  border: 1px solid var(--af-error);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.af-danger:hover {
+  background: rgba(248, 81, 73, 0.12);
+}
+.af-danger:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.af-modal-host {
+  position: relative;
+  z-index: 20;
+}
+.af-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(1, 4, 9, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 20;
+}
+.af-modal-card {
+  width: 100%;
+  max-width: 30rem;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--af-surface);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  padding: 1.5rem;
+}
+.af-modal-busy {
+  opacity: 0.8;
+}
+.af-modal-title {
+  margin: 0 0 1rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.af-modal-form,
+.af-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.af-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.af-modal-label {
+  font-size: 0.72rem;
+  color: var(--af-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.af-input {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  background: var(--af-bg);
+  border: 1px solid var(--af-border);
+  border-radius: 6px;
+  color: var(--af-text);
+  font: inherit;
+  font-size: 0.88rem;
+}
+.af-input:focus {
+  outline: none;
+  border-color: var(--af-accent);
+}
+.af-textarea {
+  resize: vertical;
+  min-height: 3rem;
+}
+.af-check-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--af-muted);
+  cursor: pointer;
+}
+.af-modal-text {
+  margin: 0;
+  color: var(--af-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+.af-modal-error {
+  margin: 0;
+  color: var(--af-error);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.af-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 0.25rem;
+}
+.af-modal-foot .af-primary,
+.af-modal-foot .af-danger {
+  margin-top: 0;
 }
 @media (max-width: 640px) {
   .af-body {
