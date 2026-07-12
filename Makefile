@@ -6,6 +6,7 @@
 
 .PHONY: test-container remote-roundtrip-container ws-pty-roundtrip-container \
 	agent-server-roundtrip-container remote-agent-server-roundtrip-container \
+	backend-docker-roundtrip \
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
 	testbox-image lint-file-length docs
 
@@ -55,6 +56,16 @@ agent-server-roundtrip-container:
 # across the process boundary — inside the same container fence as the full suite.
 remote-agent-server-roundtrip-container:
 	scripts/testbox.sh test ./integration -run TestRemoteAgentServerRoundTrip
+
+# Flagship docker backend round-trip (#1592 Phase 4 PR4): runs a session in a
+# REAL container to parity — build a slim git+tmux+bash image, create a session
+# on backend=docker, drive the in-container `af agent-server` over wss://+token
+# (Provision/Launch → PTY input echo → preview/snapshot/alive), then Kill and
+# assert the container is reaped. Runs ON THE HOST (needs a real docker daemon);
+# it is NOT inside the testbox fence, which has no docker. SKIPS cleanly where
+# docker is unavailable. See docs/backends.md.
+backend-docker-roundtrip:
+	go test ./integration -run TestDockerBackendRoundTrip -v -count=1 -timeout 15m
 
 # Interactive TUI play-test sandbox: builds af inside, scaffolds a
 # throwaway AF home + mock project repo, drops you in a shell with a

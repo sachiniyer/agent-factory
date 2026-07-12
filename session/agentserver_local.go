@@ -52,7 +52,10 @@ func (i *Instance) AgentServer() AgentServer {
 	defer i.agentSrvMu.Unlock()
 	if i.agentSrv == nil {
 		if i.remoteClient != nil {
-			i.agentSrv = &remoteAgentServer{rc: i.remoteClient}
+			// teardown reaps the sandbox this session runs in (docker rm -f) after
+			// the remote Kill tears the in-sandbox workspace down — nil for the PR2
+			// out-of-process case (no sandbox to reap), set for a docker session.
+			i.agentSrv = &remoteAgentServer{rc: i.remoteClient, teardown: i.runtimeTeardown}
 		} else {
 			i.agentSrv = &localAgentServer{inst: i}
 		}

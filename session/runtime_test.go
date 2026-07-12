@@ -92,30 +92,45 @@ func TestLocalRuntimeProvision_Unchanged(t *testing.T) {
 	assert.Nil(t, res.Endpoint, "an in-process runtime exposes no remote endpoint")
 }
 
-// TestDockerSSHRuntime_NotImplemented proves docker and ssh are registered but
-// fail create with a clear, actionable error naming the PR that implements them
-// — and that the error echoes the configured image/host (so the config sections
-// are genuinely consumed).
-func TestDockerSSHRuntime_NotImplemented(t *testing.T) {
+// TestSSHRuntime_NotImplemented proves ssh is registered but fails create with a
+// clear, actionable error naming the PR that implements it — and that the error
+// echoes the configured host (so the ssh config section is genuinely consumed).
+func TestSSHRuntime_NotImplemented(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	writeInRepoConfig(t, repoRoot, map[string]any{
-		"backend": "docker",
-		"docker":  map[string]any{"image": "my-runtime:latest"},
+		"backend": "ssh",
 		"ssh":     map[string]any{"host": "build-box:2222"},
 	})
-
-	_, derr := dockerRuntime{}.Provision(ProvisionSpec{RepoRoot: repoRoot})
-	require.Error(t, derr)
-	assert.Contains(t, derr.Error(), "docker backend is not yet implemented")
-	assert.Contains(t, derr.Error(), "PR4")
-	assert.Contains(t, derr.Error(), "my-runtime:latest")
 
 	_, serr := sshRuntime{}.Provision(ProvisionSpec{RepoRoot: repoRoot})
 	require.Error(t, serr)
 	assert.Contains(t, serr.Error(), "ssh backend is not yet implemented")
 	assert.Contains(t, serr.Error(), "PR5")
 	assert.Contains(t, serr.Error(), "build-box:2222")
+}
+
+// TestDockerRuntime_ConfigValidation pins the docker runtime's cheap, hermetic
+// preconditions (no docker daemon needed): docker.image is required, and a fresh
+// repo with no origin remote fails with the actionable "no origin remote" error.
+// The real container round-trip lives in the integration package (docker-gated).
+func TestDockerRuntime_ConfigValidation(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	// backend=docker with no docker.image → clear "image required" error.
+	noImage := initTempGitRepo(t)
+	writeInRepoConfig(t, noImage, map[string]any{"backend": "docker", "docker": map[string]any{}})
+	_, err := dockerRuntime{}.Provision(ProvisionSpec{RepoRoot: noImage, Title: "s", CloneURL: "file:///x"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "docker.image")
+
+	// image set but no origin remote to clone from → actionable error, before any
+	// docker call.
+	withImage := initTempGitRepo(t)
+	writeInRepoConfig(t, withImage, map[string]any{"backend": "docker", "docker": map[string]any{"image": "my-runtime:latest"}})
+	_, err = dockerRuntime{}.Provision(ProvisionSpec{RepoRoot: withImage, Title: "s", CloneURL: ""})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "origin")
 }
 
 // fakeRuntime is a Runtime that returns a fixed provision result — used to
@@ -188,19 +203,22 @@ func TestDefaultBackendFactory_ConfigSelection(t *testing.T) {
 
 	t.Run("local default is a plain LocalBackend", func(t *testing.T) {
 		repoRoot := initTempGitRepo(t) // no in-repo config → local
-		b, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
+		res, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
 		require.NoError(t, err)
-		if _, ok := b.(*LocalBackend); !ok {
-			t.Fatalf("local default must be *LocalBackend, got %T", b)
+		if _, ok := res.Backend.(*LocalBackend); !ok {
+			t.Fatalf("local default must be *LocalBackend, got %T", res.Backend)
 		}
+		assert.Nil(t, res.Endpoint, "a local session exposes no remote endpoint")
 	})
 
-	t.Run("docker config fails not-implemented", func(t *testing.T) {
+	t.Run("docker config without image fails cleanly", func(t *testing.T) {
+		// A docker create with no docker.image errors before any docker call — the
+		// hermetic precondition. The real container path is the integration round-trip.
 		repoRoot := initTempGitRepo(t)
-		writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img"}})
+		writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{}})
 		_, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not yet implemented")
+		assert.Contains(t, err.Error(), "docker.image")
 	})
 
 	t.Run("hook config still builds a HookBackend", func(t *testing.T) {
@@ -213,10 +231,10 @@ func TestDefaultBackendFactory_ConfigSelection(t *testing.T) {
 				"delete_cmd": "echo",
 			},
 		})
-		b, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
+		res, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
 		require.NoError(t, err)
-		if _, ok := b.(*HookBackend); !ok {
-			t.Fatalf("backend=hook must build a *HookBackend, got %T", b)
+		if _, ok := res.Backend.(*HookBackend); !ok {
+			t.Fatalf("backend=hook must build a *HookBackend, got %T", res.Backend)
 		}
 	})
 

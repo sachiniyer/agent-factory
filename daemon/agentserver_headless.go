@@ -125,6 +125,12 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		Path:    opts.RepoPath,
 		Program: program,
 		AutoYes: opts.AutoYes,
+		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
+		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly
+		// so a workspace whose repo config declares backend=docker/ssh (cloned into
+		// the container by the docker runtime, #1592 Phase 4 PR4) does not make the
+		// agent-server recursively try to provision another sandbox inside itself.
+		Backend: session.BackendLocal,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to build workspace instance: %w", err)

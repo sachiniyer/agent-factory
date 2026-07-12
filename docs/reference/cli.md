@@ -892,7 +892,7 @@ af sessions create [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, hook; defaults to the repo's backend config, or local). docker/ssh are not yet implemented |
+| `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh is not yet implemented |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
 | `--in-place` |  | Alias for --here |
 | `--name` | `string` | Session name (required) |

@@ -109,11 +109,22 @@ func (c *tmuxClientlessChannel) Resize(rows, cols uint16) error {
 	return c.ts.ResizeWindow(int(cols), int(rows))
 }
 
-// pipePaneCommand builds the `cat >> <fifo>` shell snippet handed to pipe-pane
-// (tmux runs it through /bin/sh). The FIFO path is single-quoted so a home dir
-// with spaces or shell metacharacters cannot break the command.
+// pipePaneCommand builds the shell snippet handed to pipe-pane (tmux runs it
+// through /bin/sh) to copy the pane's live output into the broker's FIFO. The
+// FIFO path is single-quoted so a home dir with spaces or shell metacharacters
+// cannot break the command.
+//
+// It uses `dd` rather than `cat` because `cat` is NOT reliably unbuffered across
+// libc/coreutils implementations (#1592 Phase 4 PR4): busybox `cat` (musl/alpine,
+// the common docker BYO image base) block-buffers its stdout when it is a pipe,
+// so a session's live PTY output never streams — it sits in cat's buffer until
+// the pane closes, which breaks the WS stream inside a container while working on
+// a glibc host. `dd` does one read()→write() per block and writes each partial
+// read immediately, so it streams promptly EVERYWHERE while a large block size
+// keeps bulk output (a full-screen repaint, a fast log) as efficient as cat was.
+// dd's completion stats go to stderr, discarded here.
 func pipePaneCommand(fifoPath string) string {
-	return "cat >> " + shellSingleQuote(fifoPath)
+	return "dd of=" + shellSingleQuote(fifoPath) + " bs=65536 2>/dev/null"
 }
 
 // shellSingleQuote single-quotes s for safe interpolation into a /bin/sh command,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -52,6 +53,12 @@ import (
 // starts a real `af agent-server` on loopback and drives it through here.
 type remoteAgentServer struct {
 	rc *remoteAgentClient
+	// teardown reaps the sandbox the agent runs in AFTER the in-sandbox workspace
+	// is killed over REST (#1592 Phase 4 PR4): `docker rm -f` the container. nil
+	// for the PR2 out-of-process case (an `af agent-server` the test owns — nothing
+	// for this client to reap). Run best-effort in Kill so a session kill also
+	// removes its container; idempotent (the runtime guards it with a sync.Once).
+	teardown func() error
 
 	mu sync.Mutex
 	// brokers holds one lazy ptyBroker per tab index, exactly like localAgentServer
@@ -204,7 +211,17 @@ func (s *remoteAgentServer) Kill() error {
 	for _, br := range brokers {
 		br.close()
 	}
-	return s.rc.call("/v1/agent/kill", struct{}{}, nil)
+	// Kill the in-sandbox workspace over REST, THEN reap the sandbox itself. Both
+	// run even if the REST kill fails (the container must not leak because its
+	// agent-server was already down) — the errors are joined so a caller sees
+	// both. teardown is idempotent, so a Kill retry after a partial failure is safe.
+	killErr := s.rc.call("/v1/agent/kill", struct{}{}, nil)
+	if s.teardown != nil {
+		if terr := s.teardown(); terr != nil {
+			return errors.Join(killErr, terr)
+		}
+	}
+	return killErr
 }
 
 // --- remote WS clientlessChannel: the sandbox stream as a broker channel ---
