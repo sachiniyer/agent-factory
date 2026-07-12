@@ -138,9 +138,7 @@ var runtimeRegistry = map[BackendKind]func() Runtime{
 }
 
 // ResolveRuntime returns the Runtime registered for kind, or an error naming the
-// unknown backend. Every registered kind is constructible; the docker/ssh
-// runtimes construct fine but return a not-implemented error from Provision
-// until PR4/PR5.
+// unknown backend. Every registered kind is constructible.
 func ResolveRuntime(kind BackendKind) (Runtime, error) {
 	ctor, ok := runtimeRegistry[kind]
 	if !ok {
