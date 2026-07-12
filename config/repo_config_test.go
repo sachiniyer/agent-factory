@@ -20,8 +20,6 @@ func TestRepoConfigRemoteHooks(t *testing.T) {
 		cfg := &RepoConfig{
 			RemoteHooks: &RemoteHooks{
 				LaunchCmd: "/usr/local/bin/launch.sh",
-				ListCmd:   "/usr/local/bin/list.sh",
-				AttachCmd: "/usr/local/bin/attach.sh",
 				DeleteCmd: "/usr/local/bin/delete.sh",
 			},
 		}
@@ -33,8 +31,6 @@ func TestRepoConfigRemoteHooks(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, loaded.RemoteHooks)
 		assert.Equal(t, "/usr/local/bin/launch.sh", loaded.RemoteHooks.LaunchCmd)
-		assert.Equal(t, "/usr/local/bin/list.sh", loaded.RemoteHooks.ListCmd)
-		assert.Equal(t, "/usr/local/bin/attach.sh", loaded.RemoteHooks.AttachCmd)
 		assert.Equal(t, "/usr/local/bin/delete.sh", loaded.RemoteHooks.DeleteCmd)
 	})
 
@@ -86,8 +82,6 @@ func TestRepoConfigRemoteHooks(t *testing.T) {
 			PostWorktreeCommands: []string{"npm install", "make build"},
 			RemoteHooks: &RemoteHooks{
 				LaunchCmd: "/bin/launch",
-				ListCmd:   "/bin/list",
-				AttachCmd: "/bin/attach",
 				DeleteCmd: "/bin/delete",
 			},
 		}
@@ -105,12 +99,10 @@ func TestRepoConfigRemoteHooks(t *testing.T) {
 
 func TestRemoteHooksJSON(t *testing.T) {
 	t.Run("marshals correctly", func(t *testing.T) {
+		// Post-PR7 the only working keys are launch_cmd and delete_cmd.
 		hooks := RemoteHooks{
-			LaunchCmd:   "/path/to/launch.sh",
-			ListCmd:     "/path/to/list.sh",
-			AttachCmd:   "/path/to/attach.sh",
-			DeleteCmd:   "/path/to/delete.sh",
-			TerminalCmd: "/path/to/terminal.sh",
+			LaunchCmd: "/path/to/launch.sh",
+			DeleteCmd: "/path/to/delete.sh",
 		}
 
 		data, err := json.Marshal(hooks)
@@ -121,30 +113,35 @@ func TestRemoteHooksJSON(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, "/path/to/launch.sh", parsed["launch_cmd"])
-		assert.Equal(t, "/path/to/list.sh", parsed["list_cmd"])
-		assert.Equal(t, "/path/to/attach.sh", parsed["attach_cmd"])
 		assert.Equal(t, "/path/to/delete.sh", parsed["delete_cmd"])
-		assert.Equal(t, "/path/to/terminal.sh", parsed["terminal_cmd"])
-	})
-
-	t.Run("empty terminal_cmd is omitted from JSON", func(t *testing.T) {
-		// terminal_cmd is optional, so configs that never set it round-trip
-		// byte-identically to the pre-#843 format.
-		data, err := json.Marshal(RemoteHooks{LaunchCmd: "/a"})
-		require.NoError(t, err)
+		// The removed tripwire keys are omitempty, so a clean config never
+		// serializes them.
+		assert.NotContains(t, string(data), "list_cmd")
+		assert.NotContains(t, string(data), "attach_cmd")
 		assert.NotContains(t, string(data), "terminal_cmd")
 	})
 
 	t.Run("unmarshals correctly", func(t *testing.T) {
-		jsonStr := `{"launch_cmd":"/a","list_cmd":"/b","attach_cmd":"/c","delete_cmd":"/d","terminal_cmd":"/e"}`
+		jsonStr := `{"launch_cmd":"/a","delete_cmd":"/d"}`
 		var hooks RemoteHooks
 		err := json.Unmarshal([]byte(jsonStr), &hooks)
 		require.NoError(t, err)
 		assert.Equal(t, "/a", hooks.LaunchCmd)
-		assert.Equal(t, "/b", hooks.ListCmd)
-		assert.Equal(t, "/c", hooks.AttachCmd)
 		assert.Equal(t, "/d", hooks.DeleteCmd)
-		assert.Equal(t, "/e", hooks.TerminalCmd)
+	})
+
+	t.Run("stale pre-PR7 keys unmarshal into tripwire fields", func(t *testing.T) {
+		// A config written before the provision-and-expose migration still
+		// carries list_cmd/attach_cmd/terminal_cmd; they decode into the
+		// Removed* tripwire fields so Validate can reject them with a
+		// migration message rather than silently dropping them.
+		jsonStr := `{"launch_cmd":"/a","delete_cmd":"/d","list_cmd":"/b","attach_cmd":"/c","terminal_cmd":"/e"}`
+		var hooks RemoteHooks
+		err := json.Unmarshal([]byte(jsonStr), &hooks)
+		require.NoError(t, err)
+		assert.Equal(t, "/b", hooks.RemovedListCmd)
+		assert.Equal(t, "/c", hooks.RemovedAttachCmd)
+		assert.Equal(t, "/e", hooks.RemovedTerminalCmd)
 	})
 
 	t.Run("omitted when nil in RepoConfig", func(t *testing.T) {
@@ -164,8 +161,6 @@ func TestRemoteHooksJSON(t *testing.T) {
 		cfg := &RepoConfig{
 			RemoteHooks: &RemoteHooks{
 				LaunchCmd: "/x/launch",
-				ListCmd:   "/x/list",
-				AttachCmd: "/x/attach",
 				DeleteCmd: "/x/delete",
 			},
 		}
@@ -243,40 +238,21 @@ func TestSaveRepoConfigAtomicWrite(t *testing.T) {
 	})
 }
 
-// TestRemoteHooksValidate covers the fail-fast guard added for #738: empty
-// (or whitespace-only) command strings for launch_cmd, attach_cmd, or
-// delete_cmd must produce an actionable error naming the offending field
-// rather than deferring to exec.Command's cryptic "exec: no command" at
-// operation time. list_cmd is intentionally optional (import/sync treat an
-// empty list_cmd as "no remote sessions to enumerate").
+// TestRemoteHooksValidate covers the post-PR7 provision-and-expose contract:
+// launch_cmd and delete_cmd are both required (the #738 fail-fast guard against
+// exec.Command's cryptic "exec: no command"), and any of the removed pre-PR7
+// keys (list_cmd/attach_cmd/terminal_cmd) must be rejected with an actionable
+// migration error rather than silently ignored.
 func TestRemoteHooksValidate(t *testing.T) {
 	full := func() RemoteHooks {
 		return RemoteHooks{
 			LaunchCmd: "/bin/launch",
-			ListCmd:   "/bin/list",
-			AttachCmd: "/bin/attach",
 			DeleteCmd: "/bin/delete",
 		}
 	}
 
-	t.Run("fully populated is valid", func(t *testing.T) {
+	t.Run("launch_cmd + delete_cmd is valid", func(t *testing.T) {
 		assert.NoError(t, full().Validate())
-	})
-
-	t.Run("empty list_cmd is allowed", func(t *testing.T) {
-		h := full()
-		h.ListCmd = ""
-		assert.NoError(t, h.Validate())
-	})
-
-	t.Run("empty terminal_cmd is allowed", func(t *testing.T) {
-		// terminal_cmd is optional (#843): empty just disables the Terminal
-		// tab for remote sessions, it is never a validation error. full()
-		// leaves it empty, and setting it must validate too.
-		assert.NoError(t, full().Validate())
-		h := full()
-		h.TerminalCmd = "/bin/terminal"
-		assert.NoError(t, h.Validate())
 	})
 
 	cases := []struct {
@@ -286,8 +262,8 @@ func TestRemoteHooksValidate(t *testing.T) {
 	}{
 		{"empty launch_cmd", func(h *RemoteHooks) { h.LaunchCmd = "" }, "remote_hooks.launch_cmd is required"},
 		{"whitespace launch_cmd", func(h *RemoteHooks) { h.LaunchCmd = "   " }, "remote_hooks.launch_cmd is required"},
-		{"empty attach_cmd", func(h *RemoteHooks) { h.AttachCmd = "" }, "remote_hooks.attach_cmd is required"},
 		{"empty delete_cmd", func(h *RemoteHooks) { h.DeleteCmd = "" }, "remote_hooks.delete_cmd is required"},
+		{"whitespace delete_cmd", func(h *RemoteHooks) { h.DeleteCmd = "   " }, "remote_hooks.delete_cmd is required"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -296,6 +272,32 @@ func TestRemoteHooksValidate(t *testing.T) {
 			err := h.Validate()
 			require.Error(t, err)
 			assert.EqualError(t, err, tc.wantMsg)
+		})
+	}
+}
+
+// TestRemoteHooksValidateMigration verifies the tripwire guard: a stale config
+// still carrying any pre-PR7 key (list_cmd/attach_cmd/terminal_cmd) fails
+// Validate with the provision-and-expose migration message naming the offending
+// key, even when launch_cmd/delete_cmd are otherwise valid.
+func TestRemoteHooksValidateMigration(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*RemoteHooks)
+		wantKey string
+	}{
+		{"list_cmd set", func(h *RemoteHooks) { h.RemovedListCmd = "/bin/list" }, "remote_hooks.list_cmd"},
+		{"attach_cmd set", func(h *RemoteHooks) { h.RemovedAttachCmd = "/bin/attach" }, "remote_hooks.attach_cmd"},
+		{"terminal_cmd set", func(h *RemoteHooks) { h.RemovedTerminalCmd = "/bin/terminal" }, "remote_hooks.terminal_cmd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := RemoteHooks{LaunchCmd: "/bin/launch", DeleteCmd: "/bin/delete"}
+			tc.mutate(&h)
+			err := h.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantKey)
+			assert.Contains(t, err.Error(), "was removed in the provision-and-expose migration")
 		})
 	}
 }
@@ -355,21 +357,14 @@ func TestResolveHookCommandPathWhitespace(t *testing.T) {
 // config struct.
 func TestRemoteHooksResolveCommandPaths(t *testing.T) {
 	orig := RemoteHooks{
-		LaunchCmd:   "./hooks/launch.sh",
-		ListCmd:     "/abs/list.sh",
-		AttachCmd:   "ssh-attach",
-		DeleteCmd:   "hooks/delete.sh",
-		TerminalCmd: "./hooks/terminal.sh",
+		LaunchCmd: "./hooks/launch.sh",
+		DeleteCmd: "hooks/delete.sh",
 	}
 	resolved := orig.resolveCommandPaths("/repo")
 
 	assert.Equal(t, "/repo/hooks/launch.sh", resolved.LaunchCmd)
-	assert.Equal(t, "/abs/list.sh", resolved.ListCmd)
-	assert.Equal(t, "ssh-attach", resolved.AttachCmd)
 	assert.Equal(t, "/repo/hooks/delete.sh", resolved.DeleteCmd)
-	assert.Equal(t, "/repo/hooks/terminal.sh", resolved.TerminalCmd)
 
 	assert.Equal(t, "./hooks/launch.sh", orig.LaunchCmd, "receiver must not be mutated")
 	assert.Equal(t, "hooks/delete.sh", orig.DeleteCmd, "receiver must not be mutated")
-	assert.Equal(t, "./hooks/terminal.sh", orig.TerminalCmd, "receiver must not be mutated")
 }

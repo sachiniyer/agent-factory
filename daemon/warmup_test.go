@@ -63,11 +63,6 @@ func TestControlServer_WarmupGatesStateRPCs(t *testing.T) {
 	if !IsDaemonStartingErr(err) {
 		t.Fatalf("SendPrompt during warm-up: want daemon-starting error, got: %v", err)
 	}
-	var importResp ImportRemoteHookSessionsResponse
-	err = callDaemonNoEnsure("ImportRemoteHookSessions", ImportRemoteHookSessionsRequest{RepoPath: repoPath}, &importResp)
-	if !IsDaemonStartingErr(err) {
-		t.Fatalf("ImportRemoteHookSessions during warm-up: want daemon-starting error, got: %v", err)
-	}
 
 	// ReloadTasks acks during warm-up: the caller's tasks.json write is
 	// durable and RunDaemon reloads it right after the restore completes.

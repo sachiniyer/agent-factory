@@ -38,9 +38,6 @@ func (i *Instance) ToInstanceData() InstanceData {
 	if i.backend != nil {
 		data.BackendType = i.backend.Type()
 	}
-	if i.remoteMeta != nil {
-		data.RemoteMeta = i.remoteMeta
-	}
 
 	// Persist the usage-limit reset time only while the session is actually
 	// limit-blocked (#1146). Gating on the liveness keeps a recovered session
@@ -142,24 +139,18 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		AutoYes:      data.AutoYes,
 		Prompt:       data.Prompt,
 		userKilled:   data.UserKilled,
-		remoteMeta:   data.RemoteMeta,
 	}
 
 	// Pick backend based on persisted BackendType.
 	switch {
-	case data.BackendType == "remote":
-		hook, err := loadHookBackendForPath(data.Path)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load remote hooks config: %w", err)
-		}
-		instance.backend = hook
 	case isSandboxBackendType(data.BackendType):
-		// A sandbox session (docker/ssh, #1592 Phase 4 PR6) has no daemon-side
-		// worktree or tmux to reconstruct — its workspace lived in a
-		// container/remote that does not survive a daemon restart; only its pushed
-		// branch on origin does. Rebuild only an INERT sandbox backend so the row
-		// still classifies as its runtime (Type/Capabilities) for archive +
-		// restore; the live runtime is re-provisioned on restore, never
+		// A sandbox session (docker/ssh/hook, #1592 Phase 4 PR6/PR7) has no
+		// daemon-side worktree or tmux to reconstruct — its workspace lived in a
+		// container/remote/user-provisioned sandbox that does not survive a daemon
+		// restart; only its pushed branch on origin does. Rebuild only an INERT
+		// sandbox backend so the row still classifies as its runtime
+		// (Type/Capabilities) for archive + restore; the live runtime is
+		// re-provisioned on restore (re-running launch_cmd for hook), never
 		// reconstructed here.
 		instance.backend = newInertSandboxBackend(data.BackendType)
 	default:

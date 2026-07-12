@@ -265,22 +265,9 @@ func TestHandleCloseTabAgentTabNoOp(t *testing.T) {
 	require.Contains(t, h.errBox.String(), "agent tab can't be closed")
 }
 
-// TestHandleNewTabRemoteShowsMessage: new-tab is unsupported for remote
-// instances and creates nothing.
-func TestHandleNewTabRemoteShowsMessage(t *testing.T) {
-	h := newTestHome(t)
-	inst, err := session.NewInstance(session.InstanceOptions{Title: "remote", Path: t.TempDir(), Program: "claude"})
-	require.NoError(t, err)
-	inst.SetBackend(&session.HookBackend{})
-	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote)
-	selectInstance(h, inst)
-
-	_, _ = h.handleNewTab()
-
-	require.Equal(t, 0, inst.TabCount(), "remote instances must not gain a local tab")
-	h.errBox.SetSize(200, 1)
-	require.Contains(t, h.errBox.String(), "remote")
-}
+// TestHandleNewTabRemoteShowsMessage removed — remote (hook) backends now have
+// full local parity including TabManagement, so new-tab is supported for remote
+// instances rather than rejected with a message. // #1592 Phase 4 PR7
 
 // TestHandleTabJump covers the number-key jump handler: in range jumps, out of
 // range is a no-op.

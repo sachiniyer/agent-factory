@@ -163,60 +163,11 @@ func TestMenuNewInstanceShowsSubmitProgramAndCancel(t *testing.T) {
 	}
 }
 
-// TestMenuRemoteInstanceOmitsUnsupportedTabKeys guards against regressing #988:
-// remote instances block `t` (new tab) and `w` (close tab) — those handlers
-// reject backends without the TabManagement capability with an error — so the
-// footer menu must only surface the tab keys that actually work (cycle / 1-9
-// jump), while local instances keep
-// the full set.
-func TestMenuRemoteInstanceOmitsUnsupportedTabKeys(t *testing.T) {
-	remote := readyUIInstance()
-	remote.SetBackend(&session.HookBackend{})
-	if remote.Capabilities().Workspace != session.WorkspaceRemote {
-		t.Fatal("sanity: instance should report as remote")
-	}
-
-	m := NewMenu()
-	m.SetInstance(remote)
-
-	var gotNewTab, gotCloseTab, gotTab, gotJump int
-	for _, k := range m.options {
-		switch k {
-		case keys.KeyNewTab:
-			gotNewTab++
-		case keys.KeyCloseTab:
-			gotCloseTab++
-		case keys.KeyTab:
-			gotTab++
-		case keys.KeyJumpTab:
-			gotJump++
-		}
-	}
-	if gotNewTab != 0 || gotCloseTab != 0 {
-		t.Errorf("remote menu must not surface t/w tab keys; got newTab=%d closeTab=%d", gotNewTab, gotCloseTab)
-	}
-	if gotTab != 1 || gotJump != 1 {
-		t.Errorf("remote menu should still surface tab cycle and 1-9 jump; got tab=%d jump=%d", gotTab, gotJump)
-	}
-
-	local := readyUIInstance()
-	if local.Capabilities().Workspace == session.WorkspaceRemote {
-		t.Fatal("sanity: instance should report as local")
-	}
-	m.SetInstance(local)
-	var localNewTab, localCloseTab int
-	for _, k := range m.options {
-		switch k {
-		case keys.KeyNewTab:
-			localNewTab++
-		case keys.KeyCloseTab:
-			localCloseTab++
-		}
-	}
-	if localNewTab != 1 || localCloseTab != 1 {
-		t.Errorf("local menu should surface t/w tab keys; got newTab=%d closeTab=%d", localNewTab, localCloseTab)
-	}
-}
+// (removed) TestMenuRemoteInstanceOmitsUnsupportedTabKeys — obsolete after
+// #1592 Phase 4 PR7: the remote HookBackend now reports full parity
+// (TabManagement=true), so a remote instance surfaces the t/w tab keys exactly
+// like a local one. The "remote omits unsupported tab keys" behavior it guarded
+// no longer exists.
 
 func TestMenuNormalWidthSurfacesTabAndPaneManagement(t *testing.T) {
 	m := NewMenu()

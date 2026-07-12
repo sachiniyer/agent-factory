@@ -3,16 +3,13 @@ package ui
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -106,22 +103,6 @@ func makeShellInstance(t *testing.T, title, captureContent string) *session.Inst
 	_, err = inst.AddShellTab()
 	require.NoError(t, err)
 	return inst
-}
-
-// makeRemoteInstance creates a started instance backed by a HookBackend with the
-// given hooks.
-func makeRemoteInstance(t *testing.T, title string, hooks config.RemoteHooks) *session.Instance {
-	t.Helper()
-	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:   title,
-		Path:    t.TempDir(),
-		Program: "claude",
-	})
-	require.NoError(t, err)
-	instance.SetBackend(&session.HookBackend{Hooks: hooks})
-	instance.SetStartedForTest(true)
-	require.True(t, instance.Capabilities().Workspace == session.WorkspaceRemote, "precondition: instance must report as remote")
-	return instance
 }
 
 func TestTabPaneShellUpdateContent(t *testing.T) {
@@ -605,73 +586,11 @@ func TestTabPaneShellScrollModeAlreadyDead(t *testing.T) {
 		"stale terminal content must not remain on screen for an already-dead shell (#998)")
 }
 
-// TestTabPaneRemoteFallbackStates covers the #843 Terminal-tab UX for remote
-// sessions on the merged pane.
-func TestTabPaneRemoteFallbackStates(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	t.Run("terminal_cmd configured shows attach prompt", func(t *testing.T) {
-		inst := makeRemoteInstance(t, "remote-843-on", config.RemoteHooks{TerminalCmd: "/bin/true"})
-		p := NewTabPane(previewFromInstance)
-		p.SetSize(80, 30)
-		require.NoError(t, p.UpdateContent(inst, 1))
-		p.mu.Lock()
-		require.True(t, p.content.fallback)
-		p.mu.Unlock()
-		require.Contains(t, p.String(), "Press Enter to open a terminal")
-	})
-
-	t.Run("terminal_cmd absent keeps not-available fallback", func(t *testing.T) {
-		inst := makeRemoteInstance(t, "remote-843-off", config.RemoteHooks{})
-		p := NewTabPane(previewFromInstance)
-		p.SetSize(80, 30)
-		require.NoError(t, p.UpdateContent(inst, 1))
-		p.mu.Lock()
-		require.True(t, p.content.fallback)
-		require.Contains(t, p.content.text, "not available for remote sessions")
-		require.Contains(t, p.content.text, "terminal_cmd")
-		p.mu.Unlock()
-	})
-}
-
-// TestTabbedWindowAttachTerminalRemote verifies the shell-tab attach path for
-// remote instances (#843) via AttachTerminalTab: with
-// terminal_cmd configured it runs the hook (with the session slug); without it
-// the attach is refused with an error naming terminal_cmd.
-func TestTabbedWindowAttachTerminalRemote(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	t.Run("not configured refuses with actionable error", func(t *testing.T) {
-		inst := makeRemoteInstance(t, "remote-843-noattach", config.RemoteHooks{})
-		_, err := AttachTerminalTab(inst, 1)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "terminal_cmd")
-	})
-
-	t.Run("configured runs terminal_cmd with the session slug", func(t *testing.T) {
-		dir := t.TempDir()
-		argsFile := filepath.Join(dir, "terminal-args")
-		script := filepath.Join(dir, "terminal.sh")
-		require.NoError(t, os.WriteFile(script,
-			[]byte("#!/bin/sh\necho \"$1\" > \""+argsFile+"\"\n"), 0755))
-
-		inst := makeRemoteInstance(t, "remote-843-attach", config.RemoteHooks{TerminalCmd: script})
-		done, err := AttachTerminalTab(inst, 1)
-		require.NoError(t, err)
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("terminal_cmd did not exit")
-		}
-
-		raw, err := os.ReadFile(argsFile)
-		require.NoError(t, err, "terminal_cmd should have run")
-		require.Equal(t, session.Slugify("remote-843-attach"), strings.TrimSpace(string(raw)),
-			"terminal_cmd must receive the session slug")
-	})
-}
+// (removed) TestTabPaneRemoteFallbackStates and TestTabbedWindowAttachTerminalRemote
+// — obsolete after #1592 Phase 4 PR7: the remote terminal_cmd terminal tab and
+// hook attach proxy are deleted. A remote session now carries only its agent tab
+// (docker/ssh baseline), so there is no remote terminal-tab fallback or
+// terminal_cmd attach path to exercise.
 
 // TestTabbedWindowAttachTerminalRefusesNil guards the #716 captured-instance
 // contract: AttachTerminalTab(nil) must error, and an instance with no

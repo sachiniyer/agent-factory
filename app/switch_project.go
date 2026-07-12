@@ -253,10 +253,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 
 	// Re-prime the projection from the new project's snapshot (scoped to the new
 	// repoID by the daemon — no cross-repo bleed). Persisted remote-hook sessions
-	// arrive on this snapshot too; the launch-time importRemoteHookSessions
-	// discovery is deliberately NOT re-run here because it resolves the CWD repo,
-	// not the switched-to one — newly-discovered remote sessions surface on the
-	// next launch instead.
+	// arrive on this snapshot too.
 	if err := m.coldStartFromSnapshot(); err != nil {
 		return m, m.handleError(fmt.Errorf("failed to load sessions for %s: %w", filepath.Base(repo.Root), err))
 	}

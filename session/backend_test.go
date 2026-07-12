@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -59,7 +58,7 @@ func TestLocalBackendType(t *testing.T) {
 }
 
 func TestHookBackendType(t *testing.T) {
-	b := &HookBackend{Hooks: config.RemoteHooks{}}
+	b := &HookBackend{}
 	assert.Equal(t, "remote", b.Type())
 }
 
@@ -67,8 +66,9 @@ func TestHookBackendType(t *testing.T) {
 // Phase 1). This is the interface-compliance / parity contract: the daemon and
 // UI branch on these bits instead of Type()=="remote", so a regression that
 // silently flips a capability (e.g. a new backend forgetting Archive) is caught
-// here rather than in a lifecycle gate. HookBackend.TerminalTab is asserted to
-// track the terminal_cmd hook, the one config-dependent capability.
+// here rather than in a lifecycle gate. Since #1592 Phase 4 PR7 the remote-hook
+// backend advertises FULL parity like docker/ssh (its old terminal_cmd-gated
+// TerminalTab and ErrRecoverUnsupported are gone).
 func TestBackendCapabilities(t *testing.T) {
 	localCaps := Capabilities{
 		Workspace:        WorkspaceLocalWorktree,
@@ -96,29 +96,21 @@ func TestBackendCapabilities(t *testing.T) {
 			want: localCaps,
 		},
 		{
-			name: "remote hook without terminal_cmd",
-			b:    &HookBackend{Hooks: config.RemoteHooks{}},
+			// #1592 Phase 4 PR7: the remote-hook backend is migrated to
+			// provision-and-expose and reaches the SAME full parity as docker/ssh —
+			// a remote workspace, but every capability true (Archive/Recover via
+			// push/pull-branch + re-running launch_cmd). No per-config TerminalTab
+			// gating, no ErrRecoverUnsupported.
+			name: "remote hook runtime — full remote parity",
+			b:    &HookBackend{},
 			want: Capabilities{
 				Workspace:        WorkspaceRemote,
 				Attach:           true,
-				Archive:          false,
-				Recover:          false,
-				TabManagement:    false,
-				TerminalTab:      false,
-				InteractiveInput: false,
-			},
-		},
-		{
-			name: "remote hook with terminal_cmd flips TerminalTab on",
-			b:    &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: "/bin/ssh host"}},
-			want: Capabilities{
-				Workspace:        WorkspaceRemote,
-				Attach:           true,
-				Archive:          false,
-				Recover:          false,
-				TabManagement:    false,
+				Archive:          true,
+				Recover:          true,
+				TabManagement:    true,
 				TerminalTab:      true,
-				InteractiveInput: false,
+				InteractiveInput: true,
 			},
 		},
 		{
@@ -361,7 +353,7 @@ func TestInstanceCapabilitiesWorkspace(t *testing.T) {
 		assert.Equal(t, WorkspaceLocalWorktree, i.Capabilities().Workspace)
 	})
 	t.Run("hook backend", func(t *testing.T) {
-		i := &Instance{backend: &HookBackend{Hooks: config.RemoteHooks{}}}
+		i := &Instance{backend: &HookBackend{}}
 		assert.Equal(t, WorkspaceRemote, i.Capabilities().Workspace)
 	})
 	t.Run("nil backend reports local parity", func(t *testing.T) {
@@ -370,45 +362,12 @@ func TestInstanceCapabilitiesWorkspace(t *testing.T) {
 	})
 }
 
-// --- HookBackend with real scripts ---
-
-// writeScript writes an executable shell script to the given path.
+// writeScript writes an executable shell script to the given path. Shared by
+// the local-restore terminal tests.
 func writeScript(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	err := os.WriteFile(path, []byte("#!/bin/sh\n"+content), 0755)
 	require.NoError(t, err)
 	return path
-}
-
-// makeHooks creates a set of fake hook scripts in a temp dir and returns
-// a HookBackend configured to use them.
-func makeHooks(t *testing.T) *HookBackend {
-	t.Helper()
-	return makeHooksWithListName(t, Slugify("test-session"))
-}
-
-// makeHooksWithListName is like makeHooks but lets the caller control
-// which session name the list_cmd will report.
-func makeHooksWithListName(t *testing.T, listName string) *HookBackend {
-	t.Helper()
-	dir := t.TempDir()
-
-	launchCmd := writeScript(t, dir, "launch.sh",
-		`echo '{"name": "'"$2"'", "status": "running"}'`)
-	listCmd := writeScript(t, dir, "list.sh",
-		`echo '[{"name": "`+listName+`", "status": "running"}]'`)
-	attachCmd := writeScript(t, dir, "attach.sh",
-		`echo "attached to $1"; sleep 0.1`)
-	deleteCmd := writeScript(t, dir, "delete.sh",
-		`echo '{"name": "'"$2"'", "deleted": true}'`)
-
-	return &HookBackend{
-		Hooks: config.RemoteHooks{
-			LaunchCmd: launchCmd,
-			ListCmd:   listCmd,
-			AttachCmd: attachCmd,
-			DeleteCmd: deleteCmd,
-		},
-	}
 }

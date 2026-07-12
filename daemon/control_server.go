@@ -365,18 +365,6 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	return nil
 }
 
-func (s *controlServer) ImportRemoteHookSessions(req ImportRemoteHookSessionsRequest, resp *ImportRemoteHookSessionsResponse) error {
-	if err := s.requireManagerReady(); err != nil {
-		return err
-	}
-	data, err := s.manager.ImportRemoteHookSessions(req)
-	if err != nil {
-		return err
-	}
-	resp.Instances = data
-	return nil
-}
-
 // daemonSpawnLockTarget returns the lock target whose adjacent flock file
 // (daemon.spawn.lock, via config.WithFileLock) serializes the daemon spawn
 // window across processes.

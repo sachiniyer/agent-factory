@@ -62,7 +62,6 @@ type InstanceData struct {
 	Worktree          GitWorktreeData        `json:"worktree"`
 	PRInfo            PRInfoData             `json:"pr_info,omitempty"`
 	BackendType       string                 `json:"backend_type,omitempty"`
-	RemoteMeta        map[string]interface{} `json:"remote_meta,omitempty"`
 }
 
 // IsRemoteHook reports whether this serialized record is a remote hook session,

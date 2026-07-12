@@ -1,54 +1,241 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// HookBackend implements Backend by delegating to user-provided shell scripts.
-type HookBackend struct {
-	Hooks config.RemoteHooks
+// The remote-hook runtime (#1592 Phase 4 PR7) — the bring-your-own-provisioner
+// escape hatch, migrated to the SAME provision-and-expose contract as the
+// docker/ssh runtimes (a BREAKING clean-break; the old terminal/attach/preview/
+// enumeration machinery is deleted). Where the docker runtime runs a container
+// and the ssh runtime dials a host, the hook runtime shells out to a
+// user-provided launch_cmd that provisions the workspace on WHATEVER infra the
+// user owns (k8s, Modal, Daytona, a bespoke orchestrator) and starts an
+// `af agent-server` (PR1) there, echoing that server's authed wss:// URL. The
+// daemon then drives it through the remoteAgentServer HTTP/WS client (PR2)
+// exactly as it drives a docker/ssh (or local) session — no hook attach proxy,
+// no preview capture, no per-config terminal gating.
+//
+// Contract (docs/remote-hooks.md):
+//
+//	launch_cmd --name <slug> --title <title> --repo <cloneURL> \
+//	           [--branch <branch>] [--program <p>] [--auto-yes]
+//	    clones <cloneURL> (repo@branch on RESTORE) on the user's infra, starts
+//	    `af agent-server --listen :PORT --repo <clonedir> --title <title> …`
+//	    there, and echoes ONE JSON object on stdout:
+//	        {"url":"wss://host:port","token":"…","tls_fingerprint":"…"}
+//	delete_cmd --name <slug>
+//	    reaps whatever launch_cmd provisioned (the runtime teardown).
+//
+// This is the most direct provision-and-expose runtime: no container/tunnel of
+// our own, just the user's script handing us a URL. GitHub is still the durable
+// workspace store (archive pushes the branch + reaps via delete_cmd, restore
+// re-runs launch_cmd to re-provision + re-clone), so hook reaches FULL capability
+// parity like docker/ssh — no ErrRecoverUnsupported, no locality special-case.
 
-	// mu protects the pty fields below.
-	mu sync.Mutex
-	// ptys maps instance title → running attach PTY for preview capture.
-	ptys map[string]*hookPTY
+const (
+	// hookLaunchTimeout / hookDeleteTimeout bound the user-provided provisioning
+	// and teardown scripts. launch_cmd may pull an image, spin up a VM, or clone a
+	// large repo, so it gets a generous budget; delete_cmd is bounded tighter so a
+	// kill never hangs on an unreachable provisioner.
+	hookLaunchTimeout = 5 * time.Minute
+	hookDeleteTimeout = 60 * time.Second
+)
+
+// hookRuntime provisions a session on user-provided infrastructure via the
+// remote_hooks scripts (#1592 Phase 4 PR7). Declared in runtime.go's registry;
+// its Provision lives here (it replaces the pre-Phase-4 ForceRemote HookBackend
+// construction, which allocated a remote session id + terminal metadata).
+type hookRuntime struct{}
+
+func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
+	hooks, err := loadRemoteHooksForPath(spec.RepoRoot)
+	if err != nil {
+		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)
+	}
+	p := &hookProvisioner{hooks: hooks, spec: spec, slug: Slugify(spec.Title)}
+	res, err := p.provision()
+	if err != nil {
+		// launch_cmd may have provisioned a sandbox before failing to hand back a
+		// usable endpoint (e.g. it started the af agent-server but printed no/bad
+		// JSON); reap it via delete_cmd so nothing leaks on a partial failure.
+		p.reap()
+		return ProvisionResult{}, err
+	}
+	return res, nil
 }
+
+// hookProvisioner holds the state of one hook provisioning so its launch step
+// and its reap closure share the slug and the "did launch_cmd actually run"
+// flag that gates teardown.
+type hookProvisioner struct {
+	hooks config.RemoteHooks
+	spec  ProvisionSpec
+	slug  string
+
+	launched bool
+	reapOnce sync.Once
+}
+
+// hookEndpointJSON is the object launch_cmd echoes: the authed `af agent-server`
+// endpoint the daemon dials. It mirrors AgentServerEndpoint's fields under the
+// documented wire names (tls_fingerprint rather than fingerprint) — the same
+// three values docker/ssh read from their in-sandbox agent-server banner, here
+// handed back by the user's script instead.
+type hookEndpointJSON struct {
+	URL            string `json:"url"`
+	Token          string `json:"token"`
+	TLSFingerprint string `json:"tls_fingerprint"`
+}
+
+// provision runs launch_cmd, parses the endpoint it echoes, and returns the
+// wiring a hook session needs: an inert HookBackend (its one local job is the
+// delete_cmd reap), the authed endpoint the daemon dials, and the teardown.
+func (p *hookProvisioner) provision() (ProvisionResult, error) {
+	ep, err := p.launch()
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	teardown := p.reap
+	log.InfoLog.Printf("hook runtime: session %q provisioned via launch_cmd, agent-server at %s", p.spec.Title, ep.URL)
+	return ProvisionResult{
+		Backend:  &HookBackend{reap: teardown},
+		Endpoint: ep,
+		Teardown: teardown,
+	}, nil
+}
+
+// launch runs the user's launch_cmd with the provision spec as flags, then
+// recovers the {url,token,tls_fingerprint} JSON it echoes (stderr may interleave
+// progress, so extractJSON pulls the object out of the combined output, mirroring
+// how docker/ssh poll their agent-server banner file).
+func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
+	args := []string{
+		"--name", p.slug,
+		"--title", p.spec.Title,
+		"--repo", p.spec.CloneURL,
+	}
+	if branch := strings.TrimSpace(p.spec.RestoreBranch); branch != "" {
+		args = append(args, "--branch", branch)
+	}
+	if prog := strings.TrimSpace(p.spec.Program); prog != "" {
+		args = append(args, "--program", prog)
+	}
+	if p.spec.AutoYes {
+		args = append(args, "--auto-yes")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), hookLaunchTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, p.hooks.LaunchCmd, args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("launch_cmd failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	// launch_cmd exited 0, so it may have provisioned a sandbox; from here any
+	// failure must trigger the delete_cmd reap (via the caller's p.reap()).
+	p.launched = true
+
+	jsonStr := extractJSON(string(out))
+	if jsonStr == "" {
+		return nil, fmt.Errorf("launch_cmd returned no {\"url\",\"token\",\"tls_fingerprint\"} JSON in its output (see docs/remote-hooks.md for the recipe): %s", strings.TrimSpace(string(out)))
+	}
+	var ej hookEndpointJSON
+	if err := json.Unmarshal([]byte(jsonStr), &ej); err != nil {
+		return nil, fmt.Errorf("launch_cmd returned invalid endpoint JSON: %s: %w", jsonStr, err)
+	}
+	if strings.TrimSpace(ej.URL) == "" || strings.TrimSpace(ej.Token) == "" {
+		return nil, fmt.Errorf("launch_cmd endpoint JSON is missing url or token (got %s); it must echo the af agent-server's {\"url\",\"token\",\"tls_fingerprint\"}", jsonStr)
+	}
+	return &AgentServerEndpoint{
+		URL:         ej.URL,
+		Token:       ej.Token,
+		Fingerprint: ej.TLSFingerprint,
+	}, nil
+}
+
+// reap runs delete_cmd to tear down whatever launch_cmd provisioned, idempotently
+// and only if launch_cmd actually ran (nothing to delete otherwise). It backs the
+// session's Kill (after the in-sandbox workspace is torn down over REST), a
+// provisioning failure, and a bad-endpoint NewInstance failure — so a provisioned
+// sandbox is never leaked. The sync.Once collapses the repeated Kill retries and
+// the Kill-vs-provision-failure races to one delete_cmd.
+func (p *hookProvisioner) reap() error {
+	var reapErr error
+	p.reapOnce.Do(func() {
+		if !p.launched {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), hookDeleteTimeout)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, p.hooks.DeleteCmd, "--name", p.slug).CombinedOutput()
+		if err != nil {
+			reapErr = fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
+			log.WarningLog.Printf("%v", reapErr)
+			return
+		}
+		log.InfoLog.Printf("hook runtime: reaped remote session %q via delete_cmd", p.slug)
+	})
+	return reapErr
+}
+
+// HookBackend is the in-process Backend for a remote-hook session (#1592 Phase 4
+// PR7). Like sshBackend/dockerBackend, its agent-facing operations delegate to
+// the instance's remote AgentServer (the HTTP/WS client to the user-provisioned
+// `af agent-server`) — so lifecycle, preview, prompt, and liveness all go over
+// the wire. Its ONE local responsibility is running delete_cmd to reap the
+// provisioned sandbox, shared via the same idempotent closure with the
+// AgentServer Kill path.
+//
+// It stays EXPORTED (unlike sshBackend/dockerBackend) because it is the public
+// bring-your-own-provisioner escape hatch and the canonical remote-backend
+// stand-in in cross-package tests. A zero-value &HookBackend{} is a valid INERT
+// hook backend (nil reap — nothing live to tear down), which is exactly what
+// FromInstanceData rebuilds for a "remote" record loaded from disk and what
+// restore replaces wholesale via a fresh hookRuntime.Provision.
+type HookBackend struct {
+	// reap runs delete_cmd to tear down the provisioned sandbox; shared with the
+	// runtime's Teardown / the AgentServer Kill path, and idempotent (a sync.Once
+	// behind the closure). nil for an inert backend loaded from disk.
+	reap func() error
+}
+
+var _ Backend = (*HookBackend)(nil)
 
 func (b *HookBackend) Type() string { return "remote" }
 
-// Capabilities reports the remote hook runtime's descriptor (#1592 Phase 1): an
-// off-box workspace reachable via attach_cmd, with no local worktree/tmux, so
-// archive/recover/tab-management/raw-input are unsupported in v1. TerminalTab is
-// dynamic — it tracks whether the optional terminal_cmd hook is configured.
+// Capabilities advertises FULL parity for the remote-hook backend (#1592 Phase 4
+// PR7, epic §5) — identical to docker/ssh: the workspace is off-box, but
+// attach/preview/liveness/prompt/tabs work through the user-provisioned
+// agent-server, and Archive/Recover work by pushing the branch to GitHub and
+// re-running launch_cmd to re-provision a fresh sandbox that clones it back
+// (§5.1). Every capability is true — no ErrRecoverUnsupported, no per-config
+// TerminalTab gating (the in-sandbox agent-server manages tabs natively, so the
+// old terminal_cmd bit is gone).
 func (b *HookBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
 		Attach:           true,
-		Archive:          false,
-		Recover:          false,
-		TabManagement:    false,
-		TerminalTab:      b.HasTerminalCmd(),
-		InteractiveInput: false,
+		Archive:          true,
+		Recover:          true,
+		TabManagement:    true,
+		TerminalTab:      true,
+		InteractiveInput: true,
 	}
 }
 
-// Start brings a remote hook session up in two explicit phases (#1592 Phase 1
-// PR4): provision establishes the remote WORKSPACE (a fresh create runs
-// launch_cmd to allocate the remote session and records its metadata; a restore
-// verifies via list_cmd that the previously-allocated remote session still
-// exists), then launch starts WHAT drives it locally (the attach/preview process
-// via ensurePTY, the tab model, and the started flag). The split is
-// behavior-preserving: Start = provision then launch reproduces the pre-split
-// Start exactly (same order, side effects, and errors), and it mirrors the local
-// backend's provision/launch seam so the future agent-server model can swap the
-// provision half (spin up an off-box workspace) without touching launch.
+// Start provisions then launches the remote workspace. The sandbox +
+// agent-server were established by the runtime (during NewInstance); Start drives
+// the agent-server's own provision/launch over REST, so the in-sandbox LOCAL
+// backend creates the git worktree + branch and spawns the agent.
 func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	if err := b.Provision(i, firstTimeSetup); err != nil {
 		return err
@@ -56,290 +243,104 @@ func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
 	return b.Launch(i, firstTimeSetup)
 }
 
-// Provision establishes the remote workspace WITHOUT starting the local
-// preview/attach process (#1592 Phase 1 PR4). A fresh create runs launch_cmd to
-// allocate the remote session and records its metadata (remoteMeta + Branch); a
-// restore only verifies that the previously-allocated remote session is still
-// alive. It sets neither the started flag nor the tab model — those belong to
-// launch — so a provision failure returns before any of launch's work, exactly
-// as the pre-split Start's early error returns did.
+// Provision drives the remote agent-server's Provision over the wire (the clone
+// is already done by launch_cmd; this creates the in-sandbox git worktree).
 func (b *HookBackend) Provision(i *Instance, firstTimeSetup bool) error {
-	if strings.TrimSpace(i.Title) == "" {
-		return fmt.Errorf("instance title cannot be empty")
-	}
-
-	if !firstTimeSetup {
-		// Restoring from storage. Before marking the instance started,
-		// confirm that the remote session reported by list_cmd still
-		// exists. Without this check, deleted/expired remote sessions
-		// were restored and shown with a green Ready dot in the sidebar
-		// even though attaching was a silent no-op (#645).
-		//
-		// list_cmd is optional at config-validation time (import/sync treat
-		// an empty list_cmd as "no remote sessions to enumerate", #738), but
-		// restore has no other way to verify liveness. An empty list_cmd here
-		// would surface as an opaque exec failure from isAliveWithTimeout.
-		// Fail fast with an actionable message that names the missing field
-		// instead (#753).
-		if strings.TrimSpace(b.Hooks.ListCmd) == "" {
-			return fmt.Errorf("cannot restore remote session %q: list_cmd is required for restore (currently empty in config; add a list_cmd to remote_hooks so the agent can verify the remote session is still alive)", i.Title)
-		}
-		// Distinguish "list_cmd could not be run" from "list_cmd ran and the
-		// session is absent" (#841): the first is a local config/network
-		// problem, the second a remote deletion or rename. For the absent
-		// case, naming what list_cmd DID return makes a hook-script rename
-		// self-diagnosing instead of requiring a manual list_cmd run.
-		alive, listed, aliveErr := b.isAliveWithTimeout(i, restoreAliveTimeout)
-		if aliveErr != nil {
-			return fmt.Errorf("cannot verify remote session %q: %w", i.Title, aliveErr)
-		}
-		if !alive {
-			return fmt.Errorf("remote session %q no longer exists in list_cmd output%s", i.Title, formatListedNames(listed))
-		}
-		return nil
-	}
-
-	// Launch a new remote session.
-	slug := Slugify(i.Title)
-	args := []string{"--name", slug, "--json"}
-	cmd := exec.Command(b.Hooks.LaunchCmd, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("launch_cmd failed: %s: %w", string(out), err)
-	}
-
-	// launch_cmd exited 0, so the remote session may now exist on the remote
-	// host even though we have not yet parsed its metadata. From here on, any
-	// failure must trigger best-effort cleanup via delete_cmd, otherwise the
-	// remote session is orphaned: Start returns an error, the caller's Kill
-	// sees remoteMeta == nil and skips delete_cmd, and the session leaks
-	// permanently (#739). delete_cmd is invoked with the same slug launch_cmd
-	// received, which is the only identifier we have when the JSON is
-	// unparseable.
-
-	// The script writes progress to stderr and JSON to stdout.
-	// With CombinedOutput we get both mixed together. Try to find
-	// the first complete top-level JSON value in the output.
-	jsonStr := extractJSON(string(out))
-	if jsonStr == "" {
-		b.cleanupOrphanedLaunch(slug, i.Title)
-		return fmt.Errorf("launch_cmd returned no JSON in output: %s", string(out))
-	}
-
-	var meta map[string]interface{}
-	if err := json.Unmarshal([]byte(jsonStr), &meta); err != nil {
-		b.cleanupOrphanedLaunch(slug, i.Title)
-		return fmt.Errorf("launch_cmd returned invalid JSON: %s: %w", jsonStr, err)
-	}
-
-	i.mu.Lock()
-	i.remoteMeta = meta
-	if name, ok := meta["name"].(string); ok && i.Branch == "" {
-		i.Branch = name
-	}
-	i.mu.Unlock()
-
-	return nil
+	return i.AgentServer().Provision(firstTimeSetup)
 }
 
-// Launch starts the local machinery that drives the remote workspace Provision
-// established (#1592 Phase 1 PR4): the attach/preview process (ensurePTY), the
-// remote tab model (syncRemoteTabs), and the started flag. It preserves each
-// path's exact pre-split ordering and error handling — a restore treats a failed
-// preview process as fatal and only marks the instance started once the PTY is
-// up, while a fresh create marks it started first and logs a failed preview
-// best-effort (launch_cmd already succeeded, so the remote session is alive and
-// still attachable interactively).
+// Launch drives the remote agent-server's Launch (spawn the agent), sets the
+// started flag, and seeds the daemon-side tab model with the agent tab (the
+// sandbox owns the real tabs; the daemon-side list mirrors the agent tab so the
+// UI renders it, matching the docker/ssh baseline).
 func (b *HookBackend) Launch(i *Instance, firstTimeSetup bool) error {
-	if !firstTimeSetup {
-		if err := b.ensurePTY(i); err != nil {
-			return fmt.Errorf("failed to start preview process: %w", err)
-		}
-		i.mu.Lock()
-		i.started = true
-		i.mu.Unlock()
-		b.syncRemoteTabs(i)
-		return nil
+	if err := i.AgentServer().Launch(firstTimeSetup); err != nil {
+		return err
 	}
-
 	i.mu.Lock()
 	i.started = true
-	i.mu.Unlock()
-
-	b.syncRemoteTabs(i)
-
-	if err := b.ensurePTY(i); err != nil {
-		// launch_cmd succeeded so the remote session itself is alive; we
-		// just couldn't spin up the preview process. Log and continue —
-		// the user can still attach interactively.
-		log.WarningLog.Printf("hook backend: preview process failed for %s: %v", i.Title, err)
+	if len(i.Tabs) == 0 {
+		i.Tabs = []*Tab{newRemoteAgentTab()}
 	}
+	i.mu.Unlock()
 	return nil
 }
 
+// Kill runs the delete_cmd reap. Instance.Kill routes through the AgentServer
+// (which tears the in-sandbox workspace down over REST and then runs the same
+// reap), so this is normally reached only if something calls backend.Kill
+// directly; the shared idempotent reap makes either path safe.
 func (b *HookBackend) Kill(i *Instance) error {
-	slug := hookNameForInstance(i)
-
-	// Snapshot whether a remote session was ever allocated. If Start never ran
-	// successfully there is nothing for delete_cmd to clean up — invoking it
-	// would surface as a confusing failure against a slug the user-provided
-	// script has never heard of. Mirrors LocalBackend.Kill's
-	// tmuxSession/gitWorktree guards.
-	//
-	// Mark the instance as stopped BEFORE any resource cleanup so that the
-	// instance is in a consistent state even if delete_cmd fails. Otherwise
-	// the PTY could be closed while started=true, leaving the session
-	// appearing running but unusable (empty preview, broken attach).
-	//
-	// Crucially, do NOT clear remoteMeta here. The daemon retains and reuses
-	// the same *Instance pointer across RPC calls (a failed kill leaves the
-	// instance in m.instances), so if we cleared remoteMeta before delete_cmd
-	// succeeded, a retried Kill would compute hadRemote == false, skip
-	// delete_cmd, and return nil — silently leaking the remote session (#922).
-	// remoteMeta is only cleared once delete_cmd has actually torn the remote
-	// session down (below), so a retry after a delete_cmd failure runs it again.
 	i.mu.Lock()
-	hadRemote := i.remoteMeta != nil
 	i.started = false
 	i.mu.Unlock()
-
-	b.closePTY(i.Title)
-
-	if !hadRemote {
-		log.WarningLog.Printf("kill %q: skipping delete_cmd, no remote session allocated", i.Title)
-		return nil
+	if b.reap != nil {
+		return b.reap()
 	}
-
-	// runDeleteCmd is slow (network/SSH) so it runs WITHOUT the lock held.
-	out, err := b.runDeleteCmd(slug)
-	if err != nil {
-		// Leave remoteMeta intact so a subsequent Kill on this same Instance
-		// re-runs delete_cmd. The remote session may still be alive.
-		return fmt.Errorf("delete_cmd failed: %s: %w", string(out), err)
-	}
-
-	// delete_cmd succeeded: the remote session is gone, so clear remoteMeta.
-	// Concurrency: two Kills racing on the same Instance both read hadRemote
-	// == true before either clears it, so both may run delete_cmd. delete_cmd
-	// against an already-deleted session is the worst case (a redundant,
-	// typically idempotent call) — never a leak, which is the semantics we
-	// optimize for here. We re-take the lock only to clear the field.
-	i.mu.Lock()
-	i.remoteMeta = nil
-	i.mu.Unlock()
-
 	return nil
 }
 
-// CloseAttachOnly stops this instance's preview process (closing its PTY/pipe)
-// WITHOUT invoking delete_cmd, so a duplicate Instance built from disk (#867)
-// can be discarded without deleting the live remote session that a canonical,
-// still-tracked Instance shares. It is the non-destructive sibling of Kill,
-// which additionally runs delete_cmd to tear the remote session down.
+// CloseAttachOnly discards this instance's local view WITHOUT running delete_cmd
+// — used to drop a duplicate Instance built from disk that lost a race to the
+// canonical one (#867). Reaping here would tear down the sandbox the canonical
+// Instance shares, so it must not run.
 func (b *HookBackend) CloseAttachOnly(i *Instance) error {
 	i.mu.Lock()
 	i.started = false
 	i.mu.Unlock()
-
-	b.closePTY(i.Title)
 	return nil
 }
 
-// runDeleteCmd invokes delete_cmd for the given hook name and returns its
-// combined output and error. Shared by Kill (which surfaces the error to the
-// user) and the orphan-cleanup path in Start (which logs it best-effort, #739)
-// so both stay in sync on how delete_cmd is invoked.
-func (b *HookBackend) runDeleteCmd(name string) ([]byte, error) {
-	return exec.Command(b.Hooks.DeleteCmd, "--name", name, "--json").CombinedOutput()
-}
-
-// cleanupOrphanedLaunch best-effort deletes a remote session that launch_cmd
-// created but whose metadata Start failed to parse (#739). It never retries
-// and never returns an error: the parse failure is the error the user sees,
-// and if delete_cmd also fails the user can clean up manually with delete_cmd.
-// slug is the --name launch_cmd was invoked with — the only identifier we have
-// once the JSON payload is unusable.
-func (b *HookBackend) cleanupOrphanedLaunch(slug, title string) {
-	out, err := b.runDeleteCmd(slug)
-	if err != nil {
-		log.WarningLog.Printf(
-			"hook backend: failed to clean up orphaned remote session %q (slug %q) after launch_cmd JSON parse failure; clean up manually via delete_cmd: %s: %v",
-			title, slug, strings.TrimSpace(string(out)), err)
-		return
-	}
-	log.WarningLog.Printf(
-		"hook backend: cleaned up orphaned remote session %q (slug %q) after launch_cmd JSON parse failure",
-		title, slug)
-}
-
 func (b *HookBackend) Preview(i *Instance) (string, error) {
-	hp := b.getPTY(i.Title)
-	if hp == nil {
-		return "", nil
-	}
-	hp.mu.Lock()
-	raw := string(hp.buf)
-	hp.mu.Unlock()
-	// Never return the raw stream: attach_cmd output is a PTY stream whose
-	// control sequences would be executed by the real terminal when the
-	// preview pane is flushed, corrupting the whole TUI (#810). Sanitizing
-	// happens outside the lock so the ingestion goroutine is never blocked
-	// on it.
-	return sanitizeHookPreview(raw), nil
+	return i.AgentServer().Preview(0, false)
 }
 
 func (b *HookBackend) PreviewFullHistory(i *Instance) (string, error) {
-	// Same as Preview for remote — we capture everything from the process.
-	return b.Preview(i)
+	return i.AgentServer().Preview(0, true)
 }
 
-// HasTerminalCmd reports whether the optional terminal_cmd hook is configured.
-// It backs the Capabilities().TerminalTab bit — when false, a remote instance
-// carries only its agent tab and AttachTerminal reports the "not available"
-// guidance (#843).
-func (b *HookBackend) HasTerminalCmd() bool {
-	return strings.TrimSpace(b.Hooks.TerminalCmd) != ""
+// Attach/AttachTerminal: a hook session attaches CLIENT-side over the WS PTY
+// stream (the daemon proxies the sandbox's stream), exactly like a docker/ssh or
+// local session — the client's attach dispatch branches on
+// Capabilities().Workspace and never reaches the backend. These satisfy the
+// interface with an explicit routing-invariant error rather than a silent no-op.
+func (b *HookBackend) Attach(*Instance) (chan struct{}, error) {
+	return nil, fmt.Errorf("hook sessions attach client-side over the WS PTY stream, not through the backend")
 }
 
-// syncRemoteTabs rebuilds i.Tabs to the uniform remote tab model: the agent tab
-// always, plus a terminal tab when terminal_cmd is configured (#930 PR 6).
-// Remote tabs carry no tmux session — the agent tab is driven by attach_cmd and
-// the hook preview process, the terminal tab by terminal_cmd — so the list is
-// derived from the live hook config here rather than restored from a persisted
-// tmux name. Both Start paths call it (fresh launch and restore), and it is
-// idempotent: a re-run after a terminal_cmd config change re-derives the
-// correct tabs, which is exactly why a restore reconstructs the terminal tab
-// from config instead of from whatever was serialized.
-func (b *HookBackend) syncRemoteTabs(i *Instance) {
-	tabs := []*Tab{newRemoteAgentTab()}
-	if b.HasTerminalCmd() {
-		tabs = append(tabs, newRemoteTerminalTab())
+func (b *HookBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
+	return nil, fmt.Errorf("hook terminal tabs attach client-side over the WS PTY stream, not through the backend")
+}
+
+func (b *HookBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
+	obs, err := i.AgentServer().Snapshot()
+	if err != nil {
+		return false, false, ""
 	}
-	i.mu.Lock()
-	i.Tabs = tabs
-	i.mu.Unlock()
+	return obs.Updated, obs.HasPrompt, obs.Content
 }
 
-func (b *HookBackend) HasUpdated(_ *Instance) (updated bool, hasPrompt bool, content string) {
-	return false, false, ""
-}
-
-func (b *HookBackend) SendPromptCommand(_ *Instance, _ string) error {
-	return fmt.Errorf("SendPromptCommand not supported for remote sessions")
+func (b *HookBackend) SendPromptCommand(i *Instance, prompt string) error {
+	return i.AgentServer().SendPrompt(prompt)
 }
 
 func (b *HookBackend) IsAlive(i *Instance) bool {
-	alive, _, _ := b.isAliveWithTimeout(i, runtimeAliveTimeout)
-	return alive
+	return i.AgentServer().Alive()
 }
 
-func (b *HookBackend) CheckAndHandleTrustPrompt(_ *Instance) bool {
-	return false
-}
+// CheckAndHandleTrustPrompt is a daemon-side no-op: the in-sandbox agent-server
+// dismisses trust/permission prompts itself on every Snapshot (its localAgentServer
+// runs CheckAndHandleTrustPrompt before reading the pane), so there is nothing for
+// the daemon to do over the wire.
+func (b *HookBackend) CheckAndHandleTrustPrompt(*Instance) bool { return false }
 
-func (b *HookBackend) TapEnter(_ *Instance) {}
+func (b *HookBackend) TapEnter(i *Instance) { i.AgentServer().TapEnter() }
 
-// Recover/Respawn are unsupported for remote sessions in v1 (#1108/#1146): a Lost
-// remote session is flagged for visibility, but reconnect semantics are TBD.
-func (b *HookBackend) Recover(_ *Instance) error { return ErrRecoverUnsupported }
-func (b *HookBackend) Respawn(_ *Instance) error { return ErrRecoverUnsupported }
+// Recover/Respawn re-establish a hook session by RE-PROVISIONING via launch_cmd
+// (which clones the session's branch back from origin), then relaunching the
+// agent (#1592 Phase 4 PR7) — the same recoverSandbox docker/ssh use (written
+// once against the Runtime interface). The old HookBackend returned
+// ErrRecoverUnsupported here; provision-and-expose makes recovery a fresh
+// re-provision of the durable branch on GitHub, so hook reaches parity.
+func (b *HookBackend) Recover(i *Instance) error { return recoverSandbox(i) }
+func (b *HookBackend) Respawn(i *Instance) error { return recoverSandbox(i) }

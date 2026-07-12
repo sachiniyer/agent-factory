@@ -6,7 +6,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -742,65 +741,4 @@ func snapshotLiveness(cur session.Liveness, d session.InstanceData) session.Live
 		return cur
 	}
 	return session.LivenessForStatus(d.Status)
-}
-
-func (m *home) importRemoteHookSessions() int {
-	repo, err := config.CurrentRepo()
-	if err != nil {
-		log.WarningLog.Printf("failed to resolve repo for remote import: %v", err)
-		return 0
-	}
-	repoCfg, err := config.ResolveConfig(repo.Root)
-	if err != nil {
-		log.WarningLog.Printf("failed to resolve repo config for remote import: %v", err)
-		return 0
-	}
-	if repoCfg.RemoteHooks == nil || repoCfg.RemoteHooks.ListCmd == "" {
-		return 0
-	}
-
-	listed, err := importRemoteSessionsThroughDaemon(repo.Root)
-	if err != nil {
-		if daemon.IsDaemonStartingErr(err) {
-			// The daemon is up but still restoring instances (#829); not a
-			// failure. Already-persisted remote sessions were loaded from
-			// storage above, and newly-discovered ones import on the next
-			// TUI launch once the daemon is warm.
-			log.InfoLog.Printf("daemon still restoring instances; skipping remote hook import this launch")
-			return 0
-		}
-		log.WarningLog.Printf("failed to list remote hook sessions: %v", err)
-		return 0
-	}
-
-	existingTitles := m.store.GetInstanceTitles()
-	existingHookNames := make(map[string]bool)
-	for _, inst := range m.store.GetInstances() {
-		if inst.Capabilities().Workspace != session.WorkspaceRemote {
-			continue
-		}
-		data := inst.ToInstanceData()
-		existingHookNames[session.RemoteHookName(data.Title, data.RemoteMeta)] = true
-	}
-
-	imported := 0
-	for _, data := range listed {
-		name := session.RemoteHookName(data.Title, data.RemoteMeta)
-		if existingTitles[data.Title] || existingHookNames[name] {
-			continue
-		}
-
-		inst, err := session.FromInstanceData(data)
-		if err != nil {
-			log.WarningLog.Printf("failed to import remote hook session %q: %v", data.Title, err)
-			continue
-		}
-		m.store.AddInstance(inst)()
-		inst.SetAutoYes(m.autoYes)
-		existingTitles[data.Title] = true
-		existingHookNames[name] = true
-		imported++
-	}
-
-	return imported
 }

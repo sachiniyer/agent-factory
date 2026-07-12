@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -29,10 +28,9 @@ type harness struct {
 }
 
 type instanceData struct {
-	Title       string                 `json:"title"`
-	TmuxName    string                 `json:"tmux_name"`
-	BackendType string                 `json:"backend_type"`
-	RemoteMeta  map[string]interface{} `json:"remote_meta"`
+	Title       string `json:"title"`
+	TmuxName    string `json:"tmux_name"`
+	BackendType string `json:"backend_type"`
 	Tabs        []struct {
 		Name string `json:"name"`
 		Kind int    `json:"kind"`
@@ -217,81 +215,11 @@ func TestDaemonLifecycleRecoversFromStaleSocketAndDeadDaemon(t *testing.T) {
 	assertTitles(t, h.listSessions(), "after-stale-socket", "after-missing-socket", "after-dead-daemon")
 }
 
-func TestRemoteHookImportKillAndFailureModes(t *testing.T) {
-	h := newHarness(t)
-
-	scriptDir := t.TempDir()
-	stateFile := filepath.Join(scriptDir, "remote-state.json")
-	failFile := filepath.Join(scriptDir, "fail-list")
-	deleteLog := filepath.Join(scriptDir, "delete.log")
-
-	writeFile(t, stateFile, `[{"name":"remote-one","title":"Display One","status":"running","host":"h1"},{"name":"remote-two","status":"stopped"}]`, 0644)
-	listCmd := writeScript(t, filepath.Join(scriptDir, "list.sh"), fmt.Sprintf(`
-if [ -f %q ]; then
-  echo "forced list failure" >&2
-  exit 7
-fi
-cat %q
-`, failFile, stateFile))
-	attachCmd := writeScript(t, filepath.Join(scriptDir, "attach.sh"), `echo "preview $1"`)
-	deleteCmd := writeScript(t, filepath.Join(scriptDir, "delete.sh"), fmt.Sprintf(`
-echo "$@" >> %q
-exit 0
-`, deleteLog))
-	launchCmd := writeScript(t, filepath.Join(scriptDir, "launch.sh"), `echo '{"name":"launched"}'`)
-
-	repo, err := config.RepoFromPath(h.repo)
-	if err != nil {
-		t.Fatalf("RepoFromPath: %v", err)
-	}
-	if err := config.SaveRepoConfig(repo.ID, &config.RepoConfig{
-		RemoteHooks: &config.RemoteHooks{
-			LaunchCmd: launchCmd,
-			ListCmd:   listCmd,
-			AttachCmd: attachCmd,
-			DeleteCmd: deleteCmd,
-		},
-	}); err != nil {
-		t.Fatalf("SaveRepoConfig: %v", err)
-	}
-
-	manager, err := daemon.NewManager(testConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	imported, err := manager.ImportRemoteHookSessions(daemon.ImportRemoteHookSessionsRequest{RepoPath: h.repo})
-	if err != nil {
-		t.Fatalf("ImportRemoteHookSessions: %v", err)
-	}
-	if len(imported) != 1 || imported[0].Title != "Display One" || imported[0].RemoteMeta["name"] != "remote-one" {
-		t.Fatalf("unexpected imported sessions: %+v", imported)
-	}
-
-	imported, err = manager.ImportRemoteHookSessions(daemon.ImportRemoteHookSessionsRequest{RepoPath: h.repo})
-	if err != nil {
-		t.Fatalf("second ImportRemoteHookSessions: %v", err)
-	}
-	if len(imported) != 0 {
-		t.Fatalf("duplicate import should be skipped, got %+v", imported)
-	}
-
-	if err := manager.KillSession(daemon.KillSessionRequest{Title: "Display One", RepoID: repo.ID}); err != nil {
-		t.Fatalf("KillSession remote: %v", err)
-	}
-	deleteArgs := strings.TrimSpace(readFile(t, deleteLog))
-	if !strings.Contains(deleteArgs, "--name remote-one --json") {
-		t.Fatalf("delete hook used wrong remote identity: %q", deleteArgs)
-	}
-
-	writeFile(t, stateFile, `not-json`, 0644)
-	if _, err := manager.ImportRemoteHookSessions(daemon.ImportRemoteHookSessionsRequest{RepoPath: h.repo}); err == nil {
-		t.Fatalf("expected bad JSON from list hook to fail")
-	}
-	writeFile(t, failFile, "fail", 0644)
-	if _, err := manager.ImportRemoteHookSessions(daemon.ImportRemoteHookSessionsRequest{RepoPath: h.repo}); err == nil {
-		t.Fatalf("expected failing list hook command to fail")
-	}
-}
+// #1592 Phase 4 PR7: TestRemoteHookImportKillAndFailureModes was removed with the
+// remote-hook enumeration/import model (list_cmd + ImportRemoteHookSessions +
+// delete-by-name). The migrated hook backend is provision-and-expose: its full
+// lifecycle (launch_cmd → drive over wss → delete_cmd teardown) is proven by
+// TestRemoteHookRoundTripMockRemote against a real af agent-server.
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
@@ -510,15 +438,6 @@ func writeFile(t *testing.T, path, body string, mode os.FileMode) {
 	if err := os.WriteFile(path, []byte(body), mode); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
-}
-
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	return string(raw)
 }
 
 func readJSONFile(t *testing.T, path string, dst interface{}) {

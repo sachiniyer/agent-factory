@@ -226,10 +226,7 @@ codex = "/usr/local/bin/codex --profile work"
 
 [remote_hooks]
 launch_cmd = "./infra/launch.sh"
-list_cmd = "./infra/list.sh"
-attach_cmd = "./infra/attach.sh"
 delete_cmd = "./infra/delete.sh"
-terminal_cmd = "./infra/terminal.sh"
 ```
 
 > **TOML top-level ordering:** put plain keys and arrays (like `post_worktree_commands`) *above* any `[table]` header. Once a table is opened, every following bare key belongs to it — that is TOML, not an af rule.

@@ -132,11 +132,6 @@ type Options struct {
 	// test or debug run is still coming back for it).
 	MinTempHomeAge time.Duration
 
-	// remoteProbeTimeout bounds the remote connectivity probe (list_cmd);
-	// defaults to remoteProbeTimeoutDefault. Tests shorten it to exercise the
-	// timeout path without waiting.
-	remoteProbeTimeout time.Duration
-
 	// remoteConfig resolves the remote-hook backend to validate and the repo
 	// root it was loaded from; nil hooks mean no remote is configured and the
 	// remote checks skip cleanly. Defaults to resolving the repo of the current

@@ -202,8 +202,8 @@ func TestResolveBackendKind_Precedence(t *testing.T) {
 
 // TestDefaultBackendFactory_ConfigSelection drives the full factory the way
 // NewInstance does: local is byte-identical, a docker config fails cleanly with
-// the not-implemented error, and a hook config still resolves to a working
-// HookBackend (the "hook still works" gate).
+// the not-implemented error, and a hook config provisions via launch_cmd and
+// exposes the af agent-server endpoint it echoes (#1592 Phase 4 PR7).
 func TestDefaultBackendFactory_ConfigSelection(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
@@ -227,14 +227,19 @@ func TestDefaultBackendFactory_ConfigSelection(t *testing.T) {
 		assert.Contains(t, err.Error(), "docker.image")
 	})
 
-	t.Run("hook config still builds a HookBackend", func(t *testing.T) {
+	t.Run("hook config provisions via launch_cmd and exposes its endpoint", func(t *testing.T) {
 		repoRoot := initTempGitRepo(t)
+		// launch_cmd echoes a static af agent-server endpoint (the provision-and-
+		// expose contract). defaultBackendFactory returns the ProvisionResult
+		// without dialing (the URL is validated later at NewInstance), so a mock
+		// echo is enough to prove the runtime parses + surfaces the endpoint.
+		launch := writeScript(t, t.TempDir(), "launch.sh",
+			`echo '{"url":"wss://127.0.0.1:9","token":"tkn","tls_fingerprint":"fp"}'`)
 		writeInRepoConfig(t, repoRoot, map[string]any{
 			"backend": "hook",
 			"remote_hooks": map[string]any{
-				"launch_cmd": "echo",
-				"attach_cmd": "echo",
-				"delete_cmd": "echo",
+				"launch_cmd": launch,
+				"delete_cmd": "true",
 			},
 		})
 		res, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
@@ -242,6 +247,26 @@ func TestDefaultBackendFactory_ConfigSelection(t *testing.T) {
 		if _, ok := res.Backend.(*HookBackend); !ok {
 			t.Fatalf("backend=hook must build a *HookBackend, got %T", res.Backend)
 		}
+		require.NotNil(t, res.Endpoint, "hook runtime must expose the launch_cmd endpoint")
+		assert.Equal(t, "wss://127.0.0.1:9", res.Endpoint.URL)
+		assert.Equal(t, "tkn", res.Endpoint.Token)
+		assert.Equal(t, "fp", res.Endpoint.Fingerprint)
+		require.NotNil(t, res.Teardown, "hook runtime must expose a delete_cmd teardown")
+	})
+
+	t.Run("hook config still carrying a removed key errors with the migration message", func(t *testing.T) {
+		repoRoot := initTempGitRepo(t)
+		writeInRepoConfig(t, repoRoot, map[string]any{
+			"backend": "hook",
+			"remote_hooks": map[string]any{
+				"launch_cmd":   "true",
+				"delete_cmd":   "true",
+				"terminal_cmd": "true",
+			},
+		})
+		_, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "was removed in the provision-and-expose migration")
 	})
 
 	t.Run("hook config without hooks errors cleanly", func(t *testing.T) {
@@ -249,7 +274,7 @@ func TestDefaultBackendFactory_ConfigSelection(t *testing.T) {
 		writeInRepoConfig(t, repoRoot, map[string]any{"backend": "hook"})
 		_, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
 		require.Error(t, err)
-		assert.True(t, strings.Contains(err.Error(), "remote hooks not configured"),
-			"want 'remote hooks not configured', got %v", err)
+		assert.True(t, strings.Contains(err.Error(), "no remote hooks configured"),
+			"want 'no remote hooks configured', got %v", err)
 	})
 }

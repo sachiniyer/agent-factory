@@ -6,7 +6,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,33 +49,10 @@ func TestGeneralHelpNavigationMatchesBindings(t *testing.T) {
 	}
 }
 
-// TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys guards against regressing
-// #988: remote instances block `t` (new tab) and `w` (close tab) — those
-// handlers reject backends without the TabManagement capability with an error —
-// so the instance-start help must
-// only advertise the tab keys that actually work (cycle / 1-9 jump). Local
-// instances keep the full hint.
-func TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys(t *testing.T) {
-	remote := newStartedInstance(t, "remote")
-	remote.SetBackend(&session.HookBackend{})
-	require.True(t, remote.Capabilities().Workspace == session.WorkspaceRemote, "sanity: instance should report as remote")
-
-	remoteContent := helpStart(remote).toContent()
-	if strings.Contains(remoteContent, "t new tab") || strings.Contains(remoteContent, "w close") {
-		t.Errorf("remote instance-start help must not advertise unsupported t/w tab keys; got:\n%s", remoteContent)
-	}
-	if !strings.Contains(remoteContent, "1-9 jump") {
-		t.Errorf("remote instance-start help should still advertise the supported 1-9 jump; got:\n%s", remoteContent)
-	}
-
-	local := newStartedInstance(t, "local")
-	require.False(t, local.Capabilities().Workspace == session.WorkspaceRemote, "sanity: instance should report as local")
-
-	localContent := helpStart(local).toContent()
-	if !strings.Contains(localContent, "t new tab") || !strings.Contains(localContent, "w close") {
-		t.Errorf("local instance-start help should advertise the full t/w/1-9 tab hint; got:\n%s", localContent)
-	}
-}
+// TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys removed — remote (hook)
+// backends now have full local parity including TabManagement, so the
+// instance-start help advertises the same t/w/1-9 tab keys for remote as for
+// local. The #988 remote tab-key restriction no longer exists. // #1592 Phase 4 PR7
 
 func TestInstanceStartHelpMentionsFullScreenDetach(t *testing.T) {
 	local := newStartedInstance(t, "local")

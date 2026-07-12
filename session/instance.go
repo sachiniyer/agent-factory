@@ -148,10 +148,8 @@ type Instance struct {
 	// repeated fetches when the user cycles the sidebar.
 	prInfoLastFetched time.Time
 
-	// backend abstracts session lifecycle (local tmux+git vs remote hooks).
+	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend
-	// remoteMeta stores additional metadata returned by remote hook scripts.
-	remoteMeta map[string]interface{}
 
 	// The below fields are initialized upon calling Start().
 

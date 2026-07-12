@@ -56,11 +56,11 @@ var backendFactory = defaultBackendFactory
 // It is the production path behind the backendFactory test seam; a test that
 // replaces backendFactory injects a FakeBackend directly and never reaches here.
 //
-// The full ProvisionResult flows to NewInstance (#1592 Phase 4 PR4): local/hook
-// provision in-process (nil Endpoint, nil Teardown — the local path is
-// unchanged), while the docker runtime returns the in-container agent-server's
-// authed endpoint + the container-reap teardown, which NewInstance threads into
-// the instance's remote agent-server client and Kill path.
+// The full ProvisionResult flows to NewInstance (#1592 Phase 4): the local
+// runtime provisions in-process (nil Endpoint, nil Teardown — the local path is
+// unchanged), while the off-box runtimes (docker/ssh/hook) return the
+// agent-server's authed endpoint + a sandbox-reap teardown, which NewInstance
+// threads into the instance's remote agent-server client and Kill path.
 func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResult, error) {
 	kind, err := resolveBackendKind(opts, absPath)
 	if err != nil {
@@ -76,12 +76,13 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 		Program:  opts.Program,
 		AutoYes:  opts.AutoYes,
 	}
-	// A sandboxed runtime clones the workspace from the repo's origin (epic
+	// An off-box runtime clones the workspace from the repo's origin (epic
 	// decision 4: GitHub is the durable store); resolve it only for those kinds so
 	// a local create never pays for an extra git subprocess. Best-effort — a repo
-	// with no origin yields "", and the docker runtime surfaces the actionable
-	// "no origin remote" error at create.
-	if kind == BackendDocker || kind == BackendSSH {
+	// with no origin yields "", and each runtime surfaces the actionable
+	// "no origin remote" error at create (the hook runtime hands the URL to
+	// launch_cmd, which does the clone on the user's infra).
+	if kind == BackendDocker || kind == BackendSSH || kind == BackendHook {
 		spec.CloneURL = originRemoteURL(absPath)
 	}
 	return rt.Provision(spec)

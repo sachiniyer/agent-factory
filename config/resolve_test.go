@@ -97,11 +97,11 @@ func TestResolveConfigPrecedence(t *testing.T) {
 }
 
 func TestResolveConfigRepoFields(t *testing.T) {
-	hooks := &RemoteHooks{LaunchCmd: "l", ListCmd: "ls", AttachCmd: "a", DeleteCmd: "d"}
+	hooks := &RemoteHooks{LaunchCmd: "l", DeleteCmd: "d"}
 
 	t.Run("in-repo values apply", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
-		writeInRepoConfig(t, repoRoot, `{"post_worktree_commands": ["npm ci"], "remote_hooks": {"launch_cmd": "l2", "attach_cmd": "a2", "delete_cmd": "d2"}}`)
+		writeInRepoConfig(t, repoRoot, `{"post_worktree_commands": ["npm ci"], "remote_hooks": {"launch_cmd": "l2", "delete_cmd": "d2"}}`)
 
 		res, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
@@ -132,7 +132,7 @@ func TestResolveConfigRepoFields(t *testing.T) {
 			PostWorktreeCommands: []string{"legacy-cmd"},
 			RemoteHooks:          hooks,
 		}))
-		writeInRepoConfig(t, repoRoot, `{"post_worktree_commands": ["new-cmd"], "remote_hooks": {"launch_cmd": "l2", "attach_cmd": "a2", "delete_cmd": "d2"}}`)
+		writeInRepoConfig(t, repoRoot, `{"post_worktree_commands": ["new-cmd"], "remote_hooks": {"launch_cmd": "l2", "delete_cmd": "d2"}}`)
 
 		res, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
@@ -161,38 +161,28 @@ func TestResolveConfigResolvesHookPaths(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
 		writeInRepoConfig(t, repoRoot, `{"remote_hooks": {
 			"launch_cmd": "./.agent-factory/hooks/launch.sh",
-			"list_cmd": "infra/list.sh",
-			"attach_cmd": "/abs/attach.sh",
-			"delete_cmd": "bash",
-			"terminal_cmd": "./.agent-factory/hooks/terminal.sh"
+			"delete_cmd": "bash"
 		}}`)
 
 		res, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
 		require.NotNil(t, res.RemoteHooks)
 		assert.Equal(t, filepath.Join(repoRoot, ".agent-factory/hooks/launch.sh"), res.RemoteHooks.LaunchCmd)
-		assert.Equal(t, filepath.Join(repoRoot, "infra/list.sh"), res.RemoteHooks.ListCmd)
-		assert.Equal(t, "/abs/attach.sh", res.RemoteHooks.AttachCmd, "absolute path passes through")
 		assert.Equal(t, "bash", res.RemoteHooks.DeleteCmd, "bare name keeps $PATH lookup")
-		assert.Equal(t, filepath.Join(repoRoot, ".agent-factory/hooks/terminal.sh"), res.RemoteHooks.TerminalCmd)
 	})
 
-	t.Run("missing terminal_cmd stays empty after resolution", func(t *testing.T) {
-		// Empty must survive the rewrite untouched (#843): the Terminal tab
-		// treats empty as "feature off", and a phantom path here would flip
-		// it on against a non-existent script.
+	t.Run("absolute launch_cmd passes through untouched", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
 		writeInRepoConfig(t, repoRoot, `{"remote_hooks": {
-			"launch_cmd": "./hooks/launch.sh",
-			"list_cmd": "./hooks/list.sh",
-			"attach_cmd": "./hooks/attach.sh",
+			"launch_cmd": "/abs/launch.sh",
 			"delete_cmd": "./hooks/delete.sh"
 		}}`)
 
 		res, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
 		require.NotNil(t, res.RemoteHooks)
-		assert.Empty(t, res.RemoteHooks.TerminalCmd)
+		assert.Equal(t, "/abs/launch.sh", res.RemoteHooks.LaunchCmd, "absolute path passes through")
+		assert.Equal(t, filepath.Join(repoRoot, "hooks/delete.sh"), res.RemoteHooks.DeleteCmd)
 	})
 
 	t.Run("legacy-location relative paths get the same resolution", func(t *testing.T) {
@@ -201,8 +191,6 @@ func TestResolveConfigResolvesHookPaths(t *testing.T) {
 		require.NoError(t, SaveRepoConfig(repoID, &RepoConfig{
 			RemoteHooks: &RemoteHooks{
 				LaunchCmd: "./hooks/launch.sh",
-				ListCmd:   "/abs/list.sh",
-				AttachCmd: "hooks/attach.sh",
 				DeleteCmd: "coder-delete",
 			},
 		}))
@@ -211,8 +199,6 @@ func TestResolveConfigResolvesHookPaths(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, res.RemoteHooks)
 		assert.Equal(t, filepath.Join(repoRoot, "hooks/launch.sh"), res.RemoteHooks.LaunchCmd)
-		assert.Equal(t, "/abs/list.sh", res.RemoteHooks.ListCmd)
-		assert.Equal(t, filepath.Join(repoRoot, "hooks/attach.sh"), res.RemoteHooks.AttachCmd)
 		assert.Equal(t, "coder-delete", res.RemoteHooks.DeleteCmd)
 
 		// The rewrite operates on a copy; a fresh load of the legacy config

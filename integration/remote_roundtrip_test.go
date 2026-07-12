@@ -16,9 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/daemon"
-	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 type remoteHTTPEnvelope struct {
@@ -28,81 +27,258 @@ type remoteHTTPEnvelope struct {
 	} `json:"error"`
 }
 
-type remoteCreateResponse struct {
-	Instance instanceData `json:"instance"`
-}
-
 type remoteSnapshotResponse struct {
 	Instances []instanceData `json:"instances"`
 }
 
+// TestRemoteHookRoundTripMockRemote is the #1592 Phase 4 PR7 proof: the
+// remote-hook backend, migrated to provision-and-expose, drives a session over a
+// REAL `af agent-server` that a mock launch_cmd starts — to parity with docker/ssh.
+//
+// A repo is configured backend=hook with a launch_cmd shell script that clones
+// repo@origin, starts an `af agent-server --listen 127.0.0.1:0` against the clone
+// (on the host, no container/ssh — hook is the most direct provision-and-expose),
+// and echoes that server's authed {url, token, tls_fingerprint}. The session is
+// created through the ordinary NewInstance path, so the hook runtime runs the
+// script, parses the endpoint, and hands it to the daemon-side remoteAgentServer,
+// which then drives the FULL surface across the process boundary:
+//
+//	Start (Provision+Launch the workspace) → Subscribe to its PTY stream →
+//	Input (typed bytes reach the agent) → observe the echo → Preview/Snapshot/Alive
+//	reflect the pane → Kill → delete_cmd reaps the af agent-server (no leak).
+//
+// This is the mock-hook round-trip the plan asks for: launch_cmd echoes an
+// af agent-server URL → the daemon drives it over wss → typed input echoes →
+// teardown. Run it in the container fence: make remote-roundtrip-container. It
+// needs git + tmux (the in-workspace agent-server runs the local tmux runtime).
 func TestRemoteHookRoundTripMockRemote(t *testing.T) {
-	h := newHarness(t)
-	mock := newMockRemote(t, h.repo)
-	h.startDaemon()
+	requireTool(t, "git")
+	requireTool(t, "tmux")
+	testguard.IsolateTmux(t)
 
-	title := "Remote Round Trip"
-	slug := "remote-round-trip"
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
 
-	var created remoteCreateResponse
-	h.httpPost("/v1/CreateSession", daemon.CreateSessionRequest{
+	afBin := buildBinary(t)
+
+	// Source repo + a bare clone the mock launch_cmd clones the workspace from
+	// (GitHub is the durable store; here a local bare repo stands in — self-
+	// contained, no network).
+	repo := setupGitRepo(t)
+	writeFile(t, filepath.Join(repo, "README.md"), "hook round-trip\n", 0644)
+	runExternal(t, repo, "git", "add", "-A")
+	runExternal(t, repo, "git", "commit", "-m", "seed")
+	bare := filepath.Join(t.TempDir(), "repo.git")
+	runExternal(t, "", "git", "clone", "--bare", repo, bare)
+	runExternal(t, repo, "git", "remote", "add", "origin", bare)
+
+	// State dir the mock hooks provision into (clone + agent-server home + pidfile).
+	state := t.TempDir()
+	launch := writeMockHookLaunch(t, filepath.Join(repo, "launch.sh"), afBin, state)
+	del := writeMockHookDelete(t, filepath.Join(repo, "delete.sh"), state)
+	writeHookRepoConfig(t, repo, launch, del)
+
+	title := "hook-rt"
+	slug := session.Slugify(title)
+
+	// --- create the session on the hook backend (the full NewInstance path) ----
+	// program `cat` echoes the PTY, so typed input observably comes back over the
+	// stream — the input-reaches-the-agent proof.
+	t.Logf("provisioning hook session %q via mock launch_cmd...", title)
+	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:       title,
-		RepoPath:    h.repo,
-		Program:     tmux.ProgramClaude,
+		Path:        repo,
+		Program:     "cat",
 		ForceRemote: true,
-	}, &created)
-	if created.Instance.Title != title {
-		t.Fatalf("create title = %q, want %q", created.Instance.Title, title)
-	}
-	if created.Instance.BackendType != "remote" {
-		t.Fatalf("create backend = %q, want remote; response=%+v", created.Instance.BackendType, created.Instance)
-	}
-	if got, _ := created.Instance.RemoteMeta["name"].(string); got != slug {
-		t.Fatalf("remote_meta.name = %q, want %q", got, slug)
-	}
-	if created.Instance.Worktree.WorktreePath != "" {
-		t.Fatalf("remote create unexpectedly allocated local worktree %q", created.Instance.Worktree.WorktreePath)
-	}
-	assertRemoteTabs(t, created.Instance)
-	mock.assertSessions(slug)
-	mock.assertEvent("launch " + slug)
-
-	var snap remoteSnapshotResponse
-	h.httpPost("/v1/Snapshot", daemon.SnapshotRequest{RepoID: mock.repoID}, &snap)
-	assertRemoteSnapshot(t, snap.Instances, title, slug)
-
-	out := h.attachAndDetach(title, mock.attachCount)
-	if !strings.Contains(out, "mock remote agent "+slug) {
-		t.Fatalf("attach output did not contain remote stream for %q:\n%s", slug, out)
-	}
-	mock.assertSessions(slug)
-
-	archiveOut, archiveErr := h.runResult("sessions", "--repo", h.repo, "archive", title)
-	if archiveErr == nil {
-		t.Fatalf("archive of remote session unexpectedly succeeded: %s", archiveOut)
-	}
-	if !strings.Contains(archiveErr.Error(), "cannot archive remote session") {
-		t.Fatalf("archive error = %v, want remote rejection", archiveErr)
-	}
-
-	killPID(readDaemonPID(t, h.home))
-	waitUntil(t, 5*time.Second, "daemon exits before restore check", func() bool {
-		return !pidAlive(readDaemonPIDIfPresent(h.home))
 	})
-	h.startDaemon()
+	if err != nil {
+		t.Fatalf("NewInstance(backend=hook): %v", err)
+	}
+	// The af agent-server is up the instant NewInstance returns (launch_cmd started
+	// it). Route every later failure through Kill so delete_cmd reaps it.
+	if !mockHookServerAlive(state, slug) {
+		t.Fatal("expected the mock launch_cmd to have started an af agent-server")
+	}
+	t.Logf("launch_cmd started an af agent-server; endpoint exposed over wss:// with TLS+token")
+	killed := false
+	defer func() {
+		if !killed {
+			_ = inst.Kill()
+		}
+	}()
 
-	h.httpPost("/v1/Snapshot", daemon.SnapshotRequest{RepoID: mock.repoID}, &snap)
-	assertRemoteSnapshot(t, snap.Instances, title, slug)
-	mock.assertEvent("list --json")
+	// --- Start: Provision + Launch the workspace over the wire -----------------
+	if err := inst.Start(true); err != nil {
+		t.Fatalf("Start (drive agent-server Provision+Launch): %v", err)
+	}
 
-	h.run("sessions", "--repo", h.repo, "kill", title)
-	waitUntil(t, 5*time.Second, "remote session deleted from mock state", func() bool {
-		return len(mock.sessions()) == 0
+	as := inst.AgentServer()
+
+	// --- Subscribe to the PTY stream across the process boundary ---------------
+	sub, err := as.Subscribe(0, 0)
+	if err != nil {
+		t.Fatalf("Subscribe to the PTY stream: %v", err)
+	}
+	defer func() { _ = sub.Close() }()
+
+	pumpCtx, pumpCancel := context.WithCancel(context.Background())
+	defer pumpCancel()
+	var (
+		pumpMu sync.Mutex
+		pump   strings.Builder
+	)
+	go func() {
+		for {
+			ev, rerr := sub.NextEvent(pumpCtx)
+			if rerr != nil {
+				return
+			}
+			if ev.Kind == session.PTYData || ev.Kind == session.PTYRepaint {
+				pumpMu.Lock()
+				pump.Write(ev.Data)
+				pumpMu.Unlock()
+			}
+		}
+	}()
+	streamOutput := func() string {
+		pumpMu.Lock()
+		defer pumpMu.Unlock()
+		return pump.String()
+	}
+
+	// --- Input: typed bytes reach the agent; the `cat` pane echoes -------------
+	marker := "hook-roundtrip-ping"
+	if err := as.Input(0, []byte(marker+"\n")); err != nil {
+		t.Fatalf("Input over the wire: %v", err)
+	}
+	waitUntil(t, 20*time.Second, "PTY stream echoes typed input", func() bool {
+		return strings.Contains(streamOutput(), marker)
 	})
-	mock.assertEvent("delete " + slug)
-	waitUntil(t, 5*time.Second, "remote session removed from CLI list", func() bool {
-		return !hasTitle(h.listSessions(), title)
+	t.Logf("typed input reached the agent and echoed over the stream: %q", strings.TrimSpace(streamOutput()))
+
+	// --- Preview / Snapshot / Alive reflect the pane ---------------------------
+	waitUntil(t, 10*time.Second, "Snapshot reflects the pane", func() bool {
+		obs, serr := as.Snapshot()
+		return serr == nil && strings.Contains(obs.Content, marker)
 	})
+	preview, err := as.Preview(0, false)
+	if err != nil {
+		t.Fatalf("Preview over the wire: %v", err)
+	}
+	if !strings.Contains(preview, marker) {
+		t.Fatalf("Preview did not reflect the typed input: %q", preview)
+	}
+	if !as.Alive() {
+		t.Fatal("expected the workspace to report Alive")
+	}
+	t.Logf("preview/liveness reflect the workspace over the wire")
+
+	// --- Kill: tear the workspace down AND reap the af agent-server -------------
+	if err := inst.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	killed = true
+	waitUntil(t, 30*time.Second, "delete_cmd reaps the af agent-server after Kill", func() bool {
+		return !mockHookServerAlive(state, slug)
+	})
+	t.Logf("af agent-server reaped by delete_cmd on Kill — no leak. hook round-trip complete.")
+}
+
+// writeMockHookLaunch writes a launch_cmd that provisions a session by cloning
+// repo@origin and starting a REAL `af agent-server` against the clone, then
+// echoing its authed {url, token, tls_fingerprint} — the provision-and-expose
+// contract. It backgrounds the server with its stdio redirected to files (so the
+// launch_cmd exec returns) and records its PID for delete_cmd to reap.
+func writeMockHookLaunch(t *testing.T, path, afBin, state string) string {
+	t.Helper()
+	body := fmt.Sprintf(`
+AF_BIN=%q
+STATE=%q
+NAME="" TITLE="" REPO="" PROGRAM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) NAME="$2"; shift 2;;
+    --title) TITLE="$2"; shift 2;;
+    --repo) REPO="$2"; shift 2;;
+    --program) PROGRAM="$2"; shift 2;;
+    --branch) shift 2;;
+    --auto-yes) shift;;
+    *) shift;;
+  esac
+done
+[ -n "$NAME" ] || { echo "launch: --name required" >&2; exit 64; }
+DIR="$STATE/$NAME"
+mkdir -p "$DIR/home"
+git clone -q "$REPO" "$DIR/workspace"
+BANNER="$DIR/banner.json"
+LOG="$DIR/agent-server.log"
+: > "$BANNER"
+ARGS="agent-server --listen 127.0.0.1:0 --repo $DIR/workspace --title $TITLE"
+[ -n "$PROGRAM" ] && ARGS="$ARGS --program $PROGRAM"
+AGENT_FACTORY_HOME="$DIR/home" TERM=xterm setsid "$AF_BIN" $ARGS >"$BANNER" 2>"$LOG" &
+echo $! > "$DIR/pid"
+i=0
+while [ $i -lt 200 ]; do
+  grep -q '"addr"' "$BANNER" 2>/dev/null && break
+  i=$((i + 1)); sleep 0.1
+done
+ADDR=$(sed -n 's/.*"addr":"\([^"]*\)".*/\1/p' "$BANNER")
+TOKEN=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$BANNER")
+FP=$(sed -n 's/.*"fingerprint":"\([^"]*\)".*/\1/p' "$BANNER")
+[ -n "$ADDR" ] || { echo "launch: af agent-server printed no banner:" >&2; cat "$LOG" >&2; exit 1; }
+printf '{"url":"wss://%%s","token":"%%s","tls_fingerprint":"%%s"}\n' "$ADDR" "$TOKEN" "$FP"
+`, afBin, state)
+	return writeScript(t, path, body)
+}
+
+// writeMockHookDelete writes a delete_cmd that reaps the af agent-server the
+// matching launch_cmd started, by PID.
+func writeMockHookDelete(t *testing.T, path, state string) string {
+	t.Helper()
+	body := fmt.Sprintf(`
+STATE=%q
+NAME=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) NAME="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+[ -n "$NAME" ] || { echo "delete: --name required" >&2; exit 64; }
+PIDFILE="$STATE/$NAME/pid"
+if [ -f "$PIDFILE" ]; then
+  kill "$(cat "$PIDFILE")" 2>/dev/null || true
+  rm -f "$PIDFILE"
+fi
+printf '{"deleted":true}\n'
+`, state)
+	return writeScript(t, path, body)
+}
+
+// writeHookRepoConfig drops a repo config selecting the hook backend with the
+// given launch_cmd + delete_cmd (the whole provision-and-expose contract).
+func writeHookRepoConfig(t *testing.T, repo, launch, del string) {
+	t.Helper()
+	dir := filepath.Join(repo, ".agent-factory")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir repo config: %v", err)
+	}
+	body := fmt.Sprintf(`{"backend":"hook","remote_hooks":{"launch_cmd":%q,"delete_cmd":%q}}`, launch, del)
+	writeFile(t, filepath.Join(dir, "config.json"), body, 0644)
+}
+
+// mockHookServerAlive reports whether the af agent-server the mock launch_cmd
+// started for slug is still running (its PID is alive).
+func mockHookServerAlive(state, slug string) bool {
+	raw, err := os.ReadFile(filepath.Join(state, slug, "pid"))
+	if err != nil {
+		return false
+	}
+	var pid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &pid); err != nil || pid <= 0 {
+		return false
+	}
+	return pidAlive(pid)
 }
 
 func (h *harness) startDaemon() {
@@ -143,7 +319,7 @@ func (h *harness) waitHTTPHealth(timeout time.Duration, stderr func() string) {
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			_ = resp.Body.Close()
 			var snap remoteSnapshotResponse
-			readyErr := h.tryHTTPPost("/v1/Snapshot", daemon.SnapshotRequest{}, &snap)
+			readyErr := h.tryHTTPPost("/v1/Snapshot", nil, &snap)
 			if readyErr == nil {
 				return
 			}
@@ -161,13 +337,6 @@ func (h *harness) waitHTTPHealth(timeout time.Duration, stderr func() string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	h.t.Fatalf("daemon HTTP socket did not become healthy: lastErr=%v stderr=%s", lastErr, stderr())
-}
-
-func (h *harness) httpPost(path string, req any, dst any) {
-	h.t.Helper()
-	if err := h.tryHTTPPost(path, req, dst); err != nil {
-		h.t.Fatal(err)
-	}
 }
 
 func (h *harness) tryHTTPPost(path string, req any, dst any) error {
@@ -201,8 +370,10 @@ func (h *harness) tryHTTPPost(path string, req any, dst any) error {
 		}
 		return fmt.Errorf("POST %s status=%d error=%s body=%s", path, resp.StatusCode, msg, raw)
 	}
-	if err := json.Unmarshal(env.Data, dst); err != nil {
-		return fmt.Errorf("decode POST %s data: %w\n%s", path, err, env.Data)
+	if dst != nil {
+		if err := json.Unmarshal(env.Data, dst); err != nil {
+			return fmt.Errorf("decode POST %s data: %w\n%s", path, err, env.Data)
+		}
 	}
 	return nil
 }
@@ -215,255 +386,6 @@ func (h *harness) httpClient() *http.Client {
 			return dialer.DialContext(ctx, "unix", socket)
 		},
 	}}
-}
-
-func (h *harness) attachAndDetach(title string, count func() int) string {
-	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, h.bin, "sessions", "--repo", h.repo, "attach", title)
-	cmd.Dir = h.repo
-	cmd.Env = append(os.Environ(),
-		"AGENT_FACTORY_HOME="+h.home,
-		"TERM=xterm",
-	)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		h.t.Fatalf("attach stdin pipe: %v", err)
-	}
-	var stdout lockedBuffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		h.t.Fatalf("start attach: %v", err)
-	}
-
-	waitUntil(h.t, 5*time.Second, "interactive attach stream appears", func() bool {
-		return count() > 0 && strings.Contains(stdout.String(), "mock remote agent")
-	})
-	if _, err := stdin.Write([]byte{tmux.DetachKeyByte}); err != nil {
-		h.t.Fatalf("write detach key: %v", err)
-	}
-	_ = stdin.Close()
-
-	err = cmd.Wait()
-	if ctx.Err() == context.DeadlineExceeded {
-		h.t.Fatalf("attach timed out; stdout=%s stderr=%s", stdout.String(), stderr.String())
-	}
-	if err != nil {
-		h.t.Fatalf("attach failed: %v; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
-	}
-	return stdout.String()
-}
-
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
-type mockRemote struct {
-	t         *testing.T
-	repoID    string
-	stateDir  string
-	eventsLog string
-}
-
-func newMockRemote(t *testing.T, repoPath string) *mockRemote {
-	t.Helper()
-	repo, err := config.RepoFromPath(repoPath)
-	if err != nil {
-		t.Fatalf("RepoFromPath: %v", err)
-	}
-	root := t.TempDir()
-	stateDir := filepath.Join(root, "mock remote state")
-	hooksDir := filepath.Join(repoPath, ".agent-factory", "mock remote hooks")
-	if err := os.MkdirAll(filepath.Join(stateDir, "sessions"), 0755); err != nil {
-		t.Fatalf("mkdir mock state: %v", err)
-	}
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
-		t.Fatalf("mkdir mock hooks: %v", err)
-	}
-	eventsLog := filepath.Join(stateDir, "events.log")
-	writeFile(t, eventsLog, "", 0644)
-
-	launch := writeScript(t, filepath.Join(hooksDir, "launch hook.sh"), fmt.Sprintf(`
-STATE_DIR=%q
-EVENTS=%q
-NAME=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --name) NAME="$2"; shift 2;;
-    --json) shift;;
-    *) echo "unexpected launch arg: $1" >&2; exit 64;;
-  esac
-done
-[ -n "$NAME" ] || { echo "missing --name" >&2; exit 64; }
-mkdir -p "$STATE_DIR/sessions/$NAME"
-printf 'running\n' > "$STATE_DIR/sessions/$NAME/status"
-printf 'launch %%s\n' "$NAME" >> "$EVENTS"
-printf '{"name":"%%s","status":"running","host":"mock-container"}\n' "$NAME"
-`, stateDir, eventsLog))
-
-	list := writeScript(t, filepath.Join(hooksDir, "list hook.sh"), fmt.Sprintf(`
-STATE_DIR=%q
-EVENTS=%q
-printf 'list %%s\n' "$*" >> "$EVENTS"
-printf '['
-sep=''
-for session_dir in "$STATE_DIR"/sessions/*; do
-  [ -d "$session_dir" ] || continue
-  name="$(basename "$session_dir")"
-  status="$(cat "$session_dir/status")"
-  printf '%%s{"name":"%%s","status":"%%s","host":"mock-container"}' "$sep" "$name" "$status"
-  sep=','
-done
-printf ']\n'
-`, stateDir, eventsLog))
-
-	attach := writeScript(t, filepath.Join(hooksDir, "attach hook.sh"), fmt.Sprintf(`
-STATE_DIR=%q
-EVENTS=%q
-NAME="${1:-}"
-[ -n "$NAME" ] || { echo "missing session name" >&2; exit 64; }
-[ -d "$STATE_DIR/sessions/$NAME" ] || { echo "unknown session $NAME" >&2; exit 66; }
-printf 'attach %%s\n' "$NAME" >> "$EVENTS"
-i=0
-while :; do
-  printf '\033[2J\033[Hmock remote agent %%s tick %%s\n' "$NAME" "$i"
-  i=$((i + 1))
-  sleep 1
-done
-`, stateDir, eventsLog))
-
-	terminal := writeScript(t, filepath.Join(hooksDir, "terminal hook.sh"), fmt.Sprintf(`
-STATE_DIR=%q
-EVENTS=%q
-NAME="${1:-}"
-[ -n "$NAME" ] || { echo "missing session name" >&2; exit 64; }
-[ -d "$STATE_DIR/sessions/$NAME" ] || { echo "unknown session $NAME" >&2; exit 66; }
-printf 'terminal %%s\n' "$NAME" >> "$EVENTS"
-printf 'mock remote terminal %%s\n' "$NAME"
-`, stateDir, eventsLog))
-
-	del := writeScript(t, filepath.Join(hooksDir, "delete hook.sh"), fmt.Sprintf(`
-STATE_DIR=%q
-EVENTS=%q
-NAME=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --name) NAME="$2"; shift 2;;
-    --json) shift;;
-    *) echo "unexpected delete arg: $1" >&2; exit 64;;
-  esac
-done
-[ -n "$NAME" ] || { echo "missing --name" >&2; exit 64; }
-rm -rf "$STATE_DIR/sessions/$NAME"
-printf 'delete %%s\n' "$NAME" >> "$EVENTS"
-printf '{"name":"%%s","deleted":true}\n' "$NAME"
-`, stateDir, eventsLog))
-
-	raw, err := json.MarshalIndent(map[string]any{
-		"remote_hooks": map[string]string{
-			"launch_cmd":   launch,
-			"list_cmd":     list,
-			"attach_cmd":   attach,
-			"delete_cmd":   del,
-			"terminal_cmd": terminal,
-		},
-	}, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal mock remote config: %v", err)
-	}
-	writeFile(t, config.InRepoConfigPath(repoPath), string(raw), 0644)
-
-	return &mockRemote{
-		t:         t,
-		repoID:    repo.ID,
-		stateDir:  stateDir,
-		eventsLog: eventsLog,
-	}
-}
-
-func (m *mockRemote) sessions() []string {
-	m.t.Helper()
-	entries, err := os.ReadDir(filepath.Join(m.stateDir, "sessions"))
-	if err != nil {
-		m.t.Fatalf("read mock sessions: %v", err)
-	}
-	var names []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			names = append(names, entry.Name())
-		}
-	}
-	return names
-}
-
-func (m *mockRemote) assertSessions(want ...string) {
-	m.t.Helper()
-	got := strings.Join(m.sessions(), ",")
-	if got != strings.Join(want, ",") {
-		m.t.Fatalf("mock sessions = %q, want %q", got, strings.Join(want, ","))
-	}
-}
-
-func (m *mockRemote) assertEvent(event string) {
-	m.t.Helper()
-	if !strings.Contains(readFile(m.t, m.eventsLog), event) {
-		m.t.Fatalf("mock event log missing %q:\n%s", event, readFile(m.t, m.eventsLog))
-	}
-}
-
-func (m *mockRemote) attachCount() int {
-	m.t.Helper()
-	return strings.Count(readFile(m.t, m.eventsLog), "attach ")
-}
-
-func assertRemoteSnapshot(t *testing.T, instances []instanceData, title, slug string) {
-	t.Helper()
-	for _, inst := range instances {
-		if inst.Title != title {
-			continue
-		}
-		if inst.BackendType != "remote" {
-			t.Fatalf("snapshot backend = %q, want remote; instance=%+v", inst.BackendType, inst)
-		}
-		if got, _ := inst.RemoteMeta["name"].(string); got != slug {
-			t.Fatalf("snapshot remote_meta.name = %q, want %q", got, slug)
-		}
-		if inst.Worktree.WorktreePath != "" {
-			t.Fatalf("snapshot remote worktree path = %q, want empty", inst.Worktree.WorktreePath)
-		}
-		assertRemoteTabs(t, inst)
-		return
-	}
-	t.Fatalf("snapshot missing %q in %+v", title, instances)
-}
-
-func assertRemoteTabs(t *testing.T, inst instanceData) {
-	t.Helper()
-	if len(inst.Tabs) != 2 {
-		t.Fatalf("remote tabs = %+v, want agent + terminal", inst.Tabs)
-	}
-	if inst.Tabs[0].Name != "agent" || inst.Tabs[0].Kind != 0 {
-		t.Fatalf("remote agent tab = %+v, want agent kind 0", inst.Tabs[0])
-	}
-	if inst.Tabs[1].Name != "shell" || inst.Tabs[1].Kind != 1 {
-		t.Fatalf("remote terminal tab = %+v, want shell kind 1", inst.Tabs[1])
-	}
 }
 
 func readDaemonPIDIfPresent(home string) int {

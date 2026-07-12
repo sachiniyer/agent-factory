@@ -9,11 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
@@ -108,116 +106,25 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 		"respawned session must include claude --plugin-dir injection so /af-* slash commands keep working (#511)")
 }
 
-// --- terminal_cmd (#843) ---
-
-func TestHookBackendAttachTerminalNotStarted(t *testing.T) {
-	b := &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: "/bin/true"}}
-	i := &Instance{backend: b, started: false}
-	_, err := b.AttachTerminal(i, 0)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not been started")
-}
-
-func TestHookBackendAttachTerminalNotConfigured(t *testing.T) {
-	for name, terminalCmd := range map[string]string{"empty": "", "whitespace": "   "} {
-		t.Run(name, func(t *testing.T) {
-			b := &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: terminalCmd}}
-			i := &Instance{backend: b}
-			i.started = true
-			_, err := b.AttachTerminal(i, 0)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "terminal_cmd",
-				"error must name the missing field so the fix is actionable")
-		})
-	}
-}
-
-// TestHookBackendAttachTerminalRunsTerminalCmdWithSlug verifies the
-// terminal_cmd contract (#843): the script is invoked with the session's hook
-// name as its only positional argument, behind a PTY (mirroring attach_cmd),
-// and the done channel closes when it exits. The attach_cmd-based preview
-// process must be left running — terminal_cmd opens a separate shell, so
-// unlike Attach there is nothing to stop.
-func TestHookBackendAttachTerminalRunsTerminalCmdWithSlug(t *testing.T) {
-	dir := t.TempDir()
-	argsFile := filepath.Join(dir, "terminal-args")
-	terminalCmd := writeScript(t, dir, "terminal.sh",
-		`echo "$1" > "`+argsFile+`"`)
-	// Preview attach_cmd prints once and lingers so we can observe that
-	// AttachTerminal does not tear it down.
-	attachCmd := writeScript(t, dir, "attach.sh",
-		`echo "preview for $1"
-sleep 5`)
-
-	b := &HookBackend{Hooks: config.RemoteHooks{AttachCmd: attachCmd, TerminalCmd: terminalCmd}}
-	i := &Instance{
-		Title:   "Terminal Cmd Test",
-		Path:    t.TempDir(),
-		backend: b,
-	}
-	i.started = true
-
-	require.NoError(t, b.ensurePTY(i))
-	require.NotNil(t, b.getPTY(i.Title))
-	defer b.closePTY(i.Title)
-
-	done, err := b.AttachTerminal(i, 0)
-	require.NoError(t, err)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("terminal_cmd did not exit")
-	}
-
-	raw, err := os.ReadFile(argsFile)
-	require.NoError(t, err, "terminal_cmd should have run and recorded its args")
-	assert.Equal(t, Slugify("Terminal Cmd Test"), strings.TrimSpace(string(raw)),
-		"terminal_cmd must receive the session slug as its positional argument")
-
-	assert.NotNil(t, b.getPTY(i.Title),
-		"AttachTerminal must leave the attach_cmd preview process running")
-}
-
-// TestHookBackendAttachTerminalUsesRemoteMetaName mirrors the attach_cmd
-// behavior: an imported session's authoritative remote_meta.name wins over the
-// title-derived slug.
-func TestHookBackendAttachTerminalUsesRemoteMetaName(t *testing.T) {
-	dir := t.TempDir()
-	argsFile := filepath.Join(dir, "terminal-args")
-	terminalCmd := writeScript(t, dir, "terminal.sh",
-		`echo "$1" > "`+argsFile+`"`)
-
-	b := &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: terminalCmd}}
-	i := &Instance{
-		Title:   "display title",
-		Path:    t.TempDir(),
-		backend: b,
-	}
-	i.started = true
-	i.remoteMeta = map[string]interface{}{"name": "imported-name"}
-
-	done, err := b.AttachTerminal(i, 0)
-	require.NoError(t, err)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("terminal_cmd did not exit")
-	}
-
-	raw, err := os.ReadFile(argsFile)
-	require.NoError(t, err)
-	assert.Equal(t, "imported-name", strings.TrimSpace(string(raw)))
-}
+// --- remote terminal capability (#1592 Phase 4 PR7) ---
+//
+// The per-config terminal_cmd hook and HookBackend.AttachTerminal are DELETED:
+// a remote session's terminal tab is now served by the in-sandbox af agent-server
+// over the WS PTY stream, exactly like docker/ssh, so a hook session always
+// advertises TerminalTab and attaches client-side (never through the backend).
 
 func TestInstanceRemoteTerminalCapability(t *testing.T) {
-	t.Run("remote with terminal_cmd advertises the terminal tab", func(t *testing.T) {
-		caps := (&Instance{backend: &HookBackend{Hooks: config.RemoteHooks{TerminalCmd: "/bin/true"}}}).Capabilities()
-		assert.True(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
+	t.Run("remote hook session always advertises the terminal tab", func(t *testing.T) {
+		caps := (&Instance{backend: &HookBackend{}}).Capabilities()
+		assert.True(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab,
+			"a provision-and-expose hook session has full parity, incl. the terminal tab")
 	})
 
-	t.Run("remote without terminal_cmd does not", func(t *testing.T) {
-		caps := (&Instance{backend: &HookBackend{}}).Capabilities()
-		assert.False(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
+	t.Run("remote hook AttachTerminal is a client-side WS routing guard", func(t *testing.T) {
+		i := &Instance{backend: &HookBackend{}}
+		_, err := i.AttachTerminal(1)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "attach client-side over the WS PTY stream")
 	})
 
 	t.Run("local backend AttachTerminal is a client-side WS routing guard", func(t *testing.T) {

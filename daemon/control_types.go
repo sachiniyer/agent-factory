@@ -235,14 +235,6 @@ type ResumeStatusPollResponse struct {
 // snapshot.go (extracted to keep control.go under its file-length ceiling,
 // #1145).
 
-type ImportRemoteHookSessionsRequest struct {
-	RepoPath string `json:"repo_path"`
-}
-
-type ImportRemoteHookSessionsResponse struct {
-	Instances []session.InstanceData `json:"instances"`
-}
-
 type PingRequest struct{}
 type PingResponse struct {
 	OK bool `json:"ok"`

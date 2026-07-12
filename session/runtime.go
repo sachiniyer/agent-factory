@@ -20,9 +20,10 @@ const (
 	BackendDocker BackendKind = config.BackendDocker
 	// BackendSSH runs the workspace + agent on a remote host over ssh (PR5).
 	BackendSSH BackendKind = config.BackendSSH
-	// BackendHook is the existing remote-hook backend (the bring-your-own
-	// provisioner escape hatch). Adapted to the Runtime seam here; its
-	// provision-and-expose migration is PR7.
+	// BackendHook is the remote-hook backend: the bring-your-own-provisioner
+	// escape hatch, migrated to the same provision-and-expose contract as
+	// docker/ssh (#1592 Phase 4 PR7). launch_cmd provisions the workspace on the
+	// user's infra and exposes an `af agent-server` URL.
 	BackendHook BackendKind = config.BackendHook
 )
 
@@ -158,20 +159,13 @@ func (localRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
 	return ProvisionResult{Backend: &LocalBackend{}}, nil
 }
 
-// hookRuntime adapts the existing remote-hook backend to the Runtime seam. It
-// loads the repo's validated RemoteHooks and builds a HookBackend — the same
-// backend the pre-Phase-4 ForceRemote path produced — so remote-hook sessions
-// keep working unchanged. Its migration to a real provision-and-expose contract
-// (launch_cmd returns an agent-server URL) is PR7.
-type hookRuntime struct{}
-
-func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
-	hook, err := loadHookBackendForPath(spec.RepoRoot)
-	if err != nil {
-		return ProvisionResult{}, fmt.Errorf("remote hooks not configured for this repo: %w", err)
-	}
-	return ProvisionResult{Backend: hook}, nil
-}
+// hookRuntime provisions a session on user-provided infrastructure (#1592 Phase 4
+// PR7 — the bring-your-own-provisioner escape hatch). Its Provision lives in
+// backend_hook_backend.go: run the repo's launch_cmd, which clones the workspace
+// and starts an `af agent-server` on the user's infra, parse the authed wss://
+// URL it echoes, and expose it — the SAME provision-and-expose contract as
+// docker/ssh. The type is declared there. Its old terminal/attach contract is
+// deleted (clean-break).
 
 // dockerRuntime provisions a real container sandbox (#1592 Phase 4 PR4). Its
 // Provision lives in backend_docker.go: run a container from the configured

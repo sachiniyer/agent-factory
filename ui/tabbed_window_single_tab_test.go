@@ -17,7 +17,7 @@ func TestTabbedWindowSingleTabHeaderRendering(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	inst := startedRemoteInstance(t, false)
+	inst := startedRemoteInstance(t)
 	w := newTestTabbedWindow()
 	setWindowInstance(w, inst)
 	require.Equal(t, []string{"Agent"}, w.tabLabels(), "remote without terminal_cmd has a single tab")
