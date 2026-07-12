@@ -266,11 +266,15 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
+	// Resolve the stable id BEFORE the teardown, while the session is still
+	// tracked — the event must carry it so clients key their session list by id,
+	// not the collision-prone title (#1592 Phase 5 PR5).
+	id := s.manager.stableIDFor(req.RepoID, req.Title)
 	if err := s.manager.KillSession(req); err != nil {
 		return err
 	}
 	resp.OK = true
-	s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{Title: req.Title})
+	s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: id, Title: req.Title})
 	return nil
 }
 
@@ -281,13 +285,16 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
+	// Resolve the stable id BEFORE the archive relocates/re-marks the session, so
+	// the event carries the id clients key their rail by (#1592 Phase 5 PR5).
+	id := s.manager.stableIDFor(req.RepoID, req.Title)
 	archivedPath, err := s.manager.ArchiveSession(req)
 	if err != nil {
 		return err
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
-	s.manager.publishEvent(agentproto.EventSessionArchived, session.InstanceData{Title: req.Title})
+	s.manager.publishEvent(agentproto.EventSessionArchived, session.InstanceData{ID: id, Title: req.Title})
 	return nil
 }
 
@@ -304,7 +311,10 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
-	s.manager.publishEvent(agentproto.EventSessionRestored, session.InstanceData{Title: req.Title})
+	// Resolve the id AFTER the restore re-registers the session in memory, so the
+	// event carries the id clients key their rail by (#1592 Phase 5 PR5).
+	id := s.manager.stableIDFor(req.RepoID, req.Title)
+	s.manager.publishEvent(agentproto.EventSessionRestored, session.InstanceData{ID: id, Title: req.Title})
 	return nil
 }
 
@@ -321,7 +331,10 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
-	s.manager.publishEvent(agentproto.EventSessionRestored, session.InstanceData{Title: req.Title})
+	// Resolve the id AFTER the restore re-registers the session in memory (#1592
+	// Phase 5 PR5) so the event carries the stable id clients key their rail by.
+	id := s.manager.stableIDFor(req.RepoID, req.Title)
+	s.manager.publishEvent(agentproto.EventSessionRestored, session.InstanceData{ID: id, Title: req.Title})
 	return nil
 }
 

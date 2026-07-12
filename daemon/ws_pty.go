@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -152,7 +154,25 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 	for {
 		ev, err := sub.NextEvent(ctx)
 		if err != nil {
-			return // ctx cancelled or io.EOF (session gone / broker closed)
+			// Distinguish a SESSION-END (the broker closed because the session was
+			// killed/archived or the agent-server torn down → NextEvent returns
+			// io.EOF) from THIS subscriber going away (the reader/keepalive cancelled
+			// ctx on a client drop → ctx.Err() != nil). On a session-end, tell the
+			// client explicitly with a MsgExit control frame so a browser terminal
+			// settles to an "exited" state and STOPS reconnecting, instead of
+			// reconnect-looping against a session that no longer exists (#1592 Phase
+			// 5 PR5). A ctx cancellation is a normal client-side teardown — nothing to
+			// announce; the socket close alone is the signal, and the client (if still
+			// alive) reconnects. This brings the local broker in line with the remote
+			// agent-server, which already emits MsgExit that the TUI attach consumes
+			// (apiclient/attach.go). Go stream consumers (TUI live panes) ignore an
+			// unrecognized control frame, so the added frame is safe for them.
+			if ctx.Err() == nil && errors.Is(err, io.EOF) {
+				ectx, ecancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+				_ = agentproto.WriteControl(ectx, conn, agentproto.NewExitMessage(0))
+				ecancel()
+			}
+			return
 		}
 		wctx, wcancel := context.WithTimeout(ctx, wsWriteTimeout)
 		switch ev.Kind {

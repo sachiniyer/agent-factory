@@ -315,3 +315,33 @@ func (m *Manager) findSession(title, repoID string) (*session.Instance, string, 
 	m.mu.Unlock()
 	return instance, rid, data, nil
 }
+
+// stableIDFor resolves the stable session id (session.InstanceData.ID, #1195)
+// of the tracked session (repoID, title) from the in-memory instance map — the
+// same fast-path lookup findSession uses — WITHOUT the disk fallback or restore
+// side effects findSession performs. It exists so the control server can stamp
+// the stable id onto the delete-class lifecycle events (killed/archived/
+// restored), which historically carried only the title and forced clients to
+// key their session lists by title — wrong when titles collide across repos
+// (#1592 Phase 5 PR5). Returns "" for a session not tracked in memory (a
+// legacy/disk-only record that never appears in a live Snapshot, hence never in
+// a client's rail); the empty id is the client's title-fallback signal.
+func (m *Manager) stableIDFor(repoID, title string) string {
+	if title == "" {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if repoID != "" {
+		if inst := m.instances[daemonInstanceKey(repoID, title)]; inst != nil {
+			return inst.ID
+		}
+		return ""
+	}
+	for _, inst := range m.instances {
+		if inst.Title == title {
+			return inst.ID
+		}
+	}
+	return ""
+}

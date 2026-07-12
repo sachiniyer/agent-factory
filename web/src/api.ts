@@ -112,3 +112,63 @@ export async function fetchSnapshot(token: string): Promise<SessionData[]> {
 export function probeToken(token: string): Promise<SessionData[]> {
   return fetchSnapshot(token);
 }
+
+// --- lifecycle mutations (#1592 Phase 5 PR5) ------------------------------
+//
+// The write side of the web client: the create/send-prompt/kill/archive verbs the
+// modals drive, each a thin POST to the daemon RPC the TUI/CLI already speak. They
+// send title-scoped requests with an EMPTY repo_id — the all-repo lookup the CLI
+// uses (`af sessions kill <title>`) — because the web is an all-repos client (like
+// the daemon Snapshot) and the InstanceData projection carries no repo id. The
+// daemon is the single writer; the resulting create/kill/archive event flows back
+// over /v1/events and updates the rail live, so these calls never touch local
+// state themselves.
+
+/** The new-session form's inputs (a subset of daemon.CreateSessionRequest). */
+export interface CreateSessionInput {
+  /** The desired title; sent as `title_base` so the daemon auto-suffixes a
+   *  collision (the TUI's friendly behavior) and returns the resolved title. */
+  title: string;
+  /** The picked project's repo root (InstanceData.worktree.repo_path). */
+  repoPath: string;
+  /** The agent program (claude/codex/…); empty resolves the repo default. */
+  program: string;
+  /** An optional initial prompt fed to the new agent. */
+  prompt: string;
+  /** Whether to run the session in auto-yes mode. */
+  autoYes: boolean;
+}
+
+/** Creates a session and returns the daemon's authoritative projection of it (the
+ *  resolved title + stable id). The created row also arrives via /v1/events. */
+export async function createSession(input: CreateSessionInput, token: string): Promise<SessionData> {
+  const resp = await af<{ instance: SessionData }>(
+    "CreateSession",
+    {
+      title_base: input.title,
+      repo_path: input.repoPath,
+      program: input.program,
+      prompt: input.prompt,
+      auto_yes: input.autoYes,
+    },
+    token,
+  );
+  return resp.instance;
+}
+
+/** Sends a prompt to an existing session (mirrors `af sessions send-prompt`). */
+export async function sendPrompt(title: string, prompt: string, token: string): Promise<void> {
+  await af("SendPrompt", { title, repo_id: "", prompt }, token);
+}
+
+/** Kills a session (mirrors `af sessions kill`). The session.killed event removes
+ *  its row from the rail live. */
+export async function killSession(title: string, token: string): Promise<void> {
+  await af("KillSession", { title, repo_id: "" }, token);
+}
+
+/** Archives a session (mirrors `af sessions archive`) — non-destructive, keeps it
+ *  restorable. The session.archived event triggers a rail resync. */
+export async function archiveSession(title: string, token: string): Promise<void> {
+  await af("ArchiveSession", { title, repo_id: "" }, token);
+}

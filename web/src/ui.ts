@@ -49,6 +49,29 @@ export interface Actions {
   disconnect(): void;
   /** Selects a session by its stable id (null-safe: rows without an id are inert). */
   select(id: string): void;
+  /** Opens the new-session modal (#1592 Phase 5 PR5). */
+  newSession(): void;
+  /** Opens the send-prompt modal for the current selection. */
+  sendPrompt(): void;
+  /** Opens the kill-confirm modal for the current selection. */
+  kill(): void;
+  /** Opens the archive-confirm modal for the current selection. */
+  archive(): void;
+}
+
+/** The distinct repo roots the current sessions belong to — the new-session
+ *  modal's project picker, derived from the live projection exactly as the TUI's
+ *  zero-config picker is (app/switch_project.go buildProjectListFrom). Sorted for a
+ *  stable menu. */
+export function deriveProjects(sessions: SessionData[]): string[] {
+  const roots = new Set<string>();
+  for (const s of sessions) {
+    const root = s.worktree?.repo_path;
+    if (root) {
+      roots.add(root);
+    }
+  }
+  return [...roots].sort();
 }
 
 /** Minimal hyperscript: create an element, apply props, append children. Keeps the
@@ -190,6 +213,7 @@ export class AppShell {
   constructor(
     private readonly actions: Actions,
     private readonly termHost: HTMLElement,
+    private readonly modalHost: HTMLElement,
   ) {
     this.pip = h("span", { class: "af-live-pip" });
     this.pip.setAttribute("aria-hidden", "true");
@@ -209,11 +233,14 @@ export class AppShell {
     );
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
+    const newBtn = h("button", { type: "button", class: "af-rail-new", title: "New session" }, "+ New");
+    newBtn.addEventListener("click", () => this.actions.newSession());
     const railHead = h(
       "div",
       { class: "af-rail-head" },
       h("span", { class: "af-rail-title" }, "Sessions"),
       this.railCount,
+      newBtn,
     );
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
@@ -222,7 +249,9 @@ export class AppShell {
 
     this.main = h("section", { class: "af-main" });
     const body = h("div", { class: "af-body" }, rail, this.main);
-    this.el = h("main", { class: "af-app" }, header, body);
+    // The modal host is a persistent overlay layer index.ts mounts modals into; it
+    // sits above the app body and is empty except while a modal is open.
+    this.el = h("main", { class: "af-app" }, header, body, this.modalHost);
   }
 
   /** Applies the latest state, touching only what changed. */
@@ -291,7 +320,19 @@ export class AppShell {
     }
     this.headTitle = h("span", { class: "af-term-title" }, selected.title);
     this.headMeta = h("span", { class: "af-term-meta" });
-    const head = h("div", { class: "af-term-head" }, this.headTitle, this.headMeta);
+    const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle, this.headMeta);
+
+    // Per-session actions (#1592 Phase 5 PR5): send a prompt, or kill/archive
+    // behind a confirm. They act on the current selection; index.ts reads it.
+    const promptBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Prompt");
+    promptBtn.addEventListener("click", () => this.actions.sendPrompt());
+    const archiveBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Archive");
+    archiveBtn.addEventListener("click", () => this.actions.archive());
+    const killBtn = h("button", { type: "button", class: "af-danger af-term-action" }, "Kill");
+    killBtn.addEventListener("click", () => this.actions.kill());
+    const actions = h("div", { class: "af-term-actions" }, promptBtn, archiveBtn, killBtn);
+
+    const head = h("div", { class: "af-term-head" }, titleBox, actions);
     this.main.className = "af-main af-main-term";
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
     // selection change, so this reparent is rare and never happens mid-type.

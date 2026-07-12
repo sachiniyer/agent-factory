@@ -11,12 +11,25 @@
 // /v1/sessions/{id}/stream WebSocket.
 
 import "./styles.css";
-import { ApiError, clearToken, fetchSnapshot, loadToken, probeToken, storeToken } from "./api.js";
+import {
+  ApiError,
+  archiveSession,
+  clearToken,
+  createSession,
+  type CreateSessionInput,
+  fetchSnapshot,
+  killSession,
+  loadToken,
+  probeToken,
+  sendPrompt,
+  storeToken,
+} from "./api.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
-import { applyEvent, pickSelection } from "./sessions.js";
+import { confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
+import { applyEvent, pickSelection, upsertSession } from "./sessions.js";
 import { Store } from "./store.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
-import { AppShell, orderedSessions, renderLogin, type AppState } from "./ui.js";
+import { AppShell, deriveProjects, orderedSessions, renderLogin, type AppState } from "./ui.js";
 import type { SessionData, WireEvent } from "./types.js";
 
 const store = new Store<AppState>({
@@ -44,6 +57,14 @@ let resyncTimer: number | null = null;
 let shell: AppShell | null = null;
 const termHost = document.createElement("div");
 termHost.className = "af-term-host";
+
+// The persistent overlay layer modals mount into (empty unless a modal is open),
+// and the one live modal at a time. Modals are managed imperatively (not via the
+// store) so their inputs keep focus/typed text across a busy/error cycle — the
+// same reason the terminal host lives outside the re-rendered tree.
+const modalHost = document.createElement("div");
+modalHost.className = "af-modal-host";
+let modal: ModalHandle | null = null;
 
 // The one live attach terminal and the session id it is bound to. Rebuilt only
 // when the selected id changes; disposed on deselect/logout.
@@ -85,11 +106,12 @@ function rerender(): void {
       shell = null; // dropped from the tree by renderLogin below
     }
     disposeTerminal();
-    renderLogin(root, state, { connect, disconnect, select });
+    closeModal();
+    renderLogin(root, state, actions);
     return;
   }
   if (!shell) {
-    shell = new AppShell({ connect, disconnect, select }, termHost);
+    shell = new AppShell(actions, termHost, modalHost);
     root.replaceChildren(shell.el);
   }
   shell.update(state);
@@ -125,6 +147,7 @@ async function connect(candidate: string): Promise<void> {
 /** Forgets the token, tears down the push stream + terminal, and returns to login. */
 function disconnect(): void {
   stopStream();
+  closeModal();
   token = null;
   clearToken();
   store.set({
@@ -141,6 +164,134 @@ function disconnect(): void {
 function select(id: string): void {
   store.set({ selectedId: id });
 }
+
+// --- lifecycle actions (modals) --------------------------------------------
+
+/** The title of the currently selected session, or null. */
+function selectedTitle(): string | null {
+  const { sessions, selectedId } = store.get();
+  return sessions.find((s) => s.id === selectedId)?.title ?? null;
+}
+
+/** Closes and clears the open modal, if any. */
+function closeModal(): void {
+  if (modal) {
+    modal.close();
+    modal = null;
+  }
+}
+
+/** Mounts a fresh modal, replacing any currently open one. */
+function openModal(m: ModalHandle): void {
+  closeModal();
+  modal = m;
+  modalHost.replaceChildren(m.el);
+}
+
+/** Opens the new-session modal, its picker seeded from the live projects. On
+ *  submit it creates the session via the daemon; the created row arrives via the
+ *  events stream. Errors (e.g. a bad repo) surface in the modal for a retry. */
+function newSession(): void {
+  const projects = deriveProjects(store.get().sessions);
+  openModal(
+    newSessionModal(projects, {
+      onSubmit: (values: CreateSessionInput) => {
+        const tok = token;
+        if (!tok || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void createSession(values, tok)
+          .then((created) => {
+            closeModal();
+            // Upsert the created row AND select it in one update, so it opens
+            // attached immediately. Upserting here (not just setting selectedId)
+            // matters: the async created event may not have landed yet, and
+            // selecting an id whose row isn't in the list would leave the pane
+            // stuck empty (the shell only re-renders the main pane on a selection
+            // change). CreateSession returns the full projection, so the row is
+            // complete; the later created event just upserts the same id again.
+            if (created.id) {
+              const sessions = upsertSession(store.get().sessions, created);
+              store.set({ sessions, selectedId: created.id });
+            }
+          })
+          .catch((e) => {
+            m.setBusy(false);
+            m.setError(describeError(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
+/** Opens the send-prompt modal for the selected session. */
+function openSendPrompt(): void {
+  const title = selectedTitle();
+  if (!title) {
+    return;
+  }
+  openModal(
+    promptModal(title, {
+      onSubmit: (text: string) => {
+        const tok = token;
+        if (!tok || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void sendPrompt(title, text, tok)
+          .then(closeModal)
+          .catch((e) => {
+            m.setBusy(false);
+            m.setError(describeError(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
+/** Opens the kill/archive confirm modal for the selected session. */
+function openConfirm(action: "kill" | "archive"): void {
+  const title = selectedTitle();
+  if (!title) {
+    return;
+  }
+  openModal(
+    confirmModal({
+      action,
+      sessionTitle: title,
+      onConfirm: () => {
+        const tok = token;
+        if (!tok || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        const run = action === "kill" ? killSession(title, tok) : archiveSession(title, tok);
+        void run.then(closeModal).catch((e) => {
+          m.setBusy(false);
+          m.setError(describeError(e));
+        });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
+/** The action callbacks the shell + login view invoke. */
+const actions = {
+  connect,
+  disconnect,
+  select,
+  newSession,
+  sendPrompt: openSendPrompt,
+  kill: () => openConfirm("kill"),
+  archive: () => openConfirm("archive"),
+};
 
 // --- attach terminal wiring ------------------------------------------------
 
@@ -238,6 +389,15 @@ function requestResync(): void {
 function onKeydown(e: KeyboardEvent): void {
   const state = store.get();
   if (state.phase !== "app") {
+    return;
+  }
+  // A modal owns the keyboard while open: Escape cancels it, and rail navigation is
+  // suppressed so arrows/j/k move within the form, not the rail behind it.
+  if (modal) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeModal();
+    }
     return;
   }
   // Don't hijack typing in a form field or the terminal (xterm's helper textarea):
