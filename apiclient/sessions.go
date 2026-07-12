@@ -23,16 +23,28 @@ func (c *Client) Snapshot(req daemon.SnapshotRequest) ([]session.InstanceData, e
 // daemon, and collapses every failure — no socket, a refused dial, a warming
 // daemon's starting-error envelope (#829) — into daemon.ErrDaemonUnavailable so
 // the read-only CLI read path (api/sessions.go) falls back to disk instead of
-// spawning a daemon or failing. This is the ONE behavioral contract the caller
-// depends on, and it matches the net/rpc twin exactly: live daemon → live
+// spawning a daemon or failing. This is the ONE behavioral contract the LOCAL
+// caller depends on, and it matches the net/rpc twin exactly: live daemon → live
 // snapshot, otherwise → disk fallback.
+//
+// For a REMOTE target (#1592 Phase 3 PR4) the contract inverts: there is no local
+// disk to fall back to (the sessions live on the remote machine), and a wrong or
+// missing token MUST surface as an auth error rather than be masked by a
+// same-machine disk read. So a remote failure returns the real error verbatim;
+// the caller (api/sessions.go) suppresses its disk fallback when IsRemoteTarget().
 func SnapshotNoSpawn(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
-	c, err := New()
+	c, err := NewTargeted()
 	if err != nil {
+		if IsRemoteTarget() {
+			return nil, err
+		}
 		return nil, daemon.ErrDaemonUnavailable
 	}
 	instances, err := c.Snapshot(req)
 	if err != nil {
+		if IsRemoteTarget() {
+			return nil, err
+		}
 		return nil, daemon.ErrDaemonUnavailable
 	}
 	return instances, nil

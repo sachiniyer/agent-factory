@@ -3,11 +3,13 @@ package apiclient
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 
 	"github.com/coder/websocket"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
@@ -49,14 +51,25 @@ func (c *Client) DialStream(ctx context.Context, title, repoID string, tab int, 
 	if since != 0 {
 		q.Set("since", strconv.FormatUint(since, 10))
 	}
-	// The host is a syntactic placeholder — the http.Client's transport dials the
-	// fixed Unix socket regardless (the same indirection every other apiclient call
-	// rides). "ws://" selects the WebSocket handshake.
-	u := "ws://unix/v1/sessions/" + url.PathEscape(title) + "/stream"
+	// For a REMOTE target the token also rides the query string (?access_token=),
+	// not just the Authorization header: browsers can't set headers on a WS
+	// handshake, so the daemon's extractor honors the query fallback and we use it
+	// here too for parity (§1.6). No-op for the local socket (empty token).
+	var opts websocket.DialOptions
+	opts.HTTPClient = c.httpClient
+	if c.token != "" {
+		q.Set(agentproto.AccessTokenQueryParam, c.token)
+		opts.HTTPHeader = http.Header{}
+		c.setAuth(opts.HTTPHeader)
+	}
+	// wsBase is the placeholder ws://unix for the local socket (the http.Client's
+	// transport dials the socket regardless of host) or the real wss://host:port
+	// for a remote daemon; either way "ws(s)://" selects the WebSocket handshake.
+	u := c.wsBase + "/v1/sessions/" + url.PathEscape(title) + "/stream"
 	if enc := q.Encode(); enc != "" {
 		u += "?" + enc
 	}
-	conn, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPClient: c.httpClient})
+	conn, resp, err := websocket.Dial(ctx, u, &opts)
 	if err != nil {
 		return nil, &TransportError{Err: fmt.Errorf("apiclient: dial pty stream: %w", err)}
 	}

@@ -52,7 +52,7 @@ func (m *home) newTabPaneSource() ui.PreviewSource {
 // every reconnect.
 func streamDialer(title, repoID string, tab int) termpane.Dialer {
 	return func(ctx context.Context, since uint64) (termpane.Stream, error) {
-		c, err := apiclient.New()
+		c, err := apiclient.NewTargeted()
 		if err != nil {
 			return nil, err
 		}
