@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -580,25 +579,22 @@ func (b *LocalBackend) PreviewFullHistory(i *Instance) (string, error) {
 	return ts.CapturePaneContentWithOptions("-", "-")
 }
 
-func (b *LocalBackend) Attach(i *Instance) (chan struct{}, error) {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxLocked()
-	i.mu.RUnlock()
-
-	if !s || ts == nil {
-		return nil, fmt.Errorf("cannot attach instance that has not been started")
-	}
-	return ts.Attach()
+// Attach and AttachTerminal are the local runtime's interactive-attach entries
+// on the Backend interface. Since #1592 Phase 2 PR7 a local session attaches
+// CLIENT-side over the daemon's WS PTY stream (apiclient.AttachStream), not
+// through the backend — the tmux-server-mediated attach driver was retired and a
+// session-package backend cannot dial the daemon socket (layering). The client's
+// attach dispatch branches on Capabilities().Workspace and routes a local
+// session to the WS driver, so these methods are never reached for a local
+// instance; they exist to satisfy the interface (whose remote hook backend does
+// attach in-process) and return an explicit routing-invariant error rather than a
+// silent no-op if something ever mis-routes here.
+func (b *LocalBackend) Attach(*Instance) (chan struct{}, error) {
+	return nil, fmt.Errorf("local sessions attach client-side over the WS PTY stream, not through the backend")
 }
 
-// AttachTerminal attaches to a local shell/process tab (#1592 Phase 1 PR5): the
-// tab's tmux session is the local runtime's PTYStream, driven by tmux's own
-// server-mediated attach/detach (TmuxSession.Attach). It is the local peer of
-// HookBackend.AttachTerminal, so callers reach a terminal tab through the
-// uniform Backend interface without type-asserting the concrete backend.
-func (b *LocalBackend) AttachTerminal(i *Instance, tabIdx int) (chan struct{}, error) {
-	return i.AttachTab(tabIdx)
+func (b *LocalBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
+	return nil, fmt.Errorf("local terminal tabs attach client-side over the WS PTY stream, not through the backend")
 }
 
 func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
@@ -611,30 +607,6 @@ func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, co
 		return false, false, ""
 	}
 	return ts.HasUpdated()
-}
-
-func (b *LocalBackend) SendPrompt(i *Instance, prompt string) error {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxLocked()
-	i.mu.RUnlock()
-
-	if !s {
-		return fmt.Errorf("instance not started")
-	}
-	if ts == nil {
-		return fmt.Errorf("tmux session not initialized")
-	}
-	if err := ts.SendKeys(prompt); err != nil {
-		return fmt.Errorf("error sending keys to tmux session: %w", err)
-	}
-
-	time.Sleep(100 * time.Millisecond)
-	if err := ts.TapEnter(); err != nil {
-		return fmt.Errorf("error tapping enter: %w", err)
-	}
-
-	return nil
 }
 
 func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
@@ -650,33 +622,6 @@ func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
 		return fmt.Errorf("tmux session not initialized")
 	}
 	return ts.SendKeysCommand(prompt)
-}
-
-func (b *LocalBackend) SendKeys(i *Instance, keys string) error {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxLocked()
-	i.mu.RUnlock()
-
-	if !s {
-		return fmt.Errorf("cannot send keys to instance that has not been started")
-	}
-	if ts == nil {
-		return fmt.Errorf("tmux session not initialized")
-	}
-	return ts.SendKeys(keys)
-}
-
-func (b *LocalBackend) SetPreviewSize(i *Instance, width, height int) error {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxLocked()
-	i.mu.RUnlock()
-
-	if !s || ts == nil {
-		return fmt.Errorf("cannot set preview size for instance that has not been started")
-	}
-	return ts.SetDetachedSize(width, height)
 }
 
 func (b *LocalBackend) IsAlive(i *Instance) bool {

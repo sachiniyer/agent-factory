@@ -270,35 +270,6 @@ func (i *Instance) TabAlive(idx int) bool {
 	return ts != nil && ts.DoesSessionExist()
 }
 
-// AttachTab attaches (interactive PTY) to the tab at idx. The captured-instance
-// semantics that protect deferred attach flows from selection drift (#716) are
-// inherent here: the tab's session belongs to this instance, so there is no
-// title-keyed cache to drift.
-func (i *Instance) AttachTab(idx int) (chan struct{}, error) {
-	i.mu.RLock()
-	ts := i.tabTmuxAtLocked(idx)
-	i.mu.RUnlock()
-	if ts == nil {
-		return nil, fmt.Errorf("no terminal session to attach to")
-	}
-	if !ts.DoesSessionExist() {
-		return nil, fmt.Errorf("terminal session does not exist")
-	}
-	return ts.Attach()
-}
-
-// SetTabDetachedSize resizes the detached session of the tab at idx so its
-// capture matches the pane dimensions. A no-op when the tab has no live session.
-func (i *Instance) SetTabDetachedSize(idx, width, height int) error {
-	i.mu.RLock()
-	ts := i.tabTmuxAtLocked(idx)
-	i.mu.RUnlock()
-	if ts == nil {
-		return nil
-	}
-	return ts.SetDetachedSize(width, height)
-}
-
 // TabCount returns the number of tabs the instance currently holds.
 func (i *Instance) TabCount() int {
 	i.mu.RLock()

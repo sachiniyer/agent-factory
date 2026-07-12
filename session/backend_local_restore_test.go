@@ -220,79 +220,26 @@ func TestInstanceRemoteTerminalCapability(t *testing.T) {
 		assert.False(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
 	})
 
-	t.Run("local backend AttachTerminal routes to a shell tab", func(t *testing.T) {
-		// The uniform Instance.AttachTerminal (#1592 Phase 1 PR5) dispatches to the
-		// backend: a local instance attaches the shell tab at tabIdx, so with no
-		// live tab it surfaces the tab error — not the former AttachRemoteTerminal
-		// "remote sessions only" type-assertion rejection.
+	t.Run("local backend AttachTerminal is a client-side WS routing guard", func(t *testing.T) {
+		// Since #1592 Phase 2 PR7 a local session's terminal tab attaches
+		// CLIENT-side over the WS PTY stream (apiclient.AttachStream); the client's
+		// locality branch never dispatches a local attach through the backend, so
+		// LocalBackend.AttachTerminal exists only to satisfy the interface and
+		// returns an explicit routing-invariant error rather than a silent no-op.
 		i := &Instance{backend: &LocalBackend{}}
 		caps := i.Capabilities()
 		assert.False(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
 		_, err := i.AttachTerminal(1)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no terminal session to attach to")
+		assert.Contains(t, err.Error(), "attach client-side over the WS PTY stream")
 	})
 }
 
-// errPtyFactory is a tmux.PtyFactory whose Start always fails — it simulates a
-// PTY allocation failure (EMFILE/ENOMEM) on the attach path so a restore can
-// fail AFTER `tmux has-session` confirms the server-side session is alive.
-type errPtyFactory struct{ err error }
-
-func (e errPtyFactory) Start(_ *exec.Cmd) (*os.File, error) { return nil, e.err }
-func (e errPtyFactory) Close()                              {}
-
-// TestLocalBackendRestorePtyFailureDoesNotKillSession is the regression test
-// for issue #895. When restoring an existing instance, `tmux has-session`
-// confirms the server-side session is alive but the local attach PTY cannot be
-// allocated (EMFILE/ENOMEM), Restore returns an error. The deferred restore
-// cleanup in LocalBackend.Start must tear down only the local attach
-// resources (CloseAttachOnly) — it must NOT run `tmux kill-session`, which
-// would destroy a live, recoverable session (scrollback + running processes)
-// and turn a transient attach failure into data loss.
-func TestLocalBackendRestorePtyFailureDoesNotKillSession(t *testing.T) {
-	var mu sync.Mutex
-	var ran []string
-	cmdExec := cmd_test.MockCmdExec{
-		RunFunc: func(c *exec.Cmd) error {
-			mu.Lock()
-			ran = append(ran, strings.Join(c.Args, " "))
-			mu.Unlock()
-			// All commands (notably has-session) succeed → Restore takes the
-			// attach branch where the PTY allocation failure fires.
-			return nil
-		},
-		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("output"), nil },
-	}
-
-	ts := tmux.NewTmuxSessionWithDeps("restore-pty-fail", "claude",
-		errPtyFactory{err: fmt.Errorf("pty allocation failed")}, cmdExec)
-	inst := &Instance{
-		Title:   "restore-pty-fail",
-		backend: &LocalBackend{},
-		started: true,
-		Tabs:    []*Tab{newAgentTab(ts)},
-	}
-
-	// firstTimeSetup=false → restore path. No gitWorktree is attached, so
-	// Restore is called with an empty workDir and a present session attaches
-	// (then fails at PTY) rather than re-spawning.
-	err := inst.backend.Start(inst, false)
-	require.Error(t, err, "restore must surface the PTY allocation failure")
-	assert.Contains(t, err.Error(), "pty allocation failed")
-
-	mu.Lock()
-	defer mu.Unlock()
-	for _, c := range ran {
-		assert.NotContains(t, c, "kill-session",
-			"restore PTY failure must NOT kill the live tmux session (#895); ran: %v", ran)
-	}
-
-	// The local attach was still torn down: the instance no longer holds the
-	// session and is marked not-started so a later retry is clean.
-	assert.Nil(t, inst.tmuxLocked(), "attach resources should be released on restore failure")
-	assert.False(t, inst.Started(), "instance should be marked not-started after a failed restore")
-}
+// NOTE: the #895 "restore PTY-allocation failure must not kill the live session"
+// regression was retired in #1592 Phase 2 PR7. Restore no longer opens a `tmux
+// attach-session` PTY (the local runtime's data plane is the daemon's clientless
+// broker), so restoring a live session can no longer fail on PTY allocation — the
+// failure mode #895 guarded was designed away, not patched.
 
 // TestLocalBackendKillRunsKillSession is the counterpart to #895: a genuine
 // Kill must still run `tmux kill-session`. This guards against an
@@ -326,36 +273,14 @@ func TestLocalBackendKillRunsKillSession(t *testing.T) {
 	assert.True(t, killed, "a genuine Kill must run tmux kill-session")
 }
 
-// closeTrackingPtyFactory is a tmux.PtyFactory returning real temp files as
-// PTYs and recording every one it hands out, so a test can assert each was
-// closed (a second Close on an *os.File fails with os.ErrClosed).
-type closeTrackingPtyFactory struct {
-	t     *testing.T
-	mu    sync.Mutex
-	files []*os.File
-}
-
-func (f *closeTrackingPtyFactory) Start(_ *exec.Cmd) (*os.File, error) {
-	file, err := os.CreateTemp(f.t.TempDir(), "pty-")
-	if err != nil {
-		return nil, err
-	}
-	f.mu.Lock()
-	f.files = append(f.files, file)
-	f.mu.Unlock()
-	return file, nil
-}
-
-func (f *closeTrackingPtyFactory) Close() {}
-
-// TestLocalBackendCloseAttachOnlyReleasesEveryTabPTY is the regression test
-// for issue #1065. The daemon discards a duplicate multi-tab Instance restored
-// from disk via CloseAttachOnly (#867); since #930 every tab owns its own
-// tmux session whose restore opened its own attach PTY, so CloseAttachOnly
-// must release the PTY of EVERY tab — not just the agent tab's — and it must
-// still never run `tmux kill-session`, because the server-side sessions are
-// shared with the canonical tracked Instance.
-func TestLocalBackendCloseAttachOnlyReleasesEveryTabPTY(t *testing.T) {
+// TestLocalBackendCloseAttachOnlyNeverKillsSharedSession is the enduring half of
+// #867/#1065: the daemon discards a duplicate multi-tab Instance restored from
+// disk via CloseAttachOnly, and that must NEVER run `tmux kill-session` (the
+// server-side sessions are shared with the canonical tracked Instance) and must
+// clear the duplicate's local refs. The attach-PTY fd leak the original #1065
+// guarded is structurally gone since #1592 Phase 2 PR7 — Restore opens no attach
+// PTY — so this now pins the surviving contract: no kill, refs cleared, clean.
+func TestLocalBackendCloseAttachOnlyNeverKillsSharedSession(t *testing.T) {
 	var mu sync.Mutex
 	var ran []string
 	cmdExec := cmd_test.MockCmdExec{
@@ -363,24 +288,14 @@ func TestLocalBackendCloseAttachOnlyReleasesEveryTabPTY(t *testing.T) {
 			mu.Lock()
 			ran = append(ran, strings.Join(c.Args, " "))
 			mu.Unlock()
-			// has-session succeeds → Restore takes the attach branch and opens
-			// a PTY for each session.
 			return nil
 		},
 		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("output"), nil },
 	}
-	pty := &closeTrackingPtyFactory{t: t}
 
-	agentTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent", "claude", pty, cmdExec)
-	shellTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent__shell", "/bin/sh", pty, cmdExec)
-	procTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent__btop", "btop", pty, cmdExec)
-	for _, ts := range []*tmux.TmuxSession{agentTs, shellTs, procTs} {
-		require.NoError(t, ts.Restore(""), "restore must attach and open a PTY")
-	}
-	pty.mu.Lock()
-	nOpened := len(pty.files)
-	pty.mu.Unlock()
-	require.Equal(t, 3, nOpened, "each tab's restore must have opened its own PTY")
+	agentTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent", "claude", nil, cmdExec)
+	shellTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent__shell", "/bin/sh", nil, cmdExec)
+	procTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_dup_agent__btop", "btop", nil, cmdExec)
 
 	inst := &Instance{
 		Title:   "dup",
@@ -394,16 +309,6 @@ func TestLocalBackendCloseAttachOnlyReleasesEveryTabPTY(t *testing.T) {
 	}
 
 	require.NoError(t, inst.CloseAttachOnly())
-
-	// Every tab's attach PTY was closed — the agent's AND the shell/process
-	// tabs' (the fds that leaked before the fix).
-	pty.mu.Lock()
-	files := append([]*os.File(nil), pty.files...)
-	pty.mu.Unlock()
-	for i, f := range files {
-		assert.ErrorIs(t, f.Close(), os.ErrClosed,
-			"PTY %d (%s) must already be closed by CloseAttachOnly", i, f.Name())
-	}
 
 	// No session was killed: they are shared with the canonical Instance.
 	mu.Lock()

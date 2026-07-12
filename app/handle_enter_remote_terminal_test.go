@@ -30,12 +30,11 @@ func (remoteFakeBackend) Capabilities() session.Capabilities {
 }
 
 // swapAttachOverlayCallbackFn redirects the handleEnter -> attachOverlayCallback
-// indirection for the duration of a test. The substitute forwards the real
-// `remote` flag the call site computed but replaces the attach closure with one
-// that detaches immediately (a pre-closed channel), so the real post-detach
-// lifecycle runs synchronously without a tmux client or a remote terminal_cmd
-// PTY.
-func swapAttachOverlayCallbackFn(t *testing.T, fn func(*home, string, string, string, bool, func() (chan struct{}, error)) tea.Cmd) {
+// indirection for the duration of a test. The substitute replaces the attach
+// closure with one that detaches immediately (a pre-closed channel), so the real
+// post-detach lifecycle runs synchronously without a tmux client or a remote
+// terminal_cmd PTY.
+func swapAttachOverlayCallbackFn(t *testing.T, fn func(*home, string, string, string, func() (chan struct{}, error)) tea.Cmd) {
 	t.Helper()
 	prev := attachOverlayCallbackFn
 	attachOverlayCallbackFn = fn
@@ -49,9 +48,9 @@ func swapAttachOverlayCallbackFn(t *testing.T, fn func(*home, string, string, st
 // The first-time attach help overlay is marked seen so showHelpScreen runs the
 // onDismiss attach callback synchronously, and the real attachOverlayCallback is
 // driven (via the swapped indirection) with a hermetic, immediately-detaching
-// attach func. The only behaviour under observation is the `remote` argument the
-// handleEnter call site chose: it decides whether the #845/#848 terminal
-// reset+reassert is emitted.
+// attach func. Since #1592 Phase 2 PR7 the post-detach #845 terminal
+// reset+reassert is uniform across local and remote, so every (tab, locality)
+// case exercises the same call site and emits it.
 func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, string) {
 	t.Helper()
 	resetDetachWatchdog(t)
@@ -83,8 +82,8 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
-	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
-		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
+		return m.attachOverlayCallback(title, label, traceSuffix, func() (chan struct{}, error) {
 			ch := make(chan struct{})
 			close(ch) // detach immediately, synchronously, no real PTY
 			return ch, nil
@@ -99,58 +98,48 @@ func driveHandleEnterAttach(t *testing.T, terminalTab, remote bool) (tea.Cmd, st
 	return cmd, out.String()
 }
 
-// TestHandleEnter_TerminalTabRemoteDetachEmitsReset is the regression guard for
-// issue #889. Detaching from a remote session in the Terminal tab streams the
-// terminal_cmd PTY (#843), which hands the terminal back via
-// session.hookAttachTerminalRestore — on the MAIN screen with reporting modes
-// off. The TUI runs in alt-screen, so the post-detach handling must re-assert
-// bubbletea's modes (remoteDetachTerminalReassert) + ClearScreen, exactly as
-// the sidebar remote attach already does.
+// TestHandleEnter_TerminalTabDetachEmitsReset is the regression guard for issue
+// #889, updated for the #1592 Phase 2 PR7 uniform reassert. Every full-screen
+// attach — local WS PTY proxy or remote hook terminal_cmd PTY — scribbles the
+// pane program's alt-screen/mouse/scroll modes onto the real terminal and hands
+// it back neutral (MAIN screen, reporting off) on detach. The TUI runs in
+// alt-screen, so the post-detach handling must ALWAYS re-assert bubbletea's
+// modes (remoteDetachTerminalReassert) + ClearScreen.
 //
-// The bug was that the terminal-tab call site in handleEnter hardcoded
-// remote=false, so the reassert never fired and the TUI kept rendering on the
-// main screen (garbled UI). This drives the real handleEnter and pins that the
-// terminal-tab path now keys the reset off the instance's real remote-ness, for
-// every (tab, remote) combination — so a revert to the hardcoded false fails
-// the remote/Terminal-tab case.
-func TestHandleEnter_TerminalTabRemoteDetachEmitsReset(t *testing.T) {
+// The original #889 bug was that the terminal-tab call site in handleEnter
+// hardcoded remote=false so the reassert never fired for a remote terminal-tab
+// detach; the reassert is now unconditional, so this drives the real handleEnter
+// and pins that EVERY (tab, locality) combination emits it.
+func TestHandleEnter_TerminalTabDetachEmitsReset(t *testing.T) {
 	cases := []struct {
 		name        string
 		terminalTab bool
 		remote      bool
 	}{
 		{"terminal-tab/remote emits reset (#889)", true, true},
-		{"terminal-tab/local emits no reset", true, false},
+		{"terminal-tab/local emits reset", true, false},
 		{"sidebar/remote emits reset", false, true},
-		{"sidebar/local emits no reset", false, false},
+		{"sidebar/local emits reset", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd, out := driveHandleEnterAttach(t, tc.terminalTab, tc.remote)
 			require.NotNil(t, cmd, "attach callback must return a post-detach cmd")
 
-			if tc.remote {
-				require.Equal(t, remoteDetachTerminalReassert, out,
-					"a remote detach must synchronously re-assert the TUI's terminal "+
-						"modes — the terminal_cmd PTY left the terminal on the main screen")
-				// Remote post-detach cmd is tea.Sequence(ClearScreen, repaint);
-				// sequenceMsg is unexported, so unpack reflectively.
-				seq := reflect.ValueOf(cmd())
-				require.Equal(t, reflect.Slice, seq.Kind(),
-					"remote post-detach cmd must be a tea.Sequence, got %T", cmd())
-				require.Equal(t, 2, seq.Len(), "sequence must be ClearScreen + repaint")
-				first, ok := seq.Index(0).Interface().(tea.Cmd)
-				require.True(t, ok)
-				assert.Equal(t, tea.ClearScreen(), first(),
-					"first sequenced cmd must invalidate the renderer's stale diff cache")
-			} else {
-				assert.Zero(t, len(out),
-					"a local detach must write no terminal reset — the tmux client "+
-						"hands the terminal back untouched")
-				_, isRepaint := cmd().(repaintAfterDetachMsg)
-				assert.True(t, isRepaint,
-					"local post-detach cmd must be the bare repaintAfterDetachMsg emitter")
-			}
+			require.Equal(t, remoteDetachTerminalReassert, out,
+				"every detach must synchronously re-assert the TUI's terminal modes "+
+					"— the attach driver (local WS proxy or remote terminal_cmd PTY) "+
+					"left the terminal on the main screen")
+			// Post-detach cmd is tea.Sequence(ClearScreen, repaint); sequenceMsg is
+			// unexported, so unpack reflectively.
+			seq := reflect.ValueOf(cmd())
+			require.Equal(t, reflect.Slice, seq.Kind(),
+				"post-detach cmd must be a tea.Sequence, got %T", cmd())
+			require.Equal(t, 2, seq.Len(), "sequence must be ClearScreen + repaint")
+			first, ok := seq.Index(0).Interface().(tea.Cmd)
+			require.True(t, ok)
+			assert.Equal(t, tea.ClearScreen(), first(),
+				"first sequenced cmd must invalidate the renderer's stale diff cache")
 		})
 	}
 }
@@ -213,13 +202,13 @@ func TestHandleEnter_RemotePanePreviewTriggersFullScreenAttach(t *testing.T) {
 	require.Equal(t, "", liveSessionName(remote, h.panePreviewTxn.target.tab),
 		"precondition: the remote target must be non-embeddable (liveSessionName == \"\")")
 
-	// Drive the attach lifecycle hermetically: the swapped callback forwards the
-	// real `remote` flag but detaches immediately (a pre-closed channel), and the
-	// remote mode re-assert lands in a buffer instead of the test's terminal.
+	// Drive the attach lifecycle hermetically: the swapped callback detaches
+	// immediately (a pre-closed channel), and the mode re-assert lands in a buffer
+	// instead of the test's terminal.
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
-	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
-		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
+		return m.attachOverlayCallback(title, label, traceSuffix, func() (chan struct{}, error) {
 			ch := make(chan struct{})
 			close(ch) // detach immediately, synchronously, no real PTY
 			return ch, nil

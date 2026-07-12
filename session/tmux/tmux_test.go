@@ -138,19 +138,11 @@ func TestSanitizeNameTmuxRestrictedChars(t *testing.T) {
 	require.Equal(t, TmuxPrefix+hash+"_test_session_1_x_2", scoped.sanitizedName)
 }
 
-// errPtyFactory is a PtyFactory that fails Start(). Used to verify Restore
-// surfaces non-missing-session errors from the PTY layer.
-type errPtyFactory struct {
-	err error
-}
-
-func (e errPtyFactory) Start(_ *exec.Cmd) (*os.File, error) { return nil, e.err }
-func (e errPtyFactory) Close()                              {}
-
-// TestRestoreAttachesWhenSessionExists covers issue #386 case (a): when the
-// tmux session is alive, Restore must attach to it (not re-spawn) regardless
-// of whether a workDir was supplied.
-func TestRestoreAttachesWhenSessionExists(t *testing.T) {
+// TestRestoreSwapsMonitorWhenSessionExists covers issue #386 case (a) as of
+// #1592 Phase 2 PR7: when the tmux session is alive, Restore is a pure logical
+// rebind — it opens NO `tmux attach-session` render client (the clientless
+// agent-server owns the data plane) and only swaps in a fresh status monitor.
+func TestRestoreSwapsMonitorWhenSessionExists(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
 
 	cmdExec := cmd_test.MockCmdExec{
@@ -163,14 +155,15 @@ func TestRestoreAttachesWhenSessionExists(t *testing.T) {
 
 	require.NoError(t, session.Restore("/some/work/dir"))
 
-	require.Equal(t, 1, len(ptyFactory.cmds), "expected exactly one PTY command (attach-session)")
-	require.Equal(t, "tmux attach-session -t =af_existing:", cmd2.ToString(ptyFactory.cmds[0]))
+	require.Equal(t, 0, len(ptyFactory.cmds), "Restore must open no PTY / attach-session client")
+	require.NotNil(t, session.monitor, "Restore must install a fresh status monitor")
 }
 
 // TestRestoreRespawnsWhenSessionMissing covers issue #386 case (b): when the
 // tmux server has died (e.g. across a machine reboot) the session is gone but
 // the worktree on disk is fine. Restore must transparently re-spawn the
-// session in workDir using the same program.
+// session in workDir using the same program. The re-spawn's `new-session` is
+// the ONLY PTY command now — the inner Restore("") opens no attach client (PR7).
 func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	// Pin the exact new-session argv regardless of the box's tmux version;
 	// marker injection is covered by TestStartInjectsEnvMarkers.
@@ -200,41 +193,19 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 
 	require.NoError(t, session.Restore(workdir))
 
-	require.Equal(t, 2, len(ptyFactory.cmds),
-		"expected new-session followed by attach-session via PTY")
+	require.Equal(t, 1, len(ptyFactory.cmds),
+		"expected only the re-spawn new-session PTY command (no attach-session)")
 	// Re-spawn must include the resume-most-recent flag so the prior
 	// conversation isn't lost on lazy respawn after a reboot (#595).
 	require.Equal(t,
 		fmt.Sprintf("tmux new-session -d -s af_missing -c %s claude --continue", workdir),
 		cmd2.ToString(ptyFactory.cmds[0]))
-	require.Equal(t, "tmux attach-session -t =af_missing:", cmd2.ToString(ptyFactory.cmds[1]))
-}
-
-// TestRestoreSurfacesPtyError covers issue #386 case (c): real failures
-// distinct from "session does not exist" — here a PTY allocation failure on
-// the attach path — must propagate to the caller unchanged so an operator
-// can act on them rather than silently fall back to a re-spawn.
-func TestRestoreSurfacesPtyError(t *testing.T) {
-	ptyFactory := errPtyFactory{err: fmt.Errorf("pty allocation failed")}
-
-	cmdExec := cmd_test.MockCmdExec{
-		// Session exists → Restore takes the attach branch where PTY error fires.
-		RunFunc:    func(cmd *exec.Cmd) error { return nil },
-		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("output"), nil },
-	}
-
-	session := newTmuxSession(toTmuxName("ptyerr", ""), "claude", ptyFactory, cmdExec)
-
-	err := session.Restore("/some/work/dir")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "pty allocation failed")
 }
 
 // TestRestoreReturnsErrorWhenSessionMissingAndNoWorkDir guards the contract
-// used by Detach() and Start()'s internal Restore("") call: when no workDir
-// is provided, a missing session is a real error and must not silently
-// re-spawn (which would lose history on Detach or recurse infinitely from
-// Start).
+// used by Start()'s internal Restore("") call: when no workDir is provided, a
+// missing session is a real error and must not silently re-spawn (which would
+// recurse infinitely from Start).
 func TestRestoreReturnsErrorWhenSessionMissingAndNoWorkDir(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
 
@@ -281,20 +252,18 @@ func TestStartTmuxSession(t *testing.T) {
 
 	err := session.Start(workdir)
 	require.NoError(t, err)
-	require.Equal(t, 2, len(ptyFactory.cmds))
+	// Only the new-session PTY command now: the internal Restore("") opens no
+	// attach-session client (#1592 Phase 2 PR7).
+	require.Equal(t, 1, len(ptyFactory.cmds))
 	require.Equal(t, fmt.Sprintf("tmux new-session -d -s af_test-session -c %s claude", workdir),
 		cmd2.ToString(ptyFactory.cmds[0]))
-	require.Equal(t, "tmux attach-session -t =af_test-session:",
-		cmd2.ToString(ptyFactory.cmds[1]))
 
-	require.Equal(t, 2, len(ptyFactory.files))
+	require.Equal(t, 1, len(ptyFactory.files))
 
-	// File should be closed.
+	// The new-session PTY is closed once the session exists (Start does not hold
+	// a render client open).
 	_, err = ptyFactory.files[0].Stat()
 	require.Error(t, err)
-	// File should be open
-	_, err = ptyFactory.files[1].Stat()
-	require.NoError(t, err)
 }
 
 // TestStartTimeoutCleanupSucceeds guards issue #696: when the session never
@@ -537,18 +506,5 @@ func TestCapturePaneContentWithOptionsWrapsErrSessionGone(t *testing.T) {
 
 	_, err := session.CapturePaneContentWithOptions("-", "-")
 	require.Error(t, err)
-	require.ErrorIs(t, err, ErrSessionGone)
-}
-
-// TestSetDetachedSizeReturnsErrSessionGoneWhenPtmxNil covers #496: when the
-// PTY has been cleared (Detach failure in #474, Close, or never restored),
-// SetDetachedSize must surface ErrSessionGone instead of panicking on
-// nil.Fd() or emitting "bad file descriptor" at ERROR.
-func TestSetDetachedSizeReturnsErrSessionGoneWhenPtmxNil(t *testing.T) {
-	var captureOK, sessionAlive atomic.Bool
-	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
-	require.Nil(t, session.ptmx, "precondition: helper builds a session without a PTY")
-
-	err := session.SetDetachedSize(80, 24)
 	require.ErrorIs(t, err, ErrSessionGone)
 }

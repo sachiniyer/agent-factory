@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -499,35 +498,5 @@ func closeWithReport(report bool) {
 	}
 	if fileWasOpened && report {
 		fmt.Fprintln(os.Stderr, "wrote logs to "+logFileName)
-	}
-}
-
-// Every is used to log at most once every timeout duration.
-type Every struct {
-	mu       sync.Mutex
-	duration time.Duration
-	timer    *time.Timer
-}
-
-func NewEvery(timeout time.Duration) *Every {
-	return &Every{duration: timeout}
-}
-
-// ShouldLog returns true if the timeout has passed since the last log.
-func (e *Every) ShouldLog() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.timer == nil {
-		e.timer = time.NewTimer(e.duration)
-		return true
-	}
-
-	select {
-	case <-e.timer.C:
-		e.timer.Reset(e.duration)
-		return true
-	default:
-		return false
 	}
 }

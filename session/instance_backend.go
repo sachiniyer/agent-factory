@@ -9,9 +9,14 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 	return i.backend.Start(i, firstTimeSetup)
 }
 
-// Kill terminates the instance and cleans up all resources
+// Kill terminates the instance and cleans up all resources. It delegates to the
+// agent-server's Kill (not backend.Kill directly) so the WS PTY broker is torn
+// down FIRST: every open subscriber's NextEvent returns io.EOF and the clientless
+// capture goroutine stops, instead of hanging until the WS keepalive lapses and
+// leaking the capture goroutine when a session is killed with a live stream open
+// (#1632). The agent-server then kills the underlying session.
 func (i *Instance) Kill() error {
-	return i.backend.Kill(i)
+	return i.AgentServer().Kill()
 }
 
 // Recover re-establishes a Lost instance's backing session (#1108). Called by
@@ -143,15 +148,6 @@ func (i *Instance) AttachTerminal(tabIdx int) (chan struct{}, error) {
 	return i.backend.AttachTerminal(i, tabIdx)
 }
 
-func (i *Instance) SetPreviewSize(width, height int) error {
-	return i.backend.SetPreviewSize(i, width, height)
-}
-
-// SendPrompt sends a prompt to the session
-func (i *Instance) SendPrompt(prompt string) error {
-	return i.backend.SendPrompt(i, prompt)
-}
-
 // SendPromptCommand sends a prompt using a more reliable command-based approach.
 // This is more reliable for headless/scheduled runs where the PTY may not persist.
 func (i *Instance) SendPromptCommand(prompt string) error {
@@ -161,12 +157,6 @@ func (i *Instance) SendPromptCommand(prompt string) error {
 // PreviewFullHistory captures the entire session output including full scrollback history
 func (i *Instance) PreviewFullHistory() (string, error) {
 	return i.backend.PreviewFullHistory(i)
-}
-
-// SendKeys sends keys to the underlying session. For remote backends this
-// returns an explicit error since raw key injection is not supported.
-func (i *Instance) SendKeys(keys string) error {
-	return i.backend.SendKeys(i, keys)
 }
 
 // Capabilities returns the backing runtime's capability descriptor (#1592

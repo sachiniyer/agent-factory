@@ -25,12 +25,12 @@ func swapRemoteDetachResetWriter(t *testing.T, w io.Writer) {
 // runAttachOverlayCallback drives the blocking attach lifecycle helper off
 // the test goroutine, simulates a detach by closing ch, and returns the
 // post-detach cmd.
-func runAttachOverlayCallback(t *testing.T, h *home, remote bool) tea.Cmd {
+func runAttachOverlayCallback(t *testing.T, h *home) tea.Cmd {
 	t.Helper()
 	ch := make(chan struct{})
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("t1", "test-attach", "", remote, func() (chan struct{}, error) {
+		done <- h.attachOverlayCallback("t1", "test-attach", "", func() (chan struct{}, error) {
 			return ch, nil
 		})
 	}()
@@ -83,29 +83,31 @@ func TestBeginAttachTransitionClearsFrameBeforeAttachStarts(t *testing.T) {
 	require.True(t, isRepaint, "beginAttachMsg must return the attach callback's cmd")
 }
 
-// TestAttachOverlayCallback_RemoteReassertsTerminalModes is the app half of
-// the #845 fix. After a remote attach returns, the hook backend has handed
-// the terminal back in a neutral state (main screen, cursor visible, all
-// reporting modes off — see session.hookAttachTerminalRestore), which is NOT
-// the state this TUI's renderer assumes. The callback must re-assert
-// bubbletea's startup modes synchronously — while the Update goroutine is
-// still blocked here, before the renderer can emit a frame — and then route
-// through tea.ClearScreen + the usual repaintAfterDetachMsg flow so the stale
-// diff cache is invalidated and the screen fully repainted.
-func TestAttachOverlayCallback_RemoteReassertsTerminalModes(t *testing.T) {
+// TestAttachOverlayCallback_ReassertsTerminalModes is the app half of the #845
+// fix. After a full-screen attach returns, the attach driver (local WS PTY
+// stream or remote hook) has handed the terminal back in a neutral state (main
+// screen, cursor visible, all reporting modes off — see tmux.NeutralTerminalRestore),
+// which is NOT the state this TUI's renderer assumes. The callback must re-assert
+// bubbletea's startup modes synchronously — while the Update goroutine is still
+// blocked here, before the renderer can emit a frame — and then route through
+// tea.ClearScreen + the usual repaintAfterDetachMsg flow so the stale diff cache
+// is invalidated and the screen fully repainted. Since #1592 Phase 2 PR7 this is
+// uniform: local attach is a WS byte proxy that scribbles the terminal exactly
+// like remote, so there is no longer a "local skips the reassert" path.
+func TestAttachOverlayCallback_ReassertsTerminalModes(t *testing.T) {
 	resetDetachWatchdog(t)
 	h := newTestHome(t)
 
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
 
-	cmd := runAttachOverlayCallback(t, h, true)
+	cmd := runAttachOverlayCallback(t, h)
 	require.NotNil(t, cmd)
 
 	// The re-assert was written before the callback returned (i.e. before the
 	// bubbletea event loop could resume), in full.
 	require.Equal(t, remoteDetachTerminalReassert, out.String(),
-		"remote detach must synchronously re-assert the TUI's terminal modes")
+		"detach must synchronously re-assert the TUI's terminal modes")
 	for _, seq := range []struct{ esc, what string }{
 		{"\x1b[?1049h", "re-enter the alt screen"},
 		{"\x1b[?25l", "re-hide the cursor"},
@@ -144,40 +146,47 @@ func TestAttachOverlayCallback_RemoteReassertsTerminalModes(t *testing.T) {
 	endDetachWatchdog()
 }
 
-// TestAttachOverlayCallback_LocalDetachWritesNoReset pins the local flow
-// unchanged: a local tmux detach leaves the terminal exactly as the TUI
-// expects, so no mode bytes are written and the post-detach cmd is the plain
-// repaintAfterDetachMsg emitter (#579/#683 flow) — no ClearScreen flicker.
-func TestAttachOverlayCallback_LocalDetachWritesNoReset(t *testing.T) {
+// TestAttachOverlayCallback_LocalAlsoReassertsTerminalModes pins the #1592
+// Phase 2 PR7 behavior change: local full-screen attach is now a WS PTY byte
+// proxy (apiclient.AttachStream), not a long-lived tmux render client, so it
+// scribbles the terminal's alt-screen/mouse/scroll modes and hands it back
+// neutral on detach — exactly like the remote path. The local detach therefore
+// takes the SAME reassert + ClearScreen path (previously it skipped the reset);
+// otherwise the TUI repaints into a stale scroll region (#845 reproduced
+// locally). This test is intentionally the local-side sibling of the reassert
+// test above — the callback no longer distinguishes local from remote.
+func TestAttachOverlayCallback_LocalAlsoReassertsTerminalModes(t *testing.T) {
 	resetDetachWatchdog(t)
 	h := newTestHome(t)
 
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
 
-	cmd := runAttachOverlayCallback(t, h, false)
+	cmd := runAttachOverlayCallback(t, h)
 	require.NotNil(t, cmd)
 
-	assert.Zero(t, out.Len(),
-		"local detach must not write any terminal reset — the tmux client "+
-			"hands the terminal back untouched")
-	_, isRepaint := cmd().(repaintAfterDetachMsg)
-	assert.True(t, isRepaint,
-		"local post-detach cmd must remain the bare repaintAfterDetachMsg emitter")
+	require.Equal(t, remoteDetachTerminalReassert, out.String(),
+		"local WS detach must now re-assert the TUI's terminal modes too (#1592 PR7)")
+	// Post-detach cmd is the tea.Sequence(ClearScreen, repaint), same as remote.
+	msg := cmd()
+	seq := reflect.ValueOf(msg)
+	require.Equal(t, reflect.Slice, seq.Kind(),
+		"local post-detach cmd must now be a tea.Sequence, got %T", msg)
+	require.Equal(t, 2, seq.Len(), "sequence must be exactly ClearScreen + repaint")
 	endDetachWatchdog()
 }
 
-// TestAttachOverlayCallback_NoResetWhenRemoteAttachErrors: when the attach
-// itself fails the terminal was never handed to the remote stream, so
-// re-asserting modes (which re-enters and clears the alt screen) would
-// pointlessly wipe the current frame.
-func TestAttachOverlayCallback_NoResetWhenRemoteAttachErrors(t *testing.T) {
+// TestAttachOverlayCallback_NoResetWhenAttachErrors: when the attach itself
+// fails the terminal was never handed to the stream, so re-asserting modes
+// (which re-enters and clears the alt screen) would pointlessly wipe the current
+// frame.
+func TestAttachOverlayCallback_NoResetWhenAttachErrors(t *testing.T) {
 	h := newTestHome(t)
 
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
 
-	cmd := h.attachOverlayCallback("t1", "test-attach", "", true, func() (chan struct{}, error) {
+	cmd := h.attachOverlayCallback("t1", "test-attach", "", func() (chan struct{}, error) {
 		return nil, assert.AnError
 	})
 

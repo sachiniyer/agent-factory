@@ -118,10 +118,7 @@ func (b *FakeBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
 	return ch, nil
 }
 func (b *FakeBackend) HasUpdated(*Instance) (bool, bool, string) { return false, false, "" }
-func (b *FakeBackend) SendPrompt(*Instance, string) error        { return nil }
 func (b *FakeBackend) SendPromptCommand(*Instance, string) error { return nil }
-func (b *FakeBackend) SendKeys(*Instance, string) error          { return nil }
-func (b *FakeBackend) SetPreviewSize(*Instance, int, int) error  { return nil }
 func (b *FakeBackend) IsAlive(*Instance) bool                    { return true }
 func (b *FakeBackend) CheckAndHandleTrustPrompt(*Instance) bool  { return false }
 func (b *FakeBackend) TapEnter(*Instance)                        {}

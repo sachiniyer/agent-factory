@@ -31,7 +31,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -403,26 +402,6 @@ func (p *Projection) RemoveInstanceByTitleWithRepo(title, repoName string) bool 
 		}
 	}
 	return false
-}
-
-// SetSessionPreviewSize sets the tmux session preview sizes. Instances whose
-// underlying tmux session has vanished (ErrSessionGone) are skipped silently
-// — the daemon-side latch already covers ongoing polling and the resize
-// itself has no useful work to do on a dead session (#496).
-func (p *Projection) SetSessionPreviewSize(width, height int) error {
-	var err error
-	for i, item := range p.instances {
-		if !item.Started() {
-			continue
-		}
-		if innerErr := item.SetPreviewSize(width, height); innerErr != nil {
-			if errors.Is(innerErr, tmux.ErrSessionGone) {
-				continue
-			}
-			err = fmt.Errorf("could not set preview size for instance %d: %v", i, innerErr)
-		}
-	}
-	return err
 }
 
 // -- Repos --

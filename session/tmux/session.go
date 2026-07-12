@@ -1,16 +1,13 @@
 package tmux
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 )
@@ -47,93 +44,23 @@ type TmuxSession struct {
 
 	// Initialized by Start or Restore
 	//
-	// ptmx is a PTY is running the tmux attach command. This can be resized to change the
-	// stdout dimensions of the tmux pane. On detach, we close it and set a new one.
-	// This should never be nil.
-	ptmx *os.File
 	// monitor monitors the tmux pane content and sends signals to the UI when it's status changes.
-	// The pointer is swapped by Restore() (a fresh monitor on every (re)attach) on the
+	// The pointer is swapped by Restore() (a fresh monitor on every restore) on the
 	// restore/RPC/event-loop goroutines while the daemon's per-second poll reads it — and mutates
 	// its dead/prevOutputHash fields — inside HasUpdated(). Every access therefore goes through the
 	// monitorMu-guarded helpers in monitor.go; never touch these two fields directly (#1528).
+	//
+	// There is deliberately no attach-client PTY here (#1592 Phase 2 PR7): the
+	// local runtime's data plane is the daemon's clientless agent-server
+	// (pipe-pane → WS broker, PR5/6), and interactive full-screen attach is a WS
+	// subscriber in the client (apiclient.AttachStream). The tmux-server-mediated
+	// attach driver — the attach ptmx, its io.Copy/detach-key goroutines, and the
+	// SIGTERM/SIGKILL abandon-drain machinery — was retired here.
 	monitor   *statusMonitor
 	monitorMu sync.Mutex
-
-	// Initialized by Attach
-	// Deinitilaized by Detach
-	//
-	// Channel to be closed at the very end of detaching. Used to signal callers.
-	attachCh chan struct{}
-	// While attached, we use some goroutines to manage the window size and stdin/stdout. This stuff
-	// is used to terminate them on Detach. We don't want them to outlive the attached window.
-	ctx    context.Context
-	cancel func()
-	wg     *sync.WaitGroup
-
-	// killAttach SIGKILLs the tmux attach-session client child whose slave end
-	// of the PTY is keeping io.Copy(os.Stdout, t.ptmx) blocked in Attach().
-	// Set by Restore() once the PTY-backed child is running; cleared by the
-	// detach/teardown paths after wg drains. Returns (pid, err) so the
-	// fallback log can name the pid that was signalled. See Detach() for the
-	// "why" — this is the defensive escape hatch for #598 when the tmux
-	// server is too contended to let the client exit on its own.
-	killAttach func() (int, error)
-
-	// termAttach SIGTERMs that same attach-session child. Detach() signals it
-	// proactively (SIGTERM → short grace → SIGKILL backstop) so io.Copy
-	// unblocks without a tmux-server round-trip, instead of racing the 1s
-	// SIGKILL deadline against the daemon's capture-pane poll — the #1157
-	// fix for the ~32% of detaches that used to stall the full second. Set
-	// and cleared in lockstep with killAttach (same pairing invariant that
-	// the #602 regression broke — see Detach's inline clear).
-	termAttach func() (int, error)
-
-	// attachMu serializes attach lifecycle teardown. Detach is invoked by an
-	// Attach-spawned stdin goroutine that is intentionally outside wg, so Close
-	// cannot rely on wg.Wait before touching attachCh/cancel/ptmx (#1477).
-	attachMu sync.Mutex
 }
 
 const TmuxPrefix = "af_"
-
-// slowDetachWgWaitThreshold is the wg.Wait elapsed above which Detach()
-// emits an ErrorLog entry. Picked above the worst recorded non-pathological
-// wait (~120ms during normal io.Copy drain) and well below the smallest
-// observed pathological wait (~42s in #598), so the threshold cleanly
-// separates "noise" from "regression of the contention fix". Exported as
-// a var so future regressions can be detected without recompiling.
-var slowDetachWgWaitThreshold = 5 * time.Second
-
-// wgWaitSigkillDeadline is the wg.Wait elapsed above which the
-// detach/teardown paths SIGKILL the tmux attach-session child to force
-// io.Copy to return. The 1s value is generous enough to absorb routine
-// kernel scheduling but short enough that the user-visible hang is bounded
-// regardless of tmux-server load — even with the pause-while-attached gate
-// in app/app.go, the daemon (separate process) still polls capture-pane
-// every second and can contend with the attach client's exit round-trip
-// (see the #598 follow-up). var, not const, so tests can lower it.
-var wgWaitSigkillDeadline = 1 * time.Second
-
-// wgWaitAbandonDeadline bounds the secondary wait after the SIGKILL/pgrep
-// fallback has already fired. If wg.Wait still hasn't returned by this
-// deadline, the io.Copy goroutine is wedged in a way our escape hatches
-// can't unstick (kernel-level PTY drain bug, syscall stuck in D-state).
-// Leaking that one goroutine until the OS eventually drains the PTY is
-// strictly better than holding the user's TUI hostage for tens of seconds
-// — the original incident in #598 was a 51s hang at 00:05:14 because the
-// fallback was missing. Set to 2× wgWaitSigkillDeadline so the total
-// worst-case detach is ~3s. var, not const, so tests can lower it.
-var wgWaitAbandonDeadline = 2 * time.Second
-
-// proactiveGraceDeadline bounds how long Detach() waits for the attach
-// goroutines to drain after a proactive SIGTERM (termAttach) before falling
-// through to waitForAttachDrain's SIGKILL backstop. Signalling the child
-// directly bypasses the tmux server, so a healthy client's io.Copy unblocks
-// within a scheduler tick or two; 150ms is generous headroom over that while
-// keeping a wedged detach an order of magnitude faster than the old 1s
-// wgWaitSigkillDeadline race against the daemon's capture-pane poll (#1157).
-// var, not const, so tests can lower it.
-var proactiveGraceDeadline = 150 * time.Millisecond
 
 // ErrSessionGone is returned by PTY/tmux operations when the underlying tmux
 // session no longer exists. Non-daemon callers (preview pane, sidebar resize,

@@ -1290,9 +1290,9 @@ func TestPane_EnterAttachTargetFollowsFocusContext(t *testing.T) {
 	h.cancelPanePreview(false)
 
 	var attachedLabel, attachedTitle string
-	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
 		attachedLabel, attachedTitle = label, title
-		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
+		return m.attachOverlayCallback(title, label, traceSuffix, func() (chan struct{}, error) {
 			ch := make(chan struct{})
 			close(ch) // detach immediately — no real PTY
 			return ch, nil

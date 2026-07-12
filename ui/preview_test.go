@@ -227,18 +227,16 @@ func TestPreviewScrolling(t *testing.T) {
 	setup := setupTestEnvironment(t, cmdExec)
 	defer setup.cleanupFn()
 
-	// Simulate running a command that produces lots of output
-	err := setup.instance.SendKeys("seq 100")
-	require.NoError(t, err)
-	err = setup.instance.SendKeys("") // Simulate pressing Enter
-	require.NoError(t, err)
+	// The pane's output is driven by the mock capture-pane (OutputFunc) above —
+	// raw key injection (the old SendKeys) was deleted in #1592 Phase 2 PR7, and
+	// the preview never depended on it here (content comes from the mock capture).
 
 	// Create the preview pane
 	previewPane := NewTabPane(previewFromInstance)
 	previewPane.SetSize(80, 30) // Set reasonable size for testing
 
 	// Step 1: Check initial content - should show normal preview mode
-	err = previewPane.UpdateContent(setup.instance, 0)
+	err := previewPane.UpdateContent(setup.instance, 0)
 	require.NoError(t, err)
 
 	// Verify we're not in scrolling mode initially

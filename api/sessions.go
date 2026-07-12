@@ -907,7 +907,27 @@ var sessionsAttachCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		detached, err := instance.Attach()
+		// A remote session attaches its hook attach_cmd PTY in-process; a local
+		// session attaches CLIENT-side over the daemon's WS PTY stream (#1592
+		// Phase 2 PR7), the same path the TUI uses. Ensure a daemon is up first —
+		// it owns the local session's clientless broker — then dial it.
+		if instance.Capabilities().Workspace == session.WorkspaceRemote {
+			detached, err := instance.Attach()
+			if err != nil {
+				return jsonError(fmt.Errorf("failed to attach: %w", err))
+			}
+			<-detached
+			return nil
+		}
+
+		if err := daemon.EnsureDaemon(); err != nil {
+			return jsonError(fmt.Errorf("failed to reach daemon for attach: %w", err))
+		}
+		client, err := apiclient.New()
+		if err != nil {
+			return jsonError(err)
+		}
+		detached, err := client.AttachStream(cmd.Context(), instance.Title, repoID, 0)
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to attach: %w", err))
 		}
