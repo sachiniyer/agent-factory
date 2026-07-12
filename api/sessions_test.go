@@ -221,14 +221,11 @@ func TestSessionsKill_ForceFlagAcceptedButNotForwarded(t *testing.T) {
 
 	prevRepoFlag := repoFlag
 	repoFlag = ""
-	prevForce := sessionsKillForce
-	sessionsKillForce = false
 	if err := sessionsKillCmd.Flags().Set("force", "true"); err != nil {
 		t.Fatalf("set force flag: %v", err)
 	}
 	t.Cleanup(func() {
 		repoFlag = prevRepoFlag
-		sessionsKillForce = prevForce
 		_ = sessionsKillCmd.Flags().Set("force", "false")
 	})
 
