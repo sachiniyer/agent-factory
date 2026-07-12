@@ -65,7 +65,7 @@ func TestKillSession_TombstoneSurvivesFailedTeardown(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	if err := manager.KillSession(KillSessionRequest{Title: "doomed", RepoID: repo.ID}); err == nil {
+	if _, err := manager.KillSession(KillSessionRequest{Title: "doomed", RepoID: repo.ID}); err == nil {
 		t.Fatal("expected KillSession to surface the teardown failure")
 	}
 
@@ -142,11 +142,12 @@ func TestKillSession_RejectsConcurrentDuplicate(t *testing.T) {
 
 	killDone := make(chan error, 1)
 	go func() {
-		killDone <- manager.KillSession(KillSessionRequest{Title: "busy", RepoID: repo.ID})
+		_, kerr := manager.KillSession(KillSessionRequest{Title: "busy", RepoID: repo.ID})
+		killDone <- kerr
 	}()
 	<-backend.killStarted
 
-	if err := manager.KillSession(KillSessionRequest{Title: "busy", RepoID: repo.ID}); err == nil {
+	if _, err := manager.KillSession(KillSessionRequest{Title: "busy", RepoID: repo.ID}); err == nil {
 		t.Fatal("expected the duplicate kill to be rejected while the first teardown is in flight")
 	}
 

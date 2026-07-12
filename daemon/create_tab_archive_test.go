@@ -100,7 +100,7 @@ func TestCreateTab_RejectedAfterArchive(t *testing.T) {
 	const title, agentName = "worker", "af_worker_agent"
 	_, srcPath, isAlive := registerArchivableWithTmux(t, manager, repoID, repoPath, title, agentName)
 
-	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
 	require.NoError(t, err)
 	require.False(t, exists(srcPath), "archive must have moved the worktree out of its original path")
 
@@ -181,7 +181,7 @@ func TestArchiveSession_ModeBTearsDownExtraTabsNoOrphan(t *testing.T) {
 	require.Equal(t, 2, inst.TabCount(), "the session now has agent + process tabs")
 	require.True(t, isAlive(agentName+"__btop"), "the process tab's tmux session is live before archive")
 
-	_, err = manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
 	require.NoError(t, err)
 
 	// Mode B: the extra tab is torn down and dropped, only the agent name-holder
@@ -200,7 +200,7 @@ func TestCreateTab_ShellRejectedAfterArchive(t *testing.T) {
 	const title, agentName = "worker", "af_worker_agent"
 	_, _, isAlive := registerArchivableWithTmux(t, manager, repoID, repoPath, title, agentName)
 
-	_, err := manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
 	require.NoError(t, err)
 
 	_, err = manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Shell: true})

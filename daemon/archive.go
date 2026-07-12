@@ -25,21 +25,31 @@ import (
 // finish-kill passes skip it) and holds the per-session op-lock (so archive,
 // kill, and Lost-recovery never interleave). Returns the relocated worktree's
 // new path.
-func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
-	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+// ArchiveSession archives the resolved session and returns the relocated worktree
+// path AND the stable identity (id + title) of the session it ACTUALLY resolved and
+// acted on, so the control server publishes the archived event for exactly that
+// session — never the request's own (possibly stale) id under a cross-repo title
+// collision (#1592 Phase 5 follow-up).
+func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
+	instance, repoID, title, resolvedID, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
-		return "", err
+		return "", session.InstanceData{}, err
 	}
+	// Canonicalize to the resolved session's title so every guard, the
+	// killsInFlight key, and the relocation key off the id-resolved identity,
+	// not the request's title. req is a value copy, so this is local.
+	req.Title = title
+	resolved := session.InstanceData{ID: resolvedID, Title: title}
 	if session.IsReservedTitle(req.Title) {
-		return "", fmt.Errorf("cannot archive the reserved %q session", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("cannot archive the reserved %q session", req.Title)
 	}
 	if instance == nil {
 		// A ghost disk record with no live instance has no in-memory worktree to
 		// relocate; there is nothing coherent to archive.
-		return "", fmt.Errorf("cannot archive session %q: it is not currently active", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: it is not currently active", req.Title)
 	}
 	if !instance.Capabilities().Archive {
-		return "", fmt.Errorf("cannot archive remote session %q: it has no local worktree to relocate", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("cannot archive remote session %q: it has no local worktree to relocate", req.Title)
 	}
 	if instance.IsExternalWorktree() {
 		// An in-place/external worktree (`af sessions create --here`, #1107 — also
@@ -49,20 +59,20 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 		// that can never be archived — otherwise the rejection would only surface
 		// in the move step, after tmux is already down, leaving a broken
 		// half-archive that rolls back to Lost.
-		return "", fmt.Errorf("cannot archive an in-place/external worktree session %q — archive relocates the worktree, which isn't supported for in-place sessions", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("cannot archive an in-place/external worktree session %q — archive relocates the worktree, which isn't supported for in-place sessions", req.Title)
 	}
 	if instance.GetLiveness() == session.LiveArchived {
-		return "", fmt.Errorf("session %q is already archived", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("session %q is already archived", req.Title)
 	}
 	if instance.GetInFlightOp() != session.OpNone {
-		return "", fmt.Errorf("session %q is busy (%v); try again in a moment", req.Title, instance.GetStatus())
+		return "", session.InstanceData{}, fmt.Errorf("session %q is busy (%v); try again in a moment", req.Title, instance.GetStatus())
 	}
 
 	key := daemonInstanceKey(repoID, req.Title)
 	m.mu.Lock()
 	if _, busy := m.killsInFlight[key]; busy {
 		m.mu.Unlock()
-		return "", fmt.Errorf("an operation is already in progress for session %q", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("an operation is already in progress for session %q", req.Title)
 	}
 	m.killsInFlight[key] = struct{}{}
 	m.mu.Unlock()
@@ -82,7 +92,7 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	current := m.instances[key]
 	m.mu.Unlock()
 	if current != instance || instance.UserKilled() {
-		return "", fmt.Errorf("session %q changed state before archive could start", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("session %q changed state before archive could start", req.Title)
 	}
 
 	// A sandbox session (docker/ssh) archives by pushing its branch to origin and
@@ -90,12 +100,16 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	// Phase 4 PR6). Route it to the remote body, which shares this method's guards,
 	// locks, and archive fence.
 	if instance.Capabilities().Workspace == session.WorkspaceRemote {
-		return m.archiveRemoteSession(repoID, instance, req.Title)
+		archivedPath, rerr := m.archiveRemoteSession(repoID, instance, req.Title)
+		if rerr != nil {
+			return "", session.InstanceData{}, rerr
+		}
+		return archivedPath, resolved, nil
 	}
 
 	dest, err := archivedWorktreePath(repoID, req.Title)
 	if err != nil {
-		return "", err
+		return "", session.InstanceData{}, err
 	}
 	// The pre-archive worktree location, captured before the move, so a persist
 	// failure after the commit can roll the worktree back home (#1538).
@@ -111,7 +125,7 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	// the op-lock guarantee this edge is legal; a rejection would surface here
 	// before any teardown.
 	if err := instance.Transition(session.BeginArchive()); err != nil {
-		return "", fmt.Errorf("cannot archive session %q: %w", req.Title, err)
+		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: %w", req.Title, err)
 	}
 
 	// Tear down tmux and relocate the worktree in one call: the move is folded
@@ -126,7 +140,7 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 		// Persist the recovery-eligible state, then surface the failure.
 		_ = instance.Transition(session.AbortArchiveToLost())
 		m.persistInstance(repoID, instance)
-		return "", fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w", req.Title, err)
+		return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w", req.Title, err)
 	}
 
 	// Success: worktree relocated, tmux down. Commit the inert Archived state
@@ -153,12 +167,12 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, error) {
 			// safest remaining state. Persist it best-effort and surface both
 			// failures so the operator can recover it manually.
 			m.persistInstance(repoID, instance)
-			return "", fmt.Errorf("archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery", req.Title, archivedPath, perr, rbErr)
+			return "", session.InstanceData{}, fmt.Errorf("archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery", req.Title, archivedPath, perr, rbErr)
 		}
-		return "", fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
+		return "", session.InstanceData{}, fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
 	}
 	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
-	return archivedPath, nil
+	return archivedPath, resolved, nil
 }
 
 // undoCommittedArchive rolls a committed-but-unpersisted archive back to a

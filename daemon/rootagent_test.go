@@ -338,7 +338,7 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoFromPath: %v", err)
 	}
-	if err := manager.KillSession(KillSessionRequest{Title: session.RootSessionTitle, RepoID: repo.ID}); err != nil {
+	if _, err := manager.KillSession(KillSessionRequest{Title: session.RootSessionTitle, RepoID: repo.ID}); err != nil {
 		t.Fatalf("KillSession: %v", err)
 	}
 
@@ -411,7 +411,8 @@ func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
 
 	killDone := make(chan error, 1)
 	go func() {
-		killDone <- manager.KillSession(KillSessionRequest{Title: session.RootSessionTitle, RepoID: repo.ID})
+		_, kerr := manager.KillSession(KillSessionRequest{Title: session.RootSessionTitle, RepoID: repo.ID})
+		killDone <- kerr
 	}()
 	waitUntil(t, 5*time.Second, "KillSession to resolve root-A and wait on the op lock", func() bool {
 		manager.mu.Lock()

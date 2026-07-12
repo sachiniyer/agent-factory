@@ -62,7 +62,8 @@ func TestKillSessionBlocksTitleReuseDuringTeardown(t *testing.T) {
 
 	killDone := make(chan error, 1)
 	go func() {
-		killDone <- manager.KillSession(KillSessionRequest{Title: "busy", RepoID: repo.ID})
+		_, kerr := manager.KillSession(KillSessionRequest{Title: "busy", RepoID: repo.ID})
+		killDone <- kerr
 	}()
 	select {
 	case <-backend.killStarted:

@@ -167,10 +167,16 @@ function select(id: string): void {
 
 // --- lifecycle actions (modals) --------------------------------------------
 
-/** The title of the currently selected session, or null. */
-function selectedTitle(): string | null {
+/** The currently selected session's stable id + display title, or null if none.
+ *  The id is the collision-proof key the daemon resolves actions by; the title is
+ *  for the modal chrome and the daemon's lifecycle event (#1592 Phase 5 follow-up). */
+function selectedSession(): { id: string; title: string } | null {
   const { sessions, selectedId } = store.get();
-  return sessions.find((s) => s.id === selectedId)?.title ?? null;
+  const s = sessions.find((x) => x.id === selectedId);
+  // A legacy/disk-only row may carry no id; send "" and the daemon falls back to
+  // its title lookup, exactly as before this fix (the id is the fast path, not a
+  // hard requirement).
+  return s ? { id: s.id ?? "", title: s.title } : null;
 }
 
 /** Closes and clears the open modal, if any. */
@@ -229,12 +235,12 @@ function newSession(): void {
 
 /** Opens the send-prompt modal for the selected session. */
 function openSendPrompt(): void {
-  const title = selectedTitle();
-  if (!title) {
+  const sel = selectedSession();
+  if (!sel) {
     return;
   }
   openModal(
-    promptModal(title, {
+    promptModal(sel.title, {
       onSubmit: (text: string) => {
         const tok = token;
         if (!tok || !modal) {
@@ -242,7 +248,7 @@ function openSendPrompt(): void {
         }
         const m = modal;
         m.setBusy(true);
-        void sendPrompt(title, text, tok)
+        void sendPrompt(sel.id, sel.title, text, tok)
           .then(closeModal)
           .catch((e) => {
             m.setBusy(false);
@@ -256,14 +262,14 @@ function openSendPrompt(): void {
 
 /** Opens the kill/archive confirm modal for the selected session. */
 function openConfirm(action: "kill" | "archive"): void {
-  const title = selectedTitle();
-  if (!title) {
+  const sel = selectedSession();
+  if (!sel) {
     return;
   }
   openModal(
     confirmModal({
       action,
-      sessionTitle: title,
+      sessionTitle: sel.title,
       onConfirm: () => {
         const tok = token;
         if (!tok || !modal) {
@@ -271,7 +277,8 @@ function openConfirm(action: "kill" | "archive"): void {
         }
         const m = modal;
         m.setBusy(true);
-        const run = action === "kill" ? killSession(title, tok) : archiveSession(title, tok);
+        const run =
+          action === "kill" ? killSession(sel.id, sel.title, tok) : archiveSession(sel.id, sel.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));

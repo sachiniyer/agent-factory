@@ -515,7 +515,8 @@ func TestKillSession_WaitsForInFlightRecover(t *testing.T) {
 
 	killDone := make(chan error, 1)
 	go func() {
-		killDone <- manager.KillSession(KillSessionRequest{Title: "contested", RepoID: repoID})
+		_, kerr := manager.KillSession(KillSessionRequest{Title: "contested", RepoID: repoID})
+		killDone <- kerr
 	}()
 
 	// The kill must be blocked behind the in-flight recover attempt.
@@ -567,7 +568,8 @@ func TestRestoreLostSessions_SkipsDuringInFlightKill(t *testing.T) {
 	killStarted := backend.killStarted
 	killDone := make(chan error, 1)
 	go func() {
-		killDone <- manager.KillSession(KillSessionRequest{Title: "doomed", RepoID: repoID})
+		_, kerr := manager.KillSession(KillSessionRequest{Title: "doomed", RepoID: repoID})
+		killDone <- kerr
 	}()
 	<-killStarted // teardown in flight, op lock + killsInFlight held
 

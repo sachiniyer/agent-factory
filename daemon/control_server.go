@@ -266,15 +266,17 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	// Resolve the stable id BEFORE the teardown, while the session is still
-	// tracked — the event must carry it so clients key their session list by id,
-	// not the collision-prone title (#1592 Phase 5 PR5).
-	id := s.manager.stableIDFor(req.RepoID, req.Title)
-	if err := s.manager.KillSession(req); err != nil {
+	// KillSession resolves the target (id-first, erroring on a stale/missing id)
+	// and returns the stable identity it ACTUALLY killed — so the event names that
+	// exact session, never the request's own id, which under a cross-repo title
+	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
+	// follow-up: the write-path analogue of the id-keyed read/stream paths).
+	killed, err := s.manager.KillSession(req)
+	if err != nil {
 		return err
 	}
 	resp.OK = true
-	s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: id, Title: req.Title})
+	s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: killed.ID, Title: killed.Title})
 	return nil
 }
 
@@ -285,16 +287,16 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	// Resolve the stable id BEFORE the archive relocates/re-marks the session, so
-	// the event carries the id clients key their rail by (#1592 Phase 5 PR5).
-	id := s.manager.stableIDFor(req.RepoID, req.Title)
-	archivedPath, err := s.manager.ArchiveSession(req)
+	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id)
+	// and returns the stable identity it ACTUALLY archived — so the event names that
+	// exact session, never the request's own id (#1592 Phase 5 PR5 + follow-up).
+	archivedPath, archived, err := s.manager.ArchiveSession(req)
 	if err != nil {
 		return err
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
-	s.manager.publishEvent(agentproto.EventSessionArchived, session.InstanceData{ID: id, Title: req.Title})
+	s.manager.publishEvent(agentproto.EventSessionArchived, session.InstanceData{ID: archived.ID, Title: archived.Title})
 	return nil
 }
 
