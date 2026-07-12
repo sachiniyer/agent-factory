@@ -42,6 +42,19 @@ const StatusDeferredAttached = "deferred: target attached"
 // durable re-queue/retry without tripping the delivery-failure alarm (#1238).
 var errTargetBusy = errors.New("target session is attached; delivery deferred until detach")
 
+// deferWhileAttached reports whether an automated delivery must be held because a
+// TUI is attached full-screen to the target (#1586). Every SendPrompt delivery
+// path routes through this: the fast "exists" path AND both wait-then-send paths
+// (the concurrent-create retry here and the re-emerging-root path in
+// rootagent.go). A TUI can attach during either wait — PauseStatusPoll leases by
+// (repoID, title) even before the session exists — so all three must re-check the
+// lease right before sending, or an automated prompt pastes into the pane the
+// user is typing in (#1638). Only automated deliveries set DeferWhileAttached; a
+// manual send-prompt is an explicit user action and still lands immediately.
+func (m *Manager) deferWhileAttached(repoID string, req DeliverPromptRequest) bool {
+	return req.DeferWhileAttached && m.isPollPaused(repoID, req.Title)
+}
+
 // DeliverPrompt delivers a prompt to a target session, auto-creating that
 // session when it does not exist. The whole create-or-send decision runs under
 // a per-(repo, title) lock, so concurrent deliveries to the same shared target
@@ -84,7 +97,7 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 		// status and re-fires next tick) rather than corrupting live input. Only
 		// automated deliveries set DeferWhileAttached — a manual send-prompt is an
 		// explicit user action and still lands immediately.
-		if req.DeferWhileAttached && m.isPollPaused(repo.ID, req.Title) {
+		if m.deferWhileAttached(repo.ID, req) {
 			return StatusDeferredAttached, nil
 		}
 		if err := m.SendPrompt(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt}); err != nil {
@@ -121,6 +134,12 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 		if isConcurrentCreateErr(err) {
 			if werr := m.waitForTargetSession(repo.ID, req.Title); werr != nil {
 				return "", werr
+			}
+			// A TUI can attach during the wait above, so re-check the defer lease
+			// before sending — otherwise this path pastes into an attached pane the
+			// "exists" path would have deferred (#1638).
+			if m.deferWhileAttached(repo.ID, req) {
+				return StatusDeferredAttached, nil
 			}
 			if serr := m.SendPrompt(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt}); serr != nil {
 				return "", serr
