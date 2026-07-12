@@ -11,8 +11,7 @@ package config
 // The four canonical `backend` values. `local` (or empty) is the default —
 // today's in-process tmux+worktree runtime, unchanged. `hook` is the existing
 // remote-hook backend. `docker` and `ssh` are the first-class sandboxed
-// runtimes (implemented in Phase 4 PR4/PR5); until then they resolve to a
-// registered runtime that returns a clear "not yet implemented" error.
+// runtimes (implemented in Phase 4 PR4/PR5).
 const (
 	BackendLocal  = "local"
 	BackendDocker = "docker"
