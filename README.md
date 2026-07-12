@@ -144,6 +144,10 @@ owner-only HTTP/JSON API over `$AGENT_FACTORY_HOME/daemon-http.sock`.
 curl --unix-socket ~/.agent-factory/daemon-http.sock http://localhost/v1/health
 ```
 
+To drive the daemon from another machine, SSH in and run `af` there, or enable
+the opt-in TLS+token TCP listener (`af token`, `--daemon-url`) — see
+[Remote daemon access](docs/remote-tcp-auth.md).
+
 ### Configuration
 
 Configuration is TOML. Global defaults live in
@@ -181,7 +185,9 @@ performance.
 - [CLI guide](docs/cli.md) and [generated CLI reference](docs/reference/cli.md).
 - [HTTP API guide](docs/http-api.md) and [generated API reference](docs/reference/api.md).
 - [Configuration](docs/configuration.md), [tasks](docs/tasks.md),
-  [remote hooks](docs/remote-hooks.md), and [usage limits](docs/usage-limits.md).
+  [remote hooks](docs/remote-hooks.md),
+  [remote daemon access](docs/remote-tcp-auth.md), and
+  [usage limits](docs/usage-limits.md).
 - [Container testing](docs/container-testing.md), [release process](docs/release-process.md),
   [release notes](docs/release-notes.md), and
   [release testing plan](docs/release-testing-plan.md).

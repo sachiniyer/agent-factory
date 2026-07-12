@@ -166,10 +166,9 @@ type Config struct {
 	LimitRetryInterval string `json:"limit_retry_interval" toml:"limit_retry_interval"`
 	// ListenAddr optionally binds the daemon's HTTP/WS API to a TLS TCP
 	// listener in addition to the always-present local unix socket (#1592
-	// Phase 3). Empty ⇒ no TCP listener (today's pure-unix behavior). A value
-	// like "0.0.0.0:8443" or ":8443" enables direct-TCP access gated by the
-	// bearer token (`af token`). DARK until Phase 3 PR3 binds the listener;
-	// declared now so the whole key set lands in one reviewable place.
+	// Phase 3). Empty ⇒ no TCP listener (the default pure-unix behavior). A
+	// value like "0.0.0.0:8443" or "127.0.0.1:8443" enables direct-TCP access
+	// gated by the bearer token (`af token`) — see docs/remote-tcp-auth.md.
 	// Global-only (daemon behavior), like daemon_poll_interval — a cloned
 	// repo must never be able to open a network port.
 	ListenAddr string `json:"listen_addr" toml:"listen_addr"`

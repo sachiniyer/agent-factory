@@ -8,17 +8,16 @@ import (
 )
 
 // The auth + CORS gate for the daemon HTTP/WS surface (#1592 Phase 2 PR5 seam,
-// filled by Phase 3 PR2, §1.4/§1.5). Every route (the REST mirror and the WS
+// filled by Phase 3, §1.4/§1.5). Every route (the REST mirror and the WS
 // routes) is served through withAuth, and the WS handshake rides the same path,
 // so one gate covers both — the Authorization header and the browser
 // ?access_token= fallback — with no route-specific auth logic.
 //
 // Enforcement is PER-LISTENER. The local unix socket is trusted transport
 // (filesystem 0600 perms are the auth, #1029): it passes a nil gate and every
-// request is authorized, token ignored. The TCP+TLS listener (PR3) passes a
-// real gate and requires a valid bearer token. Because only the unix listener
-// exists today, this whole enforcement path is DARK — the gate is always nil at
-// runtime and nothing is ever rejected — until PR3 binds TCP with gate != nil.
+// request is authorized, token ignored. The TCP+TLS listener passes a real gate
+// (startTCPListener) and requires a valid bearer token on every request, so the
+// nil-vs-real gate is the whole difference between the two transports.
 
 // errUnauthorized is the failure surfaced (as a 401 envelope) when a gated
 // request presents a missing or invalid bearer token. For a REST call it is a

@@ -34,6 +34,14 @@ var (
 	rootCmd     = &cobra.Command{
 		Use:   "af",
 		Short: "Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.",
+		Long: `Run 'af' with no arguments to open the TUI. The subcommands below drive the
+same daemon non-interactively (` + "`af sessions`, `af tasks`" + ` emit JSON).
+
+By default 'af' talks to a daemon on the local machine over a Unix socket. To
+drive a daemon on ANOTHER machine, SSH to the host and run 'af' there, or enable
+the opt-in TLS+token TCP listener and point a client at it with the persistent
+--daemon-url/--token/--tls-fingerprint flags (see 'af token' for the credentials).
+Full guide: https://sachiniyer.github.io/agent-factory/remote-tcp-auth/`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			log.Initialize(daemonFlag)

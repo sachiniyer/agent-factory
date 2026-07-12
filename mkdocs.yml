@@ -120,6 +120,7 @@ nav:
           - The daemon: concepts/daemon.md
           - Tasks & automation: tasks.md
           - Remote hooks: remote-hooks.md
+          - Remote daemon access: remote-tcp-auth.md
           - Usage limits: usage-limits.md
       - API & reference:
           - HTTP API guide: http-api.md
