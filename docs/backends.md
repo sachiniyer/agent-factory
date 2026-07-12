@@ -10,7 +10,7 @@ containerised session identically to a local one.
 | `local` (default) | a git worktree + tmux on the daemon's own machine | nothing (the default), or `backend = "local"` |
 | `docker` | a container on the daemon's Docker host | `backend = "docker"` + `docker.image` |
 | `ssh` | a remote host over SSH | `backend = "ssh"` + `ssh.host` |
-| `hook` | wherever your provisioner scripts put it | `backend = "hook"` (see [Remote hooks](remote-hooks.md)) |
+| `hook` | wherever your provisioner scripts put it | `backend = "hook"` (see [Hook backend](#hook-backend-bring-your-own-provisioner)) |
 
 Select a backend per-repo in `.agent-factory/config.json`, or per-session with
 `af sessions create --backend <name>` (the flag overrides the repo config).
@@ -198,6 +198,55 @@ case commits real work, **archives** it (branch pushed to `origin`, remote
 sandbox reaped), then **restores** it (a fresh remote clones the branch back, the
 commit is present, the session is drivable) — the identical push/pull-branch
 flow, over ssh. It skips cleanly where Docker is unavailable.
+
+---
+
+## Hook backend (bring-your-own-provisioner)
+
+`backend = "hook"` is the escape hatch for infrastructure the built-in `docker`
+and `ssh` runtimes don't model — Kubernetes, Modal, Daytona, a bastion with
+exotic auth, a bespoke orchestrator. Instead of an opinionated built-in, **you**
+provide the provisioning: two shell scripts that stand the workspace up and tear
+it down.
+
+Since **#1592 Phase 4 PR7** the hook backend follows the **same
+provision-and-expose contract** as `docker`/`ssh`. Your `launch_cmd` clones the
+repo on your infra, starts an **`af agent-server`** there, and echoes that
+server's authed endpoint (`{url, token, tls_fingerprint}`); the daemon then
+drives the session over that `wss://` stream — so a hook session is
+behaviorally identical to a local, docker, or ssh one (attach, type, resize,
+tabs, preview, archive/restore, kill).
+
+```json
+{
+  "backend": "hook",
+  "remote_hooks": {
+    "launch_cmd": "./.agent-factory/hooks/launch.sh",
+    "delete_cmd": "./.agent-factory/hooks/delete.sh"
+  }
+}
+```
+
+The mechanics of `launch_cmd` (its arguments, the JSON endpoint it must echo,
+how to start an `af agent-server` on your infra), `delete_cmd`, session-name
+slugging, and `af doctor` validation live in the dedicated guide — see
+**[Remote hooks](remote-hooks.md)**. This is intentionally the built-in `ssh`
+runtime done by hand: if plain SSH-to-a-host covers your case, prefer `ssh`
+(zero scripting); reach for `hook` only when it doesn't.
+
+### Migrating from the old `remote_hooks` contract
+
+PR7 is a **breaking, clean-break change**. The old hook contract — `launch_cmd`
+returning a session id, plus `list_cmd`/`attach_cmd`/`terminal_cmd` for
+enumeration, terminal proxying, and preview capture — has been **removed**;
+`launch_cmd` now returns an `af agent-server` endpoint and the only other script
+is `delete_cmd`. A config that still sets a removed key is rejected with an error
+pointing at the guide.
+
+The migration is mechanical (your `launch_cmd` gains an `af agent-server` start
+and echoes its URL). Rather than duplicate it here, follow the copy-pasteable
+recipe in
+**[Remote hooks → Migrating from the old contract](remote-hooks.md#migrating-from-the-old-contract)**.
 
 ---
 

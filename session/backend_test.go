@@ -151,6 +151,85 @@ func TestBackendCapabilities(t *testing.T) {
 	}
 }
 
+// complianceBackends returns one instance of every Backend implementation a
+// registered runtime can produce, keyed by its BackendKind. It is the single
+// list the parity matrix runs against; TestBackendComplianceCoversRegistry
+// asserts it stays in lockstep with runtimeRegistry, so a NEW backend added to
+// the registry cannot dodge the matrix by being omitted here.
+func complianceBackends() map[BackendKind]Backend {
+	return map[BackendKind]Backend{
+		BackendLocal:  &LocalBackend{},
+		BackendHook:   &HookBackend{},
+		BackendDocker: &dockerBackend{},
+		BackendSSH:    &sshBackend{},
+	}
+}
+
+// TestBackendComplianceCoversRegistry guards the parity matrix's completeness:
+// every runtime the registry can resolve MUST have a compliance backend in the
+// matrix, and vice versa. Without this, a future backend registered in
+// runtimeRegistry but never added to complianceBackends would silently escape
+// the "every backend implements every capability" assertion below.
+func TestBackendComplianceCoversRegistry(t *testing.T) {
+	compliance := complianceBackends()
+	for kind := range runtimeRegistry {
+		if _, ok := compliance[kind]; !ok {
+			t.Errorf("backend %q is registered in runtimeRegistry but missing from the compliance matrix (complianceBackends); add it so it is held to the parity contract", kind)
+		}
+	}
+	for kind := range compliance {
+		if _, ok := runtimeRegistry[kind]; !ok {
+			t.Errorf("backend %q is in the compliance matrix but not registered in runtimeRegistry (stale entry?)", kind)
+		}
+	}
+}
+
+// TestBackendCapabilityParity is the epic end-state assertion (#1592 Phase 4,
+// §5.2): EVERY backend implements EVERY optional capability — no backend gates an
+// operation off behind a "not supported" descriptor bit, and none returns an
+// ErrRecoverUnsupported/ErrArchiveUnsupported sentinel (both are DELETED; a
+// reference would fail to compile). The old locality special-case — a remote
+// backend advertising Archive/Recover=false and returning
+// ErrRecoverUnsupported — is gone. Attach/preview/archive/restore/tab all route
+// through the uniform agent-server + push/pull-branch contract, so this table
+// asserts the full optional-capability matrix is TRUE for every registered
+// backend. A regression that flips any bit false (re-introducing a locality
+// gap) fails here.
+//
+// This runs everywhere (host, no docker/ssh needed): it asserts the descriptor
+// each backend SELF-REPORTS. The availability-gated docker/ssh round-trips
+// (make backend-docker-roundtrip / backend-ssh-roundtrip) additionally prove the
+// REAL backends SERVICE the same matrix over the wire — see
+// integration/backend_capability_matrix_test.go.
+func TestBackendCapabilityParity(t *testing.T) {
+	// The optional capabilities every backend must service. Workspace is NOT
+	// here — it is a locality descriptor (local worktree vs off-box), not an
+	// operation, and the client dispatches attach/preview on it. Parity is about
+	// the OPERATIONS: no backend may report it cannot do one.
+	optional := []struct {
+		name string
+		get  func(Capabilities) bool
+	}{
+		{"Attach", func(c Capabilities) bool { return c.Attach }},
+		{"Archive", func(c Capabilities) bool { return c.Archive }},
+		{"Recover", func(c Capabilities) bool { return c.Recover }},
+		{"TabManagement", func(c Capabilities) bool { return c.TabManagement }},
+		{"TerminalTab", func(c Capabilities) bool { return c.TerminalTab }},
+		{"InteractiveInput", func(c Capabilities) bool { return c.InteractiveInput }},
+	}
+
+	for kind, b := range complianceBackends() {
+		t.Run(string(kind), func(t *testing.T) {
+			caps := b.Capabilities()
+			for _, oc := range optional {
+				assert.Truef(t, oc.get(caps),
+					"backend %q must service capability %s at full parity (#1592 Phase 4 end-state: no locality special-case, no unsupported sentinel)",
+					kind, oc.name)
+			}
+		})
+	}
+}
+
 // TestLocalBackendKillBestEffort_TmuxFails is a regression test for issue
 // #478. When the tmux teardown fails, Kill must still clear in-memory state
 // and return nil so the caller can finish removing the session from the
