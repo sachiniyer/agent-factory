@@ -235,6 +235,12 @@ func previewCommitError(inst *session.Instance) error {
 		return fmt.Errorf("cannot commit preview for %q: session no longer running", inst.Title)
 	case session.LiveLost:
 		return fmt.Errorf("cannot commit preview for %q: session was lost", inst.Title)
+	case session.LiveArchived:
+		// An archived session has no live tmux binding, and pruneDeadPanes closes
+		// any pane bound to one on the next tick — so committing a split-pane
+		// preview here would flash a pane that immediately vanishes. Reject it like
+		// Dead/Lost, matching interactiveGuard's archived case (#1633).
+		return fmt.Errorf("cannot commit preview for %q: session is archived", inst.Title)
 	}
 	return nil
 }
