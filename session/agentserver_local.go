@@ -30,6 +30,11 @@ type localAgentServer struct {
 	// streaming): the agent tab (0) and each shell/process tab (>0) have their own
 	// clientless capture + ring buffer so a pane bound to any tab streams over WS.
 	brokers map[int]*ptyBroker
+	// closed latches once Kill has run. A Subscribe/Input/Resize that races the
+	// kill must NOT lazily resurrect a broker (which would start a fresh clientless
+	// capture goroutine on a session that is already being torn down and never gets
+	// closed — the #1632 leak). ensureBroker refuses once closed.
+	closed bool
 }
 
 // AgentServer returns the cached agent-server for this instance's runtime (#1592
@@ -112,6 +117,9 @@ func (s *localAgentServer) TapEnter() {
 func (s *localAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil, fmt.Errorf("session %q is being terminated", s.inst.Title)
+	}
 	if br := s.brokers[tab]; br != nil {
 		return br, nil
 	}
@@ -154,7 +162,12 @@ func (s *localAgentServer) Resize(tab int, rows, cols uint16) error {
 func (s *localAgentServer) Kill() error {
 	// Tear every tab's data plane down first so the clientless captures stop and
 	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.
+	// Latch closed under the same lock that snapshots the brokers so a Subscribe
+	// racing this teardown can't resurrect a broker after we've drained the map
+	// (#1632): ensureBroker refuses once closed, so no post-kill capture goroutine
+	// is ever started.
 	s.mu.Lock()
+	s.closed = true
 	brokers := s.brokers
 	s.brokers = nil
 	s.mu.Unlock()

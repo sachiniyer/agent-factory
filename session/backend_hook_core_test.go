@@ -553,41 +553,13 @@ func TestHookBackendHasUpdated(t *testing.T) {
 	assert.False(t, hasPrompt)
 }
 
-func TestHookBackendSendPromptReturnsError(t *testing.T) {
-	b := &HookBackend{Hooks: config.RemoteHooks{}}
-	i := &Instance{backend: b}
-	err := b.SendPrompt(i, "test")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not supported")
-}
-
 func TestHookBackendSendPromptCommandReturnsError(t *testing.T) {
 	b := &HookBackend{Hooks: config.RemoteHooks{}}
 	i := &Instance{backend: b}
+	// SendPromptCommand is the sole delivery seam after the raw SendPrompt path
+	// was deleted (#1626); the remote runtime rejects it.
 	err := b.SendPromptCommand(i, "test")
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not supported")
-}
-
-func TestHookBackendSendKeysReturnsError(t *testing.T) {
-	b := &HookBackend{Hooks: config.RemoteHooks{}}
-	i := &Instance{backend: b}
-	err := b.SendKeys(i, "test")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not supported")
-}
-
-// Regression test for #267: SendKeys on a remote instance must return an
-// error rather than panic with a nil tmuxSession dereference.
-func TestInstanceSendKeysRemoteNoPanic(t *testing.T) {
-	b := &HookBackend{Hooks: config.RemoteHooks{}}
-	i := &Instance{
-		Title:   "remote-inst",
-		backend: b,
-		started: true, // simulate remote instance started without tmux session
-	}
-	err := i.SendKeys("hello")
-	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not supported")
 }
 
@@ -618,40 +590,6 @@ func TestLocalBackendTapEnterNilTmuxSession(t *testing.T) {
 	}
 	// Should not panic.
 	b.TapEnter(i)
-}
-
-// LocalBackend.SendKeys should return an error (not panic) when the tmux
-// session has not been initialized yet.
-func TestLocalBackendSendKeysNilTmuxSession(t *testing.T) {
-	b := &LocalBackend{}
-	i := &Instance{
-		Title:   "local-inst",
-		backend: b,
-		started: true, // tmuxSession intentionally left nil
-	}
-	err := b.SendKeys(i, "hello")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tmux session not initialized")
-}
-
-// LocalBackend.SendKeys should return an error when the instance has not
-// been started yet.
-func TestLocalBackendSendKeysNotStarted(t *testing.T) {
-	b := &LocalBackend{}
-	i := &Instance{
-		Title:   "local-inst",
-		backend: b,
-	}
-	err := b.SendKeys(i, "hello")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "has not been started")
-}
-
-func TestHookBackendSetPreviewSizeIsNoop(t *testing.T) {
-	b := &HookBackend{Hooks: config.RemoteHooks{}}
-	i := &Instance{backend: b}
-	err := b.SetPreviewSize(i, 80, 24)
-	assert.NoError(t, err)
 }
 
 func TestHookBackendCheckAndHandleTrustPrompt(t *testing.T) {

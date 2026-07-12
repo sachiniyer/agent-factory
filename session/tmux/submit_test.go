@@ -229,7 +229,6 @@ func TestBashWrappedSubmitDoesNotDuplicateCommandPrefix(t *testing.T) {
 		require.NoError(t, session.Close())
 	})
 
-	require.NoError(t, session.SetDetachedSize(24, 10))
 	resizeCmd := exec.Command("tmux", "resize-window", "-t", exactTarget(session.sanitizedName), "-x", "24", "-y", "10")
 	require.NoError(t, session.cmdExec.Run(resizeCmd))
 

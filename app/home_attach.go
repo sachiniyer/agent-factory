@@ -71,28 +71,27 @@ func (m *home) beginAttachTransition(run func() tea.Cmd) tea.Cmd {
 
 // attachOverlayCallbackFn is the indirection handleEnter reaches
 // attachOverlayCallback through. Production points it at the method; tests swap
-// it to substitute a hermetic attach func (no real tmux client or remote
-// terminal_cmd PTY) while preserving the real `remote` argument the call site
-// computed. That keeps the call-site decision exercised end to end — the #889
-// regression is that the terminal-tab site passed a hardcoded false instead of
-// the instance's real remote-ness (now Capabilities().Workspace ==
-// WorkspaceRemote), which can only be caught by a test that drives the real
-// handleEnter and observes the post-detach reset keyed off that argument.
+// it to substitute a hermetic attach func (no real WS PTY stream or remote
+// terminal_cmd PTY) while preserving the call-site behaviour.
 var attachOverlayCallbackFn = (*home).attachOverlayCallback
 
 // attachOverlayCallback runs the attach-overlay onDismiss lifecycle: emits
 // the detach-trace markers, invokes attach, arms the attached flag for the
-// duration of `<-ch`, then returns the tea.Cmd to emit the
-// repaintAfterDetachMsg{}. Returns nil when attach itself fails so the
+// duration of `<-ch`, then returns the tea.Cmd that re-asserts the terminal and
+// emits repaintAfterDetachMsg{}. Returns nil when attach itself fails so the
 // callback can be passed directly to showHelpScreen's onDismiss.
 //
-// remote selects the post-detach terminal handling. A local tmux detach
-// leaves the terminal exactly as the TUI expects (the long-lived tmux client
-// never replays its setup/teardown sequences across attach cycles), so the
-// flow is the plain repaint it has always been. A remote detach hands the
-// terminal back in the neutral state described on
-// remoteDetachTerminalReassert, so the TUI's modes are re-asserted before the
-// event loop resumes, and the repaint is preceded by tea.ClearScreen (#845).
+// Post-detach terminal handling is now uniform (#1592 Phase 2 PR7): every
+// full-screen attach — a local WS PTY subscriber (apiclient.AttachStream) or a
+// remote hook attach_cmd — is a RAW byte proxy that scribbles the pane program's
+// alt-screen/mouse/scroll modes onto the real terminal and hands it back neutral
+// (main screen, cursor visible, reporting off) on detach. Local attach used to be
+// exempt only because a long-lived `tmux attach-session` client replayed clean
+// restores across attach cycles; the clientless WS proxy has no such client, so
+// the local path now hits the same #845 problem as remote. So both re-assert
+// bubbletea's startup modes synchronously — while the Update goroutine is still
+// blocked here, before the renderer can emit a frame — and precede the repaint
+// with tea.ClearScreen to invalidate the stale diff cache (#845).
 //
 // The defer on m.attached.Store(false) is load-bearing: it guarantees the
 // flag clears even if `<-ch` is woken by an abnormal close or a panic
@@ -104,8 +103,8 @@ var attachOverlayCallbackFn = (*home).attachOverlayCallback
 // Extracted so the attach call-sites (handleEnter sidebar, handleEnter
 // terminal-tab) all funnel through one place — and so the pause-while-attached
 // gating + the flag-clears-on-error path are testable without spinning up
-// real tmux.
-func (m *home) attachOverlayCallback(title, label, traceSuffix string, remote bool, attach func() (chan struct{}, error)) tea.Cmd {
+// a real WS stream.
+func (m *home) attachOverlayCallback(title, label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
 	detachTraceMark(label + "-onDismiss-entry" + traceSuffix)
 	ch, err := attach()
 	if err != nil {
@@ -163,17 +162,14 @@ func (m *home) attachOverlayCallback(title, label, traceSuffix string, remote bo
 		detachTrace(detachStart, label+"-repaintAfterDetachMsg-emitted")
 		return repaintAfterDetachMsg{}
 	}
-	if remote {
-		// The hook backend wrote its neutral restore before closing ch, so
-		// this lands strictly after it. The Update goroutine is still blocked
-		// in this callback, so no renderer write can interleave (#845).
-		_, _ = io.WriteString(remoteDetachResetWriter, remoteDetachTerminalReassert)
-		// ClearScreen first so the renderer's stale diff cache is invalidated
-		// before the repaint flow runs; then the usual repaintAfterDetachMsg
-		// path, watchdog semantics (#683) included.
-		return tea.Sequence(tea.ClearScreen, repaintCmd)
-	}
-	return repaintCmd
+	// The attach driver (WS or hook) wrote its neutral restore before closing ch,
+	// so this lands strictly after it. The Update goroutine is still blocked in
+	// this callback, so no renderer write can interleave (#845). ClearScreen first
+	// so the renderer's stale diff cache is invalidated before the repaint flow
+	// runs; then the usual repaintAfterDetachMsg path, watchdog semantics (#683)
+	// included.
+	_, _ = io.WriteString(remoteDetachResetWriter, remoteDetachTerminalReassert)
+	return tea.Sequence(tea.ClearScreen, repaintCmd)
 }
 
 // statusPollRenewInterval is how often an attached TUI re-sends PauseStatusPoll

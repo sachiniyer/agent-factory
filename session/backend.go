@@ -111,18 +111,12 @@ type Backend interface {
 	// live pane (remote/hook) or when the capture is unavailable.
 	HasUpdated(instance *Instance) (updated bool, hasPrompt bool, content string)
 
-	// SendPrompt sends a prompt string via PTY writes.
-	SendPrompt(instance *Instance, prompt string) error
-
-	// SendPromptCommand sends a prompt using a more reliable command-based
-	// approach (e.g. tmux send-keys).
+	// SendPromptCommand sends a prompt using a reliable command-based approach
+	// (tmux send-keys for the local runtime). This is the SOLE prompt-delivery
+	// primitive: AgentServer.SendPrompt delegates here, and it lands whether or
+	// not a PTY is currently attached — the raw PTY-write SendPrompt (a 100ms
+	// send-then-Enter) was deleted as dead post-migration (#1626).
 	SendPromptCommand(instance *Instance, prompt string) error
-
-	// SendKeys sends raw keys to the session (without pressing Enter).
-	SendKeys(instance *Instance, keys string) error
-
-	// SetPreviewSize sets the terminal dimensions for the session preview.
-	SetPreviewSize(instance *Instance, width, height int) error
 
 	// IsAlive returns true if the underlying session is still running.
 	IsAlive(instance *Instance) bool

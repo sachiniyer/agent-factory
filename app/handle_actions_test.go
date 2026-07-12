@@ -15,22 +15,6 @@ import (
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
-// recordingAttachBackend wraps a FakeBackend and records the title of the
-// instance whose Attach() is invoked, so tests can prove which instance the
-// deferred attach actually connected to.
-type recordingAttachBackend struct {
-	*session.FakeBackend
-	title string
-	log   *[]string
-}
-
-func (b *recordingAttachBackend) Attach(*session.Instance) (chan struct{}, error) {
-	*b.log = append(*b.log, b.title)
-	ch := make(chan struct{})
-	close(ch)
-	return ch, nil
-}
-
 // TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift is the regression
 // guard for issue #716. For first-time attachers the attach is deferred until
 // the attach help overlay is dismissed. The old code captured a method value
@@ -39,34 +23,31 @@ func (b *recordingAttachBackend) Attach(*session.Instance) (chan struct{}, error
 // the overlay was open caused the attach to connect to the wrong instance.
 //
 // The fix captures the instance at Enter-press time (the synchronous moment the
-// selection is provably current) and attaches to that captured instance. This
-// test selects instance-a, presses Enter, drifts the selection to instance-b
-// while the help overlay is open, then dismisses it and asserts the attach
-// targeted instance-a.
+// selection is provably current) and attaches to that captured instance. Since
+// #1592 Phase 2 PR7 a local full-screen attach is a WS PTY proxy rather than a
+// Backend.Attach() call, so the captured instance is observed via the title the
+// attach call site passes to attachOverlayCallbackFn (instance.Title captured at
+// Enter-press time). This test selects instance-a, presses Enter, drifts the
+// selection to instance-b while the help overlay is open, then dismisses it and
+// asserts the attach targeted instance-a.
 func TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift(t *testing.T) {
-	var attachLog []string
-	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
-		return &recordingAttachBackend{
-			FakeBackend: session.NewFakeBackend(),
-			title:       opts.Title,
-			log:         &attachLog,
-		}, nil
-	})
-	defer restore()
-
 	h := newTestHome(t)
 
-	a, err := session.NewInstance(session.InstanceOptions{Title: "instance-a", Path: t.TempDir(), Program: "claude"})
-	require.NoError(t, err)
-	a.SetStatusForTest(session.Running)
-	b, err := session.NewInstance(session.InstanceOptions{Title: "instance-b", Path: t.TempDir(), Program: "claude"})
-	require.NoError(t, err)
-	b.SetStatusForTest(session.Running)
-
+	a := instanceWithFakeBackend(t, "instance-a")
+	b := instanceWithFakeBackend(t, "instance-b")
 	h.store.AddInstance(a)
 	h.store.AddInstance(b)
 	// User presses Enter on instance-a.
 	h.sidebar.SetSelectedInstance(0)
+
+	// The deferred attach records the title it targets. instance.Title is bound
+	// into the attach closure at Enter-press time (#716), so a title of
+	// "instance-b" here would mean the code re-read the drifted live selection.
+	var attachedTitle string
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
+		attachedTitle = title
+		return nil
+	})
 
 	model, _ := h.handleEnter()
 	h = model.(*home)
@@ -84,7 +65,7 @@ func TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift(t *testing.T) {
 	_, cmd := h.handleHelpState(tea.KeyMsg{Type: tea.KeyEnter})
 	_ = runAttachTransitionCmd(t, h, cmd)
 
-	require.Equal(t, []string{"instance-a"}, attachLog,
+	require.Equal(t, "instance-a", attachedTitle,
 		"attach must target the instance captured at Enter-press time, not the drifted selection")
 }
 
@@ -95,7 +76,7 @@ func TestFirstRunAttachHelpEscCancelsAttach(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	attached := 0
-	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, attach func() (chan struct{}, error)) tea.Cmd {
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
 		attached++
 		return nil
 	})

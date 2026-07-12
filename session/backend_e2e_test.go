@@ -196,12 +196,12 @@ func TestE2ERemoteHooksFullLifecycle(t *testing.T) {
 	assert.False(t, obs.Updated)
 	assert.False(t, obs.HasPrompt)
 
-	// --- Step 7: SendPrompt/SendPromptCommand should return errors ---
-	assert.Error(t, instance.SendPrompt("hello"))
+	// --- Step 7: prompt delivery should return errors ---
+	// The active delivery seam is AgentServer.SendPrompt (which routes to the
+	// reliable SendPromptCommand path); the remote runtime rejects it. The raw
+	// PTY-write SendPrompt path was deleted as dead post-migration (#1626).
+	assert.Error(t, instance.AgentServer().SendPrompt("hello"))
 	assert.Error(t, instance.SendPromptCommand("hello"))
-
-	// --- Step 8: SetPreviewSize should be a no-op (no error) ---
-	assert.NoError(t, instance.SetPreviewSize(120, 40))
 
 	// --- Step 9: Remote-specific checks ---
 	assert.Equal(t, "", instance.GetWorktreePath(), "remote instances have no worktree")

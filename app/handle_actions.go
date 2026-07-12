@@ -1,11 +1,13 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -746,24 +748,39 @@ func (m *home) attachSelected(selected *session.Instance) (tea.Model, tea.Cmd) {
 // remote-ness (#889). Callers pass the tab index captured at keypress time
 // (#716), before help-overlay deferral can let selection or active tab drift.
 func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLabel, terminalLabel string) (tea.Model, tea.Cmd) {
-	// The post-detach terminal reset+reassert (#845/#848) keys off whether the
-	// workspace is remote: a remote instance's terminal tab is its terminal_cmd
-	// PTY, a local one's is a tmux session (#843/#889).
 	remote := instance.Capabilities().Workspace == session.WorkspaceRemote
+	label := agentLabel
 	if tabIdx != 0 {
-		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
-			return m.beginAttachTransition(func() tea.Cmd {
-				return attachOverlayCallbackFn(m, instance.Title, terminalLabel, "", remote, func() (chan struct{}, error) {
-					return ui.AttachTerminalTab(instance, tabIdx)
-				})
-			})
-		})
+		label = terminalLabel
+	}
+	// Pick the attach byte source by LOCALITY — a capability check, not a
+	// concrete-backend type assertion (#1592 Phase 1). A local session (agent tab
+	// 0 or a shell/process tab) attaches CLIENT-side as a WS PTY subscriber over
+	// the daemon socket (apiclient.AttachStream, #1592 Phase 2 PR7), replacing the
+	// retired tmux-server-mediated attach driver. A remote session attaches its
+	// hook attach_cmd (agent tab) / terminal_cmd (terminal tab) PTY in-process
+	// through the uniform Backend interface. Both return a chan closed on detach,
+	// and both now scribble the terminal (see attachOverlayCallback's uniform
+	// reassert). instance + repoID are captured here at keypress so a deferred
+	// attach (help overlay open) targets the captured session, not a drifted
+	// selection (#716).
+	repoID := m.repoID
+	attach := func() (chan struct{}, error) {
+		if remote {
+			if tabIdx != 0 {
+				return ui.AttachTerminalTab(instance, tabIdx)
+			}
+			return m.store.AttachInstance(instance)
+		}
+		c, err := apiclient.New()
+		if err != nil {
+			return nil, err
+		}
+		return c.AttachStream(context.Background(), instance.Title, repoID, tabIdx)
 	}
 	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {
-			return attachOverlayCallbackFn(m, instance.Title, agentLabel, "", remote, func() (chan struct{}, error) {
-				return m.store.AttachInstance(instance)
-			})
+			return attachOverlayCallbackFn(m, instance.Title, label, "", attach)
 		})
 	})
 }

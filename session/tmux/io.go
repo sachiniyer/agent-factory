@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/creack/pty"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -35,39 +34,37 @@ func (m *statusMonitor) hash(s string) []byte {
 	return h.Sum(nil)
 }
 
-// TapEnter sends an enter keystroke to the tmux pane.
+// TapEnter injects a bare Enter into the pane via a clientless `send-keys`
+// command (#1592 Phase 2 PR7). It replaces the old write of CR to the attach
+// PTY: the tmux-server-mediated attach client is gone, so input now lands
+// through a command exactly like the interactive multi-writer path. Used by
+// AutoYes (daemon poll) and the trust-prompt dismissal in
+// CheckAndHandleTrustPrompt. A missing session surfaces ErrSessionGone so
+// callers degrade gracefully instead of logging at ERROR (#510).
 func (t *TmuxSession) TapEnter() error {
-	// Detach failure (or Close) clears t.ptmx (#474), so callers that fire
-	// keystrokes against a detached session must surface ErrSessionGone
-	// instead of panicking on a nil Write (#510).
-	if t.ptmx == nil {
-		return ErrSessionGone
-	}
-	_, err := t.ptmx.Write([]byte{0x0D})
-	if err != nil {
-		return fmt.Errorf("error sending enter keystroke to PTY: %w", err)
+	cmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "Enter")
+	if err := t.cmdExec.Run(cmd); err != nil {
+		if !t.DoesSessionExist() {
+			return fmt.Errorf("%w: send-keys Enter", ErrSessionGone)
+		}
+		return fmt.Errorf("error sending enter keystroke: %w", err)
 	}
 	return nil
 }
 
-// TapDAndEnter sends 'D' followed by an enter keystroke to the tmux pane.
+// TapDAndEnter injects 'D' then Enter (the non-Claude trust/doc-dialog
+// dismissal) via a clientless `send-keys` command. "D" is the literal glyph and
+// "Enter" the named key — semantically identical to the old ptmx write of
+// {0x44, 0x0D}.
 func (t *TmuxSession) TapDAndEnter() error {
-	if t.ptmx == nil {
-		return ErrSessionGone
-	}
-	_, err := t.ptmx.Write([]byte{0x44, 0x0D})
-	if err != nil {
-		return fmt.Errorf("error sending enter keystroke to PTY: %w", err)
+	cmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "D", "Enter")
+	if err := t.cmdExec.Run(cmd); err != nil {
+		if !t.DoesSessionExist() {
+			return fmt.Errorf("%w: send-keys D Enter", ErrSessionGone)
+		}
+		return fmt.Errorf("error sending D+enter keystroke: %w", err)
 	}
 	return nil
-}
-
-func (t *TmuxSession) SendKeys(keys string) error {
-	if t.ptmx == nil {
-		return ErrSessionGone
-	}
-	_, err := t.ptmx.Write([]byte(keys))
-	return err
 }
 
 // HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if the tmux
@@ -143,35 +140,6 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	}
 	t.monitorMu.Unlock()
 	return changed, hasPrompt, content
-}
-
-// SetDetachedSize set the width and height of the session while detached. This makes the
-// tmux output conform to the specified shape.
-func (t *TmuxSession) SetDetachedSize(width, height int) error {
-	// Detach failure (or Close) clears t.ptmx (#474), and the tmux session
-	// may have been killed externally. Guard the ioctl so a missing PTY
-	// surfaces as ErrSessionGone instead of panicking on nil.Fd() or
-	// logging "bad file descriptor" at ERROR (#496).
-	if t.ptmx == nil {
-		return ErrSessionGone
-	}
-	if err := t.updateWindowSize(width, height); err != nil {
-		if !t.DoesSessionExist() {
-			return fmt.Errorf("%w: %v", ErrSessionGone, err)
-		}
-		return err
-	}
-	return nil
-}
-
-// updateWindowSize updates the window size of the PTY.
-func (t *TmuxSession) updateWindowSize(cols, rows int) error {
-	return pty.Setsize(t.ptmx, &pty.Winsize{
-		Rows: uint16(rows),
-		Cols: uint16(cols),
-		X:    0,
-		Y:    0,
-	})
 }
 
 // CapturePaneContent captures the content of the tmux pane. When the

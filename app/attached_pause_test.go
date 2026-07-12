@@ -13,6 +13,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// assertPostDetachRepaintSequence pins that a post-detach cmd is the uniform
+// tea.Sequence(tea.ClearScreen, repaintAfterDetachMsg) the callback now returns
+// for every attach (#1592 Phase 2 PR7 — local and remote converge). sequenceMsg
+// is unexported, so unpack it reflectively.
+func assertPostDetachRepaintSequence(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	require.NotNil(t, cmd, "success path must return the post-detach cmd")
+	seq := reflect.ValueOf(cmd())
+	require.Equal(t, reflect.Slice, seq.Kind(),
+		"post-detach cmd must be a tea.Sequence, got %T", cmd())
+	require.Equal(t, 2, seq.Len(), "sequence must be exactly ClearScreen + repaint")
+	second, ok := seq.Index(1).Interface().(tea.Cmd)
+	require.True(t, ok)
+	_, isRepaint := second().(repaintAfterDetachMsg)
+	assert.True(t, isRepaint, "second sequenced cmd must emit repaintAfterDetachMsg")
+}
+
 // TestPreviewTick_PausedWhileAttached verifies that the previewTickMsg
 // handler skips selectionChanged (and therefore refreshPanesCmd, two
 // capture-pane shell-outs) while attached. The handler must still re-arm
@@ -111,7 +128,7 @@ func TestAttachOverlayCallback_ClearsFlagOnDetach(t *testing.T) {
 
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("t1", "test-attach", " title=t1", false, attach)
+		done <- h.attachOverlayCallback("t1", "test-attach", " title=t1", attach)
 	}()
 
 	// While the callback is blocked on <-ch the flag must be set.
@@ -127,10 +144,7 @@ func TestAttachOverlayCallback_ClearsFlagOnDetach(t *testing.T) {
 		"attached flag must clear after <-ch unblocks — otherwise the "+
 			"metadata tick / preview refresh / PR info fetcher stay paused "+
 			"until the next process restart")
-	require.NotNil(t, postDetachCmd, "success path returns repaintAfterDetachMsg cmd")
-	msg := postDetachCmd()
-	_, ok := msg.(repaintAfterDetachMsg)
-	assert.True(t, ok, "post-detach cmd must emit repaintAfterDetachMsg, got %T", msg)
+	assertPostDetachRepaintSequence(t, postDetachCmd)
 	// End the watchdog we armed via beginDetachWatchdog so subsequent
 	// tests don't see a stray running goroutine.
 	endDetachWatchdog()
@@ -148,7 +162,7 @@ func TestAttachOverlayCallback_LeavesFlagAloneWhenAttachErrors(t *testing.T) {
 	attachErr := errors.New("simulated attach failure")
 	attach := func() (chan struct{}, error) { return nil, attachErr }
 
-	cmd := h.attachOverlayCallback("t1", "test-attach", "", false, attach)
+	cmd := h.attachOverlayCallback("t1", "test-attach", "", attach)
 
 	assert.Nil(t, cmd, "attachOverlayCallback must return nil when attach fails")
 	assert.False(t, h.attached.Load(),
@@ -194,7 +208,7 @@ func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("alpha", "test-attach", "", false, attach)
+		done <- h.attachOverlayCallback("alpha", "test-attach", "", attach)
 	}()
 
 	// The pause must fire while the user is still attached — i.e. before we
@@ -275,7 +289,7 @@ func TestAttachOverlayCallback_ResumeOrderedAfterLastPause(t *testing.T) {
 	attach := func() (chan struct{}, error) { return ch, nil }
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("alpha", "test-attach", "", false, attach)
+		done <- h.attachOverlayCallback("alpha", "test-attach", "", attach)
 	}()
 
 	// Wait until the on-attach pause is in-flight (blocked on releasePause).
@@ -326,7 +340,7 @@ func TestAttachOverlayCallback_AttachSucceedsWhenPauseErrors(t *testing.T) {
 
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("alpha", "test-attach", "", false, attach)
+		done <- h.attachOverlayCallback("alpha", "test-attach", "", attach)
 	}()
 
 	require.Eventually(t, func() bool { return h.attached.Load() },
@@ -335,10 +349,7 @@ func TestAttachOverlayCallback_AttachSucceedsWhenPauseErrors(t *testing.T) {
 	close(ch)
 	cmd := <-done
 
-	require.NotNil(t, cmd, "attach must still return the repaint cmd despite a pause RPC error")
-	msg := cmd()
-	_, ok := msg.(repaintAfterDetachMsg)
-	assert.True(t, ok, "post-detach cmd must emit repaintAfterDetachMsg, got %T", msg)
+	assertPostDetachRepaintSequence(t, cmd)
 	require.False(t, h.attached.Load(),
 		"attached flag must clear on detach even when the pause/resume RPCs error (best-effort)")
 	endDetachWatchdog()

@@ -110,7 +110,7 @@ func TestRunHookAttachWithDetach_EmitsTerminalRestoreOnDetachKill(t *testing.T) 
 
 	got := out.String()
 	assert.Contains(t, got, remoteJunk, "test premise: the remote stream was copied raw")
-	require.True(t, strings.HasSuffix(got, hookAttachTerminalRestore),
+	require.True(t, strings.HasSuffix(got, tmux.NeutralTerminalRestore),
 		"stdout must END with the neutral terminal restore so it lands after "+
 			"every remote byte (#845); got tail %q", got[max(0, len(got)-120):])
 }
@@ -135,7 +135,7 @@ func TestRunHookAttachWithDetach_EmitsTerminalRestoreOnNaturalExit(t *testing.T)
 
 	got := out.String()
 	assert.Contains(t, got, remoteJunk, "test premise: the remote stream was copied raw")
-	require.True(t, strings.HasSuffix(got, hookAttachTerminalRestore),
+	require.True(t, strings.HasSuffix(got, tmux.NeutralTerminalRestore),
 		"stdout must end with the neutral terminal restore on natural exit too (#845); got tail %q",
 		got[max(0, len(got)-120):])
 }

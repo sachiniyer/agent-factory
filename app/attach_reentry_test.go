@@ -65,9 +65,9 @@ func TestHandleEnter_SecondEnterDuringAttachDoesNotScheduleSecondAttach(t *testi
 	swapRemoteDetachResetWriter(t, &out)
 
 	attaches := 0
-	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
 		attaches++
-		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
+		return m.attachOverlayCallback(title, label, traceSuffix, func() (chan struct{}, error) {
 			ch := make(chan struct{})
 			close(ch) // detach immediately, synchronously, no real PTY
 			return ch, nil
@@ -114,9 +114,9 @@ func TestHandleEnter_CanceledAttachHelpDoesNotWedgeGuard(t *testing.T) {
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
 	attaches := 0
-	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, rem bool, _ func() (chan struct{}, error)) tea.Cmd {
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
 		attaches++
-		return m.attachOverlayCallback(title, label, traceSuffix, rem, func() (chan struct{}, error) {
+		return m.attachOverlayCallback(title, label, traceSuffix, func() (chan struct{}, error) {
 			ch := make(chan struct{})
 			close(ch)
 			return ch, nil

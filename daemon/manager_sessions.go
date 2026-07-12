@@ -201,12 +201,25 @@ func shellQuoteArg(s string) string {
 // is restored and tracked exactly once, and the returned server is the tracked
 // instance's cached singleton whose ring buffer/subscribers persist.
 func (m *Manager) agentServerForStream(title, repoID string) (session.AgentServer, error) {
-	instance, _, _, err := m.findSession(title, repoID)
+	instance, resolvedRepoID, _, err := m.findSession(title, repoID)
 	if err != nil {
 		return nil, err
 	}
 	if instance == nil {
 		return nil, fmt.Errorf("session %q not found", title)
+	}
+	// Reject a new subscription while a kill is in flight for this session, the
+	// same killsInFlight gate SendPrompt checks (#1632). Streaming previously
+	// skipped it, so a Subscribe could race KillSession's teardown; the
+	// agent-server's closed latch is the structural backstop (it refuses to
+	// resurrect a broker), and this makes the daemon reject the dial up front
+	// rather than opening a stream that immediately EOFs.
+	key := daemonInstanceKey(resolvedRepoID, title)
+	m.mu.Lock()
+	_, killing := m.killsInFlight[key]
+	m.mu.Unlock()
+	if killing {
+		return nil, fmt.Errorf("session %q is being deleted", title)
 	}
 	return instance.AgentServer(), nil
 }

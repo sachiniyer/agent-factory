@@ -1,11 +1,9 @@
 package tmux
 
 import (
-	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -156,42 +154,13 @@ func (t *TmuxSession) Restore(workDir string) error {
 		return t.Start(workDir)
 	}
 
-	// `=` forces an exact session match so a surviving sibling session (e.g.
-	// the `__shell` tab) can never be prefix-matched and attached instead of
-	// the agent session (#1006). killTmuxAttachByName's pgrep pattern must
-	// stay in lockstep with this argv.
-	attachCmd := exec.Command("tmux", "attach-session", "-t", exactTarget(t.sanitizedName))
-	ptmx, err := t.ptyFactory.Start(attachCmd)
-	if err != nil {
-		return fmt.Errorf("error opening PTY: %w", err)
-	}
-	t.ptmx = ptmx
-	// Swap in a fresh monitor under monitorMu: the daemon poll may be inside
-	// HasUpdated() reading the old pointer and mutating its fields right now (#1528).
+	// The session is live. Restore is now a pure logical rebind (#1592 Phase 2
+	// PR7): it opens NO `tmux attach-session` render client — the local runtime's
+	// data plane is the daemon's clientless agent-server (pipe-pane → WS broker,
+	// PR5/6), and interactive full-screen attach is a WS subscriber in the client
+	// (apiclient.AttachStream). All Restore still owes is a fresh status monitor,
+	// swapped under monitorMu because the daemon poll may be inside HasUpdated()
+	// reading the old pointer and mutating its fields right now (#1528).
 	t.setMonitor(newStatusMonitor())
-	// Save a closure that SIGKILLs the attach-session child so Detach() can
-	// force io.Copy(os.Stdout, t.ptmx) to unblock when the tmux server is
-	// too contended to let the client exit on its own. Closing ptmx (the
-	// master end) doesn't wake a blocking Read on a non-pollable character
-	// device — only the slave end closing (i.e. the client child exiting)
-	// does. See Detach() and the wgWaitSigkillDeadline comment for the
-	// full reasoning (#598 follow-up).
-	t.killAttach = func() (int, error) {
-		if attachCmd.Process == nil {
-			return 0, errors.New("attach process not started")
-		}
-		return attachCmd.Process.Pid, attachCmd.Process.Kill()
-	}
-	// termAttach is the gentle sibling Detach() reaches for first: a SIGTERM
-	// lets a well-behaved tmux client detach and exit cleanly, closing the
-	// slave PTY so io.Copy returns — all without touching the (possibly
-	// contended) tmux server. Paired with killAttach and the same ptmx so the
-	// #602 invariant holds: both are set here and cleared together.
-	t.termAttach = func() (int, error) {
-		if attachCmd.Process == nil {
-			return 0, errors.New("attach process not started")
-		}
-		return attachCmd.Process.Pid, attachCmd.Process.Signal(syscall.SIGTERM)
-	}
 	return nil
 }
