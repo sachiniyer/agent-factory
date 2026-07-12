@@ -26,10 +26,8 @@ type CreateSessionRequest struct {
 	InPlace     bool `json:"in_place"`
 	ForceRemote bool `json:"force_remote"`
 	// Backend explicitly selects the session's runtime (the `--backend` create
-	// flag, #1592 Phase 4 PR3): one of local|docker|ssh|hook. Empty resolves
-	// from the repo's `backend` config key, defaulting to local. docker/ssh are
-	// registered but not yet implemented (they fail create with a clear error
-	// until Phase 4 PR4/PR5).
+	// flag): one of local|docker|ssh|hook. Empty resolves from the repo's
+	// `backend` config key, defaulting to local.
 	Backend string `json:"backend,omitempty"`
 
 	// allowReserved lets the daemon's own root-agent ensure loop (#1106)

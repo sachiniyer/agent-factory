@@ -249,8 +249,8 @@ it per `af sessions create`:
 |-------|---------|
 | `local` (default, or unset) | Today's in-process runtime: the agent runs as a tmux session in a git worktree on the machine running the daemon. |
 | `hook` | The remote-hook backend — a bring-your-own provisioner driven by the `[remote_hooks]` scripts (equivalent to the TUI's "new remote session"). |
-| `docker` | Run the workspace + agent in a container started from `[docker].image`. *Not yet implemented — selecting it fails create with a clear error (arrives in a later Phase 4 PR).* |
-| `ssh` | Run the workspace + agent on `[ssh].host` over ssh. *Not yet implemented — selecting it fails create with a clear error (arrives in a later Phase 4 PR).* |
+| `docker` | Run the workspace + agent in a container started from `[docker].image`. |
+| `ssh` | Run the workspace + agent on `[ssh].host` over ssh. |
 
 ```toml
 backend = "docker"
