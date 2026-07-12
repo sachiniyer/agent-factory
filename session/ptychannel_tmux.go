@@ -89,17 +89,24 @@ func (c *tmuxClientlessChannel) SendRaw(b []byte) error {
 }
 
 // Snapshot returns the pane's current visible screen with escape sequences
-// (`capture-pane -p -e -J`) — the repaint the broker injects so a fresh subscriber
-// (and every subscriber after a resize) sees the actual screen. `pipe-pane` only
-// streams FUTURE output, and — unlike a `tmux attach` client — never receives
-// tmux's screen redraw, so without this a just-opened or just-resized pane would
-// render blank until the next byte of output (#1592 Phase 2 PR6).
-func (c *tmuxClientlessChannel) Snapshot() ([]byte, error) {
+// (`capture-pane -p -e -J`) plus the pane cursor position — the repaint the broker
+// injects so a fresh subscriber sees the actual screen. `pipe-pane` only streams
+// FUTURE output, and — unlike a `tmux attach` client — never receives tmux's screen
+// redraw, so without this a just-opened pane would render blank until the next byte
+// of output (#1592 Phase 2 PR6). The cursor position lets the repaint leave the
+// emulator cursor where the pane program's cursor really is (see PaneSnapshot).
+func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	content, err := c.ts.CapturePaneContent()
 	if err != nil {
-		return nil, err
+		return PaneSnapshot{}, err
 	}
-	return []byte(content), nil
+	snap := PaneSnapshot{Screen: []byte(content)}
+	// The cursor position is best-effort: a failure to read it degrades to a
+	// screen-only repaint (the pre-fix behavior) rather than failing the subscribe.
+	if row, col, curErr := c.ts.CursorPosition(); curErr == nil {
+		snap.CursorRow, snap.CursorCol, snap.HasCursor = row, col, true
+	}
+	return snap, nil
 }
 
 // Resize applies the winning size to the window (clientless resize-window). tmux

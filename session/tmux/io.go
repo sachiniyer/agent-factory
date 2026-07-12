@@ -162,6 +162,24 @@ func (t *TmuxSession) CapturePaneContent() (string, error) {
 	return string(output), nil
 }
 
+// CursorPosition reports the pane cursor position as 0-based (row, col) via
+// display-message (`#{cursor_y} #{cursor_x}`, both 0-based in tmux). The broker's
+// repaint uses it to restore the emulator cursor to where the pane program's
+// cursor actually is, so a fresh subscriber's redraw does not orphan a stale copy
+// of the line at the top (the duplicated-prompt artifact). `=` forces an exact
+// session match, mirroring CapturePaneContent (#1006).
+func (t *TmuxSession) CursorPosition() (row, col int, err error) {
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{cursor_y} #{cursor_x}")
+	output, err := t.cmdExec.Output(cmd)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read tmux cursor position: %v", err)
+	}
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d %d", &row, &col); err != nil {
+		return 0, 0, fmt.Errorf("failed to parse tmux cursor position %q: %v", string(output), err)
+	}
+	return row, col, nil
+}
+
 // CapturePaneContentWithOptions captures the pane content with additional options
 // start and end specify the starting and ending line numbers (use "-" for the start/end of history).
 // Wraps ErrSessionGone when the session has vanished, mirroring CapturePaneContent.

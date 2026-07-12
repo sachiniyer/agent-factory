@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/x/vt"
 )
 
 // fakeClientlessChannel is an in-memory clientlessChannel: StartCapture hands
@@ -25,6 +28,12 @@ type fakeClientlessChannel struct {
 	// subscribe and after a resize; snapshots counts how many times it was read.
 	snapshot  []byte
 	snapshots int
+	// cursorRow/cursorCol/hasCursor are the canned cursor position Snapshot reports
+	// (0-based); hasCursor false (the default) means "channel can't report a cursor",
+	// so the repaint omits cursor restore — the pre-fix behavior.
+	cursorRow int
+	cursorCol int
+	hasCursor bool
 	// wClosed reports whether the CURRENT capture writer (f.w) has been closed by a
 	// StopCapture — the test proxy for "the pane pipe was disabled". Reset on each
 	// StartCapture. Used by the #1661 teardown-clobber regression test.
@@ -85,11 +94,16 @@ func (f *fakeClientlessChannel) Resize(rows, cols uint16) error {
 	return nil
 }
 
-func (f *fakeClientlessChannel) Snapshot() ([]byte, error) {
+func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshots++
-	return append([]byte(nil), f.snapshot...), nil
+	return PaneSnapshot{
+		Screen:    append([]byte(nil), f.snapshot...),
+		CursorRow: f.cursorRow,
+		CursorCol: f.cursorCol,
+		HasCursor: f.hasCursor,
+	}, nil
 }
 
 // emit writes pane output into the capture pipe. Write blocks until the broker's
@@ -189,6 +203,100 @@ func TestPTYBrokerInitialRepaint(t *testing.T) {
 	}
 	ch.emit(t, []byte("live"))
 	mustData(t, re, "live")
+}
+
+// gridRows renders a vt emulator's grid to plain-text rows (cell contents, blanks
+// as spaces) so a test can assert what a terminal would actually show.
+func gridRows(emu *vt.Emulator, w, h int) []string {
+	rows := make([]string, h)
+	for y := 0; y < h; y++ {
+		var b strings.Builder
+		for x := 0; x < w; x++ {
+			if c := emu.CellAt(x, y); c != nil && c.Content != "" {
+				b.WriteString(c.Content)
+			} else {
+				b.WriteString(" ")
+			}
+		}
+		rows[y] = strings.TrimRight(b.String(), " ")
+	}
+	return rows
+}
+
+// TestPTYBrokerRepaintRestoresCursor pins the duplicated-prompt fix. The initial
+// repaint replays a capture-pane snapshot — for a fresh shell that is the prompt on
+// row 0 followed by trailing blank rows (capture-pane emits the full pane height).
+// Writing that body leaves the emulator cursor at the BOTTOM, but the pane program's
+// cursor is really on row 0. Before the fix, the pane's next relative-positioned
+// redraw (a shell's SIGWINCH prompt redraw, which uses CR to return to the current
+// line) therefore landed at the bottom and orphaned the row-0 copy: the prompt
+// rendered TWICE. The fix makes the repaint restore the cursor to the pane's real
+// position, so the redraw overwrites in place and the prompt renders ONCE. This is
+// the deterministic form of the visual artifact: feed the repaint the broker
+// produces, then the CR-redraw, into the SAME vt emulator the TUI/attach consumers
+// use, and count the prompt rows.
+func TestPTYBrokerRepaintRestoresCursor(t *testing.T) {
+	const cols, rows = 40, 8
+	const prompt = "user@host$ "
+	// The snapshot: prompt on row 0, then trailing blank rows to fill the pane — the
+	// exact shape `capture-pane -p -e -J` returns for a just-started shell.
+	screen := prompt + strings.Repeat("\n", rows-1)
+
+	// The CR-based prompt redraw a shell emits on the connect-time SIGWINCH: return
+	// to column 0 of the CURRENT line, clear it, reprint the prompt.
+	redraw := []byte("\r\x1b[K" + prompt)
+
+	repaintFor := func(hasCursor bool) []byte {
+		ch := &fakeClientlessChannel{
+			snapshot:  []byte(screen),
+			hasCursor: hasCursor,
+			cursorRow: 0, cursorCol: len(prompt),
+		}
+		br := newPTYBroker(ch)
+		sub, err := br.subscribe(0)
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		ev, err := nextWithin(t, sub, 2*time.Second)
+		if err != nil {
+			t.Fatalf("repaint NextEvent: %v", err)
+		}
+		if ev.Kind != PTYRepaint {
+			t.Fatalf("first event = %+v, want PTYRepaint", ev)
+		}
+		return ev.Data
+	}
+	countPromptRows := func(repaint []byte) (int, []string) {
+		emu := vt.NewEmulator(cols, rows)
+		_, _ = emu.Write(repaint)
+		_, _ = emu.Write(redraw)
+		grid := gridRows(emu, cols, rows)
+		n := 0
+		for _, ln := range grid {
+			if strings.Contains(ln, "user@host$") {
+				n++
+			}
+		}
+		return n, grid
+	}
+
+	// With the cursor restored (the fix), the redraw overwrites row 0 — one prompt.
+	n, grid := countPromptRows(repaintFor(true))
+	if n != 1 {
+		t.Fatalf("with cursor restore: prompt on %d rows, want 1 (duplicated-prompt artifact): %#v", n, grid)
+	}
+	if !strings.Contains(grid[0], "user@host$") {
+		t.Fatalf("with cursor restore: prompt not on row 0 (the pane's real cursor row): %#v", grid)
+	}
+
+	// Control: WITHOUT the cursor position the pre-fix behavior returns — the redraw
+	// lands at the bottom while row 0 stays stale, so the prompt doubles. This proves
+	// the test actually discriminates the artifact (and guards the graceful-degrade
+	// path the remote channel relies on).
+	n, grid = countPromptRows(repaintFor(false))
+	if n != 2 {
+		t.Fatalf("without cursor: prompt on %d rows, want 2 (the pre-fix doubling this test guards against): %#v", n, grid)
+	}
 }
 
 func TestPTYBrokerFanout(t *testing.T) {
