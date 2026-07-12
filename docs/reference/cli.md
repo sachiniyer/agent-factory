@@ -9,6 +9,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 ## Commands
 
 - [`af`](#af) — Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.
+- [`af agent-server`](#af-agent-server) — Run a headless single-workspace agent-server over HTTP/WS+TLS+token
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
@@ -78,6 +79,7 @@ af [flags]
 
 **Subcommands**
 
+- [`af agent-server`](#af-agent-server) — Run a headless single-workspace agent-server over HTTP/WS+TLS+token
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
@@ -100,6 +102,48 @@ af [flags]
 | `-y`, `--autoyes` |  | [experimental] If enabled, all instances will automatically accept prompts |
 | `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `-p`, `--program` | `string` | Program to run in new instances (one of: claude, codex, aider, gemini, amp) |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
+## af agent-server
+
+Run a headless single-workspace agent-server over HTTP/WS+TLS+token
+
+Run a headless agent-server for exactly one session's workspace, served over
+the same REST + WebSocket protocol the daemon speaks, behind a TLS listener that
+requires a bearer token on every request.
+
+This is the process that will later run inside a docker container or on an ssh
+remote (#1592 Phase 4): a remote daemon dials the authed URL it exposes and
+drives the workspace exactly as it drives a local in-process session. Run it
+directly to reach one workspace over the network.
+
+The listener is always TLS + token (the token must never ride the wire in the
+clear). On startup it prints one JSON line to stdout carrying the bound address,
+the bearer token, and the self-signed cert path/fingerprint to pin. On
+SIGINT/SIGTERM it tears the workspace down (kills tmux, removes the worktree) —
+durability of in-progress work is the driving daemon's job (push the branch
+before shutdown), not this server's.
+
+```
+af agent-server [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--auto-yes` |  | Enable the agent-server's AutoYes accept for the workspace |
+| `--listen` | `string` | TLS TCP bind address (host:port); :0 lets the kernel pick a free port (default `127.0.0.1:0`) |
+| `--program` | `string` | Agent program to run (default: the configured default_program) |
+| `--repo` | `string` | Repository path the workspace runs against (default: current directory) |
+| `--title` | `string` | Session title for the workspace (required) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
 | `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 
