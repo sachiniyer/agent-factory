@@ -31,6 +31,9 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
+// The name of the task the harness seeds (web-selftest-entry.sh) so the tasks list
+// is non-empty on load.
+const SEEDED_TASK = process.env.AF_WEB_TASK_NAME ?? "probe-task";
 // The marker the seeded fake agent prints on launch (web-selftest-entry.sh), so
 // "the terminal shows live output" is a deterministic string assertion.
 const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
@@ -230,6 +233,115 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
 
   await page.unroute("**/v1/CreateTab");
   await page.unroute("**/v1/CloseTab");
+});
+
+test("projects view (#1592 PR8): the seeded repo groups its sessions; a row jumps to it", async () => {
+  // Switch to the projects view via its appbar tab (the [ / ] keyboard path is
+  // covered by the nav unit tests). The projects pane replaces the sessions body.
+  await page.locator('.af-viewtab[data-view="projects"]').click();
+  await expect(page.locator('.af-viewtab[data-view="projects"]')).toHaveClass(/af-viewtab-active/);
+  const projects = page.locator(".af-projects");
+  await expect(projects).toBeVisible();
+
+  // The two seeded sessions live in ONE mock repo, so exactly one project section
+  // renders — proof the grouping is derived from the live projection's repo roots
+  // (not an invented client id). Its friendly label + full repo path both show.
+  const project = projects.locator(".af-project");
+  await expect(project).toHaveCount(1);
+  await expect(project.locator(".af-project-name")).toContainText("mock-repo");
+  await expect(project.locator(".af-project-path")).toContainText("mock-repo");
+
+  // Both seeded sessions are grouped under the project.
+  const grouped = project.locator(".af-project-sessions .af-row");
+  await expect(grouped.filter({ hasText: SESSION_A })).toHaveCount(1);
+  await expect(grouped.filter({ hasText: SESSION_B })).toHaveCount(1);
+
+  // Clicking a project's session row is the jump-to-session affordance: it returns
+  // to the sessions view AND attaches that session's terminal.
+  await project.locator(".af-project-sessions .af-row", { hasText: SESSION_A }).click();
+  await expect(page.locator('.af-viewtab[data-view="sessions"]')).toHaveClass(/af-viewtab-active/);
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+});
+
+test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round-trips", async () => {
+  // Capture the task-mutation request bodies so we can prove every mutation carries
+  // the STABLE task id — the add mints it client-side, and trigger/remove must send
+  // that SAME id, never the (non-unique) name (the #1678 id-scoping class, PR8).
+  let addedTaskId: string | undefined;
+  let triggerId: string | undefined;
+  let removeId: string | undefined;
+  await page.route("**/v1/AddTask", async (route) => {
+    addedTaskId = route.request().postDataJSON()?.task?.id;
+    await route.continue();
+  });
+  await page.route("**/v1/TriggerTask", async (route) => {
+    triggerId = route.request().postDataJSON()?.id;
+    await route.continue();
+  });
+  await page.route("**/v1/RemoveTask", async (route) => {
+    removeId = route.request().postDataJSON()?.id;
+    await route.continue();
+  });
+
+  // Switch to the tasks view. The seeded cron task is listed on load — proof the
+  // pane is driven by the daemon's ListTasks, not a static list.
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  await expect(page.locator('.af-viewtab[data-view="tasks"]')).toHaveClass(/af-viewtab-active/);
+  const tasks = page.locator(".af-tasks");
+  await expect(tasks).toBeVisible();
+  const seeded = tasks.locator(".af-task-row", { hasText: SEEDED_TASK });
+  await expect(seeded).toHaveCount(1);
+  await expect(seeded.locator(".af-task-trigger")).toContainText("0 9 * * *");
+
+  // Add a cron task via the + Add modal. The project picker auto-selects the only
+  // project; a cron task requires a prompt (the daemon rejects an empty one).
+  const added = `probe-task-${Date.now().toString(36)}`;
+  await tasks.locator(".af-tasks-add").click();
+  const modal = page.locator(".af-modal-card");
+  await expect(modal).toBeVisible();
+  await modal.locator('input[aria-label="Task name"]').fill(added);
+  await modal.locator('input[aria-label="Cron expression"]').fill("*/5 * * * *");
+  await modal.locator('textarea[aria-label="Prompt"]').fill("echo scheduled-web");
+  await modal.locator("button.af-primary").click();
+
+  // The new task's row appears (AddTask succeeded; the list refetched).
+  const addedRow = tasks.locator(".af-task-row", { hasText: added });
+  await expect(addedRow).toBeVisible({ timeout: 30_000 });
+  await expect(modal).toBeHidden();
+  expect(addedTaskId, "AddTask must mint + send a stable task id").toBeTruthy();
+
+  // Enable/disable round-trips via UpdateTask: the new task is enabled (Disable
+  // shown). Disabling flips it, and re-enabling flips it back — proof the toggle
+  // rides UpdateTask keyed by the task's id.
+  await addedRow.locator("button", { hasText: "Disable" }).click();
+  await expect(addedRow.locator("button", { hasText: "Enable" })).toBeVisible({ timeout: 30_000 });
+  await addedRow.locator("button", { hasText: "Enable" }).click();
+  await expect(addedRow.locator("button", { hasText: "Disable" })).toBeVisible({ timeout: 30_000 });
+
+  // Trigger-now round-trips via TriggerTask (enabled cron tasks only). Await the RPC
+  // response and assert the envelope carries no error — the daemon fired it — and the
+  // id sent matches the one AddTask minted (id-stability, not the name).
+  const [triggerResp] = await Promise.all([
+    page.waitForResponse("**/v1/TriggerTask"),
+    addedRow.locator("button", { hasText: "Trigger" }).click(),
+  ]);
+  expect((await triggerResp.json()).error, "TriggerTask must succeed (no envelope error)").toBeNull();
+  expect(triggerId, "TriggerTask must send the same stable id AddTask minted").toBe(addedTaskId);
+
+  // Remove round-trips via RemoveTask: the row disappears, and the id sent is again
+  // the stable one (never the name).
+  await addedRow.locator("button", { hasText: "Remove" }).click();
+  await expect(tasks.locator(".af-task-row", { hasText: added })).toHaveCount(0, { timeout: 30_000 });
+  expect(removeId, "RemoveTask must send the same stable id").toBe(addedTaskId);
+
+  await page.unroute("**/v1/AddTask");
+  await page.unroute("**/v1/TriggerTask");
+  await page.unroute("**/v1/RemoveTask");
+
+  // Return to the sessions view so the subsequent create/kill/archive flows drive the
+  // rail (which is hidden while the tasks view shows).
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+  await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
 test("create: the + New modal creates a session and its row appears", async () => {

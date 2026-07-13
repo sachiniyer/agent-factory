@@ -12,6 +12,7 @@
 
 import "./styles.css";
 import {
+  addTask,
   ApiError,
   archiveSession,
   clearToken,
@@ -21,17 +22,22 @@ import {
   createTab,
   fetchSnapshot,
   killSession,
+  listTasks,
   loadToken,
   probeAuthRequired,
   probeToken,
+  removeTask,
   sendPrompt,
   storeToken,
+  triggerTask,
+  updateTask,
 } from "./api.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
-import { decideKey, type KeyboardFocus } from "./nav.js";
+import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
 import { Store } from "./store.js";
+import { addTaskModal, type AddTaskInput, buildTask } from "./tasks.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
 import {
   AppShell,
@@ -42,10 +48,11 @@ import {
   supportsTabManagement,
   type AppState,
 } from "./ui.js";
-import type { SessionData, WireEvent } from "./types.js";
+import type { SessionData, TaskData, WireEvent } from "./types.js";
 
 const store = new Store<AppState>({
   phase: "login",
+  view: "sessions",
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
   // showing the paste form before that resolves would flash a token field a
@@ -61,6 +68,7 @@ const store = new Store<AppState>({
   focus: "rail",
   activeTab: 0,
   tabError: null,
+  tasks: [],
 });
 
 // The credential and the push stream are process-local singletons: one token
@@ -78,6 +86,9 @@ let stream: EventStream | null = null;
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
+// Debounces the ListTasks refetch that task.* events trigger (#1592 Phase 5 PR8),
+// so a burst of task deltas collapses into one authoritative refetch.
+let taskResyncTimer: number | null = null;
 // The auto-dismiss timer for the tab-error toast, and how long it shows.
 let tabErrorTimer: number | null = null;
 const TAB_ERROR_MS = 6000;
@@ -201,6 +212,7 @@ async function connect(candidate: string): Promise<void> {
   }
   store.set({
     phase: "app",
+    view: "sessions",
     connecting: false,
     loginError: null,
     sessions,
@@ -209,8 +221,13 @@ async function connect(candidate: string): Promise<void> {
     focus: "rail",
     activeTab: 0,
     tabError: null,
+    tasks: [],
   });
   startStream(candidate);
+  // Seed the tasks view alongside the rail: one ListTasks fetch so the tasks pane is
+  // populated the moment the user switches to it. Task deltas then arrive via the
+  // task.* events plane (onEvent), which triggers a debounced refetch.
+  refreshTasks();
 }
 
 /** Forgets the token, tears down the push stream + terminal, and returns to login. */
@@ -221,6 +238,7 @@ function disconnect(): void {
   clearToken();
   store.set({
     phase: "login",
+    view: "sessions",
     connecting: false,
     loginError: null,
     sessions: [],
@@ -229,6 +247,7 @@ function disconnect(): void {
     focus: "rail",
     activeTab: 0,
     tabError: null,
+    tasks: [],
   });
 }
 
@@ -247,8 +266,13 @@ function moveSelection(id: string): void {
 
 /** The click/Enter path: selects the session AND hands the keyboard to its terminal
  *  (attach). moveSelection rebuilds the terminal synchronously (via rerender), so
- *  focusTerminal then focuses the fresh instance. */
+ *  focusTerminal then focuses the fresh instance. Also switches to the sessions view:
+ *  this is the projects pane's jump-to-session affordance too (a project's session
+ *  row calls open), so opening a session always lands on the sessions view. */
 function openFromRail(id: string): void {
+  if (store.get().view !== "sessions") {
+    store.set({ view: "sessions" });
+  }
   moveSelection(id);
   focusTerminal();
 }
@@ -270,6 +294,27 @@ function focusRail(): void {
   store.set({ focus: "rail" });
   if (terminal) {
     terminal.blur();
+  }
+}
+
+// --- top-level view switching (#1592 Phase 5 PR8) --------------------------
+
+/** Switches the top-level view (sessions | projects | tasks). Leaving the sessions
+ *  view hands the keyboard back to the rail AND blurs the (still-live but now hidden)
+ *  terminal, so a stray key in the projects/tasks view never leaks to the agent — the
+ *  view switch composes with the #1694 focus model instead of fighting it. Switching
+ *  INTO the tasks view refreshes the task list so it is current on arrival. */
+function switchView(view: View): void {
+  if (store.get().view === view) {
+    return;
+  }
+  clearTabError();
+  if (view !== "sessions" && terminal) {
+    terminal.blur();
+  }
+  store.set({ view, focus: "rail" });
+  if (view === "tasks") {
+    refreshTasks();
   }
 }
 
@@ -518,6 +563,103 @@ function clearTabError(): void {
   }
 }
 
+// --- task actions (#1592 Phase 5 PR8) --------------------------------------
+
+/** Refetches the authoritative task list and commits it to the store. Failures are
+ *  swallowed: the events plane / a later action retries, exactly like the Snapshot
+ *  resync. `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696). */
+function refreshTasks(): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void listTasks(tok)
+    .then((tasks) => store.set({ tasks }))
+    .catch(() => {
+      // Transport/auth failure: leave the last-known list up; a task.* event or the
+      // next mutation refetches. Nothing to surface here.
+    });
+}
+
+/** Debounced task refetch for a burst of task.* events, mirroring requestResync. */
+function requestTaskResync(): void {
+  if (taskResyncTimer !== null) {
+    return;
+  }
+  taskResyncTimer = window.setTimeout(() => {
+    taskResyncTimer = null;
+    refreshTasks();
+  }, 150);
+}
+
+/** Opens the add-task modal, its project picker seeded from the live projects. On
+ *  submit it builds a task.Task (a fresh id, exactly one trigger) and POSTs AddTask;
+ *  the created task also arrives via a task.created event, and a refetch reconciles.
+ *  Errors (a bad cron expression, a duplicate) surface in the modal for a retry. */
+function openAddTask(): void {
+  const projects = deriveProjects(store.get().sessions);
+  openModal(
+    addTaskModal(projects, {
+      onSubmit: (input: AddTaskInput) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void addTask(buildTask(input), tok)
+          .then(() => {
+            closeModal();
+            refreshTasks();
+          })
+          .catch((e) => {
+            m.setBusy(false);
+            m.setError(describeError(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
+/** Enables/disables a task (UpdateTask with `enabled` flipped), then refetches. A
+ *  failure surfaces as the shared transient toast (task ops have no modal). Keys off
+ *  the task's stable id — requireTaskID in the api layer refuses a missing one. */
+function toggleTask(task: TaskData): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void updateTask({ ...task, enabled: !task.enabled }, tok)
+    .then(refreshTasks)
+    .catch((e) => surfaceTabError(e));
+}
+
+/** Fires a task now (TriggerTask), then refetches to pick up the new last-run. The
+ *  tasks pane only offers this for enabled cron tasks (the daemon refuses disabled +
+ *  watch tasks); a failure still surfaces as a toast. */
+function doTriggerTask(task: TaskData): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void triggerTask(task.id, tok)
+    .then(refreshTasks)
+    .catch((e) => surfaceTabError(e));
+}
+
+/** Removes a task (RemoveTask), then refetches. Keys off the stable id. */
+function doRemoveTask(task: TaskData): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void removeTask(task.id, tok)
+    .then(refreshTasks)
+    .catch((e) => surfaceTabError(e));
+}
+
 /** The action callbacks the shell + login view invoke. */
 const actions = {
   connect,
@@ -531,6 +673,11 @@ const actions = {
   openTab,
   newTab: createSessionTab,
   closeTab: closeSessionTab,
+  switchView,
+  addTask: openAddTask,
+  toggleTask,
+  triggerTask: doTriggerTask,
+  removeTask: doRemoveTask,
 };
 
 // --- attach terminal wiring ------------------------------------------------
@@ -593,6 +740,10 @@ function stopStream(): void {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
   }
+  if (taskResyncTimer !== null) {
+    window.clearTimeout(taskResyncTimer);
+    taskResyncTimer = null;
+  }
   if (stream) {
     stream.stop();
     stream = null;
@@ -607,6 +758,15 @@ function stopStream(): void {
  * terminal down for.
  */
 function onEvent(ev: WireEvent): void {
+  // Task deltas (#1592 Phase 5 PR8) don't touch the session list; the daemon owns
+  // tasks.json, so a task.created/updated/removed event just triggers a debounced
+  // ListTasks refetch (the authoritative task projection). The session reducer
+  // no-ops these, so run both: the reducer for session.* and the task refetch for
+  // task.*.
+  if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
+    requestTaskResync();
+    return;
+  }
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
   applySessions(sessions);
   if (needsResync) {
@@ -686,16 +846,19 @@ function onKeydown(e: KeyboardEvent): void {
   if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
-  // The mode is "terminal" only when a terminal actually exists to own the keyboard;
-  // a since-disposed terminal (e.g. the selected session was killed) can leave the
-  // stored focus stale, so we never honor terminal mode without one. The pure state
-  // machine (nav.ts) decides the rest; index.ts only performs the effect.
-  const focus: KeyboardFocus = terminal ? state.focus : "rail";
+  // The mode is "terminal" only when a terminal actually exists to own the keyboard
+  // AND the sessions view is showing it; a since-disposed terminal (the selected
+  // session was killed) or a switch to the projects/tasks view (which hides the
+  // terminal) must not leave the stored focus stale, so we never honor terminal mode
+  // without a live, visible terminal. The pure state machine (nav.ts) decides the
+  // rest; index.ts only performs the effect.
+  const focus: KeyboardFocus = terminal && state.view === "sessions" ? state.focus : "rail";
   // The selected session's tab shape drives the nav-mode tab keys (1-9 / t / w).
   const selected = selectedSessionData();
   const action = decideKey(e.key, {
     focus,
     modalOpen: modal !== null,
+    view: state.view,
     orderedIds: orderedSessions(state.sessions)
       .map((s) => s.id ?? "")
       .filter((id) => id !== ""),
@@ -733,6 +896,9 @@ function onKeydown(e: KeyboardEvent): void {
       break;
     case "closeTab":
       closeSessionTab(store.get().activeTab);
+      break;
+    case "switchView":
+      switchView(action.view);
       break;
   }
 }

@@ -30,6 +30,7 @@ BASE_URL="https://${LISTEN}"
 READY_MARKER=AF_SELFTEST_READY
 SESSION_A=probe-a
 SESSION_B=probe-b
+SEEDED_TASK=probe-task
 export AGENT_FACTORY_HOME="$HOME_DIR"
 # A container binary is built at the branch version (typically behind the latest
 # release); without this it would self-update on boot and restart the daemon
@@ -138,6 +139,13 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# --- seed a scheduled task (#1592 Phase 5 PR8) ------------------------------
+# So the tasks view is non-empty on load. A cron task needs a prompt (there is no
+# event line to fall back to); the schedule never actually fires in the test window,
+# it just has to exist for the list + the enable/disable/trigger/remove flows.
+echo ">>> seeding task $SEEDED_TASK ..."
+"$BIN" tasks add --repo "$MOCK" --name "$SEEDED_TASK" --prompt "echo scheduled" --cron "0 9 * * *" >/dev/null
+
 # --- run the Playwright harness ---------------------------------------------
 echo ">>> installing web deps + running the Playwright harness ..."
 cd /work/web
@@ -150,5 +158,6 @@ export AF_WEB_BASE_URL="$BASE_URL"
 export AF_WEB_SESSION_A="$SESSION_A"
 export AF_WEB_SESSION_B="$SESSION_B"
 export AF_WEB_READY_MARKER="$READY_MARKER"
+export AF_WEB_TASK_NAME="$SEEDED_TASK"
 
 npx playwright test

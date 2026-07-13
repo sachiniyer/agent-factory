@@ -11,7 +11,7 @@
 // request. The WS `?access_token=` fallback (browsers cannot set WS headers) is
 // used by the /v1/events subscriber (events.ts) and, in PR4, the PTY stream.
 
-import type { SessionData, SnapshotResponse } from "./types.js";
+import type { SessionData, SnapshotResponse, TaskData, TasksResponse } from "./types.js";
 
 const TOKEN_KEY = "af.token";
 
@@ -260,4 +260,69 @@ export async function createTab(id: string, title: string, token: string): Promi
 export async function closeTab(id: string, title: string, tabName: string, token: string): Promise<void> {
   requireSessionID(id, "close a tab");
   await af("CloseTab", { id, title, repo_id: "", tab_name: tabName, tab_index: 0 }, token);
+}
+
+// --- task mutations (#1592 Phase 5 PR8) ------------------------------------
+//
+// The tasks-view write verbs, mirroring `af tasks add/update/remove/trigger`. They
+// are thin POSTs to the daemon's task-CRUD RPCs the CLI/TUI already speak (#1029
+// PR3): the daemon is the SOLE writer of tasks.json and re-arms its own scheduler
+// in-process, so these calls never touch local state — the resulting task.* event
+// flows back over /v1/events and the tasks list refetches.
+//
+// Every MUTATION keys off the task's globally-unique `id`, NEVER the (optional,
+// non-unique) name: UpdateTask/TriggerTask/RemoveTask all resolve the target task
+// by id first-match on the daemon, so sending anything but the real id could hit the
+// wrong task. Like the session tab ops, they FAIL CLOSED on a missing id
+// (requireTaskID) — refusing BEFORE the request rather than letting an empty id fall
+// through to the daemon's first-match, the task analogue of the #1678 id-scoping
+// class the session write-path fixed.
+
+/** Fetches every task across all repos (mirrors `af tasks list`). Returns [] for an
+ *  empty daemon (never null); throws ApiError on transport/auth failure so callers
+ *  share one error path. The read side of the task single-writer model (#1029 PR3). */
+export async function listTasks(token: string): Promise<TaskData[]> {
+  const resp = await af<TasksResponse>("ListTasks", {}, token);
+  return resp.tasks ?? [];
+}
+
+/** Refuses a task mutation that has no stable task id to target, before any request
+ *  is issued — so a missing id can never fall through to the daemon's first-match on
+ *  another task. The task analogue of requireSessionID (the #1678 id-scoping class);
+ *  every task from ListTasks carries an id, so this only trips on a malformed record
+ *  a client somehow built without one. */
+function requireTaskID(id: string, action: string): void {
+  if (id === "") {
+    throw new ApiError(0, `cannot ${action}: this task has no stable id to target safely`);
+  }
+}
+
+/** Adds a task (mirrors `af tasks add`). The daemon re-validates (trigger, program)
+ *  and owns the write; the created task also arrives via a task.created event. */
+export async function addTask(task: TaskData, token: string): Promise<void> {
+  await af("AddTask", { task }, token);
+}
+
+/** Updates a task (mirrors `af tasks update`) — the edit + enable/disable path. The
+ *  daemon preserves the scheduler-owned fields (last_run_*, created_at) from the
+ *  freshly-loaded record under its file lock, so a stale client copy never clobbers
+ *  them. Refuses a task with no stable id, before issuing the request. */
+export async function updateTask(task: TaskData, token: string): Promise<void> {
+  requireTaskID(task.id, "update a task");
+  await af("UpdateTask", { task }, token);
+}
+
+/** Fires a task NOW (mirrors `af tasks trigger`). The daemon runs it through the same
+ *  scheduler path it uses for a scheduled fire, and refuses disabled + watch tasks.
+ *  Refuses a task with no stable id, before issuing the request. */
+export async function triggerTask(id: string, token: string): Promise<void> {
+  requireTaskID(id, "trigger a task");
+  await af("TriggerTask", { id }, token);
+}
+
+/** Removes a task by id (mirrors `af tasks remove`). Refuses a task with no stable
+ *  id, before issuing the request. */
+export async function removeTask(id: string, token: string): Promise<void> {
+  requireTaskID(id, "remove a task");
+  await af("RemoveTask", { id }, token);
 }
