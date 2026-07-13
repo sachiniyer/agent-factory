@@ -381,6 +381,55 @@ func TestPTYBrokerRepaintCursorWidthMismatch(t *testing.T) {
 	}
 }
 
+// TestPTYBrokerRepaintTrailingNewlineKeepsBottomRow guards the trailing-newline
+// edge Greptile/T-Rex reproduced. Real `capture-pane -p -e` (no -J) ends with ONE
+// trailing "\n" after the last row (it strips trailing blank rows, so that "\n" is a
+// row SEPARATOR, not a real empty row). If buildRepaint splits without trimming it,
+// the split yields a phantom trailing "" element and emits an out-of-range
+// CSI (N+1);1 H + erase — which, in an emulator clamped to the pane height, clamps
+// onto the real bottom row and WIPES it (often Claude's input/status line). The fake
+// emulator runs WITHOUT tmux, so this closes the CI coverage gap the real-tmux test
+// left (tmux is not on the CI PATH, so that test is skipped there).
+func TestPTYBrokerRepaintTrailingNewlineKeepsBottomRow(t *testing.T) {
+	const cols, rows = 20, 3
+	// A snapshot that FILLS the pane height (all 3 rows have content) and ends with a
+	// trailing "\n" — exactly what capture-pane emits. The bottom row is the one the
+	// phantom out-of-range clear would wipe.
+	screen := "top-row\nmid-row\nBOTTOM-ROW\n"
+	const curRow, curCol = 2, 10 // cursor on the bottom row (end of "BOTTOM-ROW")
+
+	ch := &fakeClientlessChannel{
+		snapshot:  []byte(screen),
+		hasCursor: true,
+		cursorRow: curRow, cursorCol: curCol,
+	}
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("repaint NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("first event = %+v, want PTYRepaint", ev)
+	}
+
+	emu := vt.NewEmulator(cols, rows)
+	if _, err := emu.Write(ev.Data); err != nil {
+		t.Fatalf("emulator write: %v", err)
+	}
+	grid := gridRows(emu, cols, rows)
+	if !strings.Contains(grid[curRow], "BOTTOM-ROW") {
+		t.Fatalf("bottom row erased by phantom trailing-newline clear: row %d = %q; rows=%#v", curRow, grid[curRow], grid)
+	}
+	// And the cursor is still on the bottom row where the pane program left it.
+	if pos := emu.CursorPosition(); pos.Y != curRow || pos.X != curCol {
+		t.Fatalf("post-repaint cursor = (row %d,col %d), want (row %d,col %d)", pos.Y, pos.X, curRow, curCol)
+	}
+}
+
 func TestPTYBrokerFanout(t *testing.T) {
 	ch := &fakeClientlessChannel{}
 	br := newPTYBroker(ch)

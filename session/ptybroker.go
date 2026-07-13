@@ -220,7 +220,15 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 // the emulator cursor on the real position so that redraw overwrites in place.
 func buildRepaint(snap PaneSnapshot) []byte {
 	out := []byte("\x1b[2J")
-	for i, line := range strings.Split(string(snap.Screen), "\n") {
+	// capture-pane emits ONE trailing "\n" after the last row and strips trailing
+	// blank rows, so that final "\n" is a row SEPARATOR, not a real empty row.
+	// Splitting without trimming it would yield a phantom trailing "" element and emit
+	// an out-of-range CSI (N+1);1 H + erase — which, in an emulator clamped to the pane
+	// height, clamps onto the real bottom row and WIPES it (Claude's input/status
+	// line). Trim exactly that one separator; a genuinely-blank last row is impossible
+	// here because capture-pane strips it. TrimSuffix is a no-op when there is none.
+	screen := strings.TrimSuffix(string(snap.Screen), "\n")
+	for i, line := range strings.Split(screen, "\n") {
 		out = append(out, []byte(fmt.Sprintf("\x1b[%d;1H\x1b[K", i+1))...)
 		out = append(out, line...)
 	}
