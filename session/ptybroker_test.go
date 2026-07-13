@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -168,13 +169,15 @@ func TestPTYBrokerInitialRepaint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	// First event is the initial repaint: ED2 + home + the screen with CRLF line
-	// breaks so columns reset. It is a PTYRepaint (not counted toward the cursor).
+	// First event is the initial repaint: ED2, then each captured row placed at its own
+	// absolute line (CSI row;1 H + erase-to-EOL + content) so the layout is pinned to
+	// the pane grid regardless of the client's width (#1688). It is a PTYRepaint (not
+	// counted toward the cursor).
 	ev, err := nextWithin(t, sub, 2*time.Second)
 	if err != nil {
 		t.Fatalf("initial NextEvent: %v", err)
 	}
-	want := "\x1b[2J\x1b[HSCREEN-A\r\nline2"
+	want := "\x1b[2J\x1b[1;1H\x1b[KSCREEN-A\x1b[2;1H\x1b[Kline2"
 	if ev.Kind != PTYRepaint || string(ev.Data) != want {
 		t.Fatalf("initial event = %+v, want PTYRepaint %q", ev, want)
 	}
@@ -296,6 +299,134 @@ func TestPTYBrokerRepaintRestoresCursor(t *testing.T) {
 	n, grid = countPromptRows(repaintFor(false))
 	if n != 2 {
 		t.Fatalf("without cursor: prompt on %d rows, want 2 (the pre-fix doubling this test guards against): %#v", n, grid)
+	}
+}
+
+// TestPTYBrokerRepaintCursorWidthMismatch is the #1688 gate: the repaint must land
+// the restored cursor on the pane's REAL row/col even when the client emulator's
+// width differs from the pane's — the case #1676's test (which used client width ==
+// pane width) missed.
+//
+// The bug: the pre-fix repaint wrote the captured screen as one CRLF-joined blob and
+// let the client emulator RE-WRAP it by the emulator's own width, then issued an
+// ABSOLUTE cursor move to the pane's cursor_y. When the emulator width != pane width
+// the re-wrap shifts the rows, so the absolute row no longer names the row the
+// content actually landed on — the cursor sits on the wrong line, and Claude's
+// relative-cursor status-block redraw corrupts the whole frame.
+//
+// The scenario models a pane of width paneW with the real cursor on the "PROMPT>"
+// row, and renders the repaint into an emulator NARROWER than the pane (clientW <
+// paneW) — the general width-mismatch case. The invariant asserted is
+// correct-by-construction: the emulator row the pane's cursor names must show the
+// content that was on that pane row, and the emulator cursor must equal the pane
+// cursor exactly.
+func TestPTYBrokerRepaintCursorWidthMismatch(t *testing.T) {
+	const paneW, paneH = 20, 6
+	// The pane grid, one entry per physical pane row — exactly what a grid-form
+	// capture (capture-pane WITHOUT -J) returns, trailing blank rows stripped. Row 0
+	// is full pane width (a command that wrapped), row 1 its continuation; the live
+	// prompt is on row 3, where the pane program's cursor sits.
+	gridRowsIn := []string{
+		"0123456789ABCDEFGHIJ", // row 0: full width (20)
+		"KLMNO",                // row 1: wrap continuation of row 0's logical line
+		"file1",                // row 2
+		"PROMPT>",              // row 3: the pane program's cursor row
+	}
+	const curRow, curCol = 3, 7 // real pane cursor: end of "PROMPT>"
+	screen := strings.Join(gridRowsIn, "\n")
+
+	// Assert the invariant at BOTH a narrower and a wider client than the pane. The
+	// narrow case is the one the pre-fix CRLF-join repaint got wrong: at clientW <
+	// paneW row 0 re-wraps into two emulator rows, shifting "PROMPT>" down while the
+	// absolute cursor move still names row 3 — landing the cursor a row above the
+	// prompt.
+	for _, clientW := range []int{10, 40} {
+		t.Run(fmt.Sprintf("clientW=%d", clientW), func(t *testing.T) {
+			ch := &fakeClientlessChannel{
+				snapshot:  []byte(screen),
+				hasCursor: true,
+				cursorRow: curRow, cursorCol: curCol,
+			}
+			br := newPTYBroker(ch)
+			sub, err := br.subscribe(0)
+			if err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
+			ev, err := nextWithin(t, sub, 2*time.Second)
+			if err != nil {
+				t.Fatalf("repaint NextEvent: %v", err)
+			}
+			if ev.Kind != PTYRepaint {
+				t.Fatalf("first event = %+v, want PTYRepaint", ev)
+			}
+
+			emu := vt.NewEmulator(clientW, paneH)
+			if _, err := emu.Write(ev.Data); err != nil {
+				t.Fatalf("emulator write: %v", err)
+			}
+
+			// Invariant 1: the emulator cursor lands exactly on the pane's real cursor.
+			pos := emu.CursorPosition()
+			if pos.Y != curRow || pos.X != curCol {
+				t.Fatalf("post-repaint cursor = (row %d,col %d), want the pane's real (row %d,col %d) at clientW=%d != paneW=%d",
+					pos.Y, pos.X, curRow, curCol, clientW, paneW)
+			}
+			// Invariant 2: the row the cursor names shows that pane row's content (the
+			// prompt), not another row shifted in by the emulator's re-wrap.
+			grid := gridRows(emu, clientW, paneH)
+			if !strings.Contains(grid[curRow], "PROMPT>") {
+				t.Fatalf("emulator row %d = %q, want the pane's %q; rows=%#v", curRow, grid[curRow], "PROMPT>", grid)
+			}
+		})
+	}
+}
+
+// TestPTYBrokerRepaintTrailingNewlineKeepsBottomRow guards the trailing-newline
+// edge Greptile/T-Rex reproduced. Real `capture-pane -p -e` (no -J) ends with ONE
+// trailing "\n" after the last row (it strips trailing blank rows, so that "\n" is a
+// row SEPARATOR, not a real empty row). If buildRepaint splits without trimming it,
+// the split yields a phantom trailing "" element and emits an out-of-range
+// CSI (N+1);1 H + erase — which, in an emulator clamped to the pane height, clamps
+// onto the real bottom row and WIPES it (often Claude's input/status line). The fake
+// emulator runs WITHOUT tmux, so this closes the CI coverage gap the real-tmux test
+// left (tmux is not on the CI PATH, so that test is skipped there).
+func TestPTYBrokerRepaintTrailingNewlineKeepsBottomRow(t *testing.T) {
+	const cols, rows = 20, 3
+	// A snapshot that FILLS the pane height (all 3 rows have content) and ends with a
+	// trailing "\n" — exactly what capture-pane emits. The bottom row is the one the
+	// phantom out-of-range clear would wipe.
+	screen := "top-row\nmid-row\nBOTTOM-ROW\n"
+	const curRow, curCol = 2, 10 // cursor on the bottom row (end of "BOTTOM-ROW")
+
+	ch := &fakeClientlessChannel{
+		snapshot:  []byte(screen),
+		hasCursor: true,
+		cursorRow: curRow, cursorCol: curCol,
+	}
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("repaint NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("first event = %+v, want PTYRepaint", ev)
+	}
+
+	emu := vt.NewEmulator(cols, rows)
+	if _, err := emu.Write(ev.Data); err != nil {
+		t.Fatalf("emulator write: %v", err)
+	}
+	grid := gridRows(emu, cols, rows)
+	if !strings.Contains(grid[curRow], "BOTTOM-ROW") {
+		t.Fatalf("bottom row erased by phantom trailing-newline clear: row %d = %q; rows=%#v", curRow, grid[curRow], grid)
+	}
+	// And the cursor is still on the bottom row where the pane program left it.
+	if pos := emu.CursorPosition(); pos.Y != curRow || pos.X != curCol {
+		t.Fatalf("post-repaint cursor = (row %d,col %d), want (row %d,col %d)", pos.Y, pos.X, curRow, curCol)
 	}
 }
 

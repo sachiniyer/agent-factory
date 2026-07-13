@@ -162,6 +162,29 @@ func (t *TmuxSession) CapturePaneContent() (string, error) {
 	return string(output), nil
 }
 
+// CaptureVisiblePaneGrid captures the visible pane as a GRID — one output line per
+// PHYSICAL pane row (capture-pane WITHOUT -J), escapes preserved (-e). Unlike
+// CapturePaneContent, which -J-joins wrapped logical lines (right for prompt
+// detection / preview, where the logical text matters), this keeps the row
+// structure so output line index i is exactly pane row i. The WS-broker repaint
+// relies on that 1:1 mapping to place each row at its true grid position and land
+// the restored cursor (a 0-based pane cursor_y) on the correct line REGARDLESS of
+// the client emulator's width (#1688): -J-joined lines re-wrap by the client's
+// width, so a client wider or narrower than the pane shifts the rows out from under
+// the absolute cursor move. Wraps ErrSessionGone when the session has vanished,
+// mirroring CapturePaneContent (#496, #1006).
+func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-t", exactTarget(t.sanitizedName))
+	output, err := t.cmdExec.Output(cmd)
+	if err != nil {
+		if !t.DoesSessionExist() {
+			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
+		}
+		return "", fmt.Errorf("error capturing pane grid: %v", err)
+	}
+	return string(output), nil
+}
+
 // CursorPosition reports the pane cursor position as 0-based (row, col) via
 // display-message (`#{cursor_y} #{cursor_x}`, both 0-based in tmux). The broker's
 // repaint uses it to restore the emulator cursor to where the pane program's

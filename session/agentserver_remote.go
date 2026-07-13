@@ -377,8 +377,13 @@ func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
 		return PaneSnapshot{}, err
 	}
 	// REST Preview carries only the screen, not the cursor position, so the repaint
-	// omits cursor restore for remote panes (HasCursor stays false) — the pre-fix
-	// behavior, unchanged over the wire.
+	// omits cursor restore for remote panes (HasCursor stays false). It is also
+	// -J-joined (the agent-server's Preview uses CapturePaneContent), NOT the grid form
+	// buildRepaint's per-row positioning wants (#1688) — so a wrapped logical line
+	// re-wraps by the client width here. This is a known screen-only best-effort
+	// limitation of the still-dark remote runtime (no cursor cascade to corrupt, since
+	// HasCursor is false); productizing it needs the agent-server to expose a grid
+	// capture + cursor over REST, mirroring tmuxClientlessChannel.Snapshot.
 	return PaneSnapshot{Screen: []byte(content)}, nil
 }
 

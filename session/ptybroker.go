@@ -56,9 +56,10 @@ type clientlessChannel interface {
 	// Resize sets the pane/window size (clientless resize-window). Last-resize-wins
 	// is enforced by the broker; this just applies the winning size.
 	Resize(rows, cols uint16) error
-	// Snapshot returns the pane's current visible screen AND the pane cursor
-	// position — the repaint the broker injects on subscribe, since pipe-pane never
-	// delivers tmux's screen redraw (#1592 Phase 2 PR6). The cursor position lets the
+	// Snapshot returns the pane's current visible screen (GRID-form, one line per pane
+	// row — see PaneSnapshot) AND the pane cursor position — the repaint the broker
+	// injects on subscribe, since pipe-pane never delivers tmux's screen redraw (#1592
+	// Phase 2 PR6). The cursor position lets the
 	// repaint leave the emulator cursor where the pane program's cursor actually is;
 	// without it the snapshot's trailing blank lines strand the emulator cursor at the
 	// bottom, so the pane's next relative-positioned redraw (a shell's SIGWINCH prompt
@@ -71,6 +72,14 @@ type clientlessChannel interface {
 // PaneSnapshot is a fresh-subscriber repaint source: the pane's current visible
 // screen (with escapes) plus the pane cursor position. CursorRow/CursorCol are
 // 0-based; they are meaningful only when HasCursor is true.
+//
+// Screen MUST be GRID-form — one line per PHYSICAL pane row, NOT -J-joined logical
+// lines. buildRepaint places each line at its own absolute row, so line index i is
+// taken to be pane row i; feeding it -J-joined lines (where one logical line spans
+// several pane rows) would mis-map the rows. The local tmux channel captures grid
+// form (CaptureVisiblePaneGrid). The remote channel's REST preview is -J-joined and
+// carries no cursor (HasCursor=false) — a known screen-only best-effort limitation,
+// see remoteClientlessChannel.Snapshot.
 type PaneSnapshot struct {
 	Screen    []byte
 	CursorRow int
@@ -183,23 +192,46 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	return sub, nil
 }
 
-// buildRepaint turns a pane snapshot into bytes that reconstruct the screen when
-// written to the emulator: clear + home, then the captured lines with CR before
-// each LF so every line starts at column 0 (capture-pane joins lines with bare
-// "\n", which would otherwise leave the column where the previous line ended).
+// buildRepaint turns a GRID-form pane snapshot (see PaneSnapshot) into bytes that
+// reconstruct the screen when written to the emulator: clear the screen, then place
+// each captured row at its OWN absolute line — CSI row;1 H, erase-to-EOL, then the
+// row's content — and finally restore the cursor to the pane's real position (1-based
+// CSI H) when the snapshot carries one.
 //
-// It ends by restoring the cursor to the pane's actual position (1-based CSI H)
-// when the snapshot carries one. Writing the full screen leaves the emulator
-// cursor at the bottom of the captured lines — including the trailing blank rows a
-// fresh shell's snapshot carries — but the pane program's cursor is wherever it
-// really is (row 0 for a just-started shell). Without the restore, the pane's next
-// relative-positioned output (a shell's SIGWINCH prompt redraw, which uses CR to
-// return to the current line) renders at the bottom while the repaint's copy sits
-// stale at the top: the duplicated-prompt artifact. The restore lands the emulator
-// cursor on the real position so that redraw overwrites in place.
+// The explicit per-row positioning is the #1688 fix. The old form wrote the whole
+// screen as one CRLF-joined blob and let the emulator RE-WRAP it by the emulator's
+// OWN width, then issued an absolute cursor move to the pane's cursor_y. That is only
+// correct when the client width == pane width: under a mismatch (multi-writer
+// last-resize-wins — e.g. a browser subscriber opening at a different size than the
+// pane) the re-wrap shifts the rows, so the absolute cursor row named the wrong line
+// and Claude's relative-cursor status-block redraw corrupted the frame. Pinning each
+// pane row at its own absolute line decouples the layout from the emulator's width:
+// row i lands on line i whether the emulator is wider or narrower than the pane, so
+// cursor_y names the same row it named in the pane. A row that overflows a narrower
+// emulator wraps, but the next row's absolute CSI H + erase overwrites the overflow,
+// so rows never accumulate a drift — correct by construction at any width.
+//
+// The cursor restore also fixes the earlier duplicated-prompt artifact (#1676):
+// writing the screen leaves the emulator cursor at the bottom (past the trailing
+// blank rows), but the pane program's cursor is wherever it really is (row 0 for a
+// just-started shell). Without the restore, the pane's next relative-positioned
+// redraw (a shell's SIGWINCH prompt redraw, which uses CR to return to the current
+// line) renders at the bottom while a stale copy sits at the top. The restore lands
+// the emulator cursor on the real position so that redraw overwrites in place.
 func buildRepaint(snap PaneSnapshot) []byte {
-	body := strings.ReplaceAll(string(snap.Screen), "\n", "\r\n")
-	out := append([]byte("\x1b[2J\x1b[H"), body...)
+	out := []byte("\x1b[2J")
+	// capture-pane emits ONE trailing "\n" after the last row and strips trailing
+	// blank rows, so that final "\n" is a row SEPARATOR, not a real empty row.
+	// Splitting without trimming it would yield a phantom trailing "" element and emit
+	// an out-of-range CSI (N+1);1 H + erase — which, in an emulator clamped to the pane
+	// height, clamps onto the real bottom row and WIPES it (Claude's input/status
+	// line). Trim exactly that one separator; a genuinely-blank last row is impossible
+	// here because capture-pane strips it. TrimSuffix is a no-op when there is none.
+	screen := strings.TrimSuffix(string(snap.Screen), "\n")
+	for i, line := range strings.Split(screen, "\n") {
+		out = append(out, []byte(fmt.Sprintf("\x1b[%d;1H\x1b[K", i+1))...)
+		out = append(out, line...)
+	}
 	if snap.HasCursor {
 		out = append(out, []byte(fmt.Sprintf("\x1b[%d;%dH", snap.CursorRow+1, snap.CursorCol+1))...)
 	}

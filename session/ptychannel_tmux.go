@@ -88,15 +88,17 @@ func (c *tmuxClientlessChannel) SendRaw(b []byte) error {
 	return c.ts.SendRawKeys(b)
 }
 
-// Snapshot returns the pane's current visible screen with escape sequences
-// (`capture-pane -p -e -J`) plus the pane cursor position — the repaint the broker
-// injects so a fresh subscriber sees the actual screen. `pipe-pane` only streams
-// FUTURE output, and — unlike a `tmux attach` client — never receives tmux's screen
-// redraw, so without this a just-opened pane would render blank until the next byte
-// of output (#1592 Phase 2 PR6). The cursor position lets the repaint leave the
-// emulator cursor where the pane program's cursor really is (see PaneSnapshot).
+// Snapshot returns the pane's current visible screen as a GRID (one line per pane
+// row, `capture-pane -p -e` WITHOUT -J) plus the pane cursor position — the repaint
+// the broker injects so a fresh subscriber sees the actual screen. `pipe-pane` only
+// streams FUTURE output, and — unlike a `tmux attach` client — never receives tmux's
+// screen redraw, so without this a just-opened pane would render blank until the
+// next byte of output (#1592 Phase 2 PR6). The grid form (not -J-joined) is what
+// lets buildRepaint pin each row at its true position and land the restored cursor
+// on the right line regardless of the client's width (#1688); the 0-based cursor_y
+// then names the same row in the client that it named in the pane.
 func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
-	content, err := c.ts.CapturePaneContent()
+	content, err := c.ts.CaptureVisiblePaneGrid()
 	if err != nil {
 		return PaneSnapshot{}, err
 	}
