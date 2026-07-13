@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Runs INSIDE the web-selftest container (see scripts/testbox.sh web-selftest):
 # build af from the mounted source, bring up a REAL af daemon on a throwaway home
-# with a loopback TLS+token listener, seed a couple of sessions in a mock repo,
-# then drive the embedded SPA in a headless Chromium via Playwright and assert the
-# core flows (web/selftest/web-driver.spec.ts).
+# with a loopback TLS listener, seed a couple of sessions in a mock repo, then drive
+# the embedded SPA in a headless Chromium via Playwright and assert the core flows
+# (web/selftest/web-driver.spec.ts).
+#
+# The daemon binds 127.0.0.1, so under #1696 the browser is a LOOPBACK peer the
+# daemon exempts from the bearer token: the SPA auto-connects with no credential and
+# the harness asserts that tokenless flow (and that every action works on it). No
+# token is pasted or exported.
 #
 # Everything here — the tmux server, the daemon, the AF home, the sessions, the
 # browser — lives and dies with the container. Teardown is `docker rm -f`, not a
@@ -109,12 +114,14 @@ for i in $(seq 1 60); do
     fi
 done
 
+# The token file still exists (EnsureToken runs before the port opens) even though
+# the loopback browser never uses it — read it purely as a daemon-health signal.
 TOKEN="$(cat "$HOME_DIR/daemon-token")"
 if [ -z "$TOKEN" ]; then
     echo "no daemon token at $HOME_DIR/daemon-token" >&2
     exit 1
 fi
-echo ">>> daemon up at $BASE_URL (token ${#TOKEN} bytes)"
+echo ">>> daemon up at $BASE_URL (loopback ⇒ tokenless browser; token ${#TOKEN} bytes exists for network peers)"
 
 # --- seed two sessions in the mock repo -------------------------------------
 echo ">>> creating sessions $SESSION_A, $SESSION_B ..."
@@ -140,7 +147,6 @@ export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 npm ci --no-audit --no-fund
 
 export AF_WEB_BASE_URL="$BASE_URL"
-export AF_WEB_TOKEN="$TOKEN"
 export AF_WEB_SESSION_A="$SESSION_A"
 export AF_WEB_SESSION_B="$SESSION_B"
 export AF_WEB_READY_MARKER="$READY_MARKER"

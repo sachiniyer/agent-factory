@@ -102,6 +102,7 @@ generated credential:
 daemon TLS TCP listener enabled on 0.0.0.0:8443 (self-signed=true)
   cert fingerprint: sha256:2f1c…
   bearer token: kZ9…-…q0
+  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above
 ```
 
 ### 2. Read the token and TLS fingerprint
@@ -166,6 +167,70 @@ one.
 An invalid or missing token is rejected with a **401** on every request and on
 the WebSocket handshake; a remote read surfaces that error rather than silently
 falling back to a local disk scan (there is no local disk on the other end).
+
+---
+
+## When is a token required? Loopback vs network
+
+The token is enforced **per connection**, judged from the peer's real transport
+address — never from a header. There are three cases:
+
+| Peer | Default (`require_token` unset/true) | `require_token = false` |
+|---|---|---|
+| **Loopback** (`127.0.0.1` / `::1`) — a browser or client on the **same machine** | **No token** — same trust as the local Unix socket | No token |
+| **Network** — any other source address | **Token required** (401 without it) | **No token** — token disabled |
+
+### Loopback is exempt by default
+
+A browser on the **same machine** as the daemon already has the local trust the
+Unix socket grants (anyone on the box runs as your user), so requiring it to
+paste a token would be friction with no security gain. Loopback peers therefore
+connect with **no token** — the browser web client detects this and skips its
+login screen entirely.
+
+Loopback is determined **only** from the TCP connection's source address
+(`net.IP.IsLoopback` on the real `RemoteAddr`). It is **never** inferred from
+`X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `Host`, or `Origin` — those are all
+attacker-controlled, so a network peer that forges them to claim `127.0.0.1` is
+**still rejected**. A source address cannot be spoofed and still complete the
+TLS handshake, so this is the only trustworthy signal.
+
+> If you put the daemon behind a **reverse proxy** on the same host, the proxy
+> connects over loopback and every forwarded request will appear loopback-exempt
+> — the proxy, not the daemon, is then responsible for auth. Terminate auth at
+> the proxy, or bind the daemon somewhere the proxy reaches non-loopback.
+
+### Network peers still require the token — by default
+
+Enabling `listen_addr` on a LAN, Tailscale, or public interface does **not**
+silently expose an unauthenticated control plane: a non-loopback peer must
+present the token, unchanged. This is the safe default and you should keep it.
+
+### Opting out on a trusted network (`require_token = false`)
+
+On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
+you can drop the token for network peers too. `require_token` is a
+**global-only** boolean (a cloned repo can never disable your auth), settable
+with `af config set require_token false` or by hand-editing the global config:
+
+```toml
+# ~/.agent-factory/config.toml (global-only), default true
+require_token = false
+```
+
+When `false`, the daemon logs a loud startup **warning** — anyone who can reach
+`listen_addr` then has full control with no credential:
+
+```
+WARNING: require_token=false — the daemon web API on "0.0.0.0:8443" accepts
+NETWORK peers with NO token; anyone who can reach it has full control. TLS still
+applies; this disables ONLY the bearer token. Unset require_token (or set it
+true) to re-enable auth.
+```
+
+**TLS is unaffected either way.** `require_token` disables *only* the bearer
+token; the TCP listener is still TLS-only, and certificate verification is still
+never skipped. Do not set this on any interface an untrusted party can reach.
 
 ---
 
@@ -268,6 +333,14 @@ cors_allowed_origins = ["https://af.example.com"]
   URL and refuses a cert that neither matches the pin nor chains to a trusted CA.
 - **The local socket is still local.** Enabling the TCP listener does not weaken
   the Unix socket, and it does not add a token requirement for local clients.
+- **Loopback is same-machine trust, not "internal network" trust.** The
+  token-free exemption is for `127.0.0.1`/`::1` only, judged from the real
+  connection address. If a same-host reverse proxy fronts the daemon, every
+  request looks loopback — auth must then live at the proxy.
+- **`require_token = false` disables auth for the whole network.** Use it only on
+  a network where every reachable party is trusted, and never on `0.0.0.0`
+  without a firewall. The startup warning is there to make an accidental setting
+  impossible to miss. TLS still applies.
 - **Rotate on suspected exposure.** `af token rotate` invalidates the old token
   for new connections at once — no restart, no downtime for live sessions.
 

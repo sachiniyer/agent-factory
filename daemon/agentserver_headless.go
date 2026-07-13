@@ -142,7 +142,13 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		events: newEventsHub(),
 	}
 
-	closeTCP, tcpInfo, err := startTCPListener(hs.newMux(), cfg)
+	// The agent-server's token is MANDATORY for every peer — it exists to be
+	// reached over the network by a remote daemon, so the token must never be
+	// optional and loopback is NOT exempt (unlike the daemon web listener, #1696).
+	// The zero-value policy is exactly that strict posture; pass it explicitly so
+	// the intent is on the page and a future require_token=false in the host
+	// config can never weaken this listener.
+	closeTCP, tcpInfo, err := startTCPListener(hs.newMux(), cfg, tokenGatePolicy{})
 	if err != nil {
 		return fmt.Errorf("failed to start agent-server listener on %q: %w", opts.ListenAddr, err)
 	}

@@ -6139,14 +6139,15 @@ var ApiError = class extends Error {
   }
 };
 async function af(method, body, token2) {
+  const headers = { "Content-Type": "application/json" };
+  if (token2 !== "") {
+    headers.Authorization = `Bearer ${token2}`;
+  }
   let resp;
   try {
     resp = await fetch(`/v1/${method}`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token2}`
-      },
+      headers,
       body: JSON.stringify(body ?? {})
     });
   } catch (e) {
@@ -6171,6 +6172,23 @@ async function fetchSnapshot(token2) {
 }
 function probeToken(token2) {
   return fetchSnapshot(token2);
+}
+async function probeAuthRequired() {
+  let resp;
+  try {
+    resp = await fetch("/v1/auth-info", { method: "GET" });
+  } catch (e) {
+    throw new ApiError(0, `cannot reach the daemon: ${e.message}`);
+  }
+  let env = null;
+  try {
+    env = await resp.json();
+  } catch {
+  }
+  if (!resp.ok) {
+    throw new ApiError(resp.status, env?.error ?? `${resp.status} ${resp.statusText}`);
+  }
+  return env?.data?.auth_required !== false;
 }
 async function createSession(input, token2) {
   const resp = await af(
@@ -7104,6 +7122,12 @@ function renderLogin(root2, state, actions2) {
   root2.replaceChildren(loginView(state, actions2));
 }
 function loginView(state, actions2) {
+  if (state.connecting && !state.loginError) {
+    return connectingView();
+  }
+  if (!state.authRequired) {
+    return noAuthLoginView(state, actions2);
+  }
   const input = h2("input", {
     type: "password",
     id: "af-token",
@@ -7139,6 +7163,43 @@ function loginView(state, actions2) {
       "Paste the daemon bearer token to connect. Get it from ",
       h2("code", {}, "af token show"),
       " on the host."
+    ),
+    form
+  ];
+  if (state.loginError) {
+    children.push(h2("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+  return h2("main", { class: "af-login" }, h2("div", { class: "af-card" }, ...children));
+}
+function connectingView() {
+  return h2(
+    "main",
+    { class: "af-login" },
+    h2(
+      "div",
+      { class: "af-card" },
+      h2("h1", { class: "af-title" }, "Agent Factory"),
+      h2("p", { class: "af-subtitle" }, "Connecting\u2026")
+    )
+  );
+}
+function noAuthLoginView(state, actions2) {
+  const button = h2(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting\u2026" : "Connect"
+  );
+  const form = h2("form", { class: "af-login-form" }, button);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    actions2.connect("");
+  });
+  const children = [
+    h2("h1", { class: "af-title" }, "Agent Factory"),
+    h2(
+      "p",
+      { class: "af-subtitle" },
+      "This daemon does not require a token for your connection."
     ),
     form
   ];
@@ -7331,7 +7392,13 @@ function sessionRow(s, selected, actions2) {
 // src/index.ts
 var store = new Store({
   phase: "login",
-  connecting: false,
+  authRequired: true,
+  // Start in the connecting state: mount() immediately probes /v1/auth-info, and
+  // showing the paste form before that resolves would flash a token field a
+  // tokenless (loopback / require_token=false) daemon doesn't need (#1696). The
+  // login view renders a neutral placeholder while connecting; bootstrap clears
+  // this only when it lands on the real paste-token form.
+  connecting: true,
   loginError: null,
   sessions: [],
   selectedId: null,
@@ -7359,10 +7426,27 @@ function mount() {
   store.subscribe(rerender);
   rerender();
   document.addEventListener("keydown", onKeydown, true);
+  void bootstrap();
+}
+async function bootstrap() {
+  let required = true;
+  try {
+    required = await probeAuthRequired();
+  } catch {
+    required = true;
+  }
+  if (!required) {
+    store.set({ authRequired: false });
+    void connect("");
+    return;
+  }
   const existing = loadToken();
   if (existing) {
+    store.set({ authRequired: true });
     void connect(existing);
+    return;
   }
+  store.set({ authRequired: true, connecting: false });
 }
 function rerender() {
   if (!root) {
@@ -7396,7 +7480,9 @@ async function connect(candidate) {
     return;
   }
   token = candidate;
-  storeToken(candidate);
+  if (candidate !== "") {
+    storeToken(candidate);
+  }
   store.set({
     phase: "app",
     connecting: false,
@@ -7465,7 +7551,7 @@ function newSession() {
     newSessionModal(projects, {
       onSubmit: (values) => {
         const tok = token;
-        if (!tok || !modal) {
+        if (tok === null || !modal) {
           return;
         }
         const m = modal;
@@ -7494,7 +7580,7 @@ function openSendPrompt() {
     promptModal(sel.title, {
       onSubmit: (text) => {
         const tok = token;
-        if (!tok || !modal) {
+        if (tok === null || !modal) {
           return;
         }
         const m = modal;
@@ -7519,7 +7605,7 @@ function openConfirm(action) {
       sessionTitle: sel.title,
       onConfirm: () => {
         const tok = token;
-        if (!tok || !modal) {
+        if (tok === null || !modal) {
           return;
         }
         const m = modal;
@@ -7551,7 +7637,7 @@ function syncTerminal(state) {
   disposeTerminal();
   terminalId = selId;
   const tok = token;
-  if (selId && tok) {
+  if (selId && tok !== null) {
     terminal = new AttachTerminal(termHost, selId, tok, {
       onStatus: (s) => store.set({ termStatus: s }),
       // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus, so a
@@ -7602,7 +7688,7 @@ function requestResync() {
   resyncTimer = window.setTimeout(() => {
     resyncTimer = null;
     const tok = token;
-    if (!tok) {
+    if (tok === null) {
       return;
     }
     void fetchSnapshot(tok).then((sessions) => {

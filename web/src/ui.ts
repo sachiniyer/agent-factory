@@ -28,6 +28,11 @@ import type { SessionData } from "./types.js";
  *  authed — the live session projection plus the current selection. */
 export interface AppState {
   phase: "login" | "app";
+  /** whether THIS client must present a bearer token, from the /v1/auth-info probe
+   *  (#1696). false ⇒ the daemon exempts this peer (loopback, or require_token=false),
+   *  so the login view offers a one-click tokenless connect instead of the paste form.
+   *  Defaults true so the paste form is shown until the probe says otherwise. */
+  authRequired: boolean;
   /** true while a token probe is in flight (disables the login form). */
   connecting: boolean;
   /** an actionable message shown under the login form after a failed probe. */
@@ -131,6 +136,19 @@ export function renderLogin(root: HTMLElement, state: AppState, actions: Actions
 }
 
 function loginView(state: AppState, actions: Actions): HTMLElement {
+  // While the initial auth probe (or a silent token resume) is in flight, show a
+  // neutral placeholder rather than flashing a paste-token field a tokenless daemon
+  // may not need (#1696). An error always wins over the placeholder so a failed
+  // probe/paste is surfaced.
+  if (state.connecting && !state.loginError) {
+    return connectingView();
+  }
+  // The daemon told us this client needs no token (loopback, or require_token=false,
+  // #1696): skip the paste form entirely and offer a single tokenless Connect. The
+  // empty-string token is the "no credential" sentinel the API layer understands.
+  if (!state.authRequired) {
+    return noAuthLoginView(state, actions);
+  }
   const input = h("input", {
     type: "password",
     id: "af-token",
@@ -169,6 +187,54 @@ function loginView(state: AppState, actions: Actions): HTMLElement {
       "Paste the daemon bearer token to connect. Get it from ",
       h("code", {}, "af token show"),
       " on the host.",
+    ),
+    form,
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+
+  return h("main", { class: "af-login" }, h("div", { class: "af-card" }, ...children));
+}
+
+/** The neutral "connecting" placeholder shown while the initial auth probe or a
+ *  token resume is in flight (#1696), so no paste-token field flashes before we know
+ *  whether this client even needs one. */
+function connectingView(): HTMLElement {
+  return h(
+    "main",
+    { class: "af-login" },
+    h(
+      "div",
+      { class: "af-card" },
+      h("h1", { class: "af-title" }, "Agent Factory"),
+      h("p", { class: "af-subtitle" }, "Connecting…"),
+    ),
+  );
+}
+
+/** The tokenless login view (#1696): the daemon exempts this client, so there is no
+ *  token to paste — just a Connect button that dials in with the empty-token
+ *  sentinel. Normally auto-connected on load; this view is what a user sees only if
+ *  they explicitly Disconnect on such a daemon. */
+function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting…" : "Connect",
+  );
+  const form = h("form", { class: "af-login-form" }, button);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    actions.connect("");
+  });
+
+  const children: (Node | string)[] = [
+    h("h1", { class: "af-title" }, "Agent Factory"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "This daemon does not require a token for your connection.",
     ),
     form,
   ];

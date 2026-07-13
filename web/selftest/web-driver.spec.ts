@@ -2,10 +2,11 @@
 // browser web client, the browser analogue of tui-driver-selftest.sh.
 //
 // It drives a headless Chromium against a REAL af daemon (a throwaway home on a
-// loopback TLS+token listener, brought up by web-selftest-entry.sh) and asserts
-// the core v1 loop end to end — assertions are the gate, not screenshots:
+// loopback TLS listener, brought up by web-selftest-entry.sh) and asserts the core
+// v1 loop end to end — assertions are the gate, not screenshots:
 //
-//   1. login          paste the daemon token → the authed app renders
+//   1. tokenless open  loopback ⇒ no token required (#1696): the SPA auto-connects
+//                      with NO credential and NEVER shows the paste-token login
 //   2. sidebar         the rail lists the sessions from the Snapshot/events plane
 //   3. attach          click-to-attach opens the xterm terminal + shows live output
 //   4. keyboard (#1694) j/k navigate the rail, Enter attaches, Escape returns to rail
@@ -13,40 +14,43 @@
 //   6. kill            the kill confirm removes the session's row
 //   7. archive         the archive confirm moves a session to the archived group
 //
+// The daemon binds 127.0.0.1, so under #1696 the browser is a LOOPBACK peer and the
+// daemon exempts it from the bearer token — the SPA's /v1/auth-info probe reports
+// auth_required=false, the login screen is skipped, and every core action
+// (create/kill/archive/send-prompt/attach) runs on the empty-token credential. That
+// makes this harness the end-to-end regression guard that tokenless authorization
+// works for ALL actions, not just the read path. (The token-PASTE UI path is not
+// reachable here — a loopback container is always exempt — so it stays covered by
+// the Go handler tests: daemon/httpauth_test.go network-peer → 401 + spoof-resistance.)
+//
 // Everything the test needs is handed in via env by the entry script (see
-// playwright.config.ts): AF_WEB_BASE_URL, AF_WEB_TOKEN, and the two seeded
-// session titles AF_WEB_SESSION_A / AF_WEB_SESSION_B.
+// playwright.config.ts): AF_WEB_BASE_URL and the two seeded session titles
+// AF_WEB_SESSION_A / AF_WEB_SESSION_B. No token is needed.
 
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-const TOKEN = requireEnv("AF_WEB_TOKEN");
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
 // The marker the seeded fake agent prints on launch (web-selftest-entry.sh), so
 // "the terminal shows live output" is a deterministic string assertion.
 const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
 
-function requireEnv(name: string): string {
-  const v = process.env[name];
-  if (!v) {
-    throw new Error(`${name} is unset — run via \`make web-selftest-container\`, which boots the daemon.`);
-  }
-  return v;
-}
-
 /** A rail row by its session title. */
 function row(page: Page, title: string): Locator {
   return page.locator(".af-rail-list .af-row", { hasText: title });
 }
 
-/** Logs in by pasting the daemon token and waits for the authed shell + the rail
- *  to be populated by the Snapshot the probe returns. */
-async function login(page: Page): Promise<void> {
+/** Opens the app on the loopback daemon and asserts the tokenless auto-connect
+ *  (#1696): the SPA learns via /v1/auth-info that this loopback client needs no
+ *  token, skips the paste-token login entirely, and renders the authed shell with
+ *  NO credential. The absence of the #af-token field is the proof no login was
+ *  shown; the rail being populated proves the Snapshot was fetched authorized. */
+async function openTokenless(page: Page): Promise<void> {
   await page.goto("/");
-  await expect(page.locator("#af-token")).toBeVisible();
-  await page.locator("#af-token").fill(TOKEN);
-  await page.locator("form.af-login-form button.af-primary").click();
+  // The authed shell renders without any login interaction.
   await expect(page.locator(".af-app")).toBeVisible();
+  // The paste-token login was never required — its input is absent from the DOM.
+  await expect(page.locator("#af-token")).toHaveCount(0);
 }
 
 // The flows share one daemon and mutate its session set (create/kill/archive), so
@@ -59,11 +63,23 @@ let createdTitle = "";
 
 test.beforeAll(async ({ browser }) => {
   page = await browser.newPage();
-  await login(page);
+  await openTokenless(page);
 });
 
 test.afterAll(async () => {
   await page.close();
+});
+
+test("tokenless loopback (#1696): the SPA auto-connects with no token, no login screen", async () => {
+  // The authed shell is up (openTokenless asserted it) with NO paste-token step —
+  // reload to prove it is not a one-off: a fresh load re-probes /v1/auth-info and
+  // again auto-connects with no credential.
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await expect(page.locator("#af-token")).toHaveCount(0);
+  // The events WS connected on the empty-token credential (the ?access_token= is
+  // blank and the loopback peer is exempt): the live pip reads open.
+  await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
 });
 
 test("sidebar lists the seeded sessions from the Snapshot/events plane", async () => {

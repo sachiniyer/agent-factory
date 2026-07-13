@@ -185,6 +185,18 @@ type Config struct {
 	// client's only Phase-3 dependency). Non-browser clients (TUI/CLI, curl)
 	// are unaffected. Global-only, like listen_addr.
 	CORSAllowedOrigins []string `json:"cors_allowed_origins,omitempty" toml:"cors_allowed_origins,omitempty"`
+	// RequireToken controls whether the daemon's TLS TCP listener enforces the
+	// bearer token for NON-loopback (network) peers (#1696). It defaults to true:
+	// a peer that is not 127.0.0.1/::1 must present the token, so enabling
+	// listen_addr on a LAN/Tailscale/public interface never silently exposes an
+	// unauthenticated control plane. Loopback peers are ALWAYS exempt (same trust
+	// as the unix socket) regardless of this key — the token cannot be required
+	// from a browser on the same machine. Set false ONLY on a trusted network to
+	// drop the token for network peers too; the daemon then logs a loud startup
+	// warning. TLS stays mandatory on TCP regardless — this key is only about the
+	// token. Global-only (daemon network surface), like listen_addr: a cloned
+	// repo must never be able to disable auth. See docs/remote-tcp-auth.md.
+	RequireToken bool `json:"require_token" toml:"require_token"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
 	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —
@@ -298,6 +310,7 @@ func DefaultConfig() *Config {
 		DefaultProgram:     defaultProgram,
 		AutoYes:            false,
 		AutoUpdate:         true,
+		RequireToken:       true,
 		DaemonPollInterval: defaultDaemonPollInterval,
 		LimitAutoResume:    false,
 		LimitRetryInterval: defaultLimitRetryInterval,

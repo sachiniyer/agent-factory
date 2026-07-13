@@ -111,13 +111,30 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	// because a network port could not open.
 	closeTCP := func() error { return nil }
 	if manager.cfg.ListenAddr != "" {
-		if closer, info, err := startTCPListener(mux, manager.cfg); err != nil {
+		// The daemon's web listener exempts loopback peers from the token (a
+		// same-machine browser gets the unix-socket's local trust, #1696) and
+		// honors require_token=false to drop the token for network peers too on a
+		// trusted network. Both are safe relaxations of the token ONLY — TLS stays
+		// mandatory in startTCPListener regardless.
+		policy := tokenGatePolicy{
+			tokenDisabled:  !manager.cfg.RequireToken,
+			loopbackExempt: true,
+		}
+		if !manager.cfg.RequireToken {
+			// A network-reachable, tokenless control plane is a deliberate but
+			// dangerous choice: anyone who can reach listen_addr has full control.
+			// Make it impossible to miss in the daemon log.
+			log.WarningLog.Printf("WARNING: require_token=false — the daemon web API on %q accepts NETWORK peers with NO token; anyone who can reach it has full control. TLS still applies; this disables ONLY the bearer token. Unset require_token (or set it true) to re-enable auth.", manager.cfg.ListenAddr)
+		}
+		if closer, info, err := startTCPListener(mux, manager.cfg, policy); err != nil {
 			log.WarningLog.Printf("failed to start daemon TLS TCP listener on %q: %v", manager.cfg.ListenAddr, err)
 		} else {
 			closeTCP = closer
 			log.InfoLog.Printf("daemon TLS TCP listener enabled on %s (self-signed=%v)", info.Addr, info.SelfSigned)
 			log.InfoLog.Printf("  cert fingerprint: %s", info.Fingerprint)
 			log.InfoLog.Printf("  bearer token: %s", info.Token)
+			log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers %s",
+				map[bool]string{true: "must present the token above", false: "also need NO token (require_token=false)"}[manager.cfg.RequireToken])
 		}
 	}
 

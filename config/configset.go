@@ -67,6 +67,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	}},
 	"auto_yes":             {kind: cfgBool},
 	"auto_update":          {kind: cfgBool},
+	"require_token":        {kind: cfgBool},
 	"daemon_poll_interval": {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("daemon_poll_interval", v) }},
 	"log_max_size_mb":      {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
 	"log_max_backups":      {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
