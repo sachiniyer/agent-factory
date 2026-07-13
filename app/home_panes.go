@@ -177,7 +177,16 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 		// capture-pane (#1089): the attach client already streams the same
 		// content, tmux-flow-limited. Capture resumes the tick after the
 		// attachment closes.
-		if w.HasLive() {
+		//
+		// EXCEPT when it just entered scroll mode (#1704): scroll mode stops
+		// rendering the live terminal and shows the capture viewport instead
+		// (String()'s liveShowing gate is false while IsScrolling), so the
+		// one-shot off-loop scrollback fill MUST run even for a live pane —
+		// otherwise the viewport stays empty and the pane renders blank until
+		// scroll mode is left. NeedsScrollFill is true only until that single
+		// fill lands (it clears scrollFillPending), so a live pane resumes
+		// skipping capture for every subsequent scroll keystroke.
+		if w.HasLive() && !w.NeedsScrollFill() {
 			continue
 		}
 		// A pane that just entered scroll mode has an empty scroll viewport

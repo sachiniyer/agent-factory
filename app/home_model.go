@@ -697,10 +697,22 @@ func (m *home) focusRegion(region string) {
 // only inside the tasks overlay, which saves on close (handleStateTasks) —
 // the in-rail automations section is read-only, so no save is needed here.
 func (m *home) cycleFocus(back bool) tea.Cmd {
+	// A live pane preview is transient chrome, not a focus stop. Tab / Shift-Tab
+	// must DISMISS it and still advance the ring one step — never swallow the
+	// keystroke (#1705). Earlier this early-returned after cancelling the
+	// preview, so with a preview live (which the idle tick creates whenever the
+	// tree cursor names a tab the owner pane isn't bound to) reverse traversal
+	// out of a pane was impossible: the ring never moved.
+	//
+	// The step anchors on ring.Active() — cancelPanePreview(false), NOT
+	// cancelPanePreview(true) — so a Tab pressed from the tree while a
+	// background preview happens to be owned by some pane still steps from the
+	// tree, not from that pane.
+	var refresh tea.Cmd
 	if m.panePreviewTxn != nil {
 		m.suppressActivePanePreview()
-		m.cancelPanePreview(true)
-		return m.panesRefresh(m.attached.Load())
+		m.cancelPanePreview(false)
+		refresh = m.panesRefresh(m.attached.Load())
 	}
 	if back {
 		m.ring.Prev()
@@ -708,7 +720,44 @@ func (m *home) cycleFocus(back bool) tea.Cmd {
 		m.ring.Next()
 	}
 	m.relayout()
-	return nil
+	return refresh
+}
+
+// focusAdjacentSection moves focus to the next / previous SECTION region — the
+// non-pane focus-ring stops: the instances tree, the automations rail, and the
+// projects rail. Workspace panes are skipped (Tab steps through those, 1-9 jump
+// to tabs). This is what the `]` / `[` "next / prev section" bindings drive
+// (#1706): automations and projects became their own Tab-focusable rail
+// sections (#1470 / #1588 / #1590) rather than sidebar section headers, so the
+// old header-walking JumpNextSection could never reach them — from an instance
+// row `]` was a silent no-op. Stepping the real focus ring makes `]` land on
+// Automations (dropping the instance-only `D kill` from the footer) exactly as
+// the binding advertises, and `[` walks back.
+func (m *home) focusAdjacentSection(back bool) tea.Cmd {
+	// Mirror cycleFocus: a live preview is transient chrome and must be
+	// dismissed without swallowing the keystroke (#1705 class).
+	var refresh tea.Cmd
+	if m.panePreviewTxn != nil {
+		m.suppressActivePanePreview()
+		m.cancelPanePreview(false)
+		refresh = m.panesRefresh(m.attached.Load())
+	}
+	// Step the ring, skipping workspace panes, until it rests on a section
+	// region. The tree is always a visible non-pane stop, so this always
+	// terminates; bound the loop by the ring size as a backstop.
+	for i := 0; i < len(m.visiblePanes)+3; i++ {
+		var id string
+		if back {
+			id = m.ring.Prev()
+		} else {
+			id = m.ring.Next()
+		}
+		if id == "" || !layout.IsPaneRegion(id) {
+			break
+		}
+	}
+	m.relayout()
+	return refresh
 }
 
 func (m *home) Init() tea.Cmd {

@@ -45,14 +45,14 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		m.sidebar.ExpandSection()
 		m.focusTreeForNav()
 		return m, m.selectionChanged()
+	// `]` / `[` jump between the focusable SECTIONS — the instances tree and the
+	// automations / projects rails — skipping workspace panes (#1706). Since
+	// automations/projects moved out of the sidebar into their own rail regions,
+	// this steps the focus ring rather than walking sidebar headers.
 	case keys.KeyNextSection:
-		m.sidebar.JumpNextSection()
-		m.focusTreeForNav()
-		return m, m.selectionChanged()
+		return m, m.focusAdjacentSection(false)
 	case keys.KeyPrevSection:
-		m.sidebar.JumpPrevSection()
-		m.focusTreeForNav()
-		return m, m.selectionChanged()
+		return m, m.focusAdjacentSection(true)
 
 	// Instance creation
 	case keys.KeyNewRemote:

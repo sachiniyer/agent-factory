@@ -589,48 +589,53 @@ func TestPanePreviewSplitFocusesAlreadyOpenTarget(t *testing.T) {
 	assert.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "existing target pane takes focus")
 }
 
-func TestPanePreviewTabAndEscCancelToOwnerPane(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		run  func(*home) tea.Cmd
-	}{
-		{
-			name: "Tab",
-			run: func(h *home) tea.Cmd {
-				_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
-				return cmd
-			},
-		},
-		{
-			name: "Esc",
-			run: func(h *home) tea.Cmd {
-				_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyEsc})
-				return cmd
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := paneTestHome(t)
-			alpha := h.store.GetInstanceByTitle("alpha")
+// TestPanePreviewEscCancelsToOwnerPane: Esc dismisses a live preview and leaves
+// focus on the owner pane — "escape the preview, stay put". (Tab, by contrast,
+// dismisses AND advances the ring — see TestPanePreviewTabDismissesAndAdvances.)
+func TestPanePreviewEscCancelsToOwnerPane(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
 
-			pressKey(t, h, "s")
-			paneA := h.store.OpenPanes()[0]
-			h.sidebar.SetSelectedInstance(1)
-			_ = h.selectionChanged()
-			require.NotNil(t, h.panePreviewTxn)
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
 
-			cmd := tc.run(h)
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyEsc})
 
-			require.NotNil(t, cmd, "cancel should schedule an owner-pane refresh")
-			require.Nil(t, h.panePreviewTxn)
-			assert.Same(t, alpha, paneA.Instance())
-			assert.Equal(t, 0, paneA.Tab())
-			assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
-			view := h.View()
-			assert.Contains(t, view, "alpha · Agent · selected: beta · Agent")
-			assert.NotContains(t, view, "PREVIEW")
-		})
-	}
+	require.NotNil(t, cmd, "cancel should schedule an owner-pane refresh")
+	require.Nil(t, h.panePreviewTxn)
+	assert.Same(t, alpha, paneA.Instance())
+	assert.Equal(t, 0, paneA.Tab())
+	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
+	view := h.View()
+	assert.Contains(t, view, "alpha · Agent · selected: beta · Agent")
+	assert.NotContains(t, view, "PREVIEW")
+}
+
+// TestPanePreviewTabDismissesAndAdvances: Tab over a live preview must dismiss
+// the preview AND still step the focus ring — never swallow the keystroke to sit
+// on the owner pane (the #1705 class, in the forward direction). With paneA the
+// only pane and focus on it, forward Tab lands on the next section (Automations).
+func TestPanePreviewTabDismissesAndAdvances(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	require.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn)
+
+	pressTab(t, h, false)
+
+	require.Nil(t, h.panePreviewTxn, "Tab dismisses the transient preview")
+	assert.Same(t, alpha, paneA.Instance(), "owner pane reverts to its real binding")
+	assert.Equal(t, layout.RegionAutomations, h.ring.Active(),
+		"Tab advances the ring off the pane rather than swallowing the keystroke")
+	assert.NotContains(t, h.View(), "PREVIEW")
 }
 
 func TestPanePreviewEnterBlocksUncommittableTargets(t *testing.T) {
