@@ -177,6 +177,7 @@ type sshProvisioner struct {
 	program string
 
 	client     *ssh.Client
+	agentConn  io.Closer
 	sessionDir string
 	remotePID  string
 	tunnelLn   net.Listener
@@ -250,6 +251,17 @@ func (p *sshProvisioner) dial() error {
 	}
 	addr := net.JoinHostPort(host, port)
 	client, err := ssh.Dial("tcp", addr, clientCfg)
+	// The ssh-agent connection (opened in authMethods) is only needed for the
+	// handshake ssh.Dial just ran — the agent signers sign the auth challenge
+	// over it, but nothing uses it afterward. Close it now, on success or
+	// failure, so the Unix socket FD and the agent client's readLoop goroutine
+	// never outlive the dial (#1684). reap() also closes it, guarding the
+	// authMethods-succeeded-but-dial-never-reached path; both closes are
+	// idempotent via the nil-out here.
+	if p.agentConn != nil {
+		_ = p.agentConn.Close()
+		p.agentConn = nil
+	}
 	if err != nil {
 		return fmt.Errorf("backend=ssh: dialing %s@%s failed (check ssh.host/ssh.user, key auth, and ssh.known_hosts): %w", clientCfg.User, addr, err)
 	}
@@ -296,8 +308,13 @@ func (p *sshProvisioner) authMethods() ([]ssh.AuthMethod, error) {
 		methods = append(methods, ssh.PublicKeys(signer))
 	}
 
-	if signers := agentSigners(); len(signers) > 0 {
+	if signers, conn := agentSigners(); len(signers) > 0 {
 		methods = append(methods, ssh.PublicKeys(signers...))
+		// The signers are agentKeyringSigner values that sign by calling back
+		// into the agent over conn during the handshake, so conn must stay open
+		// until ssh.Dial completes. Own it on the provisioner; reap() closes it
+		// alongside the ssh client. (#1684)
+		p.agentConn = conn
 	}
 
 	if len(methods) == 0 {
@@ -310,21 +327,30 @@ func (p *sshProvisioner) authMethods() ([]ssh.AuthMethod, error) {
 // the agent up front (rather than registering a lazy PublicKeysCallback) so an
 // empty/wedged agent socket contributes nothing to the auth attempt instead of
 // aborting the handshake or burning MaxAuthTries on keys that do not exist.
-func agentSigners() []ssh.Signer {
+//
+// When it returns a non-empty slice, it ALSO returns the live agent connection as
+// an io.Closer: the signers are agentKeyringSigner values that sign by calling
+// back into the agent over conn during the ssh handshake (they are not
+// self-contained key snapshots), so the caller must keep conn open until the dial
+// completes and then close it — otherwise the Unix socket FD and the agent
+// client's readLoop goroutine leak on every session creation (#1684). When there
+// are no usable signers, conn is closed here and a nil closer is returned so an
+// empty/wedged agent never leaks either.
+func agentSigners() ([]ssh.Signer, io.Closer) {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
-		return nil
+		return nil, nil
 	}
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	signers, err := agent.NewClient(conn).Signers()
-	if err != nil {
+	if err != nil || len(signers) == 0 {
 		_ = conn.Close()
-		return nil
+		return nil, nil
 	}
-	return signers
+	return signers, conn
 }
 
 // hostKeyCallback verifies the remote's host key against a known_hosts file
@@ -570,6 +596,13 @@ func (p *sshProvisioner) reap() error {
 	p.reapOnce.Do(func() {
 		if p.tunnelLn != nil {
 			_ = p.tunnelLn.Close()
+		}
+		// Close the ssh-agent connection unconditionally — it is opened in
+		// authMethods() before the dial, so it must be released even when the
+		// dial itself failed (p.client == nil). Closing it stops the agent
+		// client's readLoop goroutine and frees the Unix socket FD (#1684).
+		if p.agentConn != nil {
+			_ = p.agentConn.Close()
 		}
 		if p.client != nil {
 			if p.remotePID != "" {
