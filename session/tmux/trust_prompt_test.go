@@ -42,9 +42,10 @@ Here is a summary of what I changed in the repo...`
 		{"reworded full dialog", rewordedDialog, true},
 		{"reworded phrase without dialog marker", rewordedMention, false},
 		{"old folder-trust wording", oldDialog, true},
-		{"MCP prompt titlecase", "New MCP server found. Do you trust this new MCP server?", true},
-		{"MCP prompt lowercase", "new mcp server found. do you trust this new mcp server?", true},
-		{"MCP mention in ordinary output", "I configured the mcp server in .mcp.json for you.", false},
+		{"MCP dialog (question anchor)", "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes", true},
+		{"MCP dialog (confirm-affordance anchor)", "New MCP server found.\n❯ 1. Yes  ·  Enter to confirm", true},
+		{"MCP dialog lowercase", "new mcp server found. do you trust this new mcp server?", true},
+		{"MCP mention without dialog marker", "I added a new MCP server entry to .mcp.json for you.", false},
 		{"normal claude input box", normalUI, false},
 	}
 
