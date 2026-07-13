@@ -151,8 +151,11 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 // trust this folder" or the "Enter to confirm" affordance), so a stray mention
 // of the phrase in scrollback or agent output never triggers a dismissal. The
 // old wording is a self-contained, dialog-specific string and stays matched
-// as-is. The MCP prompt renders as "New MCP server ..."; we case-fold that one
-// narrow phrase so a casing tweak upstream doesn't silently reopen the hang.
+// as-is. The MCP prompt renders as "New MCP server found. Do you trust this new
+// MCP server?"; we case-fold the specific "new mcp server" phrase (not a bare
+// "mcp server") so a casing tweak upstream doesn't reopen the hang while still
+// keeping the match dialog-specific — an incidental mention of "mcp server" in
+// ordinary agent output must not trigger a spurious Enter on the continuous poll.
 func claudeTrustPromptPresent(content string) bool {
 	// Reworded folder-trust dialog — question anchored to real dialog chrome.
 	reworded := strings.Contains(content, "Is this a project you created or one you trust") &&
@@ -161,7 +164,7 @@ func claudeTrustPromptPresent(content string) bool {
 
 	return reworded ||
 		strings.Contains(content, "Do you trust the files in this folder?") ||
-		strings.Contains(strings.ToLower(content), "mcp server")
+		strings.Contains(strings.ToLower(content), "new mcp server")
 }
 
 // Restore attaches to an existing tmux session. If the session is missing
