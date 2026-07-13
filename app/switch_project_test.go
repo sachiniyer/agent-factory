@@ -212,10 +212,11 @@ func TestSwitchProjectWithArchivedSection(t *testing.T) {
 	// Repo A: a live session plus an archived one, with the archived folder
 	// expanded and the cursor driven into it.
 	h.store.AddInstance(newSnapshotTestInstance(t, "repoA-live"))
-	h.store.AddInstance(archiveActionInstance(t, "repoA-archived", session.Archived))
+	archivedA := archiveActionInstance(t, "repoA-archived", session.Archived)
+	h.store.AddInstance(archivedA)
 	h.sidebar.ExpandSection()
-	h.sidebar.JumpNextSection() // move toward the archived folder
-	_ = h.sidebar.String()      // exercises the archived render + auto-collapse path
+	h.sidebar.SelectInstance(archivedA) // drive the cursor into the archived folder
+	_ = h.sidebar.String()              // exercises the archived render + auto-collapse path
 	require.NotNil(t, findSidebarInstance(h, "repoA-archived"))
 
 	repoBRoot := t.TempDir()

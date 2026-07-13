@@ -612,28 +612,6 @@ func (s *Sidebar) moveCursorToInstanceRow(instIdx int) {
 	}
 }
 
-// JumpNextSection jumps to the next section header.
-func (s *Sidebar) JumpNextSection() {
-	s.syncFromStore()
-	for i := s.selectedIdx + 1; i < len(s.visibleItems); i++ {
-		if s.visibleItems[i].IsHeader {
-			s.selectedIdx = i
-			return
-		}
-	}
-}
-
-// JumpPrevSection jumps to the previous section header.
-func (s *Sidebar) JumpPrevSection() {
-	s.syncFromStore()
-	for i := s.selectedIdx - 1; i >= 0; i-- {
-		if s.visibleItems[i].IsHeader {
-			s.selectedIdx = i
-			return
-		}
-	}
-}
-
 // GetSelectedInstance returns the instance under the cursor — including when
 // the cursor rests on one of its tab rows — or nil when the cursor rests on a
 // section header. Note this is the cursor-derived selection; the store's

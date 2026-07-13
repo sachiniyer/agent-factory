@@ -148,31 +148,6 @@ func TestSidebarToggleSection(t *testing.T) {
 	assert.True(t, s.sections[0].Expanded)
 }
 
-func TestSidebarJumpSections(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false, store.NewProjection())
-
-	inst, _ := session.NewInstance(session.InstanceOptions{
-		Title: "inst", Path: t.TempDir(), Program: "test",
-	})
-	addTestInstance(s, inst)
-
-	// Start on Instances header
-	sel := s.GetSelection()
-	assert.Equal(t, SectionInstances, sel.Kind)
-
-	// With Instances the only section (#1024 PR 4), the section-jump keys
-	// no-op forward and return the cursor to the header from a tab row.
-	s.JumpNextSection()
-	assert.Equal(t, sel, s.GetSelection(), "no next section to jump to")
-
-	s.Down() // onto the instance's Agent tab
-	s.JumpPrevSection()
-	sel = s.GetSelection()
-	assert.True(t, sel.IsHeader)
-	assert.Equal(t, SectionInstances, sel.Kind)
-}
-
 func TestSidebarCollapseFromChild(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	s := NewSidebar(&spin, false, store.NewProjection())

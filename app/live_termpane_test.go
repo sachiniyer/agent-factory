@@ -108,6 +108,37 @@ func TestSyncLiveTermPaneBindsFocusedPane(t *testing.T) {
 	assert.NotContains(t, h.lastPaneCapture, p.ID(), "live pane must not capture-poll")
 }
 
+// TestLivePaneScrollFillCapturesDespiteLiveSkip is the #1704 regression. When a
+// live pane enters scroll mode (Ctrl+U) it stops rendering the streamed live
+// grid and shows the capture viewport instead — which is EMPTY until the
+// off-loop scrollback fill runs. panesRefresh normally skips capture for a live
+// pane, but that skip must NOT apply while a scroll fill is pending, or the
+// viewport stays blank forever and Ctrl+D can never restore it. Before the fix
+// `if w.HasLive() { continue }` swallowed the fill; now it is gated on
+// !NeedsScrollFill so the one-shot fill lands.
+func TestLivePaneScrollFillCapturesDespiteLiveSkip(t *testing.T) {
+	h, _ := liveTestHome(t)
+	_, _ = stubLiveTermFactory(t)
+	h.syncLiveTermPane()
+
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	w := h.paneWindows[p.ID()]
+	require.True(t, w.HasLive(), "pane renders through the live attachment")
+
+	// Ctrl+U enters scroll mode: the live render is replaced by the capture
+	// viewport, empty with a pending fill.
+	w.ScrollUp()
+	require.True(t, w.NeedsScrollFill(), "scroll entry leaves a pending scrollback fill")
+
+	// The pending fill MUST get a capture dispatched even though the pane is live
+	// — otherwise the viewport renders blank until scroll mode is left (#1704).
+	h.lastPaneCapture = map[int]time.Time{}
+	_ = h.panesRefresh(false)
+	assert.Contains(t, h.lastPaneCapture, p.ID(),
+		"a live pane with a pending scroll fill must capture the scrollback (#1704)")
+}
+
 func TestSyncLiveTermPaneSurvivesFocusOnTree(t *testing.T) {
 	h, _ := liveTestHome(t)
 	fakes, _ := stubLiveTermFactory(t)
