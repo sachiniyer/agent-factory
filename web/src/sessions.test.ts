@@ -139,11 +139,28 @@ test("clampActiveTab keeps the active tab in range as the live tab list changes"
   assert.equal(clampActiveTab([threeTabs], "id-x", -1), 0);
 });
 
-test("orderedSessions puts live rows before archived, then by created_at", () => {
+test("orderedSessions: live rows oldest-first, archived group last newest-first (#1605/#1674)", () => {
   const list = [
-    sess("late", { created_at: "2026-01-02T00:00:00Z" }),
-    sess("arch", { liveness: Liveness.Archived, created_at: "2026-01-01T00:00:00Z" }),
-    sess("early", { created_at: "2026-01-01T00:00:00Z" }),
+    sess("live-late", { created_at: "2026-01-02T00:00:00Z" }),
+    sess("arch-old", { liveness: Liveness.Archived, created_at: "2026-01-01T00:00:00Z" }),
+    sess("live-early", { created_at: "2026-01-01T00:00:00Z" }),
+    sess("arch-new", { liveness: Liveness.Archived, created_at: "2026-01-03T00:00:00Z" }),
   ];
-  assert.deepEqual(orderedSessions(list).map((s) => s.title), ["early", "late", "arch"]);
+  // Live rows keep the projection's oldest-first order; the archived group sorts
+  // NEWEST-created first, mirroring the TUI sidebar (partitionByArchived, #1605) —
+  // the web previously sorted archived oldest-first too (#1674 PR3 review).
+  assert.deepEqual(orderedSessions(list).map((s) => s.title), [
+    "live-early",
+    "live-late",
+    "arch-new",
+    "arch-old",
+  ]);
+});
+
+test("orderedSessions: title breaks a created_at tie in the archived group (total order)", () => {
+  const list = [
+    sess("arch-b", { liveness: Liveness.Archived, created_at: "2026-01-01T00:00:00Z" }),
+    sess("arch-a", { liveness: Liveness.Archived, created_at: "2026-01-01T00:00:00Z" }),
+  ];
+  assert.deepEqual(orderedSessions(list).map((s) => s.title), ["arch-a", "arch-b"]);
 });

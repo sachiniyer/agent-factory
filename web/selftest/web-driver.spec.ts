@@ -430,3 +430,41 @@ test("archive: the archive confirm moves a session to the archived group", async
   // with the af-row-archived modifier and sorted last).
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
 });
+
+// NOTE on #1675 PR4 (ended PTY → "exited", not a reconnect loop): this is already
+// wired end-to-end — the daemon emits a MsgExit control frame on session-end
+// (daemon/ws_pty.go, covered by the Go handler tests), and terminal.ts settles to an
+// "exited" state + stops reconnecting on it (see onControl's "exit" arm and the
+// TerminalStatus="exited" pane header). It is NOT browser-tested here: a real
+// mid-stream exit can't be forced without killing the session (which removes the row
+// and disposes the terminal before the exit renders), and mocking the per-session WS
+// against the loopback TLS daemon proved unreliable in this harness. The Go side is
+// the regression guard for the emit; the client arm is exercised by the daemon's own
+// session-end path in manual play-testing.
+
+test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeholder", async () => {
+  // Force the authoritative Snapshot to come back empty, then reload so bootstrap
+  // re-seeds the rail from it. HTTP routing (unlike WS mocking) is deterministic
+  // against the loopback daemon, so this reliably drives the zero-sessions state the
+  // seeded harness otherwise never reaches. Runs LAST — it reloads and mocks Snapshot,
+  // so it must not precede the create/kill/archive flows.
+  await page.route("**/v1/Snapshot", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: { instances: [] }, error: null }),
+    });
+  });
+  await page.reload();
+
+  // The authed shell still comes up (tokenless loopback), but the rail shows its
+  // empty-state copy instead of rows, and the count reads 0 — the empty state renders
+  // as designed rather than a broken/blank shell.
+  await expect(page.locator(".af-app")).toBeVisible();
+  await expect(page.locator(".af-rail-empty")).toContainText("No sessions yet");
+  await expect(page.locator(".af-rail-count")).toHaveText("0");
+  // With nothing selected the main pane is the "Select a session" placeholder.
+  await expect(page.locator(".af-main-empty")).toContainText("Select a session");
+
+  await page.unroute("**/v1/Snapshot");
+});

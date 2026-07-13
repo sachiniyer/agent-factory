@@ -22,7 +22,7 @@ import type { EventStreamStatus } from "./events.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { VIEWS } from "./nav.js";
 import { ProjectsPane } from "./projects.js";
-import { isArchived, rowStatus, rowTitle } from "./status.js";
+import { compareSessionsForRail, isArchived, rowStatus, rowTitle } from "./status.js";
 import { TasksPane } from "./tasks.js";
 import type { TerminalStatus } from "./terminal.js";
 import type { SessionData, TaskData } from "./types.js";
@@ -198,25 +198,13 @@ function h<K extends keyof HTMLElementTagNameMap>(
 }
 
 /**
- * The rail's session order, mirroring the TUI sidebar: live sessions first, the
- * archived group last (ui/tree groups Archived under its own section), each group
- * ordered by creation time so the list is stable across re-renders and events.
- * Exported so keyboard navigation (index.ts) walks the SAME order the DOM shows.
+ * The rail's session order, mirroring the TUI sidebar (ui/sidebar_model.go): live
+ * sessions first ordered oldest-created first, the archived group last ordered
+ * newest-created first (#1605) — see compareSessionsForRail. Exported so keyboard
+ * navigation (index.ts) walks the SAME order the DOM shows.
  */
 export function orderedSessions(sessions: SessionData[]): SessionData[] {
-  return [...sessions].sort((a, b) => {
-    const aa = isArchived(a) ? 1 : 0;
-    const bb = isArchived(b) ? 1 : 0;
-    if (aa !== bb) {
-      return aa - bb;
-    }
-    const at = a.created_at ?? "";
-    const bt = b.created_at ?? "";
-    if (at !== bt) {
-      return at < bt ? -1 : 1;
-    }
-    return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-  });
+  return [...sessions].sort(compareSessionsForRail);
 }
 
 /** Renders the paste-token login view, replacing the root's contents. */
@@ -391,6 +379,12 @@ export class AppShell {
   private lastKb: KeyboardFocus | null = null;
   private lastActiveTab = 0;
   private lastError: string | null = null;
+  // Whether the main pane has been rendered at least once. The constructor leaves it
+  // an empty <section>, so the FIRST update must render it even when nothing is
+  // selected (selectedId is null before AND after that first update, so the
+  // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
+  // load until a select-then-deselect. (#1592 Phase 5 PR9)
+  private mainRendered = false;
 
   constructor(
     private readonly actions: Actions,
@@ -530,12 +524,14 @@ export class AppShell {
       this.renderRail(state);
     }
 
-    // The main pane's STRUCTURE only changes when the selected session changes;
+    // The main pane's STRUCTURE only changes when the selected session changes (or on
+    // the very first update, which lays down the initial empty-state placeholder);
     // otherwise we just patch its header text (status/title/branch), leaving the
     // terminal host — and its focus and scrollback — in place.
     const activeTabChanged = this.lastActiveTab !== state.activeTab;
     this.lastActiveTab = state.activeTab;
-    if (selectionChanged) {
+    if (selectionChanged || !this.mainRendered) {
+      this.mainRendered = true;
       this.renderMain(state);
     } else {
       this.patchMainHead(state);
