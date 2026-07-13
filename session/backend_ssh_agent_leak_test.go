@@ -3,133 +3,113 @@ package session
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh/agent"
 )
 
-// TestAgentSignersNoLeak is the #1684 regression. agentSigners() probes a running
-// ssh-agent for signers; the signers are agentKeyringSigner values that sign by
-// calling back into the agent over the Unix-socket connection during the ssh
-// handshake, so agentSigners() cannot self-contain them — it hands the live
-// connection back to the caller as an io.Closer to close once the dial is done.
+// #1684 regression. agentSigners() probes a running ssh-agent for signers; the
+// signers are agentKeyringSigner values that sign by calling back into the agent
+// over the Unix-socket connection during the ssh handshake, so agentSigners()
+// cannot self-contain them — it hands the live connection back to the caller as
+// an io.Closer to close once the dial is done.
 //
 // The bug (introduced in #1665) was that agentSigners() opened the connection,
 // pulled the signers, and returned WITHOUT ever surfacing or closing the conn on
-// the success path: the agent client's readLoop goroutine stayed blocked reading
-// from the socket forever (a GC root, so nothing was reclaimed) and the Unix
-// socket FD stayed open. Every ssh session creation leaked one of each, unbounded.
+// the success path — and likewise left the probe conn open when the agent held no
+// keys. The agent client's readLoop goroutine stayed blocked reading from the
+// socket forever (a GC root, so nothing was reclaimed) and the Unix socket FD
+// stayed open. Every ssh session creation leaked one of each, unbounded.
 //
-// This test starts an in-process ssh-agent holding one key and asserts:
-//  1. agentSigners() returns a NON-NIL closer whenever it returns signers — the
-//     structural contract that lets the caller reclaim the connection at all.
-//  2. Calling agentSigners() N times and closing each returned conn leaves the
-//     goroutine (and FD) count flat — the leak is gone.
-//  3. Discarding the closer instead (the old, leaky shape) DOES grow goroutines —
-//     proving the no-growth assertion in (2) is meaningful, not vacuously true.
-func TestAgentSignersNoLeak(t *testing.T) {
-	sock := startTestSSHAgent(t)
-	t.Setenv("SSH_AUTH_SOCK", sock)
+// These tests assert the fix DETERMINISTICALLY rather than by sampling goroutine
+// counts (which flakes under CI load): a stub ssh-agent signals on connClosed the
+// instant a served connection's handler returns — i.e. the moment the client end
+// is actually closed. "Conn not closed" is then a missing event (a blocked
+// waitClosed), not a fuzzy count delta.
 
-	const n = 20
+// TestAgentSignersClosesConnOnSuccess covers the success path: an agent holding a
+// key. agentSigners() must return the live conn as a NON-NIL closer (pre-fix it
+// returned no closer at all, so the caller could never reclaim it), and closing
+// that closer must actually close the underlying agent conn — which the stub
+// observes as its handler returning.
+func TestAgentSignersClosesConnOnSuccess(t *testing.T) {
+	stub := startStubAgent(t, keyringWithKey(t))
+	t.Setenv("SSH_AUTH_SOCK", stub.sock)
 
-	// (2) The fixed path: obtain signers, close the returned conn each time. The
-	// readLoop goroutine and its socket FD must not accumulate.
-	t.Run("closed_conn_does_not_leak", func(t *testing.T) {
-		settleGoroutines()
-		baseGo := runtime.NumGoroutine()
-		baseFD := openFDCount(t)
-
-		for i := 0; i < n; i++ {
-			signers, conn := agentSigners()
-			if len(signers) == 0 {
-				t.Fatalf("call %d: agentSigners returned no signers; the test agent holds one key", i)
-			}
-			// (1) The core contract: a live conn backs the signers, so the caller
-			// must be handed a closer to reclaim it.
-			if conn == nil {
-				t.Fatalf("call %d: agentSigners returned signers but a nil closer — the conn cannot be reclaimed (the #1684 leak)", i)
-			}
-			if err := conn.Close(); err != nil {
-				t.Fatalf("call %d: closing agent conn: %v", i, err)
-			}
-		}
-
-		settleGoroutines()
-		if grew := runtime.NumGoroutine() - baseGo; grew > 2 {
-			t.Errorf("goroutines grew by %d after %d closed agentSigners calls; want ~0 (leaked readLoop goroutines)", grew, n)
-		}
-		if fd := openFDCount(t); fd > 0 && baseFD > 0 && fd-baseFD > 2 {
-			t.Errorf("open FDs grew by %d after %d closed agentSigners calls; want ~0 (leaked ssh-agent socket FDs)", fd-baseFD, n)
-		}
-	})
-
-	// (3) Sanity check on the methodology: keep the conns OPEN (the pre-fix shape,
-	// where the caller had no closer to call) and confirm goroutines DO grow. If
-	// this did not grow, the no-growth assertion above would prove nothing.
-	t.Run("leaked_conn_grows_goroutines", func(t *testing.T) {
-		settleGoroutines()
-		baseGo := runtime.NumGoroutine()
-
-		conns := make([]io.Closer, 0, n)
-		for i := 0; i < n; i++ {
-			signers, conn := agentSigners()
-			if len(signers) == 0 || conn == nil {
-				t.Fatalf("call %d: expected signers + closer from the test agent", i)
-			}
-			conns = append(conns, conn) // deliberately do NOT close yet
-		}
-
-		if grew := runtime.NumGoroutine() - baseGo; grew < n/2 {
-			t.Errorf("goroutines grew by only %d with %d open agent conns; expected a leaked readLoop per open conn — the leak-detection methodology is not working", grew, n)
-		}
-
-		// Clean up: close them so the leaked goroutines exit before the next test.
-		for _, c := range conns {
-			_ = c.Close()
-		}
-		settleGoroutines()
-	})
+	signers, closer := agentSigners()
+	if len(signers) == 0 {
+		t.Fatal("agentSigners returned no signers; the stub agent holds one key")
+	}
+	if closer == nil {
+		t.Fatal("agentSigners returned signers but a nil closer — the caller cannot reclaim the agent conn (the #1684 leak)")
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("closing the returned agent conn: %v", err)
+	}
+	// Deterministic: the stub's handler returns only when its read errors, i.e.
+	// when the client end is closed. If Close() had not closed the real conn, this
+	// blocks until the timeout and fails.
+	stub.waitClosed(t)
 }
 
-// TestAgentSignersEmptyAgentNoLeak covers the no-usable-signers path: an agent
+// TestAgentSignersClosesConnWhenNoKeys covers the no-usable-signers path: an agent
 // that holds no keys. agentSigners() opens the probe connection, finds nothing,
-// and must close that connection itself (returning a nil closer) — otherwise an
+// and must close that connection ITSELF (returning a nil closer) — otherwise an
 // empty or wedged agent socket leaks a goroutine + FD on every call just the same.
-func TestAgentSignersEmptyAgentNoLeak(t *testing.T) {
-	sock := startTestSSHAgentEmpty(t)
-	t.Setenv("SSH_AUTH_SOCK", sock)
+// This is the direct red-on-pre-fix / green-on-fix assertion: the old code left
+// this conn open, so waitClosed would block; the fix closes it, so waitClosed
+// returns promptly.
+func TestAgentSignersClosesConnWhenNoKeys(t *testing.T) {
+	stub := startStubAgent(t, agent.NewKeyring())
+	t.Setenv("SSH_AUTH_SOCK", stub.sock)
 
-	settleGoroutines()
-	baseGo := runtime.NumGoroutine()
-
-	const n = 20
-	for i := 0; i < n; i++ {
-		signers, conn := agentSigners()
-		if len(signers) != 0 {
-			t.Fatalf("call %d: empty agent returned %d signers, want 0", i, len(signers))
-		}
-		if conn != nil {
-			t.Fatalf("call %d: empty agent returned a non-nil closer; agentSigners must close the probe conn itself when there are no signers", i)
-		}
+	signers, closer := agentSigners()
+	if len(signers) != 0 {
+		t.Fatalf("empty agent returned %d signers, want 0", len(signers))
 	}
+	if closer != nil {
+		t.Fatal("empty agent returned a non-nil closer; agentSigners must close the probe conn itself when there are no signers")
+	}
+	// We closed nothing — agentSigners itself must have closed the probe conn.
+	stub.waitClosed(t)
+}
 
-	settleGoroutines()
-	if grew := runtime.NumGoroutine() - baseGo; grew > 2 {
-		t.Errorf("goroutines grew by %d after %d calls against an empty agent; want ~0 (probe conn not closed)", grew, n)
+// TestAgentSignersNoSocket covers the trivial no-agent path: with SSH_AUTH_SOCK
+// unset there is nothing to dial, so nothing is opened and nothing can leak.
+func TestAgentSignersNoSocket(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	if signers, closer := agentSigners(); signers != nil || closer != nil {
+		t.Fatalf("agentSigners with no SSH_AUTH_SOCK = (%v, %v), want (nil, nil)", signers, closer)
 	}
 }
 
-// startTestSSHAgent serves an in-process ssh-agent holding a single ed25519 key
-// over a Unix socket and returns its path. The listener + accept loop are torn
-// down on test cleanup.
-func startTestSSHAgent(t *testing.T) string {
+// stubAgent is an in-process ssh-agent served over a Unix socket. Each served
+// connection sends on connClosed the moment its handler returns — ServeAgent
+// returns when the connection read errors, which happens when the client end is
+// closed — giving tests a deterministic "the agent conn was closed" signal.
+type stubAgent struct {
+	sock       string
+	connClosed chan struct{}
+}
+
+// waitClosed blocks until a served connection's client end is closed, or fails
+// the test after a generous timeout (only reached if the conn is genuinely never
+// closed — the leak).
+func (s *stubAgent) waitClosed(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.connClosed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ssh-agent conn was never closed — leaked FD + readLoop goroutine (#1684)")
+	}
+}
+
+// keyringWithKey returns an in-memory agent.Agent holding a single ed25519 key.
+func keyringWithKey(t *testing.T) agent.Agent {
 	t.Helper()
 	keyring := agent.NewKeyring()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -137,22 +117,18 @@ func startTestSSHAgent(t *testing.T) string {
 		t.Fatalf("generate ed25519 key: %v", err)
 	}
 	if err := keyring.Add(agent.AddedKey{PrivateKey: priv}); err != nil {
-		t.Fatalf("add key to test agent: %v", err)
+		t.Fatalf("add key to stub agent: %v", err)
 	}
-	return serveTestSSHAgent(t, keyring)
+	return keyring
 }
 
-// startTestSSHAgentEmpty serves an in-process ssh-agent with no keys.
-func startTestSSHAgentEmpty(t *testing.T) string {
+// startStubAgent serves keyring over a Unix socket and returns its handle. It
+// SKIPS (does not fail) the test where Unix sockets are unavailable or the socket
+// path would exceed the platform's sun_path limit — the socket path is kept short
+// (a minimal temp dir + a one-char name) to stay well under it.
+func startStubAgent(t *testing.T, keyring agent.Agent) *stubAgent {
 	t.Helper()
-	return serveTestSSHAgent(t, agent.NewKeyring())
-}
-
-func serveTestSSHAgent(t *testing.T, keyring agent.Agent) string {
-	t.Helper()
-	// Keep the socket path short — Unix socket paths are capped (~108 bytes on
-	// Linux) and t.TempDir() can be long, so use a compact temp dir name.
-	dir, err := os.MkdirTemp("", "af-agent")
+	dir, err := os.MkdirTemp("", "afa")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}
@@ -161,40 +137,26 @@ func serveTestSSHAgent(t *testing.T, keyring agent.Agent) string {
 
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
-		t.Fatalf("listen on agent socket: %v", err)
+		t.Skipf("unix-socket ssh-agent unavailable here (%v); skipping ssh-agent leak test", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
+	s := &stubAgent{sock: sock, connClosed: make(chan struct{}, 64)}
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return // listener closed on cleanup
 			}
-			go func() { _ = agent.ServeAgent(keyring, conn) }()
+			go func(c net.Conn) {
+				_ = agent.ServeAgent(keyring, c)
+				_ = c.Close()
+				select {
+				case s.connClosed <- struct{}{}:
+				default:
+				}
+			}(conn)
 		}
 	}()
-	return sock
-}
-
-// settleGoroutines gives asynchronously-exiting goroutines (agent readLoops that
-// unblock when a conn closes) a moment to actually finish before the count is
-// sampled, so the assertions do not race the teardown.
-func settleGoroutines() {
-	for i := 0; i < 30; i++ {
-		runtime.GC()
-		time.Sleep(15 * time.Millisecond)
-	}
-}
-
-// openFDCount returns the number of open file descriptors for this process on
-// Linux (via /proc/self/fd), or 0 where that is unavailable — callers treat 0 as
-// "FD counting not supported" and skip the FD assertion.
-func openFDCount(t *testing.T) int {
-	t.Helper()
-	entries, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
-		return 0
-	}
-	return len(entries)
+	return s
 }
