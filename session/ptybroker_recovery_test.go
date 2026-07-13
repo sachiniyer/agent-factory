@@ -1,79 +1,111 @@
 package session
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
 
-// TestPTYBrokerResetCaptureRestartsAfterRecovery is the #1682 regression: after a
-// running session's tmux dies and the daemon recovers it (respawn → Restore →
-// ConfirmLive), the PTY broker's stale capture must be reset so a NEW subscriber
-// gets live output from the re-spawned pane — instead of attaching to a broker that
-// is still `capturing` over a readLoop parked forever on the dead pane's FIFO.
+// mustRepaintContains blocks for the next event and asserts it is a PTYRepaint whose
+// bytes contain want (the recovered screen re-seed).
+func mustRepaintContains(t *testing.T, sub PTYSubscription, want string) {
+	t.Helper()
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NextEvent (want repaint %q): %v", want, err)
+	}
+	if ev.Kind != PTYRepaint || !strings.Contains(string(ev.Data), want) {
+		t.Fatalf("event = %+v, want PTYRepaint containing %q", ev, want)
+	}
+}
+
+// TestPTYBrokerRecoveryResumesExistingSubscriber is the #1682 residual (T-Rex
+// reproduced): a subscriber that was ALREADY connected when tmux died must resume
+// seeing output on its own after recovery — repaint the recovered screen and stream
+// live bytes — WITHOUT a second Subscribe. resetCapture (the recovery hook) stops the
+// stale capture, then — because a subscriber is still attached — restarts the capture
+// against the re-spawned pane and re-seeds the subscriber.
 //
-// The test drives the broker seam directly (reproducing a real tmux death in a unit
-// test is impractical): a subscriber brings the capture up (readLoop parks on the
-// fake pipe, exactly as the real readLoop parks on the O_RDWR FIFO), then the test
-// asserts the pre-fix defect and the post-fix recovery around resetCapture().
-func TestPTYBrokerResetCaptureRestartsAfterRecovery(t *testing.T) {
-	ch := &fakeClientlessChannel{}
+// Fail-before/pass-after: a stop-only resetCapture (the first-cut fix) would leave the
+// already-attached subscriber with capturing=false and no restart, so it hangs until
+// an unrelated later Subscribe brings the capture back up — exactly the residual. The
+// asserts below (fresh StartCapture #2 driven by the reset itself, repaint of the
+// recovered screen, then live output) all fail on that path.
+func TestPTYBrokerRecoveryResumesExistingSubscriber(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
 	br := newPTYBroker(ch)
 
-	// A subscriber brings the "gen-1" capture up: StartCapture #1, capturing=true, a
-	// readLoop parked on the pipe reader (the fake's analogue of the real readLoop
-	// parked on the O_RDWR FIFO that never sees EOF when pipe-pane's writer dies).
+	// A connects before tmux dies: StartCapture #1, initial repaint of the pre-death
+	// screen, then a live byte. Consume both so the ring/cursor are at the live tail.
 	a, err := br.subscribe(0)
 	if err != nil {
 		t.Fatalf("subscribe A: %v", err)
 	}
-	_ = a
+	mustRepaintContains(t, a, "SCREEN-BEFORE-DEATH")
+	ch.emit(t, []byte("pre-death-output"))
+	mustData(t, a, "pre-death-output")
 	if ch.starts != 1 {
-		t.Fatalf("StartCapture calls = %d, want 1 after first subscribe", ch.starts)
+		t.Fatalf("StartCapture calls = %d, want 1 before recovery", ch.starts)
 	}
 
-	// --- Prove the bug on the pre-fix path -------------------------------------
-	// tmux has died; the daemon has re-spawned it. WITHOUT a capture reset the
-	// broker stays capturing=true, so a fresh subscribe short-circuits
-	// ensureCaptureStarted and NO new capture is bound to the recovered pane — the
-	// post-recovery subscriber is stranded on the dead gen-1 capture (ch.starts
-	// never advances past 1). This is the exact stale-broker defect #1682 reports.
-	b, err := br.subscribe(0)
-	if err != nil {
-		t.Fatalf("subscribe B (pre-reset): %v", err)
-	}
-	_ = b
-	if ch.starts != 1 {
-		t.Fatalf("pre-reset: StartCapture calls = %d, want 1 (no fresh capture on the recovered pane — the #1682 defect)", ch.starts)
-	}
+	// tmux dies and the daemon re-spawns it. The recovered pane shows a new screen.
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY")
+	ch.mu.Unlock()
 
-	// --- Recovery resets the stale capture -------------------------------------
+	// Recovery hook: reset the stale broker capture. Because A is still attached this
+	// must restart the capture AND re-seed A — with no second Subscribe.
 	br.resetCapture()
-	if ch.stops != 1 {
-		t.Fatalf("resetCapture: StopCapture calls = %d, want 1 (stale capture torn down + parked readLoop joined)", ch.stops)
-	}
-	br.mu.Lock()
-	capturing := br.capturing
-	br.mu.Unlock()
-	if capturing {
-		t.Fatal("resetCapture: broker still capturing, want the latch cleared so the next subscribe restarts capture")
-	}
 
-	// --- Prove the fix: a NEW subscriber after recovery streams live output -----
-	c, err := br.subscribe(0)
-	if err != nil {
-		t.Fatalf("subscribe C (post-reset): %v", err)
+	if ch.stops != 1 {
+		t.Fatalf("StopCapture calls = %d, want 1 (stale capture torn down + parked readLoop joined)", ch.stops)
 	}
 	if ch.starts != 2 {
-		t.Fatalf("post-reset: StartCapture calls = %d, want 2 (a FRESH capture against the recovered pane)", ch.starts)
+		t.Fatalf("StartCapture calls = %d, want 2 (capture restarted by the reset itself, NOT waiting for a new Subscribe — the #1682 residual)", ch.starts)
 	}
-	// gen-2 output from the re-spawned pane reaches the post-recovery subscriber.
-	ch.emit(t, []byte("LIVE-AFTER-RECOVERY"))
-	mustData(t, c, "LIVE-AFTER-RECOVERY")
+
+	// A resumes on its own: a repaint of the RECOVERED screen, then live output from
+	// the re-spawned pane — without ever issuing a second Subscribe.
+	mustRepaintContains(t, a, "SCREEN-AFTER-RECOVERY")
+	ch.emit(t, []byte("post-recovery-output"))
+	mustData(t, a, "post-recovery-output")
+}
+
+// TestPTYBrokerRecoveryNewSubscriberAlsoStreams pins that a NEW subscriber connecting
+// after recovery streams too: the reset restarted the capture, so the fresh subscribe
+// short-circuits (no third StartCapture) and rides the live capture.
+func TestPTYBrokerRecoveryNewSubscriberAlsoStreams(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("S")}
+	br := newPTYBroker(ch)
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "S")
+
+	br.resetCapture() // A still attached → restart (StartCapture #2)
+	if ch.starts != 2 {
+		t.Fatalf("StartCapture after reset = %d, want 2", ch.starts)
+	}
+
+	mustRepaintContains(t, a, "S") // A's recovery re-seed repaint
+
+	b, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe B after recovery: %v", err)
+	}
+	if ch.starts != 2 {
+		t.Fatalf("StartCapture after new subscribe = %d, want 2 (capture already live, no restart)", ch.starts)
+	}
+	mustRepaintContains(t, b, "S") // B's initial-subscribe repaint
+	ch.emit(t, []byte("live-for-both"))
+	mustData(t, a, "live-for-both")
+	mustData(t, b, "live-for-both")
 }
 
 // TestPTYBrokerResetCaptureNoopWhenIdle pins that a reset is harmless when no
-// capture is running (a session nobody was streaming when it recovered): no
-// StopCapture is issued and the lazy lifecycle is untouched.
+// subscriber was attached at recovery time (a session nobody was streaming): no
+// capture is started or stopped, and the lazy lifecycle is untouched.
 func TestPTYBrokerResetCaptureNoopWhenIdle(t *testing.T) {
 	ch := &fakeClientlessChannel{}
 	br := newPTYBroker(ch)
@@ -91,19 +123,24 @@ func TestPTYBrokerResetCaptureNoopWhenIdle(t *testing.T) {
 }
 
 // TestLocalAgentServerResetBrokerCaptures exercises the recovery reset at the
-// agentserver seam: resetBrokerCaptures snapshots the tab-broker map and resets
-// each broker's stale capture (#1682), and is a no-op once Kill has latched closed.
+// agentserver seam: resetBrokerCaptures snapshots the tab-broker map and recovers
+// each broker's capture (#1682), restarting + re-seeding brokers with live
+// subscribers, and is a no-op once Kill has latched closed.
 func TestLocalAgentServerResetBrokerCaptures(t *testing.T) {
-	ch0 := &fakeClientlessChannel{}
-	ch1 := &fakeClientlessChannel{}
+	ch0 := &fakeClientlessChannel{snapshot: []byte("tab0-screen")}
+	ch1 := &fakeClientlessChannel{snapshot: []byte("tab1-screen")}
 	br0 := newPTYBroker(ch0)
 	br1 := newPTYBroker(ch1)
-	if _, err := br0.subscribe(0); err != nil {
+	a0, err := br0.subscribe(0)
+	if err != nil {
 		t.Fatalf("subscribe tab 0: %v", err)
 	}
-	if _, err := br1.subscribe(0); err != nil {
+	mustRepaintContains(t, a0, "tab0-screen")
+	a1, err := br1.subscribe(0)
+	if err != nil {
 		t.Fatalf("subscribe tab 1: %v", err)
 	}
+	mustRepaintContains(t, a1, "tab1-screen")
 
 	s := &localAgentServer{brokers: map[int]*ptyBroker{0: br0, 1: br1}}
 	s.resetBrokerCaptures()
@@ -112,43 +149,36 @@ func TestLocalAgentServerResetBrokerCaptures(t *testing.T) {
 		if ch.stops != 1 {
 			t.Fatalf("%s: StopCapture calls = %d, want 1 (stale capture reset)", name, ch.stops)
 		}
-	}
-	for name, br := range map[string]*ptyBroker{"tab0": br0, "tab1": br1} {
-		br.mu.Lock()
-		capturing := br.capturing
-		br.mu.Unlock()
-		if capturing {
-			t.Fatalf("%s: still capturing after resetBrokerCaptures", name)
+		if ch.starts != 2 {
+			t.Fatalf("%s: StartCapture calls = %d, want 2 (capture restarted for the attached subscriber)", name, ch.starts)
 		}
 	}
 
-	// A fresh subscribe on each tab restarts capture against the recovered pane.
-	c0, err := br0.subscribe(0)
-	if err != nil {
-		t.Fatalf("re-subscribe tab 0: %v", err)
-	}
-	if ch0.starts != 2 {
-		t.Fatalf("tab0 StartCapture calls = %d, want 2 (restarted)", ch0.starts)
-	}
+	// Each still-attached subscriber resumed on its own: a recovered-screen repaint,
+	// then live output — no new Subscribe.
+	mustRepaintContains(t, a0, "tab0-screen")
 	ch0.emit(t, []byte("tab0-live"))
-	mustData(t, c0, "tab0-live")
+	mustData(t, a0, "tab0-live")
+	mustRepaintContains(t, a1, "tab1-screen")
+	ch1.emit(t, []byte("tab1-live"))
+	mustData(t, a1, "tab1-live")
 
 	// Once closed (Kill), reset is a no-op — it must not resurrect capture on a
 	// session being torn down.
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
-	prevStops := ch1.stops
+	prevStarts, prevStops := ch1.starts, ch1.stops
 	s.resetBrokerCaptures()
-	if ch1.stops != prevStops {
-		t.Fatalf("resetBrokerCaptures after close touched a broker: stops=%d, want %d", ch1.stops, prevStops)
+	if ch1.starts != prevStarts || ch1.stops != prevStops {
+		t.Fatalf("resetBrokerCaptures after close touched a broker: starts=%d stops=%d, want %d/%d", ch1.starts, ch1.stops, prevStarts, prevStops)
 	}
 }
 
 // TestPTYBrokerResetCaptureJoinsParkedReadLoop asserts resetCapture does not return
 // until the stale readLoop has actually exited (no goroutine leak): the stopCapture
-// closure blocks on the readLoop's done channel, so once resetCapture returns the
-// old capture reader is fully drained and the next capture starts clean.
+// closure blocks on the readLoop's done channel, so once resetCapture returns the old
+// capture reader is fully drained before the fresh capture starts.
 func TestPTYBrokerResetCaptureJoinsParkedReadLoop(t *testing.T) {
 	ch := &fakeClientlessChannel{}
 	br := newPTYBroker(ch)

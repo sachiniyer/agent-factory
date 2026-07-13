@@ -247,7 +247,15 @@ func buildRepaint(snap PaneSnapshot) []byte {
 func (b *ptyBroker) ensureCaptureStarted() error {
 	b.captureMu.Lock()
 	defer b.captureMu.Unlock()
+	return b.ensureCaptureStartedLocked()
+}
 
+// ensureCaptureStartedLocked is ensureCaptureStarted's body with captureMu already
+// held, so a caller mid-transition (resetCapture, which stops the stale capture and
+// restarts a fresh one atomically under one captureMu hold) can reuse the bring-up
+// without dropping the serialization. Callers that are not already holding captureMu
+// must use ensureCaptureStarted.
+func (b *ptyBroker) ensureCaptureStartedLocked() error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -305,35 +313,90 @@ func (b *ptyBroker) maybeStopCapture() {
 	}
 }
 
-// resetCapture stops any in-flight clientless capture WITHOUT closing the broker
-// or dropping its subscribers, so the next Subscribe (via ensureCaptureStarted)
-// brings a FRESH capture up against a re-spawned tmux pane (#1682). On session
-// recovery the previous tmux — and with it the `pipe-pane` writer feeding this
-// broker's FIFO — died, but the broker's readLoop is parked on the O_RDWR FIFO
-// (which never sees EOF) with `capturing` still true, so ensureCaptureStarted
-// would short-circuit and no bytes would ever flow to a post-recovery subscriber.
-// Clearing the latch here and running the stale stopCapture unblocks and JOINS the
-// parked readLoop (no goroutine leak) and re-arms the lazy lifecycle. A no-op when
-// no capture is running or the broker is already closed. Serialized against every
-// other capture transition by captureMu (captureMu-then-mu ordering) so it cannot
-// race a concurrent ensureCaptureStarted.
+// resetCapture recovers the broker onto a re-spawned tmux pane WITHOUT closing it or
+// dropping its subscribers (#1682). On session recovery the previous tmux — and with
+// it the `pipe-pane` writer feeding this broker's FIFO — died, but the broker's
+// readLoop is parked on the O_RDWR FIFO (which never sees EOF) with `capturing` still
+// true, so the cached broker keeps short-circuiting ensureCaptureStarted and no bytes
+// ever flow again. resetCapture, holding captureMu across the whole transition so no
+// concurrent bring-up/teardown can interleave (#1661):
+//
+//  1. Stops the stale capture — unblocking and JOINING the parked readLoop (no
+//     goroutine leak) — and clears the capturing latch.
+//  2. If subscribers are STILL attached (a web/TUI client that stayed connected
+//     across the respawn — the common case), restarts the capture against the fresh
+//     pane and re-seeds each subscriber with a repaint of the recovered screen, so it
+//     resumes output on its OWN rather than hanging until some unrelated later
+//     Subscribe happens to bring the capture back up (the #1682 residual T-Rex hit).
+//     With no subscribers left, the lazy lifecycle is simply re-armed for the next
+//     Subscribe.
+//
+// The subscriber count is re-read AFTER the stop (still under captureMu) so a
+// subscriber that left during the blocking teardown is not resurrected onto a capture
+// nobody wants. A no-op when the broker is already closed.
 func (b *ptyBroker) resetCapture() {
 	b.captureMu.Lock()
 	defer b.captureMu.Unlock()
 
 	b.mu.Lock()
-	if b.closed || !b.capturing {
+	if b.closed {
 		b.mu.Unlock()
 		return
 	}
-	stop := b.stopCapture
-	b.capturing = false
-	b.stopCapture = nil
+	var stop func()
+	if b.capturing {
+		stop = b.stopCapture
+		b.capturing = false
+		b.stopCapture = nil
+	}
 	b.mu.Unlock()
 
 	if stop != nil {
 		stop()
 	}
+
+	// Re-read the subscriber count AFTER the teardown drained: nobody left → just the
+	// lazy re-arm, the next Subscribe restarts a fresh capture.
+	b.mu.Lock()
+	resume := !b.closed && len(b.subs) != 0
+	b.mu.Unlock()
+	if !resume {
+		return
+	}
+
+	// A subscriber stayed attached across the respawn. Restart the capture against the
+	// re-spawned pane and re-seed every current subscriber so it repaints the recovered
+	// screen and resumes live output without a new Subscribe.
+	if err := b.ensureCaptureStartedLocked(); err != nil {
+		log.WarningLog.Printf("pty broker: restart capture after recovery: %v", err)
+		return
+	}
+	b.reseedSubscribersLocked()
+}
+
+// reseedSubscribersLocked gives every currently-registered subscriber a fresh initial
+// repaint of the recovered pane's screen and wakes it, so a client that stayed
+// attached across a tmux respawn repaints the current screen and resumes live output
+// on its own (#1682). It mirrors subscribe()'s initial-repaint injection but fans the
+// one snapshot to ALL subscribers. Best-effort: a Snapshot error (or an empty screen)
+// degrades to just waking the subscribers — the restarted capture's next live byte
+// still reaches them — rather than failing the recovery. Caller holds captureMu; the
+// snapshot exec runs without b.mu held, matching subscribe().
+func (b *ptyBroker) reseedSubscribersLocked() {
+	var rp []byte
+	if snap, err := b.ch.Snapshot(); err != nil {
+		log.WarningLog.Printf("pty broker: snapshot for recovery re-seed: %v", err)
+	} else if len(snap.Screen) > 0 {
+		rp = buildRepaint(snap)
+	}
+	b.mu.Lock()
+	if len(rp) > 0 {
+		for _, s := range b.subs {
+			s.pendingRepaint = rp
+		}
+	}
+	b.wakeAllLocked()
+	b.mu.Unlock()
 }
 
 // readLoop copies the clientless capture reader into the ring until it errors or
