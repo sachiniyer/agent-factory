@@ -92,7 +92,7 @@ af daemon install      # register autostart at login
 af daemon uninstall    # remove it (the daemon still starts on demand)
 ```
 
-- Task edits made through `af tasks` go through the daemon: writes persist and the daemon re-arms its schedules atomically in one RPC. TUI edits still write `tasks.json` directly and poke `ReloadTasks`; that path remains correct (cross-process `WithFileLock`) and is a tracked follow-up to migrate it too.
+- Task edits made through `af tasks` or the TUI go through the daemon: writes persist and the daemon re-arms its schedules atomically in one RPC. The daemon is the sole task writer; the TUI sends field-level patches (`UpdateTask(id, patch)`) so a single-field edit cannot clobber a concurrent edit another client made to a different field (#1700).
 
 ## Migration notes
 
