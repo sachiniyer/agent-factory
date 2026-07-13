@@ -25,6 +25,19 @@ const archiveSnapshotMessage = "af: pre-archive snapshot (uncommitted work)"
 // or failing pre-commit hook never blocks an archive. A clean tree skips the
 // commit entirely.
 //
+// The snapshot commit lands on whatever the worktree's HEAD currently is, and we
+// push that HEAD to the session branch on origin (HEAD:refs/heads/<branch>) — NOT
+// a bare `push origin <branch>`. This closes #1721: if an agent switched branches
+// inside the sandbox (git checkout -b …) or left HEAD detached, `git commit`
+// applies to the current HEAD, so pushing the stored g.branchName would push a
+// stale tip that misses the just-committed work and report success — silent data
+// loss once the sandbox is reaped. Pushing HEAD makes the actual working-tree
+// state durable on the session branch regardless of which branch/HEAD the
+// worktree is on. Restore re-clones this branch, so it recovers that state. The
+// push is a plain (non-force) push, so a genuinely divergent HEAD is rejected by
+// origin and surfaces as an error here rather than silently overwriting or losing
+// history.
+//
 // The push runs under the network timeout (a stalled or auth-prompting origin
 // must not hang the archive forever). Credentials are the sandbox image's/host's
 // responsibility — the same `origin` the sandbox cloned from must be pushable
@@ -54,9 +67,15 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 		}
 	}
 
-	// Push the branch to origin under the network timeout. A "src refspec ..."
-	// or auth failure surfaces here with git's stderr folded in.
-	if out, err := g.runGitNetworkCommand(g.worktreePath, "push", "origin", branch); err != nil {
+	// Push the CURRENT HEAD (which now carries the snapshot commit, if any) to the
+	// session branch on origin, under the network timeout. Pushing HEAD rather than
+	// the stored branch name means the actual working-tree state is what becomes
+	// durable even if the agent left HEAD on a different branch or detached (#1721);
+	// a non-fast-forward divergence is rejected by origin and surfaces here rather
+	// than silently dropping the work. A "src refspec ..." or auth failure surfaces
+	// here too, with git's stderr folded in.
+	refspec := "HEAD:refs/heads/" + branch
+	if out, err := g.runGitNetworkCommand(g.worktreePath, "push", "origin", refspec); err != nil {
 		return "", fmt.Errorf("failed to push branch %q to origin (archive stores durable state on GitHub): %s: %w",
 			branch, strings.TrimSpace(out), err)
 	}

@@ -115,6 +115,52 @@ func TestSnapshotAndPushBranch_CleanTreeJustPushes(t *testing.T) {
 	assert.Equal(t, tip, branchTip(t, bare, "refs/heads/root/clean"))
 }
 
+// TestSnapshotAndPushBranch_PreservesWorkWhenHeadOnOtherBranch is the #1721
+// regression: an agent switched branches inside the sandbox (git checkout -b …),
+// so the worktree HEAD is no longer on g.branchName. The snapshot commit lands on
+// the current HEAD; archive must still make that uncommitted work durable on the
+// session branch (by pushing HEAD, not the stale stored branch), or it is lost
+// when the sandbox is reaped.
+func TestSnapshotAndPushBranch_PreservesWorkWhenHeadOnOtherBranch(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/session")
+	wt := gw.GetWorktreePath()
+
+	// Agent switched to a different branch, then left uncommitted work.
+	runGit(t, wt, "checkout", "-b", "agent-scratch")
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "work.txt"), []byte("precious"), 0644))
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/session", got, "the pushed/returned branch is the session branch, not the scratch branch")
+
+	// Origin's session branch — the one restore re-clones — must carry the work.
+	pushed := runGitOut(t, bare, "ls-tree", "-r", "--name-only", "refs/heads/root/session")
+	assert.Contains(t, pushed, "work.txt",
+		"uncommitted work committed on the detoured HEAD must survive on the session branch")
+}
+
+// TestSnapshotAndPushBranch_PreservesWorkWhenHeadDetached is the #1721 regression
+// for a detached HEAD: the snapshot commit is created off any branch, and archive
+// must still push it onto the session branch so it survives sandbox teardown.
+func TestSnapshotAndPushBranch_PreservesWorkWhenHeadDetached(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/session")
+	wt := gw.GetWorktreePath()
+
+	// Detach HEAD, then leave uncommitted work.
+	runGit(t, wt, "checkout", "--detach", "HEAD")
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "work.txt"), []byte("precious"), 0644))
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/session", got)
+
+	pushed := runGitOut(t, bare, "ls-tree", "-r", "--name-only", "refs/heads/root/session")
+	assert.Contains(t, pushed, "work.txt",
+		"uncommitted work committed on a detached HEAD must survive on the session branch")
+}
+
 // TestSnapshotAndPushBranch_RejectsExternalWorktree pins that an in-place/external
 // worktree (the user's own tree) is never pushed by the archive primitive.
 func TestSnapshotAndPushBranch_RejectsExternalWorktree(t *testing.T) {
