@@ -348,6 +348,9 @@ func TestDefaultConfig(t *testing.T) {
 		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
 		assert.False(t, cfg.AutoYes)
 		assert.True(t, cfg.AutoUpdate)
+		// require_token defaults to true — a network daemon is never silently
+		// unauthenticated by omission (#1696).
+		assert.True(t, cfg.RequireToken)
 		assert.Equal(t, 1000, cfg.DaemonPollInterval)
 		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
 		assert.Equal(t, DefaultThemeConfig(), cfg.Theme)
@@ -912,6 +915,7 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(data), `update_channel = 'stable'`)
 		assert.Contains(t, string(data), `auto_update = true`)
+		assert.Contains(t, string(data), `require_token = true`)
 		assert.Contains(t, string(data), `worktree_root = 'sibling'`)
 		assert.Contains(t, string(data), `[theme]`)
 		assert.Contains(t, string(data), `accent = '#8CD0D3'`)
@@ -1350,6 +1354,37 @@ auto_yes = false
 		assert.Equal(t, "claude", agent.Program)
 		assert.False(t, agent.AutoYesEnabled())
 	})
+}
+
+// TestRequireTokenLoadSemantics pins the default-true bool behavior for
+// require_token (#1696): an omitted key keeps the fail-safe default (token
+// required), and an explicit false disables it. This is the load-side guarantee
+// behind the daemon gate — a config that never mentions the key must never
+// silently disable auth.
+func TestRequireTokenLoadSemantics(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"absent ⇒ default true", "default_program = 'claude'\n", true},
+		{"explicit true", "require_token = true\n", true},
+		{"explicit false", "require_token = false\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			fastShell(t)
+			configDir, err := GetConfigDir()
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(configDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(configDir, TomlConfigFileName), []byte(tc.content), 0o644))
+
+			cfg, err := LoadConfig()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.RequireToken)
+		})
+	}
 }
 
 func TestSaveConfig(t *testing.T) {

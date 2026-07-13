@@ -20,6 +20,7 @@ import {
   fetchSnapshot,
   killSession,
   loadToken,
+  probeAuthRequired,
   probeToken,
   sendPrompt,
   storeToken,
@@ -35,7 +36,13 @@ import type { SessionData, WireEvent } from "./types.js";
 
 const store = new Store<AppState>({
   phase: "login",
-  connecting: false,
+  authRequired: true,
+  // Start in the connecting state: mount() immediately probes /v1/auth-info, and
+  // showing the paste form before that resolves would flash a token field a
+  // tokenless (loopback / require_token=false) daemon doesn't need (#1696). The
+  // login view renders a neutral placeholder while connecting; bootstrap clears
+  // this only when it lands on the real paste-token form.
+  connecting: true,
   loginError: null,
   sessions: [],
   selectedId: null,
@@ -47,6 +54,13 @@ const store = new Store<AppState>({
 // The credential and the push stream are process-local singletons: one token
 // drives the REST resync fetch, the events WS, and the PTY stream; one events
 // stream is live at a time (started on connect, stopped on disconnect).
+//
+// THREE-STATE, not truthy (#1696): `null` = logged out / not connected; a
+// non-empty string = a real bearer token; the EMPTY STRING = connected but the
+// daemon requires no token for this client (loopback, or require_token=false) —
+// a fully authorized connection. Every "am I connected?" guard MUST test
+// `token === null`, never `!token`, or a tokenless client's create/kill/archive/
+// send-prompt/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
 let stream: EventStream | null = null;
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
@@ -90,12 +104,40 @@ function mount(): void {
   // stray ESC byte into the PTY.
   document.addEventListener("keydown", onKeydown, true);
 
-  // Resume within the tab: sessionStorage keeps the token across a reload, so a
-  // returning tab re-probes it silently and skips the login form on success.
+  void bootstrap();
+}
+
+/** Decides the opening view (#1696): probe whether the daemon requires a token for
+ *  THIS client. If not (loopback, or require_token=false), connect straight through
+ *  with no credential. If it does, resume a token kept in sessionStorage across a
+ *  reload, else land on the paste-token login. A probe transport failure falls back
+ *  to the token login — never auto-connects on uncertainty. */
+async function bootstrap(): Promise<void> {
+  let required = true;
+  try {
+    required = await probeAuthRequired();
+  } catch {
+    // Can't reach the probe (daemon down / TLS not yet trusted): fail safe to the
+    // token login — the user can still paste a token and retry.
+    required = true;
+  }
+  if (!required) {
+    // Tokenless client (loopback / require_token=false): connect straight through
+    // with no credential. `connecting` stays true so the placeholder shows until
+    // connect() flips the phase to "app" — the paste form never flashes.
+    store.set({ authRequired: false });
+    void connect("");
+    return;
+  }
   const existing = loadToken();
   if (existing) {
+    // Resume a stored token silently — again, placeholder until connect() lands.
+    store.set({ authRequired: true });
     void connect(existing);
+    return;
   }
+  // Token required and none stored: reveal the paste-token form.
+  store.set({ authRequired: true, connecting: false });
 }
 
 /** Reflects the current store state into the DOM: the login view, or the app shell
@@ -136,7 +178,11 @@ async function connect(candidate: string): Promise<void> {
     return;
   }
   token = candidate;
-  storeToken(candidate);
+  // Persist only a REAL token so a reload can resume it; the empty-token sentinel
+  // (no-auth client, #1696) is never worth storing — bootstrap re-probes on reload.
+  if (candidate !== "") {
+    storeToken(candidate);
+  }
   store.set({
     phase: "app",
     connecting: false,
@@ -243,7 +289,8 @@ function newSession(): void {
     newSessionModal(projects, {
       onSubmit: (values: CreateSessionInput) => {
         const tok = token;
-        if (!tok || !modal) {
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
           return;
         }
         const m = modal;
@@ -283,7 +330,8 @@ function openSendPrompt(): void {
     promptModal(sel.title, {
       onSubmit: (text: string) => {
         const tok = token;
-        if (!tok || !modal) {
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
           return;
         }
         const m = modal;
@@ -312,7 +360,8 @@ function openConfirm(action: "kill" | "archive"): void {
       sessionTitle: sel.title,
       onConfirm: () => {
         const tok = token;
-        if (!tok || !modal) {
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
           return;
         }
         const m = modal;
@@ -353,7 +402,9 @@ function syncTerminal(state: AppState): void {
   disposeTerminal();
   terminalId = selId; // set before constructing so the onStatus re-render is a no-op
   const tok = token;
-  if (selId && tok) {
+  // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696),
+  // so a loopback client still attaches its live terminal.
+  if (selId && tok !== null) {
     terminal = new AttachTerminal(termHost, selId, tok, {
       onStatus: (s: TerminalStatus) => store.set({ termStatus: s }),
       // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus, so a
@@ -421,7 +472,8 @@ function requestResync(): void {
   resyncTimer = window.setTimeout(() => {
     resyncTimer = null;
     const tok = token;
-    if (!tok) {
+    // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+    if (tok === null) {
       return;
     }
     void fetchSnapshot(tok)

@@ -36,16 +36,35 @@ type tcpListenerInfo struct {
 	SelfSigned  bool   // true for the generated self-signed default, false for a user cert
 }
 
+// tokenGatePolicy is how a TCP listener's bearer-token gate treats peers. Its
+// zero value is the strict, fail-safe posture — token mandatory for every peer,
+// no exemptions — so a caller opts INTO relaxations explicitly (#1696):
+//
+//   - the daemon's own listen_addr web listener passes {loopbackExempt: true}
+//     (and tokenDisabled from require_token=false) so a same-machine browser
+//     needs no token while network peers still do;
+//   - the agent-server passes the zero value, keeping its token mandatory for
+//     every peer (it exists to be reached over the network — the token must
+//     never be optional there).
+type tokenGatePolicy struct {
+	// tokenDisabled drops the token for ALL peers (require_token=false).
+	tokenDisabled bool
+	// loopbackExempt lets 127.0.0.1/::1 peers skip the token.
+	loopbackExempt bool
+}
+
 // startTCPListener binds the TLS TCP listener on cfg.ListenAddr and serves mux
 // wrapped in a token-enforcing gate + the CORS allow-list. It returns a cleanup
 // function that shuts the server down and the banner payload the caller logs.
+// policy selects how the gate treats peers (loopback exemption / token disable);
+// its zero value is the strict "token mandatory for everyone" posture.
 //
 // It resolves the TLS material (PR1: self-signed default, or the user's
 // tls_cert/tls_key), ensures the bearer token exists before opening the port
 // (so an operator enabling the listener always has a credential to present),
 // and reads that token FRESH per auth event through the gate so `af token
 // rotate` takes effect for new connections without a daemon restart.
-func startTCPListener(mux http.Handler, cfg *config.Config) (func() error, tcpListenerInfo, error) {
+func startTCPListener(mux http.Handler, cfg *config.Config, policy tokenGatePolicy) (func() error, tcpListenerInfo, error) {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return nil, tcpListenerInfo{}, err
@@ -74,9 +93,13 @@ func startTCPListener(mux http.Handler, cfg *config.Config) (func() error, tcpLi
 	if err != nil {
 		return nil, tcpListenerInfo{}, fmt.Errorf("ensure daemon token: %w", err)
 	}
-	gate := &authGate{expectedToken: func() (string, error) {
-		return LoadToken(tokenPath)
-	}}
+	gate := &authGate{
+		expectedToken: func() (string, error) {
+			return LoadToken(tokenPath)
+		},
+		tokenDisabled:  policy.tokenDisabled,
+		loopbackExempt: policy.loopbackExempt,
+	}
 
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},

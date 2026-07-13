@@ -56,14 +56,18 @@ export class ApiError extends Error {
  * whole client shares one error path.
  */
 export async function af<T>(method: string, body: unknown, token: string): Promise<T> {
+  // An empty token is the "this client needs none" sentinel (loopback, or
+  // require_token=false, #1696): send no Authorization header at all rather than a
+  // bogus "Bearer " — the daemon exempts the peer, so the header is simply absent.
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
   let resp: Response;
   try {
     resp = await fetch(`/v1/${method}`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
+      headers,
       body: JSON.stringify(body ?? {}),
     });
   } catch (e) {
@@ -111,6 +115,36 @@ export async function fetchSnapshot(token: string): Promise<SessionData[]> {
  */
 export function probeToken(token: string): Promise<SessionData[]> {
   return fetchSnapshot(token);
+}
+
+/**
+ * Asks the daemon whether THIS client must present a bearer token, via the
+ * unauthenticated `/v1/auth-info` probe (#1696). The daemon answers from the
+ * transport peer address and its policy: false when it exempts this client —
+ * a loopback browser, or a network client under require_token=false — so the SPA
+ * can skip the paste-token login and connect with no credential; true otherwise.
+ *
+ * Fails SAFE: a body missing the flag is treated as "token required", so a probe
+ * the daemon didn't answer as expected never silently drops the login. Throws
+ * ApiError on a transport failure so the caller can fall back to the token form.
+ */
+export async function probeAuthRequired(): Promise<boolean> {
+  let resp: Response;
+  try {
+    resp = await fetch("/v1/auth-info", { method: "GET" });
+  } catch (e) {
+    throw new ApiError(0, `cannot reach the daemon: ${(e as Error).message}`);
+  }
+  let env: Envelope<{ auth_required?: boolean }> | null = null;
+  try {
+    env = (await resp.json()) as Envelope<{ auth_required?: boolean }>;
+  } catch {
+    // Non-JSON body: fall through to the status check / safe default below.
+  }
+  if (!resp.ok) {
+    throw new ApiError(resp.status, env?.error ?? `${resp.status} ${resp.statusText}`);
+  }
+  return env?.data?.auth_required !== false;
 }
 
 // --- lifecycle mutations (#1592 Phase 5 PR5) ------------------------------

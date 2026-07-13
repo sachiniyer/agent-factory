@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -42,7 +43,11 @@ func TestTCPListener_TLS_TokenRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	cs := &controlServer{manager: m, scheduler: newTaskScheduler()}
-	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg)
+	// Strict policy: token mandatory for every peer, loopback NOT exempt. This is
+	// the agent-server posture; it lets a real loopback socket still exercise the
+	// token-enforcement path (the daemon's loopback-exempt policy is covered by
+	// TestTCPListener_LoopbackExempt and the handler-level matrix in httpauth_test).
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{})
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 
@@ -144,7 +149,10 @@ func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
 	require.NoError(t, err)
 
 	cs := &controlServer{manager: m, scheduler: newTaskScheduler()}
-	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg)
+	// Strict policy (loopback NOT exempt) so the "/v1 stays token-gated" assertions
+	// below still hold over a real loopback socket — this test's subject is the
+	// UNAUTHENTICATED static shell, which is policy-independent.
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{})
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 
@@ -184,6 +192,55 @@ func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode, "a valid token still reaches the API")
+}
+
+// TestTCPListener_LoopbackExempt is the #1696 end-to-end payoff: the daemon's
+// web policy (loopback exempt) over a REAL TLS TCP socket on 127.0.0.1 serves the
+// /v1 data plane with NO token, because the peer is loopback. It proves the
+// exemption holds through the full TLS + webShellHandler + gate stack, not just
+// the handler unit test.
+func TestTCPListener_LoopbackExempt(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+
+	cs := &controlServer{manager: m, scheduler: newTaskScheduler()}
+	// The daemon's real posture: loopback exempt, token still required for the
+	// (here unreachable) network peers.
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{loopbackExempt: true})
+	require.NoError(t, err)
+	defer func() { _ = closeTCP() }()
+
+	dir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(t, dir+"/"+daemonTLSCertFileName)},
+	}
+	baseURL := "https://" + info.Addr
+
+	// --- /v1 data plane over loopback with NO token → 200 (exempt) ----------
+	resp, err := client.Get(baseURL + "/v1/health")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "loopback peer must reach the API with no token")
+
+	// --- Unauthenticated auth-info probe → auth_required=false for loopback --
+	resp, err = client.Get(baseURL + "/v1/auth-info")
+	require.NoError(t, err)
+	var env struct {
+		Data struct {
+			AuthRequired bool `json:"auth_required"`
+		} `json:"data"`
+		Error *string `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&env))
+	_ = resp.Body.Close()
+	require.Nil(t, env.Error)
+	require.False(t, env.Data.AuthRequired, "a loopback client must be told it needs no token")
 }
 
 // TestStartHTTPServer_NoTCPByDefault pins the off-by-default guarantee: with an

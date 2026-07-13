@@ -88,7 +88,7 @@ func TestConfigEntriesCoverAllKeys(t *testing.T) {
 		got[e.Key] = true
 	}
 	want := []string{
-		"default_program", "program_overrides", "auto_yes", "auto_update", "daemon_poll_interval",
+		"default_program", "program_overrides", "auto_yes", "auto_update", "require_token", "daemon_poll_interval",
 		"log_max_size_mb", "log_max_backups", "branch_prefix", "detach_keys",
 		"worktree_root", "update_channel", "theme", "root_agents", "limit_patterns", "keys",
 	}
