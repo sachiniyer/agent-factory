@@ -12,10 +12,7 @@ import (
 // daemon-backed source instead.
 func previewFromInstance(instance *session.Instance, tab int, full bool) (string, error) {
 	if tab == 0 {
-		if full {
-			return instance.PreviewFullHistory()
-		}
-		return instance.Preview()
+		return instance.AgentServer().Preview(tab, full)
 	}
 	if full {
 		return instance.PreviewTabFullHistory(tab)

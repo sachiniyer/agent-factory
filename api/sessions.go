@@ -744,7 +744,7 @@ var sessionsPreviewCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		content, err := instance.Preview()
+		content, err := instance.AgentServer().Preview(0, false)
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to get preview: %w", err))
 		}

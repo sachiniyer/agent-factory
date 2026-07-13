@@ -200,7 +200,7 @@ func WaitForReady(instance *session.Instance) error {
 			hooksDone, hookGrace = nil, nil
 			timeout = time.After(waitForReadyTimeout)
 		case <-timeout:
-			content, err := instance.Preview()
+			content, err := instance.AgentServer().Preview(0, false)
 			if err != nil {
 				// Mirror the ticker case: ErrSessionGone is a definitive,
 				// non-retryable death, so surface the actionable "session died"
@@ -222,7 +222,7 @@ func WaitForReady(instance *session.Instance) error {
 			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
 			return formatWaitForReadyTimeoutError(waitForReadyTimeout, content)
 		case <-ticker.C:
-			content, err := instance.Preview()
+			content, err := instance.AgentServer().Preview(0, false)
 			if err != nil {
 				// ErrSessionGone is a definitive, non-retryable failure: the
 				// tmux session no longer exists, so it can never become ready.

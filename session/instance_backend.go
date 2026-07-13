@@ -126,10 +126,6 @@ func (i *Instance) CloseAttachOnly() error {
 	return i.backend.CloseAttachOnly(i)
 }
 
-func (i *Instance) Preview() (string, error) {
-	return i.backend.Preview(i)
-}
-
 // CheckAndHandleTrustPrompt checks for and dismisses the trust prompt for supported programs.
 func (i *Instance) CheckAndHandleTrustPrompt() bool {
 	return i.backend.CheckAndHandleTrustPrompt(i)
@@ -146,17 +142,6 @@ func (i *Instance) Attach() (chan struct{}, error) {
 // closed when the user detaches.
 func (i *Instance) AttachTerminal(tabIdx int) (chan struct{}, error) {
 	return i.backend.AttachTerminal(i, tabIdx)
-}
-
-// SendPromptCommand sends a prompt using a more reliable command-based approach.
-// This is more reliable for headless/scheduled runs where the PTY may not persist.
-func (i *Instance) SendPromptCommand(prompt string) error {
-	return i.backend.SendPromptCommand(i, prompt)
-}
-
-// PreviewFullHistory captures the entire session output including full scrollback history
-func (i *Instance) PreviewFullHistory() (string, error) {
-	return i.backend.PreviewFullHistory(i)
 }
 
 // Capabilities returns the backing runtime's capability descriptor (#1592

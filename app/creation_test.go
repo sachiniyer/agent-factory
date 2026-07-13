@@ -132,10 +132,8 @@ func testPreviewFetcher(h *home) func(daemon.PreviewRequest) (string, bool, erro
 		var content string
 		var err error
 		switch {
-		case req.Tab == 0 && req.Full:
-			content, err = inst.PreviewFullHistory()
 		case req.Tab == 0:
-			content, err = inst.Preview()
+			content, err = inst.AgentServer().Preview(req.Tab, req.Full)
 		case req.Full:
 			content, err = inst.PreviewTabFullHistory(req.Tab)
 		default:

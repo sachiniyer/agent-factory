@@ -243,7 +243,7 @@ func TestPreviewScrolling(t *testing.T) {
 	require.False(t, previewPane.isScrolling, "Should not be in scrolling mode initially")
 
 	// Step 2: Check that PreviewFullHistory returns all content
-	fullHistory, err := setup.instance.PreviewFullHistory()
+	fullHistory, err := setup.instance.AgentServer().Preview(0, true)
 	require.NoError(t, err)
 
 	// Verify that the full history contains both the command and early output
