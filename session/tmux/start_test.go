@@ -40,6 +40,15 @@ func TestClaudeTrustPromptPresent(t *testing.T) {
 			want:    false,
 		},
 		{
+			// The reworded phrase is natural language; seeing it in ordinary agent
+			// output (no dialog markers) must NOT fire a dismissal Enter (#1714 /
+			// #1715 Greptile). Only the real dialog, which co-renders a marker,
+			// dismisses.
+			name:    "reworded phrase in ordinary output without dialog markers",
+			content: "Summary: the gate asks \"Is this a project you created or one you trust\" and then waits.\n❯ ",
+			want:    false,
+		},
+		{
 			name:    "empty",
 			content: "",
 			want:    false,

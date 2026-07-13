@@ -106,8 +106,17 @@ func (t *TmuxSession) Start(workDir string) error {
 // the dialog from "Do you trust the files in this folder?" to "Is this a
 // project you created or one you trust?" (#1714), which the old single-string
 // match missed, leaving fresh worktrees hung on the trust screen.
+//
+// The reworded phrase is natural language that could appear in ordinary agent
+// output, so — unlike the older, more distinctive strings — it is anchored to a
+// marker the dialog always renders ("❯ 1. Yes, I trust this folder" / "Enter to
+// confirm"). Requiring co-occurrence keeps a stray mention of the phrase from
+// firing a spurious Enter onto whatever is in the pane.
 func claudeTrustPromptPresent(content string) bool {
-	return strings.Contains(content, "Is this a project you created or one you trust") ||
+	rewordedDialog := strings.Contains(content, "Is this a project you created or one you trust") &&
+		(strings.Contains(content, "Yes, I trust this folder") ||
+			strings.Contains(content, "Enter to confirm"))
+	return rewordedDialog ||
 		strings.Contains(content, "Do you trust the files in this folder?") ||
 		strings.Contains(content, "new MCP server")
 }
