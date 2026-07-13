@@ -111,8 +111,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	// substring check would route e.g. /opt/claude-wrapper/run through the
 	// claude branch (#1116 defect class).
 	if DetectAgentFromCommand(t.programCmd()) == ProgramClaude {
-		if strings.Contains(content, "Do you trust the files in this folder?") ||
-			strings.Contains(content, "new MCP server") {
+		if claudeTrustPromptPresent(content) {
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
 				return false
@@ -129,6 +128,40 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		}
 	}
 	return false
+}
+
+// claudeTrustPromptPresent reports whether the captured pane content is showing
+// one of Claude Code's launch-time gates that af auto-dismisses with Enter: the
+// folder-trust prompt (either wording) or the "new MCP server" trust prompt.
+//
+// This runs on the daemon's CONTINUOUS Snapshot poll (session/agentserver_local.go
+// CheckAndHandleTrustPrompt), and CapturePaneContent is visible-only
+// (capture-pane -p, no -S), so `content` is whatever is on screen right now —
+// including ordinary agent output. A bare substring match on natural-language
+// prompt text would therefore risk firing a spurious Enter on unrelated output.
+//
+// Claude Code reworded the folder-trust gate from the interrogative
+// "Do you trust the files in this folder?" to a "Quick safety check: Is this a
+// project you created or one you trust? ... ❯ 1. Yes, I trust this folder /
+// Enter to confirm · Esc to cancel" dialog. af's dismissal missed the new
+// wording, so brand-new sessions hung at the prompt and rendered a blank pane.
+//
+// We match the reworded prompt ANCHORED: the natural-language question must
+// co-occur with a dialog-chrome marker only the real modal renders ("Yes, I
+// trust this folder" or the "Enter to confirm" affordance), so a stray mention
+// of the phrase in scrollback or agent output never triggers a dismissal. The
+// old wording is a self-contained, dialog-specific string and stays matched
+// as-is. The MCP prompt renders as "New MCP server ..."; we case-fold that one
+// narrow phrase so a casing tweak upstream doesn't silently reopen the hang.
+func claudeTrustPromptPresent(content string) bool {
+	// Reworded folder-trust dialog — question anchored to real dialog chrome.
+	reworded := strings.Contains(content, "Is this a project you created or one you trust") &&
+		(strings.Contains(content, "Yes, I trust this folder") ||
+			strings.Contains(content, "Enter to confirm"))
+
+	return reworded ||
+		strings.Contains(content, "Do you trust the files in this folder?") ||
+		strings.Contains(strings.ToLower(content), "mcp server")
 }
 
 // Restore attaches to an existing tmux session. If the session is missing
