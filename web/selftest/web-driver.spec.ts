@@ -142,6 +142,28 @@ test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to 
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 });
 
+test("the #1694 keyboard model: [ / ] cycle the top-level view (PR8)", async () => {
+  // Rail mode from the previous flow. [ / ] cycle the top-level view; they fire in
+  // rail mode only (a modal or focused terminal would swallow them). After Escape
+  // the active element is document.body, so the document-level capture-phase keydown
+  // listener (index.ts) handles the press.
+  const active = (view: string) =>
+    expect(page.locator(`.af-viewtab[data-view="${view}"]`)).toHaveClass(/af-viewtab-active/);
+  await active("sessions");
+  // ] steps forward through the cycle: sessions -> projects -> tasks.
+  await page.keyboard.press("]");
+  await active("projects");
+  await page.keyboard.press("]");
+  await active("tasks");
+  // [ steps back: tasks -> projects -> sessions, returning to the start view so the
+  // following rail-driven flows still see the sessions rail.
+  await page.keyboard.press("[");
+  await active("projects");
+  await page.keyboard.press("[");
+  await active("sessions");
+  await expect(page.locator(".af-rail-list")).toBeVisible();
+});
+
 test("tabs: create a shell tab, switch to it, see its distinct output, close it (#1592 PR7)", async () => {
   // Capture the tab-mutation request bodies so we can assert they carry the stable
   // session id (#1592 PR7 fix 1 — the daemon must resolve by id, not the cross-repo

@@ -7,8 +7,8 @@ port and no shared secret — anyone who can read the socket already runs as you
 user.
 
 Sometimes you want a client on **another machine** to drive that daemon: your
-laptop's TUI pointed at a workstation, a script on a build box, or (in the
-future) a browser web client. There are two ways to do that, and **they are not
+laptop's TUI pointed at a workstation, a script on a build box, or a browser
+web client. There are two ways to do that, and **they are not
 equal on security** — pick the first one unless you have a specific reason not
 to.
 

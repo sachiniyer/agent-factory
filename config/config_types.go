@@ -181,7 +181,7 @@ type Config struct {
 	// CORSAllowedOrigins is the exact-match allow-list of browser origins
 	// permitted to call the API cross-origin (#1592 Phase 3, §1.5), e.g.
 	// ["https://af.example.com"]. Empty ⇒ no Access-Control-Allow-Origin is
-	// emitted, so no cross-origin browser can reach the API (the future web
+	// emitted, so no cross-origin browser can reach the API (the web
 	// client's only Phase-3 dependency). Non-browser clients (TUI/CLI, curl)
 	// are unaffected. Global-only, like listen_addr.
 	CORSAllowedOrigins []string `json:"cors_allowed_origins,omitempty" toml:"cors_allowed_origins,omitempty"`
