@@ -77,6 +77,48 @@ func persistInstanceData(repoID string, data session.InstanceData) error {
 	return nil
 }
 
+// renameInstanceDataTitle rewrites the on-disk record currently stored under
+// oldTitle to newData, which carries the session's NEW title and relocated
+// worktree path (feat: reuse archived name). It matches the record by oldTitle and
+// — when both records carry one — the stable ID, so a title reused elsewhere can't
+// misdirect the rewrite. It refuses to proceed if newData.Title already names a
+// DIFFERENT record, keeping the rename from clobbering an unrelated session. Errors
+// when no record under oldTitle exists (the caller resolved a live archived
+// instance, so a missing disk record means storage drifted out from under us).
+func renameInstanceDataTitle(repoID, oldTitle string, newData session.InstanceData) error {
+	newData = newData.ForStorage()
+	found := false
+	if err := config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
+		var existing []session.InstanceData
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
+		}
+		for i := range existing {
+			if existing[i].Title == newData.Title && !stableIDMatchesForDaemon(existing[i].ID, newData.ID) {
+				return nil, fmt.Errorf("cannot rename archived session to %q: another session already holds that title", newData.Title)
+			}
+		}
+		for i := range existing {
+			if existing[i].Title != oldTitle {
+				continue
+			}
+			if !stableIDMatchesForDaemon(existing[i].ID, newData.ID) {
+				continue
+			}
+			existing[i] = newData
+			found = true
+			return json.MarshalIndent(existing, "", "  ")
+		}
+		return raw, nil
+	}); err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("archived instance %q not found in storage", oldTitle)
+	}
+	return nil
+}
+
 func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 	raw, err := config.LoadRepoInstances(repoID)
 	if err != nil {

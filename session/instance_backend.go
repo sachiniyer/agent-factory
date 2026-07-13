@@ -84,6 +84,39 @@ func (i *Instance) RestoreArchivedWorktree(dest string) error {
 	return gw.RestoreWorktreeTo(dest)
 }
 
+// RenameArchived atomically relocates an archived instance's worktree to dest (a
+// new title-keyed archive dir) and updates its Title, so a fresh session can reuse
+// the archived session's name (feat: reuse archived name). Both mutations happen
+// under i.mu so a concurrent Snapshot/ToInstanceData never observes a torn state
+// (new title paired with the old worktree path, or vice versa). Archived instances
+// are inert — no async Start/Recover goroutine touches them — so holding i.mu
+// across the git move only blocks a brief Snapshot RLock, never a live operation.
+//
+// The stable id, git branch, and worktree contents are preserved: only the on-disk
+// directory + git's two-way registration move, and only the display title changes.
+// On a relocation failure the worktree and title are left untouched and the error
+// is surfaced, so the caller can abort the reuse without having half-renamed the
+// archived session.
+func (i *Instance) RenameArchived(newTitle, dest string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.liveness != LiveArchived {
+		return fmt.Errorf("cannot rename session %q: it is not archived", i.Title)
+	}
+	gw := i.gitWorktree
+	if gw == nil {
+		return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
+	}
+	// MoveWorktree relocates the bytes + repairs git's registration and, on success,
+	// updates gw's stored worktree path — all under i.mu here, matching how
+	// ToInstanceData reads the worktree path under i.mu.RLock.
+	if err := gw.MoveWorktree(dest); err != nil {
+		return err
+	}
+	i.Title = newTitle
+	return nil
+}
+
 // RestoreFromArchive re-spawns an archived instance's agent after its worktree
 // has been moved back into place (#1028), flipping it live. It marks the
 // instance started + Lost so the Recover re-spawn path is eligible (the same

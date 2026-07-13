@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -27,11 +29,20 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 			}
 		}
 	}
-	repo, title, release, err := m.reserveCreate(req)
+	repo, title, release, renamedArchived, err := m.reserveCreate(req)
 	if err != nil {
 		return session.InstanceData{}, err
 	}
 	defer release()
+
+	// reserveCreate may have renamed a colliding archived session to free this
+	// title (feat: reuse archived name). Publish its new name onto the events plane
+	// so the TUI + web rail relabel the archived row (it stays selectable/restorable
+	// under the new title). Done after reserveCreate released m.mu so the fan-out
+	// never runs under the manager lock.
+	if renamedArchived != nil {
+		m.publishEvent(agentproto.EventSessionUpdated, *renamedArchived)
+	}
 
 	repoStartLock := m.startLockForRepo(repo.ID)
 	repoStartLock.Lock()
@@ -89,38 +100,52 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 	return data, nil
 }
 
-func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), error) {
+func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
 	if req.RepoPath == "" {
-		return nil, "", nil, fmt.Errorf("repo path is required")
+		return nil, "", nil, nil, fmt.Errorf("repo path is required")
 	}
 	repo, err := config.RepoFromPath(req.RepoPath)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", nil, nil, err
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.refreshLocked(); err != nil {
-		return nil, "", nil, err
+		return nil, "", nil, nil, err
 	}
 
 	diskData, err := loadRepoInstanceData(repo.ID)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", nil, nil, err
 	}
 
+	var renamedArchived *session.InstanceData
 	title := req.Title
 	if title == "" {
 		base := req.TitleBase
 		if base == "" {
-			return nil, "", nil, fmt.Errorf("session title is required")
+			return nil, "", nil, nil, fmt.Errorf("session title is required")
 		}
+		// A derived title_base keeps auto-suffixing around every existing session,
+		// archived rows included — the archived-name-reuse rename is reserved for an
+		// EXPLICIT title the caller asked for by name (below).
 		title, err = m.nextAvailableTitleLocked(repo.ID, repo.Root, base, req.Program, req.ForceRemote, diskData)
 		if err != nil {
-			return nil, "", nil, err
+			return nil, "", nil, nil, err
 		}
-	} else if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, req.ForceRemote, req.allowReserved, diskData); err != nil {
-		return nil, "", nil, err
+	} else {
+		// When the requested title is held ONLY by an archived session, rename that
+		// archived session out of the way so the new session can take the name
+		// (feat: reuse archived name). A LIVE collision is left untouched, so
+		// validateTitleAvailableLocked below still rejects it exactly as before.
+		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, repo.Root, title, req.Program, &diskData)
+		if err != nil {
+			return nil, "", nil, nil, err
+		}
+		if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, req.ForceRemote, req.allowReserved, diskData); err != nil {
+			return nil, "", nil, nil, err
+		}
 	}
 
 	key := daemonInstanceKey(repo.ID, title)
@@ -128,7 +153,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	if req.ForceRemote {
 		remoteName = session.Slugify(title)
 		if _, ok := m.reservedRemoteNames[remoteName]; ok {
-			return nil, "", nil, fmt.Errorf("remote hook name %q is already reserved", remoteName)
+			return nil, "", nil, nil, fmt.Errorf("remote hook name %q is already reserved", remoteName)
 		}
 	}
 
@@ -145,7 +170,124 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		}
 	}
 
-	return repo, title, release, nil
+	return repo, title, release, renamedArchived, nil
+}
+
+// renameArchivedForReuseLocked frees `title` for a new session when the ONLY thing
+// holding it is an archived session, by renaming that archived session to a
+// disambiguated "<title> (archived[ N])" (feat: reuse archived name). It returns
+// the renamed archived session's data (for a session.updated event) or nil when no
+// rename happened — no archived collision, or a LIVE/reserved session also holds
+// the name, in which case the create is left to fail in validateTitleAvailableLocked
+// exactly as before. Runs under m.mu.
+func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program string, diskData *[]session.InstanceData) (*session.InstanceData, error) {
+	archived, oldKey := m.findArchivedOnlyCollisionLocked(repoID, title)
+	if archived == nil {
+		return nil, nil
+	}
+	oldTitle := archived.Title
+	newTitle, err := m.uniqueArchivedTitleLocked(repoID, repoPath, oldTitle, program, *diskData)
+	if err != nil {
+		return nil, err
+	}
+	newDest, err := archivedWorktreePath(repoID, newTitle)
+	if err != nil {
+		return nil, err
+	}
+	origDest, err := archivedWorktreePath(repoID, oldTitle)
+	if err != nil {
+		return nil, err
+	}
+
+	// Relocate the archived worktree + update the title atomically on the instance.
+	if err := archived.RenameArchived(newTitle, newDest); err != nil {
+		return nil, fmt.Errorf("cannot free the archived name %q for reuse: failed to relocate its worktree: %w", oldTitle, err)
+	}
+	// Re-key the manager map so the archived row is addressable under its new title.
+	newKey := daemonInstanceKey(repoID, newTitle)
+	delete(m.instances, oldKey)
+	m.instances[newKey] = archived
+
+	// Persist the rename durably. On failure, roll the worktree + in-memory identity
+	// back so disk and reality stay consistent (mirrors the archive commit rollback,
+	// #1538): otherwise the on-disk record would point at the pre-rename path that no
+	// longer exists, stranding the archive after a daemon restart.
+	renamed := archived.ToInstanceData()
+	if perr := renameInstanceDataTitle(repoID, oldTitle, renamed); perr != nil {
+		if rbErr := archived.RenameArchived(oldTitle, origDest); rbErr != nil {
+			// Could not move the worktree home: leave it re-keyed under the new title
+			// (the bytes live at newDest) and surface both failures so the operator can
+			// recover it. The new session create aborts.
+			m.persistInstance(repoID, archived)
+			return nil, fmt.Errorf("failed to durably rename archived session %q and could not roll it back (%v); it may need manual recovery: %w", oldTitle, rbErr, perr)
+		}
+		delete(m.instances, newKey)
+		m.instances[oldKey] = archived
+		return nil, fmt.Errorf("failed to durably rename archived session %q to free the name; rolled it back: %w", oldTitle, perr)
+	}
+
+	// Reflect the rename in the caller's diskData snapshot so the subsequent
+	// title-availability check for the NEW session no longer sees the old record.
+	for i := range *diskData {
+		if (*diskData)[i].Title == oldTitle {
+			(*diskData)[i] = renamed
+			break
+		}
+	}
+	log.InfoLog.Printf("renamed archived session %q -> %q (repo %s) to free the name for a new session", oldTitle, newTitle, repoID)
+	return &renamed, nil
+}
+
+// findArchivedOnlyCollisionLocked returns the archived instance whose title
+// collides with `title`, together with its manager-map key — but ONLY when nothing
+// else claims the name: no LIVE (non-archived) instance and no in-flight
+// reservation collide with it. A live or reserved collision returns nil, so the
+// archived-name-reuse rename never runs around a name a real session still holds.
+// Runs under m.mu.
+func (m *Manager) findArchivedOnlyCollisionLocked(repoID, title string) (*session.Instance, string) {
+	for key := range m.reservedTitles {
+		rid, existing := splitDaemonInstanceKey(key)
+		if rid == repoID && m.titlesCollide(existing, title) {
+			// A concurrent create is reserving a colliding name; let the
+			// availability check reject with errConcurrentCreate.
+			return nil, ""
+		}
+	}
+	var archived *session.Instance
+	var archivedKey string
+	for key, inst := range m.instances {
+		rid, _ := splitDaemonInstanceKey(key)
+		if rid != repoID || inst == nil {
+			continue
+		}
+		if !m.titlesCollide(inst.Title, title) {
+			continue
+		}
+		if inst.GetLiveness() != session.LiveArchived {
+			// A live session still holds the name — do not rename around it.
+			return nil, ""
+		}
+		archived = inst
+		archivedKey = key
+	}
+	return archived, archivedKey
+}
+
+// uniqueArchivedTitleLocked returns the first free disambiguated title for an
+// archived session being renamed out of the way: "<base> (archived)", then
+// "<base> (archived 2)", "(archived 3)", … skipping any that collide with an
+// existing live or archived session (feat: reuse archived name). Runs under m.mu.
+func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, diskData []session.InstanceData) (string, error) {
+	for i := 1; i <= 10000; i++ {
+		candidate := fmt.Sprintf("%s (archived)", base)
+		if i > 1 {
+			candidate = fmt.Sprintf("%s (archived %d)", base, i)
+		}
+		if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, false, false, diskData); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find an available archived name for %q", base)
 }
 
 func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program string, remote bool, diskData []session.InstanceData) (string, error) {
