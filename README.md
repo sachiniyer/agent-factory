@@ -31,6 +31,9 @@ branded docs site.
   prompts into existing ones.
 - **Scriptable control:** `af sessions` and `af tasks` print JSON; the daemon
   also exposes a local HTTP/JSON API over a Unix socket.
+- **Browser web client:** the same rail, live terminals, tabs, projects, and
+  tasks in a browser — opt in with a [TLS listener](docs/remote-tcp-auth.md) and
+  open it from a browser (see the [web client guide](docs/web.md)).
 - **Remote hooks:** plug in your own launch/list/attach/delete scripts for
   remote session backends.
 
