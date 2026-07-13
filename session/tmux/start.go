@@ -99,6 +99,19 @@ func (t *TmuxSession) Start(workDir string) error {
 	return nil
 }
 
+// claudeTrustPromptPresent reports whether captured pane content shows a
+// folder-trust or MCP-server prompt that a single Enter keystroke dismisses.
+// Several phrasings of the folder-trust question are matched so the prompt is
+// dismissed across the Claude Code versions af users run: Claude Code reworded
+// the dialog from "Do you trust the files in this folder?" to "Is this a
+// project you created or one you trust?" (#1714), which the old single-string
+// match missed, leaving fresh worktrees hung on the trust screen.
+func claudeTrustPromptPresent(content string) bool {
+	return strings.Contains(content, "Is this a project you created or one you trust") ||
+		strings.Contains(content, "Do you trust the files in this folder?") ||
+		strings.Contains(content, "new MCP server")
+}
+
 // CheckAndHandleTrustPrompt checks the pane content once for a trust prompt and dismisses it if found.
 // Returns true if the prompt was found and handled.
 func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
@@ -111,8 +124,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	// substring check would route e.g. /opt/claude-wrapper/run through the
 	// claude branch (#1116 defect class).
 	if DetectAgentFromCommand(t.programCmd()) == ProgramClaude {
-		if strings.Contains(content, "Do you trust the files in this folder?") ||
-			strings.Contains(content, "new MCP server") {
+		if claudeTrustPromptPresent(content) {
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
 				return false
