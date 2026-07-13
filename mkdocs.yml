@@ -117,6 +117,7 @@ nav:
       - Core concepts:
           - Sessions & worktrees: concepts/worktree-agents.md
           - The TUI: concepts/tui.md
+          - The web client: web.md
           - The daemon: concepts/daemon.md
           - Tasks & automation: tasks.md
           - Backends (runtimes): backends.md
