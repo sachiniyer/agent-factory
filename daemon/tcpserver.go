@@ -15,9 +15,11 @@ import (
 // the auth, #1029) and passes a nil gate, while this listener requires a valid
 // bearer token on every request and applies the CORS allow-list.
 //
-// It is OFF BY DEFAULT — bound only when config.ListenAddr is non-empty. When
-// empty (the default) startHTTPServer never calls in here, so behavior is
-// byte-identical to the pure-unix daemon that shipped before Phase 3.
+// It is ON BY DEFAULT — config.ListenAddr defaults to loopback
+// ("127.0.0.1:8443"), so the bundled web UI is served on localhost out of the
+// box. Only an explicit `listen_addr = ""` opts out: startHTTPServer then never
+// calls in here and behavior is byte-identical to the pure-unix daemon that
+// shipped before Phase 3.
 
 // tlsMinVersion is the floor for the TCP listener. TLS 1.2 is the modern
 // baseline (1.0/1.1 are deprecated); the bearer token must never ride a

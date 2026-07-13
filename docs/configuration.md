@@ -61,6 +61,8 @@ pane_border_preview = "#DC8CC3"
 | `auto_yes` | Auto-accept agent prompts (experimental). |
 | `auto_update` | Startup self-update check. Defaults to `true`: `af` checks the configured `update_channel` on launch and automatically applies newer releases. Set to `false`, or set `AGENT_FACTORY_AUTO_UPDATE=0`, to opt out. |
 | `daemon_poll_interval` | Daemon polling interval in ms. |
+| `listen_addr` | Address the daemon serves the bundled **web UI** + HTTP/WS API on, over TLS. Defaults to `127.0.0.1:8443` (loopback), so a fresh install has a browser client at `https://127.0.0.1:8443` with no token (loopback is exempt). Set it to `""` to **disable** the web server entirely (pure-unix daemon); set it to a routable host:port like `0.0.0.0:8443` to expose it to the network (still token-gated for non-loopback peers unless `require_token = false`). A web-port bind conflict is logged and skipped — it never blocks the daemon. Global-only. See [The web client](web.md) and [Remote daemon access](remote-tcp-auth.md). |
+| `require_token` | Whether the web/TCP listener requires the bearer token for **non-loopback** (network) peers (default `true`). Loopback peers are always exempt. Set `false` only on a trusted network to drop the token for network peers too (TLS still applies); the daemon logs a loud startup warning. Global-only. |
 | `branch_prefix` | Prefix for worktree branches (defaults to `username/`). |
 | `worktree_root` | Where new worktrees are created: `sibling` (default, next to the repo as `<repo>-<session>`) or `subdirectory` (under `~/.agent-factory/worktrees/<branch>`). |
 | `detach_keys` | Key combination that detaches from an attached session (defaults to `ctrl-w`). |

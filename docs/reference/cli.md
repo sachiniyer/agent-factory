@@ -67,9 +67,11 @@ Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini
 Run 'af' with no arguments to open the TUI. The subcommands below drive the
 same daemon non-interactively (`af sessions`, `af tasks` emit JSON).
 
-By default 'af' talks to a daemon on the local machine over a Unix socket. To
-drive a daemon on ANOTHER machine, SSH to the host and run 'af' there, or enable
-the opt-in TLS+token TCP listener and point a client at it with the persistent
+By default 'af' talks to a daemon on the local machine over a Unix socket. The
+daemon also serves the bundled web UI on loopback (https://127.0.0.1:8443) by
+default. To drive a daemon on ANOTHER machine, SSH to the host and run 'af'
+there, or expose the TLS+token TCP listener to the network (set a routable
+listen_addr) and point a client at it with the persistent
 --daemon-url/--token/--tls-fingerprint flags (see 'af token' for the credentials).
 Full guide: https://sachiniyer.github.io/agent-factory/remote-tcp-auth/
 

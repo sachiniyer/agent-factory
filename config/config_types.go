@@ -21,6 +21,15 @@ const (
 	TomlConfigFileName        = "config.toml"
 	defaultProgram            = tmux.ProgramClaude
 	defaultDaemonPollInterval = 1000
+	// defaultListenAddr is the daemon's default web/API/WS bind address: the
+	// loopback interface on 8443. The web UI is bundled with the daemon and
+	// served here by default — a same-machine browser at https://127.0.0.1:8443
+	// reaches it with no token (loopback is exempt, #1696). It is loopback (not
+	// 0.0.0.0) on purpose: shipping the control plane on by default must NOT put
+	// it on the network. Exposing it to a LAN/Tailscale/public interface stays an
+	// explicit opt-in (set listen_addr to a routable host:port), and disabling
+	// the web server entirely is an explicit opt-out (listen_addr = "").
+	defaultListenAddr = "127.0.0.1:8443"
 )
 
 // Release channels selectable via the update_channel config key (#1041).
@@ -164,13 +173,20 @@ type Config struct {
 	// reset time WAS parsed (that schedules against the reset time + grace).
 	// Global-only, like limit_auto_resume. See LimitRetryIntervalDuration.
 	LimitRetryInterval string `json:"limit_retry_interval" toml:"limit_retry_interval"`
-	// ListenAddr optionally binds the daemon's HTTP/WS API to a TLS TCP
-	// listener in addition to the always-present local unix socket (#1592
-	// Phase 3). Empty ⇒ no TCP listener (the default pure-unix behavior). A
-	// value like "0.0.0.0:8443" or "127.0.0.1:8443" enables direct-TCP access
-	// gated by the bearer token (`af token`) — see docs/remote-tcp-auth.md.
-	// Global-only (daemon behavior), like daemon_poll_interval — a cloned
-	// repo must never be able to open a network port.
+	// ListenAddr binds the daemon's web UI + HTTP/WS API to a TLS TCP listener
+	// in addition to the always-present local unix socket (#1592 Phase 3). It
+	// DEFAULTS to defaultListenAddr ("127.0.0.1:8443"): the web client is
+	// bundled with the daemon and served on loopback by default, so a fresh
+	// install with no config has a browser UI at https://127.0.0.1:8443 with no
+	// token (loopback is exempt, #1696). Because config parsing unmarshals on top
+	// of DefaultConfig(), an ABSENT listen_addr key inherits this default, while
+	// an explicit `listen_addr = ""` OVERRIDES it to empty — the opt-out that
+	// DISABLES the web server entirely (no TCP listener, pure-unix daemon). A
+	// routable value like "0.0.0.0:8443" or a LAN/Tailscale IP exposes it to the
+	// network (opt-in), still bearer-token-gated for non-loopback peers unless
+	// require_token=false — see docs/remote-tcp-auth.md. Global-only (daemon
+	// behavior), like daemon_poll_interval — a cloned repo must never be able to
+	// open a network port.
 	ListenAddr string `json:"listen_addr" toml:"listen_addr"`
 	// TLSCert / TLSKey optionally point at a user-provided PEM cert and its
 	// matching key for the TCP listener (#1592 Phase 3, §1.2). Empty ⇒ the
@@ -311,6 +327,7 @@ func DefaultConfig() *Config {
 		AutoYes:            false,
 		AutoUpdate:         true,
 		RequireToken:       true,
+		ListenAddr:         defaultListenAddr,
 		DaemonPollInterval: defaultDaemonPollInterval,
 		LimitAutoResume:    false,
 		LimitRetryInterval: defaultLimitRetryInterval,

@@ -104,11 +104,16 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		}
 	}()
 
-	// Optional TLS TCP listener (#1592 Phase 3 PR3, §1.1). OFF BY DEFAULT: only
-	// bound when listen_addr is set. It serves the same mux behind a
-	// token-enforcing gate. A bind failure is logged but never fatal — the unix
-	// socket and control plane every local client depends on must not regress
-	// because a network port could not open.
+	// TLS TCP listener (#1592 Phase 3 PR3, §1.1) — the daemon's bundled web UI +
+	// HTTP/WS surface. ON BY DEFAULT: listen_addr defaults to loopback
+	// ("127.0.0.1:8443"), so a daemon with no config serves the browser client on
+	// localhost. An explicit `listen_addr = ""` is the opt-out that skips this
+	// block entirely (pure-unix daemon). It serves the same mux behind a
+	// token-enforcing gate. A bind failure — including the loopback default
+	// losing a port race with another daemon — is logged but NEVER fatal: the
+	// unix socket and control plane every local client depends on must not
+	// regress because a web port could not open, so the daemon keeps running with
+	// the web server skipped.
 	closeTCP := func() error { return nil }
 	if manager.cfg.ListenAddr != "" {
 		// The daemon's web listener exempts loopback peers from the token (a

@@ -32,8 +32,10 @@ branded docs site.
 - **Scriptable control:** `af sessions` and `af tasks` print JSON; the daemon
   also exposes a local HTTP/JSON API over a Unix socket.
 - **Browser web client:** the same rail, live terminals, tabs, projects, and
-  tasks in a browser — opt in with a [TLS listener](docs/remote-tcp-auth.md) and
-  open it from a browser (see the [web client guide](docs/web.md)).
+  tasks in a browser — bundled with the daemon and served on loopback **by
+  default** at `https://127.0.0.1:8443` (no token on the same machine). Disable
+  it with `listen_addr = ""` or expose it to a network with a routable
+  `listen_addr`; see the [web client guide](docs/web.md).
 - **Remote hooks:** plug in your own launch/list/attach/delete scripts for
   remote session backends.
 
@@ -147,9 +149,10 @@ owner-only HTTP/JSON API over `$AGENT_FACTORY_HOME/daemon-http.sock`.
 curl --unix-socket ~/.agent-factory/daemon-http.sock http://localhost/v1/health
 ```
 
-To drive the daemon from another machine, SSH in and run `af` there, or enable
-the opt-in TLS+token TCP listener (`af token`, `--daemon-url`) — see
-[Remote daemon access](docs/remote-tcp-auth.md).
+To drive the daemon from another machine, SSH in and run `af` there, or expose
+the TLS+token TCP listener to the network — it's on by default on loopback, so
+this means pointing `listen_addr` at a routable host:port (`af token`,
+`--daemon-url`) — see [Remote daemon access](docs/remote-tcp-auth.md).
 
 ### Configuration
 

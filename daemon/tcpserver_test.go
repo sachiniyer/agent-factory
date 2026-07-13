@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -243,14 +244,40 @@ func TestTCPListener_LoopbackExempt(t *testing.T) {
 	require.False(t, env.Data.AuthRequired, "a loopback client must be told it needs no token")
 }
 
-// TestStartHTTPServer_NoTCPByDefault pins the off-by-default guarantee: with an
-// empty ListenAddr (the default) startHTTPServer binds ONLY the unix socket and
-// no TCP port is opened — byte-identical to the pre-Phase-3 daemon.
-func TestStartHTTPServer_NoTCPByDefault(t *testing.T) {
+// TestStartHTTPServer_WebOnByDefault pins the bundled-web-UI default: the plain
+// DefaultConfig() carries the loopback listen_addr, so startHTTPServer binds the
+// TLS TCP listener (and generates the self-signed cert) with no config at all.
+func TestStartHTTPServer_WebOnByDefault(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	m, err := NewManager(config.DefaultConfig())
+	cfg := config.DefaultConfig()
+	require.Equal(t, "127.0.0.1:8443", cfg.ListenAddr,
+		"default config must serve the web UI on loopback")
+	// Use :0 so the test never races the real 8443 or another daemon; the point
+	// under test is that a non-empty default triggers the bind, not the port.
+	cfg.ListenAddr = "127.0.0.1:0"
+	m, err := NewManager(cfg)
 	require.NoError(t, err)
-	require.Empty(t, m.cfg.ListenAddr, "default config must leave the TCP listener off")
+
+	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, closeHTTP()) }()
+
+	// The self-signed TLS material is materialized once the listener binds.
+	dir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, statErr := os.Stat(dir + "/" + daemonTLSCertFileName)
+	require.NoError(t, statErr, "self-signed cert should be generated when the web listener binds")
+}
+
+// TestStartHTTPServer_NoTCPWhenDisabled pins the opt-out: an explicit
+// listen_addr="" leaves ONLY the unix socket bound and opens no TCP port —
+// byte-identical to the pre-Phase-3 daemon.
+func TestStartHTTPServer_NoTCPWhenDisabled(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "" // explicit opt-out disables the web server
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
 
 	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
 	require.NoError(t, err)
@@ -260,5 +287,42 @@ func TestStartHTTPServer_NoTCPByDefault(t *testing.T) {
 	dir, err := config.GetConfigDir()
 	require.NoError(t, err)
 	_, statErr := os.Stat(dir + "/" + daemonTLSCertFileName)
-	require.True(t, os.IsNotExist(statErr), "no cert should be generated when TCP is off")
+	require.True(t, os.IsNotExist(statErr), "no cert should be generated when the web server is disabled")
+}
+
+// TestStartHTTPServer_BindConflictNonFatal pins robustness item 3: when the web
+// listener cannot bind (here, an already-in-use address, the port-race case),
+// startHTTPServer still returns a live daemon — the web server is skipped, never
+// crashes the control plane. The bound unix socket keeps working.
+func TestStartHTTPServer_BindConflictNonFatal(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	// Occupy a port, then point the daemon's web listener straight at it so the
+	// TLS bind is guaranteed to fail with EADDRINUSE.
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = blocker.Close() }()
+
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = blocker.Addr().String()
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+
+	// The daemon comes up despite the doomed web bind.
+	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
+	require.NoError(t, err, "a web-port conflict must never fail daemon startup")
+	defer func() { require.NoError(t, closeHTTP()) }()
+
+	// The unix control socket is still serving — Ping over it succeeds.
+	socketPath, err := DaemonHTTPSocketPath()
+	require.NoError(t, err)
+	httpClient := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		},
+	}}
+	resp, err := httpClient.Get("http://unix/v1/health")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
