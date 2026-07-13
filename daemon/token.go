@@ -19,6 +19,27 @@ import (
 // `af token rotate` takes effect without a restart. The unix control socket
 // stays unauthenticated (filesystem 0600 perms are the local auth, #1029) and
 // never reads this token.
+//
+// Two concurrency guarantees mirror the TLS-material fix (#1690):
+//
+//   - Generation is serialized under an exclusive file lock (config.WithFileLock,
+//     the sibling daemon-token.lock). Before this, EnsureToken's LoadToken-miss →
+//     generateToken → writeToken sequence was a TOCTOU race (#1720): two callers
+//     (e.g. daemon startup and `af token show`) could both observe "no token" and
+//     both generate, racing to persist different tokens. The lock makes the
+//     first caller win and later callers observe its token, so every caller
+//     agrees.
+//   - The write is atomic (config.AtomicWriteFile: temp file + rename). Before
+//     this, writeToken used os.WriteFile (O_TRUNC), so a rotation left a window
+//     where the file was truncated-but-not-yet-rewritten. The withAuth gate
+//     re-reads the token per request (authorize → expectedToken → LoadToken), so
+//     a request landing in that window saw an empty file, LoadToken errored, and
+//     the gate failed closed => a spurious 401 (#1722). An atomic rename lets a
+//     reader observe only the whole old or whole new token, never a partial.
+//
+// Readers (the auth gate) deliberately do NOT take the lock: they do a plain
+// LoadToken so rotation stays live per request, and the atomic write is what
+// keeps that lock-free read from ever seeing a torn value.
 
 const (
 	// daemonTokenFileName is the bearer token file in the af home. 0600 —
@@ -50,20 +71,16 @@ func generateToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// writeToken persists tok to path with 0600 permissions, creating the parent
-// af home directory if needed. It writes then chmods so the mode is exactly
-// 0600 regardless of the process umask.
+// writeToken persists tok to path atomically with 0600 permissions, creating
+// the parent af home directory if needed. It writes to a temp file and renames
+// it into place (config.AtomicWriteFile), so a concurrent reader never observes
+// a truncated/empty token file mid-write (the #1722 rotation-401 window).
+// AtomicWriteFile applies perm exactly via tmp.Chmod, so the token lands 0600
+// regardless of the process umask, and it MkdirAll's the parent dir itself —
+// no separate MkdirAll/Chmod needed.
 func writeToken(path, tok string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create token directory: %w", err)
-	}
-	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
+	if err := config.AtomicWriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write token: %w", err)
-	}
-	// WriteFile only applies the mode on create and masks it by the umask;
-	// force 0600 so a pre-existing file with looser perms is tightened too.
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("chmod token: %w", err)
 	}
 	return nil
 }
@@ -85,40 +102,78 @@ func LoadToken(path string) (string, error) {
 }
 
 // EnsureToken returns the bearer token at path, generating and persisting one
-// (0600) if the file does not yet exist. It is idempotent: a second call
-// returns the same token. This is the generate-if-absent entry point behind
-// `af token show`, so the token exists before the TCP listener is ever
-// enabled.
+// (0600) if the file does not yet exist. It is idempotent even under concurrent
+// callers: the check-then-generate-then-write runs under an exclusive file lock
+// (config.WithFileLock), so two callers racing on a missing token (e.g. daemon
+// startup and `af token show`) can no longer both generate — the first inside
+// the lock writes it, the rest observe it and return the same value (#1720).
+// This is the generate-if-absent entry point behind `af token show`, so the
+// token exists before the TCP listener is ever enabled.
 func EnsureToken(path string) (string, error) {
-	if tok, err := LoadToken(path); err == nil {
-		return tok, nil
-	} else if !os.IsNotExist(err) {
-		return "", err
+	// Pre-create the AF home 0700 BEFORE taking the lock: config.WithFileLock's
+	// internal MkdirAll uses 0755 (it is shared by non-secret callers), and on a
+	// token-first fresh run it would otherwise create the AF home world-readable.
+	// The home holds secrets (daemon-token, daemon-tls.key, state.json), so it
+	// must be owner-only. MkdirAll never loosens an existing dir, so the lock's
+	// later 0755 MkdirAll no-ops once this has run.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create token directory: %w", err)
 	}
-	tok, err := generateToken()
+	var resolved string
+	err := config.WithFileLock(path, func() error {
+		if tok, err := LoadToken(path); err == nil {
+			resolved = tok
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		tok, err := generateToken()
+		if err != nil {
+			return err
+		}
+		if err := writeToken(path, tok); err != nil {
+			return err
+		}
+		resolved = tok
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-	if err := writeToken(path, tok); err != nil {
-		return "", err
-	}
-	return tok, nil
+	return resolved, nil
 }
 
 // RotateToken generates a fresh bearer token, persists it (0600) over any
-// existing one, and returns it. Because the auth gate re-reads the token file
-// per auth event (§1.3), rotation takes effect for new connections
-// immediately without a daemon RPC; existing streams keep running until they
-// reconnect.
+// existing one, and returns it. The generate+write runs under the same
+// exclusive file lock as EnsureToken (config.WithFileLock) so a rotation
+// serializes against a concurrent first-time generation — the two can't
+// interleave and clobber each other (mirrors the cert template, #1690).
+// Because the auth gate re-reads the token file per auth event (§1.3) and the
+// write is atomic, rotation takes effect for new connections immediately
+// without a daemon RPC and no reader ever sees a partial token; existing
+// streams keep running until they reconnect.
 func RotateToken(path string) (string, error) {
-	tok, err := generateToken()
+	// Pre-create the AF home 0700 before the lock, same reason as EnsureToken:
+	// WithFileLock's MkdirAll is 0755 and the home holds secrets.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create token directory: %w", err)
+	}
+	var resolved string
+	err := config.WithFileLock(path, func() error {
+		tok, err := generateToken()
+		if err != nil {
+			return err
+		}
+		if err := writeToken(path, tok); err != nil {
+			return err
+		}
+		resolved = tok
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-	if err := writeToken(path, tok); err != nil {
-		return "", err
-	}
-	return tok, nil
+	return resolved, nil
 }
 
 // ConstantTimeEqual reports whether got equals want without leaking, through
