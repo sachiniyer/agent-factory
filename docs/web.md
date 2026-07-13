@@ -98,7 +98,7 @@ not see the warning, point the daemon at a real CA-signed certificate — see
 
 Whether the web client asks you for a token depends on **where your browser is**,
 judged from the real TCP connection address (never a header — those are
-attacker-controlled and ignored, see [the security notes](remote-tcp-auth.md#loopback-vs-network)).
+attacker-controlled and ignored, see [When is a token required?](remote-tcp-auth.md#when-is-a-token-required-loopback-vs-network)).
 
 | Your browser is on… | Token needed? | What you see |
 | --- | --- | --- |
