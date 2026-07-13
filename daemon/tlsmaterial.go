@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // The TLS material for the daemon's TCP surface (#1592 Phase 3, §1.2). TLS is
@@ -85,19 +87,27 @@ func ResolveTLSMaterial(dir, userCert, userKey string) (TLSMaterial, error) {
 // generating and persisting a fresh pair only when either file is missing. It
 // is idempotent — once generated the pair is reused, so the pinned
 // fingerprint stays stable across daemon restarts.
+//
+// The check-then-generate is serialized under an exclusive file lock so that
+// concurrent callers (daemon startup and `af token show` race, #1683) never
+// both generate: the first caller writes the pair, later callers observe both
+// files and return without regenerating. Combined with generateSelfSignedCert's
+// atomic writes, a reader never observes a mismatched cert/key pair.
 func ensureSelfSignedCert(certPath, keyPath string) error {
-	_, certErr := os.Stat(certPath)
-	_, keyErr := os.Stat(keyPath)
-	if certErr == nil && keyErr == nil {
-		return nil
-	}
-	if certErr != nil && !os.IsNotExist(certErr) {
-		return fmt.Errorf("stat tls cert: %w", certErr)
-	}
-	if keyErr != nil && !os.IsNotExist(keyErr) {
-		return fmt.Errorf("stat tls key: %w", keyErr)
-	}
-	return generateSelfSignedCert(certPath, keyPath)
+	return config.WithFileLock(certPath, func() error {
+		_, certErr := os.Stat(certPath)
+		_, keyErr := os.Stat(keyPath)
+		if certErr == nil && keyErr == nil {
+			return nil
+		}
+		if certErr != nil && !os.IsNotExist(certErr) {
+			return fmt.Errorf("stat tls cert: %w", certErr)
+		}
+		if keyErr != nil && !os.IsNotExist(keyErr) {
+			return fmt.Errorf("stat tls key: %w", keyErr)
+		}
+		return generateSelfSignedCert(certPath, keyPath)
+	})
 }
 
 // generateSelfSignedCert writes a fresh self-signed ECDSA P-256 cert/key pair
@@ -145,17 +155,20 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		return fmt.Errorf("create tls directory: %w", err)
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
-		return fmt.Errorf("write tls cert: %w", err)
-	}
+	// Write both files atomically (temp file + rename in the same dir) so a
+	// concurrent reader never observes a half-written file or a cert/key pair
+	// from different keypairs (#1683). The key is written first so that if the
+	// process dies between the two renames, the observable state is at most a
+	// key without a cert — ensureSelfSignedCert then regenerates a fresh
+	// matching pair, never serving a mismatched one. AtomicWriteFile applies
+	// perm exactly (via tmp.Chmod), so the key lands 0600 regardless of umask.
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+	if err := config.AtomicWriteFile(keyPath, keyPEM, 0o600); err != nil {
 		return fmt.Errorf("write tls key: %w", err)
 	}
-	// Force 0600 on the key regardless of umask (WriteFile masks the mode).
-	if err := os.Chmod(keyPath, 0o600); err != nil {
-		return fmt.Errorf("chmod tls key: %w", err)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := config.AtomicWriteFile(certPath, certPEM, 0o644); err != nil {
+		return fmt.Errorf("write tls cert: %w", err)
 	}
 	return nil
 }
