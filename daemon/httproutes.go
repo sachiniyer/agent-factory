@@ -147,7 +147,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:        http.MethodPost,
 		Path:          "/v1/UpdateTask",
-		Description:   "Update an existing task, preserving scheduler-owned fields.",
+		Description:   "Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields.",
 		RequestFields: jsonFields(reflect.TypeOf(UpdateTaskRequest{})),
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UpdateTask) },
 	},

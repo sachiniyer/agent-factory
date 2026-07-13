@@ -18,7 +18,6 @@ import {
   triggerTask,
   updateTask,
 } from "./api.js";
-import type { TaskData } from "./types.js";
 
 interface Captured {
   url: string;
@@ -115,28 +114,17 @@ test("createTab / closeTab FAIL CLOSED on a missing id — no title-scoped reque
 
 // --- task mutations (#1592 Phase 5 PR8) ------------------------------------
 
-/** A minimal valid TaskData for the mutation tests; `id` is overridden per case. */
-function task(id: string): TaskData {
-  return {
-    id,
-    name: "nightly",
-    prompt: "do the thing",
-    cron_expr: "0 9 * * *",
-    project_path: "/repo",
-    program: "claude",
-    enabled: true,
-    created_at: "2026-07-13T00:00:00Z",
-  };
-}
-
-test("updateTask posts the task keyed by its stable id", async () => {
+test("updateTask posts a field-level patch keyed by the stable id", async () => {
   const cap = stubFetch();
-  await updateTask({ ...task("t-abc123"), enabled: false }, "tok");
+  await updateTask("t-abc123", { enabled: false }, "tok");
   assert.equal(cap.url, "/v1/UpdateTask");
   assert.equal(cap.auth, "Bearer tok");
-  const sent = cap.body.task as Record<string, unknown>;
-  assert.equal(sent.id, "t-abc123", "the daemon resolves the task by its unique id, not its name");
-  assert.equal(sent.enabled, false, "the enable/disable toggle rides UpdateTask");
+  assert.equal(cap.body.id, "t-abc123", "the daemon resolves the task by its unique id, not its name");
+  const sent = cap.body.update as Record<string, unknown>;
+  assert.equal(sent.enabled, false, "the enable/disable toggle rides UpdateTask as an `enabled`-only patch");
+  // A toggle must carry ONLY the flipped field — never the rest of a cached task
+  // that could clobber a concurrent edit (#1700).
+  assert.deepEqual(Object.keys(sent), ["enabled"], "the toggle patch carries only the enabled field");
 });
 
 test("triggerTask / removeTask post the stable id", async () => {
@@ -155,7 +143,7 @@ test("updateTask / triggerTask / removeTask FAIL CLOSED on a missing task id", a
   // A task with no id must NOT be mutated by a daemon first-match on another task —
   // the task analogue of the #1678 id-scoping class. Each refuses BEFORE any request.
   await assert.rejects(
-    () => updateTask(task(""), "tok"),
+    () => updateTask("", { enabled: false }, "tok"),
     (e: unknown) => e instanceof ApiError && /no stable id/.test((e as ApiError).message),
     "updateTask with an empty id must reject",
   );

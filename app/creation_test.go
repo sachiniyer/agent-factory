@@ -39,7 +39,12 @@ func newTestHome(t *testing.T) *home {
 	// after driving the handlers) keep exercising the save orchestration
 	// unchanged. Tests asserting the daemon-dispatch itself swap in a recorder.
 	t.Cleanup(SetTaskAdderForTest(task.AddTask))
-	t.Cleanup(SetTaskUpdaterForTest(task.UpdateTask))
+	// task.UpdateTask returns the merged record; the seam only needs the error,
+	// so adapt it to the field-level updater signature (#1700).
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate) error {
+		_, err := task.UpdateTask(id, update)
+		return err
+	}))
 	t.Cleanup(SetTaskRemoverForTest(task.RemoveTask))
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 

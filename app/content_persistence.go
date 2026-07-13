@@ -100,13 +100,17 @@ func (m *home) saveContentPaneState() error {
 	// its schedule refresh are one atomic daemon call (removing the old
 	// double-reload).
 	//
-	// Persist ONLY the tasks the user actually edited (ConsumeDirty), not the
-	// whole pane: an unmodified task changed out-of-band (CLI, daemon) while the
-	// pane was open must not be clobbered by the pane's stale copy — #1213.
-	for _, tsk := range sp.ConsumeDirty() {
-		if err := updateTaskThroughDaemon(tsk); err != nil {
+	// Persist ONLY the tasks the user actually edited (ConsumeDirty), and only
+	// the FIELDS they changed: each edit carries a field-level patch (diffed
+	// against the copy the pane loaded), so a save of one field never rewrites a
+	// field another writer (CLI/daemon) changed out-of-band while the pane was
+	// open — the #1700 clobber, of which #1213's whole-task guard was only a
+	// partial fix. A patch that turns out empty (edited then reverted) is a
+	// harmless no-op the daemon still validates.
+	for _, edit := range sp.ConsumeDirty() {
+		if err := updateTaskThroughDaemon(edit.ID, edit.Update); err != nil {
 			log.ErrorLog.Printf("failed to update task: %v", err)
-			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save task %q: %w", tsk.Name, err))
+			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save task %q: %w", edit.ID, err))
 		}
 	}
 	for _, tsk := range sp.ConsumeDeleted() {

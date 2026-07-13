@@ -76,9 +76,8 @@ func TestSchedulerReloadFollowsTaskCRUD(t *testing.T) {
 	}
 
 	// Disable one.
-	disabled := mk("bbbb0001")
-	disabled.Enabled = false
-	if err := task.UpdateTask(disabled); err != nil {
+	disabledEnabled := false
+	if _, err := task.UpdateTask("bbbb0001", task.TaskUpdate{Enabled: &disabledEnabled}); err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
 	if err := s.Reload(); err != nil {

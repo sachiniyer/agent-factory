@@ -182,8 +182,11 @@ var (
 	addTaskThroughDaemon = func(t task.Task) error {
 		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t) })
 	}
-	updateTaskThroughDaemon = func(t task.Task) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error { return c.UpdateTask(t) })
+	updateTaskThroughDaemon = func(id string, update task.TaskUpdate) error {
+		return withDaemonHTTP(func(c *apiclient.Client) error {
+			_, err := c.UpdateTask(id, update)
+			return err
+		})
 	}
 	removeTaskThroughDaemon = func(id string) error {
 		return withDaemonHTTP(func(c *apiclient.Client) error { return c.RemoveTask(id) })
@@ -344,7 +347,7 @@ func SetTaskAdderForTest(f func(task.Task) error) func() {
 	return func() { addTaskThroughDaemon = prev }
 }
 
-func SetTaskUpdaterForTest(f func(task.Task) error) func() {
+func SetTaskUpdaterForTest(f func(id string, update task.TaskUpdate) error) func() {
 	prev := updateTaskThroughDaemon
 	updateTaskThroughDaemon = f
 	return func() { updateTaskThroughDaemon = prev }

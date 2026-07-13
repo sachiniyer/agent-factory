@@ -11,7 +11,7 @@
 // request. The WS `?access_token=` fallback (browsers cannot set WS headers) is
 // used by the /v1/events subscriber (events.ts) and, in PR4, the PTY stream.
 
-import type { SessionData, SnapshotResponse, TaskData, TasksResponse } from "./types.js";
+import type { SessionData, SnapshotResponse, TaskData, TasksResponse, TaskUpdate } from "./types.js";
 
 const TOKEN_KEY = "af.token";
 
@@ -303,13 +303,16 @@ export async function addTask(task: TaskData, token: string): Promise<void> {
   await af("AddTask", { task }, token);
 }
 
-/** Updates a task (mirrors `af tasks update`) — the edit + enable/disable path. The
- *  daemon preserves the scheduler-owned fields (last_run_*, created_at) from the
- *  freshly-loaded record under its file lock, so a stale client copy never clobbers
- *  them. Refuses a task with no stable id, before issuing the request. */
-export async function updateTask(task: TaskData, token: string): Promise<void> {
-  requireTaskID(task.id, "update a task");
-  await af("UpdateTask", { task }, token);
+/** Updates a task (mirrors `af tasks update`) — the edit + enable/disable path.
+ *  Sends a FIELD-LEVEL patch (#1700): only the fields in `update` are changed, so
+ *  a toggle shipping just `{ enabled }` can never clobber a concurrent edit another
+ *  client made to a different field. The daemon merges the patch onto the
+ *  freshly-loaded record under its file lock and leaves scheduler-owned fields
+ *  (last_run_*, created_at) untouched. Refuses a task with no stable id, before
+ *  issuing the request. */
+export async function updateTask(id: string, update: TaskUpdate, token: string): Promise<void> {
+  requireTaskID(id, "update a task");
+  await af("UpdateTask", { id, update }, token);
 }
 
 /** Fires a task NOW (mirrors `af tasks trigger`). The daemon runs it through the same

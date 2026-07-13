@@ -123,14 +123,18 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 }
 
 func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskResponse) error {
-	if err := task.UpdateTask(req.Task); err != nil {
+	merged, err := task.UpdateTask(req.ID, req.Update)
+	if err != nil {
 		return err
 	}
 	if err := s.reloadTaskSchedules(); err != nil {
 		return err
 	}
 	resp.OK = true
-	s.manager.publishEvent(agentproto.EventTaskUpdated, req.Task)
+	resp.Task = merged
+	// Publish the merged record — the authoritative post-edit task — not the
+	// partial patch, so subscribers (TUI/web) receive the full updated task.
+	s.manager.publishEvent(agentproto.EventTaskUpdated, merged)
 	return nil
 }
 

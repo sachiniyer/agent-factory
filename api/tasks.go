@@ -36,6 +36,13 @@ var (
 	daemonTriggerTask      = daemon.TriggerTask
 )
 
+// strPtr / boolPtr build the pointer fields of a task.TaskUpdate patch. The CLI
+// sends a field-level patch (#1700): only the flags the user actually passed
+// become non-nil fields, so `af tasks update --enabled false` ships just Enabled
+// and can never clobber a concurrent edit to the prompt/trigger/target.
+func strPtr(s string) *string { return &s }
+func boolPtr(b bool) *bool    { return &b }
+
 // listTasks returns the full task list, preferring the daemon's authoritative
 // snapshot and falling back to a disk read when no daemon is reachable (#1029
 // PR 3). It never spawns a daemon, so `af tasks list` keeps working with none
@@ -272,13 +279,24 @@ var tasksUpdateCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
+		// Load the current record for the cross-field pre-checks below (the
+		// switch-to-cron-needs-a-prompt rule reads the stored prompt/trigger).
+		// This is a client-side nicety only — the WRITE ships a field-level
+		// patch, never this whole struct, so an out-of-band edit to a field the
+		// user is not changing survives (#1700). The daemon re-validates the
+		// merged result authoritatively.
 		s, err := task.GetTask(args[0])
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to get task: %w", err))
 		}
 
+		// Accumulate only the fields the user actually passed. Each flag that is
+		// set becomes one non-nil patch field; everything else stays nil and is
+		// left as-stored by the daemon.
+		var patch task.TaskUpdate
+
 		if taskUpdateNameFlag != "" {
-			s.Name = taskUpdateNameFlag
+			patch.Name = strPtr(taskUpdateNameFlag)
 		}
 		if taskUpdatePromptFlag != "" {
 			// Partial-update semantics keep `--prompt ""` as "leave
@@ -290,6 +308,7 @@ var tasksUpdateCmd = &cobra.Command{
 				return jsonError(errors.New("prompt must be non-empty"))
 			}
 			s.Prompt = taskUpdatePromptFlag
+			patch.Prompt = strPtr(taskUpdatePromptFlag)
 		}
 
 		if taskUpdateCronFlag != "" && taskUpdateWatchCmdFlag != "" {
@@ -332,21 +351,26 @@ var tasksUpdateCmd = &cobra.Command{
 			}
 			// Setting one trigger clears the other so the exactly-one rule
 			// holds when switching a watch task back to a schedule.
-			s.CronExpr = strings.TrimSpace(taskUpdateCronFlag)
-			s.WatchCmd = ""
+			patch.CronExpr = strPtr(strings.TrimSpace(taskUpdateCronFlag))
+			patch.WatchCmd = strPtr("")
 		}
 		if taskUpdateWatchCmdFlag != "" {
-			s.WatchCmd = strings.TrimSpace(taskUpdateWatchCmdFlag)
-			s.CronExpr = ""
+			patch.WatchCmd = strPtr(strings.TrimSpace(taskUpdateWatchCmdFlag))
+			patch.CronExpr = strPtr("")
 		}
 		// --target-session "" is a meaningful value (revert to
 		// create-a-session-per-run), so distinguish "flag not given" from
 		// "given as empty" instead of treating "" as unchanged.
 		if cmd.Flags().Changed("target-session") {
-			s.TargetSession = taskUpdateTargetSessionFlag
+			patch.TargetSession = strPtr(taskUpdateTargetSessionFlag)
 		}
 
-		s.Enabled = updatedEnabled
+		// Only patch Enabled when --enabled was passed: an absent flag must
+		// leave the stored value untouched, not re-assert the copy this client
+		// read.
+		if taskUpdateEnabledFlag != "" {
+			patch.Enabled = boolPtr(updatedEnabled)
+		}
 
 		// Partial-update semantics: "" means "leave unchanged" (mirroring
 		// --name and the add path's taskAddProgramFlag != "" guard). There is
@@ -358,13 +382,14 @@ var tasksUpdateCmd = &cobra.Command{
 			if err := config.ValidateProgramEnum("--program flag", "--program flag", taskUpdateProgramFlag, ""); err != nil {
 				return jsonError(err)
 			}
-			s.Program = taskUpdateProgramFlag
+			patch.Program = strPtr(taskUpdateProgramFlag)
 		}
 
-		if err := daemonUpdateTask(*s); err != nil {
+		updated, err := daemonUpdateTask(args[0], patch)
+		if err != nil {
 			return jsonError(fmt.Errorf("failed to update task: %w", err))
 		}
 
-		return jsonOut(s)
+		return jsonOut(updated)
 	},
 }

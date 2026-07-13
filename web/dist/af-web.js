@@ -6243,9 +6243,9 @@ function requireTaskID(id, action) {
 async function addTask(task, token2) {
   await af("AddTask", { task }, token2);
 }
-async function updateTask(task, token2) {
-  requireTaskID(task.id, "update a task");
-  await af("UpdateTask", { task }, token2);
+async function updateTask(id, update, token2) {
+  requireTaskID(id, "update a task");
+  await af("UpdateTask", { id, update }, token2);
 }
 async function triggerTask(id, token2) {
   requireTaskID(id, "trigger a task");
@@ -8307,7 +8307,7 @@ function toggleTask(task) {
   if (tok === null) {
     return;
   }
-  void updateTask({ ...task, enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void updateTask(task.id, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
 }
 function doTriggerTask(task) {
   const tok = token;

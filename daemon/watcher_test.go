@@ -516,8 +516,8 @@ func TestDeliverWatchEvent_RendersTemplateAndRecordsStatus(t *testing.T) {
 
 	// An event for a task that was disabled after the watcher spawned must
 	// not deliver.
-	got.Enabled = false
-	if err := task.UpdateTask(*got); err != nil {
+	disabled := false
+	if _, err := task.UpdateTask("cafe0001", task.TaskUpdate{Enabled: &disabled}); err != nil {
 		t.Fatalf("disable task: %v", err)
 	}
 	if err := deliverWatchEvent("cafe0001", "late event"); err == nil {
