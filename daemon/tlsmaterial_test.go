@@ -259,6 +259,67 @@ func TestEnsureSelfSignedCertTokenShowStartupRace(t *testing.T) {
 	}
 }
 
+// TestEnsureSelfSignedCertRegeneratesMismatchedPair covers the residual #1683
+// window the concurrent-race fix alone left open: two files that both EXIST but
+// come from different keypairs. This arises from a crash between the key and
+// cert renames when a cert already existed (new key + old cert), manual
+// tampering, or a stale mismatched pair predating the fix. An existence-only
+// check blesses it, and the daemon's tls.LoadX509KeyPair then fails so the
+// TLS TCP listener won't start. ensureSelfSignedCert must instead detect the
+// mismatch and regenerate a fresh matching pair.
+func TestEnsureSelfSignedCertRegeneratesMismatchedPair(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, daemonTLSCertFileName)
+	keyPath := filepath.Join(dir, daemonTLSKeyFileName)
+
+	// Seed a valid pair, capture its cert, then overwrite the KEY with a key
+	// from a different, independently generated pair. Now cert and key both
+	// exist but do not pair.
+	if err := generateSelfSignedCert(certPath, keyPath); err != nil {
+		t.Fatalf("seed initial pair: %v", err)
+	}
+	if _, err := tls.LoadX509KeyPair(certPath, keyPath); err != nil {
+		t.Fatalf("sanity: seeded pair should load: %v", err)
+	}
+	origFingerprint, err := CertFingerprint(certPath)
+	if err != nil {
+		t.Fatalf("fingerprint seeded cert: %v", err)
+	}
+
+	otherCert := filepath.Join(dir, "other.crt")
+	otherKey := filepath.Join(dir, "other.key")
+	if err := generateSelfSignedCert(otherCert, otherKey); err != nil {
+		t.Fatalf("generate foreign pair: %v", err)
+	}
+	foreignKey, err := os.ReadFile(otherKey)
+	if err != nil {
+		t.Fatalf("read foreign key: %v", err)
+	}
+	if err := os.WriteFile(keyPath, foreignKey, 0o600); err != nil {
+		t.Fatalf("overwrite key with foreign key: %v", err)
+	}
+	// Precondition: the on-disk pair is now mismatched.
+	if _, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
+		t.Fatal("precondition failed: seeded pair is not mismatched")
+	}
+
+	// ensureSelfSignedCert must NOT bless the mismatch — it must regenerate.
+	if err := ensureSelfSignedCert(certPath, keyPath); err != nil {
+		t.Fatalf("ensureSelfSignedCert on mismatched pair: %v", err)
+	}
+	if _, err := tls.LoadX509KeyPair(certPath, keyPath); err != nil {
+		t.Fatalf("cert/key still mismatched after ensureSelfSignedCert: %v", err)
+	}
+	// It regenerated (fresh pair), so the fingerprint changed from the seed.
+	newFingerprint, err := CertFingerprint(certPath)
+	if err != nil {
+		t.Fatalf("fingerprint regenerated cert: %v", err)
+	}
+	if newFingerprint == origFingerprint {
+		t.Fatal("expected a fresh cert after regeneration, got the original fingerprint")
+	}
+}
+
 func TestCertFingerprintNonCert(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "notacert.pem")

@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -90,21 +91,33 @@ func ResolveTLSMaterial(dir, userCert, userKey string) (TLSMaterial, error) {
 //
 // The check-then-generate is serialized under an exclusive file lock so that
 // concurrent callers (daemon startup and `af token show` race, #1683) never
-// both generate: the first caller writes the pair, later callers observe both
-// files and return without regenerating. Combined with generateSelfSignedCert's
-// atomic writes, a reader never observes a mismatched cert/key pair.
+// both generate: the first caller writes the pair, later callers observe it
+// and return without regenerating.
+//
+// Reuse requires more than existence — the two files must actually form a
+// MATCHING keypair. Existence alone is insufficient: a crash between the key
+// and cert renames when a cert already existed (new key + old cert), manual
+// tampering, or a stale mismatched pair from before this fix can leave two
+// files that both exist but come from different keypairs. Blessing such a pair
+// would make the daemon's tls.LoadX509KeyPair fail so the TCP/TLS listener
+// refuses to start — the exact intermittent failure #1683 is about. So we load
+// the pair to validate it and only reuse it when it pairs; otherwise we fall
+// through and regenerate a fresh matching pair (still under the lock).
 func ensureSelfSignedCert(certPath, keyPath string) error {
 	return config.WithFileLock(certPath, func() error {
 		_, certErr := os.Stat(certPath)
 		_, keyErr := os.Stat(keyPath)
-		if certErr == nil && keyErr == nil {
-			return nil
-		}
 		if certErr != nil && !os.IsNotExist(certErr) {
 			return fmt.Errorf("stat tls cert: %w", certErr)
 		}
 		if keyErr != nil && !os.IsNotExist(keyErr) {
 			return fmt.Errorf("stat tls key: %w", keyErr)
+		}
+		if certErr == nil && keyErr == nil {
+			if _, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
+				return nil
+			}
+			// Both files exist but do not form a valid keypair — regenerate.
 		}
 		return generateSelfSignedCert(certPath, keyPath)
 	})
@@ -156,12 +169,12 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 		return fmt.Errorf("create tls directory: %w", err)
 	}
 	// Write both files atomically (temp file + rename in the same dir) so a
-	// concurrent reader never observes a half-written file or a cert/key pair
-	// from different keypairs (#1683). The key is written first so that if the
-	// process dies between the two renames, the observable state is at most a
-	// key without a cert — ensureSelfSignedCert then regenerates a fresh
-	// matching pair, never serving a mismatched one. AtomicWriteFile applies
-	// perm exactly (via tmp.Chmod), so the key lands 0600 regardless of umask.
+	// concurrent reader never observes a half-written file (#1683). If the
+	// process dies between the two renames, both files may briefly disagree
+	// (e.g. new key + old cert when a cert already existed) — ensureSelfSignedCert
+	// guards against that by validating the pair loads before reuse, so a
+	// mismatch is regenerated rather than served. AtomicWriteFile applies perm
+	// exactly (via tmp.Chmod), so the key lands 0600 regardless of umask.
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 	if err := config.AtomicWriteFile(keyPath, keyPEM, 0o600); err != nil {
 		return fmt.Errorf("write tls key: %w", err)
