@@ -110,6 +110,45 @@ export interface SnapshotResponse {
   delivery_alarms?: unknown[];
 }
 
+/**
+ * The subset of task.Task (task/task.go) the tasks view reads and mutates (#1592
+ * Phase 5 PR8). Field names and JSON tags match the Go struct EXACTLY so this
+ * decodes the daemon's ListTasks projection as-is and round-trips through
+ * AddTask/UpdateTask unchanged. `id` is globally unique — the stable key every
+ * mutation (UpdateTask/TriggerTask/RemoveTask) resolves by, NEVER the name (which
+ * is optional and non-unique). Optional fields carry Go's `omitempty` semantics:
+ * exactly one of `cron_expr` / `watch_cmd` is set on an enabled task, and the
+ * `last_run_*` fields are absent until the task first runs.
+ */
+export interface TaskData {
+  id: string;
+  name?: string;
+  prompt: string;
+  /** Time trigger (cron schedule); exactly one of cron_expr / watch_cmd on an
+   *  enabled task (task.ValidateTrigger). */
+  cron_expr?: string;
+  /** Event trigger: a long-lived watch command whose stdout lines fire the task. */
+  watch_cmd?: string;
+  /** Route deliveries into this session by title (empty ⇒ a fresh session per run). */
+  target_session?: string;
+  /** The repo root the task belongs to — the project it groups under. */
+  project_path: string;
+  /** The agent program; empty resolves the repo default at run time. */
+  program: string;
+  enabled: boolean;
+  /** RFC3339 creation time. */
+  created_at: string;
+  /** RFC3339 last-run time (absent until the task first runs). */
+  last_run_at?: string;
+  /** The outcome of the last run (scheduler-owned; absent until first run). */
+  last_run_status?: string;
+}
+
+/** The ListTasks RPC response (daemon/control_types.go: ListTasksResponse). */
+export interface TasksResponse {
+  tasks: TaskData[] | null;
+}
+
 /** agentproto.EventType (agentproto/message.go): the /v1/events discriminators. */
 export type EventType =
   | "session.created"

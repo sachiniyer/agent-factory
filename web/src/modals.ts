@@ -27,7 +27,10 @@ export interface ModalHandle {
   close(): void;
 }
 
-function h<K extends keyof HTMLElementTagNameMap>(
+/** Minimal hyperscript (shared by the modal builders and the projects/tasks panes,
+ *  #1592 Phase 5 PR8): create an element, apply props, append children — CSP-safe
+ *  createElement, no innerHTML. */
+export function h<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   props: Partial<HTMLElementTagNameMap[K]> & { class?: string } = {},
   ...children: (Node | string)[]
@@ -50,7 +53,7 @@ function h<K extends keyof HTMLElementTagNameMap>(
  *  error line, and a footer with a cancel + a primary action button. Returns the
  *  pieces the specific modals wire their behavior onto. Clicking the backdrop or
  *  pressing Escape cancels; Enter is left to the form's own submit. */
-function modalChrome(opts: {
+export function modalChrome(opts: {
   title: string;
   confirmLabel: string;
   confirmClass: string;
@@ -113,7 +116,7 @@ function modalChrome(opts: {
 
 /** Wraps the card's content in a <form> so Enter submits and the browser handles
  *  focus, calling onSubmit with preventDefault already applied. */
-function asForm(card: HTMLElement, onSubmit: () => void): void {
+export function asForm(card: HTMLElement, onSubmit: () => void): void {
   // The card children were appended directly; re-parent them under a form so a
   // native submit (Enter / the primary button) is captured once.
   const form = h("form", { class: "af-modal-form" });
@@ -263,12 +266,12 @@ export function confirmModal(
 }
 
 /** A labeled field row: a caption above its control. */
-function field(label: string, control: HTMLElement): HTMLElement {
+export function field(label: string, control: HTMLElement): HTMLElement {
   return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
 }
 
 /** A friendly project label: the repo's basename with its parent for context. */
-function projectLabel(root: string): string {
+export function projectLabel(root: string): string {
   const parts = root.replace(/\/+$/, "").split("/");
   const base = parts[parts.length - 1] || root;
   const parent = parts.length >= 2 ? parts[parts.length - 2] : "";

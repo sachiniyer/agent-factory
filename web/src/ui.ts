@@ -19,15 +19,22 @@
 // session changes (a deliberate user act that rebuilds the terminal anyway).
 
 import type { EventStreamStatus } from "./events.js";
-import type { KeyboardFocus } from "./nav.js";
+import type { KeyboardFocus, View } from "./nav.js";
+import { VIEWS } from "./nav.js";
+import { ProjectsPane } from "./projects.js";
 import { isArchived, rowStatus, rowTitle } from "./status.js";
+import { TasksPane } from "./tasks.js";
 import type { TerminalStatus } from "./terminal.js";
-import type { SessionData } from "./types.js";
+import type { SessionData, TaskData } from "./types.js";
 
 /** The whole client state: which view to show, the login details, and — once
  *  authed — the live session projection plus the current selection. */
 export interface AppState {
   phase: "login" | "app";
+  /** the top-level view (#1592 Phase 5 PR8): the live sessions rail+terminal, the
+   *  projects (repo grouping) pane, or the tasks (scheduled automations) pane. The
+   *  appbar view tabs and the [ / ] keys switch it; it selects which body shows. */
+  view: View;
   /** whether THIS client must present a bearer token, from the /v1/auth-info probe
    *  (#1696). false ⇒ the daemon exempts this peer (loopback, or require_token=false),
    *  so the login view offers a one-click tokenless connect instead of the paste form.
@@ -57,10 +64,12 @@ export interface AppState {
    *  the selection changes. */
   activeTab: number;
   /** an actionable message shown as a transient toast when a tab op (create/close)
-   *  fails, or null when there is none. Tab ops have no modal to surface an error
-   *  in (unlike create/kill/archive), so the failure is shown here instead of being
-   *  silently swallowed (#1592 Phase 5 PR7). */
+   *  or a task op (toggle/trigger/remove) fails, or null when there is none. These
+   *  ops have no modal to surface an error in (unlike create/kill/archive), so the
+   *  failure is shown here instead of being silently swallowed (#1592 Phase 5 PR7/PR8). */
   tabError: string | null;
+  /** the live task projection (ListTasks + task.* events), the tasks view's data. */
+  tasks: TaskData[];
 }
 
 /** Callbacks the shell invokes; index.ts owns the real behavior. */
@@ -90,6 +99,18 @@ export interface Actions {
   /** Closes the tab at `index` of the selected session (the `w` key / × button);
    *  the agent tab (index 0) is unclosable. */
   closeTab(index: number): void;
+  /** Switches the top-level view (#1592 Phase 5 PR8): the appbar view tabs and the
+   *  [ / ] keys route here; index.ts flips the store and hands the keyboard back to
+   *  the rail (blurring the terminal) when leaving the sessions view. */
+  switchView(view: View): void;
+  /** Opens the add-task modal (#1592 Phase 5 PR8). */
+  addTask(): void;
+  /** Enables/disables a task via UpdateTask. */
+  toggleTask(task: TaskData): void;
+  /** Fires a task now via TriggerTask (enabled cron tasks). */
+  triggerTask(task: TaskData): void;
+  /** Removes a task via RemoveTask. */
+  removeTask(task: TaskData): void;
 }
 
 /** The soft cap on tabs per session (session/tab.go maxTabs): the agent tab plus
@@ -140,6 +161,18 @@ export function deriveProjects(sessions: SessionData[]): string[] {
     }
   }
   return [...roots].sort();
+}
+
+/** The appbar label for a top-level view (#1592 Phase 5 PR8). */
+function viewLabel(view: View): string {
+  switch (view) {
+    case "sessions":
+      return "Sessions";
+    case "projects":
+      return "Projects";
+    case "tasks":
+      return "Tasks";
+  }
 }
 
 /** Minimal hyperscript: create an element, apply props, append children. Keeps the
@@ -332,6 +365,17 @@ export class AppShell {
   // A transient toast for failed tab ops (create/close), shown/hidden by `tabError`.
   private readonly toast: HTMLElement;
 
+  // The top-level view switcher (#1592 Phase 5 PR8): the appbar tabs (by view) and
+  // the three body surfaces they toggle between. The sessions body (rail+terminal)
+  // stays mounted while another view shows — hidden, not destroyed — so switching
+  // views never tears down the focused terminal or its scrollback.
+  private readonly viewTabs = new Map<View, HTMLElement>();
+  private readonly sessionsBody: HTMLElement;
+  private readonly projectsPane: ProjectsPane;
+  private readonly tasksPane: TasksPane;
+  private lastView: View | null = null;
+  private lastTasks: TaskData[] | null = null;
+
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
   private headMeta: HTMLElement | null = null;
@@ -362,10 +406,26 @@ export class AppShell {
     const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect.addEventListener("click", () => this.actions.disconnect());
 
+    // The view switcher: one tab per top-level view, left-to-right in the [ / ] cycle
+    // order (nav.ts VIEWS), the active one highlighted in update(). A click routes
+    // through actions.switchView, exactly like the keyboard path.
+    const viewNav = h("div", { class: "af-viewnav" });
+    viewNav.setAttribute("role", "tablist");
+    viewNav.setAttribute("aria-label", "Views");
+    for (const v of VIEWS) {
+      const tab = h("button", { type: "button", class: "af-viewtab" }, viewLabel(v));
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("data-view", v);
+      tab.addEventListener("click", () => this.actions.switchView(v));
+      this.viewTabs.set(v, tab);
+      viewNav.append(tab);
+    }
+
     const header = h(
       "header",
       { class: "af-appbar" },
       h("span", { class: "af-brand" }, "Agent Factory"),
+      viewNav,
       live,
       disconnect,
     );
@@ -386,14 +446,27 @@ export class AppShell {
     const rail = h("nav", { class: "af-rail" }, railHead, this.railList);
 
     this.main = h("section", { class: "af-main" });
-    const body = h("div", { class: "af-body" }, rail, this.main);
+    this.sessionsBody = h("div", { class: "af-body" }, rail, this.main);
+
+    // The projects + tasks views are peers of the sessions body inside one viewport;
+    // update() shows exactly one and hides the others by `state.view`. They own their
+    // own subtrees so a task.* / rail event patches only the active pane.
+    this.projectsPane = new ProjectsPane((id: string) => this.actions.open(id));
+    this.tasksPane = new TasksPane({
+      add: () => this.actions.addTask(),
+      toggle: (task: TaskData) => this.actions.toggleTask(task),
+      trigger: (task: TaskData) => this.actions.triggerTask(task),
+      remove: (task: TaskData) => this.actions.removeTask(task),
+    });
+    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.projectsPane.el, this.tasksPane.el);
+
     // A transient toast for failed tab ops: a fixed-position banner that fades in
     // only while `tabError` is set (index.ts clears it on a timer / selection change).
     this.toast = h("div", { class: "af-toast" });
     this.toast.setAttribute("role", "alert");
     // The modal host is a persistent overlay layer index.ts mounts modals into; it
     // sits above the app body and is empty except while a modal is open.
-    this.el = h("main", { class: "af-app" }, header, body, this.toast, this.modalHost);
+    this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
   }
 
   /** Applies the latest state, touching only what changed. */
@@ -420,6 +493,30 @@ export class AppShell {
       this.pip.className = `af-live-pip af-live-${state.live}`;
       this.pipLabel.textContent =
         state.live === "open" ? "Live" : state.live === "connecting" ? "Connecting…" : "Reconnecting…";
+    }
+
+    // View switching (#1592 Phase 5 PR8): show the active view's body, hide the
+    // others, and highlight its appbar tab. The sessions body is only HIDDEN (never
+    // removed), so the terminal host inside it — and its focus/scrollback — survives
+    // a round trip to another view.
+    if (this.lastView !== state.view) {
+      this.lastView = state.view;
+      this.sessionsBody.hidden = state.view !== "sessions";
+      this.projectsPane.el.hidden = state.view !== "projects";
+      this.tasksPane.el.hidden = state.view !== "tasks";
+      for (const [v, tab] of this.viewTabs) {
+        tab.classList.toggle("af-viewtab-active", v === state.view);
+        tab.setAttribute("aria-selected", v === state.view ? "true" : "false");
+      }
+    }
+
+    // The projects pane mirrors the live session grouping; the tasks pane mirrors the
+    // task projection. Each self-guards on an unchanged reference, so these are cheap
+    // no-ops when their data didn't change (and when their view isn't showing).
+    this.projectsPane.update(state.sessions, state.selectedId);
+    if (this.lastTasks !== state.tasks) {
+      this.lastTasks = state.tasks;
+      this.tasksPane.update(state.tasks);
     }
 
     const sessionsChanged = this.lastSessions !== state.sessions;

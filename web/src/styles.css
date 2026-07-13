@@ -751,6 +751,247 @@ body {
   margin-top: 0;
 }
 
+/* View switcher (#1592 Phase 5 PR8): appbar tabs for the top-level views (Sessions /
+ * Projects / Tasks), mirroring the TUI's rail sections. The active tab is
+ * accent-underlined, the tab-row analogue of the session tab bar. */
+.af-viewnav {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  margin-left: 0.5rem;
+}
+
+.af-viewtab {
+  padding: 0.3rem 0.7rem;
+  background: transparent;
+  color: var(--af-muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.af-viewtab:hover {
+  color: var(--af-text);
+}
+
+.af-viewtab-active {
+  color: var(--af-text);
+  border-bottom-color: var(--af-accent);
+}
+
+/* The viewport holds the three view bodies; exactly one shows at a time (the others
+ * carry the `hidden` attribute). The explicit rule beats the bodies' own
+ * `display:flex`, which would otherwise keep a hidden body visible (author styles
+ * outrank the UA `[hidden]` rule). */
+.af-viewport {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.af-viewport > [hidden] {
+  display: none;
+}
+
+.af-viewport > * {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Projects view: a scrollable column of project sections, each a repo root with its
+ * sessions grouped under it (the browser analogue of ui/projects.go). */
+.af-projects,
+.af-tasks {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.af-projects-head,
+.af-tasks-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--af-border);
+  background: var(--af-surface);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.af-projects-title,
+.af-tasks-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--af-muted);
+}
+
+/* The projects/tasks count badge, styled like the rail's session count (a distinct
+ * class so the sessions rail's .af-rail-count selector stays unambiguous). */
+.af-view-count {
+  font-size: 0.75rem;
+  color: var(--af-muted);
+  background: var(--af-bg);
+  border: 1px solid var(--af-border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+
+/* The tasks "+ Add" button, styled like the rail's "+ New" and pushed to the far
+ * right of its header (its own class so the rail's .af-rail-new stays unambiguous). */
+.af-tasks-add {
+  margin-left: auto;
+  padding: 0.25rem 0.55rem;
+  background: transparent;
+  color: var(--af-accent);
+  border: 1px solid var(--af-accent);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.af-tasks-add:hover {
+  background: rgba(47, 129, 247, 0.12);
+}
+
+.af-projects-empty,
+.af-tasks-empty {
+  padding: 1.25rem 1rem;
+  color: var(--af-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.af-projects-empty code {
+  color: var(--af-text);
+}
+
+.af-projects-list {
+  padding: 0.5rem 0.75rem 1.5rem;
+}
+
+.af-project {
+  margin-bottom: 0.75rem;
+}
+
+.af-project-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem 0.35rem;
+}
+
+.af-project-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-project-count {
+  font-size: 0.72rem;
+  color: var(--af-muted);
+}
+
+.af-project-path {
+  grid-column: 1 / -1;
+  font-size: 0.7rem;
+  color: var(--af-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-project-sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.af-project-row {
+  padding: 0.4rem 0.6rem;
+}
+
+/* Tasks view: a scrollable list of scheduled tasks, each with its trigger + last-run
+ * and the enable/disable · trigger · remove actions (mirrors ui/automations.go). */
+.af-tasks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem 0.75rem 1.5rem;
+}
+
+.af-task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.6rem;
+  border-bottom: 1px solid var(--af-border);
+}
+
+.af-task-enabled {
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+  color: var(--af-muted);
+  line-height: 1.5;
+}
+
+.af-task-enabled.af-task-on {
+  color: var(--af-dot-ready);
+}
+
+.af-task-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.af-task-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-task-trigger {
+  margin-top: 0.15rem;
+  font-size: 0.75rem;
+  color: var(--af-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-task-meta {
+  margin-top: 0.1rem;
+  font-size: 0.72rem;
+  color: var(--af-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-task-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+}
+
+.af-task-action {
+  padding: 0.3rem 0.55rem;
+  font-size: 0.72rem;
+}
+
 /* Narrow viewport: stack the rail above the main pane (design §7.2 item 7 —
  * usable-but-not-optimized on a phone). */
 @media (max-width: 640px) {

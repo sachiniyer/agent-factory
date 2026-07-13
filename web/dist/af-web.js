@@ -6231,6 +6231,30 @@ async function closeTab(id, title, tabName, token2) {
   requireSessionID(id, "close a tab");
   await af("CloseTab", { id, title, repo_id: "", tab_name: tabName, tab_index: 0 }, token2);
 }
+async function listTasks(token2) {
+  const resp = await af("ListTasks", {}, token2);
+  return resp.tasks ?? [];
+}
+function requireTaskID(id, action) {
+  if (id === "") {
+    throw new ApiError(0, `cannot ${action}: this task has no stable id to target safely`);
+  }
+}
+async function addTask(task, token2) {
+  await af("AddTask", { task }, token2);
+}
+async function updateTask(task, token2) {
+  requireTaskID(task.id, "update a task");
+  await af("UpdateTask", { task }, token2);
+}
+async function triggerTask(id, token2) {
+  requireTaskID(id, "trigger a task");
+  await af("TriggerTask", { id }, token2);
+}
+async function removeTask(id, token2) {
+  requireTaskID(id, "remove a task");
+  await af("RemoveTask", { id }, token2);
+}
 
 // src/events.ts
 var BACKOFF_BASE_MS = 500;
@@ -6508,6 +6532,12 @@ function projectLabel(root2) {
 }
 
 // src/nav.ts
+var VIEWS = ["sessions", "projects", "tasks"];
+function cycleView(current, delta) {
+  const i = VIEWS.indexOf(current);
+  const n = VIEWS.length;
+  return VIEWS[(i + delta + n) % n];
+}
 function nextSelection(orderedIds, selectedId, delta) {
   if (orderedIds.length === 0) {
     return null;
@@ -6527,6 +6557,15 @@ function decideKey(key, ctx) {
   }
   if (ctx.focus === "terminal") {
     return key === "Escape" ? { kind: "toRail" } : { kind: "none" };
+  }
+  if (key === "[") {
+    return { kind: "switchView", view: cycleView(ctx.view, -1) };
+  }
+  if (key === "]") {
+    return { kind: "switchView", view: cycleView(ctx.view, 1) };
+  }
+  if (ctx.view !== "sessions") {
+    return { kind: "none" };
   }
   if (key === "Enter") {
     return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
@@ -6640,6 +6679,213 @@ var Store = class {
     };
   }
 };
+
+// src/tasks.ts
+function genTaskId() {
+  const b = new Uint8Array(4);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+function buildTask(input) {
+  return {
+    id: genTaskId(),
+    name: input.name,
+    prompt: input.prompt,
+    cron_expr: input.trigger === "cron" ? input.cron : "",
+    watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
+    target_session: input.targetSession,
+    project_path: input.projectPath,
+    program: input.program,
+    enabled: true,
+    created_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function triggerSummary(t) {
+  if (t.watch_cmd && t.watch_cmd.trim() !== "") {
+    return `watch: ${t.watch_cmd}`;
+  }
+  if (t.cron_expr && t.cron_expr.trim() !== "") {
+    return `cron: ${t.cron_expr}`;
+  }
+  return "no trigger";
+}
+function canTrigger(t) {
+  return t.enabled && !!t.cron_expr && t.cron_expr.trim() !== "" && !(t.watch_cmd && t.watch_cmd.trim() !== "");
+}
+function lastRunSummary(t) {
+  if (!t.last_run_at) {
+    return "never run";
+  }
+  const status = t.last_run_status ? ` (${t.last_run_status})` : "";
+  return `last run ${t.last_run_at}${status}`;
+}
+var TasksPane = class {
+  constructor(actions2) {
+    this.actions = actions2;
+    this.el = h("section", { class: "af-tasks" });
+    this.el.setAttribute("aria-label", "Tasks");
+  }
+  el;
+  lastTasks = null;
+  update(tasks) {
+    if (this.lastTasks === tasks) {
+      return;
+    }
+    this.lastTasks = tasks;
+    this.render(tasks);
+  }
+  render(tasks) {
+    const addBtn = h("button", { type: "button", class: "af-tasks-add", title: "Add task" }, "+ Add");
+    addBtn.addEventListener("click", () => this.actions.add());
+    const head = h(
+      "div",
+      { class: "af-tasks-head" },
+      h("span", { class: "af-tasks-title" }, "Tasks"),
+      h("span", { class: "af-view-count" }, String(tasks.length)),
+      addBtn
+    );
+    if (tasks.length === 0) {
+      this.el.replaceChildren(
+        head,
+        h(
+          "p",
+          { class: "af-tasks-empty" },
+          "No scheduled tasks yet. Add one to deliver a prompt on a cron schedule."
+        )
+      );
+      return;
+    }
+    const rows = [...tasks].sort((a, b) => a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0).map((t) => this.taskRow(t));
+    this.el.replaceChildren(head, h("ul", { class: "af-tasks-list" }, ...rows));
+  }
+  taskRow(t) {
+    const glyph = t.enabled ? "[\u2713]" : "[ ]";
+    const enabledDot = h("span", { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` }, glyph);
+    enabledDot.setAttribute("aria-hidden", "true");
+    const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
+    const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
+    const metaParts = [];
+    if (t.target_session && t.target_session.trim() !== "") {
+      metaParts.push(`\u2192 ${t.target_session}`);
+    }
+    metaParts.push(lastRunSummary(t));
+    const meta = h("div", { class: "af-task-meta" }, metaParts.join("  \xB7  "));
+    const main = h("div", { class: "af-task-main" }, name, trigger, meta);
+    const toggleBtn = h(
+      "button",
+      { type: "button", class: "af-ghost af-task-action" },
+      t.enabled ? "Disable" : "Enable"
+    );
+    toggleBtn.addEventListener("click", () => this.actions.toggle(t));
+    const actionEls = [toggleBtn];
+    if (canTrigger(t)) {
+      const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
+      triggerBtn.addEventListener("click", () => this.actions.trigger(t));
+      actionEls.push(triggerBtn);
+    }
+    const removeBtn = h("button", { type: "button", class: "af-danger af-task-action" }, "Remove");
+    removeBtn.addEventListener("click", () => this.actions.remove(t));
+    actionEls.push(removeBtn);
+    const actions2 = h("div", { class: "af-task-actions" }, ...actionEls);
+    return h("li", { class: "af-task-row" }, enabledDot, main, actions2);
+  }
+};
+function addTaskModal(projects, callbacks) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: "Add task",
+    confirmLabel: "Add",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  const nameInput = h("input", { type: "text", class: "af-input", placeholder: "Task name", autocomplete: "off" });
+  nameInput.setAttribute("aria-label", "Task name");
+  const projectSelect = h("select", { class: "af-input" });
+  projectSelect.setAttribute("aria-label", "Project");
+  if (projects.length === 0) {
+    const opt = h("option", { value: "" }, "No projects yet \u2014 create a session first");
+    opt.disabled = true;
+    opt.selected = true;
+    projectSelect.append(opt);
+    confirmBtn.disabled = true;
+  } else {
+    for (const p of projects) {
+      projectSelect.append(h("option", { value: p }, projectLabel(p)));
+    }
+  }
+  const triggerSelect = h("select", { class: "af-input" });
+  triggerSelect.setAttribute("aria-label", "Trigger type");
+  triggerSelect.append(h("option", { value: "cron" }, "Cron schedule"));
+  triggerSelect.append(h("option", { value: "watch" }, "Watch command"));
+  const cronInput = h("input", { type: "text", class: "af-input", placeholder: "0 9 * * *", autocomplete: "off" });
+  cronInput.setAttribute("aria-label", "Cron expression");
+  const cronField = field("Cron expression", cronInput);
+  const watchInput = h("input", { type: "text", class: "af-input", placeholder: "tail -F events.log", autocomplete: "off" });
+  watchInput.setAttribute("aria-label", "Watch command");
+  const watchField = field("Watch command", watchInput);
+  watchField.hidden = true;
+  triggerSelect.addEventListener("change", () => {
+    const isWatch = triggerSelect.value === "watch";
+    cronField.hidden = isWatch;
+    watchField.hidden = !isWatch;
+  });
+  const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt to deliver ({{line}} for the watch line)", rows: 3 });
+  promptArea.setAttribute("aria-label", "Prompt");
+  const targetInput = h("input", { type: "text", class: "af-input", placeholder: "Target session (optional)", autocomplete: "off" });
+  targetInput.setAttribute("aria-label", "Target session");
+  const programSelect = h("select", { class: "af-input" });
+  programSelect.setAttribute("aria-label", "Program");
+  programSelect.append(h("option", { value: "" }, "Repo default"));
+  for (const prog of ["claude", "codex", "aider", "gemini", "amp"]) {
+    programSelect.append(h("option", { value: prog }, prog));
+  }
+  body.append(
+    field("Name", nameInput),
+    field("Project", projectSelect),
+    field("Trigger", triggerSelect),
+    cronField,
+    watchField,
+    field("Prompt", promptArea),
+    field("Target session", targetInput),
+    field("Program", programSelect)
+  );
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const trigger = triggerSelect.value === "watch" ? "watch" : "cron";
+    const name = nameInput.value.trim();
+    const cron = cronInput.value.trim();
+    const watchCmd = watchInput.value.trim();
+    const prompt = promptArea.value.trim();
+    if (name === "" || projectSelect.value === "") {
+      handle.setError("A name and a project are required.");
+      return;
+    }
+    if (trigger === "cron" && cron === "") {
+      handle.setError("A cron expression is required for a cron task.");
+      return;
+    }
+    if (trigger === "cron" && prompt === "") {
+      handle.setError("A prompt is required for a cron task.");
+      return;
+    }
+    if (trigger === "watch" && watchCmd === "") {
+      handle.setError("A watch command is required for a watch task.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit({
+      name,
+      projectPath: projectSelect.value,
+      trigger,
+      cron,
+      watchCmd,
+      prompt: promptArea.value,
+      targetSession: targetInput.value.trim(),
+      program: programSelect.value
+    });
+  });
+  queueMicrotask(() => nameInput.focus());
+  return handle;
+}
 
 // src/terminal.ts
 var import_addon_fit = __toESM(require_addon_fit(), 1);
@@ -7126,6 +7372,115 @@ function formatLimitReset(reset, now) {
   return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
 }
 
+// src/projects.ts
+function orderWithinProject(sessions) {
+  return [...sessions].sort((a, b) => {
+    const aa = isArchived(a) ? 1 : 0;
+    const bb = isArchived(b) ? 1 : 0;
+    if (aa !== bb) {
+      return aa - bb;
+    }
+    const at = a.created_at ?? "";
+    const bt = b.created_at ?? "";
+    if (at !== bt) {
+      return at < bt ? -1 : 1;
+    }
+    return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+  });
+}
+function groupSessionsByProject(sessions) {
+  const byRoot = /* @__PURE__ */ new Map();
+  for (const s of sessions) {
+    const root2 = s.worktree?.repo_path;
+    if (!root2) {
+      continue;
+    }
+    const arr = byRoot.get(root2) ?? [];
+    arr.push(s);
+    byRoot.set(root2, arr);
+  }
+  return [...byRoot.keys()].sort().map((root2) => ({ root: root2, label: projectLabel(root2), sessions: orderWithinProject(byRoot.get(root2) ?? []) }));
+}
+var ProjectsPane = class {
+  /** onOpen selects + attaches a session by its stable id (index.ts switches to the
+   *  sessions view and hands the terminal the keyboard), so a project's session row
+   *  is a jump-to-session affordance. */
+  constructor(onOpen) {
+    this.onOpen = onOpen;
+    this.el = h("section", { class: "af-projects" });
+    this.el.setAttribute("aria-label", "Projects");
+  }
+  el;
+  lastSessions = null;
+  lastSelectedId = null;
+  /** Re-renders when the session list or the selection changed. */
+  update(sessions, selectedId) {
+    if (this.lastSessions === sessions && this.lastSelectedId === selectedId) {
+      return;
+    }
+    this.lastSessions = sessions;
+    this.lastSelectedId = selectedId;
+    this.render(sessions, selectedId);
+  }
+  render(sessions, selectedId) {
+    const groups = groupSessionsByProject(sessions);
+    const head = h(
+      "div",
+      { class: "af-projects-head" },
+      h("span", { class: "af-projects-title" }, "Projects"),
+      h("span", { class: "af-view-count" }, String(groups.length))
+    );
+    if (groups.length === 0) {
+      this.el.replaceChildren(
+        head,
+        h(
+          "p",
+          { class: "af-projects-empty" },
+          "No projects yet. Create a session in a repo (the TUI or ",
+          h("code", {}, "af sessions create"),
+          ") and it appears here."
+        )
+      );
+      return;
+    }
+    const sections = groups.map((g) => this.projectSection(g, selectedId));
+    this.el.replaceChildren(head, h("div", { class: "af-projects-list" }, ...sections));
+  }
+  projectSection(group, selectedId) {
+    const header = h(
+      "div",
+      { class: "af-project-head" },
+      h("span", { class: "af-project-name" }, group.label),
+      h("span", { class: "af-project-count" }, `${group.sessions.length}`)
+    );
+    header.append(h("div", { class: "af-project-path" }, group.root));
+    const rows = group.sessions.map((s) => this.sessionRow(s, s.id === selectedId));
+    return h("section", { class: "af-project" }, header, h("ul", { class: "af-project-sessions" }, ...rows));
+  }
+  /** One session row under a project: the same status dot + prefixed title the rail
+   *  row carries (status.ts), keyed by the stable id. Clicking opens it (→ sessions
+   *  view). A row with no id (never from a live Snapshot) renders but is inert. */
+  sessionRow(s, selected) {
+    const status = rowStatus(s);
+    const dot = h(
+      "span",
+      { class: `af-dot af-dot-${status.kind}${status.spinning ? " af-dot-spin" : ""}` },
+      status.glyph
+    );
+    dot.setAttribute("aria-hidden", "true");
+    const title = h("div", { class: "af-row-title" }, rowTitle(s));
+    const cls = `af-row af-project-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}`;
+    const row = h("li", { class: cls }, dot, h("div", { class: "af-row-main" }, title));
+    row.setAttribute("role", "button");
+    row.setAttribute("title", `${s.title} \u2014 ${status.label}`);
+    if (s.id) {
+      const id = s.id;
+      row.addEventListener("click", () => this.onOpen(id));
+    }
+    return row;
+  }
+};
+
 // src/ui.ts
 var MAX_TABS = 9;
 function supportsTabManagement(s) {
@@ -7155,6 +7510,16 @@ function deriveProjects(sessions) {
     }
   }
   return [...roots].sort();
+}
+function viewLabel(view) {
+  switch (view) {
+    case "sessions":
+      return "Sessions";
+    case "projects":
+      return "Projects";
+    case "tasks":
+      return "Tasks";
+  }
 }
 function h2(tag, props = {}, ...children) {
   const el = document.createElement(tag);
@@ -7299,10 +7664,22 @@ var AppShell = class {
     live.setAttribute("role", "status");
     const disconnect2 = h2("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect2.addEventListener("click", () => this.actions.disconnect());
+    const viewNav = h2("div", { class: "af-viewnav" });
+    viewNav.setAttribute("role", "tablist");
+    viewNav.setAttribute("aria-label", "Views");
+    for (const v of VIEWS) {
+      const tab = h2("button", { type: "button", class: "af-viewtab" }, viewLabel(v));
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("data-view", v);
+      tab.addEventListener("click", () => this.actions.switchView(v));
+      this.viewTabs.set(v, tab);
+      viewNav.append(tab);
+    }
     const header = h2(
       "header",
       { class: "af-appbar" },
       h2("span", { class: "af-brand" }, "Agent Factory"),
+      viewNav,
       live,
       disconnect2
     );
@@ -7321,10 +7698,18 @@ var AppShell = class {
     this.railList.setAttribute("aria-label", "Sessions");
     const rail = h2("nav", { class: "af-rail" }, railHead, this.railList);
     this.main = h2("section", { class: "af-main" });
-    const body = h2("div", { class: "af-body" }, rail, this.main);
+    this.sessionsBody = h2("div", { class: "af-body" }, rail, this.main);
+    this.projectsPane = new ProjectsPane((id) => this.actions.open(id));
+    this.tasksPane = new TasksPane({
+      add: () => this.actions.addTask(),
+      toggle: (task) => this.actions.toggleTask(task),
+      trigger: (task) => this.actions.triggerTask(task),
+      remove: (task) => this.actions.removeTask(task)
+    });
+    const viewport = h2("div", { class: "af-viewport" }, this.sessionsBody, this.projectsPane.el, this.tasksPane.el);
     this.toast = h2("div", { class: "af-toast" });
     this.toast.setAttribute("role", "alert");
-    this.el = h2("main", { class: "af-app" }, header, body, this.toast, this.modalHost);
+    this.el = h2("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
   }
   el;
   pip;
@@ -7334,6 +7719,16 @@ var AppShell = class {
   main;
   // A transient toast for failed tab ops (create/close), shown/hidden by `tabError`.
   toast;
+  // The top-level view switcher (#1592 Phase 5 PR8): the appbar tabs (by view) and
+  // the three body surfaces they toggle between. The sessions body (rail+terminal)
+  // stays mounted while another view shows — hidden, not destroyed — so switching
+  // views never tears down the focused terminal or its scrollback.
+  viewTabs = /* @__PURE__ */ new Map();
+  sessionsBody;
+  projectsPane;
+  tasksPane;
+  lastView = null;
+  lastTasks = null;
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
   headMeta = null;
@@ -7365,6 +7760,21 @@ var AppShell = class {
       this.lastLive = state.live;
       this.pip.className = `af-live-pip af-live-${state.live}`;
       this.pipLabel.textContent = state.live === "open" ? "Live" : state.live === "connecting" ? "Connecting\u2026" : "Reconnecting\u2026";
+    }
+    if (this.lastView !== state.view) {
+      this.lastView = state.view;
+      this.sessionsBody.hidden = state.view !== "sessions";
+      this.projectsPane.el.hidden = state.view !== "projects";
+      this.tasksPane.el.hidden = state.view !== "tasks";
+      for (const [v, tab] of this.viewTabs) {
+        tab.classList.toggle("af-viewtab-active", v === state.view);
+        tab.setAttribute("aria-selected", v === state.view ? "true" : "false");
+      }
+    }
+    this.projectsPane.update(state.sessions, state.selectedId);
+    if (this.lastTasks !== state.tasks) {
+      this.lastTasks = state.tasks;
+      this.tasksPane.update(state.tasks);
     }
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
@@ -7524,6 +7934,7 @@ function sessionRow(s, selected, actions2) {
 // src/index.ts
 var store = new Store({
   phase: "login",
+  view: "sessions",
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
   // showing the paste form before that resolves would flash a token field a
@@ -7538,11 +7949,13 @@ var store = new Store({
   termStatus: "connecting",
   focus: "rail",
   activeTab: 0,
-  tabError: null
+  tabError: null,
+  tasks: []
 });
 var token = null;
 var stream = null;
 var resyncTimer = null;
+var taskResyncTimer = null;
 var tabErrorTimer = null;
 var TAB_ERROR_MS = 6e3;
 var shell = null;
@@ -7622,6 +8035,7 @@ async function connect(candidate) {
   }
   store.set({
     phase: "app",
+    view: "sessions",
     connecting: false,
     loginError: null,
     sessions,
@@ -7629,9 +8043,11 @@ async function connect(candidate) {
     live: "connecting",
     focus: "rail",
     activeTab: 0,
-    tabError: null
+    tabError: null,
+    tasks: []
   });
   startStream(candidate);
+  refreshTasks();
 }
 function disconnect() {
   stopStream();
@@ -7640,6 +8056,7 @@ function disconnect() {
   clearToken();
   store.set({
     phase: "login",
+    view: "sessions",
     connecting: false,
     loginError: null,
     sessions: [],
@@ -7647,7 +8064,8 @@ function disconnect() {
     live: "connecting",
     focus: "rail",
     activeTab: 0,
-    tabError: null
+    tabError: null,
+    tasks: []
   });
 }
 function moveSelection(id) {
@@ -7655,6 +8073,9 @@ function moveSelection(id) {
   store.set({ selectedId: id, focus: "rail", activeTab: 0 });
 }
 function openFromRail(id) {
+  if (store.get().view !== "sessions") {
+    store.set({ view: "sessions" });
+  }
   moveSelection(id);
   focusTerminal();
 }
@@ -7669,6 +8090,19 @@ function focusRail() {
   store.set({ focus: "rail" });
   if (terminal) {
     terminal.blur();
+  }
+}
+function switchView(view) {
+  if (store.get().view === view) {
+    return;
+  }
+  clearTabError();
+  if (view !== "sessions" && terminal) {
+    terminal.blur();
+  }
+  store.set({ view, focus: "rail" });
+  if (view === "tasks") {
+    refreshTasks();
   }
 }
 function selectedSession2() {
@@ -7830,6 +8264,67 @@ function clearTabError() {
     store.set({ tabError: null });
   }
 }
+function refreshTasks() {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void listTasks(tok).then((tasks) => store.set({ tasks })).catch(() => {
+  });
+}
+function requestTaskResync() {
+  if (taskResyncTimer !== null) {
+    return;
+  }
+  taskResyncTimer = window.setTimeout(() => {
+    taskResyncTimer = null;
+    refreshTasks();
+  }, 150);
+}
+function openAddTask() {
+  const projects = deriveProjects(store.get().sessions);
+  openModal(
+    addTaskModal(projects, {
+      onSubmit: (input) => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void addTask(buildTask(input), tok).then(() => {
+          closeModal();
+          refreshTasks();
+        }).catch((e) => {
+          m.setBusy(false);
+          m.setError(describeError(e));
+        });
+      },
+      onCancel: closeModal
+    })
+  );
+}
+function toggleTask(task) {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void updateTask({ ...task, enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+}
+function doTriggerTask(task) {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void triggerTask(task.id, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+}
+function doRemoveTask(task) {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void removeTask(task.id, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+}
 var actions = {
   connect,
   disconnect,
@@ -7841,7 +8336,12 @@ var actions = {
   switchTab,
   openTab,
   newTab: createSessionTab,
-  closeTab: closeSessionTab
+  closeTab: closeSessionTab,
+  switchView,
+  addTask: openAddTask,
+  toggleTask,
+  triggerTask: doTriggerTask,
+  removeTask: doRemoveTask
 };
 function syncTerminal(state) {
   const selId = state.selectedId;
@@ -7886,12 +8386,20 @@ function stopStream() {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
   }
+  if (taskResyncTimer !== null) {
+    window.clearTimeout(taskResyncTimer);
+    taskResyncTimer = null;
+  }
   if (stream) {
     stream.stop();
     stream = null;
   }
 }
 function onEvent(ev) {
+  if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
+    requestTaskResync();
+    return;
+  }
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
   applySessions(sessions);
   if (needsResync) {
@@ -7936,11 +8444,12 @@ function onKeydown(e) {
   if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
-  const focus = terminal ? state.focus : "rail";
+  const focus = terminal && state.view === "sessions" ? state.focus : "rail";
   const selected = selectedSessionData();
   const action = decideKey(e.key, {
     focus,
     modalOpen: modal !== null,
+    view: state.view,
     orderedIds: orderedSessions(state.sessions).map((s) => s.id ?? "").filter((id) => id !== ""),
     selectedId: state.selectedId,
     tabCount: selected ? sessionTabs(selected).length : 1,
@@ -7973,6 +8482,9 @@ function onKeydown(e) {
       break;
     case "closeTab":
       closeSessionTab(store.get().activeTab);
+      break;
+    case "switchView":
+      switchView(action.view);
       break;
   }
 }
