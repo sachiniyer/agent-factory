@@ -1,0 +1,61 @@
+# Web-driver-selftest container for agent-factory (#1592 Phase 5 PR6).
+#
+# The browser harness needs THREE toolchains in one image that the plain testbox
+# image (Dockerfile.test) deliberately does NOT carry: Go (to build af + run the
+# daemon), Node (to run Playwright), and a real Chromium with all its system deps.
+# Rather than bloat the shared testbox image that every other gate uses, this is a
+# dedicated image built only for `make web-selftest-container`.
+#
+# Base: the official Playwright image, which pins Node + a Chromium build + every
+# libnss/libgbm/font system dep the browser needs. Pinned to v1.56.1-noble to match
+# the @playwright/test version locked in web/package-lock.json, so the bundled
+# browser revision matches the npm package the harness runs.
+#
+# Toolchain-only, like Dockerfile.test: the source is bind-mounted read-only at run
+# time (scripts/testbox.sh), so this image rebuilds only when the toolchain changes,
+# never on code changes. Build it with no context (`docker build - < …`); no COPY.
+FROM mcr.microsoft.com/playwright:v1.56.1-noble
+
+# tmux + git are what the daemon drives to run sessions; procps provides pgrep for
+# the daemon's SIGTERM fallback path — the same trio Dockerfile.test installs.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tmux git procps ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go 1.25 (the repo floor, CLAUDE.md). Fetched from the official tarball for the
+# build arch so the image is not tied to a distro Go package. GO_SHA256 pins the
+# amd64 tarball; arm64 builds skip the checksum (dev box + CI are amd64).
+ARG GO_VERSION=1.25.0
+ARG GO_SHA256=2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) goarch=amd64 ;; \
+        arm64) goarch=arm64 ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://go.dev/dl/go${GO_VERSION}.linux-${goarch}.tar.gz"; \
+    curl -fsSL "$url" -o /tmp/go.tgz; \
+    if [ "$goarch" = amd64 ]; then echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c -; fi; \
+    tar -C /usr/local -xzf /tmp/go.tgz; \
+    rm /tmp/go.tgz
+
+# Stable git identity so no mock-repo commit depends on host git config leaking in
+# (mirrors Dockerfile.test), and mark the read-only /src bind mount safe so the Go
+# toolchain / git never refuse it as "dubious ownership" (#1167).
+RUN git config --system user.name "AF Web Selftest" \
+    && git config --system user.email "web-selftest@localhost" \
+    && git config --system init.defaultBranch master \
+    && git config --system --add safe.directory /src \
+    && git config --system --add safe.directory /work
+
+# Go on PATH; module/build caches under /work (the writable copy the entry makes),
+# so a warm bind-mounted cache volume can speed repeat runs. TERM mirrors an
+# interactive box (the fake agent runs under tmux). PLAYWRIGHT_BROWSERS_PATH is set
+# by the base image to the bundled browser location — left as-is.
+ENV PATH=/usr/local/go/bin:/root/go/bin:$PATH \
+    TERM=xterm-256color \
+    GOMODCACHE=/cache/gomod \
+    GOCACHE=/cache/gobuild
+
+WORKDIR /src

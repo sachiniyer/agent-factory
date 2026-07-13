@@ -8,7 +8,7 @@
 	agent-server-roundtrip-container remote-agent-server-roundtrip-container \
 	backend-docker-roundtrip backend-ssh-roundtrip \
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
-	testbox-image lint-file-length docs web-build web-test
+	testbox-image lint-file-length docs web-build web-test web-selftest-container
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
 # (1000 for production code, 1500 for *_test.go) unless grandfathered in
@@ -141,3 +141,16 @@ web-build: web/node_modules
 # wired now but not invoked here.
 web-test: web/node_modules
 	cd web && npm run typecheck && npm run test
+
+# Playwright web-driver-selftest (#1592 Phase 5 PR6): the browser analogue of
+# tui-driver-selftest. It builds a dedicated Go+Node+Chromium image and runs the
+# WHOLE harness inside ONE ephemeral container — build af, boot a real daemon on a
+# loopback TLS+token listener, open the embedded SPA in headless Chromium, and
+# assert the core flows (login, sidebar, click-to-attach + live xterm output, the
+# #1694 j/k/Enter/Esc keyboard model, create/kill/archive). Assertions are the
+# gate, not screenshots. Node/Playwright stay behind this target — the Go build and
+# `make test-container` never invoke them. Needs a real docker/podman daemon; the
+# whole run is fenced in the container, isolated from the host tmux + real AF home.
+# See docs/web-selftest.md.
+web-selftest-container:
+	scripts/testbox.sh web-selftest

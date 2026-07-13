@@ -19,6 +19,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${AF_TESTBOX_IMAGE:-agent-factory-testbox}"
+# The web-driver-selftest uses a SEPARATE, heavier image (Go + Node + Chromium);
+# see scripts/container/Dockerfile.web-selftest. Kept distinct so it never bloats
+# the plain testbox image every other gate shares.
+WEB_IMAGE="${AF_WEB_TESTBOX_IMAGE:-agent-factory-web-selftest}"
 
 # _uniq — a per-invocation token (pid + a little randomness) for container
 # names, so two runs never share a name.
@@ -194,8 +198,27 @@ drive)
     echo "testbox: tear down with: $ENGINE rm -f $PLAYTEST_NAME" >&2
     exec "$ENGINE" exec -it "$PLAYTEST_NAME" tmux attach -t drive
     ;;
+web-selftest)
+    # Playwright web-driver-selftest (#1592 Phase 5 PR6): build the dedicated
+    # Go+Node+Chromium image, then run the whole harness in ONE ephemeral
+    # container — it builds af, boots a real daemon on a loopback TLS+token
+    # listener, and drives the embedded SPA in a headless Chromium. Everything
+    # (daemon, tmux, browser) lives on 127.0.0.1 inside the container: no
+    # published ports, no host tmux, no real AF home.
+    "$ENGINE" build -q -t "$WEB_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.web-selftest" >/dev/null
+    # Dedicated cache volumes (not the shared testbox ones): this container runs
+    # as root, so mixing caches would leave root-owned files the dev-user testbox
+    # can't write. Chromium wants more memory + pids than the default suite.
+    exec "$ENGINE" run --rm --init \
+        -v "$REPO_ROOT":/src:ro \
+        -v af-web-selftest-gomod:/cache/gomod \
+        -v af-web-selftest-gobuild:/cache/gobuild \
+        --pids-limit "${AF_TESTBOX_PIDS:-2048}" \
+        --memory "${AF_WEB_TESTBOX_MEMORY:-4g}" \
+        "$WEB_IMAGE" bash /src/scripts/container/web-selftest-entry.sh
+    ;;
 *)
-    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | build)" >&2
+    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | web-selftest | build)" >&2
     exit 1
     ;;
 esac

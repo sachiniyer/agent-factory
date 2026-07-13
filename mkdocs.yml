@@ -129,6 +129,7 @@ nav:
           - HTTP API reference: reference/api.md
       - Maintainers:
           - Container testing: container-testing.md
+          - Web client selftest: web-selftest.md
           - File-length lint: file-length-lint.md
           - Release process: release-process.md
           - Release notes: release-notes.md

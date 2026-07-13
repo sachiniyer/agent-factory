@@ -39,10 +39,14 @@ __debug_bin*
 # web/dist/ IS committed (locked decision) so `go build`/Go tests stay Node-free.
 web/node_modules/
 web/*.tsbuildinfo
-# Playwright browser downloads / run artifacts (harness itself lands in PR6).
+# Playwright web-driver-selftest run artifacts (#1592 Phase 5 PR6). The harness
+# sources (web/playwright.config.ts, web/selftest/*.spec.ts) ARE committed; only
+# the per-run outputs below are ignored.
 web/test-results/
 web/playwright-report/
 web/.playwright/
+web/selftest/.last-run.json
+web/blob-report/
 
 # MkDocs build output
 site/
