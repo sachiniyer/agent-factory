@@ -15,8 +15,10 @@ import {
   ApiError,
   archiveSession,
   clearToken,
+  closeTab,
   createSession,
   type CreateSessionInput,
+  createTab,
   fetchSnapshot,
   killSession,
   loadToken,
@@ -28,10 +30,18 @@ import {
 import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
 import { decideKey, type KeyboardFocus } from "./nav.js";
-import { applyEvent, pickSelection, upsertSession } from "./sessions.js";
+import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
 import { Store } from "./store.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
-import { AppShell, deriveProjects, orderedSessions, renderLogin, type AppState } from "./ui.js";
+import {
+  AppShell,
+  deriveProjects,
+  orderedSessions,
+  renderLogin,
+  sessionTabs,
+  supportsTabManagement,
+  type AppState,
+} from "./ui.js";
 import type { SessionData, WireEvent } from "./types.js";
 
 const store = new Store<AppState>({
@@ -49,6 +59,8 @@ const store = new Store<AppState>({
   live: "connecting",
   termStatus: "connecting",
   focus: "rail",
+  activeTab: 0,
+  tabError: null,
 });
 
 // The credential and the push stream are process-local singletons: one token
@@ -66,6 +78,9 @@ let stream: EventStream | null = null;
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
+// The auto-dismiss timer for the tab-error toast, and how long it shows.
+let tabErrorTimer: number | null = null;
+const TAB_ERROR_MS = 6000;
 
 // The app-phase DOM (built once per login) and the persistent terminal host that
 // lives inside it. Keeping the host stable across renders is what lets the focused
@@ -82,10 +97,11 @@ const modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 let modal: ModalHandle | null = null;
 
-// The one live attach terminal and the session id it is bound to. Rebuilt only
-// when the selected id changes; disposed on deselect/logout.
+// The one live attach terminal and the (session id, tab index) it is bound to.
+// Rebuilt when either changes; disposed on deselect/logout.
 let terminal: AttachTerminal | null = null;
 let terminalId: string | null = null;
+let terminalTab = 0;
 
 let root: HTMLElement | null = null;
 
@@ -191,6 +207,8 @@ async function connect(candidate: string): Promise<void> {
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
     focus: "rail",
+    activeTab: 0,
+    tabError: null,
   });
   startStream(candidate);
 }
@@ -209,6 +227,8 @@ function disconnect(): void {
     selectedId: null,
     live: "connecting",
     focus: "rail",
+    activeTab: 0,
+    tabError: null,
   });
 }
 
@@ -218,9 +238,11 @@ function disconnect(): void {
  *  rail-nav mode. This is the keyboard path (j/k): selecting a row never steals the
  *  keyboard into the terminal — you attach explicitly with Enter. Resetting focus to
  *  "rail" here also clears any stale "terminal" mode left by a since-disposed
- *  terminal, so j/k keep working after the selected session goes away. */
+ *  terminal, so j/k keep working after the selected session goes away. Selecting a
+ *  session always resets the active tab to its agent tab (index 0). */
 function moveSelection(id: string): void {
-  store.set({ selectedId: id, focus: "rail" });
+  clearTabError();
+  store.set({ selectedId: id, focus: "rail", activeTab: 0 });
 }
 
 /** The click/Enter path: selects the session AND hands the keyboard to its terminal
@@ -307,7 +329,11 @@ function newSession(): void {
             // complete; the later created event just upserts the same id again.
             if (created.id) {
               const sessions = upsertSession(store.get().sessions, created);
-              store.set({ sessions, selectedId: created.id });
+              // Reset to the agent tab: selecting a DIFFERENT session must show its
+              // tab 0 (a new session has only the agent tab), or a stale activeTab
+              // would stream ?tab=<n> for a tab this session doesn't have. This is
+              // the same invariant moveSelection enforces for the keyboard path.
+              store.set({ sessions, selectedId: created.id, activeTab: 0, tabError: null });
             }
           })
           .catch((e) => {
@@ -378,6 +404,120 @@ function openConfirm(action: "kill" | "archive"): void {
   );
 }
 
+// --- tab management (#1592 Phase 5 PR7) ------------------------------------
+
+/** The full projection of the selected session, or null — the source of its tab
+ *  list and backend type, which the id/title-only selectedSession() omits. */
+function selectedSessionData(): SessionData | null {
+  const { sessions, selectedId } = store.get();
+  return sessions.find((s) => s.id === selectedId) ?? null;
+}
+
+/** Switches the active tab WITHOUT attaching (the 1-9 keys). syncTerminal rebuilds
+ *  the terminal for the new tab on the store update; the keyboard stays in rail
+ *  mode, mirroring how j/k select a row without attaching. */
+function switchTab(index: number): void {
+  store.set({ activeTab: index, focus: "rail" });
+}
+
+/** Switches to a tab AND attaches its terminal (a tab-bar click). The store update
+ *  rebuilds the terminal synchronously (via rerender → syncTerminal), so
+ *  focusTerminal then focuses the fresh instance — the same pattern as openFromRail. */
+function openTab(index: number): void {
+  store.set({ activeTab: index });
+  focusTerminal();
+}
+
+/** Creates a $SHELL tab on the selected session (the `t` key / + button), then
+ *  resyncs to pull the grown tab list (the daemon emits no event for a tab change),
+ *  selects the new tab, and attaches it — mirroring the TUI's `t`, which opens the
+ *  fresh tab as a pane. Errors (e.g. a remote session, or the tab cap) surface on
+ *  the pane header's status line. */
+function createSessionTab(): void {
+  const sel = selectedSessionData();
+  const tok = token;
+  // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696),
+  // so a loopback client can still create tabs.
+  if (!sel || tok === null || !supportsTabManagement(sel)) {
+    return;
+  }
+  clearTabError();
+  const selId = sel.id ?? "";
+  void createTab(selId, sel.title, tok)
+    .then(() => fetchSnapshot(tok))
+    .then((sessions) => {
+      const grown = sessions.find((s) => s.id === selId);
+      const newIdx = grown ? sessionTabs(grown).length - 1 : store.get().activeTab;
+      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId), activeTab: newIdx });
+      focusTerminal();
+    })
+    .catch((e) => surfaceTabError(e));
+}
+
+/** Closes the tab at `index` of the selected session (the `w` key / × button),
+ *  then resyncs the shrunk tab list and re-points the active tab. The agent tab
+ *  (index 0) is unclosable. */
+function closeSessionTab(index: number): void {
+  const sel = selectedSessionData();
+  const tok = token;
+  // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+  if (!sel || tok === null || index <= 0 || !supportsTabManagement(sel)) {
+    return;
+  }
+  const tabs = sessionTabs(sel);
+  const target = tabs[index];
+  if (!target) {
+    return;
+  }
+  clearTabError();
+  const selId = sel.id ?? "";
+  void closeTab(selId, sel.title, target.name, tok)
+    .then(() => fetchSnapshot(tok))
+    .then((sessions) => {
+      // The close shifts every higher tab down by one: if the closed tab was at or
+      // before the active one, the active index moves left to keep showing the same
+      // tab (or its left neighbor when the active tab itself was closed).
+      const cur = store.get().activeTab;
+      const shrunk = sessions.find((s) => s.id === selId);
+      const n = shrunk ? sessionTabs(shrunk).length : 1;
+      const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
+      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId), activeTab: next });
+    })
+    .catch((e) => surfaceTabError(e));
+}
+
+/** Surfaces a failed tab mutation as a transient toast (there is no modal for tab
+ *  ops, unlike create/kill/archive). The terminal keeps streaming; the message is
+ *  the cue to fix the cause (e.g. the tab cap or a remote session). It auto-clears
+ *  after a few seconds, and a fresh failure resets the timer. */
+function surfaceTabError(e: unknown): void {
+  // The raw error message — NOT describeError, whose "Login failed…/Couldn't reach
+  // the daemon…" framing is for the login probe. A tab op carries the daemon's own
+  // message (e.g. the tab cap) or the fail-closed "no stable id" refusal verbatim.
+  const msg = e instanceof ApiError ? e.message : (e as Error).message;
+  console.error("af-web: tab operation failed:", msg);
+  if (tabErrorTimer !== null) {
+    window.clearTimeout(tabErrorTimer);
+  }
+  store.set({ tabError: msg });
+  tabErrorTimer = window.setTimeout(() => {
+    tabErrorTimer = null;
+    store.set({ tabError: null });
+  }, TAB_ERROR_MS);
+}
+
+/** Clears the tab-error toast and cancels its auto-dismiss timer (on a selection
+ *  change or a fresh successful op). */
+function clearTabError(): void {
+  if (tabErrorTimer !== null) {
+    window.clearTimeout(tabErrorTimer);
+    tabErrorTimer = null;
+  }
+  if (store.get().tabError !== null) {
+    store.set({ tabError: null });
+  }
+}
+
 /** The action callbacks the shell + login view invoke. */
 const actions = {
   connect,
@@ -387,25 +527,36 @@ const actions = {
   sendPrompt: openSendPrompt,
   kill: () => openConfirm("kill"),
   archive: () => openConfirm("archive"),
+  switchTab,
+  openTab,
+  newTab: createSessionTab,
+  closeTab: closeSessionTab,
 };
 
 // --- attach terminal wiring ------------------------------------------------
 
-/** Opens/closes the attach terminal to match the current selection. Rebuilds only
- *  when the selected id actually changes, so a live rail event never disturbs an
- *  open, focused terminal. */
+/** Opens/closes the attach terminal to match the current selection AND active tab.
+ *  Rebuilds only when the selected id OR the active tab actually changes, so a live
+ *  rail event never disturbs an open, focused terminal — but switching tabs
+ *  (1-9 / a tab-bar click) re-points the stream to the new tab (#1592 Phase 5 PR7). */
 function syncTerminal(state: AppState): void {
   const selId = state.selectedId;
-  if (selId === terminalId) {
+  // Clamp to the selected session's live tab list as a last line of defense: any
+  // path that leaves activeTab stale relative to the selection (a smaller new
+  // session, an out-of-band tab close) can never build a ?tab=<n> URL for a tab
+  // this session doesn't have — the terminal always attaches a real tab.
+  const tab = clampActiveTab(state.sessions, selId, state.activeTab);
+  if (selId === terminalId && tab === terminalTab) {
     return;
   }
   disposeTerminal();
   terminalId = selId; // set before constructing so the onStatus re-render is a no-op
+  terminalTab = tab;
   const tok = token;
   // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696),
   // so a loopback client still attaches its live terminal.
   if (selId && tok !== null) {
-    terminal = new AttachTerminal(termHost, selId, tok, {
+    terminal = new AttachTerminal(termHost, selId, tok, tab, {
       onStatus: (s: TerminalStatus) => store.set({ termStatus: s }),
       // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus, so a
       // click straight into the terminal enters terminal mode (and tabbing/click
@@ -421,6 +572,7 @@ function disposeTerminal(): void {
     terminal = null;
   }
   terminalId = null;
+  terminalTab = 0;
   termHost.replaceChildren(); // clear any leftover xterm DOM
 }
 
@@ -456,10 +608,23 @@ function stopStream(): void {
  */
 function onEvent(ev: WireEvent): void {
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
-  store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+  applySessions(sessions);
   if (needsResync) {
     requestResync();
   }
+}
+
+/** Commits an externally-derived session list (an event delta or a resync) to the
+ *  store, re-validating the selection AND the active tab against it. If the
+ *  selection survives, the active tab is clamped to the (possibly changed) tab list
+ *  so a tab closed/created out-of-band by another client can't leave the visible
+ *  tab or the streamed tab pointing past the end; if the selection changed (e.g.
+ *  the selected session was killed), the active tab resets to the agent tab. */
+function applySessions(sessions: SessionData[]): void {
+  const prevSel = store.get().selectedId;
+  const selectedId = pickSelection(sessions, prevSel);
+  const activeTab = selectedId === prevSel ? clampActiveTab(sessions, selectedId, store.get().activeTab) : 0;
+  store.set({ sessions, selectedId, activeTab });
 }
 
 /** Re-fetches the authoritative Snapshot (debounced) and replaces the rail — the
@@ -478,7 +643,7 @@ function requestResync(): void {
     }
     void fetchSnapshot(tok)
       .then((sessions) => {
-        store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+        applySessions(sessions);
       })
       .catch(() => {
         // Transport/auth failure: the events stream owns reconnection; a later
@@ -526,6 +691,8 @@ function onKeydown(e: KeyboardEvent): void {
   // stored focus stale, so we never honor terminal mode without one. The pure state
   // machine (nav.ts) decides the rest; index.ts only performs the effect.
   const focus: KeyboardFocus = terminal ? state.focus : "rail";
+  // The selected session's tab shape drives the nav-mode tab keys (1-9 / t / w).
+  const selected = selectedSessionData();
   const action = decideKey(e.key, {
     focus,
     modalOpen: modal !== null,
@@ -533,6 +700,9 @@ function onKeydown(e: KeyboardEvent): void {
       .map((s) => s.id ?? "")
       .filter((id) => id !== ""),
     selectedId: state.selectedId,
+    tabCount: selected ? sessionTabs(selected).length : 1,
+    activeTab: state.activeTab,
+    tabManagement: selected ? supportsTabManagement(selected) : false,
   });
   if (action.kind === "none") {
     return;
@@ -554,6 +724,15 @@ function onKeydown(e: KeyboardEvent): void {
       break;
     case "toRail":
       focusRail();
+      break;
+    case "switchTab":
+      switchTab(action.index);
+      break;
+    case "newTab":
+      createSessionTab();
+      break;
+    case "closeTab":
+      closeSessionTab(store.get().activeTab);
       break;
   }
 }

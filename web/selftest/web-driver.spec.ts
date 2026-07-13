@@ -139,8 +139,119 @@ test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to 
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 });
 
+test("tabs: create a shell tab, switch to it, see its distinct output, close it (#1592 PR7)", async () => {
+  // Capture the tab-mutation request bodies so we can assert they carry the stable
+  // session id (#1592 PR7 fix 1 — the daemon must resolve by id, not the cross-repo
+  // ambiguous title), and let one CloseTab be forced to fail (fix 3 — the error
+  // surfaces as a visible toast).
+  let lastCreateBody: { id?: string } | null = null;
+  let lastCloseBody: { id?: string } | null = null;
+  let failClose = false;
+  await page.route("**/v1/CreateTab", async (route) => {
+    lastCreateBody = route.request().postDataJSON();
+    await route.continue();
+  });
+  await page.route("**/v1/CloseTab", async (route) => {
+    lastCloseBody = route.request().postDataJSON();
+    if (failClose) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: null, error: "simulated tab-close failure" }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  // Attach to A so its tab bar renders. A fresh session has exactly one tab — the
+  // unclosable "Agent" tab — and it is active.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  const tabbar = page.locator(".af-tabbar");
+  await expect(tabbar).toBeVisible();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1);
+  await expect(tabbar.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+
+  // Create a $SHELL tab via the + button (mirrors the TUI `t`). The tab bar grows
+  // to two tabs, the new "Terminal" tab appears AND becomes active (createSessionTab
+  // attaches it), and the terminal re-points its WS stream to that tab.
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
+  await expect(shellTab).toHaveClass(/af-tab-active/);
+
+  // Fix 1: the CreateTab request carried the stable session id, not just the title.
+  expect(lastCreateBody?.id, "CreateTab must send the stable session id").toBeTruthy();
+
+  // Distinct output: the shell tab is a FRESH PTY, not the agent's — its pane does
+  // not carry the agent's ready marker (the terminal was rebuilt for the new tab).
+  await expect(page.locator(".af-term-host")).not.toContainText(READY_MARKER);
+  // Wait for the shell tab's stream to be live before typing — keystrokes sent
+  // before the WS opens are dropped by the terminal's send() guard.
+  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  // The + attached the shell tab, so keys reach it: type a marker and see it come
+  // back over the new tab's stream — proof the switch re-pointed to a live PTY.
+  await page.keyboard.type("echo AF_TAB_OUTPUT_OK");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".af-term-host")).toContainText("AF_TAB_OUTPUT_OK", { timeout: 15_000 });
+
+  // 1-9 switch tabs in rail nav mode: Escape back to the rail, then 1 selects the
+  // agent tab and 2 the shell tab — the active highlight follows the digit.
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
+  await page.keyboard.press("1");
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+  await page.keyboard.press("2");
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+
+  // Fix 3: a failed close surfaces a visible toast (tab ops have no modal). Force
+  // the next CloseTab to error, click ×, and assert the toast — the tab stays.
+  failClose = true;
+  await shellTab.locator(".af-tab-close").click();
+  await expect(page.locator(".af-toast.af-toast-show")).toContainText("simulated tab-close failure");
+  // A failed close leaves the tab in place.
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
+  // The CloseTab request was also id-scoped, at the same session as the create.
+  expect(lastCloseBody?.id, "CloseTab must send the stable session id").toBeTruthy();
+  expect(lastCloseBody?.id).toBe(lastCreateBody?.id);
+
+  // Now let the close succeed via its × (mirrors `w`): the bar shrinks back to the
+  // unclosable agent tab, which becomes active again AND the terminal re-points to
+  // it (fix 2 — the visible tab and the streamed tab stay in sync as the list
+  // shrinks; the agent pane's ready marker is back on screen).
+  failClose = false;
+  await shellTab.locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  await page.unroute("**/v1/CreateTab");
+  await page.unroute("**/v1/CloseTab");
+});
+
 test("create: the + New modal creates a session and its row appears", async () => {
   const created = `probe-created-${Date.now().toString(36)}`;
+
+  // Regression guard (#1592 PR7 review): first move the CURRENT session onto a
+  // NON-agent tab, so a create path that wrongly preserved activeTab would build a
+  // ?tab=1 stream URL for the brand-new session (which has only the agent tab).
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await page.locator(".af-tabbar .af-tab-new").click();
+  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+
+  // Capture every PTY stream WebSocket opened from here on, so we can assert the
+  // new session's stream carries NO stale tab= selector.
+  const streamUrls: string[] = [];
+  page.on("websocket", (ws) => {
+    if (ws.url().includes("/stream")) {
+      streamUrls.push(ws.url());
+    }
+  });
 
   await page.locator("button.af-rail-new").click();
   const modal = page.locator(".af-modal-card");
@@ -156,6 +267,20 @@ test("create: the + New modal creates a session and its row appears", async () =
   // which index.ts upserts + selects immediately).
   await expect(row(page, created)).toBeVisible({ timeout: 30_000 });
   await expect(modal).toBeHidden();
+
+  // The new session is auto-selected AND attached at its AGENT tab (index 0), not
+  // the tab-2 we were on: its tab bar has just the agent tab, and its terminal
+  // shows the fake agent's ready marker — which it could not if the stream had
+  // dialed a ?tab=<n> the session has no tab for.
+  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(1);
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 30_000 });
+
+  // And the new session's stream URL carries no stale tab= selector (the agent tab
+  // is the default, sent only for a non-agent tab).
+  const lastStream = streamUrls[streamUrls.length - 1];
+  expect(lastStream, "a PTY stream WS should have opened for the new session").toBeTruthy();
+  expect(lastStream).not.toContain("tab=");
 
   // Stash it for the kill flow.
   createdTitle = created;

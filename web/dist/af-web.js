@@ -6213,6 +6213,24 @@ async function killSession(id, title, token2) {
 async function archiveSession(id, title, token2) {
   await af("ArchiveSession", { id, title, repo_id: "" }, token2);
 }
+function requireSessionID(id, action) {
+  if (id === "") {
+    throw new ApiError(0, `cannot ${action}: this session has no stable id to target safely`);
+  }
+}
+async function createTab(id, title, token2) {
+  requireSessionID(id, "create a tab");
+  const resp = await af(
+    "CreateTab",
+    { id, title, repo_id: "", shell: true, command: "", name: "" },
+    token2
+  );
+  return resp.name;
+}
+async function closeTab(id, title, tabName, token2) {
+  requireSessionID(id, "close a tab");
+  await af("CloseTab", { id, title, repo_id: "", tab_name: tabName, tab_index: 0 }, token2);
+}
 
 // src/events.ts
 var BACKOFF_BASE_MS = 500;
@@ -6513,6 +6531,21 @@ function decideKey(key, ctx) {
   if (key === "Enter") {
     return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
   }
+  if (ctx.selectedId) {
+    if (key.length === 1 && key >= "1" && key <= "9") {
+      const index = key.charCodeAt(0) - "1".charCodeAt(0);
+      if (index < ctx.tabCount && index !== ctx.activeTab) {
+        return { kind: "switchTab", index };
+      }
+      return { kind: "none" };
+    }
+    if (key === "t") {
+      return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
+    }
+    if (key === "w") {
+      return ctx.tabManagement && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
+    }
+  }
   let delta;
   if (key === "ArrowDown" || key === "j") {
     delta = 1;
@@ -6568,6 +6601,17 @@ function pickSelection(list, currentId) {
     return currentId;
   }
   return null;
+}
+function clampActiveTab(list, selectedId, activeTab) {
+  if (!selectedId) {
+    return 0;
+  }
+  const sel = list.find((s) => s.id === selectedId);
+  if (!sel) {
+    return 0;
+  }
+  const n = sel.tabs && sel.tabs.length > 0 ? sel.tabs.length : 1;
+  return Math.min(Math.max(activeTab, 0), n - 1);
 }
 
 // src/store.ts
@@ -6706,9 +6750,10 @@ function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
 var AttachTerminal = class {
-  constructor(container, sessionId, token2, cb) {
+  constructor(container, sessionId, token2, tab, cb) {
     this.sessionId = sessionId;
     this.token = token2;
+    this.tab = tab;
     this.cb = cb;
     this.term = new import_xterm.Terminal({
       allowProposedApi: true,
@@ -6797,6 +6842,9 @@ var AttachTerminal = class {
     const base = `${wsScheme2()}//${window.location.host}/v1/sessions/${encodeURIComponent(this.sessionId)}/stream`;
     const params = new URLSearchParams();
     params.set("access_token", this.token);
+    if (this.tab > 0) {
+      params.set("tab", String(this.tab));
+    }
     if (this.seeded) {
       params.set("since", this.cursor.toString());
     }
@@ -7079,6 +7127,25 @@ function formatLimitReset(reset, now) {
 }
 
 // src/ui.ts
+var MAX_TABS = 9;
+function supportsTabManagement(s) {
+  return s.backend_type !== "remote";
+}
+function sessionTabs(s) {
+  if (s.tabs && s.tabs.length > 0) {
+    return s.tabs;
+  }
+  return [{ name: "agent", kind: 0 }];
+}
+function tabLabel(tab) {
+  if (tab.kind === 0) {
+    return "Agent";
+  }
+  if (tab.kind === 1) {
+    return "Terminal";
+  }
+  return tab.name || "Tab";
+}
 function deriveProjects(sessions) {
   const roots = /* @__PURE__ */ new Set();
   for (const s of sessions) {
@@ -7255,7 +7322,9 @@ var AppShell = class {
     const rail = h2("nav", { class: "af-rail" }, railHead, this.railList);
     this.main = h2("section", { class: "af-main" });
     const body = h2("div", { class: "af-body" }, rail, this.main);
-    this.el = h2("main", { class: "af-app" }, header, body, this.modalHost);
+    this.toast = h2("div", { class: "af-toast" });
+    this.toast.setAttribute("role", "alert");
+    this.el = h2("main", { class: "af-app" }, header, body, this.toast, this.modalHost);
   }
   el;
   pip;
@@ -7263,14 +7332,22 @@ var AppShell = class {
   railCount;
   railList;
   main;
+  // A transient toast for failed tab ops (create/close), shown/hidden by `tabError`.
+  toast;
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
   headMeta = null;
+  // The tab bar for the selected session, (re)created per selection and patched in
+  // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
+  // nothing is selected (the empty state has no tabs).
+  tabBar = null;
   // Last-applied state, for cheap change detection between updates.
   lastSessions = null;
   lastSelectedId = null;
   lastLive = null;
   lastKb = null;
+  lastActiveTab = 0;
+  lastError = null;
   /** Applies the latest state, touching only what changed. */
   update(state) {
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
@@ -7278,6 +7355,11 @@ var AppShell = class {
       this.lastKb = kb;
       this.el.classList.toggle("af-kb-terminal", kb === "terminal");
       this.el.classList.toggle("af-kb-rail", kb === "rail");
+    }
+    if (this.lastError !== state.tabError) {
+      this.lastError = state.tabError;
+      this.toast.textContent = state.tabError ?? "";
+      this.toast.classList.toggle("af-toast-show", state.tabError !== null);
     }
     if (this.lastLive !== state.live) {
       this.lastLive = state.live;
@@ -7291,10 +7373,15 @@ var AppShell = class {
     if (sessionsChanged || selectionChanged) {
       this.renderRail(state);
     }
+    const activeTabChanged = this.lastActiveTab !== state.activeTab;
+    this.lastActiveTab = state.activeTab;
     if (selectionChanged) {
       this.renderMain(state);
     } else {
       this.patchMainHead(state);
+      if (sessionsChanged || activeTabChanged) {
+        this.renderTabBar(state);
+      }
     }
   }
   renderRail(state) {
@@ -7322,6 +7409,7 @@ var AppShell = class {
     if (!selected) {
       this.headTitle = null;
       this.headMeta = null;
+      this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       this.main.replaceChildren(
         h2("p", { class: "af-empty-title" }, "Select a session"),
@@ -7340,9 +7428,36 @@ var AppShell = class {
     killBtn.addEventListener("click", () => this.actions.kill());
     const actions2 = h2("div", { class: "af-term-actions" }, promptBtn, archiveBtn, killBtn);
     const head = h2("div", { class: "af-term-head" }, titleBox, actions2);
+    this.tabBar = h2("div", { class: "af-tabbar" });
+    this.tabBar.setAttribute("role", "tablist");
+    this.tabBar.setAttribute("aria-label", "Session tabs");
     this.main.className = "af-main af-main-term";
-    this.main.replaceChildren(head, this.termHost);
+    this.main.replaceChildren(head, this.tabBar, this.termHost);
+    this.renderTabBar(state);
     this.patchMainHead(state);
+  }
+  /** (Re)builds the tab bar's buttons from the selected session's tabs, with the
+   *  active tab highlighted. Rebuilds only the bar's children, so the sibling
+   *  termHost — and the focused xterm in it — is never touched. */
+  renderTabBar(state) {
+    const bar = this.tabBar;
+    if (!bar) {
+      return;
+    }
+    const selected = selectedSession(state);
+    if (!selected) {
+      return;
+    }
+    const tabs = sessionTabs(selected);
+    const canManage = supportsTabManagement(selected);
+    const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
+    const children = tabs.map((tab, i) => tabButton(tab, i, i === active, canManage, this.actions));
+    if (canManage && tabs.length < MAX_TABS) {
+      const add = h2("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
+      add.addEventListener("click", () => this.actions.newTab());
+      children.push(add);
+    }
+    bar.replaceChildren(...children);
   }
   patchMainHead(state) {
     const selected = selectedSession(state);
@@ -7360,6 +7475,23 @@ var AppShell = class {
 };
 function selectedSession(state) {
   return state.selectedId ? state.sessions.find((s) => s.id === state.selectedId) ?? null : null;
+}
+function tabButton(tab, index, active, canManage, actions2) {
+  const btn = h2("button", { type: "button", class: `af-tab${active ? " af-tab-active" : ""}` });
+  btn.setAttribute("role", "tab");
+  btn.setAttribute("aria-selected", active ? "true" : "false");
+  btn.append(h2("span", { class: "af-tab-label" }, tabLabel(tab)));
+  btn.addEventListener("click", () => actions2.openTab(index));
+  if (index > 0 && canManage) {
+    const close = h2("span", { class: "af-tab-close", title: "Close tab" }, "\xD7");
+    close.setAttribute("aria-hidden", "true");
+    close.addEventListener("click", (e) => {
+      e.stopPropagation();
+      actions2.closeTab(index);
+    });
+    btn.append(close);
+  }
+  return btn;
 }
 function sessionRow(s, selected, actions2) {
   const status = rowStatus(s);
@@ -7404,11 +7536,15 @@ var store = new Store({
   selectedId: null,
   live: "connecting",
   termStatus: "connecting",
-  focus: "rail"
+  focus: "rail",
+  activeTab: 0,
+  tabError: null
 });
 var token = null;
 var stream = null;
 var resyncTimer = null;
+var tabErrorTimer = null;
+var TAB_ERROR_MS = 6e3;
 var shell = null;
 var termHost = document.createElement("div");
 termHost.className = "af-term-host";
@@ -7417,6 +7553,7 @@ modalHost.className = "af-modal-host";
 var modal = null;
 var terminal = null;
 var terminalId = null;
+var terminalTab = 0;
 var root = null;
 function mount() {
   root = document.getElementById("app");
@@ -7490,7 +7627,9 @@ async function connect(candidate) {
     sessions,
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
-    focus: "rail"
+    focus: "rail",
+    activeTab: 0,
+    tabError: null
   });
   startStream(candidate);
 }
@@ -7506,11 +7645,14 @@ function disconnect() {
     sessions: [],
     selectedId: null,
     live: "connecting",
-    focus: "rail"
+    focus: "rail",
+    activeTab: 0,
+    tabError: null
   });
 }
 function moveSelection(id) {
-  store.set({ selectedId: id, focus: "rail" });
+  clearTabError();
+  store.set({ selectedId: id, focus: "rail", activeTab: 0 });
 }
 function openFromRail(id) {
   moveSelection(id);
@@ -7560,7 +7702,7 @@ function newSession() {
           closeModal();
           if (created.id) {
             const sessions = upsertSession(store.get().sessions, created);
-            store.set({ sessions, selectedId: created.id });
+            store.set({ sessions, selectedId: created.id, activeTab: 0, tabError: null });
           }
         }).catch((e) => {
           m.setBusy(false);
@@ -7620,6 +7762,74 @@ function openConfirm(action) {
     })
   );
 }
+function selectedSessionData() {
+  const { sessions, selectedId } = store.get();
+  return sessions.find((s) => s.id === selectedId) ?? null;
+}
+function switchTab(index) {
+  store.set({ activeTab: index, focus: "rail" });
+}
+function openTab(index) {
+  store.set({ activeTab: index });
+  focusTerminal();
+}
+function createSessionTab() {
+  const sel = selectedSessionData();
+  const tok = token;
+  if (!sel || tok === null || !supportsTabManagement(sel)) {
+    return;
+  }
+  clearTabError();
+  const selId = sel.id ?? "";
+  void createTab(selId, sel.title, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
+    const grown = sessions.find((s) => s.id === selId);
+    const newIdx = grown ? sessionTabs(grown).length - 1 : store.get().activeTab;
+    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId), activeTab: newIdx });
+    focusTerminal();
+  }).catch((e) => surfaceTabError(e));
+}
+function closeSessionTab(index) {
+  const sel = selectedSessionData();
+  const tok = token;
+  if (!sel || tok === null || index <= 0 || !supportsTabManagement(sel)) {
+    return;
+  }
+  const tabs = sessionTabs(sel);
+  const target = tabs[index];
+  if (!target) {
+    return;
+  }
+  clearTabError();
+  const selId = sel.id ?? "";
+  void closeTab(selId, sel.title, target.name, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
+    const cur = store.get().activeTab;
+    const shrunk = sessions.find((s) => s.id === selId);
+    const n = shrunk ? sessionTabs(shrunk).length : 1;
+    const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
+    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId), activeTab: next });
+  }).catch((e) => surfaceTabError(e));
+}
+function surfaceTabError(e) {
+  const msg = e instanceof ApiError ? e.message : e.message;
+  console.error("af-web: tab operation failed:", msg);
+  if (tabErrorTimer !== null) {
+    window.clearTimeout(tabErrorTimer);
+  }
+  store.set({ tabError: msg });
+  tabErrorTimer = window.setTimeout(() => {
+    tabErrorTimer = null;
+    store.set({ tabError: null });
+  }, TAB_ERROR_MS);
+}
+function clearTabError() {
+  if (tabErrorTimer !== null) {
+    window.clearTimeout(tabErrorTimer);
+    tabErrorTimer = null;
+  }
+  if (store.get().tabError !== null) {
+    store.set({ tabError: null });
+  }
+}
 var actions = {
   connect,
   disconnect,
@@ -7627,18 +7837,24 @@ var actions = {
   newSession,
   sendPrompt: openSendPrompt,
   kill: () => openConfirm("kill"),
-  archive: () => openConfirm("archive")
+  archive: () => openConfirm("archive"),
+  switchTab,
+  openTab,
+  newTab: createSessionTab,
+  closeTab: closeSessionTab
 };
 function syncTerminal(state) {
   const selId = state.selectedId;
-  if (selId === terminalId) {
+  const tab = clampActiveTab(state.sessions, selId, state.activeTab);
+  if (selId === terminalId && tab === terminalTab) {
     return;
   }
   disposeTerminal();
   terminalId = selId;
+  terminalTab = tab;
   const tok = token;
   if (selId && tok !== null) {
-    terminal = new AttachTerminal(termHost, selId, tok, {
+    terminal = new AttachTerminal(termHost, selId, tok, tab, {
       onStatus: (s) => store.set({ termStatus: s }),
       // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus, so a
       // click straight into the terminal enters terminal mode (and tabbing/click
@@ -7653,6 +7869,7 @@ function disposeTerminal() {
     terminal = null;
   }
   terminalId = null;
+  terminalTab = 0;
   termHost.replaceChildren();
 }
 function startStream(tok) {
@@ -7676,10 +7893,16 @@ function stopStream() {
 }
 function onEvent(ev) {
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
-  store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+  applySessions(sessions);
   if (needsResync) {
     requestResync();
   }
+}
+function applySessions(sessions) {
+  const prevSel = store.get().selectedId;
+  const selectedId = pickSelection(sessions, prevSel);
+  const activeTab = selectedId === prevSel ? clampActiveTab(sessions, selectedId, store.get().activeTab) : 0;
+  store.set({ sessions, selectedId, activeTab });
 }
 function requestResync() {
   if (resyncTimer !== null) {
@@ -7692,7 +7915,7 @@ function requestResync() {
       return;
     }
     void fetchSnapshot(tok).then((sessions) => {
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+      applySessions(sessions);
     }).catch(() => {
     });
   }, 150);
@@ -7714,11 +7937,15 @@ function onKeydown(e) {
     return;
   }
   const focus = terminal ? state.focus : "rail";
+  const selected = selectedSessionData();
   const action = decideKey(e.key, {
     focus,
     modalOpen: modal !== null,
     orderedIds: orderedSessions(state.sessions).map((s) => s.id ?? "").filter((id) => id !== ""),
-    selectedId: state.selectedId
+    selectedId: state.selectedId,
+    tabCount: selected ? sessionTabs(selected).length : 1,
+    activeTab: state.activeTab,
+    tabManagement: selected ? supportsTabManagement(selected) : false
   });
   if (action.kind === "none") {
     return;
@@ -7737,6 +7964,15 @@ function onKeydown(e) {
       break;
     case "toRail":
       focusRail();
+      break;
+    case "switchTab":
+      switchTab(action.index);
+      break;
+    case "newTab":
+      createSessionTab();
+      break;
+    case "closeTab":
+      closeSessionTab(store.get().activeTab);
       break;
   }
 }

@@ -216,6 +216,54 @@ func TestSendPromptByIDTargetsRightSession(t *testing.T) {
 	}
 }
 
+// TestCreateCloseTabByIDTargetsRightSession pins id-first targeting for the tab
+// mutations (#1592 Phase 5 PR7): with two same-title sessions in different repos,
+// a web-shaped CreateTab/CloseTab addressed by id (empty repo_id) must grow/shrink
+// the ADDRESSED session's tab list and leave the other same-title session's tabs
+// untouched — where a title-only request could resolve to either.
+func TestCreateCloseTabByIDTargetsRightSession(t *testing.T) {
+	manager, repoA, _, repoB, dataB := createDuplicateTitleSessions(t, "feature")
+	cs := &controlServer{manager: manager}
+
+	tabCount := func(repoID string) int {
+		inst, _, _, err := manager.findSession("feature", repoID)
+		if err != nil {
+			t.Fatalf("findSession(%s): %v", repoID, err)
+		}
+		return inst.TabCount()
+	}
+	if got := tabCount(repoA.ID); got != 1 {
+		t.Fatalf("session A starts with %d tabs, want 1", got)
+	}
+	if got := tabCount(repoB.ID); got != 1 {
+		t.Fatalf("session B starts with %d tabs, want 1", got)
+	}
+
+	// CreateTab addressed by id B (empty repo) lands the shell tab on B, not A.
+	var cResp CreateTabResponse
+	if err := cs.CreateTab(CreateTabRequest{ID: dataB.ID, Title: "feature", RepoID: "", Shell: true}, &cResp); err != nil {
+		t.Fatalf("CreateTab by id B: %v", err)
+	}
+	if got := tabCount(repoB.ID); got != 2 {
+		t.Fatalf("session B has %d tabs after CreateTab, want 2", got)
+	}
+	if got := tabCount(repoA.ID); got != 1 {
+		t.Fatalf("session A tab count changed to %d; CreateTab hit the wrong session", got)
+	}
+
+	// CloseTab addressed by id B removes the shell tab from B; A stays untouched.
+	var xResp CloseTabResponse
+	if err := cs.CloseTab(CloseTabRequest{ID: dataB.ID, Title: "feature", RepoID: "", TabName: cResp.Name}, &xResp); err != nil {
+		t.Fatalf("CloseTab by id B: %v", err)
+	}
+	if got := tabCount(repoB.ID); got != 1 {
+		t.Fatalf("session B has %d tabs after CloseTab, want 1", got)
+	}
+	if got := tabCount(repoA.ID); got != 1 {
+		t.Fatalf("session A tab count changed to %d; CloseTab hit the wrong session", got)
+	}
+}
+
 // TestActionWithStaleIDErrorsRatherThanRetargeting is the missing coverage Greptile
 // flagged (the residual stale-id leg): with two same-title/different-id sessions, a
 // web-shaped Kill/Archive/SendPrompt carrying a STALE non-empty id (naming a session

@@ -12,7 +12,16 @@ import { type NavContext, decideKey, nextSelection } from "./nav.js";
 const IDS = ["a", "b", "c"];
 
 function ctx(over: Partial<NavContext> = {}): NavContext {
-  return { focus: "rail", modalOpen: false, orderedIds: IDS, selectedId: "b", ...over };
+  return {
+    focus: "rail",
+    modalOpen: false,
+    orderedIds: IDS,
+    selectedId: "b",
+    tabCount: 1,
+    activeTab: 0,
+    tabManagement: true,
+    ...over,
+  };
 }
 
 test("nextSelection: j/k move within the list and clamp at the ends", () => {
@@ -64,4 +73,40 @@ test("modal mode: the modal owns the keyboard — only Escape (to cancel) is our
 test("modal precedence: a modal over a focused terminal still routes Escape to the modal", () => {
   const both = ctx({ modalOpen: true, focus: "terminal" });
   assert.deepEqual(decideKey("Escape", both), { kind: "closeModal" }, "modal wins over terminal");
+});
+
+test("nav mode: 1-9 switch to an existing tab of the selected session", () => {
+  const three = ctx({ tabCount: 3, activeTab: 0 });
+  assert.deepEqual(decideKey("2", three), { kind: "switchTab", index: 1 });
+  assert.deepEqual(decideKey("3", three), { kind: "switchTab", index: 2 });
+  // A digit past the last tab is a no-op (passes through).
+  assert.deepEqual(decideKey("4", three), { kind: "none" }, "no 4th tab to switch to");
+  // The already-active tab is a no-op (no needless terminal rebuild).
+  assert.deepEqual(decideKey("1", three), { kind: "none" }, "already on tab 1");
+  // With no selection there is nothing to switch.
+  assert.deepEqual(decideKey("2", ctx({ selectedId: null, tabCount: 3 })), { kind: "none" });
+});
+
+test("nav mode: t creates a tab; w closes the active non-agent tab", () => {
+  // t always works for a tab-managed session (mirrors TUI `t` → AddShellTab).
+  assert.deepEqual(decideKey("t", ctx()), { kind: "newTab" });
+  // w on the agent tab (index 0) is refused — kill the session instead.
+  assert.deepEqual(decideKey("w", ctx({ activeTab: 0 })), { kind: "none" }, "agent tab is unclosable");
+  // w on a non-agent tab closes it.
+  assert.deepEqual(decideKey("w", ctx({ tabCount: 2, activeTab: 1 })), { kind: "closeTab" });
+});
+
+test("nav mode: remote sessions can't manage tabs (t/w pass through) but can still switch", () => {
+  const remote = ctx({ tabManagement: false, tabCount: 2, activeTab: 0 });
+  assert.deepEqual(decideKey("t", remote), { kind: "none" }, "no new tab on a remote session");
+  assert.deepEqual(decideKey("w", ctx({ tabManagement: false, tabCount: 2, activeTab: 1 })), { kind: "none" });
+  // Switching among the fixed tabs of a remote session is still fine.
+  assert.deepEqual(decideKey("2", remote), { kind: "switchTab", index: 1 });
+});
+
+test("terminal mode: tab keys reach the agent, not the tab bar", () => {
+  const t = ctx({ focus: "terminal", tabCount: 3, activeTab: 0 });
+  assert.deepEqual(decideKey("2", t), { kind: "none" }, "a digit reaches the shell, not the tab bar");
+  assert.deepEqual(decideKey("t", t), { kind: "none" }, "t reaches the agent");
+  assert.deepEqual(decideKey("w", ctx({ focus: "terminal", tabCount: 2, activeTab: 1 })), { kind: "none" });
 });

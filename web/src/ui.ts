@@ -51,6 +51,16 @@ export interface AppState {
    *  the selection); "terminal" means keys go to the agent until Escape. Drives the
    *  visible focus indicator so the active mode is legible, mirroring the TUI. */
   focus: KeyboardFocus;
+  /** the selected session's active tab index (#1592 Phase 5 PR7): 0 is the agent
+   *  tab, 1-8 the user-created shell/process tabs. The attach terminal streams
+   *  /stream?tab=<activeTab>, and the tab bar highlights it. Reset to 0 whenever
+   *  the selection changes. */
+  activeTab: number;
+  /** an actionable message shown as a transient toast when a tab op (create/close)
+   *  fails, or null when there is none. Tab ops have no modal to surface an error
+   *  in (unlike create/kill/archive), so the failure is shown here instead of being
+   *  silently swallowed (#1592 Phase 5 PR7). */
+  tabError: string | null;
 }
 
 /** Callbacks the shell invokes; index.ts owns the real behavior. */
@@ -69,6 +79,52 @@ export interface Actions {
   kill(): void;
   /** Opens the archive-confirm modal for the current selection. */
   archive(): void;
+  /** Switches the selected session's active tab WITHOUT attaching — the keyboard
+   *  stays in rail nav mode (the 1-9 keys, mirroring the TUI). */
+  switchTab(index: number): void;
+  /** Switches to a tab AND attaches its terminal (a tab-bar click, mirroring how a
+   *  session-row click attaches). */
+  openTab(index: number): void;
+  /** Creates a new $SHELL tab on the selected session (the `t` key / + button). */
+  newTab(): void;
+  /** Closes the tab at `index` of the selected session (the `w` key / × button);
+   *  the agent tab (index 0) is unclosable. */
+  closeTab(index: number): void;
+}
+
+/** The soft cap on tabs per session (session/tab.go maxTabs): the agent tab plus
+ *  up to eight shell/process tabs, matching the 1-9 number-key range. The + button
+ *  hides at the cap so the web never fires a guaranteed-to-fail CreateTab. */
+const MAX_TABS = 9;
+
+/** Whether a session supports user tab management: remote-hook sessions have their
+ *  tabs fixed by config (daemon Capabilities().TabManagement), so the web hides
+ *  their + / × affordances and gates the `t`/`w` keys. */
+export function supportsTabManagement(s: SessionData): boolean {
+  return s.backend_type !== "remote";
+}
+
+/** The selected session's tabs, always non-empty: a pre-#930 record with no tabs
+ *  is shown as a single implicit agent tab so the bar (and index math) never sees
+ *  an empty list. */
+export function sessionTabs(s: SessionData): { name: string; kind: number }[] {
+  if (s.tabs && s.tabs.length > 0) {
+    return s.tabs;
+  }
+  return [{ name: "agent", kind: 0 }];
+}
+
+/** The label a tab reads as, mirroring the TUI's labelForTab (ui/tree/labels.go):
+ *  the agent tab is "Agent", a shell tab is "Terminal", a process tab shows its
+ *  name. Keeps the web tab bar TUI-faithful. */
+function tabLabel(tab: { name: string; kind: number }): string {
+  if (tab.kind === 0) {
+    return "Agent";
+  }
+  if (tab.kind === 1) {
+    return "Terminal";
+  }
+  return tab.name || "Tab";
 }
 
 /** The distinct repo roots the current sessions belong to — the new-session
@@ -273,16 +329,24 @@ export class AppShell {
   private readonly railCount: HTMLElement;
   private readonly railList: HTMLElement;
   private readonly main: HTMLElement;
+  // A transient toast for failed tab ops (create/close), shown/hidden by `tabError`.
+  private readonly toast: HTMLElement;
 
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
   private headMeta: HTMLElement | null = null;
+  // The tab bar for the selected session, (re)created per selection and patched in
+  // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
+  // nothing is selected (the empty state has no tabs).
+  private tabBar: HTMLElement | null = null;
 
   // Last-applied state, for cheap change detection between updates.
   private lastSessions: SessionData[] | null = null;
   private lastSelectedId: string | null = null;
   private lastLive: EventStreamStatus | null = null;
   private lastKb: KeyboardFocus | null = null;
+  private lastActiveTab = 0;
+  private lastError: string | null = null;
 
   constructor(
     private readonly actions: Actions,
@@ -323,9 +387,13 @@ export class AppShell {
 
     this.main = h("section", { class: "af-main" });
     const body = h("div", { class: "af-body" }, rail, this.main);
+    // A transient toast for failed tab ops: a fixed-position banner that fades in
+    // only while `tabError` is set (index.ts clears it on a timer / selection change).
+    this.toast = h("div", { class: "af-toast" });
+    this.toast.setAttribute("role", "alert");
     // The modal host is a persistent overlay layer index.ts mounts modals into; it
     // sits above the app body and is empty except while a modal is open.
-    this.el = h("main", { class: "af-app" }, header, body, this.modalHost);
+    this.el = h("main", { class: "af-app" }, header, body, this.toast, this.modalHost);
   }
 
   /** Applies the latest state, touching only what changed. */
@@ -339,6 +407,12 @@ export class AppShell {
       this.lastKb = kb;
       this.el.classList.toggle("af-kb-terminal", kb === "terminal");
       this.el.classList.toggle("af-kb-rail", kb === "rail");
+    }
+
+    if (this.lastError !== state.tabError) {
+      this.lastError = state.tabError;
+      this.toast.textContent = state.tabError ?? "";
+      this.toast.classList.toggle("af-toast-show", state.tabError !== null);
     }
 
     if (this.lastLive !== state.live) {
@@ -362,10 +436,19 @@ export class AppShell {
     // The main pane's STRUCTURE only changes when the selected session changes;
     // otherwise we just patch its header text (status/title/branch), leaving the
     // terminal host — and its focus and scrollback — in place.
+    const activeTabChanged = this.lastActiveTab !== state.activeTab;
+    this.lastActiveTab = state.activeTab;
     if (selectionChanged) {
       this.renderMain(state);
     } else {
       this.patchMainHead(state);
+      // The tab bar reflects the live tab list and the active-tab highlight; either
+      // can change without a selection change (a resync grows/shrinks the list, or
+      // a 1-9 key moves the highlight). Rebuilding just the bar leaves termHost —
+      // and the focused xterm inside it — untouched.
+      if (sessionsChanged || activeTabChanged) {
+        this.renderTabBar(state);
+      }
     }
   }
 
@@ -395,6 +478,7 @@ export class AppShell {
     if (!selected) {
       this.headTitle = null;
       this.headMeta = null;
+      this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
       this.main.replaceChildren(
@@ -418,11 +502,47 @@ export class AppShell {
     const actions = h("div", { class: "af-term-actions" }, promptBtn, archiveBtn, killBtn);
 
     const head = h("div", { class: "af-term-head" }, titleBox, actions);
+
+    // The tab bar sits between the header and the terminal, mirroring the TUI's
+    // tab row (ui/tabbed_window.go): one button per tab, the active one highlighted,
+    // a × on closable (non-agent) tabs, and a + to add a shell tab.
+    this.tabBar = h("div", { class: "af-tabbar" });
+    this.tabBar.setAttribute("role", "tablist");
+    this.tabBar.setAttribute("aria-label", "Session tabs");
+
     this.main.className = "af-main af-main-term";
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
     // selection change, so this reparent is rare and never happens mid-type.
-    this.main.replaceChildren(head, this.termHost);
+    this.main.replaceChildren(head, this.tabBar, this.termHost);
+    this.renderTabBar(state);
     this.patchMainHead(state);
+  }
+
+  /** (Re)builds the tab bar's buttons from the selected session's tabs, with the
+   *  active tab highlighted. Rebuilds only the bar's children, so the sibling
+   *  termHost — and the focused xterm in it — is never touched. */
+  private renderTabBar(state: AppState): void {
+    const bar = this.tabBar;
+    if (!bar) {
+      return;
+    }
+    const selected = selectedSession(state);
+    if (!selected) {
+      return;
+    }
+    const tabs = sessionTabs(selected);
+    const canManage = supportsTabManagement(selected);
+    // The active index is clamped: a resync that shrank the list must not leave the
+    // highlight (and the streamed tab) pointing past the end.
+    const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
+
+    const children: HTMLElement[] = tabs.map((tab, i) => tabButton(tab, i, i === active, canManage, this.actions));
+    if (canManage && tabs.length < MAX_TABS) {
+      const add = h("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
+      add.addEventListener("click", () => this.actions.newTab());
+      children.push(add);
+    }
+    bar.replaceChildren(...children);
   }
 
   private patchMainHead(state: AppState): void {
@@ -443,6 +563,35 @@ export class AppShell {
 /** The currently selected session row, or null. */
 function selectedSession(state: AppState): SessionData | null {
   return state.selectedId ? (state.sessions.find((s) => s.id === state.selectedId) ?? null) : null;
+}
+
+/** One tab-bar button: its label, an active-state highlight, and — for a closable
+ *  (non-agent) tab of a tab-managed session — a × that closes it. Clicking the
+ *  button switches to the tab AND attaches (like a session-row click); clicking
+ *  the × closes it without attaching (stopPropagation so it isn't also a switch). */
+function tabButton(
+  tab: { name: string; kind: number },
+  index: number,
+  active: boolean,
+  canManage: boolean,
+  actions: Actions,
+): HTMLElement {
+  const btn = h("button", { type: "button", class: `af-tab${active ? " af-tab-active" : ""}` });
+  btn.setAttribute("role", "tab");
+  btn.setAttribute("aria-selected", active ? "true" : "false");
+  btn.append(h("span", { class: "af-tab-label" }, tabLabel(tab)));
+  btn.addEventListener("click", () => actions.openTab(index));
+  // The agent tab (index 0) is unclosable — killing the session tears it down.
+  if (index > 0 && canManage) {
+    const close = h("span", { class: "af-tab-close", title: "Close tab" }, "×");
+    close.setAttribute("aria-hidden", "true");
+    close.addEventListener("click", (e) => {
+      e.stopPropagation();
+      actions.closeTab(index);
+    });
+    btn.append(close);
+  }
+  return btn;
 }
 
 /** One session row: a status dot, the (prefixed) title, and the branch line —

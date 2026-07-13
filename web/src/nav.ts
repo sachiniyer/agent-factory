@@ -19,14 +19,24 @@
  *  on attach (Enter / click) and hands back on Escape. */
 export type KeyboardFocus = "rail" | "terminal";
 
-/** The state the key decision reads: the current mode, whether a modal is up, and
- *  the rail order + selection needed to compute the next selected row. */
+/** The state the key decision reads: the current mode, whether a modal is up, the
+ *  rail order + selection needed to compute the next selected row, and the selected
+ *  session's tab shape for the nav-mode tab keys (#1592 Phase 5 PR7). */
 export interface NavContext {
   focus: KeyboardFocus;
   modalOpen: boolean;
   /** The rail's session ids in DISPLAY order (the same order the DOM shows). */
   orderedIds: string[];
   selectedId: string | null;
+  /** The selected session's tab count (≥1: at least the agent tab). Bounds the
+   *  1-9 tab-switch keys so a digit past the last tab is a no-op. */
+  tabCount: number;
+  /** The selected session's active tab index (0 = agent). `w` refuses to close
+   *  tab 0, and the 1-9 keys no-op on the already-active tab. */
+  activeTab: number;
+  /** Whether the selected session supports user tab management (false for remote
+   *  sessions, whose tabs are fixed by hook config). Gates `t`/`w`. */
+  tabManagement: boolean;
 }
 
 /** What a keydown resolves to. Anything other than "none" is a handled key the
@@ -36,7 +46,10 @@ export type NavAction =
   | { kind: "closeModal" }
   | { kind: "select"; id: string }
   | { kind: "attach" }
-  | { kind: "toRail" };
+  | { kind: "toRail" }
+  | { kind: "switchTab"; index: number }
+  | { kind: "newTab" }
+  | { kind: "closeTab" };
 
 /** The next selected id after moving `delta` rows, clamped to the ends. From no
  *  selection, a downward move lands on the first row and an upward move on the last
@@ -74,6 +87,30 @@ export function decideKey(key: string, ctx: NavContext): NavAction {
   // terminal and hands it the keyboard; j/k and the arrows move the selection.
   if (key === "Enter") {
     return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
+  }
+  // Tab management, mirroring the TUI's nav-mode tab keys (#930 t/w/1-9). These
+  // only fire in rail mode: in terminal mode the branch above already forwards
+  // them to the agent (a shell needs t/w/digits), exactly like the TUI forwards
+  // everything while interactive. All require a selected session.
+  if (ctx.selectedId) {
+    // 1-9 switch to that tab of the selected session; a digit past the last tab
+    // or onto the already-active tab is a no-op (passes through).
+    if (key.length === 1 && key >= "1" && key <= "9") {
+      const index = key.charCodeAt(0) - "1".charCodeAt(0);
+      if (index < ctx.tabCount && index !== ctx.activeTab) {
+        return { kind: "switchTab", index };
+      }
+      return { kind: "none" };
+    }
+    // t creates a new $SHELL tab (no command prompt, like Instance.AddShellTab);
+    // w closes the active non-agent tab. Both need user tab management (remote
+    // sessions' tabs are fixed), and w refuses the agent tab (index 0).
+    if (key === "t") {
+      return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
+    }
+    if (key === "w") {
+      return ctx.tabManagement && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
+    }
   }
   let delta: 1 | -1;
   if (key === "ArrowDown" || key === "j") {
