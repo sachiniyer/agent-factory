@@ -152,25 +152,23 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 // of the phrase in scrollback or agent output never triggers a dismissal. The
 // old wording is a self-contained, dialog-specific string and stays matched
 // as-is. The MCP prompt ("New MCP server found. Do you trust this new MCP
-// server? ❯ 1. Yes ... Enter to confirm") is anchored the SAME way: the
-// case-folded "new mcp server" phrase must co-occur with a marker only the real
-// trust modal renders (the "do you trust this new mcp server" question or the
-// "Enter to confirm" affordance), so a normal Claude response that merely
-// mentions a new MCP server never triggers a spurious Enter on the continuous
-// poll. All three prompts are dialog-anchored, closing the whole false-positive
-// class consistently.
+// server? ❯ 1. Yes ... Enter to confirm") is anchored on its UNIQUE question
+// "do you trust this new mcp server" — a phrase Claude only ever renders inside
+// the real MCP trust modal, never in ordinary output. We deliberately do NOT
+// anchor on a generic marker like "Enter to confirm": that affordance appears
+// in many dialogs, so pairing it with a bare "new mcp server" mention would
+// still false-match on normal agent output. Each anchor here is a string that
+// only its own dialog emits, closing the whole false-positive class.
 func claudeTrustPromptPresent(content string) bool {
 	lower := strings.ToLower(content)
 
-	// Reworded folder-trust dialog — question anchored to real dialog chrome.
+	// Reworded folder-trust dialog — the question co-occurs with the
+	// dialog-only option label. Both strings are specific to this modal.
 	reworded := strings.Contains(content, "Is this a project you created or one you trust") &&
-		(strings.Contains(content, "Yes, I trust this folder") ||
-			strings.Contains(content, "Enter to confirm"))
+		strings.Contains(content, "Yes, I trust this folder")
 
-	// MCP trust dialog — phrase anchored to the question / confirm affordance.
-	mcpDialog := strings.Contains(lower, "new mcp server") &&
-		(strings.Contains(lower, "do you trust this new mcp server") ||
-			strings.Contains(content, "Enter to confirm"))
+	// MCP trust dialog — anchored on its unique question (case-insensitive).
+	mcpDialog := strings.Contains(lower, "do you trust this new mcp server")
 
 	return reworded ||
 		mcpDialog ||

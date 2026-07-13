@@ -42,10 +42,10 @@ Here is a summary of what I changed in the repo...`
 		{"reworded full dialog", rewordedDialog, true},
 		{"reworded phrase without dialog marker", rewordedMention, false},
 		{"old folder-trust wording", oldDialog, true},
-		{"MCP dialog (question anchor)", "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes", true},
-		{"MCP dialog (confirm-affordance anchor)", "New MCP server found.\n❯ 1. Yes  ·  Enter to confirm", true},
+		{"MCP dialog (unique question anchor)", "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes", true},
 		{"MCP dialog lowercase", "new mcp server found. do you trust this new mcp server?", true},
-		{"MCP mention without dialog marker", "I added a new MCP server entry to .mcp.json for you.", false},
+		{"MCP mention without unique question", "I added a new MCP server entry to .mcp.json for you.", false},
+		{"MCP mention plus generic confirm affordance", "I added a new MCP server entry.\nPress Enter to confirm the change.", false},
 		{"normal claude input box", normalUI, false},
 	}
 
