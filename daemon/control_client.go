@@ -286,10 +286,16 @@ func AddTask(t task.Task) error {
 	return callDaemon("AddTask", AddTaskRequest{Task: t}, &resp)
 }
 
-// UpdateTask asks the daemon to persist an edited task and re-arm its schedule.
-func UpdateTask(t task.Task) error {
+// UpdateTask asks the daemon to apply a field-level patch to the task with the
+// given id and re-arm its schedule, returning the merged record (#1700). Only
+// the patch's non-nil fields are written, so a single-field edit never clobbers
+// a concurrent edit another client made to a different field.
+func UpdateTask(id string, update task.TaskUpdate) (task.Task, error) {
 	var resp UpdateTaskResponse
-	return callDaemon("UpdateTask", UpdateTaskRequest{Task: t}, &resp)
+	if err := callDaemon("UpdateTask", UpdateTaskRequest{ID: id, Update: update}, &resp); err != nil {
+		return task.Task{}, err
+	}
+	return resp.Task, nil
 }
 
 // RemoveTask asks the daemon to delete a task and re-arm its schedule.

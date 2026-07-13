@@ -12,6 +12,14 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 	s.tasks = tasks
 	s.dirty = false
 	s.dirtyIDs = nil
+	// Snapshot the loaded records so ConsumeDirty can diff an edit against the
+	// copy the pane started from and emit a field-level patch (#1700). Task is a
+	// value type (its only pointer field, LastRunAt, is scheduler-owned and never
+	// diffed), so a by-value copy is a sufficient baseline.
+	s.originals = make(map[string]task.Task, len(tasks))
+	for _, t := range tasks {
+		s.originals[t.ID] = t
+	}
 	s.deleted = nil
 	s.editing = false
 	// A reload replaces the create-form buffers a pending create was captured
@@ -60,27 +68,35 @@ func (s *TaskPane) markTaskDirty(id string) {
 	s.dirty = true
 }
 
-// ConsumeDirty returns the tasks the user actually edited since the pane was
-// loaded and clears the per-task dirty set. saveContentPaneState persists only
-// these — never the full task list — so saving an edit to one task can't write
-// a stale pane copy of an UNMODIFIED task back over a change another writer
-// (CLI/daemon) committed while the pane was open (#1213). Mirrors the
-// per-task tracking that ConsumeDeleted already does for deletions. The
-// pane-wide dirty flag is left to ConsumeDeleted to clear so a save that has
-// both edits and deletions still processes both.
-func (s *TaskPane) ConsumeDirty() []task.Task {
+// ConsumeDirty returns a field-level patch for each task the user actually
+// edited since the pane was loaded and clears the per-task dirty set. Each edit
+// carries ONLY the fields that differ from the copy the pane loaded (diffed via
+// task.DiffTask against the originals snapshot), so saving an edit to one field
+// can't write a stale pane copy of an UNCHANGED field back over a change another
+// writer (CLI/daemon) committed while the pane was open — the #1700 clobber (of
+// which #1213's per-task tracking was only a partial fix). An edit whose diff is
+// empty (a value toggled and reverted) is dropped: there is nothing to persist.
+// Mirrors the per-task tracking ConsumeDeleted does for deletions; the pane-wide
+// dirty flag is left to ConsumeDeleted to clear so a save with both edits and
+// deletions still processes both.
+func (s *TaskPane) ConsumeDirty() []task.TaskEdit {
 	if len(s.dirtyIDs) == 0 {
 		s.dirtyIDs = nil
 		return nil
 	}
-	var modified []task.Task
+	var edits []task.TaskEdit
 	for _, t := range s.tasks {
-		if s.dirtyIDs[t.ID] {
-			modified = append(modified, t)
+		if !s.dirtyIDs[t.ID] {
+			continue
 		}
+		update := task.DiffTask(s.originals[t.ID], t)
+		if update.IsEmpty() {
+			continue
+		}
+		edits = append(edits, task.TaskEdit{ID: t.ID, Update: update})
 	}
 	s.dirtyIDs = nil
-	return modified
+	return edits
 }
 
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's

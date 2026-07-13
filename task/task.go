@@ -380,28 +380,151 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 	})
 }
 
-func UpdateTask(t Task) error {
-	if err := ValidateTaskID(t.ID); err != nil {
-		return err
+// TaskUpdate is a field-level patch for UpdateTask (#1700). Each non-nil field
+// replaces that field on the freshly-loaded record under the file lock; a nil
+// field is left exactly as stored. Because the write carries ONLY the fields the
+// caller changed — never a full, possibly-stale copy — a single-field edit (the
+// enable/disable toggle sends just Enabled) is structurally incapable of
+// clobbering a concurrent edit another client made to a different field.
+//
+// Only the user-editable fields are patchable. The scheduler-owned LastRunAt/
+// LastRunStatus and the immutable CreatedAt never appear here — UpdateTaskStatus
+// stays their canonical writer (#731/#1215), and preserving them is now inherent
+// to the merge (the record starts from the on-disk copy).
+//
+// The json tags define the HTTP JSON body shape for the daemon's /v1/UpdateTask
+// route; a nil pointer serializes as an absent key (omitempty), so the wire form
+// carries exactly the changed fields. The net/rpc gob control socket the CLI
+// uses goes through the same JSON encoding via GobEncode/GobDecode below — see
+// there for why plain gob would be lossy for this type.
+type TaskUpdate struct {
+	Name          *string `json:"name,omitempty"`
+	Prompt        *string `json:"prompt,omitempty"`
+	CronExpr      *string `json:"cron_expr,omitempty"`
+	WatchCmd      *string `json:"watch_cmd,omitempty"`
+	TargetSession *string `json:"target_session,omitempty"`
+	Program       *string `json:"program,omitempty"`
+	Enabled       *bool   `json:"enabled,omitempty"`
+}
+
+// GobEncode/GobDecode route TaskUpdate through JSON on the net/rpc gob control
+// socket the CLI uses (daemon.UpdateTask → callDaemon). This is REQUIRED for
+// correctness, not an optimization: gob elides a struct field holding its zero
+// value, and — fatally here — a *bool pointing at false (or a *string at "") is
+// followed to that zero and dropped, so the pointer decodes back as nil. That
+// would silently turn `af tasks update --enabled false` and the trigger-clearing
+// WatchCmd:"" / CronExpr:"" patches into no-ops. JSON preserves the exact
+// nil-vs-non-nil-zero-pointer distinction (omitempty omits ONLY a nil pointer, so
+// a non-nil &false serializes as `false`), so this round-trip is lossless.
+func (u TaskUpdate) GobEncode() ([]byte, error) {
+	return json.Marshal(u)
+}
+
+func (u *TaskUpdate) GobDecode(data []byte) error {
+	return json.Unmarshal(data, u)
+}
+
+// IsEmpty reports whether the patch changes no field. An empty patch is a
+// well-formed no-op: UpdateTask still validates and returns the record but
+// writes nothing new.
+func (u TaskUpdate) IsEmpty() bool {
+	return u.Name == nil && u.Prompt == nil && u.CronExpr == nil &&
+		u.WatchCmd == nil && u.TargetSession == nil && u.Program == nil && u.Enabled == nil
+}
+
+// apply merges the non-nil fields of u onto t and returns the result. It never
+// touches CreatedAt/LastRunAt/LastRunStatus, so a merge onto the freshly-loaded
+// record preserves those scheduler-owned values automatically.
+func (u TaskUpdate) apply(t Task) Task {
+	if u.Name != nil {
+		t.Name = *u.Name
 	}
-	if err := t.ValidateTrigger(); err != nil {
-		return err
+	if u.Prompt != nil {
+		t.Prompt = *u.Prompt
 	}
-	// Empty Program means "fall back to the configured default_program at
-	// run time"; only validate when an explicit per-task override was set.
-	if t.Program != "" {
-		if err := config.ValidateProgramEnum("task program", "task program", t.Program, ""); err != nil {
-			return err
-		}
+	if u.CronExpr != nil {
+		t.CronExpr = *u.CronExpr
+	}
+	if u.WatchCmd != nil {
+		t.WatchCmd = *u.WatchCmd
+	}
+	if u.TargetSession != nil {
+		t.TargetSession = *u.TargetSession
+	}
+	if u.Program != nil {
+		t.Program = *u.Program
+	}
+	if u.Enabled != nil {
+		t.Enabled = *u.Enabled
+	}
+	return t
+}
+
+// TaskEdit pairs a task ID with the field-level patch to apply to it. The TUI's
+// task pane emits one per edited task (see DiffTask) so a save sends only the
+// fields the user actually changed.
+type TaskEdit struct {
+	ID     string
+	Update TaskUpdate
+}
+
+// DiffTask returns a TaskUpdate holding exactly the user-editable fields that
+// differ between old and cur. The TUI uses it to turn an in-place edit of a
+// cached task into a minimal patch, so saving one field never rewrites another
+// that changed out-of-band while the editor was open (#1700/#1213).
+func DiffTask(old, cur Task) TaskUpdate {
+	var u TaskUpdate
+	if cur.Name != old.Name {
+		u.Name = &cur.Name
+	}
+	if cur.Prompt != old.Prompt {
+		u.Prompt = &cur.Prompt
+	}
+	if cur.CronExpr != old.CronExpr {
+		u.CronExpr = &cur.CronExpr
+	}
+	if cur.WatchCmd != old.WatchCmd {
+		u.WatchCmd = &cur.WatchCmd
+	}
+	if cur.TargetSession != old.TargetSession {
+		u.TargetSession = &cur.TargetSession
+	}
+	if cur.Program != old.Program {
+		u.Program = &cur.Program
+	}
+	if cur.Enabled != old.Enabled {
+		u.Enabled = &cur.Enabled
+	}
+	return u
+}
+
+// UpdateTask applies a field-level patch to the task with the given id under the
+// file lock and returns the merged record. Only the patch's non-nil fields are
+// written; every other field — including a value a concurrent writer committed
+// after the caller read its copy — is preserved from the freshly-loaded record.
+// This closes the full-struct read-modify-write clobber (#1700): an enable/
+// disable toggle patches only Enabled and cannot revert another client's edit to
+// the prompt, trigger, target session, or program.
+//
+// The merged task is validated (ValidateTrigger, plus the program enum when the
+// patch sets Program) before it is written, so a patch that would leave the task
+// in an invalid state is rejected. Scheduler-owned fields (LastRunAt/
+// LastRunStatus) and CreatedAt are never patchable — UpdateTaskStatus remains
+// their canonical writer (#731/#1215). Returns the not-found error when no task
+// with the given id exists.
+func UpdateTask(id string, update TaskUpdate) (Task, error) {
+	if err := ValidateTaskID(id); err != nil {
+		return Task{}, err
 	}
 	path, err := getTasksPathFn()
 	if err != nil {
-		return err
+		return Task{}, err
 	}
 	if err := ensureTasksSchemaMigrated(path); err != nil {
-		return err
+		return Task{}, err
 	}
-	return config.WithFileLock(path, func() error {
+	var merged Task
+	lockErr := config.WithFileLock(path, func() error {
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
@@ -409,29 +532,34 @@ func UpdateTask(t Task) error {
 
 		found := false
 		for i, existing := range tasks {
-			if existing.ID == t.ID {
-				// Preserve scheduler/system-managed fields from the freshly
-				// loaded record. UpdateTask is a user-edit path (name, prompt,
-				// cron/watch_cmd, target_session, program, enabled); its caller may carry a stale copy of
-				// LastRunAt/LastRunStatus read before a concurrent scheduler run
-				// or manual trigger updated them (TOCTOU via GetTask outside the
-				// lock, or a stale TUI cache). Re-applying the caller's struct
-				// wholesale would clobber those fresher values. CreatedAt is
-				// immutable. UpdateTaskStatus remains the canonical path for the
-				// scheduler-owned status fields. See #731.
-				t.LastRunAt = existing.LastRunAt
-				t.LastRunStatus = existing.LastRunStatus
-				t.CreatedAt = existing.CreatedAt
-				tasks[i] = t
+			if existing.ID == id {
+				merged = update.apply(existing)
+				if err := merged.ValidateTrigger(); err != nil {
+					return err
+				}
+				// Validate the program ONLY when the patch sets it: a toggle or
+				// an unrelated field edit must not fail on a pre-existing Program
+				// value that would no longer pass current enum validation (the
+				// same tolerance UpdateTaskStatus applies to legacy records).
+				if update.Program != nil && merged.Program != "" {
+					if err := config.ValidateProgramEnum("task program", "task program", merged.Program, ""); err != nil {
+						return err
+					}
+				}
+				tasks[i] = merged
 				found = true
 				break
 			}
 		}
 
 		if !found {
-			return fmt.Errorf("task with id %q not found", t.ID)
+			return fmt.Errorf("task with id %q not found", id)
 		}
 
 		return saveTasks(tasks)
 	})
+	if lockErr != nil {
+		return Task{}, lockErr
+	}
+	return merged, nil
 }

@@ -94,8 +94,14 @@ type TaskPane struct {
 	// open — the lost-update in #1213. Deletions stay tracked separately in
 	// `deleted` (mirrors ConsumeDeleted).
 	dirtyIDs map[string]bool
-	deleted  []task.Task
-	hasFocus bool
+	// originals holds the task record as loaded (keyed by ID) so ConsumeDirty
+	// can diff each edited task against the copy the pane started from and emit a
+	// FIELD-LEVEL patch (task.DiffTask). Sending only the changed fields — not
+	// the whole task — means a save of one field can never clobber a field
+	// another writer changed out-of-band while the editor was open (#1700).
+	originals map[string]task.Task
+	deleted   []task.Task
+	hasFocus  bool
 }
 
 // NewTaskPane creates a new task pane.

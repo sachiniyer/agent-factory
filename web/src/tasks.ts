@@ -32,7 +32,8 @@ export interface AddTaskInput {
 
 /** The row-level actions the tasks pane invokes; index.ts owns the real behavior
  *  (the daemon RPC + list refresh). Each mutation is handed the whole task so the
- *  handler has its stable id AND its current fields (UpdateTask needs the full task). */
+ *  handler has its stable id and current state; the toggle turns that into a
+ *  field-level `{ enabled }` patch (UpdateTask), never a full-struct write (#1700). */
 export interface TaskActions {
   /** Opens the add-task modal. */
   add(): void;

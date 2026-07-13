@@ -144,6 +144,24 @@ export interface TaskData {
   last_run_status?: string;
 }
 
+/**
+ * A FIELD-LEVEL patch for UpdateTask (task.TaskUpdate, #1700): only the fields
+ * present are changed; the daemon leaves every omitted field as-stored, merging
+ * the patch onto the freshly-loaded record under its file lock. So the
+ * enable/disable toggle sends just `{ enabled }` and can never clobber a
+ * concurrent edit another client made to a different field. Field names/JSON tags
+ * match the Go TaskUpdate struct EXACTLY (the daemon rejects unknown keys).
+ */
+export interface TaskUpdate {
+  name?: string;
+  prompt?: string;
+  cron_expr?: string;
+  watch_cmd?: string;
+  target_session?: string;
+  program?: string;
+  enabled?: boolean;
+}
+
 /** The ListTasks RPC response (daemon/control_types.go: ListTasksResponse). */
 export interface TasksResponse {
   tasks: TaskData[] | null;

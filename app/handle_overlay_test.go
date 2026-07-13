@@ -418,7 +418,7 @@ func TestHandleStateTasks_FailedCreateDoesNotDuplicateOnReopen(t *testing.T) {
 
 	// Force the pre-create flush to fail, so the create is submitted but
 	// handleTaskCreate never runs and pendingCreate is stranded.
-	restoreUpdater := SetTaskUpdaterForTest(func(task.Task) error {
+	restoreUpdater := SetTaskUpdaterForTest(func(string, task.TaskUpdate) error {
 		return fmt.Errorf("daemon RPC failure")
 	})
 
@@ -558,9 +558,12 @@ func TestSaveContentPaneState_RoutesThroughDaemonRPC(t *testing.T) {
 
 	// Swap the write seams for recorders AFTER seeding (the seed used the direct
 	// writer); the save-on-close must now dispatch through these instead of disk.
-	var updated []task.Task
+	var updated []task.TaskEdit
 	var removed []string
-	t.Cleanup(SetTaskUpdaterForTest(func(tk task.Task) error { updated = append(updated, tk); return nil }))
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate) error {
+		updated = append(updated, task.TaskEdit{ID: id, Update: update})
+		return nil
+	}))
 	t.Cleanup(SetTaskRemoverForTest(func(id string) error { removed = append(removed, id); return nil }))
 
 	// Toggle the first task (keep) off — dirty, not yet persisted.
@@ -579,10 +582,11 @@ func TestSaveContentPaneState_RoutesThroughDaemonRPC(t *testing.T) {
 	require.Len(t, removed, 1, "delete must route through the remove RPC")
 	assert.Equal(t, "gone-1029", removed[0])
 	var sawToggledKeep bool
-	for _, tk := range updated {
-		if tk.ID == "keep-1029" {
+	for _, edit := range updated {
+		if edit.ID == "keep-1029" {
 			sawToggledKeep = true
-			assert.False(t, tk.Enabled, "the toggled state must be dispatched to the update RPC")
+			require.NotNil(t, edit.Update.Enabled, "the toggle must ship the Enabled field")
+			assert.False(t, *edit.Update.Enabled, "the toggled state must be dispatched to the update RPC")
 		}
 	}
 	assert.True(t, sawToggledKeep, "the surviving task must route through the update RPC")
@@ -647,9 +651,9 @@ func TestSaveContentPaneState_DoesNotClobberUneditedTask(t *testing.T) {
 	require.True(t, tp.IsDirty(), "toggling A must mark the pane dirty")
 
 	// The CLI changes Task B on disk while the pane is open, holding a stale B.
-	cliB := taskB
-	cliB.Prompt = "CLI MODIFIED"
-	require.NoError(t, task.UpdateTask(cliB))
+	newPrompt := "CLI MODIFIED"
+	_, err = task.UpdateTask("task-b-1213", task.TaskUpdate{Prompt: &newPrompt})
+	require.NoError(t, err)
 
 	// Esc releases focus → the overlay closes and saveContentPaneState runs.
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})

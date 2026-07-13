@@ -297,15 +297,26 @@ type AddTaskResponse struct {
 	OK bool `json:"ok"`
 }
 
-// UpdateTaskRequest carries the edited task.Task to persist. task.UpdateTask
-// preserves the scheduler-owned fields (LastRunAt/LastRunStatus/CreatedAt) from
-// the freshly-loaded record under the file lock, so a stale client copy never
-// clobbers them.
+// UpdateTaskRequest carries a FIELD-LEVEL patch (#1700): the ID of the task to
+// edit and a task.TaskUpdate holding only the field(s) the caller intends to
+// change. The daemon merges the patch onto the freshly-loaded record under the
+// file lock, leaving every unspecified field as-stored — so a single-field edit
+// (the enable/disable toggle sends just Enabled) cannot clobber a concurrent
+// edit another client made to a different field. This replaces the prior
+// full-struct read-modify-write, which re-applied every user field from the
+// caller's possibly-stale copy. Scheduler-owned fields (LastRunAt/LastRunStatus/
+// CreatedAt) are never patchable — UpdateTaskStatus stays their writer.
 type UpdateTaskRequest struct {
-	Task task.Task `json:"task"`
+	ID     string          `json:"id"`
+	Update task.TaskUpdate `json:"update"`
 }
+
+// UpdateTaskResponse returns the merged record the write produced, so the CLI
+// can print the authoritative post-edit task and the daemon publishes the full
+// task (not the partial patch) on its EventTaskUpdated.
 type UpdateTaskResponse struct {
-	OK bool `json:"ok"`
+	OK   bool      `json:"ok"`
+	Task task.Task `json:"task"`
 }
 
 type RemoveTaskRequest struct {

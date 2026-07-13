@@ -72,12 +72,12 @@ func TestControlUpdateTask_WritesAndRearms(t *testing.T) {
 	require.NoError(t, task.AddTask(enabledCronTask("cccc0001", "")))
 
 	srv := &controlServer{scheduler: newTaskScheduler()}
-	edited := enabledCronTask("cccc0001", "")
-	edited.CronExpr = "30 6 * * 1"
+	newCron := "30 6 * * 1"
 
 	var resp UpdateTaskResponse
-	require.NoError(t, srv.UpdateTask(UpdateTaskRequest{Task: edited}, &resp))
+	require.NoError(t, srv.UpdateTask(UpdateTaskRequest{ID: "cccc0001", Update: task.TaskUpdate{CronExpr: &newCron}}, &resp))
 	assert.True(t, resp.OK)
+	assert.Equal(t, "30 6 * * 1", resp.Task.CronExpr, "the response carries the merged record")
 
 	got, err := task.GetTask("cccc0001")
 	require.NoError(t, err)

@@ -30,6 +30,10 @@ type daemonCalls struct {
 	removeErr error
 	triggered []string
 	runErr    error
+	// lastUpdate records the field-level patch the CLI sent on the most recent
+	// UpdateTask dispatch (#1700), so tests can assert `af tasks update` ships
+	// ONLY the flags the user passed and never a full-struct copy.
+	lastUpdate task.TaskUpdate
 }
 
 // stubDaemon swaps the daemon task-RPC indirections for in-memory stubs and
@@ -60,15 +64,17 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		calls.writes++
 		return nil
 	}
-	daemonUpdateTask = func(tk task.Task) error {
+	daemonUpdateTask = func(id string, update task.TaskUpdate) (task.Task, error) {
 		if calls.updateErr != nil {
-			return calls.updateErr
+			return task.Task{}, calls.updateErr
 		}
-		if err := task.UpdateTask(tk); err != nil {
-			return err
+		merged, err := task.UpdateTask(id, update)
+		if err != nil {
+			return task.Task{}, err
 		}
 		calls.writes++
-		return nil
+		calls.lastUpdate = update
+		return merged, nil
 	}
 	daemonRemoveTask = func(id string) error {
 		if calls.removeErr != nil {

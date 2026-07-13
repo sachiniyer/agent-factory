@@ -1,6 +1,8 @@
 package task
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"os"
@@ -194,15 +196,26 @@ func TestGetTaskNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
+// ptr returns the address of v, for building the pointer fields of a TaskUpdate
+// patch in tests.
+func ptr[T any](v T) *T { return &v }
+
 func TestUpdateTask(t *testing.T) {
 	tasks := []Task{
 		{ID: "u1", Name: "Old Name", Prompt: "old prompt", CronExpr: "0 * * * *", Enabled: true},
 	}
 	setupTestTasks(t, tasks)
 
-	updated := Task{ID: "u1", Name: "New Name", Prompt: "new prompt", CronExpr: "0 0 * * *", Enabled: false}
-	err := UpdateTask(updated)
+	merged, err := UpdateTask("u1", TaskUpdate{
+		Name:     ptr("New Name"),
+		Prompt:   ptr("new prompt"),
+		CronExpr: ptr("0 0 * * *"),
+		Enabled:  ptr(false),
+	})
 	assert.NoError(t, err)
+	// UpdateTask returns the authoritative merged record.
+	assert.Equal(t, "New Name", merged.Name)
+	assert.Equal(t, "0 0 * * *", merged.CronExpr)
 
 	s, err := GetTask("u1")
 	assert.NoError(t, err)
@@ -212,10 +225,65 @@ func TestUpdateTask(t *testing.T) {
 	assert.False(t, s.Enabled)
 }
 
+// TestUpdateTaskFieldLevelDoesNotClobber is the core regression guard for #1700:
+// a single-field patch (here disabling the task) must leave every field the
+// patch does NOT mention exactly as-stored — including a value a concurrent
+// client committed after this caller last read the record. The old full-struct
+// read-modify-write reverted those fields; the field-level merge cannot.
+func TestUpdateTaskFieldLevelDoesNotClobber(t *testing.T) {
+	setupTestTasks(t, []Task{
+		{ID: "t1", Name: "orig", Prompt: "orig prompt", CronExpr: "0 * * * *", TargetSession: "sess-a", Program: "claude", Enabled: true},
+	})
+
+	// Client B changes the cron and target session out-of-band.
+	_, err := UpdateTask("t1", TaskUpdate{CronExpr: ptr("30 6 * * 1"), TargetSession: ptr("sess-b")})
+	require.NoError(t, err)
+
+	// Client A, holding a copy from BEFORE B's edit, only toggles Enabled off.
+	// It ships just that one field.
+	merged, err := UpdateTask("t1", TaskUpdate{Enabled: ptr(false)})
+	require.NoError(t, err)
+	assert.False(t, merged.Enabled)
+
+	got, err := GetTask("t1")
+	require.NoError(t, err)
+	assert.False(t, got.Enabled, "A's toggle must apply")
+	// B's concurrent edits survive — A's toggle carried no cron/target field.
+	assert.Equal(t, "30 6 * * 1", got.CronExpr, "B's concurrent cron edit must NOT be clobbered by A's toggle")
+	assert.Equal(t, "sess-b", got.TargetSession, "B's concurrent target-session edit must survive")
+	// Fields neither client touched are untouched.
+	assert.Equal(t, "orig prompt", got.Prompt)
+	assert.Equal(t, "orig", got.Name)
+}
+
+// TestTaskUpdateGobRoundTripPreservesZeroPointers guards the net/rpc control
+// socket (the CLI transport): gob elides a struct field at its zero value and
+// follows a *bool→false / *string→"" down to that zero and drops it, decoding the
+// pointer back as nil. TaskUpdate's JSON-backed gob codec must defeat that, or
+// `af tasks update --enabled false` and the trigger-clearing "" patches would
+// silently become no-ops over the socket (#1700).
+func TestTaskUpdateGobRoundTripPreservesZeroPointers(t *testing.T) {
+	in := TaskUpdate{Enabled: ptr(false), WatchCmd: ptr(""), CronExpr: ptr("0 9 * * *")}
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(in))
+	var out TaskUpdate
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&out))
+
+	require.NotNil(t, out.Enabled, "a disable patch (&false) must survive gob, not decode to nil")
+	assert.False(t, *out.Enabled)
+	require.NotNil(t, out.WatchCmd, "a trigger-clearing (&\"\") patch must survive gob, not decode to nil")
+	assert.Equal(t, "", *out.WatchCmd)
+	require.NotNil(t, out.CronExpr)
+	assert.Equal(t, "0 9 * * *", *out.CronExpr)
+	// An unset field stays nil (absent), never a spurious zero.
+	assert.Nil(t, out.Name)
+	assert.Nil(t, out.Prompt)
+}
+
 func TestUpdateTaskNotFound(t *testing.T) {
 	setupTestTasks(t, []Task{})
 
-	err := UpdateTask(Task{ID: "missing"})
+	_, err := UpdateTask("missing", TaskUpdate{Name: ptr("x")})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -238,10 +306,16 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 	t2 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
 	require.NoError(t, UpdateTaskStatus("u1", &t2, "completed"))
 
-	// User edit carries a STALE copy: LastRunAt=t1, LastRunStatus="started",
-	// plus an attempt to mutate CreatedAt. None of these should win.
-	stale := Task{ID: "u1", Name: "New Name", Prompt: "new prompt", CronExpr: "0 0 * * *", Enabled: false, CreatedAt: time.Time{}, LastRunAt: &t1, LastRunStatus: "started"}
-	require.NoError(t, UpdateTask(stale))
+	// A user edit patches only user-editable fields; the scheduler-owned status
+	// fields and immutable CreatedAt are not part of TaskUpdate, so they can
+	// never regress to a stale value — preservation is inherent to the merge.
+	_, err := UpdateTask("u1", TaskUpdate{
+		Name:     ptr("New Name"),
+		Prompt:   ptr("new prompt"),
+		CronExpr: ptr("0 0 * * *"),
+		Enabled:  ptr(false),
+	})
+	require.NoError(t, err)
 
 	s, err := GetTask("u1")
 	require.NoError(t, err)
@@ -323,9 +397,8 @@ func TestUpdateTaskPersistsProgram(t *testing.T) {
 	}
 	setupTestTasks(t, tasks)
 
-	updated := tasks[0]
-	updated.Program = "amp"
-	require.NoError(t, UpdateTask(updated))
+	_, err := UpdateTask("p1", TaskUpdate{Program: ptr("amp")})
+	require.NoError(t, err)
 
 	got, err := GetTask("p1")
 	require.NoError(t, err)
@@ -419,7 +492,7 @@ func TestRemoveTask_RejectsInvalidID(t *testing.T) {
 func TestUpdateTask_RejectsInvalidID(t *testing.T) {
 	setupTestTasks(t, []Task{{ID: "real"}})
 
-	err := UpdateTask(Task{ID: "../etc/passwd"})
+	_, err := UpdateTask("../etc/passwd", TaskUpdate{Name: ptr("x")})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid task id")
 }
@@ -493,9 +566,7 @@ func TestUpdateTask_RejectsBadProgram(t *testing.T) {
 	}
 	setupTestTasks(t, stored)
 
-	bad := stored[0]
-	bad.Program = "/home/foo/bin/claude"
-	err := UpdateTask(bad)
+	_, err := UpdateTask("edit1", TaskUpdate{Program: ptr("/home/foo/bin/claude")})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "task program")
 }
@@ -573,9 +644,10 @@ func TestAddTask_EnforcesTriggerContract(t *testing.T) {
 	watch := Task{ID: "bbbb0003", WatchCmd: "tail -f x", Enabled: true, CreatedAt: time.Now()}
 	require.NoError(t, AddTask(watch))
 
-	// Updating the watch task to also carry a cron must be refused.
-	watch.CronExpr = "0 3 * * *"
-	require.Error(t, UpdateTask(watch))
+	// Patching the watch task to ALSO carry a cron (without clearing watch) must
+	// be refused — the merged record would set both triggers.
+	_, err := UpdateTask("bbbb0003", TaskUpdate{CronExpr: ptr("0 3 * * *")})
+	require.Error(t, err)
 }
 
 // TestWatchFieldsJSONRoundTrip pins the wire contract: the new fields are

@@ -84,7 +84,12 @@ func TestTaskPaneConsumeDirtyTracksOnlyEditedTasks(t *testing.T) {
 	dirty := tp.ConsumeDirty()
 	require.Len(t, dirty, 1, "only the toggled task must be dirty")
 	assert.Equal(t, "a", dirty[0].ID)
-	assert.False(t, dirty[0].Enabled, "the dirty task carries the toggled value")
+	// The edit is a field-level patch carrying ONLY the toggled field (#1700):
+	// Enabled is set to the new value and no other field is present.
+	require.NotNil(t, dirty[0].Update.Enabled, "the patch must carry the toggled Enabled field")
+	assert.False(t, *dirty[0].Update.Enabled, "the patch carries the toggled value")
+	assert.Nil(t, dirty[0].Update.Name, "a toggle must not patch any other field")
+	assert.Nil(t, dirty[0].Update.Prompt, "a toggle must not patch any other field")
 
 	// ConsumeDirty clears the set: a second call returns nothing.
 	assert.Empty(t, tp.ConsumeDirty(), "ConsumeDirty must clear the dirty set")

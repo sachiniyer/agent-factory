@@ -26,7 +26,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/SetPRInfo` | `title`, `repo_id`, `pr_info` | Record or clear the GitHub PR info for a session. |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
 | `POST` | `/v1/AddTask` | `task` | Append a new task and re-arm the scheduler. |
-| `POST` | `/v1/UpdateTask` | `task` | Update an existing task, preserving scheduler-owned fields. |
+| `POST` | `/v1/UpdateTask` | `id`, `update` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields. |
 | `POST` | `/v1/RemoveTask` | `id` | Remove a task by ID. |
 | `POST` | `/v1/TriggerTask` | `id` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |
 

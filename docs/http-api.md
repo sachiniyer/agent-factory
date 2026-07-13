@@ -140,10 +140,16 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 `RestoreArchived` returns `{ "ok": true, "worktree_path": "…" }`;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab` /
 `CloseTab` return `{ "name": "<resolved-tab-name>" }`; `ListTasks` returns
-`{ "tasks": [<task>…] }`; the rest return `{ "ok": true }`. The `task` field of
-`AddTask` / `UpdateTask` is a full task object — the CLI/TUI build and validate
-it, and the daemon re-validates and owns the write. See [tasks.md](tasks.md) for
-the task shape.
+`{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`
+(the merged record); the rest return `{ "ok": true }`. The `task` field of
+`AddTask` is a full task object — the CLI/TUI build and validate it, and the
+daemon re-validates and owns the write. `UpdateTask` instead takes a target `id`
+and a FIELD-LEVEL `update` patch carrying only the fields to change (e.g.
+`{ "id": "ab12cd34", "update": { "enabled": false } }`): the daemon merges the
+patch onto the freshly-loaded record under its file lock and leaves every
+unspecified field — and the scheduler-owned fields — as-stored, so a single-field
+edit cannot clobber a concurrent edit another client made (#1700). See
+[tasks.md](tasks.md) for the task shape.
 
 ## Examples
 
