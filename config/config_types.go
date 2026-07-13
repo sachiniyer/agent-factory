@@ -21,6 +21,15 @@ const (
 	TomlConfigFileName        = "config.toml"
 	defaultProgram            = tmux.ProgramClaude
 	defaultDaemonPollInterval = 1000
+	// defaultListenAddr is the daemon's default web/API/WS bind address: the
+	// loopback interface on 8443. The web UI is bundled with the daemon and
+	// served here by default — a same-machine browser at https://127.0.0.1:8443
+	// reaches it with no token (loopback is exempt, #1696). It is loopback (not
+	// 0.0.0.0) on purpose: shipping the control plane on by default must NOT put
+	// it on the network. Exposing it to a LAN/Tailscale/public interface stays an
+	// explicit opt-in (set listen_addr to a routable host:port), and disabling
+	// the web server entirely is an explicit opt-out (listen_addr = "").
+	defaultListenAddr = "127.0.0.1:8443"
 )
 
 // Release channels selectable via the update_channel config key (#1041).
@@ -164,13 +173,20 @@ type Config struct {
 	// reset time WAS parsed (that schedules against the reset time + grace).
 	// Global-only, like limit_auto_resume. See LimitRetryIntervalDuration.
 	LimitRetryInterval string `json:"limit_retry_interval" toml:"limit_retry_interval"`
-	// ListenAddr optionally binds the daemon's HTTP/WS API to a TLS TCP
-	// listener in addition to the always-present local unix socket (#1592
-	// Phase 3). Empty ⇒ no TCP listener (the default pure-unix behavior). A
-	// value like "0.0.0.0:8443" or "127.0.0.1:8443" enables direct-TCP access
-	// gated by the bearer token (`af token`) — see docs/remote-tcp-auth.md.
-	// Global-only (daemon behavior), like daemon_poll_interval — a cloned
-	// repo must never be able to open a network port.
+	// ListenAddr binds the daemon's web UI + HTTP/WS API to a TLS TCP listener
+	// in addition to the always-present local unix socket (#1592 Phase 3). It
+	// DEFAULTS to defaultListenAddr ("127.0.0.1:8443"): the web client is
+	// bundled with the daemon and served on loopback by default, so a fresh
+	// install with no config has a browser UI at https://127.0.0.1:8443 with no
+	// token (loopback is exempt, #1696). Because config parsing unmarshals on top
+	// of DefaultConfig(), an ABSENT listen_addr key inherits this default, while
+	// an explicit `listen_addr = ""` OVERRIDES it to empty — the opt-out that
+	// DISABLES the web server entirely (no TCP listener, pure-unix daemon). A
+	// routable value like "0.0.0.0:8443" or a LAN/Tailscale IP exposes it to the
+	// network (opt-in), still bearer-token-gated for non-loopback peers unless
+	// require_token=false — see docs/remote-tcp-auth.md. Global-only (daemon
+	// behavior), like daemon_poll_interval — a cloned repo must never be able to
+	// open a network port.
 	ListenAddr string `json:"listen_addr" toml:"listen_addr"`
 	// TLSCert / TLSKey optionally point at a user-provided PEM cert and its
 	// matching key for the TCP listener (#1592 Phase 3, §1.2). Empty ⇒ the
@@ -197,6 +213,20 @@ type Config struct {
 	// token. Global-only (daemon network surface), like listen_addr: a cloned
 	// repo must never be able to disable auth. See docs/remote-tcp-auth.md.
 	RequireToken bool `json:"require_token" toml:"require_token"`
+	// RequireLoopbackToken controls whether even LOOPBACK peers (127.0.0.1/::1)
+	// must present the bearer token on the web/TCP listener. It defaults to FALSE:
+	// a same-machine browser reaches the default loopback web UI with NO token,
+	// the zero-config experience the loopback default exists for. That exemption
+	// grants every local process/user the same access as the owner — weaker than
+	// the unix control socket, whose 0600 perms restrict it to the owning user —
+	// so on a SHARED/multi-user machine set this TRUE: loopback peers then need
+	// the token too (`af token`), closing the gap. It only tightens the loopback
+	// path and is independent of require_token (which governs network peers);
+	// require_token=false still drops the token for ALL peers, loopback included,
+	// so this key has effect only while tokens are otherwise enforced. Global-only
+	// (daemon network surface), like require_token — a cloned repo must never be
+	// able to flip it. See docs/remote-tcp-auth.md.
+	RequireLoopbackToken bool `json:"require_loopback_token" toml:"require_loopback_token"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
 	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —
@@ -306,19 +336,21 @@ func ResolveProgram(cfg *Config, agent string) string {
 // a bare agent enum name.
 func DefaultConfig() *Config {
 	cfg := &Config{
-		SchemaVersion:      GlobalConfigSchemaVersion,
-		DefaultProgram:     defaultProgram,
-		AutoYes:            false,
-		AutoUpdate:         true,
-		RequireToken:       true,
-		DaemonPollInterval: defaultDaemonPollInterval,
-		LimitAutoResume:    false,
-		LimitRetryInterval: defaultLimitRetryInterval,
-		LogMaxSizeMB:       log.DefaultMaxSizeMB,
-		LogMaxBackups:      log.DefaultMaxBackups,
-		UpdateChannel:      UpdateChannelStable,
-		Theme:              DefaultThemeConfig(),
-		WorktreeRoot:       WorktreeRootSibling,
+		SchemaVersion:        GlobalConfigSchemaVersion,
+		DefaultProgram:       defaultProgram,
+		AutoYes:              false,
+		AutoUpdate:           true,
+		RequireToken:         true,
+		RequireLoopbackToken: false,
+		ListenAddr:           defaultListenAddr,
+		DaemonPollInterval:   defaultDaemonPollInterval,
+		LimitAutoResume:      false,
+		LimitRetryInterval:   defaultLimitRetryInterval,
+		LogMaxSizeMB:         log.DefaultMaxSizeMB,
+		LogMaxBackups:        log.DefaultMaxBackups,
+		UpdateChannel:        UpdateChannelStable,
+		Theme:                DefaultThemeConfig(),
+		WorktreeRoot:         WorktreeRootSibling,
 		BranchPrefix: func() string {
 			user, err := user.Current()
 			if err != nil || user == nil || user.Username == "" {

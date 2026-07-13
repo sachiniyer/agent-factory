@@ -104,7 +104,7 @@ func TestLoadInRepoConfigEmptyValueIsSet(t *testing.T) {
 }
 
 func TestLoadInRepoConfigRejectsGlobalOnlyKeys(t *testing.T) {
-	for _, key := range []string{"auto_update", "auto_yes", "branch_prefix", "cors_allowed_origins", "daemon_poll_interval", "detach_keys", "keys", "listen_addr", "log_max_backups", "log_max_size_mb", "require_token", "root_agents", "tls_cert", "tls_key", "update_channel", "worktree_root"} {
+	for _, key := range []string{"auto_update", "auto_yes", "branch_prefix", "cors_allowed_origins", "daemon_poll_interval", "detach_keys", "keys", "listen_addr", "log_max_backups", "log_max_size_mb", "require_loopback_token", "require_token", "root_agents", "tls_cert", "tls_key", "update_channel", "worktree_root"} {
 		t.Run(key, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("AGENT_FACTORY_HOME", home)

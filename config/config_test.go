@@ -351,6 +351,12 @@ func TestDefaultConfig(t *testing.T) {
 		// require_token defaults to true — a network daemon is never silently
 		// unauthenticated by omission (#1696).
 		assert.True(t, cfg.RequireToken)
+		// The web UI is bundled with the daemon and served on loopback by
+		// default; an absent listen_addr inherits this, an explicit "" opts out.
+		assert.Equal(t, "127.0.0.1:8443", cfg.ListenAddr)
+		// The loopback token exemption is ON by default (zero-config no-token
+		// local access); require_loopback_token=true is the shared-machine opt-in.
+		assert.False(t, cfg.RequireLoopbackToken)
 		assert.Equal(t, 1000, cfg.DaemonPollInterval)
 		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
 		assert.Equal(t, DefaultThemeConfig(), cfg.Theme)
@@ -1062,6 +1068,44 @@ codex = "/opt/codex/bin/codex --quiet"
 			cfg.ProgramOverrides[tmux.ProgramClaude])
 		assert.Equal(t, "/opt/codex/bin/codex --quiet",
 			cfg.ProgramOverrides[tmux.ProgramCodex])
+	})
+
+	t.Run("absent listen_addr inherits the loopback web default", func(t *testing.T) {
+		// A config that never mentions listen_addr must serve the web UI on
+		// loopback: parsing unmarshals on top of DefaultConfig(), so the absent
+		// key keeps the default rather than resetting to empty.
+		writeToml(t, "default_program = \"claude\"\n")
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "127.0.0.1:8443", cfg.ListenAddr)
+	})
+
+	t.Run("explicit empty listen_addr disables the web server", func(t *testing.T) {
+		// The documented opt-out: an explicit "" OVERRIDES the loopback default,
+		// so the daemon runs pure-unix with no TCP/web listener.
+		writeToml(t, "listen_addr = \"\"\n")
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		assert.Empty(t, cfg.ListenAddr, "explicit empty listen_addr must disable the web server")
+	})
+
+	t.Run("network listen_addr is honored verbatim", func(t *testing.T) {
+		writeToml(t, "listen_addr = \"0.0.0.0:8443\"\n")
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "0.0.0.0:8443", cfg.ListenAddr)
+	})
+
+	t.Run("require_loopback_token defaults false and is honored when set", func(t *testing.T) {
+		writeToml(t, "default_program = \"claude\"\n")
+		cfg, err := LoadConfig()
+		require.NoError(t, err)
+		assert.False(t, cfg.RequireLoopbackToken, "absent require_loopback_token keeps the loopback exemption")
+
+		writeToml(t, "require_loopback_token = true\n")
+		cfg, err = LoadConfig()
+		require.NoError(t, err)
+		assert.True(t, cfg.RequireLoopbackToken)
 	})
 
 	t.Run("invalid theme color warns and falls back", func(t *testing.T) {

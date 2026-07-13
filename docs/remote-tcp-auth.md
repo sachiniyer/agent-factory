@@ -1,10 +1,12 @@
 # Remote daemon access: TCP, TLS, and tokens
 
 By default the Agent Factory daemon is reachable **only** from the machine it
-runs on, over a local Unix socket whose `0600` permissions are the entire auth
-story (see the [HTTP API guide](http-api.md#authentication)). There is no open
-port and no shared secret — anyone who can read the socket already runs as your
-user.
+runs on. Local clients use a Unix socket whose `0600` permissions are the entire
+auth story (see the [HTTP API guide](http-api.md#authentication)), and the
+bundled web client is served on a **loopback** TLS port (`listen_addr` defaults
+to `127.0.0.1:8443`) that only the same machine can reach. Neither is exposed to
+the network, and no shared secret is needed on the same box — anyone who can
+reach either already runs as your user.
 
 Sometimes you want a client on **another machine** to drive that daemon: your
 laptop's TUI pointed at a workstation, a script on a build box, or a browser
@@ -46,11 +48,12 @@ local-only model it was designed for.
 
 **If you specifically want a *local* client driving the remote daemon** (for
 example your laptop's TUI, over a low-latency link), keep the TCP listener bound
-to **loopback** on the host and forward it through SSH rather than exposing it to
-the network:
+to **loopback** on the host — which is the default — and forward it through SSH
+rather than exposing it to the network:
 
 ```toml
 # ~/.agent-factory/config.toml on the HOST — loopback only, never 0.0.0.0
+# (this is already the default; shown here to be explicit)
 listen_addr = "127.0.0.1:8443"
 ```
 
@@ -74,18 +77,24 @@ web client. It opens a **TLS-only** TCP listener on the daemon, gated by a
 clear) and certificate verification is never skipped.
 
 The local Unix socket is **unaffected** — it stays tokenless and keeps working
-for local clients exactly as before. The TCP listener is purely additive and
-**off by default**.
+for local clients exactly as before.
 
-### 1. Enable the listener
+The TCP listener is **on by default, bound to loopback** (`listen_addr` defaults
+to `127.0.0.1:8443`) so the bundled web client works out of the box on the same
+machine. This section is about the other case: making it reachable **from the
+network**, which is always an explicit opt-in.
+
+### 1. Point the listener at the network
 
 `listen_addr` is a **global-only** key (a cloned repo must never be able to open
 a network port), and it is not one of the scalar keys `af config set` writes, so
-**hand-edit** your global config:
+**hand-edit** your global config. Change the default loopback address to a
+routable one:
 
 ```toml
 # ~/.agent-factory/config.toml
-listen_addr = "0.0.0.0:8443"   # or "127.0.0.1:8443" for loopback-only (SSH-tunnelled)
+listen_addr = "0.0.0.0:8443"   # routable — reachable from the network (opt-in)
+                               # (the default "127.0.0.1:8443" is loopback-only)
 ```
 
 Then restart the daemon so it binds the port:
@@ -199,6 +208,36 @@ TLS handshake, so this is the only trustworthy signal.
 > connects over loopback and every forwarded request will appear loopback-exempt
 > — the proxy, not the daemon, is then responsible for auth. Terminate auth at
 > the proxy, or bind the daemon somewhere the proxy reaches non-loopback.
+
+#### Shared machines: the loopback exemption is weaker than the Unix socket
+
+The loopback exemption trusts the **machine**, not a **user**. The Unix control
+socket is gated by filesystem permissions (`0600`) — only **your** account can
+open it. The loopback web listener has no such per-user gate: **any local process
+or user** on the box can reach `127.0.0.1:8443` and drive your sessions with no
+token. On a single-user machine that's equivalent to the Unix socket (anyone who
+runs a process as you already has that access); on a **shared / multi-user
+machine** it is strictly weaker.
+
+Close the gap with **`require_loopback_token`** (default `false`). Set it `true`
+and loopback peers must present the bearer token too — the same credential a
+network peer uses — so a same-machine account without the token is rejected:
+
+```toml
+# ~/.agent-factory/config.toml — require the token even from loopback
+require_loopback_token = true
+```
+
+```bash
+af daemon restart
+```
+
+The daemon then logs `require_loopback_token=true: loopback peers … must present
+the token above`, and the browser web client shows its paste-token login for
+same-machine visitors. (To turn the web server off entirely instead, set
+`listen_addr = ""`.) `require_loopback_token` only tightens the loopback path and
+is independent of `require_token`; note that `require_token = false` drops the
+token for **all** peers, loopback included, so it overrides this key.
 
 ### Network peers still require the token — by default
 
@@ -337,6 +376,12 @@ cors_allowed_origins = ["https://af.example.com"]
   token-free exemption is for `127.0.0.1`/`::1` only, judged from the real
   connection address. If a same-host reverse proxy fronts the daemon, every
   request looks loopback — auth must then live at the proxy.
+- **Loopback trust is machine-wide, not per-user.** The default loopback web UI
+  is reachable with **no token by any local account** — weaker than the Unix
+  socket's `0600` owner-only gate. On a **shared / multi-user machine**, set
+  `require_loopback_token = true` (loopback then needs the token too) or
+  `listen_addr = ""` (disable the web server). See
+  [Shared machines](#shared-machines-the-loopback-exemption-is-weaker-than-the-unix-socket).
 - **`require_token = false` disables auth for the whole network.** Use it only on
   a network where every reachable party is trusted, and never on `0.0.0.0`
   without a firewall. The startup warning is there to make an accidental setting

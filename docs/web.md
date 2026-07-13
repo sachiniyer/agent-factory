@@ -6,10 +6,10 @@ straight from the daemon and rendered in a browser. It is the browser analogue o
 the TUI: everything reads from the daemon's live projection, so what you see in the
 browser matches what you see in `af` and `af sessions list`.
 
-It is **off by default**. The daemon only serves it once you enable a network
-listener (`listen_addr`), because a browser can't reach the daemon's local Unix
-socket. Enabling that listener is the one setup step; the rest of this page is a
-tour.
+It is **on by default**. The daemon serves it on loopback
+(`https://127.0.0.1:8443`) with no extra setup, so a same-machine browser reaches
+it with no token. You only touch config to **disable** it or to **expose** it to
+another machine; the rest of this page is a tour.
 
 !!! note "Where the auth details live"
     This page covers the web client itself. The listener, TLS, and token model it
@@ -19,22 +19,14 @@ tour.
 
 ---
 
-## Enable it
+## It's already on
 
-The web client is served on the daemon's **TLS TCP listener**. Turn it on with a
-single global-config key, then restart the daemon so it binds the port.
-
-`listen_addr` is a **global-only** key — a cloned repo must never be able to open a
-network port — so **hand-edit** your global config:
-
-```toml
-# ~/.agent-factory/config.toml
-listen_addr = "127.0.0.1:8443"   # loopback only — recommended (see below)
-```
-
-```bash
-af daemon restart   # live sessions keep running; the new daemon re-adopts them
-```
+The web client is served on the daemon's **TLS TCP listener**, and that listener
+is bound by default at `127.0.0.1:8443`. A fresh install needs **zero** config:
+start the daemon (any `af` command does), open `https://127.0.0.1:8443`, and
+you're in. The address is controlled by one **global-only** key, `listen_addr` — a
+cloned repo must never be able to open a network port, so it lives only in your
+global config and defaults to loopback.
 
 On startup the daemon logs a one-time banner with the address, TLS fingerprint,
 and the bearer token:
@@ -46,23 +38,57 @@ daemon TLS TCP listener enabled on 127.0.0.1:8443 (self-signed=true)
   loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above
 ```
 
-### Loopback vs. the network
+### Loopback (default), the network, or off
 
-- **`127.0.0.1:8443` (recommended).** The listener is reachable only from the same
+`listen_addr` takes three shapes. Because config parsing layers your file on top
+of the defaults, an **absent** `listen_addr` inherits the loopback default, while
+an **explicit** `listen_addr = ""` is the deliberate opt-out — the two are not the
+same.
+
+- **`127.0.0.1:8443` — the default.** The listener is reachable only from the same
   machine. A browser on that machine is a **loopback** peer and needs **no token**
-  (see [the auth model](#the-auth-model)). To reach it from another machine,
-  forward the port over SSH — nothing new is exposed to the network:
+  (see [the auth model](#the-auth-model)). You get this with no config at all. To
+  reach it from another machine, forward the port over SSH — nothing new is
+  exposed to the network:
 
     ```bash
     # on your laptop: forward local :8443 to the host's loopback listener
     ssh -N -L 8443:127.0.0.1:8443 you@workstation
     ```
 
-- **`0.0.0.0:8443`.** The listener is reachable from the network. A browser on
-  another machine is a **network** peer and must present the bearer token by
-  default. Only bind a routable interface when you must, and put it behind a
-  firewall. See [Remote daemon access](remote-tcp-auth.md#option-2-direct-tcp-token)
-  for the full network setup, including CORS and `require_token`.
+- **`0.0.0.0:8443` (or a LAN/Tailscale IP) — expose to the network.** The listener
+  is reachable from the network. A browser on another machine is a **network** peer
+  and must present the bearer token by default. Only bind a routable interface when
+  you must, and put it behind a firewall. Hand-edit your global config and restart
+  the daemon:
+
+    ```toml
+    # ~/.agent-factory/config.toml
+    listen_addr = "0.0.0.0:8443"
+    ```
+
+    ```bash
+    af daemon restart   # live sessions keep running; the new daemon re-adopts them
+    ```
+
+    See [Remote daemon access](remote-tcp-auth.md#option-2-direct-tcp-token) for the
+    full network setup, including CORS and `require_token`.
+
+- **`""` — disable the web server.** An explicit empty value turns the TLS/TCP
+  listener off entirely; the daemon runs pure-unix-socket and serves no browser UI:
+
+    ```toml
+    # ~/.agent-factory/config.toml
+    listen_addr = ""
+    ```
+
+    ```bash
+    af daemon restart
+    ```
+
+If the default loopback port is already taken (for example a second daemon), the
+bind is **logged and skipped** — the daemon keeps running, just without the web
+server. A web-port conflict never blocks session management.
 
 TLS is always on. With no `tls_cert`/`tls_key` configured, the daemon generates a
 self-signed certificate once — which your browser will warn about the first time.
@@ -102,16 +128,23 @@ attacker-controlled and ignored, see [When is a token required?](remote-tcp-auth
 
 | Your browser is on… | Token needed? | What you see |
 | --- | --- | --- |
-| **The same machine** as the daemon (loopback) | **No** | The app loads straight through — no login screen |
+| **The same machine** as the daemon (loopback), default | **No** | The app loads straight through — no login screen |
+| **The same machine**, `require_loopback_token = true` | **Yes** | A login screen asking you to paste the daemon token |
 | **Another machine** (network peer), default | **Yes** | A login screen asking you to paste the daemon token |
 | **Another machine**, `require_token = false` | No | The app loads straight through |
 
-### Same machine: no token
+### Same machine: no token (by default)
 
 A browser on the daemon's own machine already has the same trust the local Unix
 socket grants (anyone on the box runs as your user), so requiring a token would be
-friction with no security gain. The web client detects this and **skips the login
-screen entirely** — you land directly in the app.
+friction with no security gain **on a single-user machine**. The web client detects
+this and **skips the login screen entirely** — you land directly in the app.
+
+On a **shared / multi-user machine** that assumption breaks: the loopback listener
+has no per-user gating, so every local account can reach it. Set
+`require_loopback_token = true` to require the token from loopback peers too (the
+app then shows the same login screen a network peer sees), or `listen_addr = ""` to
+turn the web server off. See the [Security notes](#security-notes).
 
 ### Another machine: paste the token
 
@@ -312,6 +345,21 @@ While a terminal is attached, all keys except `Escape` flow to the agent.
 ---
 
 ## Security notes
+
+!!! warning "Shared machines: the default loopback web UI has no local auth"
+    The default `127.0.0.1:8443` web listener is reachable by **any local process
+    or user** on the machine with **no token** — that's what makes zero-config
+    local access work. Unlike the daemon's unix control socket, whose `0600`
+    permissions restrict it to **your** account, the loopback web listener grants
+    every local account on the box the same full control of your sessions.
+
+    On a **single-user machine** (a laptop, a personal workstation) this is fine —
+    anyone who can run a process as you already has that access. On a
+    **shared / multi-user machine**, close the gap one of two ways:
+
+    - `require_loopback_token = true` — loopback peers must present the bearer
+      token too (`af token`), same as network peers; or
+    - `listen_addr = ""` — disable the web server entirely.
 
 - **The token is full access.** Under the single-owner model, one token grants full
   control of the daemon. Treat it like a password; never commit it or paste it into
