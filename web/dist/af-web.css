@@ -373,6 +373,97 @@ body {
 .af-term-meta.af-term-exited {
   color: var(--af-dot-dead);
 }
+.af-tabbar {
+  display: flex;
+  align-items: stretch;
+  gap: 0.15rem;
+  padding: 0 0.6rem;
+  background: var(--af-surface);
+  border-bottom: 1px solid var(--af-border);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.af-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.6rem;
+  background: transparent;
+  color: var(--af-muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  font: inherit;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.af-tab:hover {
+  color: var(--af-text);
+}
+.af-tab-active {
+  color: var(--af-text);
+  border-bottom-color: var(--af-accent);
+}
+.af-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 12rem;
+}
+.af-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1em;
+  height: 1.1em;
+  border-radius: 3px;
+  color: var(--af-muted);
+  font-size: 0.9rem;
+  line-height: 1;
+}
+.af-tab-close:hover {
+  color: var(--af-error);
+  background: rgba(248, 81, 73, 0.14);
+}
+.af-tab-new {
+  padding: 0.35rem 0.55rem;
+  background: transparent;
+  color: var(--af-accent);
+  border: none;
+  border-radius: 0;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+.af-tab-new:hover {
+  color: var(--af-text);
+}
+.af-toast {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  max-width: 24rem;
+  padding: 0.6rem 0.85rem;
+  background: var(--af-surface);
+  color: var(--af-text);
+  border: 1px solid var(--af-error);
+  border-left-width: 3px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  transform: translateY(0.4rem);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+  z-index: 20;
+}
+.af-toast.af-toast-show {
+  opacity: 1;
+  transform: translateY(0);
+}
 .af-term-host {
   flex: 1;
   min-height: 0;

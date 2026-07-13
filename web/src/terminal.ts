@@ -93,12 +93,13 @@ function wsScheme(): string {
 
 /**
  * One live attach terminal bound to a container element. Construct it with the
- * bearer token and a session id, and it owns everything from there: the xterm
- * instance, the WS to `/v1/sessions/{id}/stream`, the fit/resize wiring, and a
- * self-healing reconnect loop. Call dispose() to tear it all down (on selection
- * change or logout). One instance per attached session — selecting a different
- * session disposes this and builds a fresh one, so scrollback never bleeds across
- * sessions.
+ * bearer token, a session id, and a tab index, and it owns everything from there:
+ * the xterm instance, the WS to `/v1/sessions/{id}/stream?tab=<idx>`, the
+ * fit/resize wiring, and a self-healing reconnect loop. Call dispose() to tear it
+ * all down (on selection/tab change or logout). One instance per attached
+ * (session, tab) — selecting a different session OR switching tabs disposes this
+ * and builds a fresh one, so scrollback and the replay cursor (which are per-tab
+ * on the broker) never bleed across tabs (#1592 Phase 5 PR7).
  */
 export class AttachTerminal {
   private readonly term: Terminal;
@@ -128,6 +129,7 @@ export class AttachTerminal {
     container: HTMLElement,
     private readonly sessionId: string,
     private readonly token: string,
+    private readonly tab: number,
     private readonly cb: TerminalCallbacks,
   ) {
     this.term = new Terminal({
@@ -217,6 +219,11 @@ export class AttachTerminal {
     const base = `${wsScheme()}//${window.location.host}/v1/sessions/${encodeURIComponent(this.sessionId)}/stream`;
     const params = new URLSearchParams();
     params.set("access_token", this.token);
+    // Select the bound tab (parseTab in daemon/ws_pty.go: empty/absent = 0 = the
+    // agent tab). Sent only for a non-agent tab so the agent-tab URL is unchanged.
+    if (this.tab > 0) {
+      params.set("tab", String(this.tab));
+    }
     if (this.seeded) {
       params.set("since", this.cursor.toString());
     }

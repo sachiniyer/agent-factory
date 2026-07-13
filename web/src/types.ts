@@ -23,6 +23,14 @@ export const Liveness = {
   LimitReached: 6,
 } as const;
 
+/** session.TabKind (session/tab.go): the kind of process a tab hosts. The agent
+ *  tab is always index 0 and is unclosable; shell/process tabs are user-created. */
+export const TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+} as const;
+
 /** session.InFlightOp (session/liveness.go): the transient client-op axis. */
 export const InFlightOp = {
   None: 0,
@@ -73,6 +81,21 @@ export interface SessionData {
    *  derive the new-session modal's project picker, exactly as the TUI does from
    *  InstanceData.Worktree.RepoPath (app/switch_project.go buildProjectListFrom). */
   worktree?: WorktreeData;
+  /** The session's tabs (session/storage.go InstanceData.Tabs): index 0 is the
+   *  agent tab, followed by up to 9 user-created shell/process tabs (#930). The
+   *  web tab bar renders these and streams a selected tab via /stream?tab=<idx>.
+   *  Absent (→ one implicit agent tab) only on pre-#930 records. */
+  tabs?: TabData[];
+}
+
+/** The subset of session.TabData (session/storage.go) the web tab bar reads: the
+ *  display name and the kind (index 0 / TabKind.Agent is the unclosable agent
+ *  tab). Field names match the Go JSON tags so this decodes the projection as-is. */
+export interface TabData {
+  name: string;
+  kind: number;
+  command?: string;
+  tmux_name?: string;
 }
 
 /** The subset of session.GitWorktreeData (session/storage.go) the web reads: the

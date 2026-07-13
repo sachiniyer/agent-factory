@@ -213,3 +213,51 @@ export async function killSession(id: string, title: string, token: string): Pro
 export async function archiveSession(id: string, title: string, token: string): Promise<void> {
   await af("ArchiveSession", { id, title, repo_id: "" }, token);
 }
+
+// --- tab mutations (#1592 Phase 5 PR7) -------------------------------------
+//
+// The web tab bar's write verbs, mirroring the TUI's `t`/`w` keys: `t` creates a
+// $SHELL tab (Shell=true, exactly like Instance.AddShellTab — no command prompt),
+// and `w` closes a non-agent tab. Both are thin POSTs to the daemon's CreateTab /
+// CloseTab RPCs the TUI/CLI already speak (#930/#960). Both send the session's
+// STABLE id as the primary lookup key alongside the (display) title with an EMPTY
+// repo_id: the daemon resolves by id FIRST (resolveActionSession), so a duplicate
+// title across repos can never make the web create/close a tab on the wrong
+// session (#1592 Phase 5 PR7 / the #1678 id-scoping class).
+//
+// FAIL-CLOSED on a missing id (#1592 PR7 review): the daemon still title-resolves
+// an EMPTY id (the CLI path, `af sessions tab-create <title>`), so the web MUST NOT
+// send one on these destructive-ish ops — an empty id + all-repo title is the
+// cross-repo landmine #1678 eliminated. Every live Snapshot row carries an id, so
+// this only trips on a legacy/disk-only record; it refuses BEFORE the request
+// rather than silently retargeting by title. The daemon emits NO event for a tab
+// change, so callers resync the Snapshot to refresh the rail's tab list.
+
+/** Refuses a tab op that has no stable session id to target, before any request is
+ *  issued — so a missing id can never fall through to the daemon's all-repo title
+ *  match on a cross-repo duplicate title (the #1678 class). */
+function requireSessionID(id: string, action: string): void {
+  if (id === "") {
+    throw new ApiError(0, `cannot ${action}: this session has no stable id to target safely`);
+  }
+}
+
+/** Creates a $SHELL tab on the session (mirrors the TUI `t` key). Returns the
+ *  daemon's resolved, collision-suffixed tab name. Refuses a session with no id. */
+export async function createTab(id: string, title: string, token: string): Promise<string> {
+  requireSessionID(id, "create a tab");
+  const resp = await af<{ name: string }>(
+    "CreateTab",
+    { id, title, repo_id: "", shell: true, command: "", name: "" },
+    token,
+  );
+  return resp.name;
+}
+
+/** Closes a non-agent tab by name (mirrors the TUI `w` key). The agent tab
+ *  (index 0) is refused daemon-side — kill the session to tear it down. Refuses a
+ *  session with no stable id, before issuing the request. */
+export async function closeTab(id: string, title: string, tabName: string, token: string): Promise<void> {
+  requireSessionID(id, "close a tab");
+  await af("CloseTab", { id, title, repo_id: "", tab_name: tabName, tab_index: 0 }, token);
+}

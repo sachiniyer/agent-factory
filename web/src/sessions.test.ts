@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { applyEvent, pickSelection, removeSession, sessionKey, upsertSession } from "./sessions.js";
+import { applyEvent, clampActiveTab, pickSelection, removeSession, sessionKey, upsertSession } from "./sessions.js";
 import { orderedSessions } from "./ui.js";
 import { Liveness, type SessionData, type WireEvent } from "./types.js";
 
@@ -114,6 +114,29 @@ test("pickSelection keeps a still-present selection by id, else clears it", () =
   assert.equal(pickSelection(list, "id-y"), "id-y");
   assert.equal(pickSelection(list, "gone"), null);
   assert.equal(pickSelection(list, null), null);
+});
+
+test("clampActiveTab keeps the active tab in range as the live tab list changes", () => {
+  const threeTabs = sess("x", {
+    id: "id-x",
+    tabs: [
+      { name: "agent", kind: 0 },
+      { name: "shell", kind: 1 },
+      { name: "shell-2", kind: 1 },
+    ],
+  });
+  const oneTab = sess("x", { id: "id-x", tabs: [{ name: "agent", kind: 0 }] });
+
+  // In range → unchanged.
+  assert.equal(clampActiveTab([threeTabs], "id-x", 2), 2);
+  // The list shrank under the client (a tab closed out-of-band) → clamp to the last.
+  assert.equal(clampActiveTab([oneTab], "id-x", 2), 0, "vanished tab falls back to the agent tab");
+  // No selection, an unknown selection, or a tab-less record → the agent tab (0).
+  assert.equal(clampActiveTab([threeTabs], null, 2), 0);
+  assert.equal(clampActiveTab([threeTabs], "gone", 2), 0);
+  assert.equal(clampActiveTab([sess("y", { id: "id-y" })], "id-y", 3), 0, "no tabs → one implicit agent tab");
+  // A negative index floors at 0.
+  assert.equal(clampActiveTab([threeTabs], "id-x", -1), 0);
 });
 
 test("orderedSessions puts live rows before archived, then by created_at", () => {

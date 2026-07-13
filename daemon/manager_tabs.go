@@ -26,21 +26,26 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		return "", fmt.Errorf("a process tab requires a non-empty command (--command)")
 	}
 
-	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+	// Resolve by stable id first (req.ID), falling back to {Title, RepoID} — the
+	// same id-preferring resolution kill/archive/prompt use, so a web tab-create
+	// under a cross-repo title collision can't hit the wrong session (#1592 Phase
+	// 5 PR7 / the #1678 class). All downstream lock keys and messages use the
+	// RESOLVED title, not the (possibly ambiguous) request title.
+	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return "", err
 	}
 	if instance == nil {
-		return "", fmt.Errorf("failed to restore instance %q", req.Title)
+		return "", fmt.Errorf("failed to restore instance %q", title)
 	}
 	if !instance.Capabilities().TabManagement {
-		return "", fmt.Errorf("cannot create a tab on remote session %q: remote sessions have no local worktree and the hook protocol can't run arbitrary commands; their terminal tab comes from remote_hooks.terminal_cmd", req.Title)
+		return "", fmt.Errorf("cannot create a tab on remote session %q: remote sessions have no local worktree and the hook protocol can't run arbitrary commands; their terminal tab comes from remote_hooks.terminal_cmd", title)
 	}
 
 	// Serialize the tab spawn against an archive/kill/restore teardown+move for
 	// this session and reject if it is archived/mid-archive (#1195); see
 	// archiveExclusiveTabLock for the op-lock ordering and orphan rationale.
-	opLock, err := m.archiveExclusiveTabLock(daemonInstanceKey(repoID, req.Title), instance)
+	opLock, err := m.archiveExclusiveTabLock(daemonInstanceKey(repoID, title), instance)
 	if err != nil {
 		return "", err
 	}
@@ -73,7 +78,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		// Roll back the just-spawned tab so a persist failure does not leave a
 		// live tmux session that vanishes from the tab list on restart.
 		if closeErr := instance.CloseTab(instance.TabCount() - 1); closeErr != nil {
-			log.WarningLog.Printf("CreateTab %q: rolling back unpersisted tab failed: %v", req.Title, closeErr)
+			log.WarningLog.Printf("CreateTab %q: rolling back unpersisted tab failed: %v", title, closeErr)
 		}
 		return "", fmt.Errorf("failed to persist new tab: %w", err)
 	}
@@ -100,15 +105,20 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 // orphan — the in-memory list (tab removed) is the more accurate state, and the
 // stale disk record is harmless (its session is dead and won't reconnect).
 func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
-	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+	// Resolve by stable id first (req.ID), falling back to {Title, RepoID} — the
+	// same id-preferring resolution kill/archive/prompt use, so a web tab-close
+	// under a cross-repo title collision can't hit the wrong session (#1592 Phase
+	// 5 PR7 / the #1678 class). All downstream lock keys and messages use the
+	// RESOLVED title, not the (possibly ambiguous) request title.
+	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return "", err
 	}
 	if instance == nil {
-		return "", fmt.Errorf("failed to restore instance %q", req.Title)
+		return "", fmt.Errorf("failed to restore instance %q", title)
 	}
 	if !instance.Capabilities().TabManagement {
-		return "", fmt.Errorf("cannot close a tab on remote session %q: its tabs are fixed by remote_hooks config, not user-managed", req.Title)
+		return "", fmt.Errorf("cannot close a tab on remote session %q: its tabs are fixed by remote_hooks config, not user-managed", title)
 	}
 
 	// Serialize the tab close against archive/kill/restore teardown for this
@@ -116,19 +126,19 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	// session; without this CloseTab can concurrently call TmuxSession.Close on
 	// the same object (#1434). Take this before the repo start lock, matching
 	// CreateTab and the kill/archive persist ordering.
-	key := daemonInstanceKey(repoID, req.Title)
+	key := daemonInstanceKey(repoID, title)
 	opLock := m.opLockFor(key)
 	opLock.Lock()
 	defer opLock.Unlock()
 
-	// findSession runs before the op-lock is acquired. If a kill/archive won the
-	// lock first, it may have deleted or replaced the tracked instance while we
-	// waited; never mutate or re-persist a stale pointer after teardown.
+	// resolveActionSession runs before the op-lock is acquired. If a kill/archive
+	// won the lock first, it may have deleted or replaced the tracked instance
+	// while we waited; never mutate or re-persist a stale pointer after teardown.
 	m.mu.Lock()
 	current := m.instances[key]
 	m.mu.Unlock()
 	if current != instance || instance.UserKilled() {
-		return "", fmt.Errorf("session %q changed state before tab close could start", req.Title)
+		return "", fmt.Errorf("session %q changed state before tab close could start", title)
 	}
 
 	// Serialize against other create/tab mutations on this repo, mirroring
@@ -151,16 +161,16 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 			}
 		}
 		if idx < 0 {
-			return "", fmt.Errorf("session %q has no tab named %q", req.Title, name)
+			return "", fmt.Errorf("session %q has no tab named %q", title, name)
 		}
 	} else {
 		if idx < 0 || idx >= len(tabs) {
-			return "", fmt.Errorf("session %q has no tab at index %d", req.Title, idx)
+			return "", fmt.Errorf("session %q has no tab at index %d", title, idx)
 		}
 		name = tabs[idx].Name
 	}
 	if idx == 0 {
-		return "", fmt.Errorf("the agent tab of session %q can't be closed; kill the session instead", req.Title)
+		return "", fmt.Errorf("the agent tab of session %q can't be closed; kill the session instead", title)
 	}
 
 	if err := instance.CloseTab(idx); err != nil {

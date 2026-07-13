@@ -99,3 +99,23 @@ export function pickSelection(list: SessionData[], currentId: string | null): st
   }
   return null;
 }
+
+/** Clamps the active tab index to the selected session's LIVE tab list (#1592
+ *  Phase 5 PR7). When the list changes out from under the client — another client
+ *  created/closed a tab, or a tab died — an index past the end falls back to the
+ *  last tab, and a vanished/absent selection falls back to the agent tab (0). This
+ *  keeps the visible tab AND the streamed tab (index.ts syncTerminal reads it) in
+ *  sync with the daemon projection, so the terminal never streams a stale/absent
+ *  tab. The count floors at 1: a pre-#930 record with no tabs is one implicit
+ *  agent tab. */
+export function clampActiveTab(list: SessionData[], selectedId: string | null, activeTab: number): number {
+  if (!selectedId) {
+    return 0;
+  }
+  const sel = list.find((s) => s.id === selectedId);
+  if (!sel) {
+    return 0;
+  }
+  const n = sel.tabs && sel.tabs.length > 0 ? sel.tabs.length : 1;
+  return Math.min(Math.max(activeTab, 0), n - 1);
+}

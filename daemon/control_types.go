@@ -175,6 +175,11 @@ type CreateTabRequest struct {
 	Command string `json:"command"`
 	Name    string `json:"name"`
 	Shell   bool   `json:"shell"`
+	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
+	// the daemon resolves the target session by id first, so a web tab-create
+	// can't hit the wrong session under a cross-repo title collision (#1592
+	// Phase 5 PR7). TUI/CLI callers omit it and resolve by {Title, RepoID}.
+	ID string `json:"id"`
 }
 
 type CreateTabResponse struct {
@@ -194,6 +199,11 @@ type CloseTabRequest struct {
 	RepoID   string `json:"repo_id"`
 	TabName  string `json:"tab_name"`
 	TabIndex int    `json:"tab_index"`
+	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
+	// the daemon resolves the target session by id first, so a web tab-close
+	// can't hit the wrong session under a cross-repo title collision (#1592
+	// Phase 5 PR7). TUI/CLI callers omit it and resolve by {Title, RepoID}.
+	ID string `json:"id"`
 }
 
 type CloseTabResponse struct {

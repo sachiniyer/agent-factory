@@ -7,19 +7,21 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { archiveSession, killSession, sendPrompt } from "./api.js";
+import { ApiError, archiveSession, closeTab, createTab, killSession, sendPrompt } from "./api.js";
 
 interface Captured {
   url: string;
   body: Record<string, unknown>;
   auth: string | undefined;
+  calls: number;
 }
 
-// Stubs global.fetch, capturing the last request and returning a 200 {data,error}
-// envelope. Returns the capture box the test asserts against.
+// Stubs global.fetch, capturing the last request (and a call count) and returning a
+// 200 {data,error} envelope. Returns the capture box the test asserts against.
 function stubFetch(): Captured {
-  const cap: Captured = { url: "", body: {}, auth: undefined };
+  const cap: Captured = { url: "", body: {}, auth: undefined, calls: 0 };
   (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    cap.calls += 1;
     cap.url = url;
     cap.body = JSON.parse(String(init.body));
     cap.auth = (init.headers as Record<string, string>).Authorization;
@@ -27,7 +29,7 @@ function stubFetch(): Captured {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({ data: { ok: true }, error: null }),
+      json: async () => ({ data: { ok: true, name: "shell" }, error: null }),
     } as unknown as Response;
   };
   return cap;
@@ -64,4 +66,38 @@ test("sendPrompt posts the stable id alongside the title and prompt", async () =
   assert.equal(cap.body.title, "feature");
   assert.equal(cap.body.prompt, "do the thing");
   assert.equal(cap.body.repo_id, "");
+});
+
+test("createTab / closeTab post the stable id alongside the title", async () => {
+  const cap = stubFetch();
+  await createTab("id-repoB", "feature", "tok");
+  assert.equal(cap.url, "/v1/CreateTab");
+  assert.equal(cap.body.id, "id-repoB", "CreateTab must resolve by id, not the cross-repo title");
+  assert.equal(cap.body.title, "feature");
+  assert.equal(cap.body.repo_id, "");
+  assert.equal(cap.body.shell, true, "the web `t` creates a $SHELL tab, like the TUI");
+
+  await closeTab("id-repoB", "feature", "shell", "tok");
+  assert.equal(cap.url, "/v1/CloseTab");
+  assert.equal(cap.body.id, "id-repoB");
+  assert.equal(cap.body.tab_name, "shell");
+  assert.equal(cap.body.repo_id, "");
+});
+
+test("createTab / closeTab FAIL CLOSED on a missing id — no title-scoped request", async () => {
+  const cap = stubFetch();
+  // A session with no stable id (a legacy/disk-only row) must NOT be tab-mutated by
+  // an all-repo title match — the #1678 cross-repo landmine. Both refuse BEFORE any
+  // request, so the daemon never sees an empty id to title-resolve.
+  await assert.rejects(
+    () => createTab("", "feature", "tok"),
+    (e: unknown) => e instanceof ApiError && /no stable id/.test((e as ApiError).message),
+    "createTab with an empty id must reject",
+  );
+  await assert.rejects(
+    () => closeTab("", "feature", "shell", "tok"),
+    (e: unknown) => e instanceof ApiError && /no stable id/.test((e as ApiError).message),
+    "closeTab with an empty id must reject",
+  );
+  assert.equal(cap.calls, 0, "no request may be issued for a tab op with a missing id");
 });
