@@ -305,6 +305,37 @@ func (b *ptyBroker) maybeStopCapture() {
 	}
 }
 
+// resetCapture stops any in-flight clientless capture WITHOUT closing the broker
+// or dropping its subscribers, so the next Subscribe (via ensureCaptureStarted)
+// brings a FRESH capture up against a re-spawned tmux pane (#1682). On session
+// recovery the previous tmux — and with it the `pipe-pane` writer feeding this
+// broker's FIFO — died, but the broker's readLoop is parked on the O_RDWR FIFO
+// (which never sees EOF) with `capturing` still true, so ensureCaptureStarted
+// would short-circuit and no bytes would ever flow to a post-recovery subscriber.
+// Clearing the latch here and running the stale stopCapture unblocks and JOINS the
+// parked readLoop (no goroutine leak) and re-arms the lazy lifecycle. A no-op when
+// no capture is running or the broker is already closed. Serialized against every
+// other capture transition by captureMu (captureMu-then-mu ordering) so it cannot
+// race a concurrent ensureCaptureStarted.
+func (b *ptyBroker) resetCapture() {
+	b.captureMu.Lock()
+	defer b.captureMu.Unlock()
+
+	b.mu.Lock()
+	if b.closed || !b.capturing {
+		b.mu.Unlock()
+		return
+	}
+	stop := b.stopCapture
+	b.capturing = false
+	b.stopCapture = nil
+	b.mu.Unlock()
+
+	if stop != nil {
+		stop()
+	}
+}
+
 // readLoop copies the clientless capture reader into the ring until it errors or
 // the capture is stopped.
 func (b *ptyBroker) readLoop(r io.Reader, done chan struct{}) {
