@@ -320,6 +320,29 @@ func TestEnsureSelfSignedCertRegeneratesMismatchedPair(t *testing.T) {
 	}
 }
 
+// TestResolveTLSMaterialCreatesHome0700 is the adjacent twin of
+// TestEnsureTokenCreatesHome0700: on a cert-first fresh run the AF home must be
+// created 0700 (daemon-tls.key is a secret). ensureSelfSignedCert routes
+// creation through config.WithFileLock (MkdirAll 0755), so it must pre-create
+// the parent 0700 before the lock. On the pre-follow-up head the parent was
+// 0755.
+func TestResolveTLSMaterialCreatesHome0700(t *testing.T) {
+	// Parent AF-home dir does NOT exist yet; ResolveTLSMaterial must create it.
+	home := filepath.Join(t.TempDir(), "af-home")
+
+	if _, err := ResolveTLSMaterial(home, "", ""); err != nil {
+		t.Fatalf("ResolveTLSMaterial: %v", err)
+	}
+
+	info, err := os.Stat(home)
+	if err != nil {
+		t.Fatalf("stat AF home: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("AF home perms after first-run cert generation = %o, want 0700", perm)
+	}
+}
+
 func TestCertFingerprintNonCert(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "notacert.pem")

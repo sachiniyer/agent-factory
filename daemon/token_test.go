@@ -272,6 +272,31 @@ func TestRotateTokenConcurrentReaderNeverEmpty(t *testing.T) {
 	}
 }
 
+// TestEnsureTokenCreatesHome0700 is the Greptile-follow-up regression guard: on
+// a fresh machine where token generation is the first thing to touch the AF
+// home, the home dir must be created 0700 (owner-only) — it holds secrets
+// (daemon-token, daemon-tls.key, state.json). The serialize+atomic fix routes
+// creation through config.WithFileLock, whose MkdirAll is 0755 (correct for its
+// non-secret callers), so EnsureToken must pre-create the parent 0700 before the
+// lock. On the pre-follow-up head the parent landed 0755.
+func TestEnsureTokenCreatesHome0700(t *testing.T) {
+	// Parent AF-home dir does NOT exist yet; EnsureToken must create it.
+	home := filepath.Join(t.TempDir(), "af-home")
+	path := filepath.Join(home, "daemon-token")
+
+	if _, err := EnsureToken(path); err != nil {
+		t.Fatalf("EnsureToken: %v", err)
+	}
+
+	info, err := os.Stat(home)
+	if err != nil {
+		t.Fatalf("stat AF home: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("AF home perms after first-run EnsureToken = %o, want 0700", perm)
+	}
+}
+
 func TestConstantTimeEqual(t *testing.T) {
 	cases := []struct {
 		name      string

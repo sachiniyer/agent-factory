@@ -110,6 +110,15 @@ func LoadToken(path string) (string, error) {
 // This is the generate-if-absent entry point behind `af token show`, so the
 // token exists before the TCP listener is ever enabled.
 func EnsureToken(path string) (string, error) {
+	// Pre-create the AF home 0700 BEFORE taking the lock: config.WithFileLock's
+	// internal MkdirAll uses 0755 (it is shared by non-secret callers), and on a
+	// token-first fresh run it would otherwise create the AF home world-readable.
+	// The home holds secrets (daemon-token, daemon-tls.key, state.json), so it
+	// must be owner-only. MkdirAll never loosens an existing dir, so the lock's
+	// later 0755 MkdirAll no-ops once this has run.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create token directory: %w", err)
+	}
 	var resolved string
 	err := config.WithFileLock(path, func() error {
 		if tok, err := LoadToken(path); err == nil {
@@ -144,6 +153,11 @@ func EnsureToken(path string) (string, error) {
 // without a daemon RPC and no reader ever sees a partial token; existing
 // streams keep running until they reconnect.
 func RotateToken(path string) (string, error) {
+	// Pre-create the AF home 0700 before the lock, same reason as EnsureToken:
+	// WithFileLock's MkdirAll is 0755 and the home holds secrets.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create token directory: %w", err)
+	}
 	var resolved string
 	err := config.WithFileLock(path, func() error {
 		tok, err := generateToken()

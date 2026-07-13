@@ -104,6 +104,15 @@ func ResolveTLSMaterial(dir, userCert, userKey string) (TLSMaterial, error) {
 // the pair to validate it and only reuse it when it pairs; otherwise we fall
 // through and regenerate a fresh matching pair (still under the lock).
 func ensureSelfSignedCert(certPath, keyPath string) error {
+	// Pre-create the AF home 0700 BEFORE taking the lock: config.WithFileLock's
+	// internal MkdirAll uses 0755 (it is shared by non-secret callers), and on a
+	// cert-first fresh run it would otherwise create the AF home world-readable
+	// before generateSelfSignedCert's own 0700 MkdirAll runs. The home holds
+	// secrets (daemon-tls.key is owner-only), so it must not be traversable by
+	// other local users. MkdirAll never loosens an existing dir.
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
+		return fmt.Errorf("create tls directory: %w", err)
+	}
 	return config.WithFileLock(certPath, func() error {
 		_, certErr := os.Stat(certPath)
 		_, keyErr := os.Stat(keyPath)
