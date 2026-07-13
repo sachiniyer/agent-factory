@@ -114,7 +114,7 @@ func installDirectSessionStarter(t *testing.T) {
 			return nil, err
 		}
 		if req.Prompt != "" {
-			if err := inst.SendPromptCommand(req.Prompt); err != nil {
+			if err := inst.AgentServer().SendPrompt(req.Prompt); err != nil {
 				return nil, err
 			}
 		}

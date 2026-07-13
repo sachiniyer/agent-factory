@@ -119,7 +119,7 @@ func TestRealLocalBackend_FullLifecycle(t *testing.T) {
 
 	// Preview should return without erroring (may be empty since cat has
 	// nothing to print — we just want no crash).
-	_, err = inst.Preview()
+	_, err = inst.AgentServer().Preview(0, false)
 	assert.NoError(t, err)
 
 	// Kill should clean up tmux + worktree.

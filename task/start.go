@@ -48,7 +48,7 @@ func StartAndSendPrompt(instance *session.Instance, prompt string) error {
 	}
 
 	if prompt != "" {
-		if err := instance.SendPromptCommand(prompt); err != nil {
+		if err := instance.AgentServer().SendPrompt(prompt); err != nil {
 			return err
 		}
 	}

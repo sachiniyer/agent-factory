@@ -106,7 +106,7 @@ func TestOutageEndToEnd_LostRestoreAndReplay(t *testing.T) {
 	// The sent text is echoed by the pane's tty line discipline, so the
 	// replayed lines are observable in a real capture of the restored pane.
 	waitUntil(t, 30*time.Second, "queued events to replay into the restored pane in order", func() bool {
-		content, err := inst.Preview()
+		content, err := inst.AgentServer().Preview(0, false)
 		if err != nil {
 			return false
 		}
