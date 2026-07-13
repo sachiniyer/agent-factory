@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -15,6 +16,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // The TLS material for the daemon's TCP surface (#1592 Phase 3, §1.2). TLS is
@@ -85,19 +88,39 @@ func ResolveTLSMaterial(dir, userCert, userKey string) (TLSMaterial, error) {
 // generating and persisting a fresh pair only when either file is missing. It
 // is idempotent — once generated the pair is reused, so the pinned
 // fingerprint stays stable across daemon restarts.
+//
+// The check-then-generate is serialized under an exclusive file lock so that
+// concurrent callers (daemon startup and `af token show` race, #1683) never
+// both generate: the first caller writes the pair, later callers observe it
+// and return without regenerating.
+//
+// Reuse requires more than existence — the two files must actually form a
+// MATCHING keypair. Existence alone is insufficient: a crash between the key
+// and cert renames when a cert already existed (new key + old cert), manual
+// tampering, or a stale mismatched pair from before this fix can leave two
+// files that both exist but come from different keypairs. Blessing such a pair
+// would make the daemon's tls.LoadX509KeyPair fail so the TCP/TLS listener
+// refuses to start — the exact intermittent failure #1683 is about. So we load
+// the pair to validate it and only reuse it when it pairs; otherwise we fall
+// through and regenerate a fresh matching pair (still under the lock).
 func ensureSelfSignedCert(certPath, keyPath string) error {
-	_, certErr := os.Stat(certPath)
-	_, keyErr := os.Stat(keyPath)
-	if certErr == nil && keyErr == nil {
-		return nil
-	}
-	if certErr != nil && !os.IsNotExist(certErr) {
-		return fmt.Errorf("stat tls cert: %w", certErr)
-	}
-	if keyErr != nil && !os.IsNotExist(keyErr) {
-		return fmt.Errorf("stat tls key: %w", keyErr)
-	}
-	return generateSelfSignedCert(certPath, keyPath)
+	return config.WithFileLock(certPath, func() error {
+		_, certErr := os.Stat(certPath)
+		_, keyErr := os.Stat(keyPath)
+		if certErr != nil && !os.IsNotExist(certErr) {
+			return fmt.Errorf("stat tls cert: %w", certErr)
+		}
+		if keyErr != nil && !os.IsNotExist(keyErr) {
+			return fmt.Errorf("stat tls key: %w", keyErr)
+		}
+		if certErr == nil && keyErr == nil {
+			if _, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
+				return nil
+			}
+			// Both files exist but do not form a valid keypair — regenerate.
+		}
+		return generateSelfSignedCert(certPath, keyPath)
+	})
 }
 
 // generateSelfSignedCert writes a fresh self-signed ECDSA P-256 cert/key pair
@@ -145,17 +168,20 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		return fmt.Errorf("create tls directory: %w", err)
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
-		return fmt.Errorf("write tls cert: %w", err)
-	}
+	// Write both files atomically (temp file + rename in the same dir) so a
+	// concurrent reader never observes a half-written file (#1683). If the
+	// process dies between the two renames, both files may briefly disagree
+	// (e.g. new key + old cert when a cert already existed) — ensureSelfSignedCert
+	// guards against that by validating the pair loads before reuse, so a
+	// mismatch is regenerated rather than served. AtomicWriteFile applies perm
+	// exactly (via tmp.Chmod), so the key lands 0600 regardless of umask.
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+	if err := config.AtomicWriteFile(keyPath, keyPEM, 0o600); err != nil {
 		return fmt.Errorf("write tls key: %w", err)
 	}
-	// Force 0600 on the key regardless of umask (WriteFile masks the mode).
-	if err := os.Chmod(keyPath, 0o600); err != nil {
-		return fmt.Errorf("chmod tls key: %w", err)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := config.AtomicWriteFile(certPath, certPEM, 0o644); err != nil {
+		return fmt.Errorf("write tls cert: %w", err)
 	}
 	return nil
 }
