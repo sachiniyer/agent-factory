@@ -7333,6 +7333,21 @@ function dotForLiveness(lv) {
 function isArchived(s) {
   return livenessOf(s) === Liveness.Archived;
 }
+function compareSessionsForRail(a, b) {
+  const aArchived = isArchived(a);
+  const aa = aArchived ? 1 : 0;
+  const bb = isArchived(b) ? 1 : 0;
+  if (aa !== bb) {
+    return aa - bb;
+  }
+  const at = a.created_at ?? "";
+  const bt = b.created_at ?? "";
+  if (at !== bt) {
+    const asc = at < bt ? -1 : 1;
+    return aArchived ? -asc : asc;
+  }
+  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
 function rowTitle(s) {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
@@ -7374,19 +7389,7 @@ function formatLimitReset(reset, now) {
 
 // src/projects.ts
 function orderWithinProject(sessions) {
-  return [...sessions].sort((a, b) => {
-    const aa = isArchived(a) ? 1 : 0;
-    const bb = isArchived(b) ? 1 : 0;
-    if (aa !== bb) {
-      return aa - bb;
-    }
-    const at = a.created_at ?? "";
-    const bt = b.created_at ?? "";
-    if (at !== bt) {
-      return at < bt ? -1 : 1;
-    }
-    return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-  });
+  return [...sessions].sort(compareSessionsForRail);
 }
 function groupSessionsByProject(sessions) {
   const byRoot = /* @__PURE__ */ new Map();
@@ -7536,19 +7539,7 @@ function h2(tag, props = {}, ...children) {
   return el;
 }
 function orderedSessions(sessions) {
-  return [...sessions].sort((a, b) => {
-    const aa = isArchived(a) ? 1 : 0;
-    const bb = isArchived(b) ? 1 : 0;
-    if (aa !== bb) {
-      return aa - bb;
-    }
-    const at = a.created_at ?? "";
-    const bt = b.created_at ?? "";
-    if (at !== bt) {
-      return at < bt ? -1 : 1;
-    }
-    return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-  });
+  return [...sessions].sort(compareSessionsForRail);
 }
 function renderLogin(root2, state, actions2) {
   root2.replaceChildren(loginView(state, actions2));
@@ -7743,6 +7734,12 @@ var AppShell = class {
   lastKb = null;
   lastActiveTab = 0;
   lastError = null;
+  // Whether the main pane has been rendered at least once. The constructor leaves it
+  // an empty <section>, so the FIRST update must render it even when nothing is
+  // selected (selectedId is null before AND after that first update, so the
+  // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
+  // load until a select-then-deselect. (#1592 Phase 5 PR9)
+  mainRendered = false;
   /** Applies the latest state, touching only what changed. */
   update(state) {
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
@@ -7785,7 +7782,8 @@ var AppShell = class {
     }
     const activeTabChanged = this.lastActiveTab !== state.activeTab;
     this.lastActiveTab = state.activeTab;
-    if (selectionChanged) {
+    if (selectionChanged || !this.mainRendered) {
+      this.mainRendered = true;
       this.renderMain(state);
     } else {
       this.patchMainHead(state);

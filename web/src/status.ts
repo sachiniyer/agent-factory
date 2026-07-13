@@ -110,6 +110,35 @@ export function isArchived(s: SessionData): boolean {
 }
 
 /**
+ * The rail's session comparator, a line-for-line mirror of the TUI sidebar
+ * (ui/sidebar_model.go partitionByArchived, #1605): live rows first, then the
+ * archived group last. The two groups order OPPOSITELY — live rows are oldest-
+ * created first (the projection's stable order), while archived rows are NEWEST-
+ * created first, so the archive reads as a most-recent-on-top history, the inverse
+ * of the live tree (#1605). Title breaks a created_at tie in BOTH groups so the
+ * order is total and never jitters. Shared by the sessions rail (ui.ts
+ * orderedSessions) and the projects pane (projects.ts) so the two surfaces can
+ * never diverge on order (#1674 PR3 review: the web must sort archived desc like
+ * the TUI, not asc).
+ */
+export function compareSessionsForRail(a: SessionData, b: SessionData): number {
+  const aArchived = isArchived(a);
+  const aa = aArchived ? 1 : 0;
+  const bb = isArchived(b) ? 1 : 0;
+  if (aa !== bb) {
+    return aa - bb;
+  }
+  const at = a.created_at ?? "";
+  const bt = b.created_at ?? "";
+  if (at !== bt) {
+    const asc = at < bt ? -1 : 1;
+    // Live: oldest-first (asc). Archived: newest-first (desc), matching the TUI.
+    return aArchived ? -asc : asc;
+  }
+  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
+
+/**
  * Builds the row title with the same prefixes the TUI prepends (render.go:304-345),
  * in the same precedence: [remote] outermost, then the state marker. Archived rows
  * deliberately carry NO word prefix (render.go:326-338) — the glyph + dimming say

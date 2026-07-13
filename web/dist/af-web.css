@@ -31,6 +31,19 @@ body {
   min-height: 100vh;
   background: var(--af-bg);
   color: var(--af-text);
+  overflow-x: hidden;
+}
+.af-primary:focus-visible,
+.af-ghost:focus-visible,
+.af-danger:focus-visible,
+.af-rail-new:focus-visible,
+.af-tasks-add:focus-visible,
+.af-tab:focus-visible,
+.af-tab-new:focus-visible,
+.af-viewtab:focus-visible,
+.af-task-action:focus-visible {
+  outline: 2px solid var(--af-accent);
+  outline-offset: 2px;
 }
 #app {
   min-height: 100vh;
@@ -125,6 +138,7 @@ body {
   padding: 0.75rem 1.25rem;
   background: var(--af-surface);
   border-bottom: 1px solid var(--af-border);
+  flex-wrap: wrap;
 }
 .af-brand {
   font-weight: 600;

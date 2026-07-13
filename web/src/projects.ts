@@ -17,7 +17,7 @@
 // shared h() helper), no innerHTML with markup.
 
 import { h, projectLabel } from "./modals.js";
-import { isArchived, rowStatus, rowTitle } from "./status.js";
+import { compareSessionsForRail, isArchived, rowStatus, rowTitle } from "./status.js";
 import type { SessionData } from "./types.js";
 
 /** One project section: its repo root (the stable id), a friendly label, and the
@@ -27,27 +27,17 @@ export interface ProjectGroup {
   root: string;
   /** The friendly label (repo basename + parent), shared with the modal picker. */
   label: string;
-  /** The project's sessions, live rows first then archived, each by creation time. */
+  /** The project's sessions in rail order: live rows oldest-first, then the archived
+   *  group newest-first (compareSessionsForRail). */
   sessions: SessionData[];
 }
 
-/** Orders sessions within a project the same way the rail does (ui.ts
- *  orderedSessions): live rows before the archived group, each ordered by creation
- *  time then title, so the projects pane and the sessions rail agree on order. */
+/** Orders sessions within a project the same way the rail does — the shared
+ *  compareSessionsForRail (status.ts): live rows oldest-first before the archived
+ *  group newest-first (#1605), so the projects pane and the sessions rail can never
+ *  diverge on order (#1674 PR3 review). */
 function orderWithinProject(sessions: SessionData[]): SessionData[] {
-  return [...sessions].sort((a, b) => {
-    const aa = isArchived(a) ? 1 : 0;
-    const bb = isArchived(b) ? 1 : 0;
-    if (aa !== bb) {
-      return aa - bb;
-    }
-    const at = a.created_at ?? "";
-    const bt = b.created_at ?? "";
-    if (at !== bt) {
-      return at < bt ? -1 : 1;
-    }
-    return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-  });
+  return [...sessions].sort(compareSessionsForRail);
 }
 
 /**

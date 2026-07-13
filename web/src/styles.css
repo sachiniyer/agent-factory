@@ -37,6 +37,30 @@ body {
   min-height: 100vh;
   background: var(--af-bg);
   color: var(--af-text);
+  /* The shell is a fixed-height flex layout whose inner regions own their own
+   * scroll (the rail list, the view bodies, the tab bar). Nothing should ever push
+   * the PAGE itself sideways, so clamp horizontal overflow at the root — the #1592
+   * Phase 5 PR9 "no horizontal body scroll on a narrow window" guarantee. Vertical
+   * scroll is unaffected, and fixed-position layers (the toast) are not clipped. */
+  overflow-x: hidden;
+}
+
+/* Keyboard focus-visible ring (#1592 Phase 5 PR9): every control reachable by Tab
+ * draws a legible accent ring when focused via the keyboard, so keyboard nav is
+ * never invisible. :focus-visible (not :focus) keeps a plain mouse click from
+ * drawing it. This is the per-CONTROL complement to the pane-level #1694 outline
+ * (.af-kb-rail/.af-kb-terminal), which marks which PANE owns the keyboard. */
+.af-primary:focus-visible,
+.af-ghost:focus-visible,
+.af-danger:focus-visible,
+.af-rail-new:focus-visible,
+.af-tasks-add:focus-visible,
+.af-tab:focus-visible,
+.af-tab-new:focus-visible,
+.af-viewtab:focus-visible,
+.af-task-action:focus-visible {
+  outline: 2px solid var(--af-accent);
+  outline-offset: 2px;
 }
 
 #app {
@@ -148,6 +172,10 @@ body {
   padding: 0.75rem 1.25rem;
   background: var(--af-surface);
   border-bottom: 1px solid var(--af-border);
+  /* Keep the bar to one row on a comfortable width, but never let it force the page
+   * wider than the viewport: on a narrow window it wraps to a second line instead of
+   * overflowing (the overflow-x guard on body would otherwise clip it). */
+  flex-wrap: wrap;
 }
 
 .af-brand {
