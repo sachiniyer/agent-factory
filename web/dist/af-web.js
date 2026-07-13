@@ -6471,6 +6471,42 @@ function projectLabel(root2) {
   return parent ? `${base}  (${parent}/${base})` : base;
 }
 
+// src/nav.ts
+function nextSelection(orderedIds, selectedId, delta) {
+  if (orderedIds.length === 0) {
+    return null;
+  }
+  const cur = selectedId ? orderedIds.indexOf(selectedId) : -1;
+  let next;
+  if (cur === -1) {
+    next = delta > 0 ? 0 : orderedIds.length - 1;
+  } else {
+    next = Math.min(Math.max(cur + delta, 0), orderedIds.length - 1);
+  }
+  return orderedIds[next] ?? null;
+}
+function decideKey(key, ctx) {
+  if (ctx.modalOpen) {
+    return key === "Escape" ? { kind: "closeModal" } : { kind: "none" };
+  }
+  if (ctx.focus === "terminal") {
+    return key === "Escape" ? { kind: "toRail" } : { kind: "none" };
+  }
+  if (key === "Enter") {
+    return ctx.selectedId ? { kind: "attach" } : { kind: "none" };
+  }
+  let delta;
+  if (key === "ArrowDown" || key === "j") {
+    delta = 1;
+  } else if (key === "ArrowUp" || key === "k") {
+    delta = -1;
+  } else {
+    return { kind: "none" };
+  }
+  const next = nextSelection(ctx.orderedIds, ctx.selectedId, delta);
+  return next ? { kind: "select", id: next } : { kind: "none" };
+}
+
 // src/sessions.ts
 function sessionKey(s) {
   return s.id && s.id !== "" ? `id ${s.id}` : `title ${s.title}`;
@@ -6670,6 +6706,19 @@ var AttachTerminal = class {
     this.term.loadAddon(this.fit);
     this.term.open(container);
     this.fit.fit();
+    const textarea = this.term.textarea;
+    if (textarea) {
+      textarea.addEventListener("focus", () => {
+        if (!this.stopped) {
+          this.cb.onFocusChange(true);
+        }
+      });
+      textarea.addEventListener("blur", () => {
+        if (!this.stopped) {
+          this.cb.onFocusChange(false);
+        }
+      });
+    }
     this.term.onData((data) => this.send(encode(inputFrame(this.enc.encode(data)))));
     this.ro = new ResizeObserver(() => this.scheduleFit());
     this.ro.observe(container);
@@ -6710,6 +6759,16 @@ var AttachTerminal = class {
     this.ro.disconnect();
     this.closeSocket();
     this.term.dispose();
+  }
+  /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
+   *  keys reach the agent — the attach half of the #1693 nav/attach model. */
+  focus() {
+    this.term.focus();
+  }
+  /** Takes the keyboard away from the terminal (blurs it) so document-level rail
+   *  navigation gets the keys again — the Escape/back-to-nav half of #1693. */
+  blur() {
+    this.term.blur();
   }
   // --- socket lifecycle ------------------------------------------------------
   connect() {
@@ -7150,8 +7209,15 @@ var AppShell = class {
   lastSessions = null;
   lastSelectedId = null;
   lastLive = null;
+  lastKb = null;
   /** Applies the latest state, touching only what changed. */
   update(state) {
+    const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
+    if (this.lastKb !== kb) {
+      this.lastKb = kb;
+      this.el.classList.toggle("af-kb-terminal", kb === "terminal");
+      this.el.classList.toggle("af-kb-rail", kb === "rail");
+    }
     if (this.lastLive !== state.live) {
       this.lastLive = state.live;
       this.pip.className = `af-live-pip af-live-${state.live}`;
@@ -7257,7 +7323,7 @@ function sessionRow(s, selected, actions2) {
   row.setAttribute("title", `${s.title} \u2014 ${status.label}`);
   if (s.id) {
     const id = s.id;
-    row.addEventListener("click", () => actions2.select(id));
+    row.addEventListener("click", () => actions2.open(id));
   }
   return row;
 }
@@ -7270,7 +7336,8 @@ var store = new Store({
   sessions: [],
   selectedId: null,
   live: "connecting",
-  termStatus: "connecting"
+  termStatus: "connecting",
+  focus: "rail"
 });
 var token = null;
 var stream = null;
@@ -7291,7 +7358,7 @@ function mount() {
   }
   store.subscribe(rerender);
   rerender();
-  document.addEventListener("keydown", onKeydown);
+  document.addEventListener("keydown", onKeydown, true);
   const existing = loadToken();
   if (existing) {
     void connect(existing);
@@ -7336,7 +7403,8 @@ async function connect(candidate) {
     loginError: null,
     sessions,
     selectedId: pickSelection(sessions, store.get().selectedId),
-    live: "connecting"
+    live: "connecting",
+    focus: "rail"
   });
   startStream(candidate);
 }
@@ -7351,11 +7419,29 @@ function disconnect() {
     loginError: null,
     sessions: [],
     selectedId: null,
-    live: "connecting"
+    live: "connecting",
+    focus: "rail"
   });
 }
-function select(id) {
-  store.set({ selectedId: id });
+function moveSelection(id) {
+  store.set({ selectedId: id, focus: "rail" });
+}
+function openFromRail(id) {
+  moveSelection(id);
+  focusTerminal();
+}
+function focusTerminal() {
+  if (!terminal) {
+    return;
+  }
+  store.set({ focus: "terminal" });
+  terminal.focus();
+}
+function focusRail() {
+  store.set({ focus: "rail" });
+  if (terminal) {
+    terminal.blur();
+  }
 }
 function selectedSession2() {
   const { sessions, selectedId } = store.get();
@@ -7451,7 +7537,7 @@ function openConfirm(action) {
 var actions = {
   connect,
   disconnect,
-  select,
+  open: openFromRail,
   newSession,
   sendPrompt: openSendPrompt,
   kill: () => openConfirm("kill"),
@@ -7467,7 +7553,11 @@ function syncTerminal(state) {
   const tok = token;
   if (selId && tok) {
     terminal = new AttachTerminal(termHost, selId, tok, {
-      onStatus: (s) => store.set({ termStatus: s })
+      onStatus: (s) => store.set({ termStatus: s }),
+      // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus, so a
+      // click straight into the terminal enters terminal mode (and tabbing/click
+      // away returns to rail mode) without going through Enter/Escape.
+      onFocusChange: (focused) => store.set({ focus: focused ? "terminal" : "rail" })
     });
   }
 }
@@ -7521,45 +7611,47 @@ function requestResync() {
     });
   }, 150);
 }
+function isNativeControl(el) {
+  if (!el) {
+    return false;
+  }
+  return el.tagName === "BUTTON" || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.tagName === "A";
+}
 function onKeydown(e) {
   const state = store.get();
   if (state.phase !== "app") {
     return;
   }
-  if (modal) {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      closeModal();
-    }
-    return;
-  }
   const target = e.target;
-  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+  const inTerminal = target ? termHost.contains(target) : false;
+  if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
-  let delta = 0;
-  if (e.key === "ArrowDown" || e.key === "j") {
-    delta = 1;
-  } else if (e.key === "ArrowUp" || e.key === "k") {
-    delta = -1;
-  } else {
-    return;
-  }
-  const ordered = orderedSessions(state.sessions);
-  if (ordered.length === 0) {
+  const focus = terminal ? state.focus : "rail";
+  const action = decideKey(e.key, {
+    focus,
+    modalOpen: modal !== null,
+    orderedIds: orderedSessions(state.sessions).map((s) => s.id ?? "").filter((id) => id !== ""),
+    selectedId: state.selectedId
+  });
+  if (action.kind === "none") {
     return;
   }
   e.preventDefault();
-  const cur = ordered.findIndex((s) => s.id === state.selectedId);
-  let next;
-  if (cur === -1) {
-    next = delta > 0 ? 0 : ordered.length - 1;
-  } else {
-    next = Math.min(Math.max(cur + delta, 0), ordered.length - 1);
-  }
-  const target2 = ordered[next];
-  if (target2 && target2.id) {
-    select(target2.id);
+  e.stopPropagation();
+  switch (action.kind) {
+    case "closeModal":
+      closeModal();
+      break;
+    case "select":
+      moveSelection(action.id);
+      break;
+    case "attach":
+      focusTerminal();
+      break;
+    case "toRail":
+      focusRail();
+      break;
   }
 }
 function describeError(e) {

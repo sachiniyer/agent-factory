@@ -47,6 +47,10 @@ export type TerminalStatus = "connecting" | "open" | "reconnecting" | "exited";
 export interface TerminalCallbacks {
   /** Fired on every connection-state change, for the pane's status indicator. */
   onStatus(status: TerminalStatus): void;
+  /** Fired when the terminal gains/loses the keyboard (xterm's helper textarea
+   *  focus/blur), so index.ts can keep its nav-vs-terminal mode (#1693) in sync
+   *  with real DOM focus — e.g. a mouse click straight into the terminal. */
+  onFocusChange(focused: boolean): void;
 }
 
 const BACKOFF_BASE_MS = 500;
@@ -141,6 +145,24 @@ export class AttachTerminal {
     this.term.open(container);
     this.fit.fit();
 
+    // Report focus/blur of xterm's helper textarea so index.ts can track which pane
+    // owns the keyboard (#1693) even when the user clicks straight into the terminal
+    // rather than pressing Enter. Guarded on `stopped` so the blur that dispose()
+    // triggers (tearing the textarea down) doesn't fire a spurious mode change.
+    const textarea = this.term.textarea;
+    if (textarea) {
+      textarea.addEventListener("focus", () => {
+        if (!this.stopped) {
+          this.cb.onFocusChange(true);
+        }
+      });
+      textarea.addEventListener("blur", () => {
+        if (!this.stopped) {
+          this.cb.onFocusChange(false);
+        }
+      });
+    }
+
     // Keystrokes → OpInput. xterm hands us the terminal's outgoing byte string
     // (regular chars and key escape sequences alike); UTF-8 encode it so a typed
     // multibyte char reaches the PTY as the same bytes a real terminal would send.
@@ -169,6 +191,18 @@ export class AttachTerminal {
     this.ro.disconnect();
     this.closeSocket();
     this.term.dispose();
+  }
+
+  /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
+   *  keys reach the agent — the attach half of the #1693 nav/attach model. */
+  focus(): void {
+    this.term.focus();
+  }
+
+  /** Takes the keyboard away from the terminal (blurs it) so document-level rail
+   *  navigation gets the keys again — the Escape/back-to-nav half of #1693. */
+  blur(): void {
+    this.term.blur();
   }
 
   // --- socket lifecycle ------------------------------------------------------

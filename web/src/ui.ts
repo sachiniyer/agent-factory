@@ -19,6 +19,7 @@
 // session changes (a deliberate user act that rebuilds the terminal anyway).
 
 import type { EventStreamStatus } from "./events.js";
+import type { KeyboardFocus } from "./nav.js";
 import { isArchived, rowStatus, rowTitle } from "./status.js";
 import type { TerminalStatus } from "./terminal.js";
 import type { SessionData } from "./types.js";
@@ -41,14 +42,20 @@ export interface AppState {
   live: EventStreamStatus;
   /** the attach terminal's connection state, shown in the pane header. */
   termStatus: TerminalStatus;
+  /** which pane owns the keyboard (#1693): "rail" is the default nav mode (j/k move
+   *  the selection); "terminal" means keys go to the agent until Escape. Drives the
+   *  visible focus indicator so the active mode is legible, mirroring the TUI. */
+  focus: KeyboardFocus;
 }
 
 /** Callbacks the shell invokes; index.ts owns the real behavior. */
 export interface Actions {
   connect(token: string): void;
   disconnect(): void;
-  /** Selects a session by its stable id (null-safe: rows without an id are inert). */
-  select(id: string): void;
+  /** Opens a session by its stable id (null-safe: rows without an id are inert):
+   *  selects the row AND hands the keyboard to its terminal, so a mouse click
+   *  attaches exactly like Enter on the selected row (#1693). */
+  open(id: string): void;
   /** Opens the new-session modal (#1592 Phase 5 PR5). */
   newSession(): void;
   /** Opens the send-prompt modal for the current selection. */
@@ -209,6 +216,7 @@ export class AppShell {
   private lastSessions: SessionData[] | null = null;
   private lastSelectedId: string | null = null;
   private lastLive: EventStreamStatus | null = null;
+  private lastKb: KeyboardFocus | null = null;
 
   constructor(
     private readonly actions: Actions,
@@ -256,6 +264,17 @@ export class AppShell {
 
   /** Applies the latest state, touching only what changed. */
   update(state: AppState): void {
+    // The keyboard-focus indicator (#1693): a modifier class on the app root that
+    // CSS turns into an accent border on whichever pane owns the keyboard. The
+    // terminal only "holds" it while a session is actually selected; with none
+    // selected the main pane is the empty state, so the rail always reads as active.
+    const kb: KeyboardFocus = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
+    if (this.lastKb !== kb) {
+      this.lastKb = kb;
+      this.el.classList.toggle("af-kb-terminal", kb === "terminal");
+      this.el.classList.toggle("af-kb-rail", kb === "rail");
+    }
+
     if (this.lastLive !== state.live) {
       this.lastLive = state.live;
       this.pip.className = `af-live-pip af-live-${state.live}`;
@@ -361,9 +380,9 @@ function selectedSession(state: AppState): SessionData | null {
 }
 
 /** One session row: a status dot, the (prefixed) title, and the branch line —
- *  the same three signals the TUI row carries (ui/tree/render.go). Clicking selects
- *  by the stable id; a row lacking an id (never expected from a live Snapshot) is
- *  rendered but inert. */
+ *  the same three signals the TUI row carries (ui/tree/render.go). Clicking opens
+ *  the session by its stable id (selects it and attaches its terminal, #1693); a
+ *  row lacking an id (never expected from a live Snapshot) is rendered but inert. */
 function sessionRow(s: SessionData, selected: boolean, actions: Actions): HTMLElement {
   const status = rowStatus(s);
   const dot = h(
@@ -389,7 +408,7 @@ function sessionRow(s: SessionData, selected: boolean, actions: Actions): HTMLEl
   row.setAttribute("title", `${s.title} — ${status.label}`);
   if (s.id) {
     const id = s.id;
-    row.addEventListener("click", () => actions.select(id));
+    row.addEventListener("click", () => actions.open(id));
   }
   return row;
 }

@@ -188,6 +188,14 @@ body {
   padding: 0.6rem 0.9rem;
   border-bottom: 1px solid var(--af-border);
 }
+.af-kb-rail .af-rail,
+.af-kb-terminal .af-main-term {
+  outline: 2px solid var(--af-accent);
+  outline-offset: -2px;
+}
+.af-kb-rail .af-row-selected {
+  box-shadow: inset 0 0 0 1px var(--af-accent);
+}
 .af-rail-title {
   font-size: 0.7rem;
   text-transform: uppercase;
