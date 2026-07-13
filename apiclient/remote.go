@@ -24,10 +24,37 @@ import (
 // cert by SHA-256 fingerprint (TOFU, §1.2) or, when no fingerprint is given,
 // verifies a real CA cert against the system trust store.
 
-// remoteDialTimeout bounds the TCP connect to a remote daemon. Unlike the local
-// unix socket (a quarter second — it is either there or not), a remote dial
-// crosses a real network, so it is given a longer, network-appropriate budget.
-const remoteDialTimeout = 10 * time.Second
+// Timeouts bounding a remote round-trip. Unlike the local unix socket (a quarter
+// second — it is either there or not), a remote target crosses a real network and
+// a half-open or wedged daemon must surface as a clear timeout error instead of
+// hanging forever (#1730). Each is chosen to bound a STALL, not to race a
+// legitimately slow call:
+//
+//   - remoteDialTimeout — the TCP connect.
+//   - remoteTLSHandshakeTimeout — the TLS handshake. Its absence was the #1730
+//     hang: a peer that accepts the TCP connection but never completes the
+//     handshake blocked every REST and WS call indefinitely. 10s matches Go's
+//     http.DefaultTransport default.
+//   - remoteResponseHeaderTimeout — the wait for the server's response headers
+//     after the request is written. This bounds a daemon that completes TLS but
+//     never answers (REST) or never returns the WS 101 (a stalled handshake on
+//     the WS path). It is stream-SAFE: it caps only the time to the response
+//     headers, never a live stream's subsequent reads, so a long-lived PTY
+//     subscription is untouched.
+//   - remoteRequestTimeout — the overall deadline on a single REST call()
+//     round-trip (applied via the request context, remote-only). WS/stream dials
+//     are deliberately EXEMPT from this overall cap — they carry only the two
+//     transport bounds above so a long-lived stream is never severed mid-flight.
+//
+// They are vars (not consts) only so a test can shrink them to prove the bound
+// fires without waiting the full budget — the same pattern attach.go's
+// attachDrainTimeout/attachWriteTimeout use.
+var (
+	remoteDialTimeout           = 10 * time.Second
+	remoteTLSHandshakeTimeout   = 10 * time.Second
+	remoteResponseHeaderTimeout = 30 * time.Second
+	remoteRequestTimeout        = 60 * time.Second
+)
 
 // NewRemote returns a Client that dials the remote daemon at daemonURL over
 // TCP+TLS, threading `token` on every REST call and WS handshake. daemonURL is a
@@ -52,14 +79,22 @@ func NewRemote(daemonURL, token, fingerprint string) (*Client, error) {
 	dialer := &net.Dialer{Timeout: remoteDialTimeout}
 	return &Client{
 		httpClient: &http.Client{
+			// No http.Client.Timeout: it would fire on the whole request lifetime,
+			// which for the WS handshake path means the established stream itself —
+			// coder/websocket explicitly warns against it. The remote round-trip is
+			// bounded instead by the transport's handshake/response-header timeouts
+			// (stream-safe) plus a per-call context deadline on the REST path only.
 			Transport: &http.Transport{
-				DialContext:     dialer.DialContext,
-				TLSClientConfig: tlsCfg,
+				DialContext:           dialer.DialContext,
+				TLSClientConfig:       tlsCfg,
+				TLSHandshakeTimeout:   remoteTLSHandshakeTimeout,
+				ResponseHeaderTimeout: remoteResponseHeaderTimeout,
 			},
 		},
-		token:    token,
-		httpBase: httpBase,
-		wsBase:   wsBase,
+		token:          token,
+		httpBase:       httpBase,
+		wsBase:         wsBase,
+		requestTimeout: remoteRequestTimeout,
 	}, nil
 }
 

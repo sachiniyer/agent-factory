@@ -2,6 +2,7 @@ package apiclient
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -170,6 +171,115 @@ func TestNewRemote_NoPinRejectsSelfSigned(t *testing.T) {
 	}
 	if _, err := c.Snapshot(daemon.SnapshotRequest{}); err == nil {
 		t.Fatal("want TLS verification failure against an un-pinned self-signed cert, got nil")
+	}
+}
+
+// stallingTLSListener accepts TCP connections but NEVER completes (or even reads)
+// the TLS handshake — it holds every accepted conn open and idle. A client dialing
+// it gets a completed TCP connect and then blocks waiting for a ServerHello that
+// never comes: the exact half-open condition that hung every remote call before
+// #1730. It returns the listen address; the listener and its held conns close on
+// cleanup.
+func stallingTLSListener(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	conns := make(chan net.Conn, 16)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			conns <- conn // hold it open, never read/write — stall the handshake
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		for c := range conns {
+			_ = c.Close()
+		}
+	})
+	return ln.Addr().String()
+}
+
+// withShrunkRemoteTimeouts temporarily shrinks the remote round-trip timeouts so a
+// stall test proves the bound FIRES without waiting the full multi-second budget,
+// restoring them on cleanup. It exercises the real NewRemote wiring (which reads
+// these vars) rather than a hand-rolled client.
+func withShrunkRemoteTimeouts(t *testing.T) {
+	t.Helper()
+	od, oh, or, oq := remoteDialTimeout, remoteTLSHandshakeTimeout, remoteResponseHeaderTimeout, remoteRequestTimeout
+	remoteDialTimeout = 500 * time.Millisecond
+	remoteTLSHandshakeTimeout = 500 * time.Millisecond
+	remoteResponseHeaderTimeout = 500 * time.Millisecond
+	remoteRequestTimeout = 500 * time.Millisecond
+	t.Cleanup(func() {
+		remoteDialTimeout, remoteTLSHandshakeTimeout, remoteResponseHeaderTimeout, remoteRequestTimeout = od, oh, or, oq
+	})
+}
+
+// TestNewRemote_StalledTLSHandshakeTimesOut is the #1730 regression: a remote
+// daemon that accepts the TCP connection but never completes the TLS handshake
+// must make a REST call return a timeout error within the configured budget, not
+// hang forever. Before the fix (no TLSHandshakeTimeout on the transport, no
+// request-context deadline) this call blocked indefinitely.
+func TestNewRemote_StalledTLSHandshakeTimesOut(t *testing.T) {
+	withShrunkRemoteTimeouts(t)
+	addr := stallingTLSListener(t)
+
+	c, err := NewRemote("https://"+addr, "tok", "sha256:"+strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		_, e := c.Snapshot(daemon.SnapshotRequest{})
+		errc <- e
+	}()
+	select {
+	case e := <-errc:
+		if e == nil {
+			t.Fatal("stalled TLS handshake: want a timeout error, got nil")
+		}
+		if !strings.Contains(e.Error(), "timeout") && !strings.Contains(e.Error(), "deadline exceeded") {
+			t.Fatalf("stalled TLS handshake: want a timeout error, got %v", e)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("HANG: Snapshot did not return on a stalled TLS handshake (#1730 regression)")
+	}
+}
+
+// TestDialStream_StalledTLSHandshakeTimesOut proves the WS path is bounded too:
+// the same stalled handshake makes DialStream error out (via the transport's
+// TLS-handshake timeout) instead of hanging, even though the WS dial is exempt
+// from the REST overall-request deadline. This covers the attach call site that
+// passes context.Background() (no caller-side deadline).
+func TestDialStream_StalledTLSHandshakeTimesOut(t *testing.T) {
+	withShrunkRemoteTimeouts(t)
+	addr := stallingTLSListener(t)
+
+	c, err := NewRemote("https://"+addr, "tok", "sha256:"+strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		_, e := c.DialStream(context.Background(), "alpha", "", 0, 0)
+		errc <- e
+	}()
+	select {
+	case e := <-errc:
+		if e == nil {
+			t.Fatal("stalled TLS handshake on WS dial: want an error, got nil")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("HANG: DialStream did not return on a stalled TLS handshake (#1730 regression)")
 	}
 }
 

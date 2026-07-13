@@ -95,6 +95,16 @@ type Client struct {
 	// wsBase is the WS scheme+authority: localWSBase ("ws://unix") for the unix
 	// socket, "wss://host:port" for a remote daemon.
 	wsBase string
+	// requestTimeout is the overall deadline applied to each REST call()
+	// round-trip via the request context. It is set only for a REMOTE target
+	// (NewRemote), so a half-open or wedged remote daemon surfaces as a timeout
+	// error instead of hanging forever (#1730). It is 0 for the local unix socket,
+	// which keeps its blocking-read semantics (the socket is either there or not,
+	// bounded by dialTimeout, and the in-memory snapshot returns promptly). WS
+	// stream dials never consult this field — they are bounded only by the
+	// transport's handshake/response-header timeouts so a long-lived stream is
+	// never severed by an overall deadline.
+	requestTimeout time.Duration
 }
 
 // New returns a Client dialing the daemon HTTP socket resolved from the current
@@ -143,7 +153,16 @@ func (c *Client) call(method string, req any, resp any) error {
 		return fmt.Errorf("apiclient: marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, c.httpBase+"/v1/"+method, bytes.NewReader(reqBody))
+	// A remote target bounds the whole round-trip with an overall deadline so a
+	// wedged daemon times out instead of hanging (#1730); the local socket leaves
+	// requestTimeout zero and blocks on the in-memory snapshot as before.
+	ctx := context.Background()
+	if c.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.requestTimeout)
+		defer cancel()
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpBase+"/v1/"+method, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("apiclient: build request: %w", err)
 	}
