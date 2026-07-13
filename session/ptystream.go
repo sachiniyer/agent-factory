@@ -14,7 +14,7 @@ import (
 // it by running attach_cmd/terminal_cmd under a PTY; the local runtime's tmux
 // client attach is its own PTYStream-shaped equivalent (kept behind tmux's
 // server-mediated detach semantics for now, see TmuxSession.Attach). This is the
-// seam a future agent-server / web client (Phase 2) reads and writes over a
+// seam the agent-server / web client reads and writes over a
 // WebSocket instead of local stdio — the transport changes, the primitive does
 // not.
 type PTYStream interface {
