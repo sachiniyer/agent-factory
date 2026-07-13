@@ -427,6 +427,15 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	// Phase 2d — the chokepoint form of MarkLive). The daemon poll re-derives
 	// Ready/Running from the live session from here on and persists the transition.
 	_ = i.Transition(ConfirmLive())
+
+	// The re-spawned tmux is a new pane process; a PTY broker that was still holding
+	// the dead pane's clientless capture must drop it so the next Subscribe streams
+	// the live pane rather than a parked, silent readLoop (#1682). The memoized
+	// accessor keeps this a no-op for sessions nobody ever streamed (empty broker
+	// map) and skips a remote runtime's agent-server (not a localAgentServer).
+	if as, ok := i.AgentServer().(*localAgentServer); ok {
+		as.resetBrokerCaptures()
+	}
 	return nil
 }
 

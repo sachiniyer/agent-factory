@@ -147,6 +147,31 @@ func (s *localAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
 	return br, nil
 }
 
+// resetBrokerCaptures stops every tab broker's stale clientless capture after a
+// session recovery re-spawns tmux (#1682). The brokers, their ring buffers, and
+// their current subscribers are all preserved — only the capture bound to the dead
+// pane is torn down, so the next Subscribe rebuilds a FRESH pipe-pane against the
+// restored pane. Without it a broker that was capturing when its tmux died keeps
+// capturing=true over a parked readLoop, and post-recovery subscribers attach but
+// never receive output. The brokers are snapshotted under s.mu and reset OUTSIDE
+// the lock so a blocking capture teardown (which joins the readLoop) can't stall a
+// concurrent Subscribe/Input/Resize. A no-op once Kill has latched closed.
+func (s *localAgentServer) resetBrokerCaptures() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	brokers := make([]*ptyBroker, 0, len(s.brokers))
+	for _, br := range s.brokers {
+		brokers = append(brokers, br)
+	}
+	s.mu.Unlock()
+	for _, br := range brokers {
+		br.resetCapture()
+	}
+}
+
 func (s *localAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error) {
 	br, err := s.ensureBroker(tab)
 	if err != nil {
