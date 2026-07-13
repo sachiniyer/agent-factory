@@ -118,8 +118,8 @@ func (s *remoteAgentServer) Expose() (StreamEndpoint, error) {
 	// from a TUI's perspective the stream is still reachable at the daemon's local
 	// path — the daemon relays. Returning Local=true keeps the daemon's stream
 	// handler on its proxy path and the TUI unchanged. The stream-info-returns-a-URL
-	// indirection (a browser dialing the sandbox directly) is a Phase-5 concern that
-	// also needs the sandbox token handed to the browser; PR2 does not flip it.
+	// indirection (a browser dialing the sandbox directly) is not implemented —
+	// browsers proxy through the daemon instead.
 	return StreamEndpoint{Local: true}, nil
 }
 

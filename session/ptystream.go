@@ -14,9 +14,13 @@ import (
 // it by running attach_cmd/terminal_cmd under a PTY; the local runtime's tmux
 // client attach is its own PTYStream-shaped equivalent (kept behind tmux's
 // server-mediated detach semantics for now, see TmuxSession.Attach). This is the
-// seam a future agent-server / web client (Phase 2) reads and writes over a
-// WebSocket instead of local stdio — the transport changes, the primitive does
-// not.
+// LOCAL full-screen attach seam (Backend.AttachTerminal): the driver copies it
+// over the local process's stdio. The browser web client does NOT read or write
+// over this interface — it gets its terminal from the daemon's WebSocket PTY
+// broker (daemon/ws_pty.go), which fans the agent-server's ring buffer of raw
+// PTY bytes to WS subscribers and applies their input/resize back
+// (AgentServer.Subscribe/Input/Resize). Same idea — a byte stream plus resize —
+// over a different seam and transport.
 type PTYStream interface {
 	io.ReadWriteCloser
 
