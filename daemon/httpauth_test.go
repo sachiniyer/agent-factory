@@ -133,6 +133,56 @@ func TestWithAuthLoopbackExemption(t *testing.T) {
 	}
 }
 
+// TestWithAuthLoopbackTokenRequired pins the require_loopback_token=true shape:
+// a gate with loopbackExempt=false (the policy startHTTPServer builds from that
+// config flag) makes loopback peers present the token exactly like network peers.
+// This is the shared/multi-user tighten-up — the default no-token loopback access
+// would otherwise hand every local account the full control plane.
+func TestWithAuthLoopbackTokenRequired(t *testing.T) {
+	const good = "s3cr3t-token"
+	gate := &authGate{
+		expectedToken:  func() (string, error) { return good, nil },
+		tokenDisabled:  false,
+		loopbackExempt: false, // require_loopback_token=true
+	}
+	h := withAuth(newHTTPMux(&controlServer{}), gate, nil)
+
+	// Loopback peers, no token → 401 (exemption withdrawn).
+	for _, addr := range []string{"127.0.0.1:5555", "[::1]:5555"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, reqFrom(addr, ""))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("loopback %s no-token status = %d, want 401 (require_loopback_token)", addr, rec.Code)
+		}
+	}
+
+	// Loopback peer WITH the correct token → 200.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, reqFrom("127.0.0.1:5555", good))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("loopback valid-token status = %d, want 200", rec.Code)
+	}
+
+	// The auth-info probe now tells a loopback client it needs a token, so the
+	// SPA shows its login instead of assuming a free pass.
+	probe := httptest.NewRecorder()
+	probeReq := reqFrom("127.0.0.1:5555", "")
+	probeReq.URL.Path = authInfoPath
+	h.ServeHTTP(probe, probeReq)
+	if probe.Code != http.StatusOK {
+		t.Fatalf("auth-info probe status = %d, want 200", probe.Code)
+	}
+	var env struct {
+		Data authInfoResponse `json:"data"`
+	}
+	if err := json.NewDecoder(probe.Body).Decode(&env); err != nil {
+		t.Fatalf("decode auth-info body: %v", err)
+	}
+	if !env.Data.AuthRequired {
+		t.Fatalf("auth_required = false, want true for loopback under require_loopback_token")
+	}
+}
+
 // TestWithAuthLoopbackSpoofResistant pins the security-critical property: loopback
 // is judged ONLY from the transport RemoteAddr, so a NETWORK peer that forges
 // X-Forwarded-For / X-Real-IP / Forwarded / Host to claim 127.0.0.1 is STILL

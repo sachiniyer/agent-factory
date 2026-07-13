@@ -244,6 +244,69 @@ func TestTCPListener_LoopbackExempt(t *testing.T) {
 	require.False(t, env.Data.AuthRequired, "a loopback client must be told it needs no token")
 }
 
+// TestTCPListener_RequireLoopbackToken pins require_loopback_token=true: the
+// loopback exemption is withdrawn (policy loopbackExempt=false, the shape
+// startHTTPServer builds from the config flag), so a same-machine peer must
+// present the token exactly like a network peer. This is the shared/multi-user
+// tighten-up — it proves a local process WITHOUT the token is rejected while the
+// same request WITH the token is allowed, through the full TLS + gate stack.
+func TestTCPListener_RequireLoopbackToken(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+
+	cs := &controlServer{manager: m, scheduler: newTaskScheduler()}
+	// require_loopback_token=true ⇒ loopbackExempt=false. Token still enforced
+	// for the (unreachable here) network peers too — this only removes the
+	// loopback shortcut.
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{loopbackExempt: false})
+	require.NoError(t, err)
+	defer func() { _ = closeTCP() }()
+	require.NotEmpty(t, info.Token)
+
+	dir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(t, dir+"/"+daemonTLSCertFileName)},
+	}
+	baseURL := "https://" + info.Addr
+
+	// --- loopback with NO token → 401 (exemption withdrawn) -----------------
+	resp, err := client.Get(baseURL + "/v1/health")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+		"require_loopback_token=true must reject a loopback peer with no token")
+
+	// --- the auth-info probe now reports auth_required=true for loopback ----
+	resp, err = client.Get(baseURL + "/v1/auth-info")
+	require.NoError(t, err)
+	var env struct {
+		Data struct {
+			AuthRequired bool `json:"auth_required"`
+		} `json:"data"`
+		Error *string `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&env))
+	_ = resp.Body.Close()
+	require.Nil(t, env.Error)
+	require.True(t, env.Data.AuthRequired, "a loopback client must now be told it needs a token")
+
+	// --- loopback WITH the correct token → 200 ------------------------------
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/health", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+info.Token)
+	resp, err = client.Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"a loopback peer presenting the token must be allowed")
+}
+
 // TestStartHTTPServer_WebOnByDefault pins the bundled-web-UI default: the plain
 // DefaultConfig() carries the loopback listen_addr, so startHTTPServer binds the
 // TLS TCP listener (and generates the self-signed cert) with no config at all.

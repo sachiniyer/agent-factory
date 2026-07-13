@@ -209,6 +209,36 @@ TLS handshake, so this is the only trustworthy signal.
 > — the proxy, not the daemon, is then responsible for auth. Terminate auth at
 > the proxy, or bind the daemon somewhere the proxy reaches non-loopback.
 
+#### Shared machines: the loopback exemption is weaker than the Unix socket
+
+The loopback exemption trusts the **machine**, not a **user**. The Unix control
+socket is gated by filesystem permissions (`0600`) — only **your** account can
+open it. The loopback web listener has no such per-user gate: **any local process
+or user** on the box can reach `127.0.0.1:8443` and drive your sessions with no
+token. On a single-user machine that's equivalent to the Unix socket (anyone who
+runs a process as you already has that access); on a **shared / multi-user
+machine** it is strictly weaker.
+
+Close the gap with **`require_loopback_token`** (default `false`). Set it `true`
+and loopback peers must present the bearer token too — the same credential a
+network peer uses — so a same-machine account without the token is rejected:
+
+```toml
+# ~/.agent-factory/config.toml — require the token even from loopback
+require_loopback_token = true
+```
+
+```bash
+af daemon restart
+```
+
+The daemon then logs `require_loopback_token=true: loopback peers … must present
+the token above`, and the browser web client shows its paste-token login for
+same-machine visitors. (To turn the web server off entirely instead, set
+`listen_addr = ""`.) `require_loopback_token` only tightens the loopback path and
+is independent of `require_token`; note that `require_token = false` drops the
+token for **all** peers, loopback included, so it overrides this key.
+
 ### Network peers still require the token — by default
 
 Enabling `listen_addr` on a LAN, Tailscale, or public interface does **not**
@@ -346,6 +376,12 @@ cors_allowed_origins = ["https://af.example.com"]
   token-free exemption is for `127.0.0.1`/`::1` only, judged from the real
   connection address. If a same-host reverse proxy fronts the daemon, every
   request looks loopback — auth must then live at the proxy.
+- **Loopback trust is machine-wide, not per-user.** The default loopback web UI
+  is reachable with **no token by any local account** — weaker than the Unix
+  socket's `0600` owner-only gate. On a **shared / multi-user machine**, set
+  `require_loopback_token = true` (loopback then needs the token too) or
+  `listen_addr = ""` (disable the web server). See
+  [Shared machines](#shared-machines-the-loopback-exemption-is-weaker-than-the-unix-socket).
 - **`require_token = false` disables auth for the whole network.** Use it only on
   a network where every reachable party is trusted, and never on `0.0.0.0`
   without a firewall. The startup warning is there to make an accidental setting

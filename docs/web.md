@@ -128,16 +128,23 @@ attacker-controlled and ignored, see [When is a token required?](remote-tcp-auth
 
 | Your browser is on… | Token needed? | What you see |
 | --- | --- | --- |
-| **The same machine** as the daemon (loopback) | **No** | The app loads straight through — no login screen |
+| **The same machine** as the daemon (loopback), default | **No** | The app loads straight through — no login screen |
+| **The same machine**, `require_loopback_token = true` | **Yes** | A login screen asking you to paste the daemon token |
 | **Another machine** (network peer), default | **Yes** | A login screen asking you to paste the daemon token |
 | **Another machine**, `require_token = false` | No | The app loads straight through |
 
-### Same machine: no token
+### Same machine: no token (by default)
 
 A browser on the daemon's own machine already has the same trust the local Unix
 socket grants (anyone on the box runs as your user), so requiring a token would be
-friction with no security gain. The web client detects this and **skips the login
-screen entirely** — you land directly in the app.
+friction with no security gain **on a single-user machine**. The web client detects
+this and **skips the login screen entirely** — you land directly in the app.
+
+On a **shared / multi-user machine** that assumption breaks: the loopback listener
+has no per-user gating, so every local account can reach it. Set
+`require_loopback_token = true` to require the token from loopback peers too (the
+app then shows the same login screen a network peer sees), or `listen_addr = ""` to
+turn the web server off. See the [Security notes](#security-notes).
 
 ### Another machine: paste the token
 
@@ -338,6 +345,21 @@ While a terminal is attached, all keys except `Escape` flow to the agent.
 ---
 
 ## Security notes
+
+!!! warning "Shared machines: the default loopback web UI has no local auth"
+    The default `127.0.0.1:8443` web listener is reachable by **any local process
+    or user** on the machine with **no token** — that's what makes zero-config
+    local access work. Unlike the daemon's unix control socket, whose `0600`
+    permissions restrict it to **your** account, the loopback web listener grants
+    every local account on the box the same full control of your sessions.
+
+    On a **single-user machine** (a laptop, a personal workstation) this is fine —
+    anyone who can run a process as you already has that access. On a
+    **shared / multi-user machine**, close the gap one of two ways:
+
+    - `require_loopback_token = true` — loopback peers must present the bearer
+      token too (`af token`), same as network peers; or
+    - `listen_addr = ""` — disable the web server entirely.
 
 - **The token is full access.** Under the single-owner model, one token grants full
   control of the daemon. Treat it like a password; never commit it or paste it into

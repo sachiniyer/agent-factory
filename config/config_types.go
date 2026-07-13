@@ -213,6 +213,20 @@ type Config struct {
 	// token. Global-only (daemon network surface), like listen_addr: a cloned
 	// repo must never be able to disable auth. See docs/remote-tcp-auth.md.
 	RequireToken bool `json:"require_token" toml:"require_token"`
+	// RequireLoopbackToken controls whether even LOOPBACK peers (127.0.0.1/::1)
+	// must present the bearer token on the web/TCP listener. It defaults to FALSE:
+	// a same-machine browser reaches the default loopback web UI with NO token,
+	// the zero-config experience the loopback default exists for. That exemption
+	// grants every local process/user the same access as the owner — weaker than
+	// the unix control socket, whose 0600 perms restrict it to the owning user —
+	// so on a SHARED/multi-user machine set this TRUE: loopback peers then need
+	// the token too (`af token`), closing the gap. It only tightens the loopback
+	// path and is independent of require_token (which governs network peers);
+	// require_token=false still drops the token for ALL peers, loopback included,
+	// so this key has effect only while tokens are otherwise enforced. Global-only
+	// (daemon network surface), like require_token — a cloned repo must never be
+	// able to flip it. See docs/remote-tcp-auth.md.
+	RequireLoopbackToken bool `json:"require_loopback_token" toml:"require_loopback_token"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
 	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —
@@ -322,20 +336,21 @@ func ResolveProgram(cfg *Config, agent string) string {
 // a bare agent enum name.
 func DefaultConfig() *Config {
 	cfg := &Config{
-		SchemaVersion:      GlobalConfigSchemaVersion,
-		DefaultProgram:     defaultProgram,
-		AutoYes:            false,
-		AutoUpdate:         true,
-		RequireToken:       true,
-		ListenAddr:         defaultListenAddr,
-		DaemonPollInterval: defaultDaemonPollInterval,
-		LimitAutoResume:    false,
-		LimitRetryInterval: defaultLimitRetryInterval,
-		LogMaxSizeMB:       log.DefaultMaxSizeMB,
-		LogMaxBackups:      log.DefaultMaxBackups,
-		UpdateChannel:      UpdateChannelStable,
-		Theme:              DefaultThemeConfig(),
-		WorktreeRoot:       WorktreeRootSibling,
+		SchemaVersion:        GlobalConfigSchemaVersion,
+		DefaultProgram:       defaultProgram,
+		AutoYes:              false,
+		AutoUpdate:           true,
+		RequireToken:         true,
+		RequireLoopbackToken: false,
+		ListenAddr:           defaultListenAddr,
+		DaemonPollInterval:   defaultDaemonPollInterval,
+		LimitAutoResume:      false,
+		LimitRetryInterval:   defaultLimitRetryInterval,
+		LogMaxSizeMB:         log.DefaultMaxSizeMB,
+		LogMaxBackups:        log.DefaultMaxBackups,
+		UpdateChannel:        UpdateChannelStable,
+		Theme:                DefaultThemeConfig(),
+		WorktreeRoot:         WorktreeRootSibling,
 		BranchPrefix: func() string {
 			user, err := user.Current()
 			if err != nil || user == nil || user.Username == "" {

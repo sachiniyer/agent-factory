@@ -122,10 +122,12 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	"limit_retry_interval": true,
 	"log_max_backups":      true,
 	"log_max_size_mb":      true,
-	// Disabling the bearer token is a daemon-network-surface decision; a cloned
-	// repo must never be able to turn off web auth (#1696).
-	"require_token": true,
-	"root_agents":   true,
+	// Disabling the bearer token — or tightening the loopback exemption — is a
+	// daemon-network-surface decision; a cloned repo must never be able to turn
+	// off web auth (#1696) or flip the loopback token requirement.
+	"require_token":          true,
+	"require_loopback_token": true,
+	"root_agents":            true,
 	// The [theme] table is a user/host visual preference; repositories must
 	// not be able to recolor a cloned user's TUI (#1389).
 	"theme":          true,

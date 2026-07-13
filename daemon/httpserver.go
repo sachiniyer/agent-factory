@@ -116,14 +116,18 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	// the web server skipped.
 	closeTCP := func() error { return nil }
 	if manager.cfg.ListenAddr != "" {
-		// The daemon's web listener exempts loopback peers from the token (a
-		// same-machine browser gets the unix-socket's local trust, #1696) and
-		// honors require_token=false to drop the token for network peers too on a
-		// trusted network. Both are safe relaxations of the token ONLY — TLS stays
-		// mandatory in startTCPListener regardless.
+		// The daemon's web listener exempts loopback peers from the token by
+		// default (a same-machine browser gets the unix-socket's local trust,
+		// #1696) and honors require_token=false to drop the token for network peers
+		// too on a trusted network. require_loopback_token=true withdraws the
+		// loopback exemption so even same-machine peers must present the token —
+		// the tighten-up for a SHARED/multi-user host, where the default exemption
+		// would hand every local account the full control plane. All three are safe
+		// relaxations/tightenings of the token ONLY — TLS stays mandatory in
+		// startTCPListener regardless.
 		policy := tokenGatePolicy{
 			tokenDisabled:  !manager.cfg.RequireToken,
-			loopbackExempt: true,
+			loopbackExempt: !manager.cfg.RequireLoopbackToken,
 		}
 		if !manager.cfg.RequireToken {
 			// A network-reachable, tokenless control plane is a deliberate but
@@ -138,8 +142,14 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 			log.InfoLog.Printf("daemon TLS TCP listener enabled on %s (self-signed=%v)", info.Addr, info.SelfSigned)
 			log.InfoLog.Printf("  cert fingerprint: %s", info.Fingerprint)
 			log.InfoLog.Printf("  bearer token: %s", info.Token)
-			log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers %s",
-				map[bool]string{true: "must present the token above", false: "also need NO token (require_token=false)"}[manager.cfg.RequireToken])
+			switch {
+			case manager.cfg.RequireLoopbackToken:
+				log.InfoLog.Printf("  require_loopback_token=true: loopback peers (127.0.0.1/::1) must present the token above, same as network peers")
+			case manager.cfg.RequireToken:
+				log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above")
+			default:
+				log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers also need NO token (require_token=false)")
+			}
 		}
 	}
 
