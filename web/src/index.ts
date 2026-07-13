@@ -26,6 +26,7 @@ import {
 } from "./api.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
+import { decideKey, type KeyboardFocus } from "./nav.js";
 import { applyEvent, pickSelection, upsertSession } from "./sessions.js";
 import { Store } from "./store.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
@@ -40,6 +41,7 @@ const store = new Store<AppState>({
   selectedId: null,
   live: "connecting",
   termStatus: "connecting",
+  focus: "rail",
 });
 
 // The credential and the push stream are process-local singletons: one token
@@ -81,10 +83,12 @@ function mount(): void {
   store.subscribe(rerender);
   rerender();
 
-  // Keyboard navigation over the rail (arrows / j / k), wired once at the document
-  // level. The handler ignores keys while a form field OR the terminal textarea has
-  // focus, so typing into the agent never moves the rail selection.
-  document.addEventListener("keydown", onKeydown);
+  // The keyboard/focus state machine (#1693), wired once at the document level in
+  // the CAPTURE phase so it decides BEFORE xterm's textarea handler: in rail mode
+  // j/k always navigate; in terminal mode keys fall through to the agent except
+  // Escape, which we swallow here (stopPropagation) so detaching never leaks a
+  // stray ESC byte into the PTY.
+  document.addEventListener("keydown", onKeydown, true);
 
   // Resume within the tab: sessionStorage keeps the token across a reload, so a
   // returning tab re-probes it silently and skips the login form on success.
@@ -140,6 +144,7 @@ async function connect(candidate: string): Promise<void> {
     sessions,
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
+    focus: "rail",
   });
   startStream(candidate);
 }
@@ -157,12 +162,47 @@ function disconnect(): void {
     sessions: [],
     selectedId: null,
     live: "connecting",
+    focus: "rail",
   });
 }
 
-/** Selects a session row by its stable id (click or keyboard). */
-function select(id: string): void {
-  store.set({ selectedId: id });
+// --- keyboard focus (nav vs terminal, #1693) -------------------------------
+
+/** Moves the rail selection to a session by its stable id and puts the keyboard in
+ *  rail-nav mode. This is the keyboard path (j/k): selecting a row never steals the
+ *  keyboard into the terminal — you attach explicitly with Enter. Resetting focus to
+ *  "rail" here also clears any stale "terminal" mode left by a since-disposed
+ *  terminal, so j/k keep working after the selected session goes away. */
+function moveSelection(id: string): void {
+  store.set({ selectedId: id, focus: "rail" });
+}
+
+/** The click/Enter path: selects the session AND hands the keyboard to its terminal
+ *  (attach). moveSelection rebuilds the terminal synchronously (via rerender), so
+ *  focusTerminal then focuses the fresh instance. */
+function openFromRail(id: string): void {
+  moveSelection(id);
+  focusTerminal();
+}
+
+/** Gives the keyboard to the selected session's terminal (attach): keys now reach
+ *  the agent. The xterm focus event echoes back through onFocusChange and confirms
+ *  the "terminal" mode; setting it here first keeps the indicator immediate. */
+function focusTerminal(): void {
+  if (!terminal) {
+    return;
+  }
+  store.set({ focus: "terminal" });
+  terminal.focus();
+}
+
+/** Returns the keyboard to the rail (Escape / detach): blurs the terminal so
+ *  document-level j/k navigate again. */
+function focusRail(): void {
+  store.set({ focus: "rail" });
+  if (terminal) {
+    terminal.blur();
+  }
 }
 
 // --- lifecycle actions (modals) --------------------------------------------
@@ -293,7 +333,7 @@ function openConfirm(action: "kill" | "archive"): void {
 const actions = {
   connect,
   disconnect,
-  select,
+  open: openFromRail,
   newSession,
   sendPrompt: openSendPrompt,
   kill: () => openConfirm("kill"),
@@ -316,6 +356,10 @@ function syncTerminal(state: AppState): void {
   if (selId && tok) {
     terminal = new AttachTerminal(termHost, selId, tok, {
       onStatus: (s: TerminalStatus) => store.set({ termStatus: s }),
+      // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus, so a
+      // click straight into the terminal enters terminal mode (and tabbing/click
+      // away returns to rail mode) without going through Enter/Escape.
+      onFocusChange: (focused: boolean) => store.set({ focus: focused ? "terminal" : "rail" }),
     });
   }
 }
@@ -393,50 +437,72 @@ function requestResync(): void {
 
 // --- keyboard navigation ---------------------------------------------------
 
+/** Whether an element is a native control that should keep its own keys (a button,
+ *  link, or form field) — as opposed to the rail/body or the terminal, which the
+ *  nav state machine drives. Used to avoid hijacking Enter on a focused + New /
+ *  Disconnect / pane-action button, or typing into a modal input. */
+function isNativeControl(el: HTMLElement | null): boolean {
+  if (!el) {
+    return false;
+  }
+  return (
+    el.tagName === "BUTTON" ||
+    el.tagName === "INPUT" ||
+    el.tagName === "TEXTAREA" ||
+    el.tagName === "SELECT" ||
+    el.tagName === "A"
+  );
+}
+
 function onKeydown(e: KeyboardEvent): void {
   const state = store.get();
   if (state.phase !== "app") {
     return;
   }
-  // A modal owns the keyboard while open: Escape cancels it, and rail navigation is
-  // suppressed so arrows/j/k move within the form, not the rail behind it.
-  if (modal) {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      closeModal();
-    }
-    return;
-  }
-  // Don't hijack typing in a form field or the terminal (xterm's helper textarea):
-  // j/k and arrows there belong to the agent, not the rail.
+  // Let native controls handle their own keys, EXCEPT the terminal (whose textarea
+  // lives in termHost and is driven by the nav state machine) and Escape (which must
+  // still close a modal / detach the terminal even from a focused field). Without
+  // this a focused + New / Disconnect / pane-action button would have its Enter
+  // hijacked as an attach, and modal typing would move the rail.
   const target = e.target as HTMLElement | null;
-  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+  const inTerminal = target ? termHost.contains(target) : false;
+  if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
-  let delta = 0;
-  if (e.key === "ArrowDown" || e.key === "j") {
-    delta = 1;
-  } else if (e.key === "ArrowUp" || e.key === "k") {
-    delta = -1;
-  } else {
+  // The mode is "terminal" only when a terminal actually exists to own the keyboard;
+  // a since-disposed terminal (e.g. the selected session was killed) can leave the
+  // stored focus stale, so we never honor terminal mode without one. The pure state
+  // machine (nav.ts) decides the rest; index.ts only performs the effect.
+  const focus: KeyboardFocus = terminal ? state.focus : "rail";
+  const action = decideKey(e.key, {
+    focus,
+    modalOpen: modal !== null,
+    orderedIds: orderedSessions(state.sessions)
+      .map((s) => s.id ?? "")
+      .filter((id) => id !== ""),
+    selectedId: state.selectedId,
+  });
+  if (action.kind === "none") {
     return;
   }
-  const ordered = orderedSessions(state.sessions);
-  if (ordered.length === 0) {
-    return;
-  }
+  // A handled key is ours: preventDefault AND stopPropagation so it never also
+  // reaches xterm's textarea (capture phase) — this is what suppresses the stray
+  // ESC byte when Escape detaches the terminal.
   e.preventDefault();
-  const cur = ordered.findIndex((s) => s.id === state.selectedId);
-  // From no selection, ArrowDown lands on the first row and ArrowUp on the last.
-  let next: number;
-  if (cur === -1) {
-    next = delta > 0 ? 0 : ordered.length - 1;
-  } else {
-    next = Math.min(Math.max(cur + delta, 0), ordered.length - 1);
-  }
-  const target2 = ordered[next];
-  if (target2 && target2.id) {
-    select(target2.id);
+  e.stopPropagation();
+  switch (action.kind) {
+    case "closeModal":
+      closeModal();
+      break;
+    case "select":
+      moveSelection(action.id);
+      break;
+    case "attach":
+      focusTerminal();
+      break;
+    case "toRail":
+      focusRail();
+      break;
   }
 }
 
