@@ -63,13 +63,26 @@ func (c *Client) DialStream(ctx context.Context, title, repoID string, tab int, 
 		c.setAuth(opts.HTTPHeader)
 	}
 	// wsBase is the placeholder ws://unix for the local socket (the http.Client's
-	// transport dials the socket regardless of host) or the real wss://host:port
-	// for a remote daemon; either way "ws(s)://" selects the WebSocket handshake.
+	// transport dials the socket regardless of host) or the real ws://host:port
+	// for a remote daemon; either way "ws://" selects the WebSocket handshake.
 	u := c.wsBase + "/v1/sessions/" + url.PathEscape(title) + "/stream"
 	if enc := q.Encode(); enc != "" {
 		u += "?" + enc
 	}
-	conn, resp, err := websocket.Dial(ctx, u, &opts)
+	// A REMOTE target bounds the UPGRADE handshake so a peer that accepts the TCP
+	// connection but never answers the 101 can't hang the attach path (which dials
+	// with context.Background()) — plain HTTP has no TLS handshake timeout to lean
+	// on. The deadline governs ONLY the handshake: coder/websocket's Dial does not
+	// use the context for the established stream, so cancelling it after Dial
+	// returns never severs the live subscription. The local unix socket keeps
+	// context.Background() (the socket is local — there or not, bounded by dial).
+	dialCtx := ctx
+	if c.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, remoteWSHandshakeTimeout)
+		defer cancel()
+	}
+	conn, resp, err := websocket.Dial(dialCtx, u, &opts)
 	if err != nil {
 		return nil, &TransportError{Err: fmt.Errorf("apiclient: dial pty stream: %w", err)}
 	}

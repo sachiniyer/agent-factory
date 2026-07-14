@@ -23,12 +23,13 @@ const (
 	defaultDaemonPollInterval = 1000
 	// defaultListenAddr is the daemon's default web/API/WS bind address: the
 	// loopback interface on 8443. The web UI is bundled with the daemon and
-	// served here by default — a same-machine browser at https://127.0.0.1:8443
-	// reaches it with no token (loopback is exempt, #1696). It is loopback (not
-	// 0.0.0.0) on purpose: shipping the control plane on by default must NOT put
-	// it on the network. Exposing it to a LAN/Tailscale/public interface stays an
-	// explicit opt-in (set listen_addr to a routable host:port), and disabling
-	// the web server entirely is an explicit opt-out (listen_addr = "").
+	// served here by default (plain HTTP, no TLS) — a same-machine browser at
+	// http://127.0.0.1:8443 reaches it with no token (loopback is exempt, #1696).
+	// It is loopback (not 0.0.0.0) on purpose: shipping the control plane on by
+	// default must NOT put it on the network. Exposing it to a
+	// LAN/Tailscale/public interface stays an explicit opt-in (set listen_addr to
+	// a routable host:port), and disabling the web server entirely is an explicit
+	// opt-out (listen_addr = "").
 	defaultListenAddr = "127.0.0.1:8443"
 )
 
@@ -173,27 +174,24 @@ type Config struct {
 	// reset time WAS parsed (that schedules against the reset time + grace).
 	// Global-only, like limit_auto_resume. See LimitRetryIntervalDuration.
 	LimitRetryInterval string `json:"limit_retry_interval" toml:"limit_retry_interval"`
-	// ListenAddr binds the daemon's web UI + HTTP/WS API to a TLS TCP listener
-	// in addition to the always-present local unix socket (#1592 Phase 3). It
-	// DEFAULTS to defaultListenAddr ("127.0.0.1:8443"): the web client is
+	// ListenAddr binds the daemon's web UI + HTTP/WS API to a plain-HTTP TCP
+	// listener in addition to the always-present local unix socket (#1592 Phase
+	// 3). It DEFAULTS to defaultListenAddr ("127.0.0.1:8443"): the web client is
 	// bundled with the daemon and served on loopback by default, so a fresh
-	// install with no config has a browser UI at https://127.0.0.1:8443 with no
+	// install with no config has a browser UI at http://127.0.0.1:8443 with no
 	// token (loopback is exempt, #1696). Because config parsing unmarshals on top
 	// of DefaultConfig(), an ABSENT listen_addr key inherits this default, while
 	// an explicit `listen_addr = ""` OVERRIDES it to empty — the opt-out that
 	// DISABLES the web server entirely (no TCP listener, pure-unix daemon). A
 	// routable value like "0.0.0.0:8443" or a LAN/Tailscale IP exposes it to the
 	// network (opt-in), still bearer-token-gated for non-loopback peers unless
-	// require_token=false — see docs/remote-tcp-auth.md. Global-only (daemon
-	// behavior), like daemon_poll_interval — a cloned repo must never be able to
-	// open a network port.
+	// require_token=false. The listener is plain HTTP — af terminates no TLS of
+	// its own; put a routable listener behind a reverse proxy (nginx/caddy) or a
+	// private network (Tailscale/VPN) if you need transport encryption. See
+	// docs/remote-http-auth.md. Global-only (daemon behavior), like
+	// daemon_poll_interval — a cloned repo must never be able to open a network
+	// port.
 	ListenAddr string `json:"listen_addr" toml:"listen_addr"`
-	// TLSCert / TLSKey optionally point at a user-provided PEM cert and its
-	// matching key for the TCP listener (#1592 Phase 3, §1.2). Empty ⇒ the
-	// daemon self-generates a pinned self-signed cert. Both must be set
-	// together. Global-only, like listen_addr.
-	TLSCert string `json:"tls_cert" toml:"tls_cert"`
-	TLSKey  string `json:"tls_key" toml:"tls_key"`
 	// CORSAllowedOrigins is the exact-match allow-list of browser origins
 	// permitted to call the API cross-origin (#1592 Phase 3, §1.5), e.g.
 	// ["https://af.example.com"]. Empty ⇒ no Access-Control-Allow-Origin is
@@ -201,7 +199,7 @@ type Config struct {
 	// client's only Phase-3 dependency). Non-browser clients (TUI/CLI, curl)
 	// are unaffected. Global-only, like listen_addr.
 	CORSAllowedOrigins []string `json:"cors_allowed_origins,omitempty" toml:"cors_allowed_origins,omitempty"`
-	// RequireToken controls whether the daemon's TLS TCP listener enforces the
+	// RequireToken controls whether the daemon's HTTP TCP listener enforces the
 	// bearer token for NON-loopback (network) peers (#1696). It defaults to true:
 	// a peer that is not 127.0.0.1/::1 must present the token, so enabling
 	// listen_addr on a LAN/Tailscale/public interface never silently exposes an
@@ -209,9 +207,11 @@ type Config struct {
 	// as the unix socket) regardless of this key — the token cannot be required
 	// from a browser on the same machine. Set false ONLY on a trusted network to
 	// drop the token for network peers too; the daemon then logs a loud startup
-	// warning. TLS stays mandatory on TCP regardless — this key is only about the
-	// token. Global-only (daemon network surface), like listen_addr: a cloned
-	// repo must never be able to disable auth. See docs/remote-tcp-auth.md.
+	// warning. The listener is plain HTTP (no TLS) regardless — this key is only
+	// about the token; the token itself travels over the plaintext connection, so
+	// front a routable listener with a proxy or private network. Global-only
+	// (daemon network surface), like listen_addr: a cloned repo must never be able
+	// to disable auth. See docs/remote-http-auth.md.
 	RequireToken bool `json:"require_token" toml:"require_token"`
 	// RequireLoopbackToken controls whether even LOOPBACK peers (127.0.0.1/::1)
 	// must present the bearer token on the web/TCP listener. It defaults to FALSE:
@@ -225,7 +225,7 @@ type Config struct {
 	// require_token=false still drops the token for ALL peers, loopback included,
 	// so this key has effect only while tokens are otherwise enforced. Global-only
 	// (daemon network surface), like require_token — a cloned repo must never be
-	// able to flip it. See docs/remote-tcp-auth.md.
+	// able to flip it. See docs/remote-http-auth.md.
 	RequireLoopbackToken bool `json:"require_loopback_token" toml:"require_loopback_token"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding

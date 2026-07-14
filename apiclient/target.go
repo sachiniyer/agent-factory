@@ -17,9 +17,8 @@ import "os"
 // Env-var names for the remote target, the fallback when the matching flag is
 // unset. Named on the AF_DAEMON_* namespace so they read as "which daemon".
 const (
-	envDaemonURL      = "AF_DAEMON_URL"
-	envDaemonToken    = "AF_DAEMON_TOKEN"
-	envTLSFingerprint = "AF_DAEMON_TLS_FINGERPRINT"
+	envDaemonURL   = "AF_DAEMON_URL"
+	envDaemonToken = "AF_DAEMON_TOKEN"
 )
 
 // Flag-backed remote-target values, bound by the root command's persistent flags
@@ -27,17 +26,15 @@ const (
 // ONLY package-level mutable state the target resolver reads; a test sets them
 // directly (and restores them) to exercise the remote path without cobra.
 var (
-	FlagDaemonURL      string
-	FlagDaemonToken    string
-	FlagTLSFingerprint string
+	FlagDaemonURL   string
+	FlagDaemonToken string
 )
 
 // resolveTarget merges flag > env into the effective remote target. An empty
 // daemonURL means "no remote target" — the caller uses the local unix socket.
-func resolveTarget() (daemonURL, token, fingerprint string) {
+func resolveTarget() (daemonURL, token string) {
 	daemonURL = firstNonEmpty(FlagDaemonURL, os.Getenv(envDaemonURL))
 	token = firstNonEmpty(FlagDaemonToken, os.Getenv(envDaemonToken))
-	fingerprint = firstNonEmpty(FlagTLSFingerprint, os.Getenv(envTLSFingerprint))
 	return
 }
 
@@ -47,7 +44,7 @@ func resolveTarget() (daemonURL, token, fingerprint string) {
 // to suppress the local disk fallback (a remote read has no local disk to fall
 // back to; surfacing the error is correct — see api/sessions.go).
 func IsRemoteTarget() bool {
-	url, _, _ := resolveTarget()
+	url, _ := resolveTarget()
 	return url != ""
 }
 
@@ -57,11 +54,11 @@ func IsRemoteTarget() bool {
 // CLI call instead of New(), so pointing at a remote daemon is one flag away and
 // the local path is provably untouched when unset.
 func NewTargeted() (*Client, error) {
-	daemonURL, token, fingerprint := resolveTarget()
+	daemonURL, token := resolveTarget()
 	if daemonURL == "" {
 		return New()
 	}
-	return NewRemote(daemonURL, token, fingerprint)
+	return NewRemote(daemonURL, token)
 }
 
 func firstNonEmpty(a, b string) string {

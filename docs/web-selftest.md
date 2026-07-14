@@ -23,7 +23,7 @@ That is the only sanctioned entry point. It:
    package.
 2. Runs the whole harness inside **one ephemeral container**
    (`scripts/container/web-selftest-entry.sh`): builds `af`, brings up a real
-   daemon on a **throwaway home** with a loopback TLS+token listener
+   daemon on a **throwaway home** with a loopback plain-HTTP+token listener
    (`listen_addr=127.0.0.1:8899`), seeds two sessions in a mock repo behind a
    fake agent, then runs Playwright (`web/selftest/web-driver.spec.ts`).
 
@@ -34,7 +34,7 @@ ports**, no access to the host tmux server, and no touch of the real
 
 ## What it asserts
 
-Against the live SPA served over the daemon's TLS listener:
+Against the live SPA served over the daemon's plain-HTTP listener:
 
 | Flow | Assertion |
 | --- | --- |

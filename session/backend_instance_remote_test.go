@@ -10,7 +10,7 @@ import (
 //
 // #1592 Phase 4 PR7: the remote-hook backend is a provision-and-expose runtime
 // whose agent operations delegate to the instance's remote AgentServer (driven
-// over wss:// to a user-provisioned `af agent-server`). Its end-to-end lifecycle
+// over ws:// to a user-provisioned `af agent-server`). Its end-to-end lifecycle
 // is exercised by the mock-hook round-trip in integration/remote_roundtrip_test.go
 // (a real af agent-server behind a mock launch_cmd), not by script-based unit
 // stubs. The unit-level contract that remains here is the daemon-side shape: a

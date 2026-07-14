@@ -20,7 +20,7 @@ import (
 const webtabPathPrefix = "/v1/webtab/"
 
 // webtabTokenCookie carries the bearer token for web-tab sub-resource requests on
-// the TCP/TLS listener. The proxy handler sets it (scoped to webtabPathPrefix)
+// the TCP listener. The proxy handler sets it (scoped to webtabPathPrefix)
 // after a header/query token first authorized the iframe's top-level navigation;
 // the auth gate then accepts it for FOLLOW-UP requests under that prefix only.
 const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a credential
@@ -102,7 +102,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// On the TCP/TLS listener a network peer authorized this top-level request via
+	// On the TCP listener a network peer authorized this top-level request via
 	// the ?access_token query (an iframe src cannot set the Authorization header).
 	// Persist that token as a path-scoped cookie so the framed app's sub-resource
 	// GETs — which carry neither header nor query — stay authorized. Loopback peers

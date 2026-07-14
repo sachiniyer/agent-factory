@@ -1,5 +1,5 @@
 // Package web embeds the built browser web client (#1592 Phase 5) into the af
-// binary so the daemon can serve a self-contained SPA over its TLS TCP listener
+// binary so the daemon can serve a self-contained SPA over its HTTP TCP listener
 // with no external assets and no Node toolchain at `go build` time.
 //
 // The committed web/dist/ tree (the esbuild bundle + the index.html shell +

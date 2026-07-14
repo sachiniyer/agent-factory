@@ -103,7 +103,7 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 	// ?since=<that> to replay a gap. Set BEFORE Accept so it rides the 101 response.
 	w.Header().Set(streamSeqHeader, strconv.FormatUint(uint64(sub.Seq()), 10))
 	// Permissive origin check on the unix socket now (§4.4); Phase 3's CORS policy
-	// tightens it for the TCP/TLS transport without reshaping this handler.
+	// tightens it for the TCP transport without reshaping this handler.
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		_ = sub.Close()
@@ -238,7 +238,7 @@ func keepalivePTY(ctx context.Context, conn *websocket.Conn) {
 // streamInfoResponse tells a client WHERE a session's PTY stream is reachable —
 // the "expose an authed URL" indirection (§4.2). For the local runtime it is the
 // relative stream path on this same socket; a Phase-4 remote/container runtime
-// returns its own authed wss:// URL, and the client dials whatever it is handed
+// returns its own authed http:// URL, and the client dials whatever it is handed
 // without knowing which runtime backs the session.
 type streamInfoResponse struct {
 	URL   string `json:"url"`

@@ -23,7 +23,7 @@ import (
 
 // remoteAgentServer is the daemon-side AgentServer for a runtime whose agent runs
 // in a SANDBOX behind an authed URL (#1592 Phase 4 PR2): a real `af agent-server`
-// (PR1) reachable over HTTP/WS+TLS+token, on another host/container. It is the
+// (PR1) reachable over HTTP/WS+token, on another host/container. It is the
 // mirror image of localAgentServer — where localAgentServer drives an in-process
 // tmux session directly, this is an HTTP/WS CLIENT to an out-of-process
 // agent-server, satisfying the SAME session.AgentServer interface so the daemon's
@@ -39,14 +39,15 @@ import (
 //     multi-writer input path work identically, and none of the broker logic is
 //     reimplemented (§ boundaries: reuse Phase 1-3, no protocol reimpl).
 //
-// Transport is Phase-3's: mandatory TLS (self-signed TOFU pin or CA cert) + a
-// bearer token on every REST call and WS handshake, and agentproto for the PTY
-// wire frames. It cannot import apiclient (that package sits above daemon, which
-// sits above session — a cycle), so it shares the pieces that matter through the
-// agentproto/apiproto leaves the whole stack already agrees on: the TLS pin
-// (agentproto.PinnedTLSConfig), the token header (agentproto.AuthHeader), the WS
-// codec (agentproto.ReadMessage/WriteFrame), and the {data,error} envelope
-// (apiproto). The thin HTTP/WS plumbing below is the only local piece.
+// Transport is Phase-3's: plain HTTP/WS (no TLS — af terminates none of its own;
+// the sandbox is reached over a private hop, a docker-published loopback port or
+// an ssh-forwarded one) + a bearer token on every REST call and WS handshake, and
+// agentproto for the PTY wire frames. It cannot import apiclient (that package
+// sits above daemon, which sits above session — a cycle), so it shares the pieces
+// that matter through the agentproto/apiproto leaves the whole stack already
+// agrees on: the token header (agentproto.AuthHeader), the WS codec
+// (agentproto.ReadMessage/WriteFrame), and the {data,error} envelope (apiproto).
+// The thin HTTP/WS plumbing below is the only local piece.
 //
 // DARK for users in PR2: no docker/ssh runtime provisions a sandbox to point one
 // at yet (PR3-PR5). It is proven by an out-of-process integration test that
@@ -79,23 +80,21 @@ var _ AgentServer = (*remoteAgentServer)(nil)
 // in-process runtime (the default, unchanged). Phase 4 PR3 generalizes this into a
 // Runtime that PROVISIONS the sandbox and fills these in; PR2 only consumes them.
 type AgentServerEndpoint struct {
-	// URL is the agent-server's TLS base URL — `wss://host:port` or
-	// `https://host:port` (equivalent; both select TLS, only the authority is
-	// used).
+	// URL is the agent-server's plain-HTTP base URL — `http://host:port` or
+	// `ws://host:port` (equivalent; both select the same plaintext transport,
+	// only the authority is used). A wss://host:port is rejected — the
+	// agent-server is HTTP-only.
 	URL string
 	// Token is the bearer credential presented on every REST call and WS handshake.
 	Token string
-	// Fingerprint pins the agent-server's self-signed cert by SHA-256 (TOFU); empty
-	// ⇒ verify a real CA cert against the system trust store.
-	Fingerprint string
 }
 
 // NewRemoteAgentServer builds a remoteAgentServer that drives the `af agent-server`
 // reachable at ep.URL for a single workspace titled `title`. It validates the URL
-// and fingerprint up front (no dial) so a bad endpoint fails at construction
-// rather than on first use — which is why Instance.AgentServer() (infallible) can
-// build one from an endpoint validated at NewInstance. The integration test
-// constructs one here directly against a real out-of-process agent-server.
+// up front (no dial) so a bad endpoint fails at construction rather than on first
+// use — which is why Instance.AgentServer() (infallible) can build one from an
+// endpoint validated at NewInstance. The integration test constructs one here
+// directly against a real out-of-process agent-server.
 func NewRemoteAgentServer(ep AgentServerEndpoint, title string) (AgentServer, error) {
 	rc, err := newRemoteAgentClient(ep, title)
 	if err != nil {
@@ -411,32 +410,28 @@ const (
 	remoteAgentCallTimeout = 30 * time.Second
 )
 
-// remoteAgentClient is the transport to ONE `af agent-server`: a TLS-pinned,
-// token-bearing HTTP client for the /v1/agent/* control REST and a matching WS
-// dialer for the /v1/sessions/{title}/stream data plane. It is the session-package
-// analogue of apiclient.Client (which session cannot import — the cycle), sharing
-// the pieces that define the contract through the agentproto/apiproto leaves.
+// remoteAgentClient is the transport to ONE `af agent-server`: a token-bearing
+// plain-HTTP client for the /v1/agent/* control REST and a matching WS dialer for
+// the /v1/sessions/{title}/stream data plane. It is the session-package analogue
+// of apiclient.Client (which session cannot import — the cycle), sharing the
+// pieces that define the contract through the agentproto/apiproto leaves.
 type remoteAgentClient struct {
 	httpClient *http.Client
-	httpBase   string // https://host:port
-	wsBase     string // wss://host:port
+	httpBase   string // http://host:port
+	wsBase     string // ws://host:port
 	token      string
 	title      string // the sandbox's single-workspace session title (the stream path id)
 }
 
-// newRemoteAgentClient builds the transport for ep, validating the URL and pin up
-// front (no dial). It mirrors apiclient.NewRemote: TLS is mandatory and never
-// skipped (pinned self-signed fingerprint or system-root CA), and the token rides
-// every request.
+// newRemoteAgentClient builds the transport for ep, validating the URL up front
+// (no dial). It mirrors apiclient.NewRemote: the transport is plain HTTP/WS (no
+// TLS — the sandbox is reached over a private hop) and the token rides every
+// request.
 func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentClient, error) {
 	if title == "" {
 		return nil, fmt.Errorf("remote agent-server requires a workspace title")
 	}
-	httpBase, wsBase, err := splitTLSBaseURL(ep.URL)
-	if err != nil {
-		return nil, err
-	}
-	tlsCfg, err := agentproto.PinnedTLSConfig(ep.Fingerprint)
+	httpBase, wsBase, err := splitHTTPBaseURL(ep.URL)
 	if err != nil {
 		return nil, err
 	}
@@ -444,8 +439,7 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 	return &remoteAgentClient{
 		httpClient: &http.Client{
 			Transport: &http.Transport{
-				DialContext:     dialer.DialContext,
-				TLSClientConfig: tlsCfg,
+				DialContext: dialer.DialContext,
 			},
 		},
 		httpBase: httpBase,
@@ -540,28 +534,29 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket
 	return conn, nil
 }
 
-// splitTLSBaseURL validates an agent-server base URL and derives its REST
-// (https://host:port) and WS (wss://host:port) authorities. It accepts the TLS
-// schemes wss/https interchangeably (the agent-server serves REST and WS on one
-// TLS listener) and rejects plaintext ws/http — there is no clear-text mode, the
-// token would leak. Only scheme+authority are used. It mirrors apiclient's
-// parseDaemonURL but with agent-server-appropriate error text.
-func splitTLSBaseURL(raw string) (httpBase, wsBase string, err error) {
+// splitHTTPBaseURL validates an agent-server base URL and derives its REST
+// (http://host:port) and WS (ws://host:port) authorities. It accepts the
+// plaintext schemes http/ws interchangeably (the agent-server serves REST and WS
+// on one HTTP listener) and rejects the TLS schemes wss/https — the agent-server
+// is HTTP-only (af terminates no TLS; the sandbox is reached over a private hop).
+// Only scheme+authority are used. It mirrors apiclient's parseDaemonURL but with
+// agent-server-appropriate error text.
+func splitHTTPBaseURL(raw string) (httpBase, wsBase string, err error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return "", "", fmt.Errorf("invalid agent-server URL %q: %w", raw, err)
 	}
 	switch strings.ToLower(u.Scheme) {
-	case "wss", "https":
-	case "ws", "http":
-		return "", "", fmt.Errorf("agent-server URL %q uses a plaintext scheme; it is TLS-only, use wss:// or https://", raw)
+	case "http", "ws":
+	case "https", "wss":
+		return "", "", fmt.Errorf("agent-server URL %q uses a TLS scheme, but the agent-server is HTTP-only; use http:// or ws://", raw)
 	default:
-		return "", "", fmt.Errorf("agent-server URL %q must be a wss:// or https:// URL", raw)
+		return "", "", fmt.Errorf("agent-server URL %q must be an http:// or ws:// URL", raw)
 	}
 	if u.Host == "" {
 		return "", "", fmt.Errorf("agent-server URL %q has no host:port", raw)
 	}
-	return "https://" + u.Host, "wss://" + u.Host, nil
+	return "http://" + u.Host, "ws://" + u.Host, nil
 }
 
 // --- wire structs: the /v1/agent/* request/response shapes (mirror PR1) ---

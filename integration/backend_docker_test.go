@@ -22,7 +22,7 @@ import (
 // and creates a session through the ordinary NewInstance path — so the docker
 // runtime runs a container, clones the workspace into it, docker cp's a static
 // `af` binary in, starts an `af agent-server` on a published loopback port behind
-// TLS+token, and exposes its wss:// URL. The daemon-side Instance then drives that
+// a bearer token, and exposes its http:// URL. The daemon-side Instance then drives that
 // in-container agent-server over the wire through the FULL surface:
 //
 //	Start (Provision+Launch the in-container workspace) → Subscribe to its PTY
@@ -91,7 +91,7 @@ func TestDockerBackendRoundTrip(t *testing.T) {
 	if got := containersForLabel(t, slug); len(got) == 0 {
 		t.Fatal("expected a running container for the docker session after provisioning")
 	}
-	t.Logf("container is up; agent-server exposed over wss:// with TLS+token")
+	t.Logf("container is up; agent-server exposed over http:// with a bearer token")
 	killed := false
 	defer func() {
 		if !killed {

@@ -13,7 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/web"
 )
 
-// The embedded SPA serving layer for the daemon's TLS TCP listener (#1592 Phase
+// The embedded SPA serving layer for the daemon's HTTP TCP listener (#1592 Phase
 // 5 PR2, design §1). Phases 2–4 made the daemon's HTTP mux the whole API; this
 // file mounts the browser web client on the catch-all so the SAME listener that
 // serves `/v1/...` also serves the app at `/`.
@@ -31,7 +31,7 @@ import (
 // socket keeps its bare mux whose `/` catch-all still 404s, so the web assets are
 // never exposed on the socket path — a browser cannot reach a unix socket anyway,
 // and keeping them off it means the only new surface is behind the opt-in
-// listen_addr TLS+token gate.
+// listen_addr token gate.
 
 // webCSP is the Content-Security-Policy served with every static asset. The
 // bundle is fully self-contained (esbuild output, no CDN, no external fonts or

@@ -25,8 +25,9 @@ import (
 // backend, the built-in opinionated version of what a hook `launch_cmd` did by
 // hand (ssh in, clone, start a session). A session's workspace + agent run on a
 // configured remote host; the host runs an `af agent-server` (PR1) bound to
-// loopback behind TLS + token; the daemon reaches it through an SSH local-forward
-// tunnel and drives it over the remoteAgentServer HTTP/WS client (PR2) exactly as
+// loopback behind a bearer token (plain HTTP); the daemon reaches it through an
+// SSH local-forward tunnel and drives it over the remoteAgentServer HTTP/WS
+// client (PR2) exactly as
 // it drives a local in-process session. Same provision-and-expose model as the
 // docker runtime (PR4), a different sandbox.
 //
@@ -47,9 +48,9 @@ import (
 //	stream af     — copy the daemon's own `af` binary into <dir>/af over the ssh
 //	                connection (scp-equivalent; no external scp/sftp dependency)
 //	af agent-server — start it headless bound to 127.0.0.1:0 on the remote; read
-//	                its startup banner (addr/token/fingerprint) from a file
+//	                its startup banner (addr/token) from a file
 //	local-forward — open an ssh tunnel from a daemon-local loopback port to the
-//	                remote agent-server's loopback addr → wss://127.0.0.1:<localport>
+//	                remote agent-server's loopback addr → http://127.0.0.1:<localport>
 //
 // The result is an AgentServerEndpoint the daemon dials over the tunnel, plus a
 // teardown that kills the remote agent-server, removes the session dir, and closes
@@ -72,7 +73,7 @@ const (
 	sshWorkspaceSubdir = "workspace"
 	// sshAfBinaryName / sshBannerName / sshLogName / sshPidName are the files the
 	// runtime writes inside the per-session dir: the streamed `af` binary, the
-	// agent-server's stdout banner (one JSON line: addr/token/fingerprint), its
+	// agent-server's stdout banner (one JSON line: addr/token), its
 	// stderr log (pulled into the error on a start failure), and the background
 	// PID (used to kill it on teardown).
 	sshAfBinaryName = "af"
@@ -116,12 +117,9 @@ func SetSSHSelfBinaryForTest(path string) func() {
 // by the round-trip test. Identical to dockerBanner — the same banner, a different
 // transport.
 type sshBanner struct {
-	Addr        string `json:"addr"`
-	Token       string `json:"token"`
-	Fingerprint string `json:"fingerprint"`
-	SelfSigned  bool   `json:"self_signed"`
-	CertPath    string `json:"cert_path"`
-	Title       string `json:"title"`
+	Addr  string `json:"addr"`
+	Token string `json:"token"`
+	Title string `json:"title"`
 }
 
 // sshRuntime provisions a real remote-machine sandbox (#1592 Phase 4 PR5).
@@ -217,9 +215,8 @@ func (p *sshProvisioner) provision() (ProvisionResult, error) {
 	}
 
 	endpoint := &AgentServerEndpoint{
-		URL:         "wss://" + localAddr,
-		Token:       banner.Token,
-		Fingerprint: banner.Fingerprint,
+		URL:   "http://" + localAddr,
+		Token: banner.Token,
 	}
 	teardown := p.reap
 	log.InfoLog.Printf("ssh runtime: session %q running on %s (remote dir %s), agent-server tunneled at %s", p.spec.Title, p.cfg.Host, p.sessionDir, endpoint.URL)
@@ -517,7 +514,7 @@ func (p *sshProvisioner) startAgentServer() error {
 }
 
 // readBanner polls the remote banner file until the agent-server has bound its
-// listener and printed its {addr,token,fingerprint} JSON line, or times out. On
+// listener and printed its {addr,token} JSON line, or times out. On
 // timeout it pulls the agent-server's stderr log into the error so a failure to
 // start (missing tmux/git, bad binary, port clash) is self-diagnosing.
 func (p *sshProvisioner) readBanner() (sshBanner, error) {
@@ -542,7 +539,7 @@ func (p *sshProvisioner) readBanner() (sshBanner, error) {
 // startTunnel opens an ssh local-forward: a daemon-local loopback listener whose
 // every accepted connection is proxied over the ssh connection to remoteAddr (the
 // agent-server's 127.0.0.1:<port> on the remote). Returns the local
-// 127.0.0.1:<port> the daemon dials. TLS + token still apply end-to-end inside the
+// 127.0.0.1:<port> the daemon dials. The bearer token still applies end-to-end inside the
 // tunnel (defense in depth), and the agent-server port is never exposed on the
 // remote's public interface.
 func (p *sshProvisioner) startTunnel(remoteAddr string) (string, error) {

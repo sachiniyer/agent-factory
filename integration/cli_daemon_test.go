@@ -218,7 +218,7 @@ func TestDaemonLifecycleRecoversFromStaleSocketAndDeadDaemon(t *testing.T) {
 // #1592 Phase 4 PR7: TestRemoteHookImportKillAndFailureModes was removed with the
 // remote-hook enumeration/import model (list_cmd + ImportRemoteHookSessions +
 // delete-by-name). The migrated hook backend is provision-and-expose: its full
-// lifecycle (launch_cmd → drive over wss → delete_cmd teardown) is proven by
+// lifecycle (launch_cmd → drive over http/ws → delete_cmd teardown) is proven by
 // TestRemoteHookRoundTripMockRemote against a real af agent-server.
 
 func newHarness(t *testing.T) *harness {

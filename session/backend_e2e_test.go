@@ -106,7 +106,7 @@ func setupE2ERelativeHooksRepo(t *testing.T) string {
 	hooksDir := filepath.Join(repoDir, config.InRepoConfigDirName, "hooks")
 	require.NoError(t, os.MkdirAll(hooksDir, 0755))
 
-	writeE2EScript(t, hooksDir, "launch.sh", `echo '{"url":"wss://127.0.0.1:9","token":"t","tls_fingerprint":"fp"}'`)
+	writeE2EScript(t, hooksDir, "launch.sh", `echo '{"url":"http://127.0.0.1:9","token":"t"}'`)
 	writeE2EScript(t, hooksDir, "delete.sh", `echo '{"deleted": true}'`)
 
 	// The whole point: the config carries repo-relative commands.

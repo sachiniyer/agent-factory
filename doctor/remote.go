@@ -99,7 +99,7 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 	// No connectivity round-trip probe: the provision-and-expose contract has no
 	// read-only verb (launch_cmd provisions + starts an af agent-server,
 	// delete_cmd tears it down — both mutate). The wire round-trip is exercised by
-	// the daemon driving the exposed agent-server over wss://, not by a doctor
+	// the daemon driving the exposed agent-server over http://, not by a doctor
 	// probe. A dry-run of launch_cmd would provision real infrastructure, so
 	// doctor deliberately does not run it.
 }

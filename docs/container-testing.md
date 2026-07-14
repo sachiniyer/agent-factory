@@ -50,8 +50,8 @@ Runs the focused remote-hook round-trip inside the testbox (#1592 Phase 4 PR7).
 The test builds `af`, configures a repo `backend=hook` with a mock `launch_cmd`
 that clones the workspace and starts a REAL `af agent-server` on the host, then
 drives the migrated provision-and-expose path end to end: create (launch_cmd
-echoes the agent-server's `{url,token,tls_fingerprint}`) → the daemon drives it
-over `wss://` → Subscribe + typed Input echoes back over the stream → Preview/
+echoes the agent-server's `{url,token}`) → the daemon drives it
+over `http://`/`ws://` → Subscribe + typed Input echoes back over the stream → Preview/
 Snapshot/Alive reflect the pane → Kill runs `delete_cmd`, which reaps the
 agent-server (no leak). It does not need Docker-in-Docker; the agent-server runs
 as a host subprocess inside the already-isolated test container (needs git + tmux).

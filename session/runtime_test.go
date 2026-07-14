@@ -154,7 +154,7 @@ func (f fakeRuntime) Provision(ProvisionSpec) (ProvisionResult, error) { return 
 // returns its authed endpoint alongside the backend, which is exactly what the
 // docker/ssh runtimes will fill in PR4/PR5.
 func TestRuntimeContract_SurfacesEndpoint(t *testing.T) {
-	ep := &AgentServerEndpoint{URL: "wss://127.0.0.1:9", Token: "tok", Fingerprint: validFingerprint}
+	ep := &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"}
 	var rt Runtime = fakeRuntime{res: ProvisionResult{Backend: &LocalBackend{}, Endpoint: ep}}
 
 	res, err := rt.Provision(ProvisionSpec{RepoRoot: t.TempDir()})
@@ -233,8 +233,11 @@ func TestDefaultBackendFactory_ConfigSelection(t *testing.T) {
 		// expose contract). defaultBackendFactory returns the ProvisionResult
 		// without dialing (the URL is validated later at NewInstance), so a mock
 		// echo is enough to prove the runtime parses + surfaces the endpoint.
+		// The endpoint is echoed with the legacy "tls_fingerprint" key present to
+		// prove an old launch_cmd still parses (the field is accepted and ignored —
+		// TLS was removed).
 		launch := writeScript(t, t.TempDir(), "launch.sh",
-			`echo '{"url":"wss://127.0.0.1:9","token":"tkn","tls_fingerprint":"fp"}'`)
+			`echo '{"url":"http://127.0.0.1:9","token":"tkn","tls_fingerprint":"fp"}'`)
 		writeInRepoConfig(t, repoRoot, map[string]any{
 			"backend": "hook",
 			"remote_hooks": map[string]any{
@@ -248,9 +251,8 @@ func TestDefaultBackendFactory_ConfigSelection(t *testing.T) {
 			t.Fatalf("backend=hook must build a *HookBackend, got %T", res.Backend)
 		}
 		require.NotNil(t, res.Endpoint, "hook runtime must expose the launch_cmd endpoint")
-		assert.Equal(t, "wss://127.0.0.1:9", res.Endpoint.URL)
+		assert.Equal(t, "http://127.0.0.1:9", res.Endpoint.URL)
 		assert.Equal(t, "tkn", res.Endpoint.Token)
-		assert.Equal(t, "fp", res.Endpoint.Fingerprint)
 		require.NotNil(t, res.Teardown, "hook runtime must expose a delete_cmd teardown")
 	})
 

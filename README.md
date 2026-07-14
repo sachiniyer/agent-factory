@@ -150,9 +150,10 @@ curl --unix-socket ~/.agent-factory/daemon-http.sock http://localhost/v1/health
 ```
 
 To drive the daemon from another machine, SSH in and run `af` there, or expose
-the TLS+token TCP listener to the network — it's on by default on loopback, so
+the HTTP+token TCP listener to the network — it's on by default on loopback, so
 this means pointing `listen_addr` at a routable host:port (`af token`,
-`--daemon-url`) — see [Remote daemon access](docs/remote-tcp-auth.md).
+`--daemon-url`). The listener is plain HTTP; put it behind a TLS-terminating
+proxy or a private network — see [Remote daemon access](docs/remote-http-auth.md).
 
 ### Configuration
 
@@ -192,7 +193,7 @@ performance.
 - [HTTP API guide](docs/http-api.md) and [generated API reference](docs/reference/api.md).
 - [Configuration](docs/configuration.md), [tasks](docs/tasks.md),
   [remote hooks](docs/remote-hooks.md),
-  [remote daemon access](docs/remote-tcp-auth.md), and
+  [remote daemon access](docs/remote-http-auth.md), and
   [usage limits](docs/usage-limits.md).
 - [Container testing](docs/container-testing.md), [release process](docs/release-process.md),
   [release notes](docs/release-notes.md), and

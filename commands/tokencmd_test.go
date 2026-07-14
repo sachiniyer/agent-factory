@@ -27,15 +27,16 @@ func runToken(t *testing.T, cmd *cobra.Command, jsonMode bool) string {
 	return out.String()
 }
 
-func TestTokenShowGeneratesTokenAndFingerprint(t *testing.T) {
+func TestTokenShowGeneratesToken(t *testing.T) {
 	tempAFHome(t)
 
 	out := runToken(t, tokenShowCmd, false)
 	if !strings.Contains(out, "token:") {
 		t.Fatalf("token show output missing token line:\n%s", out)
 	}
-	if !strings.Contains(out, "tls_fingerprint: sha256:") {
-		t.Fatalf("token show output missing tls_fingerprint line:\n%s", out)
+	// HTTP-only: there is no TLS cert, so no fingerprint line is printed.
+	if strings.Contains(out, "tls_fingerprint") {
+		t.Fatalf("token show must not print a tls_fingerprint line (TLS was removed):\n%s", out)
 	}
 }
 
@@ -50,12 +51,6 @@ func TestTokenShowIdempotent(t *testing.T) {
 	}
 	if first.Token != second.Token {
 		t.Fatalf("token show not idempotent: %q != %q", first.Token, second.Token)
-	}
-	if first.TLSFingerprint != second.TLSFingerprint {
-		t.Fatalf("fingerprint changed across shows: %q != %q", first.TLSFingerprint, second.TLSFingerprint)
-	}
-	if !strings.HasPrefix(first.TLSFingerprint, "sha256:") {
-		t.Fatalf("unexpected fingerprint format: %q", first.TLSFingerprint)
 	}
 }
 
@@ -80,8 +75,7 @@ func TestTokenRotateChangesToken(t *testing.T) {
 
 // tokenJSONPayload mirrors tokenShowResult/tokenRotateResult for decoding.
 type tokenJSONPayload struct {
-	Token          string `json:"token"`
-	TLSFingerprint string `json:"tls_fingerprint"`
+	Token string `json:"token"`
 }
 
 func parseTokenJSON(t *testing.T, out string) tokenJSONPayload {
