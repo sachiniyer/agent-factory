@@ -71,7 +71,24 @@ type TabPane struct {
 	// lazy-fill and NeedsScrollFill key off — a sized viewport's View() is never
 	// the empty string (it renders padding), so viewport emptiness cannot serve.
 	scrollFillPending bool
-	viewport          viewport.Model
+	// scrollFillGen / scrollFillDispatchedGen are the generation token that
+	// replaces a plain in-flight bool (#1709). scrollFillGen stamps the current
+	// scroll-fill lifecycle: it bumps on every scroll entry, every reset, and
+	// every re-arm, so each owed fill is a distinct request. scrollFillDispatchedGen
+	// records the generation panesRefresh has already dispatched a capture for.
+	//
+	// A generation, not a bool, because the in-flight state is shared across scroll
+	// EXIT and RE-ENTRY on the same instance/tab (unchanged render seq — scroll
+	// entry/exit does not bump ContentSeq). A capture stamps scrollFillGen at
+	// dispatch and, on return, applies its result only if the generation still
+	// matches; a slow capture from a previous scroll session finds the generation
+	// moved on and is ignored, so it can neither satisfy nor clear the newer
+	// entry's fill. Masking (no redundant dispatch) falls out of the same tokens:
+	// a fill is owed-and-undispatched only while scrollFillDispatchedGen != the
+	// current scrollFillGen.
+	scrollFillGen           uint64
+	scrollFillDispatchedGen uint64
+	viewport                viewport.Model
 
 	// currentInstance + currentTab identify the (instance, tab-index) view
 	// currently rendered. UpdateContent/ScrollUp/ScrollDown reset scroll-mode
@@ -124,7 +141,41 @@ func (p *TabPane) IsScrolling() bool {
 func (p *TabPane) NeedsScrollFill() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.isScrolling && p.scrollFillPending && p.viewport.Height > 0
+	// Owed AND not yet dispatched for the current generation: a dispatched capture
+	// (scrollFillDispatchedGen == scrollFillGen) masks the pane until it resolves
+	// or a new generation supersedes it, so no redundant capture fires (#1709).
+	return p.isScrolling && p.scrollFillPending &&
+		p.scrollFillDispatchedGen != p.scrollFillGen && p.viewport.Height > 0
+}
+
+// BeginScrollFill records that panesRefresh has dispatched a capture for the
+// current fill generation, so a refresh cycle in the dispatch→land window sees
+// NeedsScrollFill go false and does not fire a redundant one (#1709). It is
+// called synchronously on the event loop the instant the capture is dispatched.
+// A later scroll entry bumps scrollFillGen past this dispatched generation, which
+// both re-arms NeedsScrollFill and marks the in-flight capture stale.
+func (p *TabPane) BeginScrollFill() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.scrollFillDispatchedGen = p.scrollFillGen
+}
+
+// resetScrollFill clears the fill-owed flag and starts a new generation. Every
+// scroll-state reset and every completed fill funnels through it: bumping the
+// generation invalidates any capture still in flight against the old one, so a
+// stale completion can never satisfy or clear a later fill (#1709). Caller must
+// hold p.mu.
+func (p *TabPane) resetScrollFill() {
+	p.scrollFillPending = false
+	p.scrollFillGen++
+}
+
+// rearmScrollFill starts a new generation while leaving the fill owed, so a
+// capture that resolved but could not publish (render binding moved on, transient
+// error) re-dispatches instead of wedging the viewport blank, and its own stale
+// return is ignored (#1709). Caller must hold p.mu.
+func (p *TabPane) rearmScrollFill() {
+	p.scrollFillGen++
 }
 
 func (p *TabPane) SetSize(width, maxHeight int) {
@@ -153,7 +204,7 @@ func (p *TabPane) dropStaleView(instance *session.Instance, activeTab int) {
 	if instance != p.currentInstance || activeTab != p.currentTab {
 		if p.isScrolling {
 			p.isScrolling = false
-			p.scrollFillPending = false
+			p.resetScrollFill()
 			p.viewport.SetContent("")
 			p.viewport.GotoTop()
 		}
@@ -176,7 +227,7 @@ func (p *TabPane) setFallbackState(message string) {
 		text:     lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message),
 	}
 	p.isScrolling = false
-	p.scrollFillPending = false
+	p.resetScrollFill()
 	p.viewport.SetContent("")
 }
 
@@ -272,11 +323,24 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	// off-loop refresh goroutine, the first time UpdateContent runs with a
 	// pending scroll fill.
 	if p.isScrolling && p.scrollFillPending {
+		gen := p.scrollFillGen
 		p.mu.Unlock()
 		content, err := p.previewSrc(instance, 0, true)
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		// A scroll exit+re-entry (or any reset) during the capture bumps the
+		// generation, handing the fill to a newer dispatch. Ignore this stale
+		// completion entirely: it must neither satisfy nor clear the newer entry's
+		// fill, and it must not publish its stale content (#1709 review). Every
+		// path that clears pending or exits scroll mode bumps the generation, so a
+		// matching generation here guarantees the fill is still owed and current.
+		if p.scrollFillGen != gen {
+			return nil
+		}
 		if !guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
+			// Could not publish for the live render binding: re-arm so the owed
+			// fill re-dispatches rather than wedging the viewport blank (#1709).
+			p.rearmScrollFill()
 			return nil
 		}
 		if err != nil {
@@ -286,21 +350,17 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 				p.setFallbackState("Session no longer running.")
 				return nil
 			}
+			p.rearmScrollFill()
 			return err
 		}
-		// Re-check under the relocked mutex: a concurrent dropStaleView/fallback
-		// during the capture may have cleared the pending fill, in which case this
-		// stale capture must not clobber the new state.
-		if p.isScrolling && p.scrollFillPending {
-			p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
-			// First fill lands at the bottom (newest output), matching the live
-			// view the user was looking at when they entered scroll mode. This is
-			// the only place that pins the offset: subsequent LineUp/LineDown move
-			// it and the fill no longer runs (pending cleared), so the scroll
-			// position is preserved (#1637).
-			p.viewport.GotoBottom()
-			p.scrollFillPending = false
-		}
+		p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
+		// First fill lands at the bottom (newest output), matching the live view
+		// the user was looking at when they entered scroll mode. This is the only
+		// place that pins the offset: subsequent LineUp/LineDown move it and the
+		// fill no longer runs (pending cleared), so the scroll position is
+		// preserved (#1637).
+		p.viewport.GotoBottom()
+		p.resetScrollFill()
 		return nil
 	}
 
@@ -415,11 +475,22 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 	// capture / daemon RPC — #1637); the shell slot fills lazily on this off-loop
 	// refresh goroutine, the first time UpdateContent runs with a pending fill.
 	if p.isScrolling && p.scrollFillPending {
+		gen := p.scrollFillGen
 		p.mu.Unlock()
 		content, err := p.previewSrc(instance, activeTab, true)
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		// Stale-generation completion (scroll exit+re-entry during the capture):
+		// ignore it entirely, so this old capture can't satisfy or clear the newer
+		// scroll entry's fill nor publish its stale content (#1709 review). A
+		// matching generation guarantees the fill is still owed and current.
+		if p.scrollFillGen != gen {
+			return nil
+		}
 		if !guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
+			// Could not publish for the live render binding: re-arm so the owed
+			// fill re-dispatches rather than wedging the viewport blank (#1709).
+			p.rearmScrollFill()
 			return nil
 		}
 		if err != nil {
@@ -429,15 +500,12 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 				p.setFallbackState("Terminal session no longer running.")
 				return nil
 			}
+			p.rearmScrollFill()
 			return err
 		}
-		// Re-check under the relocked mutex (see updateAgent): a concurrent
-		// dropStaleView/fallback may have cleared the pending fill.
-		if p.isScrolling && p.scrollFillPending {
-			p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
-			p.viewport.GotoBottom()
-			p.scrollFillPending = false
-		}
+		p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
+		p.viewport.GotoBottom()
+		p.resetScrollFill()
 		return nil
 	}
 
@@ -590,6 +658,11 @@ func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab in
 	p.viewport.SetContent("")
 	p.isScrolling = true
 	p.scrollFillPending = true
+	// Start a new generation: this entry's fill is owed and undispatched
+	// (scrollFillDispatchedGen now trails scrollFillGen), and any capture still in
+	// flight from a previous scroll session is stamped an older generation, so it
+	// can't satisfy this entry (#1709).
+	p.scrollFillGen++
 	return nil
 }
 
@@ -603,7 +676,7 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	wasScrolling := p.isScrolling
 	if wasScrolling {
 		p.isScrolling = false
-		p.scrollFillPending = false
+		p.resetScrollFill()
 		p.viewport.SetContent("")
 		p.viewport.GotoTop()
 	}

@@ -532,6 +532,13 @@ func (w *TabbedWindow) NeedsScrollFill() bool {
 	return w.tab.NeedsScrollFill()
 }
 
+// BeginScrollFill claims the pending scroll fill for the capture panesRefresh is
+// about to dispatch, so a refresh cycle that fires before it lands does not
+// dispatch a redundant one (#1709).
+func (w *TabbedWindow) BeginScrollFill() {
+	w.tab.BeginScrollFill()
+}
+
 // renderHeader renders the one-line `title · tab` header. The header is the
 // only place the pane's tab is named inside the pane (the tab bar is gone);
 // the highlight doubles as the pane's focus indicator.
