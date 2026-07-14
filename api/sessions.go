@@ -79,7 +79,7 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 			}
 		}
 		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
-		return nil, fmt.Errorf("instance %q %w", title, errTitleNotFound)
+		return nil, fmt.Errorf("session %q %w", title, errTitleNotFound)
 	}
 	// Remote target: no local disk fallback; surface the error (see snapshotRead).
 	if !fallBack {
@@ -407,7 +407,7 @@ results.`,
 			return jsonError(err)
 		}
 		if !exists {
-			return jsonError(fmt.Errorf("instance %q not found. Use --create to auto-create the session, or run: af sessions create --name %q --prompt <prompt>", title, title))
+			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: af sessions create --name %q --prompt <prompt>", title, title))
 		}
 
 		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: prompt}); err != nil {
@@ -971,7 +971,7 @@ var sessionsAttachCmd = &cobra.Command{
 var sessionsWhoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Identify the current Agent Factory session",
-	Long:  "Returns the session info for the current tmux session by matching the tmux session name against stored instances.",
+	Long:  "Returns the session info for the current tmux session by matching the tmux session name against stored sessions.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()

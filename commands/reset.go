@@ -260,7 +260,7 @@ func planFactoryReset() (*resetPlan, error) {
 
 	all, err := state.GetAllInstances()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read stored instances: %w", err)
+		return nil, fmt.Errorf("failed to read stored sessions: %w", err)
 	}
 	for repoID, raw := range all {
 		if len(raw) == 0 || string(raw) == "[]" || string(raw) == "null" {
@@ -333,7 +333,7 @@ func planFactoryReset() (*resetPlan, error) {
 				continue
 			}
 			if _, ok := seen[e.Name()]; !ok {
-				log.WarningLog.Printf("reset: leaving repo %s intact: unreadable instance records", e.Name())
+				log.WarningLog.Printf("reset: leaving repo %s intact: unreadable session records", e.Name())
 				plan.corruptRepoIDs = append(plan.corruptRepoIDs, e.Name())
 			}
 		}
@@ -426,7 +426,7 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	// orphan that branch.
 	if len(plan.corruptRepoIDs) == 0 {
 		if err := plan.storage.DeleteAllInstances(); err != nil {
-			errs = append(errs, fmt.Errorf("reset instance storage: %w", err))
+			errs = append(errs, fmt.Errorf("reset session storage: %w", err))
 		}
 	} else {
 		for _, rid := range plan.processedRepoIDs {
@@ -519,7 +519,7 @@ func printResetPlan(out io.Writer, plan *resetPlan) {
 	fmt.Fprintf(out, "  • %d scheduled task(s)\n", plan.tasks)
 	fmt.Fprintf(out, "  • %d AF worktree(s) across %d repo(s)\n", plan.worktrees, len(plan.repoRoots))
 	fmt.Fprintf(out, "  • %d AF-created session branch(es)\n", plan.branchCount())
-	fmt.Fprintln(out, "  • all AF state (instances, archived sessions, events, logs, locks)")
+	fmt.Fprintln(out, "  • all AF state (live sessions, archived sessions, events, logs, locks)")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "WILL KEEP:")
 	fmt.Fprintln(out, "  • your git repositories (working tree, .git, and your own branches)")

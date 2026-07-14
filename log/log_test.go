@@ -222,16 +222,34 @@ func TestCloseClaimsFileOnlyWhenOpened(t *testing.T) {
 		}
 	})
 
-	t.Run("file opened: wrote-logs claim present", func(t *testing.T) {
+	t.Run("file opened and dirtied: wrote-logs claim present", func(t *testing.T) {
+		// #1749: the claim is printed only when the run actually logged
+		// something at WARNING/ERROR level (a WarningLog write dirties the run).
 		logPathOverride = filepath.Join(t.TempDir(), "agent-factory.log")
 		globalLogFile = nil
 		out := captureStderr(t, func() {
 			Initialize(false)
+			WarningLog.Print("something worth reporting")
 			Close()
 		})
 		want := "wrote logs to " + logFileName
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected Close() to print %q; stderr: %q", want, out)
+		}
+	})
+
+	t.Run("file opened but clean: no wrote-logs claim", func(t *testing.T) {
+		// #1749: a successful command that logged nothing at WARNING/ERROR ends
+		// with its own output — Close() must not append the bookkeeping line.
+		logPathOverride = filepath.Join(t.TempDir(), "agent-factory.log")
+		globalLogFile = nil
+		out := captureStderr(t, func() {
+			Initialize(false)
+			InfoLog.Print("routine chatter does not dirty the run")
+			Close()
+		})
+		if strings.Contains(out, "wrote logs to") {
+			t.Fatalf("Close() claimed logs were written on a clean run; stderr: %q", out)
 		}
 	})
 }

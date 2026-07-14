@@ -41,6 +41,14 @@ there, or expose the TLS+token TCP listener to the network (set a routable
 listen_addr) and point a client at it with the persistent
 --daemon-url/--token/--tls-fingerprint flags (see 'af token' for the credentials).
 Full guide: https://sachiniyer.github.io/agent-factory/remote-tcp-auth/`,
+		// A runtime (RunE) failure should print as one calm line, not a usage
+		// dump. Silencing usage here — after flag parsing has already succeeded —
+		// keeps the usage/flag help on flag-PARSE errors (which fail before this
+		// hook runs) while suppressing it for genuine runtime errors across every
+		// subcommand, since cobra checks the root command's SilenceUsage (#1749).
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			cmd.Root().SilenceUsage = true
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			log.Initialize(daemonFlag)
@@ -70,7 +78,7 @@ Full guide: https://sachiniyer.github.io/agent-factory/remote-tcp-auth/`,
 
 			repo, err := config.CurrentRepo()
 			if err != nil {
-				return fmt.Errorf("failed to determine repo context: %w", err)
+				return fmt.Errorf("failed to determine project context: %w", err)
 			}
 
 			// Resolve the effective config for this repo: app defaults ->
@@ -188,17 +196,23 @@ Full guide: https://sachiniyer.github.io/agent-factory/remote-tcp-auth/`,
 				return err
 			}
 
+			// SOURCE only annotates the rows that carry information: fixed
+			// (structural, un-rebindable) and rebound (with the default shown).
+			// The old DESCRIPTION column restated ACTION, and a SOURCE of
+			// "default" on every plain binding said nothing — both dropped so
+			// the table reads at a glance (#1749). A blank SOURCE means the
+			// action is on its built-in default.
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 0, 3, ' ', 0)
-			fmt.Fprintln(w, "ACTION\tKEYS\tDESCRIPTION\tSOURCE")
+			fmt.Fprintln(w, "ACTION\tKEYS\tSOURCE")
 			for _, info := range infos {
-				action, source := info.Action, "default"
+				action, source := info.Action, ""
 				switch {
 				case info.Action == "":
 					action, source = "-", "fixed"
 				case info.Rebound:
 					source = fmt.Sprintf("rebound (default: %s)", strings.Join(info.Default, ", "))
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", action, strings.Join(info.Keys, ", "), info.Desc, source)
+				fmt.Fprintf(w, "%s\t%s\t%s\n", action, strings.Join(info.Keys, ", "), source)
 			}
 			return w.Flush()
 		},
@@ -213,6 +227,13 @@ func NewRootCommand(opts Options) *cobra.Command {
 	if opts.Version != "" {
 		version = opts.Version
 	}
+	// Setting Version makes cobra provide `af --version` (and -v) for free,
+	// instead of erroring with a usage dump (#1749). The `version` subcommand is
+	// kept; both share this format so they never drift.
+	rootCmd.Version = version
+	rootCmd.SetVersionTemplate(
+		"agent-factory version {{.Version}}\n" +
+			"https://github.com/sachiniyer/agent-factory/releases/tag/v{{.Version}}\n")
 	return rootCmd
 }
 
@@ -220,10 +241,10 @@ func init() {
 	// The --program flag is validated as an enum (bare agent name) via
 	// tmux.SupportedPrograms, so advertise exactly those accepted values.
 	rootCmd.Flags().StringVarP(&programFlag, "program", "p", "",
-		fmt.Sprintf("Program to run in new instances (one of: %s)",
+		fmt.Sprintf("Program to run in new sessions (one of: %s)",
 			tmux.SupportedProgramsString()))
 	rootCmd.Flags().BoolVarP(&autoYesFlag, "autoyes", "y", false,
-		"[experimental] If enabled, all instances will automatically accept prompts")
+		"[experimental] If enabled, all sessions will automatically accept prompts")
 	rootCmd.Flags().BoolVar(&daemonFlag, "daemon", false, "Run the background daemon that schedules"+
 		" tasks and runs autoyes mode on all sessions.")
 
@@ -241,12 +262,16 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonURL, "daemon-url", "",
 		"Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket "+
 			"(env: AF_DAEMON_URL). Requires --token.")
+	// NOTE: no backticks in these usage strings. pflag's UnquoteUsage treats the
+	// first backticked span as the flag's arg-name placeholder, so `af token
+	// show` would render "--token af token show" instead of "--token string" on
+	// every help screen (#1749). Use plain quotes for inline example commands.
 	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonToken, "token", "",
 		"Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). "+
-			"Get it with `af token show` on the daemon host.")
+			"Get it with 'af token show' on the daemon host.")
 	rootCmd.PersistentFlags().StringVar(&apiclient.FlagTLSFingerprint, "tls-fingerprint", "",
 		"Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert "+
-			"(env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`.")
+			"(env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From 'af token show'.")
 
 	rootCmd.AddCommand(debugCmd)
 	rootCmd.AddCommand(keysCmd)

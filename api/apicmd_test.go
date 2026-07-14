@@ -53,6 +53,43 @@ func TestAPICmd_ListsEveryRegisteredEndpoint(t *testing.T) {
 	assert.Contains(t, out, "0600")
 }
 
+// TestAPICmd_ExamplesUseShortRouteNames covers #1749 item 12: the Examples
+// section anchors each curl with a short "# <RouteName>" comment (the last path
+// segment) rather than repeating the endpoint's full description verbatim — the
+// description already appears once in the table above.
+func TestAPICmd_ExamplesUseShortRouteNames(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	out := runAPICmd(t, false)
+
+	idx := strings.Index(out, "Examples:")
+	require.GreaterOrEqual(t, idx, 0, "human catalog must have an Examples section")
+	examples := out[idx:]
+
+	for _, rt := range daemon.HTTPRoutes() {
+		assert.Containsf(t, examples, "# "+routeName(rt),
+			"examples must anchor %s with its short route name", rt.Path)
+		// The verbose description is table-only; it must not be echoed as a
+		// comment in the examples anymore.
+		if rt.Description != routeName(rt) {
+			assert.NotContainsf(t, examples, "# "+rt.Description,
+				"examples must not repeat the full description for %s", rt.Path)
+		}
+	}
+}
+
+// TestRouteName pins the short-label derivation used by the examples section.
+func TestRouteName(t *testing.T) {
+	cases := map[string]string{
+		"/v1/CreateSession": "CreateSession",
+		"/v1/health":        "health",
+		"noslash":           "noslash",
+	}
+	for path, want := range cases {
+		assert.Equalf(t, want, routeName(daemon.HTTPRoute{Path: path}),
+			"routeName(%q)", path)
+	}
+}
+
 // TestAPICmd_JSONEmitsEnvelopeCatalog covers `af api --json`: the output is the
 // shared {data,error} envelope wrapping the endpoint catalog, and the endpoints
 // match daemon.HTTPRoutes exactly.
