@@ -275,9 +275,29 @@ func (m *home) forwardInteractiveMouse(msg tea.MouseMsg) bool {
 		return false
 	}
 	if kind == zones.PaneKindTerm {
+		// The wheel belongs to the inner app ONLY when it has enabled mouse
+		// reporting (tmux semantics): otherwise it falls through to handleWheel so
+		// the wheel scrolls the pane scrollback instead of being swallowed by a
+		// program sitting at a prompt (#1024 wheel fix). Clicks/motion/release stay
+		// forwarded regardless — this narrows the change to the wheel alone.
+		if isWheelButton(msg.Button) && !lt.MouseTrackingEnabled() {
+			return false
+		}
 		lt.SendMouse(msg, local.X, local.Y)
 	}
 	return true
+}
+
+// isWheelButton reports whether b is any mouse-wheel button. Wheel events are the
+// only ones the interactive router hands back to the host when the inner app has
+// not enabled mouse reporting (#1024 wheel fix).
+func isWheelButton(b tea.MouseButton) bool {
+	switch b {
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown,
+		tea.MouseButtonWheelLeft, tea.MouseButtonWheelRight:
+		return true
+	}
+	return false
 }
 
 // handleWheel scrolls the region UNDER THE CURSOR (RFC §2.5) — before this

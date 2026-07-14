@@ -2,6 +2,7 @@ package termpane
 
 import (
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/vt"
@@ -102,4 +103,63 @@ func TestTranslateMouseUnknownButton(t *testing.T) {
 	msg := mouseMsg(tea.MouseActionPress, tea.MouseButton(99), 0, 0)
 	_, ok := translateMouse(msg, 0, 0)
 	assert.False(t, ok)
+}
+
+// waitTrackingEnabled blocks until MouseTrackingEnabled reports want; the DECSET
+// bytes flow through the run goroutine's emu.Write, so the callback lands
+// asynchronously.
+func waitTrackingEnabled(t *testing.T, tp *TermPane, want bool, msg string) {
+	t.Helper()
+	require.Eventuallyf(t, func() bool {
+		return tp.MouseTrackingEnabled() == want
+	}, 2*time.Second, 5*time.Millisecond, msg)
+}
+
+// TestMouseTrackingEnabledReflectsDECSET: MouseTrackingEnabled tracks the inner
+// app's DECSET/DECRST for the mouse-tracking modes (#1024 wheel fix). This is the
+// signal the host router keys wheel ownership off of, so it must go true when the
+// app requests tracking and false when it releases it — and it must ignore the SGR
+// ENCODING mode (1006), which changes how reports are encoded, not whether the app
+// gets them.
+func TestMouseTrackingEnabledReflectsDECSET(t *testing.T) {
+	tp, s := newSingleStreamPane(t, 40, 6)
+	require.False(t, tp.MouseTrackingEnabled(), "a fresh pane has no mouse tracking")
+
+	// The SGR encoding mode alone is not tracking — no reports happen.
+	s.feed("\x1b[?1006h")
+	waitTrackingEnabled(t, tp, false, "1006 (SGR encoding) alone must not enable tracking")
+
+	// Normal mouse tracking on → enabled.
+	s.feed("\x1b[?1000h")
+	waitTrackingEnabled(t, tp, true, "DECSET 1000 must enable tracking")
+
+	// Reset it → back to disabled (the SGR mode is still set but is not tracking).
+	s.feed("\x1b[?1000l")
+	waitTrackingEnabled(t, tp, false, "DECRST 1000 must disable tracking")
+
+	// Button-event tracking on (what an agent CLI/vim requests) → enabled again.
+	s.feed("\x1b[?1002h")
+	waitTrackingEnabled(t, tp, true, "DECSET 1002 (button-event) must enable tracking")
+
+	s.feed("\x1b[?1002l")
+	waitTrackingEnabled(t, tp, false, "DECRST 1002 must disable tracking")
+}
+
+// TestMouseTrackingEnabledClearedByReset pins the #1748 review hardening: a full
+// terminal RESET (RIS, ESC c — e.g. a program exits or reinitializes the
+// terminal) must clear the tracked mouse state so the wheel doesn't stay stuck
+// forwarding to a program that no longer wants the mouse. The emulator's
+// resetModes re-drives setMode(ModeReset) for every mouse mode, which fires the
+// DisableMode callback, so the tracked set can't persist across a reset.
+func TestMouseTrackingEnabledClearedByReset(t *testing.T) {
+	tp, s := newSingleStreamPane(t, 40, 6)
+
+	// An app enables mouse reporting…
+	s.feed("\x1b[?1000h")
+	waitTrackingEnabled(t, tp, true, "DECSET 1000 must enable tracking")
+
+	// …then the terminal is fully reset (RIS). Tracking must go false again so the
+	// wheel returns to scrolling scrollback.
+	s.feed("\x1bc")
+	waitTrackingEnabled(t, tp, false, "a full reset (RIS) must clear mouse tracking, not leave it stuck on")
 }

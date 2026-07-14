@@ -759,8 +759,11 @@ func TestMouse_InteractiveForwardsGridEvents(t *testing.T) {
 	assert.Equal(t, tea.MouseButtonLeft, fake.mice[0].msg.Button)
 	assert.True(t, h.interactive, "a forwarded press must not leave the mode")
 
+	// The wheel forwards ONLY when the inner app enabled mouse reporting (#1024
+	// wheel fix). With tracking on it owns the wheel, exactly like a click.
+	fake.mouseTracking = true
 	wheel(h, term.X+5, term.Y+3, true)
-	require.Len(t, fake.mice, 2, "the wheel forwards too — the inner app owns scroll (§2.5)")
+	require.Len(t, fake.mice, 2, "with tracking enabled the inner app owns the wheel (§2.5)")
 	assert.Equal(t, tea.MouseButtonWheelUp, fake.mice[1].msg.Button)
 	assert.False(t, h.paneWindows[h.focusedOpenPane().ID()].IsInScrollMode(),
 		"a forwarded wheel must not flip the live pane into host capture scroll")
@@ -769,6 +772,29 @@ func TestMouse_InteractiveForwardsGridEvents(t *testing.T) {
 		X: term.X + 5, Y: term.Y + 3, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft,
 	})
 	require.Len(t, fake.mice, 3, "releases forward so the inner app sees complete clicks")
+}
+
+// TestMouse_InteractiveWheelWithoutTrackingScrollsScrollback: over the FOCUSED
+// live pane, a wheel from a program that has NOT enabled mouse reporting must
+// fall through to the host wheel handler and scroll the pane scrollback (tmux
+// semantics) — the #1024 regression where the wheel was swallowed at a prompt.
+func TestMouse_InteractiveWheelWithoutTrackingScrollsScrollback(t *testing.T) {
+	h, fake, region := interactiveMouseHome(t)
+	require.False(t, fake.mouseTracking, "the inner app owns no wheel until it enables tracking")
+
+	term := zoneRect(t, h, zones.PaneTerm(region))
+	wheel(h, term.X+5, term.Y+3, true)
+
+	assert.Empty(t, fake.mice, "an untracked wheel must not forward into the inner app")
+	assert.True(t, h.paneWindows[h.focusedOpenPane().ID()].IsInScrollMode(),
+		"an untracked wheel scrolls the pane scrollback instead of being swallowed")
+	assert.True(t, h.interactive, "scrolling scrollback must not leave interactive mode")
+
+	// A click still forwards (the fix is scoped to the wheel), proving the pane is
+	// still the interactive input target.
+	press(h, term.X+5, term.Y+3)
+	require.Len(t, fake.mice, 1, "clicks forward unchanged — only the wheel falls through")
+	assert.Equal(t, tea.MouseButtonLeft, fake.mice[0].msg.Button)
 }
 
 func TestMouse_InteractiveTabDragConsumesTerminalMotionAndDrop(t *testing.T) {

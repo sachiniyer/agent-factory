@@ -34,6 +34,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 )
 
@@ -120,6 +121,18 @@ type TermPane struct {
 	// emulator's CursorVisibility callback (fired inside emu.Write, under gridMu's
 	// write lock); Render reads it under the read lock. Starts true.
 	cursorVisible bool
+	// mouseModes is the set of mouse-tracking DECModes (X10/normal/highlight/
+	// button-event/any-event) the inner app currently has enabled, maintained by
+	// the emulator's EnableMode/DisableMode callbacks (fired inside emu.Write, under
+	// gridMu's write lock). MouseTrackingEnabled reads it under the read lock. It
+	// mirrors exactly the set emu.SendMouse consults, so "tracking enabled" means
+	// "a forwarded wheel/click would actually reach the inner app". Starts empty.
+	//
+	// It cannot go stale across a terminal reset: a full reset (RIS) runs the
+	// emulator's resetModes, which re-drives setMode(ModeReset) for every mouse
+	// mode and thus fires DisableMode for each — clearing this set — so the wheel
+	// can never stay stuck forwarding to a program that reset the terminal (#1748).
+	mouseModes    map[ansi.Mode]bool
 	width, height int
 
 	dial Dialer
@@ -146,6 +159,7 @@ func New(dial Dialer, width, height int) *TermPane {
 	t := &TermPane{
 		emu:           vt.NewEmulator(width, height),
 		cursorVisible: true,
+		mouseModes:    make(map[ansi.Mode]bool),
 		width:         width,
 		height:        height,
 		dial:          dial,
@@ -159,6 +173,18 @@ func New(dial Dialer, width, height int) *TermPane {
 	// field write is ordered against Render's locked reads.
 	t.emu.SetCallbacks(vt.Callbacks{
 		CursorVisibility: func(visible bool) { t.cursorVisible = visible },
+		// Track the inner app's mouse-reporting requests so the host can tell
+		// whether the wheel belongs to the program or to pane scrollback (#1024
+		// wheel fix). Both callbacks fire from emu.Write under gridMu's write lock,
+		// ordering these map writes against MouseTrackingEnabled's locked read.
+		EnableMode: func(mode ansi.Mode) {
+			if isMouseTrackingMode(mode) {
+				t.mouseModes[mode] = true
+			}
+		},
+		DisableMode: func(mode ansi.Mode) {
+			delete(t.mouseModes, mode)
+		},
 	})
 
 	t.wg.Add(2)
