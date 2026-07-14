@@ -10,12 +10,41 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+// snapshotRead runs the non-spawning daemon snapshot and reports whether the
+// caller may fall back to a local disk scan. It is the single seam every
+// daemon→disk read path (listSessions, getSessionByTitle, whoamiSession,
+// getSessionByTitleInScope) routes through so the "remote reads never fall back
+// to disk" contract cannot be silently reintroduced at a new read site (#1679,
+// #1681). On daemon success it returns (data, false, nil). On error it returns:
+//   - remote target: (nil, false, err) — surface the real error; a remote daemon
+//     has no local disk to fall back to, and a bad token must not be masked by a
+//     same-machine disk read (docs/remote-tcp-auth.md, #1592 Phase 3 PR4).
+//   - local target:  (nil, true, err)  — the caller runs its own disk scan.
+//
+// Callers switch on err == nil for the success path and, on error, consult the
+// fallBackToDisk flag before touching disk. This keeps each caller's exact local
+// disk-fallback behavior (diskListSessions / diskWhoami / findInstanceByTitle,
+// including their distinct not-found and corrupt-repo errors) while centralizing
+// the one decision that must never regress: whether disk may be read at all.
+func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, fallBackToDisk bool, err error) {
+	data, err = snapshotViaDaemon(req)
+	if err == nil {
+		return data, false, nil
+	}
+	if apiclient.IsRemoteTarget() {
+		return nil, false, err
+	}
+	return nil, true, err
+}
 
 // Shared flags
 var (
