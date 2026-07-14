@@ -186,7 +186,8 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 		// scroll mode is left. NeedsScrollFill is true only until that single
 		// fill lands (it clears scrollFillPending), so a live pane resumes
 		// skipping capture for every subsequent scroll keystroke.
-		if w.HasLive() && !w.NeedsScrollFill() {
+		needsFill := w.NeedsScrollFill()
+		if w.HasLive() && !needsFill {
 			continue
 		}
 		// A pane that just entered scroll mode has an empty scroll viewport
@@ -194,10 +195,17 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 		// so the fill lands on this refresh instead of up to a tick later, which
 		// would flash a blank viewport. Scroll-mode entry no longer captures on the
 		// event loop, so this off-loop fill is the only place that populates it.
-		if !w.NeedsScrollFill() && time.Since(m.lastPaneCapture[p.ID()]) < paneCaptureMinInterval {
+		if !needsFill && time.Since(m.lastPaneCapture[p.ID()]) < paneCaptureMinInterval {
 			continue
 		}
 		m.lastPaneCapture[p.ID()] = time.Now()
+		// Claim the fill before dispatching so the next refresh in the
+		// dispatch→land window sees NeedsScrollFill go false and does not fire a
+		// redundant capture (#1709). NeedsScrollFill re-arms if this capture fails
+		// to publish (view changed mid-flight), so a genuinely-owed fill still runs.
+		if needsFill {
+			w.BeginScrollFill()
+		}
 		binding, seq := m.renderBindingForPane(p)
 		cmds = append(cmds, refreshPaneBindingCmd(w, binding.instance, binding.tab, seq))
 	}

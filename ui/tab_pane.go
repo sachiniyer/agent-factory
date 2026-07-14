@@ -71,7 +71,15 @@ type TabPane struct {
 	// lazy-fill and NeedsScrollFill key off — a sized viewport's View() is never
 	// the empty string (it renders padding), so viewport emptiness cannot serve.
 	scrollFillPending bool
-	viewport          viewport.Model
+	// scrollFillInFlight is set by BeginScrollFill the moment panesRefresh
+	// dispatches the off-loop fill, and cleared once that capture resolves (or
+	// scroll state resets). NeedsScrollFill masks a pane while it is set, so a
+	// refresh cycle that fires before the in-flight capture lands — rapid scroll
+	// input, or a slow daemon Preview RPC — no longer dispatches a redundant
+	// capture (#1709). scrollFillPending alone can't serve: it stays true from
+	// scroll entry until the fill LANDS, which spans the dispatch→land window.
+	scrollFillInFlight bool
+	viewport           viewport.Model
 
 	// currentInstance + currentTab identify the (instance, tab-index) view
 	// currently rendered. UpdateContent/ScrollUp/ScrollDown reset scroll-mode
@@ -124,7 +132,29 @@ func (p *TabPane) IsScrolling() bool {
 func (p *TabPane) NeedsScrollFill() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.isScrolling && p.scrollFillPending && p.viewport.Height > 0
+	return p.isScrolling && p.scrollFillPending && !p.scrollFillInFlight && p.viewport.Height > 0
+}
+
+// BeginScrollFill claims the pending fill for a dispatched off-loop capture so a
+// second refresh cycle in the dispatch→land window does not fire a redundant one
+// (#1709). panesRefresh calls it synchronously the instant it dispatches the
+// capture — on the event loop, before the goroutine runs — so the very next
+// refresh already sees the claim. The claim is released when the fill resolves
+// (updateAgent/updateShell) or scroll state resets, both of which run through
+// resetScrollFill / clear scrollFillPending.
+func (p *TabPane) BeginScrollFill() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.scrollFillInFlight = true
+}
+
+// resetScrollFill clears both the fill-owed and fill-in-flight flags. Every
+// scroll-state reset and every completed/abandoned fill funnels through it so a
+// stale in-flight claim can never wedge NeedsScrollFill false forever (#1709).
+// Caller must hold p.mu.
+func (p *TabPane) resetScrollFill() {
+	p.scrollFillPending = false
+	p.scrollFillInFlight = false
 }
 
 func (p *TabPane) SetSize(width, maxHeight int) {
@@ -153,7 +183,7 @@ func (p *TabPane) dropStaleView(instance *session.Instance, activeTab int) {
 	if instance != p.currentInstance || activeTab != p.currentTab {
 		if p.isScrolling {
 			p.isScrolling = false
-			p.scrollFillPending = false
+			p.resetScrollFill()
 			p.viewport.SetContent("")
 			p.viewport.GotoTop()
 		}
@@ -176,7 +206,7 @@ func (p *TabPane) setFallbackState(message string) {
 		text:     lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message),
 	}
 	p.isScrolling = false
-	p.scrollFillPending = false
+	p.resetScrollFill()
 	p.viewport.SetContent("")
 }
 
@@ -276,6 +306,11 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		content, err := p.previewSrc(instance, 0, true)
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		// This fill attempt has resolved: release the in-flight claim so a fresh
+		// dispatch can retry if it turns out this one couldn't publish (view
+		// changed mid-capture, error). A successful publish clears pending below,
+		// so NeedsScrollFill stays false either way (#1709).
+		p.scrollFillInFlight = false
 		if !guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
 			return nil
 		}
@@ -299,7 +334,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 			// it and the fill no longer runs (pending cleared), so the scroll
 			// position is preserved (#1637).
 			p.viewport.GotoBottom()
-			p.scrollFillPending = false
+			p.resetScrollFill()
 		}
 		return nil
 	}
@@ -419,6 +454,10 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		content, err := p.previewSrc(instance, activeTab, true)
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		// Release the in-flight claim now the attempt resolved (see updateAgent):
+		// a successful publish clears pending below; a view change / error leaves
+		// pending set so a fresh dispatch retries, never a redundant one (#1709).
+		p.scrollFillInFlight = false
 		if !guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
 			return nil
 		}
@@ -436,7 +475,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		if p.isScrolling && p.scrollFillPending {
 			p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
 			p.viewport.GotoBottom()
-			p.scrollFillPending = false
+			p.resetScrollFill()
 		}
 		return nil
 	}
@@ -590,6 +629,9 @@ func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab in
 	p.viewport.SetContent("")
 	p.isScrolling = true
 	p.scrollFillPending = true
+	// A fresh fill is owed and none is dispatched yet: clear any stale in-flight
+	// claim from a prior scroll session so this entry's fill can dispatch (#1709).
+	p.scrollFillInFlight = false
 	return nil
 }
 
@@ -603,7 +645,7 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	wasScrolling := p.isScrolling
 	if wasScrolling {
 		p.isScrolling = false
-		p.scrollFillPending = false
+		p.resetScrollFill()
 		p.viewport.SetContent("")
 		p.viewport.GotoTop()
 	}
