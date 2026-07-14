@@ -104,6 +104,67 @@ func TestTempHomeDaemonUncertainLivenessSparesHome(t *testing.T) {
 	require.True(t, okContains(report, "daemon.pid liveness is uncertain"))
 }
 
+// TestScanContextDefaultsSnapshot pins the invariant broken by #1785: the
+// context the checks read must carry a snapshot func even when the caller
+// supplied none. Defaulting after the scanContext copies the Options left
+// ctx.opts.snapshot nil in production, quietly turning the fix-time process
+// recheck in staleTempHomeRemoveFix into dead code that only tests reached.
+func TestScanContextDefaultsSnapshot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// Production shape: no injected snapshot, exactly as `af doctor` calls it.
+	ctx, err := newScanContext(Options{TempDir: t.TempDir()})
+	require.NoError(t, err)
+	require.NotNil(t, ctx.opts.snapshot,
+		"scan context must carry a snapshot func, else the fix-time process recheck is unreachable")
+}
+
+// TestStaleTempHomeRefusesWithoutSnapshotFunc pins the fail-closed branch: a
+// context with no snapshot func cannot recheck for live processes, so it must
+// refuse rather than delete on the stale detection snapshot.
+func TestStaleTempHomeRefusesWithoutSnapshotFunc(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.no-snapshot-func")
+	ctx := &scanContext{opts: Options{TempDir: tempRoot, ConfigDir: t.TempDir()}}
+
+	err := staleTempHomeRemoveFix(ctx, dir)()
+	require.ErrorContains(t, err, "no process snapshot available")
+	require.DirExists(t, dir, "an un-recheckable home must fail closed, not be removed")
+}
+
+// TestStaleTempHomeClaimedAfterDetectionIsSpared is the behavioral contract the
+// fix-time recheck exists for: a home that looked abandoned during detection but
+// was claimed by a process before --fix ran must survive. The snapshot func hides
+// the claimer from the detection pass and reveals it at fix time, standing in for
+// a process that started in between.
+func TestStaleTempHomeClaimedAfterDetectionIsSpared(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.claimed-late")
+
+	claimer := spawnWithEnv(t, "sh", nil, map[string]string{"AGENT_FACTORY_HOME": dir})
+
+	opts := macLikeTempHomeOptions(t, tempRoot, true)
+	var calls int
+	opts.snapshot = func() (map[int]proctree.Process, error) {
+		calls++
+		if calls == 1 {
+			// Detection: the claimer has not started yet.
+			return map[int]proctree.Process{}, nil
+		}
+		// Fix time: the claimer now holds the home.
+		return map[int]proctree.Process{claimer.PID: claimer}, nil
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Greater(t, calls, 1, "fix must re-take the process snapshot, not reuse the detection one")
+
+	findings := findByCheck(report, "stale-temp-home")
+	require.Len(t, findings, 1, "detection saw an abandoned home and proposed removing it")
+	require.False(t, findings[0].Fixed)
+	require.ErrorContains(t, findings[0].FixErr, "live process references it")
+	require.DirExists(t, dir, "a home claimed between detection and fix must not be removed")
+}
+
 func TestTempHomeWithLiveTmuxSessionMarkerSparesHomeWithoutProc(t *testing.T) {
 	tempRoot := t.TempDir()
 	dir := makeOldTempAFHome(t, tempRoot, "tmp.live-session")

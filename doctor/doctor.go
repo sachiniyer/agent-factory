@@ -159,34 +159,62 @@ type scanContext struct {
 	selfAncestors map[int]bool
 }
 
-// Run executes all checks and (when opts.Fix) applies the safe remediations.
-func Run(opts Options) (*Report, error) {
-	if opts.ConfigDir == "" {
+// applyDefaults resolves every zero-valued option to its production default.
+// It must run to completion before the Options are copied into a scanContext:
+// a default applied afterwards would land on this copy only and never reach
+// the checks, silently disabling whatever it guards (see #1785).
+func (o *Options) applyDefaults() error {
+	if o.ConfigDir == "" {
 		dir, err := config.GetConfigDir()
 		if err != nil {
-			return nil, fmt.Errorf("resolving agent-factory home: %w", err)
+			return fmt.Errorf("resolving agent-factory home: %w", err)
 		}
-		opts.ConfigDir = dir
+		o.ConfigDir = dir
 	}
-	if opts.TempDir == "" {
-		opts.TempDir = tempDirDefault()
+	if o.TempDir == "" {
+		o.TempDir = tempDirDefault()
 	}
-	if opts.Exec == nil {
-		opts.Exec = cmd.MakeExecutor()
+	if o.Exec == nil {
+		o.Exec = cmd.MakeExecutor()
 	}
-	if opts.MinTempHomeAge == 0 {
-		opts.MinTempHomeAge = 7 * 24 * time.Hour
+	if o.MinTempHomeAge == 0 {
+		o.MinTempHomeAge = 7 * 24 * time.Hour
 	}
-	if opts.killGrace == 0 {
-		opts.killGrace = 2 * time.Second
+	if o.killGrace == 0 {
+		o.killGrace = 2 * time.Second
 	}
-	if opts.killTermWait == 0 {
-		opts.killTermWait = 2 * time.Second
+	if o.killTermWait == 0 {
+		o.killTermWait = 2 * time.Second
+	}
+	if o.snapshot == nil {
+		o.snapshot = proctree.Snapshot
+	}
+	return nil
+}
+
+// newScanContext defaults the options and seals them into the run's context.
+// Every caller must go through here: scanContext holds its own copy of the
+// Options, so this is the one place where defaulting is guaranteed to happen
+// before that copy is taken.
+func newScanContext(opts Options) (*scanContext, error) {
+	if err := opts.applyDefaults(); err != nil {
+		return nil, err
+	}
+	return &scanContext{opts: opts, selfAncestors: map[int]bool{}}, nil
+}
+
+// Run executes all checks and (when opts.Fix) applies the safe remediations.
+// Past the constructor, ctx.opts is the only source of truth for the run's
+// options — reading or mutating the `opts` argument here would diverge from
+// what the checks actually see (#1785).
+func Run(opts Options) (*Report, error) {
+	ctx, err := newScanContext(opts)
+	if err != nil {
+		return nil, err
 	}
 
-	ctx := &scanContext{opts: opts, selfAncestors: map[int]bool{}}
 	report := &Report{}
-	if opts.Setup {
+	if ctx.opts.Setup {
 		checkSetup(ctx, report)
 		return report, nil
 	}
@@ -194,11 +222,7 @@ func Run(opts Options) (*Report, error) {
 	cfg := checkConfigAndStorage(ctx, report)
 	checkEnvironment(ctx, report, cfg)
 
-	if opts.snapshot == nil {
-		opts.snapshot = proctree.Snapshot
-	}
-
-	if snap, err := opts.snapshot(); err == nil {
+	if snap, err := ctx.opts.snapshot(); err == nil {
 		ctx.snap = snap
 		for pid := range selfAndAncestors(snap) {
 			ctx.selfAncestors[pid] = true
@@ -213,7 +237,7 @@ func Run(opts Options) (*Report, error) {
 	checkForeignDaemons(ctx, report)
 	checkRemoteSetup(ctx, report)
 
-	if opts.Fix {
+	if ctx.opts.Fix {
 		for i := range report.Findings {
 			f := &report.Findings[i]
 			if f.fix == nil {

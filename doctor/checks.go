@@ -588,14 +588,17 @@ func staleTempHomeRemoveFix(ctx *scanContext, dir string) func() error {
 		//     daemon.pid + tmux guards, exactly as before — otherwise --fix
 		//     could never clean a stale temp home on such platforms.
 		snap := ctx.snap
-		if ctx.opts.snapshot != nil {
-			fresh, err := ctx.opts.snapshot()
-			switch {
-			case err == nil:
-				snap = fresh
-			case ctx.snap != nil:
-				return fmt.Errorf("refusing to remove %s: process snapshot failed: %w", dir, err)
-			}
+		if ctx.opts.snapshot == nil {
+			// Unreachable via Run (applyDefaults always installs one). Fail
+			// closed rather than delete on the stale detection snapshot.
+			return fmt.Errorf("refusing to remove %s: no process snapshot available", dir)
+		}
+		fresh, err := ctx.opts.snapshot()
+		switch {
+		case err == nil:
+			snap = fresh
+		case ctx.snap != nil:
+			return fmt.Errorf("refusing to remove %s: process snapshot failed: %w", dir, err)
 		}
 		if reason := tempHomeInUseReason(dir, processReferencedHomes(snap), liveTmuxHomes(ctx)); reason != "" {
 			return fmt.Errorf("refusing to remove %s: %s", dir, reason)
