@@ -185,11 +185,17 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 
 // SetPRInfo records (or clears) the GitHub PR info for the target session and
 // persists it (#960 PR 1). A zero-value PRInfo (Number 0) clears the recorded
-// info. It mirrors CreateTab's discipline — find, mutate+persist under the
-// per-repo start lock, persist through the targeted writer (persistInstanceData)
-// — and rolls the in-memory value back on persist failure so memory and disk
-// stay consistent. This is the daemon-side write the TUI performs today via
-// prInfoUpdatedMsg + a full-list save (#921); the TUI is switched to it in PR 2.
+// info. It mirrors CloseTab's discipline — find, take the per-session op-lock so
+// a concurrent kill/archive teardown can't replace the session out from under
+// us, re-verify the tracked instance hasn't been swapped for a same-titled
+// recreate, then mutate+persist under the per-repo start lock through the
+// targeted writer (persistInstanceData) — and rolls the in-memory value back on
+// persist failure so memory and disk stay consistent. Without the op-lock and
+// stale-instance check a SetPRInfo racing KillSession+CreateSession wrote the
+// old instance's data (including its stale stable id) over the new instance's
+// disk record, corrupting the persisted identity (#1723). This is the
+// daemon-side write the TUI performs today via prInfoUpdatedMsg + a full-list
+// save (#921); the TUI is switched to it in PR 2.
 func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
 	if err != nil {
@@ -197,6 +203,24 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	}
 	if instance == nil {
 		return fmt.Errorf("failed to restore instance %q", req.Title)
+	}
+
+	// Serialize against an archive/kill/restore teardown for this session and,
+	// after winning the lock, confirm the session we resolved is still the tracked
+	// current one — a kill/recreate can replace it (same title, DIFFERENT stable
+	// id) in the window between findSession and this lock. Take the op-lock before
+	// the per-repo start lock, matching the kill/archive persist ordering.
+	title := instance.Title
+	key := daemonInstanceKey(repoID, title)
+	opLock := m.opLockFor(key)
+	opLock.Lock()
+	defer opLock.Unlock()
+
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	if current != instance || instance.UserKilled() {
+		return fmt.Errorf("session %q changed state before PR info could be recorded", title)
 	}
 
 	repoStartLock := m.startLockForRepo(repoID)

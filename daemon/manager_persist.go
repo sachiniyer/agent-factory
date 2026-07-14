@@ -43,33 +43,54 @@ func appendInstanceData(repoID string, data session.InstanceData) error {
 // persistInstanceData replaces the on-disk record for data.Title in repoID's
 // instances file with data, under the per-repo file lock, leaving every other
 // record untouched. It is the targeted, clobber-safe persist primitive for
-// in-place mutations of an existing session (CloseTab, SetPRInfo) — the
-// single-writer direction of #960 — analogous to appendInstanceData for
-// creates and storage.DeleteInstance for kills. It deliberately does NOT use a
-// whole-list SaveInstances, which would re-serialize the manager's entire view
-// and reintroduce the dual-writer clobber surface #960 is retiring. Errors when
-// no record with that title exists (the caller already resolved a live
-// instance, so a missing disk record means storage drifted out from under us).
+// in-place mutations of an existing session (CloseTab, SetPRInfo, status/limit
+// polls, archive) — the single-writer direction of #960 — analogous to
+// appendInstanceData for creates and storage.DeleteInstance for kills. It
+// deliberately does NOT use a whole-list SaveInstances, which would re-serialize
+// the manager's entire view and reintroduce the dual-writer clobber surface #960
+// is retiring.
+//
+// It matches the row to overwrite by title AND stable id (#1723, the same
+// "key by stable id, not title/ordinal" class as #1678/#1738): if a record with
+// the same title carries a DIFFERENT stable id, a kill/recreate has replaced the
+// session out from under this writer, so it REFUSES to write rather than clobber
+// the new instance's identity with the caller's stale data. stableIDMatchesForDaemon
+// treats an empty id on either side as a match, so legacy records without a
+// stored id, and callers whose in-memory instance predates the id, still persist.
+// Errors when no record with that title exists (the caller already resolved a
+// live instance, so a missing disk record means storage drifted out from under
+// us).
 func persistInstanceData(repoID string, data session.InstanceData) error {
 	data = data.ForStorage()
 	found := false
+	sameTitleDifferentID := false
 	if err := config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
 		var existing []session.InstanceData
 		if err := json.Unmarshal(raw, &existing); err != nil {
 			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
 		}
 		for i := range existing {
-			if existing[i].Title == data.Title {
-				existing[i] = data
-				found = true
-				return json.MarshalIndent(existing, "", "  ")
+			if existing[i].Title != data.Title {
+				continue
 			}
+			if !stableIDMatchesForDaemon(existing[i].ID, data.ID) {
+				// A same-titled record with a different stable id belongs to a
+				// different (newer) session; never overwrite its identity.
+				sameTitleDifferentID = true
+				return raw, nil
+			}
+			existing[i] = data
+			found = true
+			return json.MarshalIndent(existing, "", "  ")
 		}
 		// Leave the file unchanged when the record is absent; the caller turns
 		// !found into an error below.
 		return raw, nil
 	}); err != nil {
 		return err
+	}
+	if sameTitleDifferentID {
+		return fmt.Errorf("instance %q identity changed in storage", data.Title)
 	}
 	if !found {
 		return fmt.Errorf("instance %q not found in storage", data.Title)
