@@ -337,9 +337,9 @@ function focusRail(): void {
 
 // --- top-level view switching (#1592 Phase 5 PR8) --------------------------
 
-/** Switches the top-level view (sessions | projects | tasks). Leaving the sessions
+/** Switches the top-level view (sessions | tasks). Leaving the sessions
  *  view hands the keyboard back to the rail AND blurs the (still-live but now hidden)
- *  terminal, so a stray key in the projects/tasks view never leaks to the agent — the
+ *  terminal, so a stray key in the tasks view never leaks to the agent — the
  *  view switch composes with the #1694 focus model instead of fighting it. Switching
  *  INTO the tasks view refreshes the task list so it is current on arrival. */
 function switchView(view: View): void {

@@ -42,7 +42,7 @@ Against the live SPA served over the daemon's plain-HTTP listener:
 | **Sidebar** | The rail lists the seeded sessions from the Snapshot/events plane, and the live pip reads "Live". |
 | **Attach** | Click-to-attach opens the xterm terminal and shows the fake agent's live output (a real binary PTY frame decoded by the TS codec and painted in the browser). |
 | **Keyboard (#1694)** | In the sessions view's rail mode `j`/`k` navigate the rail; `Enter` attaches the selection; `Escape` returns to the rail. |
-| **View cycling (#1694/PR8)** | In rail mode `]` cycles the top-level view forward (sessions → projects → tasks) and `[` cycles it back (tasks → projects → sessions), the active view tab following each step. |
+| **View cycling (#1694/PR8)** | In rail mode `]` cycles the top-level view forward (sessions → tasks) and `[` cycles it back (tasks → sessions), the active view tab following each step. |
 | **Tabs (#1592 PR7)** | The tab bar creates a shell tab (`+` / `t`), switches to it (click / `1`-`9`) and shows its distinct PTY output, and closes it (`×` / `w`) — the agent tab stays unclosable. |
 | **Create** | The **+ New** modal creates a session and its row appears in the rail. |
 | **Kill** | The kill confirm removes the session's row. |

@@ -117,7 +117,7 @@ export function isArchived(s: SessionData): boolean {
  * created first, so the archive reads as a most-recent-on-top history, the inverse
  * of the live tree (#1605). Title breaks a created_at tie in BOTH groups so the
  * order is total and never jitters. Shared by the sessions rail (ui.ts
- * orderedSessions) and the projects pane (projects.ts) so the two surfaces can
+ * orderedSessions) and the project switcher (project.ts) so the two surfaces can
  * never diverge on order (#1674 PR3 review: the web must sort archived desc like
  * the TUI, not asc).
  */
