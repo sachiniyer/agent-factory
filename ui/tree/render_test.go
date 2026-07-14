@@ -258,8 +258,11 @@ func TestInstanceRendererLimitReachedMarker(t *testing.T) {
 // TestInstanceRendererStatusGlyphs pins the #1766 status-cell contract, the same
 // (Liveness, InFlightOp)→glyph mapping the web mirrors (web/src/status.ts): only a
 // waiting/Ready session shows the green ● dot; every working/busy state — LiveRunning
-// or any in-flight op (kill/archive) — shows NO status glyph and NO animated spinner
-// frame; the terminal/error states keep their STATIC glyphs (◌/○/◆/▧).
+// or ANY in-flight op (create/restore/kill/archive) — shows NO status glyph and NO
+// animated spinner frame; the terminal/error states keep their STATIC glyphs (◌/○/◆/▧).
+// An in-flight create/restore is a LOADING state that draws a clean blank cell — no
+// dot, no spinner, no stale glyph — and the op axis deliberately masks the liveness
+// glyph so a restoring-but-still-Archived row never leaks the ▧ nor a premature dot.
 func TestInstanceRendererStatusGlyphs(t *testing.T) {
 	newInst := func(t *testing.T, title string) *session.Instance {
 		t.Helper()
@@ -311,6 +314,52 @@ func TestInstanceRendererStatusGlyphs(t *testing.T) {
 			}
 		})
 	}
+
+	// An in-flight create is a LOADING state: no glyph, and (unlike kill/archive) NO
+	// title prefix — a bare, clean loading row (#1766). The green dot appears only once
+	// the op clears and the agent is Ready (the progression test below).
+	t.Run("creating (OpCreating) shows no glyph and no prefix", func(t *testing.T) {
+		inst := newInst(t, "spawning")
+		inst.SetInFlightOpForTest(session.OpCreating)
+		clean := cell(t, inst)
+		assert.NotRegexp(t, brailleFrame, clean, "a creating row must not render a spinner frame")
+		for _, g := range allGlyphs {
+			assert.NotContainsf(t, clean, g, "a creating row must not show the %s status glyph", g)
+		}
+		assert.NotContains(t, clean, "[deleting]", "create adds no going-away prefix")
+		assert.Contains(t, clean, "spawning", "a creating row still shows its name")
+	})
+
+	// An in-flight restore of an ARCHIVED instance is rehomed into the live section
+	// (#1210) while its liveness is still LiveArchived. The op axis is checked FIRST, so
+	// it must render a BLANK status cell — NOT the ▧ archived glyph and NOT the green
+	// dot — until the restore completes (#1766).
+	t.Run("restoring (OpRestoring) on an archived instance shows no glyph", func(t *testing.T) {
+		inst := newInst(t, "coming-back")
+		inst.SetArchived()
+		inst.SetInFlightOpForTest(session.OpRestoring)
+		require.False(t, inst.ShownArchived(), "a restoring instance is rehomed into the live section")
+		clean := cell(t, inst)
+		assert.NotRegexp(t, brailleFrame, clean, "a restoring row must not render a spinner frame")
+		for _, g := range allGlyphs {
+			assert.NotContainsf(t, clean, g, "a restoring row must not show the %s status glyph (not ▧, not ●)", g)
+		}
+	})
+
+	// The loading → ready progression: a create shows nothing while in flight, then the
+	// green dot appears the instant the op clears and the agent reaches Ready (#1766).
+	t.Run("a cleared create at Ready shows the green dot", func(t *testing.T) {
+		inst := newInst(t, "born")
+		inst.SetInFlightOpForTest(session.OpCreating)
+		for _, g := range allGlyphs {
+			assert.NotContainsf(t, cell(t, inst), g, "while creating, no %s glyph", g)
+		}
+		inst.SetInFlightOpForTest(session.OpNone)
+		require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+		clean := cell(t, inst)
+		assert.Contains(t, clean, "●", "once Ready with no op, the green dot appears")
+		assert.NotRegexp(t, brailleFrame, clean, "the ready dot is static")
+	})
 
 	statics := []struct {
 		name  string

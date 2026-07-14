@@ -273,18 +273,27 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		descS = listDescStyle
 	}
 
-	// Status glyph. Read the two axes directly (#1195): a row with any in-flight
-	// op (create/kill/archive) is a working/busy state and shows NO status glyph
-	// (#1766); otherwise the daemon-owned liveness picks the glyph. The liveness
-	// switch is TOTAL — every value is rendered explicitly, no silent default — so
-	// adding a Liveness value (LimitReached landed this way, #1146) forces a
-	// deliberate choice here. Only a waiting/Ready session gets a (green) dot;
-	// every working/busy state renders blankIcon so the columns stay aligned.
+	// Status glyph. Read the two axes directly (#1195): a row with ANY in-flight op
+	// — create, restore, kill, or archive — is a working/busy state and shows NO
+	// status glyph (#1766); otherwise the daemon-owned liveness picks the glyph. The
+	// liveness switch is TOTAL — every value is rendered explicitly, no silent
+	// default — so adding a Liveness value (LimitReached landed this way, #1146)
+	// forces a deliberate choice here. Only a waiting/Ready session gets a (green)
+	// dot; every working/busy state renders blankIcon so the columns stay aligned.
 	liveness := i.GetLiveness()
 	op := i.GetInFlightOp()
 	var join string
 	switch {
 	case op != session.OpNone:
+		// The op axis is checked FIRST and DELIBERATELY masks the liveness glyph:
+		// an in-flight create/restore is a loading state (nothing, not a spinner —
+		// #1766), and this ordering is load-bearing for two cases in particular:
+		//   - OpRestoring on a still-Archived instance (rehomed into the live
+		//     section, #1210) must NOT draw the ▧ archived glyph — it draws blank.
+		//   - a completing op whose liveness already flipped to Ready must NOT draw
+		//     the green dot prematurely — the dot appears only once the op clears.
+		// Kill/archive keep their [deleting] title prefix below (create/restore add
+		// no prefix — a bare, clean loading row).
 		join = blankIcon
 	default:
 		switch liveness {
