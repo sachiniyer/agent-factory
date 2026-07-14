@@ -137,6 +137,25 @@ var runtimeRegistry = map[BackendKind]func() Runtime{
 	BackendSSH:    func() Runtime { return sshRuntime{} },
 }
 
+// SetRuntimeForTest replaces the Runtime registered for kind with ctor and
+// returns a restore function. It is the exported form of the registry swap the
+// in-package sandbox tests already do by hand, so tests OUTSIDE this package (the
+// daemon's remote limit-resume regression, #1786) can drive the real
+// re-provision path — reprovisionRemote resolves the runtime through this
+// registry — against a mock sandbox instead of a real docker/ssh host. Mirrors
+// the SetBackendFactoryForTest / SetDockerSelfBinaryForTest seam pattern.
+func SetRuntimeForTest(kind BackendKind, ctor func() Runtime) func() {
+	prev, had := runtimeRegistry[kind]
+	runtimeRegistry[kind] = ctor
+	return func() {
+		if had {
+			runtimeRegistry[kind] = prev
+			return
+		}
+		delete(runtimeRegistry, kind)
+	}
+}
+
 // ResolveRuntime returns the Runtime registered for kind, or an error naming the
 // unknown backend. Every registered kind is constructible.
 func ResolveRuntime(kind BackendKind) (Runtime, error) {

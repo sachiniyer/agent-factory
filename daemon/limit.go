@@ -250,6 +250,13 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		if rerr := instance.Respawn(); rerr != nil {
 			return fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
+		// Re-fetch: a REMOTE respawn re-provisions a FRESH sandbox and rebinds the
+		// instance to its endpoint (bindProvisionResult swaps remoteClient and clears
+		// the cached agent-server), so the `as` captured above is a client pinned to
+		// the sandbox Respawn just tore down — SendPrompt below would target a dead
+		// endpoint and the resume could never clear the limit (#1786). Inert for local
+		// sessions, whose localAgentServer resolves i.backend per call.
+		as = instance.AgentServer()
 	}
 
 	prompt := strings.TrimSpace(instance.Prompt)
