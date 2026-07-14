@@ -110,7 +110,14 @@ func LoadState() *State {
 	return state
 }
 
-// SaveState saves the state to disk
+// SaveState saves the state to disk.
+//
+// The write is refused when the on-disk state.json carries a schema_version
+// newer than this binary understands: an older af must never clobber (and thus
+// downgrade/corrupt) state written by a newer af. This mirrors the save-blocking
+// guard config.toml and tui-state.json already enforce (#1725). Same- or
+// older-schema saves proceed unchanged; a missing or unreadable/corrupt file
+// does not block the write.
 func SaveState(state *State) error {
 	configDir, err := GetConfigDir()
 	if err != nil {
@@ -122,13 +129,46 @@ func SaveState(state *State) error {
 	}
 
 	statePath := filepath.Join(configDir, StateFileName)
-	state.SchemaVersion = StateSchemaVersion
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal state: %w", err)
-	}
+	return WithFileLock(statePath, func() error {
+		if err := refuseStateDowngrade(statePath); err != nil {
+			return err
+		}
+		state.SchemaVersion = StateSchemaVersion
+		data, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal state: %w", err)
+		}
+		return AtomicWriteFile(statePath, data, 0644)
+	})
+}
 
-	return AtomicWriteFile(statePath, data, 0644)
+// refuseStateDowngrade returns an UnsupportedSchemaVersionError when the file at
+// statePath was written by a newer af (schema_version > StateSchemaVersion), so
+// the caller must not overwrite it. A missing file (first run), an unreadable
+// file, or one whose schema_version cannot be detected does not block the write:
+// those recover to a freshly-written default rather than wedging saves forever.
+func refuseStateDowngrade(statePath string) error {
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.WarningLog.Printf("could not read %s before saving state; overwriting: %v", statePath, err)
+		}
+		return nil
+	}
+	version, err := DetectJSONSchemaVersion(data)
+	if err != nil {
+		log.WarningLog.Printf("could not detect schema version of %s before saving state; overwriting: %v", statePath, err)
+		return nil
+	}
+	if version > StateSchemaVersion {
+		return &UnsupportedSchemaVersionError{
+			StoreName:        StateFileName,
+			Path:             statePath,
+			FileVersion:      version,
+			SupportedVersion: StateSchemaVersion,
+		}
+	}
+	return nil
 }
 
 // Per-repo instance file functions
