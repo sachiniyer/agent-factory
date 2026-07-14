@@ -378,6 +378,14 @@ func (s *TaskPane) selectedTaskInRange() bool {
 	return s.selectedIdx >= 0 && s.selectedIdx < len(s.tasks)
 }
 
+// selectedTaskIsWatch reports whether the currently-selected task is a watch
+// task. Watch tasks fire from their watch command's stdout and cannot be
+// manually triggered (RunTask refuses them), so the "run now" affordance is
+// suppressed for them (#1758).
+func (s *TaskPane) selectedTaskIsWatch() bool {
+	return s.selectedTaskInRange() && s.tasks[s.selectedIdx].IsWatch()
+}
+
 func (s *TaskPane) toggleSelectedTask() {
 	if !s.selectedTaskInRange() {
 		return
@@ -407,6 +415,15 @@ func (s *TaskPane) runSelectedTask() {
 	if !s.selectedTaskInRange() {
 		s.pendingTrigger = true
 		s.pendingTriggerID = ""
+		return
+	}
+	// Watch tasks fire from their watch command's stdout; a manual trigger has
+	// no event line to render the prompt, so the daemon refuses them (RunTask).
+	// Don't queue a doomed run — surface the reason inline (shown in edit mode)
+	// and keep the "run now" affordance out of the hints for watch tasks (#1758).
+	if s.tasks[s.selectedIdx].IsWatch() {
+		s.editError = "watch tasks run on their watch command's output, not on manual trigger"
+		s.editErrorField = taskFocusTrigger
 		return
 	}
 	s.pendingTrigger = true
@@ -569,8 +586,15 @@ func (s *TaskPane) renderListMode() string {
 	b.WriteString("\n")
 	if s.hasFocus {
 		hint := "↑/↓ select • n new • enter edit • r run now • x toggle • D delete • esc back"
+		short := "r run now • ↑/↓ • n new • enter • esc"
+		// A watch task can't be manually run (#1758): drop "r run now" so the
+		// hint never advertises an action that always fails.
+		if s.selectedTaskIsWatch() {
+			hint = "↑/↓ select • n new • enter edit • x toggle • D delete • esc back"
+			short = "↑/↓ • n new • enter • esc"
+		}
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = "r run now • ↑/↓ • n new • enter • esc"
+			hint = short
 		}
 		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 	} else {

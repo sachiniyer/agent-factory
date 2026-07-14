@@ -317,6 +317,9 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString(label("Trigger:"))
 	b.WriteString(s.renderTriggerSelector())
 	b.WriteString("\n")
+	// A watch task's "run now" is refused by the daemon (#1758); pressing r
+	// lands its explanation here, under the trigger-type selector.
+	b.WriteString(fieldErr(taskFocusTrigger))
 	markEnd(taskFocusTrigger)
 	markStart(taskFocusTriggerValue)
 	if s.editTriggerIsWatch {
@@ -389,8 +392,15 @@ func (s *TaskPane) renderEditMode() string {
 		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 		b.WriteString("\n")
 		actions := "r run now • x toggle • D delete • esc list • " + quitHint
+		short := "r run • x toggle • D del • esc • " + quitHint
+		// A watch task can't be manually run (#1758): drop "r run" so the
+		// editor never advertises an action that always fails.
+		if s.selectedTaskIsWatch() {
+			actions = "x toggle • D delete • esc list • " + quitHint
+			short = "x toggle • D del • esc • " + quitHint
+		}
 		if s.width > 0 && lipgloss.Width(actions) > s.width {
-			actions = "r run • x toggle • D del • esc • " + quitHint
+			actions = short
 		}
 		b.WriteString(hintStyle.Render(fitLine(actions, s.width)))
 	}
