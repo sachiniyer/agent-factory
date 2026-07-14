@@ -97,6 +97,30 @@ test("nav mode: t creates a tab; w closes the active non-agent tab", () => {
   assert.deepEqual(decideKey("w", ctx({ tabCount: 2, activeTab: 1 })), { kind: "closeTab" });
 });
 
+test("split panes: Alt+j/k cycle pane focus, Alt+w closes the focused pane", () => {
+  // The Alt chord fires in BOTH modes — a split is only meaningful while attached, and
+  // a bare j/k/w must still reach the agent in terminal mode.
+  assert.deepEqual(decideKey("j", ctx(), { alt: true }), { kind: "cyclePane", delta: 1 });
+  assert.deepEqual(decideKey("k", ctx(), { alt: true }), { kind: "cyclePane", delta: -1 });
+  assert.deepEqual(decideKey("w", ctx(), { alt: true }), { kind: "closePane" });
+  assert.deepEqual(
+    decideKey("j", ctx({ focus: "terminal" }), { alt: true }),
+    { kind: "cyclePane", delta: 1 },
+    "the Alt chord works while attached, unlike a bare j",
+  );
+});
+
+test("split panes: the Alt chord needs a selection in the sessions view, and yields to a modal", () => {
+  // No selection → nothing to split.
+  assert.deepEqual(decideKey("j", ctx({ selectedId: null }), { alt: true }), { kind: "none" });
+  // Another view has no panes.
+  assert.deepEqual(decideKey("j", ctx({ view: "tasks" }), { alt: true }), { kind: "none" });
+  // A modal still owns the keyboard.
+  assert.deepEqual(decideKey("w", ctx({ modalOpen: true }), { alt: true }), { kind: "none" });
+  // Without Alt these stay their normal rail actions (no accidental pane ops).
+  assert.deepEqual(decideKey("j", ctx()), { kind: "select", id: "c" });
+});
+
 test("nav mode: remote sessions can't manage tabs (t/w pass through) but can still switch", () => {
   const remote = ctx({ tabManagement: false, tabCount: 2, activeTab: 0 });
   assert.deepEqual(decideKey("t", remote), { kind: "none" }, "no new tab on a remote session");

@@ -36,9 +36,10 @@ import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
+import { SplitView } from "./split.js";
 import { Store } from "./store.js";
 import { addTaskModal, type AddTaskInput, buildTask } from "./tasks.js";
-import { AttachTerminal, type TerminalStatus } from "./terminal.js";
+import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
   deriveProjects,
@@ -46,6 +47,7 @@ import {
   renderLogin,
   sessionTabs,
   supportsTabManagement,
+  tabIdentity,
   type AppState,
 } from "./ui.js";
 import type { SessionData, TaskData, WireEvent } from "./types.js";
@@ -67,6 +69,7 @@ const store = new Store<AppState>({
   termStatus: "connecting",
   focus: "rail",
   activeTab: 0,
+  shownTabs: [0],
   tabError: null,
   tasks: [],
 });
@@ -95,7 +98,9 @@ const TAB_ERROR_MS = 6000;
 
 // The app-phase DOM (built once per login) and the persistent terminal host that
 // lives inside it. Keeping the host stable across renders is what lets the focused
-// xterm survive rail updates (see ui.ts AppShell).
+// xterm survive rail updates (see ui.ts AppShell). The host now holds a SPLIT LAYOUT
+// (split.ts) rather than a single xterm: one leaf by default (today's behavior), or
+// multiple concurrent panes when the user drags tabs into splits.
 let shell: AppShell | null = null;
 const termHost = document.createElement("div");
 termHost.className = "af-term-host";
@@ -108,11 +113,21 @@ const modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 let modal: ModalHandle | null = null;
 
-// The one live attach terminal and the (session id, tab index) it is bound to.
-// Rebuilt when either changes; disposed on deselect/logout.
-let terminal: AttachTerminal | null = null;
-let terminalId: string | null = null;
-let terminalTab = 0;
+// The split-pane view bound to termHost: it owns the per-instance layout tree and one
+// live AttachTerminal per pane, rebuilt/reconciled as the selection, tab list, or
+// layout changes (see syncSplit). It diffs the session internally, so syncSplit can
+// call setSession on every store change without tearing down unchanged panes.
+const splitView = new SplitView(termHost, {
+  onStatus: (s: TerminalStatus) => store.set({ termStatus: s }),
+  // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
+  // pane, so a click straight into a pane enters terminal mode (and clicking/tabbing
+  // away from all panes returns to rail mode) without going through Enter/Escape.
+  onFocusChange: (focused: boolean) => store.set({ focus: focused ? "terminal" : "rail" }),
+  // Mirror the layout into the store so the tab bar can highlight the focused pane's
+  // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
+  // on a real change, so this write never loops back through rerender → syncSplit.
+  onLayout: ({ focusedTab, shownTabs }) => store.set({ activeTab: focusedTab, shownTabs }),
+});
 
 let root: HTMLElement | null = null;
 
@@ -178,7 +193,7 @@ function rerender(): void {
     if (shell) {
       shell = null; // dropped from the tree by renderLogin below
     }
-    disposeTerminal();
+    disposeSplit();
     closeModal();
     renderLogin(root, state, actions);
     return;
@@ -188,7 +203,7 @@ function rerender(): void {
     root.replaceChildren(shell.el);
   }
   shell.update(state);
-  syncTerminal(state);
+  syncSplit(state);
 }
 
 /** Validates the token (Snapshot probe), and on success persists it, seeds the rail
@@ -220,6 +235,7 @@ async function connect(candidate: string): Promise<void> {
     live: "connecting",
     focus: "rail",
     activeTab: 0,
+    shownTabs: [0],
     tabError: null,
     tasks: [],
   });
@@ -246,6 +262,7 @@ function disconnect(): void {
     live: "connecting",
     focus: "rail",
     activeTab: 0,
+    shownTabs: [0],
     tabError: null,
     tasks: [],
   });
@@ -277,24 +294,19 @@ function openFromRail(id: string): void {
   focusTerminal();
 }
 
-/** Gives the keyboard to the selected session's terminal (attach): keys now reach
+/** Gives the keyboard to the selected session's FOCUSED pane (attach): keys now reach
  *  the agent. The xterm focus event echoes back through onFocusChange and confirms
  *  the "terminal" mode; setting it here first keeps the indicator immediate. */
 function focusTerminal(): void {
-  if (!terminal) {
-    return;
-  }
   store.set({ focus: "terminal" });
-  terminal.focus();
+  splitView.focus();
 }
 
-/** Returns the keyboard to the rail (Escape / detach): blurs the terminal so
+/** Returns the keyboard to the rail (Escape / detach): blurs every pane so
  *  document-level j/k navigate again. */
 function focusRail(): void {
   store.set({ focus: "rail" });
-  if (terminal) {
-    terminal.blur();
-  }
+  splitView.blur();
 }
 
 // --- top-level view switching (#1592 Phase 5 PR8) --------------------------
@@ -309,8 +321,8 @@ function switchView(view: View): void {
     return;
   }
   clearTabError();
-  if (view !== "sessions" && terminal) {
-    terminal.blur();
+  if (view !== "sessions") {
+    splitView.blur();
   }
   store.set({ view, focus: "rail" });
   if (view === "tasks") {
@@ -458,18 +470,20 @@ function selectedSessionData(): SessionData | null {
   return sessions.find((s) => s.id === selectedId) ?? null;
 }
 
-/** Switches the active tab WITHOUT attaching (the 1-9 keys). syncTerminal rebuilds
- *  the terminal for the new tab on the store update; the keyboard stays in rail
- *  mode, mirroring how j/k select a row without attaching. */
+/** Points the FOCUSED pane at `index` WITHOUT attaching (the 1-9 keys). The split
+ *  view rebuilds that pane's terminal and mirrors the new focused tab back into the
+ *  store (onLayout → activeTab); the keyboard stays in rail mode, mirroring how j/k
+ *  select a row without attaching. */
 function switchTab(index: number): void {
-  store.set({ activeTab: index, focus: "rail" });
+  splitView.setFocusedTab(index);
+  store.set({ focus: "rail" });
 }
 
-/** Switches to a tab AND attaches its terminal (a tab-bar click). The store update
- *  rebuilds the terminal synchronously (via rerender → syncTerminal), so
- *  focusTerminal then focuses the fresh instance — the same pattern as openFromRail. */
+/** Points the focused pane at a tab AND attaches it (a tab-bar click). The split view
+ *  rebuilds that pane's terminal synchronously, so focusTerminal then focuses the
+ *  fresh instance — the same pattern as openFromRail. */
 function openTab(index: number): void {
-  store.set({ activeTab: index });
+  splitView.setFocusedTab(index);
   focusTerminal();
 }
 
@@ -493,7 +507,11 @@ function createSessionTab(): void {
     .then((sessions) => {
       const grown = sessions.find((s) => s.id === selId);
       const newIdx = grown ? sessionTabs(grown).length - 1 : store.get().activeTab;
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId), activeTab: newIdx });
+      // Commit the grown tab list first (rerender → syncSplit sees the new tabCount),
+      // then point the focused pane at the fresh tab and attach it — mirroring the
+      // TUI's `t`, which opens the new tab as the active pane.
+      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+      splitView.setFocusedTab(newIdx);
       focusTerminal();
     })
     .catch((e) => surfaceTabError(e));
@@ -526,7 +544,10 @@ function closeSessionTab(index: number): void {
       const shrunk = sessions.find((s) => s.id === selId);
       const n = shrunk ? sessionTabs(shrunk).length : 1;
       const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId), activeTab: next });
+      // Commit the shrunk tab list first (rerender → syncSplit re-validates the tree,
+      // clamping any pane past the new end), then re-point the focused pane.
+      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+      splitView.setFocusedTab(next);
     })
     .catch((e) => surfaceTabError(e));
 }
@@ -685,45 +706,30 @@ const actions = {
 
 // --- attach terminal wiring ------------------------------------------------
 
-/** Opens/closes the attach terminal to match the current selection AND active tab.
- *  Rebuilds only when the selected id OR the active tab actually changes, so a live
- *  rail event never disturbs an open, focused terminal — but switching tabs
- *  (1-9 / a tab-bar click) re-points the stream to the new tab (#1592 Phase 5 PR7). */
-function syncTerminal(state: AppState): void {
+/** Syncs the split view to the current selection: shows the selected session's layout
+ *  (its retained tree, or a fresh single leaf), reconciling live terminals. Called on
+ *  every store change, it is cheap on a no-op — the split view only rebuilds terminals
+ *  when the session changes or the tab list shrinks/grows, so a live rail event never
+ *  disturbs an open, focused pane. */
+function syncSplit(state: AppState): void {
   const selId = state.selectedId;
-  // Clamp to the selected session's live tab list as a last line of defense: any
-  // path that leaves activeTab stale relative to the selection (a smaller new
-  // session, an out-of-band tab close) can never build a ?tab=<n> URL for a tab
-  // this session doesn't have — the terminal always attaches a real tab.
-  const tab = clampActiveTab(state.sessions, selId, state.activeTab);
-  if (selId === terminalId && tab === terminalTab) {
-    return;
-  }
-  disposeTerminal();
-  terminalId = selId; // set before constructing so the onStatus re-render is a no-op
-  terminalTab = tab;
   const tok = token;
-  // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696),
-  // so a loopback client still attaches its live terminal.
-  if (selId && tok !== null) {
-    terminal = new AttachTerminal(termHost, selId, tok, tab, {
-      onStatus: (s: TerminalStatus) => store.set({ termStatus: s }),
-      // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus, so a
-      // click straight into the terminal enters terminal mode (and tabbing/click
-      // away returns to rail mode) without going through Enter/Escape.
-      onFocusChange: (focused: boolean) => store.set({ focus: focused ? "terminal" : "rail" }),
-    });
-  }
+  // The initial tab for a session shown for the first time: the store's activeTab
+  // (reset to 0 on a fresh selection), clamped to the session's real tab list so a
+  // stale index can never bind a pane to a tab that doesn't exist.
+  const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
+  const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
+  // The ordered tab identities, so the split view can (a) know the live tab count and
+  // (b) reject a drop whose drag-time snapshot no longer matches (a mid-drag reorder).
+  const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
+  // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696), so a
+  // loopback client still attaches its live panes.
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab);
 }
 
-function disposeTerminal(): void {
-  if (terminal) {
-    terminal.dispose();
-    terminal = null;
-  }
-  terminalId = null;
-  terminalTab = 0;
-  termHost.replaceChildren(); // clear any leftover xterm DOM
+function disposeSplit(): void {
+  splitView.dispose();
+  termHost.replaceChildren(); // clear any leftover pane DOM
 }
 
 // --- events plane wiring ---------------------------------------------------
@@ -849,27 +855,30 @@ function onKeydown(e: KeyboardEvent): void {
   if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
-  // The mode is "terminal" only when a terminal actually exists to own the keyboard
-  // AND the sessions view is showing it; a since-disposed terminal (the selected
-  // session was killed) or a switch to the projects/tasks view (which hides the
-  // terminal) must not leave the stored focus stale, so we never honor terminal mode
-  // without a live, visible terminal. The pure state machine (nav.ts) decides the
-  // rest; index.ts only performs the effect.
-  const focus: KeyboardFocus = terminal && state.view === "sessions" ? state.focus : "rail";
+  // The mode is "terminal" only when a session is selected (so a pane exists to own
+  // the keyboard) AND the sessions view is showing it; a killed selection or a switch
+  // to the projects/tasks view (which hides the panes) must not leave the stored focus
+  // stale, so we never honor terminal mode without a live, visible pane. The pure state
+  // machine (nav.ts) decides the rest; index.ts only performs the effect.
+  const focus: KeyboardFocus = state.selectedId && state.view === "sessions" ? state.focus : "rail";
   // The selected session's tab shape drives the nav-mode tab keys (1-9 / t / w).
   const selected = selectedSessionData();
-  const action = decideKey(e.key, {
-    focus,
-    modalOpen: modal !== null,
-    view: state.view,
-    orderedIds: orderedSessions(state.sessions)
-      .map((s) => s.id ?? "")
-      .filter((id) => id !== ""),
-    selectedId: state.selectedId,
-    tabCount: selected ? sessionTabs(selected).length : 1,
-    activeTab: state.activeTab,
-    tabManagement: selected ? supportsTabManagement(selected) : false,
-  });
+  const action = decideKey(
+    e.key,
+    {
+      focus,
+      modalOpen: modal !== null,
+      view: state.view,
+      orderedIds: orderedSessions(state.sessions)
+        .map((s) => s.id ?? "")
+        .filter((id) => id !== ""),
+      selectedId: state.selectedId,
+      tabCount: selected ? sessionTabs(selected).length : 1,
+      activeTab: state.activeTab,
+      tabManagement: selected ? supportsTabManagement(selected) : false,
+    },
+    { alt: e.altKey },
+  );
   if (action.kind === "none") {
     return;
   }
@@ -902,6 +911,12 @@ function onKeydown(e: KeyboardEvent): void {
       break;
     case "switchView":
       switchView(action.view);
+      break;
+    case "cyclePane":
+      splitView.cyclePane(action.delta);
+      break;
+    case "closePane":
+      splitView.closeFocusedPane();
       break;
   }
 }

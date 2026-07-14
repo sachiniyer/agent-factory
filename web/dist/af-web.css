@@ -419,6 +419,16 @@ body {
   color: var(--af-text);
   border-bottom-color: var(--af-accent);
 }
+.af-tab-shown {
+  color: var(--af-text);
+  border-bottom-color: var(--af-border);
+}
+.af-tab {
+  cursor: grab;
+}
+.af-tab:active {
+  cursor: grabbing;
+}
 .af-tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -481,12 +491,147 @@ body {
 .af-term-host {
   flex: 1;
   min-height: 0;
-  padding: 0.4rem 0.6rem;
+  display: flex;
   background: var(--af-bg);
   overflow: hidden;
 }
-.af-term-host .xterm {
+.af-split {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.af-split-row {
+  flex-direction: row;
+}
+.af-split-column {
+  flex-direction: column;
+}
+.af-divider {
+  flex: 0 0 auto;
+  background: var(--af-border);
+  transition: background 0.1s ease;
+}
+.af-divider:hover,
+.af-resizing-col .af-divider-row,
+.af-resizing-row .af-divider-column {
+  background: var(--af-accent);
+}
+.af-divider-row {
+  width: 4px;
+  cursor: col-resize;
+}
+.af-divider-column {
+  height: 4px;
+  cursor: row-resize;
+}
+.af-resizing-col,
+.af-resizing-col * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+.af-resizing-row,
+.af-resizing-row * {
+  cursor: row-resize !important;
+  user-select: none;
+}
+.af-pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.af-pane-head {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.15rem 0.5rem;
+  background: var(--af-surface);
+  border-bottom: 1px solid var(--af-border);
+}
+.af-pane-multi .af-pane-head {
+  display: flex;
+}
+.af-pane-label {
+  font-size: 0.68rem;
+  color: var(--af-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.af-pane-close {
+  flex: 0 0 auto;
+  padding: 0 0.25rem;
+  background: transparent;
+  color: var(--af-muted);
+  border: none;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.af-pane-close:hover {
+  color: var(--af-error);
+  background: rgba(248, 81, 73, 0.14);
+}
+.af-pane-host {
+  flex: 1;
+  min-height: 0;
+  padding: 0.4rem 0.6rem;
+  overflow: hidden;
+}
+.af-pane-host .xterm {
   height: 100%;
+}
+.af-kb-terminal .af-split-multi .af-pane-focused {
+  outline: 2px solid var(--af-accent);
+  outline-offset: -2px;
+}
+.af-dragging-tab .af-pane {
+  outline: 1px dashed var(--af-border);
+  outline-offset: -1px;
+}
+.af-drop-overlay {
+  position: absolute;
+  display: none;
+  background: rgba(47, 129, 247, 0.28);
+  border: 1px solid var(--af-accent);
+  pointer-events: none;
+  z-index: 5;
+}
+.af-drop-overlay.af-drop-show {
+  display: block;
+}
+.af-drop-center {
+  inset: 0;
+}
+.af-drop-left {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 50%;
+}
+.af-drop-right {
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 50%;
+}
+.af-drop-top {
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 50%;
+}
+.af-drop-bottom {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 50%;
 }
 .af-rail-new {
   padding: 0.25rem 0.55rem;

@@ -21,6 +21,7 @@
 import type { EventStreamStatus } from "./events.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { VIEWS } from "./nav.js";
+import { TAB_DND_MIME } from "./layout.js";
 import { ProjectsPane } from "./projects.js";
 import { compareSessionsForRail, isArchived, rowStatus, rowTitle } from "./status.js";
 import { TasksPane } from "./tasks.js";
@@ -61,8 +62,14 @@ export interface AppState {
   /** the selected session's active tab index (#1592 Phase 5 PR7): 0 is the agent
    *  tab, 1-8 the user-created shell/process tabs. The attach terminal streams
    *  /stream?tab=<activeTab>, and the tab bar highlights it. Reset to 0 whenever
-   *  the selection changes. */
+   *  the selection changes. With split panes (feat: drag-and-drop split tabs) this
+   *  tracks the FOCUSED pane's tab, so the tab bar highlights the tab the keyboard
+   *  is on. */
   activeTab: number;
+  /** the tabs currently shown across ALL panes of the selected session (split.ts's
+   *  layout mirror), so the tab bar can flag which tabs are already open in a pane.
+   *  Defaults to [activeTab] — one pane — for the unsplit case. */
+  shownTabs: number[];
   /** an actionable message shown as a transient toast when a tab op (create/close)
    *  or a task op (toggle/trigger/remove) fails, or null when there is none. These
    *  ops have no modal to surface an error in (unlike create/kill/archive), so the
@@ -133,6 +140,16 @@ export function sessionTabs(s: SessionData): { name: string; kind: number }[] {
     return s.tabs;
   }
   return [{ name: "agent", kind: 0 }];
+}
+
+/** A stable-ish client-side IDENTITY for a tab (feat: split tabs), used to detect a
+ *  tab set that changed mid-drag. It is NOT a daemon tab id (there is none yet — the
+ *  full stable-id fix is #1738); it is the best identity the client has: the tab's
+ *  kind + name. The ordered list of these is snapshotted at dragstart and re-checked
+ *  at drop, so a concurrent close/create/reorder cancels the drop instead of binding a
+ *  pane to the wrong live tab. */
+export function tabIdentity(tab: { name: string; kind: number }): string {
+  return `${tab.kind}:${tab.name}`;
 }
 
 /** The label a tab reads as, mirroring the TUI's labelForTab (ui/tree/labels.go):
@@ -628,8 +645,16 @@ export class AppShell {
     // The active index is clamped: a resync that shrank the list must not leave the
     // highlight (and the streamed tab) pointing past the end.
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
+    // Which tabs are currently rendered in a pane (feat: split tabs), so the bar can
+    // mark an already-open tab distinctly from the focused one.
+    const shown = new Set(state.shownTabs);
+    // The ordered tab identities at THIS render, snapshotted into a dragged tab's
+    // payload so the drop can detect a mid-drag tab-set change and cancel.
+    const tabIds = tabs.map(tabIdentity);
 
-    const children: HTMLElement[] = tabs.map((tab, i) => tabButton(tab, i, i === active, canManage, this.actions));
+    const children: HTMLElement[] = tabs.map((tab, i) =>
+      tabButton(tab, i, i === active, shown.has(i), canManage, tabIds, this.actions),
+    );
     if (canManage && tabs.length < MAX_TABS) {
       const add = h("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
       add.addEventListener("click", () => this.actions.newTab());
@@ -658,22 +683,43 @@ function selectedSession(state: AppState): SessionData | null {
   return state.selectedId ? (state.sessions.find((s) => s.id === state.selectedId) ?? null) : null;
 }
 
-/** One tab-bar button: its label, an active-state highlight, and — for a closable
- *  (non-agent) tab of a tab-managed session — a × that closes it. Clicking the
- *  button switches to the tab AND attaches (like a session-row click); clicking
- *  the × closes it without attaching (stopPropagation so it isn't also a switch). */
+/** One tab-bar button: its label, an active-state highlight, a "shown in a pane"
+ *  marker, and — for a closable (non-agent) tab of a tab-managed session — a × that
+ *  closes it. Clicking the button points the focused pane at the tab AND attaches
+ *  (like a session-row click); clicking the × closes the tab without attaching
+ *  (stopPropagation so it isn't also a switch).
+ *
+ *  The button is also a DRAG SOURCE (feat: drag-and-drop split tabs): dragging it
+ *  onto a pane edge splits that pane with this tab; onto a pane center replaces it.
+ *  The dragged tab index rides the dataTransfer under a private MIME the panes read. */
 function tabButton(
   tab: { name: string; kind: number },
   index: number,
   active: boolean,
+  shown: boolean,
   canManage: boolean,
+  tabIds: string[],
   actions: Actions,
 ): HTMLElement {
-  const btn = h("button", { type: "button", class: `af-tab${active ? " af-tab-active" : ""}` });
+  const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
+  const btn = h("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
   btn.append(h("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions.openTab(index));
+  // Drag source: stamp the dragged index PLUS a snapshot of the instance's ordered
+  // tab identities at drag time, so the drop can cancel if the tab set changed
+  // mid-drag (a concurrent close/create/reorder — see split.ts). Flag the body so
+  // panes can show drop hints.
+  btn.addEventListener("dragstart", (e) => {
+    if (!e.dataTransfer) {
+      return;
+    }
+    e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ index, tabs: tabIds }));
+    e.dataTransfer.effectAllowed = "move";
+    document.body.classList.add("af-dragging-tab");
+  });
+  btn.addEventListener("dragend", () => document.body.classList.remove("af-dragging-tab"));
   // The agent tab (index 0) is unclosable — killing the session tears it down.
   if (index > 0 && canManage) {
     const close = h("span", { class: "af-tab-close", title: "Close tab" }, "×");

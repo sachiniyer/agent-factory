@@ -74,7 +74,15 @@ export type NavAction =
   | { kind: "switchTab"; index: number }
   | { kind: "newTab" }
   | { kind: "closeTab" }
-  | { kind: "switchView"; view: View };
+  | { kind: "switchView"; view: View }
+  | { kind: "cyclePane"; delta: 1 | -1 }
+  | { kind: "closePane" };
+
+/** Modifier flags the split keybinds read. Only Alt is consulted; the rest are
+ *  ignored so the split chords never shadow a browser/OS shortcut. */
+export interface KeyMods {
+  alt?: boolean;
+}
 
 /** The next selected id after moving `delta` rows, clamped to the ends. From no
  *  selection, a downward move lands on the first row and an upward move on the last
@@ -97,11 +105,33 @@ export function nextSelection(orderedIds: string[], selectedId: string | null, d
  *  the store — the caller (index.ts onKeydown) performs the effect for the returned
  *  action. Precedence is modal → terminal → rail, so an open modal and a focused
  *  terminal never leak keys to the rail. */
-export function decideKey(key: string, ctx: NavContext): NavAction {
+export function decideKey(key: string, ctx: NavContext, mods: KeyMods = {}): NavAction {
   // A modal owns the keyboard while open: Escape cancels it; everything else falls
   // through to the form (a normal keystroke into its input), never the rail.
   if (ctx.modalOpen) {
     return key === "Escape" ? { kind: "closeModal" } : { kind: "none" };
+  }
+  // Split-pane keys (feat: drag-and-drop split tabs), an Alt chord over the j/k/w
+  // movement vocabulary so they read as "same motion, on PANES not the rail": Alt+j/k
+  // cycle pane focus, Alt+w closes the focused pane. They fire in EITHER mode (a split
+  // is only meaningful while attached, and in terminal mode a bare j/k/w must still
+  // reach the agent — the Alt guard is what keeps them from leaking there) but only in
+  // the sessions view with a selection. Handled before the terminal branch so terminal
+  // mode doesn't swallow them.
+  if (mods.alt === true && (key === "j" || key === "k" || key === "w")) {
+    // Consume the chord even with no selection / outside the sessions view, so Alt+j
+    // never falls through to a rail navigation (a pane action with no panes is just a
+    // no-op, not a selection move).
+    if (ctx.view !== "sessions" || !ctx.selectedId) {
+      return { kind: "none" };
+    }
+    if (key === "j") {
+      return { kind: "cyclePane", delta: 1 };
+    }
+    if (key === "k") {
+      return { kind: "cyclePane", delta: -1 };
+    }
+    return { kind: "closePane" };
   }
   // The terminal owns the keyboard: keys go to the agent. Escape is the escape
   // hatch back to rail navigation (mirrors the TUI detach); nothing else is ours.
