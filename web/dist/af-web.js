@@ -6889,16 +6889,61 @@ function decode(raw) {
   }
 }
 
-// src/terminal.ts
-var BACKOFF_BASE_MS2 = 500;
-var BACKOFF_MAX_MS2 = 1e4;
-var RESIZE_DEBOUNCE_MS = 120;
-var THEME = {
-  background: "#0d1117",
-  foreground: "#e6edf3",
-  cursor: "#e6edf3",
-  cursorAccent: "#0d1117",
-  selectionBackground: "rgba(47, 129, 247, 0.30)",
+// src/theme.ts
+var THEME_CHOICES = ["auto", "light", "dark"];
+var STORAGE_KEY = "af-theme";
+function isChoice(v) {
+  return v === "auto" || v === "light" || v === "dark";
+}
+function readThemeChoice() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (isChoice(raw)) {
+      return raw;
+    }
+  } catch {
+  }
+  return "auto";
+}
+function persistThemeChoice(choice) {
+  try {
+    localStorage.setItem(STORAGE_KEY, choice);
+  } catch {
+  }
+}
+function stampTheme(choice) {
+  const root2 = document.documentElement;
+  if (choice === "auto") {
+    root2.removeAttribute("data-theme");
+  } else {
+    root2.setAttribute("data-theme", choice);
+  }
+}
+function bootStampTheme() {
+  const choice = readThemeChoice();
+  stampTheme(choice);
+  return choice;
+}
+function prefersDark() {
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  } catch {
+    return false;
+  }
+}
+function currentMode() {
+  const attr = document.documentElement.getAttribute("data-theme");
+  if (attr === "light" || attr === "dark") {
+    return attr;
+  }
+  return prefersDark() ? "dark" : "light";
+}
+var DARK_XTERM = {
+  background: "#0c1016",
+  foreground: "#e7ecf3",
+  cursor: "#e7ecf3",
+  cursorAccent: "#0c1016",
+  selectionBackground: "rgba(122, 162, 247, 0.2)",
   black: "#484f58",
   red: "#ff7b72",
   green: "#3fb950",
@@ -6916,6 +6961,40 @@ var THEME = {
   brightCyan: "#56d4dd",
   brightWhite: "#f0f6fc"
 };
+var LIGHT_XTERM = {
+  background: "#fdfefe",
+  foreground: "#17202e",
+  cursor: "#17202e",
+  cursorAccent: "#fdfefe",
+  selectionBackground: "rgba(47, 95, 216, 0.16)",
+  black: "#24292f",
+  red: "#cf222e",
+  green: "#1a7f37",
+  yellow: "#9a6700",
+  blue: "#0969da",
+  magenta: "#8250df",
+  cyan: "#1b7c83",
+  white: "#6e7781",
+  brightBlack: "#57606a",
+  brightRed: "#a40e26",
+  brightGreen: "#116329",
+  brightYellow: "#7d4e00",
+  brightBlue: "#0550ae",
+  brightMagenta: "#6639ba",
+  brightCyan: "#3192aa",
+  brightWhite: "#8c959f"
+};
+function xtermTheme(mode) {
+  return mode === "dark" ? DARK_XTERM : LIGHT_XTERM;
+}
+function currentXtermTheme() {
+  return xtermTheme(currentMode());
+}
+
+// src/terminal.ts
+var BACKOFF_BASE_MS2 = 500;
+var BACKOFF_MAX_MS2 = 1e4;
+var RESIZE_DEBOUNCE_MS = 120;
 function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
@@ -6930,7 +7009,9 @@ var AttachTerminal = class {
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
       fontSize: 13,
-      theme: THEME,
+      // Born in the active theme (theme.ts derives the xterm palette from the same
+      // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
+      theme: currentXtermTheme(),
       // The stream is the source of truth; local echo/scrollback beyond the ring is
       // fine but the server never sees our convert-eol, so leave it raw.
       scrollback: 5e3
@@ -7002,6 +7083,12 @@ var AttachTerminal = class {
    *  navigation gets the keys again — the Escape/back-to-nav half of #1693. */
   blur() {
     this.term.blur();
+  }
+  /** Re-applies an xterm palette live (a theme toggle): xterm repaints the canvas
+   *  from the new ITheme, so an open terminal switches light/dark without a
+   *  reconnect or losing scrollback. */
+  setTheme(theme) {
+    this.term.options.theme = theme;
   }
   // --- socket lifecycle ------------------------------------------------------
   connect() {
@@ -7328,6 +7415,15 @@ var SplitView = class {
   blur() {
     for (const pane of this.panes.values()) {
       pane.term?.blur();
+    }
+  }
+  /** Re-applies the active xterm theme to every live pane (a theme toggle). New
+   *  panes already pick it up via terminal.ts's currentXtermTheme(); this repaints
+   *  the ones already open, including split panes. */
+  applyTheme() {
+    const theme = currentXtermTheme();
+    for (const pane of this.panes.values()) {
+      pane.term?.setTheme(theme);
     }
   }
   /** Moves pane focus by `delta` (wrapping) and attaches the newly focused pane. */
@@ -8323,6 +8419,16 @@ function viewLabel(view) {
       return "Tasks";
   }
 }
+function themeLabel(choice) {
+  switch (choice) {
+    case "auto":
+      return "Auto";
+    case "light":
+      return "Light";
+    case "dark":
+      return "Dark";
+  }
+}
 function h2(tag, props = {}, ...children) {
   const el2 = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
@@ -8454,6 +8560,17 @@ var AppShell = class {
     live.setAttribute("role", "status");
     const disconnect2 = h2("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect2.addEventListener("click", () => this.actions.disconnect());
+    const themeToggle = h2("div", { class: "af-theme-toggle" });
+    themeToggle.setAttribute("role", "group");
+    themeToggle.setAttribute("aria-label", "Theme");
+    for (const choice of THEME_CHOICES) {
+      const opt = h2("button", { type: "button", class: "af-theme-opt" }, themeLabel(choice));
+      opt.setAttribute("data-theme-opt", choice);
+      opt.setAttribute("title", `${themeLabel(choice)} theme`);
+      opt.addEventListener("click", () => this.actions.setTheme(choice));
+      this.themeOpts.set(choice, opt);
+      themeToggle.append(opt);
+    }
     const viewNav = h2("div", { class: "af-viewnav" });
     viewNav.setAttribute("role", "tablist");
     viewNav.setAttribute("aria-label", "Views");
@@ -8471,6 +8588,7 @@ var AppShell = class {
       h2("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       live,
+      themeToggle,
       disconnect2
     );
     this.railCount = h2("span", { class: "af-rail-count" }, "0");
@@ -8517,6 +8635,10 @@ var AppShell = class {
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
   viewTabs = /* @__PURE__ */ new Map();
+  // The appbar theme toggle (redesign PR1): one button per Auto/Light/Dark choice,
+  // the active one highlighted in update().
+  themeOpts = /* @__PURE__ */ new Map();
+  lastThemeChoice = null;
   sessionsBody;
   projectsPane;
   tasksPane;
@@ -8568,6 +8690,14 @@ var AppShell = class {
       for (const [v, tab] of this.viewTabs) {
         tab.classList.toggle("af-viewtab-active", v === state.view);
         tab.setAttribute("aria-selected", v === state.view ? "true" : "false");
+      }
+    }
+    if (this.lastThemeChoice !== state.themeChoice) {
+      this.lastThemeChoice = state.themeChoice;
+      for (const [choice, opt] of this.themeOpts) {
+        const active = choice === state.themeChoice;
+        opt.classList.toggle("af-theme-opt-active", active);
+        opt.setAttribute("aria-pressed", active ? "true" : "false");
       }
     }
     this.projectsPane.update(state.sessions, state.selectedId);
@@ -8746,6 +8876,7 @@ function sessionRow(s, selected, actions2) {
 }
 
 // src/index.ts
+var initialThemeChoice = bootStampTheme();
 var store = new Store({
   phase: "login",
   view: "sessions",
@@ -8765,7 +8896,8 @@ var store = new Store({
   activeTab: 0,
   shownTabs: [0],
   tabError: null,
-  tasks: []
+  tasks: [],
+  themeChoice: initialThemeChoice
 });
 var token = null;
 var stream = null;
@@ -8799,6 +8931,7 @@ function mount() {
   store.subscribe(rerender);
   rerender();
   document.addEventListener("keydown", onKeydown, true);
+  watchSystemTheme();
   void bootstrap();
 }
 async function bootstrap() {
@@ -9169,6 +9302,33 @@ function doRemoveTask(task) {
   }
   void removeTask(task.id, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
 }
+function setTheme(choice) {
+  if (store.get().themeChoice === choice) {
+    return;
+  }
+  persistThemeChoice(choice);
+  stampTheme(choice);
+  store.set({ themeChoice: choice });
+  splitView.applyTheme();
+}
+function watchSystemTheme() {
+  let mql;
+  try {
+    mql = window.matchMedia("(prefers-color-scheme: dark)");
+  } catch {
+    return;
+  }
+  const onChange = () => {
+    if (store.get().themeChoice === "auto") {
+      splitView.applyTheme();
+    }
+  };
+  if (typeof mql.addEventListener === "function") {
+    mql.addEventListener("change", onChange);
+  } else if (typeof mql.addListener === "function") {
+    mql.addListener(onChange);
+  }
+}
 var actions = {
   connect,
   disconnect,
@@ -9186,7 +9346,8 @@ var actions = {
   toggleTask,
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask,
-  deleteProject: openDeleteProject
+  deleteProject: openDeleteProject,
+  setTheme
 };
 function syncSplit(state) {
   const selId = state.selectedId;

@@ -834,3 +834,84 @@ test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeh
 
   await page.unroute("**/v1/Snapshot");
 });
+
+// --- theme (redesign PR1): design tokens + light/dark ----------------------
+//
+// These run LAST: the first reloads with a persisted dark choice (to prove the boot
+// stamp beats first paint), and both mutate localStorage + data-theme. They assert on
+// the chrome (data-theme + token-driven computed colors), not on session state, so
+// the earlier flows are undisturbed. The final test resets to Auto + clears the saved
+// choice so the page is left in its default theme.
+
+/** The computed background color of a selector, for a token-driven-color diff. */
+async function bgColor(p: Page, selector: string): Promise<string> {
+  return p.evaluate((sel) => {
+    const node = document.querySelector(sel);
+    return node ? getComputedStyle(node).backgroundColor : "";
+  }, selector);
+}
+
+test("theme (redesign PR1): a saved dark choice is stamped before the app mounts — no flash", async () => {
+  // Persist a dark choice, then install a document-start trap on #app.replaceChildren
+  // (how index.ts mounts its content into #app) that records data-theme AT THE EXACT
+  // synchronous instant the app first mounts. Because the boot stamp runs at index.ts
+  // module top — earlier in the SAME synchronous module turn than mount() — the trap
+  // must see data-theme already "dark". This is race-free (no rAF/microtask timing),
+  // unlike a paint- or observer-based probe.
+  await page.evaluate(() => localStorage.setItem("af-theme", "dark"));
+  await page.addInitScript(() => {
+    interface ThemeProbe {
+      __afMountTheme?: string | null;
+    }
+    const w = window as unknown as ThemeProbe;
+    w.__afMountTheme = "__unset__";
+    const orig = Element.prototype.replaceChildren;
+    Element.prototype.replaceChildren = function (this: Element, ...args: (Node | string)[]): void {
+      if (this.id === "app" && w.__afMountTheme === "__unset__") {
+        w.__afMountTheme = document.documentElement.getAttribute("data-theme");
+      }
+      return orig.apply(this, args);
+    };
+  });
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+
+  const atMount = await page.evaluate(
+    () => (window as unknown as { __afMountTheme?: string | null }).__afMountTheme,
+  );
+  // data-theme was already "dark" the instant the app mounted: no light→dark flash.
+  expect(atMount).toBe("dark");
+  // And it stuck: <html data-theme="dark"> after the app is up.
+  expect(await page.evaluate(() => document.documentElement.getAttribute("data-theme"))).toBe("dark");
+  // The dark theme option reads active in the appbar toggle.
+  await expect(page.locator('.af-theme-opt[data-theme-opt="dark"]')).toHaveClass(/af-theme-opt-active/);
+});
+
+test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors live", async () => {
+  // Force Dark and capture a token-driven color (the rail surface).
+  await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  const darkRail = await bgColor(page, ".af-rail");
+  const darkBody = await bgColor(page, "body");
+
+  // Toggle to Light: the SAME selectors resolve to different token values, proving the
+  // chrome is driven by the CSS custom properties, not hardcoded colors.
+  await page.locator('.af-theme-opt[data-theme-opt="light"]').click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  const lightRail = await bgColor(page, ".af-rail");
+  const lightBody = await bgColor(page, "body");
+
+  expect(lightRail).not.toBe(darkRail);
+  expect(lightBody).not.toBe(darkBody);
+  // The light rail surface is the white token (#ffffff → rgb(255, 255, 255)).
+  expect(lightRail).toBe("rgb(255, 255, 255)");
+  await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
+
+  // Reset to Auto and clear the saved choice so the page is left in its default theme.
+  // Auto removes data-theme entirely (follow prefers-color-scheme).
+  await page.locator('.af-theme-opt[data-theme-opt="auto"]').click();
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.hasAttribute("data-theme")))
+    .toBe(false);
+  await page.evaluate(() => localStorage.removeItem("af-theme"));
+});

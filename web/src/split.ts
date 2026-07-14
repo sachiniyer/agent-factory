@@ -39,6 +39,7 @@ import {
   validate,
 } from "./layout.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
+import { currentXtermTheme } from "./theme.js";
 import { TabKind } from "./types.js";
 
 /** How close (as a fraction of the pane) to an edge the pointer must be for the drop
@@ -236,6 +237,16 @@ export class SplitView {
   blur(): void {
     for (const pane of this.panes.values()) {
       pane.term?.blur();
+    }
+  }
+
+  /** Re-applies the active xterm theme to every live pane (a theme toggle). New
+   *  panes already pick it up via terminal.ts's currentXtermTheme(); this repaints
+   *  the ones already open, including split panes. */
+  applyTheme(): void {
+    const theme = currentXtermTheme();
+    for (const pane of this.panes.values()) {
+      pane.term?.setTheme(theme);
     }
   }
 
