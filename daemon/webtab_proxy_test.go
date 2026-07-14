@@ -122,6 +122,58 @@ func TestWebTabProxy_SetsScopedTokenCookie(t *testing.T) {
 	}
 }
 
+// TestWebTabProxy_ForwardsCookiesBothDirections verifies cookie-backed dev apps
+// work in the iframe: the client's app cookies are forwarded upstream (with the
+// daemon's own token cookie stripped), and the upstream's Set-Cookie is relayed
+// back re-scoped under the tab's proxy path (Domain dropped).
+func TestWebTabProxy_ForwardsCookiesBothDirections(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Echo the Cookie the upstream received so the test can assert what was forwarded.
+		w.Header().Set("X-Echo-Cookie", r.Header.Get("Cookie"))
+		http.SetCookie(w, &http.Cookie{Name: "appsess", Value: "abc", Path: "/", Domain: "localhost"})
+		fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+	mux, id, idx := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/webtab/%s/%d/", id, idx), nil)
+	// The browser sends both the daemon token cookie and the app's own cookie.
+	req.Header.Set("Cookie", webtabTokenCookie+"=daemon-tok; appsess=xyz")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	// Upstream must have seen the app cookie but NOT the daemon token cookie.
+	echoed := rec.Header().Get("X-Echo-Cookie")
+	if !contains(echoed, "appsess=xyz") {
+		t.Fatalf("upstream Cookie %q missing app cookie appsess=xyz", echoed)
+	}
+	if contains(echoed, webtabTokenCookie) {
+		t.Fatalf("upstream Cookie %q must not carry the daemon token cookie", echoed)
+	}
+
+	// The upstream Set-Cookie must be relayed back, re-scoped under this tab's proxy
+	// path, Domain dropped.
+	wantPath := fmt.Sprintf("/v1/webtab/%s/%d/", id, idx)
+	var app *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "appsess" {
+			app = c
+		}
+	}
+	if app == nil {
+		t.Fatal("upstream Set-Cookie (appsess) was not relayed to the client")
+	}
+	if app.Path != wantPath {
+		t.Fatalf("relayed cookie Path = %q, want %q", app.Path, wantPath)
+	}
+	if app.Domain != "" {
+		t.Fatalf("relayed cookie Domain = %q, want empty (defaults to proxy host)", app.Domain)
+	}
+}
+
 // TestWebTabProxy_StripsFramingHeaders verifies the proxy removes a dev server's
 // X-Frame-Options and the frame-ancestors CSP directive, so a same-origin preview
 // always frames, while leaving other CSP directives intact.

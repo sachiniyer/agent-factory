@@ -7571,6 +7571,15 @@ var SplitView = class {
     fallback.append(fbMsg, fbLink);
     wrap.append(bar, frame, fallback);
     pane.host.replaceChildren(wrap);
+    if (target.trim() === "") {
+      fbMsg.textContent = "This web tab has no URL.";
+      fbLink.hidden = true;
+      open.hidden = true;
+      fallback.hidden = false;
+      frame.hidden = true;
+      pane.webDispose = null;
+      return;
+    }
     reload.addEventListener("click", (e) => {
       e.stopPropagation();
       if (src === "") {

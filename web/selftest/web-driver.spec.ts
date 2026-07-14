@@ -499,6 +499,45 @@ test("web tab (feat): an external URL is iframed directly and shows a fallback w
   await page.unroute("**/blocked.example.test/**");
 });
 
+test("web tab (feat): a tab with no target URL renders a clean fallback, not a blank pane", async () => {
+  // The CLI/API refuse to create a URL-less web tab, so this malformed/older-record
+  // case is injected by rewriting the Snapshot to append a web tab (kind 3) with an
+  // empty url to the web-tab session. The pane must render the fallback, not blank.
+  await page.route("**/v1/Snapshot", async (route) => {
+    const resp = await route.fetch();
+    const body = await resp.json();
+    // The Snapshot envelope is { data: { instances: SessionData[] } }.
+    const snap = body?.data as { instances?: Array<{ title: string; tabs?: Array<{ name: string; kind: number; url?: string }> }> };
+    const web = snap?.instances?.find((s) => s.title === SESSION_WEB);
+    if (web) {
+      web.tabs = web.tabs ?? [];
+      web.tabs.push({ name: "nourl", kind: 3, url: "" });
+    }
+    // Fulfill with a freshly-serialized body — the fetched APIResponse has already
+    // been consumed by .json(), so it can't be reused as `response`.
+    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+  });
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await expect(row(page, SESSION_WEB)).toBeVisible({ timeout: 15_000 });
+
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const nourlTab = tabbar.locator(".af-tab", { hasText: "nourl" });
+  await expect(nourlTab).toHaveCount(1, { timeout: 15_000 });
+  await nourlTab.click();
+
+  // A clean fallback (no broken iframe), not a blank pane.
+  const fallback = page.locator(".af-term-host .af-pane-host .af-webpane-fallback");
+  await expect(fallback).toBeVisible({ timeout: 10_000 });
+  await expect(fallback).toContainText("no URL");
+
+  await page.unroute("**/v1/Snapshot");
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+});
+
 test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", async () => {
   // Split A into two panes.
   await row(page, SESSION_A).click();

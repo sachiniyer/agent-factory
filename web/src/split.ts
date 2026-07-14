@@ -527,6 +527,19 @@ export class SplitView {
     wrap.append(bar, frame, fallback);
     pane.host.replaceChildren(wrap);
 
+    // A web tab with no target (a malformed request, or an older persisted record)
+    // renders a clean fallback rather than a blank pane — there is nothing to frame
+    // or open.
+    if (target.trim() === "") {
+      fbMsg.textContent = "This web tab has no URL.";
+      fbLink.hidden = true;
+      open.hidden = true;
+      fallback.hidden = false;
+      frame.hidden = true;
+      pane.webDispose = null;
+      return;
+    }
+
     reload.addEventListener("click", (e) => {
       e.stopPropagation();
       if (src === "") {

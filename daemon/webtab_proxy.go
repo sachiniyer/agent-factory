@@ -118,16 +118,23 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		})
 	}
 
+	// The path prefix this tab's cookies are scoped under. Upstream Set-Cookie
+	// paths are rewritten beneath it so a cookie-backed dev app (login/session/
+	// CSRF) works in the iframe without its cookies colliding with the daemon's
+	// own /v1/webtab/ token cookie or leaking to a sibling tab.
+	cookiePathPrefix := webtabPathPrefix + sessionID + "/" + strconv.Itoa(tabIdx)
+
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = targetURL.Scheme
 			pr.Out.URL.Host = targetURL.Host
 			pr.Out.Host = targetURL.Host
 			pr.Out.URL.Path = joinURLPath(targetURL.Path, "/"+rest)
-			// Strip the daemon credential from what we forward upstream: the dev
-			// server must never see the daemon's bearer token or the auth cookie.
+			// Never leak the daemon credential upstream: drop the Authorization
+			// header and the daemon's own token cookie, but FORWARD the dev app's
+			// cookies so cookie-backed dev servers work in the iframe.
 			pr.Out.Header.Del("Authorization")
-			pr.Out.Header.Del("Cookie")
+			forwardAppCookies(pr.Out)
 			if pr.Out.URL.Query().Has(agentproto.AccessTokenQueryParam) {
 				q := pr.Out.URL.Query()
 				q.Del(agentproto.AccessTokenQueryParam)
@@ -143,6 +150,11 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			// viewed through their own daemon.
 			resp.Header.Del("X-Frame-Options")
 			stripFrameAncestors(resp.Header)
+			// Relay the dev app's Set-Cookie back to the browser, re-scoped under
+			// this tab's proxy path (and Domain dropped so it defaults to the daemon
+			// host) so the cookie lands on the right path and coexists with the
+			// daemon's token cookie.
+			rewriteSetCookiePaths(resp.Header, cookiePathPrefix)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
@@ -152,6 +164,63 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// forwardAppCookies forwards the dev app's cookies upstream while stripping the
+// daemon's own token cookie, so a cookie-backed dev server sees its session/CSRF
+// cookies but never the daemon bearer token.
+func forwardAppCookies(r *http.Request) {
+	cookies := r.Cookies()
+	r.Header.Del("Cookie")
+	var b strings.Builder
+	for _, c := range cookies {
+		if c.Name == webtabTokenCookie {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(c.Name)
+		b.WriteString("=")
+		b.WriteString(c.Value)
+	}
+	if b.Len() > 0 {
+		r.Header.Set("Cookie", b.String())
+	}
+}
+
+// rewriteSetCookiePaths re-scopes the dev app's Set-Cookie headers under the
+// tab's proxy path prefix so a cookie the app set for "/" (or "/api", …) lands on
+// the proxied path the browser actually uses, coexisting with the daemon's
+// /v1/webtab/ token cookie. Domain is dropped so the cookie defaults to the proxy
+// (daemon) host rather than the dev server's own host. Unparseable Set-Cookie
+// lines are passed through untouched.
+func rewriteSetCookiePaths(h http.Header, prefix string) {
+	values := h.Values("Set-Cookie")
+	if len(values) == 0 {
+		return
+	}
+	rewritten := make([]string, 0, len(values))
+	for _, line := range values {
+		c, err := http.ParseSetCookie(line)
+		if err != nil {
+			rewritten = append(rewritten, line)
+			continue
+		}
+		orig := c.Path
+		if orig == "" {
+			orig = "/"
+		}
+		c.Path = joinURLPath(prefix, orig)
+		c.Domain = "" // default to the proxy host
+		if s := c.String(); s != "" {
+			rewritten = append(rewritten, s)
+		}
+	}
+	h.Del("Set-Cookie")
+	for _, v := range rewritten {
+		h.Add("Set-Cookie", v)
+	}
 }
 
 // stripFrameAncestors removes the frame-ancestors directive from any
