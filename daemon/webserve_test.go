@@ -64,7 +64,7 @@ func TestServeSPA_StaticAssetsAndFallback(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, "default-src 'self'; style-src 'self' 'unsafe-inline'", resp.Header.Get("Content-Security-Policy"))
+	require.Equal(t, "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-src 'self' https: http:", resp.Header.Get("Content-Security-Policy"))
 	require.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
 	require.Contains(t, resp.Header.Get("Content-Type"), "javascript")
 	require.NotEmpty(t, body)
@@ -83,7 +83,7 @@ func TestServeSPA_StaticAssetsAndFallback(t *testing.T) {
 	body, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, "default-src 'self'; style-src 'self' 'unsafe-inline'", resp.Header.Get("Content-Security-Policy"))
+	require.Equal(t, "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-src 'self' https: http:", resp.Header.Get("Content-Security-Policy"))
 	require.Contains(t, string(body), `id="app"`, "unknown path must fall back to index.html")
 
 	// A path traversal attempt is contained: it resolves to the shell, never

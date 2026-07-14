@@ -193,6 +193,12 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	mux.HandleFunc("GET /v1/sessions/{id}/stream-info", cs.streamInfoHandler)
 	mux.HandleFunc("GET /v1/events", cs.eventsHandler)
 
+	// The web-tab reverse proxy: not a JSON-envelope RPC (it relays a dev
+	// server's raw HTTP/asset/WS traffic), so it is registered directly here like
+	// the stream routes rather than in the httpRoutes catalog. No method filter —
+	// a framed dev app issues GET/POST/WS to its own origin (this proxy path).
+	mux.HandleFunc(webtabPathPrefix+"{sessionId}/{tabIdx}/{rest...}", cs.webTabProxyHandler)
+
 	// Catch-all: any other path is an unknown route → 404 with the envelope.
 	// ServeMux routes the longest prefix match, so a real route above always
 	// wins and only genuinely-unknown paths (e.g. /v1/Nope, /) land here.

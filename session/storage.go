@@ -97,6 +97,10 @@ type TabData struct {
 	Kind     TabKind `json:"kind"`
 	Command  string  `json:"command,omitempty"`
 	TmuxName string  `json:"tmux_name,omitempty"`
+	// URL is the target of a TabKindWeb tab (the iframe/proxy address); empty for
+	// every other kind. Surfaced in the snapshot so the web UI can iframe it and
+	// so `af sessions get` shows the target.
+	URL string `json:"url,omitempty"`
 	// Conversation is the provider-specific conversation id for this tab, when
 	// the underlying agent exposes a durable resume id. Omitted for legacy rows
 	// and providers where af can only resume "latest".

@@ -21,9 +21,38 @@ import (
 // commands — a remote session's only terminal tab is the terminal_cmd one), an
 // empty command, or an instance already at the soft cap (maxTabs, enforced by
 // AddProcessTab).
+// webTabKind is the CreateTabRequest.Kind value that selects a URL/iframe tab.
+const webTabKind = "web"
+
 func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
-	if !req.Shell && strings.TrimSpace(req.Command) == "" {
+	isWeb := req.Kind == webTabKind
+	if !isWeb && req.Kind != "" {
+		return "", fmt.Errorf("unknown tab kind %q (expected %q or empty)", req.Kind, webTabKind)
+	}
+	if !isWeb && !req.Shell && strings.TrimSpace(req.Command) == "" {
 		return "", fmt.Errorf("a process tab requires a non-empty command (--command)")
+	}
+	// Resolve the web target up front so an invalid URL/port fails fast, before
+	// any session lookup or lock. Only loopback targets are reverse-proxied
+	// (webtab_proxy.go); an external URL is iframed directly by the web UI.
+	var webURL string
+	if isWeb {
+		target := strings.TrimSpace(req.URL)
+		if target == "" {
+			if req.Port == 0 {
+				return "", fmt.Errorf("a web tab requires a target (--url or --port)")
+			}
+			portURL, perr := session.WebTabURLForPort(req.Port)
+			if perr != nil {
+				return "", perr
+			}
+			target = portURL
+		}
+		normalized, nerr := session.NormalizeWebTabURL(target)
+		if nerr != nil {
+			return "", nerr
+		}
+		webURL = normalized
 	}
 
 	// Resolve by stable id first (req.ID), falling back to {Title, RepoID} — the
@@ -58,12 +87,16 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
 
-	// A shell tab runs $SHELL (the TUI `t` mutation, #960 PR 2); a process tab
-	// runs the requested command (the CLI/API path, #930 PR 5).
+	// A web tab is pure metadata (a URL, no PTY); a shell tab runs $SHELL (the TUI
+	// `t` mutation, #960 PR 2); a process tab runs the requested command (the
+	// CLI/API path, #930 PR 5).
 	var tab *session.Tab
-	if req.Shell {
+	switch {
+	case isWeb:
+		tab, err = instance.AddWebTab(webURL, req.Name)
+	case req.Shell:
 		tab, err = instance.AddShellTab()
-	} else {
+	default:
 		tab, err = instance.AddProcessTab(req.Command, req.Name)
 	}
 	if err != nil {

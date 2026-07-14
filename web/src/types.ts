@@ -29,6 +29,10 @@ export const TabKind = {
   Agent: 0,
   Shell: 1,
   Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3,
 } as const;
 
 /** session.InFlightOp (session/liveness.go): the transient client-op axis. */
@@ -96,6 +100,10 @@ export interface TabData {
   kind: number;
   command?: string;
   tmux_name?: string;
+  /** The iframe target of a web tab (TabKind.Web); absent for other kinds. A
+   *  loopback URL is rendered through the same-origin daemon proxy, an external
+   *  URL directly. Mirrors session.TabData.URL (session/storage.go). */
+  url?: string;
 }
 
 /** The subset of session.GitWorktreeData (session/storage.go) the web reads: the

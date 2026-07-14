@@ -752,9 +752,12 @@ function syncSplit(state: AppState): void {
   // The ordered tab identities, so the split view can (a) know the live tab count and
   // (b) reject a drop whose drag-time snapshot no longer matches (a mid-drag reorder).
   const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
+  // The per-tab iframe target for web tabs (undefined for terminal tabs), parallel
+  // to tabIds, so the split view can iframe a web leaf.
+  const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
   // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696), so a
   // loopback client still attaches its live panes.
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab);
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets);
 }
 
 function disposeSplit(): void {

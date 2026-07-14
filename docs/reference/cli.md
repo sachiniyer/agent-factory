@@ -42,10 +42,10 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
-- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab running a command in a session's worktree
+- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's process tabs (create/delete)
-- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab running a command in a session's worktree
+- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
@@ -881,7 +881,7 @@ af sessions
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
-- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab running a command in a session's worktree
+- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's process tabs (create/delete)
 - [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
@@ -1162,18 +1162,26 @@ af sessions send-prompt <title> <prompt> [flags]
 
 ## af sessions tab-create
 
-Spawn a process tab running a command in a session's worktree
+Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
 
-Create a new tab in an existing session that runs the given command in the
-session's git worktree (e.g. a data explorer TUI or a test watcher).
+Create a new tab in an existing session.
+
+Process tab (default): runs --command in the session's git worktree (e.g. a data
+explorer TUI or a test watcher). If --name is omitted, a name is derived from the
+command's basename.
+
+Web tab (--kind web): a URL/iframe tab with NO process — an agent injects a live
+browser view into the user's screen. Point it at a local dev server with --port
+<n> (= http://localhost:<n>) or --url <addr>, or at an external site with --url
+https://... A localhost/loopback target is reverse-proxied by the daemon so the
+preview works even when the web UI is viewed remotely (Tailscale/SSH); an external
+URL is iframed directly (best-effort — many sites block embedding). The web tab
+renders as an iframe in the web UI and as a placeholder in the TUI.
 
 The tab persists and reconnects across a daemon/af restart like every other tab.
-If --name is omitted, a name is derived from the command's basename; the name is
-made unique within the session (auto-suffixed -2, -3, …). The resolved tab name
-is printed on success so scripts/agents can address it. Not available for remote
-sessions: they have no local worktree and the hook protocol can't run arbitrary
-commands — a remote session's only terminal tab comes from
-remote_hooks.terminal_cmd.
+The name is made unique within the session (auto-suffixed -2, -3, …). The resolved
+tab name is printed on success so scripts/agents can address it. Not available for
+remote sessions: they have no local worktree.
 
 ```
 af sessions tab-create <title> [flags]
@@ -1183,8 +1191,11 @@ af sessions tab-create <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--command` | `string` | Command to run in the new tab (required) |
-| `--name` | `string` | Tab name (defaults to the command basename; auto-suffixed on collision) |
+| `--command` | `string` | Command to run in a process tab (required unless --kind web) |
+| `--kind` | `string` | Tab kind: empty for a process tab, or "web" for a URL/iframe tab |
+| `--name` | `string` | Tab name (defaults to the command basename, or "web" for a web tab; auto-suffixed on collision) |
+| `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
+| `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
 
@@ -1248,7 +1259,7 @@ af sessions tabs
 
 **Subcommands**
 
-- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab running a command in a session's worktree
+- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 
 **Global flags**
@@ -1263,7 +1274,7 @@ af sessions tabs
 
 ## af sessions tabs create
 
-Spawn a process tab running a command in a session's worktree
+Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
 
 Alias for "sessions tab-create". See "af sessions tab-create --help" for details.
 
@@ -1275,8 +1286,11 @@ af sessions tabs create <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--command` | `string` | Command to run in the new tab (required) |
-| `--name` | `string` | Tab name (defaults to the command basename; auto-suffixed on collision) |
+| `--command` | `string` | Command to run in a process tab (required unless --kind web) |
+| `--kind` | `string` | Tab kind: empty for a process tab, or "web" for a URL/iframe tab |
+| `--name` | `string` | Tab name (defaults to the command basename, or "web" for a web tab; auto-suffixed on collision) |
+| `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
+| `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
 

@@ -9,6 +9,10 @@ const agentTabName = "agent"
 // per-instance terminal session ('t' / `af sessions tab-create`).
 const shellTabName = "shell"
 
+// webTabName is the default display label of a web/iframe tab ('web', then
+// 'web-2', … on collision). Created via `af sessions tab-create --kind web`.
+const webTabName = "web"
+
 // shellTmuxSuffix extends an instance's agent tmux session name to derive its
 // shell tab's session name (e.g. af_<repoHash>_<title>__shell). Deterministic
 // so the shell session is collision-free across instances and restorable by
@@ -38,6 +42,14 @@ const (
 	// TabKindProcess runs an arbitrary command in the worktree (the future
 	// CLI-spawned tab). Not created in PR 1.
 	TabKindProcess
+	// TabKindWeb is a URL/iframe tab: it has NO tmux PTY and no process. It
+	// carries a target URL (a loopback dev-server address the daemon
+	// reverse-proxies, or an external absolute URL the web UI iframes directly)
+	// so an agent can inject a live browser view into the user's screen. Rendered
+	// as an iframe in the web UI and as a placeholder in the TUI (which cannot
+	// render a browser). Created only through `af sessions tab-create --kind web`
+	// / the CreateTab API — never a TUI hotkey.
+	TabKindWeb
 )
 
 // Tab is one process running in an instance's worktree, backed by a single tmux
@@ -54,6 +66,11 @@ type Tab struct {
 	// Command is the process to run; empty means the kind's default. Unused in
 	// PR 1 — the agent program is still resolved by the local backend.
 	Command string
+	// URL is the target of a TabKindWeb tab: a normalized absolute URL, either a
+	// loopback dev-server address (http://localhost:PORT) the daemon
+	// reverse-proxies, or an external absolute URL the web UI iframes directly.
+	// Empty for every other kind.
+	URL string
 	// Conversation is the provider-specific id that resumes this tab's agent
 	// conversation exactly. Empty means recovery falls back to the provider's
 	// existing latest-session behavior.
@@ -88,12 +105,19 @@ func newRemoteAgentTab() *Tab {
 	return &Tab{Name: agentTabName, Kind: TabKindAgent}
 }
 
+// newWebTab returns a TabKindWeb tab pointing at url. It carries no tmux
+// session (web tabs have no PTY): the target is rendered as an iframe in the web
+// UI and as a placeholder in the TUI. The caller sets a unique display name.
+func newWebTab(url string) *Tab {
+	return &Tab{Name: webTabName, Kind: TabKindWeb, URL: url}
+}
+
 // tabKindForData clamps a persisted TabKind to a known value, defaulting to
 // TabKindShell for any unexpected value written by a newer binary so a forward-
 // incompatible record degrades to a plain shell tab rather than an agent tab.
 func tabKindForData(k TabKind) TabKind {
 	switch k {
-	case TabKindAgent, TabKindShell, TabKindProcess:
+	case TabKindAgent, TabKindShell, TabKindProcess, TabKindWeb:
 		return k
 	default:
 		return TabKindShell

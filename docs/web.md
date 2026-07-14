@@ -327,6 +327,65 @@ a bad cron expression comes back as an inline error.
 
 ---
 
+## Web tabs
+
+Alongside terminal tabs, a session can hold **web tabs** — a tab that renders a
+**site in an iframe** instead of a terminal. The primary use is a **live
+dev-server preview**: an agent runs a dev server in its worktree and injects a tab
+pointing at it, so you watch the app render in the browser as the agent builds it.
+
+Web tabs are created from inside a session (by an agent or by you) with the
+CLI/API — there is no `+`-button for them, because the target comes from whatever
+the agent is running:
+
+```bash
+# a local dev server on port 5173 (Vite/Next/CRA/…)
+af sessions tab-create <title> --kind web --port 5173
+
+# any URL (localhost or external)
+af sessions tab-create <title> --kind web --url http://localhost:3000
+af sessions tab-create <title> --kind web --url https://example.com/docs
+```
+
+How the target is rendered depends on whether it is **local** or **external**:
+
+- **Local (`--port`, `localhost`, `127.0.0.1`, `::1`):** the **daemon
+  reverse-proxies** it under a same-origin path (`/v1/webtab/…`), and the web UI
+  iframes that. Because the daemon shares the machine with the dev server, the
+  preview works **even when you view the web UI remotely** (over Tailscale or an
+  SSH-forwarded port) — a raw `localhost` iframe would otherwise hit *your*
+  machine, not the daemon's. Same-origin also sidesteps the dev server's
+  `X-Frame-Options`. Only loopback targets are proxied — the daemon never proxies
+  an external host, so it can't be turned into an open proxy.
+- **External (`https://…`):** the web UI iframes it **directly** (never through the
+  daemon). This is best-effort: many sites send `X-Frame-Options` /
+  `frame-ancestors` and the **browser blocks embedding**. af does not try to defeat
+  framing protections — every external web tab carries an always-present **"open
+  ↗"** link (the guaranteed escape hatch), and if the site does not load in time
+  (slow / unreachable) the tab shows a clean fallback panel with an **"Open in a
+  new tab"** link.
+
+In the **TUI** a web tab shows a placeholder (the target URL + "view in the web
+UI or open in a browser") — a terminal can't render a browser. Tab navigation
+(`1`–`9`, the sidebar tree) treats it like any other tab.
+
+!!! note "Dev-server base path"
+    The proxy serves the dev server under `/v1/webtab/<session>/<tab>/`. Apps that
+    request assets with **relative** paths resolve correctly under that prefix. An
+    app that hard-codes **absolute** asset paths (`/assets/app.js`) will not find
+    them through the proxy — configure the dev server with a matching base path
+    (e.g. Vite's `base`) or serve relative asset URLs. WebSocket-based hot reload
+    is proxied on a best-effort basis.
+
+    Over a **token-protected** network listener, iframe sub-resource requests are
+    kept authorized via a path-scoped cookie; if a preview loads only partially
+    over a direct network listener, prefer an **SSH-forwarded loopback** port
+    (which needs no token) — the common remote-preview path.
+
+The iframe is sandboxed (scripts and forms run, but it gets an opaque origin, so a
+proxied preview cannot reach the web UI or read its token). A small **reload**
+control sits above every web tab for dev-preview refreshes.
+
 ## Keyboard reference
 
 | Key | In the Sessions view |

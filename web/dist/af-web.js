@@ -7173,6 +7173,42 @@ var AttachTerminal = class {
   }
 };
 
+// src/types.ts
+var Liveness = {
+  Unset: 0,
+  Running: 1,
+  Ready: 2,
+  Lost: 3,
+  Dead: 4,
+  Archived: 5,
+  LimitReached: 6
+};
+var TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3
+};
+var InFlightOp = {
+  None: 0,
+  Creating: 1,
+  Killing: 2,
+  Archiving: 3,
+  Restoring: 4
+};
+var Status = {
+  Running: 0,
+  Ready: 1,
+  Loading: 2,
+  Deleting: 3,
+  Dead: 4,
+  Lost: 5,
+  Archived: 6
+};
+
 // src/split.ts
 var EDGE_BAND = 0.3;
 function el(tag, cls) {
@@ -7185,6 +7221,23 @@ function sameTabs(a, b) {
     return false;
   }
   return a.every((v, i) => v === b[i]);
+}
+function isLoopbackWebUrl(raw) {
+  try {
+    let host = new URL(raw).hostname.toLowerCase();
+    host = host.replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+  } catch {
+    return false;
+  }
+}
+function webProxyPath(sessionId, tabIdx, token2) {
+  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
+  return token2 ? `${base}?access_token=${encodeURIComponent(token2)}` : base;
+}
+function webFallbackMs() {
+  const override = globalThis.__afWebtabFallbackMs;
+  return typeof override === "number" ? override : 2500;
 }
 var SplitView = class {
   constructor(host, cb) {
@@ -7202,6 +7255,10 @@ var SplitView = class {
   // store update. A drop compares its drag-time snapshot against this to detect a
   // mid-drag tab-set change (concurrent close/create/reorder) and cancel.
   tabIds = [];
+  // Per-tab-index iframe target for web tabs (TabKind.Web); undefined for a
+  // terminal tab. Parallel to the tab list, refreshed on every setSession, so
+  // reconcile can mount an iframe for a web leaf without extra plumbing.
+  tabTargets = [];
   tree = null;
   focusedId = null;
   // Debounces the "focus left every pane" report so a click that moves focus A→B
@@ -7218,9 +7275,10 @@ var SplitView = class {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId, token2, tabIds, initialTab) {
+  setSession(sessionId, token2, tabIds, initialTab, tabTargets = []) {
     this.token = token2;
     this.tabIds = tabIds;
+    this.tabTargets = tabTargets;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
     if (sessionId === null || token2 === null) {
       this.teardown();
@@ -7342,6 +7400,7 @@ var SplitView = class {
   teardown() {
     for (const pane of this.panes.values()) {
       pane.term?.dispose();
+      pane.webDispose?.();
     }
     this.panes.clear();
     this.host.replaceChildren();
@@ -7361,6 +7420,7 @@ var SplitView = class {
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
         pane.term?.dispose();
+        pane.webDispose?.();
         this.panes.delete(id);
       }
     }
@@ -7382,8 +7442,22 @@ var SplitView = class {
       if (!pane) {
         continue;
       }
-      if (!pane.term || pane.tab !== leaf.tab) {
+      const webTarget = this.webTargetAt(leaf.tab);
+      if (webTarget !== null) {
+        if (pane.term || pane.webUrl !== webTarget || pane.tab !== leaf.tab) {
+          pane.term?.dispose();
+          pane.term = null;
+          pane.webDispose?.();
+          pane.host.replaceChildren();
+          pane.tab = leaf.tab;
+          this.mountWebPane(pane, webTarget);
+          pane.status = "open";
+          this.onPaneStatus(leaf.id, "open");
+        }
+      } else if (!pane.term || pane.tab !== leaf.tab) {
         pane.term?.dispose();
+        pane.webDispose?.();
+        pane.webUrl = null;
         pane.host.replaceChildren();
         pane.tab = leaf.tab;
         pane.status = "connecting";
@@ -7417,9 +7491,127 @@ var SplitView = class {
     const overlay = el("div", "af-drop-overlay");
     container.append(head, paneHost, overlay);
     container.addEventListener("mousedown", () => this.focusPane(leaf.id));
-    const pane = { leafId: leaf.id, container, host: paneHost, label, overlay, term: null, tab: -1, status: "connecting" };
+    const pane = {
+      leafId: leaf.id,
+      container,
+      host: paneHost,
+      label,
+      overlay,
+      term: null,
+      tab: -1,
+      status: "connecting",
+      webUrl: null,
+      webDispose: null
+    };
     this.wireDrop(pane);
     return pane;
+  }
+  /** The iframe target for the tab at `idx`, or null when it is not a web tab.
+   *  Confirms the kind from tabIds (the "kind:name" identity) so a stale/mismatched
+   *  tabTargets entry can never turn a terminal tab into an iframe. */
+  webTargetAt(idx) {
+    const identity = this.tabIds[idx];
+    if (!identity) {
+      return null;
+    }
+    const kind = Number.parseInt(identity.split(":", 1)[0] ?? "", 10);
+    if (kind !== TabKind.Web) {
+      return null;
+    }
+    return this.tabTargets[idx] ?? "";
+  }
+  /** Mounts an iframe for a web tab into pane.host and records its teardown on the
+   *  pane. A loopback target is loaded through the same-origin daemon proxy
+   *  (/v1/webtab/...), which makes a localhost dev-server preview work even for a
+   *  REMOTE viewer and sidesteps X-Frame-Options; an external URL is iframed
+   *  directly (best-effort). A reload control and an "open in new tab" affordance
+   *  are always present; for a direct external frame a load-timeout reveals a
+   *  fallback when embedding is blocked. */
+  mountWebPane(pane, target) {
+    pane.webUrl = target;
+    const sessionId = this.sessionId ?? "";
+    const proxied = target !== "" && isLoopbackWebUrl(target);
+    const src = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    const openHref = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    const wrap = el("div", "af-webpane");
+    const bar = el("div", "af-webpane-bar");
+    const reload = document.createElement("button");
+    reload.type = "button";
+    reload.className = "af-webpane-reload";
+    reload.title = "Reload";
+    reload.setAttribute("aria-label", "Reload web tab");
+    reload.textContent = "\u21BB";
+    const urlText = el("span", "af-webpane-url");
+    urlText.textContent = target || "(no URL)";
+    urlText.title = target;
+    const open = document.createElement("a");
+    open.className = "af-webpane-open";
+    open.href = openHref;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    open.textContent = "open \u2197";
+    bar.append(reload, urlText, open);
+    const frame = document.createElement("iframe");
+    frame.className = "af-webframe";
+    frame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    if (src !== "") {
+      frame.src = src;
+    }
+    const fallback = el("div", "af-webpane-fallback");
+    fallback.hidden = true;
+    const fbMsg = el("div", "af-webpane-fallback-msg");
+    fbMsg.textContent = "This site can't be embedded (it blocks framing).";
+    const fbLink = document.createElement("a");
+    fbLink.className = "af-webpane-fallback-link";
+    fbLink.href = openHref;
+    fbLink.target = "_blank";
+    fbLink.rel = "noopener noreferrer";
+    fbLink.textContent = "Open in a new tab \u2197";
+    fallback.append(fbMsg, fbLink);
+    wrap.append(bar, frame, fallback);
+    pane.host.replaceChildren(wrap);
+    if (target.trim() === "") {
+      fbMsg.textContent = "This web tab has no URL.";
+      fbLink.hidden = true;
+      open.hidden = true;
+      fallback.hidden = false;
+      frame.hidden = true;
+      pane.webDispose = null;
+      return;
+    }
+    reload.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (src === "") {
+        return;
+      }
+      fallback.hidden = true;
+      frame.hidden = false;
+      frame.src = "";
+      frame.src = src;
+    });
+    let settled = false;
+    const onLoad = () => {
+      settled = true;
+      fallback.hidden = true;
+      frame.hidden = false;
+    };
+    frame.addEventListener("load", onLoad);
+    let timer = null;
+    if (!proxied && src !== "") {
+      timer = setTimeout(() => {
+        if (!settled) {
+          fallback.hidden = false;
+          frame.hidden = true;
+        }
+      }, webFallbackMs());
+    }
+    pane.webDispose = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      frame.removeEventListener("load", onLoad);
+    };
   }
   buildNode(node) {
     if (node.kind === "leaf") {
@@ -7867,33 +8059,6 @@ function addTaskModal(projects, callbacks) {
   return handle;
 }
 
-// src/types.ts
-var Liveness = {
-  Unset: 0,
-  Running: 1,
-  Ready: 2,
-  Lost: 3,
-  Dead: 4,
-  Archived: 5,
-  LimitReached: 6
-};
-var InFlightOp = {
-  None: 0,
-  Creating: 1,
-  Killing: 2,
-  Archiving: 3,
-  Restoring: 4
-};
-var Status = {
-  Running: 0,
-  Ready: 1,
-  Loading: 2,
-  Deleting: 3,
-  Dead: 4,
-  Lost: 5,
-  Archived: 6
-};
-
 // src/status.ts
 var READY_GLYPH = "\u25CF";
 var DEAD_GLYPH = "\u25CB";
@@ -8132,6 +8297,9 @@ function tabLabel(tab) {
   }
   if (tab.kind === 1) {
     return "Terminal";
+  }
+  if (tab.kind === 3) {
+    return tab.name || "Web";
   }
   return tab.name || "Tab";
 }
@@ -9026,7 +9194,8 @@ function syncSplit(state) {
   const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
   const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab);
+  const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets);
 }
 function disposeSplit() {
   splitView.dispose();

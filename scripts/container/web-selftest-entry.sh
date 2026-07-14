@@ -30,7 +30,14 @@ BASE_URL="https://${LISTEN}"
 READY_MARKER=AF_SELFTEST_READY
 SESSION_A=probe-a
 SESSION_B=probe-b
+SESSION_WEB=probe-web
 SEEDED_TASK=probe-task
+# A throwaway loopback HTTP server the web-tab test points a local web tab at, so
+# the daemon reverse-proxy + iframe render is exercised end to end against real
+# content. The external web tab points at a host the Playwright test intercepts.
+WEBTAB_PORT=8890
+WEBTAB_LOCAL_MARKER=AF_WEBTAB_LOCAL_OK
+WEBTAB_EXTERNAL_URL=https://blocked.example.test/
 export AGENT_FACTORY_HOME="$HOME_DIR"
 # A container binary is built at the branch version (typically behind the latest
 # release); without this it would self-update on boot and restart the daemon
@@ -81,12 +88,15 @@ fi
 echo ">>> starting af daemon (listen_addr=$LISTEN) ..."
 "$BIN" --daemon >/work/daemon.log 2>&1 &
 DAEMON_PID=$!
+WEBTAB_SERVER_PID=""
 
 cleanup() {
     rc=$?
     echo ">>> tearing down (rc=$rc) ..."
     "$BIN" sessions kill "$SESSION_A" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_B" >/dev/null 2>&1 || true
+    "$BIN" sessions kill "$SESSION_WEB" >/dev/null 2>&1 || true
+    kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
     if [ "$rc" -ne 0 ]; then
         echo "===== daemon.log (tail) =====" >&2
@@ -146,6 +156,37 @@ done
 echo ">>> seeding task $SEEDED_TASK ..."
 "$BIN" tasks add --repo "$MOCK" --name "$SEEDED_TASK" --prompt "echo scheduled" --cron "0 9 * * *" >/dev/null
 
+# --- seed a web-tab session (feat: web/iframe tabs) -------------------------
+# A tiny loopback HTTP server serves a deterministic marker; a LOCAL web tab
+# points at it (exercising the daemon reverse-proxy + iframe render), and an
+# EXTERNAL web tab points at a host the Playwright test intercepts (exercising the
+# direct-iframe + blocked-embedding fallback).
+echo ">>> starting web-tab preview server on 127.0.0.1:$WEBTAB_PORT ..."
+cat >/work/webtab-server.js <<EOF
+const http = require("http");
+http
+  .createServer((req, res) => {
+    res.setHeader("content-type", "text/html");
+    res.end('<!doctype html><html><body><h1 id="marker">$WEBTAB_LOCAL_MARKER</h1><p>path=' + req.url + "</p></body></html>");
+  })
+  .listen($WEBTAB_PORT, "127.0.0.1");
+EOF
+node /work/webtab-server.js &
+WEBTAB_SERVER_PID=$!
+
+echo ">>> creating web-tab session $SESSION_WEB ..."
+"$BIN" sessions create --repo "$MOCK" --name "$SESSION_WEB" --program claude >/dev/null
+for i in $(seq 1 30); do
+    if "$BIN" sessions get "$SESSION_WEB" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+# A local web tab (daemon-proxied) named "preview" and an external one named
+# "external", so the Playwright test can address each by its tab label.
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --port "$WEBTAB_PORT" --name preview >/dev/null
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --url "$WEBTAB_EXTERNAL_URL" --name external >/dev/null
+
 # --- run the Playwright harness ---------------------------------------------
 echo ">>> installing web deps + running the Playwright harness ..."
 cd /work/web
@@ -157,7 +198,10 @@ npm ci --no-audit --no-fund
 export AF_WEB_BASE_URL="$BASE_URL"
 export AF_WEB_SESSION_A="$SESSION_A"
 export AF_WEB_SESSION_B="$SESSION_B"
+export AF_WEB_SESSION_WEB="$SESSION_WEB"
 export AF_WEB_READY_MARKER="$READY_MARKER"
 export AF_WEB_TASK_NAME="$SEEDED_TASK"
+export AF_WEBTAB_LOCAL_MARKER="$WEBTAB_LOCAL_MARKER"
+export AF_WEBTAB_EXTERNAL_URL="$WEBTAB_EXTERNAL_URL"
 
 npx playwright test

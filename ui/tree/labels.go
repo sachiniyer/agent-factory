@@ -44,6 +44,11 @@ func labelForTab(tab *session.Tab) string {
 		return "Agent"
 	case session.TabKindShell:
 		return "Terminal"
+	case session.TabKindWeb:
+		if tab.Name != "" {
+			return tab.Name
+		}
+		return "Web"
 	default:
 		if tab.Name != "" {
 			return tab.Name

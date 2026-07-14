@@ -39,6 +39,7 @@ import {
   validate,
 } from "./layout.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
+import { TabKind } from "./types.js";
 
 /** How close (as a fraction of the pane) to an edge the pointer must be for the drop
  *  to split rather than replace — the outer 30% band on each side is an edge zone. */
@@ -67,6 +68,12 @@ interface Pane {
   term: AttachTerminal | null;
   tab: number;
   status: TerminalStatus;
+  // A web/iframe pane (TabKind.Web) has no AttachTerminal: it mounts an iframe in
+  // `host` instead. webUrl is the target currently mounted (so reconcile can tell
+  // a same-tab no-op from a target change), and webDispose tears down the iframe's
+  // listeners/timers. Both null for a terminal pane.
+  webUrl: string | null;
+  webDispose: (() => void) | null;
 }
 
 function el(tag: string, cls: string): HTMLElement {
@@ -82,6 +89,37 @@ function sameTabs(a: string[], b: string[]): boolean {
     return false;
   }
   return a.every((v, i) => v === b[i]);
+}
+
+/** Whether a web-tab target points at a loopback host (localhost/127.x/::1) — the
+ *  only targets the daemon reverse-proxies. Mirrors session.IsLoopbackWebTarget
+ *  (session/weburl.go). A URL that does not parse is treated as non-loopback. */
+export function isLoopbackWebUrl(raw: string): boolean {
+  try {
+    let host = new URL(raw).hostname.toLowerCase();
+    host = host.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+  } catch {
+    return false;
+  }
+}
+
+/** The same-origin daemon proxy path for a loopback web tab, so the iframe hits
+ *  the daemon (which shares the machine with the dev server) rather than the
+ *  viewer's own machine. The bearer token rides ?access_token= for network peers
+ *  (an iframe src can't set the Authorization header); a loopback/tokenless client
+ *  sends none. The trailing slash matters — the route requires it, and it makes
+ *  the dev app's RELATIVE asset URLs resolve under the proxy prefix. */
+export function webProxyPath(sessionId: string, tabIdx: number, token: string | null): string {
+  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
+  return token ? `${base}?access_token=${encodeURIComponent(token)}` : base;
+}
+
+/** The delay before an unresponsive DIRECT external frame reveals its fallback.
+ *  Overridable via window.__afWebtabFallbackMs for deterministic tests. */
+function webFallbackMs(): number {
+  const override = (globalThis as { __afWebtabFallbackMs?: number }).__afWebtabFallbackMs;
+  return typeof override === "number" ? override : 2500;
 }
 
 /** The drag payload a tab-bar drag stamps into the dataTransfer (ui.ts): the dragged
@@ -104,6 +142,10 @@ export class SplitView {
   // store update. A drop compares its drag-time snapshot against this to detect a
   // mid-drag tab-set change (concurrent close/create/reorder) and cancel.
   private tabIds: string[] = [];
+  // Per-tab-index iframe target for web tabs (TabKind.Web); undefined for a
+  // terminal tab. Parallel to the tab list, refreshed on every setSession, so
+  // reconcile can mount an iframe for a web leaf without extra plumbing.
+  private tabTargets: (string | undefined)[] = [];
   private tree: LayoutNode | null = null;
   private focusedId: string | null = null;
 
@@ -128,9 +170,16 @@ export class SplitView {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId: string | null, token: string | null, tabIds: string[], initialTab: number): void {
+  setSession(
+    sessionId: string | null,
+    token: string | null,
+    tabIds: string[],
+    initialTab: number,
+    tabTargets: (string | undefined)[] = [],
+  ): void {
     this.token = token;
     this.tabIds = tabIds;
+    this.tabTargets = tabTargets;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
     if (sessionId === null || token === null) {
       this.teardown();
@@ -271,6 +320,7 @@ export class SplitView {
   private teardown(): void {
     for (const pane of this.panes.values()) {
       pane.term?.dispose();
+      pane.webDispose?.();
     }
     this.panes.clear();
     this.host.replaceChildren();
@@ -293,6 +343,7 @@ export class SplitView {
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
         pane.term?.dispose();
+        pane.webDispose?.();
         this.panes.delete(id);
       }
     }
@@ -324,8 +375,25 @@ export class SplitView {
       if (!pane) {
         continue;
       }
-      if (!pane.term || pane.tab !== leaf.tab) {
+      const webTarget = this.webTargetAt(leaf.tab);
+      if (webTarget !== null) {
+        // A web/iframe tab: mount an iframe instead of an xterm. Rebuild only when
+        // the bound tab or its target changed, so a no-op reconcile never reloads
+        // the frame (which would drop the dev server's in-page state).
+        if (pane.term || pane.webUrl !== webTarget || pane.tab !== leaf.tab) {
+          pane.term?.dispose();
+          pane.term = null;
+          pane.webDispose?.();
+          pane.host.replaceChildren();
+          pane.tab = leaf.tab;
+          this.mountWebPane(pane, webTarget);
+          pane.status = "open";
+          this.onPaneStatus(leaf.id, "open");
+        }
+      } else if (!pane.term || pane.tab !== leaf.tab) {
         pane.term?.dispose();
+        pane.webDispose?.();
+        pane.webUrl = null;
         pane.host.replaceChildren();
         pane.tab = leaf.tab;
         pane.status = "connecting";
@@ -366,9 +434,153 @@ export class SplitView {
     // pane is the focused one by the time keys flow.
     container.addEventListener("mousedown", () => this.focusPane(leaf.id));
 
-    const pane: Pane = { leafId: leaf.id, container, host: paneHost, label, overlay, term: null, tab: -1, status: "connecting" };
+    const pane: Pane = {
+      leafId: leaf.id,
+      container,
+      host: paneHost,
+      label,
+      overlay,
+      term: null,
+      tab: -1,
+      status: "connecting",
+      webUrl: null,
+      webDispose: null,
+    };
     this.wireDrop(pane);
     return pane;
+  }
+
+  /** The iframe target for the tab at `idx`, or null when it is not a web tab.
+   *  Confirms the kind from tabIds (the "kind:name" identity) so a stale/mismatched
+   *  tabTargets entry can never turn a terminal tab into an iframe. */
+  private webTargetAt(idx: number): string | null {
+    const identity = this.tabIds[idx];
+    if (!identity) {
+      return null;
+    }
+    const kind = Number.parseInt(identity.split(":", 1)[0] ?? "", 10);
+    if (kind !== TabKind.Web) {
+      return null;
+    }
+    return this.tabTargets[idx] ?? "";
+  }
+
+  /** Mounts an iframe for a web tab into pane.host and records its teardown on the
+   *  pane. A loopback target is loaded through the same-origin daemon proxy
+   *  (/v1/webtab/...), which makes a localhost dev-server preview work even for a
+   *  REMOTE viewer and sidesteps X-Frame-Options; an external URL is iframed
+   *  directly (best-effort). A reload control and an "open in new tab" affordance
+   *  are always present; for a direct external frame a load-timeout reveals a
+   *  fallback when embedding is blocked. */
+  private mountWebPane(pane: Pane, target: string): void {
+    pane.webUrl = target;
+    const sessionId = this.sessionId ?? "";
+    const proxied = target !== "" && isLoopbackWebUrl(target);
+    const src = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    // The "open externally" href: for a proxied local preview, the same-origin
+    // proxy path (works for the remote viewer); for an external tab, the site URL.
+    const openHref = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+
+    const wrap = el("div", "af-webpane");
+
+    const bar = el("div", "af-webpane-bar");
+    const reload = document.createElement("button");
+    reload.type = "button";
+    reload.className = "af-webpane-reload";
+    reload.title = "Reload";
+    reload.setAttribute("aria-label", "Reload web tab");
+    reload.textContent = "↻"; // ↻
+    const urlText = el("span", "af-webpane-url");
+    urlText.textContent = target || "(no URL)";
+    urlText.title = target;
+    const open = document.createElement("a");
+    open.className = "af-webpane-open";
+    open.href = openHref;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    open.textContent = "open ↗"; // ↗
+    bar.append(reload, urlText, open);
+
+    const frame = document.createElement("iframe");
+    frame.className = "af-webframe";
+    // No allow-same-origin: the frame runs with an opaque origin, so a proxied
+    // (same-origin) dev server can't reach the parent SPA or read its bearer
+    // token, while scripts/forms still run for a functional preview.
+    frame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    if (src !== "") {
+      frame.src = src;
+    }
+
+    const fallback = el("div", "af-webpane-fallback");
+    fallback.hidden = true;
+    const fbMsg = el("div", "af-webpane-fallback-msg");
+    fbMsg.textContent = "This site can't be embedded (it blocks framing).";
+    const fbLink = document.createElement("a");
+    fbLink.className = "af-webpane-fallback-link";
+    fbLink.href = openHref;
+    fbLink.target = "_blank";
+    fbLink.rel = "noopener noreferrer";
+    fbLink.textContent = "Open in a new tab ↗";
+    fallback.append(fbMsg, fbLink);
+
+    wrap.append(bar, frame, fallback);
+    pane.host.replaceChildren(wrap);
+
+    // A web tab with no target (a malformed request, or an older persisted record)
+    // renders a clean fallback rather than a blank pane — there is nothing to frame
+    // or open.
+    if (target.trim() === "") {
+      fbMsg.textContent = "This web tab has no URL.";
+      fbLink.hidden = true;
+      open.hidden = true;
+      fallback.hidden = false;
+      frame.hidden = true;
+      pane.webDispose = null;
+      return;
+    }
+
+    reload.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (src === "") {
+        return;
+      }
+      fallback.hidden = true;
+      frame.hidden = false;
+      // Reassign src to force a reload (contentWindow.reload throws cross-origin).
+      // Clear it first so re-setting the same URL still triggers a navigation.
+      frame.src = "";
+      frame.src = src;
+    });
+
+    let settled = false;
+    const onLoad = (): void => {
+      settled = true;
+      fallback.hidden = true;
+      frame.hidden = false;
+    };
+    frame.addEventListener("load", onLoad);
+
+    // Only a DIRECT external frame can be blocked by X-Frame-Options; a same-origin
+    // proxied preview always loads. Arm a load-timeout that reveals the fallback if
+    // no load event arrives (refused / blocked). Best-effort: some blocked frames
+    // still fire load, so the always-present "open" link is the guaranteed escape.
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (!proxied && src !== "") {
+      timer = setTimeout(() => {
+        if (!settled) {
+          fallback.hidden = false;
+          frame.hidden = true;
+        }
+      }, webFallbackMs());
+    }
+
+    pane.webDispose = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      frame.removeEventListener("load", onLoad);
+    };
   }
 
   private buildNode(node: LayoutNode): HTMLElement {

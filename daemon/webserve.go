@@ -48,7 +48,14 @@ import (
 // still inherits `default-src 'self'`, so the self-contained / no-off-origin
 // guarantee the CSP exists to enforce is unchanged; only inline styling is
 // permitted, and the app has no untrusted-HTML sink for a style-injection to ride.
-const webCSP = "default-src 'self'; style-src 'self' 'unsafe-inline'"
+// frame-src is deliberately permissive (self for the daemon web-tab proxy, plus
+// any http/https origin for an external web tab): a web tab's whole purpose is to
+// embed an arbitrary site. This does NOT weaken the self-contained guarantee for
+// the SPA itself — script-src/connect-src/etc. still inherit default-src 'self',
+// and a framed document has its OWN (separate) CSP; frame-src only governs which
+// URLs the shell may embed. Framed sites are sandboxed (no allow-same-origin) so
+// they get an opaque origin and cannot reach the shell or its token.
+const webCSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-src 'self' https: http:"
 
 // webShellHandler wraps the authed API handler so the TCP listener serves the
 // embedded SPA on every non-API path while `/v1/...` keeps flowing through the

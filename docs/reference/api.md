@@ -22,7 +22,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/SendPrompt` | `title`, `repo_id`, `prompt`, `id` | Send a prompt to an existing session's agent. |
 | `POST` | `/v1/DeleteProject` | `repo_path`, `repo_id` | Delete a project (a repo's session grouping): archive its live sessions (restorable), tear down in-place ones, and drop its root_agents opt-in — the real git repo is untouched. |
 | `POST` | `/v1/DeliverPrompt` | `title`, `repo_path`, `program`, `prompt`, `auto_yes`, `defer_while_attached` | Deliver a prompt to a session, auto-creating it if it does not exist yet. |
-| `POST` | `/v1/CreateTab` | `title`, `repo_id`, `command`, `name`, `shell`, `id` | Spawn a tab (process or shell) in a session's worktree. |
+| `POST` | `/v1/CreateTab` | `title`, `repo_id`, `command`, `name`, `shell`, `kind`, `url`, `port`, `id` | Spawn a tab in a session: a process tab (command) or shell tab in the worktree, or a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct). |
 | `POST` | `/v1/CloseTab` | `title`, `repo_id`, `tab_name`, `tab_index`, `id` | Close a non-agent tab of a session (the agent tab cannot be closed). |
 | `POST` | `/v1/SetPRInfo` | `title`, `repo_id`, `pr_info` | Record or clear the GitHub PR info for a session. |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
