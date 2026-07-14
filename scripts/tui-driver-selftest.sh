@@ -222,7 +222,7 @@ step "af_select evaluates the boundary step (#1759)"        _expect_af_select_bo
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks
 step "reopen tasks — edit-mode overlay recognized (#1757)"  af_open_tasks
-step "assert the task editor shows the run action"          af_assert_screen 'r run( |$)' 'task-overlay run action'
+step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
 step "close the tasks overlay"                              af_close_tasks
 
 step "open beta's tab as a pane"                            af_open_pane

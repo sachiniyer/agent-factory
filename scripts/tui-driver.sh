@@ -585,11 +585,21 @@ _af_tab_count() {
 # open. `m` drops STRAIGHT into the selected task's edit form when a task exists
 # (#1249), whose narrow-width footer collapses `r run now` to `r run` — so the
 # old `run now` marker matched the empty-list view but MISSED the edit view at
-# 80x24 and af_open_tasks reported a false timeout (#1757). `r run` is the one
-# run affordance common to every list/edit × wide/narrow variant. The
-# `( |$)` tail keeps it from matching a pane's "Session no longer running."
-# fallback text ("longe`r run`ning") — that has no space/EOL after `r run`.
-: "${_AF_TASKS_RUN_HINT:=r run( |\$)}"
+# 80x24 and af_open_tasks reported a false timeout (#1757). `r run[ now]` is the
+# one run affordance common to every list/edit × wide/narrow variant.
+#
+# ANCHOR it on BOTH sides of the `r` key hint so it can only match the overlay's
+# own menu line, never arbitrary visible pane text that happens to contain the
+# substring `r run` (Greptile, PR #1769):
+#   * LEFT — `(^|[^[:alnum:]])`: the `r` must start a token (line start, or a
+#     non-alphanumeric like the frame padding / a `• ` separator before it), so
+#     the trailing `r` of a word does NOT count ("serve`r run` •", "you`r run`").
+#   * RIGHT — ` •` (U+2022): the run action is ALWAYS followed by the menu's
+#     space-and-bullet separator (`r run now • …` / `r run • …`), which no shell
+#     output line ("no longe`r run`ning.", "you`r run` finished") carries.
+# The bullet is matched as a literal byte sequence, not a bracket expression, so
+# it works under the sandbox's C/POSIX locale (cf. _af_tab_count).
+: "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? •}"
 
 # af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
 # `r run` run-action hint, present whether it opens in list or edit mode.
