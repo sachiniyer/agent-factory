@@ -331,6 +331,13 @@ var sensitiveJSONKeys = map[string]bool{
 	"private_key": true, "url": true,
 	"path": true, "home": true, "repo_path": true, "worktree_path": true,
 	"remote_meta": true,
+	// tmux_name and session_name mirror the typed-path redaction
+	// (redactInstanceData drops TmuxName, Worktree.SessionName, and
+	// Tabs[].TmuxName): each carries the free-text session title. Without
+	// them the fallback path leaked titles the typed path already scrubs,
+	// including the nested tabs[].tmux_name and worktree.session_name the
+	// recursive walk below reaches (#1680).
+	"tmux_name": true, "session_name": true,
 }
 
 // redactUnknownJSON recursively rebuilds a decoded JSON value, blanking any

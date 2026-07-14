@@ -266,6 +266,106 @@ func TestRedactInstancesFallbackRedactsOnDecodeFailure(t *testing.T) {
 	}
 }
 
+// TestRedactInstancesFallbackRedactsTmuxNameAndSessionName is the #1680
+// regression guard: a legacy/corrupt record that fails the typed decode (here
+// `status` is a string) must still have tmux_name and worktree.session_name and
+// tabs[].tmux_name redacted on the fallback path — each carries the session
+// title. Before the fix these keys were absent from sensitiveJSONKeys, so they
+// passed through unredacted and the title leaked into the shared bundle.
+func TestRedactInstancesFallbackRedactsTmuxNameAndSessionName(t *testing.T) {
+	r := &redactor{}
+	raw := json.RawMessage(`[{"id":"leg-1","status":"legacy-string-status","tmux_name":"af_0f8fc14c_confidential-session-title","title":"confidential session title","worktree":{"session_name":"confidential session title","branch":"feature/test"},"tabs":[{"tmux_name":"af_0f8fc14c_confidential-session-title"}]}]`)
+	out := string(r.redactInstancesJSON(raw))
+	for _, leak := range []string{"confidential-session-title", "confidential session title"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("fallback path leaked: %q\n%s", leak, out)
+		}
+	}
+}
+
+// TestRedactInstancesFallbackRedactsAllNestedTitleFields proves each of the four
+// title-bearing locations — top-level tmux_name, worktree.session_name, and the
+// nested tabs[].tmux_name (two tabs) — is individually redacted on the fallback
+// path, not just the top-level one. The typed decode is forced to fail with a
+// string `status` (the field is an int), and every field uses a distinct
+// sentinel so a surviving value pinpoints exactly which nested location leaked.
+func TestRedactInstancesFallbackRedactsAllNestedTitleFields(t *testing.T) {
+	r := &redactor{}
+	raw := json.RawMessage(`[{
+		"id": "leg-1",
+		"status": "legacy-string-status",
+		"tmux_name": "af_0f8fc14c_toplevel-secret-title",
+		"worktree": {"session_name": "worktree-secret-title", "branch": "feature/test"},
+		"tabs": [
+			{"tmux_name": "af_0f8fc14c_tab-one-secret-title"},
+			{"tmux_name": "af_0f8fc14c_tab-two-secret-title"}
+		]
+	}]`)
+
+	out := string(r.redactInstancesJSON(raw))
+
+	// None of the four distinct secret values may survive.
+	for _, leak := range []string{
+		"toplevel-secret-title",
+		"worktree-secret-title",
+		"tab-one-secret-title",
+		"tab-two-secret-title",
+	} {
+		if strings.Contains(out, leak) {
+			t.Errorf("fallback path leaked %q:\n%s", leak, out)
+		}
+	}
+	// All four title-bearing fields must be replaced with the marker: the two
+	// tab tmux_names, the top-level tmux_name, and worktree.session_name.
+	if got := strings.Count(out, redactedMarker); got < 4 {
+		t.Errorf("expected >= 4 redaction markers (one per title field), got %d:\n%s", got, out)
+	}
+	// Structural fields still survive the fallback walk.
+	if !strings.Contains(out, "leg-1") || !strings.Contains(out, "legacy-string-status") ||
+		!strings.Contains(out, "feature/test") {
+		t.Errorf("fallback dropped safe structural fields:\n%s", out)
+	}
+}
+
+// TestRedactInstancesTypedPathRedactsTmuxAndSessionName confirms the typed path
+// is unchanged: the same shape as the fallback test but VALID as
+// []InstanceData (int status) still redacts tmux_name, worktree.session_name,
+// and tabs[].tmux_name via redactInstanceData. (redactInstanceData is also
+// covered directly by TestRedactInstanceDataKeepsStructuralDropsFreeText; this
+// asserts the end-to-end redactInstancesJSON typed branch.)
+func TestRedactInstancesTypedPathRedactsTmuxAndSessionName(t *testing.T) {
+	r := &redactor{}
+	raw, err := json.Marshal([]session.InstanceData{{
+		ID:       "abc123",
+		Status:   session.Status(1),
+		Program:  "claude",
+		TmuxName: "af_0f8fc14c_confidential-session-title",
+		Title:    "confidential session title",
+		Worktree: session.GitWorktreeData{
+			SessionName: "confidential session title",
+			BranchName:  "feature/test",
+		},
+		Tabs: []session.TabData{{TmuxName: "af_0f8fc14c_confidential-session-title"}},
+	}})
+	if err != nil {
+		t.Fatalf("marshal test instance: %v", err)
+	}
+
+	out := string(r.redactInstancesJSON(raw))
+	for _, leak := range []string{"confidential-session-title", "confidential session title"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("typed path leaked: %q\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, redactedMarker) {
+		t.Errorf("expected redaction marker on the typed path:\n%s", out)
+	}
+	// Structural fields survive.
+	if !strings.Contains(out, "abc123") || !strings.Contains(out, "feature/test") {
+		t.Errorf("typed path dropped structural fields:\n%s", out)
+	}
+}
+
 // TestRedactInstancesInvalidJSONOmitted confirms that a payload which is not
 // even valid JSON surfaces nothing — the contents are omitted with a note.
 func TestRedactInstancesInvalidJSONOmitted(t *testing.T) {
