@@ -79,7 +79,15 @@ type TabPane struct {
 	// capture (#1709). scrollFillPending alone can't serve: it stays true from
 	// scroll entry until the fill LANDS, which spans the dispatch→land window.
 	scrollFillInFlight bool
-	viewport           viewport.Model
+	// scrollFillGen stamps each scroll-fill lifecycle. It bumps on every scroll
+	// entry and every reset, so a slow capture that returns after the user exited
+	// and re-entered scroll mode (a NEW lifecycle, same instance/tab, unchanged
+	// render seq) can tell it is stale: it reads the generation at dispatch and
+	// bails on return if it no longer matches, rather than clearing the in-flight
+	// claim or publishing over the newer entry's fill (#1709 review). The seq
+	// guard can't catch this — scroll entry/exit does not bump ContentSeq.
+	scrollFillGen uint64
+	viewport      viewport.Model
 
 	// currentInstance + currentTab identify the (instance, tab-index) view
 	// currently rendered. UpdateContent/ScrollUp/ScrollDown reset scroll-mode
@@ -148,13 +156,15 @@ func (p *TabPane) BeginScrollFill() {
 	p.scrollFillInFlight = true
 }
 
-// resetScrollFill clears both the fill-owed and fill-in-flight flags. Every
-// scroll-state reset and every completed/abandoned fill funnels through it so a
-// stale in-flight claim can never wedge NeedsScrollFill false forever (#1709).
-// Caller must hold p.mu.
+// resetScrollFill clears both the fill-owed and fill-in-flight flags and starts
+// a new fill generation. Every scroll-state reset and every completed/abandoned
+// fill funnels through it so a stale in-flight claim can never wedge
+// NeedsScrollFill false forever, and any capture still in flight against the old
+// generation is invalidated (#1709). Caller must hold p.mu.
 func (p *TabPane) resetScrollFill() {
 	p.scrollFillPending = false
 	p.scrollFillInFlight = false
+	p.scrollFillGen++
 }
 
 func (p *TabPane) SetSize(width, maxHeight int) {
@@ -302,10 +312,18 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	// off-loop refresh goroutine, the first time UpdateContent runs with a
 	// pending scroll fill.
 	if p.isScrolling && p.scrollFillPending {
+		gen := p.scrollFillGen
 		p.mu.Unlock()
 		content, err := p.previewSrc(instance, 0, true)
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		// A scroll exit+re-entry (or any reset) during the capture bumps the
+		// generation, handing the fill to a newer dispatch. Bail without touching
+		// the shared claim or pending: this stale completion must neither satisfy
+		// nor clear the newer entry's in-flight fill (#1709 review).
+		if p.scrollFillGen != gen {
+			return nil
+		}
 		// This fill attempt has resolved: release the in-flight claim so a fresh
 		// dispatch can retry if it turns out this one couldn't publish (view
 		// changed mid-capture, error). A successful publish clears pending below,
@@ -450,10 +468,17 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 	// capture / daemon RPC — #1637); the shell slot fills lazily on this off-loop
 	// refresh goroutine, the first time UpdateContent runs with a pending fill.
 	if p.isScrolling && p.scrollFillPending {
+		gen := p.scrollFillGen
 		p.mu.Unlock()
 		content, err := p.previewSrc(instance, activeTab, true)
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		// Stale-generation completion (scroll exit+re-entry during the capture):
+		// bail without touching the shared claim/pending, so this old capture can't
+		// satisfy or clear the newer scroll entry's fill (#1709 review).
+		if p.scrollFillGen != gen {
+			return nil
+		}
 		// Release the in-flight claim now the attempt resolved (see updateAgent):
 		// a successful publish clears pending below; a view change / error leaves
 		// pending set so a fresh dispatch retries, never a redundant one (#1709).
@@ -630,8 +655,10 @@ func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab in
 	p.isScrolling = true
 	p.scrollFillPending = true
 	// A fresh fill is owed and none is dispatched yet: clear any stale in-flight
-	// claim from a prior scroll session so this entry's fill can dispatch (#1709).
+	// claim and start a new generation so this entry's fill dispatches and an
+	// in-flight capture from a previous scroll session can't satisfy it (#1709).
 	p.scrollFillInFlight = false
+	p.scrollFillGen++
 	return nil
 }
 
