@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -57,7 +58,7 @@ func TestCreateSession_ParksOnUsageLimitBanner(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	data, err := manager.CreateSession(CreateSessionRequest{
+	data, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "nightly-task",
 		RepoPath: repoPath,
 		Program:  "claude",

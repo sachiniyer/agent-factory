@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -21,7 +22,29 @@ var (
 	// misconfigured non-terminating hook; real provisioning builds finish far
 	// inside it, so it is generous rather than tight.
 	waitForReadyHookGrace = 10 * time.Minute
-	ampPromptFrameTop     = regexp.MustCompile(`(?m)^\s*╭[─ ]+(low|medium|high|deep)[─ ]+╮\s*\n\s*│`)
+	// ampAnsiEscape strips the ANSI CSI/OSC escape sequences tmux's capture
+	// (capture-pane -e keeps them) leaves in the pane so amp's prompt frame can be
+	// matched on its plain-text skeleton. amp wraps the mode label in a truecolor
+	// escape ("\x1b[38;2;61;255;166mmedium\x1b[39m") and the repo/branch in a dim
+	// escape, both sitting *between* the box-drawing glyphs — which is exactly why
+	// the old box regex never matched in the wild and amp creates spun the full
+	// readiness timeout. Covers CSI (ESC [ … final byte) and OSC (ESC ] … ST/BEL);
+	// amp's banner uses an OSC-8 hyperlink.
+	ampAnsiEscape = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
+	// ampPromptFrameTop matches the top rule of amp's input-prompt frame: a
+	// box-drawing top run carrying the mode label near its right end, e.g.
+	// "╭──── medium ────╮" (matched after ANSI stripping). The left side is
+	// tolerant of decorations amp interleaves into the rule (e.g. a "$0.06" cost
+	// indicator once a turn has spent tokens: "╭──── $0.06 ─ medium ─╮"), so the
+	// match keeps working across those format variants; the mode label followed
+	// by the closing "─╮" is the stable anchor.
+	ampPromptFrameTop = regexp.MustCompile(`╭[─ ].*[─ ](low|medium|high|deep)[─ ]+╮`)
+	// ampPromptFrameBottom matches the bottom rule of the same frame, which carries
+	// the repo/branch, e.g. "╰──── repo (branch) ────╯". Requiring BOTH the labeled
+	// top and the closing bottom confirms the input box fully rendered and is
+	// accepting input — it excludes amp's blank loading pane and its "Welcome to
+	// Amp" banner, neither of which draws the box (the reason the match is strict).
+	ampPromptFrameBottom = regexp.MustCompile(`╰[─ ].*[─ ]╯`)
 )
 
 // postWorktreeHooksDoneForWait resolves the instance's post-worktree hook
@@ -134,8 +157,14 @@ func isReadyContent(content, agent string) bool {
 	}
 }
 
+// isAmpPromptFrame reports whether content shows amp's input-prompt frame in its
+// accepting-input state. amp colorizes the frame, so the ANSI escapes are stripped
+// first (see ampAnsiEscape); then BOTH the labeled top rule and the closing bottom
+// rule must be present so a loading pane, banner, or partial redraw never counts as
+// ready.
 func isAmpPromptFrame(content string) bool {
-	return ampPromptFrameTop.MatchString(content)
+	plain := ampAnsiEscape.ReplaceAllString(content, "")
+	return ampPromptFrameTop.MatchString(plain) && ampPromptFrameBottom.MatchString(plain)
 }
 
 // isDocTrustPrompt reports whether content shows the documentation-link trust
@@ -148,7 +177,17 @@ func isDocTrustPrompt(content string) bool {
 
 // WaitForReady polls the instance's tmux pane until the program shows its
 // input prompt or trust prompt, or times out after 60 seconds.
-func WaitForReady(instance *session.Instance) error {
+//
+// The poll is bound to ctx: if the caller abandons the create (client
+// disconnect, parent cancellation), the loop stops capturing the pane and
+// returns ctx.Err() instead of spinning to the internal timeout. That, plus the
+// 60s cap, is the guard against a stuck create leaving a capture-pane poll
+// pinning the daemon indefinitely (the amp hang). A nil ctx is treated as
+// context.Background() so the internal timeout still governs.
+func WaitForReady(ctx context.Context, instance *session.Instance) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Resolve the canonical agent once so isReadyContent matches the right
 	// per-agent prompt signals (#714). ResolvedAgent detects the agent from
 	// the command the pane actually runs — not the config-name enum — so a
@@ -189,6 +228,12 @@ func WaitForReady(instance *session.Instance) error {
 
 	for {
 		select {
+		case <-ctx.Done():
+			// The caller gave up (abandoned/cancelled create): stop polling
+			// immediately so no capture-pane loop lingers after the caller is
+			// gone. Returns "context canceled"/"deadline exceeded" — the create
+			// path tears the half-started instance down on any error.
+			return ctx.Err()
 		case <-hooksDone:
 			// Provisioning finished: arm the full readiness budget from here and
 			// stop watching the hooks channels.

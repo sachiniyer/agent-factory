@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -51,7 +52,7 @@ func createRealKillSession(t *testing.T, title string) (*Manager, config.RepoCon
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	data, err := manager.CreateSession(CreateSessionRequest{
+	data, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    title,
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -210,7 +211,7 @@ func TestKillSessionInPlaceDoesNotDeleteRepoRoot(t *testing.T) {
 	runGitTest(t, repoPath, "commit", "-m", "user work")
 	branch := strings.TrimSpace(runGitTest(t, repoPath, "rev-parse", "--abbrev-ref", "HEAD"))
 
-	data, err := manager.CreateSession(CreateSessionRequest{
+	data, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "inplace",
 		RepoPath: repoPath,
 		Program:  "claude",

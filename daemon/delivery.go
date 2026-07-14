@@ -7,6 +7,7 @@ package daemon
 // under its file-length ceiling.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -118,7 +119,7 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 	// The session is absent and, because deliveries to this target serialize on
 	// the per-target lock, no other in-daemon delivery is creating it. Create it
 	// now and deliver the prompt as its initial prompt.
-	created, err := m.CreateSession(CreateSessionRequest{
+	created, err := m.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    req.Title,
 		RepoPath: req.RepoPath,
 		Program:  req.Program,

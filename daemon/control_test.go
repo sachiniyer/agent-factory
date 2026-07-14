@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,7 +72,7 @@ func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	data, err := manager.CreateSession(CreateSessionRequest{
+	data, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "daemon-owned",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -96,7 +97,7 @@ func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
 		t.Fatalf("expected created session in storage, got %+v", stored)
 	}
 
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "daemon-owned",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -173,7 +174,7 @@ func TestManagerCreateSessionAtomicWithRefresh(t *testing.T) {
 	const numSessions = 8
 	for i := 0; i < numSessions; i++ {
 		title := fmt.Sprintf("race-%d", i)
-		if _, err := manager.CreateSession(CreateSessionRequest{
+		if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 			Title:    title,
 			RepoPath: repoPath,
 			Program:  "claude",
@@ -238,7 +239,7 @@ func TestManagerCreateSessionIgnoresLoadingGhost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "stuck",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -263,7 +264,7 @@ func TestManagerCreateSessionRejectsCaseVariantTitle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "MyApp",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -272,7 +273,7 @@ func TestManagerCreateSessionRejectsCaseVariantTitle(t *testing.T) {
 		t.Fatalf("first CreateSession: %v", err)
 	}
 
-	_, err = manager.CreateSession(CreateSessionRequest{
+	_, err = manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "myapp",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -341,7 +342,7 @@ func TestManagerCreateSessionRejectsCaseVariantTitleFromDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	_, err = manager.CreateSession(CreateSessionRequest{
+	_, err = manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "myapp",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -372,7 +373,7 @@ func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "A B",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -381,7 +382,7 @@ func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
 		t.Fatalf("first CreateSession: %v", err)
 	}
 
-	_, err = manager.CreateSession(CreateSessionRequest{
+	_, err = manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "a-b",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -399,7 +400,7 @@ func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
 	}
 
 	// The case-only path from #605 must still work: "Foo" then "foo" collides.
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "Foo",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -407,7 +408,7 @@ func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateSession Foo: %v", err)
 	}
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "foo",
 		RepoPath: repoPath,
 		Program:  "claude",

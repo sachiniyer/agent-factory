@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/rpc"
@@ -194,11 +195,19 @@ func (s *controlServer) requireManagerReady() error {
 	return errDaemonStarting()
 }
 
+// CreateSession is the net/rpc entrypoint. net/rpc gives no per-call context, so
+// it passes Background; the create is still bounded by WaitForReady's internal
+// timeout and torn down when this returns. The HTTP route wires the request
+// context through createSession so a web/API client disconnect cancels the poll.
 func (s *controlServer) CreateSession(req CreateSessionRequest, resp *CreateSessionResponse) error {
+	return s.createSession(context.Background(), req, resp)
+}
+
+func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error {
 	if err := s.requireManagerReady(); err != nil {
 		return err
 	}
-	data, err := s.manager.CreateSession(req)
+	data, err := s.manager.CreateSession(ctx, req)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"testing"
@@ -163,7 +164,7 @@ func TestSetPRInfo_RaceKillRecreateNeverCorruptsIdentity(t *testing.T) {
 	const title = "worker"
 	key := daemonInstanceKey(repo.ID, title)
 
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title: title, RepoPath: repoPath, Program: "claude", AutoYes: true,
 	}); err != nil {
 		t.Fatalf("initial CreateSession: %v", err)
@@ -191,7 +192,7 @@ func TestSetPRInfo_RaceKillRecreateNeverCorruptsIdentity(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_, _ = manager.KillSession(KillSessionRequest{Title: title, RepoID: repo.ID})
-			_, _ = manager.CreateSession(CreateSessionRequest{
+			_, _ = manager.CreateSession(context.Background(), CreateSessionRequest{
 				Title: title, RepoPath: repoPath, Program: "claude", AutoYes: true,
 			})
 		}()

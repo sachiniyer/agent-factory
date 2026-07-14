@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -62,7 +63,7 @@ func TestCreateSessionRejectsRemoteSlugCollisionWithInMemoryInstance(t *testing.
 		t.Fatalf("test premise broken: %q and %q must slugify to the same hook name", existingTitle, newTitle)
 	}
 
-	_, err = manager.CreateSession(CreateSessionRequest{
+	_, err = manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:       newTitle,
 		RepoPath:    repoPath,
 		Program:     "claude",

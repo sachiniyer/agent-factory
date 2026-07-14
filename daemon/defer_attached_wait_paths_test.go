@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestDeliverPrompt_ReemergingRootDefersWhileAttached(t *testing.T) {
 	// in place. The delivery must then DEFER (attached), not send.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		if _, err := manager.CreateSession(CreateSessionRequest{
+		if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 			Title:         session.RootSessionTitle,
 			RepoPath:      repoPath,
 			Program:       "claude",

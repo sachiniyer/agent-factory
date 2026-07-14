@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func TestKillSessionBlocksTitleReuseDuringTeardown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "busy",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -72,7 +73,7 @@ func TestKillSessionBlocksTitleReuseDuringTeardown(t *testing.T) {
 	}
 
 	// Mid-teardown: the title must still be blocked against reuse.
-	_, err = manager.CreateSession(CreateSessionRequest{
+	_, err = manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "busy",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -95,7 +96,7 @@ func TestKillSessionBlocksTitleReuseDuringTeardown(t *testing.T) {
 	}
 
 	// Teardown finished: the title is free again.
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "busy",
 		RepoPath: repoPath,
 		Program:  "claude",

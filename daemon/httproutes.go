@@ -56,7 +56,7 @@ var httpRoutes = []HTTPRoute{
 		Path:          "/v1/CreateSession",
 		Description:   "Create a new session (git worktree + agent) in a repo.",
 		RequestFields: jsonFields(reflect.TypeOf(CreateSessionRequest{})),
-		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CreateSession) },
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.createSession) },
 	},
 	{
 		Method:        http.MethodPost,

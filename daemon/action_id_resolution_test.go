@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -35,7 +36,7 @@ func createDuplicateTitleSessions(t *testing.T, title string) (*Manager, config.
 		if err != nil {
 			t.Fatalf("RepoFromPath: %v", err)
 		}
-		data, err := manager.CreateSession(CreateSessionRequest{Title: title, RepoPath: repoPath, Program: "claude"})
+		data, err := manager.CreateSession(context.Background(), CreateSessionRequest{Title: title, RepoPath: repoPath, Program: "claude"})
 		if err != nil {
 			t.Fatalf("CreateSession(%s): %v", repoPath, err)
 		}

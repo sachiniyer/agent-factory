@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -57,7 +58,7 @@ func TestKillSession_TombstoneSurvivesFailedTeardown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "doomed",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -132,7 +133,7 @@ func TestKillSession_RejectsConcurrentDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "busy",
 		RepoPath: repoPath,
 		Program:  "claude",

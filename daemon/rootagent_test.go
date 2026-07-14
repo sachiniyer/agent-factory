@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -433,7 +434,7 @@ func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
 	delete(manager.instances, key)
 	manager.mu.Unlock()
 
-	rootBData, err := manager.CreateSession(CreateSessionRequest{
+	rootBData, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:         session.RootSessionTitle,
 		RepoPath:      repo.Root,
 		Program:       "claude",
@@ -688,7 +689,7 @@ func TestCreateSessionRejectsReservedRootTitle(t *testing.T) {
 	}
 
 	for _, title := range []string{"root", "Root", "ROOT", " root "} {
-		_, err := manager.CreateSession(CreateSessionRequest{
+		_, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 			Title:    title,
 			RepoPath: repoPath,
 			Program:  "claude",
@@ -714,7 +715,7 @@ func TestCreateSessionTitleBaseRootSkipsReserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	data, err := manager.CreateSession(CreateSessionRequest{
+	data, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		TitleBase: "root",
 		RepoPath:  repoPath,
 		Program:   "claude",

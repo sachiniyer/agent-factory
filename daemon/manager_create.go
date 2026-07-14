@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -13,7 +14,19 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData, error) {
+func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+	// Own the create's lifetime: cancel derives a child context that is cancelled
+	// the instant this returns (success, failure, or panic), so the readiness poll
+	// StartAndSendPrompt runs can never outlive the create and keep capturing the
+	// pane — the amp hang, where a create that never reached ready left a poll
+	// spinning under the per-repo start lock and pinned the daemon. A caller
+	// context cancelled early (an abandoned create) tears it down even sooner.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	if req.Program == "" {
 		// Default from the repo-resolved config so an in-repo
 		// default_program applies to daemon-created sessions (task runs,
@@ -67,7 +80,7 @@ func (m *Manager) CreateSession(req CreateSessionRequest) (session.InstanceData,
 	// InPlace only changes WHICH worktree that is — the repo's own working tree,
 	// marked external — not the flow itself. finishCreateStart marks the instance
 	// live, PARKS it at a usage-limit wall (#1146 PR4), or returns a fatal error.
-	if serr := finishCreateStart(instance, req.Prompt, task.StartAndSendPrompt(instance, req.Prompt)); serr != nil {
+	if serr := finishCreateStart(instance, req.Prompt, task.StartAndSendPrompt(ctx, instance, req.Prompt)); serr != nil {
 		_ = instance.Kill()
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
 	}
