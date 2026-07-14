@@ -82,13 +82,13 @@ func sanitizeError(raw string) string {
 
 func truncateStatusText(text string, width int) string {
 	// Only add ellipsis when the string is long enough that the truncated
-	// content plus "..." is shorter than the original. Otherwise just
-	// hard-truncate to avoid losing more content to the 3-char ellipsis than
+	// content plus "…" is shorter than the original. Otherwise just
+	// hard-truncate to avoid losing more content to the ellipsis than
 	// we save by truncating.
-	tail := "..."
+	tail := "…"
 	tailWidth := runewidth.StringWidth(tail)
 	if width < tailWidth {
-		// Container is too narrow to fit "..."; drop the tail to avoid
+		// Container is too narrow to fit "…"; drop the tail to avoid
 		// overflowing past width (lipgloss.Place won't clip).
 		tail = ""
 	} else if runewidth.StringWidth(text) <= width+tailWidth {

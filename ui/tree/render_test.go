@@ -195,10 +195,10 @@ func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
 
 			if tc.expectFullTitle {
 				assert.Contains(t, titleLine, inst.Title, "wide terminal should render the full title")
-				assert.NotContains(t, titleLine, "...", "wide terminal should not truncate")
+				assert.NotContains(t, titleLine, "…", "wide terminal should not truncate")
 			}
 			if tc.expectEllipsis {
-				assert.Contains(t, titleLine, "...", "title should be truncated with ellipsis when there is room for it")
+				assert.Contains(t, titleLine, "…", "title should be truncated with ellipsis when there is room for it")
 			}
 			if tc.expectNoOverflow {
 				assert.LessOrEqualf(t, w, sidebarW,
