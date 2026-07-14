@@ -12,6 +12,11 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// deregisterRootAgents is the durable root_agents removal DeleteProject runs. A
+// package var so tests can force a persist failure in isolation (exercising the
+// #1740-review fatal-on-config-failure path) without disturbing the real config.
+var deregisterRootAgents = config.DeregisterRootAgentsForRepo
+
 // DeleteProjectResult reports what DeleteProject did so the control server can
 // publish one archived/killed event per affected session (plus a
 // projects-changed signal), and the CLI/TUI can report the counts.
@@ -52,7 +57,19 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		if root == "" {
 			return DeleteProjectResult{}, fmt.Errorf("delete project: repo_id or repo_path is required")
 		}
-		repoID = config.RepoIDFromRoot(filepath.Clean(root))
+		// Canonicalize the path the SAME way the daemon keys repos everywhere:
+		// resolve it to the main-repo root (git toplevel) and hash THAT, so a
+		// symlinked / trailing-slash / relative / subdirectory / ".."-laden form of
+		// a REAL project still resolves to its sessions' repo id — never a silent
+		// miss. Only when the path does not resolve to a git repo (a moved/removed/
+		// typo'd project) fall back to hashing the cleaned path: that yields no
+		// match, which is the clean idempotent no-op deleting an unknown project
+		// must be (Sachin's locked semantics), not a wrong-project hit.
+		if repo, rerr := config.RepoFromPath(root); rerr == nil {
+			repoID = repo.ID
+		} else {
+			repoID = config.RepoIDFromRoot(filepath.Clean(root))
+		}
 	}
 	result := DeleteProjectResult{RepoID: repoID}
 
@@ -61,6 +78,19 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// teardown guarantees no poll tick can respawn a root we are about to remove
 	// (#1735).
 	m.suppressRootAgent(repoID)
+
+	// Drop the repo's root_agents opt-in on disk BEFORE archiving, and treat a
+	// failed write as FATAL to the whole delete (#1740 review): if this durable
+	// removal fails, a daemon restart would re-register the root and the project
+	// would REAPPEAR — so reporting success would be a lie. Aborting here (before
+	// any session is archived) also keeps the failure clean: nothing is torn down,
+	// the project is intact, and the returned error tells the caller to retry. A
+	// project with no opt-in is a nil, nil no-op that falls straight through.
+	if removed, cfgErr := deregisterRootAgents(repoID); cfgErr != nil {
+		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was archived; retry: %w", repoID, cfgErr)
+	} else if len(removed) > 0 {
+		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
+	}
 
 	// Snapshot the repo's LIVE (non-archived) sessions under the lock, then act
 	// with the lock released — ArchiveSession/KillSession take their own
@@ -104,16 +134,6 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			continue
 		}
 		result.Archived = append(result.Archived, session.InstanceData{ID: archived.ID, Title: archived.Title})
-	}
-
-	// Drop the repo's root_agents opt-in on disk so a restart forgets it too
-	// (the in-memory suppression above already holds for this daemon's life).
-	// Non-fatal: the sessions are already archived either way.
-	removed, cfgErr := config.DeregisterRootAgentsForRepo(repoID)
-	if cfgErr != nil {
-		log.WarningLog.Printf("delete project %s: archived %d session(s) but failed to remove its root_agents opt-in from config: %v", repoID, len(result.Archived), cfgErr)
-	} else if len(removed) > 0 {
-		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
 	}
 
 	if len(errs) > 0 {

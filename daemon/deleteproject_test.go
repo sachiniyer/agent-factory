@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -136,4 +138,49 @@ func TestDeleteProject_DerivesRepoIDFromPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, result.Archived, 1, "the session is found via the path-derived repo id")
 	assert.Empty(t, liveProjectRoots(manager.Snapshot(repoID)))
+}
+
+// TestDeleteProject_NonCanonicalPathStillMatches: a path-only request whose path
+// is NOT the canonical repo root (here a subdirectory of the repo — hashing it
+// raw would miss) still targets the right project, because the daemon resolves it
+// to the git toplevel the same way it keys repos everywhere (#1740 review). A
+// silent no-op on a real project must never happen.
+func TestDeleteProject_NonCanonicalPathStillMatches(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "worker")
+
+	// A subdirectory path: RepoIDFromRoot(subdir) != repoID, so without
+	// canonicalization this would silently match nothing.
+	subdir := filepath.Join(repoPath, "nested", "deep")
+	require.NoError(t, os.MkdirAll(subdir, 0o755))
+	require.NotEqual(t, repoID, config.RepoIDFromRoot(subdir), "precondition: the raw subdir hash differs from the repo id")
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: subdir})
+	require.NoError(t, err)
+	assert.Len(t, result.Archived, 1, "a non-canonical path must still resolve to the real project's sessions")
+	assert.Empty(t, liveProjectRoots(manager.Snapshot(repoID)), "the project is gone, not silently missed")
+}
+
+// TestDeleteProject_RootAgentsWriteFailureIsFatal: if the durable root_agents
+// removal fails, DeleteProject must FAIL (never report success) and, because the
+// write is attempted before any teardown, leave the project intact — otherwise a
+// daemon restart would re-register the root and the "deleted" project would
+// reappear while the caller believed it was gone (#1740 review).
+func TestDeleteProject_RootAgentsWriteFailureIsFatal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, src := registerArchivable(t, manager, repoID, repoPath, "worker")
+
+	orig := deregisterRootAgents
+	deregisterRootAgents = func(string) ([]string, error) { return nil, fmt.Errorf("forced config write failure") }
+	t.Cleanup(func() { deregisterRootAgents = orig })
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.Error(t, err, "a failed root_agents write must surface as an error, not a silent success")
+	assert.Empty(t, result.Archived, "nothing is archived when the durable removal fails")
+
+	// The project is NOT gone: its session is still live and it still appears in
+	// the active list.
+	assert.NotEqual(t, session.Archived, inst.GetStatus(), "the session must remain live on a failed delete")
+	assert.True(t, exists(src), "the session's worktree must be untouched on a failed delete")
+	assert.True(t, liveProjectRoots(manager.Snapshot(repoID))[repoPath], "the project must remain in the active list on a failed delete")
 }
