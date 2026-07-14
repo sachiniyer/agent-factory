@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -676,6 +678,63 @@ func TestWatcherDrainExpiresAgedEvents(t *testing.T) {
 	})
 	if got := fd.delivered(); len(got) != 1 {
 		t.Fatalf("stale events must never be delivered, got %v", got)
+	}
+}
+
+// TestWatcherDrainLogsExpiryCountWhenStoppedMidBackoff (#1789): the drain loop
+// expires aged events by advancing the cursor past them — irreversibly, since
+// the advance is persisted and no later session re-sees them. So the expiry
+// count must be logged on EVERY exit, not just the queue-drained one. Here the
+// drainer expires two events and then parks retrying an undeliverable third;
+// stopping it mid-backoff must still account for the two.
+func TestWatcherDrainLogsExpiryCountWhenStoppedMidBackoff(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab178901", `sleep 60`, dir)))
+	// Never heals: once the stale head is expired, the fresh event's delivery
+	// fails forever, so the drainer sits in the stop-aware backoff sleep — the
+	// exact window the stop has to land in.
+	var attempts atomic.Int64
+	s.deliver = func(taskID, line string) error {
+		attempts.Add(1)
+		return errors.New("target unreachable (outage)")
+	}
+	s.queueMaxAge = 5 * time.Second
+	queueDir, _ := s.queueDir()
+
+	seed := newEventQueue(queueDir, "ab178901")
+	seed.now = func() time.Time { return time.Now().Add(-time.Hour) }
+	for _, line := range []string{"stale-1", "stale-2"} {
+		if err := seed.enqueue(line); err != nil {
+			t.Fatalf("seed enqueue: %v", err)
+		}
+	}
+	seed.now = time.Now
+	if err := seed.enqueue("fresh"); err != nil {
+		t.Fatalf("seed enqueue fresh: %v", err)
+	}
+
+	var info bytes.Buffer
+	prevInfo := aflog.InfoLog.Writer()
+	aflog.InfoLog.SetOutput(&info)
+	t.Cleanup(func() { aflog.InfoLog.SetOutput(prevInfo) })
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	// A delivery attempt proves the drainer is past both stale events: replay is
+	// strictly FIFO, so nothing reaches deliver until the head has expired.
+	waitUntil(t, 10*time.Second, "the drainer to expire the stale head and park on delivery backoff", func() bool {
+		return attempts.Load() > 0
+	})
+
+	// Stop lands in sleepStopAware (or at the loop-top stop check) — either way
+	// the loop exits without reaching the queue-drained summary branch. Stop
+	// waits on the drainer's wg slot, so the log is flushed once it returns.
+	s.Stop()
+
+	if got := info.String(); !strings.Contains(got, "expired 2") {
+		t.Fatalf("expiries went unlogged when the drainer stopped mid-backoff (#1789):\n%s", got)
 	}
 }
 

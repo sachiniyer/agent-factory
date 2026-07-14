@@ -32,6 +32,17 @@ func (w *taskWatcher) drainLoop() {
 	defer w.wg.Done()
 	backoff := w.sup.drainBaseBackoff
 	replayed, expired := 0, 0
+	// Account for the replay on EVERY exit, not just the drained-empty one
+	// (#1789). Expiring advances the cursor irreversibly — the record is gone
+	// and no later session can report it — so a stop landing in one of the
+	// stop-aware waits, or a parked queue error, must still say what was
+	// consumed. Deferred after wg.Done's registration, so it runs before it:
+	// a stop's Wait cannot return until the summary is out.
+	defer func() {
+		if replayed > 0 || expired > 0 {
+			log.InfoLog.Printf("watch task %s: replayed %d queued event(s), expired %d older than %s", w.taskID, replayed, expired, w.sup.queueMaxAge)
+		}
+	}()
 	for {
 		if w.stopRequested() {
 			w.stopDraining()
@@ -47,7 +58,7 @@ func (w *taskWatcher) drainLoop() {
 			// Retention (#1129): an event older than the age bound is expired
 			// instead of delivered — a prompt about a days-old notification is
 			// noise, and re-sweepable sources re-emit on their next poll.
-			// Counted and logged below, never silent.
+			// Counted here and logged by the exit summary above, never silent.
 			advanced, err := w.queue.advance(cursor)
 			if err != nil {
 				log.ErrorLog.Printf("watch task %s: failed to expire aged queued event; replay parked until the next reload: %v", w.taskID, err)
@@ -61,9 +72,6 @@ func (w *taskWatcher) drainLoop() {
 			continue
 		}
 		if !ok {
-			if replayed > 0 || expired > 0 {
-				log.InfoLog.Printf("watch task %s: replayed %d queued event(s), expired %d older than %s", w.taskID, replayed, expired, w.sup.queueMaxAge)
-			}
 			w.stopDraining()
 			// Close the wake-up race: an event enqueued after the empty peek
 			// but before draining cleared would otherwise strand until the
