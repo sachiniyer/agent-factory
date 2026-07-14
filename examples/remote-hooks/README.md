@@ -11,12 +11,12 @@ For the full protocol specification and a ready-to-use reference `launch.sh`, se
 
 | Script | Purpose |
 |---|---|
-| `launch.sh` | Provision the workspace, start an `af agent-server`, echo its `{url,token,tls_fingerprint}` |
+| `launch.sh` | Provision the workspace, start an `af agent-server`, echo its `{url,token}` |
 | `delete.sh` | Tear the provisioned sandbox back down |
 
 The old `list.sh` / `attach.sh` / `terminal.sh` are **gone**: enumeration, terminal
 proxying, and preview capture are now served by the in-workspace `af agent-server`
-over its `wss://` stream. The daemon drives a hook session exactly like a
+over its `ws://` stream. The daemon drives a hook session exactly like a
 docker/ssh one.
 
 ## Quick start
