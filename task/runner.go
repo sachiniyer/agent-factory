@@ -17,6 +17,12 @@ import (
 var (
 	waitForReadyTimeout      = 60 * time.Second
 	waitForReadyPollInterval = 500 * time.Millisecond
+	// waitForReadyCaptureTimeout bounds a single pane capture so a slow or wedged
+	// `tmux capture-pane` can never block the poll loop indefinitely — the loop
+	// must always be able to observe cancellation and its own deadline, and
+	// release the per-repo start lock, within a bounded window (Greptile P1 on
+	// #1756). Generous vs. a normal capture (milliseconds).
+	waitForReadyCaptureTimeout = 10 * time.Second
 	// waitForReadyHookGrace bounds how long in-flight post-worktree hooks may
 	// hold the readiness deadline open (see WaitForReady). It only matters for a
 	// misconfigured non-terminating hook; real provisioning builds finish far
@@ -159,12 +165,36 @@ func isReadyContent(content, agent string) bool {
 
 // isAmpPromptFrame reports whether content shows amp's input-prompt frame in its
 // accepting-input state. amp colorizes the frame, so the ANSI escapes are stripped
-// first (see ampAnsiEscape); then BOTH the labeled top rule and the closing bottom
-// rule must be present so a loading pane, banner, or partial redraw never counts as
-// ready.
+// first (see ampAnsiEscape).
+//
+// Readiness requires a CONTIGUOUS frame: a labeled top rule, immediately followed
+// by the box-interior rows (each a "│ … │" line) and then the closing bottom rule,
+// with no other line in between. Matching the top and bottom rules independently
+// anywhere in the pane would let an old top border in scrollback pair with a newer
+// bottom border (or vice-versa) and read as ready before amp is accepting input
+// (Greptile P2 on #1756). The capture is visible-only, so a single current box is
+// what a real ready pane shows.
 func isAmpPromptFrame(content string) bool {
 	plain := ampAnsiEscape.ReplaceAllString(content, "")
-	return ampPromptFrameTop.MatchString(plain) && ampPromptFrameBottom.MatchString(plain)
+	lines := strings.Split(plain, "\n")
+	for i, line := range lines {
+		if !ampPromptFrameTop.MatchString(line) {
+			continue
+		}
+		// Walk downward from the labeled top rule: box-interior rows begin with
+		// the "│" border; the first bottom rule closes a real, current frame.
+		// Any other line before the bottom rule means these borders are not one
+		// contiguous box, so this top rule is stale scrollback — keep scanning.
+		for j := i + 1; j < len(lines); j++ {
+			if ampPromptFrameBottom.MatchString(lines[j]) {
+				return true
+			}
+			if !strings.HasPrefix(strings.TrimSpace(lines[j]), "│") {
+				break
+			}
+		}
+	}
+	return false
 }
 
 // isDocTrustPrompt reports whether content shows the documentation-link trust
@@ -227,6 +257,15 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 	defer ticker.Stop()
 
 	for {
+		// Observe cancellation at the top of every iteration, before starting
+		// another capture: if the create was abandoned/cancelled while the
+		// previous capture ran, return NOW rather than spending a poll on a pane
+		// nobody is waiting for. This — plus the bounded, cancellable capture
+		// below — is what releases the per-repo start lock within ~one poll
+		// interval of cancellation instead of stalling inside tmux (Greptile P1).
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			// The caller gave up (abandoned/cancelled create): stop polling
@@ -245,7 +284,7 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 			hooksDone, hookGrace = nil, nil
 			timeout = time.After(waitForReadyTimeout)
 		case <-timeout:
-			content, err := instance.AgentServer().Preview(0, false)
+			content, err := capturePreview(ctx, instance)
 			if err != nil {
 				// Mirror the ticker case: ErrSessionGone is a definitive,
 				// non-retryable death, so surface the actionable "session died"
@@ -267,13 +306,21 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
 			return formatWaitForReadyTimeoutError(waitForReadyTimeout, content)
 		case <-ticker.C:
-			content, err := instance.AgentServer().Preview(0, false)
+			content, err := capturePreview(ctx, instance)
 			if err != nil {
+				// A cancelled/timed-out create surfaces here as context.Canceled /
+				// DeadlineExceeded: return at once (the top-of-loop check would
+				// catch it next hop, but returning here frees the lock a poll
+				// sooner).
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				// ErrSessionGone is a definitive, non-retryable failure: the
 				// tmux session no longer exists, so it can never become ready.
 				// Fail fast with a clear cause instead of polling the full
 				// timeout and returning a misleading "timed out" error (#976).
-				// Other errors are transient — keep polling.
+				// Other errors (incl. a capture that hit waitForReadyCaptureTimeout)
+				// are transient — keep polling.
 				if errors.Is(err, tmux.ErrSessionGone) {
 					return fmt.Errorf("session died while waiting for agent to start: %w", err)
 				}
@@ -290,6 +337,34 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 				return nil
 			}
 		}
+	}
+}
+
+// capturePreview captures the agent pane but abandons the wait the moment ctx is
+// done OR the capture exceeds waitForReadyCaptureTimeout, so a cancelled/timed-out
+// create returns — and releases the per-repo start lock — within a bounded window
+// instead of blocking indefinitely inside a slow/wedged `tmux capture-pane`
+// (Greptile P1 on #1756). The capture runs in a goroutine; when it is abandoned
+// the goroutine still completes its bounded tmux exec and exits, and its buffered
+// result channel keeps it from leaking. On abandonment it returns ctx/deadline
+// error, which callers treat as (respectively) a fast return or a transient poll.
+func capturePreview(ctx context.Context, instance *session.Instance) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, waitForReadyCaptureTimeout)
+	defer cancel()
+	type previewResult struct {
+		content string
+		err     error
+	}
+	ch := make(chan previewResult, 1)
+	go func() {
+		content, err := instance.AgentServer().Preview(0, false)
+		ch <- previewResult{content: content, err: err}
+	}()
+	select {
+	case <-cctx.Done():
+		return "", cctx.Err()
+	case r := <-ch:
+		return r.content, r.err
 	}
 }
 

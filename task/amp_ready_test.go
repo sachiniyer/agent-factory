@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -80,6 +81,63 @@ func TestIsAmpPromptFrameRequiresBothRules(t *testing.T) {
 	}
 }
 
+// TestIsAmpPromptFrameRequiresContiguousBox pins Greptile P2: the labeled top rule
+// and the closing bottom rule must belong to ONE adjacent box. Separated fragments
+// — an old frame's top border left in scrollback, unrelated output, then a bottom
+// border — must not read as ready; one contiguous current box must.
+func TestIsAmpPromptFrameRequiresContiguousBox(t *testing.T) {
+	stale := "╭──────── medium ────────╮\n" +
+		"some unrelated output line\n" +
+		"more logs scrolled in between\n" +
+		"╰──────── /tmp/repo (main) ────────╯\n"
+	if isAmpPromptFrame(stale) {
+		t.Error("separated top/bottom rules (stale scrollback) must not count as ready")
+	}
+
+	live := "╭──────── medium ────────╮\n" +
+		"│ >                                        │\n" +
+		"│                                          │\n" +
+		"╰──────── /tmp/repo (main) ────────╯\n"
+	if !isAmpPromptFrame(live) {
+		t.Error("a contiguous current amp prompt box must count as ready")
+	}
+}
+
+// TestWaitForReadyCancelReturnsDuringBlockingCapture pins Greptile P1: a cancel
+// must return — and release the per-repo start lock — even when the poll is
+// currently blocked inside a slow/wedged `tmux capture-pane`. Without the bounded,
+// cancellable capture the create would stall inside the capture, holding the lock.
+func TestWaitForReadyCancelReturnsDuringBlockingCapture(t *testing.T) {
+	defer setWaitForReadyTimingForTest(10*time.Second, time.Millisecond)()
+	defer setWaitLimitForTest(NewLimitDetector(nil), time.Now)()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	inst := newPreviewInstance(t, func() (string, error) {
+		once.Do(func() { close(entered) })
+		<-release // simulate a capture that blocks for a long time
+		return "still starting up...\n", nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(ctx, inst) }()
+
+	<-entered // the capture is now blocked inside Preview
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled while a capture is blocked, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady stayed blocked on the in-flight capture after cancel — the start lock would stay held")
+	}
+	close(release) // let the abandoned capture goroutine finish and exit
+}
+
 // TestWaitForReadyStopsPollingOnContextCancel pins BUG 2: an abandoned/cancelled
 // create must tear the readiness poll down at once — never leave a capture-pane
 // loop spinning after the caller gave up (the leak that pinned Sachin's daemon at
@@ -120,13 +178,15 @@ func TestWaitForReadyStopsPollingOnContextCancel(t *testing.T) {
 		t.Fatal("WaitForReady did not return after context cancel — poll goroutine leaked")
 	}
 
-	// The poll goroutine is gone: snapshot the capture count, wait several poll
-	// intervals, and assert it did not grow. A lingering spinner would keep
-	// capturing.
+	// The poll loop has exited; at most the single in-flight capture may still
+	// complete, but no NEW capture may start. Let any in-flight goroutine drain,
+	// snapshot, then assert the count is stable — a lingering spinner would keep
+	// incrementing.
+	time.Sleep(60 * time.Millisecond)
 	settled := captures.Load()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
 	if grew := captures.Load() - settled; grew != 0 {
-		t.Fatalf("pane captured %d more time(s) after cancel — poll goroutine leaked", grew)
+		t.Fatalf("pane captured %d more time(s) after cancel drained — poll goroutine leaked", grew)
 	}
 }
 
