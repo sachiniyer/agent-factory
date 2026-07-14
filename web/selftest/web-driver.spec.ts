@@ -475,6 +475,109 @@ test("split panes (feat): drag a tab to a pane edge splits into two live panes; 
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
+test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up)", async () => {
+  // The regression: only tabs present at first render were drag sources; a tab created
+  // AFTER load (a new terminal tab) could not be dragged into a split. Create a new
+  // terminal tab, then drag THAT tab (not an initial one) onto a pane edge and prove it
+  // splits into two live panes — the drag wiring must cover tabs created after render.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
+  await expect(shellTab).toHaveClass(/af-tab-active/);
+
+  // The freshly-created tab is a real HTML5 drag source: draggable is set on it just
+  // like an initial tab. A real mouse drag needs this attribute (a synthetic dispatch
+  // would fire regardless), so assert it directly — a missing draggable is exactly the
+  // "the new tab isn't a drag source" framing of the bug.
+  await expect(shellTab).toHaveJSProperty("draggable", true);
+
+  // Show the AGENT tab in the single pane, so dragging the new Terminal tab produces a
+  // split with two DISTINCT tabs (agent + the freshly-created shell), not a self-split.
+  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  // Drag the NEWLY-CREATED Terminal tab (index 1) onto the RIGHT edge → the pane splits,
+  // the new right pane bound to the shell tab with its OWN live WS stream.
+  await dragTabToPane(page, "Terminal", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
+  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
+
+  // BOTH panes are live: the agent pane still streams the ready marker, and the other
+  // pane is the shell tab the freshly-created drag source bound. Type into the shell
+  // pane and its echo returns over its own stream — proving the split from the NEW tab
+  // is a real, independent PTY, not a dead pane.
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+  const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+  await expect(agentPane).toHaveCount(1);
+  await expect(shellPane).toHaveCount(1);
+  await shellPane.locator(".af-pane-host").click();
+  await page.keyboard.type("echo AF_NEWTAB_DRAG_OK");
+  await page.keyboard.press("Enter");
+  await expect(shellPane).toContainText("AF_NEWTAB_DRAG_OK", { timeout: 15_000 });
+
+  // Collapse the split and restore A to a single tab for the later flows.
+  await shellPane.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
+test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", async () => {
+  // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
+  // bar), no dragend can fire on the now-detached source — the global "dragging" state
+  // would otherwise stick, leaving the pane hints + drop overlay on screen forever. The
+  // bar rebuild must reconcile-clear that state.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+
+  // Begin a real drag on the Terminal tab and drive a dragover so a pane shows its drop
+  // overlay — the exact on-screen state a drop/dragend would normally clear. The single
+  // shared DataTransfer carries the tab MIME, so split.ts recognises the drag.
+  await page.evaluate(() => {
+    const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes("Terminal"));
+    const pane = document.querySelector(".af-term-host .af-pane");
+    if (!tab || !pane) {
+      throw new Error("drag source or pane not found");
+    }
+    const dt = new DataTransfer();
+    tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
+    const r = pane.getBoundingClientRect();
+    const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.right - 6, clientY: r.top + r.height / 2 };
+    pane.dispatchEvent(new DragEvent("dragenter", init));
+    pane.dispatchEvent(new DragEvent("dragover", init));
+  });
+  // The drag is visibly in progress: body flag set, a drop overlay shown.
+  await expect(page.locator("body.af-dragging-tab")).toHaveCount(1);
+  await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).toBeVisible();
+
+  // Force a bar rebuild that REPLACES the drag's source button, with NO dragend on it —
+  // add another tab (a concurrent tab change would do the same).
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+
+  // The drag ended cleanly: no stuck flag, and the overlay is no longer shown (its
+  // visibility is gated on the now-cleared flag).
+  await expect(page.locator("body.af-dragging-tab")).toHaveCount(0);
+  await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).not.toBeVisible();
+
+  // Restore A to a single tab for the later flows.
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
 test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", async () => {
   // Attach to A (a single agent tab, so tab index 1+ does not exist).
   await row(page, SESSION_A).click();

@@ -1283,7 +1283,11 @@ body {
   z-index: 5;
 }
 
-.af-drop-overlay.af-drop-show {
+/* Shown ONLY while a tab drag is actually in progress (the body flag). If the drag's
+ * source button is replaced mid-drag — a concurrent tab change rebuilds the bar and no
+ * dragend fires on the now-detached source — clearing the body flag also hides any
+ * overlay that would otherwise linger, so the UI can't get stuck in "dragging" mode. */
+.af-dragging-tab .af-drop-overlay.af-drop-show {
   display: block;
 }
 

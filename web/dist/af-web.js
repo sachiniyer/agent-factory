@@ -8722,12 +8722,18 @@ var AppShell = class {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   tabBar = null;
+  // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
+  // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
+  // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
+  currentTabIds = [];
+  // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
+  // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
+  lastTabBarSig = "";
   // Last-applied state, for cheap change detection between updates.
   lastSessions = null;
   lastSelectedId = null;
   lastLive = null;
   lastKb = null;
-  lastActiveTab = 0;
   lastError = null;
   // Whether the main pane has been rendered at least once. The constructor leaves it
   // an empty <section>, so the FIRST update must render it even when nothing is
@@ -8789,14 +8795,12 @@ var AppShell = class {
     if (sessionsChanged || selectionChanged || projectChanged) {
       this.renderRail(state);
     }
-    const activeTabChanged = this.lastActiveTab !== state.activeTab;
-    this.lastActiveTab = state.activeTab;
     if (selectionChanged || !this.mainRendered) {
       this.mainRendered = true;
       this.renderMain(state);
     } else {
       this.patchMainHead(state);
-      if (sessionsChanged || activeTabChanged) {
+      if (tabBarSig(state) !== this.lastTabBarSig) {
         this.renderTabBar(state);
       }
     }
@@ -8944,6 +8948,7 @@ var AppShell = class {
     this.tabBar = h2("div", { class: "af-tabbar" });
     this.tabBar.setAttribute("role", "tablist");
     this.tabBar.setAttribute("aria-label", "Session tabs");
+    this.attachTabDrag(this.tabBar);
     this.main.className = "af-main af-main-term";
     this.main.replaceChildren(head, this.tabBar, this.termHost);
     this.renderTabBar(state);
@@ -8965,9 +8970,9 @@ var AppShell = class {
     const canManage = supportsTabManagement(selected);
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
-    const tabIds = tabs.map(tabIdentity);
+    this.currentTabIds = tabs.map(tabIdentity);
     const children = tabs.map(
-      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, tabIds, this.actions)
+      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions)
     );
     if (canManage && tabs.length < MAX_TABS) {
       const add = h2("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
@@ -8975,6 +8980,31 @@ var AppShell = class {
       children.push(add);
     }
     bar.replaceChildren(...children);
+    document.body.classList.remove("af-dragging-tab");
+    this.lastTabBarSig = tabBarSig(state);
+  }
+  /** Wires the tab bar as a DRAG SOURCE via event DELEGATION on the (stable) bar
+   *  container. Binding once here — rather than per button in tabButton — means every
+   *  tab is a drag source no matter when it was created, and a bar re-render can't drop
+   *  the wiring for a subset of tabs (#1737 follow-up). dragstart reads the grabbed
+   *  tab's index from its data-tab-index and stamps the payload: the index PLUS a
+   *  snapshot of the live tab identities, so the drop cancels if the tab set changed
+   *  mid-drag (split.ts). The body flag lets panes show drop hints. */
+  attachTabDrag(bar) {
+    bar.addEventListener("dragstart", (e) => {
+      const btn = e.target?.closest(".af-tab");
+      if (!btn || !bar.contains(btn) || !e.dataTransfer) {
+        return;
+      }
+      const index = Number(btn.dataset.tabIndex);
+      if (!Number.isInteger(index)) {
+        return;
+      }
+      e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ index, tabs: this.currentTabIds }));
+      e.dataTransfer.effectAllowed = "move";
+      document.body.classList.add("af-dragging-tab");
+    });
+    bar.addEventListener("dragend", () => document.body.classList.remove("af-dragging-tab"));
   }
   patchMainHead(state) {
     const selected = selectedSession(state);
@@ -8993,22 +9023,25 @@ var AppShell = class {
 function selectedSession(state) {
   return state.selectedId ? state.sessions.find((s) => s.id === state.selectedId) ?? null : null;
 }
-function tabButton(tab, index, active, shown, canManage, tabIds, actions2) {
+function tabBarSig(state) {
+  const selected = selectedSession(state);
+  if (!selected) {
+    return "";
+  }
+  const tabs = sessionTabs(selected);
+  const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
+  const canManage = supportsTabManagement(selected);
+  const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
+  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
+}
+function tabButton(tab, index, active, shown, canManage, actions2) {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
   const btn = h2("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
+  btn.dataset.tabIndex = String(index);
   btn.append(h2("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions2.openTab(index));
-  btn.addEventListener("dragstart", (e) => {
-    if (!e.dataTransfer) {
-      return;
-    }
-    e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ index, tabs: tabIds }));
-    e.dataTransfer.effectAllowed = "move";
-    document.body.classList.add("af-dragging-tab");
-  });
-  btn.addEventListener("dragend", () => document.body.classList.remove("af-dragging-tab"));
   if (index > 0 && canManage) {
     const close = h2("span", { class: "af-tab-close", title: "Close tab" }, "\xD7");
     close.setAttribute("aria-hidden", "true");
