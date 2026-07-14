@@ -425,9 +425,13 @@ While a terminal is attached, all keys except `Escape` flow to the agent.
   TLS. Never expose it beyond loopback without a TLS-terminating reverse proxy
   (nginx/Caddy), a private network (Tailscale/VPN), or an SSH tunnel — the token
   travels over the connection as-is.
-- **Loopback is same-machine trust, not "internal network" trust.** The token-free
-  exemption is for `127.0.0.1` / `::1` only. If a same-host reverse proxy fronts the
-  daemon, every request looks loopback and auth must live at the proxy.
+- **The loopback exemption is scoped to a loopback bind.** It applies only when
+  `listen_addr` is loopback (`127.0.0.1`/`::1`/`localhost`). On a **network** bind
+  (`0.0.0.0`/routable) the token is enforced for every peer, loopback-origin
+  included, so a same-host reverse proxy cannot bypass it. Behind a proxy on a
+  loopback-bound daemon, auth is the proxy's job (or set `require_loopback_token
+  = true`). See
+  [Reverse proxies and the loopback exemption](remote-http-auth.md#reverse-proxies-and-the-loopback-exemption).
 
 ## See also
 

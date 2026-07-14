@@ -116,18 +116,15 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	// could not open, so the daemon keeps running with the web server skipped.
 	closeTCP := func() error { return nil }
 	if manager.cfg.ListenAddr != "" {
-		// The daemon's web listener exempts loopback peers from the token by
-		// default (a same-machine browser gets the unix-socket's local trust,
-		// #1696) and honors require_token=false to drop the token for network peers
-		// too on a trusted network. require_loopback_token=true withdraws the
-		// loopback exemption so even same-machine peers must present the token —
-		// the tighten-up for a SHARED/multi-user host, where the default exemption
-		// would hand every local account the full control plane.
-		policy := tokenGatePolicy{
-			tokenDisabled:  !manager.cfg.RequireToken,
-			loopbackExempt: !manager.cfg.RequireLoopbackToken,
-		}
-		if !manager.cfg.RequireToken {
+		// The daemon's web listener exempts loopback peers from the token only when
+		// the listener is LOOPBACK-BOUND (a same-machine browser gets the
+		// unix-socket's local trust, #1696), honors require_token=false to drop the
+		// token for all peers on a trusted network, and withdraws the loopback
+		// exemption on require_loopback_token=true. Crucially, a NETWORK-bound
+		// listener never exempts loopback: a same-host reverse proxy connects from
+		// 127.0.0.1, so exempting it would bypass the token (webListenerPolicy).
+		policy := webListenerPolicy(manager.cfg)
+		if policy.tokenDisabled {
 			// A network-reachable, tokenless control plane is a deliberate but
 			// dangerous choice: anyone who can reach listen_addr has full control.
 			// Make it impossible to miss in the daemon log.
@@ -140,12 +137,14 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 			log.InfoLog.Printf("daemon HTTP TCP listener enabled on %s (plain HTTP — terminate TLS at a proxy if needed)", info.Addr)
 			log.InfoLog.Printf("  bearer token: %s", info.Token)
 			switch {
-			case manager.cfg.RequireLoopbackToken:
-				log.InfoLog.Printf("  require_loopback_token=true: loopback peers (127.0.0.1/::1) must present the token above, same as network peers")
-			case manager.cfg.RequireToken:
+			case policy.tokenDisabled:
+				log.InfoLog.Printf("  all peers connect with NO token (require_token=false)")
+			case policy.loopbackExempt:
 				log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above")
+			case isLoopbackListenAddr(manager.cfg.ListenAddr):
+				log.InfoLog.Printf("  require_loopback_token=true: every peer (loopback included) must present the token above")
 			default:
-				log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers also need NO token (require_token=false)")
+				log.InfoLog.Printf("  listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests — a same-host reverse proxy is NOT exempt (front it and let the proxy pass the token, or set require_token=false only on a fully trusted network)")
 			}
 		}
 	}

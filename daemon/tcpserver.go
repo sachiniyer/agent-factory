@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -54,6 +55,58 @@ type tokenGatePolicy struct {
 	tokenDisabled bool
 	// loopbackExempt lets 127.0.0.1/::1 peers skip the token.
 	loopbackExempt bool
+}
+
+// isLoopbackListenAddr reports whether a listen_addr binds ONLY the loopback
+// interface (127.0.0.1 / ::1 / localhost). It governs the loopback token
+// exemption, and the distinction is load-bearing for security now that the
+// recommended way to add TLS is a same-host reverse proxy:
+//
+// A reverse proxy on the same host (nginx/Caddy terminating TLS) connects to the
+// daemon from 127.0.0.1, so EVERY request it forwards has a loopback RemoteAddr —
+// indistinguishable from a genuine same-machine user. If the loopback exemption
+// applied on a network-bound listener, all proxied traffic would skip the token
+// and reach the control plane unauthenticated. So the exemption is safe ONLY when
+// the listener itself is loopback-bound (where a loopback RemoteAddr truly is a
+// local peer). On a NETWORK bind (0.0.0.0, a routable/Tailscale IP, or an empty
+// host = every interface) the exemption is withheld and the token is required for
+// all peers, loopback-origin included. An unparseable address fails safe to "not
+// loopback" (token enforced).
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		host = strings.TrimSpace(addr)
+	}
+	if host == "" {
+		return false // empty host binds every interface — network-reachable
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// webListenerPolicy is the token-gate posture for the daemon's own listen_addr
+// web listener, derived from config. It relaxes the fail-safe default in exactly
+// two ways, and the loopback relaxation is now bind-aware:
+//
+//   - tokenDisabled from require_token=false — drop the token for ALL peers on a
+//     network the operator fully trusts (Tailscale/VPN). Unchanged.
+//   - loopbackExempt lets same-machine peers skip the token, BUT only when the
+//     listener is LOOPBACK-BOUND. On a network bind the exemption is withheld
+//     regardless of require_loopback_token: a same-host reverse proxy connects
+//     from 127.0.0.1, so exempting loopback there would let anything behind the
+//     proxy reach the control plane with no token. require_loopback_token=true
+//     withdraws the exemption even on a loopback bind (shared/multi-user host).
+//
+// The agent-server does NOT use this — it passes the strict zero-value policy
+// (token mandatory for every peer) directly.
+func webListenerPolicy(cfg *config.Config) tokenGatePolicy {
+	return tokenGatePolicy{
+		tokenDisabled:  !cfg.RequireToken,
+		loopbackExempt: isLoopbackListenAddr(cfg.ListenAddr) && !cfg.RequireLoopbackToken,
+	}
 }
 
 // startTCPListener binds the plain-HTTP TCP listener on cfg.ListenAddr and

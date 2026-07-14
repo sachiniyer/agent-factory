@@ -410,6 +410,16 @@ const (
 	remoteAgentCallTimeout = 30 * time.Second
 )
 
+// remoteAgentWSHandshakeTimeout bounds the WS UPGRADE handshake on the internal
+// daemon→agent-server stream dial — the 101 exchange after the TCP connect. Plain
+// HTTP has no TLS handshake to time out, so without this a wedged agent-server
+// that accepts the TCP connection but never answers the upgrade would hang the
+// daemon's capture goroutine forever (the #1730 half-open class, on the internal
+// hop). It bounds ONLY the handshake: coder/websocket's Dial context does not
+// govern the established stream, so a long-lived PTY subscription is never
+// severed. A var (not const) so a test can shrink it to prove the bound fires.
+var remoteAgentWSHandshakeTimeout = 10 * time.Second
+
 // remoteAgentClient is the transport to ONE `af agent-server`: a token-bearing
 // plain-HTTP client for the /v1/agent/* control REST and a matching WS dialer for
 // the /v1/sessions/{title}/stream data plane. It is the session-package analogue
@@ -526,7 +536,13 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket
 		HTTPClient: c.httpClient,
 		HTTPHeader: http.Header{agentproto.AuthHeader: []string{agentproto.BearerScheme + c.token}},
 	}
-	conn, _, err := websocket.Dial(ctx, u, opts)
+	// Bound the UPGRADE handshake so a wedged agent-server (TCP accepted, 101 never
+	// sent) can't hang this dial forever. coder/websocket's Dial context bounds only
+	// the handshake — the established stream reads use the parent ctx (passed into
+	// readLoop), so cancelling this after Dial returns never severs the live stream.
+	dialCtx, cancel := context.WithTimeout(ctx, remoteAgentWSHandshakeTimeout)
+	defer cancel()
+	conn, _, err := websocket.Dial(dialCtx, u, opts)
 	if err != nil {
 		return nil, fmt.Errorf("remote agent-server: dial pty stream: %w", err)
 	}

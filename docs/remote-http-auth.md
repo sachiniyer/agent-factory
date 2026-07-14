@@ -212,11 +212,13 @@ expose `listen_addr` to anything beyond loopback, put encryption in front of it:
 - **An SSH tunnel** — [Option 1](#option-1-ssh-recommended). The SSH channel
   encrypts the forwarded connection end to end.
 
-> When a proxy fronts the daemon it connects over loopback, so **every** proxied
-> request looks loopback-exempt (see below) — the **proxy**, not af, is then
-> responsible for auth. Terminate auth at the proxy, set
-> `require_loopback_token = true` so af still demands the token, or bind af
-> somewhere the proxy reaches non-loopback.
+> **How a same-host proxy interacts with the token depends on af's OWN bind
+> address** (see [Reverse proxies and the loopback
+> exemption](#reverse-proxies-and-the-loopback-exemption)): a proxy in front of a
+> **loopback-bound** af is exempt (auth is then the proxy's job, unless you set
+> `require_loopback_token = true`), while a **network-bound** af enforces the token
+> even for the proxy's loopback connection — so the proxy must forward the token.
+> A same-host proxy can never silently bypass the token on a network-bound listener.
 
 ---
 
@@ -238,6 +240,13 @@ paste a token would be friction with no security gain. Loopback peers therefore
 connect with **no token** — the browser web client detects this and skips its
 login screen entirely.
 
+The exemption applies **only when `listen_addr` is loopback-bound** (the default
+`127.0.0.1:8443`, or `::1`/`localhost`). On a **network** bind (`0.0.0.0`, a
+routable/Tailscale IP, or `:port` = every interface) it is **withheld**: the token
+is enforced for every peer, loopback-origin requests included. That is the fix
+that stops a same-host reverse proxy from bypassing the token — see
+[Reverse proxies and the loopback exemption](#reverse-proxies-and-the-loopback-exemption).
+
 Loopback is determined **only** from the TCP connection's source address
 (`net.IP.IsLoopback` on the real `RemoteAddr`). It is **never** inferred from
 `X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `Host`, or `Origin` — those are all
@@ -245,11 +254,29 @@ attacker-controlled, so a network peer that forges them to claim `127.0.0.1` is
 **still rejected**. A source address cannot be spoofed and still complete the TCP
 handshake, so this is the only trustworthy signal.
 
-> If you put the daemon behind a **reverse proxy** on the same host, the proxy
-> connects over loopback and every forwarded request will appear loopback-exempt
-> — the proxy, not the daemon, is then responsible for auth. Terminate auth at
-> the proxy, set `require_loopback_token = true`, or bind the daemon somewhere the
-> proxy reaches non-loopback.
+#### Reverse proxies and the loopback exemption
+
+A same-host reverse proxy (nginx/Caddy — the way you add TLS) connects to af from
+`127.0.0.1`, so **every** request it forwards has a loopback source address,
+indistinguishable from a genuine local user. How af treats that connection is
+scoped to af's **own bind address**, which is what makes the exemption safe:
+
+- **af bound to loopback** (`127.0.0.1:8443` — the recommended proxy backend, and
+  the only address a same-host proxy needs to reach). af is unreachable except
+  from the same machine, so it **exempts** the proxy's loopback connection: proxied
+  requests reach af with no token, and the **proxy** is responsible for auth
+  (terminate it there, or enforce nothing if the proxy itself is access-controlled).
+  To make af **also** demand the token from the proxy, set
+  `require_loopback_token = true`.
+- **af bound to a network address** (`0.0.0.0` or a routable/Tailscale IP). af
+  **enforces** the token even for the proxy's loopback connection, so the proxy
+  must forward it (`proxy_set_header Authorization` in nginx, or a client cert /
+  the token in Caddy). A same-host proxy can **never** silently bypass the token on
+  a network-bound listener — that was the bypass this rule closes.
+
+Either way, don't assume "the proxy connects over loopback, so af trusts it": on a
+network-bound listener af does **not**, and on a loopback-bound listener the trust
+is a deliberate convenience you can tighten with `require_loopback_token`.
 
 #### Shared machines: the loopback exemption is weaker than the Unix socket
 
@@ -373,10 +400,13 @@ plaintext backend.
   the web client), and put it behind a proxy and a firewall.
 - **The local socket is still local.** Enabling the TCP listener does not weaken
   the Unix socket, and it does not add a token requirement for local clients.
-- **Loopback is same-machine trust, not "internal network" trust.** The
-  token-free exemption is for `127.0.0.1`/`::1` only, judged from the real
-  connection address. If a same-host reverse proxy fronts the daemon, every
-  request looks loopback — auth must then live at the proxy.
+- **The loopback exemption is scoped to a loopback bind.** It applies only when
+  `listen_addr` is loopback (`127.0.0.1`/`::1`/`localhost`), judged from the real
+  connection address. On a **network** bind (`0.0.0.0`/routable) the token is
+  enforced for every peer, loopback-origin included — so a same-host reverse proxy
+  cannot bypass it. Behind a proxy on a loopback-bound af, auth is the proxy's job
+  (or set `require_loopback_token = true`). See
+  [Reverse proxies and the loopback exemption](#reverse-proxies-and-the-loopback-exemption).
 - **Loopback trust is machine-wide, not per-user.** The default loopback web UI
   is reachable with **no token by any local account** — weaker than the Unix
   socket's `0600` owner-only gate. On a **shared / multi-user machine**, set
