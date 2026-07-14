@@ -3,11 +3,14 @@ package tmux
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // stallingTmuxOnPath puts a `tmux` earlier on PATH that never exits, standing in
@@ -121,3 +124,59 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 		t.Fatalf("ResizeWindow: %v", err)
 	}
 }
+
+// TestRealPipePaneStreamsPastTheReap pins the invariant that makes the reap in
+// runTmuxBounded/outputTmuxBounded safe: boundedTmuxCommand puts each tmux
+// command in its OWN process group and SIGKILLs that group on every exit path —
+// including SUCCESS — to collect any child holding the capture pipe. That is
+// only correct because `pipe-pane`'s shell command (the broker's `dd`) is
+// spawned by the tmux SERVER, not by the short-lived tmux CLIENT we exec, so it
+// is not in the group we kill. If it ever were, EnablePipePane would destroy its
+// own pipe the instant it succeeded and the WS stream would silently go dead —
+// a far worse regression than the hang this all fixes, and one no mock can
+// catch. So this drives a REAL tmux, on a private server (IsolateTmux) so it
+// cannot touch the developer's sessions.
+func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const name = "af1787-reap-pipe"
+	ex := cmd.MakeExecutor()
+	if err := ex.Run(exec.Command("tmux", "new-session", "-d", "-s", name, "sh")); err != nil {
+		t.Fatalf("new-session: %v", err)
+	}
+	t.Cleanup(func() { _ = ex.Run(exec.Command("tmux", "kill-session", "-t", "="+name)) })
+
+	ts := NewTmuxSessionFromSanitizedNameWithDeps(name, "sh", MakePtyFactory(), ex)
+	fifo := filepath.Join(t.TempDir(), "pane.out")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	// O_RDWR so the read end stays valid before tmux's writer opens, mirroring
+	// tmuxClientlessChannel.StartCapture.
+	rc, err := os.OpenFile(fifo, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open fifo: %v", err)
+	}
+	t.Cleanup(func() { _ = rc.Close() })
+
+	if err := ts.EnablePipePane("dd of=" + shellQuoteForTest(fifo) + " bs=4096 2>/dev/null"); err != nil {
+		t.Fatalf("EnablePipePane: %v", err)
+	}
+	// Produce output AFTER the pipe is up: pipe-pane only streams future bytes.
+	if err := ts.SendRawKeys([]byte("echo AF1787MARKER\n")); err != nil {
+		t.Fatalf("SendRawKeys: %v", err)
+	}
+	buf := make([]byte, 4096)
+	if err := rc.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	n, err := rc.Read(buf)
+	if err != nil || n == 0 {
+		t.Fatalf("no bytes streamed after EnablePipePane — did the reap kill pipe-pane's own dd? err=%v n=%d", err, n)
+	}
+	if err := ts.DisablePipePane(); err != nil {
+		t.Fatalf("DisablePipePane: %v", err)
+	}
+}
+
+func shellQuoteForTest(s string) string { return "'" + s + "'" }
