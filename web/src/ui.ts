@@ -118,6 +118,9 @@ export interface Actions {
   triggerTask(task: TaskData): void;
   /** Removes a task via RemoveTask. */
   removeTask(task: TaskData): void;
+  /** Opens the reversible delete-project confirm for a project row (#1735); on
+   *  confirm index.ts calls DeleteProject, which archives its live sessions. */
+  deleteProject(root: string, label: string, sessionCount: number): void;
 }
 
 /** The soft cap on tabs per session (session/tab.go maxTabs): the agent tab plus
@@ -462,7 +465,10 @@ export class AppShell {
     // The projects + tasks views are peers of the sessions body inside one viewport;
     // update() shows exactly one and hides the others by `state.view`. They own their
     // own subtrees so a task.* / rail event patches only the active pane.
-    this.projectsPane = new ProjectsPane((id: string) => this.actions.open(id));
+    this.projectsPane = new ProjectsPane(
+      (id: string) => this.actions.open(id),
+      (root: string, label: string, count: number) => this.actions.deleteProject(root, label, count),
+    );
     this.tasksPane = new TasksPane({
       add: () => this.actions.addTask(),
       toggle: (task: TaskData) => this.actions.toggleTask(task),

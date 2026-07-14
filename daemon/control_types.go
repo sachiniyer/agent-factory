@@ -110,6 +110,32 @@ type RestoreSessionResponse struct {
 	WorktreePath string `json:"worktree_path"`
 }
 
+// DeleteProjectRequest asks the daemon to delete a project — a repo grouping of
+// sessions (#1735). The delete is ARCHIVE-THEN-REMOVE and reversible: every live
+// session of the repo is archived (worktree relocated, branch/state preserved,
+// restorable via RestoreArchived), the repo's root_agents opt-in is dropped, and
+// the always-on root agent (if any) is stopped — the user's real git repo is
+// never touched. Restoring any archived session brings the project back.
+//
+// RepoPath is the repo root (the stable project id clients group by:
+// worktree.repo_path). RepoID is the precomputed id; when empty the daemon
+// derives it from RepoPath. At least one must be set. Deleting an unknown or
+// already-empty project is a clean no-op, not an error.
+type DeleteProjectRequest struct {
+	RepoPath string `json:"repo_path"`
+	RepoID   string `json:"repo_id"`
+}
+
+type DeleteProjectResponse struct {
+	OK bool `json:"ok"`
+	// ArchivedCount is how many live sessions were archived (restorable).
+	ArchivedCount int `json:"archived_count"`
+	// KilledCount is how many live sessions could not be archived and were torn
+	// down instead — only in-place/external worktrees (the root agent, `--here`
+	// sessions), whose kill never touches the user's tree or branch.
+	KilledCount int `json:"killed_count"`
+}
+
 type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`

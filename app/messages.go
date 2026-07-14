@@ -33,6 +33,26 @@ type startArchiveMsg struct {
 	title string
 }
 
+// startDeleteProjectMsg is emitted by the delete-project confirmation (#1735);
+// its handler dispatches deleteProjectCmd to run the daemon archive-then-remove
+// off the event loop, mirroring startArchiveMsg → archiveInstanceCmd.
+type startDeleteProjectMsg struct {
+	root   string
+	repoID string
+	name   string
+}
+
+// projectDeletedMsg reports completion of an async delete-project (#1735). On
+// success the archived rows leave the active list via the next daemon Snapshot
+// reconcile; a non-nil err is surfaced in the error box.
+type projectDeletedMsg struct {
+	root     string
+	repoID   string
+	name     string
+	archived int
+	err      error
+}
+
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async
 // archive / restore (#1028). On success the row's new status arrives via the
 // next daemon Snapshot reconcile (which re-partitions it into / out of the

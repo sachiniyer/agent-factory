@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -64,6 +65,14 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Proje
 	}
 
 	for _, d := range data {
+		// Only LIVE sessions define an "active project" (#1735): a repo whose
+		// sessions are all archived is not an active project — its archived rows
+		// live in the sidebar's Archived group and are restorable, which brings
+		// the project back. This is what makes delete-project (archive every live
+		// session) drop the repo from the list, and restore re-add it.
+		if session.IsArchivedData(d) {
+			continue
+		}
 		root := d.Worktree.RepoPath
 		if root == "" {
 			continue
@@ -203,6 +212,60 @@ func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
 	}
 	m.closeProjectPicker()
 	return m.switchProject(repo)
+}
+
+// handleDeleteProject opens the reversible delete-project confirmation for the
+// cursor's project in the Projects section (#1735). The copy makes the
+// reversibility explicit: sessions are archived (restorable), the real repo is
+// untouched, and restoring any archived session brings the project back. On
+// confirm it dispatches the async daemon archive-then-remove.
+func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) {
+	repoID := config.RepoIDFromRoot(proj.Root)
+	sessionWord := "sessions"
+	if proj.SessionCount == 1 {
+		sessionWord = "session"
+	}
+	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
+	message := fmt.Sprintf(
+		"[!] Delete project '%s'?\n\nIts %d %s are archived (tmux torn down, worktrees moved out — branches and uncommitted work preserved) and it is removed from the projects list. Your real git repository is untouched. Restore any archived session (%s, or `af sessions restore`) to bring the project back.",
+		proj.Name, proj.SessionCount, sessionWord, restoreKey,
+	)
+	return m, m.confirmAction(message, func() tea.Msg {
+		return startDeleteProjectMsg{root: proj.Root, repoID: repoID, name: proj.Name}
+	})
+}
+
+// deleteProjectCmd runs the daemon archive-then-remove off the event loop
+// (#1735), mirroring archiveInstanceCmd, and reports completion.
+func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
+	return func() tea.Msg {
+		resp, err := deleteProjectThroughDaemon(msg.root, msg.repoID)
+		return projectDeletedMsg{root: msg.root, repoID: msg.repoID, name: msg.name, archived: resp.ArchivedCount, err: err}
+	}
+}
+
+// handleProjectDeleted finalizes an async delete-project (#1735). On success it
+// drops the local root_agents opt-in mirror (the daemon removed it on disk; a
+// separate attached TUI reflects it on its next launch, matching how
+// RegisterRootAgent's persistence is picked up) and refreshes the Projects
+// section so the now-empty project leaves the list immediately.
+func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, m.handleError(fmt.Errorf("failed to delete project '%s': %w", msg.name, msg.err))
+	}
+	if m.appConfig != nil {
+		for path := range m.appConfig.RootAgents {
+			if repo, err := config.RepoFromPath(config.ExpandTilde(path)); err == nil && repo.ID == msg.repoID {
+				delete(m.appConfig.RootAgents, path)
+			}
+		}
+	}
+	m.refreshSidebarProjects()
+	sessionWord := "sessions"
+	if msg.archived == 1 {
+		sessionWord = "session"
+	}
+	return m, m.showTransientMessage(fmt.Sprintf("Deleted project '%s' — archived %d %s (restorable)", msg.name, msg.archived, sessionWord))
 }
 
 func (m *home) closeProjectPicker() {

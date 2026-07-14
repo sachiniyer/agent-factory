@@ -20,6 +20,7 @@ import {
   createSession,
   type CreateSessionInput,
   createTab,
+  deleteProject,
   fetchSnapshot,
   killSession,
   listTasks,
@@ -33,7 +34,7 @@ import {
   updateTask,
 } from "./api.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
-import { confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
+import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
@@ -461,6 +462,34 @@ function openConfirm(action: "kill" | "archive"): void {
   );
 }
 
+/** Opens the reversible delete-project confirm for a project row (#1735). On
+ *  confirm it archives the repo's live sessions via DeleteProject; the archived
+ *  events + projects.changed resync the rail and drop the project from the view. */
+function openDeleteProject(root: string, label: string, sessionCount: number): void {
+  openModal(
+    confirmDeleteProjectModal({
+      projectLabel: label,
+      sessionCount,
+      onConfirm: () => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void deleteProject(root, tok)
+          .then(closeModal)
+          .catch((e) => {
+            m.setBusy(false);
+            m.setError(describeError(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
 // --- tab management (#1592 Phase 5 PR7) ------------------------------------
 
 /** The full projection of the selected session, or null — the source of its tab
@@ -702,6 +731,7 @@ const actions = {
   toggleTask,
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask,
+  deleteProject: openDeleteProject,
 };
 
 // --- attach terminal wiring ------------------------------------------------

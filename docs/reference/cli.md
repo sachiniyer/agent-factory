@@ -29,6 +29,8 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
+- [`af projects`](#af-projects) — Manage projects (repo groupings of sessions)
+- [`af projects delete`](#af-projects-delete) — Delete a project: archive its sessions and remove it (reversibly)
 - [`af reset`](#af-reset) — Reset all stored instances
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
@@ -90,6 +92,7 @@ af [flags]
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
+- [`af projects`](#af-projects) — Manage projects (repo groupings of sessions)
 - [`af reset`](#af-reset) — Reset all stored instances
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af tasks`](#af-tasks) — Manage tasks
@@ -757,6 +760,66 @@ af keys
 | Flag | Type | Description |
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
+## af projects
+
+Manage projects (repo groupings of sessions)
+
+```
+af projects
+```
+
+**Subcommands**
+
+- [`af projects delete`](#af-projects-delete) — Delete a project: archive its sessions and remove it (reversibly)
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
+
+## af projects delete
+
+Delete a project: archive its sessions and remove it (reversibly)
+
+Delete a project — the group of sessions sharing a git repository.
+
+This is ARCHIVE-THEN-REMOVE and reversible. Every live session of the repo is
+archived (its tmux is torn down and its worktree moved to the archive dir, but
+its branch and uncommitted changes are preserved), the project drops out of the
+active projects list, and its always-on root agent (if any) is stopped and its
+root_agents opt-in removed. In-place sessions (the root agent, 'af sessions
+create --here') are torn down instead of archived — their cleanup never touches
+your working tree or branch.
+
+Your real git repository is never touched. To undo a mis-click, restore any
+archived session with 'af sessions restore <title>' — its project reappears.
+
+[repo] is a path inside the repository to delete (default: the current repo).
+Deleting an unknown or already-empty project is a clean no-op. Prints how many
+sessions were archived.
+
+```
+af projects delete [repo]
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket (env: AF_DAEMON_URL). Requires --token. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--tls-fingerprint` | `string` | Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert (env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From `af token show`. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with `af token show` on the daemon host. |
 

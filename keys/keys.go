@@ -85,6 +85,11 @@ const (
 	// (handleProjectsFocus), so this name never appears in GlobalKeyStringsMap.
 	KeySwitchProjectRow
 
+	// KeyDeleteProject deletes the cursor's project from the focused Projects
+	// section (#1735): archive-then-remove, reversible. Dispatch is root-routed
+	// (handleProjectsFocus), so this name never appears in GlobalKeyStringsMap.
+	KeyDeleteProject
+
 	// Interactive mode (#1089, RFC §2.3): Enter on a live pane enters it —
 	// every subsequent keystroke (including Tab) forwards to the agent/shell
 	// in-pane, no full-screen takeover. KeyAttach keeps the full-screen tmux
@@ -154,6 +159,7 @@ var specs = []spec{
 	{name: KeyTaskList, configKey: "tasks", keys: []string{"m"}, desc: "tasks", dispatch: true},
 	{name: KeyManageAutomations, keys: []string{"enter"}, desc: "manage"},
 	{name: KeySwitchProjectRow, keys: []string{"enter"}, desc: "switch"},
+	{name: KeyDeleteProject, keys: []string{"D"}, desc: "delete project"},
 	{name: KeyOpenPane, configKey: "open_pane", keys: []string{"s"}, desc: "open pane", dispatch: true},
 	{name: KeySplitPane, configKey: "split_pane", keys: []string{"S"}, desc: "split pane", dispatch: true},
 	{name: KeyHidePane, configKey: "hide_pane", keys: []string{"x"}, desc: "hide pane", dispatch: true},

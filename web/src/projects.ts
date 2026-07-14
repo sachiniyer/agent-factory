@@ -50,6 +50,14 @@ function orderWithinProject(sessions: SessionData[]): SessionData[] {
 export function groupSessionsByProject(sessions: SessionData[]): ProjectGroup[] {
   const byRoot = new Map<string, SessionData[]>();
   for (const s of sessions) {
+    // Only LIVE sessions define an "active project" (#1735): an archived session
+    // belongs to the sessions rail's Archived group, not the projects view. This
+    // is what makes delete-project (archive every live session) drop the project
+    // row, and restoring an archived session bring it back — the reversible
+    // contract. It mirrors the TUI's live-only buildProjectListFrom.
+    if (isArchived(s)) {
+      continue;
+    }
     const root = s.worktree?.repo_path;
     if (!root) {
       continue;
@@ -76,8 +84,12 @@ export class ProjectsPane {
 
   /** onOpen selects + attaches a session by its stable id (index.ts switches to the
    *  sessions view and hands the terminal the keyboard), so a project's session row
-   *  is a jump-to-session affordance. */
-  constructor(private readonly onOpen: (id: string) => void) {
+   *  is a jump-to-session affordance. onDeleteProject deletes a project by its repo
+   *  root (#1735) — index.ts confirms first, then calls the DeleteProject RPC. */
+  constructor(
+    private readonly onOpen: (id: string) => void,
+    private readonly onDeleteProject: (root: string, label: string, sessionCount: number) => void,
+  ) {
     this.el = h("section", { class: "af-projects" });
     this.el.setAttribute("aria-label", "Projects");
   }
@@ -118,11 +130,18 @@ export class ProjectsPane {
   }
 
   private projectSection(group: ProjectGroup, selectedId: string | null): HTMLElement {
+    // The reversible delete-project control (#1735): a ghost button on the header,
+    // mirroring the terminal-head Archive button. index.ts pops the confirm modal.
+    const deleteBtn = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete");
+    deleteBtn.setAttribute("title", `Delete project ${group.label} (archives its sessions, restorable)`);
+    deleteBtn.setAttribute("aria-label", `Delete project ${group.label}`);
+    deleteBtn.addEventListener("click", () => this.onDeleteProject(group.root, group.label, group.sessions.length));
     const header = h(
       "div",
       { class: "af-project-head" },
       h("span", { class: "af-project-name" }, group.label),
       h("span", { class: "af-project-count" }, `${group.sessions.length}`),
+      deleteBtn,
     );
     header.append(h("div", { class: "af-project-path" }, group.root));
     const rows = group.sessions.map((s) => this.sessionRow(s, s.id === selectedId));

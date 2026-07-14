@@ -240,6 +240,17 @@ func RestoreSession(req RestoreSessionRequest) (string, error) {
 	return resp.WorktreePath, nil
 }
 
+// DeleteProject asks the daemon to delete a project (#1735): archive its live
+// sessions (restorable), tear down any in-place ones, and drop its root_agents
+// opt-in. Returns how many sessions were archived and how many were torn down.
+func DeleteProject(req DeleteProjectRequest) (DeleteProjectResponse, error) {
+	var resp DeleteProjectResponse
+	if err := callDaemon("DeleteProject", req, &resp); err != nil {
+		return DeleteProjectResponse{}, err
+	}
+	return resp, nil
+}
+
 // SendPrompt asks the daemon to send a prompt to an existing session.
 func SendPrompt(req SendPromptRequest) error {
 	var resp SendPromptResponse

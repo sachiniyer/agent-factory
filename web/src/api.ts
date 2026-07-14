@@ -214,6 +214,23 @@ export async function archiveSession(id: string, title: string, token: string): 
   await af("ArchiveSession", { id, title, repo_id: "" }, token);
 }
 
+/** The daemon's DeleteProject response: how many sessions it archived vs tore
+ *  down (in-place ones that can't be archived). */
+export interface DeleteProjectResult {
+  ok: boolean;
+  archived_count: number;
+  killed_count: number;
+}
+
+/** Deletes a project (mirrors `af projects delete`) — archive-then-remove and
+ *  reversible: the repo's live sessions are archived (restorable), it drops out
+ *  of the projects view, and its real git repo is untouched. `root` is the repo
+ *  path (worktree.repo_path, the stable project id). The per-session archived
+ *  events + the projects.changed event trigger a rail/projects resync. */
+export async function deleteProject(root: string, token: string): Promise<DeleteProjectResult> {
+  return af("DeleteProject", { repo_path: root, repo_id: "" }, token);
+}
+
 // --- tab mutations (#1592 Phase 5 PR7) -------------------------------------
 //
 // The web tab bar's write verbs, mirroring the TUI's `t`/`w` keys: `t` creates a

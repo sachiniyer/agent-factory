@@ -49,6 +49,17 @@ func (c *Client) RestoreSession(req daemon.RestoreSessionRequest) (string, error
 	return resp.WorktreePath, nil
 }
 
+// DeleteProject asks the daemon to delete a project (#1735): archive its live
+// sessions (restorable), tear down in-place ones, and drop its root_agents
+// opt-in. Returns the daemon's response (archived/killed counts).
+func (c *Client) DeleteProject(req daemon.DeleteProjectRequest) (daemon.DeleteProjectResponse, error) {
+	var resp daemon.DeleteProjectResponse
+	if err := c.call("DeleteProject", req, &resp); err != nil {
+		return daemon.DeleteProjectResponse{}, err
+	}
+	return resp, nil
+}
+
 // ResumeFromLimit asks the daemon to resume a usage-limit-blocked session
 // (#1146) — the TUI's `c` key. It rides an internal (non-cataloged) route: a
 // client-facing session verb the `af api` catalog does not advertise.

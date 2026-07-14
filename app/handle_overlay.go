@@ -144,6 +144,15 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		m.focusRegion(layout.RegionTree)
 		return m, nil, true
 	}
+	// Delete the cursor's project (#1735): archive-then-remove, reversible. Routed
+	// explicitly like `/` so the captive-section no-op below does not swallow it.
+	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyDeleteProject]) {
+		if proj, ok := m.projects.SelectedProject(); ok {
+			mod, cmd := m.handleDeleteProject(proj)
+			return mod, cmd, true
+		}
+		return m, nil, true
+	}
 	// `/` is the ONLY key that enters search from the Projects section (#1620),
 	// vim-style. Route it explicitly rather than letting it fall through, so the
 	// blanket no-op below can suppress every other key without also swallowing

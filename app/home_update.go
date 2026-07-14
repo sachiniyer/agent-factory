@@ -242,6 +242,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleInstanceArchived(msg)
 	case instanceRestoredMsg:
 		return m.handleInstanceRestored(msg)
+	case startDeleteProjectMsg:
+		// Delete-project confirmed; run the daemon archive-then-remove off the
+		// event loop (#1735), mirroring the archive dispatch.
+		return m, m.deleteProjectCmd(msg)
+	case projectDeletedMsg:
+		return m.handleProjectDeleted(msg)
 	case limitRetriedMsg:
 		return m.handleLimitRetried(msg)
 	case repaintAfterDetachMsg:

@@ -868,10 +868,15 @@ body {
 }
 .af-project-head {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   align-items: baseline;
   gap: 0.5rem;
   padding: 0.5rem 0.6rem 0.35rem;
+}
+.af-project-delete {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  align-self: center;
 }
 .af-project-name {
   font-size: 0.85rem;

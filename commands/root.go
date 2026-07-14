@@ -327,5 +327,6 @@ func init() {
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(api.SessionsCmd)
 	rootCmd.AddCommand(api.TasksCmd)
+	rootCmd.AddCommand(api.ProjectsCmd)
 	rootCmd.AddCommand(api.APICmd)
 }

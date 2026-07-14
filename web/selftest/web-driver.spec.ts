@@ -654,6 +654,35 @@ test("archive: the archive confirm moves a session to the archived group", async
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
 });
 
+test("delete project (#1735): the delete confirm archives the repo's sessions and removes the project row", async () => {
+  // Switch to the projects view: the seeded mock repo shows as one project with
+  // its remaining LIVE session (SESSION_A — SESSION_B was archived above, and the
+  // projects view is live-only, so it lists only SESSION_A now).
+  await page.locator('.af-viewtab[data-view="projects"]').click();
+  const projects = page.locator(".af-projects");
+  await expect(projects).toBeVisible();
+  const project = projects.locator(".af-project");
+  await expect(project).toHaveCount(1);
+
+  // Click the reversible Delete control on the project header, then confirm. The
+  // copy makes the reversibility explicit ("restorable").
+  await project.locator("button.af-project-delete").click();
+  const modal = page.locator(".af-modal-card");
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText("restorable");
+  await modal.locator("button.af-danger").click();
+
+  // The project row disappears from the projects view: archiving its last live
+  // session leaves it with none, so it drops out of the (live-only) derivation.
+  await expect(projects.locator(".af-project")).toHaveCount(0, { timeout: 30_000 });
+
+  // Its sessions moved to the archived group: back on the sessions view, the
+  // formerly-live SESSION_A now renders archived (restorable), the real repo
+  // untouched.
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+  await expect(row(page, SESSION_A)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
+});
+
 // NOTE on #1675 PR4 (ended PTY → "exited", not a reconnect loop): this is already
 // wired end-to-end — the daemon emits a MsgExit control frame on session-end
 // (daemon/ws_pty.go, covered by the Go handler tests), and terminal.ts settles to an

@@ -6213,6 +6213,9 @@ async function killSession(id, title, token2) {
 async function archiveSession(id, title, token2) {
   await af("ArchiveSession", { id, title, repo_id: "" }, token2);
 }
+async function deleteProject(root2, token2) {
+  return af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
+}
 function requireSessionID(id, action) {
   if (id === "") {
     throw new ApiError(0, `cannot ${action}: this session has no stable id to target safely`);
@@ -6521,6 +6524,28 @@ function confirmModal(opts) {
   });
   return handle;
 }
+function confirmDeleteProjectModal(opts) {
+  const word = opts.sessionCount === 1 ? "session" : "sessions";
+  const { handle, body } = modalChrome({
+    title: `Delete project ${opts.projectLabel}?`,
+    confirmLabel: "Delete project",
+    confirmClass: "af-danger",
+    onCancel: opts.onCancel
+  });
+  body.append(
+    h(
+      "p",
+      { class: "af-modal-text" },
+      `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`
+    )
+  );
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    handle.setError(null);
+    opts.onConfirm();
+  });
+  return handle;
+}
 function field(label, control) {
   return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
 }
@@ -6642,6 +6667,8 @@ function applyEvent(list, ev) {
       return { sessions: list, needsResync: false };
     case "session.archived":
     case "session.restored":
+      return { sessions: list, needsResync: true };
+    case "projects.changed":
       return { sessions: list, needsResync: true };
     default:
       return { sessions: list, needsResync: false };
@@ -7985,6 +8012,9 @@ function orderWithinProject(sessions) {
 function groupSessionsByProject(sessions) {
   const byRoot = /* @__PURE__ */ new Map();
   for (const s of sessions) {
+    if (isArchived(s)) {
+      continue;
+    }
     const root2 = s.worktree?.repo_path;
     if (!root2) {
       continue;
@@ -7998,9 +8028,11 @@ function groupSessionsByProject(sessions) {
 var ProjectsPane = class {
   /** onOpen selects + attaches a session by its stable id (index.ts switches to the
    *  sessions view and hands the terminal the keyboard), so a project's session row
-   *  is a jump-to-session affordance. */
-  constructor(onOpen) {
+   *  is a jump-to-session affordance. onDeleteProject deletes a project by its repo
+   *  root (#1735) — index.ts confirms first, then calls the DeleteProject RPC. */
+  constructor(onOpen, onDeleteProject) {
     this.onOpen = onOpen;
+    this.onDeleteProject = onDeleteProject;
     this.el = h("section", { class: "af-projects" });
     this.el.setAttribute("aria-label", "Projects");
   }
@@ -8041,11 +8073,16 @@ var ProjectsPane = class {
     this.el.replaceChildren(head, h("div", { class: "af-projects-list" }, ...sections));
   }
   projectSection(group, selectedId) {
+    const deleteBtn = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete");
+    deleteBtn.setAttribute("title", `Delete project ${group.label} (archives its sessions, restorable)`);
+    deleteBtn.setAttribute("aria-label", `Delete project ${group.label}`);
+    deleteBtn.addEventListener("click", () => this.onDeleteProject(group.root, group.label, group.sessions.length));
     const header = h(
       "div",
       { class: "af-project-head" },
       h("span", { class: "af-project-name" }, group.label),
-      h("span", { class: "af-project-count" }, `${group.sessions.length}`)
+      h("span", { class: "af-project-count" }, `${group.sessions.length}`),
+      deleteBtn
     );
     header.append(h("div", { class: "af-project-path" }, group.root));
     const rows = group.sessions.map((s) => this.sessionRow(s, s.id === selectedId));
@@ -8284,7 +8321,10 @@ var AppShell = class {
     const rail = h2("nav", { class: "af-rail" }, railHead, this.railList);
     this.main = h2("section", { class: "af-main" });
     this.sessionsBody = h2("div", { class: "af-body" }, rail, this.main);
-    this.projectsPane = new ProjectsPane((id) => this.actions.open(id));
+    this.projectsPane = new ProjectsPane(
+      (id) => this.actions.open(id),
+      (root2, label, count) => this.actions.deleteProject(root2, label, count)
+    );
     this.tasksPane = new TasksPane({
       add: () => this.actions.addTask(),
       toggle: (task) => this.actions.toggleTask(task),
@@ -8808,6 +8848,27 @@ function openConfirm(action) {
     })
   );
 }
+function openDeleteProject(root2, label, sessionCount) {
+  openModal(
+    confirmDeleteProjectModal({
+      projectLabel: label,
+      sessionCount,
+      onConfirm: () => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void deleteProject(root2, tok).then(closeModal).catch((e) => {
+          m.setBusy(false);
+          m.setError(describeError(e));
+        });
+      },
+      onCancel: closeModal
+    })
+  );
+}
 function selectedSessionData() {
   const { sessions, selectedId } = store.get();
   return sessions.find((s) => s.id === selectedId) ?? null;
@@ -8956,7 +9017,8 @@ var actions = {
   addTask: openAddTask,
   toggleTask,
   triggerTask: doTriggerTask,
-  removeTask: doRemoveTask
+  removeTask: doRemoveTask,
+  deleteProject: openDeleteProject
 };
 function syncSplit(state) {
   const selId = state.selectedId;

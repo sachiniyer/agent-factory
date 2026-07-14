@@ -111,6 +111,18 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 		return
 	}
 
+	// A project deleted at runtime (#1735) is suppressed for the rest of this
+	// daemon's life: DeleteProject already stopped its root and removed it from
+	// root_agents on disk, so respawning it here from the still-immutable
+	// in-memory m.cfg would resurrect the project the user just deleted.
+	m.mu.Lock()
+	_, deleted := m.deletedRootRepos[repo.ID]
+	m.mu.Unlock()
+	if deleted {
+		m.rootEnsureSucceeded(st)
+		return
+	}
+
 	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
 	m.mu.Lock()
 	killedAt, killed := m.rootKilledAt[repo.ID]

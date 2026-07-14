@@ -489,6 +489,10 @@ func init() {
 	SessionsCmd.AddCommand(sessionsAttachCmd)
 	SessionsCmd.AddCommand(sessionsWhoamiCmd)
 
+	// Projects (repo groupings, #1735)
+	ProjectsCmd.PersistentFlags().BoolVar(&envelopeOutput, "json", false, jsonFlagUsage)
+	ProjectsCmd.AddCommand(projectsDeleteCmd)
+
 	// Tasks
 	tasksAddCmd.Flags().StringVar(&taskAddNameFlag, "name", "", "Task name (required)")
 	tasksAddCmd.Flags().StringVar(&taskAddPromptFlag, "prompt", "", "Prompt to send (required for --cron tasks; --watch-cmd tasks default to the emitted line, with {{line}} substituted when present)")
