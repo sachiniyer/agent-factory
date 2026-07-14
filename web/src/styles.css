@@ -69,7 +69,6 @@
   --af-dot-dead: #6e7887;
   --af-dot-archived: #6e7887;
   --af-dot-limit: #b13d33;
-  --af-dot-working: #17202e;
 
   /* Terminal hues */
   --af-term-green: #1f7a33;
@@ -111,7 +110,6 @@
     --af-dot-dead: #989890;
     --af-dot-archived: #989890;
     --af-dot-limit: #cc9393;
-    --af-dot-working: #e7ecf3;
     --af-term-green: #7f9f7f;
     --af-term-amber: #f0dfaf;
     --af-term-blue: #7aa2f7;
@@ -149,7 +147,6 @@
   --af-dot-dead: #6e7887;
   --af-dot-archived: #6e7887;
   --af-dot-limit: #b13d33;
-  --af-dot-working: #17202e;
   --af-term-green: #1f7a33;
   --af-term-amber: #93650a;
   --af-term-blue: #2f5fd8;
@@ -186,7 +183,6 @@
   --af-dot-dead: #989890;
   --af-dot-archived: #989890;
   --af-dot-limit: #cc9393;
-  --af-dot-working: #e7ecf3;
   --af-term-green: #7f9f7f;
   --af-term-amber: #f0dfaf;
   --af-term-blue: #7aa2f7;
@@ -801,14 +797,9 @@ body {
   color: var(--af-dot-limit);
 }
 
-.af-dot-working {
-  color: var(--af-dot-working);
-}
-
-.af-dot-spin {
-  animation: af-pulse 1.1s ease-in-out infinite;
-}
-
+/* af-pulse is retained for the connection live-pip (.af-live-connecting /
+ * .af-live-reconnecting / .af-term-connecting); the session status dot no longer
+ * animates — a working row shows no dot at all (#1766). */
 @keyframes af-pulse {
   0%,
   100% {

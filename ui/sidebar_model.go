@@ -10,7 +10,6 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -190,7 +189,7 @@ type Sidebar struct {
 }
 
 // NewSidebar creates a new sidebar rendering the given projection.
-func NewSidebar(spin *spinner.Model, autoYes bool, proj *store.Projection) *Sidebar {
+func NewSidebar(autoYes bool, proj *store.Projection) *Sidebar {
 	s := &Sidebar{
 		proj: proj,
 		sections: []SidebarSection{
@@ -200,7 +199,7 @@ func NewSidebar(spin *spinner.Model, autoYes bool, proj *store.Projection) *Side
 			// folder).
 			{Kind: SectionArchived, Title: "Archived", Expanded: false},
 		},
-		renderer:      tree.NewInstanceRenderer(spin),
+		renderer:      tree.NewInstanceRenderer(),
 		autoyes:       autoYes,
 		lastCursorTab: -1,
 	}

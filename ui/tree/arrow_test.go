@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,13 +27,12 @@ func runeAtCell(line string, col int) rune {
 // target for the ▸/▾ glyph (#1024 R4) — against Render's actual output, so a
 // prefix layout change moves the hit target with it or fails here.
 func TestArrowCellMatchesRenderedArrow(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "arrow-pin", Path: t.TempDir(), Program: "test",
 	})
 	require.NoError(t, err)
 
-	r := NewInstanceRenderer(&spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(30)
 
 	x, y, ok := ArrowCell(30)

@@ -14,7 +14,7 @@
 // as sessions.ts / nav.ts are.
 
 import { projectLabel } from "./modals.js";
-import { isArchived, rowStatus } from "./status.js";
+import { isArchived, isWorking } from "./status.js";
 import type { SessionData, TaskData } from "./types.js";
 
 /** localStorage key for the persisted selected-project root (the repo path). Kept in
@@ -35,7 +35,7 @@ export interface ProjectSummary {
   path: string;
   /** Live (non-archived) sessions in this project — the "active work" count. */
   liveCount: number;
-  /** Live sessions currently working (a spinning status dot) — the glance signal. */
+  /** Live sessions currently working (no status dot, #1766) — the glance signal. */
   workingCount: number;
   /** Total sessions (live + archived) attributed to the project's repo root. */
   totalCount: number;
@@ -104,7 +104,7 @@ export function projectSummaries(sessions: SessionData[], tasks: TaskData[]): Pr
   return [...roots].sort().map((root) => {
     const rows = byRoot.get(root) ?? [];
     const live = rows.filter((s) => !isArchived(s));
-    const working = live.filter((s) => rowStatus(s).spinning).length;
+    const working = live.filter((s) => isWorking(s)).length;
     return {
       root,
       name: projectName(root),

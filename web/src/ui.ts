@@ -966,12 +966,6 @@ function tabButton(
  *  row lacking an id (never expected from a live Snapshot) is rendered but inert. */
 function sessionRow(s: SessionData, selected: boolean, actions: Actions): HTMLElement {
   const status = rowStatus(s);
-  const dot = h(
-    "span",
-    { class: `af-dot af-dot-${status.kind}${status.spinning ? " af-dot-spin" : ""}` },
-    status.glyph,
-  );
-  dot.setAttribute("aria-hidden", "true");
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const branch = h(
@@ -981,9 +975,19 @@ function sessionRow(s: SessionData, selected: boolean, actions: Actions): HTMLEl
     " ",
     s.branch || "—",
   );
+  const main = h("div", { class: "af-row-main" }, title, branch);
 
   const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}`;
-  const row = h("li", { class: cls }, dot, h("div", { class: "af-row-main" }, title, branch));
+  const row = h("li", { class: cls });
+  // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
+  // one. When there is no dot the span is omitted entirely (kind is null), matching
+  // the TUI's blank status cell.
+  if (status.kind) {
+    const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, status.glyph);
+    dot.setAttribute("aria-hidden", "true");
+    row.append(dot);
+  }
+  row.append(main);
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} — ${status.label}`);

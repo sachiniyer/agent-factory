@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -304,8 +303,6 @@ type home struct {
 	// whose events are failing to reach their target session. Fed each poll by
 	// applyDeliveryAlarms from the snapshot's DeliveryAlarms projection.
 	alarmBanner *ui.AlarmBanner
-	// global spinner instance. we plumb this down to where it's needed
-	spinner spinner.Model
 	// textOverlay displays text information
 	textOverlay *overlay.TextOverlay
 	// textOverlayDismissAnyKey keeps the one-shot intro/created overlays as
@@ -381,7 +378,6 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 	h := &home{
 		alarmBanner:      ui.NewAlarmBanner(),
 		ctx:              ctx,
-		spinner:          spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		store:            proj,
 		menu:             menu,
 		errBox:           errBox,
@@ -408,7 +404,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		state:            stateDefault,
 		appState:         appState,
 	}
-	h.sidebar = ui.NewSidebar(&h.spinner, autoYes, proj)
+	h.sidebar = ui.NewSidebar(autoYes, proj)
 	h.wireZoneRegistry()
 	// No panes are open at startup: the focus ring is tree → automations →
 	// projects until the first pane opens (relayout rebuilds the ring's pane
@@ -762,7 +758,6 @@ func (m *home) focusAdjacentSection(back bool) tea.Cmd {
 
 func (m *home) Init() tea.Cmd {
 	return tea.Batch(
-		m.spinner.Tick,
 		func() tea.Msg {
 			time.Sleep(100 * time.Millisecond)
 			return previewTickMsg{}

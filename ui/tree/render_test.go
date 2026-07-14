@@ -1,11 +1,11 @@
 package tree
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/assert"
@@ -16,13 +16,17 @@ import (
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
+// brailleFrame matches any Braille-pattern glyph — the shape the (now removed)
+// bubbles spinner animated the status cell through. After #1766 no status cell
+// may contain one: a working/busy row shows nothing, never an animated frame.
+var brailleFrame = regexp.MustCompile(`[\x{2800}-\x{28FF}]`)
+
 // TestInstanceRendererRemoteBadge pins the sidebar "[remote]" title badge to the
 // backend's WorkspaceRemote capability rather than a Type()=="remote" check
 // (#1592 Phase 1 PR2): a hook-backed (remote-workspace) instance is prefixed,
 // a local one is not.
 func TestInstanceRendererRemoteBadge(t *testing.T) {
-	spin := spinner.New()
-	r := NewInstanceRenderer(&spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(60)
 
 	render := func(t *testing.T, remote bool) string {
@@ -59,7 +63,7 @@ func effectiveWidth(width int) int {
 // returns the number of leading whitespace cells in front of the branch icon.
 // Instance indices are no longer rendered (#1494), so secondary-row indentation
 // must not change as idx crosses power-of-10 boundaries.
-func branchLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
+func branchLineIndent(t *testing.T, idx int) int {
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "feature",
@@ -68,7 +72,7 @@ func branchLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
 	})
 	require.NoError(t, err)
 
-	r := NewInstanceRenderer(spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(60) // wide enough to render the full branch line
 
 	out := r.Render(inst, idx, false, false, false)
@@ -86,7 +90,6 @@ func branchLineIndent(t *testing.T, idx int, spin *spinner.Model) int {
 // still carry tree arrows and state glyphs, but it must not render a leading
 // "1. title" / "42. title" instance index.
 func TestInstanceRendererOmitsInstanceIndex(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "feature",
 		Path:    t.TempDir(),
@@ -94,7 +97,7 @@ func TestInstanceRendererOmitsInstanceIndex(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	r := NewInstanceRenderer(&spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(60)
 	indexPrefix := regexp.MustCompile(`\b\d+\.\s+feature`)
 	for _, idx := range []int{1, 9, 10, 99, 100, 10000} {
@@ -111,11 +114,10 @@ func TestInstanceRendererOmitsInstanceIndex(t *testing.T) {
 // indentation stable now that idx is display-only input rather than a rendered
 // prefix component.
 func TestInstanceRendererSecondaryIndentIgnoresIndex(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
-	base := branchLineIndent(t, 1, &spin)
+	base := branchLineIndent(t, 1)
 	for _, idx := range []int{9, 10, 11, 99, 100, 101, 999, 1000, 1001, 9999, 10000} {
-		got := branchLineIndent(t, idx, &spin)
+		got := branchLineIndent(t, idx)
 		require.Equalf(t, base, got,
 			"branch line indent at idx=%d (%d) must match idx=1 (%d); idx leaked into display",
 			idx, got, base)
@@ -126,10 +128,10 @@ func TestInstanceRendererSecondaryIndentIgnoresIndex(t *testing.T) {
 // from the given terminal width, and returns the rendered title line. The
 // renderer wraps each section in lipgloss padding, so the visible title
 // content sits on line 1 (after the top-padding line).
-func renderForTerminal(t *testing.T, terminalW int, inst *session.Instance, spin *spinner.Model) (titleLine string, sidebarW int) {
+func renderForTerminal(t *testing.T, terminalW int, inst *session.Instance) (titleLine string, sidebarW int) {
 	t.Helper()
 	sidebarW = int(float32(terminalW) * 0.3)
-	r := NewInstanceRenderer(spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(effectiveWidth(sidebarW))
 	out := r.Render(inst, 1, false, false, false)
 	lines := strings.Split(out, "\n")
@@ -143,7 +145,6 @@ func renderForTerminal(t *testing.T, terminalW int, inst *session.Instance, spin
 // row ended with a "..." artifact that pushed the rendered line one cell past
 // the sidebar container width.
 func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "long-feature",
 		Path:    t.TempDir(),
@@ -189,7 +190,7 @@ func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			titleLine, sidebarW := renderForTerminal(t, tc.terminalW, inst, &spin)
+			titleLine, sidebarW := renderForTerminal(t, tc.terminalW, inst)
 			w := lipgloss.Width(titleLine)
 
 			if tc.expectFullTitle {
@@ -218,9 +219,8 @@ func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
 
 // TestInstanceRendererDeletingMarker pins the #844 sidebar treatment: a row
 // whose teardown is running in the background must carry an explicit
-// "[deleting]" marker (the spinner alone reads as "busy working").
+// "[deleting]" marker (a bare working row shows no status glyph).
 func TestInstanceRendererDeletingMarker(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "going-away",
 		Path:    t.TempDir(),
@@ -229,11 +229,11 @@ func TestInstanceRendererDeletingMarker(t *testing.T) {
 	require.NoError(t, err)
 
 	inst.SetStatusForTest(session.Ready)
-	before, _ := renderForTerminal(t, 120, inst, &spin)
+	before, _ := renderForTerminal(t, 120, inst)
 	assert.NotContains(t, before, "[deleting]")
 
 	inst.SetStatusForTest(session.Deleting)
-	after, _ := renderForTerminal(t, 120, inst, &spin)
+	after, _ := renderForTerminal(t, 120, inst)
 	assert.Contains(t, after, "[deleting]", "deleting rows must be explicitly marked")
 	assert.Contains(t, after, "going-away", "the title must remain visible while deleting")
 }
@@ -242,7 +242,6 @@ func TestInstanceRendererDeletingMarker(t *testing.T) {
 // requirement for #1146: a LimitReached liveness renders its own explicit marker
 // (no silent default / blank dot). #1204 refines the label + reset time on top.
 func TestInstanceRendererLimitReachedMarker(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "throttled",
 		Path:    t.TempDir(),
@@ -251,9 +250,144 @@ func TestInstanceRendererLimitReachedMarker(t *testing.T) {
 	require.NoError(t, err)
 
 	_ = inst.Transition(session.ObserveLiveness(session.LiveLimitReached))
-	out, _ := renderForTerminal(t, 120, inst, &spin)
+	out, _ := renderForTerminal(t, 120, inst)
 	assert.Contains(t, out, "[limit]", "a usage-limit-reached row must be explicitly marked (#1146)")
 	assert.Contains(t, out, "throttled", "the title must remain visible")
+}
+
+// TestInstanceRendererStatusGlyphs pins the #1766 status-cell contract, the same
+// (Liveness, InFlightOp)→glyph mapping the web mirrors (web/src/status.ts): only a
+// waiting/Ready session shows the green ● dot; every working/busy state — LiveRunning
+// or ANY in-flight op (create/restore/kill/archive) — shows NO status glyph and NO
+// animated spinner frame; the terminal/error states keep their STATIC glyphs (◌/○/◆/▧).
+// An in-flight create/restore is a LOADING state that draws a clean blank cell — no
+// dot, no spinner, no stale glyph — and the op axis deliberately masks the liveness
+// glyph so a restoring-but-still-Archived row never leaks the ▧ nor a premature dot.
+func TestInstanceRendererStatusGlyphs(t *testing.T) {
+	newInst := func(t *testing.T, title string) *session.Instance {
+		t.Helper()
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title: title, Path: t.TempDir(), Program: "test",
+		})
+		require.NoError(t, err)
+		return inst
+	}
+	// cell renders inst at a wide width and returns the ANSI-stripped title line —
+	// the row's status glyph sits at its trailing edge.
+	cell := func(t *testing.T, inst *session.Instance) string {
+		t.Helper()
+		title, _ := renderForTerminal(t, 120, inst)
+		return ansiEscape.ReplaceAllString(title, "")
+	}
+	// allGlyphs is every positive/terminal status glyph; a working row must show none.
+	allGlyphs := []string{"●", "○", "◌", "▧", "◆"}
+
+	t.Run("ready shows the green dot", func(t *testing.T) {
+		inst := newInst(t, "waiting")
+		require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+		clean := cell(t, inst)
+		assert.Contains(t, clean, "●", "a waiting/Ready row must show the green ● dot")
+		assert.NotRegexp(t, brailleFrame, clean, "the ready dot is static, never an animated frame")
+	})
+
+	t.Run("running shows no status glyph", func(t *testing.T) {
+		inst := newInst(t, "busy")
+		require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveRunning)))
+		clean := cell(t, inst)
+		assert.NotRegexp(t, brailleFrame, clean, "a working row must not render a spinner frame")
+		for _, g := range allGlyphs {
+			assert.NotContainsf(t, clean, g, "a working row must not show the %s status glyph", g)
+		}
+	})
+
+	for _, op := range []session.InFlightOp{session.OpKilling, session.OpArchiving} {
+		op := op
+		t.Run(fmt.Sprintf("in-flight op %v shows no glyph but stays [deleting]", op), func(t *testing.T) {
+			inst := newInst(t, "going")
+			require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveRunning)))
+			inst.SetInFlightOpForTest(op)
+			clean := cell(t, inst)
+			assert.Contains(t, clean, "[deleting]", "a kill/archive row keeps its [deleting] prefix")
+			assert.NotRegexp(t, brailleFrame, clean, "an in-flight-op row must not render a spinner frame")
+			for _, g := range allGlyphs {
+				assert.NotContainsf(t, clean, g, "an in-flight-op row must not show the %s status glyph", g)
+			}
+		})
+	}
+
+	// An in-flight create is a LOADING state: no glyph, and (unlike kill/archive) NO
+	// title prefix — a bare, clean loading row (#1766). The green dot appears only once
+	// the op clears and the agent is Ready (the progression test below).
+	t.Run("creating (OpCreating) shows no glyph and no prefix", func(t *testing.T) {
+		inst := newInst(t, "spawning")
+		inst.SetInFlightOpForTest(session.OpCreating)
+		clean := cell(t, inst)
+		assert.NotRegexp(t, brailleFrame, clean, "a creating row must not render a spinner frame")
+		for _, g := range allGlyphs {
+			assert.NotContainsf(t, clean, g, "a creating row must not show the %s status glyph", g)
+		}
+		assert.NotContains(t, clean, "[deleting]", "create adds no going-away prefix")
+		assert.Contains(t, clean, "spawning", "a creating row still shows its name")
+	})
+
+	// An in-flight restore of an ARCHIVED instance is rehomed into the live section
+	// (#1210) while its liveness is still LiveArchived. The op axis is checked FIRST, so
+	// it must render a BLANK status cell — NOT the ▧ archived glyph and NOT the green
+	// dot — until the restore completes (#1766).
+	t.Run("restoring (OpRestoring) on an archived instance shows no glyph", func(t *testing.T) {
+		inst := newInst(t, "coming-back")
+		inst.SetArchived()
+		inst.SetInFlightOpForTest(session.OpRestoring)
+		require.False(t, inst.ShownArchived(), "a restoring instance is rehomed into the live section")
+		clean := cell(t, inst)
+		assert.NotRegexp(t, brailleFrame, clean, "a restoring row must not render a spinner frame")
+		for _, g := range allGlyphs {
+			assert.NotContainsf(t, clean, g, "a restoring row must not show the %s status glyph (not ▧, not ●)", g)
+		}
+	})
+
+	// The loading → ready progression: a create shows nothing while in flight, then the
+	// green dot appears the instant the op clears and the agent reaches Ready (#1766).
+	t.Run("a cleared create at Ready shows the green dot", func(t *testing.T) {
+		inst := newInst(t, "born")
+		inst.SetInFlightOpForTest(session.OpCreating)
+		for _, g := range allGlyphs {
+			assert.NotContainsf(t, cell(t, inst), g, "while creating, no %s glyph", g)
+		}
+		inst.SetInFlightOpForTest(session.OpNone)
+		require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+		clean := cell(t, inst)
+		assert.Contains(t, clean, "●", "once Ready with no op, the green dot appears")
+		assert.NotRegexp(t, brailleFrame, clean, "the ready dot is static")
+	})
+
+	statics := []struct {
+		name  string
+		lv    session.Liveness
+		glyph string
+	}{
+		{"lost", session.LiveLost, "◌"},
+		{"dead", session.LiveDead, "○"},
+		{"limit", session.LiveLimitReached, "◆"},
+	}
+	for _, tc := range statics {
+		tc := tc
+		t.Run(tc.name+" shows its static glyph", func(t *testing.T) {
+			inst := newInst(t, "x")
+			require.NoError(t, inst.Transition(session.ObserveLiveness(tc.lv)))
+			clean := cell(t, inst)
+			assert.Containsf(t, clean, tc.glyph, "%s row must show its static %s glyph", tc.name, tc.glyph)
+			assert.NotRegexpf(t, brailleFrame, clean, "%s row must render a static glyph, no spinner", tc.name)
+		})
+	}
+
+	t.Run("archived shows its static glyph", func(t *testing.T) {
+		inst := newInst(t, "filed")
+		inst.SetArchived()
+		clean := cell(t, inst)
+		assert.Contains(t, clean, "▧", "an archived row must show its static ▧ glyph")
+		assert.NotRegexp(t, brailleFrame, clean, "an archived row must render a static glyph, no spinner")
+	})
 }
 
 // TestInstanceRendererArchivedShowsName pins #1225: an archived row must show
@@ -262,7 +396,6 @@ func TestInstanceRendererLimitReachedMarker(t *testing.T) {
 // The archived state is conveyed by the ▧ glyph + dimming + section header, so
 // the title cell is spent on the identifier, exactly like a live row.
 func TestInstanceRendererArchivedShowsName(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "one",
 		Path:    t.TempDir(),
@@ -272,7 +405,7 @@ func TestInstanceRendererArchivedShowsName(t *testing.T) {
 	inst.SetArchived()
 
 	for _, terminalW := range []int{100, 80} {
-		title, _ := renderForTerminal(t, terminalW, inst, &spin)
+		title, _ := renderForTerminal(t, terminalW, inst)
 		clean := ansiEscape.ReplaceAllString(title, "")
 		assert.Containsf(t, clean, "one",
 			"archived row must show its name at %d cols; got %q", terminalW, clean)
@@ -282,7 +415,6 @@ func TestInstanceRendererArchivedShowsName(t *testing.T) {
 }
 
 func TestInstanceRendererCreatingRowShowsBareName(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "alpha",
 		Path:    t.TempDir(),
@@ -291,7 +423,7 @@ func TestInstanceRendererCreatingRowShowsBareName(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, inst.Transition(session.BeginCreate()))
 
-	r := NewInstanceRenderer(&spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(40)
 
 	title := strings.Split(ansiEscape.ReplaceAllString(r.Render(inst, 1, true, false, false), ""), "\n")[1]
@@ -318,7 +450,6 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 		lipgloss.SetHasDarkBackground(prevDark)
 	})
 
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "going-away",
 		Path:    t.TempDir(),
@@ -329,7 +460,7 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 	// SGR foreground params of the default Zenburn deleting gray.
 	dimFG := termenv.RGBColor("#989890").Sequence(false)
 
-	r := NewInstanceRenderer(&spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(effectiveWidth(36))
 
 	renderLines := func() []string {
@@ -356,7 +487,6 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 // (#1024 PR 3): an expandable instance carries ▸ collapsed / ▾ expanded, and a
 // transient (Loading/Deleting) row — never expandable — renders neither.
 func TestInstanceRendererTreeArrow(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "arrowed",
 		Path:    t.TempDir(),
@@ -364,7 +494,7 @@ func TestInstanceRendererTreeArrow(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	r := NewInstanceRenderer(&spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(40)
 
 	collapsed := strings.Split(r.Render(inst, 1, false, false, false), "\n")[1]
@@ -386,8 +516,7 @@ func TestInstanceRendererTreeArrow(t *testing.T) {
 // slot number matching the 1-9 jump keys, the tmux-style " *" marker on the
 // active tab, and hard truncation at narrow widths.
 func TestRenderTabRows(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	r := NewInstanceRenderer(&spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(30)
 
 	mid := ansiEscape.ReplaceAllString(r.RenderTab("Agent", 1, false, false, true), "")

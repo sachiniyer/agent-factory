@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -74,7 +73,6 @@ func newTestHome(t *testing.T) *home {
 	}
 	t.Cleanup(func() { newLiveTermPaneFn = origLiveTerm })
 
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
 
 	state := config.DefaultState()
@@ -105,7 +103,6 @@ func newTestHome(t *testing.T) *home {
 		pauseStatusPoll:  func(string, string) error { return nil },
 		resumeStatusPoll: func(string, string) error { return nil },
 		store:            proj,
-		spinner:          spin,
 		repoID:           repoID,
 	}
 	// Content capture routes through the daemon Preview RPC since #1592 PR6.
@@ -115,7 +112,7 @@ func newTestHome(t *testing.T) *home {
 	// so the source captures it.
 	h.previewFetcher = testPreviewFetcher(h)
 
-	h.sidebar = ui.NewSidebar(&h.spinner, false, proj)
+	h.sidebar = ui.NewSidebar(false, proj)
 	wireTestPanes(h, proj)
 	return h
 }

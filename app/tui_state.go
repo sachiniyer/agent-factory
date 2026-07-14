@@ -6,7 +6,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -288,7 +287,7 @@ func (m *home) persistTUIViewStateAfter(msg tea.Msg) {
 
 func shouldPersistTUIViewStateAfter(msg tea.Msg) bool {
 	switch msg.(type) {
-	case previewTickMsg, panesRefreshedMsg, repaintAfterDetachMsg, spinner.TickMsg, keyupMsg, hideErrMsg:
+	case previewTickMsg, panesRefreshedMsg, repaintAfterDetachMsg, keyupMsg, hideErrMsg:
 		return false
 	default:
 		return true
