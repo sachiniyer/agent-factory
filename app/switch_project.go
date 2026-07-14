@@ -17,10 +17,11 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
-// showProjectPickerOverlay opens the searchable project switcher (#1461): every
-// repo af has seen — the current project, repos with tracked sessions, and the
-// root_agents opt-ins — each with its session count, plus a "+ Add project…"
-// affordance for registering a new repo on the fly.
+// showProjectPickerOverlay opens the project switcher (#1461): every repo af has
+// seen — the current project, repos with tracked sessions, and the root_agents
+// opt-ins — each with its session count, plus a "+ Add project…" affordance for
+// registering a new repo on the fly. The picker navigates like the instances
+// rail (up/k, down/j over the full list); there is no search.
 func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	projects := m.buildProjectList()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
