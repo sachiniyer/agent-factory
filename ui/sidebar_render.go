@@ -232,10 +232,10 @@ func (s *Sidebar) renderWindowIndicator(arrow string, hidden int) string {
 	w := s.contentWidth()
 	text := fmt.Sprintf("%s %d more", arrow, hidden)
 	if w > 0 && runewidth.StringWidth(text) > w {
-		// Same narrow-width handling as renderHeader: drop the "..." tail when
+		// Same narrow-width handling as renderHeader: drop the "…" tail when
 		// it would itself overflow, since lipgloss.Place won't clip oversize
 		// content.
-		tail := "..."
+		tail := "…"
 		if w < runewidth.StringWidth(tail) {
 			tail = ""
 		}
@@ -310,10 +310,10 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 	w := s.contentWidth()
 	text := arrow + label
 	if w > 0 && runewidth.StringWidth(text) > w {
-		// Drop the "..." tail when the container is too narrow to fit it,
+		// Drop the "…" tail when the container is too narrow to fit it,
 		// otherwise runewidth.Truncate returns content wider than w and
 		// lipgloss.Place won't clip the overflow.
-		tail := "..."
+		tail := "…"
 		if w < runewidth.StringWidth(tail) {
 			tail = ""
 		}

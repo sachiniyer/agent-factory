@@ -222,8 +222,10 @@ func (r *InstanceRenderer) SetWidth(width int) {
 	r.width = width
 }
 
-// ɹ and ɻ are other options.
-const branchIcon = "Ꮧ"
+// branchIcon is the real terminal branch glyph ⎇ (U+2387), matching the web
+// UI (web/src/ui.ts). It previously rendered a Cherokee syllabary letter
+// (U+13D7) that merely resembled a branch mark (#1761).
+const branchIcon = "⎇"
 
 // ArrowCell returns the (x, y) cell of the ▾/▸ expand/collapse arrow within
 // an instance row block rendered at content width w, for mouse hit-testing
@@ -370,10 +372,10 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// intact here would spill past sidebarW (#646).
 		titleText = ""
 	} else if runewidth.StringWidth(titleText) > widthAvail {
-		// Drop the "..." tail when the container is too narrow to fit it,
+		// Drop the "…" tail when the container is too narrow to fit it,
 		// otherwise runewidth.Truncate returns content wider than widthAvail
 		// and lipgloss.Place won't clip the overflow.
-		tail := "..."
+		tail := "…"
 		if widthAvail < runewidth.StringWidth(tail) {
 			tail = ""
 		}
@@ -420,17 +422,17 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 			branch += fmt.Sprintf(" (%s)", repoName)
 		}
 	}
-	// Don't show branch if there's no space for it. Or show ellipsis if it's too long.
+	// Don't show the branch if there's no space for it; otherwise fit it into
+	// remainingWidth. runewidth.Truncate reserves the "…" tail (1 cell) inside
+	// remainingWidth itself, so we must NOT subtract for the tail here. The old
+	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
+	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
+	// widths (#1772 review).
 	branchWidth := runewidth.StringWidth(branch)
-	if remainingWidth < 0 {
+	if remainingWidth <= 0 {
 		branch = ""
-	} else if remainingWidth < branchWidth {
-		if remainingWidth < 3 {
-			branch = ""
-		} else {
-			// We know the remainingWidth is at least 4 and branch is longer than that, so this is safe.
-			branch = runewidth.Truncate(branch, remainingWidth-3, "...")
-		}
+	} else if branchWidth > remainingWidth {
+		branch = runewidth.Truncate(branch, remainingWidth, "…")
 	}
 	remainingWidth -= runewidth.StringWidth(branch)
 
@@ -465,10 +467,10 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 		strings.Repeat(" ", runewidth.StringWidth(instancePrefix(expandedArrow, r.width))),
 		connector, oneBased, label, marker)
 	if r.width > 0 && runewidth.StringWidth(text) > r.width {
-		// Same narrow-width handling as the instance rows: drop the "..." tail
+		// Same narrow-width handling as the instance rows: drop the "…" tail
 		// when it would itself overflow, since lipgloss.Place won't clip
 		// oversize content.
-		tail := "..."
+		tail := "…"
 		if r.width < runewidth.StringWidth(tail) {
 			tail = ""
 		}

@@ -9,8 +9,8 @@ import (
 )
 
 // TestErrBoxNarrowWidthDoesNotOverflow is a regression test for issue #337.
-// When the container width is less than the width of the "..." tail,
-// runewidth.Truncate(..., width, "...") returns "..." which is wider than
+// When the container width is less than the width of the "…" tail,
+// runewidth.Truncate(..., width, "…") returns "…" which is wider than
 // the container. lipgloss.Place does not clip, so the overflow is visible.
 // The fix drops the ellipsis tail when the container can't fit it.
 func TestErrBoxNarrowWidthDoesNotOverflow(t *testing.T) {
