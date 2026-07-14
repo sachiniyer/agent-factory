@@ -403,21 +403,31 @@ af_new_instance() {
 # GetSelectedInstance()), so requiring it forces `j` past the header/title rows
 # until the cursor truly lands on an actionable tab row.
 af_select() {
-    local name="$1" _ screen name_re
+    local name="$1" i screen name_re
     [ -n "$name" ] || { _af_fail "af_select: name required"; return 1; }
     name_re="$(_af_regex_escape "$name")"
     af_ensure_nav
     af_focus_tree || return 1
-    for _ in $(seq 1 30); do af_send k; done
+    for i in $(seq 1 30); do af_send k; done
     sleep "$AF_DRIVER_POLL"
-    for _ in $(seq 1 40); do
+    # Scan down from the anchored top tab stop, evaluating the ready condition
+    # AFTER every `j` — including the final one. The old loop captured, checked,
+    # THEN pressed `j`, so the state produced by the 40th (boundary) `j` was
+    # never evaluated: a row that only became actionable on that last step was
+    # missed and af_select reported a false selection failure (#1759). `seq 0 40`
+    # checks the anchored position first (i=0, no `j`), then re-checks after each
+    # of the 40 downward steps, with a settle poll between the `j` and the
+    # capture so the post-`j` frame is the one we inspect.
+    for i in $(seq 0 40); do
+        if [ "$i" -gt 0 ]; then
+            af_send j
+            sleep "$AF_DRIVER_POLL"
+        fi
         screen="$(af_capture)"
         if printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)" \
            && printf '%s\n' "$screen" | grep -qE -- 'D kill'; then
             return 0
         fi
-        af_send j
-        sleep "$AF_DRIVER_POLL"
     done
     _af_log "could not select '${name}' (need ▾ on its parent row AND cursor-on-tab, i.e. 'D kill' in the menu)"
     printf '%s\n' "$screen" >&2
@@ -571,29 +581,67 @@ _af_tab_count() {
     af_capture | grep -cE '^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]' || true
 }
 
+# _AF_TASKS_RUN_HINT — the run-action affordance that marks the task overlay as
+# open. `m` drops STRAIGHT into the selected task's edit form when a task exists
+# (#1249), whose narrow-width footer collapses `r run now` to `r run` — so the
+# old `run now` marker matched the empty-list view but MISSED the edit view at
+# 80x24 and af_open_tasks reported a false timeout (#1757). `r run` is the one
+# run affordance common to every list/edit × wide/narrow variant. The
+# `( |$)` tail keeps it from matching a pane's "Session no longer running."
+# fallback text ("longe`r run`ning") — that has no space/EOL after `r run`.
+: "${_AF_TASKS_RUN_HINT:=r run( |\$)}"
+
 # af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
-# unique `r run now` hint line.
+# `r run` run-action hint, present whether it opens in list or edit mode.
 af_open_tasks() {
     af_ensure_nav
     af_send m
-    af_wait_for 'run now' "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
+    af_wait_for "$_AF_TASKS_RUN_HINT" "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
 }
 
-# af_close_tasks — dismiss the tasks overlay (Escape).
+# af_close_tasks — dismiss the tasks overlay (Escape). When the overlay opened
+# in edit mode the first Escape drops back to the list (still showing the run
+# hint), so a second Escape closes it; both cases sync on the run hint going
+# away.
 af_close_tasks() {
     local deadline screen
     af_send Escape
     deadline=$(( $(_af_now) + 4 ))
     while :; do
         screen="$(af_capture)"
-        if ! printf '%s\n' "$screen" | grep -qE -- 'run now'; then
+        if ! printf '%s\n' "$screen" | grep -qE -- "$_AF_TASKS_RUN_HINT"; then
             return 0
         fi
         [ "$(_af_now)" -ge "$deadline" ] && break
         sleep "$AF_DRIVER_POLL"
     done
     af_send Escape
-    af_wait_gone 'run now' 8 'tasks overlay closed' || return 1
+    af_wait_gone "$_AF_TASKS_RUN_HINT" 8 'tasks overlay closed' || return 1
+}
+
+# af_add_task <name> — seed a minimal valid cron task through the overlay's
+# create form, so a later af_open_tasks lands on the EDIT-mode overlay whose
+# narrow footer shows `r run` (the #1757 flow). Opens the tasks overlay (list
+# mode when empty), fills name + cron expression + prompt (the path field
+# pre-fills with the launch repo, a valid git repo), submits, and waits for the
+# new task's row to appear. Leaves the overlay open in list mode.
+af_add_task() {
+    local name="${1:-selftest-task}" name_re
+    name_re="$(_af_regex_escape "$name")"
+    af_open_tasks || return 1
+    af_send n
+    # Sync on the form title, not the footer: the footer's "enter create" hint
+    # collapses away at a narrow overlay width, but "New Task" is always shown.
+    af_wait_for 'New Task' "$AF_DRIVER_TIMEOUT" 'task create form' || return 1
+    af_send_literal "$name"
+    af_send Tab                    # name -> trigger selector (cron is default)
+    af_send Tab                    # -> trigger value (cron expression)
+    af_send_literal '0 3 * * *'
+    af_send Tab                    # -> prompt (Enter here inserts a newline)
+    af_send_literal 'selftest prompt'
+    af_send Tab                    # -> target; Enter from here submits the form
+    af_send Enter
+    af_wait_for "${name_re}" "$AF_DRIVER_TIMEOUT" "task '${name}' created" || return 1
 }
 
 # af_click <x> <y> — inject an SGR left click at 1-based screen cell (x,y).
