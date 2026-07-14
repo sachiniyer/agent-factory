@@ -15,7 +15,7 @@ function sess(over: Partial<SessionData> = {}): SessionData {
 }
 
 test("liveness → dot kind mirrors render.go's TOTAL switch", () => {
-  // Working (LiveRunning / the Unset sentinel) shows NO dot (#1765): null kind, empty
+  // Working (LiveRunning / the Unset sentinel) shows NO dot (#1766): null kind, empty
   // glyph. Ready is the only positive/green dot; the error states keep static glyphs.
   const cases: Array<[number, DotKind | null, string]> = [
     [Liveness.Ready, "ready", "●"],
@@ -33,7 +33,7 @@ test("liveness → dot kind mirrors render.go's TOTAL switch", () => {
   }
 });
 
-test("a working row has no dot; Ready/error states do (#1765)", () => {
+test("a working row has no dot; Ready/error states do (#1766)", () => {
   const running = rowStatus(sess({ liveness: Liveness.Running }));
   assert.equal(running.kind, null, "Running is working → no dot");
   assert.equal(running.glyph, "", "a working row draws no glyph");

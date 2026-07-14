@@ -799,7 +799,7 @@ body {
 
 /* af-pulse is retained for the connection live-pip (.af-live-connecting /
  * .af-live-reconnecting / .af-term-connecting); the session status dot no longer
- * animates — a working row shows no dot at all (#1765). */
+ * animates — a working row shows no dot at all (#1766). */
 @keyframes af-pulse {
   0%,
   100% {

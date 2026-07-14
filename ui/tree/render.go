@@ -15,7 +15,7 @@ import (
 const readyIcon = "● "
 
 // blankIcon fills the status cell for a working/busy row, which shows no status
-// glyph (#1765: only a waiting/Ready session gets the green dot). Its two cells
+// glyph (#1766: only a waiting/Ready session gets the green dot). Its two cells
 // match the width every status glyph occupies (glyph + trailing pad space) so a
 // dot-less row keeps the title/branch columns aligned with its neighbors.
 const blankIcon = "  "
@@ -275,7 +275,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	// Status glyph. Read the two axes directly (#1195): a row with any in-flight
 	// op (create/kill/archive) is a working/busy state and shows NO status glyph
-	// (#1765); otherwise the daemon-owned liveness picks the glyph. The liveness
+	// (#1766); otherwise the daemon-owned liveness picks the glyph. The liveness
 	// switch is TOTAL — every value is rendered explicitly, no silent default — so
 	// adding a Liveness value (LimitReached landed this way, #1146) forces a
 	// deliberate choice here. Only a waiting/Ready session gets a (green) dot;

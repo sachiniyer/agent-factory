@@ -35,7 +35,7 @@ export interface ProjectSummary {
   path: string;
   /** Live (non-archived) sessions in this project — the "active work" count. */
   liveCount: number;
-  /** Live sessions currently working (no status dot, #1765) — the glance signal. */
+  /** Live sessions currently working (no status dot, #1766) — the glance signal. */
   workingCount: number;
   /** Total sessions (live + archived) attributed to the project's repo root. */
   totalCount: number;

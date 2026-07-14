@@ -194,7 +194,7 @@ test("sidebar lists the seeded sessions from the Snapshot/events plane", async (
   await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
 });
 
-test("status dots (#1765): waiting shows a green dot, working shows none, error states are static — no spin anywhere", async () => {
+test("status dots (#1766): waiting shows a green dot, working shows none, error states are static — no spin anywhere", async () => {
   // The daemon can't be coerced to Running/Lost/Dead/Limit on demand, so pin the
   // states by rewriting the Snapshot: the two real rows get Running (working) and
   // Ready (waiting); synthetic rows cloned into the same project cover the static
@@ -973,7 +973,7 @@ test("archive: the archive confirm moves a session to the archived group", async
   // with the af-row-archived modifier and sorted last).
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
   // The archived row carries the static ▧ archived dot (no spinner) — proof the
-  // error/terminal states keep their static glyphs (#1765).
+  // error/terminal states keep their static glyphs (#1766).
   const archivedDot = row(page, SESSION_B).locator(".af-dot");
   await expect(archivedDot).toHaveClass(/af-dot-archived/);
   await expect(archivedDot).toHaveText("▧");

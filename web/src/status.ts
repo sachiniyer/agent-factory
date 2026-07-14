@@ -15,14 +15,14 @@ import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
 /** The visual kind of a status dot, one per color bucket the TUI paints. Drives
  *  the .af-dot-<kind> CSS class whose color matches render.go's lipgloss styles.
- *  A working/busy row has no dot (#1765), so there is no "working" bucket. */
+ *  A working/busy row has no dot (#1766), so there is no "working" bucket. */
 export type DotKind = "ready" | "lost" | "dead" | "archived" | "limit";
 
 /** A fully-resolved status descriptor for one row: the dot to draw and the
  *  human label (used for the row's aria/title so the state is legible to a
  *  screen reader, not only by color — the same intent as the TUI's text prefixes). */
 export interface RowStatus {
-  /** The glyph to draw, or "" for a working/busy row which shows no dot (#1765). */
+  /** The glyph to draw, or "" for a working/busy row which shows no dot (#1766). */
   glyph: string;
   /** The dot's color bucket, or null for a working row (the dot is omitted). */
   kind: DotKind | null;
@@ -38,7 +38,7 @@ const LOST_GLYPH = "◌";
 const ARCHIVED_GLYPH = "▧";
 const LIMIT_GLYPH = "◆";
 
-// A working/busy row shows NO status dot (#1765): the TUI renders a blank status
+// A working/busy row shows NO status dot (#1766): the TUI renders a blank status
 // cell for LiveRunning / any in-flight op, and the web omits the dot entirely.
 // Kept as a resolved status (empty glyph, null kind) so rowStatus stays total and
 // callers can still detect the working state (isWorking, the project glance count).
@@ -46,7 +46,7 @@ const WORKING: RowStatus = { glyph: "", kind: null, label: "Working" };
 
 /**
  * Resolves a session's status dot from its two axes, mirroring render.go exactly:
- * any in-flight op is a working/busy state and shows no dot (#1765); otherwise the
+ * any in-flight op is a working/busy state and shows no dot (#1766); otherwise the
  * liveness picks the dot. Falls back to the legacy `status` int only when `liveness`
  * is absent (a pre-#1195 record — never emitted by the daemon's live Snapshot, but
  * handled so a stray zero renders as working, matching render.go's LivenessUnset arm).
@@ -63,7 +63,7 @@ export function rowStatus(s: SessionData): RowStatus {
 }
 
 /** True when the row is a working/busy session — the state that shows NO status
- *  dot (#1765). Kept exported so the project switcher's per-project "working"
+ *  dot (#1766). Kept exported so the project switcher's per-project "working"
  *  glance count (project.ts) stays derivable now that the dot itself is gone. */
 export function isWorking(s: SessionData): boolean {
   return rowStatus(s).kind === null;

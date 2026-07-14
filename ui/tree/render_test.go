@@ -17,7 +17,7 @@ import (
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // brailleFrame matches any Braille-pattern glyph — the shape the (now removed)
-// bubbles spinner animated the status cell through. After #1765 no status cell
+// bubbles spinner animated the status cell through. After #1766 no status cell
 // may contain one: a working/busy row shows nothing, never an animated frame.
 var brailleFrame = regexp.MustCompile(`[\x{2800}-\x{28FF}]`)
 
@@ -255,7 +255,7 @@ func TestInstanceRendererLimitReachedMarker(t *testing.T) {
 	assert.Contains(t, out, "throttled", "the title must remain visible")
 }
 
-// TestInstanceRendererStatusGlyphs pins the #1765 status-cell contract, the same
+// TestInstanceRendererStatusGlyphs pins the #1766 status-cell contract, the same
 // (Liveness, InFlightOp)→glyph mapping the web mirrors (web/src/status.ts): only a
 // waiting/Ready session shows the green ● dot; every working/busy state — LiveRunning
 // or any in-flight op (kill/archive) — shows NO status glyph and NO animated spinner

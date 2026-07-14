@@ -979,7 +979,7 @@ function sessionRow(s: SessionData, selected: boolean, actions: Actions): HTMLEl
 
   const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}`;
   const row = h("li", { class: cls });
-  // A working/busy row shows NO status dot (#1765) — only Ready/error states draw
+  // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
   // one. When there is no dot the span is omitted entirely (kind is null), matching
   // the TUI's blank status cell.
   if (status.kind) {
