@@ -228,24 +228,68 @@ func isWordByte(b byte) bool {
 // redacted, so scrubLog can strip them from the log tail. Called on each record
 // while collecting instances, i.e. before collectLog runs.
 func (r *redactor) noteSession(d *session.InstanceData) {
-	if r.tmuxNames == nil {
-		r.tmuxNames = make(map[string]struct{})
+	r.noteTmuxName(d.TmuxName)
+	r.noteTitle(d.Title)
+	r.noteTitle(d.Worktree.SessionName)
+	for _, tab := range d.Tabs {
+		r.noteTmuxName(tab.TmuxName)
+	}
+}
+
+// noteTitle records one raw session title for scrubLog, skipping blanks.
+func (r *redactor) noteTitle(title string) {
+	if strings.TrimSpace(title) == "" {
+		return
 	}
 	if r.titles == nil {
 		r.titles = make(map[string]struct{})
 	}
-	if d.TmuxName != "" {
-		r.tmuxNames[d.TmuxName] = struct{}{}
+	r.titles[title] = struct{}{}
+}
+
+// noteTmuxName records one raw tmux session name for scrubLog, skipping blanks.
+func (r *redactor) noteTmuxName(name string) {
+	if name == "" {
+		return
 	}
-	if strings.TrimSpace(d.Title) != "" {
-		r.titles[d.Title] = struct{}{}
+	if r.tmuxNames == nil {
+		r.tmuxNames = make(map[string]struct{})
 	}
-	if strings.TrimSpace(d.Worktree.SessionName) != "" {
-		r.titles[d.Worktree.SessionName] = struct{}{}
-	}
-	for _, tab := range d.Tabs {
-		if tab.TmuxName != "" {
-			r.tmuxNames[tab.TmuxName] = struct{}{}
+	r.tmuxNames[name] = struct{}{}
+}
+
+// titleJSONKeys are the object keys whose string value is a raw session title on
+// the generic fallback path, mirroring the fields noteSession reads off a typed
+// record (InstanceData.Title and Worktree.SessionName). `tmux_name` is handled
+// separately — it is a name derived from the title, not the title itself.
+var titleJSONKeys = map[string]bool{"title": true, "session_name": true}
+
+// noteUnknownJSON walks a decoded-but-unparseable instances.json payload and
+// records every title/tmux-name it carries, so scrubLog can strip them from the
+// log tail exactly as it does for records that decoded typed (#1790). It must
+// run BEFORE redactUnknownJSON blanks those same values.
+//
+// The walk is key-driven and shape-agnostic, so it reaches nested title-bearing
+// locations (worktree.session_name, tabs[].tmux_name) without assuming the
+// record layout the typed decode already rejected.
+func (r *redactor) noteUnknownJSON(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			s, isString := val.(string)
+			key := strings.ToLower(k)
+			switch {
+			case !isString:
+				r.noteUnknownJSON(val)
+			case titleJSONKeys[key]:
+				r.noteTitle(s)
+			case key == "tmux_name":
+				r.noteTmuxName(s)
+			}
+		}
+	case []any:
+		for _, e := range t {
+			r.noteUnknownJSON(e)
 		}
 	}
 }
@@ -304,6 +348,11 @@ func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 	if err := json.Unmarshal(raw, &generic); err != nil {
 		return json.RawMessage(unparsedInstancesNote)
 	}
+	// Record the titles this payload carries before blanking them, so scrubLog
+	// strips them from the log tail too — the typed path above does this via
+	// noteSession, and without it a corrupt instances.json redacted the JSON
+	// section while leaving bare titles in the bundled log (#1790).
+	r.noteUnknownJSON(generic)
 	out, err := json.MarshalIndent(redactUnknownJSON(generic), "", "  ")
 	if err != nil {
 		return json.RawMessage(unparsedInstancesNote)

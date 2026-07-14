@@ -327,6 +327,62 @@ func TestRedactInstancesFallbackRedactsAllNestedTitleFields(t *testing.T) {
 	}
 }
 
+// TestRedactInstancesFallbackNotesTitlesForLogScrub is the #1790 regression
+// guard. #1680 taught the fallback path to redact the title-bearing keys out of
+// the JSON section, but the fallback still never recorded those titles for
+// scrubLog the way the typed path does via noteSession. So when instances.json
+// failed the typed decode, the bundle redacted the JSON section while the
+// verbatim log tail kept printing the same titles bare — the #1584 leak class,
+// reachable through a single corrupt record.
+//
+// The log lines here quote titles bare (no af_<hash>_ name), so the
+// afTmuxSessionName shape regex cannot reach them: only titles collected off the
+// fallback payload can.
+func TestRedactInstancesFallbackNotesTitlesForLogScrub(t *testing.T) {
+	r := &redactor{}
+	// Typed decode fails (`status` is a string, the field is an int), forcing the
+	// generic fallback. Each title-bearing location carries a distinct sentinel so
+	// a surviving value pinpoints which one was not noted.
+	raw := json.RawMessage(`[{
+		"id": "leg-1",
+		"status": "legacy-string-status",
+		"title": "ConfidentialProjectAlpha",
+		"tmux_name": "af_ConfidentialProjectAlpha",
+		"worktree": {"session_name": "WorktreeSecretTitle", "branch": "feature/test"}
+	}]`)
+
+	// Runs first, exactly as collectInstances does before collectLog.
+	if out := string(r.redactInstancesJSON(raw)); strings.Contains(out, "ConfidentialProjectAlpha") {
+		t.Fatalf("fallback path leaked the title in the JSON section:\n%s", out)
+	}
+
+	in := strings.Join([]string{
+		`task cron-123 started successfully as instance ConfidentialProjectAlpha`,
+		`recover: rebuilt session "WorktreeSecretTitle" at /path from ` + testSHA,
+		`tmux session af_ConfidentialProjectAlpha is gone; status monitor going silent`,
+	}, "\n")
+
+	out := r.scrubLog(in)
+
+	for _, leaked := range []string{"ConfidentialProjectAlpha", "WorktreeSecretTitle"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("title from a corrupt instances.json leaked through the log scrub: %q\n%s", leaked, out)
+		}
+	}
+	// The non-hashed af_<title> name is redacted to the prefix marker, matching
+	// what the typed path produces for the same name.
+	if !strings.Contains(out, tmuxPrefixMarker) {
+		t.Errorf("expected the non-hashed af_ name to collapse to the prefix marker:\n%s", out)
+	}
+	// Structural context around the redacted titles survives so the log stays
+	// triageable.
+	if !strings.Contains(out, "started successfully as instance") ||
+		!strings.Contains(out, "status monitor going silent") ||
+		!strings.Contains(out, testSHA) {
+		t.Errorf("structural log context should survive:\n%s", out)
+	}
+}
+
 // TestRedactInstancesTypedPathRedactsTmuxAndSessionName confirms the typed path
 // is unchanged: the same shape as the fallback test but VALID as
 // []InstanceData (int status) still redacts tmux_name, worktree.session_name,
