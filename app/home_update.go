@@ -211,8 +211,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		msg.fn(m)
 		close(msg.done)
 		return m, nil
-	case instanceChangedMsg:
-		return m, m.selectionChanged()
 	case enterInteractiveMsg:
 		// Deferred by the first-time interactive help screen's dismiss cmd
 		// (#1089 PR 2); the pane pointer is re-validated inside.

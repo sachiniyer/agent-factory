@@ -360,7 +360,7 @@ func TestConfirmActionWithDifferentTypes(t *testing.T) {
 
 	t.Run("works with action returning custom message", func(t *testing.T) {
 		action := func() tea.Msg {
-			return instanceChangedMsg{}
+			return testForwardedMsg{}
 		}
 
 		// Set up callback to track action execution
@@ -380,8 +380,8 @@ func TestConfirmActionWithDifferentTypes(t *testing.T) {
 
 		// Execute the confirmation callback
 		h.confirmationOverlay.OnConfirm()
-		_, ok := receivedMsg.(instanceChangedMsg)
-		assert.True(t, ok, "Expected instanceChangedMsg but got %T", receivedMsg)
+		_, ok := receivedMsg.(testForwardedMsg)
+		assert.True(t, ok, "Expected testForwardedMsg but got %T", receivedMsg)
 	})
 }
 
@@ -460,9 +460,9 @@ func TestMultipleConfirmationsDontInterfere(t *testing.T) {
 }
 
 // TestConfirmActionForwardsNonErrorMsg verifies that a non-error tea.Msg returned
-// by a confirmation action (e.g. instanceChangedMsg{}) is forwarded back into the
-// Bubble Tea event loop so its handler runs (e.g. selectionChanged updating the
-// content pane after a session is killed). Regression test for #259.
+// by a confirmation action is forwarded back into the Bubble Tea event loop so
+// its handler can run (e.g. selectionChanged updating the content pane after a
+// session is killed). Regression test for #259.
 func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
@@ -477,11 +477,11 @@ func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
 	}
 	wireTestPanes(h, proj)
 
-	// Build an action mirroring killAction: returns instanceChangedMsg{} on success.
+	// Build an action mirroring killAction: returns a non-error tea.Msg on success.
 	actionCalled := false
 	action := func() tea.Msg {
 		actionCalled = true
-		return instanceChangedMsg{}
+		return testForwardedMsg{}
 	}
 
 	// Trigger the confirmation flow.
@@ -490,7 +490,7 @@ func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
 	require.NotNil(t, h.confirmationOverlay)
 
 	// Simulate pressing 'y' to confirm. handleStateConfirm should now return
-	// a command that emits the instanceChangedMsg back to the event loop.
+	// a command that emits the forwarded msg back to the event loop.
 	confirmKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
 	_, cmd := h.handleStateConfirm(confirmKey)
 
@@ -498,18 +498,18 @@ func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
 	assert.Equal(t, stateDefault, h.state)
 	assert.Nil(t, h.confirmationOverlay)
 	assert.Nil(t, h.pendingConfirmMsg, "pending msg should be consumed after forwarding")
-	require.NotNil(t, cmd, "handleStateConfirm must return a tea.Cmd that forwards instanceChangedMsg")
+	require.NotNil(t, cmd, "handleStateConfirm must return a tea.Cmd that forwards the msg")
 
-	// Execute the returned command and confirm it emits instanceChangedMsg.
+	// Execute the returned command and confirm it emits the forwarded msg.
 	msg := cmd()
-	_, ok := msg.(instanceChangedMsg)
-	assert.True(t, ok, "expected instanceChangedMsg, got %T", msg)
+	_, ok := msg.(testForwardedMsg)
+	assert.True(t, ok, "expected testForwardedMsg, got %T", msg)
 
-	// Feed the message into Update to confirm the main event loop routes it to
-	// selectionChanged (which manipulates the sidebar/content pane, verifying
-	// the message really reaches its handler without panicking).
+	// Feed the message into Update to confirm the main event loop handles it
+	// without panicking (the forwarded msg is a no-op in Update, but the point
+	// is that the forwarding plumbing delivers it back to the event loop).
 	_, updateCmd := h.Update(msg)
-	_ = updateCmd // selectionChanged returns nil when no instance is selected
+	_ = updateCmd
 }
 
 // TestConfirmActionErrorStillRecorded verifies that error returns from the
@@ -567,3 +567,10 @@ func TestConfirmationModalVisualAppearance(t *testing.T) {
 	// Test that the danger indicator is preserved
 	assert.Contains(t, rendered, "[!")
 }
+
+// testForwardedMsg is a test-only tea.Msg used to exercise the
+// pendingConfirmMsg forwarding path in confirmAction — it stands in for any
+// non-error tea.Msg a confirmation action returns (e.g. startKillMsg in
+// production), letting the tests verify the plumbing without coupling to a
+// specific production message type or triggering its handler side effects.
+type testForwardedMsg struct{}
