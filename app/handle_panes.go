@@ -131,21 +131,24 @@ func (m *home) openOrFocusPane(instance *session.Instance, tab int) (tea.Model, 
 			return m, nil
 		}
 	}
-	m.focusOpenPane(p)
+	statusCmd := m.focusOpenPane(p)
 	selectionCmd := m.selectionChanged()
-	statusCmd := m.consumePaneAutoHideStatus()
 	return m, tea.Batch(selectionCmd, statusCmd)
 }
 
 // focusOpenPane stamps an existing pane as recently focused, makes it visible
-// if pane-count fitting had hidden it, and moves the focus ring onto it.
-func (m *home) focusOpenPane(p *store.OpenPane) {
+// if pane-count fitting had hidden it, and moves the focus ring onto it. Its
+// relayout can auto-hide a previously visible pane (§2.6 fitting), so it returns
+// the consume cmd that starts that notice's 3s auto-clear timer — callers MUST
+// dispatch it, or the "N hidden" guidance lingers forever (#1685).
+func (m *home) focusOpenPane(p *store.OpenPane) tea.Cmd {
 	if p == nil {
-		return
+		return nil
 	}
 	m.store.TouchOpenPane(p)
 	m.relayout()
 	m.focusRegion(layout.PaneRegion(p.ID()))
+	return m.consumePaneAutoHideStatus()
 }
 
 // handleSplitPane dispatches the `S` key: commit the active preview alongside
