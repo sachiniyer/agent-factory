@@ -133,12 +133,20 @@ func (m *home) openOrFocusPane(instance *session.Instance, tab int) (tea.Model, 
 	}
 	m.focusOpenPane(p)
 	selectionCmd := m.selectionChanged()
+	// Consume AFTER selectionChanged so this catch-all drains an auto-hide
+	// status produced by ANY relayout in this open-or-focus operation — the
+	// focusOpenPane above or a preview relayout inside selectionChanged (#1685).
 	statusCmd := m.consumePaneAutoHideStatus()
 	return m, tea.Batch(selectionCmd, statusCmd)
 }
 
 // focusOpenPane stamps an existing pane as recently focused, makes it visible
-// if pane-count fitting had hidden it, and moves the focus ring onto it.
+// if pane-count fitting had hidden it, and moves the focus ring onto it. Its
+// relayout can auto-hide a previously visible pane (§2.6 fitting), which sets a
+// pending auto-hide status; callers MUST run consumePaneAutoHideStatus()
+// afterwards to start that notice's 3s auto-clear timer (#1685). openOrFocusPane
+// does so via its trailing consume; the mouse/preview path does so in
+// updatePanePreview.
 func (m *home) focusOpenPane(p *store.OpenPane) {
 	if p == nil {
 		return

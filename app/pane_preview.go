@@ -32,17 +32,20 @@ func samePaneBinding(a, b paneBinding) bool {
 	return a.instance == b.instance && a.tab == b.tab
 }
 
-func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabSpecific bool, attachedNow bool) {
+// updatePanePreview returns a tea.Cmd the caller MUST dispatch: the
+// already-open-tab branch focuses that pane via focusOpenPane, whose relayout
+// can auto-hide another pane and hand back the notice's auto-clear timer (#1685).
+func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabSpecific bool, attachedNow bool) tea.Cmd {
 	defer m.syncSplitPaneHint()
 
 	if attachedNow || m.interactive || selected == nil {
 		m.cancelPanePreview(false)
-		return
+		return nil
 	}
 	owner := m.previewOwnerPane()
 	if owner == nil {
 		m.cancelPanePreview(false)
-		return
+		return nil
 	}
 	if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID != owner.ID() {
 		m.cancelPanePreview(false)
@@ -50,7 +53,7 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 	w := m.paneWindows[owner.ID()]
 	if w == nil {
 		m.cancelPanePreview(false)
-		return
+		return nil
 	}
 	original := paneBinding{instance: owner.Instance(), tab: owner.Tab()}
 	if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID == owner.ID() {
@@ -63,7 +66,7 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 	if (!tabSpecific && original.instance == target.instance) ||
 		(tabSpecific && samePaneBinding(original, target)) {
 		m.cancelPanePreview(false)
-		return
+		return nil
 	}
 	if existing := m.store.FindOpenPane(target.instance, target.tab); existing != nil && existing != owner {
 		m.cancelPanePreview(false)
@@ -76,12 +79,17 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		// elsewhere just means "no preview to show" — leave focus put.
 		if !m.inPreviewTick {
 			m.focusOpenPane(existing)
+			// focusOpenPane's relayout can auto-hide a pane; consume the pending
+			// status HERE so its 3s clear timer starts. This is the mouse/preview
+			// path (selectionChanged → updatePanePreview), which — unlike
+			// openOrFocusPane — has no trailing consume to fall back on (#1685).
+			return m.consumePaneAutoHideStatus()
 		}
-		return
+		return nil
 	}
 	if m.isPanePreviewSuppressed(original, target) {
 		m.cancelPanePreview(false)
-		return
+		return nil
 	}
 	changed := m.panePreviewTxn == nil ||
 		m.panePreviewTxn.ownerPaneID != owner.ID() ||
@@ -104,6 +112,7 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		w.InvalidateContent(target.instance, target.tab, "Loading preview...")
 		m.lastPaneCapture[owner.ID()] = time.Time{}
 	}
+	return nil
 }
 
 func (m *home) cancelPanePreview(focusOwner bool) {

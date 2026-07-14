@@ -35,7 +35,7 @@ func (m *home) selectionChanged() tea.Cmd {
 	// that happens between attach failures is consistent.
 	attachedNow := m.attached.Load()
 
-	var prFetch tea.Cmd
+	var prFetch, previewCmd tea.Cmd
 	if sel.Kind == ui.SectionInstances && !sel.IsHeader {
 		selected := m.sidebar.GetSelectedInstance()
 		// Track the cursor's instance in the store's display selection — what
@@ -55,7 +55,7 @@ func (m *home) selectionChanged() tea.Cmd {
 			previewTab = sel.TabIndex
 			previewTabSpecific = true
 		}
-		m.updatePanePreview(selected, previewTab, previewTabSpecific, attachedNow)
+		previewCmd = m.updatePanePreview(selected, previewTab, previewTabSpecific, attachedNow)
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
 		// Lazily refresh PR info when the user lands on an instance that
 		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
@@ -92,7 +92,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		}
 	}
 
-	return tea.Batch(prFetch, m.panesRefresh(attachedNow))
+	return tea.Batch(prFetch, previewCmd, m.panesRefresh(attachedNow))
 }
 
 // clampSelectionTab bounds the selection's active tab index against the
