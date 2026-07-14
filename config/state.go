@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/sachiniyer/agent-factory/log"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 const (
@@ -142,11 +144,15 @@ func SaveState(state *State) error {
 	})
 }
 
-// refuseStateDowngrade returns an UnsupportedSchemaVersionError when the file at
-// statePath was written by a newer af (schema_version > StateSchemaVersion), so
-// the caller must not overwrite it. A missing file (first run), an unreadable
-// file, or one whose schema_version cannot be detected does not block the write:
-// those recover to a freshly-written default rather than wedging saves forever.
+// refuseStateDowngrade blocks a save that would downgrade/clobber a state.json
+// this binary must not overwrite. It fails closed on ambiguity: the write is
+// only allowed when the on-disk schema is definitively same-or-older (or
+// absent/legacy). A missing file (first run) or a structurally-corrupt file
+// recovers to a freshly-written default rather than wedging saves forever, but a
+// schema_version that is PRESENT yet cannot be parsed/interpreted as a version
+// this binary understands (non-integer, out of range, wrong type) is treated as
+// "possibly newer" and refused — a value we cannot read might come from a newer
+// af, so we must not clobber it (#1725).
 func refuseStateDowngrade(statePath string) error {
 	data, err := os.ReadFile(statePath)
 	if err != nil {
@@ -155,20 +161,64 @@ func refuseStateDowngrade(statePath string) error {
 		}
 		return nil
 	}
-	version, err := DetectJSONSchemaVersion(data)
-	if err != nil {
-		log.WarningLog.Printf("could not detect schema version of %s before saving state; overwriting: %v", statePath, err)
+
+	present, version, verr := onDiskStateSchemaVersion(data)
+	switch {
+	case !present:
+		// Absent field, legacy array-root, or a structurally-corrupt file: none
+		// of these is a newer schema. Legacy files upgrade in place; corrupt
+		// files recover to a default on write.
+		if verr != nil {
+			log.WarningLog.Printf("could not detect schema version of %s before saving state; overwriting: %v", statePath, verr)
+		}
 		return nil
-	}
-	if version > StateSchemaVersion {
+	case verr != nil:
+		// schema_version is present but uninterpretable — fail closed.
+		return fmt.Errorf("%s has an unrecognizable schema_version (%v); this binary supports up to %d and will not overwrite it, as it may have been written by a newer af — upgrade af",
+			describeSchemaStore(StateFileName, statePath), verr, StateSchemaVersion)
+	case version > StateSchemaVersion:
 		return &UnsupportedSchemaVersionError{
 			StoreName:        StateFileName,
 			Path:             statePath,
 			FileVersion:      version,
 			SupportedVersion: StateSchemaVersion,
 		}
+	default:
+		return nil
 	}
-	return nil
+}
+
+// onDiskStateSchemaVersion reports whether a state.json blob carries a
+// schema_version field and, if so, how it parses. present is false for a
+// structurally-corrupt blob (not a JSON object), a JSON array (legacy), or an
+// object lacking the field — with verr carrying the parse failure for the
+// corrupt case. present is true when the field exists; verr is then non-nil iff
+// the value could not be interpreted as a version integer.
+func onDiskStateSchemaVersion(data []byte) (present bool, version int, verr error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var root any
+	if err := decoder.Decode(&root); err != nil {
+		return false, LegacySchemaVersion, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return false, LegacySchemaVersion, fmt.Errorf("trailing data after JSON value")
+	}
+	obj, ok := root.(map[string]any)
+	if !ok {
+		// Arrays are legacy v0; any other scalar root is corrupt. Neither is newer.
+		if _, isArray := root.([]any); isArray {
+			return false, LegacySchemaVersion, nil
+		}
+		return false, LegacySchemaVersion, fmt.Errorf("JSON root must be an object, got %T", root)
+	}
+	value, ok := obj[SchemaVersionField]
+	if !ok {
+		return false, LegacySchemaVersion, nil
+	}
+	version, verr = schemaVersionFromValue(value)
+	return true, version, verr
 }
 
 // Per-repo instance file functions

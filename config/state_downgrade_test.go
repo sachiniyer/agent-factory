@@ -116,6 +116,38 @@ func TestSaveState_LegacySchemaSaveWorks(t *testing.T) {
 	assert.Equal(t, float64(8), saved["help_screens_seen"])
 }
 
+// Fail-closed edge (Greptile #1778): a state.json whose schema_version is
+// PRESENT but cannot be parsed/interpreted as a version this binary understands
+// (non-integer, string, out-of-range, negative) is ambiguous — it might come
+// from a newer af — so the write must be refused and the file preserved, not
+// clobbered.
+func TestSaveState_PresentButUnparseableSchemaRefused(t *testing.T) {
+	cases := map[string]string{
+		"string_value": `{"schema_version":"2","help_screens_seen":42}`,
+		"non_integer":  `{"schema_version":1.5,"help_screens_seen":42}`,
+		"overflow_int": `{"schema_version":99999999999999999999999,"help_screens_seen":42}`,
+		"negative":     `{"schema_version":-3,"help_screens_seen":42}`,
+		"bool_value":   `{"schema_version":true,"help_screens_seen":42}`,
+		"null_value":   `{"schema_version":null,"help_screens_seen":42}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			tempHome := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", tempHome)
+			statePath := filepath.Join(tempHome, StateFileName)
+			require.NoError(t, os.WriteFile(statePath, []byte(body), 0644))
+
+			err := SaveState(&State{HelpScreensSeen: 1})
+			require.Error(t, err, "write over unparseable schema_version must be refused")
+
+			// The file must be byte-for-byte preserved.
+			after, err := os.ReadFile(statePath)
+			require.NoError(t, err)
+			assert.Equal(t, body, string(after))
+		})
+	}
+}
+
 // A corrupt/unreadable state.json must not wedge saves forever: the guard lets
 // the write recover the file to a valid default.
 func TestSaveState_CorruptFileDoesNotBlockSave(t *testing.T) {
