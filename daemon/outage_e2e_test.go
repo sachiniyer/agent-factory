@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
@@ -47,7 +48,7 @@ func TestOutageEndToEnd_LostRestoreAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	data, err := manager.CreateSession(CreateSessionRequest{
+	data, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "worker",
 		RepoPath: repoPath,
 		Program:  "claude",

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -38,7 +39,7 @@ func TestManagerCreateSessionCarriesInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "captain-here",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -54,7 +55,7 @@ func TestManagerCreateSessionCarriesInPlace(t *testing.T) {
 	}
 
 	// A plain create must stay on the fresh-worktree path.
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "normal",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -77,7 +78,7 @@ func TestManagerCreateSessionRejectsInPlaceRemote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	_, err = manager.CreateSession(CreateSessionRequest{
+	_, err = manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:       "here-remote",
 		RepoPath:    repoPath,
 		Program:     "claude",

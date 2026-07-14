@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +110,7 @@ func TestStartAndSendPrompt_BoundsPersistentTrustPrompt(t *testing.T) {
 	})
 
 	backend := &startBackend{trustPrompts: maxTrustPromptAttempts + 5}
-	err := StartAndSendPrompt(newStartTestInstance(t, backend), "do work")
+	err := StartAndSendPrompt(context.Background(), newStartTestInstance(t, backend), "do work")
 	if err == nil {
 		t.Fatalf("expected persistent trust prompt error")
 	}
@@ -130,7 +131,7 @@ func TestStartAndSendPrompt_BoundsPersistentTrustPrompt(t *testing.T) {
 // also covers the daemon's CreateSession path, which delegates here (#782).
 func TestStartAndSendPrompt_EmptyPromptStillHandlesTrust(t *testing.T) {
 	backend := &startBackend{}
-	if err := StartAndSendPrompt(newStartTestInstance(t, backend), ""); err != nil {
+	if err := StartAndSendPrompt(context.Background(), newStartTestInstance(t, backend), ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if backend.trustChecks == 0 {
@@ -143,7 +144,7 @@ func TestStartAndSendPrompt_EmptyPromptStillHandlesTrust(t *testing.T) {
 
 func TestStartAndSendPrompt_NonEmptyPromptSends(t *testing.T) {
 	backend := &startBackend{}
-	if err := StartAndSendPrompt(newStartTestInstance(t, backend), "do work"); err != nil {
+	if err := StartAndSendPrompt(context.Background(), newStartTestInstance(t, backend), "do work"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if backend.trustChecks == 0 {
@@ -165,7 +166,7 @@ func TestStartAndSendPrompt_AllowsSequentialTrustPrompts(t *testing.T) {
 	})
 
 	backend := &startBackend{trustPrompts: 3}
-	err := StartAndSendPrompt(newStartTestInstance(t, backend), "do work")
+	err := StartAndSendPrompt(context.Background(), newStartTestInstance(t, backend), "do work")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

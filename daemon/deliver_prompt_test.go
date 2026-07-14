@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -563,7 +564,7 @@ func TestSendPrompt_DeliversBeforeLaterKillStartsTeardown(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "captain",
 		RepoPath: repoPath,
 		Program:  "claude",
@@ -738,7 +739,7 @@ func TestWaitForTargetSession_ReturnsWhenSessionAppears(t *testing.T) {
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		if _, err := manager.CreateSession(CreateSessionRequest{
+		if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 			Title:    "captain",
 			RepoPath: repoPath,
 			Program:  "claude",
@@ -802,7 +803,7 @@ func TestDeliverPrompt_RootTargetWaitsForRecreationThenSends(t *testing.T) {
 	// own ensure path does). The delivery must then send into it.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		if _, err := manager.CreateSession(CreateSessionRequest{
+		if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 			Title:         session.RootSessionTitle,
 			RepoPath:      repoPath,
 			Program:       "claude",

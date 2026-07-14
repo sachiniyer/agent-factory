@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -147,13 +148,28 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 // returned error wraps ErrSessionGone so non-daemon callers can degrade
 // gracefully instead of logging at ERROR (#496).
 func (t *TmuxSession) CapturePaneContent() (string, error) {
+	return t.CapturePaneContentContext(context.Background())
+}
+
+// CapturePaneContentContext is CapturePaneContent bound to ctx: the underlying
+// `tmux capture-pane` is launched with exec.CommandContext, so a cancelled or
+// deadline-exceeded ctx SIGKILLs the capture subprocess instead of letting it run
+// to completion. The readiness poll (task.WaitForReady) uses it so an abandoned
+// create tears down its in-flight capture — no lingering tmux subprocess or
+// goroutine after the caller gives up. On cancellation it returns ctx.Err()
+// directly, skipping the DoesSessionExist probe (which would spawn another tmux
+// subprocess) since the failure cause is the cancel, not a dead session.
+func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes). `=` forces
 	// an exact session match: without it tmux would prefix-match a surviving
 	// sibling session (e.g. the `__shell` tab) when the agent session has
 	// died, capturing the wrong pane and masking the dead agent (#1006).
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", exactTarget(t.sanitizedName))
+	cmd := exec.CommandContext(ctx, "tmux", "capture-pane", "-p", "-e", "-J", "-t", exactTarget(t.sanitizedName))
 	output, err := t.cmdExec.Output(cmd)
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		if !t.DoesSessionExist() {
 			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
 		}

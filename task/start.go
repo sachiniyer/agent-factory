@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -21,7 +22,14 @@ var trustPromptRetryDelay = time.Second
 // appropriate. For TUI async paths, the instanceStartedMsg handler sets
 // Running after saving to disk; for synchronous API/runner paths, the caller
 // sets Running immediately after this function returns.
-func StartAndSendPrompt(instance *session.Instance, prompt string) error {
+//
+// ctx bounds the readiness wait: an abandoned or cancelled create tears down the
+// pane-poll instead of spinning to the timeout (see WaitForReady). A nil ctx is
+// treated as context.Background().
+func StartAndSendPrompt(ctx context.Context, instance *session.Instance, prompt string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := instance.Start(true); err != nil {
 		return err
 	}
@@ -33,7 +41,7 @@ func StartAndSendPrompt(instance *session.Instance, prompt string) error {
 		return nil
 	}
 
-	if err := WaitForReady(instance); err != nil {
+	if err := WaitForReady(ctx, instance); err != nil {
 		return err
 	}
 
@@ -41,8 +49,14 @@ func StartAndSendPrompt(instance *session.Instance, prompt string) error {
 		if attempts+1 >= maxTrustPromptAttempts {
 			return fmt.Errorf("trust prompt did not dismiss after %d attempts", maxTrustPromptAttempts)
 		}
-		time.Sleep(trustPromptRetryDelay)
-		if err := WaitForReady(instance); err != nil {
+		// Honor cancellation while backing off between trust-prompt retries so an
+		// abandoned create doesn't sit here sleeping and re-waiting.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(trustPromptRetryDelay):
+		}
+		if err := WaitForReady(ctx, instance); err != nil {
 			return err
 		}
 	}

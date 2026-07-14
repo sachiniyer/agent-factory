@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	stdlog "log"
 	"os"
@@ -475,7 +476,7 @@ func installRaceBackend(t *testing.T, backend *raceBackend, title string) (*Mana
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateSession(CreateSessionRequest{
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    title,
 		RepoPath: repoPath,
 		Program:  "claude",

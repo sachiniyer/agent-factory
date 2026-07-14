@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -226,6 +227,17 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 // body (400 or 413) short-circuits before the manager call, so an oversize or
 // malformed request is never dispatched.
 func rpcHandler[Req any, Resp any](call func(Req, *Resp) error) http.HandlerFunc {
+	return rpcHandlerCtx(func(_ context.Context, req Req, resp *Resp) error {
+		return call(req, resp)
+	})
+}
+
+// rpcHandlerCtx is rpcHandler for handlers that take the request context, so a
+// long-running RPC (CreateSession's readiness wait) is cancelled when the HTTP
+// client disconnects — r.Context() is done the moment the connection drops. This
+// is what stops an abandoned create from leaving a pane-poll spinning on the
+// daemon.
+func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeHTTPError(w, http.StatusMethodNotAllowed,
@@ -245,7 +257,7 @@ func rpcHandler[Req any, Resp any](call func(Req, *Resp) error) http.HandlerFunc
 			return
 		}
 		var resp Resp
-		if err := call(req, &resp); err != nil {
+		if err := call(r.Context(), req, &resp); err != nil {
 			writeHTTPError(w, http.StatusInternalServerError, err)
 			return
 		}

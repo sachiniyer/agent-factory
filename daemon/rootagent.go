@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -186,7 +187,7 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 	}
 
 	program := rootAgentProgram(repo.Root, rc)
-	if _, err := m.CreateSession(CreateSessionRequest{
+	if _, err := m.CreateSession(context.Background(), CreateSessionRequest{
 		Title:         session.RootSessionTitle,
 		RepoPath:      repo.Root,
 		Program:       program,

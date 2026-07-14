@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -570,6 +571,21 @@ func (b *LocalBackend) Preview(i *Instance) (string, error) {
 		return "", nil
 	}
 	return ts.CapturePaneContent()
+}
+
+// PreviewContext is Preview bound to ctx: the pane capture is cancellable, so a
+// cancelled readiness wait tears down the in-flight `tmux capture-pane` subprocess
+// instead of letting it run to completion (task.WaitForReady's capturePreview).
+func (b *LocalBackend) PreviewContext(ctx context.Context, i *Instance) (string, error) {
+	i.mu.RLock()
+	s := i.started
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+
+	if !s || ts == nil {
+		return "", nil
+	}
+	return ts.CapturePaneContentContext(ctx)
 }
 
 func (b *LocalBackend) PreviewFullHistory(i *Instance) (string, error) {

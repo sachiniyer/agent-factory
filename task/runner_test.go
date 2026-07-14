@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -251,7 +252,7 @@ func TestWaitForReadyNonAgentBecomesReadyOnAnyOutput(t *testing.T) {
 	})
 
 	done := make(chan error, 1)
-	go func() { done <- WaitForReady(inst) }()
+	go func() { done <- WaitForReady(context.Background(), inst) }()
 
 	select {
 	case err := <-done:
@@ -319,7 +320,7 @@ func TestWaitForReadySlowHookDoesNotTimeOutHealthyAgent(t *testing.T) {
 	}()
 
 	done := make(chan error, 1)
-	go func() { done <- WaitForReady(inst) }()
+	go func() { done <- WaitForReady(context.Background(), inst) }()
 
 	select {
 	case err := <-done:
@@ -347,7 +348,7 @@ func TestWaitForReadyHookGraceBoundsNonTerminatingHook(t *testing.T) {
 	})
 
 	done := make(chan error, 1)
-	go func() { done <- WaitForReady(inst) }()
+	go func() { done <- WaitForReady(context.Background(), inst) }()
 
 	select {
 	case err := <-done:
@@ -376,7 +377,7 @@ func TestWaitForReadyFailsFastWhenSessionGone(t *testing.T) {
 	})
 
 	done := make(chan error, 1)
-	go func() { done <- WaitForReady(inst) }()
+	go func() { done <- WaitForReady(context.Background(), inst) }()
 
 	select {
 	case err := <-done:
@@ -411,7 +412,7 @@ func TestWaitForReadyTimeoutCaseChecksErrSessionGone(t *testing.T) {
 	})
 
 	done := make(chan error, 1)
-	go func() { done <- WaitForReady(inst) }()
+	go func() { done <- WaitForReady(context.Background(), inst) }()
 
 	select {
 	case err := <-done:
@@ -447,7 +448,7 @@ func TestWaitForReadyKeepsPollingThroughTransientErrors(t *testing.T) {
 	})
 
 	done := make(chan error, 1)
-	go func() { done <- WaitForReady(inst) }()
+	go func() { done <- WaitForReady(context.Background(), inst) }()
 
 	select {
 	case err := <-done:
@@ -473,7 +474,7 @@ func TestWaitForReadyTimesOutOnPersistentTransientErrors(t *testing.T) {
 	})
 
 	done := make(chan error, 1)
-	go func() { done <- WaitForReady(inst) }()
+	go func() { done <- WaitForReady(context.Background(), inst) }()
 
 	select {
 	case err := <-done:
@@ -542,7 +543,7 @@ func TestWaitForReadyParksOnUsageLimit(t *testing.T) {
 				return tc.banner, nil
 			})
 			done := make(chan error, 1)
-			go func() { done <- WaitForReady(inst) }()
+			go func() { done <- WaitForReady(context.Background(), inst) }()
 
 			select {
 			case err := <-done:
@@ -578,7 +579,7 @@ func TestWaitForReadyDoesNotParkNonLimitAgent(t *testing.T) {
 		return "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", nil
 	})
 	done := make(chan error, 1)
-	go func() { done <- WaitForReady(inst) }()
+	go func() { done <- WaitForReady(context.Background(), inst) }()
 
 	select {
 	case err := <-done:
