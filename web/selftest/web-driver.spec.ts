@@ -84,6 +84,33 @@ async function dragTabToPane(page: Page, tabText: string, edge: "left" | "right"
   );
 }
 
+/**
+ * Dispatches a drop carrying an ARBITRARY tab index onto the (single) current pane —
+ * bypassing the real tab buttons so a stale / out-of-range index can be injected. Used
+ * to prove the drop handler validates the payload against the live tab count and
+ * no-ops an invalid one instead of binding a pane to a nonexistent tab.
+ */
+async function dropRawTabIndexOnPane(page: Page, tabIndex: number): Promise<void> {
+  await page.evaluate((tabIndex) => {
+    const pane = document.querySelector(".af-term-host .af-pane");
+    if (!pane) {
+      throw new Error("no pane to drop on");
+    }
+    const dt = new DataTransfer();
+    dt.setData("application/x-af-tab", String(tabIndex));
+    const r = pane.getBoundingClientRect();
+    const init = {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: dt,
+      clientX: r.right - 6, // aim at the right edge → a split, if it were allowed
+      clientY: r.top + r.height / 2,
+    };
+    pane.dispatchEvent(new DragEvent("dragover", init));
+    pane.dispatchEvent(new DragEvent("drop", init));
+  }, tabIndex);
+}
+
 /** Opens the app on the loopback daemon and asserts the tokenless auto-connect
  *  (#1696): the SPA learns via /v1/auth-info that this loopback client needs no
  *  token, skips the paste-token login entirely, and renders the authed shell with
@@ -346,6 +373,57 @@ test("split panes (feat): drag a tab to a pane edge splits into two live panes; 
   // Restore A to a single tab for the later create/kill/archive flows.
   await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
+test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", async () => {
+  // Attach to A (a single agent tab, so tab index 1+ does not exist).
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  // Drop a stale / out-of-range tab index (9) on the pane's edge. The drop handler
+  // validates it against the live tab count and no-ops it — no split is created, so
+  // no pane can bind to a nonexistent tab and break its stream.
+  await dropRawTabIndexOnPane(page, 9);
+  // Give the (rejected) drop a beat, then assert the layout is unchanged.
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+  // The one pane still shows the live agent output — it was never disturbed.
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+});
+
+test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", async () => {
+  // Split A into two panes.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+
+  // Log out, then reconnect (tokenless loopback: the no-auth login offers a single
+  // Connect button, no token to paste).
+  await page.locator(".af-appbar button", { hasText: "Disconnect" }).click();
+  await expect(page.locator(".af-login")).toBeVisible();
+  await page.locator(".af-login button.af-primary").click();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
+
+  // Re-select A: the retained split was cleared on logout, so it opens as a SINGLE
+  // pane (the zero-config default), not the previous two-pane split.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  // Restore A to a single tab (the shell tab survived on the daemon; only the pane
+  // was gone) for the later create/kill/archive flows.
+  const bar = page.locator(".af-tabbar");
+  const shellTab = bar.locator(".af-tab", { hasText: "Terminal" });
+  if ((await shellTab.count()) > 0) {
+    await shellTab.locator(".af-tab-close").click();
+    await expect(bar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  }
 });
 
 test("projects view (#1592 PR8): the seeded repo groups its sessions; a row jumps to it", async () => {

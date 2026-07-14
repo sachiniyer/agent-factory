@@ -7261,12 +7261,19 @@ var SplitView = class {
   isSplit() {
     return this.tree ? leafCount(this.tree) > 1 : false;
   }
-  /** Tears down every live terminal and clears the host (logout / deselect). The
-   *  retained trees survive so a re-selection restores the split. */
+  /** Tears down every live terminal, clears the host, AND drops the retained
+   *  per-instance trees (logout). Keeping the trees across a logout would leave them
+   *  pointing at torn-down panes, so a re-login would resurrect a stale split instead
+   *  of the single-leaf default — so a fresh login starts clean. (Instance→instance
+   *  switches never call this; they go through setSession, which keeps the trees.) */
   dispose() {
     this.teardown();
+    this.trees.clear();
     this.sessionId = null;
     this.tree = null;
+    this.lastFocusedTab = -1;
+    this.lastShown = "";
+    this.lastPaneCount = 0;
   }
   // --- internal: mutation commit --------------------------------------------
   /** Persists the current tree for the session, re-renders, and reports the layout. */
@@ -7452,7 +7459,7 @@ var SplitView = class {
       this.hideZone(pane);
       const raw = e.dataTransfer?.getData(TAB_DND_MIME);
       const tab = raw ? Number.parseInt(raw, 10) : Number.NaN;
-      if (Number.isNaN(tab) || !this.tree) {
+      if (Number.isNaN(tab) || tab < 0 || tab >= this.tabCount || !this.tree) {
         return;
       }
       const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
