@@ -85,7 +85,14 @@ func (i *Instance) RestoreSandbox() error {
 	if err := i.reprovisionRemote(); err != nil {
 		return err
 	}
-	return i.Start(true)
+	if err := i.Start(true); err != nil {
+		// The sandbox is up but the agent failed to launch on it — reap the
+		// freshly provisioned sandbox and clear its wiring so a retry re-provisions
+		// from a clean state instead of stranding a container/remote (#1726).
+		i.teardownAfterStartFailure()
+		return err
+	}
+	return nil
 }
 
 // recoverSandbox re-establishes a Lost/restoring sandbox session in place: it
@@ -101,6 +108,11 @@ func recoverSandbox(i *Instance) error {
 		return err
 	}
 	if err := i.Start(true); err != nil {
+		// Same leak guard as RestoreSandbox: reap the fresh sandbox and reset the
+		// remote wiring on a Start failure so the Lost-restore loop's next retry
+		// re-provisions cleanly rather than stacking a second sandbox on the first
+		// still-running one (#1726).
+		i.teardownAfterStartFailure()
 		return err
 	}
 	_ = i.Transition(ConfirmLive())
@@ -189,6 +201,26 @@ func (i *Instance) resetRemoteRuntime() {
 	i.remoteClient = nil
 	i.runtimeTeardown = nil
 	i.mu.Unlock()
+}
+
+// teardownAfterStartFailure reaps a freshly re-provisioned sandbox after the
+// agent Start failed on the restore/recover path, then clears the remote-runtime
+// wiring (#1726). It mirrors reprovisionRemote's bind-failure discipline —
+// run the stored Teardown so the container/remote is reclaimed — and reuses the
+// SAME i.mu ownership as bindProvisionResult/resetRemoteRuntime (#1729): the
+// teardown is read under i.mu.RLock and invoked OUTSIDE the lock (it may block on
+// docker/ssh I/O), then resetRemoteRuntime clears remoteClient/runtimeTeardown/
+// agentSrv together so a retry starts from a clean, unbound state and never
+// stacks a second sandbox on the first. runtimeTeardown is sync.Once-guarded, so
+// a later Kill re-running it is a harmless no-op.
+func (i *Instance) teardownAfterStartFailure() {
+	i.mu.RLock()
+	teardown := i.runtimeTeardown
+	i.mu.RUnlock()
+	if teardown != nil {
+		_ = teardown()
+	}
+	i.resetRemoteRuntime()
 }
 
 // isSandboxBackendType reports whether a persisted backend Type() names a
