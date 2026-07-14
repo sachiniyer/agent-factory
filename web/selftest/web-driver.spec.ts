@@ -5,8 +5,12 @@
 // loopback plain-HTTP listener, brought up by web-selftest-entry.sh) and asserts the core
 // v1 loop end to end — assertions are the gate, not screenshots:
 //
-//   1. tokenless open  loopback ⇒ no token required (#1696): the SPA auto-connects
-//                      with NO credential and NEVER shows the paste-token login
+//   1. tokenless open  no token required ⇒ the SPA auto-connects with NO credential
+//                      and NEVER shows the paste-token login (#1696); the decision
+//                      follows the daemon's /v1/auth-info answer, and a forced
+//                      auth_required=true brings the login back even on loopback
+//   1b. real errors    a failed login renders the daemon's own message — never the
+//                      literal "[object Object]" the string/object envelope fork gave
 //   2. sidebar         the rail lists the sessions from the Snapshot/events plane
 //   3. attach          click-to-attach opens the xterm terminal + shows live output
 //   4. keyboard (#1694) j/k navigate the rail, Enter attaches, Escape returns to rail
@@ -14,14 +18,19 @@
 //   6. kill            the kill confirm removes the session's row
 //   7. archive         the archive confirm moves a session to the archived group
 //
-// The daemon binds 127.0.0.1, so under #1696 the browser is a LOOPBACK peer and the
-// daemon exempts it from the bearer token — the SPA's /v1/auth-info probe reports
-// auth_required=false, the login screen is skipped, and every core action
-// (create/kill/archive/send-prompt/attach) runs on the empty-token credential. That
-// makes this harness the end-to-end regression guard that tokenless authorization
-// works for ALL actions, not just the read path. (The token-PASTE UI path is not
-// reachable here — a loopback container is always exempt — so it stays covered by
-// the Go handler tests: daemon/httpauth_test.go network-peer → 401 + spoof-resistance.)
+// The daemon runs with the shipped default require_token=false, so NO peer needs a
+// token — the SPA's /v1/auth-info probe reports auth_required=false, the login screen
+// is skipped, and every core action (create/kill/archive/send-prompt/attach) runs on
+// the empty-token credential. That makes this harness the end-to-end regression guard
+// that tokenless authorization works for ALL actions, not just the read path.
+//
+// The token-PASTE UI is exercised here by intercepting /v1/auth-info to force
+// auth_required=true: that both proves the SPA obeys the daemon's answer rather than
+// sniffing its own loopback address (so the tokenless path works for a network peer
+// too) and gives the failed-login error assertions a screen to render on. The real
+// server-side enforcement stays covered by the Go handler tests
+// (daemon/httpauth_test.go network-peer → 401 + spoof-resistance, and
+// daemon/web_listener_policy_test.go for the config→policy→gate wiring).
 //
 // Everything the test needs is handed in via env by the entry script (see
 // playwright.config.ts): AF_WEB_BASE_URL and the two seeded session titles
@@ -175,6 +184,96 @@ test("tokenless loopback (#1696): the SPA auto-connects with no token, no login 
   // The events WS connected on the empty-token credential (the ?access_token= is
   // blank and the loopback peer is exempt): the live pip reads open.
   await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
+});
+
+// The auth-info envelope the SPA probes, as the daemon would send it.
+function authInfoBody(required: boolean): string {
+  return JSON.stringify({ data: { auth_required: required }, error: null });
+}
+
+// The daemon's REAL failure envelope: `error` is an OBJECT ({message}), not a
+// string (apiproto.EnvelopeError). This is the shape that used to render as the
+// literal text "[object Object]" on every error surface.
+function failureBody(message: string): string {
+  return JSON.stringify({ data: null, error: { message } });
+}
+
+test("the tokenless path follows the daemon's answer, not loopback detection (#1696)", async ({ browser }) => {
+  // This browser IS a loopback peer, so a client that decided "no token" by sniffing
+  // its own address would auto-connect here. Force the daemon's answer to
+  // auth_required=true and the SPA must show the paste-token login anyway — that is
+  // the proof the tokenless path keys off /v1/auth-info and nothing else, so it will
+  // equally trigger for a NETWORK peer whose daemon reports no token required
+  // (the require_token=false default).
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.route("**/v1/auth-info", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: authInfoBody(true) }),
+  );
+
+  await p.goto("/");
+  await expect(p.locator("#af-token")).toBeVisible();
+  await expect(p.locator(".af-app")).toHaveCount(0);
+
+  await ctx.close();
+});
+
+test("a failed login renders the daemon's real message, never [object Object]", async ({ browser }) => {
+  // The regression this pins: the client typed the envelope's `error` as a string
+  // while the daemon sends {message}, so `new ApiError(status, env.error)` stringified
+  // an object and every failure read "Login failed: [object Object]" — telling the
+  // operator nothing. Drive a real failed login and assert the daemon's own words
+  // reach the screen.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.route("**/v1/auth-info", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: authInfoBody(true) }),
+  );
+  // The login probe hits Snapshot; fail it with a structured, non-401 envelope so
+  // describeError takes the branch that renders the message (401 has canned text).
+  await p.route("**/v1/Snapshot", (route) =>
+    route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: failureBody("token rejected by policy: expired credential"),
+    }),
+  );
+
+  await p.goto("/");
+  await p.locator("#af-token").fill("some-token");
+  await p.locator(".af-login-form button[type=submit]").click();
+
+  const err = p.locator(".af-error");
+  await expect(err).toBeVisible();
+  await expect(err).toContainText("token rejected by policy: expired credential");
+  await expect(err).not.toContainText("[object Object]");
+  await expect(err).not.toContainText("undefined");
+
+  await ctx.close();
+});
+
+test("an unreachable daemon reports a real transport message, not [object Object]", async ({ browser }) => {
+  // The other failure mode Sachin hit: connection refused rather than a bad token.
+  // The thrown value is a TypeError, not an envelope — errorText must still yield a
+  // readable string.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.route("**/v1/auth-info", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: authInfoBody(true) }),
+  );
+  await p.route("**/v1/Snapshot", (route) => route.abort("connectionrefused"));
+
+  await p.goto("/");
+  await p.locator("#af-token").fill("some-token");
+  await p.locator(".af-login-form button[type=submit]").click();
+
+  const err = p.locator(".af-error");
+  await expect(err).toBeVisible();
+  await expect(err).toContainText("Couldn't reach the daemon");
+  await expect(err).not.toContainText("[object Object]");
+  await expect(err).not.toContainText("undefined");
+
+  await ctx.close();
 });
 
 test("sidebar lists the seeded sessions from the Snapshot/events plane", async () => {
@@ -350,7 +449,11 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ data: null, error: "simulated tab-close failure" }),
+        // The daemon's real failure shape: `error` is an object carrying `message`
+        // (apiproto.EnvelopeError). This mock used to send a bare string, mirroring
+        // the client's old (wrong) type — so the two agreed with each other and
+        // disagreed with the daemon, which is how "[object Object]" survived.
+        body: JSON.stringify({ data: null, error: { message: "simulated tab-close failure" } }),
       });
       return;
     }

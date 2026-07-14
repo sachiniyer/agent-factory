@@ -46,11 +46,12 @@ type authGate struct {
 	// empty token — fails closed: the gate denies (see ConstantTimeEqual).
 	expectedToken func() (string, error)
 
-	// tokenDisabled drops token enforcement for ALL peers — the opt-in
-	// require_token=false posture for a trusted network (#1696). Zero value
-	// false ⇒ the token is enforced (fail-safe). Only the daemon's own
-	// listen_addr listener ever sets this, and only when the operator opted out;
-	// the agent-server never does (its token is mandatory).
+	// tokenDisabled drops token enforcement for ALL peers — the require_token=false
+	// posture, which is now the DEFAULT so the daemon-served web UI opens with no
+	// login (#1696). Zero value false ⇒ the token is enforced, so this struct's
+	// fail-safe posture is unchanged; the relaxation is chosen by the config-derived
+	// webListenerPolicy, not inherited. Only the daemon's own listen_addr listener
+	// ever sets this; the agent-server never does (its token is mandatory).
 	tokenDisabled bool
 
 	// loopbackExempt lets 127.0.0.1/::1 peers skip the token, the same trust the

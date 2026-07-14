@@ -32,10 +32,12 @@ branded docs site.
 - **Scriptable control:** `af sessions` and `af tasks` print JSON; the daemon
   also exposes a local HTTP/JSON API over a Unix socket.
 - **Browser web client:** the same rail, live terminals, tabs, projects, and
-  tasks in a browser — bundled with the daemon and served on loopback **by
-  default** at `http://127.0.0.1:8443` (no token on the same machine). Disable
-  it with `listen_addr = ""` or expose it to a network with a routable
-  `listen_addr`; see the [web client guide](docs/web.md).
+  tasks in a browser. It is **bundled into the daemon** and on by default — start
+  the daemon (any `af` command does) and open **<http://localhost:8443>**. No
+  token, no login screen. Disable it with `listen_addr = ""`, or expose it to a
+  network with a routable `listen_addr` — in which case set `require_token = true`
+  or keep it behind a VPN/proxy, since auth is off by default. See the
+  [web client guide](docs/web.md).
 - **Remote hooks:** plug in your own launch/list/attach/delete scripts for
   remote session backends.
 

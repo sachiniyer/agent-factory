@@ -34,13 +34,23 @@ var (
 		Long: `Run 'af' with no arguments to open the TUI. The subcommands below drive the
 same daemon non-interactively (` + "`af sessions`, `af tasks`" + ` emit JSON).
 
-By default 'af' talks to a daemon on the local machine over a Unix socket. The
-daemon also serves the bundled web UI on loopback (http://127.0.0.1:8443) by
-default. To drive a daemon on ANOTHER machine, SSH to the host and run 'af'
-there, or expose the HTTP+token TCP listener to the network (set a routable
-listen_addr) and point a client at it with the persistent --daemon-url/--token
-flags (see 'af token' for the credential). The listener is plain HTTP — put it
-behind a reverse proxy or a private network (Tailscale/VPN) if you need TLS.
+WEB UI: the daemon serves a browser client with the same rail, terminals, tabs,
+projects, and tasks. Start the daemon (any 'af' command does) and open
+
+    http://localhost:8443
+
+It needs no token by default, so the page just connects. The web UI is part of
+the daemon — 'af agent-server' does NOT serve it (that is the headless
+per-workspace backend a daemon drives on a remote machine).
+
+By default 'af' talks to a daemon on the local machine over a Unix socket. To
+drive a daemon on ANOTHER machine, SSH to the host and run 'af' there, or expose
+the TCP listener to the network (set a routable listen_addr) and point a client
+at it with the persistent --daemon-url/--token flags. Auth is OPT-IN: set
+require_token = true so network peers must present a token (see 'af token' for
+the credential), otherwise a routable listener is open to anyone who can reach
+it. The listener is plain HTTP — put it behind a reverse proxy or a private
+network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 		// A runtime (RunE) failure should print as one calm line, not a usage
 		// dump. Silencing usage here — after flag parsing has already succeeded —

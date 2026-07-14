@@ -21,6 +21,7 @@ import {
   type CreateSessionInput,
   createTab,
   deleteProject,
+  errorText,
   fetchSnapshot,
   killSession,
   listTasks,
@@ -632,7 +633,7 @@ function surfaceTabError(e: unknown): void {
   // The raw error message — NOT describeError, whose "Login failed…/Couldn't reach
   // the daemon…" framing is for the login probe. A tab op carries the daemon's own
   // message (e.g. the tab cap) or the fail-closed "no stable id" refusal verbatim.
-  const msg = e instanceof ApiError ? e.message : (e as Error).message;
+  const msg = errorText(e);
   console.error("af-web: tab operation failed:", msg);
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
@@ -1066,18 +1067,21 @@ function onKeydown(e: KeyboardEvent): void {
   }
 }
 
-/** Turns a probe failure into a message that tells the operator what to fix. */
+/** Turns a probe failure into a message that tells the operator what to fix. All
+ *  branches route the underlying value through errorText(), so a thrown non-Error
+ *  (or an envelope error object) still renders as readable text rather than
+ *  "[object Object]" or "undefined". */
 function describeError(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.status === 401) {
       return "That token was rejected. Check `af token show` on the host and try again.";
     }
     if (e.status === 0) {
-      return `Couldn't reach the daemon. Confirm the listener address, then retry. (${e.message})`;
+      return `Couldn't reach the daemon. Confirm the listener address, then retry. (${errorText(e)})`;
     }
-    return `Login failed: ${e.message}`;
+    return `Login failed: ${errorText(e)}`;
   }
-  return `Login failed: ${(e as Error).message}`;
+  return `Login failed: ${errorText(e)}`;
 }
 
 if (document.readyState === "loading") {

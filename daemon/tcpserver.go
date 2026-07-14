@@ -44,14 +44,17 @@ type tcpListenerInfo struct {
 // zero value is the strict, fail-safe posture — token mandatory for every peer,
 // no exemptions — so a caller opts INTO relaxations explicitly (#1696):
 //
-//   - the daemon's own listen_addr web listener passes {loopbackExempt: true}
-//     (and tokenDisabled from require_token=false) so a same-machine browser
-//     needs no token while network peers still do;
+//   - the daemon's own listen_addr web listener derives its policy from config
+//     (webListenerPolicy). By DEFAULT that is {tokenDisabled: true} — require_token
+//     defaults to false, so the daemon-served web UI needs no token from anyone;
+//     require_token=true falls back to {loopbackExempt: true}, where a same-machine
+//     browser needs no token while network peers do;
 //   - the agent-server passes the zero value, keeping its token mandatory for
 //     every peer (it exists to be reached over the network — the token must
-//     never be optional there).
+//     never be optional there). It is NOT governed by require_token.
 type tokenGatePolicy struct {
-	// tokenDisabled drops the token for ALL peers (require_token=false).
+	// tokenDisabled drops the token for ALL peers (require_token=false, the
+	// default). It short-circuits authRequired, so it overrides loopbackExempt.
 	tokenDisabled bool
 	// loopbackExempt lets 127.0.0.1/::1 peers skip the token.
 	loopbackExempt bool
@@ -88,17 +91,23 @@ func isLoopbackListenAddr(addr string) bool {
 }
 
 // webListenerPolicy is the token-gate posture for the daemon's own listen_addr
-// web listener, derived from config. It relaxes the fail-safe default in exactly
-// two ways, and the loopback relaxation is now bind-aware:
+// web listener, derived from config. It relaxes the strict zero value in exactly
+// two ways, and the loopback relaxation is bind-aware:
 //
-//   - tokenDisabled from require_token=false — drop the token for ALL peers on a
-//     network the operator fully trusts (Tailscale/VPN). Unchanged.
+//   - tokenDisabled from require_token=false, THE DEFAULT — drop the token for ALL
+//     peers, so the daemon-served web UI opens with no login. Paired with the
+//     loopback-only default listen_addr, nothing off-host can reach it; on a
+//     network bind this is an open control plane, which is the operator's explicit
+//     choice to make (and the one startTCPListener's caller warns about).
 //   - loopbackExempt lets same-machine peers skip the token, BUT only when the
 //     listener is LOOPBACK-BOUND. On a network bind the exemption is withheld
 //     regardless of require_loopback_token: a same-host reverse proxy connects
 //     from 127.0.0.1, so exempting loopback there would let anything behind the
 //     proxy reach the control plane with no token. require_loopback_token=true
 //     withdraws the exemption even on a loopback bind (shared/multi-user host).
+//
+// Because tokenDisabled short-circuits the gate, loopbackExempt only matters once
+// require_token=true — require_loopback_token alone is inert under the default.
 //
 // The agent-server does NOT use this — it passes the strict zero-value policy
 // (token mandatory for every peer) directly.

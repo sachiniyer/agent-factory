@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -39,13 +40,16 @@ func TestWebListenerPolicy(t *testing.T) {
 		wantTokenDisabled    bool
 		wantLoopbackExempt   bool
 	}{
-		{"loopback bind, defaults", "127.0.0.1:8443", true, false, false, true},
+		{"loopback bind, require_token opt-in", "127.0.0.1:8443", true, false, false, true},
 		{"loopback bind, require_loopback_token", "127.0.0.1:8443", true, true, false, false},
 		{"network bind, require_token (proxy-bypass closed)", "0.0.0.0:8443", true, false, false, false},
 		{"network bind, all-interfaces empty host", ":8443", true, false, false, false},
 		{"tailscale IP bind, require_token", "100.64.0.1:8443", true, false, false, false},
 		{"network bind, require_token=false stays open", "0.0.0.0:8443", false, false, true, false},
-		{"loopback bind, require_token=false stays open", "127.0.0.1:8443", false, false, true, true},
+		{"loopback bind, require_token=false (the default) stays open", "127.0.0.1:8443", false, false, true, true},
+		// require_loopback_token is inert while tokens are off for everyone:
+		// tokenDisabled short-circuits the gate, so this must not read as "locked".
+		{"require_loopback_token alone is inert under the default", "127.0.0.1:8443", false, true, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,7 +75,10 @@ func TestTCPListener_NetworkBindDeniesLoopbackWithoutToken(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0" // NETWORK bind (all interfaces), reachable via loopback
-	require.True(t, cfg.RequireToken, "default require_token must be true")
+	// require_token now defaults to FALSE (tokenless web UI), which would disable the
+	// gate entirely. This test is about the bind-aware loopback exemption, which only
+	// exists once tokens are enforced — so opt in explicitly.
+	cfg.RequireToken = true
 	require.False(t, isLoopbackListenAddr(cfg.ListenAddr), "0.0.0.0 is a network bind")
 
 	m, err := NewManager(cfg)
@@ -123,19 +130,23 @@ func TestTCPListener_NetworkBindDeniesLoopbackWithoutToken(t *testing.T) {
 }
 
 // TestTCPListener_LoopbackBindStillExemptViaPolicy is the unchanged-behavior
-// control: a LOOPBACK-bound listener with the default config still exempts a
-// same-machine peer (no token needed), derived through webListenerPolicy.
+// control: a LOOPBACK-bound listener still exempts a same-machine peer (no token
+// needed) via the loopback exemption, derived through webListenerPolicy. It sets
+// require_token=true deliberately — under the default (false) the gate is off for
+// everyone, so the request would pass without exercising the exemption at all.
 func TestTCPListener_LoopbackBindStillExemptViaPolicy(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0" // loopback bind
+	cfg.RequireToken = true
 	m, err := NewManager(cfg)
 	require.NoError(t, err)
 	cs := &controlServer{manager: m, scheduler: newTaskScheduler()}
 
 	policy := webListenerPolicy(cfg)
-	require.True(t, policy.loopbackExempt, "a loopback bind with defaults must exempt loopback")
+	require.True(t, policy.loopbackExempt, "a loopback bind must exempt loopback")
+	require.False(t, policy.tokenDisabled, "the gate must be live, so the exemption is what carries the request")
 
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, policy)
 	require.NoError(t, err)
@@ -146,4 +157,74 @@ func TestTCPListener_LoopbackBindStillExemptViaPolicy(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode, "a loopback peer of a loopback-bound listener still connects with no token")
+}
+
+// TestTCPListener_DefaultConfigIsTokenless pins the shipped default posture: a
+// daemon started with no config at all serves its web API to a peer that presents
+// NO token, and tells that peer so via /v1/auth-info (auth_required=false) — the
+// probe the SPA reads to skip its login screen. This is the whole "open the URL
+// and it connects" path; if it regresses, the web UI grows a login screen it can
+// never satisfy on a fresh install.
+func TestTCPListener_DefaultConfigIsTokenless(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	require.False(t, cfg.RequireToken, "require_token must default to false — auth is opt-in")
+	cfg.ListenAddr = "127.0.0.1:0"
+
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+	cs := &controlServer{manager: m, scheduler: newTaskScheduler()}
+
+	policy := webListenerPolicy(cfg)
+	require.True(t, policy.tokenDisabled, "the default config must disable the token gate")
+
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, policy)
+	require.NoError(t, err)
+	defer func() { _ = closeTCP() }()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	resp, err := client.Get("http://" + info.Addr + "/v1/health")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "a default daemon serves its API with no token")
+
+	probe, err := client.Get("http://" + info.Addr + authInfoPath)
+	require.NoError(t, err)
+	defer func() { _ = probe.Body.Close() }()
+	require.Equal(t, http.StatusOK, probe.StatusCode)
+
+	var env struct {
+		Data authInfoResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(probe.Body).Decode(&env))
+	require.False(t, env.Data.AuthRequired, "the default daemon must report auth_required=false so the SPA skips its login")
+}
+
+// TestTCPListener_DefaultConfigServesNetworkPeersTokenless documents the security
+// trade-off of the tokenless default explicitly, so it is a decision on the record
+// rather than an accident: on a NETWORK bind, the default config serves a peer that
+// is not loopback with no token. The loopback-only default listen_addr is what keeps
+// this off the network in practice; an operator who opts into a network bind must
+// set require_token=true or front the listener with a private network/proxy.
+func TestTCPListener_DefaultConfigServesNetworkPeersTokenless(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0" // operator opts into a network bind
+	require.False(t, isLoopbackListenAddr(cfg.ListenAddr))
+
+	policy := webListenerPolicy(cfg)
+	require.True(t, policy.tokenDisabled, "require_token=false disables the token for network peers too")
+
+	gate := &authGate{
+		expectedToken:  func() (string, error) { return "unused-token", nil },
+		tokenDisabled:  policy.tokenDisabled,
+		loopbackExempt: policy.loopbackExempt,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+	req.RemoteAddr = "192.168.1.50:54321" // a genuine off-host peer
+	require.False(t, gate.authRequired(req), "a network peer needs no token under the default")
+	require.True(t, gate.authorize(req), "and is therefore authorized without one")
 }

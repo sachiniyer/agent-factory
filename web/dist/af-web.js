@@ -6130,6 +6130,38 @@ function storeToken(token2) {
 function clearToken() {
   sessionStorage.removeItem(TOKEN_KEY);
 }
+function errorText(e, fallback = "unknown error") {
+  if (e instanceof Error) {
+    return e.message !== "" ? e.message : fallback;
+  }
+  if (typeof e === "string") {
+    return e !== "" ? e : fallback;
+  }
+  if (e !== null && typeof e === "object") {
+    const msg = e.message;
+    if (typeof msg === "string" && msg !== "") {
+      return msg;
+    }
+    try {
+      const json = JSON.stringify(e);
+      if (json !== void 0 && json !== "{}") {
+        return json;
+      }
+    } catch {
+    }
+  }
+  if (e === null || e === void 0) {
+    return fallback;
+  }
+  const s = String(e);
+  return s !== "" && s !== "[object Object]" ? s : fallback;
+}
+function envelopeErrorText(err, statusLine) {
+  if (err === null || err === void 0) {
+    return statusLine;
+  }
+  return errorText(err, statusLine);
+}
 var ApiError = class extends Error {
   status;
   constructor(status, message) {
@@ -6151,18 +6183,19 @@ async function af(method, body, token2) {
       body: JSON.stringify(body ?? {})
     });
   } catch (e) {
-    throw new ApiError(0, `cannot reach the daemon: ${e.message}`);
+    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
   }
   let env = null;
   try {
     env = await resp.json();
   } catch {
   }
+  const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, env?.error ?? `${resp.status} ${resp.statusText}`);
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine));
   }
-  if (env && env.error !== null) {
-    throw new ApiError(resp.status, env.error);
+  if (env && env.error != null) {
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine));
   }
   return env?.data;
 }
@@ -6178,7 +6211,7 @@ async function probeAuthRequired() {
   try {
     resp = await fetch("/v1/auth-info", { method: "GET" });
   } catch (e) {
-    throw new ApiError(0, `cannot reach the daemon: ${e.message}`);
+    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
   }
   let env = null;
   try {
@@ -6186,7 +6219,7 @@ async function probeAuthRequired() {
   } catch {
   }
   if (!resp.ok) {
-    throw new ApiError(resp.status, env?.error ?? `${resp.status} ${resp.statusText}`);
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, `${resp.status} ${resp.statusText}`.trim()));
   }
   return env?.data?.auth_required !== false;
 }
@@ -9463,7 +9496,7 @@ function closeSessionTab(index) {
   }).catch((e) => surfaceTabError(e));
 }
 function surfaceTabError(e) {
-  const msg = e instanceof ApiError ? e.message : e.message;
+  const msg = errorText(e);
   console.error("af-web: tab operation failed:", msg);
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
@@ -9750,11 +9783,11 @@ function describeError(e) {
       return "That token was rejected. Check `af token show` on the host and try again.";
     }
     if (e.status === 0) {
-      return `Couldn't reach the daemon. Confirm the listener address, then retry. (${e.message})`;
+      return `Couldn't reach the daemon. Confirm the listener address, then retry. (${errorText(e)})`;
     }
-    return `Login failed: ${e.message}`;
+    return `Login failed: ${errorText(e)}`;
   }
-  return `Login failed: ${e.message}`;
+  return `Login failed: ${errorText(e)}`;
 }
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", mount, { once: true });

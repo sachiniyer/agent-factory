@@ -125,11 +125,14 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		// listener never exempts loopback: a same-host reverse proxy connects from
 		// 127.0.0.1, so exempting it would bypass the token (webListenerPolicy).
 		policy := webListenerPolicy(manager.cfg)
-		if policy.tokenDisabled {
-			// A network-reachable, tokenless control plane is a deliberate but
-			// dangerous choice: anyone who can reach listen_addr has full control.
-			// Make it impossible to miss in the daemon log.
-			log.WarningLog.Printf("WARNING: require_token=false — the daemon web API on %q accepts NETWORK peers with NO token; anyone who can reach it has full control. The listener is plain HTTP (no TLS), so this leaves it fully open. Unset require_token (or set it true) to re-enable auth.", manager.cfg.ListenAddr)
+		if policy.tokenDisabled && !isLoopbackListenAddr(manager.cfg.ListenAddr) {
+			// Tokenless is the DEFAULT (require_token=false), so warning on it alone
+			// would fire on every ordinary loopback start and train operators to
+			// ignore the line. The dangerous combination is tokenless AND
+			// network-bound: that is a control plane anyone who can route to
+			// listen_addr owns outright. Warn on exactly that, so the line stays rare
+			// and therefore readable.
+			log.WarningLog.Printf("WARNING: the daemon web API on %q is NETWORK-bound and requires NO token (require_token defaults to false); anyone who can reach it has full control. The listener is plain HTTP (no TLS), so this leaves it fully open. Set require_token = true to require auth, or keep the listener on a private network (Tailscale/VPN) or behind an authenticating proxy.", manager.cfg.ListenAddr)
 		}
 		if closer, info, err := startTCPListener(mux, manager.cfg, policy); err != nil {
 			log.WarningLog.Printf("failed to start daemon HTTP TCP listener on %q: %v", manager.cfg.ListenAddr, err)
@@ -139,7 +142,7 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 			log.InfoLog.Printf("  bearer token: %s", info.Token)
 			switch {
 			case policy.tokenDisabled:
-				log.InfoLog.Printf("  all peers connect with NO token (require_token=false)")
+				log.InfoLog.Printf("  all peers connect with NO token (require_token defaults to false; set require_token = true to require auth)")
 			case policy.loopbackExempt:
 				log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above")
 			case isLoopbackListenAddr(manager.cfg.ListenAddr):
