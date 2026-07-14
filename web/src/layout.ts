@@ -1,0 +1,228 @@
+// The pure split-layout tree model for the web client's per-instance split panes
+// (feat(web): drag-and-drop split tabs). A layout is a binary tree: each LEAF binds
+// one of the instance's tabs to a pane; each SPLIT divides its area into two
+// children — side by side ("row", a vertical divider) or stacked ("column", a
+// horizontal divider) — at a resize ratio. The DEFAULT layout is a single leaf, so
+// a user who never splits sees exactly today's one-tab-at-a-time behavior and
+// nothing regresses.
+//
+// One tab lives in at most ONE pane: dragging a tab that is already shown elsewhere
+// MOVES it (VS-Code-style), which also sidesteps two panes fighting over the same
+// tab's PTY resize (the multi-writer stream is last-resize-wins, but showing one tab
+// at two sizes would still look janky).
+//
+// Kept pure — no DOM, no I/O — so the tree transforms are unit-tested
+// (layout.test.ts) independently of the imperative view (split.ts), exactly as
+// nav.ts and sessions.ts separate their pure logic from index.ts's wiring.
+
+/** The dataTransfer MIME the tab bar (ui.ts) stamps a dragged tab index into, and the
+ *  panes (split.ts) read on drop. A private type keeps a page's other drags out. It
+ *  lives here — the css-free pure module — so ui.ts can import it without dragging in
+ *  the xterm/terminal (and its CSS) that split.ts pulls in. */
+export const TAB_DND_MIME = "application/x-af-tab";
+
+/** A split's orientation: "row" lays its two children left→right (a vertical
+ *  divider between them); "column" lays them top→bottom (a horizontal divider). */
+export type SplitDir = "row" | "column";
+
+/** Where a dragged tab lands on a pane: an edge splits in that direction with the
+ *  new pane on that side; "center" replaces the pane's bound tab. */
+export type Edge = "left" | "right" | "top" | "bottom" | "center";
+
+/** A pane: one of the instance's tabs rendered as a live terminal. */
+export interface LeafNode {
+  kind: "leaf";
+  id: string;
+  tab: number;
+}
+
+/** An internal split of one area into two children at `ratio` (the first child's
+ *  fraction of the axis, in [0.1, 0.9]). */
+export interface SplitNode {
+  kind: "split";
+  id: string;
+  dir: SplitDir;
+  ratio: number;
+  a: LayoutNode;
+  b: LayoutNode;
+}
+
+export type LayoutNode = LeafNode | SplitNode;
+
+// A monotonic id source for freshly created nodes. A module counter (not
+// Math.random) keeps split/close deterministic for the unit tests; resetIds() lets a
+// test pin the sequence.
+let idSeq = 0;
+
+/** Test hook: reset the node-id counter so a test sees a deterministic sequence. */
+export function resetIds(): void {
+  idSeq = 0;
+}
+
+function nextId(prefix: string): string {
+  idSeq += 1;
+  return `${prefix}${idSeq}`;
+}
+
+/** The default single-pane layout bound to `tab` (today's behavior). */
+export function singleLeaf(tab: number): LeafNode {
+  return { kind: "leaf", id: nextId("leaf"), tab };
+}
+
+/** Every leaf in visual order (a-child before b-child, i.e. left/top first) — the
+ *  order pane-focus cycling walks. */
+export function leaves(node: LayoutNode): LeafNode[] {
+  if (node.kind === "leaf") {
+    return [node];
+  }
+  return [...leaves(node.a), ...leaves(node.b)];
+}
+
+/** The number of panes in the layout. */
+export function leafCount(node: LayoutNode): number {
+  return leaves(node).length;
+}
+
+/** The leaf with the given id, or null. */
+export function findLeaf(node: LayoutNode, id: string): LeafNode | null {
+  if (node.kind === "leaf") {
+    return node.id === id ? node : null;
+  }
+  return findLeaf(node.a, id) ?? findLeaf(node.b, id);
+}
+
+/** Returns a new tree with the leaf `id` replaced by `fn(leaf)` (which may be a
+ *  leaf or a split); structure elsewhere is shared. */
+function mapLeaf(node: LayoutNode, id: string, fn: (leaf: LeafNode) => LayoutNode): LayoutNode {
+  if (node.kind === "leaf") {
+    return node.id === id ? fn(node) : node;
+  }
+  return { ...node, a: mapLeaf(node.a, id, fn), b: mapLeaf(node.b, id, fn) };
+}
+
+/** Maps every leaf through `fn`, PRESERVING the node reference when nothing changed
+ *  (fn returns the same leaf and both children are unchanged). Reference stability is
+ *  load-bearing: setSession re-validates on every store update, and a validate() that
+ *  always produced a fresh tree would reconcile — and rebuild terminals — on every
+ *  status tick, re-entering itself to a stack overflow. */
+function mapAllLeaves(node: LayoutNode, fn: (leaf: LeafNode) => LeafNode): LayoutNode {
+  if (node.kind === "leaf") {
+    return fn(node);
+  }
+  const a = mapAllLeaves(node.a, fn);
+  const b = mapAllLeaves(node.b, fn);
+  if (a === node.a && b === node.b) {
+    return node;
+  }
+  return { ...node, a, b };
+}
+
+/**
+ * Removes the leaf `leafId`, collapsing its parent split so the sibling fills the
+ * freed space. Returns the new tree, or null if `leafId` is the only pane (the last
+ * pane can't be closed — a session always shows at least one terminal).
+ */
+export function closeLeaf(root: LayoutNode, leafId: string): LayoutNode | null {
+  const remove = (node: LayoutNode): LayoutNode | null => {
+    if (node.kind === "leaf") {
+      return node.id === leafId ? null : node;
+    }
+    const a = remove(node.a);
+    const b = remove(node.b);
+    // A split has a single target at most, so at most one side collapses to null;
+    // return the surviving sibling in that case (the collapse).
+    if (a === null) {
+      return b;
+    }
+    if (b === null) {
+      return a;
+    }
+    if (a === node.a && b === node.b) {
+      return node;
+    }
+    return { ...node, a, b };
+  };
+  // remove(root) is null only when root itself is the target leaf.
+  return remove(root);
+}
+
+/** Drops every leaf bound to `tab` except the one with id `keepId`, collapsing each
+ *  removal. Enforces the one-tab-one-pane invariant after a split/replace. */
+function dedupeExcept(root: LayoutNode, tab: number, keepId: string): LayoutNode {
+  const dupes = leaves(root).filter((l) => l.tab === tab && l.id !== keepId);
+  let cur = root;
+  for (const d of dupes) {
+    cur = closeLeaf(cur, d.id) ?? cur;
+  }
+  return cur;
+}
+
+/**
+ * Splits the leaf `leafId` along `edge`, placing a NEW pane bound to `tab` on that
+ * edge's side (left/right → a row; top/bottom → a column). If `tab` is already shown
+ * in another pane it is MOVED here (the one-tab-one-pane invariant). A "center" edge
+ * is not a split — it replaces the pane's tab (see replaceTab).
+ */
+export function splitLeaf(root: LayoutNode, leafId: string, edge: Edge, tab: number): LayoutNode {
+  if (edge === "center") {
+    return replaceTab(root, leafId, tab);
+  }
+  const dir: SplitDir = edge === "left" || edge === "right" ? "row" : "column";
+  const newFirst = edge === "left" || edge === "top";
+  const fresh: LeafNode = { kind: "leaf", id: nextId("leaf"), tab };
+  const grown = mapLeaf(root, leafId, (leaf) => {
+    const [a, b] = newFirst ? [fresh, leaf] : [leaf, fresh];
+    return { kind: "split", id: nextId("split"), dir, ratio: 0.5, a, b };
+  });
+  return dedupeExcept(grown, tab, fresh.id);
+}
+
+/** Rebinds the pane `leafId` to show `tab` (a center-drop, a tab-bar click, or a 1-9
+ *  key on the focused pane). Moves the tab here if it was shown elsewhere. */
+export function replaceTab(root: LayoutNode, leafId: string, tab: number): LayoutNode {
+  const target = findLeaf(root, leafId);
+  if (!target || target.tab === tab) {
+    // No-op when the pane is gone or already shows this tab — but still dedupe in
+    // case the same tab lingers in another pane.
+    return dedupeExcept(root, tab, leafId);
+  }
+  const updated = mapLeaf(root, leafId, (leaf) => ({ ...leaf, tab }));
+  return dedupeExcept(updated, tab, leafId);
+}
+
+/** Sets the split `splitId`'s divider ratio, clamped to [0.1, 0.9] so a pane can be
+ *  shrunk but never collapsed to nothing by a drag. */
+export function setRatio(root: LayoutNode, splitId: string, ratio: number): LayoutNode {
+  const clamped = Math.min(0.9, Math.max(0.1, ratio));
+  const rec = (node: LayoutNode): LayoutNode => {
+    if (node.kind === "leaf") {
+      return node;
+    }
+    if (node.id === splitId) {
+      return { ...node, ratio: clamped };
+    }
+    return { ...node, a: rec(node.a), b: rec(node.b) };
+  };
+  return rec(root);
+}
+
+/**
+ * Reconciles a layout against the session's current tab list: clamps every leaf's
+ * tab into [0, tabCount-1] (a tab closed elsewhere would otherwise stream a
+ * nonexistent tab) and drops the resulting duplicate panes, keeping the first. Used
+ * when another client grows/shrinks the tab list out from under a split.
+ */
+export function validate(root: LayoutNode, tabCount: number): LayoutNode {
+  const max = Math.max(0, tabCount - 1);
+  const clamped = mapAllLeaves(root, (leaf) => (leaf.tab > max ? { ...leaf, tab: max } : leaf));
+  const seen = new Set<number>();
+  let cur = clamped;
+  for (const l of leaves(clamped)) {
+    if (seen.has(l.tab)) {
+      cur = closeLeaf(cur, l.id) ?? cur;
+    } else {
+      seen.add(l.tab);
+    }
+  }
+  return cur;
+}

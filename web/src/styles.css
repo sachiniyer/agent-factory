@@ -532,6 +532,24 @@ body {
   border-bottom-color: var(--af-accent);
 }
 
+/* A tab shown in a (non-focused) pane while the layout is split: brighter than an
+ * idle tab, with a muted underline, so it reads as "already open" without competing
+ * with the focused tab's accent underline. */
+.af-tab-shown {
+  color: var(--af-text);
+  border-bottom-color: var(--af-border);
+}
+
+/* The tab is a drag source (feat: split tabs): a grab cursor cues that it can be
+ * dragged into a pane to split. */
+.af-tab {
+  cursor: grab;
+}
+
+.af-tab:active {
+  cursor: grabbing;
+}
+
 .af-tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -604,19 +622,200 @@ body {
   transform: translateY(0);
 }
 
-/* The persistent xterm host: fills the pane, and xterm's own .xterm fills it. The
- * small padding is inside the terminal background so the scrollback isn't flush to
- * the edges. */
+/* The persistent split host (feat: drag-and-drop split tabs): a flex container that
+ * holds the layout tree — one pane by default (today's behavior), or nested splits
+ * with dividers. It fills the pane below the tab bar; padding now lives on each pane
+ * so a divider reaches the host edges. */
 .af-term-host {
   flex: 1;
   min-height: 0;
-  padding: 0.4rem 0.6rem;
+  display: flex;
   background: var(--af-bg);
   overflow: hidden;
 }
 
-.af-term-host .xterm {
+/* A split node: two children laid out along its axis with a divider between them.
+ * The children carry their flex-basis inline (from the tree's ratio). */
+.af-split {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.af-split-row {
+  flex-direction: row;
+}
+
+.af-split-column {
+  flex-direction: column;
+}
+
+/* The drag handle between two split children. A thin hit target with a hover accent;
+ * dragging it resizes the split (split.ts persists the ratio). */
+.af-divider {
+  flex: 0 0 auto;
+  background: var(--af-border);
+  transition: background 0.1s ease;
+}
+
+.af-divider:hover,
+.af-resizing-col .af-divider-row,
+.af-resizing-row .af-divider-column {
+  background: var(--af-accent);
+}
+
+.af-divider-row {
+  width: 4px;
+  cursor: col-resize;
+}
+
+.af-divider-column {
+  height: 4px;
+  cursor: row-resize;
+}
+
+/* While a divider drag is live, force the resize cursor everywhere and suppress text
+ * selection so the drag stays smooth over the terminals. */
+.af-resizing-col,
+.af-resizing-col * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+.af-resizing-row,
+.af-resizing-row * {
+  cursor: row-resize !important;
+  user-select: none;
+}
+
+/* A pane: one leaf of the layout, a live terminal. position:relative anchors its drop
+ * overlay; it stacks an optional head (shown only when split) over the xterm host. */
+.af-pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The per-pane head: shown only when the layout has >1 pane, so a single pane reads
+ * exactly like the pre-split terminal (zero-config default). It carries the pane's
+ * tab label and a × to close just that pane (collapsing its split). */
+.af-pane-head {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.15rem 0.5rem;
+  background: var(--af-surface);
+  border-bottom: 1px solid var(--af-border);
+}
+
+.af-pane-multi .af-pane-head {
+  display: flex;
+}
+
+.af-pane-label {
+  font-size: 0.68rem;
+  color: var(--af-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-pane-close {
+  flex: 0 0 auto;
+  padding: 0 0.25rem;
+  background: transparent;
+  color: var(--af-muted);
+  border: none;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.af-pane-close:hover {
+  color: var(--af-error);
+  background: rgba(248, 81, 73, 0.14);
+}
+
+/* The xterm mount: fills the pane below its (optional) head. The small padding keeps
+ * scrollback off the edges, as the single terminal host did before. */
+.af-pane-host {
+  flex: 1;
+  min-height: 0;
+  padding: 0.4rem 0.6rem;
+  overflow: hidden;
+}
+
+.af-pane-host .xterm {
   height: 100%;
+}
+
+/* The focused pane, marked only when the layout is split (a single pane already reads
+ * as focused via the whole-pane .af-kb-terminal outline). An inner accent ring shows
+ * which pane the keyboard, Alt+w close, and a tab-bar click act on. */
+.af-kb-terminal .af-split-multi .af-pane-focused {
+  outline: 2px solid var(--af-accent);
+  outline-offset: -2px;
+}
+
+/* While a tab is being dragged, every pane hints it can receive the drop. */
+.af-dragging-tab .af-pane {
+  outline: 1px dashed var(--af-border);
+  outline-offset: -1px;
+}
+
+/* The drop-zone overlay: an accent wash over the region a drop would fill — an edge
+ * half for a split, or the whole pane for a replace. pointer-events:none so the drag
+ * keeps hitting the pane, not the overlay. */
+.af-drop-overlay {
+  position: absolute;
+  display: none;
+  background: rgba(47, 129, 247, 0.28);
+  border: 1px solid var(--af-accent);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.af-drop-overlay.af-drop-show {
+  display: block;
+}
+
+.af-drop-center {
+  inset: 0;
+}
+
+.af-drop-left {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 50%;
+}
+
+.af-drop-right {
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 50%;
+}
+
+.af-drop-top {
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 50%;
+}
+
+.af-drop-bottom {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 50%;
 }
 
 /* Rail "+ New" button (#1592 Phase 5 PR5): a compact accent-outlined action in

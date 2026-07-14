@@ -6351,18 +6351,18 @@ var EventStream = class {
 
 // src/modals.ts
 function h(tag, props = {}, ...children) {
-  const el = document.createElement(tag);
+  const el2 = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
     if (key === "class") {
-      el.className = value;
+      el2.className = value;
     } else {
-      el[key] = value;
+      el2[key] = value;
     }
   }
   for (const child of children) {
-    el.append(child);
+    el2.append(child);
   }
-  return el;
+  return el2;
 }
 function modalChrome(opts) {
   const body = h("div", { class: "af-modal-body" });
@@ -6551,9 +6551,21 @@ function nextSelection(orderedIds, selectedId, delta) {
   }
   return orderedIds[next] ?? null;
 }
-function decideKey(key, ctx) {
+function decideKey(key, ctx, mods = {}) {
   if (ctx.modalOpen) {
     return key === "Escape" ? { kind: "closeModal" } : { kind: "none" };
+  }
+  if (mods.alt === true && (key === "j" || key === "k" || key === "w")) {
+    if (ctx.view !== "sessions" || !ctx.selectedId) {
+      return { kind: "none" };
+    }
+    if (key === "j") {
+      return { kind: "cyclePane", delta: 1 };
+    }
+    if (key === "k") {
+      return { kind: "cyclePane", delta: -1 };
+    }
+    return { kind: "closePane" };
   }
   if (ctx.focus === "terminal") {
     return key === "Escape" ? { kind: "toRail" } : { kind: "none" };
@@ -6653,238 +6665,123 @@ function clampActiveTab(list, selectedId, activeTab) {
   return Math.min(Math.max(activeTab, 0), n - 1);
 }
 
-// src/store.ts
-var Store = class {
-  state;
-  listeners = /* @__PURE__ */ new Set();
-  constructor(initial) {
-    this.state = initial;
-  }
-  /** The current immutable snapshot of state. */
-  get() {
-    return this.state;
-  }
-  /** Merges a partial update and notifies every subscriber with the new state. */
-  set(patch) {
-    this.state = { ...this.state, ...patch };
-    for (const listener of this.listeners) {
-      listener(this.state);
-    }
-  }
-  /** Registers a listener and returns an unsubscribe function. */
-  subscribe(listener) {
-    this.listeners.add(listener);
-    return () => {
-      this.listeners.delete(listener);
-    };
-  }
-};
-
-// src/tasks.ts
-function genTaskId() {
-  const b = new Uint8Array(4);
-  crypto.getRandomValues(b);
-  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+// src/layout.ts
+var TAB_DND_MIME = "application/x-af-tab";
+var idSeq = 0;
+function nextId(prefix) {
+  idSeq += 1;
+  return `${prefix}${idSeq}`;
 }
-function buildTask(input) {
-  return {
-    id: genTaskId(),
-    name: input.name,
-    prompt: input.prompt,
-    cron_expr: input.trigger === "cron" ? input.cron : "",
-    watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
-    target_session: input.targetSession,
-    project_path: input.projectPath,
-    program: input.program,
-    enabled: true,
-    created_at: (/* @__PURE__ */ new Date()).toISOString()
+function singleLeaf(tab) {
+  return { kind: "leaf", id: nextId("leaf"), tab };
+}
+function leaves(node) {
+  if (node.kind === "leaf") {
+    return [node];
+  }
+  return [...leaves(node.a), ...leaves(node.b)];
+}
+function leafCount(node) {
+  return leaves(node).length;
+}
+function findLeaf(node, id) {
+  if (node.kind === "leaf") {
+    return node.id === id ? node : null;
+  }
+  return findLeaf(node.a, id) ?? findLeaf(node.b, id);
+}
+function mapLeaf(node, id, fn) {
+  if (node.kind === "leaf") {
+    return node.id === id ? fn(node) : node;
+  }
+  return { ...node, a: mapLeaf(node.a, id, fn), b: mapLeaf(node.b, id, fn) };
+}
+function mapAllLeaves(node, fn) {
+  if (node.kind === "leaf") {
+    return fn(node);
+  }
+  const a = mapAllLeaves(node.a, fn);
+  const b = mapAllLeaves(node.b, fn);
+  if (a === node.a && b === node.b) {
+    return node;
+  }
+  return { ...node, a, b };
+}
+function closeLeaf(root2, leafId) {
+  const remove = (node) => {
+    if (node.kind === "leaf") {
+      return node.id === leafId ? null : node;
+    }
+    const a = remove(node.a);
+    const b = remove(node.b);
+    if (a === null) {
+      return b;
+    }
+    if (b === null) {
+      return a;
+    }
+    if (a === node.a && b === node.b) {
+      return node;
+    }
+    return { ...node, a, b };
   };
+  return remove(root2);
 }
-function triggerSummary(t) {
-  if (t.watch_cmd && t.watch_cmd.trim() !== "") {
-    return `watch: ${t.watch_cmd}`;
+function dedupeExcept(root2, tab, keepId) {
+  const dupes = leaves(root2).filter((l) => l.tab === tab && l.id !== keepId);
+  let cur = root2;
+  for (const d of dupes) {
+    cur = closeLeaf(cur, d.id) ?? cur;
   }
-  if (t.cron_expr && t.cron_expr.trim() !== "") {
-    return `cron: ${t.cron_expr}`;
-  }
-  return "no trigger";
+  return cur;
 }
-function canTrigger(t) {
-  return t.enabled && !!t.cron_expr && t.cron_expr.trim() !== "" && !(t.watch_cmd && t.watch_cmd.trim() !== "");
-}
-function lastRunSummary(t) {
-  if (!t.last_run_at) {
-    return "never run";
+function splitLeaf(root2, leafId, edge, tab) {
+  if (edge === "center") {
+    return replaceTab(root2, leafId, tab);
   }
-  const status = t.last_run_status ? ` (${t.last_run_status})` : "";
-  return `last run ${t.last_run_at}${status}`;
-}
-var TasksPane = class {
-  constructor(actions2) {
-    this.actions = actions2;
-    this.el = h("section", { class: "af-tasks" });
-    this.el.setAttribute("aria-label", "Tasks");
-  }
-  el;
-  lastTasks = null;
-  update(tasks) {
-    if (this.lastTasks === tasks) {
-      return;
-    }
-    this.lastTasks = tasks;
-    this.render(tasks);
-  }
-  render(tasks) {
-    const addBtn = h("button", { type: "button", class: "af-tasks-add", title: "Add task" }, "+ Add");
-    addBtn.addEventListener("click", () => this.actions.add());
-    const head = h(
-      "div",
-      { class: "af-tasks-head" },
-      h("span", { class: "af-tasks-title" }, "Tasks"),
-      h("span", { class: "af-view-count" }, String(tasks.length)),
-      addBtn
-    );
-    if (tasks.length === 0) {
-      this.el.replaceChildren(
-        head,
-        h(
-          "p",
-          { class: "af-tasks-empty" },
-          "No scheduled tasks yet. Add one to deliver a prompt on a cron schedule."
-        )
-      );
-      return;
-    }
-    const rows = [...tasks].sort((a, b) => a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0).map((t) => this.taskRow(t));
-    this.el.replaceChildren(head, h("ul", { class: "af-tasks-list" }, ...rows));
-  }
-  taskRow(t) {
-    const glyph = t.enabled ? "[\u2713]" : "[ ]";
-    const enabledDot = h("span", { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` }, glyph);
-    enabledDot.setAttribute("aria-hidden", "true");
-    const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
-    const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
-    const metaParts = [];
-    if (t.target_session && t.target_session.trim() !== "") {
-      metaParts.push(`\u2192 ${t.target_session}`);
-    }
-    metaParts.push(lastRunSummary(t));
-    const meta = h("div", { class: "af-task-meta" }, metaParts.join("  \xB7  "));
-    const main = h("div", { class: "af-task-main" }, name, trigger, meta);
-    const toggleBtn = h(
-      "button",
-      { type: "button", class: "af-ghost af-task-action" },
-      t.enabled ? "Disable" : "Enable"
-    );
-    toggleBtn.addEventListener("click", () => this.actions.toggle(t));
-    const actionEls = [toggleBtn];
-    if (canTrigger(t)) {
-      const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
-      triggerBtn.addEventListener("click", () => this.actions.trigger(t));
-      actionEls.push(triggerBtn);
-    }
-    const removeBtn = h("button", { type: "button", class: "af-danger af-task-action" }, "Remove");
-    removeBtn.addEventListener("click", () => this.actions.remove(t));
-    actionEls.push(removeBtn);
-    const actions2 = h("div", { class: "af-task-actions" }, ...actionEls);
-    return h("li", { class: "af-task-row" }, enabledDot, main, actions2);
-  }
-};
-function addTaskModal(projects, callbacks) {
-  const { handle, body, confirmBtn } = modalChrome({
-    title: "Add task",
-    confirmLabel: "Add",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
+  const dir = edge === "left" || edge === "right" ? "row" : "column";
+  const newFirst = edge === "left" || edge === "top";
+  const fresh = { kind: "leaf", id: nextId("leaf"), tab };
+  const grown = mapLeaf(root2, leafId, (leaf) => {
+    const [a, b] = newFirst ? [fresh, leaf] : [leaf, fresh];
+    return { kind: "split", id: nextId("split"), dir, ratio: 0.5, a, b };
   });
-  const nameInput = h("input", { type: "text", class: "af-input", placeholder: "Task name", autocomplete: "off" });
-  nameInput.setAttribute("aria-label", "Task name");
-  const projectSelect = h("select", { class: "af-input" });
-  projectSelect.setAttribute("aria-label", "Project");
-  if (projects.length === 0) {
-    const opt = h("option", { value: "" }, "No projects yet \u2014 create a session first");
-    opt.disabled = true;
-    opt.selected = true;
-    projectSelect.append(opt);
-    confirmBtn.disabled = true;
-  } else {
-    for (const p of projects) {
-      projectSelect.append(h("option", { value: p }, projectLabel(p)));
+  return dedupeExcept(grown, tab, fresh.id);
+}
+function replaceTab(root2, leafId, tab) {
+  const target = findLeaf(root2, leafId);
+  if (!target || target.tab === tab) {
+    return dedupeExcept(root2, tab, leafId);
+  }
+  const updated = mapLeaf(root2, leafId, (leaf) => ({ ...leaf, tab }));
+  return dedupeExcept(updated, tab, leafId);
+}
+function setRatio(root2, splitId, ratio) {
+  const clamped = Math.min(0.9, Math.max(0.1, ratio));
+  const rec = (node) => {
+    if (node.kind === "leaf") {
+      return node;
+    }
+    if (node.id === splitId) {
+      return { ...node, ratio: clamped };
+    }
+    return { ...node, a: rec(node.a), b: rec(node.b) };
+  };
+  return rec(root2);
+}
+function validate(root2, tabCount) {
+  const max = Math.max(0, tabCount - 1);
+  const clamped = mapAllLeaves(root2, (leaf) => leaf.tab > max ? { ...leaf, tab: max } : leaf);
+  const seen = /* @__PURE__ */ new Set();
+  let cur = clamped;
+  for (const l of leaves(clamped)) {
+    if (seen.has(l.tab)) {
+      cur = closeLeaf(cur, l.id) ?? cur;
+    } else {
+      seen.add(l.tab);
     }
   }
-  const triggerSelect = h("select", { class: "af-input" });
-  triggerSelect.setAttribute("aria-label", "Trigger type");
-  triggerSelect.append(h("option", { value: "cron" }, "Cron schedule"));
-  triggerSelect.append(h("option", { value: "watch" }, "Watch command"));
-  const cronInput = h("input", { type: "text", class: "af-input", placeholder: "0 9 * * *", autocomplete: "off" });
-  cronInput.setAttribute("aria-label", "Cron expression");
-  const cronField = field("Cron expression", cronInput);
-  const watchInput = h("input", { type: "text", class: "af-input", placeholder: "tail -F events.log", autocomplete: "off" });
-  watchInput.setAttribute("aria-label", "Watch command");
-  const watchField = field("Watch command", watchInput);
-  watchField.hidden = true;
-  triggerSelect.addEventListener("change", () => {
-    const isWatch = triggerSelect.value === "watch";
-    cronField.hidden = isWatch;
-    watchField.hidden = !isWatch;
-  });
-  const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt to deliver ({{line}} for the watch line)", rows: 3 });
-  promptArea.setAttribute("aria-label", "Prompt");
-  const targetInput = h("input", { type: "text", class: "af-input", placeholder: "Target session (optional)", autocomplete: "off" });
-  targetInput.setAttribute("aria-label", "Target session");
-  const programSelect = h("select", { class: "af-input" });
-  programSelect.setAttribute("aria-label", "Program");
-  programSelect.append(h("option", { value: "" }, "Repo default"));
-  for (const prog of ["claude", "codex", "aider", "gemini", "amp"]) {
-    programSelect.append(h("option", { value: prog }, prog));
-  }
-  body.append(
-    field("Name", nameInput),
-    field("Project", projectSelect),
-    field("Trigger", triggerSelect),
-    cronField,
-    watchField,
-    field("Prompt", promptArea),
-    field("Target session", targetInput),
-    field("Program", programSelect)
-  );
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    const trigger = triggerSelect.value === "watch" ? "watch" : "cron";
-    const name = nameInput.value.trim();
-    const cron = cronInput.value.trim();
-    const watchCmd = watchInput.value.trim();
-    const prompt = promptArea.value.trim();
-    if (name === "" || projectSelect.value === "") {
-      handle.setError("A name and a project are required.");
-      return;
-    }
-    if (trigger === "cron" && cron === "") {
-      handle.setError("A cron expression is required for a cron task.");
-      return;
-    }
-    if (trigger === "cron" && prompt === "") {
-      handle.setError("A prompt is required for a cron task.");
-      return;
-    }
-    if (trigger === "watch" && watchCmd === "") {
-      handle.setError("A watch command is required for a watch task.");
-      return;
-    }
-    handle.setError(null);
-    callbacks.onSubmit({
-      name,
-      projectPath: projectSelect.value,
-      trigger,
-      cron,
-      watchCmd,
-      prompt: promptArea.value,
-      targetSession: targetInput.value.trim(),
-      program: programSelect.value
-    });
-  });
-  queueMicrotask(() => nameInput.focus());
-  return handle;
+  return cur;
 }
 
 // src/terminal.ts
@@ -7249,6 +7146,658 @@ var AttachTerminal = class {
   }
 };
 
+// src/split.ts
+var EDGE_BAND = 0.3;
+function el(tag, cls) {
+  const node = document.createElement(tag);
+  node.className = cls;
+  return node;
+}
+var SplitView = class {
+  constructor(host, cb) {
+    this.host = host;
+    this.cb = cb;
+  }
+  // Retained layout per session id (in-memory; a nice-to-have to persist across
+  // reload is out of scope for v1). Keyed by the stable session id.
+  trees = /* @__PURE__ */ new Map();
+  panes = /* @__PURE__ */ new Map();
+  sessionId = null;
+  token = null;
+  tabCount = 1;
+  tree = null;
+  focusedId = null;
+  // Debounces the "focus left every pane" report so a click that moves focus A→B
+  // (blur A, then focus B) doesn't flap the nav mode through rail and back.
+  blurTimer = null;
+  // Last values reported via onLayout, so a no-op reconcile never re-fires it (which
+  // would re-enter the store→rerender→setSession loop).
+  lastFocusedTab = -1;
+  lastShown = "";
+  lastPaneCount = 0;
+  /**
+   * Shows `sessionId`'s layout, building/rebuilding terminals as needed. Called on
+   * every selection/tab change: a NEW session rebuilds from its retained tree (or a
+   * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
+   * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
+   */
+  setSession(sessionId, token2, tabCount, initialTab) {
+    this.token = token2;
+    if (sessionId === null || token2 === null) {
+      this.teardown();
+      this.sessionId = null;
+      this.tree = null;
+      this.report();
+      return;
+    }
+    if (sessionId === this.sessionId) {
+      this.tabCount = tabCount;
+      const before = this.tree;
+      this.tree = validate(this.tree ?? singleLeaf(initialTab), tabCount);
+      if (this.trees.get(sessionId) !== this.tree) {
+        this.trees.set(sessionId, this.tree);
+      }
+      if (before !== this.tree) {
+        this.reconcile();
+        this.report();
+      }
+      return;
+    }
+    this.teardown();
+    this.sessionId = sessionId;
+    this.tabCount = tabCount;
+    const retained = this.trees.get(sessionId);
+    this.tree = validate(retained ?? singleLeaf(initialTab), tabCount);
+    this.trees.set(sessionId, this.tree);
+    this.focusedId = leaves(this.tree)[0]?.id ?? null;
+    this.reconcile();
+    this.report();
+  }
+  /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
+   *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
+  setFocusedTab(tab) {
+    if (!this.tree || !this.focusedId) {
+      return;
+    }
+    this.tree = replaceTab(this.tree, this.focusedId, tab);
+    this.commit();
+  }
+  /** Gives the keyboard to the focused pane's terminal (attach). */
+  focus() {
+    const pane = this.focusedId ? this.panes.get(this.focusedId) : null;
+    pane?.term?.focus();
+  }
+  /** Takes the keyboard away from every pane (back to rail nav). */
+  blur() {
+    for (const pane of this.panes.values()) {
+      pane.term?.blur();
+    }
+  }
+  /** Moves pane focus by `delta` (wrapping) and attaches the newly focused pane. */
+  cyclePane(delta) {
+    if (!this.tree) {
+      return;
+    }
+    const ids = leaves(this.tree).map((l) => l.id);
+    if (ids.length <= 1) {
+      this.focus();
+      return;
+    }
+    const cur = this.focusedId ? ids.indexOf(this.focusedId) : -1;
+    const next = ids[(cur + delta + ids.length) % ids.length];
+    if (next) {
+      this.focusPane(next);
+      this.focus();
+    }
+  }
+  /** Closes the focused pane, collapsing its split. No-op when it is the only pane
+   *  (a session always shows at least one terminal — close the TAB instead). */
+  closeFocusedPane() {
+    if (this.focusedId) {
+      this.closePane(this.focusedId);
+    }
+  }
+  /** Whether the layout currently has more than one pane. */
+  isSplit() {
+    return this.tree ? leafCount(this.tree) > 1 : false;
+  }
+  /** Tears down every live terminal and clears the host (logout / deselect). The
+   *  retained trees survive so a re-selection restores the split. */
+  dispose() {
+    this.teardown();
+    this.sessionId = null;
+    this.tree = null;
+  }
+  // --- internal: mutation commit --------------------------------------------
+  /** Persists the current tree for the session, re-renders, and reports the layout. */
+  commit() {
+    if (this.sessionId && this.tree) {
+      this.trees.set(this.sessionId, this.tree);
+    }
+    this.reconcile();
+    this.report();
+  }
+  closePane(leafId) {
+    if (!this.tree) {
+      return;
+    }
+    const next = closeLeaf(this.tree, leafId);
+    if (next === null) {
+      return;
+    }
+    this.tree = next;
+    if (this.focusedId === leafId) {
+      this.focusedId = leaves(this.tree)[0]?.id ?? null;
+    }
+    this.commit();
+    this.focus();
+  }
+  // --- internal: reconcile tree → DOM + terminals ---------------------------
+  teardown() {
+    for (const pane of this.panes.values()) {
+      pane.term?.dispose();
+    }
+    this.panes.clear();
+    this.host.replaceChildren();
+    this.host.classList.remove("af-split-multi");
+    this.focusedId = null;
+  }
+  /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
+   *  (re)creates terminals whose tab changed, rebuilds the split wrappers (reusing
+   *  the persistent pane containers so surviving xterms are only reparented, never
+   *  recreated), and refreshes focus/head chrome. */
+  reconcile() {
+    if (!this.tree || !this.sessionId || this.token === null) {
+      return;
+    }
+    const desired = leaves(this.tree);
+    const wanted = new Set(desired.map((l) => l.id));
+    for (const [id, pane] of this.panes) {
+      if (!wanted.has(id)) {
+        pane.term?.dispose();
+        this.panes.delete(id);
+      }
+    }
+    for (const leaf of desired) {
+      if (!this.panes.has(leaf.id)) {
+        this.panes.set(leaf.id, this.createPane(leaf));
+      }
+    }
+    if (!this.focusedId || !wanted.has(this.focusedId)) {
+      this.focusedId = desired[0]?.id ?? null;
+    }
+    const rootEl = this.buildNode(this.tree);
+    rootEl.style.flex = "1 1 0";
+    this.host.replaceChildren(rootEl);
+    const multi = desired.length > 1;
+    this.host.classList.toggle("af-split-multi", multi);
+    for (const leaf of desired) {
+      const pane = this.panes.get(leaf.id);
+      if (!pane) {
+        continue;
+      }
+      if (!pane.term || pane.tab !== leaf.tab) {
+        pane.term?.dispose();
+        pane.host.replaceChildren();
+        pane.tab = leaf.tab;
+        pane.status = "connecting";
+        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, leaf.tab, {
+          onStatus: (s) => this.onPaneStatus(leaf.id, s),
+          onFocusChange: (f) => this.onPaneFocus(leaf.id, f)
+        });
+      }
+      pane.container.classList.toggle("af-pane-multi", multi);
+      pane.label.textContent = `Tab ${leaf.tab + 1}`;
+    }
+    this.applyFocusClass();
+  }
+  createPane(leaf) {
+    const container = el("div", "af-pane");
+    container.setAttribute("data-leaf", leaf.id);
+    const head = el("div", "af-pane-head");
+    const label = el("span", "af-pane-label");
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "af-pane-close";
+    closeBtn.title = "Close pane";
+    closeBtn.setAttribute("aria-label", "Close pane");
+    closeBtn.textContent = "\xD7";
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.closePane(leaf.id);
+    });
+    head.append(label, closeBtn);
+    const paneHost = el("div", "af-pane-host");
+    const overlay = el("div", "af-drop-overlay");
+    container.append(head, paneHost, overlay);
+    container.addEventListener("mousedown", () => this.focusPane(leaf.id));
+    const pane = { leafId: leaf.id, container, host: paneHost, label, overlay, term: null, tab: -1, status: "connecting" };
+    this.wireDrop(pane);
+    return pane;
+  }
+  buildNode(node) {
+    if (node.kind === "leaf") {
+      return this.panes.get(node.id)?.container ?? el("div", "af-pane");
+    }
+    const a = this.buildNode(node.a);
+    const b = this.buildNode(node.b);
+    a.style.flex = `${node.ratio} 1 0`;
+    b.style.flex = `${1 - node.ratio} 1 0`;
+    const divider = this.buildDivider(node, a, b);
+    const wrap = el("div", `af-split af-split-${node.dir}`);
+    wrap.append(a, divider, b);
+    return wrap;
+  }
+  buildDivider(node, aEl, bEl) {
+    const divider = el("div", `af-divider af-divider-${node.dir}`);
+    divider.setAttribute("role", "separator");
+    divider.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const parent = divider.parentElement;
+      if (!parent) {
+        return;
+      }
+      divider.setPointerCapture(e.pointerId);
+      document.body.classList.add(node.dir === "row" ? "af-resizing-col" : "af-resizing-row");
+      const rect = parent.getBoundingClientRect();
+      const onMove = (ev) => {
+        const ratio = node.dir === "row" ? (ev.clientX - rect.left) / rect.width : (ev.clientY - rect.top) / rect.height;
+        const clamped = Math.min(0.9, Math.max(0.1, ratio));
+        node.ratio = clamped;
+        aEl.style.flex = `${clamped} 1 0`;
+        bEl.style.flex = `${1 - clamped} 1 0`;
+      };
+      const onUp = (ev) => {
+        divider.releasePointerCapture(ev.pointerId);
+        divider.removeEventListener("pointermove", onMove);
+        divider.removeEventListener("pointerup", onUp);
+        document.body.classList.remove("af-resizing-col", "af-resizing-row");
+        if (this.tree) {
+          this.tree = setRatio(this.tree, node.id, node.ratio);
+          if (this.sessionId) {
+            this.trees.set(this.sessionId, this.tree);
+          }
+        }
+      };
+      divider.addEventListener("pointermove", onMove);
+      divider.addEventListener("pointerup", onUp);
+    });
+    return divider;
+  }
+  // --- internal: drag-and-drop ----------------------------------------------
+  wireDrop(pane) {
+    const isTabDrag = (e) => e.dataTransfer?.types.includes(TAB_DND_MIME) ?? false;
+    pane.container.addEventListener("dragover", (e) => {
+      if (!isTabDrag(e)) {
+        return;
+      }
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = "move";
+      }
+      this.showZone(pane, this.zoneAt(pane.container, e.clientX, e.clientY));
+    });
+    pane.container.addEventListener("dragleave", (e) => {
+      const to = e.relatedTarget;
+      if (to && pane.container.contains(to)) {
+        return;
+      }
+      this.hideZone(pane);
+    });
+    pane.container.addEventListener("drop", (e) => {
+      if (!isTabDrag(e)) {
+        return;
+      }
+      e.preventDefault();
+      this.hideZone(pane);
+      const raw = e.dataTransfer?.getData(TAB_DND_MIME);
+      const tab = raw ? Number.parseInt(raw, 10) : Number.NaN;
+      if (Number.isNaN(tab) || !this.tree) {
+        return;
+      }
+      const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
+      this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, tab);
+      const landed = leaves(this.tree).find((l) => l.tab === tab);
+      if (landed) {
+        this.focusedId = landed.id;
+      }
+      this.commit();
+      this.focus();
+    });
+  }
+  /** The drop zone for a pointer position over a pane: an edge (outer band) or the
+   *  center. */
+  zoneAt(container, x, y) {
+    const r = container.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) {
+      return "center";
+    }
+    const fx = (x - r.left) / r.width;
+    const fy = (y - r.top) / r.height;
+    const d = { left: fx, right: 1 - fx, top: fy, bottom: 1 - fy };
+    const min = Math.min(d.left, d.right, d.top, d.bottom);
+    if (min > EDGE_BAND) {
+      return "center";
+    }
+    if (min === d.left) {
+      return "left";
+    }
+    if (min === d.right) {
+      return "right";
+    }
+    if (min === d.top) {
+      return "top";
+    }
+    return "bottom";
+  }
+  showZone(pane, zone) {
+    pane.overlay.className = `af-drop-overlay af-drop-show af-drop-${zone}`;
+  }
+  hideZone(pane) {
+    pane.overlay.className = "af-drop-overlay";
+  }
+  // --- internal: focus + status ---------------------------------------------
+  focusPane(leafId) {
+    if (this.focusedId === leafId) {
+      return;
+    }
+    this.focusedId = leafId;
+    this.applyFocusClass();
+    const pane = this.panes.get(leafId);
+    if (pane) {
+      this.cb.onStatus(pane.status);
+    }
+    this.report();
+  }
+  applyFocusClass() {
+    for (const [id, pane] of this.panes) {
+      pane.container.classList.toggle("af-pane-focused", id === this.focusedId);
+    }
+  }
+  onPaneStatus(leafId, status) {
+    const pane = this.panes.get(leafId);
+    if (pane) {
+      pane.status = status;
+    }
+    if (leafId === this.focusedId) {
+      this.cb.onStatus(status);
+    }
+  }
+  onPaneFocus(leafId, focused) {
+    if (focused) {
+      if (this.blurTimer !== null) {
+        window.clearTimeout(this.blurTimer);
+        this.blurTimer = null;
+      }
+      if (this.focusedId !== leafId) {
+        this.focusPane(leafId);
+      }
+      this.cb.onFocusChange(true);
+      return;
+    }
+    if (this.blurTimer !== null) {
+      window.clearTimeout(this.blurTimer);
+    }
+    this.blurTimer = window.setTimeout(() => {
+      this.blurTimer = null;
+      const active = document.activeElement;
+      const stillInPane = active ? [...this.panes.values()].some((p) => p.host.contains(active)) : false;
+      if (!stillInPane) {
+        this.cb.onFocusChange(false);
+      }
+    }, 0);
+  }
+  /** Fires onLayout when the focused tab, the shown-tab set, or the pane count
+   *  changed — never on a no-op, so writing the store from it can't loop. */
+  report() {
+    const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
+    const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0 : 0;
+    const paneCount = shownTabs.length;
+    const shownKey = shownTabs.join(",");
+    if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
+      return;
+    }
+    this.lastFocusedTab = focusedTab;
+    this.lastShown = shownKey;
+    this.lastPaneCount = paneCount;
+    this.cb.onLayout({ focusedTab, shownTabs, paneCount });
+  }
+};
+
+// src/store.ts
+var Store = class {
+  state;
+  listeners = /* @__PURE__ */ new Set();
+  constructor(initial) {
+    this.state = initial;
+  }
+  /** The current immutable snapshot of state. */
+  get() {
+    return this.state;
+  }
+  /** Merges a partial update and notifies every subscriber with the new state. */
+  set(patch) {
+    this.state = { ...this.state, ...patch };
+    for (const listener of this.listeners) {
+      listener(this.state);
+    }
+  }
+  /** Registers a listener and returns an unsubscribe function. */
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+};
+
+// src/tasks.ts
+function genTaskId() {
+  const b = new Uint8Array(4);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+function buildTask(input) {
+  return {
+    id: genTaskId(),
+    name: input.name,
+    prompt: input.prompt,
+    cron_expr: input.trigger === "cron" ? input.cron : "",
+    watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
+    target_session: input.targetSession,
+    project_path: input.projectPath,
+    program: input.program,
+    enabled: true,
+    created_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function triggerSummary(t) {
+  if (t.watch_cmd && t.watch_cmd.trim() !== "") {
+    return `watch: ${t.watch_cmd}`;
+  }
+  if (t.cron_expr && t.cron_expr.trim() !== "") {
+    return `cron: ${t.cron_expr}`;
+  }
+  return "no trigger";
+}
+function canTrigger(t) {
+  return t.enabled && !!t.cron_expr && t.cron_expr.trim() !== "" && !(t.watch_cmd && t.watch_cmd.trim() !== "");
+}
+function lastRunSummary(t) {
+  if (!t.last_run_at) {
+    return "never run";
+  }
+  const status = t.last_run_status ? ` (${t.last_run_status})` : "";
+  return `last run ${t.last_run_at}${status}`;
+}
+var TasksPane = class {
+  constructor(actions2) {
+    this.actions = actions2;
+    this.el = h("section", { class: "af-tasks" });
+    this.el.setAttribute("aria-label", "Tasks");
+  }
+  el;
+  lastTasks = null;
+  update(tasks) {
+    if (this.lastTasks === tasks) {
+      return;
+    }
+    this.lastTasks = tasks;
+    this.render(tasks);
+  }
+  render(tasks) {
+    const addBtn = h("button", { type: "button", class: "af-tasks-add", title: "Add task" }, "+ Add");
+    addBtn.addEventListener("click", () => this.actions.add());
+    const head = h(
+      "div",
+      { class: "af-tasks-head" },
+      h("span", { class: "af-tasks-title" }, "Tasks"),
+      h("span", { class: "af-view-count" }, String(tasks.length)),
+      addBtn
+    );
+    if (tasks.length === 0) {
+      this.el.replaceChildren(
+        head,
+        h(
+          "p",
+          { class: "af-tasks-empty" },
+          "No scheduled tasks yet. Add one to deliver a prompt on a cron schedule."
+        )
+      );
+      return;
+    }
+    const rows = [...tasks].sort((a, b) => a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0).map((t) => this.taskRow(t));
+    this.el.replaceChildren(head, h("ul", { class: "af-tasks-list" }, ...rows));
+  }
+  taskRow(t) {
+    const glyph = t.enabled ? "[\u2713]" : "[ ]";
+    const enabledDot = h("span", { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` }, glyph);
+    enabledDot.setAttribute("aria-hidden", "true");
+    const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
+    const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
+    const metaParts = [];
+    if (t.target_session && t.target_session.trim() !== "") {
+      metaParts.push(`\u2192 ${t.target_session}`);
+    }
+    metaParts.push(lastRunSummary(t));
+    const meta = h("div", { class: "af-task-meta" }, metaParts.join("  \xB7  "));
+    const main = h("div", { class: "af-task-main" }, name, trigger, meta);
+    const toggleBtn = h(
+      "button",
+      { type: "button", class: "af-ghost af-task-action" },
+      t.enabled ? "Disable" : "Enable"
+    );
+    toggleBtn.addEventListener("click", () => this.actions.toggle(t));
+    const actionEls = [toggleBtn];
+    if (canTrigger(t)) {
+      const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
+      triggerBtn.addEventListener("click", () => this.actions.trigger(t));
+      actionEls.push(triggerBtn);
+    }
+    const removeBtn = h("button", { type: "button", class: "af-danger af-task-action" }, "Remove");
+    removeBtn.addEventListener("click", () => this.actions.remove(t));
+    actionEls.push(removeBtn);
+    const actions2 = h("div", { class: "af-task-actions" }, ...actionEls);
+    return h("li", { class: "af-task-row" }, enabledDot, main, actions2);
+  }
+};
+function addTaskModal(projects, callbacks) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: "Add task",
+    confirmLabel: "Add",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  const nameInput = h("input", { type: "text", class: "af-input", placeholder: "Task name", autocomplete: "off" });
+  nameInput.setAttribute("aria-label", "Task name");
+  const projectSelect = h("select", { class: "af-input" });
+  projectSelect.setAttribute("aria-label", "Project");
+  if (projects.length === 0) {
+    const opt = h("option", { value: "" }, "No projects yet \u2014 create a session first");
+    opt.disabled = true;
+    opt.selected = true;
+    projectSelect.append(opt);
+    confirmBtn.disabled = true;
+  } else {
+    for (const p of projects) {
+      projectSelect.append(h("option", { value: p }, projectLabel(p)));
+    }
+  }
+  const triggerSelect = h("select", { class: "af-input" });
+  triggerSelect.setAttribute("aria-label", "Trigger type");
+  triggerSelect.append(h("option", { value: "cron" }, "Cron schedule"));
+  triggerSelect.append(h("option", { value: "watch" }, "Watch command"));
+  const cronInput = h("input", { type: "text", class: "af-input", placeholder: "0 9 * * *", autocomplete: "off" });
+  cronInput.setAttribute("aria-label", "Cron expression");
+  const cronField = field("Cron expression", cronInput);
+  const watchInput = h("input", { type: "text", class: "af-input", placeholder: "tail -F events.log", autocomplete: "off" });
+  watchInput.setAttribute("aria-label", "Watch command");
+  const watchField = field("Watch command", watchInput);
+  watchField.hidden = true;
+  triggerSelect.addEventListener("change", () => {
+    const isWatch = triggerSelect.value === "watch";
+    cronField.hidden = isWatch;
+    watchField.hidden = !isWatch;
+  });
+  const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt to deliver ({{line}} for the watch line)", rows: 3 });
+  promptArea.setAttribute("aria-label", "Prompt");
+  const targetInput = h("input", { type: "text", class: "af-input", placeholder: "Target session (optional)", autocomplete: "off" });
+  targetInput.setAttribute("aria-label", "Target session");
+  const programSelect = h("select", { class: "af-input" });
+  programSelect.setAttribute("aria-label", "Program");
+  programSelect.append(h("option", { value: "" }, "Repo default"));
+  for (const prog of ["claude", "codex", "aider", "gemini", "amp"]) {
+    programSelect.append(h("option", { value: prog }, prog));
+  }
+  body.append(
+    field("Name", nameInput),
+    field("Project", projectSelect),
+    field("Trigger", triggerSelect),
+    cronField,
+    watchField,
+    field("Prompt", promptArea),
+    field("Target session", targetInput),
+    field("Program", programSelect)
+  );
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const trigger = triggerSelect.value === "watch" ? "watch" : "cron";
+    const name = nameInput.value.trim();
+    const cron = cronInput.value.trim();
+    const watchCmd = watchInput.value.trim();
+    const prompt = promptArea.value.trim();
+    if (name === "" || projectSelect.value === "") {
+      handle.setError("A name and a project are required.");
+      return;
+    }
+    if (trigger === "cron" && cron === "") {
+      handle.setError("A cron expression is required for a cron task.");
+      return;
+    }
+    if (trigger === "cron" && prompt === "") {
+      handle.setError("A prompt is required for a cron task.");
+      return;
+    }
+    if (trigger === "watch" && watchCmd === "") {
+      handle.setError("A watch command is required for a watch task.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit({
+      name,
+      projectPath: projectSelect.value,
+      trigger,
+      cron,
+      watchCmd,
+      prompt: promptArea.value,
+      targetSession: targetInput.value.trim(),
+      program: programSelect.value
+    });
+  });
+  queueMicrotask(() => nameInput.focus());
+  return handle;
+}
+
 // src/types.ts
 var Liveness = {
   Unset: 0,
@@ -7525,18 +8074,18 @@ function viewLabel(view) {
   }
 }
 function h2(tag, props = {}, ...children) {
-  const el = document.createElement(tag);
+  const el2 = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
     if (key === "class") {
-      el.className = value;
+      el2.className = value;
     } else {
-      el[key] = value;
+      el2[key] = value;
     }
   }
   for (const child of children) {
-    el.append(child);
+    el2.append(child);
   }
-  return el;
+  return el2;
 }
 function orderedSessions(sessions) {
   return [...sessions].sort(compareSessionsForRail);
@@ -7859,7 +8408,10 @@ var AppShell = class {
     const tabs = sessionTabs(selected);
     const canManage = supportsTabManagement(selected);
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
-    const children = tabs.map((tab, i) => tabButton(tab, i, i === active, canManage, this.actions));
+    const shown = new Set(state.shownTabs);
+    const children = tabs.map(
+      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions)
+    );
     if (canManage && tabs.length < MAX_TABS) {
       const add = h2("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
       add.addEventListener("click", () => this.actions.newTab());
@@ -7884,12 +8436,22 @@ var AppShell = class {
 function selectedSession(state) {
   return state.selectedId ? state.sessions.find((s) => s.id === state.selectedId) ?? null : null;
 }
-function tabButton(tab, index, active, canManage, actions2) {
-  const btn = h2("button", { type: "button", class: `af-tab${active ? " af-tab-active" : ""}` });
+function tabButton(tab, index, active, shown, canManage, actions2) {
+  const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
+  const btn = h2("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
   btn.append(h2("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions2.openTab(index));
+  btn.addEventListener("dragstart", (e) => {
+    if (!e.dataTransfer) {
+      return;
+    }
+    e.dataTransfer.setData(TAB_DND_MIME, String(index));
+    e.dataTransfer.effectAllowed = "move";
+    document.body.classList.add("af-dragging-tab");
+  });
+  btn.addEventListener("dragend", () => document.body.classList.remove("af-dragging-tab"));
   if (index > 0 && canManage) {
     const close = h2("span", { class: "af-tab-close", title: "Close tab" }, "\xD7");
     close.setAttribute("aria-hidden", "true");
@@ -7947,6 +8509,7 @@ var store = new Store({
   termStatus: "connecting",
   focus: "rail",
   activeTab: 0,
+  shownTabs: [0],
   tabError: null,
   tasks: []
 });
@@ -7962,9 +8525,17 @@ termHost.className = "af-term-host";
 var modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 var modal = null;
-var terminal = null;
-var terminalId = null;
-var terminalTab = 0;
+var splitView = new SplitView(termHost, {
+  onStatus: (s) => store.set({ termStatus: s }),
+  // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
+  // pane, so a click straight into a pane enters terminal mode (and clicking/tabbing
+  // away from all panes returns to rail mode) without going through Enter/Escape.
+  onFocusChange: (focused) => store.set({ focus: focused ? "terminal" : "rail" }),
+  // Mirror the layout into the store so the tab bar can highlight the focused pane's
+  // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
+  // on a real change, so this write never loops back through rerender → syncSplit.
+  onLayout: ({ focusedTab, shownTabs }) => store.set({ activeTab: focusedTab, shownTabs })
+});
 var root = null;
 function mount() {
   root = document.getElementById("app");
@@ -8005,7 +8576,7 @@ function rerender() {
     if (shell) {
       shell = null;
     }
-    disposeTerminal();
+    disposeSplit();
     closeModal();
     renderLogin(root, state, actions);
     return;
@@ -8015,7 +8586,7 @@ function rerender() {
     root.replaceChildren(shell.el);
   }
   shell.update(state);
-  syncTerminal(state);
+  syncSplit(state);
 }
 async function connect(candidate) {
   store.set({ connecting: true, loginError: null });
@@ -8041,6 +8612,7 @@ async function connect(candidate) {
     live: "connecting",
     focus: "rail",
     activeTab: 0,
+    shownTabs: [0],
     tabError: null,
     tasks: []
   });
@@ -8062,6 +8634,7 @@ function disconnect() {
     live: "connecting",
     focus: "rail",
     activeTab: 0,
+    shownTabs: [0],
     tabError: null,
     tasks: []
   });
@@ -8078,25 +8651,20 @@ function openFromRail(id) {
   focusTerminal();
 }
 function focusTerminal() {
-  if (!terminal) {
-    return;
-  }
   store.set({ focus: "terminal" });
-  terminal.focus();
+  splitView.focus();
 }
 function focusRail() {
   store.set({ focus: "rail" });
-  if (terminal) {
-    terminal.blur();
-  }
+  splitView.blur();
 }
 function switchView(view) {
   if (store.get().view === view) {
     return;
   }
   clearTabError();
-  if (view !== "sessions" && terminal) {
-    terminal.blur();
+  if (view !== "sessions") {
+    splitView.blur();
   }
   store.set({ view, focus: "rail" });
   if (view === "tasks") {
@@ -8199,10 +8767,11 @@ function selectedSessionData() {
   return sessions.find((s) => s.id === selectedId) ?? null;
 }
 function switchTab(index) {
-  store.set({ activeTab: index, focus: "rail" });
+  splitView.setFocusedTab(index);
+  store.set({ focus: "rail" });
 }
 function openTab(index) {
-  store.set({ activeTab: index });
+  splitView.setFocusedTab(index);
   focusTerminal();
 }
 function createSessionTab() {
@@ -8216,7 +8785,8 @@ function createSessionTab() {
   void createTab(selId, sel.title, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
     const grown = sessions.find((s) => s.id === selId);
     const newIdx = grown ? sessionTabs(grown).length - 1 : store.get().activeTab;
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId), activeTab: newIdx });
+    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    splitView.setFocusedTab(newIdx);
     focusTerminal();
   }).catch((e) => surfaceTabError(e));
 }
@@ -8238,7 +8808,8 @@ function closeSessionTab(index) {
     const shrunk = sessions.find((s) => s.id === selId);
     const n = shrunk ? sessionTabs(shrunk).length : 1;
     const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId), activeTab: next });
+    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    splitView.setFocusedTab(next);
   }).catch((e) => surfaceTabError(e));
 }
 function surfaceTabError(e) {
@@ -8341,33 +8912,16 @@ var actions = {
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask
 };
-function syncTerminal(state) {
+function syncSplit(state) {
   const selId = state.selectedId;
-  const tab = clampActiveTab(state.sessions, selId, state.activeTab);
-  if (selId === terminalId && tab === terminalTab) {
-    return;
-  }
-  disposeTerminal();
-  terminalId = selId;
-  terminalTab = tab;
   const tok = token;
-  if (selId && tok !== null) {
-    terminal = new AttachTerminal(termHost, selId, tok, tab, {
-      onStatus: (s) => store.set({ termStatus: s }),
-      // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus, so a
-      // click straight into the terminal enters terminal mode (and tabbing/click
-      // away returns to rail mode) without going through Enter/Escape.
-      onFocusChange: (focused) => store.set({ focus: focused ? "terminal" : "rail" })
-    });
-  }
+  const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
+  const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
+  const tabCount = selected ? sessionTabs(selected).length : 1;
+  splitView.setSession(tok !== null ? selId : null, tok, tabCount, initialTab);
 }
-function disposeTerminal() {
-  if (terminal) {
-    terminal.dispose();
-    terminal = null;
-  }
-  terminalId = null;
-  terminalTab = 0;
+function disposeSplit() {
+  splitView.dispose();
   termHost.replaceChildren();
 }
 function startStream(tok) {
@@ -8426,11 +8980,11 @@ function requestResync() {
     });
   }, 150);
 }
-function isNativeControl(el) {
-  if (!el) {
+function isNativeControl(el2) {
+  if (!el2) {
     return false;
   }
-  return el.tagName === "BUTTON" || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.tagName === "A";
+  return el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
 }
 function onKeydown(e) {
   const state = store.get();
@@ -8442,18 +8996,22 @@ function onKeydown(e) {
   if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
-  const focus = terminal && state.view === "sessions" ? state.focus : "rail";
+  const focus = state.selectedId && state.view === "sessions" ? state.focus : "rail";
   const selected = selectedSessionData();
-  const action = decideKey(e.key, {
-    focus,
-    modalOpen: modal !== null,
-    view: state.view,
-    orderedIds: orderedSessions(state.sessions).map((s) => s.id ?? "").filter((id) => id !== ""),
-    selectedId: state.selectedId,
-    tabCount: selected ? sessionTabs(selected).length : 1,
-    activeTab: state.activeTab,
-    tabManagement: selected ? supportsTabManagement(selected) : false
-  });
+  const action = decideKey(
+    e.key,
+    {
+      focus,
+      modalOpen: modal !== null,
+      view: state.view,
+      orderedIds: orderedSessions(state.sessions).map((s) => s.id ?? "").filter((id) => id !== ""),
+      selectedId: state.selectedId,
+      tabCount: selected ? sessionTabs(selected).length : 1,
+      activeTab: state.activeTab,
+      tabManagement: selected ? supportsTabManagement(selected) : false
+    },
+    { alt: e.altKey }
+  );
   if (action.kind === "none") {
     return;
   }
@@ -8483,6 +9041,12 @@ function onKeydown(e) {
       break;
     case "switchView":
       switchView(action.view);
+      break;
+    case "cyclePane":
+      splitView.cyclePane(action.delta);
+      break;
+    case "closePane":
+      splitView.closeFocusedPane();
       break;
   }
 }

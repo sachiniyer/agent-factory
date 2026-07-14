@@ -43,6 +43,47 @@ function row(page: Page, title: string): Locator {
   return page.locator(".af-rail-list .af-row", { hasText: title });
 }
 
+/**
+ * Simulates dragging the tab labelled `tabText` from the tab bar onto an `edge` of
+ * the (single) current pane. Playwright's mouse-based dragTo doesn't drive HTML5
+ * drag-and-drop reliably, so we dispatch the drag events ourselves with a shared
+ * DataTransfer — the same object across dragstart/dragover/drop makes getData work,
+ * exactly as a real drag would — and aim the drop at the edge band so the pane splits
+ * in that direction (see split.ts zoneAt). A center drop uses the middle instead.
+ */
+async function dragTabToPane(page: Page, tabText: string, edge: "left" | "right" | "top" | "bottom" | "center"): Promise<void> {
+  await page.evaluate(
+    ({ tabText, edge }) => {
+      const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes(tabText));
+      const pane = document.querySelector(".af-term-host .af-pane");
+      if (!tab || !pane) {
+        throw new Error("drag source or target pane not found");
+      }
+      const dt = new DataTransfer();
+      tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const r = pane.getBoundingClientRect();
+      let x = r.left + r.width / 2;
+      let y = r.top + r.height / 2;
+      const m = 6;
+      if (edge === "left") {
+        x = r.left + m;
+      } else if (edge === "right") {
+        x = r.right - m;
+      } else if (edge === "top") {
+        y = r.top + m;
+      } else if (edge === "bottom") {
+        y = r.bottom - m;
+      }
+      const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x, clientY: y };
+      pane.dispatchEvent(new DragEvent("dragenter", init));
+      pane.dispatchEvent(new DragEvent("dragover", init));
+      pane.dispatchEvent(new DragEvent("drop", init));
+      tab.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer: dt }));
+    },
+    { tabText, edge },
+  );
+}
+
 /** Opens the app on the loopback daemon and asserts the tokenless auto-connect
  *  (#1696): the SPA learns via /v1/auth-info that this loopback client needs no
  *  token, skips the paste-token login entirely, and renders the authed shell with
@@ -255,6 +296,56 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
 
   await page.unroute("**/v1/CreateTab");
   await page.unroute("**/v1/CloseTab");
+});
+
+test("split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back", async () => {
+  // Attach to A and give it a second tab, so there is a distinct tab to drag into a
+  // split (dragging the only tab onto itself just moves it — no split).
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-term-meta")).toContainText("Live");
+
+  // A single pane so far — today's zero-config default.
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two, the
+  // new right pane bound to the agent tab with its OWN live WS stream.
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  // Two concurrent xterm instances now render side by side, each with per-pane chrome.
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
+  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
+
+  // BOTH panes show live output. The new agent pane streams the ready marker over its
+  // own stream — identify it by that marker.
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+  const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+  await expect(agentPane).toHaveCount(1);
+  await expect(shellPane).toHaveCount(1);
+  // The other pane (the shell tab) is an independent live PTY — focus it and type, and
+  // its echo comes back over its own stream, proving both panes are live at once.
+  await shellPane.locator(".af-pane-host").click();
+  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await page.keyboard.type("echo AF_SPLIT_OK");
+  await page.keyboard.press("Enter");
+  await expect(shellPane).toContainText("AF_SPLIT_OK", { timeout: 15_000 });
+
+  // Close the agent pane via its × — the split collapses and the shell pane fills the
+  // whole area (one pane again), without closing the underlying tab.
+  await agentPane.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  // The tab list is unchanged — only the pane closed, not the underlying tab.
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
+
+  // Restore A to a single tab for the later create/kill/archive flows.
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
 test("projects view (#1592 PR8): the seeded repo groups its sessions; a row jumps to it", async () => {
