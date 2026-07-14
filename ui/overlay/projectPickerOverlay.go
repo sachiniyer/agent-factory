@@ -20,18 +20,16 @@ type Project struct {
 	SessionCount int
 }
 
-// ProjectPickerOverlay is the searchable project switcher (#1461). It mirrors
-// SearchOverlay's idiom — a hand-rolled query buffer, fuzzy filter, windowed
-// list, Enter/Esc handling — and adds an "+ Add project…" affordance: selecting
-// the trailing add row switches the overlay into add mode, where the query line
-// becomes a repo-path input. Path validation and registration happen app-side
-// (this package must not shell out to git), so add mode reports the entered path
-// back to the caller, which validates and either switches or feeds an inline
-// error back via SetAddError.
+// ProjectPickerOverlay is the project switcher (#1461). It navigates like the
+// instances rail — a windowed list over ALL projects with up/k and down/j
+// cursor movement, Enter to switch, Esc to cancel; there is no search. It adds a
+// trailing "+ Add project…" affordance: selecting the add row switches the
+// overlay into add mode, where a repo-path input line appears. Path validation
+// and registration happen app-side (this package must not shell out to git), so
+// add mode reports the entered path back to the caller, which validates and
+// either switches or feeds an inline error back via SetAddError.
 type ProjectPickerOverlay struct {
-	all     []Project
-	results []Project
-	query   string
+	all []Project
 
 	selectedIdx int
 	width       int
@@ -61,8 +59,7 @@ func NewProjectPickerOverlay(projects []Project, currentRoot string) *ProjectPic
 		all:   projects,
 		width: 60,
 	}
-	p.updateResults()
-	for i, proj := range p.results {
+	for i, proj := range p.all {
 		if proj.Root == currentRoot {
 			p.selectedIdx = i
 			break
@@ -85,18 +82,18 @@ func (p *ProjectPickerOverlay) IsSubmitted() bool { return p.submitted }
 
 // SelectedProject returns the project the user chose, or false when none was.
 func (p *ProjectPickerOverlay) SelectedProject() (Project, bool) {
-	if p.submitted && p.selectedIdx >= 0 && p.selectedIdx < len(p.results) {
-		return p.results[p.selectedIdx], true
+	if p.submitted && p.selectedIdx >= 0 && p.selectedIdx < len(p.all) {
+		return p.all[p.selectedIdx], true
 	}
 	return Project{}, false
 }
 
-// rowCount is the number of navigable rows: the filtered projects plus the
-// trailing "+ Add project…" row, which is always present.
-func (p *ProjectPickerOverlay) rowCount() int { return len(p.results) + 1 }
+// rowCount is the number of navigable rows: every project plus the trailing
+// "+ Add project…" row, which is always present.
+func (p *ProjectPickerOverlay) rowCount() int { return len(p.all) + 1 }
 
 // addRowSelected reports whether the cursor is on the "+ Add project…" row.
-func (p *ProjectPickerOverlay) addRowSelected() bool { return p.selectedIdx == len(p.results) }
+func (p *ProjectPickerOverlay) addRowSelected() bool { return p.selectedIdx == len(p.all) }
 
 // TakeAddRequest returns a submitted add-mode path once, clearing the pending
 // flag so the caller validates it exactly once. The caller registers + switches
@@ -123,40 +120,31 @@ func (p *ProjectPickerOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 }
 
 func (p *ProjectPickerOverlay) handleListKey(msg tea.KeyMsg) bool {
-	switch msg.Type {
-	case tea.KeyEsc, tea.KeyCtrlC:
+	// The picker navigates like the instances rail: up/k and down/j move the
+	// cursor over the full list (clamped, no wrap), Enter switches, Esc cancels.
+	// There is no search — any other key (typed letters, etc.) is ignored.
+	switch msg.String() {
+	case "esc", "ctrl+c":
 		p.canceled = true
 		return true
-	case tea.KeyEnter:
+	case "enter":
 		if p.addRowSelected() {
 			p.adding = true
 			p.addErr = ""
 			return false
 		}
-		if len(p.results) > 0 {
+		if len(p.all) > 0 {
 			p.submitted = true
 			return true
 		}
-	case tea.KeyUp:
+	case "up", "k":
 		if p.selectedIdx > 0 {
 			p.selectedIdx--
 		}
-	case tea.KeyDown:
+	case "down", "j":
 		if p.selectedIdx < p.rowCount()-1 {
 			p.selectedIdx++
 		}
-	case tea.KeyBackspace:
-		if len(p.query) > 0 {
-			runes := []rune(p.query)
-			p.query = string(runes[:len(runes)-1])
-			p.updateResults()
-		}
-	case tea.KeySpace:
-		p.query += " "
-		p.updateResults()
-	case tea.KeyRunes:
-		p.query += string(msg.Runes)
-		p.updateResults()
 	}
 	return false
 }
@@ -188,29 +176,6 @@ func (p *ProjectPickerOverlay) handleAddKey(msg tea.KeyMsg) bool {
 		p.addErr = ""
 	}
 	return false
-}
-
-func (p *ProjectPickerOverlay) updateResults() {
-	p.results = nil
-	for _, proj := range p.all {
-		if p.matches(proj, p.query) {
-			p.results = append(p.results, proj)
-		}
-	}
-	// Clamp selection into the row range (projects + add row).
-	if p.selectedIdx >= p.rowCount() {
-		p.selectedIdx = p.rowCount() - 1
-	}
-	if p.selectedIdx < 0 {
-		p.selectedIdx = 0
-	}
-}
-
-func (p *ProjectPickerOverlay) matches(proj Project, query string) bool {
-	if query == "" {
-		return true
-	}
-	return fuzzyMatch(query, proj.Name) || fuzzyMatch(query, proj.Root)
 }
 
 // visibleWindow returns the [start, end) window over the navigable rows Render
@@ -269,12 +234,9 @@ func (p *ProjectPickerOverlay) Render() string {
 		return finishRender(style, fit, textRect, lines)
 	}
 
-	lines = append(lines, truncateOverlayLine("/ "+queryStyle.Render(p.query+"_"), cw))
-	lines = append(lines, "")
-
-	// Reserve rows for the fixed chrome (title, blank, query, blank, blank,
-	// hint) and window the navigable rows into what remains.
-	avail := textRect.H - 6
+	// Reserve rows for the fixed chrome (title, blank, blank, hint) and window
+	// the navigable rows into what remains.
+	avail := textRect.H - 4
 	if avail < 1 {
 		avail = 1
 	}
@@ -290,9 +252,9 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 
 	lines = append(lines, "")
-	hint := "↑/↓ navigate • enter switch • esc close"
+	hint := "j/k navigate • enter switch • esc cancel"
 	if lipgloss.Width(hint) > cw {
-		hint = "↑/↓ • enter • esc"
+		hint = "j/k • enter • esc"
 	}
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
 
@@ -303,14 +265,14 @@ func (p *ProjectPickerOverlay) Render() string {
 // "+ Add project…" affordance, highlighting the selected one.
 func (p *ProjectPickerOverlay) renderRow(i int, selectedStyle, normalStyle, countStyle, addStyle lipgloss.Style) string {
 	selected := i == p.selectedIdx
-	if i == len(p.results) {
+	if i == len(p.all) {
 		text := "+ Add project…"
 		if selected {
 			return "  " + selectedStyle.Render("▸ "+text)
 		}
 		return "    " + addStyle.Render(text)
 	}
-	proj := p.results[i]
+	proj := p.all[i]
 	count := countStyle.Render(fmt.Sprintf(" (%d)", proj.SessionCount))
 	if selected {
 		return "  " + selectedStyle.Render("▸ "+proj.Name) + count
