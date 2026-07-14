@@ -427,13 +427,19 @@ export class AppShell {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   private tabBar: HTMLElement | null = null;
+  // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
+  // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
+  // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
+  private currentTabIds: string[] = [];
+  // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
+  // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
+  private lastTabBarSig = "";
 
   // Last-applied state, for cheap change detection between updates.
   private lastSessions: SessionData[] | null = null;
   private lastSelectedId: string | null = null;
   private lastLive: EventStreamStatus | null = null;
   private lastKb: KeyboardFocus | null = null;
-  private lastActiveTab = 0;
   private lastError: string | null = null;
   // Whether the main pane has been rendered at least once. The constructor leaves it
   // an empty <section>, so the FIRST update must render it even when nothing is
@@ -656,18 +662,20 @@ export class AppShell {
     // the very first update, which lays down the initial empty-state placeholder);
     // otherwise we just patch its header text (status/title/branch), leaving the
     // terminal host — and its focus and scrollback — in place.
-    const activeTabChanged = this.lastActiveTab !== state.activeTab;
-    this.lastActiveTab = state.activeTab;
     if (selectionChanged || !this.mainRendered) {
       this.mainRendered = true;
       this.renderMain(state);
     } else {
       this.patchMainHead(state);
-      // The tab bar reflects the live tab list and the active-tab highlight; either
-      // can change without a selection change (a resync grows/shrinks the list, or
-      // a 1-9 key moves the highlight). Rebuilding just the bar leaves termHost —
-      // and the focused xterm inside it — untouched.
-      if (sessionsChanged || activeTabChanged) {
+      // The tab bar reflects the live tab list and the active/shown highlight; any of
+      // those can change without a selection change (a resync grows/shrinks the list, a
+      // 1-9 key moves the highlight, a pane split changes the shown set). Rebuild ONLY
+      // when that signature actually changes — NOT on every sessions snapshot: an
+      // unrelated status-only event (a rail update) must not replaceChildren() the bar,
+      // because that destroys the very button a user has grabbed to drag, breaking a
+      // real HTML5 drag mid-gesture on a freshly-created tab (#1737 follow-up). termHost
+      // (and its focused xterm) is untouched either way.
+      if (tabBarSig(state) !== this.lastTabBarSig) {
         this.renderTabBar(state);
       }
     }
@@ -846,6 +854,10 @@ export class AppShell {
     this.tabBar = h("div", { class: "af-tabbar" });
     this.tabBar.setAttribute("role", "tablist");
     this.tabBar.setAttribute("aria-label", "Session tabs");
+    // The drag source is wired ONCE here on the (stable) bar container via delegation,
+    // not per button — so EVERY tab, including one created after load, is a drag source
+    // by construction, with no per-button binding to forget on a re-render (#1737).
+    this.attachTabDrag(this.tabBar);
 
     this.main.className = "af-main af-main-term";
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
@@ -875,12 +887,13 @@ export class AppShell {
     // Which tabs are currently rendered in a pane (feat: split tabs), so the bar can
     // mark an already-open tab distinctly from the focused one.
     const shown = new Set(state.shownTabs);
-    // The ordered tab identities at THIS render, snapshotted into a dragged tab's
-    // payload so the drop can detect a mid-drag tab-set change and cancel.
-    const tabIds = tabs.map(tabIdentity);
+    // The ordered tab identities at THIS render, kept for the delegated dragstart to
+    // stamp into a dragged tab's payload so the drop can detect a mid-drag tab-set
+    // change and cancel (split.ts).
+    this.currentTabIds = tabs.map(tabIdentity);
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
-      tabButton(tab, i, i === active, shown.has(i), canManage, tabIds, this.actions),
+      tabButton(tab, i, i === active, shown.has(i), canManage, this.actions),
     );
     if (canManage && tabs.length < MAX_TABS) {
       const add = h("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
@@ -888,6 +901,33 @@ export class AppShell {
       children.push(add);
     }
     bar.replaceChildren(...children);
+    // Record the signature this render represents, so update() skips a rebuild until
+    // the bar's inputs actually change again.
+    this.lastTabBarSig = tabBarSig(state);
+  }
+
+  /** Wires the tab bar as a DRAG SOURCE via event DELEGATION on the (stable) bar
+   *  container. Binding once here — rather than per button in tabButton — means every
+   *  tab is a drag source no matter when it was created, and a bar re-render can't drop
+   *  the wiring for a subset of tabs (#1737 follow-up). dragstart reads the grabbed
+   *  tab's index from its data-tab-index and stamps the payload: the index PLUS a
+   *  snapshot of the live tab identities, so the drop cancels if the tab set changed
+   *  mid-drag (split.ts). The body flag lets panes show drop hints. */
+  private attachTabDrag(bar: HTMLElement): void {
+    bar.addEventListener("dragstart", (e) => {
+      const btn = (e.target as HTMLElement | null)?.closest<HTMLElement>(".af-tab");
+      if (!btn || !bar.contains(btn) || !e.dataTransfer) {
+        return;
+      }
+      const index = Number(btn.dataset.tabIndex);
+      if (!Number.isInteger(index)) {
+        return;
+      }
+      e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ index, tabs: this.currentTabIds }));
+      e.dataTransfer.effectAllowed = "move";
+      document.body.classList.add("af-dragging-tab");
+    });
+    bar.addEventListener("dragend", () => document.body.classList.remove("af-dragging-tab"));
   }
 
   private patchMainHead(state: AppState): void {
@@ -910,6 +950,28 @@ function selectedSession(state: AppState): SessionData | null {
   return state.selectedId ? (state.sessions.find((s) => s.id === state.selectedId) ?? null) : null;
 }
 
+/** A signature of everything the tab BAR draws for the selected session: which session
+ *  it is, the ordered tab identities (kind:name), the active index, the shown-in-a-pane
+ *  set, and whether tabs are manageable (the + / × affordances). The bar is rebuilt
+ *  ONLY when this changes (ui update()), so an unrelated session-status snapshot — a
+ *  rail event that leaves the tab list, highlight, and split layout alone — no longer
+ *  replaceChildren()es the bar. That churn was the real cause of "a freshly-created tab
+ *  can't be dragged": a new terminal tab's shell flaps status right after creation, and
+ *  each snapshot destroyed the button the user had just grabbed, aborting the native
+ *  HTML5 drag mid-gesture (#1737 follow-up). Exported for unit coverage. */
+export function tabBarSig(state: AppState): string {
+  const selected = selectedSession(state);
+  if (!selected) {
+    return "";
+  }
+  const tabs = sessionTabs(selected);
+  const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
+  const canManage = supportsTabManagement(selected);
+  const ids = tabs.map(tabIdentity).join("|");
+  const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b).join(",");
+  return `${selected.id ?? ""}::${ids}::${active}::${shown}::${canManage ? "m" : "-"}`;
+}
+
 /** One tab-bar button: its label, an active-state highlight, a "shown in a pane"
  *  marker, and — for a closable (non-agent) tab of a tab-managed session — a × that
  *  closes it. Clicking the button points the focused pane at the tab AND attaches
@@ -918,35 +980,25 @@ function selectedSession(state: AppState): SessionData | null {
  *
  *  The button is also a DRAG SOURCE (feat: drag-and-drop split tabs): dragging it
  *  onto a pane edge splits that pane with this tab; onto a pane center replaces it.
- *  The dragged tab index rides the dataTransfer under a private MIME the panes read. */
+ *  It carries draggable=true plus its index in data-tab-index; the actual dragstart is
+ *  handled once, via delegation, on the bar container (AppShell.attachTabDrag) so a tab
+ *  created after load is a drag source with no per-button rebinding (#1737). */
 function tabButton(
   tab: { name: string; kind: number },
   index: number,
   active: boolean,
   shown: boolean,
   canManage: boolean,
-  tabIds: string[],
   actions: Actions,
 ): HTMLElement {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
   const btn = h("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
+  // The index the delegated dragstart reads to build the drag payload.
+  btn.dataset.tabIndex = String(index);
   btn.append(h("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions.openTab(index));
-  // Drag source: stamp the dragged index PLUS a snapshot of the instance's ordered
-  // tab identities at drag time, so the drop can cancel if the tab set changed
-  // mid-drag (a concurrent close/create/reorder — see split.ts). Flag the body so
-  // panes can show drop hints.
-  btn.addEventListener("dragstart", (e) => {
-    if (!e.dataTransfer) {
-      return;
-    }
-    e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ index, tabs: tabIds }));
-    e.dataTransfer.effectAllowed = "move";
-    document.body.classList.add("af-dragging-tab");
-  });
-  btn.addEventListener("dragend", () => document.body.classList.remove("af-dragging-tab"));
   // The agent tab (index 0) is unclosable — killing the session tears it down.
   if (index > 0 && canManage) {
     const close = h("span", { class: "af-tab-close", title: "Close tab" }, "×");
