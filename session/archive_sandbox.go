@@ -58,18 +58,34 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to push branch for session %q before archive: %w", i.Title, err)
 	}
-	// 2. Tear the in-sandbox workspace down over REST and reap the sandbox itself
+	// 2. Record the branch the INSTANT it is durable on origin — before the teardown
+	//    below, which can fail (#1781). Durable-on-origin is the point of no return:
+	//    from here the branch is the only handle on the user's work, so it belongs on
+	//    the record whatever happens to the sandbox afterwards. Recording it only on
+	//    the all-succeeded path loses it exactly when it matters most — a sandbox
+	//    session's daemon-side i.Branch is otherwise EMPTY (the only other writer,
+	//    backend_local.go's provision, runs INSIDE the sandbox and never mutates this
+	//    Instance; the branch reaches the daemon solely as this Archive() return), and
+	//    a failed Kill sends the session to Lost + recovery-eligible via the caller's
+	//    AbortArchiveToLost (daemon/archive.go). The Lost-restore loop then re-provisions
+	//    from i.Branch (reprovisionRemote → ProvisionSpec.RestoreBranch), and an empty
+	//    RestoreBranch makes the docker/ssh runtimes SKIP the restore fetch and clone the
+	//    repo's DEFAULT branch — a "successful" recovery onto the wrong branch that
+	//    silently strands the work this push just made durable.
+	i.mu.Lock()
+	i.Branch = branch
+	i.mu.Unlock()
+	// 3. Tear the in-sandbox workspace down over REST and reap the sandbox itself
 	//    (container rm / remote dir cleanup + tunnel close) — the branch is durable,
 	//    the sandbox is disposable.
 	if err := as.Kill(); err != nil {
 		return branch, fmt.Errorf("pushed branch %q but failed to tear the sandbox down for session %q: %w", branch, i.Title, err)
 	}
-	// 3. Drop the dead remote wiring so the instance is an inert archived record
+	// 4. Drop the dead remote wiring so the instance is an inert archived record
 	//    until restore re-provisions it. The backend stays (its Type()/Capabilities
 	//    keep the session classified as a remote sandbox for load + restore).
 	i.resetRemoteRuntime()
 	i.mu.Lock()
-	i.Branch = branch
 	i.started = false
 	i.mu.Unlock()
 	return branch, nil

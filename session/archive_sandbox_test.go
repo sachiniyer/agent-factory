@@ -250,6 +250,130 @@ func TestArchiveSandbox_RejectsNonSandbox(t *testing.T) {
 	}
 }
 
+// stubAgentServer is an inert AgentServer stand-in for driving the ArchiveSandbox
+// mechanic with no sandbox behind it (#1781). Only Archive and Kill carry
+// behavior — the two calls ArchiveSandbox makes — scripted per test; the rest
+// satisfy the interface as no-ops. It is installed by pinning i.agentSrv, which is
+// the seam AgentServer() honors: its fast path returns a non-nil cache as-is
+// (agentserver_local.go), so the archive runs the REAL code path against this stub
+// rather than building a remoteAgentServer over a dead endpoint.
+type stubAgentServer struct {
+	branch    string
+	killErr   error
+	killCalls int
+}
+
+func (s *stubAgentServer) Archive() (string, error) { return s.branch, nil }
+func (s *stubAgentServer) Kill() error              { s.killCalls++; return s.killErr }
+
+func (s *stubAgentServer) Provision(bool) error                        { return nil }
+func (s *stubAgentServer) Launch(bool) error                           { return nil }
+func (s *stubAgentServer) Expose() (StreamEndpoint, error)             { return StreamEndpoint{}, nil }
+func (s *stubAgentServer) Snapshot() (Observation, error)              { return Observation{}, nil }
+func (s *stubAgentServer) Preview(int, bool) (string, error)           { return "", nil }
+func (s *stubAgentServer) Alive() bool                                 { return false }
+func (s *stubAgentServer) SendPrompt(string) error                     { return nil }
+func (s *stubAgentServer) TapEnter()                                   {}
+func (s *stubAgentServer) Subscribe(int, Seq) (PTYSubscription, error) { return nil, nil }
+func (s *stubAgentServer) Input(int, []byte) error                     { return nil }
+func (s *stubAgentServer) Resize(int, uint16, uint16) error            { return nil }
+
+// newStubbedSandboxInstance builds an inert docker-classified instance whose
+// archive drives `as`: remoteClient is set only to satisfy ArchiveSandbox's
+// isRemote guard (nothing dials it — agentSrv short-circuits the build).
+func newStubbedSandboxInstance(as AgentServer) *Instance {
+	return &Instance{
+		Title:        "s",
+		backend:      newInertSandboxBackend("docker"),
+		remoteClient: &remoteAgentClient{title: "s"},
+		agentSrv:     as,
+	}
+}
+
+// TestArchiveSandbox_RecordsBranchOnKillFailure pins the #1781 invariant: once
+// as.Archive() has pushed the branch to origin the branch is DURABLE, so it must be
+// on the instance record even though the teardown that follows fails. Before the
+// fix i.Branch was only assigned on the all-succeeded path, so this partial failure
+// left a Lost, recovery-eligible session with an EMPTY Branch — and the Lost-restore
+// loop re-provisions from i.Branch, so an empty one silently recovers the session
+// onto the repo's default branch and hides the work that was just pushed.
+func TestArchiveSandbox_RecordsBranchOnKillFailure(t *testing.T) {
+	as := &stubAgentServer{branch: "root/s", killErr: fmt.Errorf("container rm failed")}
+	i := newStubbedSandboxInstance(as)
+
+	branch, err := i.ArchiveSandbox()
+
+	require.Error(t, err, "the teardown failure must still surface to the caller")
+	assert.Equal(t, "root/s", branch, "the pushed branch is returned even on a partial failure")
+	assert.Contains(t, err.Error(), `pushed branch "root/s"`, "error names the branch that IS durable")
+	assert.Contains(t, err.Error(), "failed to tear the sandbox down", "error names the half that failed")
+	assert.Equal(t, 1, as.killCalls, "the teardown was attempted")
+
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	assert.Equal(t, "root/s", i.Branch,
+		"the durable branch must be recorded despite the teardown failure — Lost-restore re-provisions from i.Branch (#1781)")
+}
+
+// TestArchiveSandbox_RecordsBranchOnSuccess pins that moving the assignment earlier
+// (#1781) did not drop it from the success path, alongside the archive's other
+// post-conditions: the wiring is reset and the session is no longer started.
+func TestArchiveSandbox_RecordsBranchOnSuccess(t *testing.T) {
+	i := newStubbedSandboxInstance(&stubAgentServer{branch: "root/s"})
+	i.started = true
+
+	branch, err := i.ArchiveSandbox()
+
+	require.NoError(t, err)
+	assert.Equal(t, "root/s", branch)
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	assert.Equal(t, "root/s", i.Branch, "the pushed branch is recorded on the success path")
+	assert.False(t, i.started, "an archived session is not started")
+	assert.Nil(t, i.remoteClient, "the dead remote wiring is cleared")
+}
+
+// specCapturingRuntime records the ProvisionSpec it was handed, so a test can
+// assert what reprovisionRemote actually asks for (fakeRuntime discards the spec).
+type specCapturingRuntime struct {
+	res  ProvisionResult
+	spec ProvisionSpec
+}
+
+func (r *specCapturingRuntime) Provision(s ProvisionSpec) (ProvisionResult, error) {
+	r.spec = s
+	return r.res, nil
+}
+
+// TestArchiveSandbox_PartialFailureReprovisionsOnPushedBranch proves the CONSEQUENCE
+// the #1781 fix buys, end-to-end across the two halves that were disconnected: after
+// a partial archive (push OK, teardown failed) the instance the daemon persists as
+// Lost is one whose subsequent re-provision — the exact call the Lost-restore loop
+// makes via Recover → recoverSandbox → reprovisionRemote — carries the PUSHED branch
+// as RestoreBranch. That is what makes the docker/ssh runtimes fetch the branch back
+// (backend_docker.go: an empty RestoreBranch skips the fetch and lands on the repo's
+// default branch) instead of silently recovering onto the wrong one.
+func TestArchiveSandbox_PartialFailureReprovisionsOnPushedBranch(t *testing.T) {
+	i := newStubbedSandboxInstance(&stubAgentServer{branch: "root/s", killErr: fmt.Errorf("container rm failed")})
+	i.Path = t.TempDir()
+
+	_, err := i.ArchiveSandbox()
+	require.Error(t, err, "this test is about the PARTIAL failure path")
+
+	rt := &specCapturingRuntime{res: ProvisionResult{
+		Backend:  &dockerBackend{containerID: "fresh"},
+		Endpoint: &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"},
+		Teardown: func() error { return nil },
+	}}
+	prev := runtimeRegistry[BackendDocker]
+	runtimeRegistry[BackendDocker] = func() Runtime { return rt }
+	defer func() { runtimeRegistry[BackendDocker] = prev }()
+
+	require.NoError(t, i.reprovisionRemote())
+	assert.Equal(t, "root/s", rt.spec.RestoreBranch,
+		"recovery after a partial archive must clone the pushed branch back, not fall through to the default branch (#1781)")
+}
+
 // TestReprovisionRemote_RebindsInstance drives the restore re-provision wiring
 // without a real sandbox (#1592 Phase 4 PR6): a fakeRuntime swapped into the
 // registry returns a fresh backend + authed endpoint + teardown, and
