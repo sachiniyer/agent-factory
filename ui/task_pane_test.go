@@ -206,6 +206,81 @@ func TestTaskPaneListModeRunNowWithoutSelectionQueuesNoTask(t *testing.T) {
 	assert.Nil(t, tp.ConsumePendingTrigger())
 }
 
+// TestTaskPaneWatchTaskRunNowIsSuppressed pins #1758: a watch task cannot be
+// manually triggered (the daemon's RunTask refuses it), so pressing `r` must
+// NOT queue a doomed run — it surfaces the reason inline instead.
+func TestTaskPaneWatchTaskRunNowIsSuppressed(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{
+		{ID: "cronny", Name: "cronny", CronExpr: "0 0 * * *"},
+		{ID: "watchy", Name: "watchy", WatchCmd: "tail -f log"},
+	})
+	tp.SetFocus(true)
+	tp.SelectTask(1)
+
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}))
+	assert.False(t, tp.HasPendingTrigger(),
+		"r on a watch task must not queue a run that RunTask will refuse")
+
+	// The cron task in the same list is unaffected: r still queues its run.
+	tp.SelectTask(0)
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}))
+	require.True(t, tp.HasPendingTrigger(), "r must still queue a cron task's run-now")
+	pending := tp.ConsumePendingTrigger()
+	require.NotNil(t, pending)
+	assert.Equal(t, "cronny", pending.ID)
+}
+
+// TestTaskPaneWatchTaskListFooterOmitsRunNow pins #1758: the task-list footer
+// must not advertise "r run now" when the selected task is a watch task.
+func TestTaskPaneWatchTaskListFooterOmitsRunNow(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetSize(80, 12)
+	tp.SetFocus(true)
+	tp.SetTasks([]task.Task{{
+		ID:       "watchy",
+		Name:     "watchy",
+		Prompt:   "do it",
+		WatchCmd: "tail -f log",
+		Program:  "claude",
+		Enabled:  true,
+	}})
+
+	lines := strings.Split(tp.String(), "\n")
+	footer := lines[len(lines)-1]
+	assert.NotContains(t, footer, "run now",
+		"watch-task list footer must not advertise a manual run that always fails")
+}
+
+// TestTaskPaneWatchTaskEditFooterOmitsRunNow pins #1758 at the editor surface
+// named in the issue repro: editing a watch task must not advertise "r run".
+func TestTaskPaneWatchTaskEditFooterOmitsRunNow(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetSize(80, 12)
+	tp.SetTasks([]task.Task{{
+		ID:          "watchy",
+		Name:        "watchy",
+		Prompt:      "do it",
+		WatchCmd:    "tail -f log",
+		ProjectPath: newGitRepo(t),
+		Program:     "claude",
+		Enabled:     true,
+	}})
+	tp.SetFocus(true)
+	tp.EnterEditSelected()
+
+	out := tp.String()
+	assert.NotContains(t, out, "r run",
+		"watch-task editor must not advertise a manual run that always fails")
+
+	// Pressing r inside the editor surfaces the reason inline rather than
+	// queuing a doomed run.
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}))
+	assert.False(t, tp.HasPendingTrigger())
+	assert.Contains(t, tp.String(), "not on manual trigger",
+		"r on a watch task must explain why manual run is unavailable")
+}
+
 func TestTaskPaneNormalModeAllowsQuitKeysToPropagate(t *testing.T) {
 	tp := NewTaskPane()
 	tp.SetFocus(true)
