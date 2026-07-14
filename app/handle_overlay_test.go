@@ -77,6 +77,37 @@ func TestPaneOverlaysQuitWithReboundKeyBeforeEditFieldsConsumeIt(t *testing.T) {
 	})
 }
 
+// TestHooksOverlayQuitKeysBypassFocusedEditForm is the regression guard for
+// #1727: in the hooks add/edit form the pane consumes ctrl+c as "cancel form",
+// so handleStateHooks must route ctrl+c (and the configured quit key) to the
+// hard-quit path before the pane sees it — matching handleStateTasks.
+func TestHooksOverlayQuitKeysBypassFocusedEditForm(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(nil))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	for _, tc := range []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{name: "configured quit", msg: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}},
+		{name: "ctrl+c hard quit", msg: tea.KeyMsg{Type: tea.KeyCtrlC}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			h.hooksPane.SetFocus(true)
+			h.state = stateHooks
+
+			// Enter the add form and type into it, then attempt to quit.
+			_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+			_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("draft")})
+			_, cmd := h.handleStateHooks(tc.msg)
+
+			assert.True(t, reachesQuit(cmd), "%s must quit before the hooks form consumes it", tc.name)
+			assert.True(t, h.hooksPane.HasFocus(), "quit routing must not first cancel the form and drop focus")
+		})
+	}
+}
+
 func TestTaskOverlayQuitKeysBypassFocusedCreateForm(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
