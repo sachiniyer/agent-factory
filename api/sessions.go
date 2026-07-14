@@ -56,13 +56,11 @@ var (
 // is reachable (#1029 PR 2). Both paths return the same shape sorted by
 // (repoID, title), so scripts see a consistent order regardless of source.
 func listSessions(repoID string) ([]session.InstanceData, error) {
-	data, err := snapshotViaDaemon(daemon.SnapshotRequest{RepoID: repoID})
+	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
 	if err == nil {
 		return data, nil
 	}
-	// A remote daemon has no local disk to fall back to, and a bad token must not
-	// be masked by a same-machine disk read — surface the error (#1592 Phase 3 PR4).
-	if apiclient.IsRemoteTarget() {
+	if !fallBack {
 		return nil, err
 	}
 	return diskListSessions(repoID)
@@ -73,7 +71,7 @@ func listSessions(repoID string) ([]session.InstanceData, error) {
 // reachable (#1029 PR 2). When a live snapshot is available the daemon is
 // authoritative: a miss returns not-found without re-reading disk.
 func getSessionByTitle(title string) (*session.InstanceData, error) {
-	data, err := snapshotViaDaemon(daemon.SnapshotRequest{})
+	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 	if err == nil {
 		for i := range data {
 			if data[i].Title == title {
@@ -83,8 +81,8 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
 		return nil, fmt.Errorf("instance %q %w", title, errTitleNotFound)
 	}
-	// Remote target: no local disk fallback; surface the error (see listSessions).
-	if apiclient.IsRemoteTarget() {
+	// Remote target: no local disk fallback; surface the error (see snapshotRead).
+	if !fallBack {
 		return nil, err
 	}
 	got, _, err := findInstanceByTitle(title)
@@ -95,13 +93,19 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 // the daemon's live snapshot and falling back to the disk scan when no daemon
 // is reachable (#1029 PR 2).
 func whoamiSession(tmuxName string) (*session.InstanceData, error) {
-	if data, err := snapshotViaDaemon(daemon.SnapshotRequest{}); err == nil {
+	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+	if err == nil {
 		for i := range data {
 			if data[i].TmuxName == tmuxName {
 				return &data[i], nil
 			}
 		}
 		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
+	}
+	// Remote target: no local disk fallback; surface the daemon error (e.g. a 401
+	// from a bad token) instead of masking it with a same-machine disk scan (#1681).
+	if !fallBack {
+		return nil, err
 	}
 	return diskWhoami(tmuxName)
 }

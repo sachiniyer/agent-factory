@@ -6,10 +6,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
+
+// remoteTarget points the CLI read path at a remote daemon for the duration of a
+// test (so apiclient.IsRemoteTarget() reports true) and restores the prior value
+// on cleanup. Without a daemonURL the read path is a LOCAL unix-socket target.
+func remoteTarget(t *testing.T) {
+	t.Helper()
+	prev := apiclient.FlagDaemonURL
+	apiclient.FlagDaemonURL = "wss://remote.example.com"
+	t.Cleanup(func() { apiclient.FlagDaemonURL = prev })
+}
 
 // stubSnapshot swaps snapshotViaDaemon for the duration of a test so the
 // list/get/whoami read paths can be exercised against a canned daemon snapshot
@@ -258,6 +269,203 @@ func TestWhoamiSession_DiskFallback(t *testing.T) {
 	got, err := whoamiSession("af_mine_agent")
 	if err != nil {
 		t.Fatalf("whoamiSession disk fallback: %v", err)
+	}
+	if got.Title != "mine" {
+		t.Fatalf("got %q, want mine", got.Title)
+	}
+}
+
+// --- Remote-target error surfacing (#1679, #1681) ------------------------------
+//
+// These lock in the contract from docs/remote-tcp-auth.md: when targeting a
+// remote daemon, a snapshot error (bad token → 401, or unreachable daemon →
+// network error) is surfaced verbatim rather than being masked by a
+// same-machine disk scan (there is no local disk on the other end). The disk is
+// deliberately seeded with a MATCHING session so a passing test proves the
+// error won over the misleading local hit. Local (unix-socket) targets keep
+// today's disk-fallback behavior unchanged — the paired *_LocalDiskFallback*
+// tests prove that.
+
+// TestSnapshotRead_RemoteVsLocalBranch is a direct test of the shared seam:
+// remote → surface err, no disk; local → signal disk fallback; success → data.
+func TestSnapshotRead_RemoteVsLocalBranch(t *testing.T) {
+	snapErr := errors.New("boom")
+
+	t.Run("remote surfaces error, forbids disk", func(t *testing.T) {
+		remoteTarget(t)
+		stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return nil, snapErr })
+		data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+		if !errors.Is(err, snapErr) {
+			t.Fatalf("want snapErr surfaced, got %v", err)
+		}
+		if fallBack {
+			t.Fatal("remote target must NOT permit disk fallback")
+		}
+		if data != nil {
+			t.Fatalf("want nil data on error, got %v", data)
+		}
+	})
+
+	t.Run("local permits disk fallback", func(t *testing.T) {
+		stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return nil, snapErr })
+		_, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+		if !errors.Is(err, snapErr) {
+			t.Fatalf("want snapErr returned, got %v", err)
+		}
+		if !fallBack {
+			t.Fatal("local target must permit disk fallback")
+		}
+	})
+
+	t.Run("success returns data and forbids disk", func(t *testing.T) {
+		live := []session.InstanceData{{Title: "live"}}
+		stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
+		data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if fallBack {
+			t.Fatal("success must not trigger disk fallback")
+		}
+		if len(data) != 1 || data[0].Title != "live" {
+			t.Fatalf("want live snapshot, got %v", data)
+		}
+	})
+}
+
+// TestGetSessionByTitleInScope_RemoteTargetSurfacesError verifies a remote 401
+// surfaces even though a matching session sits on local disk (#1679, #1681).
+func TestGetSessionByTitleInScope_RemoteTargetSurfacesError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	remoteTarget(t)
+
+	authErr := errors.New("unauthorized: invalid bearer token")
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return nil, authErr })
+
+	diskJSON, err := json.Marshal([]session.InstanceData{{Title: "test-session"}})
+	if err != nil {
+		t.Fatalf("marshal disk: %v", err)
+	}
+	if err := config.SaveRepoInstances("some-repo-id", diskJSON); err != nil {
+		t.Fatalf("save disk: %v", err)
+	}
+
+	got, err := getSessionByTitleInScope("some-repo-id", "test-session")
+	if err == nil {
+		t.Fatalf("expected error from daemon auth failure, got session %+v (disk fallback masked it)", got)
+	}
+	if !errors.Is(err, authErr) {
+		t.Fatalf("expected daemon auth error to surface, got: %v", err)
+	}
+}
+
+// TestGetSessionByTitleInScope_RemoteTargetSurfacesNetworkError verifies an
+// unreachable remote daemon surfaces its network error, not "instance not found".
+func TestGetSessionByTitleInScope_RemoteTargetSurfacesNetworkError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	remoteTarget(t)
+
+	netErr := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return nil, netErr })
+
+	diskJSON, _ := json.Marshal([]session.InstanceData{{Title: "test-session"}})
+	if err := config.SaveRepoInstances("some-repo-id", diskJSON); err != nil {
+		t.Fatalf("save disk: %v", err)
+	}
+
+	_, err := getSessionByTitleInScope("some-repo-id", "test-session")
+	if !errors.Is(err, netErr) {
+		t.Fatalf("expected network error to surface, got: %v", err)
+	}
+	if errors.Is(err, errTitleNotFound) {
+		t.Fatal("network error must not be masked as instance-not-found")
+	}
+}
+
+// TestGetSessionByTitleInScope_LocalDiskFallbackUnchanged proves the local
+// (unix-socket) target still falls back to disk on snapshot error exactly as
+// before — the fix must not disturb local behavior.
+func TestGetSessionByTitleInScope_LocalDiskFallbackUnchanged(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// FlagDaemonURL empty => local target.
+	stubSnapshot(t, daemonUnavailable)
+
+	diskJSON, _ := json.Marshal([]session.InstanceData{{Title: "test-session"}})
+	if err := config.SaveRepoInstances("some-repo-id", diskJSON); err != nil {
+		t.Fatalf("save disk: %v", err)
+	}
+
+	got, err := getSessionByTitleInScope("some-repo-id", "test-session")
+	if err != nil {
+		t.Fatalf("local disk fallback should succeed: %v", err)
+	}
+	if got.Title != "test-session" {
+		t.Fatalf("got %q, want test-session", got.Title)
+	}
+}
+
+// TestWhoamiSession_RemoteTargetSurfacesError verifies whoami surfaces a remote
+// 401 even though a matching TmuxName sits on local disk (#1681).
+func TestWhoamiSession_RemoteTargetSurfacesError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	remoteTarget(t)
+
+	authErr := errors.New("unauthorized: invalid bearer token")
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return nil, authErr })
+
+	diskJSON, _ := json.Marshal([]session.InstanceData{{Title: "mine", TmuxName: "af_mine_agent"}})
+	if err := config.SaveRepoInstances("repo-x", diskJSON); err != nil {
+		t.Fatalf("save disk: %v", err)
+	}
+
+	got, err := whoamiSession("af_mine_agent")
+	if err == nil {
+		t.Fatalf("expected error from daemon auth failure, got session %+v (disk fallback masked it)", got)
+	}
+	if !errors.Is(err, authErr) {
+		t.Fatalf("expected daemon auth error to surface, got: %v", err)
+	}
+}
+
+// TestWhoamiSession_RemoteTargetSurfacesNetworkError verifies an unreachable
+// remote daemon surfaces its network error from whoami, not "no session found".
+func TestWhoamiSession_RemoteTargetSurfacesNetworkError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	remoteTarget(t)
+
+	netErr := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return nil, netErr })
+
+	diskJSON, _ := json.Marshal([]session.InstanceData{{Title: "mine", TmuxName: "af_mine_agent"}})
+	if err := config.SaveRepoInstances("repo-x", diskJSON); err != nil {
+		t.Fatalf("save disk: %v", err)
+	}
+
+	_, err := whoamiSession("af_mine_agent")
+	if !errors.Is(err, netErr) {
+		t.Fatalf("expected network error to surface, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "no Agent Factory session found") {
+		t.Fatal("network error must not be masked as no-session-found")
+	}
+}
+
+// TestWhoamiSession_LocalDiskFallbackUnchanged proves the local target still
+// resolves whoami from disk on snapshot error (mirrors TestWhoamiSession_DiskFallback,
+// paired here with the remote cases to document the intended contrast).
+func TestWhoamiSession_LocalDiskFallbackUnchanged(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// FlagDaemonURL empty => local target.
+	stubSnapshot(t, daemonUnavailable)
+
+	diskJSON, _ := json.Marshal([]session.InstanceData{{Title: "mine", TmuxName: "af_mine_agent"}})
+	if err := config.SaveRepoInstances("repo-x", diskJSON); err != nil {
+		t.Fatalf("save disk: %v", err)
+	}
+
+	got, err := whoamiSession("af_mine_agent")
+	if err != nil {
+		t.Fatalf("local disk fallback should succeed: %v", err)
 	}
 	if got.Title != "mine" {
 		t.Fatalf("got %q, want mine", got.Title)

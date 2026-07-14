@@ -190,17 +190,18 @@ func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, erro
 	if repoID == "" {
 		return getSessionByTitle(title)
 	}
-	if data, err := snapshotViaDaemon(daemon.SnapshotRequest{RepoID: repoID}); err == nil {
-		for i := range data {
-			if data[i].Title == title {
-				return &data[i], nil
-			}
-		}
-		return nil, fmt.Errorf("instance %q %w", title, errTitleNotFound)
-	}
-	data, err := diskListSessions(repoID)
+	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
 	if err != nil {
-		return nil, err
+		// Remote target: no local disk fallback; surface the daemon error (e.g. a
+		// 401 from a bad token) instead of masking it as "instance not found" via a
+		// same-machine disk scan (#1679).
+		if !fallBack {
+			return nil, err
+		}
+		data, err = diskListSessions(repoID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	for i := range data {
 		if data[i].Title == title {
