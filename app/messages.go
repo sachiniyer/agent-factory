@@ -8,7 +8,6 @@ type hideErrMsg struct {
 	noticeID uint64
 }
 type previewTickMsg struct{}
-type instanceChangedMsg struct{}
 
 // startKillMsg is emitted by the kill confirmation action right after the
 // target row has been marked Deleting on the event loop. Its handler

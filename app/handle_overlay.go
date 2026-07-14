@@ -38,8 +38,8 @@ func (m *home) handleStateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.confirmationOverlay = nil
 		// Forward any non-error tea.Msg returned by the confirmation
-		// action (e.g. instanceChangedMsg{}) back into the Bubble Tea
-		// event loop so its handler can run (e.g. selectionChanged).
+		// action (e.g. startKillMsg) back into the Bubble Tea event loop
+		// so its handler can run.
 		if pending := m.pendingConfirmMsg; pending != nil {
 			m.pendingConfirmMsg = nil
 			return m, func() tea.Msg { return pending }
