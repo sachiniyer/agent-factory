@@ -44,8 +44,11 @@ var resetForceFlag bool
 //     is user configuration, not session state.
 //   - daemon.pid/sock, daemon-token, daemon-tls.* — daemon runtime identity;
 //     wiping them would needlessly break already-configured remote clients.
+//
+// NOTE: "archived" is deliberately NOT here — archived worktrees are removed
+// per-repo (removeArchivedDirs) so a preserved (corrupt/unreadable) record is
+// never left pointing at a deleted archive.
 var resetWipePaths = []string{
-	"archived",              // relocated archived-session worktrees
 	"worktrees",             // AF-managed worktree parent dir (residue after cleanup)
 	"events",                // daemon event queue
 	"logs",                  // per-task run logs
@@ -248,6 +251,10 @@ func planFactoryReset() (*resetPlan, error) {
 	}
 	for repoID, raw := range all {
 		if len(raw) == 0 || string(raw) == "[]" || string(raw) == "null" {
+			// A cleanly-readable empty record set: nothing to plan, but it IS a
+			// processed (deletable) repo — mark it so the disk cross-check below
+			// does not mistake it for an unreadable one.
+			plan.processedRepoIDs = append(plan.processedRepoIDs, repoID)
 			continue
 		}
 		var recs []session.InstanceData
@@ -416,6 +423,12 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		}
 	}
 
+	// Remove archived-session worktree dirs PER REPO, skipping any preserved
+	// (corrupt/unreadable) repo — its records still point at those archives, so
+	// deleting them would leave a dangling reference. A whole-tree wipe would do
+	// exactly that; keep preserved records and their archives consistent.
+	errs = append(errs, removeArchivedDirs(plan.configDir, plan.corruptRepoIDs)...)
+
 	// Delete the task store (removes <AF_HOME>/tasks.json).
 	if err := task.DeleteAllTasks(); err != nil {
 		errs = append(errs, fmt.Errorf("reset tasks: %w", err))
@@ -444,6 +457,47 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	return summary, nil
 }
 
+// removeArchivedDirs removes each per-repo archived-worktree tree under
+// <AF_HOME>/archived/<repoID>/, EXCEPT for repos in preserve (the corrupt/
+// unreadable ones). Those repos' records survive the reset and still point at
+// their archives, so removing the archives would leave a dangling reference.
+// Archived dirs for deleted repos — and orphaned dirs with no record at all —
+// are removed. Returns any per-dir removal errors (best-effort, non-fatal).
+func removeArchivedDirs(configDir string, preserve []string) []error {
+	archivedRoot := filepath.Join(configDir, "archived")
+	entries, err := os.ReadDir(archivedRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return []error{fmt.Errorf("read %s: %w", archivedRoot, err)}
+	}
+
+	keep := make(map[string]struct{}, len(preserve))
+	for _, id := range preserve {
+		keep[id] = struct{}{}
+	}
+
+	var errs []error
+	for _, e := range entries {
+		if _, preserved := keep[e.Name()]; preserved {
+			continue // preserved repo — keep its archives consistent with its record
+		}
+		p := filepath.Join(archivedRoot, e.Name())
+		if err := os.RemoveAll(p); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
+		}
+	}
+	// If nothing is preserved, the archived/ root is now empty — drop it too so a
+	// clean reset leaves no stray dir behind.
+	if len(preserve) == 0 {
+		if err := os.RemoveAll(archivedRoot); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", archivedRoot, err))
+		}
+	}
+	return errs
+}
+
 func printResetPlan(out io.Writer, plan *resetPlan) {
 	fmt.Fprintln(out, "af reset — factory reset (IRREVERSIBLE)")
 	fmt.Fprintln(out)
@@ -468,8 +522,9 @@ func printResetSummary(out io.Writer, s *resetSummary) {
 	fmt.Fprintf(out, "  worktrees: %d\n", s.worktrees)
 	fmt.Fprintf(out, "  branches:  %d\n", s.branches)
 	if s.corrupt > 0 {
-		fmt.Fprintf(out, "  NOTE: %d repo(s) had unreadable records and were LEFT INTACT "+
-			"(their branches were NOT pruned). Fix or remove those instances.json files and re-run.\n", s.corrupt)
+		fmt.Fprintf(out, "  NEEDS ATTENTION: %d repo(s) had unreadable records and were LEFT INTACT "+
+			"— their records, branches, and archived worktrees were all KEPT (nothing dangling). "+
+			"Fix or remove those instances.json files and re-run to finish.\n", s.corrupt)
 	}
 	fmt.Fprintln(out, "Preserved: your git repositories and daemon config (config.toml).")
 	fmt.Fprintln(out, "The supervised daemon will restart with empty session/task state and the same config.")

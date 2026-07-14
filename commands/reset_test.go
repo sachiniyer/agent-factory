@@ -340,6 +340,17 @@ func TestFactoryReset_CorruptRecordLeftIntact(t *testing.T) {
 	}
 	writeFile(t, instPath, "{ this is not valid json for instances")
 
+	// The corrupt repo also has archived worktrees on disk: its preserved
+	// record points at them, so they must survive too (no dangling reference).
+	corruptArchive := filepath.Join(home, "archived", repoID, "sess")
+	writeFile(t, filepath.Join(corruptArchive, "keep"), "x")
+
+	// A DELETED repo's archived worktrees (an orphaned archive with no readable
+	// record) must still be removed.
+	deletedRepoID := config.RepoIDFromRoot(t.TempDir())
+	deletedArchive := filepath.Join(home, "archived", deletedRepoID, "sess")
+	writeFile(t, filepath.Join(deletedArchive, "gone"), "x")
+
 	cfgBytes := []byte("listen_addr = \"127.0.0.1:9000\"\n")
 	writeFileBytes(t, filepath.Join(home, "config.toml"), cfgBytes)
 
@@ -366,6 +377,12 @@ func TestFactoryReset_CorruptRecordLeftIntact(t *testing.T) {
 	if _, err := os.Stat(instPath); err != nil {
 		t.Errorf("corrupt instances.json was erased: %v", err)
 	}
+	// The preserved record's archived worktree is KEPT (no dangling reference).
+	if _, err := os.Stat(corruptArchive); err != nil {
+		t.Errorf("preserved record's archived worktree was deleted (dangling reference): %v", err)
+	}
+	// A deleted/orphaned repo's archive IS removed.
+	assertGone(t, filepath.Join(home, "archived", deletedRepoID))
 	// Its branch is NOT orphaned/deleted.
 	if !branchExists(repo, "orphan-candidate") {
 		t.Error("branch of an unreadable record must be preserved (not orphaned or deleted)")
