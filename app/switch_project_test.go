@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -253,6 +254,57 @@ func TestSwitchProjectSameRepoIsNoop(t *testing.T) {
 	h.switchProject(same)
 
 	require.NotNil(t, findSidebarInstance(h, "existing"), "a same-repo switch must not wipe the sidebar")
+}
+
+// TestSwitchProjectFailedSnapshotLeavesProjectIntact is the #1788 guarantee: a
+// switch whose snapshot fetch fails (a wedged or unreachable daemon — most
+// likely against a remote target) must be a no-op, not a half-applied switch.
+// Before the fix the model was re-scoped to the incoming repo and the projection
+// reset BEFORE the fetch ran, so a failure stranded the TUI on the new
+// repoID/repoRoot with an empty sidebar: background polls and any new session
+// then targeted a project the user could not see.
+func TestSwitchProjectFailedSnapshotLeavesProjectIntact(t *testing.T) {
+	h := newTestHome(t)
+	h.sidebar.SetSize(40, 20)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+
+	// Give repo A a concrete root and an open session, as a live TUI would have.
+	repoARoot := t.TempDir()
+	h.repoRoot = repoARoot
+	h.sidebar.SetProjectName(filepath.Base(repoARoot))
+	repoAID := h.repoID
+	h.store.AddInstance(newSnapshotTestInstance(t, "repoA-session"))
+	require.NotNil(t, findSidebarInstance(h, "repoA-session"))
+
+	repoBRoot := t.TempDir()
+	repoB := &config.RepoContext{Root: repoBRoot, ID: config.RepoIDFromRoot(repoBRoot)}
+
+	// Repo B's snapshot is unavailable; repo A's would still succeed.
+	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+		if repoID == repoB.ID {
+			return daemon.SnapshotResponse{}, errors.New("daemon unavailable")
+		}
+		return daemon.SnapshotResponse{}, nil
+	}
+
+	h.switchProject(repoB)
+
+	// The repo context never moved, so polls and new sessions stay on repo A.
+	assert.Equal(t, repoAID, h.repoID, "a failed switch must not re-scope repoID")
+	assert.Equal(t, repoARoot, h.repoRoot, "a failed switch must not re-scope repoRoot")
+
+	// Repo A's sidebar survived rather than being cleared for a switch that
+	// never landed.
+	require.NotNil(t, findSidebarInstance(h, "repoA-session"), "the current project's sessions must survive a failed switch")
+	assert.Contains(t, h.sidebar.String(), filepath.Base(repoARoot), "the sidebar must still name the current project")
+
+	// The user-visible payoff: a session created after the failed switch still
+	// targets the project the sidebar is showing.
+	h.startNewInstance(false)
+	require.NotNil(t, h.namingInstance)
+	assert.Equal(t, repoARoot, h.namingInstance.Path, "new sessions must still target the current project after a failed switch")
 }
 
 // TestSwitchProjectClearsHooksWhenConfigResolveFails is the #1686 guarantee:
