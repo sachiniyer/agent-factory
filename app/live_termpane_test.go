@@ -24,6 +24,10 @@ type fakeLiveTerm struct {
 	// mice records every event forwarded through SendMouse with its grid-local
 	// coordinates (#1024 R4 interactive forwarding).
 	mice []forwardedMouse
+	// mouseTracking is what MouseTrackingEnabled reports — the fake's stand-in for
+	// the inner app having requested mouse reporting (#1024 wheel fix). Off by
+	// default: a program sitting at a prompt owns no wheel.
+	mouseTracking bool
 }
 
 // forwardedMouse is one SendMouse call as the fake recorded it.
@@ -46,6 +50,8 @@ func (f *fakeLiveTerm) SendMouse(msg tea.MouseMsg, x, y int) bool {
 	f.mice = append(f.mice, forwardedMouse{msg: msg, x: x, y: y})
 	return true
 }
+
+func (f *fakeLiveTerm) MouseTrackingEnabled() bool { return f.mouseTracking }
 
 // stubLiveTermFactory points the attachment seam at fake attachments and returns
 // the created fakes + the session titles they were created for.

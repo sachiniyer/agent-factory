@@ -2,6 +2,7 @@ package termpane
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 )
 
@@ -40,6 +41,36 @@ func (t *TermPane) SendMouse(msg tea.MouseMsg, x, y int) bool {
 	}
 	t.emu.SendMouse(ev)
 	return true
+}
+
+// MouseTrackingEnabled reports whether the inner application has requested mouse
+// reporting — i.e. it has a mouse-tracking DECMode active (X10 9, normal 1000,
+// highlight 1001, button-event 1002, or any-event 1003). This is exactly the set
+// emu.SendMouse consults before it encodes anything, so a true here means a
+// forwarded event would actually reach the program. The host uses it to decide
+// who owns the mouse WHEEL (tmux semantics): a program that has NOT enabled
+// tracking leaves the wheel to pane scrollback (#1024 wheel fix). The read is
+// under the same lock the mode-change callbacks write beneath.
+func (t *TermPane) MouseTrackingEnabled() bool {
+	t.gridMu.RLock()
+	defer t.gridMu.RUnlock()
+	return len(t.mouseModes) > 0
+}
+
+// isMouseTrackingMode reports whether mode is one of the DECModes that makes the
+// terminal report mouse events to the inner app. It mirrors the tracking-mode
+// list emu.SendMouse iterates; the SGR encoding mode (1006) is deliberately
+// excluded — it only changes how reports are encoded, not whether they happen.
+func isMouseTrackingMode(mode ansi.Mode) bool {
+	switch mode {
+	case ansi.ModeMouseX10,
+		ansi.ModeMouseNormal,
+		ansi.ModeMouseHighlight,
+		ansi.ModeMouseButtonEvent,
+		ansi.ModeMouseAnyEvent:
+		return true
+	}
+	return false
 }
 
 // translateMouse maps a bubbletea v1 mouse message to the emulator's event

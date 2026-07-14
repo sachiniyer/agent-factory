@@ -45,6 +45,11 @@ type liveTermAttachment interface {
 	// in-pane mouse path (#1024 R4). The emulator is mode-aware: the event reaches
 	// the inner app only if it enabled mouse tracking, and is dropped otherwise.
 	SendMouse(msg tea.MouseMsg, x, y int) bool
+	// MouseTrackingEnabled reports whether the inner app has requested mouse
+	// reporting (a mouse-tracking DECMode is active). The router uses it to decide
+	// wheel ownership: an app that has not enabled tracking leaves the wheel to
+	// pane scrollback rather than swallowing it (#1024 wheel fix).
+	MouseTrackingEnabled() bool
 }
 
 // newLiveTermPaneFn is the attachment creation seam. Production dials the daemon
