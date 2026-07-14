@@ -14,6 +14,13 @@ import (
 
 func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	defer m.persistTUIViewStateAfter(msg)
+	// The double-click tracker is only valid within an unbroken run of
+	// stateDefault: any modal/overlay excursion between two clicks must
+	// invalidate a pre-modal press so it can't pair with a post-modal press
+	// into a false double click (#1731). Update is the single chokepoint every
+	// message (keyboard-driven modal open/close included) flows through.
+	stateBefore := m.state
+	defer m.clearStaleClickTrackerAfter(stateBefore)
 	switch msg := msg.(type) {
 	case hideErrMsg:
 		if msg.noticeID == m.transientNoticeID {

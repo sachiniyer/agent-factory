@@ -355,13 +355,17 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	double := m.trackClick(id)
 
 	// Modal states: the overlay owns the screen, so only its buttons (and,
 	// while naming, the status-bar hints that ARE the form's verbs) react.
+	// Track the click AFTER this gate so a swallowed modal click never seeds
+	// the double-click tracker — otherwise a click on the same zone within the
+	// window after the modal closes reads as a false double click (#1731).
 	if m.state != stateDefault {
 		return m.handleModalClick(id)
 	}
+
+	double := m.trackClick(id)
 
 	switch id {
 	case zones.TreeHeader:
@@ -537,6 +541,21 @@ func (m *home) handleHintClick(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.handleKeyPress(msg)
+}
+
+// clearStaleClickTrackerAfter drops the double-click tracker whenever this
+// Update touched a non-default (modal/overlay) state — entering it, sitting in
+// it, or leaving it. The tracker only ever pairs two clicks inside one
+// uninterrupted stateDefault run; a modal excursion between them must not let a
+// pre-modal press combine with a post-modal press into a false double click
+// (#1731). A pure stateDefault→stateDefault Update leaves the tracker intact so
+// genuine double clicks (which span two Update calls) still register.
+func (m *home) clearStaleClickTrackerAfter(stateBefore state) {
+	if stateBefore == stateDefault && m.state == stateDefault {
+		return
+	}
+	m.lastClickZone = ""
+	m.lastClickAt = time.Time{}
 }
 
 // trackClick records a press on zone id and reports whether it completed a
