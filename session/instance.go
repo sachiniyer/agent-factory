@@ -169,13 +169,15 @@ type Instance struct {
 	// rather than reconstructed per call because its data plane holds stateful
 	// pieces — the PTY output ring buffer and the fan-out subscriber set — that
 	// must persist across calls; a fresh server each call would drop subscribers
-	// and lose the replay buffer. Lazily built by AgentServer(), guarded by
-	// agentSrvMu (a dedicated mutex, not i.mu, so building the server never
-	// contends with the session-state fields i.mu guards). Interface-typed since
-	// #1592 Phase 4 PR2: AgentServer() returns the local in-process impl by
+	// and lose the replay buffer. Lazily built by AgentServer() and guarded by i.mu,
+	// the SAME lock as remoteClient/runtimeTeardown (the fields that select which
+	// impl it is): a cache and its source fields must share one mutex so a restore
+	// that swaps the fields and clears the cache is atomic wrt the poll — a
+	// dedicated agentSrvMu split them and let AgentServer() rebuild the cache from a
+	// pre-restore snapshot, pinning a torn-down endpoint (#1729). Interface-typed
+	// since #1592 Phase 4 PR2: AgentServer() returns the local in-process impl by
 	// default, or a remoteAgentServer when remoteClient is set.
-	agentSrv   AgentServer
-	agentSrvMu sync.Mutex
+	agentSrv AgentServer
 	// remoteClient is the runtime handle selecting the REMOTE agent-server impl
 	// (#1592 Phase 4 PR2): when non-nil, AgentServer() returns a remoteAgentServer
 	// driving the `af agent-server` this points at, instead of the local in-process

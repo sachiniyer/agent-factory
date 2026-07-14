@@ -48,8 +48,31 @@ type localAgentServer struct {
 // every other session gets the local in-process impl over tmux — the default,
 // unchanged. The client was validated at construction, so this stays infallible.
 func (i *Instance) AgentServer() AgentServer {
-	i.agentSrvMu.Lock()
-	defer i.agentSrvMu.Unlock()
+	// i.mu is the SOLE owner of BOTH the runtime-selection fields
+	// (remoteClient/runtimeTeardown) AND the derived i.agentSrv cache (#1729).
+	// Guarding a cache and the fields it is derived from under ONE mutex is what
+	// keeps them consistent: restore/recover (bindProvisionResult/
+	// resetRemoteRuntime) clears the cache and swaps the fields in a SINGLE i.mu
+	// section, so AgentServer() can never rebuild the cache from a pre-restore
+	// snapshot of the fields. The earlier two-mutex split (agentSrvMu for the cache,
+	// i.mu for the fields) caused both the original data race AND a stale-cache
+	// TOCTOU — a rebuild from an OLD snapshot that pinned a torn-down endpoint.
+	//
+	// Fast path: a warm cache is returned under a read lock. Slow path:
+	// double-checked under the write lock, building + storing the cache from the
+	// fields read in the SAME critical section. The server values are trivial struct
+	// literals — they don't re-enter i.mu at construction — so building under i.mu is
+	// safe. Callers must not already hold i.mu (the returned server's methods
+	// re-acquire it), the same invariant tabTmuxSession relies on.
+	i.mu.RLock()
+	if as := i.agentSrv; as != nil {
+		i.mu.RUnlock()
+		return as
+	}
+	i.mu.RUnlock()
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	if i.agentSrv == nil {
 		if i.remoteClient != nil {
 			// teardown reaps the sandbox this session runs in (docker rm -f) after
