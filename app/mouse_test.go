@@ -674,6 +674,45 @@ func TestMouse_ModalSwallowedClickNoFalseDouble(t *testing.T) {
 	assert.Equal(t, stateDefault, h.state)
 }
 
+// TestMouse_StaleClickTrackerClearedAcrossModal: a pre-modal click seeds the
+// double-click tracker; a modal that opens and closes (driven through Update,
+// the real keyboard path) must invalidate that seed so a fast click on the same
+// row afterwards stays a single click — not a false double-click enter (#1731).
+func TestMouse_StaleClickTrackerClearedAcrossModal(t *testing.T) {
+	h, _, beta := mouseTestHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	_, _ = stubLiveTermFactory(t)
+
+	// A real click on beta's row seeds the tracker (and selects beta).
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	require.Equal(t, zones.TreeInstance(beta.Title), h.lastClickZone,
+		"precondition: the click seeds the double-click tracker")
+	require.Equal(t, beta.Title, h.store.GetSelectedInstance().Title)
+
+	// Open the kill confirmation through Update — 'D' first highlights the menu
+	// hint and re-emits itself, so it takes two dispatches to reach handleKill.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	require.Equal(t, stateConfirm, h.state, "D opens the kill confirmation")
+	require.Empty(t, h.lastClickZone,
+		"a modal excursion must clear the stale pre-modal click tracker (#1731)")
+
+	// Cancel the confirmation, back to the default state.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "esc cancels the confirmation")
+
+	// A fast click on that same row within the double-click window must stay a
+	// single select — the pre-modal press must not pair with it.
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+
+	assert.Zero(t, h.store.NumOpenPanes(),
+		"a pre-modal click must not survive a modal into a false double (#1731)")
+	assert.False(t, h.interactive, "the post-modal single click must not enter interactive mode")
+	assert.Equal(t, stateDefault, h.state)
+}
+
 // TestMouse_SelectionOverlayRowClick: clicking a program row selects and
 // submits it, like ↓ + enter.
 func TestMouse_SelectionOverlayRowClick(t *testing.T) {

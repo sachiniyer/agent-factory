@@ -543,6 +543,21 @@ func (m *home) handleHintClick(key string) (tea.Model, tea.Cmd) {
 	return m.handleKeyPress(msg)
 }
 
+// clearStaleClickTrackerAfter drops the double-click tracker whenever this
+// Update touched a non-default (modal/overlay) state — entering it, sitting in
+// it, or leaving it. The tracker only ever pairs two clicks inside one
+// uninterrupted stateDefault run; a modal excursion between them must not let a
+// pre-modal press combine with a post-modal press into a false double click
+// (#1731). A pure stateDefault→stateDefault Update leaves the tracker intact so
+// genuine double clicks (which span two Update calls) still register.
+func (m *home) clearStaleClickTrackerAfter(stateBefore state) {
+	if stateBefore == stateDefault && m.state == stateDefault {
+		return
+	}
+	m.lastClickZone = ""
+	m.lastClickAt = time.Time{}
+}
+
 // trackClick records a press on zone id and reports whether it completed a
 // double click. A completed double resets the tracker so a triple click
 // can't read as two doubles.
