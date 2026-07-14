@@ -48,14 +48,28 @@ type localAgentServer struct {
 // every other session gets the local in-process impl over tmux — the default,
 // unchanged. The client was validated at construction, so this stays infallible.
 func (i *Instance) AgentServer() AgentServer {
+	// remoteClient/runtimeTeardown are owned by i.mu (they are rebound under it on
+	// restore/recover by bindProvisionResult/resetRemoteRuntime); agentSrvMu guards
+	// ONLY the i.agentSrv cache (#1729). Snapshot the i.mu-owned fields into locals
+	// FIRST, releasing i.mu before taking agentSrvMu, so the two locks are never
+	// held nested here. That fixes the lock order at i.mu → agentSrvMu; the only
+	// other agentSrvMu holders (bindProvisionResult, resetRemoteRuntime) release
+	// agentSrvMu before touching i.mu, so nothing ever takes them in the opposite
+	// order — no deadlock. Reading remoteClient under agentSrvMu (the pre-#1729 bug)
+	// raced the i.mu writer across two unrelated mutexes.
+	i.mu.RLock()
+	rc := i.remoteClient
+	teardown := i.runtimeTeardown
+	i.mu.RUnlock()
+
 	i.agentSrvMu.Lock()
 	defer i.agentSrvMu.Unlock()
 	if i.agentSrv == nil {
-		if i.remoteClient != nil {
+		if rc != nil {
 			// teardown reaps the sandbox this session runs in (docker rm -f) after
 			// the remote Kill tears the in-sandbox workspace down — nil for the PR2
 			// out-of-process case (no sandbox to reap), set for a docker session.
-			i.agentSrv = &remoteAgentServer{rc: i.remoteClient, teardown: i.runtimeTeardown}
+			i.agentSrv = &remoteAgentServer{rc: rc, teardown: teardown}
 		} else {
 			i.agentSrv = &localAgentServer{inst: i}
 		}
