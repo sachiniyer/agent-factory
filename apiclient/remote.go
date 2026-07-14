@@ -24,10 +24,45 @@ import (
 // cert by SHA-256 fingerprint (TOFU, §1.2) or, when no fingerprint is given,
 // verifies a real CA cert against the system trust store.
 
-// remoteDialTimeout bounds the TCP connect to a remote daemon. Unlike the local
-// unix socket (a quarter second — it is either there or not), a remote dial
-// crosses a real network, so it is given a longer, network-appropriate budget.
-const remoteDialTimeout = 10 * time.Second
+// Timeouts bounding a remote round-trip. Unlike the local unix socket (a quarter
+// second — it is either there or not), a remote target crosses a real network and
+// a half-open or wedged daemon must surface as a clear error instead of hanging
+// forever (#1730). There are exactly two connection-level bounds plus ONE overall
+// REST deadline — no per-layer split, so there is a single number to reason about:
+//
+//   - remoteDialTimeout — the TCP connect.
+//   - remoteTLSHandshakeTimeout — the TLS handshake. Its absence was the #1730
+//     hang: a peer that accepts the TCP connection but never completes the
+//     handshake blocked every REST and WS call indefinitely. 10s matches Go's
+//     http.DefaultTransport default. These two catch the common unreachable /
+//     wedged-at-connect cases FAST, for both REST and WS.
+//   - remoteRequestTimeout — the single overall deadline on one REST call()
+//     round-trip (applied via the request context, remote-only). It is the sole
+//     REST wait-bound: a daemon that completes TLS but then never sends a response
+//     surfaces here instead of hanging. It is deliberately GENEROUS, not snappy,
+//     because a mutating RPC runs SYNCHRONOUSLY inside the request — a remote
+//     docker/ssh CreateSession (#1592 Phase 4) can spend minutes provisioning
+//     (image pull, ssh spin-up) before the daemon writes response headers, and a
+//     tight deadline would sever a create that is actually succeeding server-side
+//     and orphan it. The value clears realistic provisioning; a truly wedged
+//     connection is still bounded (just not instantly), and the fast-fail cases
+//     are already covered by dial + handshake above.
+//
+// Notably there is NO transport-level ResponseHeaderTimeout and NO
+// http.Client.Timeout: a shared ResponseHeaderTimeout would fire mid-provision on
+// a slow synchronous create (Greptile #1734), and http.Client.Timeout would
+// additionally kill an established WS stream (coder/websocket warns against it).
+// WS/stream dials are EXEMPT from the overall deadline entirely — they carry only
+// the dial + handshake bounds, so a long-lived PTY subscription is never severed.
+//
+// They are vars (not consts) only so a test can shrink them to prove the bound
+// fires without waiting the full budget — the same pattern attach.go's
+// attachDrainTimeout/attachWriteTimeout use.
+var (
+	remoteDialTimeout         = 10 * time.Second
+	remoteTLSHandshakeTimeout = 10 * time.Second
+	remoteRequestTimeout      = 5 * time.Minute
+)
 
 // NewRemote returns a Client that dials the remote daemon at daemonURL over
 // TCP+TLS, threading `token` on every REST call and WS handshake. daemonURL is a
@@ -52,14 +87,21 @@ func NewRemote(daemonURL, token, fingerprint string) (*Client, error) {
 	dialer := &net.Dialer{Timeout: remoteDialTimeout}
 	return &Client{
 		httpClient: &http.Client{
+			// No http.Client.Timeout: it fires on the whole request lifetime, which
+			// for the WS handshake path is the established stream itself
+			// (coder/websocket warns against it). The overall REST bound is applied
+			// per-call as a request-context deadline instead (call(), remote-only),
+			// so WS/stream dials stay exempt.
 			Transport: &http.Transport{
-				DialContext:     dialer.DialContext,
-				TLSClientConfig: tlsCfg,
+				DialContext:         dialer.DialContext,
+				TLSClientConfig:     tlsCfg,
+				TLSHandshakeTimeout: remoteTLSHandshakeTimeout,
 			},
 		},
-		token:    token,
-		httpBase: httpBase,
-		wsBase:   wsBase,
+		token:          token,
+		httpBase:       httpBase,
+		wsBase:         wsBase,
+		requestTimeout: remoteRequestTimeout,
 	}, nil
 }
 
