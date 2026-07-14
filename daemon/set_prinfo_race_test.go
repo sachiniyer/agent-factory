@@ -73,6 +73,67 @@ func TestPersistInstanceData_RefusesCrossIdentityClobber(t *testing.T) {
 	}
 }
 
+// TestPersistInstanceData_UpdatesIDMatchedRowDespiteEarlierTitleCollision
+// guards the row-selection edge (Greptile P1): the shared writer keys on the
+// stable id, so a stray earlier row that shares the title but carries a
+// DIFFERENT id must not mask the legitimate write to the later id-matched row.
+// The transient kill/recreate window this whole fix targets is exactly when two
+// same-title rows can momentarily coexist, so a valid id-matched persist must
+// still land — updating the correct row and leaving the unrelated one untouched.
+func TestPersistInstanceData_UpdatesIDMatchedRowDespiteEarlierTitleCollision(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	const title = "worker"
+	// Two same-title rows: a stray/foreign one first, the real one (id-current)
+	// second.
+	seed, err := json.Marshal([]session.InstanceData{
+		{ID: "id-stray", Title: title, Path: repoPath, Status: session.Running, PRInfo: session.PRInfoData{Number: 1, State: "MERGED"}},
+		{ID: "id-current", Title: title, Path: repoPath, Status: session.Running, PRInfo: session.PRInfoData{Number: 2, State: "OPEN"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := config.LoadState().SaveInstances(repo.ID, seed); err != nil {
+		t.Fatalf("seed disk: %v", err)
+	}
+
+	// Persist an update whose stable id matches the LATER row.
+	update := session.InstanceData{
+		ID: "id-current", Title: title, Path: repoPath, Status: session.Running,
+		PRInfo: session.PRInfoData{Number: 99, State: "OPEN"},
+	}
+	if err := persistInstanceData(repo.ID, update); err != nil {
+		t.Fatalf("persistInstanceData rejected a valid id-matched update behind an earlier same-title row: %v", err)
+	}
+
+	raw, err := config.LoadRepoInstances(repo.ID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+	var got []session.InstanceData
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal instances: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 persisted instances, got %d: %+v", len(got), got)
+	}
+	byID := map[string]session.InstanceData{}
+	for _, d := range got {
+		byID[d.ID] = d
+	}
+	if cur := byID["id-current"]; cur.PRInfo.Number != 99 {
+		t.Fatalf("id-current row not updated: PR = %+v, want #99", cur.PRInfo)
+	}
+	if stray := byID["id-stray"]; stray.PRInfo.Number != 1 || stray.PRInfo.State != "MERGED" {
+		t.Fatalf("earlier same-title row was clobbered: %+v, want PR #1 MERGED intact", stray.PRInfo)
+	}
+}
+
 // TestSetPRInfo_RaceKillRecreateNeverCorruptsIdentity is the load-bearing -race
 // regression test for #1723. It races SetPRInfo against KillSession+CreateSession
 // on the same title. Without the per-session op-lock and stale-instance re-check,

@@ -69,27 +69,36 @@ func persistInstanceData(repoID string, data session.InstanceData) error {
 		if err := json.Unmarshal(raw, &existing); err != nil {
 			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
 		}
+		// Prefer the row whose stable id matches; only if NO same-titled row
+		// shares this id do we treat it as an identity change. Scanning the whole
+		// slice (rather than deciding on the first title hit) keeps a stray
+		// duplicate-title row — a foreign id ordered before the real one — from
+		// masking the legitimate write and failing a live caller (Greptile P1).
+		match := -1
 		for i := range existing {
 			if existing[i].Title != data.Title {
 				continue
 			}
-			if !stableIDMatchesForDaemon(existing[i].ID, data.ID) {
-				// A same-titled record with a different stable id belongs to a
-				// different (newer) session; never overwrite its identity.
-				sameTitleDifferentID = true
-				return raw, nil
+			if stableIDMatchesForDaemon(existing[i].ID, data.ID) {
+				match = i
+				break
 			}
-			existing[i] = data
+			// A same-titled record with a different stable id belongs to a
+			// different (newer) session; never overwrite its identity.
+			sameTitleDifferentID = true
+		}
+		if match >= 0 {
+			existing[match] = data
 			found = true
 			return json.MarshalIndent(existing, "", "  ")
 		}
-		// Leave the file unchanged when the record is absent; the caller turns
-		// !found into an error below.
+		// Leave the file unchanged when no matching-id record exists; the caller
+		// turns !found / sameTitleDifferentID into an error below.
 		return raw, nil
 	}); err != nil {
 		return err
 	}
-	if sameTitleDifferentID {
+	if !found && sameTitleDifferentID {
 		return fmt.Errorf("instance %q identity changed in storage", data.Title)
 	}
 	if !found {
