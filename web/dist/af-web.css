@@ -801,13 +801,15 @@ body {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  background: var(--af-bg-term);
 }
 .af-webpane-bar {
   display: flex;
   align-items: center;
   gap: var(--af-sp-2);
   padding: var(--af-sp-1) 0.4rem;
-  border-bottom: 1px solid var(--af-border);
+  background: var(--af-bg-surface);
+  border-bottom: 1px solid var(--af-border-subtle);
   font-size: var(--af-fs-sm);
 }
 .af-webpane-reload {
@@ -844,7 +846,7 @@ body {
   min-height: 0;
   width: 100%;
   border: 0;
-  background: var(--af-bg-surface);
+  background: var(--af-bg-term);
 }
 .af-webpane-fallback {
   display: flex;
@@ -855,7 +857,7 @@ body {
   flex: 1 1 0;
   padding: var(--af-sp-4);
   text-align: center;
-  color: var(--af-text);
+  color: var(--af-text-2);
 }
 .af-webpane-fallback[hidden] {
   display: none;

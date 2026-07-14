@@ -995,12 +995,16 @@ body {
   height: 100%;
 }
 
-/* A web/iframe tab: fills the pane host with a thin control bar above the frame. */
+/* A web/iframe tab: fills the pane host with a thin control bar above the frame. It
+ * matches the terminal pane's treatment — the pane canvas is --af-bg-term (so the
+ * .af-pane-host inset gutter blends seamlessly in both themes), with a raised
+ * --af-bg-surface control bar over it, like the .af-pane-head strip. */
 .af-webpane {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  background: var(--af-bg-term);
 }
 
 .af-webpane-bar {
@@ -1008,7 +1012,8 @@ body {
   align-items: center;
   gap: var(--af-sp-2);
   padding: var(--af-sp-1) 0.4rem;
-  border-bottom: 1px solid var(--af-border);
+  background: var(--af-bg-surface);
+  border-bottom: 1px solid var(--af-border-subtle);
   font-size: var(--af-fs-sm);
 }
 
@@ -1051,10 +1056,15 @@ body {
   min-height: 0;
   width: 100%;
   border: 0;
-  background: var(--af-bg-surface);
+  /* The backing shown before the framed page paints (or for a transparent page):
+   * the pane canvas token, so a load reads as the theme's terminal surface rather
+   * than a mismatched light box in dark mode. */
+  background: var(--af-bg-term);
 }
 
-/* Shown when a direct external frame is blocked from embedding (best-effort). */
+/* Shown when a direct external frame is blocked from embedding (best-effort), or for
+ * a URL-less tab. It fills the pane canvas (--af-bg-term via .af-webpane) with themed
+ * text, so it reads correctly in both light and dark. */
 .af-webpane-fallback {
   display: flex;
   flex-direction: column;
@@ -1064,7 +1074,7 @@ body {
   flex: 1 1 0;
   padding: var(--af-sp-4);
   text-align: center;
-  color: var(--af-text);
+  color: var(--af-text-2);
 }
 
 .af-webpane-fallback[hidden] {

@@ -851,6 +851,11 @@ async function bgColor(p: Page, selector: string): Promise<string> {
   }, selector);
 }
 
+/** The resolved value of a CSS custom property on :root, for a token-flip diff. */
+async function cssVar(p: Page, name: string): Promise<string> {
+  return p.evaluate((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(), name);
+}
+
 test("theme (redesign PR1): a saved dark choice is stamped before the app mounts — no flash", async () => {
   // Persist a dark choice, then install a document-start trap on #app.replaceChildren
   // (how index.ts mounts its content into #app) that records data-theme AT THE EXACT
@@ -893,6 +898,10 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   const darkRail = await bgColor(page, ".af-rail");
   const darkBody = await bgColor(page, "body");
+  // The web/iframe-pane tokens (fixed in this PR to match the terminal pane) resolve
+  // to their dark values.
+  const darkTerm = await cssVar(page, "--af-bg-term");
+  const darkBorderSubtle = await cssVar(page, "--af-border-subtle");
 
   // Toggle to Light: the SAME selectors resolve to different token values, proving the
   // chrome is driven by the CSS custom properties, not hardcoded colors.
@@ -900,9 +909,15 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   const lightRail = await bgColor(page, ".af-rail");
   const lightBody = await bgColor(page, "body");
+  const lightTerm = await cssVar(page, "--af-bg-term");
+  const lightBorderSubtle = await cssVar(page, "--af-border-subtle");
 
   expect(lightRail).not.toBe(darkRail);
   expect(lightBody).not.toBe(darkBody);
+  // The web-pane canvas + separator tokens flip too, so the embedded web pane reads
+  // correctly in both themes (the dark-mode regression this PR fixes).
+  expect(lightTerm).not.toBe(darkTerm);
+  expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
   // The light rail surface is the white token (#ffffff → rgb(255, 255, 255)).
   expect(lightRail).toBe("rgb(255, 255, 255)");
   await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
