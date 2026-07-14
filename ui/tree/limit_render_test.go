@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -14,8 +13,7 @@ import (
 // renderClean renders an instance and returns its output with ANSI stripped.
 func renderClean(t *testing.T, inst *session.Instance) string {
 	t.Helper()
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	r := NewInstanceRenderer(&spin)
+	r := NewInstanceRenderer()
 	r.SetWidth(80)
 	out := r.Render(inst, 1, false, false, false)
 	return ansiEscape.ReplaceAllString(out, "")

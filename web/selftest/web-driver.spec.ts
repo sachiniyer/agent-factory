@@ -194,6 +194,75 @@ test("sidebar lists the seeded sessions from the Snapshot/events plane", async (
   await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
 });
 
+test("status dots (#1765): waiting shows a green dot, working shows none, error states are static — no spin anywhere", async () => {
+  // The daemon can't be coerced to Running/Lost/Dead/Limit on demand, so pin the
+  // states by rewriting the Snapshot: the two real rows get Running (working) and
+  // Ready (waiting); synthetic rows cloned into the same project cover the static
+  // error glyphs. The events plane only pushes future deltas, so the reloaded rail
+  // reflects this Snapshot (the same route-transform pattern the no-url / empty-state
+  // tests use).
+  await page.route("**/v1/Snapshot", async (route) => {
+    const resp = await route.fetch();
+    const body = await resp.json();
+    const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
+    const list = snap?.instances ?? [];
+    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
+    for (const s of list) {
+      if (s.title === SESSION_A) {
+        s.liveness = 1; // Running → working → no dot
+        s.in_flight_op = 0;
+      }
+      if (s.title === SESSION_B) {
+        s.liveness = 2; // Ready → waiting → green dot
+        s.in_flight_op = 0;
+      }
+    }
+    // Clone SESSION_A's record (same worktree/repo_path, so they land in this project's
+    // scoped rail) into inert synthetic rows for the static error glyphs. Give each a
+    // distinct branch so their rendered branch line never contains "probe-a"/"probe-b"
+    // (the row() locator matches row text by substring).
+    const synth = (title: string, liveness: number) => ({
+      ...proto,
+      id: `synth-${title}`,
+      title,
+      branch: `synth-${title}`,
+      liveness,
+      in_flight_op: 0,
+    });
+    list.push(synth("probe-lost", 3), synth("probe-dead", 4), synth("probe-limit", 6));
+    if (snap) {
+      snap.instances = list;
+    }
+    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+  });
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await expect(row(page, SESSION_A)).toBeVisible({ timeout: 15_000 });
+
+  // Working row (A): NO status dot at all — the dot span is omitted entirely.
+  await expect(row(page, SESSION_A).locator(".af-dot")).toHaveCount(0);
+  // Waiting row (B): the static green ● dot, in the ready color bucket, never spinning.
+  const readyDot = row(page, SESSION_B).locator(".af-dot");
+  await expect(readyDot).toHaveClass(/af-dot-ready/);
+  await expect(readyDot).toHaveText("●");
+  await expect(readyDot).not.toHaveClass(/af-dot-spin/);
+  // Error/terminal states keep their STATIC glyphs (◌/○/◆), copied from the TUI.
+  await expect(row(page, "probe-lost").locator(".af-dot")).toHaveText("◌");
+  await expect(row(page, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
+  await expect(row(page, "probe-dead").locator(".af-dot")).toHaveText("○");
+  await expect(row(page, "probe-limit").locator(".af-dot")).toHaveText("◆");
+  // The animation class is gone from every status row, and the removed "working" dot
+  // kind never renders anywhere.
+  await expect(page.locator(".af-dot-spin")).toHaveCount(0);
+  await expect(page.locator(".af-dot-working")).toHaveCount(0);
+
+  // Restore the real projection for the following flows.
+  await page.unroute("**/v1/Snapshot");
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await expect(row(page, SESSION_A)).toBeVisible({ timeout: 15_000 });
+});
+
 test("click-to-attach opens the xterm terminal and shows live output", async () => {
   await row(page, SESSION_A).click();
 
@@ -903,6 +972,12 @@ test("archive: the archive confirm moves a session to the archived group", async
   // B is not killed — it stays in the rail, but in the archived group (rendered
   // with the af-row-archived modifier and sorted last).
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
+  // The archived row carries the static ▧ archived dot (no spinner) — proof the
+  // error/terminal states keep their static glyphs (#1765).
+  const archivedDot = row(page, SESSION_B).locator(".af-dot");
+  await expect(archivedDot).toHaveClass(/af-dot-archived/);
+  await expect(archivedDot).toHaveText("▧");
+  await expect(archivedDot).not.toHaveClass(/af-dot-spin/);
 });
 
 test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bound project makes it go away — not a no-op", async () => {

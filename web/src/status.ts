@@ -14,17 +14,18 @@
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
 /** The visual kind of a status dot, one per color bucket the TUI paints. Drives
- *  the .af-dot-<kind> CSS class whose color matches render.go's lipgloss styles. */
-export type DotKind = "working" | "ready" | "lost" | "dead" | "archived" | "limit";
+ *  the .af-dot-<kind> CSS class whose color matches render.go's lipgloss styles.
+ *  A working/busy row has no dot (#1765), so there is no "working" bucket. */
+export type DotKind = "ready" | "lost" | "dead" | "archived" | "limit";
 
 /** A fully-resolved status descriptor for one row: the dot to draw and the
  *  human label (used for the row's aria/title so the state is legible to a
  *  screen reader, not only by color — the same intent as the TUI's text prefixes). */
 export interface RowStatus {
+  /** The glyph to draw, or "" for a working/busy row which shows no dot (#1765). */
   glyph: string;
-  kind: DotKind;
-  /** Whether the dot should animate (the TUI shows a spinner for working). */
-  spinning: boolean;
+  /** The dot's color bucket, or null for a working row (the dot is omitted). */
+  kind: DotKind | null;
   /** Accessible one-word state label, e.g. "Ready", "Working", "Lost". */
   label: string;
 }
@@ -36,27 +37,36 @@ const DEAD_GLYPH = "○";
 const LOST_GLYPH = "◌";
 const ARCHIVED_GLYPH = "▧";
 const LIMIT_GLYPH = "◆";
-// Working has no fixed glyph in the TUI (a bubbles spinner); the web draws a
-// filled dot and animates it via .af-dot-working (styles.css).
-const WORKING_GLYPH = "●";
 
-const WORKING: RowStatus = { glyph: WORKING_GLYPH, kind: "working", spinning: true, label: "Working" };
+// A working/busy row shows NO status dot (#1765): the TUI renders a blank status
+// cell for LiveRunning / any in-flight op, and the web omits the dot entirely.
+// Kept as a resolved status (empty glyph, null kind) so rowStatus stays total and
+// callers can still detect the working state (isWorking, the project glance count).
+const WORKING: RowStatus = { glyph: "", kind: null, label: "Working" };
 
 /**
  * Resolves a session's status dot from its two axes, mirroring render.go exactly:
- * any in-flight op keeps the spinner ("busy"); otherwise the liveness picks the
- * dot. Falls back to the legacy `status` int only when `liveness` is absent (a
- * pre-#1195 record — never emitted by the daemon's live Snapshot, but handled so
- * a stray zero never blanks the dot, matching render.go's LivenessUnset arm).
+ * any in-flight op is a working/busy state and shows no dot (#1765); otherwise the
+ * liveness picks the dot. Falls back to the legacy `status` int only when `liveness`
+ * is absent (a pre-#1195 record — never emitted by the daemon's live Snapshot, but
+ * handled so a stray zero renders as working, matching render.go's LivenessUnset arm).
  */
 export function rowStatus(s: SessionData): RowStatus {
   const op = s.in_flight_op ?? InFlightOp.None;
-  // An in-flight op overlays the liveness and wins the dot (render.go:280-282):
-  // the [deleting] title prefix, added below, distinguishes kill/archive.
+  // An in-flight op overlays the liveness and reads as working (render.go:280-282),
+  // so it shows no dot; the [deleting] title prefix (rowTitle) distinguishes
+  // kill/archive.
   if (op !== InFlightOp.None) {
     return WORKING;
   }
   return dotForLiveness(livenessOf(s));
+}
+
+/** True when the row is a working/busy session — the state that shows NO status
+ *  dot (#1765). Kept exported so the project switcher's per-project "working"
+ *  glance count (project.ts) stays derivable now that the dot itself is gone. */
+export function isWorking(s: SessionData): boolean {
+  return rowStatus(s).kind === null;
 }
 
 /** The daemon always emits `liveness`; this only guards a pre-#1195 record by
@@ -86,15 +96,15 @@ function livenessOf(s: SessionData): number {
 function dotForLiveness(lv: number): RowStatus {
   switch (lv) {
     case Liveness.Ready:
-      return { glyph: READY_GLYPH, kind: "ready", spinning: false, label: "Ready" };
+      return { glyph: READY_GLYPH, kind: "ready", label: "Ready" };
     case Liveness.Lost:
-      return { glyph: LOST_GLYPH, kind: "lost", spinning: false, label: "Lost" };
+      return { glyph: LOST_GLYPH, kind: "lost", label: "Lost" };
     case Liveness.Dead:
-      return { glyph: DEAD_GLYPH, kind: "dead", spinning: false, label: "Dead" };
+      return { glyph: DEAD_GLYPH, kind: "dead", label: "Dead" };
     case Liveness.Archived:
-      return { glyph: ARCHIVED_GLYPH, kind: "archived", spinning: false, label: "Archived" };
+      return { glyph: ARCHIVED_GLYPH, kind: "archived", label: "Archived" };
     case Liveness.LimitReached:
-      return { glyph: LIMIT_GLYPH, kind: "limit", spinning: false, label: "Limit reached" };
+      return { glyph: LIMIT_GLYPH, kind: "limit", label: "Limit reached" };
     // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
     case Liveness.Running:
     case Liveness.Unset:

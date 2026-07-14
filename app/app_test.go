@@ -13,7 +13,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,9 +130,8 @@ func TestConfirmationModalStateTransitions(t *testing.T) {
 
 // TestConfirmationModalKeyHandling tests the actual key handling in confirmation state
 func TestConfirmationModalKeyHandling(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
-	sidebar := ui.NewSidebar(&spin, false, proj)
+	sidebar := ui.NewSidebar(false, proj)
 
 	// Create enough of home struct to test handleKeyPress in confirmation state
 	h := &home{
@@ -253,9 +251,8 @@ func TestConfirmationMessageFormatting(t *testing.T) {
 
 // TestConfirmationFlowSimulation tests the confirmation flow by simulating the state changes
 func TestConfirmationFlowSimulation(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
-	sidebar := ui.NewSidebar(&spin, false, proj)
+	sidebar := ui.NewSidebar(false, proj)
 
 	// Add test instance
 	instance, err := session.NewInstance(session.InstanceOptions{
@@ -464,9 +461,8 @@ func TestMultipleConfirmationsDontInterfere(t *testing.T) {
 // its handler can run (e.g. selectionChanged updating the content pane after a
 // session is killed). Regression test for #259.
 func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
-	sidebar := ui.NewSidebar(&spin, false, proj)
+	sidebar := ui.NewSidebar(false, proj)
 
 	h := &home{
 		ctx:       context.Background(),

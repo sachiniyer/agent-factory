@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
@@ -14,6 +13,12 @@ import (
 )
 
 const readyIcon = "● "
+
+// blankIcon fills the status cell for a working/busy row, which shows no status
+// glyph (#1765: only a waiting/Ready session gets the green dot). Its two cells
+// match the width every status glyph occupies (glyph + trailing pad space) so a
+// dot-less row keeps the title/branch columns aligned with its neighbors.
+const blankIcon = "  "
 
 // Theme is the subset of the TUI palette the tree renderer needs. It is
 // supplied by ui.ApplyTheme so this subpackage does not import ui.
@@ -201,16 +206,15 @@ func ApplyTheme(t Theme) {
 // InstanceRenderer renders the tree's rows: session.Instance rows (absorbed
 // from ui/list.go) and their tab child rows.
 type InstanceRenderer struct {
-	spinner *spinner.Model
 	// width is the effective content width — the caller passes the sidebar's
 	// usable column (its rect minus row padding), keeping the layout math in
 	// one place outside this package.
 	width int
 }
 
-// NewInstanceRenderer creates a renderer sharing the app-wide spinner.
-func NewInstanceRenderer(spin *spinner.Model) *InstanceRenderer {
-	return &InstanceRenderer{spinner: spin}
+// NewInstanceRenderer creates a renderer.
+func NewInstanceRenderer() *InstanceRenderer {
+	return &InstanceRenderer{}
 }
 
 // SetWidth sets the effective content width rows render into.
@@ -269,21 +273,23 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		descS = listDescStyle
 	}
 
-	// Status dot / spinner. Read the two axes directly (#1195): a row with any
-	// in-flight op (create/kill/archive) keeps the spinner ("busy"); otherwise
-	// the daemon-owned liveness picks the dot. The liveness switch is TOTAL — every
-	// value is rendered explicitly, no silent default — so adding a Liveness value
-	// (LimitReached landed this way, #1146) forces a deliberate choice here.
+	// Status glyph. Read the two axes directly (#1195): a row with any in-flight
+	// op (create/kill/archive) is a working/busy state and shows NO status glyph
+	// (#1765); otherwise the daemon-owned liveness picks the glyph. The liveness
+	// switch is TOTAL — every value is rendered explicitly, no silent default — so
+	// adding a Liveness value (LimitReached landed this way, #1146) forces a
+	// deliberate choice here. Only a waiting/Ready session gets a (green) dot;
+	// every working/busy state renders blankIcon so the columns stay aligned.
 	liveness := i.GetLiveness()
 	op := i.GetInFlightOp()
 	var join string
 	switch {
 	case op != session.OpNone:
-		join = fmt.Sprintf("%s ", r.spinner.View())
+		join = blankIcon
 	default:
 		switch liveness {
 		case session.LiveRunning:
-			join = fmt.Sprintf("%s ", r.spinner.View())
+			join = blankIcon
 		case session.LiveReady:
 			join = readyStyle.Render(readyIcon)
 		case session.LiveDead:
@@ -295,9 +301,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		case session.LiveLimitReached:
 			join = limitStyle.Render(limitIcon)
 		case session.LivenessUnset:
-			// Serialization sentinel, never a live in-memory value; render like
-			// Running so a stray zero never blanks the dot.
-			join = fmt.Sprintf("%s ", r.spinner.View())
+			// Serialization sentinel, never a live in-memory value; treated as
+			// working — no status glyph.
+			join = blankIcon
 		}
 	}
 
@@ -306,8 +312,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if i.Capabilities().Workspace == session.WorkspaceRemote {
 		titleText = "[remote] " + titleText
 	}
-	// A deleting row keeps spinning but is explicitly marked and dimmed so it
-	// reads as "going away", not "busy working" (#844).
+	// A deleting row shows no status glyph (like any working row) but is
+	// explicitly marked and dimmed so it reads as "going away", not "busy
+	// working" (#844).
 	// A lost row is explicitly marked so "tmux vanished under it, no kill on
 	// record" (#1108) is readable without decoding the amber dot; the title
 	// keeps full contrast — unlike deleting/dead treatments, the session is

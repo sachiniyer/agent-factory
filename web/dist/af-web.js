@@ -6679,14 +6679,16 @@ var DEAD_GLYPH = "\u25CB";
 var LOST_GLYPH = "\u25CC";
 var ARCHIVED_GLYPH = "\u25A7";
 var LIMIT_GLYPH = "\u25C6";
-var WORKING_GLYPH = "\u25CF";
-var WORKING = { glyph: WORKING_GLYPH, kind: "working", spinning: true, label: "Working" };
+var WORKING = { glyph: "", kind: null, label: "Working" };
 function rowStatus(s) {
   const op = s.in_flight_op ?? InFlightOp.None;
   if (op !== InFlightOp.None) {
     return WORKING;
   }
   return dotForLiveness(livenessOf(s));
+}
+function isWorking(s) {
+  return rowStatus(s).kind === null;
 }
 function livenessOf(s) {
   const lv = s.liveness ?? Liveness.Unset;
@@ -6711,15 +6713,15 @@ function livenessOf(s) {
 function dotForLiveness(lv) {
   switch (lv) {
     case Liveness.Ready:
-      return { glyph: READY_GLYPH, kind: "ready", spinning: false, label: "Ready" };
+      return { glyph: READY_GLYPH, kind: "ready", label: "Ready" };
     case Liveness.Lost:
-      return { glyph: LOST_GLYPH, kind: "lost", spinning: false, label: "Lost" };
+      return { glyph: LOST_GLYPH, kind: "lost", label: "Lost" };
     case Liveness.Dead:
-      return { glyph: DEAD_GLYPH, kind: "dead", spinning: false, label: "Dead" };
+      return { glyph: DEAD_GLYPH, kind: "dead", label: "Dead" };
     case Liveness.Archived:
-      return { glyph: ARCHIVED_GLYPH, kind: "archived", spinning: false, label: "Archived" };
+      return { glyph: ARCHIVED_GLYPH, kind: "archived", label: "Archived" };
     case Liveness.LimitReached:
-      return { glyph: LIMIT_GLYPH, kind: "limit", spinning: false, label: "Limit reached" };
+      return { glyph: LIMIT_GLYPH, kind: "limit", label: "Limit reached" };
     // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
     case Liveness.Running:
     case Liveness.Unset:
@@ -6821,7 +6823,7 @@ function projectSummaries(sessions, tasks) {
   return [...roots].sort().map((root2) => {
     const rows = byRoot.get(root2) ?? [];
     const live = rows.filter((s) => !isArchived(s));
-    const working = live.filter((s) => rowStatus(s).spinning).length;
+    const working = live.filter((s) => isWorking(s)).length;
     return {
       root: root2,
       name: projectName(root2),
@@ -9020,12 +9022,6 @@ function tabButton(tab, index, active, shown, canManage, tabIds, actions2) {
 }
 function sessionRow(s, selected, actions2) {
   const status = rowStatus(s);
-  const dot = h2(
-    "span",
-    { class: `af-dot af-dot-${status.kind}${status.spinning ? " af-dot-spin" : ""}` },
-    status.glyph
-  );
-  dot.setAttribute("aria-hidden", "true");
   const title = h2("div", { class: "af-row-title" }, rowTitle(s));
   const branch = h2(
     "div",
@@ -9034,8 +9030,15 @@ function sessionRow(s, selected, actions2) {
     " ",
     s.branch || "\u2014"
   );
+  const main = h2("div", { class: "af-row-main" }, title, branch);
   const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}`;
-  const row = h2("li", { class: cls }, dot, h2("div", { class: "af-row-main" }, title, branch));
+  const row = h2("li", { class: cls });
+  if (status.kind) {
+    const dot = h2("span", { class: `af-dot af-dot-${status.kind}` }, status.glyph);
+    dot.setAttribute("aria-hidden", "true");
+    row.append(dot);
+  }
+  row.append(main);
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} \u2014 ${status.label}`);

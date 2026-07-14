@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sachiniyer/agent-factory/task"
@@ -148,9 +147,8 @@ func requireExactRect(t *testing.T, out string, r layout.Rect, name string) {
 // The content window is unbound (nil pane): the rect/clamp contract under test
 // is binding-independent.
 func newTestWorkspace() (*Sidebar, *TabbedWindow, *AutomationsPane, *StatusBar) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	proj := store.NewProjection()
-	sidebar := NewSidebar(&spin, false, proj)
+	sidebar := NewSidebar(false, proj)
 	paneA := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	automations := NewAutomationsPane(proj)
 	statusBar := NewStatusBar(NewMenu(), NewErrBox())

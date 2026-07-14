@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,8 +20,7 @@ import (
 // Since #1100 the slot list mirrors the real tabs — there is no padding.
 func newTreeSidebar(t *testing.T, n int) *Sidebar {
 	t.Helper()
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false, store.NewProjection())
+	s := NewSidebar(false, store.NewProjection())
 	dir := t.TempDir()
 	for i := 0; i < n; i++ {
 		inst, err := session.NewInstance(session.InstanceOptions{
@@ -82,8 +80,7 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 // one child row — no phantom "Terminal" row for a tab that doesn't exist —
 // and the on-demand shell tab (`t`) grows it to two.
 func TestSidebarTreeFreshInstanceSingleTabRow(t *testing.T) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false, store.NewProjection())
+	s := NewSidebar(false, store.NewProjection())
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "fresh", Path: t.TempDir(), Program: "test",
 	})
@@ -389,8 +386,7 @@ func TestSidebarTreeWindowingWithTabRows(t *testing.T) {
 func TestSidebarUltraNarrowNoOverflow(t *testing.T) {
 	for _, autoyes := range []bool{false, true} {
 		for _, w := range []int{8, 9, 10, 11, 12} {
-			spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-			s := NewSidebar(&spin, autoyes, store.NewProjection())
+			s := NewSidebar(autoyes, store.NewProjection())
 			dir := t.TempDir()
 			for i := 0; i < 12; i++ {
 				inst, err := session.NewInstance(session.InstanceOptions{
@@ -416,8 +412,7 @@ func TestSidebarUltraNarrowNoOverflow(t *testing.T) {
 // instance's children render — collapse-by-default bounds the row count), full
 // String() per iteration at a typical sidebar allocation.
 func BenchmarkSidebarTreeRender(b *testing.B) {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	s := NewSidebar(&spin, false, store.NewProjection())
+	s := NewSidebar(false, store.NewProjection())
 	dir := b.TempDir()
 	for i := 0; i < 50; i++ {
 		inst, err := session.NewInstance(session.InstanceOptions{

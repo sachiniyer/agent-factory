@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { isArchived, rowStatus, rowTitle } from "./status.js";
+import { type DotKind, isArchived, isWorking, rowStatus, rowTitle } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
 function sess(over: Partial<SessionData> = {}): SessionData {
@@ -15,14 +15,16 @@ function sess(over: Partial<SessionData> = {}): SessionData {
 }
 
 test("liveness → dot kind mirrors render.go's TOTAL switch", () => {
-  const cases: Array<[number, string, string]> = [
+  // Working (LiveRunning / the Unset sentinel) shows NO dot (#1765): null kind, empty
+  // glyph. Ready is the only positive/green dot; the error states keep static glyphs.
+  const cases: Array<[number, DotKind | null, string]> = [
     [Liveness.Ready, "ready", "●"],
     [Liveness.Lost, "lost", "◌"],
     [Liveness.Dead, "dead", "○"],
     [Liveness.Archived, "archived", "▧"],
     [Liveness.LimitReached, "limit", "◆"],
-    [Liveness.Running, "working", "●"],
-    [Liveness.Unset, "working", "●"], // stray zero renders like Running (render.go:297)
+    [Liveness.Running, null, ""],
+    [Liveness.Unset, null, ""], // stray zero renders like Running (render.go:297)
   ];
   for (const [lv, kind, glyph] of cases) {
     const st = rowStatus(sess({ liveness: lv }));
@@ -31,18 +33,24 @@ test("liveness → dot kind mirrors render.go's TOTAL switch", () => {
   }
 });
 
-test("only Ready/Running/Unset spin like the TUI (Ready is a settled dot)", () => {
-  assert.equal(rowStatus(sess({ liveness: Liveness.Running })).spinning, true);
-  assert.equal(rowStatus(sess({ liveness: Liveness.Ready })).spinning, false);
-  assert.equal(rowStatus(sess({ liveness: Liveness.Lost })).spinning, false);
+test("a working row has no dot; Ready/error states do (#1765)", () => {
+  const running = rowStatus(sess({ liveness: Liveness.Running }));
+  assert.equal(running.kind, null, "Running is working → no dot");
+  assert.equal(running.glyph, "", "a working row draws no glyph");
+  assert.equal(isWorking(sess({ liveness: Liveness.Running })), true);
+  assert.equal(isWorking(sess({ liveness: Liveness.Unset })), true);
+  assert.equal(isWorking(sess({ liveness: Liveness.Ready })), false);
+  assert.equal(isWorking(sess({ liveness: Liveness.Lost })), false);
+  assert.notEqual(rowStatus(sess({ liveness: Liveness.Ready })).kind, null, "Ready keeps its dot");
 });
 
-test("any in-flight op overlays the liveness and wins the working dot", () => {
+test("any in-flight op overlays the liveness and reads as working (no dot)", () => {
   for (const op of [InFlightOp.Creating, InFlightOp.Killing, InFlightOp.Archiving, InFlightOp.Restoring]) {
     // Even a Ready liveness reads as working while an op is in flight (render.go:280).
     const st = rowStatus(sess({ liveness: Liveness.Ready, in_flight_op: op }));
-    assert.equal(st.kind, "working", `op ${op} → working`);
-    assert.equal(st.spinning, true);
+    assert.equal(st.kind, null, `op ${op} → working (no dot)`);
+    assert.equal(st.glyph, "", `op ${op} draws no glyph`);
+    assert.equal(isWorking(sess({ liveness: Liveness.Ready, in_flight_op: op })), true);
   }
 });
 
@@ -51,7 +59,7 @@ test("liveness absent falls back to the legacy status int", () => {
   assert.equal(rowStatus(sess({ status: Status.Lost })).kind, "lost");
   assert.equal(rowStatus(sess({ status: Status.Dead })).kind, "dead");
   assert.equal(rowStatus(sess({ status: Status.Archived })).kind, "archived");
-  assert.equal(rowStatus(sess({ status: Status.Running })).kind, "working");
+  assert.equal(rowStatus(sess({ status: Status.Running })).kind, null);
 });
 
 test("title prefixes match render.go precedence", () => {
