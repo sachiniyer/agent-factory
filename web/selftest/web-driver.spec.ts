@@ -680,6 +680,61 @@ test("task-only project (redesign PR2, Fix 1): a repo with a task but no session
   await expect(row(page, SESSION_A)).toBeVisible();
 });
 
+test("task-only project (redesign PR2, follow-on): add-task targets ITS repo, and a reload restores it as itself", async () => {
+  // Capture the AddTask request so we can prove it targeted the task-only project's
+  // repo — not a session-derived one, and not blocked by the absence of a session.
+  let addBody: { task?: { project_path?: string } } | null = null;
+  await page.route("**/v1/AddTask", async (route) => {
+    addBody = route.request().postDataJSON();
+    await route.continue();
+  });
+
+  // Select the task-only project.
+  await page.locator(".af-project-switch").click();
+  await projectItem(page, "mock-repo-3").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-3");
+
+  // Fix 1: add a task from the Tasks view. The project picker DEFAULTS to this
+  // (task-only) project, so submitting creates the task on mock-repo-3's repo, and the
+  // form is not blocked despite the project having no session.
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const added = `mock3-added-${Date.now().toString(36)}`;
+  await page.locator(".af-tasks-add").click();
+  const modal = page.locator(".af-modal-card");
+  await expect(modal).toBeVisible();
+  await modal.locator('input[aria-label="Task name"]').fill(added);
+  await modal.locator('input[aria-label="Cron expression"]').fill("*/5 * * * *");
+  await modal.locator('textarea[aria-label="Prompt"]').fill("echo mock3-added");
+  await modal.locator("button.af-primary").click();
+
+  await expect(page.locator(".af-tasks .af-task-row", { hasText: added })).toBeVisible({ timeout: 30_000 });
+  await expect(modal).toBeHidden();
+  // The task was created on the SELECTED task-only project's repo (mock-repo-3), not
+  // another project's (mock-repo / mock-repo-2).
+  expect(addBody?.task?.project_path, "AddTask must target the selected task-only project's repo").toContain(
+    "mock-repo-3",
+  );
+  expect(addBody?.task?.project_path).not.toContain("mock-repo-2");
+  await page.unroute("**/v1/AddTask");
+
+  // Fix 2: reload. The persisted task-only selection restores AS ITSELF (a real
+  // task-derived project), not a temporary session-backed fallback — and the Tasks
+  // view scopes to it (its tasks show, another project's seeded task does not).
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-3");
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  await expect(page.locator(".af-tasks .af-task-row", { hasText: TASK3_NAME })).toHaveCount(1);
+  await expect(page.locator(".af-tasks .af-task-row", { hasText: SEEDED_TASK })).toHaveCount(0);
+
+  // Return to the first project + the sessions view for the following rail-driven flows.
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+  await page.locator(".af-project-switch").click();
+  await projectItem(page, "mock-repo").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
+  await expect(row(page, SESSION_A)).toBeVisible();
+});
+
 test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round-trips", async () => {
   // Capture the task-mutation request bodies so we can prove every mutation carries
   // the STABLE task id — the add mints it client-side, and trigger/remove must send

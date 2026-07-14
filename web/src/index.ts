@@ -36,7 +36,7 @@ import {
 import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
-import { loadProjectChoice, persistProjectChoice, reconcileProject, scopeToProject } from "./project.js";
+import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
 import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
 import { Store } from "./store.js";
@@ -45,7 +45,6 @@ import { addTaskModal, type AddTaskInput, buildTask } from "./tasks.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
-  deriveProjects,
   orderedSessions,
   renderLogin,
   sessionTabs,
@@ -239,12 +238,21 @@ async function connect(candidate: string): Promise<void> {
   if (candidate !== "") {
     storeToken(candidate);
   }
-  // Scope to a project on connect (redesign PR2): resume the persisted choice if it
-  // still exists, else the most-recently-active project's default. Tasks aren't
-  // fetched yet (refreshTasks runs just below), so a task-only project resolves once
-  // its tasks land — the reconcile in refreshTasks re-scopes then. Persisted only, so
-  // a reload lands on the same project the user left.
-  const selectedProject = reconcileProject(sessions, [], loadProjectChoice(), null);
+  // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
+  // follow-on Fix 2): the persisted selection must reconcile against the FULL project
+  // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
+  // not as a temporary session-backed fallback that would then stick (reconcile keeps
+  // a valid current selection). A transport failure degrades to no tasks (the events
+  // plane / a view switch refetches); the scope then falls back until they load.
+  let tasks: TaskData[] = [];
+  try {
+    tasks = await listTasks(candidate);
+  } catch {
+    tasks = [];
+  }
+  // Scope to a project on connect: resume the persisted choice if it is still a real
+  // project (session- OR task-derived), else the most-recently-active default.
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null);
   store.set({
     phase: "app",
     view: "sessions",
@@ -258,13 +266,9 @@ async function connect(candidate: string): Promise<void> {
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
-    tasks: [],
+    tasks,
   });
   startStream(candidate);
-  // Seed the tasks view alongside the rail: one ListTasks fetch so the tasks pane is
-  // populated the moment the user switches to it. Task deltas then arrive via the
-  // task.* events plane (onEvent), which triggers a debounced refetch.
-  refreshTasks();
 }
 
 /** Forgets the token, tears down the push stream + terminal, and returns to login. */
@@ -403,7 +407,7 @@ function openModal(m: ModalHandle): void {
  *  submit it creates the session via the daemon; the created row arrives via the
  *  events stream. Errors (e.g. a bad repo) surface in the modal for a retry. */
 function newSession(): void {
-  const projects = deriveProjects(store.get().sessions);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       onSubmit: (values: CreateSessionInput) => {
@@ -693,7 +697,11 @@ function requestTaskResync(): void {
  *  the created task also arrives via a task.created event, and a refetch reconciles.
  *  Errors (a bad cron expression, a duplicate) surface in the modal for a retry. */
 function openAddTask(): void {
-  const projects = deriveProjects(store.get().sessions);
+  // The picker's projects come from sessions AND tasks (redesign PR2, Greptile
+  // follow-on Fix 1), so a TASK-ONLY project is selectable and the default lands on
+  // the currently-scoped project — adding a task targets ITS repo, and is never
+  // blocked by the absence of a session.
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       onSubmit: (input: AddTaskInput) => {

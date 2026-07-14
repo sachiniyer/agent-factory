@@ -189,21 +189,6 @@ function tabLabel(tab: { name: string; kind: number }): string {
   return tab.name || "Tab";
 }
 
-/** The distinct repo roots the current sessions belong to — the new-session
- *  modal's project picker, derived from the live projection exactly as the TUI's
- *  zero-config picker is (app/switch_project.go buildProjectListFrom). Sorted for a
- *  stable menu. */
-export function deriveProjects(sessions: SessionData[]): string[] {
-  const roots = new Set<string>();
-  for (const s of sessions) {
-    const root = s.worktree?.repo_path;
-    if (root) {
-      roots.add(root);
-    }
-  }
-  return [...roots].sort();
-}
-
 /** The appbar label for a top-level view. */
 function viewLabel(view: View): string {
   switch (view) {

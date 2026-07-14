@@ -6840,6 +6840,21 @@ function projectMeta(p) {
   const base = `${p.liveCount} session${p.liveCount === 1 ? "" : "s"}`;
   return p.workingCount > 0 ? `${base} \xB7 ${p.workingCount} working` : base;
 }
+function pickerProjects(sessions, tasks) {
+  const roots = /* @__PURE__ */ new Set();
+  for (const s of sessions) {
+    const root2 = s.worktree?.repo_path;
+    if (root2) {
+      roots.add(root2);
+    }
+  }
+  for (const t of tasks) {
+    if (t.project_path) {
+      roots.add(t.project_path);
+    }
+  }
+  return [...roots].sort();
+}
 function scopeToProject(sessions, root2) {
   if (!root2) {
     return [];
@@ -8424,16 +8439,6 @@ function tabLabel(tab) {
   }
   return tab.name || "Tab";
 }
-function deriveProjects(sessions) {
-  const roots = /* @__PURE__ */ new Set();
-  for (const s of sessions) {
-    const root2 = s.worktree?.repo_path;
-    if (root2) {
-      roots.add(root2);
-    }
-  }
-  return [...roots].sort();
-}
 function viewLabel(view) {
   switch (view) {
     case "sessions":
@@ -9156,7 +9161,13 @@ async function connect(candidate) {
   if (candidate !== "") {
     storeToken(candidate);
   }
-  const selectedProject = reconcileProject(sessions, [], loadProjectChoice(), null);
+  let tasks = [];
+  try {
+    tasks = await listTasks(candidate);
+  } catch {
+    tasks = [];
+  }
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null);
   store.set({
     phase: "app",
     view: "sessions",
@@ -9170,10 +9181,9 @@ async function connect(candidate) {
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
-    tasks: []
+    tasks
   });
   startStream(candidate);
-  refreshTasks();
 }
 function disconnect() {
   stopStream();
@@ -9256,7 +9266,7 @@ function openModal(m) {
   modalHost.replaceChildren(m.el);
 }
 function newSession() {
-  const projects = deriveProjects(store.get().sessions);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       onSubmit: (values) => {
@@ -9443,7 +9453,7 @@ function requestTaskResync() {
   }, 150);
 }
 function openAddTask() {
-  const projects = deriveProjects(store.get().sessions);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       onSubmit: (input) => {

@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 
 import {
   defaultProject,
+  pickerProjects,
   projectMeta,
   projectName,
   projectSummaries,
@@ -93,6 +94,19 @@ test("projectMeta: the cross-project glance pluralizes and shows the working cou
     projectMeta(projectSummaries([working("a", "/r"), ready("b", "/r")], [])[0]!),
     "2 sessions · 1 working",
   );
+});
+
+test("pickerProjects: the UNION of session repos and task repos, sorted (a task-only repo is targetable)", () => {
+  const roots = pickerProjects(
+    [ready("a", "/repos/sess"), archived("b", "/repos/arch")],
+    [task("t1", "/repos/tasked"), task("t2", "/repos/sess")],
+  );
+  assert.deepEqual(
+    roots,
+    ["/repos/arch", "/repos/sess", "/repos/tasked"],
+    "includes the task-only repo AND an archived-only session repo, deduped + sorted",
+  );
+  assert.deepEqual(pickerProjects([], []), [], "nothing to target with no sessions and no tasks");
 });
 
 test("scopeToProject: only the selected repo's sessions (live + archived); null → none", () => {

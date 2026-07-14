@@ -134,6 +134,28 @@ export function projectFullLabel(root: string): string {
   return projectLabel(root);
 }
 
+/** The repo roots offered by the new-session / add-task pickers: the UNION of every
+ *  repo af has a SESSION in AND every repo it has a TASK in, sorted. Including task
+ *  repos is what lets a TASK-ONLY project be the target of a new task (or session) —
+ *  a session-only picker would omit it, so adding a task while a task-only project is
+ *  selected would silently target another repo, or be blocked when there is no session
+ *  repo at all (redesign PR2, Greptile follow-on Fix 1). */
+export function pickerProjects(sessions: SessionData[], tasks: TaskData[]): string[] {
+  const roots = new Set<string>();
+  for (const s of sessions) {
+    const root = s.worktree?.repo_path;
+    if (root) {
+      roots.add(root);
+    }
+  }
+  for (const t of tasks) {
+    if (t.project_path) {
+      roots.add(t.project_path);
+    }
+  }
+  return [...roots].sort();
+}
+
 /** The sessions attributed to `root` (live + archived), the rail's scoped list. A
  *  null root (no project selected — none exist) scopes to nothing. This is the ONE
  *  place the all-projects rail behavior is replaced: the rail renders this, never the
