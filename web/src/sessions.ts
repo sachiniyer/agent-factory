@@ -84,6 +84,11 @@ export function applyEvent(list: SessionData[], ev: WireEvent): ApplyResult {
     case "session.archived":
     case "session.restored":
       return { sessions: list, needsResync: true };
+    case "projects.changed":
+      // A project was deleted as a whole (#1735): the per-session archived events
+      // already flip each row, but resync so the derived projects view (and any
+      // dropped root_agents opt-in) settle against authoritative state.
+      return { sessions: list, needsResync: true };
     default:
       return { sessions: list, needsResync: false };
   }

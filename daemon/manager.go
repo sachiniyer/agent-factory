@@ -46,6 +46,15 @@ type Manager struct {
 	// rootKillHealDelay, then self-heals a still-configured root (#1223): config
 	// (root_agents), not a runtime kill, decides whether an always-on root runs.
 	rootKilledAt map[string]time.Time
+	// deletedRootRepos records repos (by repo ID) whose project was deleted at
+	// runtime (#1735), so the ensure loop STOPS re-creating their always-on root
+	// agent even though m.cfg is immutable in memory after start. DeleteProject
+	// also removes the repo from root_agents ON DISK, so a daemon restart drops it
+	// for good; this in-memory set is what suppresses the respawn for the rest of
+	// the running daemon's life (matching the existing "root_agents changes take
+	// effect on the next daemon start" contract — a re-added project's root
+	// materializes on restart, not mid-run). Guarded by m.mu.
+	deletedRootRepos map[string]struct{}
 	// killsInFlight marks sessions (by daemon instance key) whose KillSession
 	// teardown is currently running, so the status poll's finish-kill pass for
 	// tombstoned records (#1108) never runs a second concurrent teardown of
@@ -128,6 +137,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		targetLocks:         make(map[string]*sync.Mutex),
 		rootEnsureStates:    make(map[string]*rootEnsureState),
 		rootKilledAt:        make(map[string]time.Time),
+		deletedRootRepos:    make(map[string]struct{}),
 		killsInFlight:       make(map[string]struct{}),
 		lostRestoreStates:   make(map[string]*lostRestoreState),
 		limitResumeStates:   make(map[string]*limitResumeState),

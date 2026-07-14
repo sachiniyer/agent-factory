@@ -90,6 +90,15 @@ const (
 	EventSessionKilled   EventType = "session.killed"
 	EventSessionArchived EventType = "session.archived"
 	EventSessionRestored EventType = "session.restored"
+	// EventProjectsChanged signals that the set of "active projects" (repos with
+	// live sessions or a root_agents opt-in) changed as a whole — e.g. a
+	// DeleteProject archived a repo's sessions and dropped its opt-in (#1735). It
+	// carries no payload: the project list is a derivation over the session
+	// projection, so a client re-derives it from a fresh Snapshot rather than
+	// patching a single row. Distinct from the per-session archived events the
+	// same delete also emits (those update the rail); this one is the signal a
+	// client keying a projects view resyncs on.
+	EventProjectsChanged EventType = "projects.changed"
 	EventTaskCreated     EventType = "task.created"
 	EventTaskUpdated     EventType = "task.updated"
 	EventTaskRemoved     EventType = "task.removed"

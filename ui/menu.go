@@ -100,7 +100,7 @@ var automationsMenuOptions = []keys.KeyName{
 // verbs here (as the pre-#1620 fall-through footer did) would advertise keys that
 // do nothing.
 var projectsMenuOptions = []keys.KeyName{
-	keys.KeySwitchProjectRow, keys.KeySearch, keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
+	keys.KeySwitchProjectRow, keys.KeyDeleteProject, keys.KeySearch, keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
 }
 
 // interactiveMenuOptions is the whole bar while interactive (#1089, RFC

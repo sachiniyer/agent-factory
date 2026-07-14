@@ -391,3 +391,14 @@ func livenessFromData(data InstanceData) Liveness {
 	}
 	return lv
 }
+
+// IsArchivedData reports whether a serialized session record is archived,
+// resolving its effective liveness with the same rollforward livenessFromData
+// applies (so a pre-#1195 record with only a legacy status still classifies
+// correctly). It is the []InstanceData analogue of Instance.ShownArchived for
+// callers that iterate the daemon Snapshot rather than live instances — e.g. the
+// "active projects" derivation, which counts only non-archived sessions so a
+// project whose sessions are all archived drops out of the active list (#1735).
+func IsArchivedData(data InstanceData) bool {
+	return livenessFromData(data) == LiveArchived
+}

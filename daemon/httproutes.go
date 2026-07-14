@@ -102,6 +102,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/DeleteProject",
+		Description:   "Delete a project (a repo's session grouping): archive its live sessions (restorable), tear down in-place ones, and drop its root_agents opt-in — the real git repo is untouched.",
+		RequestFields: jsonFields(reflect.TypeOf(DeleteProjectRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DeleteProject) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/DeliverPrompt",
 		Description:   "Deliver a prompt to a session, auto-creating it if it does not exist yet.",
 		RequestFields: jsonFields(reflect.TypeOf(DeliverPromptRequest{})),

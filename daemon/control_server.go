@@ -358,6 +358,40 @@ func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptRespon
 	return nil
 }
 
+// DeleteProject deletes a project (a repo grouping of sessions, #1735):
+// archive-then-remove, reversible. The manager archives every live session
+// (restorable), tears down in-place sessions (repo untouched), and drops the
+// repo's root_agents opt-in. It publishes one archived/killed event per affected
+// session — so every client's rail moves the sessions exactly as a per-session
+// archive/kill would — plus a projects-changed signal for clients keying a
+// projects view. On a partial failure it still publishes what DID happen before
+// surfacing the error, so the rail never lags reality.
+func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProjectResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	result, err := s.manager.DeleteProject(req)
+	for _, a := range result.Archived {
+		s.manager.publishEvent(agentproto.EventSessionArchived, session.InstanceData{ID: a.ID, Title: a.Title})
+	}
+	for _, k := range result.Killed {
+		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: k.ID, Title: k.Title})
+	}
+	if len(result.Archived) > 0 || len(result.Killed) > 0 {
+		s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
+	}
+	if err != nil {
+		return err
+	}
+	resp.OK = true
+	resp.ArchivedCount = len(result.Archived)
+	resp.KilledCount = len(result.Killed)
+	return nil
+}
+
 // validateRPCRepoID enforces the RepoID shape for RPC requests that allow an
 // empty value to mean "search all repos". A non-empty RepoID must satisfy
 // config.ValidateRepoID so it cannot escape the per-repo file scope through

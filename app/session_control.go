@@ -131,6 +131,20 @@ var restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
 	return path, err
 }
 
+// deleteProjectThroughDaemon routes the TUI's delete-project verb (#1735)
+// through the daemon (the single writer): it archives the repo's live sessions
+// (restorable), tears down any in-place ones, and drops its root_agents opt-in.
+// A package var so the app test suite can stub it without dialing a real daemon.
+var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeleteProjectResponse, error) {
+	var resp daemon.DeleteProjectResponse
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		resp, e = c.DeleteProject(daemon.DeleteProjectRequest{RepoPath: repoRoot, RepoID: repoID})
+		return e
+	})
+	return resp, err
+}
+
 // resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)
 // verb (#1146) through the daemon — the single writer (#960) — which re-spawns
 // the agent if it exited, re-delivers the pending prompt, and clears the limit

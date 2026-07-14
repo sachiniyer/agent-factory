@@ -265,6 +265,37 @@ export function confirmModal(
   return handle;
 }
 
+/** A reversible delete-project confirm modal (#1735): a normal confirm (NOT a
+ *  typed-name gate) because the action is reversible — the project's live
+ *  sessions are archived (restorable) and its real git repo is untouched. */
+export function confirmDeleteProjectModal(
+  opts: { projectLabel: string; sessionCount: number; onConfirm: () => void; onCancel: () => void },
+): ModalHandle {
+  const word = opts.sessionCount === 1 ? "session" : "sessions";
+  const { handle, body } = modalChrome({
+    title: `Delete project ${opts.projectLabel}?`,
+    confirmLabel: "Delete project",
+    confirmClass: "af-danger",
+    onCancel: opts.onCancel,
+  });
+
+  body.append(
+    h(
+      "p",
+      { class: "af-modal-text" },
+      `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched — restore any of them to bring the project back.`,
+    ),
+  );
+
+  const card = handle.el.firstElementChild as HTMLElement;
+  asForm(card, () => {
+    handle.setError(null);
+    opts.onConfirm();
+  });
+
+  return handle;
+}
+
 /** A labeled field row: a caption above its control. */
 export function field(label: string, control: HTMLElement): HTMLElement {
   return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
