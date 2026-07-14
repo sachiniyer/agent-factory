@@ -24,12 +24,20 @@ cd /work
 
 HOME_DIR=/work/afhome
 MOCK=/work/mock-repo
+# A SECOND mock repo (redesign PR2): the single-project IA scopes the rail to one
+# project, so the harness needs a second project to prove sessions from another
+# project are hidden and that switching projects swaps the rail. Its one session
+# (SESSION_C) is created BEFORE the first repo's sessions so the most-recently-active
+# default still lands on the first repo (probe-a/b/web), keeping the A/B-driven flows
+# on the default project.
+MOCK2=/work/mock-repo-2
 BIN=/work/bin/af
 LISTEN=127.0.0.1:8899
 BASE_URL="https://${LISTEN}"
 READY_MARKER=AF_SELFTEST_READY
 SESSION_A=probe-a
 SESSION_B=probe-b
+SESSION_C=probe-c
 SESSION_WEB=probe-web
 SEEDED_TASK=probe-task
 # A throwaway loopback HTTP server the web-tab test points a local web tab at, so
@@ -72,17 +80,19 @@ cat >"$HOME_DIR/config.json" <<EOF
 }
 EOF
 
-# --- mock project repo (never a real repo) ----------------------------------
-if [ ! -d "$MOCK" ]; then
-    mkdir -p "$MOCK"
-    (
-        cd "$MOCK"
-        git init -q -b master
-        printf '# mock\nA throwaway repo for the web-driver-selftest.\n' >README.md
-        git add -A
-        git commit -qm "initial project"
-    )
-fi
+# --- mock project repos (never real repos) ----------------------------------
+for repo in "$MOCK" "$MOCK2"; do
+    if [ ! -d "$repo" ]; then
+        mkdir -p "$repo"
+        (
+            cd "$repo"
+            git init -q -b master
+            printf '# mock\nA throwaway repo for the web-driver-selftest.\n' >README.md
+            git add -A
+            git commit -qm "initial project"
+        )
+    fi
+done
 
 # --- start the daemon + wait for the TLS listener ---------------------------
 echo ">>> starting af daemon (listen_addr=$LISTEN) ..."
@@ -95,6 +105,7 @@ cleanup() {
     echo ">>> tearing down (rc=$rc) ..."
     "$BIN" sessions kill "$SESSION_A" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_B" >/dev/null 2>&1 || true
+    "$BIN" sessions kill "$SESSION_C" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_WEB" >/dev/null 2>&1 || true
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
@@ -134,7 +145,13 @@ if [ -z "$TOKEN" ]; then
 fi
 echo ">>> daemon up at $BASE_URL (loopback ⇒ tokenless browser; token ${#TOKEN} bytes exists for network peers)"
 
-# --- seed two sessions in the mock repo -------------------------------------
+# --- seed a session in the SECOND repo (redesign PR2) -----------------------
+# Created first so the most-recently-active default lands on the FIRST repo below.
+# This is the "other project" the scoping tests assert is hidden by default.
+echo ">>> creating session $SESSION_C in the second repo ..."
+"$BIN" sessions create --repo "$MOCK2" --name "$SESSION_C" --program claude >/dev/null
+
+# --- seed two sessions in the (default) mock repo ---------------------------
 echo ">>> creating sessions $SESSION_A, $SESSION_B ..."
 "$BIN" sessions create --repo "$MOCK" --name "$SESSION_A" --program claude >/dev/null
 "$BIN" sessions create --repo "$MOCK" --name "$SESSION_B" --program claude >/dev/null
@@ -143,7 +160,7 @@ echo ">>> creating sessions $SESSION_A, $SESSION_B ..."
 # them and the fake agent's marker is on-screen for the attach flow.
 for i in $(seq 1 30); do
     count="$("$BIN" sessions list 2>/dev/null | grep -c '"title"' || true)"
-    if [ "${count:-0}" -ge 2 ]; then
+    if [ "${count:-0}" -ge 3 ]; then
         break
     fi
     sleep 1
@@ -198,6 +215,7 @@ npm ci --no-audit --no-fund
 export AF_WEB_BASE_URL="$BASE_URL"
 export AF_WEB_SESSION_A="$SESSION_A"
 export AF_WEB_SESSION_B="$SESSION_B"
+export AF_WEB_SESSION_C="$SESSION_C"
 export AF_WEB_SESSION_WEB="$SESSION_WEB"
 export AF_WEB_READY_MARKER="$READY_MARKER"
 export AF_WEB_TASK_NAME="$SEEDED_TASK"

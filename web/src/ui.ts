@@ -22,7 +22,7 @@ import type { EventStreamStatus } from "./events.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { VIEWS } from "./nav.js";
 import { TAB_DND_MIME } from "./layout.js";
-import { ProjectsPane } from "./projects.js";
+import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import { compareSessionsForRail, isArchived, rowStatus, rowTitle } from "./status.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
@@ -33,10 +33,16 @@ import type { SessionData, TaskData } from "./types.js";
  *  authed — the live session projection plus the current selection. */
 export interface AppState {
   phase: "login" | "app";
-  /** the top-level view (#1592 Phase 5 PR8): the live sessions rail+terminal, the
-   *  projects (repo grouping) pane, or the tasks (scheduled automations) pane. The
+  /** the top-level view: the live sessions rail+terminal, or the tasks (scheduled
+   *  automations) pane — both SCOPED to the selected project (redesign PR2). The
    *  appbar view tabs and the [ / ] keys switch it; it selects which body shows. */
   view: View;
+  /** the selected project's repo root (redesign PR2), or null when there are no
+   *  projects at all. The whole UI is scoped to it: the rail lists only this
+   *  project's sessions and the tasks view only its tasks. The top-right switcher
+   *  changes it; it is derived client-side by grouping sessions by repo and persisted
+   *  to localStorage so it survives a reload. */
+  selectedProject: string | null;
   /** whether THIS client must present a bearer token, from the /v1/auth-info probe
    *  (#1696). false ⇒ the daemon exempts this peer (loopback, or require_token=false),
    *  so the login view offers a one-click tokenless connect instead of the paste form.
@@ -111,10 +117,14 @@ export interface Actions {
   /** Closes the tab at `index` of the selected session (the `w` key / × button);
    *  the agent tab (index 0) is unclosable. */
   closeTab(index: number): void;
-  /** Switches the top-level view (#1592 Phase 5 PR8): the appbar view tabs and the
-   *  [ / ] keys route here; index.ts flips the store and hands the keyboard back to
-   *  the rail (blurring the terminal) when leaving the sessions view. */
+  /** Switches the top-level view: the appbar view tabs and the [ / ] keys route
+   *  here; index.ts flips the store and hands the keyboard back to the rail (blurring
+   *  the terminal) when leaving the sessions view. */
   switchView(view: View): void;
+  /** Switches the active project (redesign PR2): the top-right switcher menu routes
+   *  here; index.ts scopes the rail + views to `root`, persists it, and drops a
+   *  selection that no longer belongs to the new project. */
+  switchProject(root: string): void;
   /** Opens the add-task modal (#1592 Phase 5 PR8). */
   addTask(): void;
   /** Enables/disables a task via UpdateTask. */
@@ -194,13 +204,11 @@ export function deriveProjects(sessions: SessionData[]): string[] {
   return [...roots].sort();
 }
 
-/** The appbar label for a top-level view (#1592 Phase 5 PR8). */
+/** The appbar label for a top-level view. */
 function viewLabel(view: View): string {
   switch (view) {
     case "sessions":
       return "Sessions";
-    case "projects":
-      return "Projects";
     case "tasks":
       return "Tasks";
   }
@@ -406,10 +414,24 @@ export class AppShell {
   private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
   private lastThemeChoice: ThemeChoice | null = null;
   private readonly sessionsBody: HTMLElement;
-  private readonly projectsPane: ProjectsPane;
   private readonly tasksPane: TasksPane;
   private lastView: View | null = null;
   private lastTasks: TaskData[] | null = null;
+  private lastTasksProject: string | null = null;
+
+  // The top-right project switcher (redesign PR2): a button showing the current
+  // project + a dropdown menu listing every project with its per-project counts, the
+  // single place project context changes. Managed imperatively (open/close, outside-
+  // click dismiss) like the modals — its open state is UI ephemera, not store state.
+  private readonly projectSwitchWrap: HTMLElement;
+  private readonly projectSwitchBtn: HTMLButtonElement;
+  private readonly projectSwitchName: HTMLElement;
+  private readonly projectMenu: HTMLElement;
+  private projectMenuOpen = false;
+  // Change-detection for the switcher label + menu: rebuilt only when the session set
+  // or the selected project changes (the counts + the current-item highlight).
+  private lastProjectSessions: SessionData[] | null = null;
+  private lastSelectedProject: string | null = null;
 
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
@@ -476,11 +498,47 @@ export class AppShell {
       viewNav.append(tab);
     }
 
+    // The project switcher (redesign PR2): a button showing the current project and a
+    // dropdown listing every project with counts. `margin-left:auto` (the wrap) pushes
+    // it — and everything after it — to the right of the segmented view nav.
+    this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "—");
+    const switchGlyph = h("span", { class: "af-project-glyph" }, "▣");
+    switchGlyph.setAttribute("aria-hidden", "true");
+    const switchCaret = h("span", { class: "af-project-caret" }, "▼");
+    switchCaret.setAttribute("aria-hidden", "true");
+    this.projectSwitchBtn = h(
+      "button",
+      { type: "button", class: "af-project-switch" },
+      switchGlyph,
+      this.projectSwitchName,
+      switchCaret,
+    );
+    this.projectSwitchBtn.setAttribute("aria-haspopup", "listbox");
+    this.projectSwitchBtn.setAttribute("aria-expanded", "false");
+    this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
+    this.projectSwitchBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleProjectMenu();
+    });
+    this.projectMenu = h("div", { class: "af-project-menu" });
+    this.projectMenu.setAttribute("role", "listbox");
+    this.projectMenu.setAttribute("aria-label", "Switch project");
+    this.projectMenu.hidden = true;
+    this.projectSwitchWrap = h("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
+    // Dismiss the menu on any click outside the switcher (a click on the button or a
+    // menu item is handled by their own listeners, which stopPropagation / close).
+    document.addEventListener("click", (e) => {
+      if (this.projectMenuOpen && !this.projectSwitchWrap.contains(e.target as Node)) {
+        this.closeProjectMenu();
+      }
+    });
+
     const header = h(
       "header",
       { class: "af-appbar" },
       h("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
+      this.projectSwitchWrap,
       live,
       themeToggle,
       disconnect,
@@ -504,20 +562,16 @@ export class AppShell {
     this.main = h("section", { class: "af-main" });
     this.sessionsBody = h("div", { class: "af-body" }, rail, this.main);
 
-    // The projects + tasks views are peers of the sessions body inside one viewport;
-    // update() shows exactly one and hides the others by `state.view`. They own their
-    // own subtrees so a task.* / rail event patches only the active pane.
-    this.projectsPane = new ProjectsPane(
-      (id: string) => this.actions.open(id),
-      (root: string, label: string, count: number) => this.actions.deleteProject(root, label, count),
-    );
+    // The tasks view is a peer of the sessions body inside one viewport; update()
+    // shows exactly one and hides the other by `state.view`. It owns its own subtree
+    // (scoped to the selected project) so a task.* event patches only that pane.
     this.tasksPane = new TasksPane({
       add: () => this.actions.addTask(),
       toggle: (task: TaskData) => this.actions.toggleTask(task),
       trigger: (task: TaskData) => this.actions.triggerTask(task),
       remove: (task: TaskData) => this.actions.removeTask(task),
     });
-    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.projectsPane.el, this.tasksPane.el);
+    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el);
 
     // A transient toast for failed tab ops: a fixed-position banner that fades in
     // only while `tabError` is set (index.ts clears it on a timer / selection change).
@@ -554,14 +608,13 @@ export class AppShell {
         state.live === "open" ? "Live" : state.live === "connecting" ? "Connecting…" : "Reconnecting…";
     }
 
-    // View switching (#1592 Phase 5 PR8): show the active view's body, hide the
-    // others, and highlight its appbar tab. The sessions body is only HIDDEN (never
-    // removed), so the terminal host inside it — and its focus/scrollback — survives
-    // a round trip to another view.
+    // View switching: show the active view's body, hide the other, and highlight its
+    // appbar tab. The sessions body is only HIDDEN (never removed), so the terminal
+    // host inside it — and its focus/scrollback — survives a round trip to the tasks
+    // view.
     if (this.lastView !== state.view) {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
-      this.projectsPane.el.hidden = state.view !== "projects";
       this.tasksPane.el.hidden = state.view !== "tasks";
       for (const [v, tab] of this.viewTabs) {
         tab.classList.toggle("af-viewtab-active", v === state.view);
@@ -579,23 +632,34 @@ export class AppShell {
       }
     }
 
-    // The projects pane mirrors the live session grouping; the tasks pane mirrors the
-    // task projection. Each self-guards on an unchanged reference, so these are cheap
-    // no-ops when their data didn't change (and when their view isn't showing).
-    this.projectsPane.update(state.sessions, state.selectedId);
-    if (this.lastTasks !== state.tasks) {
+    // The tasks pane mirrors the task projection, SCOPED to the selected project
+    // (redesign PR2). It re-renders when either the task list or the project scope
+    // changes, so switching projects re-scopes the tasks view too.
+    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject) {
       this.lastTasks = state.tasks;
-      this.tasksPane.update(state.tasks);
+      this.lastTasksProject = state.selectedProject;
+      this.tasksPane.update(state.tasks, state.selectedProject);
     }
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
+    const projectChanged = this.lastSelectedProject !== state.selectedProject;
+
+    // The project switcher label + menu reflect the derived project list and the
+    // current scope; rebuild only when the sessions or the selection changed.
+    if (this.lastProjectSessions !== state.sessions || projectChanged) {
+      this.lastProjectSessions = state.sessions;
+      this.lastSelectedProject = state.selectedProject;
+      this.renderProjectSwitch(state);
+    }
+
     this.lastSessions = state.sessions;
     this.lastSelectedId = state.selectedId;
 
-    // Rebuild the rail when the list OR the highlighted row changed. Neither touches
-    // the terminal host (it lives in the main pane), so events never blur it.
-    if (sessionsChanged || selectionChanged) {
+    // Rebuild the rail when the list, the highlighted row, OR the project scope
+    // changed (switching projects swaps the rail). None touches the terminal host (it
+    // lives in the main pane), so events never blur it.
+    if (sessionsChanged || selectionChanged || projectChanged) {
       this.renderRail(state);
     }
 
@@ -620,10 +684,17 @@ export class AppShell {
     }
   }
 
+  /** Renders the rail SCOPED to the selected project (redesign PR2): only that
+   *  project's sessions, never the whole projection. Three states: no project at all
+   *  (nothing created yet) → the "no sessions yet" empty rail; a project with no LIVE
+   *  sessions → the dim one-line per-project empty state; otherwise the scoped rows. */
   private renderRail(state: AppState): void {
-    this.railCount.textContent = String(state.sessions.length);
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    this.railCount.textContent = String(scoped.length);
     const list = this.railList;
-    if (state.sessions.length === 0) {
+    // No project selected ⇒ there are no projects at all (nothing has been created):
+    // the global empty rail, its copy pointing at how to create the first session.
+    if (!state.selectedProject) {
       list.replaceChildren(
         h(
           "li",
@@ -635,10 +706,106 @@ export class AppShell {
       );
       return;
     }
-    const rows = orderedSessions(state.sessions).map((s) =>
-      sessionRow(s, s.id === state.selectedId, this.actions),
-    );
+    const rows = orderedSessions(scoped).map((s) => sessionRow(s, s.id === state.selectedId, this.actions));
+    // A selected project with no LIVE sessions (all archived / none): a clean, dim
+    // one-liner with a + New affordance rather than a blank rail (redesign PR2). Any
+    // archived rows still render below it so the history stays reachable.
+    const hasLive = scoped.some((s) => !isArchived(s));
+    if (!hasLive) {
+      const name = projectName(state.selectedProject);
+      const newBtn = h("button", { type: "button", class: "af-rail-empty-new", title: "New session" }, "+ New");
+      newBtn.addEventListener("click", () => this.actions.newSession());
+      const empty = h("li", { class: "af-rail-empty-project" }, `No sessions in ${name} — `, newBtn);
+      list.replaceChildren(empty, ...rows);
+      return;
+    }
     list.replaceChildren(...rows);
+  }
+
+  /** (Re)builds the project switcher: the button's current-project name and the
+   *  dropdown menu of every project with its per-project counts (redesign PR2). The
+   *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
+   *  triggered by a live event doesn't snap an open menu shut. */
+  private renderProjectSwitch(state: AppState): void {
+    const summaries = projectSummaries(state.sessions);
+    const current = state.selectedProject;
+    this.projectSwitchName.textContent = current ? projectName(current) : "No project";
+    // Disable the switcher when there are no projects to switch between.
+    this.projectSwitchBtn.disabled = summaries.length === 0;
+
+    const children: HTMLElement[] = [h("div", { class: "af-project-menu-label" }, "Switch project")];
+    if (summaries.length === 0) {
+      children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet."));
+    }
+    for (const p of summaries) {
+      children.push(this.projectItem(p, p.root === current));
+    }
+    // The reversible delete-project control (#1735) lived on the old Projects view's
+    // header; with that view folded into the switcher it moves here, as a footer
+    // action on the CURRENT project (single-project IA). index.ts pops the confirm.
+    const currentSummary = summaries.find((p) => p.root === current);
+    if (currentSummary) {
+      const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
+      del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.closeProjectMenu();
+        this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
+      });
+      children.push(h("div", { class: "af-project-menu-foot" }, del));
+    }
+    this.projectMenu.replaceChildren(...children);
+  }
+
+  /** One project row in the switcher menu: a check on the current project, the name +
+   *  full path, and the cross-project glance (session + working counts). Clicking it
+   *  switches the active project and closes the menu. */
+  private projectItem(p: ProjectSummary, current: boolean): HTMLElement {
+    const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
+    const check = h("span", { class: "af-project-check" }, current ? "✓" : "");
+    check.setAttribute("aria-hidden", "true");
+    const label = h(
+      "span",
+      { class: "af-project-item-label" },
+      h("span", { class: "af-project-item-name" }, p.name),
+      h("span", { class: "af-project-item-path" }, p.path),
+    );
+    const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
+    const item = h("button", { type: "button", class: cls }, check, label, meta);
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", current ? "true" : "false");
+    item.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.actions.switchProject(p.root);
+    });
+    return item;
+  }
+
+  private toggleProjectMenu(): void {
+    if (this.projectMenuOpen) {
+      this.closeProjectMenu();
+    } else {
+      this.openProjectMenu();
+    }
+  }
+
+  private openProjectMenu(): void {
+    if (this.projectSwitchBtn.disabled) {
+      return;
+    }
+    this.projectMenuOpen = true;
+    this.projectMenu.hidden = false;
+    this.projectSwitchBtn.setAttribute("aria-expanded", "true");
+  }
+
+  private closeProjectMenu(): void {
+    if (!this.projectMenuOpen) {
+      return;
+    }
+    this.projectMenuOpen = false;
+    this.projectMenu.hidden = true;
+    this.projectSwitchBtn.setAttribute("aria-expanded", "false");
   }
 
   private renderMain(state: AppState): void {

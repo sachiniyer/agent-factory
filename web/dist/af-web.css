@@ -215,6 +215,8 @@ body {
 .af-tab-new:focus-visible,
 .af-viewtab:focus-visible,
 .af-theme-opt:focus-visible,
+.af-project-switch:focus-visible,
+.af-project-item:focus-visible,
 .af-task-action:focus-visible {
   outline: 2px solid var(--af-accent);
   outline-offset: 2px;
@@ -323,8 +325,131 @@ body {
   font-weight: 600;
   letter-spacing: var(--af-track);
 }
-.af-appbar .af-live {
+.af-project-switch-wrap {
+  position: relative;
   margin-left: auto;
+}
+.af-project-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.65rem;
+  background: var(--af-bg-inset);
+  color: var(--af-text);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+  font: inherit;
+  font-size: var(--af-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.af-project-switch:hover:not(:disabled) {
+  border-color: var(--af-border-strong);
+  background: var(--af-bg-surface);
+}
+.af-project-switch:disabled {
+  cursor: default;
+  color: var(--af-text-3);
+}
+.af-project-glyph {
+  color: var(--af-accent);
+  font-weight: 700;
+}
+.af-project-caret {
+  color: var(--af-text-3);
+  font-size: 0.6em;
+}
+.af-project-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 17rem;
+  max-width: 24rem;
+  background: var(--af-bg-raised);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-lg);
+  box-shadow: var(--af-shadow-overlay);
+  padding: 0.3rem;
+  z-index: 30;
+}
+.af-project-menu-label {
+  padding: 0.35rem 0.6rem 0.25rem;
+  font-size: var(--af-fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--af-track);
+  color: var(--af-text-3);
+}
+.af-project-menu-empty {
+  padding: 0.35rem 0.6rem 0.5rem;
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-2);
+}
+.af-project-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.42rem 0.6rem;
+  background: transparent;
+  border: none;
+  border-radius: var(--af-r-md);
+  color: var(--af-text);
+  font: inherit;
+  font-size: var(--af-fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.af-project-item:hover {
+  background: var(--af-bg-inset);
+}
+.af-project-item-current,
+.af-project-item-current:hover {
+  background: var(--af-accent-subtle);
+}
+.af-project-check {
+  flex: 0 0 auto;
+  width: 0.8rem;
+  color: var(--af-accent);
+  font-weight: 700;
+}
+.af-project-item-label {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.af-project-item-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.af-project-item-current .af-project-item-name {
+  color: var(--af-accent);
+}
+.af-project-item-path {
+  font-size: var(--af-fs-2xs);
+  color: var(--af-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.af-project-item-meta {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--af-text-3);
+  font-size: var(--af-fs-2xs);
+  white-space: nowrap;
+}
+.af-project-menu-foot {
+  margin-top: 0.25rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--af-border-subtle);
+  display: flex;
+}
+.af-project-delete {
+  width: 100%;
+  justify-content: center;
+  font-size: var(--af-fs-xs);
 }
 .af-live {
   display: inline-flex;
@@ -448,6 +573,30 @@ body {
 .af-rail-empty code {
   font-family: var(--af-font-mono);
   color: var(--af-text);
+}
+.af-rail-empty-project {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: var(--af-sp-3) var(--af-sp-3);
+  color: var(--af-text-3);
+  font-size: var(--af-fs-xs);
+  line-height: 1.5;
+}
+.af-rail-empty-new {
+  padding: 0.1rem 0.5rem;
+  background: var(--af-accent-subtle);
+  color: var(--af-accent);
+  border: none;
+  border-radius: var(--af-r-md);
+  font: inherit;
+  font-size: var(--af-fs-2xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.af-rail-empty-new:hover {
+  background: var(--af-accent-tint);
 }
 .af-row {
   display: flex;
@@ -1047,26 +1196,31 @@ body {
 .af-viewnav {
   display: inline-flex;
   align-items: stretch;
-  gap: var(--af-sp-1);
+  gap: 2px;
+  padding: 2px;
   margin-left: var(--af-sp-2);
+  background: var(--af-bg-inset);
+  border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-r-md);
 }
 .af-viewtab {
-  padding: 0.3rem 0.7rem;
+  padding: 0.24rem 0.75rem;
   background: transparent;
   color: var(--af-text-2);
   border: none;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
+  border-radius: var(--af-r-sm);
   font: inherit;
-  font-size: var(--af-fs-sm);
+  font-size: var(--af-fs-xs);
+  font-weight: 500;
   cursor: pointer;
 }
 .af-viewtab:hover {
   color: var(--af-text);
 }
 .af-viewtab-active {
+  background: var(--af-bg-surface);
   color: var(--af-text);
-  border-bottom-color: var(--af-accent);
+  box-shadow: var(--af-shadow-1);
 }
 .af-viewport {
   flex: 1;
@@ -1081,13 +1235,11 @@ body {
   min-width: 0;
   min-height: 0;
 }
-.af-projects,
 .af-tasks {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
 }
-.af-projects-head,
 .af-tasks-head {
   display: flex;
   align-items: center;
@@ -1099,7 +1251,6 @@ body {
   top: 0;
   z-index: 1;
 }
-.af-projects-title,
 .af-tasks-title {
   font-size: var(--af-fs-xs);
   text-transform: uppercase;
@@ -1129,61 +1280,11 @@ body {
 .af-tasks-add:hover {
   background: var(--af-accent-subtle);
 }
-.af-projects-empty,
 .af-tasks-empty {
   padding: var(--af-sp-5) var(--af-sp-4);
   color: var(--af-text-2);
   font-size: var(--af-fs-md);
   line-height: 1.5;
-}
-.af-projects-empty code {
-  font-family: var(--af-font-mono);
-  color: var(--af-text);
-}
-.af-projects-list {
-  padding: var(--af-sp-2) 0.75rem var(--af-sp-5);
-}
-.af-project {
-  margin-bottom: 0.75rem;
-}
-.af-project-head {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  align-items: baseline;
-  gap: var(--af-sp-2);
-  padding: var(--af-sp-2) 0.6rem 0.35rem;
-}
-.af-project-delete {
-  font-size: var(--af-fs-2xs);
-  padding: 0.1rem 0.4rem;
-  align-self: center;
-}
-.af-project-name {
-  font-size: var(--af-fs-md);
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.af-project-count {
-  font-size: var(--af-fs-xs);
-  color: var(--af-text-2);
-}
-.af-project-path {
-  grid-column: 1 / -1;
-  font-size: var(--af-fs-xs);
-  color: var(--af-text-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.af-project-sessions {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.af-project-row {
-  padding: 0.4rem 0.6rem;
 }
 .af-tasks-list {
   list-style: none;

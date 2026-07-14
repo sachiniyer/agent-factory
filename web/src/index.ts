@@ -36,6 +36,7 @@ import {
 import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
+import { loadProjectChoice, persistProjectChoice, reconcileProject, scopeToProject } from "./project.js";
 import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
 import { Store } from "./store.js";
@@ -63,6 +64,7 @@ const initialThemeChoice = bootStampTheme();
 const store = new Store<AppState>({
   phase: "login",
   view: "sessions",
+  selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
   // showing the paste form before that resolves would flash a token field a
@@ -237,9 +239,14 @@ async function connect(candidate: string): Promise<void> {
   if (candidate !== "") {
     storeToken(candidate);
   }
+  // Scope to a project on connect (redesign PR2): resume the persisted choice if it
+  // still exists, else the most-recently-active project's default. Persisted only, so
+  // a reload lands on the same project the user left.
+  const selectedProject = reconcileProject(sessions, loadProjectChoice(), null);
   store.set({
     phase: "app",
     view: "sessions",
+    selectedProject,
     connecting: false,
     loginError: null,
     sessions,
@@ -267,6 +274,7 @@ function disconnect(): void {
   store.set({
     phase: "login",
     view: "sessions",
+    selectedProject: null,
     connecting: false,
     loginError: null,
     sessions: [],
@@ -342,6 +350,24 @@ function switchView(view: View): void {
   }
 }
 
+/** Switches the active project (redesign PR2): scope the rail + views to `root`,
+ *  persist it so a reload resumes it, and drop a selection that doesn't belong to the
+ *  new project (its terminal detaches). A no-op when already on that project. */
+function switchProject(root: string): void {
+  if (store.get().selectedProject === root) {
+    return;
+  }
+  clearTabError();
+  persistProjectChoice(root);
+  // Keep the current selection only if it lives in the newly selected project; else
+  // clear it so the main pane returns to its empty state instead of showing a session
+  // hidden from the scoped rail.
+  const sel = selectedSessionData();
+  const keep = sel && sel.worktree?.repo_path === root ? store.get().selectedId : null;
+  splitView.blur();
+  store.set({ selectedProject: root, selectedId: keep, focus: "rail", activeTab: 0 });
+}
+
 // --- lifecycle actions (modals) --------------------------------------------
 
 /** The currently selected session's stable id + display title, or null if none.
@@ -377,7 +403,7 @@ function openModal(m: ModalHandle): void {
 function newSession(): void {
   const projects = deriveProjects(store.get().sessions);
   openModal(
-    newSessionModal(projects, {
+    newSessionModal(projects, store.get().selectedProject, {
       onSubmit: (values: CreateSessionInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -660,7 +686,7 @@ function requestTaskResync(): void {
 function openAddTask(): void {
   const projects = deriveProjects(store.get().sessions);
   openModal(
-    addTaskModal(projects, {
+    addTaskModal(projects, store.get().selectedProject, {
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -777,6 +803,7 @@ const actions = {
   newTab: createSessionTab,
   closeTab: closeSessionTab,
   switchView,
+  switchProject,
   addTask: openAddTask,
   toggleTask,
   triggerTask: doTriggerTask,
@@ -875,9 +902,21 @@ function onEvent(ev: WireEvent): void {
  *  the selected session was killed), the active tab resets to the agent tab. */
 function applySessions(sessions: SessionData[]): void {
   const prevSel = store.get().selectedId;
-  const selectedId = pickSelection(sessions, prevSel);
+  // Reconcile the project scope against the new session set (redesign PR2): a project
+  // that vanished (its last session gone) falls back gracefully to the persisted/
+  // default one, so the rail is never pinned to a dead root.
+  const selectedProject = reconcileProject(sessions, loadProjectChoice(), store.get().selectedProject);
+  let selectedId = pickSelection(sessions, prevSel);
+  // Drop a selection that no longer belongs to the scoped project, so the terminal
+  // never stays attached to a session hidden from the (now re-scoped) rail.
+  if (selectedId) {
+    const sel = sessions.find((s) => s.id === selectedId);
+    if (sel && sel.worktree?.repo_path !== selectedProject) {
+      selectedId = null;
+    }
+  }
   const activeTab = selectedId === prevSel ? clampActiveTab(sessions, selectedId, store.get().activeTab) : 0;
-  store.set({ sessions, selectedId, activeTab });
+  store.set({ sessions, selectedProject, selectedId, activeTab });
 }
 
 /** Re-fetches the authoritative Snapshot (debounced) and replaces the rail — the
@@ -953,7 +992,9 @@ function onKeydown(e: KeyboardEvent): void {
       focus,
       modalOpen: modal !== null,
       view: state.view,
-      orderedIds: orderedSessions(state.sessions)
+      // j/k navigate only the SCOPED rail (redesign PR2): the ids in the order the
+      // rail shows them, restricted to the selected project.
+      orderedIds: orderedSessions(scopeToProject(state.sessions, state.selectedProject))
         .map((s) => s.id ?? "")
         .filter((id) => id !== ""),
       selectedId: state.selectedId,

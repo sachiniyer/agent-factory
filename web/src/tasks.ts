@@ -110,18 +110,24 @@ function lastRunSummary(t: TaskData): string {
 export class TasksPane {
   readonly el: HTMLElement;
   private lastTasks: TaskData[] | null = null;
+  private lastProject: string | null = null;
 
   constructor(private readonly actions: TaskActions) {
     this.el = h("section", { class: "af-tasks" });
     this.el.setAttribute("aria-label", "Tasks");
   }
 
-  update(tasks: TaskData[]): void {
-    if (this.lastTasks === tasks) {
+  /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
+   *  tasks whose project_path matches, so the tasks view operates within the same
+   *  project the rail is scoped to. A null project (none exist) shows no tasks. */
+  update(tasks: TaskData[], selectedProject: string | null): void {
+    if (this.lastTasks === tasks && this.lastProject === selectedProject) {
       return;
     }
     this.lastTasks = tasks;
-    this.render(tasks);
+    this.lastProject = selectedProject;
+    const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
+    this.render(scoped);
   }
 
   private render(tasks: TaskData[]): void {
@@ -198,6 +204,7 @@ export class TasksPane {
  */
 export function addTaskModal(
   projects: string[],
+  defaultProject: string | null,
   callbacks: { onSubmit: (input: AddTaskInput) => void; onCancel: () => void },
 ): ModalHandle {
   const { handle, body, confirmBtn } = modalChrome({
@@ -221,6 +228,11 @@ export function addTaskModal(
   } else {
     for (const p of projects) {
       projectSelect.append(h("option", { value: p }, projectLabel(p)));
+    }
+    // Default the picker to the currently-scoped project (redesign PR2), so adding a
+    // task from within a project lands it in that project without extra clicks.
+    if (defaultProject && projects.includes(defaultProject)) {
+      projectSelect.value = defaultProject;
     }
   }
 

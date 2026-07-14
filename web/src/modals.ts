@@ -135,6 +135,7 @@ export function asForm(card: HTMLElement, onSubmit: () => void): void {
  *  TUI's zero-config picker). onSubmit fires with the collected form values. */
 export function newSessionModal(
   projects: string[],
+  defaultProject: string | null,
   callbacks: { onSubmit: (values: CreateSessionInput) => void; onCancel: () => void },
 ): ModalHandle {
   const { handle, body, confirmBtn } = modalChrome({
@@ -158,6 +159,11 @@ export function newSessionModal(
   } else {
     for (const p of projects) {
       projectSelect.append(h("option", { value: p }, projectLabel(p)));
+    }
+    // Default to the currently-scoped project (redesign PR2): a new session created
+    // from within a project lands in that project by default.
+    if (defaultProject && projects.includes(defaultProject)) {
+      projectSelect.value = defaultProject;
     }
   }
 
