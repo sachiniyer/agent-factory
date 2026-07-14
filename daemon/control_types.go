@@ -185,7 +185,7 @@ type DeliverPromptResponse struct {
 // worktree. Title selects the session; RepoID scopes the lookup like the other
 // sessions verbs (empty = all-repo).
 //
-// Two kinds of tab can be created:
+// Three kinds of tab can be created:
 //   - Process tab (Shell=false, the #930 PR 5 default): runs Command in the
 //     worktree. Name is the optional display name (a default is derived from
 //     Command's basename when empty). Command must be non-empty.
@@ -193,6 +193,8 @@ type DeliverPromptResponse struct {
 //     `t` key (Instance.AddShellTab). Command/Name are ignored; the name is the
 //     auto-derived unique "shell"/"shell-2"/… The TUI routes its `t` mutation
 //     here so the daemon — not the TUI — owns the tab write (#960 PR 2).
+//   - Web tab (Kind="web"): an iframe/URL tab with no PTY. URL is the target
+//     (or Port as a localhost:<port> convenience). See the Kind/URL/Port fields.
 //
 // Either way the resolved, collision-suffixed name is returned.
 type CreateTabRequest struct {
