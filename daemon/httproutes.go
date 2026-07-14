@@ -117,7 +117,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:        http.MethodPost,
 		Path:          "/v1/CreateTab",
-		Description:   "Spawn a tab (process or shell) in a session's worktree.",
+		Description:   "Spawn a tab in a session: a process tab (command) or shell tab in the worktree, or a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct).",
 		RequestFields: jsonFields(reflect.TypeOf(CreateTabRequest{})),
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CreateTab) },
 	},

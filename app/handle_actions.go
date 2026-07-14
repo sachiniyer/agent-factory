@@ -644,6 +644,9 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	if err := interactiveGuard(selected); err != nil {
 		return m, m.handleError(err)
 	}
+	if err := webTabAttachGuard(selected, m.store.ActiveTab()); err != nil {
+		return m, m.handleError(err)
+	}
 	if liveSessionName(selected, m.store.ActiveTab()) == "" {
 		// Not embeddable (remote): the old full-screen attach flow.
 		return m.attachSelected(selected)
@@ -725,7 +728,24 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 	if err := interactiveGuard(selected); err != nil {
 		return m, m.handleError(err)
 	}
+	if err := webTabAttachGuard(selected, m.store.ActiveTab()); err != nil {
+		return m, m.handleError(err)
+	}
 	return m.attachSelected(selected)
+}
+
+// webTabAttachGuard fences attach/enter off a web tab: it has no PTY to attach or
+// embed, so instead of a doomed WS-PTY subscription the TUI surfaces a message
+// pointing the user at the web UI. A nil error means the tab is not a web tab.
+func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
+	if inst == nil {
+		return nil
+	}
+	tabs := inst.GetTabs()
+	if tabIdx < 0 || tabIdx >= len(tabs) || tabs[tabIdx].Kind != session.TabKindWeb {
+		return nil
+	}
+	return fmt.Errorf("this is a web tab (%s) — view it in the web UI or open the URL in a browser", tabs[tabIdx].URL)
 }
 
 // attachSelected runs the tree-selection full-screen attach flow for a

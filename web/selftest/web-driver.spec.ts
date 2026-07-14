@@ -37,6 +37,12 @@ const SEEDED_TASK = process.env.AF_WEB_TASK_NAME ?? "probe-task";
 // The marker the seeded fake agent prints on launch (web-selftest-entry.sh), so
 // "the terminal shows live output" is a deterministic string assertion.
 const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
+// The web-tab session (feat: web/iframe tabs) and its seeded targets: a LOCAL web
+// tab named "preview" pointing at a loopback server the daemon proxies, and an
+// EXTERNAL web tab named "external" whose host this test intercepts.
+const SESSION_WEB = process.env.AF_WEB_SESSION_WEB ?? "probe-web";
+const WEBTAB_LOCAL_MARKER = process.env.AF_WEBTAB_LOCAL_MARKER ?? "AF_WEBTAB_LOCAL_OK";
+const WEBTAB_EXTERNAL_URL = process.env.AF_WEBTAB_EXTERNAL_URL ?? "https://blocked.example.test/";
 
 /** A rail row by its session title. */
 function row(page: Page, title: string): Locator {
@@ -422,6 +428,75 @@ test("split panes (feat): a mid-drag tab-set change cancels the drop — no misb
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
   await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
+test("web tab (feat): a local dev-server preview is daemon-proxied and rendered in an iframe", async () => {
+  // The web-tab session was seeded (web-selftest-entry.sh) with a LOCAL web tab
+  // "preview" pointing at a loopback HTTP server. Attaching shows the agent tab
+  // plus the two web tabs; the tab bar renders web tabs by name.
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  const tabbar = page.locator(".af-tabbar");
+  await expect(tabbar).toBeVisible();
+  const previewTab = tabbar.locator(".af-tab", { hasText: "preview" });
+  await expect(previewTab).toHaveCount(1);
+
+  // Switch to the local web tab: the pane mounts an IFRAME (not an xterm) whose src
+  // is the SAME-ORIGIN daemon proxy path, so a remote viewer's browser hits the
+  // daemon (which reaches the loopback dev server) rather than its own machine.
+  await previewTab.click();
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  await expect(frame).toHaveAttribute("src", /\/v1\/webtab\//);
+  // The pane is an iframe, not a terminal.
+  await expect(page.locator(".af-term-host .af-pane-host .xterm")).toHaveCount(0);
+  // Every web tab has a reload control for dev-preview refreshes.
+  await expect(page.locator(".af-webpane-reload")).toHaveCount(1);
+
+  // The daemon actually reverse-proxied the loopback server: the framed document
+  // shows the marker the server served (proof the proxy relayed real content).
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER, {
+    timeout: 15_000,
+  });
+});
+
+test("web tab (feat): an external URL is iframed directly and shows a fallback when embedding is blocked", async () => {
+  // Speed up the fallback timeout for a deterministic assertion, and make the
+  // external host HANG (intercept the request and never resolve it) so no load
+  // event ever arrives — the reliable "didn't load in time" signal the load-timeout
+  // detects. af never tries to defeat framing protections, so a fast-but-blocked
+  // (X-Frame-Options) load isn't auto-detected; the always-present "open ↗" link is
+  // the guaranteed escape hatch, asserted below.
+  await page.evaluate(() => {
+    (window as unknown as { __afWebtabFallbackMs: number }).__afWebtabFallbackMs = 400;
+  });
+  await page.route("**/blocked.example.test/**", () => {
+    // Intentionally never fulfill/abort: the iframe request hangs, so no load event
+    // fires and the fallback timeout wins.
+  });
+
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const externalTab = tabbar.locator(".af-tab", { hasText: "external" });
+  await expect(externalTab).toHaveCount(1);
+  await externalTab.click();
+
+  // The external tab iframes the URL DIRECTLY (not through the daemon proxy).
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  // The always-present escape hatch: an "open in a new tab" link at the external URL.
+  await expect(page.locator("a.af-webpane-open")).toHaveAttribute("href", WEBTAB_EXTERNAL_URL);
+
+  // A site that doesn't load in time surfaces the clean fallback with its own
+  // open-in-new-tab link.
+  const fallback = page.locator(".af-webpane-fallback");
+  await expect(fallback).toBeVisible({ timeout: 10_000 });
+  await expect(fallback.locator("a.af-webpane-fallback-link")).toHaveAttribute("href", WEBTAB_EXTERNAL_URL);
+
+  await page.unroute("**/blocked.example.test/**");
 });
 
 test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", async () => {

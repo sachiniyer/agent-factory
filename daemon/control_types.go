@@ -201,6 +201,18 @@ type CreateTabRequest struct {
 	Command string `json:"command"`
 	Name    string `json:"name"`
 	Shell   bool   `json:"shell"`
+	// Kind selects the tab type. Empty (the default) means a process tab (or a
+	// shell tab when Shell is set); "web" creates a URL/iframe tab with no PTY,
+	// targeting URL (or Port as a localhost:<port> convenience). Value types so
+	// they travel over both the gob control socket (CLI) and JSON (HTTP) without
+	// the zero-value pointer elision gob applies to *T fields.
+	Kind string `json:"kind,omitempty"`
+	// URL is the target of a web tab (Kind=="web"): a loopback dev-server address
+	// the daemon reverse-proxies or an external absolute URL the web UI iframes.
+	URL string `json:"url,omitempty"`
+	// Port is a convenience for a web tab: when set (and URL is empty) the target
+	// becomes http://localhost:<port>.
+	Port int `json:"port,omitempty"`
 	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
 	// the daemon resolves the target session by id first, so a web tab-create
 	// can't hit the wrong session under a cross-repo title collision (#1592

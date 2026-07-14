@@ -138,7 +138,7 @@ export function supportsTabManagement(s: SessionData): boolean {
 /** The selected session's tabs, always non-empty: a pre-#930 record with no tabs
  *  is shown as a single implicit agent tab so the bar (and index math) never sees
  *  an empty list. */
-export function sessionTabs(s: SessionData): { name: string; kind: number }[] {
+export function sessionTabs(s: SessionData): { name: string; kind: number; url?: string }[] {
   if (s.tabs && s.tabs.length > 0) {
     return s.tabs;
   }
@@ -164,6 +164,9 @@ function tabLabel(tab: { name: string; kind: number }): string {
   }
   if (tab.kind === 1) {
     return "Terminal";
+  }
+  if (tab.kind === 3) {
+    return tab.name || "Web";
   }
   return tab.name || "Tab";
 }

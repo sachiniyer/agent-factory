@@ -152,3 +152,46 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	}
 	return tab, nil
 }
+
+// AddWebTab appends a new Web-kind tab pointing at url to the instance's Tabs and
+// returns it. Unlike shell/process tabs a web tab has NO tmux session — it is
+// pure metadata (a URL the web UI iframes and, for loopback targets, the daemon
+// reverse-proxies), so there is nothing to spawn: the append itself is the whole
+// operation. url must already be normalized (session.NormalizeWebTabURL); the
+// display name is requestedName when non-empty, otherwise "web", made unique
+// within the instance ("web", "web-2", …). Local instances only, matching
+// shell/process tabs: a web tab is persisted on the local instance record and
+// rebuilt from it on restart, and remote/hook sessions rebuild their tabs from
+// hook config instead (callers reject non-TabManagement backends first). Errors
+// when the instance is not started/has no worktree or already holds maxTabs tabs.
+func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
+	if strings.TrimSpace(url) == "" {
+		return nil, fmt.Errorf("a web tab requires a non-empty URL")
+	}
+
+	base := webTabName
+	if n := sanitizeTabName(requestedName); n != "" {
+		base = n
+	}
+
+	i.mu.Lock()
+	// Everything a web tab needs happens under the single write lock: unlike
+	// shell/process tabs there is no out-of-lock tmux spawn, so no
+	// spawn-then-recheck window opens and no orphaned session can be leaked. Guard
+	// the same preconditions the other Add*Tab methods do so a web tab can't be
+	// wedged onto a not-started, tearing-down, or full instance.
+	defer i.mu.Unlock()
+	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
+		return nil, spawnErr
+	}
+	if !i.started || i.tmuxLocked() == nil || i.gitWorktree == nil {
+		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
+	}
+	if len(i.Tabs) >= maxTabs {
+		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
+	}
+	tab := newWebTab(url)
+	tab.Name = uniqueTabName(i.Tabs, base)
+	i.Tabs = append(i.Tabs, tab)
+	return tab, nil
+}

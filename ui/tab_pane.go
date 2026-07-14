@@ -335,6 +335,13 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	return nil
 }
 
+// webTabPlaceholder is the TUI content for a web/iframe tab, which the terminal
+// cannot render: the target URL plus a pointer to where it can be viewed. Shared
+// by updateShell and enterScrollModeLocked so the two never diverge.
+func webTabPlaceholder(url string) string {
+	return fmt.Sprintf("%s\n\nweb tab — view in the web UI or open in a browser", url)
+}
+
 // updateShell reproduces the former TerminalPane.UpdateContent for the
 // shell/process tab at activeTab.
 func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard contentGuard) error {
@@ -359,6 +366,16 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 	}
 	if !instance.Started() {
 		p.setFallbackState("Instance is not started yet.")
+		p.mu.Unlock()
+		return nil
+	}
+
+	// A web tab has no PTY to capture — it is a URL the web UI iframes. The TUI
+	// cannot render a browser, so show a clean placeholder (the target + where to
+	// view it) instead of falling through to the misleading "Terminal session not
+	// available" branch below (a web tab is never TabAlive).
+	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) && tabs[activeTab].Kind == session.TabKindWeb {
+		p.setFallbackState(webTabPlaceholder(tabs[activeTab].URL))
 		p.mu.Unlock()
 		return nil
 	}
@@ -550,6 +567,12 @@ func (p *TabPane) ScrollDown(instance *session.Instance, activeTab int) error {
 func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab int) error {
 	if instance.IsTearingDown() {
 		p.setFallbackState("Tearing down session...")
+		return nil
+	}
+	// A web tab has no scrollback (no PTY): keep the placeholder rather than
+	// entering scroll mode over an empty capture. Mirrors updateShell's web branch.
+	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) && tabs[activeTab].Kind == session.TabKindWeb {
+		p.setFallbackState(webTabPlaceholder(tabs[activeTab].URL))
 		return nil
 	}
 	// An already-dead shell tab transitions to the fallback rather than entering

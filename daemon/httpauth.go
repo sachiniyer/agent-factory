@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 )
@@ -89,7 +90,26 @@ func (g *authGate) authorize(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return ConstantTimeEqual(agentproto.TokenFromRequest(r), want)
+	return ConstantTimeEqual(webTabAwareToken(r), want)
+}
+
+// webTabAwareToken returns the request's bearer token, extended for the web-tab
+// proxy path ONLY. An iframe's sub-resource GETs can carry neither the
+// Authorization header nor the ?access_token query, so under webtabPathPrefix the
+// scoped af_webtab_token cookie — set by the proxy handler after a header/query
+// token first authorized the top-level navigation — is also accepted. The cookie
+// is NEVER honored for any other route, so it adds no ambient credential to the
+// state-changing API surface (no CSRF vector on the RPC endpoints).
+func webTabAwareToken(r *http.Request) string {
+	if tok := agentproto.TokenFromRequest(r); tok != "" {
+		return tok
+	}
+	if r.URL != nil && strings.HasPrefix(r.URL.Path, webtabPathPrefix) {
+		if c, err := r.Cookie(webtabTokenCookie); err == nil {
+			return c.Value
+		}
+	}
+	return ""
 }
 
 // isLoopbackRequest reports whether the request's peer is a loopback address,

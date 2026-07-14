@@ -56,7 +56,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 	// config (syncRemoteTabs) rather than from this serialized list, so a
 	// terminal_cmd added or removed while af was down is honored.
 	for _, tab := range i.Tabs {
-		td := TabData{Name: tab.Name, Kind: tab.Kind, Command: tab.Command}
+		td := TabData{Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL}
 		if tab.tmux != nil {
 			td.TmuxName = tab.tmux.SanitizedName()
 		}
@@ -263,6 +263,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Name:         td.Name,
 				Kind:         kind,
 				Command:      td.Command,
+				URL:          td.URL,
 				Conversation: conversation,
 				tmux:         ts,
 			})
