@@ -25,6 +25,7 @@ import { TAB_DND_MIME } from "./layout.js";
 import { ProjectsPane } from "./projects.js";
 import { compareSessionsForRail, isArchived, rowStatus, rowTitle } from "./status.js";
 import { TasksPane } from "./tasks.js";
+import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
 import type { SessionData, TaskData } from "./types.js";
 
@@ -77,6 +78,10 @@ export interface AppState {
   tabError: string | null;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
+  /** the persisted theme preference (redesign PR1): Auto follows the OS, Light/Dark
+   *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
+   *  and re-themes the live terminals. */
+  themeChoice: ThemeChoice;
 }
 
 /** Callbacks the shell invokes; index.ts owns the real behavior. */
@@ -121,6 +126,9 @@ export interface Actions {
   /** Opens the reversible delete-project confirm for a project row (#1735); on
    *  confirm index.ts calls DeleteProject, which archives its live sessions. */
   deleteProject(root: string, label: string, sessionCount: number): void;
+  /** Sets the theme preference (redesign PR1): persists it, stamps data-theme on
+   *  <html>, and re-themes the live terminals. */
+  setTheme(choice: ThemeChoice): void;
 }
 
 /** The soft cap on tabs per session (session/tab.go maxTabs): the agent tab plus
@@ -195,6 +203,18 @@ function viewLabel(view: View): string {
       return "Projects";
     case "tasks":
       return "Tasks";
+  }
+}
+
+/** The appbar label for a theme choice (redesign PR1). */
+function themeLabel(choice: ThemeChoice): string {
+  switch (choice) {
+    case "auto":
+      return "Auto";
+    case "light":
+      return "Light";
+    case "dark":
+      return "Dark";
   }
 }
 
@@ -381,6 +401,10 @@ export class AppShell {
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
   private readonly viewTabs = new Map<View, HTMLElement>();
+  // The appbar theme toggle (redesign PR1): one button per Auto/Light/Dark choice,
+  // the active one highlighted in update().
+  private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
+  private lastThemeChoice: ThemeChoice | null = null;
   private readonly sessionsBody: HTMLElement;
   private readonly projectsPane: ProjectsPane;
   private readonly tasksPane: TasksPane;
@@ -423,6 +447,20 @@ export class AppShell {
     const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect.addEventListener("click", () => this.actions.disconnect());
 
+    // The theme toggle: a compact Auto/Light/Dark segmented control. A click routes
+    // through actions.setTheme, which persists the choice and re-themes the terminals.
+    const themeToggle = h("div", { class: "af-theme-toggle" });
+    themeToggle.setAttribute("role", "group");
+    themeToggle.setAttribute("aria-label", "Theme");
+    for (const choice of THEME_CHOICES) {
+      const opt = h("button", { type: "button", class: "af-theme-opt" }, themeLabel(choice));
+      opt.setAttribute("data-theme-opt", choice);
+      opt.setAttribute("title", `${themeLabel(choice)} theme`);
+      opt.addEventListener("click", () => this.actions.setTheme(choice));
+      this.themeOpts.set(choice, opt);
+      themeToggle.append(opt);
+    }
+
     // The view switcher: one tab per top-level view, left-to-right in the [ / ] cycle
     // order (nav.ts VIEWS), the active one highlighted in update(). A click routes
     // through actions.switchView, exactly like the keyboard path.
@@ -444,6 +482,7 @@ export class AppShell {
       h("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       live,
+      themeToggle,
       disconnect,
     );
 
@@ -527,6 +566,16 @@ export class AppShell {
       for (const [v, tab] of this.viewTabs) {
         tab.classList.toggle("af-viewtab-active", v === state.view);
         tab.setAttribute("aria-selected", v === state.view ? "true" : "false");
+      }
+    }
+
+    // Highlight the active theme option (redesign PR1) when the choice changes.
+    if (this.lastThemeChoice !== state.themeChoice) {
+      this.lastThemeChoice = state.themeChoice;
+      for (const [choice, opt] of this.themeOpts) {
+        const active = choice === state.themeChoice;
+        opt.classList.toggle("af-theme-opt-active", active);
+        opt.setAttribute("aria-pressed", active ? "true" : "false");
       }
     }
 

@@ -39,6 +39,7 @@ import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
 import { Store } from "./store.js";
+import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
 import { addTaskModal, type AddTaskInput, buildTask } from "./tasks.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
@@ -52,6 +53,12 @@ import {
   type AppState,
 } from "./ui.js";
 import type { SessionData, TaskData, WireEvent } from "./types.js";
+
+// Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
+// mounts (before first paint), so an explicit light/dark choice shows no flash. This
+// is the CSP-safe stamp — it ships in the same-origin bundle, not an inline <script>
+// the daemon's `default-src 'self'` would block. Runs at module top, above the store.
+const initialThemeChoice = bootStampTheme();
 
 const store = new Store<AppState>({
   phase: "login",
@@ -73,6 +80,7 @@ const store = new Store<AppState>({
   shownTabs: [0],
   tabError: null,
   tasks: [],
+  themeChoice: initialThemeChoice,
 });
 
 // The credential and the push stream are process-local singletons: one token
@@ -146,6 +154,9 @@ function mount(): void {
   // Escape, which we swallow here (stopPropagation) so detaching never leaks a
   // stray ESC byte into the PTY.
   document.addEventListener("keydown", onKeydown, true);
+
+  // Follow the OS theme while the choice is Auto (redesign PR1).
+  watchSystemTheme();
 
   void bootstrap();
 }
@@ -714,6 +725,45 @@ function doRemoveTask(task: TaskData): void {
 }
 
 /** The action callbacks the shell + login view invoke. */
+// --- theme (redesign PR1) --------------------------------------------------
+
+/** Applies a theme choice: persist it, stamp data-theme on <html> (the CSS resolves
+ *  the right token layer synchronously), reflect it in the store so the appbar toggle
+ *  highlights it, and re-theme the live terminals (xterm can't read CSS vars, so it's
+ *  repainted from theme.ts's derived palette). */
+function setTheme(choice: ThemeChoice): void {
+  if (store.get().themeChoice === choice) {
+    return;
+  }
+  persistThemeChoice(choice);
+  stampTheme(choice);
+  store.set({ themeChoice: choice });
+  splitView.applyTheme();
+}
+
+/** While the choice is Auto, follow the OS: a prefers-color-scheme flip re-themes the
+ *  terminals to match (the CSS chrome already reacts via the media query). An explicit
+ *  Light/Dark choice ignores the OS. */
+function watchSystemTheme(): void {
+  let mql: MediaQueryList;
+  try {
+    mql = window.matchMedia("(prefers-color-scheme: dark)");
+  } catch {
+    return; // no matchMedia (very old / headless): nothing to follow
+  }
+  const onChange = (): void => {
+    if (store.get().themeChoice === "auto") {
+      splitView.applyTheme();
+    }
+  };
+  if (typeof mql.addEventListener === "function") {
+    mql.addEventListener("change", onChange);
+  } else if (typeof mql.addListener === "function") {
+    // Safari < 14 fallback.
+    mql.addListener(onChange);
+  }
+}
+
 const actions = {
   connect,
   disconnect,
@@ -732,6 +782,7 @@ const actions = {
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
+  setTheme,
 };
 
 // --- attach terminal wiring ------------------------------------------------

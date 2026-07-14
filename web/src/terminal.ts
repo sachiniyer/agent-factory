@@ -37,9 +37,10 @@
 // daemon/webserve.go.)
 
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
+import { type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
+import { currentXtermTheme } from "./theme.js";
 
 /** The attach terminal's connection state, surfaced for a small status line. */
 export type TerminalStatus = "connecting" | "open" | "reconnecting" | "exited";
@@ -58,32 +59,6 @@ const BACKOFF_MAX_MS = 10_000;
 // Debounce the fit→OpResize send so dragging a window edge sends one resize on
 // settle, not one per animation frame. The server echoes the winning size back.
 const RESIZE_DEBOUNCE_MS = 120;
-
-/** xterm theme mirroring the app's GitHub-dark palette (styles.css) and the TUI's
- *  terminal aesthetic, so the browser terminal reads like the rest of the shell. */
-const THEME = {
-  background: "#0d1117",
-  foreground: "#e6edf3",
-  cursor: "#e6edf3",
-  cursorAccent: "#0d1117",
-  selectionBackground: "rgba(47, 129, 247, 0.30)",
-  black: "#484f58",
-  red: "#ff7b72",
-  green: "#3fb950",
-  yellow: "#d29922",
-  blue: "#58a6ff",
-  magenta: "#bc8cff",
-  cyan: "#39c5cf",
-  white: "#b1bac4",
-  brightBlack: "#6e7681",
-  brightRed: "#ffa198",
-  brightGreen: "#56d364",
-  brightYellow: "#e3b341",
-  brightBlue: "#79c0ff",
-  brightMagenta: "#d2a8ff",
-  brightCyan: "#56d4dd",
-  brightWhite: "#f0f6fc",
-} as const;
 
 /** ws: matching the page origin — the daemon serves the SPA over plain HTTP, so
  *  this is normally ws:. If a reverse proxy fronts the daemon and serves the page
@@ -138,7 +113,9 @@ export class AttachTerminal {
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
       fontSize: 13,
-      theme: THEME,
+      // Born in the active theme (theme.ts derives the xterm palette from the same
+      // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
+      theme: currentXtermTheme(),
       // The stream is the source of truth; local echo/scrollback beyond the ring is
       // fine but the server never sees our convert-eol, so leave it raw.
       scrollback: 5000,
@@ -206,6 +183,13 @@ export class AttachTerminal {
    *  navigation gets the keys again — the Escape/back-to-nav half of #1693. */
   blur(): void {
     this.term.blur();
+  }
+
+  /** Re-applies an xterm palette live (a theme toggle): xterm repaints the canvas
+   *  from the new ITheme, so an open terminal switches light/dark without a
+   *  reconnect or losing scrollback. */
+  setTheme(theme: ITheme): void {
+    this.term.options.theme = theme;
   }
 
   // --- socket lifecycle ------------------------------------------------------
