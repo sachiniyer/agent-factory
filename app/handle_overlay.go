@@ -300,7 +300,7 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 // configured quit key is root-routed before the pane can type it into an edit
 // field, and ctrl+c still quits from normal mode.
 func (m *home) handleStateHooks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
+	if msg.String() == "ctrl+c" || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
 		return m.handleQuit()
 	}
 
