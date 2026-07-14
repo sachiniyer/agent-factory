@@ -31,7 +31,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects (repo groupings of sessions)
 - [`af projects delete`](#af-projects-delete) — Delete a project: archive its sessions and remove it (reversibly)
-- [`af reset`](#af-reset) — Reset all stored instances
+- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
@@ -93,7 +93,7 @@ af [flags]
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects (repo groupings of sessions)
-- [`af reset`](#af-reset) — Reset all stored instances
+- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
@@ -825,11 +825,34 @@ af projects delete [repo]
 
 ## af reset
 
-Reset all stored instances
+Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)
+
+Factory-reset Agent Factory.
+
+Removes every AF-created resource — all sessions (live and archived), all
+scheduled cron/watch tasks, all AF worktrees, the AF session branches AF
+created, and all stored state — returning AF to a clean slate.
+
+KEEPS your real git repositories (working tree, .git, and your own branches),
+and KEEPS the daemon configuration (config.toml: listen_addr, defaults,
+root_agents, update_channel, and per-repo config). After the wipe the
+supervised daemon restarts with empty session/task state and the same config;
+root_agents in config re-register, which is intended.
+
+This is IRREVERSIBLE. You will be asked to type WIPE to confirm. Pass --yes
+(or --force) to skip the prompt for scripted use; when stdin is not a terminal
+the prompt is skipped automatically so existing scripted callers do not hang.
 
 ```
-af reset
+af reset [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--force` |  | Alias for --yes: skip the typed WIPE confirmation |
+| `-y`, `--yes` |  | Skip the typed WIPE confirmation (for non-interactive/scripted use) |
 
 **Global flags**
 
