@@ -24,14 +24,14 @@ func LocalBranchExists(repoRoot, branch string) bool {
 // `repoRoot`, but only if it currently exists. It reports whether a branch was
 // actually deleted.
 //
-// It exists for the factory-reset path (`af reset`, #1736): CleanupWorktreesForRepo
-// prunes only the branches of worktrees still registered with git, so an
-// ARCHIVED session's branch — whose worktree was relocated out to
-// <AF_HOME>/archived/ and is no longer a live worktree of the repo — survives
-// that pass. The caller enumerates exactly the branches AF created for its own
-// sessions (GitWorktreeData.BranchCreatedByUs) and deletes each here, so the
-// user's own branches (master/main/their feature branches, and any branch a
-// session merely reused) are never touched.
+// It is the SOLE branch-deletion path of the factory reset (`af reset`, #1736):
+// reset removes worktree directories via RemoveWorktreesForRepo, which deletes
+// no branches, and then deletes branches ONLY through here. The caller
+// enumerates exactly the branches AF created for its own sessions — live and
+// archived — gated on GitWorktreeData.BranchCreatedByUs, so the user's own
+// branches (master/main/their feature branches, and any branch a session merely
+// reused) are never touched, even for a session whose worktree was still
+// registered with git.
 //
 // A missing branch is not an error (idempotent: a second `af reset` is a
 // clean no-op), and neither is a non-git or missing repo path — those are

@@ -3,6 +3,7 @@ package commands
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,6 +68,15 @@ type resetPlan struct {
 	worktrees int                 // AF-managed worktrees (excludes external --here trees)
 	repoRoots map[string]struct{} // repos to run worktree cleanup across
 	branches  map[string][]string // repoRoot -> AF-created branch names to prune
+
+	// processedRepoIDs are the repos whose instances.json parsed cleanly and
+	// are therefore safe to delete. corruptRepoIDs are repos whose records
+	// could not be read: we cannot tell which branches AF created, so we leave
+	// their records AND branches intact and report them rather than erasing a
+	// record while orphaning its branch (or guessing and deleting a user's
+	// branch). A re-run after the file is fixed/removed finishes the job.
+	processedRepoIDs []string
+	corruptRepoIDs   []string
 }
 
 func (p *resetPlan) branchCount() int {
@@ -84,6 +94,7 @@ type resetSummary struct {
 	tasks     int
 	worktrees int
 	branches  int // branches actually deleted (<= plan.branchCount())
+	corrupt   int // repos left intact because their records were unreadable
 }
 
 var resetCmd = &cobra.Command{
@@ -165,14 +176,19 @@ func runReset(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintln(out, "Tmux sessions have been cleaned up")
 
-	// 6. Execute the destructive wipe.
-	summary, err := executeFactoryReset(plan)
-	if err != nil {
-		return err
-	}
+	// 6. Execute the destructive wipe. Resilient: it continues past per-item
+	//    failures and returns them joined rather than aborting half-applied.
+	summary, resetErr := executeFactoryReset(plan)
 
-	// 7. Report what was removed and what was preserved.
+	// 7. Report what was removed and what was preserved — even on partial
+	//    failure, so the user sees exactly where the reset got to.
 	printResetSummary(out, summary)
+	if resetErr != nil {
+		fmt.Fprintln(out, "\nSome items could not be removed; the reset is PARTIAL. "+
+			"Every step is idempotent — re-run `af reset` to finish. Details:")
+		fmt.Fprintln(out, resetErr)
+		return resetErr
+	}
 	return nil
 }
 
@@ -237,10 +253,16 @@ func planFactoryReset() (*resetPlan, error) {
 		var recs []session.InstanceData
 		if err := json.Unmarshal(raw, &recs); err != nil {
 			// One repo's corrupted instances.json must not abort the reset:
-			// skip-and-warn and keep planning the others (#869).
-			log.WarningLog.Printf("reset: skipping repo %s: corrupted instances.json: %v", repoID, err)
+			// skip-and-warn and keep planning the others (#869). We CANNOT
+			// determine BranchCreatedByUs for these records, so we neither prune
+			// their branches nor delete their records — conservatively leaving
+			// both intact (and reporting the repo) rather than orphaning a
+			// branch or deleting a user's branch by guessing.
+			log.WarningLog.Printf("reset: leaving repo %s intact: corrupted instances.json: %v", repoID, err)
+			plan.corruptRepoIDs = append(plan.corruptRepoIDs, repoID)
 			continue
 		}
+		plan.processedRepoIDs = append(plan.processedRepoIDs, repoID)
 		for _, r := range recs {
 			if session.IsArchivedData(r) {
 				plan.archived++
@@ -265,6 +287,30 @@ func planFactoryReset() (*resetPlan, error) {
 			// record (the user's own master/main/feature branches).
 			if branchCreatedByAF(r.Worktree) && r.Worktree.BranchName != "" {
 				plan.branches[root] = append(plan.branches[root], r.Worktree.BranchName)
+			}
+		}
+	}
+
+	// Cross-check the instances/ dir: any repoID directory GetAllInstances did
+	// NOT surface (e.g. an unsupported newer schema version it skipped upstream)
+	// is a record we cannot read. Treat it like a corrupt one — leave it and its
+	// branches intact rather than erasing it wholesale — so an unreadable record
+	// never has its branch orphaned or deleted by guessing.
+	seen := make(map[string]struct{}, len(plan.processedRepoIDs)+len(plan.corruptRepoIDs))
+	for _, id := range plan.processedRepoIDs {
+		seen[id] = struct{}{}
+	}
+	for _, id := range plan.corruptRepoIDs {
+		seen[id] = struct{}{}
+	}
+	if entries, derr := os.ReadDir(filepath.Join(dir, "instances")); derr == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			if _, ok := seen[e.Name()]; !ok {
+				log.WarningLog.Printf("reset: leaving repo %s intact: unreadable instance records", e.Name())
+				plan.corruptRepoIDs = append(plan.corruptRepoIDs, e.Name())
 			}
 		}
 	}
@@ -298,12 +344,18 @@ func branchCreatedByAF(w session.GitWorktreeData) bool {
 // executeFactoryReset performs the destructive wipe described by plan. It is
 // separated from the daemon/tmux teardown and the interactive prompt so it can
 // be exercised directly against a throwaway AF home + mock repo in tests.
+//
+// It is RESILIENT: one repo's cleanup failure (or one un-removable path) does
+// NOT abort the reset. Every step runs, per-item errors are collected, and the
+// wipe still reaches a consistent end state (records/tasks/state cleared where
+// possible). Any collected errors are returned joined so the caller reports
+// them and exits non-zero; because every step is idempotent, a re-run finishes
+// whatever a transient failure left behind.
 func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
-	// Snapshot which AF-created branches exist up front, so the final count
-	// reflects branches removed by EITHER pass below: CleanupWorktreesForRepo
-	// deletes the branch of each still-registered worktree, while DeleteLocalBranch
-	// handles the survivors (archived sessions). Counting only the second pass
-	// would under-report the branches a live session's worktree cleanup removed.
+	var errs []error
+
+	// Snapshot which AF-created branches exist up front, so the final count is
+	// accurate even though branch deletion happens AFTER worktree removal.
 	type branchRef struct{ root, name string }
 	var planned []branchRef
 	existedBefore := make(map[branchRef]bool)
@@ -315,27 +367,31 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		}
 	}
 
-	// Clean worktrees across every repo with stored state. This removes the
-	// live worktree dirs and deletes the branch of each worktree still
-	// registered with git.
+	// Remove worktree DIRECTORIES across every repo with stored state, deleting
+	// NO branches here: the bulk pass cannot tell an AF-created branch from one
+	// a session merely reused, so letting it run `git branch -D` would destroy a
+	// user's branch (#1736). Branch deletion is funneled entirely through the
+	// BranchCreatedByUs-guarded pass below. Resilient: a per-repo failure is
+	// collected, not fatal.
 	for root := range plan.repoRoots {
-		if err := git.CleanupWorktreesForRepo(root); err != nil {
-			return nil, fmt.Errorf("failed to cleanup worktrees for %s: %w", root, err)
+		if _, err := git.RemoveWorktreesForRepo(root); err != nil {
+			errs = append(errs, fmt.Errorf("cleanup worktrees for %s: %w", root, err))
 		}
 	}
 
-	// Prune the AF-created session branches that survive worktree cleanup —
-	// archived sessions, whose worktree was relocated to <AF_HOME>/archived/
-	// and is no longer a live worktree of the repo. Best-effort: a single
-	// branch failure is logged, not fatal, so the rest of the reset completes.
+	// Delete ONLY the branches AF created for its own sessions (live and
+	// archived), gated on BranchCreatedByUs at plan time. After worktree removal
+	// + prune above, a live session's branch is no longer checked out, so
+	// `git branch -D` succeeds. Best-effort per branch.
 	for _, ref := range planned {
 		if _, err := git.DeleteLocalBranch(ref.root, ref.name); err != nil {
 			log.WarningLog.Printf("reset: %v", err)
+			errs = append(errs, fmt.Errorf("delete branch %s in %s: %w", ref.name, ref.root, err))
 		}
 	}
 
 	// A planned branch that existed before and is gone now was removed by this
-	// reset (via either pass).
+	// reset.
 	branchesDeleted := 0
 	for _, ref := range planned {
 		if existedBefore[ref] && !git.LocalBranchExists(ref.root, ref.name) {
@@ -343,14 +399,26 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		}
 	}
 
-	// Delete instance storage (removes <AF_HOME>/instances/ and every record).
-	if err := plan.storage.DeleteAllInstances(); err != nil {
-		return nil, fmt.Errorf("failed to reset instance storage: %w", err)
+	// Delete instance records. With no corrupt repos, remove the whole
+	// <AF_HOME>/instances/ tree. With corrupt repos present, delete ONLY the
+	// repos we could parse and LEAVE the corrupt ones (and their branches)
+	// intact — erasing a record whose branch we deliberately did not prune would
+	// orphan that branch.
+	if len(plan.corruptRepoIDs) == 0 {
+		if err := plan.storage.DeleteAllInstances(); err != nil {
+			errs = append(errs, fmt.Errorf("reset instance storage: %w", err))
+		}
+	} else {
+		for _, rid := range plan.processedRepoIDs {
+			if err := config.DeleteRepoInstances(rid); err != nil {
+				errs = append(errs, fmt.Errorf("delete instances for repo %s: %w", rid, err))
+			}
+		}
 	}
 
 	// Delete the task store (removes <AF_HOME>/tasks.json).
 	if err := task.DeleteAllTasks(); err != nil {
-		return nil, fmt.Errorf("failed to reset tasks: %w", err)
+		errs = append(errs, fmt.Errorf("reset tasks: %w", err))
 	}
 
 	// Remove the remaining AF state trees/files, leaving config (config.toml,
@@ -358,17 +426,22 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	for _, name := range resetWipePaths {
 		p := filepath.Join(plan.configDir, name)
 		if err := os.RemoveAll(p); err != nil {
-			return nil, fmt.Errorf("failed to remove %s: %w", p, err)
+			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
 		}
 	}
 
-	return &resetSummary{
+	summary := &resetSummary{
 		sessions:  plan.sessions,
 		archived:  plan.archived,
 		tasks:     plan.tasks,
 		worktrees: plan.worktrees,
 		branches:  branchesDeleted,
-	}, nil
+		corrupt:   len(plan.corruptRepoIDs),
+	}
+	if len(errs) > 0 {
+		return summary, errors.Join(errs...)
+	}
+	return summary, nil
 }
 
 func printResetPlan(out io.Writer, plan *resetPlan) {
@@ -394,6 +467,10 @@ func printResetSummary(out io.Writer, s *resetSummary) {
 	fmt.Fprintf(out, "  tasks:     %d\n", s.tasks)
 	fmt.Fprintf(out, "  worktrees: %d\n", s.worktrees)
 	fmt.Fprintf(out, "  branches:  %d\n", s.branches)
+	if s.corrupt > 0 {
+		fmt.Fprintf(out, "  NOTE: %d repo(s) had unreadable records and were LEFT INTACT "+
+			"(their branches were NOT pruned). Fix or remove those instances.json files and re-run.\n", s.corrupt)
+	}
 	fmt.Fprintln(out, "Preserved: your git repositories and daemon config (config.toml).")
 	fmt.Fprintln(out, "The supervised daemon will restart with empty session/task state and the same config.")
 }
