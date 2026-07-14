@@ -170,12 +170,12 @@ screen — useful on a shared machine.
 
 ## A tour of the app
 
-The app is one screen with three top-level views, switched by the **view tabs** in
-the top bar or the `[` / `]` keys:
+The app is one screen with two top-level views, switched by the **view tabs** in
+the top bar, the **project switcher** (top-right), or the `[` / `]` keys:
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│  Agent Factory   [ Sessions ] Projects  Tasks        ● Live   Disconnect│  ← app bar
+│  Agent Factory   [ Sessions ]  Tasks       project ▾   ● Live   Disconnect│  ← app bar
 ├──────────────────────┬────────────────────────────────────────────────┤
 │ Sessions        3 +New│  fix-login-flow · Live · fix/login             │  ← pane header
 │                       │ ┌────────────────────────────────────────────┐ │
@@ -190,14 +190,19 @@ the top bar or the `[` / `]` keys:
 └──────────────────────┴────────────────────────────────────────────────┘
 ```
 
-The **app bar** carries, left to right: the **Agent Factory** brand, the three
-**view tabs** (Sessions / Projects / Tasks), a **Live** pip showing the daemon
-event-stream state (`Live` / `Connecting…` / `Reconnecting…`), and **Disconnect**.
+The **app bar** carries, left to right: the **Agent Factory** brand, the two
+**view tabs** (Sessions / Tasks), the **project switcher** (top-right; lists
+every project with per-project session + working counts, and scopes the rail and
+Tasks view to the selected project), a **Live** pip showing the daemon
+event-stream state (`Live` / `Connecting…` / `Reconnecting…`), and
+**Disconnect**.
 
 ### Sessions view
 
-The default view: a **rail** of every session on the left, a **main pane** on the
-right that attaches the selected session's live terminal.
+The default view: a **rail** of the selected project's sessions on the left, a
+**main pane** on the right that attaches the selected session's live terminal.
+The project switcher (top-right) scopes the rail and Tasks view; the rail lists
+only sessions whose repo root matches the selected project.
 
 **The rail** mirrors the TUI sidebar. Each row carries the same three signals as
 the TUI:
@@ -276,27 +281,15 @@ failed tab op (e.g. hitting the nine-tab cap) surfaces as a brief toast rather t
 a modal. **Remote-hook sessions** have their tabs fixed by their hook config, so
 their `+` / `×` affordances and the `t` / `w` keys are disabled.
 
-### Projects view
+### Project switcher
 
-The **Projects** view groups every session by its repo root — one section per
-project af has seen — the browser analogue of the TUI's projects pane. It's a
-**read-and-jump** surface: clicking a session under its project **opens it**, which
-switches back to the Sessions view and attaches its terminal. Handy as a
-per-project session switcher when you're juggling several repos.
-
-```
-Projects  2
-
-  agent-factory   3
-  ~/code/agent-factory
-    ● fix-login-flow
-    ○ add-metrics
-    ◆ nightly-refactor
-
-  website   1
-  ~/code/website
-    ● copy-tweaks
-```
+The **project switcher** in the top-right of the app bar lists every project (repo)
+af has a session or task in, each showing a per-project session + working count —
+the cross-project glance that replaces the old all-projects rail. Selecting a
+project scopes the rail and Tasks view to it; the choice persists across reloads.
+Projects with no live sessions show an empty-state prompt (`No sessions in
+<project> — + New`). The reversible delete-project control sits in the switcher
+menu footer.
 
 ### Tasks view
 
@@ -391,7 +384,7 @@ control sits above every web tab for dev-preview refreshes.
 | `1`–`9` | Switch to that tab of the selected session |
 | `t` | New shell tab in the worktree |
 | `w` | Close the active shell tab (tab 0, the agent, is unclosable) |
-| `[` / `]` | Cycle the top-level view (Sessions → Projects → Tasks) |
+| `[` / `]` | Cycle the top-level view (Sessions → Tasks) |
 
 `[` / `]` work in every view; the rest are the Sessions view's session/tab keys.
 While a terminal is attached, all keys except `Escape` flow to the agent.
