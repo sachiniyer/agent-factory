@@ -293,9 +293,11 @@ var (
 // dotted key (section.leaf = …) — and edits whichever is present, so a
 // hand-edited dotted-key file is never left with a duplicate. If the key is
 // absent it is inserted with minimal disturbance — appended to the end of its
-// section's block (or, for a root key, the pre-section block); if the section
-// itself is absent a new [section] block is appended. section == "" targets the
-// root block.
+// section's content block, i.e. after the section's last non-blank line
+// (comments included) and before any trailing blanks preceding the next section
+// or EOF (#1687), or for a root key the pre-section block; if the section itself
+// is absent a new [section] block is appended. section == "" targets the root
+// block.
 func setTOMLScalar(content, section, leaf, encoded string) string {
 	newLine := leaf + " = " + encoded
 
@@ -328,7 +330,15 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 	curSection := ""
 	firstHeaderIdx := -1
 	targetHeaderIdx := -1
-	lastLineIdxInTarget := -1
+	// lastContentIdxInTarget tracks the last non-blank line of the target
+	// section INCLUDING comment lines, so a missing key is appended at the END
+	// of the section's content block (the documented contract). Tracking only
+	// key=value lines (the pre-#1687 behavior) left it at -1 for a comment-only
+	// section, which inserted the new key immediately after the [section] header
+	// and ABOVE the section's comments (#1687). Blank lines never update it, so
+	// trailing blanks before the next header / EOF are excluded and the insert
+	// lands at the end of the content, not spilling past it.
+	lastContentIdxInTarget := -1
 
 	rebuild := func() string {
 		out := strings.Join(ls, "\n")
@@ -367,9 +377,8 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 			ls[i] = m[1] + encoded + comment
 			return rebuild()
 		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			lastLineIdxInTarget = i
+		if strings.TrimSpace(line) != "" {
+			lastContentIdxInTarget = i
 		}
 	}
 
@@ -383,8 +392,8 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 	switch {
 	case section == "":
 		switch {
-		case lastLineIdxInTarget != -1:
-			insertAt(lastLineIdxInTarget+1, newLine)
+		case lastContentIdxInTarget != -1:
+			insertAt(lastContentIdxInTarget+1, newLine)
 		case firstHeaderIdx != -1:
 			insertAt(firstHeaderIdx, newLine)
 		default:
@@ -397,8 +406,8 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 		}
 		ls = append(ls, "["+section+"]", newLine)
 	default:
-		if lastLineIdxInTarget != -1 {
-			insertAt(lastLineIdxInTarget+1, newLine)
+		if lastContentIdxInTarget != -1 {
+			insertAt(lastContentIdxInTarget+1, newLine)
 		} else {
 			insertAt(targetHeaderIdx+1, newLine)
 		}
