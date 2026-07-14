@@ -4,7 +4,7 @@
 # starts an `af agent-server` there, and echoes that server's authed endpoint.
 #
 # Args:  --name <slug> --title <title> --repo <url> [--branch <b>] [--program <p>] [--auto-yes]
-# stdout: one JSON object {"url","token","tls_fingerprint"}  (the agent-server banner)
+# stdout: one JSON object {"url","token"}  (the agent-server banner)
 # stderr: progress logs
 #
 # See docs/remote-hooks.md for the full contract and a ready-to-use reference.
@@ -36,11 +36,11 @@ echo "Provisioning session $NAME..." >&2
 #   3. Start the agent-server, capturing its one-line JSON banner:
 #         af agent-server --listen 0.0.0.0:0 --repo "$WORKDIR/workspace" \
 #            --title "$TITLE" ${PROGRAM:+--program "$PROGRAM"} $AUTOYES >banner.json 2>log &
-#   4. Re-emit its {addr,token,fingerprint} as the endpoint contract below.
+#   4. Re-emit its {addr,token} as the endpoint contract below.
 #
 # The daemon dials the URL you print, so it must be reachable from the daemon
 # (a public/forwarded address, or a tunnel you open here).
 
-# echo '{"url": "wss://HOST:PORT", "token": "TOKEN", "tls_fingerprint": "FINGERPRINT"}'
+# echo '{"url": "http://HOST:PORT", "token": "TOKEN"}'
 echo "Error: fill in your provisioning logic in launch.sh" >&2
 exit 1
