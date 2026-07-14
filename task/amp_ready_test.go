@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestIsAmpPromptFrameRealCapture pins BUG 1 to the ACTUAL bytes amp's ready pane
@@ -187,6 +189,69 @@ func TestWaitForReadyStopsPollingOnContextCancel(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	if grew := captures.Load() - settled; grew != 0 {
 		t.Fatalf("pane captured %d more time(s) after cancel drained — poll goroutine leaked", grew)
+	}
+}
+
+// ctxCaptureBackend is a fake backend whose agent-tab capture is context-bound
+// (like the local tmux runtime). Its PreviewContext blocks until the capture's
+// context is cancelled, then records that it observed the cancellation — standing
+// in for a `tmux capture-pane` subprocess that gets torn down on cancel.
+type ctxCaptureBackend struct {
+	*session.FakeBackend
+	entered  chan struct{}
+	enterOne sync.Once
+	ctxFired atomic.Bool
+}
+
+func (b *ctxCaptureBackend) PreviewContext(ctx context.Context, _ *session.Instance) (string, error) {
+	b.enterOne.Do(func() { close(b.entered) })
+	<-ctx.Done() // a real capture would be killed here via exec.CommandContext
+	b.ctxFired.Store(true)
+	return "", ctx.Err()
+}
+
+// TestWaitForReadyThreadsContextIntoCapture pins the last Greptile P1 tail: the
+// capture itself must RECEIVE cancellation (so the subprocess is killed), not just
+// have the wait race around it. On cancel, WaitForReady returns promptly AND the
+// in-flight capture observes its context firing.
+func TestWaitForReadyThreadsContextIntoCapture(t *testing.T) {
+	defer setWaitForReadyTimingForTest(10*time.Second, time.Millisecond)()
+	defer setWaitLimitForTest(NewLimitDetector(nil), time.Now)()
+
+	backend := &ctxCaptureBackend{FakeBackend: session.NewFakeBackend(), entered: make(chan struct{})}
+	restore := session.SetBackendFactoryForTest(func(_ session.InstanceOptions, _ string) (session.Backend, error) {
+		return backend, nil
+	})
+	defer restore()
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "ctxcap", Path: t.TempDir(), Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(ctx, inst) }()
+
+	<-backend.entered // a capture is in flight, holding a context
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForReady did not return after cancel")
+	}
+
+	// The capture's own context must have fired — i.e. cancellation was threaded
+	// into the capture, not just raced around it.
+	deadline := time.Now().Add(time.Second)
+	for !backend.ctxFired.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("capture did not receive context cancellation — ctx not threaded to the capture subprocess")
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 

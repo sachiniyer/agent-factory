@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"sync"
 )
@@ -127,6 +128,27 @@ func (s *localAgentServer) Preview(tab int, full bool) (string, error) {
 		return s.inst.PreviewTabFullHistory(tab)
 	}
 	return s.inst.PreviewTab(tab)
+}
+
+// ctxPreviewBackend is the optional backend capability for a pane capture bound to
+// a context (the local tmux runtime). When the backend supports it, PreviewContext
+// threads ctx down to the capture so a cancelled readiness wait kills the in-flight
+// capture subprocess.
+type ctxPreviewBackend interface {
+	PreviewContext(ctx context.Context, i *Instance) (string, error)
+}
+
+// PreviewContext is Preview for tab 0 (the agent tab) bound to ctx: cancelling ctx
+// tears down the in-flight capture when the backend supports it (local tmux). Other
+// tabs / full-history / non-ctx-aware backends fall back to the ctx-free capture —
+// the caller's wait still returns promptly; only the subprocess-kill is skipped.
+func (s *localAgentServer) PreviewContext(ctx context.Context, tab int, full bool) (string, error) {
+	if tab == 0 && !full {
+		if cb, ok := s.inst.backend.(ctxPreviewBackend); ok {
+			return cb.PreviewContext(ctx, s.inst)
+		}
+	}
+	return s.Preview(tab, full)
 }
 
 func (s *localAgentServer) Alive() bool {

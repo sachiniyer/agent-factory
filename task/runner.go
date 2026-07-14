@@ -340,24 +340,44 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 	}
 }
 
+// contextPreviewer is the optional capability an agent server exposes when its
+// pane capture can be bound to a context — cancelling the context tears down the
+// in-flight capture (the local tmux runtime kills the `capture-pane` subprocess).
+// WaitForReady uses it so an abandoned create leaves no lingering capture.
+type contextPreviewer interface {
+	PreviewContext(ctx context.Context, tab int, full bool) (string, error)
+}
+
 // capturePreview captures the agent pane but abandons the wait the moment ctx is
 // done OR the capture exceeds waitForReadyCaptureTimeout, so a cancelled/timed-out
 // create returns — and releases the per-repo start lock — within a bounded window
-// instead of blocking indefinitely inside a slow/wedged `tmux capture-pane`
-// (Greptile P1 on #1756). The capture runs in a goroutine; when it is abandoned
-// the goroutine still completes its bounded tmux exec and exits, and its buffered
-// result channel keeps it from leaking. On abandonment it returns ctx/deadline
-// error, which callers treat as (respectively) a fast return or a transient poll.
+// instead of blocking inside a slow/wedged `tmux capture-pane` (Greptile P1 on
+// #1756).
+//
+// When the agent server supports a context-bound capture (the local tmux runtime),
+// cctx is threaded all the way into the capture so cancellation SIGKILLs the
+// capture subprocess — the goroutine then returns promptly too, leaving nothing
+// behind. Runtimes without that capability (a future remote capture) fall back to
+// the ctx-free Preview; the wait still returns promptly via the cctx race, and the
+// goroutine completes its own bounded work. The buffered channel keeps the
+// goroutine from blocking on send after the wait has moved on.
 func capturePreview(ctx context.Context, instance *session.Instance) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, waitForReadyCaptureTimeout)
 	defer cancel()
+	server := instance.AgentServer()
 	type previewResult struct {
 		content string
 		err     error
 	}
 	ch := make(chan previewResult, 1)
 	go func() {
-		content, err := instance.AgentServer().Preview(0, false)
+		var content string
+		var err error
+		if cp, ok := server.(contextPreviewer); ok {
+			content, err = cp.PreviewContext(cctx, 0, false)
+		} else {
+			content, err = server.Preview(0, false)
+		}
 		ch <- previewResult{content: content, err: err}
 	}()
 	select {
