@@ -109,7 +109,7 @@ func TestPrInfoUpdatedMsg_RoutesWriteThroughDaemon(t *testing.T) {
 	defer restore()
 
 	info := &sessiongit.PRInfo{Number: 42, Title: "add feature", URL: "https://x/42", State: "OPEN"}
-	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, repoID: h.repoID, info: info})
 
 	require.Equal(t, inst.Title, gotTitle, "SetPRInfo must target the resolved session")
 	require.Equal(t, h.repoID, gotRepo, "SetPRInfo must be scoped to the TUI's repo")
@@ -143,7 +143,7 @@ func TestPrInfoUpdatedMsg_BranchMismatchSkipsDaemon(t *testing.T) {
 
 	info := &sessiongit.PRInfo{Number: 99, Title: "wrong branch", State: "OPEN"}
 	// The fetch was kicked off for a different branch than the instance now has.
-	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, branch: "feature-y", info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, branch: "feature-y", repoID: h.repoID, info: info})
 
 	require.False(t, called, "a branch mismatch must not write PR info to the daemon")
 	require.Nil(t, inst.GetPRInfo(), "a branch mismatch must not apply the badge")

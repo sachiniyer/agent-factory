@@ -61,7 +61,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
 		// data is still fresh, so rapid Up/Down navigation doesn't hammer gh.
 		if !attachedNow && selected != nil && selected.Started() {
-			prFetch = fetchPRInfoCmd(selected, false)
+			prFetch = fetchPRInfoCmd(selected, m.repoID, false)
 		}
 	} else {
 		// Header row: the menu drops the instance-specific hints; the open
