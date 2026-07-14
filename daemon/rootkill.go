@@ -1,9 +1,6 @@
 package daemon
 
 import (
-	"encoding/json"
-	"fmt"
-
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -51,7 +48,7 @@ func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance
 	}
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
-	err := persistInstanceDataByStableID(repoID, d)
+	err := persistInstanceData(repoID, d)
 	repoStartLock.Unlock()
 	if err != nil {
 		log.WarningLog.Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
@@ -121,38 +118,4 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		delete(m.instances, key)
 	}
 	m.mu.Unlock()
-}
-
-func persistInstanceDataByStableID(repoID string, data session.InstanceData) error {
-	data = data.ForStorage()
-	found := false
-	sameTitleDifferentID := false
-	if err := config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
-		var existing []session.InstanceData
-		if err := json.Unmarshal(raw, &existing); err != nil {
-			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
-		}
-		for i := range existing {
-			if existing[i].Title != data.Title {
-				continue
-			}
-			if !stableIDMatchesForDaemon(existing[i].ID, data.ID) {
-				sameTitleDifferentID = true
-				return raw, nil
-			}
-			existing[i] = data
-			found = true
-			return json.MarshalIndent(existing, "", "  ")
-		}
-		return raw, nil
-	}); err != nil {
-		return err
-	}
-	if sameTitleDifferentID {
-		return fmt.Errorf("instance %q identity changed in storage", data.Title)
-	}
-	if !found {
-		return fmt.Errorf("instance %q not found in storage", data.Title)
-	}
-	return nil
 }
