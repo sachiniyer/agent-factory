@@ -82,3 +82,20 @@ test("manageability (local vs remote) is part of the sig — the + / × affordan
 test("no selection collapses to the empty sig", () => {
   assert.equal(tabBarSig(state({ selectedId: null })), "");
 });
+
+test("the signature is delimiter-safe: a tab name containing separators can't hide a change", () => {
+  // A naive `${kind}:${name}` joined by "|" would collide these two DIFFERENT tab sets
+  // into the same string ("1:a|1:b") — suppressing a required rebuild and leaving a
+  // stale tab bar. A structured signature must tell them apart.
+  const oneTab = state({ sessions: [sess({ tabs: [{ name: "a|1:b", kind: 1 }] })] });
+  const twoTabs = state({ sessions: [sess({ tabs: [{ name: "a", kind: 1 }, { name: "b", kind: 1 }] })] });
+  assert.notEqual(tabBarSig(oneTab), tabBarSig(twoTabs));
+});
+
+test("the signature is delimiter-safe: a name mimicking the field separators still changes the sig", () => {
+  const plain = state({ sessions: [sess({ tabs: [{ name: "t", kind: 1 }] })] });
+  // A name crafted to look like the trailing sig fields must not collide with any real
+  // active/shown/manageability combination.
+  const tricky = state({ sessions: [sess({ tabs: [{ name: 't"::0::[0]::true', kind: 1 }] })] });
+  assert.notEqual(tabBarSig(plain), tabBarSig(tricky));
+});

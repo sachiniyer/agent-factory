@@ -8978,6 +8978,7 @@ var AppShell = class {
       children.push(add);
     }
     bar.replaceChildren(...children);
+    document.body.classList.remove("af-dragging-tab");
     this.lastTabBarSig = tabBarSig(state);
   }
   /** Wires the tab bar as a DRAG SOURCE via event DELEGATION on the (stable) bar
@@ -9028,9 +9029,8 @@ function tabBarSig(state) {
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
   const canManage = supportsTabManagement(selected);
-  const ids = tabs.map(tabIdentity).join("|");
-  const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b).join(",");
-  return `${selected.id ?? ""}::${ids}::${active}::${shown}::${canManage ? "m" : "-"}`;
+  const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
+  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
 }
 function tabButton(tab, index, active, shown, canManage, actions2) {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;

@@ -1030,7 +1030,7 @@ body {
   pointer-events: none;
   z-index: 5;
 }
-.af-drop-overlay.af-drop-show {
+.af-dragging-tab .af-drop-overlay.af-drop-show {
   display: block;
 }
 .af-drop-center {

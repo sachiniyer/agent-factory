@@ -901,6 +901,12 @@ export class AppShell {
       children.push(add);
     }
     bar.replaceChildren(...children);
+    // Rebuilding the bar detaches EVERY tab button — including the source of an
+    // in-flight drag. A native dragend can't fire on a detached node, so the delegated
+    // dragend (on the bar) would never run and the drag flag would stick, leaving the UI
+    // in "dragging" mode (pane hints + drop overlay, both gated on the flag). Clear it
+    // here so a drag that loses its source still ends cleanly. A no-op when idle.
+    document.body.classList.remove("af-dragging-tab");
     // Record the signature this render represents, so update() skips a rebuild until
     // the bar's inputs actually change again.
     this.lastTabBarSig = tabBarSig(state);
@@ -951,14 +957,19 @@ function selectedSession(state: AppState): SessionData | null {
 }
 
 /** A signature of everything the tab BAR draws for the selected session: which session
- *  it is, the ordered tab identities (kind:name), the active index, the shown-in-a-pane
- *  set, and whether tabs are manageable (the + / × affordances). The bar is rebuilt
- *  ONLY when this changes (ui update()), so an unrelated session-status snapshot — a
- *  rail event that leaves the tab list, highlight, and split layout alone — no longer
+ *  it is, the ordered tabs (kind + name), the active index, the shown-in-a-pane set, and
+ *  whether tabs are manageable (the + / × affordances). The bar is rebuilt ONLY when
+ *  this changes (ui update()), so an unrelated session-status snapshot — a rail event
+ *  that leaves the tab list, highlight, and split layout alone — no longer
  *  replaceChildren()es the bar. That churn was the real cause of "a freshly-created tab
  *  can't be dragged": a new terminal tab's shell flaps status right after creation, and
  *  each snapshot destroyed the button the user had just grabbed, aborting the native
- *  HTML5 drag mid-gesture (#1737 follow-up). Exported for unit coverage. */
+ *  HTML5 drag mid-gesture (#1737 follow-up).
+ *
+ *  Encoded with JSON.stringify over a STRUCTURED tuple, not a delimiter-joined string:
+ *  a tab name containing a separator character must not be able to collide two distinct
+ *  tab sets into the same signature and suppress a required rebuild. Exported for unit
+ *  coverage. */
 export function tabBarSig(state: AppState): string {
   const selected = selectedSession(state);
   if (!selected) {
@@ -967,9 +978,8 @@ export function tabBarSig(state: AppState): string {
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
   const canManage = supportsTabManagement(selected);
-  const ids = tabs.map(tabIdentity).join("|");
-  const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b).join(",");
-  return `${selected.id ?? ""}::${ids}::${active}::${shown}::${canManage ? "m" : "-"}`;
+  const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
+  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
 }
 
 /** One tab-bar button: its label, an active-state highlight, a "shown in a pane"
