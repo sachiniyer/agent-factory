@@ -57,6 +57,32 @@ func TestParseDaemonURL_AcceptsHTTPSchemesRejectsTLS(t *testing.T) {
 	}
 }
 
+// TestParseDaemonURL_RejectsEmptyHost pins the #1784 contract: a URL carrying a
+// scheme but no host is rejected at VALIDATION with the actionable "missing host"
+// message, not admitted and left to fail later as `dial tcp :8443: connect:
+// connection refused`. The `:8443` / `:` forms are the regression that matters —
+// net/url gives them a non-empty Host, so the old u.Host check waved them
+// through; they are exactly what `http://${DAEMON_HOST}:8443` expands to when the
+// variable is unset.
+func TestParseDaemonURL_RejectsEmptyHost(t *testing.T) {
+	for _, in := range []string{"http://:8443", "ws://:8443", "http://:", "http:///path", "ws://", "http://"} {
+		_, _, err := parseDaemonURL(in)
+		if err == nil {
+			t.Fatalf("parseDaemonURL(%q): want error, got nil", in)
+		}
+		if !strings.Contains(err.Error(), "missing host") {
+			t.Fatalf("parseDaemonURL(%q): want actionable missing-host error, got %v", in, err)
+		}
+	}
+	// A real host — including the IPv6 literal whose brackets Hostname() strips —
+	// still parses, so the check narrows nothing it shouldn't.
+	for _, in := range []string{"http://host:8443", "http://[::1]:8443"} {
+		if _, _, err := parseDaemonURL(in); err != nil {
+			t.Fatalf("parseDaemonURL(%q): unexpected error %v", in, err)
+		}
+	}
+}
+
 // clearTargetEnv unsets every AF_DAEMON_* env var (and any bound flag) so a test's
 // remote-target resolution starts from a known-empty state, then restores the flag
 // vars on cleanup. Env vars are cleared via t.Setenv, which auto-restores.

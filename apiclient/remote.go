@@ -106,6 +106,13 @@ func NewRemote(daemonURL, token string) (*Client, error) {
 // clear HTTP-only error — af removed TLS, so a client pointed at a wss:// URL is
 // almost certainly a stale config from the old pinned-TLS listener. Only the
 // scheme and authority are used; any path or query on the URL is ignored.
+//
+// The host check tests u.Hostname(), not u.Host: net/url parses `http://:8443`
+// into a NON-empty Host (":8443") with an empty Hostname, so a u.Host check
+// admits a hostless URL and defers the failure to an opaque `dial tcp :8443:
+// connect: connection refused` (#1784). That form is what an unset variable
+// expands to (`AF_DAEMON_URL="http://${DAEMON_HOST}:8443"`), so it is the case
+// most worth naming precisely.
 func parseDaemonURL(daemonURL string) (httpBase, wsBase string, err error) {
 	u, err := url.Parse(strings.TrimSpace(daemonURL))
 	if err != nil {
@@ -121,8 +128,9 @@ func parseDaemonURL(daemonURL string) (httpBase, wsBase string, err error) {
 	default:
 		return "", "", fmt.Errorf("--daemon-url %q must be an http:// or ws:// URL", daemonURL)
 	}
-	if u.Host == "" {
-		return "", "", fmt.Errorf("--daemon-url %q has no host:port", daemonURL)
+	if u.Hostname() == "" {
+		return "", "", fmt.Errorf("invalid --daemon-url %q: missing host; use http://HOST:PORT "+
+			"(if this URL came from a variable, it likely expanded empty)", daemonURL)
 	}
 	return "http://" + u.Host, "ws://" + u.Host, nil
 }
