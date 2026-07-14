@@ -286,6 +286,18 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Fetch the INCOMING project's snapshot FIRST, while the outgoing project is
+	// still fully intact. Everything below this point is unconditional mutation
+	// with no way back — the panes are torn down and the projection reset — so a
+	// fetch failure (a wedged or unreachable daemon, common against a remote
+	// target) must abort here, leaving the current project exactly as it was,
+	// rather than stranding the TUI on the new repoID with an empty sidebar
+	// (#1788).
+	data, err := m.fetchColdStartSnapshot(repo.ID)
+	if err != nil {
+		return m, m.handleError(fmt.Errorf("failed to load sessions for %s: %w", filepath.Base(repo.Root), err))
+	}
+
 	// Persist the OUTGOING project's pane/selection state under its still-current
 	// repoID before anything changes.
 	m.flushTUIViewStateBestEffort()
@@ -322,12 +334,11 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		m.hooksPane.SetCommands(nil)
 	}
 
-	// Re-prime the projection from the new project's snapshot (scoped to the new
+	// Re-prime the projection from the snapshot fetched above (scoped to the new
 	// repoID by the daemon — no cross-repo bleed). Persisted remote-hook sessions
-	// arrive on this snapshot too.
-	if err := m.coldStartFromSnapshot(); err != nil {
-		return m, m.handleError(fmt.Errorf("failed to load sessions for %s: %w", filepath.Base(repo.Root), err))
-	}
+	// arrive on this snapshot too. Materializing cannot fail as a whole: an
+	// unrestorable record is skipped, so the switch is committed from here on.
+	m.materializeSnapshot(data)
 
 	if tasks, err := task.LoadTasksForRepo(repo.Root); err != nil {
 		log.WarningLog.Printf("switch project: failed to load tasks for %s: %v", repo.Root, err)

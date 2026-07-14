@@ -158,10 +158,20 @@ var coldStartWarmupWait = 2 * time.Minute
 // (non-warming) daemon failure, which newHome surfaces and exits on — there is
 // no standalone fallback anymore (#960 PR 6 dropped no-daemon mode).
 func (m *home) coldStartFromSnapshot() error {
-	data, err := m.fetchColdStartSnapshot()
+	data, err := m.fetchColdStartSnapshot(m.repoID)
 	if err != nil {
 		return err
 	}
+	m.materializeSnapshot(data)
+	return nil
+}
+
+// materializeSnapshot builds each snapshot record into a live instance and adds
+// it to the projection. Split out of coldStartFromSnapshot so switchProject can
+// fetch a target project's snapshot up front — while the outgoing project is
+// still intact — and only materialize it once the fetch has succeeded (#1788).
+// A single unrestorable record is logged and skipped, never aborting the batch.
+func (m *home) materializeSnapshot(data []session.InstanceData) {
 	for _, d := range data {
 		inst, err := buildInstanceFromSnapshot(d)
 		if err != nil {
@@ -173,7 +183,6 @@ func (m *home) coldStartFromSnapshot() error {
 		m.store.AddInstance(inst)()
 		inst.SetAutoYes(m.autoYes)
 	}
-	return nil
 }
 
 // fetchColdStartSnapshot fetches the cold-start snapshot, tolerating a warming
@@ -183,11 +192,13 @@ func (m *home) coldStartFromSnapshot() error {
 // session list rather than an empty sidebar that looks like a fresh install
 // (#766/#868). On a hard error the daemon is unavailable and the launch aborts —
 // post-#782 the daemon is always-on, so there is no degraded standalone path.
-func (m *home) fetchColdStartSnapshot() ([]session.InstanceData, error) {
+// The repoID is passed explicitly rather than read from m.repoID so switchProject
+// can fetch the INCOMING project's snapshot before it re-scopes the model (#1788).
+func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, error) {
 	deadline := time.Now().Add(coldStartWarmupWait)
 	announced := false
 	for {
-		resp, err := m.snapshotFetcher(m.repoID)
+		resp, err := m.snapshotFetcher(repoID)
 		if err == nil {
 			return resp.Instances, nil
 		}
