@@ -240,9 +240,11 @@ async function connect(candidate: string): Promise<void> {
     storeToken(candidate);
   }
   // Scope to a project on connect (redesign PR2): resume the persisted choice if it
-  // still exists, else the most-recently-active project's default. Persisted only, so
+  // still exists, else the most-recently-active project's default. Tasks aren't
+  // fetched yet (refreshTasks runs just below), so a task-only project resolves once
+  // its tasks land — the reconcile in refreshTasks re-scopes then. Persisted only, so
   // a reload lands on the same project the user left.
-  const selectedProject = reconcileProject(sessions, loadProjectChoice(), null);
+  const selectedProject = reconcileProject(sessions, [], loadProjectChoice(), null);
   store.set({
     phase: "app",
     view: "sessions",
@@ -661,7 +663,14 @@ function refreshTasks(): void {
     return;
   }
   void listTasks(tok)
-    .then((tasks) => store.set({ tasks }))
+    .then((tasks) => {
+      // Reconcile the project scope against the new task set (redesign PR2): a
+      // task-only project appears once its tasks load, and drops when its last task
+      // is removed (if it also has no live sessions). This is what makes a task-only
+      // repo reachable in the switcher and its tasks scoped to it.
+      const selectedProject = reconcileProject(store.get().sessions, tasks, loadProjectChoice(), store.get().selectedProject);
+      store.set({ tasks, selectedProject });
+    })
     .catch(() => {
       // Transport/auth failure: leave the last-known list up; a task.* event or the
       // next mutation refetches. Nothing to surface here.
@@ -905,7 +914,7 @@ function applySessions(sessions: SessionData[]): void {
   // Reconcile the project scope against the new session set (redesign PR2): a project
   // that vanished (its last session gone) falls back gracefully to the persisted/
   // default one, so the rail is never pinned to a dead root.
-  const selectedProject = reconcileProject(sessions, loadProjectChoice(), store.get().selectedProject);
+  const selectedProject = reconcileProject(sessions, store.get().tasks, loadProjectChoice(), store.get().selectedProject);
   let selectedId = pickSelection(sessions, prevSel);
   // Drop a selection that no longer belongs to the scoped project, so the terminal
   // never stays attached to a session hidden from the (now re-scoped) rail.

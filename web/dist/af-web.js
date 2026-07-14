@@ -6790,7 +6790,7 @@ function projectName(root2) {
   const parts = root2.replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || root2;
 }
-function projectSummaries(sessions) {
+function projectSummaries(sessions, tasks) {
   const byRoot = /* @__PURE__ */ new Map();
   for (const s of sessions) {
     const root2 = s.worktree?.repo_path;
@@ -6801,7 +6801,24 @@ function projectSummaries(sessions) {
     arr.push(s);
     byRoot.set(root2, arr);
   }
-  return [...byRoot.keys()].sort().map((root2) => {
+  const taskCounts = /* @__PURE__ */ new Map();
+  for (const t of tasks) {
+    const root2 = t.project_path;
+    if (!root2) {
+      continue;
+    }
+    taskCounts.set(root2, (taskCounts.get(root2) ?? 0) + 1);
+  }
+  const roots = /* @__PURE__ */ new Set();
+  for (const [root2, rows] of byRoot) {
+    if (rows.some((s) => !isArchived(s))) {
+      roots.add(root2);
+    }
+  }
+  for (const root2 of taskCounts.keys()) {
+    roots.add(root2);
+  }
+  return [...roots].sort().map((root2) => {
     const rows = byRoot.get(root2) ?? [];
     const live = rows.filter((s) => !isArchived(s));
     const working = live.filter((s) => rowStatus(s).spinning).length;
@@ -6811,13 +6828,14 @@ function projectSummaries(sessions) {
       path: root2,
       liveCount: live.length,
       workingCount: working,
-      totalCount: rows.length
+      totalCount: rows.length,
+      taskCount: taskCounts.get(root2) ?? 0
     };
   });
 }
 function projectMeta(p) {
   if (p.liveCount === 0) {
-    return "no sessions yet";
+    return p.taskCount > 0 ? `${p.taskCount} task${p.taskCount === 1 ? "" : "s"}` : "no sessions yet";
   }
   const base = `${p.liveCount} session${p.liveCount === 1 ? "" : "s"}`;
   return p.workingCount > 0 ? `${base} \xB7 ${p.workingCount} working` : base;
@@ -6828,35 +6846,48 @@ function scopeToProject(sessions, root2) {
   }
   return sessions.filter((s) => s.worktree?.repo_path === root2);
 }
-function validRoots(sessions) {
-  return new Set(projectSummaries(sessions).map((p) => p.root));
+function validRoots(sessions, tasks) {
+  return new Set(projectSummaries(sessions, tasks).map((p) => p.root));
 }
-function defaultProject(sessions) {
-  const summaries = projectSummaries(sessions);
+function defaultProject(sessions, tasks) {
+  const summaries = projectSummaries(sessions, tasks);
   if (summaries.length === 0) {
     return null;
   }
-  const withRepo = sessions.filter((s) => s.worktree?.repo_path);
-  const live = withRepo.filter((s) => !isArchived(s));
-  const pool = live.length > 0 ? live : withRepo;
+  const valid = new Set(summaries.map((p) => p.root));
   let best = null;
-  for (const s of pool) {
+  for (const s of sessions) {
+    const root2 = s.worktree?.repo_path;
+    if (!root2 || isArchived(s) || !valid.has(root2)) {
+      continue;
+    }
     if (!best || (s.created_at ?? "") > (best.created_at ?? "")) {
       best = s;
     }
   }
-  const root2 = best?.worktree?.repo_path;
-  return root2 ?? summaries[0]?.root ?? null;
+  if (best?.worktree?.repo_path) {
+    return best.worktree.repo_path;
+  }
+  let bestTask = null;
+  for (const t of tasks) {
+    if (!t.project_path || !valid.has(t.project_path)) {
+      continue;
+    }
+    if (!bestTask || (t.created_at ?? "") > (bestTask.created_at ?? "")) {
+      bestTask = t;
+    }
+  }
+  return bestTask?.project_path ?? summaries[0]?.root ?? null;
 }
-function reconcileProject(sessions, persisted, current) {
-  const valid = validRoots(sessions);
+function reconcileProject(sessions, tasks, persisted, current) {
+  const valid = validRoots(sessions, tasks);
   if (current && valid.has(current)) {
     return current;
   }
   if (persisted && valid.has(persisted)) {
     return persisted;
   }
-  return defaultProject(sessions);
+  return defaultProject(sessions, tasks);
 }
 function loadProjectChoice() {
   try {
@@ -8671,9 +8702,11 @@ var AppShell = class {
   projectSwitchName;
   projectMenu;
   projectMenuOpen = false;
-  // Change-detection for the switcher label + menu: rebuilt only when the session set
-  // or the selected project changes (the counts + the current-item highlight).
+  // Change-detection for the switcher label + menu: rebuilt only when the session set,
+  // the task set, or the selected project changes (the counts + the current-item
+  // highlight; the task set can add/drop a task-only project).
   lastProjectSessions = null;
+  lastProjectTasks = null;
   lastSelectedProject = null;
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
@@ -8738,8 +8771,9 @@ var AppShell = class {
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
-    if (this.lastProjectSessions !== state.sessions || projectChanged) {
+    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || projectChanged) {
       this.lastProjectSessions = state.sessions;
+      this.lastProjectTasks = state.tasks;
       this.lastSelectedProject = state.selectedProject;
       this.renderProjectSwitch(state);
     }
@@ -8797,7 +8831,7 @@ var AppShell = class {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   renderProjectSwitch(state) {
-    const summaries = projectSummaries(state.sessions);
+    const summaries = projectSummaries(state.sessions, state.tasks);
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     this.projectSwitchBtn.disabled = summaries.length === 0;
@@ -8811,12 +8845,20 @@ var AppShell = class {
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h2("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
-      del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
-      del.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.closeProjectMenu();
-        this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
-      });
+      if (currentSummary.liveCount === 0) {
+        del.disabled = true;
+        del.setAttribute(
+          "title",
+          `No live sessions in ${currentSummary.name} to archive \u2014 remove its tasks from the Tasks view to clear it`
+        );
+      } else {
+        del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
+        del.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.closeProjectMenu();
+          this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
+        });
+      }
       children.push(h2("div", { class: "af-project-menu-foot" }, del));
     }
     this.projectMenu.replaceChildren(...children);
@@ -9114,7 +9156,7 @@ async function connect(candidate) {
   if (candidate !== "") {
     storeToken(candidate);
   }
-  const selectedProject = reconcileProject(sessions, loadProjectChoice(), null);
+  const selectedProject = reconcileProject(sessions, [], loadProjectChoice(), null);
   store.set({
     phase: "app",
     view: "sessions",
@@ -9385,7 +9427,10 @@ function refreshTasks() {
   if (tok === null) {
     return;
   }
-  void listTasks(tok).then((tasks) => store.set({ tasks })).catch(() => {
+  void listTasks(tok).then((tasks) => {
+    const selectedProject = reconcileProject(store.get().sessions, tasks, loadProjectChoice(), store.get().selectedProject);
+    store.set({ tasks, selectedProject });
+  }).catch(() => {
   });
 }
 function requestTaskResync() {
@@ -9538,7 +9583,7 @@ function onEvent(ev) {
 }
 function applySessions(sessions) {
   const prevSel = store.get().selectedId;
-  const selectedProject = reconcileProject(sessions, loadProjectChoice(), store.get().selectedProject);
+  const selectedProject = reconcileProject(sessions, store.get().tasks, loadProjectChoice(), store.get().selectedProject);
   let selectedId = pickSelection(sessions, prevSel);
   if (selectedId) {
     const sel = sessions.find((s) => s.id === selectedId);

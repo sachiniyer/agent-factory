@@ -15,7 +15,7 @@
 
 import { projectLabel } from "./modals.js";
 import { isArchived, rowStatus } from "./status.js";
-import type { SessionData } from "./types.js";
+import type { SessionData, TaskData } from "./types.js";
 
 /** localStorage key for the persisted selected-project root (the repo path). Kept in
  *  localStorage (not sessionStorage) so the choice survives a full reload/new tab —
@@ -39,6 +39,9 @@ export interface ProjectSummary {
   workingCount: number;
   /** Total sessions (live + archived) attributed to the project's repo root. */
   totalCount: number;
+  /** Scheduled tasks in this project — so a task-only repo (a project with no
+   *  sessions) still lists with a meaningful glance and stays reachable. */
+  taskCount: number;
 }
 
 /** The repo basename (last path segment) — the switcher's compact project label,
@@ -50,15 +53,25 @@ export function projectName(root: string): string {
 }
 
 /**
- * Derives the switcher's project list from the session projection: group EVERY
- * session (live + archived) that carries a repo root, one summary per distinct root,
- * sorted by path for a stable menu. A project exists as long as af has any session
- * in that repo — so a project whose sessions are all archived still appears (as "no
- * sessions yet" in the menu), the single-project analogue of the mockup's glance.
- * Sessions with no repo_path are skipped (they can't be attributed to a project),
- * the same rows the new-session picker omits.
+ * Derives the switcher's project list, mirroring the daemon's LIVE-only project
+ * contract (app/switch_project.go buildProjectListFrom) and extending it to tasks: a
+ * repo is a project if it has any LIVE (non-archived) session OR any scheduled task.
+ * One summary per distinct root, sorted by path for a stable menu.
+ *
+ * Two deliberate consequences:
+ *  - An ARCHIVED-only repo (no live session, no task) is NOT a project — it drops out
+ *    the moment its last session is archived, exactly as the daemon's DeleteProject
+ *    reversible contract intends (deleting a project archives its live sessions, and
+ *    the project disappears). So the switcher never shows a stale archived-only entry
+ *    whose delete would be a silent no-op.
+ *  - A TASK-only repo (a task but no session) IS a project, so its tasks stay
+ *    reachable (the Tasks view scopes to it); its rail is the empty state.
+ *
+ * Archived sessions still count toward a project's totalCount (they show in the rail
+ * when the project is live/task-derived), but never on their own define one. Rows /
+ * tasks with no repo_path / project_path are skipped (they can't be attributed).
  */
-export function projectSummaries(sessions: SessionData[]): ProjectSummary[] {
+export function projectSummaries(sessions: SessionData[], tasks: TaskData[]): ProjectSummary[] {
   const byRoot = new Map<string, SessionData[]>();
   for (const s of sessions) {
     const root = s.worktree?.repo_path;
@@ -69,7 +82,26 @@ export function projectSummaries(sessions: SessionData[]): ProjectSummary[] {
     arr.push(s);
     byRoot.set(root, arr);
   }
-  return [...byRoot.keys()].sort().map((root) => {
+  const taskCounts = new Map<string, number>();
+  for (const t of tasks) {
+    const root = t.project_path;
+    if (!root) {
+      continue;
+    }
+    taskCounts.set(root, (taskCounts.get(root) ?? 0) + 1);
+  }
+  // A repo is a project if it has any LIVE session OR any task. Archived-only repos
+  // (rows present but all archived, and no task) are excluded.
+  const roots = new Set<string>();
+  for (const [root, rows] of byRoot) {
+    if (rows.some((s) => !isArchived(s))) {
+      roots.add(root);
+    }
+  }
+  for (const root of taskCounts.keys()) {
+    roots.add(root);
+  }
+  return [...roots].sort().map((root) => {
     const rows = byRoot.get(root) ?? [];
     const live = rows.filter((s) => !isArchived(s));
     const working = live.filter((s) => rowStatus(s).spinning).length;
@@ -80,16 +112,17 @@ export function projectSummaries(sessions: SessionData[]): ProjectSummary[] {
       liveCount: live.length,
       workingCount: working,
       totalCount: rows.length,
+      taskCount: taskCounts.get(root) ?? 0,
     };
   });
 }
 
 /** The one-line glance shown beside a switcher menu item, mirroring the mockup's
- *  "7 sessions · 2 working" / "no sessions yet". Counts LIVE sessions (active work);
- *  archived-only projects read as empty. */
+ *  "7 sessions · 2 working". Prefers the live-session glance; a task-only project
+ *  (no live sessions) reads as its task count. */
 export function projectMeta(p: ProjectSummary): string {
   if (p.liveCount === 0) {
-    return "no sessions yet";
+    return p.taskCount > 0 ? `${p.taskCount} task${p.taskCount === 1 ? "" : "s"}` : "no sessions yet";
   }
   const base = `${p.liveCount} session${p.liveCount === 1 ? "" : "s"}`;
   return p.workingCount > 0 ? `${base} · ${p.workingCount} working` : base;
@@ -112,58 +145,73 @@ export function scopeToProject(sessions: SessionData[], root: string | null): Se
   return sessions.filter((s) => s.worktree?.repo_path === root);
 }
 
-/** The set of valid project roots (a project exists while af has any session in it).
- *  A selected root must be in this set or it is stale — reconcileProject falls back. */
-function validRoots(sessions: SessionData[]): Set<string> {
-  return new Set(projectSummaries(sessions).map((p) => p.root));
+/** The set of valid project roots (a project has any live session or any task). A
+ *  selected root must be in this set or it is stale — reconcileProject falls back. */
+function validRoots(sessions: SessionData[], tasks: TaskData[]): Set<string> {
+  return new Set(projectSummaries(sessions, tasks).map((p) => p.root));
 }
 
 /**
  * The default project on first load / when the selection is stale: the project of the
- * MOST-RECENTLY-ACTIVE session (the greatest created_at, live sessions preferred), so
- * the client opens on the project the user most likely just worked in. Falls back to
- * the first project by path, then null when there are no projects at all.
+ * MOST-RECENTLY-ACTIVE live session (the greatest created_at), so the client opens on
+ * the project the user most likely just worked in. When no live sessions exist it
+ * falls back to a task-only project (the newest task's), then the first project by
+ * path, then null when there are no projects at all.
  */
-export function defaultProject(sessions: SessionData[]): string | null {
-  const summaries = projectSummaries(sessions);
+export function defaultProject(sessions: SessionData[], tasks: TaskData[]): string | null {
+  const summaries = projectSummaries(sessions, tasks);
   if (summaries.length === 0) {
     return null;
   }
-  // Prefer a live session's repo; only if there are no live sessions anywhere do we
-  // fall back to the newest archived one, so the default lands on active work.
-  const withRepo = sessions.filter((s) => s.worktree?.repo_path);
-  const live = withRepo.filter((s) => !isArchived(s));
-  const pool = live.length > 0 ? live : withRepo;
+  const valid = new Set(summaries.map((p) => p.root));
+  // Prefer the most-recently-created LIVE session whose repo is a real project.
   let best: SessionData | null = null;
-  for (const s of pool) {
+  for (const s of sessions) {
+    const root = s.worktree?.repo_path;
+    if (!root || isArchived(s) || !valid.has(root)) {
+      continue;
+    }
     if (!best || (s.created_at ?? "") > (best.created_at ?? "")) {
       best = s;
     }
   }
-  const root = best?.worktree?.repo_path;
-  return root ?? summaries[0]?.root ?? null;
+  if (best?.worktree?.repo_path) {
+    return best.worktree.repo_path;
+  }
+  // No live sessions: fall back to the newest task's project (a task-only default).
+  let bestTask: TaskData | null = null;
+  for (const t of tasks) {
+    if (!t.project_path || !valid.has(t.project_path)) {
+      continue;
+    }
+    if (!bestTask || (t.created_at ?? "") > (bestTask.created_at ?? "")) {
+      bestTask = t;
+    }
+  }
+  return bestTask?.project_path ?? summaries[0]?.root ?? null;
 }
 
 /**
- * Reconciles the selected project against the current session set: keep the current
- * selection if it is still a real project; else resume the persisted choice if it is;
- * else pick the default. Called on connect AND on every session-list change, so a
- * project that vanishes (its last session killed) falls back gracefully instead of
- * leaving the rail pinned to a dead root.
+ * Reconciles the selected project against the current session + task sets: keep the
+ * current selection if it is still a real project; else resume the persisted choice
+ * if it is; else pick the default. Called on connect AND on every session/task change,
+ * so a project that vanishes (its last live session archived AND no tasks) falls back
+ * gracefully instead of leaving the rail pinned to a dead root.
  */
 export function reconcileProject(
   sessions: SessionData[],
+  tasks: TaskData[],
   persisted: string | null,
   current: string | null,
 ): string | null {
-  const valid = validRoots(sessions);
+  const valid = validRoots(sessions, tasks);
   if (current && valid.has(current)) {
     return current;
   }
   if (persisted && valid.has(persisted)) {
     return persisted;
   }
-  return defaultProject(sessions);
+  return defaultProject(sessions, tasks);
 }
 
 // --- persistence -----------------------------------------------------------

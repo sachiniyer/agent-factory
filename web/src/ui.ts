@@ -428,9 +428,11 @@ export class AppShell {
   private readonly projectSwitchName: HTMLElement;
   private readonly projectMenu: HTMLElement;
   private projectMenuOpen = false;
-  // Change-detection for the switcher label + menu: rebuilt only when the session set
-  // or the selected project changes (the counts + the current-item highlight).
+  // Change-detection for the switcher label + menu: rebuilt only when the session set,
+  // the task set, or the selected project changes (the counts + the current-item
+  // highlight; the task set can add/drop a task-only project).
   private lastProjectSessions: SessionData[] | null = null;
+  private lastProjectTasks: TaskData[] | null = null;
   private lastSelectedProject: string | null = null;
 
   // Header text nodes for the selected pane, (re)created per selection.
@@ -646,9 +648,11 @@ export class AppShell {
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
 
     // The project switcher label + menu reflect the derived project list and the
-    // current scope; rebuild only when the sessions or the selection changed.
-    if (this.lastProjectSessions !== state.sessions || projectChanged) {
+    // current scope; rebuild when the sessions, the tasks (a task-only project), or
+    // the selection changed.
+    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || projectChanged) {
       this.lastProjectSessions = state.sessions;
+      this.lastProjectTasks = state.tasks;
       this.lastSelectedProject = state.selectedProject;
       this.renderProjectSwitch(state);
     }
@@ -727,7 +731,7 @@ export class AppShell {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   private renderProjectSwitch(state: AppState): void {
-    const summaries = projectSummaries(state.sessions);
+    const summaries = projectSummaries(state.sessions, state.tasks);
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     // Disable the switcher when there are no projects to switch between.
@@ -746,12 +750,25 @@ export class AppShell {
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
-      del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
-      del.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.closeProjectMenu();
-        this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
-      });
+      // Delete-project ARCHIVES the project's live sessions (#1735, reversible). With
+      // no live sessions to archive it would be a silent no-op, so it is DISABLED for a
+      // task-only project — its tasks are cleared from the Tasks view, not here. This is
+      // also why an archived-only repo is never a project (projectSummaries): the delete
+      // can never appear-but-do-nothing.
+      if (currentSummary.liveCount === 0) {
+        del.disabled = true;
+        del.setAttribute(
+          "title",
+          `No live sessions in ${currentSummary.name} to archive — remove its tasks from the Tasks view to clear it`,
+        );
+      } else {
+        del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
+        del.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.closeProjectMenu();
+          this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
+        });
+      }
       children.push(h("div", { class: "af-project-menu-foot" }, del));
     }
     this.projectMenu.replaceChildren(...children);

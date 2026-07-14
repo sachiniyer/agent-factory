@@ -31,6 +31,11 @@ MOCK=/work/mock-repo
 # default still lands on the first repo (probe-a/b/web), keeping the A/B-driven flows
 # on the default project.
 MOCK2=/work/mock-repo-2
+# A THIRD mock repo (redesign PR2, Greptile Fix 1): a TASK-ONLY project — a scheduled
+# task but NO session — to prove a repo with tasks and no sessions still lists in the
+# switcher and its tasks stay reachable (the Tasks view scopes to it, the rail is the
+# empty state). It has no session, so it is never the most-recently-active default.
+MOCK3=/work/mock-repo-3
 BIN=/work/bin/af
 LISTEN=127.0.0.1:8899
 BASE_URL="https://${LISTEN}"
@@ -40,6 +45,9 @@ SESSION_B=probe-b
 SESSION_C=probe-c
 SESSION_WEB=probe-web
 SEEDED_TASK=probe-task
+# The task-only project's task name (MOCK3), kept distinct from SEEDED_TASK so the
+# scoped Tasks assertions never collide on a substring match.
+TASK3_NAME=mock3-task
 # A throwaway loopback HTTP server the web-tab test points a local web tab at, so
 # the daemon reverse-proxy + iframe render is exercised end to end against real
 # content. The external web tab points at a host the Playwright test intercepts.
@@ -81,7 +89,7 @@ cat >"$HOME_DIR/config.json" <<EOF
 EOF
 
 # --- mock project repos (never real repos) ----------------------------------
-for repo in "$MOCK" "$MOCK2"; do
+for repo in "$MOCK" "$MOCK2" "$MOCK3"; do
     if [ ! -d "$repo" ]; then
         mkdir -p "$repo"
         (
@@ -173,6 +181,12 @@ done
 echo ">>> seeding task $SEEDED_TASK ..."
 "$BIN" tasks add --repo "$MOCK" --name "$SEEDED_TASK" --prompt "echo scheduled" --cron "0 9 * * *" >/dev/null
 
+# A task in the THIRD repo, which has NO session (redesign PR2, Greptile Fix 1): this
+# makes MOCK3 a TASK-ONLY project so the harness can prove it lists in the switcher
+# and its tasks scope correctly.
+echo ">>> seeding task-only project $MOCK3 (task $TASK3_NAME, no session) ..."
+"$BIN" tasks add --repo "$MOCK3" --name "$TASK3_NAME" --prompt "echo mock3" --cron "0 9 * * *" >/dev/null
+
 # --- seed a web-tab session (feat: web/iframe tabs) -------------------------
 # A tiny loopback HTTP server serves a deterministic marker; a LOCAL web tab
 # points at it (exercising the daemon reverse-proxy + iframe render), and an
@@ -219,6 +233,7 @@ export AF_WEB_SESSION_C="$SESSION_C"
 export AF_WEB_SESSION_WEB="$SESSION_WEB"
 export AF_WEB_READY_MARKER="$READY_MARKER"
 export AF_WEB_TASK_NAME="$SEEDED_TASK"
+export AF_WEB_TASK3_NAME="$TASK3_NAME"
 export AF_WEBTAB_LOCAL_MARKER="$WEBTAB_LOCAL_MARKER"
 export AF_WEBTAB_EXTERNAL_URL="$WEBTAB_EXTERNAL_URL"
 

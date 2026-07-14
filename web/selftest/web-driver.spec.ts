@@ -39,6 +39,9 @@ const SESSION_C = process.env.AF_WEB_SESSION_C ?? "probe-c";
 // The name of the task the harness seeds (web-selftest-entry.sh) so the tasks list
 // is non-empty on load.
 const SEEDED_TASK = process.env.AF_WEB_TASK_NAME ?? "probe-task";
+// The task in the TASK-ONLY project (a third repo with a task but no session,
+// redesign PR2): proves a task-only repo lists in the switcher and its tasks scope.
+const TASK3_NAME = process.env.AF_WEB_TASK3_NAME ?? "mock3-task";
 // The marker the seeded fake agent prints on launch (web-selftest-entry.sh), so
 // "the terminal shows live output" is a deterministic string assertion.
 const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
@@ -52,6 +55,15 @@ const WEBTAB_EXTERNAL_URL = process.env.AF_WEBTAB_EXTERNAL_URL ?? "https://block
 /** A rail row by its session title. */
 function row(page: Page, title: string): Locator {
   return page.locator(".af-rail-list .af-row", { hasText: title });
+}
+
+/** A project switcher menu item by its EXACT repo basename (redesign PR2). Filters on
+ *  the name span with an anchored regex so "mock-repo" never also matches
+ *  "mock-repo-2" / "mock-repo-3" (they share the prefix). */
+function projectItem(page: Page, name: string): Locator {
+  return page
+    .locator(".af-project-menu .af-project-item")
+    .filter({ has: page.locator(".af-project-item-name", { hasText: new RegExp(`^${name}$`) }) });
 }
 
 /**
@@ -589,24 +601,25 @@ test("project switcher (redesign PR2): lists projects with counts; selecting one
   const switcher = page.locator(".af-project-switch");
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
 
-  // Open the menu: it lists BOTH projects (the cross-project glance that replaces the
-  // old all-projects rail), each with its per-project session-count meta.
+  // Open the menu: it lists every project — the two session repos AND the task-only
+  // repo (the cross-project glance that replaces the old all-projects rail), each with
+  // its per-project count meta.
   await switcher.click();
   const menu = page.locator(".af-project-menu");
   await expect(menu).toBeVisible();
   const items = menu.locator(".af-project-item");
-  await expect(items).toHaveCount(2);
+  await expect(items).toHaveCount(3);
   const currentItem = menu.locator(".af-project-item-current");
   await expect(currentItem.locator(".af-project-item-name")).toHaveText("mock-repo");
-  // The second project is listed with its own count (its one session).
-  const otherItem = menu.locator(".af-project-item", { hasText: "mock-repo-2" });
-  await expect(otherItem).toHaveCount(1);
-  await expect(otherItem.locator(".af-project-item-meta")).toContainText("1 session");
+  // The second project (a session repo) shows its session count; the third (task-only,
+  // no session) shows its task count — proof it's derived from sessions OR tasks.
+  await expect(projectItem(page, "mock-repo-2").locator(".af-project-item-meta")).toContainText("1 session");
+  await expect(projectItem(page, "mock-repo-3").locator(".af-project-item-meta")).toContainText("1 task");
 
   // Select the second project: the rail SWAPS to it — only SESSION_C shows, and the
   // first repo's A/B are gone (proof the rail is scoped to ONE project, the behavior
   // this PR replaces).
-  await otherItem.click();
+  await projectItem(page, "mock-repo-2").click();
   await expect(menu).toBeHidden();
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-2");
   await expect(row(page, SESSION_C)).toBeVisible();
@@ -624,10 +637,47 @@ test("project switcher (redesign PR2): lists projects with counts; selecting one
   // Switch back to the first project so the following rail-driven flows (tabs, create,
   // kill, archive) see A/B again. Persisted as the first repo for the rest of the run.
   await switcher.click();
-  await page.locator(".af-project-item", { hasText: "mock-repo" }).filter({ hasNotText: "mock-repo-2" }).click();
+  await projectItem(page, "mock-repo").click();
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
   await expect(row(page, SESSION_A)).toBeVisible();
   await expect(row(page, SESSION_B)).toBeVisible();
+});
+
+test("task-only project (redesign PR2, Fix 1): a repo with a task but no session lists, scopes Tasks, and its delete is disabled", async () => {
+  // Select the task-only project (a third repo with a task but NO session). It lists in
+  // the switcher (derived from sessions OR tasks), so its tasks stay reachable.
+  await page.locator(".af-project-switch").click();
+  await projectItem(page, "mock-repo-3").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-3");
+
+  // Its rail is the clean empty state (no sessions), not a blank rail.
+  const empty = page.locator(".af-rail-empty-project");
+  await expect(empty).toContainText("No sessions in");
+  await expect(empty).toContainText("mock-repo-3");
+  await expect(empty.locator(".af-rail-empty-new")).toBeVisible();
+
+  // The delete-project action is DISABLED here — there are no live sessions to archive,
+  // so it can never be a silent no-op (Greptile Fix 2). An archived-only repo, by the
+  // same rule, is never even a project. Toggle the menu open, assert, then closed.
+  await page.locator(".af-project-switch").click();
+  await expect(page.locator(".af-project-menu .af-project-delete")).toBeDisabled();
+  await page.locator(".af-project-switch").click();
+  await expect(page.locator(".af-project-menu")).toBeHidden();
+
+  // The Tasks view is scoped to this project: its task shows, and the first repo's
+  // seeded task does NOT (proof the Tasks view operates within the selected project).
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const tasks = page.locator(".af-tasks");
+  await expect(tasks).toBeVisible();
+  await expect(tasks.locator(".af-task-row", { hasText: TASK3_NAME })).toHaveCount(1);
+  await expect(tasks.locator(".af-task-row", { hasText: SEEDED_TASK })).toHaveCount(0);
+
+  // Return to the first project + the sessions view for the following rail-driven flows.
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+  await page.locator(".af-project-switch").click();
+  await projectItem(page, "mock-repo").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
+  await expect(row(page, SESSION_A)).toBeVisible();
 });
 
 test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round-trips", async () => {
@@ -800,53 +850,40 @@ test("archive: the archive confirm moves a session to the archived group", async
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
 });
 
-test("empty-project state (redesign PR2): a project with no live sessions shows the dim empty rail", async () => {
-  // Switch to the second project (its one live session, SESSION_C) and archive that
-  // session, leaving the project with no live work. The rail then shows the clean
-  // per-project empty state rather than a blank rail.
+test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bound project makes it go away — not a no-op", async () => {
+  // Use the SECOND project (SESSION_C, no task): switch to it, then delete it from the
+  // switcher menu footer. Delete archives its one live session; with no task left, the
+  // repo is no longer a project — so it must DISAPPEAR from the switcher (not linger as
+  // a stale archived-only entry whose delete is a silent no-op).
   await page.locator(".af-project-switch").click();
-  await page.locator(".af-project-menu .af-project-item", { hasText: "mock-repo-2" }).click();
+  await projectItem(page, "mock-repo-2").click();
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-2");
   await expect(row(page, SESSION_C)).toBeVisible();
 
-  await row(page, SESSION_C).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await page.locator(".af-term-head button", { hasText: "Archive" }).click();
-  const modal = page.locator(".af-modal-card");
-  await expect(modal).toBeVisible();
-  await modal.locator("button.af-primary").click();
-
-  // No live sessions remain in the project: the dim one-liner empty state renders,
-  // naming the project and offering + New — not a blank rail.
-  const empty = page.locator(".af-rail-empty-project");
-  await expect(empty).toContainText("No sessions in", { timeout: 30_000 });
-  await expect(empty).toContainText("mock-repo-2");
-  await expect(empty.locator(".af-rail-empty-new")).toBeVisible();
-});
-
-test("delete project (#1735, redesign PR2): the switcher-menu delete archives the project's live sessions", async () => {
-  // Switch back to the first project — it still has a live session (SESSION_A, plus
-  // the web-tab session). Deleting a project is now a switcher-menu footer action on
-  // the CURRENT project (the Projects view it lived on is gone).
+  // Open the switcher menu and click the reversible Delete-project footer action (it is
+  // ENABLED here — there is a live session to archive). The copy makes the reversibility
+  // explicit ("restorable").
   await page.locator(".af-project-switch").click();
-  await page.locator(".af-project-menu .af-project-item", { hasText: "mock-repo" }).filter({ hasNotText: "mock-repo-2" }).click();
-  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
-  await expect(row(page, SESSION_A)).toBeVisible();
-
-  // Open the switcher menu and click the reversible Delete-project footer action, then
-  // confirm. The copy makes the reversibility explicit ("restorable").
-  await page.locator(".af-project-switch").click();
-  await page.locator(".af-project-menu .af-project-delete").click();
+  const del = page.locator(".af-project-menu .af-project-delete");
+  await expect(del).toBeEnabled();
+  await del.click();
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
   await expect(modal).toContainText("restorable");
   await modal.locator("button.af-danger").click();
 
-  // Archiving the project's last live sessions leaves it with none: the rail shows the
-  // per-project empty state, and the formerly-live SESSION_A now renders as an archived
-  // row (restorable) — the real repo untouched.
-  await expect(page.locator(".af-rail-empty-project")).toContainText("No sessions in", { timeout: 30_000 });
-  await expect(row(page, SESSION_A)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
+  // The project ACTUALLY GOES AWAY: SESSION_C is archived, the repo now has no live
+  // session and no task, so it drops from the derivation and the selection falls back
+  // to the first project (its live sessions the most-recently-active).
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo", { timeout: 30_000 });
+  await page.locator(".af-project-switch").click();
+  await expect(projectItem(page, "mock-repo-2")).toHaveCount(0);
+  await expect(projectItem(page, "mock-repo")).toHaveCount(1);
+  await page.locator(".af-project-switch").click();
+  await expect(page.locator(".af-project-menu")).toBeHidden();
+
+  // Back on the (fallen-back) first project, its live rail is intact.
+  await expect(row(page, SESSION_A)).toBeVisible();
 });
 
 // NOTE on #1675 PR4 (ended PTY → "exited", not a reconnect loop): this is already
@@ -873,6 +910,15 @@ test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeh
       body: JSON.stringify({ data: { instances: [] }, error: null }),
     });
   });
+  // Empty the task list too (redesign PR2): a task-only project would otherwise keep a
+  // project selected, so the GLOBAL no-projects empty state needs both planes empty.
+  await page.route("**/v1/ListTasks", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: { tasks: [] }, error: null }),
+    });
+  });
   await page.reload();
 
   // The authed shell still comes up (tokenless loopback), but the rail shows its
@@ -885,6 +931,7 @@ test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeh
   await expect(page.locator(".af-main-empty")).toContainText("Select a session");
 
   await page.unroute("**/v1/Snapshot");
+  await page.unroute("**/v1/ListTasks");
 });
 
 // --- theme (redesign PR1): design tokens + light/dark ----------------------
