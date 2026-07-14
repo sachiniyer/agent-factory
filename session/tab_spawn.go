@@ -129,7 +129,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 		return nil, fmt.Errorf("failed to start process tab: %w", err)
 	}
 
-	tab := &Tab{Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux}
+	tab := &Tab{ID: newTabID(), Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux}
 	i.mu.Lock()
 	// Re-check started AND status under the write lock before appending (see
 	// AddShellTab): Kill can have flipped started=false and snapshotted Tabs for

@@ -87,10 +87,28 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, http.StatusBadRequest, err)
 		return
 	}
-	as, err := cs.manager.agentServerForStream(id, repoID)
+	as, instance, err := cs.manager.agentServerForStream(id, repoID)
 	if err != nil {
 		writeHTTPError(w, http.StatusNotFound, err)
 		return
+	}
+	// Address the tab by its STABLE id (#1738) when the client supplies ?tab_id=:
+	// resolveTab maps the id to the tab's CURRENT ordinal on EVERY operation
+	// (initial Subscribe and each later Input/Resize), so a reorder/close on another
+	// client can never make this connection's captured position refer to a different
+	// tab. Without a ?tab_id= (legacy client) it pins the ?tab= ordinal, preserving
+	// the old positional behavior. A ?tab_id= that names no live tab is a 404 up
+	// front rather than a silent fall-through to a stale ordinal.
+	tabID := r.URL.Query().Get("tab_id")
+	resolveTab := staticTabResolver(tab)
+	if tabID != "" {
+		idx, ok := instance.TabIndexByID(tabID)
+		if !ok {
+			writeHTTPError(w, http.StatusNotFound, fmt.Errorf("session %q has no tab with id %q", id, tabID))
+			return
+		}
+		tab = idx
+		resolveTab = func() (int, bool) { return instance.TabIndexByID(tabID) }
 	}
 	sub, err := as.Subscribe(tab, since)
 	if err != nil {
@@ -109,21 +127,29 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		_ = sub.Close()
 		return // Accept already wrote the error response.
 	}
-	servePTYStream(as, tab, sub, conn)
+	servePTYStream(as, resolveTab, sub, conn)
+}
+
+// staticTabResolver returns a resolver that always yields the fixed ordinal idx.
+// It is the legacy ?tab=<idx> path: without a stable ?tab_id= there is nothing to
+// re-resolve, so Input/Resize keep addressing the same ordinal for the
+// connection's life (the pre-#1738 positional behavior).
+func staticTabResolver(idx int) func() (int, bool) {
+	return func() (int, bool) { return idx, true }
 }
 
 // servePTYStream runs the three loops of one subscriber's connection until any of
 // them ends: the writer (ring → PTY_OUT / resize-echo), the reader (INPUT/RESIZE/
 // detach → agent-server), and the keepalive pinger. It owns closing the
 // subscription and the socket.
-func servePTYStream(as session.AgentServer, tab int, sub session.PTYSubscription, conn *websocket.Conn) {
+func servePTYStream(as session.AgentServer, resolveTab func() (int, bool), sub session.PTYSubscription, conn *websocket.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	defer func() { _ = sub.Close() }()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); defer cancel(); readPTYClient(ctx, as, tab, conn) }()
+	go func() { defer wg.Done(); defer cancel(); readPTYClient(ctx, as, resolveTab, conn) }()
 	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn) }()
 
 	writePTYStream(ctx, sub, conn)
@@ -193,13 +219,22 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 // readPTYClient handles client → server frames: INPUT and RESIZE are applied to
 // the agent-server (multi-writer, from any subscriber); a detach control frame or
 // any read error ends the connection.
-func readPTYClient(ctx context.Context, as session.AgentServer, tab int, conn *websocket.Conn) {
+func readPTYClient(ctx context.Context, as session.AgentServer, resolveTab func() (int, bool), conn *websocket.Conn) {
 	for {
 		msg, err := agentproto.ReadMessage(ctx, conn)
 		if err != nil {
 			return
 		}
 		if msg.Binary {
+			// Re-resolve the tab ordinal per frame (#1738): for a ?tab_id= connection
+			// this maps the stable id to wherever the tab now sits, so a keystroke or
+			// resize can't land on a different tab after a mid-connection reorder/close.
+			// A tab that has since been closed no longer resolves — drop the frame
+			// rather than routing it to whatever tab now holds the old ordinal.
+			tab, ok := resolveTab()
+			if !ok {
+				continue
+			}
 			switch msg.Frame.Op {
 			case agentproto.OpInput:
 				_ = as.Input(tab, msg.Frame.Data)
@@ -255,7 +290,7 @@ func (cs *controlServer) streamInfoHandler(w http.ResponseWriter, r *http.Reques
 	}
 	id := r.PathValue("id")
 	repoID := r.URL.Query().Get("repo_id")
-	as, err := cs.manager.agentServerForStream(id, repoID)
+	as, _, err := cs.manager.agentServerForStream(id, repoID)
 	if err != nil {
 		writeHTTPError(w, http.StatusNotFound, err)
 		return

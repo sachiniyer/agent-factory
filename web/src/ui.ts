@@ -156,21 +156,22 @@ export function supportsTabManagement(s: SessionData): boolean {
 /** The selected session's tabs, always non-empty: a pre-#930 record with no tabs
  *  is shown as a single implicit agent tab so the bar (and index math) never sees
  *  an empty list. */
-export function sessionTabs(s: SessionData): { name: string; kind: number; url?: string }[] {
+export function sessionTabs(s: SessionData): { id?: string; name: string; kind: number; url?: string }[] {
   if (s.tabs && s.tabs.length > 0) {
     return s.tabs;
   }
   return [{ name: "agent", kind: 0 }];
 }
 
-/** A stable-ish client-side IDENTITY for a tab (feat: split tabs), used to detect a
- *  tab set that changed mid-drag. It is NOT a daemon tab id (there is none yet — the
- *  full stable-id fix is #1738); it is the best identity the client has: the tab's
- *  kind + name. The ordered list of these is snapshotted at dragstart and re-checked
- *  at drop, so a concurrent close/create/reorder cancels the drop instead of binding a
- *  pane to the wrong live tab. */
-export function tabIdentity(tab: { name: string; kind: number }): string {
-  return `${tab.kind}:${tab.name}`;
+/** The STABLE IDENTITY for a tab (#1738): the daemon-minted, never-reused tab id
+ *  (session.TabData.ID). It is what a stream (?tab_id=) and a DnD/pane binding
+ *  address the tab by, so a reorder/close can't misroute — the drop resolves this
+ *  id to the tab's CURRENT ordinal instead of trusting the drag-time position. Falls
+ *  back to the legacy kind:name for a record written before #1738 (no id): still a
+ *  per-tab string, just not collision-proof against a close+recreate of the same
+ *  name — the exact residual #1738 closes once every record carries an id. */
+export function tabIdentity(tab: { id?: string; name: string; kind: number }): string {
+  return tab.id && tab.id !== "" ? tab.id : `${tab.kind}:${tab.name}`;
 }
 
 /** The label a tab reads as, mirroring the TUI's labelForTab (ui/tree/labels.go):
@@ -929,7 +930,12 @@ export class AppShell {
       if (!Number.isInteger(index)) {
         return;
       }
-      e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ index, tabs: this.currentTabIds }));
+      // Stamp the dragged tab's STABLE id (#1738) so the drop resolves it to the
+      // tab's CURRENT ordinal — correct even if a concurrent client reordered/closed
+      // tabs mid-drag. index + the identity snapshot ride along as a legacy fallback
+      // for a tab without an id (pre-#1738 record).
+      const id = this.currentTabIds[index] ?? "";
+      e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ id, index, tabs: this.currentTabIds }));
       e.dataTransfer.effectAllowed = "move";
       document.body.classList.add("af-dragging-tab");
     });

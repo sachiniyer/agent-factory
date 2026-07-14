@@ -124,8 +124,11 @@ function webFallbackMs(): number {
 }
 
 /** The drag payload a tab-bar drag stamps into the dataTransfer (ui.ts): the dragged
- *  tab index plus a snapshot of the instance's ordered tab identities at drag time. */
+ *  tab's STABLE id (#1738) — what the drop resolves to a current ordinal, so a
+ *  mid-drag reorder/close can't misroute — plus the ordinal index and an ordered
+ *  identity snapshot as a legacy fallback for a tab with no id. */
 interface DragPayload {
+  id?: string;
   index: number;
   tabs: string[];
 }
@@ -147,6 +150,11 @@ export class SplitView {
   // terminal tab. Parallel to the tab list, refreshed on every setSession, so
   // reconcile can mount an iframe for a web leaf without extra plumbing.
   private tabTargets: (string | undefined)[] = [];
+  // The kind of each tab, parallel to tabIds — kept because the tab identity is now
+  // the opaque stable id (#1738), which no longer encodes the kind the way the old
+  // "kind:name" identity did. webTargetAt reads it to tell a web/iframe tab from a
+  // terminal one.
+  private tabKinds: number[] = [];
   private tree: LayoutNode | null = null;
   private focusedId: string | null = null;
 
@@ -177,10 +185,12 @@ export class SplitView {
     tabIds: string[],
     initialTab: number,
     tabTargets: (string | undefined)[] = [],
+    tabKinds: number[] = [],
   ): void {
     this.token = token;
     this.tabIds = tabIds;
     this.tabTargets = tabTargets;
+    this.tabKinds = tabKinds;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
     if (sessionId === null || token === null) {
       this.teardown();
@@ -408,7 +418,10 @@ export class SplitView {
         pane.host.replaceChildren();
         pane.tab = leaf.tab;
         pane.status = "connecting";
-        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, leaf.tab, {
+        // Address the stream by the tab's STABLE id (#1738) at this ordinal, so a
+        // reorder/close resolves to the right PTY server-side; empty (a legacy tab
+        // without an id) makes AttachTerminal fall back to the ordinal ?tab=.
+        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, this.tabIds[leaf.tab] ?? "", leaf.tab, {
           onStatus: (s) => this.onPaneStatus(leaf.id, s),
           onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
         });
@@ -462,15 +475,14 @@ export class SplitView {
   }
 
   /** The iframe target for the tab at `idx`, or null when it is not a web tab.
-   *  Confirms the kind from tabIds (the "kind:name" identity) so a stale/mismatched
-   *  tabTargets entry can never turn a terminal tab into an iframe. */
+   *  Confirms the kind from the parallel tabKinds list (the identity is now the
+   *  opaque stable id, #1738) so a stale/mismatched tabTargets entry can never turn a
+   *  terminal tab into an iframe. */
   private webTargetAt(idx: number): string | null {
-    const identity = this.tabIds[idx];
-    if (!identity) {
+    if (idx < 0 || idx >= this.tabIds.length) {
       return null;
     }
-    const kind = Number.parseInt(identity.split(":", 1)[0] ?? "", 10);
-    if (kind !== TabKind.Web) {
+    if (this.tabKinds[idx] !== TabKind.Web) {
       return null;
     }
     return this.tabTargets[idx] ?? "";
@@ -670,7 +682,8 @@ export class SplitView {
       typeof (parsed as DragPayload).index === "number" &&
       Array.isArray((parsed as DragPayload).tabs)
     ) {
-      return parsed as DragPayload;
+      const p = parsed as DragPayload;
+      return { id: typeof p.id === "string" ? p.id : undefined, index: p.index, tabs: p.tabs };
     }
     return null;
   }
@@ -705,21 +718,25 @@ export class SplitView {
       if (!drag || !this.tree) {
         return;
       }
-      const tab = drag.index;
-      // Reject an out-of-range index (a stale payload / a tab closed mid-drag): a pane
-      // must never bind to a nonexistent tab (same stale-index discipline as the tab-op
-      // fixes in #1698/#1710).
-      if (tab < 0 || tab >= this.tabCount) {
-        return;
-      }
-      // Reject an IN-RANGE-but-STALE drop (#1738 repro): if the instance's tab set
-      // changed since dragstart — a concurrent client closed/created/reordered a tab —
-      // the dragged index now points at a DIFFERENT live tab than the user grabbed, so
-      // splitting would silently bind the new pane to the wrong tab's stream. Compare
-      // the drag-time snapshot to the live identities and cancel on any mismatch; the
-      // user simply re-drags. (The full stable-tab-id fix is daemon-wide, in #1738.)
-      if (!sameTabs(drag.tabs, this.tabIds)) {
-        return;
+      // Resolve the dragged tab by its STABLE id (#1738) to its CURRENT ordinal: this
+      // is the misroute fix. Even if a concurrent client reordered/closed tabs
+      // mid-drag, indexOf lands on wherever the SAME tab now sits (or -1 if it was
+      // closed → cancel), so the drop can never bind the new pane to a different live
+      // tab the way a trusted drag-time index could.
+      let tab: number;
+      if (drag.id) {
+        tab = this.tabIds.indexOf(drag.id);
+        if (tab < 0) {
+          return; // the dragged tab was closed mid-drag — nothing to bind
+        }
+      } else {
+        // Legacy fallback for a payload with no stable id (pre-#1738 tab): trust the
+        // drag-time index but keep the #1737 mid-drag guard — reject if the tab set
+        // changed since dragstart, and reject an out-of-range index.
+        tab = drag.index;
+        if (tab < 0 || tab >= this.tabCount || !sameTabs(drag.tabs, this.tabIds)) {
+          return;
+        }
       }
       const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
       this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, tab);

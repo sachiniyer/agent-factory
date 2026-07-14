@@ -56,7 +56,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 	// config (syncRemoteTabs) rather than from this serialized list, so a
 	// terminal_cmd added or removed while af was down is honored.
 	for _, tab := range i.Tabs {
-		td := TabData{Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL}
+		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL}
 		if tab.tmux != nil {
 			td.TmuxName = tab.tmux.SanitizedName()
 		}
@@ -259,7 +259,15 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 			} else if idx == 0 && data.AgentConversation != nil {
 				conversation = *data.AgentConversation
 			}
+			// Backfill a stable id for a legacy tab persisted before #1738 (no id):
+			// mint one now so the restored tab is addressable by a stable id from
+			// this load forward (rollforward, mirroring the InstanceData.ID backfill).
+			id := td.ID
+			if id == "" {
+				id = newTabID()
+			}
 			instance.Tabs = append(instance.Tabs, &Tab{
+				ID:           id,
 				Name:         td.Name,
 				Kind:         kind,
 				Command:      td.Command,

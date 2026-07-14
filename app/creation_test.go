@@ -68,7 +68,7 @@ func newTestHome(t *testing.T) *home {
 	// (mock-backed instances answer has-session) binds harmlessly instead of
 	// dialing the daemon. Tests exercising the live path swap in a recording fake.
 	origLiveTerm := newLiveTermPaneFn
-	newLiveTermPaneFn = func(title, repoID string, tab, width, height int) liveTermAttachment {
+	newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int) liveTermAttachment {
 		return newFakeLiveTerm()
 	}
 	t.Cleanup(func() { newLiveTermPaneFn = origLiveTerm })

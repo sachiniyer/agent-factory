@@ -60,7 +60,7 @@ func stubLiveTermFactory(t *testing.T) (created *[]*fakeLiveTerm, titles *[]stri
 	var fakes []*fakeLiveTerm
 	var names []string
 	orig := newLiveTermPaneFn
-	newLiveTermPaneFn = func(title, repoID string, tab, width, height int) liveTermAttachment {
+	newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int) liveTermAttachment {
 		f := newFakeLiveTerm()
 		fakes = append(fakes, f)
 		names = append(names, title)

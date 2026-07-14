@@ -251,6 +251,39 @@ func (i *Instance) tabTmuxAtLocked(idx int) *tmux.TmuxSession {
 	return i.Tabs[idx].tmux
 }
 
+// TabIDAt returns the stable id (#1738) of the tab at ordinal idx, and whether
+// idx is in range. It is the index→id direction the data plane keys its per-tab
+// broker on, so a broker follows its tab across a reorder/close instead of being
+// pinned to a shifting ordinal.
+func (i *Instance) TabIDAt(idx int) (string, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if idx < 0 || idx >= len(i.Tabs) {
+		return "", false
+	}
+	return i.Tabs[idx].ID, true
+}
+
+// TabIndexByID returns the CURRENT ordinal of the tab with stable id (#1738),
+// and whether such a tab exists. It is the id→index resolution the stream
+// endpoint runs per operation: a client addresses a tab by its stable id and the
+// daemon maps it to wherever that tab now sits, so a reorder/close on another
+// client can never make the client's captured position refer to a different tab.
+// An empty id never matches (a legacy/absent id is not addressable by id).
+func (i *Instance) TabIndexByID(id string) (int, bool) {
+	if id == "" {
+		return 0, false
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	for idx, t := range i.Tabs {
+		if t.ID == id {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
 // PreviewTab captures the detached content of the tab at idx. Returns ("", nil)
 // when the instance is not started or the tab has no live session, and
 // tmux.ErrSessionGone when the session vanished — mirroring Instance.Preview for
@@ -395,6 +428,11 @@ func (i *Instance) AttachShellTab(name string) (*Tab, error) {
 
 	tab := newShellTab(shellTmux)
 	tab.Name = name
+	// The daemon owns this tab's stable id (#1738) — it minted and persisted one in
+	// its CreateTab. Don't invent a competing local id: leave it empty so the tab is
+	// addressed positionally (safe: the TUI just created it, single-client) until the
+	// next snapshot's ReconcileTabsFromData adopts the daemon's authoritative id.
+	tab.ID = ""
 	i.mu.Lock()
 	// Re-check started under the write lock before appending, mirroring
 	// AddShellTab: Kill is not serialized against attach and can have flipped
@@ -525,7 +563,11 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 			}
 			continue
 		}
-		tab := &Tab{Name: td.Name, Kind: kind, Command: td.Command, tmux: ts}
+		id := td.ID
+		if id == "" {
+			id = newTabID()
+		}
+		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, tmux: ts}
 		i.mu.Lock()
 		// Re-check under the write lock: a concurrent reconcile/AddTab may have
 		// added this name while we reconnected outside the lock.
@@ -542,6 +584,27 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		}
 		i.mu.Unlock()
 	}
+
+	// Adopt the daemon's authoritative stable tab id (#1738) for every name-matched
+	// local tab. The daemon is the single owner of tab identity (#960); a local tab
+	// materialized out-of-band — AttachShellTab leaves its id empty on purpose, and
+	// a legacy record may carry an id minted on an earlier load — must key on the
+	// daemon's id so a TUI-side stream/pane binding addresses the SAME id the daemon
+	// resolves. Names are unique per instance, so name is a safe join key. Not
+	// counted as a visible change: the id is internal addressing, not display state.
+	i.mu.Lock()
+	for _, td := range target {
+		if td.ID == "" {
+			continue
+		}
+		for _, t := range i.Tabs {
+			if t.Name == td.Name && t.ID != td.ID {
+				t.ID = td.ID
+			}
+		}
+	}
+	i.mu.Unlock()
+
 	return changed, firstErr
 }
 

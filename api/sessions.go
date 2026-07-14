@@ -809,7 +809,10 @@ var sessionsAttachCmd = &cobra.Command{
 		if err != nil {
 			return jsonError(err)
 		}
-		detached, err := client.AttachStream(cmd.Context(), instance.Title, repoID, 0)
+		// The CLI attaches the agent tab (index 0), which is structurally always
+		// first and never shifts, so a positional address is unambiguous — no stable
+		// tab id needed here (#1738).
+		detached, err := client.AttachStream(cmd.Context(), instance.Title, repoID, "", 0)
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to attach: %w", err))
 		}

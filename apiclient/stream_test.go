@@ -110,7 +110,7 @@ func TestDialStream_HandshakeCarriesQueryAndStartSeq(t *testing.T) {
 	c := NewWithSocket(sockPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sc, err := c.DialStream(ctx, "alpha", "repo-x", 3, 7)
+	sc, err := c.DialStream(ctx, "alpha", "repo-x", "", 3, 7)
 	if err != nil {
 		t.Fatalf("DialStream: %v", err)
 	}

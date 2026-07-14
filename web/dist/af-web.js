@@ -7286,9 +7286,10 @@ function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
 var AttachTerminal = class {
-  constructor(container, sessionId, token2, tab, cb) {
+  constructor(container, sessionId, token2, tabId, tab, cb) {
     this.sessionId = sessionId;
     this.token = token2;
+    this.tabId = tabId;
     this.tab = tab;
     this.cb = cb;
     this.term = new import_xterm.Terminal({
@@ -7386,7 +7387,9 @@ var AttachTerminal = class {
     const base = `${wsScheme2()}//${window.location.host}/v1/sessions/${encodeURIComponent(this.sessionId)}/stream`;
     const params = new URLSearchParams();
     params.set("access_token", this.token);
-    if (this.tab > 0) {
+    if (this.tabId !== "") {
+      params.set("tab_id", this.tabId);
+    } else if (this.tab > 0) {
       params.set("tab", String(this.tab));
     }
     if (this.seeded) {
@@ -7597,6 +7600,11 @@ var SplitView = class {
   // terminal tab. Parallel to the tab list, refreshed on every setSession, so
   // reconcile can mount an iframe for a web leaf without extra plumbing.
   tabTargets = [];
+  // The kind of each tab, parallel to tabIds — kept because the tab identity is now
+  // the opaque stable id (#1738), which no longer encodes the kind the way the old
+  // "kind:name" identity did. webTargetAt reads it to tell a web/iframe tab from a
+  // terminal one.
+  tabKinds = [];
   tree = null;
   focusedId = null;
   // Debounces the "focus left every pane" report so a click that moves focus A→B
@@ -7613,10 +7621,11 @@ var SplitView = class {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId, token2, tabIds, initialTab, tabTargets = []) {
+  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = []) {
     this.token = token2;
     this.tabIds = tabIds;
     this.tabTargets = tabTargets;
+    this.tabKinds = tabKinds;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
     if (sessionId === null || token2 === null) {
       this.teardown();
@@ -7808,7 +7817,7 @@ var SplitView = class {
         pane.host.replaceChildren();
         pane.tab = leaf.tab;
         pane.status = "connecting";
-        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, leaf.tab, {
+        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, this.tabIds[leaf.tab] ?? "", leaf.tab, {
           onStatus: (s) => this.onPaneStatus(leaf.id, s),
           onFocusChange: (f) => this.onPaneFocus(leaf.id, f)
         });
@@ -7854,15 +7863,14 @@ var SplitView = class {
     return pane;
   }
   /** The iframe target for the tab at `idx`, or null when it is not a web tab.
-   *  Confirms the kind from tabIds (the "kind:name" identity) so a stale/mismatched
-   *  tabTargets entry can never turn a terminal tab into an iframe. */
+   *  Confirms the kind from the parallel tabKinds list (the identity is now the
+   *  opaque stable id, #1738) so a stale/mismatched tabTargets entry can never turn a
+   *  terminal tab into an iframe. */
   webTargetAt(idx) {
-    const identity = this.tabIds[idx];
-    if (!identity) {
+    if (idx < 0 || idx >= this.tabIds.length) {
       return null;
     }
-    const kind = Number.parseInt(identity.split(":", 1)[0] ?? "", 10);
-    if (kind !== TabKind.Web) {
+    if (this.tabKinds[idx] !== TabKind.Web) {
       return null;
     }
     return this.tabTargets[idx] ?? "";
@@ -8023,7 +8031,8 @@ var SplitView = class {
       return null;
     }
     if (typeof parsed === "object" && parsed !== null && typeof parsed.index === "number" && Array.isArray(parsed.tabs)) {
-      return parsed;
+      const p = parsed;
+      return { id: typeof p.id === "string" ? p.id : void 0, index: p.index, tabs: p.tabs };
     }
     return null;
   }
@@ -8056,12 +8065,17 @@ var SplitView = class {
       if (!drag || !this.tree) {
         return;
       }
-      const tab = drag.index;
-      if (tab < 0 || tab >= this.tabCount) {
-        return;
-      }
-      if (!sameTabs(drag.tabs, this.tabIds)) {
-        return;
+      let tab;
+      if (drag.id) {
+        tab = this.tabIds.indexOf(drag.id);
+        if (tab < 0) {
+          return;
+        }
+      } else {
+        tab = drag.index;
+        if (tab < 0 || tab >= this.tabCount || !sameTabs(drag.tabs, this.tabIds)) {
+          return;
+        }
       }
       const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
       this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, tab);
@@ -8427,7 +8441,7 @@ function sessionTabs(s) {
   return [{ name: "agent", kind: 0 }];
 }
 function tabIdentity(tab) {
-  return `${tab.kind}:${tab.name}`;
+  return tab.id && tab.id !== "" ? tab.id : `${tab.kind}:${tab.name}`;
 }
 function tabLabel(tab) {
   if (tab.kind === 0) {
@@ -9000,7 +9014,8 @@ var AppShell = class {
       if (!Number.isInteger(index)) {
         return;
       }
-      e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ index, tabs: this.currentTabIds }));
+      const id = this.currentTabIds[index] ?? "";
+      e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ id, index, tabs: this.currentTabIds }));
       e.dataTransfer.effectAllowed = "move";
       document.body.classList.add("af-dragging-tab");
     });
@@ -9587,7 +9602,8 @@ function syncSplit(state) {
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
   const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
   const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets);
+  const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds);
 }
 function disposeSplit() {
   splitView.dispose();

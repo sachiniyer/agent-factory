@@ -36,16 +36,21 @@ type StreamConn struct {
 // StartSeq + bytesReceived and reconnects with ?since=<that> to replay a drop.
 func (s *StreamConn) StartSeq() uint64 { return s.startSeq }
 
-// DialStream opens a WS subscription to tab `tab` of the session (title, optional
-// repoID) starting at output cursor `since` (0 = the live tail). The read/write
-// framing is agentproto's; this only establishes the connection and reports the
-// server's starting cursor. The caller owns Conn and must Close it.
-func (c *Client) DialStream(ctx context.Context, title, repoID string, tab int, since uint64) (*StreamConn, error) {
+// DialStream opens a WS subscription to a tab of the session (title, optional
+// repoID) starting at output cursor `since` (0 = the live tail). The tab is
+// addressed by its stable id (#1738) when tabID is non-empty — so a reorder/close
+// can't misroute the stream — and by the ordinal `tab` otherwise (legacy
+// positional path). The read/write framing is agentproto's; this only establishes
+// the connection and reports the server's starting cursor. The caller owns Conn
+// and must Close it.
+func (c *Client) DialStream(ctx context.Context, title, repoID, tabID string, tab int, since uint64) (*StreamConn, error) {
 	q := url.Values{}
 	if repoID != "" {
 		q.Set("repo_id", repoID)
 	}
-	if tab != 0 {
+	if tabID != "" {
+		q.Set("tab_id", tabID)
+	} else if tab != 0 {
 		q.Set("tab", strconv.Itoa(tab))
 	}
 	if since != 0 {

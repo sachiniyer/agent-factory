@@ -93,6 +93,13 @@ func (d InstanceData) ForStorage() InstanceData {
 // precedent: instances.json written before #930 PR 2 simply has no Tabs, and
 // FromInstanceData synthesizes [agent, shell] from the legacy TmuxName/Program.
 type TabData struct {
+	// ID is the tab's stable identity (#1738), minted at creation and never
+	// reused. It is the collision-proof key the PTY stream (?tab_id=) and the web
+	// DnD/pane bindings address the tab by, so a reorder/close can't misroute.
+	// omitempty + additive, mirroring the InstanceData.ID / BranchCreatedByUs
+	// rollforward precedent: a record written before #1738 has no id, and
+	// restoreLocalTabs backfills a fresh one on load.
+	ID       string  `json:"id,omitempty"`
 	Name     string  `json:"name"`
 	Kind     TabKind `json:"kind"`
 	Command  string  `json:"command,omitempty"`

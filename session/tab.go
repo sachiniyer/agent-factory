@@ -1,6 +1,31 @@
 package session
 
-import "github.com/sachiniyer/agent-factory/session/tmux"
+import (
+	"crypto/rand"
+	"fmt"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+// newTabID mints a stable, collision-free identity for a tab (#1738). Unlike a
+// tab's ordinal position (which shifts on a reorder/close) or its display name
+// (which is reused on close+recreate — a fresh "shell" after the old one is
+// gone), this id is minted once at creation, persisted, and never reused, so a
+// stream or pane binding keyed on it can never misroute to a different tab after
+// the tab list changes. It is a package var so tests can inject deterministic
+// ids. crypto/rand is the entropy source; on the (near-impossible) read failure
+// it falls back to a timestamp-derived value so tab creation never blocks on
+// entropy — still unique per call in practice. 16 hex chars (64 bits) is ample
+// for the handful of tabs an instance ever holds and keeps the id compact in a
+// ?tab_id= query string.
+var newTabID = func() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t-%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x", b[:])
+}
 
 // agentTabName is the display label of the default Agent tab.
 const agentTabName = "agent"
@@ -59,6 +84,12 @@ const (
 // (create/close) and per-tab persistence land in later PRs; PR 1 keeps the
 // on-disk format and all behavior unchanged.
 type Tab struct {
+	// ID is the tab's stable identity (#1738), minted at creation and persisted.
+	// It is the collision-proof key streams and pane bindings address the tab by —
+	// unlike the ordinal position (shifts on reorder/close) or the display name
+	// (reused on close+recreate). Empty only for a legacy persisted tab written
+	// before #1738, which restoreLocalTabs backfills with a fresh id on load.
+	ID string
 	// Name is the display label (e.g. "agent").
 	Name string
 	// Kind selects the tab's process behavior.
@@ -84,7 +115,7 @@ type Tab struct {
 // newAgentTab returns the single Agent-kind tab that wraps an instance's tmux
 // session.
 func newAgentTab(ts *tmux.TmuxSession) *Tab {
-	return &Tab{Name: agentTabName, Kind: TabKindAgent, tmux: ts}
+	return &Tab{ID: newTabID(), Name: agentTabName, Kind: TabKindAgent, tmux: ts}
 }
 
 // newShellTab returns a Shell-kind tab named "shell" wrapping the given tmux
@@ -93,7 +124,7 @@ func newAgentTab(ts *tmux.TmuxSession) *Tab {
 // (#1100); the only automatic use is setupTabs replacing a persisted shell tab
 // that restored dead (#991).
 func newShellTab(ts *tmux.TmuxSession) *Tab {
-	return &Tab{Name: shellTabName, Kind: TabKindShell, tmux: ts}
+	return &Tab{ID: newTabID(), Name: shellTabName, Kind: TabKindShell, tmux: ts}
 }
 
 // newRemoteAgentTab returns the Agent tab for a remote/hook-backed instance
@@ -102,14 +133,14 @@ func newShellTab(ts *tmux.TmuxSession) *Tab {
 // tmux session. It lets remote instances be tab-driven through the same Tabs
 // list as local ones.
 func newRemoteAgentTab() *Tab {
-	return &Tab{Name: agentTabName, Kind: TabKindAgent}
+	return &Tab{ID: newTabID(), Name: agentTabName, Kind: TabKindAgent}
 }
 
 // newWebTab returns a TabKindWeb tab pointing at url. It carries no tmux
 // session (web tabs have no PTY): the target is rendered as an iframe in the web
 // UI and as a placeholder in the TUI. The caller sets a unique display name.
 func newWebTab(url string) *Tab {
-	return &Tab{Name: webTabName, Kind: TabKindWeb, URL: url}
+	return &Tab{ID: newTabID(), Name: webTabName, Kind: TabKindWeb, URL: url}
 }
 
 // tabKindForData clamps a persisted TabKind to a known value, defaulting to
