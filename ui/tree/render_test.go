@@ -217,6 +217,58 @@ func TestInstanceRendererNarrowTerminalNoOverflow(t *testing.T) {
 	}
 }
 
+// branchLineForTerminal renders an instance at the sidebar width app.go
+// derives from terminalW and returns the rendered secondary row — the one
+// carrying the ⎇ branch glyph.
+func branchLineForTerminal(t *testing.T, terminalW int, inst *session.Instance) (branchLine string, sidebarW int) {
+	t.Helper()
+	sidebarW = int(float32(terminalW) * 0.3)
+	r := NewInstanceRenderer()
+	r.SetWidth(effectiveWidth(sidebarW))
+	out := r.Render(inst, 1, false, false, false)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(ansiEscape.ReplaceAllString(line, ""), branchIcon) {
+			return line, sidebarW
+		}
+	}
+	t.Fatalf("no branch line found in rendered output:\n%s", out)
+	return "", sidebarW
+}
+
+// TestInstanceRendererBranchLineNarrowWidth guards the #1772-review fix: the
+// branch-name truncation must budget for the one-cell "…" tail (U+2026), not
+// the old three-cell ASCII "..." reservation (remainingWidth-3), which
+// over-reserved two cells and mis-truncated at narrow widths. Across a sweep of
+// narrow-to-medium widths the rendered branch row must (a) stay within the
+// sidebar container, (b) never emit an ASCII "..." artifact, and (c) truncate
+// with a "…" tail where it doesn't fit.
+func TestInstanceRendererBranchLineNarrowWidth(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "feature",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+	// Single-goroutine test: set the branch directly (GetBranch reads this).
+	inst.Branch = "very-long-feature-branch-name-that-must-truncate"
+
+	sawEllipsis := false
+	for terminalW := 30; terminalW <= 120; terminalW++ {
+		branchLine, sidebarW := branchLineForTerminal(t, terminalW, inst)
+		clean := ansiEscape.ReplaceAllString(branchLine, "")
+		assert.LessOrEqualf(t, lipgloss.Width(branchLine), sidebarW,
+			"branch line width (%d) must fit sidebar container (%d) at terminal=%d",
+			lipgloss.Width(branchLine), sidebarW, terminalW)
+		assert.NotContainsf(t, clean, "...",
+			"branch line must not carry an ASCII '...' artifact at terminal=%d", terminalW)
+		if strings.Contains(clean, "…") {
+			sawEllipsis = true
+		}
+	}
+	assert.True(t, sawEllipsis,
+		"a long branch must truncate with a '…' tail at some swept width")
+}
+
 // TestInstanceRendererDeletingMarker pins the #844 sidebar treatment: a row
 // whose teardown is running in the background must carry an explicit
 // "[deleting]" marker (a bare working row shows no status glyph).

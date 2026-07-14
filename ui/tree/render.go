@@ -422,17 +422,17 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 			branch += fmt.Sprintf(" (%s)", repoName)
 		}
 	}
-	// Don't show branch if there's no space for it. Or show ellipsis if it's too long.
+	// Don't show the branch if there's no space for it; otherwise fit it into
+	// remainingWidth. runewidth.Truncate reserves the "…" tail (1 cell) inside
+	// remainingWidth itself, so we must NOT subtract for the tail here. The old
+	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
+	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
+	// widths (#1772 review).
 	branchWidth := runewidth.StringWidth(branch)
-	if remainingWidth < 0 {
+	if remainingWidth <= 0 {
 		branch = ""
-	} else if remainingWidth < branchWidth {
-		if remainingWidth < 3 {
-			branch = ""
-		} else {
-			// We know the remainingWidth is at least 4 and branch is longer than that, so this is safe.
-			branch = runewidth.Truncate(branch, remainingWidth-3, "…")
-		}
+	} else if branchWidth > remainingWidth {
+		branch = runewidth.Truncate(branch, remainingWidth, "…")
 	}
 	remainingWidth -= runewidth.StringWidth(branch)
 
