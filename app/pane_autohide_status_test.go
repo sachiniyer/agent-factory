@@ -3,8 +3,8 @@ package app
 import (
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
-	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -38,56 +38,96 @@ func TestPane_OpenHiddenThenResizeWideNoDupNoStaleStatus(t *testing.T) {
 		"the narrow-width guidance clears once the panes fit again")
 }
 
-// TestPane_AutoHideViaFocusOpenPaneStartsClearTimer is the #1685 regression:
-// focusing an already-open pane through the mouse/preview path (focusOpenPane,
-// reached via selectionChanged → updatePanePreview) can auto-hide another pane
-// via relayout. That notice must start its 3s auto-clear timer just like the
-// resize and open-or-focus paths do — the bug left focusOpenPane's relayout
-// setting the status but never consuming it, so the "N hidden" guidance
-// lingered forever. focusOpenPane now returns the consume cmd; the pending
-// status is drained and a clear-timer cmd is handed back.
-func TestPane_AutoHideViaFocusOpenPaneStartsClearTimer(t *testing.T) {
-	h := paneTestHome(t)
-	resizeHome(h, layout.MultiPaneMinWidth-1, 24) // only one pane fits
-
+// openPanesForBothAndReturnHidden opens alpha's and beta's panes at a width
+// where only one fits, then returns (visible instance, hidden instance) for the
+// resulting split — which pane wins visibility is a store detail the callers
+// don't care about, only that exactly one is hidden.
+func openPanesForBothAndReturnHidden(t *testing.T, h *home) (visible, hidden *session.Instance) {
+	t.Helper()
 	alpha := h.store.GetInstanceByTitle("alpha")
 	beta := h.store.GetInstanceByTitle("beta")
 	require.NotNil(t, alpha)
 	require.NotNil(t, beta)
-
-	// Open both instances' panes; at this width only one fits, so exactly one is
-	// visible and the other is auto-hidden.
 	_, _ = h.openOrFocusPane(alpha, 0)
 	_, _ = h.openOrFocusPane(beta, 0)
 	require.Equal(t, 2, h.store.NumOpenPanes())
 	require.Equal(t, 1, len(h.visiblePanes), "only one pane fits at the narrow width")
-
-	// Grab the currently hidden pane — focusing it will re-hide the visible one.
-	visibleID := h.visiblePanes[0].ID()
-	var hidden *store.OpenPane
-	for _, p := range h.store.OpenPanes() {
-		if p.ID() != visibleID {
-			hidden = p
-		}
+	visible = h.visiblePanes[0].Instance()
+	hidden = alpha
+	if visible == alpha {
+		hidden = beta
 	}
-	require.NotNil(t, hidden, "one pane is auto-hidden at the narrow width")
+	return visible, hidden
+}
+
+// TestPane_AutoHideViaPreviewFocusStartsClearTimer is the #1685 regression:
+// landing on an already-open-but-hidden pane through the mouse/preview path
+// (selectionChanged → updatePanePreview → focusOpenPane) auto-hides the visible
+// pane via relayout. That notice must start its 3s auto-clear timer just like
+// the resize and open-or-focus paths do — the bug left updatePanePreview's
+// focusOpenPane relayout setting the status but never consuming it, so the
+// "N hidden" guidance lingered forever. updatePanePreview now consumes it and
+// returns the clear-timer cmd, which selectionChanged batches to the event loop.
+func TestPane_AutoHideViaPreviewFocusStartsClearTimer(t *testing.T) {
+	h := paneTestHome(t)
+	resizeHome(h, layout.MultiPaneMinWidth-1, 24) // only one pane fits
+
+	_, hidden := openPanesForBothAndReturnHidden(t, h)
 
 	// Reset any notice state the open path left behind so the assertion isolates
-	// the focusOpenPane relayout.
+	// the preview-focus relayout.
 	h.errBox.Clear()
 	h.pendingPaneAutoHideStatus = ""
 	h.paneAutoHideNoticeID = 0
 
-	// Focus the hidden pane the way the mouse/preview path does. This re-hides
-	// the other pane, showing the auto-hide notice — which must be consumed so
-	// the timer runs.
-	cmd := h.focusOpenPane(hidden)
+	// Drive the mouse/preview path directly: landing on the hidden instance
+	// focuses its pane, re-hiding the visible one and showing the auto-hide
+	// notice — which must be consumed so the timer runs.
+	cmd := h.updatePanePreview(hidden, 0, false, false)
 
 	require.NotEmpty(t, h.errBox.FullError(), "the auto-hide notice is shown on re-hide")
 	assert.Equal(t, "", h.pendingPaneAutoHideStatus,
-		"focusOpenPane consumes the pending status instead of leaving it dangling (#1685)")
+		"the preview-focus path consumes the pending status instead of leaving it dangling (#1685)")
 	require.NotNil(t, cmd,
-		"focusOpenPane returns the clear-timer cmd so the notice auto-clears after 3s (#1685)")
+		"updatePanePreview returns the clear-timer cmd so the notice auto-clears after 3s (#1685)")
+}
+
+// TestPane_OpenFocusRefreshProducedStatusStillClears guards the Greptile edge on
+// PR #1771: a status produced by the SUBSEQUENT selectionChanged refresh during
+// an open-or-focus must still be drained + timed. Here focusOpenPane on the
+// already-visible pane hides nothing, but the refresh reads the sidebar cursor
+// (parked on the hidden instance), re-focuses that pane, and auto-hides the
+// visible one — producing the status LATE. openOrFocusPane's consume runs AFTER
+// selectionChanged precisely so that late status never lingers with no timer.
+func TestPane_OpenFocusRefreshProducedStatusStillClears(t *testing.T) {
+	h := paneTestHome(t)
+	resizeHome(h, layout.MultiPaneMinWidth-1, 24) // only one pane fits
+
+	visible, hidden := openPanesForBothAndReturnHidden(t, h)
+
+	// Park the sidebar cursor on the hidden instance so the refresh inside the
+	// next openOrFocusPane re-focuses it (and auto-hides the visible pane).
+	hiddenIdx := 0
+	for i, inst := range h.store.GetInstances() {
+		if inst == hidden {
+			hiddenIdx = i
+		}
+	}
+	h.sidebar.SetSelectedInstance(hiddenIdx)
+
+	h.errBox.Clear()
+	h.pendingPaneAutoHideStatus = ""
+	h.paneAutoHideNoticeID = 0
+
+	// Open/focus the currently-visible instance. Its own focusOpenPane hides
+	// nothing; the auto-hide status is produced by the refresh that follows.
+	_, cmd := h.openOrFocusPane(visible, 0)
+
+	require.NotEmpty(t, h.errBox.FullError(), "the refresh-produced auto-hide notice is shown")
+	assert.Equal(t, "", h.pendingPaneAutoHideStatus,
+		"a status produced by the refresh during open/focus is still drained (#1685)")
+	require.NotNil(t, cmd,
+		"openOrFocusPane returns a clear-timer cmd so the late notice auto-clears (#1685)")
 }
 
 // TestPane_OpenPaneWindowIsIdempotent proves the (instance, tab) →

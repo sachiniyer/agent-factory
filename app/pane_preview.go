@@ -78,7 +78,12 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		// panes or rest on the tree. From a background refresh the tab being open
 		// elsewhere just means "no preview to show" — leave focus put.
 		if !m.inPreviewTick {
-			return m.focusOpenPane(existing)
+			m.focusOpenPane(existing)
+			// focusOpenPane's relayout can auto-hide a pane; consume the pending
+			// status HERE so its 3s clear timer starts. This is the mouse/preview
+			// path (selectionChanged → updatePanePreview), which — unlike
+			// openOrFocusPane — has no trailing consume to fall back on (#1685).
+			return m.consumePaneAutoHideStatus()
 		}
 		return nil
 	}
