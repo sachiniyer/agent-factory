@@ -355,13 +355,17 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	double := m.trackClick(id)
 
 	// Modal states: the overlay owns the screen, so only its buttons (and,
 	// while naming, the status-bar hints that ARE the form's verbs) react.
+	// Track the click AFTER this gate so a swallowed modal click never seeds
+	// the double-click tracker — otherwise a click on the same zone within the
+	// window after the modal closes reads as a false double click (#1731).
 	if m.state != stateDefault {
 		return m.handleModalClick(id)
 	}
+
+	double := m.trackClick(id)
 
 	switch id {
 	case zones.TreeHeader:
