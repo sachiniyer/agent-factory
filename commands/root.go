@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -12,12 +11,10 @@ import (
 	"github.com/sachiniyer/agent-factory/api"
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/app"
-	cmdutil "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
@@ -128,73 +125,8 @@ Full guide: https://sachiniyer.github.io/agent-factory/remote-tcp-auth/`,
 		},
 	}
 
-	resetCmd = &cobra.Command{
-		Use:   "reset",
-		Short: "Reset all stored instances",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			log.Initialize(false)
-			defer log.Close()
-
-			// Kill any daemon that's running first. StopDaemon only finds
-			// daemons that wrote a PID file; a pre-1.0.69 daemon leaves none,
-			// so only claim success when we actually stopped one (#937).
-			stopped, err := daemon.StopDaemon()
-			if err != nil {
-				return err
-			}
-			if stopped {
-				fmt.Println("daemon has been stopped")
-			} else {
-				fmt.Println("No managed daemon was stopped (no PID file, or the recorded process was already gone). " +
-					"If an old daemon is still running (e.g. one built from source as `agent-factory --daemon`), " +
-					"stop it with: pkill -f -- '--daemon'")
-			}
-
-			// Clean up resources before deleting storage records
-			if err := tmux.CleanupSessions(cmdutil.MakeExecutor()); err != nil {
-				return fmt.Errorf("failed to cleanup tmux sessions: %w", err)
-			}
-			fmt.Println("Tmux sessions have been cleaned up")
-
-			// Clean worktrees across ALL repos with stored instances, not
-			// just the current repo. Storage is global (DeleteAllInstances
-			// removes records for every repo), so worktree cleanup must match
-			// that scope — otherwise repos we don't run reset from are left
-			// with orphaned worktrees/branches (issue #265).
-			state := config.LoadState()
-			storage, err := session.NewStorage(state, "")
-			if err != nil {
-				return fmt.Errorf("failed to initialize storage: %w", err)
-			}
-
-			repoRoots, err := storage.CollectRepoRoots()
-			if err != nil {
-				return fmt.Errorf("failed to collect repo roots: %w", err)
-			}
-			// Ensure the current repo (if any) is cleaned even when it has
-			// no stored instances, matching prior behavior.
-			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
-				if root, rerr := config.ResolveMainRepoRoot(cwd); rerr == nil {
-					repoRoots[root] = struct{}{}
-				}
-			}
-
-			for root := range repoRoots {
-				if err := git.CleanupWorktreesForRepo(root); err != nil {
-					return fmt.Errorf("failed to cleanup worktrees for %s: %w", root, err)
-				}
-			}
-			fmt.Println("Worktrees have been cleaned up")
-
-			// Delete storage last, after resources are cleaned up
-			if err := storage.DeleteAllInstances(); err != nil {
-				return fmt.Errorf("failed to reset storage: %w", err)
-			}
-			fmt.Println("Storage has been reset successfully")
-
-			return nil
-		},
-	}
+	// resetCmd lives in reset.go (the factory-reset flow is substantial: typed
+	// confirmation, plan/summary, task+archive+branch wipe).
 
 	debugCmd = &cobra.Command{
 		Use:   "debug",

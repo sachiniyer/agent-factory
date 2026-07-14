@@ -410,6 +410,56 @@ func (g *GitWorktree) Prune() error {
 	return nil
 }
 
+// RemoveWorktreeDir removes a SINGLE worktree directory that AF created for a
+// session in the repo at repoRoot, and prunes the registry. It deletes NO
+// branch. It reports whether a directory was actually removed.
+//
+// This is the factory reset's only worktree-removal path (`af reset`, #1736):
+// reset must remove ONLY the worktrees AF created — identified by the paths in
+// AF's own session records — and NEVER the user's manually-created linked
+// worktrees, so there is deliberately no per-repo bulk pass. It also refuses to
+// touch the main worktree: a worktreePath that resolves to repoRoot (an
+// external `--here` session's tree) is a no-op. Branch deletion is handled
+// separately, gated on BranchCreatedByUs, so this never removes a branch either.
+//
+// A missing directory is not an error (idempotent: a second reset is a clean
+// no-op); the registry is still pruned so a stale entry cannot later block a
+// `git branch -D`.
+func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
+	if repoRoot == "" || worktreePath == "" {
+		return false, nil
+	}
+	// Never remove the main repo/working tree (e.g. an external --here session
+	// whose worktree path IS the user's repo).
+	if filepath.Clean(repoRoot) == filepath.Clean(worktreePath) {
+		return false, nil
+	}
+
+	// If the directory is already gone, just prune any stale registry entry so a
+	// later branch delete isn't blocked, and report nothing removed.
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		_ = exec.Command("git", "-C", repoRoot, "worktree", "prune").Run()
+		return false, nil
+	}
+
+	// Remove the worktree FIRST (git refuses to delete a branch checked out in a
+	// worktree). Fall back to a manual directory removal if git can't (e.g. the
+	// worktree was relocated to the archive and is no longer registered).
+	if err := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", worktreePath).Run(); err != nil {
+		log.ErrorLog.Printf("failed to remove worktree %s: %v", worktreePath, err)
+		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
+			return false, fmt.Errorf("remove worktree dir %s: %w", worktreePath, rmErr)
+		}
+	}
+
+	// Prune stale metadata so a subsequent `git branch -D` for this session's
+	// branch isn't blocked by a lingering worktree registration.
+	if err := exec.Command("git", "-C", repoRoot, "worktree", "prune").Run(); err != nil {
+		log.ErrorLog.Printf("failed to prune worktrees for %s: %v", repoRoot, err)
+	}
+	return true, nil
+}
+
 // CleanupWorktreesForRepo removes all worktrees and their associated branches
 // for the given repo root. The main worktree (the repo itself) is preserved.
 // The repoRoot must be the main repo path; callers should resolve linked

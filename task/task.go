@@ -263,6 +263,28 @@ func RemoveTask(id string) error {
 	})
 }
 
+// DeleteAllTasks removes the entire task store, leaving zero scheduled
+// cron/watch tasks. It is the wipe primitive for `af reset` (#1736): the whole
+// file is removed rather than emptied, and LoadTasks treats a missing file as
+// an empty list, so the next daemon start comes up with no schedules.
+// Idempotent — a missing store is a clean no-op, so a second `af reset` does
+// not error.
+//
+// The caller (`af reset`) stops the daemon first, so no live writer holds the
+// store; taking the file lock still guards against a concurrent CLI writer.
+func DeleteAllTasks() error {
+	path, err := getTasksPathFn()
+	if err != nil {
+		return err
+	}
+	return config.WithFileLock(path, func() error {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove tasks file: %w", err)
+		}
+		return nil
+	})
+}
+
 func GetTask(id string) (*Task, error) {
 	if err := ValidateTaskID(id); err != nil {
 		return nil, err
