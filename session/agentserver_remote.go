@@ -556,7 +556,9 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket
 // on one HTTP listener) and rejects the TLS schemes wss/https — the agent-server
 // is HTTP-only (af terminates no TLS; the sandbox is reached over a private hop).
 // Only scheme+authority are used. It mirrors apiclient's parseDaemonURL but with
-// agent-server-appropriate error text.
+// agent-server-appropriate error text — including its u.Hostname() host check,
+// which (unlike u.Host) rejects the hostless `http://:8443` form instead of
+// deferring it to an opaque dial error (#1784).
 func splitHTTPBaseURL(raw string) (httpBase, wsBase string, err error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -569,8 +571,8 @@ func splitHTTPBaseURL(raw string) (httpBase, wsBase string, err error) {
 	default:
 		return "", "", fmt.Errorf("agent-server URL %q must be an http:// or ws:// URL", raw)
 	}
-	if u.Host == "" {
-		return "", "", fmt.Errorf("agent-server URL %q has no host:port", raw)
+	if u.Hostname() == "" {
+		return "", "", fmt.Errorf("invalid agent-server URL %q: missing host; use http://HOST:PORT", raw)
 	}
 	return "http://" + u.Host, "ws://" + u.Host, nil
 }

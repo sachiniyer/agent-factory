@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -51,6 +52,7 @@ func TestNewRemoteAgentServer_ValidatesEndpoint(t *testing.T) {
 		{"tls scheme wss", AgentServerEndpoint{URL: "wss://host:1"}, "t"},
 		{"tls scheme https", AgentServerEndpoint{URL: "https://host:1"}, "t"},
 		{"no host", AgentServerEndpoint{URL: "http://"}, "t"},
+		{"port but no host", AgentServerEndpoint{URL: "http://:8443"}, "t"},
 		{"empty title", AgentServerEndpoint{URL: "http://host:1"}, ""},
 	}
 	for _, tc := range cases {
@@ -70,6 +72,28 @@ func TestNewRemoteAgentServer_ValidatesEndpoint(t *testing.T) {
 		}
 		if _, ok := as.(*remoteAgentServer); !ok {
 			t.Fatalf("expected *remoteAgentServer, got %T", as)
+		}
+	}
+}
+
+// TestSplitHTTPBaseURL_RejectsEmptyHost is the agent-server half of the #1784
+// contract, mirroring apiclient's TestParseDaemonURL_RejectsEmptyHost: a hostless
+// URL fails at validation with an actionable message rather than at dial time. The
+// `:8443` / `:` forms are the regression — net/url leaves their Host non-empty, so
+// the old u.Host check admitted them.
+func TestSplitHTTPBaseURL_RejectsEmptyHost(t *testing.T) {
+	for _, in := range []string{"http://:8443", "ws://:8443", "http://:", "http:///path", "ws://", "http://"} {
+		_, _, err := splitHTTPBaseURL(in)
+		if err == nil {
+			t.Fatalf("splitHTTPBaseURL(%q): want error, got nil", in)
+		}
+		if !strings.Contains(err.Error(), "missing host") {
+			t.Fatalf("splitHTTPBaseURL(%q): want actionable missing-host error, got %v", in, err)
+		}
+	}
+	for _, in := range []string{"http://host:8443", "http://[::1]:8443"} {
+		if _, _, err := splitHTTPBaseURL(in); err != nil {
+			t.Fatalf("splitHTTPBaseURL(%q): unexpected error %v", in, err)
 		}
 	}
 }
