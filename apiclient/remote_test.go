@@ -212,13 +212,12 @@ func stallingTLSListener(t *testing.T) string {
 // these vars) rather than a hand-rolled client.
 func withShrunkRemoteTimeouts(t *testing.T) {
 	t.Helper()
-	od, oh, or, oq := remoteDialTimeout, remoteTLSHandshakeTimeout, remoteResponseHeaderTimeout, remoteRequestTimeout
+	od, oh, or := remoteDialTimeout, remoteTLSHandshakeTimeout, remoteRequestTimeout
 	remoteDialTimeout = 500 * time.Millisecond
 	remoteTLSHandshakeTimeout = 500 * time.Millisecond
-	remoteResponseHeaderTimeout = 500 * time.Millisecond
-	remoteRequestTimeout = 500 * time.Millisecond
+	remoteRequestTimeout = 2 * time.Second
 	t.Cleanup(func() {
-		remoteDialTimeout, remoteTLSHandshakeTimeout, remoteResponseHeaderTimeout, remoteRequestTimeout = od, oh, or, oq
+		remoteDialTimeout, remoteTLSHandshakeTimeout, remoteRequestTimeout = od, oh, or
 	})
 }
 
@@ -280,6 +279,88 @@ func TestDialStream_StalledTLSHandshakeTimesOut(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("HANG: DialStream did not return on a stalled TLS handshake (#1730 regression)")
+	}
+}
+
+// TestNewRemote_NeverRespondsAfterConnectTimesOut proves the OTHER stall the fix
+// must catch: a daemon that completes the TLS handshake but then never sends a
+// response. The single overall request deadline bounds it, so the REST call
+// returns a timeout ("context deadline exceeded") instead of hanging.
+func TestNewRemote_NeverRespondsAfterConnectTimesOut(t *testing.T) {
+	withShrunkRemoteTimeouts(t)
+	// release lets cleanup unblock the handler: the client aborting on its request
+	// deadline does not promptly cancel the server-side request context, so without
+	// this srv.Close would wait on the parked handler.
+	release := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/Snapshot", func(w http.ResponseWriter, r *http.Request) {
+		select { // handshake done, but the response headers never come
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)                 // runs LAST (LIFO): a clean close after...
+	t.Cleanup(func() { close(release) }) // ...this unparks the handler first
+	pin := agentproto.CertFingerprint(srv.Certificate().Raw)
+
+	c, err := NewRemote(srv.URL, "tok", pin)
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+	errc := make(chan error, 1)
+	go func() {
+		_, e := c.Snapshot(daemon.SnapshotRequest{})
+		errc <- e
+	}()
+	select {
+	case e := <-errc:
+		if e == nil {
+			t.Fatal("daemon that never responds: want a timeout error, got nil")
+		}
+		if !strings.Contains(e.Error(), "timeout") && !strings.Contains(e.Error(), "deadline exceeded") {
+			t.Fatalf("want a timeout error, got %v", e)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("HANG: Snapshot did not return when the daemon never responded (#1730 regression)")
+	}
+}
+
+// TestNewRemote_SlowButProgressingResponseNotKilled is the Greptile correctness
+// guard for a slow SYNCHRONOUS create: a valid RPC whose server does real work for
+// a while and answers JUST UNDER the overall deadline (like a remote docker/ssh
+// CreateSession provisioning) must SUCCEED, not be severed early. It proves the
+// single deadline is a wedged-connection backstop, not a race against slow work.
+func TestNewRemote_SlowButProgressingResponseNotKilled(t *testing.T) {
+	withShrunkRemoteTimeouts(t) // remoteRequestTimeout is now 2s
+	// The daemon takes a substantial slice of the deadline before responding — well
+	// past what a snappy read would need — yet lands comfortably before it. Sized
+	// off the live var so it stays under the deadline if the value ever changes.
+	serverWork := remoteRequestTimeout / 2
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/Snapshot", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(serverWork):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.SnapshotResponse{Instances: richInstances()}))
+	})
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	pin := agentproto.CertFingerprint(srv.Certificate().Raw)
+
+	c, err := NewRemote(srv.URL, "tok", pin)
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+	got, err := c.Snapshot(daemon.SnapshotRequest{})
+	if err != nil {
+		t.Fatalf("slow-but-progressing response must NOT be timed out, got %v", err)
+	}
+	if len(got) != len(richInstances()) || got[0].Title != "alpha" {
+		t.Fatalf("slow response decoded wrong: %+v", got)
 	}
 }
 

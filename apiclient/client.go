@@ -95,15 +95,17 @@ type Client struct {
 	// wsBase is the WS scheme+authority: localWSBase ("ws://unix") for the unix
 	// socket, "wss://host:port" for a remote daemon.
 	wsBase string
-	// requestTimeout is the overall deadline applied to each REST call()
+	// requestTimeout is the SINGLE overall deadline applied to each REST call()
 	// round-trip via the request context. It is set only for a REMOTE target
-	// (NewRemote), so a half-open or wedged remote daemon surfaces as a timeout
-	// error instead of hanging forever (#1730). It is 0 for the local unix socket,
-	// which keeps its blocking-read semantics (the socket is either there or not,
-	// bounded by dialTimeout, and the in-memory snapshot returns promptly). WS
-	// stream dials never consult this field — they are bounded only by the
-	// transport's handshake/response-header timeouts so a long-lived stream is
-	// never severed by an overall deadline.
+	// (NewRemote), so a daemon that completes TLS but then never responds surfaces
+	// as a timeout instead of hanging forever (#1730) — the sole REST wait-bound,
+	// deliberately generous so a synchronous mutating RPC (a remote docker/ssh
+	// CreateSession) is not severed mid-provision. It is 0 for the local unix
+	// socket, which keeps its blocking-read semantics (the socket is either there
+	// or not, bounded by dialTimeout, and the in-memory snapshot returns promptly).
+	// WS stream dials never consult this field — they are bounded only by the
+	// transport's dial + handshake timeouts, so a long-lived stream is never
+	// severed by an overall deadline.
 	requestTimeout time.Duration
 }
 
@@ -153,9 +155,11 @@ func (c *Client) call(method string, req any, resp any) error {
 		return fmt.Errorf("apiclient: marshal request: %w", err)
 	}
 
-	// A remote target bounds the whole round-trip with an overall deadline so a
-	// wedged daemon times out instead of hanging (#1730); the local socket leaves
-	// requestTimeout zero and blocks on the in-memory snapshot as before.
+	// A remote target bounds the whole round-trip with a single overall deadline so
+	// a wedged daemon (TLS up, never responds) times out instead of hanging
+	// (#1730); the deadline is generous so a slow synchronous create is not
+	// severed. The local socket leaves requestTimeout zero and blocks on the
+	// in-memory snapshot as before.
 	ctx := context.Background()
 	if c.requestTimeout > 0 {
 		var cancel context.CancelFunc
