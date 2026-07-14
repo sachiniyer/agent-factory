@@ -25,8 +25,8 @@ func LocalBranchExists(repoRoot, branch string) bool {
 // actually deleted.
 //
 // It is the SOLE branch-deletion path of the factory reset (`af reset`, #1736):
-// reset removes worktree directories via RemoveWorktreesForRepo, which deletes
-// no branches, and then deletes branches ONLY through here. The caller
+// reset removes worktree directories via RemoveWorktreeDir, which deletes no
+// branches, and then deletes branches ONLY through here. The caller
 // enumerates exactly the branches AF created for its own sessions — live and
 // archived — gated on GitWorktreeData.BranchCreatedByUs, so the user's own
 // branches (master/main/their feature branches, and any branch a session merely

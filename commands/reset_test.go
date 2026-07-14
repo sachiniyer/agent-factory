@@ -396,10 +396,68 @@ func TestFactoryReset_CorruptRecordLeftIntact(t *testing.T) {
 	}
 }
 
-// TestFactoryReset_ResilientPartialFailure proves that a worktree-cleanup error
-// on one repo does NOT abort the reset: the other repo's worktree is still
-// removed, state/tasks are still cleared, and the error is surfaced (Greptile
-// #3). A follow-up run with the bad root removed completes cleanly.
+// TestFactoryReset_PreservesUserWorktreesWithNoAFRecords proves the reset never
+// removes the user's own manually-created linked worktrees: a repo with a
+// user-created worktree and NO AF records is left entirely alone, even when it
+// is the current directory (the pre-#1736 cwd fallback would have bulk-removed
+// it). AF-created worktrees are still removed (covered by the end-to-end test).
+func TestFactoryReset_PreservesUserWorktreesWithNoAFRecords(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-q", "-m", "init")
+	runGit(t, repo, "branch", "-M", "master")
+
+	// A worktree the USER created by hand, OUTSIDE the AF home, with no AF record.
+	userWT := filepath.Join(t.TempDir(), "user-wt")
+	runGit(t, repo, "worktree", "add", "-q", "-b", "user-branch", userWT)
+
+	writeFileBytes(t, filepath.Join(home, "config.toml"), []byte("listen_addr = \"127.0.0.1:9000\"\n"))
+
+	// chdir INTO the repo: the removed cwd fallback would have grabbed it here.
+	t.Chdir(repo)
+
+	plan, err := planFactoryReset()
+	if err != nil {
+		t.Fatalf("planFactoryReset: %v", err)
+	}
+	if len(plan.worktreeTargets) != 0 {
+		t.Errorf("worktreeTargets = %v, want none (no AF records)", plan.worktreeTargets)
+	}
+	if _, ok := plan.repoRoots[repo]; ok {
+		t.Error("a repo with no AF records must not be pulled in (cwd fallback dropped)")
+	}
+
+	if _, err := executeFactoryReset(plan); err != nil {
+		t.Fatalf("executeFactoryReset: %v", err)
+	}
+
+	// The user's worktree, its contents, and its branch are untouched.
+	if _, err := os.Stat(filepath.Join(userWT, "README.md")); err != nil {
+		t.Errorf("user-created worktree was removed: %v", err)
+	}
+	if !branchExists(repo, "user-branch") {
+		t.Error("user-branch must be preserved")
+	}
+	if !branchExists(repo, "master") {
+		t.Error("master must be preserved")
+	}
+	// The worktree is still registered and functional.
+	if out := runGit(t, repo, "worktree", "list", "--porcelain"); !strings.Contains(out, userWT) {
+		t.Errorf("user worktree no longer registered:\n%s", out)
+	}
+}
+
+// TestFactoryReset_ResilientPartialFailure proves a mid-reset step failure does
+// NOT abort the wipe: worktrees are still removed, AF branches still pruned,
+// state still cleared, and the error is surfaced (Greptile #3). A follow-up run
+// after the failure is cleared completes cleanly.
 func TestFactoryReset_ResilientPartialFailure(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -408,42 +466,36 @@ func TestFactoryReset_ResilientPartialFailure(t *testing.T) {
 	repo, liveWT, reusedWT := seedMockRepo(t, home)
 	seedAFState(t, home, repo, liveWT, reusedWT)
 
-	state := config.LoadState()
-	storage, err := session.NewStorage(state, "")
+	// Plan while everything is well-formed.
+	plan, err := planFactoryReset()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("planFactoryReset: %v", err)
 	}
 
-	// Inject a failing repo root ("" errors in RemoveWorktreesForRepo) alongside
-	// the real one, to force the collect-and-continue path deterministically.
-	plan := &resetPlan{
-		configDir: home,
-		storage:   storage,
-		sessions:  3, archived: 1, tasks: 2, worktrees: 3,
-		repoRoots: map[string]struct{}{"": {}, repo: {}},
-		branches:  map[string][]string{repo: {"af-session-1", "af-session-2"}},
+	// Inject a deterministic, uid-independent failure into a mid-reset step:
+	// replace tasks.json with a NON-EMPTY directory, so DeleteAllTasks's
+	// os.Remove fails with ENOTEMPTY (which not even root can rmdir).
+	tasksPath := filepath.Join(home, "tasks.json")
+	if err := os.Remove(tasksPath); err != nil {
+		t.Fatal(err)
 	}
+	mkdir(t, filepath.Join(tasksPath, "x"))
 
 	summary, err := executeFactoryReset(plan)
 	if err == nil {
-		t.Fatal("expected a joined error from the failing repo root, got nil")
+		t.Fatal("expected a joined error from the failing task-delete step, got nil")
 	}
-	if !strings.Contains(err.Error(), "cleanup worktrees") {
-		t.Errorf("error should name the worktree-cleanup failure: %v", err)
+	if !strings.Contains(err.Error(), "reset tasks") {
+		t.Errorf("error should name the failing step: %v", err)
 	}
 
-	// Despite the failure, the reset reached a consistent end state.
+	// Despite the failure, everything else reached a consistent end state.
 	assertGone(t, liveWT)
 	assertGone(t, reusedWT)
 	assertGone(t, filepath.Join(home, "instances"))
 	assertGone(t, filepath.Join(home, config.StateFileName))
-	assertGone(t, filepath.Join(home, "tasks.json"))
-	if tasks, _ := task.LoadTasks(); len(tasks) != 0 {
-		t.Errorf("tasks not cleared despite partial failure: %d", len(tasks))
-	}
-	// The good repo's AF branches were still pruned; user branches preserved.
 	if branchExists(repo, "af-session-1") || branchExists(repo, "af-session-2") {
-		t.Error("AF branches should be pruned even when another repo failed")
+		t.Error("AF branches should be pruned even when a later step failed")
 	}
 	if !branchExists(repo, "reused-linked") || !branchExists(repo, "my-feature") {
 		t.Error("user branches must be preserved")
@@ -452,7 +504,10 @@ func TestFactoryReset_ResilientPartialFailure(t *testing.T) {
 		t.Errorf("branches = %d, want 2", summary.branches)
 	}
 
-	// A clean re-run (no bad root) is a no-op that succeeds.
+	// Clear the injected failure and re-run: a clean run completes.
+	if err := os.RemoveAll(tasksPath); err != nil {
+		t.Fatal(err)
+	}
 	plan2, err := planFactoryReset()
 	if err != nil {
 		t.Fatalf("re-run planFactoryReset: %v", err)

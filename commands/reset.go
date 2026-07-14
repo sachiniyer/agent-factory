@@ -69,8 +69,14 @@ type resetPlan struct {
 	archived  int                 // archived session records
 	tasks     int                 // scheduled cron/watch tasks
 	worktrees int                 // AF-managed worktrees (excludes external --here trees)
-	repoRoots map[string]struct{} // repos to run worktree cleanup across
+	repoRoots map[string]struct{} // distinct repos with AF records (display only)
 	branches  map[string][]string // repoRoot -> AF-created branch names to prune
+
+	// worktreeTargets are the SPECIFIC worktree dirs AF created for its sessions
+	// (from the records), each paired with its repo root. Reset removes exactly
+	// these — never a blind per-repo bulk pass, which would delete the user's own
+	// manually-created linked worktrees (#1736).
+	worktreeTargets []worktreeTarget
 
 	// processedRepoIDs are the repos whose instances.json parsed cleanly and
 	// are therefore safe to delete. corruptRepoIDs are repos whose records
@@ -80,6 +86,13 @@ type resetPlan struct {
 	// branch). A re-run after the file is fixed/removed finishes the job.
 	processedRepoIDs []string
 	corruptRepoIDs   []string
+}
+
+// worktreeTarget is one AF-created worktree directory to remove, with the repo
+// root git needs to operate on it.
+type worktreeTarget struct {
+	root string
+	path string
 }
 
 func (p *resetPlan) branchCount() int {
@@ -271,19 +284,23 @@ func planFactoryReset() (*resetPlan, error) {
 		}
 		plan.processedRepoIDs = append(plan.processedRepoIDs, repoID)
 		for _, r := range recs {
+			root := r.Worktree.RepoPath
+			if root == "" {
+				root = r.Path
+			}
 			if session.IsArchivedData(r) {
 				plan.archived++
 			} else {
 				plan.sessions++
 			}
-			// Count only AF-managed worktrees; an external (--here) session
-			// IS the user's live tree and is never removed.
-			if r.Worktree.WorktreePath != "" && !r.Worktree.ExternalWorktree {
+			// Target ONLY the worktree dirs AF created for its sessions. An
+			// external (--here) session IS the user's live tree, so it is never a
+			// target. This record-driven list is why reset never removes the
+			// user's own manually-created linked worktrees.
+			if r.Worktree.WorktreePath != "" && !r.Worktree.ExternalWorktree && root != "" {
 				plan.worktrees++
-			}
-			root := r.Worktree.RepoPath
-			if root == "" {
-				root = r.Path
+				plan.worktreeTargets = append(plan.worktreeTargets,
+					worktreeTarget{root: root, path: r.Worktree.WorktreePath})
 			}
 			if root == "" {
 				continue
@@ -322,13 +339,10 @@ func planFactoryReset() (*resetPlan, error) {
 		}
 	}
 
-	// Ensure the current repo is cleaned even when it has no stored instances,
-	// matching prior `af reset` behavior.
-	if cwd, cwdErr := os.Getwd(); cwdErr == nil {
-		if root, rerr := config.ResolveMainRepoRoot(cwd); rerr == nil {
-			plan.repoRoots[root] = struct{}{}
-		}
-	}
+	// NOTE: there is deliberately NO current-repo fallback. The pre-#1736 reset
+	// forced the cwd's repo into a bulk worktree cleanup even when it had no AF
+	// records — which would delete the user's own manually-created linked
+	// worktrees. If a repo has no AF records, AF created nothing there to remove.
 
 	tasks, err := task.LoadTasks()
 	if err != nil {
@@ -374,15 +388,14 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		}
 	}
 
-	// Remove worktree DIRECTORIES across every repo with stored state, deleting
-	// NO branches here: the bulk pass cannot tell an AF-created branch from one
-	// a session merely reused, so letting it run `git branch -D` would destroy a
-	// user's branch (#1736). Branch deletion is funneled entirely through the
-	// BranchCreatedByUs-guarded pass below. Resilient: a per-repo failure is
-	// collected, not fatal.
-	for root := range plan.repoRoots {
-		if _, err := git.RemoveWorktreesForRepo(root); err != nil {
-			errs = append(errs, fmt.Errorf("cleanup worktrees for %s: %w", root, err))
+	// Remove ONLY the specific worktree DIRECTORIES AF created for its sessions
+	// (from the records), never a blind per-repo bulk pass — that would delete
+	// the user's own manually-created linked worktrees. Deletes NO branch here;
+	// branch deletion is funneled through the BranchCreatedByUs-guarded pass
+	// below. Resilient: a per-worktree failure is collected, not fatal.
+	for _, wt := range plan.worktreeTargets {
+		if _, err := git.RemoveWorktreeDir(wt.root, wt.path); err != nil {
+			errs = append(errs, fmt.Errorf("remove worktree %s: %w", wt.path, err))
 		}
 	}
 

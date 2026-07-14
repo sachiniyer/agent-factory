@@ -410,40 +410,63 @@ func (g *GitWorktree) Prune() error {
 	return nil
 }
 
+// RemoveWorktreeDir removes a SINGLE worktree directory that AF created for a
+// session in the repo at repoRoot, and prunes the registry. It deletes NO
+// branch. It reports whether a directory was actually removed.
+//
+// This is the factory reset's only worktree-removal path (`af reset`, #1736):
+// reset must remove ONLY the worktrees AF created — identified by the paths in
+// AF's own session records — and NEVER the user's manually-created linked
+// worktrees, so there is deliberately no per-repo bulk pass. It also refuses to
+// touch the main worktree: a worktreePath that resolves to repoRoot (an
+// external `--here` session's tree) is a no-op. Branch deletion is handled
+// separately, gated on BranchCreatedByUs, so this never removes a branch either.
+//
+// A missing directory is not an error (idempotent: a second reset is a clean
+// no-op); the registry is still pruned so a stale entry cannot later block a
+// `git branch -D`.
+func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
+	if repoRoot == "" || worktreePath == "" {
+		return false, nil
+	}
+	// Never remove the main repo/working tree (e.g. an external --here session
+	// whose worktree path IS the user's repo).
+	if filepath.Clean(repoRoot) == filepath.Clean(worktreePath) {
+		return false, nil
+	}
+
+	// If the directory is already gone, just prune any stale registry entry so a
+	// later branch delete isn't blocked, and report nothing removed.
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		_ = exec.Command("git", "-C", repoRoot, "worktree", "prune").Run()
+		return false, nil
+	}
+
+	// Remove the worktree FIRST (git refuses to delete a branch checked out in a
+	// worktree). Fall back to a manual directory removal if git can't (e.g. the
+	// worktree was relocated to the archive and is no longer registered).
+	if err := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", worktreePath).Run(); err != nil {
+		log.ErrorLog.Printf("failed to remove worktree %s: %v", worktreePath, err)
+		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
+			return false, fmt.Errorf("remove worktree dir %s: %w", worktreePath, rmErr)
+		}
+	}
+
+	// Prune stale metadata so a subsequent `git branch -D` for this session's
+	// branch isn't blocked by a lingering worktree registration.
+	if err := exec.Command("git", "-C", repoRoot, "worktree", "prune").Run(); err != nil {
+		log.ErrorLog.Printf("failed to prune worktrees for %s: %v", repoRoot, err)
+	}
+	return true, nil
+}
+
 // CleanupWorktreesForRepo removes all worktrees and their associated branches
 // for the given repo root. The main worktree (the repo itself) is preserved.
 // The repoRoot must be the main repo path; callers should resolve linked
 // worktree paths to the main repo root before invoking this function.
 func CleanupWorktreesForRepo(repoRoot string) error {
-	_, err := cleanupWorktreesForRepo(repoRoot, true)
-	return err
-}
-
-// RemoveWorktreesForRepo removes every linked worktree DIRECTORY of the given
-// repo root (never the main worktree) and prunes the registry, but deletes NO
-// branches. It returns the number of worktree directories removed.
-//
-// It exists for the factory reset (`af reset`, #1736): reset must NEVER delete
-// a branch AF did not create, so branch deletion is funneled entirely through
-// the BranchCreatedByUs-guarded path (session/git.DeleteLocalBranch), and this
-// bulk worktree pass is forbidden from touching any branch. A session that
-// reused a pre-existing user branch has a linked worktree here but
-// BranchCreatedByUs=false; letting the bulk `git branch -D` run (as
-// CleanupWorktreesForRepo does) would delete the user's branch — the data-loss
-// bug this split closes.
-func RemoveWorktreesForRepo(repoRoot string) (int, error) {
-	return cleanupWorktreesForRepo(repoRoot, false)
-}
-
-// cleanupWorktreesForRepo lists and removes every linked worktree of repoRoot
-// (never the main worktree, which is index 0). When deleteBranches is true it
-// also force-deletes each removed worktree's branch (the historical
-// CleanupWorktreesForRepo behavior); when false it removes only the directories
-// and prunes, leaving every branch intact. Returns the count of worktree
-// directories removed.
-func cleanupWorktreesForRepo(repoRoot string, deleteBranches bool) (int, error) {
 	if repoRoot == "" {
-		return 0, fmt.Errorf("repo root is empty")
+		return fmt.Errorf("repo root is empty")
 	}
 
 	// Skip cleanup if the repo path no longer exists on disk. `af reset`
@@ -452,9 +475,9 @@ func cleanupWorktreesForRepo(repoRoot string, deleteBranches bool) (int, error) 
 	// the entire reset before subsequent repos (and DeleteAllInstances) ran.
 	if _, err := os.Stat(repoRoot); os.IsNotExist(err) {
 		log.WarningLog.Printf("skipping cleanup for deleted repo: %s", repoRoot)
-		return 0, nil
+		return nil
 	} else if err != nil {
-		return 0, fmt.Errorf("failed to access repo path: %w", err)
+		return fmt.Errorf("failed to access repo path: %w", err)
 	}
 
 	// List all worktrees from the repo. If the path exists but is no longer a
@@ -465,7 +488,7 @@ func cleanupWorktreesForRepo(repoRoot string, deleteBranches bool) (int, error) 
 	output, err := cmd.Output()
 	if err != nil {
 		log.WarningLog.Printf("skipping cleanup for non-git path: %s", repoRoot)
-		return 0, nil
+		return nil
 	}
 
 	// Parse output to get (worktreePath, branchName) pairs.
@@ -498,7 +521,6 @@ func cleanupWorktreesForRepo(repoRoot string, deleteBranches bool) (int, error) 
 	}
 
 	// Skip the first entry (the main worktree / repo itself)
-	removed := 0
 	if len(worktrees) > 1 {
 		for _, wt := range worktrees[1:] {
 			// Remove the worktree FIRST (git refuses to delete a branch checked out in a worktree)
@@ -514,7 +536,6 @@ func cleanupWorktreesForRepo(repoRoot string, deleteBranches bool) (int, error) 
 					log.ErrorLog.Printf("failed to remove worktree directory %s: %v", wt.path, err)
 				}
 			}
-			removed++
 
 			// Prune stale worktree metadata (best-effort) BEFORE deleting the
 			// branch. When the `git worktree remove -f` above fails and we fall
@@ -525,13 +546,8 @@ func cleanupWorktreesForRepo(repoRoot string, deleteBranches bool) (int, error) 
 				log.ErrorLog.Printf("failed to prune worktree metadata before deleting branch %s: %v", wt.branch, err)
 			}
 
-			// THEN delete the branch — but ONLY when the caller opted in. The
-			// factory reset (RemoveWorktreesForRepo, deleteBranches=false) must
-			// not let this unguarded bulk path delete a branch: it can't tell an
-			// AF-created branch from one the session merely reused, so it would
-			// destroy the user's branch. Reset deletes branches separately, gated
-			// on BranchCreatedByUs (#1736).
-			if deleteBranches && wt.branch != "" {
+			// THEN delete the branch
+			if wt.branch != "" {
 				deleteCmd := exec.Command("git", "-C", repoRoot, "branch", "-D", wt.branch)
 				if err := deleteCmd.Run(); err != nil {
 					log.ErrorLog.Printf("failed to delete branch %s: %v", wt.branch, err)
@@ -543,8 +559,8 @@ func cleanupWorktreesForRepo(repoRoot string, deleteBranches bool) (int, error) 
 	// Prune worktree references
 	pruneCmd := exec.Command("git", "-C", repoRoot, "worktree", "prune")
 	if _, err := pruneCmd.Output(); err != nil {
-		return removed, fmt.Errorf("failed to prune worktrees: %w", err)
+		return fmt.Errorf("failed to prune worktrees: %w", err)
 	}
 
-	return removed, nil
+	return nil
 }
