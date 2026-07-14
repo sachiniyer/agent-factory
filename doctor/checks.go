@@ -574,10 +574,27 @@ func staleTempHomeRemoveFix(ctx *scanContext, dir string) func() error {
 			return fmt.Errorf("refusing to remove %s: it no longer looks like an agent-factory home", dir)
 		}
 
+		// Re-take the process snapshot at fix time: a home that looked
+		// abandoned during detection may have been claimed since. When the
+		// recheck fails, how we react depends on whether detection had a
+		// working snapshot at all:
+		//   - detection got one (ctx.snap != nil): the process guard was live
+		//     protection we now can't reproduce, and ctx.snap is stale. Fail
+		//     closed rather than delete on stale data — a process that started
+		//     using dir after detection would otherwise lose its home.
+		//   - detection had none (ctx.snap == nil, e.g. no /proc on macOS):
+		//     the process guard is unavailable on this platform and was a
+		//     no-op at detection too. Keep snap nil and fall through to the
+		//     daemon.pid + tmux guards, exactly as before — otherwise --fix
+		//     could never clean a stale temp home on such platforms.
 		snap := ctx.snap
 		if ctx.opts.snapshot != nil {
-			if fresh, err := ctx.opts.snapshot(); err == nil {
+			fresh, err := ctx.opts.snapshot()
+			switch {
+			case err == nil:
 				snap = fresh
+			case ctx.snap != nil:
+				return fmt.Errorf("refusing to remove %s: process snapshot failed: %w", dir, err)
 			}
 		}
 		if reason := tempHomeInUseReason(dir, processReferencedHomes(snap), liveTmuxHomes(ctx)); reason != "" {

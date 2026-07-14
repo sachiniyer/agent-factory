@@ -156,3 +156,47 @@ func TestStaleTempHomeFixRechecksDaemonBeforeRemove(t *testing.T) {
 	require.Contains(t, err.Error(), "daemon pid is live")
 	require.DirExists(t, dir, "fix must re-check and refuse to remove a newly active temp home")
 }
+
+// TestStaleTempHomeFixFailsClosedWhenSnapshotFailsAtFixTime is the #1728
+// regression: detection got a working process snapshot (so the home was
+// flagged stale on genuinely-empty data), but the fix-time recheck fails
+// (transient /proc error). The detection snapshot is now stale — a one-off
+// command with no daemon.pid and no tmux marker could have claimed the home
+// in between — so the fix must fail closed rather than delete on stale data.
+// Before the fix, the snapshot error was swallowed and the home deleted.
+func TestStaleTempHomeFixFailsClosedWhenSnapshotFailsAtFixTime(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.snapshot-race")
+
+	opts := testOptions(t, true)
+	opts.TempDir = tempRoot
+	// No live tmux session references the home.
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			return nil, fmt.Errorf("no tmux")
+		},
+	}
+	// Detection (call 1) sees a clean, non-nil snapshot so the home is flagged
+	// stale; the fix-time recheck (call 2+) fails, mirroring a transient /proc
+	// error between detection and remediation.
+	var calls int
+	opts.snapshot = func() (map[int]proctree.Process, error) {
+		calls++
+		if calls == 1 {
+			return map[int]proctree.Process{}, nil
+		}
+		return nil, fmt.Errorf("snapshot unavailable at fix time")
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	findings := findByCheck(report, "stale-temp-home")
+	require.Len(t, findings, 1, "home must be detected as stale")
+	require.GreaterOrEqual(t, calls, 2, "fix must re-take the snapshot at fix time")
+	require.False(t, findings[0].Fixed, "fix must fail closed when the fix-time snapshot fails")
+	require.Error(t, findings[0].FixErr)
+	require.Contains(t, findings[0].FixErr.Error(), "process snapshot failed")
+	require.DirExists(t, dir, "an in-use home must never be deleted when liveness cannot be verified")
+}
