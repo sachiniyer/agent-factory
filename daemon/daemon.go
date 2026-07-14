@@ -50,6 +50,27 @@ func RunDaemon(cfg *config.Config) error {
 		return nil
 	}
 
+	// Acquire the exclusive per-home lock BEFORE touching the socket, PID file,
+	// or any state. This is the singleton guarantee (#960 split-brain): only the
+	// lock holder ever binds the control socket or writes state, so a second
+	// daemon can never clobber a live one — even if the ping above transiently
+	// failed under load and let it slip past. The flock is held for the whole
+	// daemon lifetime and auto-releases if the process dies, so a crashed
+	// daemon's lock frees automatically with no stale-lock pid guessing.
+	//
+	// A held lock means another live daemon owns this home (the top ping only
+	// misses it during the sub-millisecond window between its flock and its
+	// socket bind, or if it is wedged): fail fast, non-zero, WITHOUT removing
+	// the socket / rewriting the PID file, so the live daemon is left intact.
+	lock, err := acquireHomeLock()
+	if err != nil {
+		if isDaemonLockHeldErr(err) {
+			log.InfoLog.Printf("%v", err)
+		}
+		return err
+	}
+	defer lock.release()
+
 	// Shell only — no restore yet, so the bind below happens within
 	// milliseconds of process start.
 	manager, err := newManagerShell(cfg)
