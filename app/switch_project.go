@@ -313,6 +313,13 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		m.hooksPane.SetCommands(resolved.PostWorktreeCommands)
 	} else {
 		log.WarningLog.Printf("switch project: failed to resolve config for %s: %v", repo.Root, err)
+		// Clear the hooks pane so the OUTGOING project's hooks cannot leak into
+		// the new project. m.repoRoot already points at the new project, so a save
+		// from a stale pane would write the previous project's hooks into this
+		// project's in-repo config (#1686). At startup the pane starts empty, so
+		// this only matters on an in-place switch.
+		m.store.SetHookCount(0)
+		m.hooksPane.SetCommands(nil)
 	}
 
 	// Re-prime the projection from the new project's snapshot (scoped to the new

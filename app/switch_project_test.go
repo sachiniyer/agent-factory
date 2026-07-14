@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -252,6 +253,44 @@ func TestSwitchProjectSameRepoIsNoop(t *testing.T) {
 	h.switchProject(same)
 
 	require.NotNil(t, findSidebarInstance(h, "existing"), "a same-repo switch must not wipe the sidebar")
+}
+
+// TestSwitchProjectClearsHooksWhenConfigResolveFails is the #1686 guarantee:
+// when config.ResolveConfig fails for the incoming project (e.g. the global
+// config is unreadable/corrupt), the switch must clear the hooks pane rather
+// than leave the OUTGOING project's hooks in it. m.repoRoot already points at
+// the new project by this point, so a save from a stale pane would write the
+// previous project's hooks into the new project's in-repo config.
+func TestSwitchProjectClearsHooksWhenConfigResolveFails(t *testing.T) {
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+
+	// The outgoing project (A) has hooks loaded into the pane.
+	projectAHooks := []string{"echo 'project-a-hook-1'", "echo 'project-a-hook-2'"}
+	h.hooksPane.SetCommands(projectAHooks)
+	h.store.SetHookCount(len(projectAHooks))
+	require.Equal(t, projectAHooks, h.hooksPane.GetCommands())
+
+	// The incoming project (B) is a real, distinct git repo.
+	projectBRoot := initTestGitRepo(t)
+	repoB := &config.RepoContext{Root: projectBRoot, ID: config.RepoIDFromRoot(projectBRoot)}
+
+	// Corrupt the global config so ResolveConfig fails on the switch. newTestHome
+	// redirects AGENT_FACTORY_HOME to a tempdir, so this only affects the test.
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(configDir, 0o755))
+	globalConfigPath := filepath.Join(configDir, "config.toml")
+	require.NoError(t, os.WriteFile(globalConfigPath, []byte("invalid toml {{{\n[broken"), 0o644))
+	_, err = config.ResolveConfig(projectBRoot)
+	require.Error(t, err, "precondition: ResolveConfig must fail with the corrupt global config")
+
+	h.switchProject(repoB)
+
+	assert.Equal(t, projectBRoot, h.repoRoot, "repoRoot must be re-scoped to the new project")
+	assert.Empty(t, h.hooksPane.GetCommands(), "stale hooks from the previous project must be cleared, not carried over")
 }
 
 // TestBuildProjectListUnionsSourcesWithCounts: the picker list unions the
