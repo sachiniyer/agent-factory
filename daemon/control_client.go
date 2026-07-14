@@ -75,7 +75,14 @@ func ensureDaemonWithLauncher(launch func() error) error {
 
 	// A previous daemon version may have a PID file but no control socket. Stop
 	// it before launching the control-plane daemon so we do not run duplicate
-	// AutoYes loops.
+	// AutoYes loops. StopDaemon is also how an alive-but-unreachable daemon
+	// (its control socket removed/corrupted) is reclaimed: it SIGTERMs the
+	// holder, which releases the per-home lock on exit, so the launch below
+	// acquires a free lock. That reclaim-then-respawn is what keeps auto-start
+	// within the singleton invariant — the freshly spawned daemon binds only
+	// once the previous one is gone. A spurious spawn that races a still-live
+	// holder can never become a second daemon: the child fails fast on the
+	// exclusive startup lock (see RunDaemon / acquireHomeLock).
 	if _, err := StopDaemon(); err != nil {
 		log.WarningLog.Printf("failed to stop stale daemon before launch: %v", err)
 	}
