@@ -303,6 +303,18 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 			if perr := limitParkError(detector, content, agent); perr != nil {
 				return perr
 			}
+			// The deadline firing is not itself proof of failure — only the pane
+			// is. The pane is sampled every waitForReadyPollInterval, so an agent
+			// that renders its prompt during the final poll gap is first observed
+			// HERE, and at the exact boundary the runtime may pick this branch over
+			// an equally-ready ticker tick. Either way the capture above already
+			// shows the agent is up, so honor it exactly as the ticker branch does:
+			// reporting a timeout would make the create path kill a healthy, ready
+			// session (#1783). Checked after limitParkError, mirroring the ticker
+			// branch's ordering.
+			if isReadyContent(content, agent) {
+				return nil
+			}
 			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
 			return formatWaitForReadyTimeoutError(waitForReadyTimeout, content)
 		case <-ticker.C:

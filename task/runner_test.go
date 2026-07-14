@@ -264,6 +264,39 @@ func TestWaitForReadyNonAgentBecomesReadyOnAnyOutput(t *testing.T) {
 	}
 }
 
+// TestWaitForReadyReadyAtTimeoutBoundaryIsReady pins #1783: an agent whose ready
+// prompt is on the pane when the readiness deadline fires must be reported READY,
+// not timed out. The timeout branch captures the pane just like the ticker branch
+// does, so it must honor the same readiness signal — otherwise a session that IS
+// ready gets a timeout error, and the create path reacts by killing it (data loss).
+//
+// The window is real at production timings: the pane is only sampled every
+// waitForReadyPollInterval (500ms), so an agent that renders its prompt during the
+// final poll gap is first observed by the timeout branch. Pinning poll > timeout
+// makes that ordering deterministic instead of racing the boundary: the ticker can
+// never fire, so the timeout branch is the only branch that ever sees the pane —
+// and it sees a pane that is unambiguously ready.
+func TestWaitForReadyReadyAtTimeoutBoundaryIsReady(t *testing.T) {
+	defer setWaitForReadyTimingForTest(50*time.Millisecond, time.Hour)()
+	defer setWaitLimitForTest(NewLimitDetector(nil), time.Now)()
+
+	inst := newPreviewInstance(t, func() (string, error) {
+		return "claude ready\n❯ ", nil // claude's ready glyph is already on the pane
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(context.Background(), inst) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a pane showing the ready prompt when the deadline fires must be READY, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitForReady never returned")
+	}
+}
+
 // setWaitForReadyTimingForTest shrinks the poll/timeout knobs so the polling
 // loop runs in milliseconds, and returns a restore func.
 func setWaitForReadyTimingForTest(timeout, poll time.Duration) func() {
