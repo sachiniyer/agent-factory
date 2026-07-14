@@ -144,6 +144,35 @@ SCREEN
     return 0
 }
 
+# _expect_af_select_boundary — regression proof for #1759. af_select must
+# evaluate its ready condition AFTER the final downward `j`, not only before it.
+# Drive af_select against stubbed send/capture (no live TUI, no real sleeps) in
+# a subshell so nothing leaks: a counter tracks `j` presses, and the row is
+# rendered actionable (▾ + `D kill`) ONLY once the count reaches 40 — exactly
+# the loop boundary. The old loop pressed the 40th `j` and exited without a
+# trailing capture, so it never saw the actionable frame and returned non-zero
+# here; the fixed loop checks the post-`j` state and returns 0.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_af_select_boundary() {
+    (
+        _AF_BOUNDARY_JCOUNT=0
+        # Stubs local to this subshell; the sourced af_select resolves them
+        # dynamically when it calls them.
+        af_ensure_nav() { :; }
+        af_focus_tree() { return 0; }
+        sleep() { :; }
+        af_send() { [ "${1:-}" = j ] && _AF_BOUNDARY_JCOUNT=$((_AF_BOUNDARY_JCOUNT + 1)); return 0; }
+        af_capture() {
+            if [ "$_AF_BOUNDARY_JCOUNT" -ge 40 ]; then
+                printf '%s\n' ' ▾ target                       │ menu: D kill'
+            else
+                printf '%s\n' ' ▸ target                       │ menu: n new'
+            fi
+        }
+        af_select target
+    )
+}
+
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
@@ -180,6 +209,21 @@ step "select alpha"                                         af_select alpha
 step "assert alpha is selected"                             af_expect_selected alpha
 step "select beta"                                          af_select beta
 step "assert beta is selected"                              af_expect_selected beta
+
+# --- #1759 regression: af_select must check AFTER the final scan step ---
+# A row that only becomes actionable on the loop's boundary `j` used to be
+# missed (false selection failure). Deterministic stub proof — no live TUI.
+step "af_select evaluates the boundary step (#1759)"        _expect_af_select_boundary
+
+# --- #1757 regression: the task-overlay run action ---
+# `m` drops straight into the selected task's EDIT form when a task exists, and
+# at 80x24 its footer collapses `r run now` to `r run`. af_open_tasks used to
+# wait for the stale `run now` and time out here; it now syncs on `r run`.
+step "seed a task via the create form"                      af_add_task selftest-task
+step "close the tasks overlay after create"                 af_close_tasks
+step "reopen tasks — edit-mode overlay recognized (#1757)"  af_open_tasks
+step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+step "close the tasks overlay"                              af_close_tasks
 
 step "open beta's tab as a pane"                            af_open_pane
 step "enter interactive mode and probe literal send"         _enter_interactive_and_probe_literal_send
