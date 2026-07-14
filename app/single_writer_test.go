@@ -42,6 +42,7 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 	_, _ = h.Update(prInfoUpdatedMsg{
 		instance: inst,
 		branch:   inst.GetBranch(),
+		repoID:   h.repoID,
 		info:     &sessiongit.PRInfo{Number: 5, State: "OPEN"},
 	})
 

@@ -63,8 +63,8 @@ func newStartedInstance(t *testing.T, title string) *session.Instance {
 // ----------------------------------------------------------------------------
 
 func TestFetchPRInfoCmd_NilInstance_ReturnsNil(t *testing.T) {
-	assert.Nil(t, fetchPRInfoCmd(nil, false))
-	assert.Nil(t, fetchPRInfoCmd(nil, true))
+	assert.Nil(t, fetchPRInfoCmd(nil, "", false))
+	assert.Nil(t, fetchPRInfoCmd(nil, "", true))
 }
 
 // TestFetchPRInfoCmd_RemoteInstance_ReturnsNil — remote sessions have no
@@ -74,8 +74,8 @@ func TestFetchPRInfoCmd_RemoteInstance_ReturnsNil(t *testing.T) {
 	inst.SetBackend(&session.HookBackend{})
 	require.True(t, inst.Capabilities().Workspace == session.WorkspaceRemote, "sanity: instance should report as remote")
 
-	assert.Nil(t, fetchPRInfoCmd(inst, false))
-	assert.Nil(t, fetchPRInfoCmd(inst, true), "force must not override the remote guard")
+	assert.Nil(t, fetchPRInfoCmd(inst, "", false))
+	assert.Nil(t, fetchPRInfoCmd(inst, "", true), "force must not override the remote guard")
 }
 
 // TestFetchPRInfoCmd_NotStarted_ReturnsNil — FetchPRInfoSnapshot returns an
@@ -88,8 +88,8 @@ func TestFetchPRInfoCmd_NotStarted_ReturnsNil(t *testing.T) {
 	require.NoError(t, err)
 	// started is false — no SetStartedForTest call.
 
-	assert.Nil(t, fetchPRInfoCmd(inst, false))
-	assert.Nil(t, fetchPRInfoCmd(inst, true))
+	assert.Nil(t, fetchPRInfoCmd(inst, "", false))
+	assert.Nil(t, fetchPRInfoCmd(inst, "", true))
 }
 
 // TestFetchPRInfoCmd_NoGitWorktree_ReturnsNil — started instance but no
@@ -100,7 +100,7 @@ func TestFetchPRInfoCmd_NoGitWorktree_ReturnsNil(t *testing.T) {
 	// gitWorktree is nil — no way to set it without a real repo. The snapshot
 	// guard catches this.
 
-	assert.Nil(t, fetchPRInfoCmd(inst, false))
+	assert.Nil(t, fetchPRInfoCmd(inst, "", false))
 }
 
 // TestFetchPRInfoCmd_DetachedHead_ReturnsNil — a detached-HEAD worktree has a
@@ -119,7 +119,7 @@ func TestFetchPRInfoCmd_DetachedHead_ReturnsNil(t *testing.T) {
 	})
 	defer restore()
 
-	assert.Nil(t, fetchPRInfoCmd(inst, true),
+	assert.Nil(t, fetchPRInfoCmd(inst, "", true),
 		"detached-HEAD instance must not schedule a fetch")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&calls),
 		"fetcher must not be invoked for an empty branch (no gh pr view \"\")")
@@ -132,7 +132,7 @@ func TestFetchPRInfoCmd_Fresh_NotForced_DebouncesFetch(t *testing.T) {
 	// Set fresh PR info — bumps prInfoLastFetched to now.
 	inst.SetPRInfo(&git.PRInfo{Number: 1, Title: "fresh"})
 
-	assert.Nil(t, fetchPRInfoCmd(inst, false),
+	assert.Nil(t, fetchPRInfoCmd(inst, "", false),
 		"no fetch should be scheduled while the cached PR info is still fresh")
 }
 
@@ -188,7 +188,7 @@ func TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp(t *testing.T) {
 	assert.Nil(t, inst.GetPRInfo(), "precondition: no cached PR info")
 
 	info := &git.PRInfo{Number: 42, Title: "add feature", URL: "https://x/42", State: "OPEN"}
-	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, repoID: h.repoID, info: info})
 
 	got := inst.GetPRInfo()
 	require.NotNil(t, got)
@@ -212,7 +212,7 @@ func TestPrInfoUpdatedMsg_Error_PreservesCacheAndDebounces(t *testing.T) {
 	// Simulate the prInfoLastFetched timestamp being old by clearing it via
 	// a fresh SetPRInfo with the same cached value, then waiting would be
 	// flaky — instead rely on MarkPRInfoFetched behavior to check debounce.
-	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, err: errors.New("gh timeout")})
+	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, repoID: h.repoID, err: errors.New("gh timeout")})
 
 	assert.Same(t, cached, inst.GetPRInfo(),
 		"transient fetch error must not clobber cached PR info")
@@ -278,12 +278,12 @@ func TestFetchPRInfoCmd_MarksFetchAtKickoff_DebouncesConcurrentCalls(t *testing.
 	require.Greater(t, inst.PRInfoAge(), 365*24*time.Hour,
 		"precondition: a freshly-restored instance reports a very large age")
 
-	cmd1 := fetchPRInfoCmd(inst, false)
+	cmd1 := fetchPRInfoCmd(inst, "", false)
 	require.NotNil(t, cmd1, "first call should dispatch a fetch")
 	assert.Less(t, inst.PRInfoAge(), time.Second,
 		"kickoff must bump prInfoLastFetched so the next tick is debounced")
 
-	cmd2 := fetchPRInfoCmd(inst, false)
+	cmd2 := fetchPRInfoCmd(inst, "", false)
 	assert.Nil(t, cmd2,
 		"second non-forced call within the stale window must be a no-op, "+
 			"even while the first fetch is still in flight")
@@ -316,8 +316,8 @@ func TestFetchPRInfoCmd_Force_StillRunsWhileFetchInFlight(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	require.NotNil(t, fetchPRInfoCmd(inst, false), "first lazy call dispatches")
-	assert.NotNil(t, fetchPRInfoCmd(inst, true),
+	require.NotNil(t, fetchPRInfoCmd(inst, "", false), "first lazy call dispatches")
+	assert.NotNil(t, fetchPRInfoCmd(inst, "", true),
 		"force=true must bypass the kickoff-debounce the previous call set")
 }
 
@@ -349,7 +349,7 @@ func TestPrInfoUpdatedMsg_InstanceSwappedDuringFetch_AppliesToLiveInstance(t *te
 	require.NotSame(t, orphan, live, "sanity: swap must produce a distinct pointer")
 
 	info := &git.PRInfo{Number: 42, Title: "add feature", URL: "https://x/42", State: "OPEN"}
-	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, repoID: h.repoID, info: info})
 
 	got := live.GetPRInfo()
 	require.NotNil(t, got, "PR info must be applied to the live sidebar instance")
@@ -369,7 +369,7 @@ func TestPrInfoUpdatedMsg_InstanceGoneDuringFetch_DropsUpdate(t *testing.T) {
 	h.store.RemoveInstanceByTitle("gone")
 
 	info := &git.PRInfo{Number: 7, Title: "lost", State: "OPEN"}
-	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, info: info})
+	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, repoID: h.repoID, info: info})
 
 	assert.Nil(t, cmd)
 	assert.Nil(t, orphan.GetPRInfo(),
@@ -392,7 +392,7 @@ func TestPrInfoUpdatedMsg_Error_SwappedDuringFetch_MarksLiveInstance(t *testing.
 	require.Greater(t, live.PRInfoAge(), 365*24*time.Hour,
 		"precondition: live instance is never-fetched")
 
-	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, err: errors.New("gh timeout")})
+	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, repoID: h.repoID, err: errors.New("gh timeout")})
 
 	assert.Less(t, live.PRInfoAge(), time.Second,
 		"the live instance must be marked fetched to debounce retries")
@@ -433,7 +433,7 @@ func TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate(t *testing.T) {
 	h.store.AddInstance(recreated)
 
 	info := &git.PRInfo{Number: 42, Title: "branch X PR", State: "OPEN"}
-	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, branch: "feature/x", info: info})
+	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, branch: "feature/x", repoID: h.repoID, info: info})
 
 	assert.Nil(t, cmd)
 	assert.Nil(t, recreated.GetPRInfo(),
@@ -460,12 +460,122 @@ func TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate(t *testing.T) {
 	require.NotSame(t, orphan, live, "sanity: swap must produce a distinct pointer")
 
 	info := &git.PRInfo{Number: 42, Title: "branch X PR", State: "OPEN"}
-	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, branch: "feature/x", info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, branch: "feature/x", repoID: h.repoID, info: info})
 
 	got := live.GetPRInfo()
 	require.NotNil(t, got, "matching-branch update must apply to the live instance")
 	assert.Equal(t, 42, got.Number)
 	assert.Nil(t, orphan.GetPRInfo(), "the orphaned pointer must not receive the update")
+}
+
+// ----------------------------------------------------------------------------
+// Regression tests for issue #1780 (sachiniyer/agent-factory):
+// "PR info from a previous project can be applied after switching projects
+// mid-fetch". Same staleness class as #1723, one level up: an in-place project
+// switch (#1461) resets the store and swaps m.repoID while a gh fetch for the
+// OLD project is still in flight. The handler's title-only re-resolution then
+// lands the old project's PR info on a same-title session in the NEW project,
+// and the #921 branch guard misses it whenever both sessions share a branch
+// name (common: "main", or the same feature branch across two checkouts). The
+// result is persisted under the new project's repoID, and the snapshot
+// reconcile mirrors it back — making the bleed durable. The fetch captures the
+// repoID at kickoff, and the handler must drop any result whose repoID no
+// longer matches, mirroring snapshotFetchedMsg's guard.
+// ----------------------------------------------------------------------------
+
+// TestPrInfoUpdatedMsg_ProjectSwitch_DropsUpdate — a fetch kicked off in project
+// A completes after the user switched to project B, which has a same-title
+// session on the same branch. The stale PR info must be neither applied in
+// memory nor persisted through the daemon.
+func TestPrInfoUpdatedMsg_ProjectSwitch_DropsUpdate(t *testing.T) {
+	h := newTestHome(t)
+	projectARepoID := h.repoID
+
+	// Project A: session "worker" on branch feature/x, PR fetch in flight.
+	orphan := newStartedInstance(t, "worker")
+	orphan.Branch = "feature/x"
+	h.store.AddInstance(orphan)
+
+	// The user switches projects in place (#1461): the store is reset and the
+	// active repo swapped, mirroring switchProject.
+	h.store.ResetInstances()
+	h.repoID = projectARepoID + "-project-b"
+
+	// Project B happens to have a same-title session on the same branch — the
+	// case the #921 branch guard cannot distinguish.
+	repoBWorker := newStartedInstance(t, "worker")
+	repoBWorker.Branch = "feature/x"
+	h.store.AddInstance(repoBWorker)
+
+	var persisted bool
+	restore := SetPRInfoSetterForTest(func(title, repoID string, info session.PRInfoData) error {
+		persisted = true
+		return nil
+	})
+	defer restore()
+
+	info := &git.PRInfo{Number: 42, Title: "project A PR", State: "OPEN"}
+	_, cmd := h.Update(prInfoUpdatedMsg{
+		instance: orphan, branch: "feature/x", repoID: projectARepoID, info: info,
+	})
+
+	assert.Nil(t, cmd)
+	assert.False(t, persisted,
+		"a fetch for project A must not persist PR info under project B's repoID")
+	assert.Nil(t, repoBWorker.GetPRInfo(),
+		"project A's PR info must not land on project B's same-title, same-branch session")
+	assert.Nil(t, orphan.GetPRInfo(), "the orphaned pointer must not receive the update either")
+}
+
+// TestPrInfoUpdatedMsg_ProjectSwitch_ErrorDropsUpdate — the error path runs
+// after the repo guard too: a failed project-A fetch must not debounce project
+// B's same-title session, which would suppress its own first real fetch.
+func TestPrInfoUpdatedMsg_ProjectSwitch_ErrorDropsUpdate(t *testing.T) {
+	h := newTestHome(t)
+	projectARepoID := h.repoID
+
+	orphan := newStartedInstance(t, "worker")
+	orphan.Branch = "feature/x"
+	h.store.AddInstance(orphan)
+
+	h.store.ResetInstances()
+	h.repoID = projectARepoID + "-project-b"
+
+	repoBWorker := newStartedInstance(t, "worker")
+	repoBWorker.Branch = "feature/x"
+	h.store.AddInstance(repoBWorker)
+	require.Greater(t, repoBWorker.PRInfoAge(), 365*24*time.Hour,
+		"precondition: project B's session is never-fetched")
+
+	_, _ = h.Update(prInfoUpdatedMsg{
+		instance: orphan, branch: "feature/x", repoID: projectARepoID,
+		err: errors.New("gh timeout"),
+	})
+
+	assert.Greater(t, repoBWorker.PRInfoAge(), 365*24*time.Hour,
+		"a project-A fetch error must not mark project B's session as fetched")
+}
+
+// TestFetchPRInfoCmd_StampsRepoIDAtKickoff — the guard above only works if the
+// fetch actually carries the repo it was scoped to. Drive the real cmd with a
+// stubbed fetcher and assert the emitted message carries the repoID captured on
+// the event loop, alongside the #921 branch.
+func TestFetchPRInfoCmd_StampsRepoIDAtKickoff(t *testing.T) {
+	inst := newStartedInstanceWithWorktree(t, "stamped")
+
+	restore := SetPRInfoFetcherForTest(func(repoPath, branch string) (*git.PRInfo, error) {
+		return &git.PRInfo{Number: 7, State: "OPEN"}, nil
+	})
+	defer restore()
+
+	cmd := fetchPRInfoCmd(inst, "repo-a", true)
+	require.NotNil(t, cmd, "a started local instance with a branch must schedule a fetch")
+
+	msg, ok := cmd().(prInfoUpdatedMsg)
+	require.True(t, ok, "the cmd must emit a prInfoUpdatedMsg")
+	assert.Equal(t, "repo-a", msg.repoID,
+		"the fetch must carry the repoID captured at kickoff so the handler can drop it after a project switch")
+	assert.Equal(t, inst.GetBranch(), msg.branch)
 }
 
 // sanity: exercise config.DefaultConfig / AppState wiring so a compile

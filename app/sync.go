@@ -71,8 +71,17 @@ type snapshotFetchedMsg struct {
 type prInfoUpdatedMsg struct {
 	instance *session.Instance
 	branch   string
-	info     *git.PRInfo
-	err      error
+	// repoID is the repo the fetch was scoped to, captured at kickoff. The
+	// handler drops the message when it no longer matches m.repoID: an in-place
+	// project switch (#1461) resets the store and swaps the active repo while a
+	// fetch launched for the previous one is still in flight, and the handler's
+	// title-only re-resolution would otherwise land the old project's PR info on
+	// a same-title, same-branch session in the NEW project — then persist it
+	// under the new repoID, where the snapshot reconcile mirrors it back and
+	// makes the bleed durable (#1780). Mirrors snapshotFetchedMsg's guard.
+	repoID string
+	info   *git.PRInfo
+	err    error
 }
 
 // -- Ticker commands --
@@ -225,8 +234,10 @@ func SetPRInfoFetcherForTest(f func(repoPath, branch string) (*git.PRInfo, error
 // background goroutine and emits a prInfoUpdatedMsg. Returns nil when the
 // instance is not eligible for a fetch (nil / not started / remote / already
 // fresh / fetch already in flight). Using force=true ignores the freshness
-// check — for tick-driven refreshes of the selected instance.
-func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
+// check — for tick-driven refreshes of the selected instance. repoID is the
+// caller's active repo, read on the event loop and carried on the result so the
+// handler can drop a fetch that outlived a project switch (#1780).
+func fetchPRInfoCmd(inst *session.Instance, repoID string, force bool) tea.Cmd {
 	// PR info comes from a local git branch (`gh pr view`), so it only applies to
 	// a backend with a local worktree.
 	if inst == nil || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree {
@@ -261,7 +272,7 @@ func fetchPRInfoCmd(inst *session.Instance, force bool) tea.Cmd {
 		detachTraceMark("fetchPRInfoCmd-goroutine-entry")
 		info, err := fetch(repoPath, branch)
 		detachTrace(fetchStart, "fetchPRInfoCmd-prInfoFetcher-returned")
-		return prInfoUpdatedMsg{instance: inst, branch: branch, info: info, err: err}
+		return prInfoUpdatedMsg{instance: inst, branch: branch, repoID: repoID, info: info, err: err}
 	}
 }
 

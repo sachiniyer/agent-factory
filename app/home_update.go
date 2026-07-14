@@ -76,9 +76,19 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tickUpdatePRInfoCmd
 		}
 		selected := m.sidebar.GetSelectedInstance()
-		return m, tea.Batch(tickUpdatePRInfoCmd, fetchPRInfoCmd(selected, true))
+		return m, tea.Batch(tickUpdatePRInfoCmd, fetchPRInfoCmd(selected, m.repoID, true))
 	case prInfoUpdatedMsg:
 		detachTraceMark("prInfoUpdatedMsg-handler-entry")
+		// Drop PR info fetched for a repo we have since switched away from
+		// (#1780). An in-place project switch (#1461) resets the store and swaps
+		// m.repoID, so the title-only re-resolution below can land the previous
+		// project's result on a same-title session in the new project — and the
+		// branch guard misses it when both sessions share a branch name. Gate on
+		// the captured repo first, mirroring snapshotFetchedMsg. No tick re-arm
+		// here: the PR-info tick re-arms itself in tickUpdatePRInfoMessage.
+		if msg.repoID != m.repoID {
+			return m, nil
+		}
 		// msg.instance is the pointer captured when the async gh fetch kicked
 		// off. A background refresh can swap it out of the sidebar while the
 		// fetch is in flight — RemoveInstanceByTitle + a rebuilt
