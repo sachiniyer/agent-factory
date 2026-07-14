@@ -101,6 +101,9 @@ func (m *Manager) RefreshStatuses() {
 //     repainted Ready, the #935 invariant the hollow status-dot rendering
 //     relies on; Lost rather than Dead since #1108 — no kill intent on record
 //     means the session is recovery-eligible), a live idle one → Ready;
+//   - a failed observation probe (only a remote agent-server can error) →
+//     Lost when a second, independent Alive() probe also fails, so an
+//     unreachable sandbox stops reading as healthy (#1782);
 //   - a session carrying the kill-intent tombstone (#1108) short-circuits all
 //     of the above: its interrupted teardown is finished instead.
 //
@@ -161,10 +164,29 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// usage-limit detector (#1146) without a second capture-pane.
 	obs, err := as.Snapshot()
 	if err != nil {
-		// A future remote runtime's observation channel failed: leave the status
-		// for the next tick rather than misreading it. The local agent-server
-		// never errors here, so this is inert today — it mirrors the paused /
-		// in-flight-op early returns above (never mark Lost on a failed probe).
+		// The observation probe failed. The local agent-server never errors here,
+		// so this is the REMOTE runtime's path (#1592 Phase 4): the REST call to
+		// the in-sandbox agent-server failed — a dead container, a dropped ssh
+		// forward, an agent-server crash.
+		//
+		// A failed probe is not by itself proof of death: a transient blip against
+		// a healthy sandbox errors identically. So confirm with the INDEPENDENT
+		// Alive() probe rather than either trusting or ignoring the error outright.
+		// Alive() is a second REST call that reports false on any transport error,
+		// so a genuinely unreachable agent-server fails both and settles to Lost,
+		// while a one-off Snapshot error against a still-reachable server leaves
+		// the status for the next tick — the conservative behaviour the paused /
+		// in-flight-op early returns above keep.
+		//
+		// Lost, not Dead (#1108): no kill intent is on record, so the session
+		// vanished out from under a live record and stays recovery-eligible.
+		// Without this the remote session kept its last-known liveness
+		// (Running/Ready) forever while its agent-server was gone, so the TUI
+		// showed a healthy row for a dead session (#1782).
+		if !as.Alive() {
+			_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+			m.persistPollChange(repoID, instance, before, beforeReset)
+		}
 		return
 	}
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
