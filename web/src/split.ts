@@ -75,6 +75,22 @@ function el(tag: string, cls: string): HTMLElement {
   return node;
 }
 
+/** Whether two ordered tab-identity lists are element-wise equal (the mid-drag
+ *  tab-set-change check). */
+function sameTabs(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((v, i) => v === b[i]);
+}
+
+/** The drag payload a tab-bar drag stamps into the dataTransfer (ui.ts): the dragged
+ *  tab index plus a snapshot of the instance's ordered tab identities at drag time. */
+interface DragPayload {
+  index: number;
+  tabs: string[];
+}
+
 export class SplitView {
   // Retained layout per session id (in-memory; a nice-to-have to persist across
   // reload is out of scope for v1). Keyed by the stable session id.
@@ -84,6 +100,10 @@ export class SplitView {
   private sessionId: string | null = null;
   private token: string | null = null;
   private tabCount = 1;
+  // The instance's ordered tab identities (ui.tabIdentity), kept current on every
+  // store update. A drop compares its drag-time snapshot against this to detect a
+  // mid-drag tab-set change (concurrent close/create/reorder) and cancel.
+  private tabIds: string[] = [];
   private tree: LayoutNode | null = null;
   private focusedId: string | null = null;
 
@@ -108,8 +128,10 @@ export class SplitView {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId: string | null, token: string | null, tabCount: number, initialTab: number): void {
+  setSession(sessionId: string | null, token: string | null, tabIds: string[], initialTab: number): void {
     this.token = token;
+    this.tabIds = tabIds;
+    const tabCount = tabIds.length > 0 ? tabIds.length : 1;
     if (sessionId === null || token === null) {
       this.teardown();
       this.sessionId = null;
@@ -407,6 +429,29 @@ export class SplitView {
 
   // --- internal: drag-and-drop ----------------------------------------------
 
+  /** Parses a drag payload from the dataTransfer, or null if it is absent/malformed
+   *  (a foreign drag, or a corrupt payload → the drop is a no-op). */
+  private parseDrag(raw: string | undefined): DragPayload | null {
+    if (!raw) {
+      return null;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      typeof (parsed as DragPayload).index === "number" &&
+      Array.isArray((parsed as DragPayload).tabs)
+    ) {
+      return parsed as DragPayload;
+    }
+    return null;
+  }
+
   private wireDrop(pane: Pane): void {
     const isTabDrag = (e: DragEvent) => e.dataTransfer?.types.includes(TAB_DND_MIME) ?? false;
     pane.container.addEventListener("dragover", (e: DragEvent) => {
@@ -433,14 +478,24 @@ export class SplitView {
       }
       e.preventDefault();
       this.hideZone(pane);
-      const raw = e.dataTransfer?.getData(TAB_DND_MIME);
-      const tab = raw ? Number.parseInt(raw, 10) : Number.NaN;
-      // Validate the dropped tab against the instance's LIVE tab count before mutating
-      // the layout: a payload that went stale mid-drag (the tab was closed) or is
-      // otherwise out of range must not bind a pane to a nonexistent tab (same
-      // stale-index discipline as the tab-op fixes in #1698/#1710). An invalid drop is
-      // a no-op — the layout is left exactly as it was.
-      if (Number.isNaN(tab) || tab < 0 || tab >= this.tabCount || !this.tree) {
+      const drag = this.parseDrag(e.dataTransfer?.getData(TAB_DND_MIME));
+      if (!drag || !this.tree) {
+        return;
+      }
+      const tab = drag.index;
+      // Reject an out-of-range index (a stale payload / a tab closed mid-drag): a pane
+      // must never bind to a nonexistent tab (same stale-index discipline as the tab-op
+      // fixes in #1698/#1710).
+      if (tab < 0 || tab >= this.tabCount) {
+        return;
+      }
+      // Reject an IN-RANGE-but-STALE drop (#1738 repro): if the instance's tab set
+      // changed since dragstart — a concurrent client closed/created/reordered a tab —
+      // the dragged index now points at a DIFFERENT live tab than the user grabbed, so
+      // splitting would silently bind the new pane to the wrong tab's stream. Compare
+      // the drag-time snapshot to the live identities and cancel on any mismatch; the
+      // user simply re-drags. (The full stable-tab-id fix is daemon-wide, in #1738.)
+      if (!sameTabs(drag.tabs, this.tabIds)) {
         return;
       }
       const zone = this.zoneAt(pane.container, e.clientX, e.clientY);

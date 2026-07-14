@@ -7153,6 +7153,12 @@ function el(tag, cls) {
   node.className = cls;
   return node;
 }
+function sameTabs(a, b) {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((v, i) => v === b[i]);
+}
 var SplitView = class {
   constructor(host, cb) {
     this.host = host;
@@ -7165,6 +7171,10 @@ var SplitView = class {
   sessionId = null;
   token = null;
   tabCount = 1;
+  // The instance's ordered tab identities (ui.tabIdentity), kept current on every
+  // store update. A drop compares its drag-time snapshot against this to detect a
+  // mid-drag tab-set change (concurrent close/create/reorder) and cancel.
+  tabIds = [];
   tree = null;
   focusedId = null;
   // Debounces the "focus left every pane" report so a click that moves focus A→B
@@ -7181,8 +7191,10 @@ var SplitView = class {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId, token2, tabCount, initialTab) {
+  setSession(sessionId, token2, tabIds, initialTab) {
     this.token = token2;
+    this.tabIds = tabIds;
+    const tabCount = tabIds.length > 0 ? tabIds.length : 1;
     if (sessionId === null || token2 === null) {
       this.teardown();
       this.sessionId = null;
@@ -7432,6 +7444,23 @@ var SplitView = class {
     return divider;
   }
   // --- internal: drag-and-drop ----------------------------------------------
+  /** Parses a drag payload from the dataTransfer, or null if it is absent/malformed
+   *  (a foreign drag, or a corrupt payload → the drop is a no-op). */
+  parseDrag(raw) {
+    if (!raw) {
+      return null;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (typeof parsed === "object" && parsed !== null && typeof parsed.index === "number" && Array.isArray(parsed.tabs)) {
+      return parsed;
+    }
+    return null;
+  }
   wireDrop(pane) {
     const isTabDrag = (e) => e.dataTransfer?.types.includes(TAB_DND_MIME) ?? false;
     pane.container.addEventListener("dragover", (e) => {
@@ -7457,9 +7486,15 @@ var SplitView = class {
       }
       e.preventDefault();
       this.hideZone(pane);
-      const raw = e.dataTransfer?.getData(TAB_DND_MIME);
-      const tab = raw ? Number.parseInt(raw, 10) : Number.NaN;
-      if (Number.isNaN(tab) || tab < 0 || tab >= this.tabCount || !this.tree) {
+      const drag = this.parseDrag(e.dataTransfer?.getData(TAB_DND_MIME));
+      if (!drag || !this.tree) {
+        return;
+      }
+      const tab = drag.index;
+      if (tab < 0 || tab >= this.tabCount) {
+        return;
+      }
+      if (!sameTabs(drag.tabs, this.tabIds)) {
         return;
       }
       const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
@@ -8051,6 +8086,9 @@ function sessionTabs(s) {
   }
   return [{ name: "agent", kind: 0 }];
 }
+function tabIdentity(tab) {
+  return `${tab.kind}:${tab.name}`;
+}
 function tabLabel(tab) {
   if (tab.kind === 0) {
     return "Agent";
@@ -8416,8 +8454,9 @@ var AppShell = class {
     const canManage = supportsTabManagement(selected);
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
+    const tabIds = tabs.map(tabIdentity);
     const children = tabs.map(
-      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions)
+      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, tabIds, this.actions)
     );
     if (canManage && tabs.length < MAX_TABS) {
       const add = h2("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
@@ -8443,7 +8482,7 @@ var AppShell = class {
 function selectedSession(state) {
   return state.selectedId ? state.sessions.find((s) => s.id === state.selectedId) ?? null : null;
 }
-function tabButton(tab, index, active, shown, canManage, actions2) {
+function tabButton(tab, index, active, shown, canManage, tabIds, actions2) {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
   const btn = h2("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
@@ -8454,7 +8493,7 @@ function tabButton(tab, index, active, shown, canManage, actions2) {
     if (!e.dataTransfer) {
       return;
     }
-    e.dataTransfer.setData(TAB_DND_MIME, String(index));
+    e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ index, tabs: tabIds }));
     e.dataTransfer.effectAllowed = "move";
     document.body.classList.add("af-dragging-tab");
   });
@@ -8924,8 +8963,8 @@ function syncSplit(state) {
   const tok = token;
   const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
-  const tabCount = selected ? sessionTabs(selected).length : 1;
-  splitView.setSession(tok !== null ? selId : null, tok, tabCount, initialTab);
+  const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab);
 }
 function disposeSplit() {
   splitView.dispose();

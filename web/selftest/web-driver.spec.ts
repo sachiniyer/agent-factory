@@ -85,19 +85,20 @@ async function dragTabToPane(page: Page, tabText: string, edge: "left" | "right"
 }
 
 /**
- * Dispatches a drop carrying an ARBITRARY tab index onto the (single) current pane —
- * bypassing the real tab buttons so a stale / out-of-range index can be injected. Used
- * to prove the drop handler validates the payload against the live tab count and
- * no-ops an invalid one instead of binding a pane to a nonexistent tab.
+ * Dispatches a drop carrying a HAND-CRAFTED drag payload ({index, tabs}) onto the
+ * (single) current pane — bypassing the real tab buttons so a stale / out-of-range /
+ * mid-drag-reorder snapshot can be injected. Used to prove the drop handler validates
+ * the payload (range + drag-time tab-set snapshot vs live) and no-ops an invalid one
+ * instead of binding a pane to the wrong / a nonexistent tab.
  */
-async function dropRawTabIndexOnPane(page: Page, tabIndex: number): Promise<void> {
-  await page.evaluate((tabIndex) => {
+async function dropSnapshotOnPane(page: Page, payload: { index: number; tabs: string[] }): Promise<void> {
+  await page.evaluate((payload) => {
     const pane = document.querySelector(".af-term-host .af-pane");
     if (!pane) {
       throw new Error("no pane to drop on");
     }
     const dt = new DataTransfer();
-    dt.setData("application/x-af-tab", String(tabIndex));
+    dt.setData("application/x-af-tab", JSON.stringify(payload));
     const r = pane.getBoundingClientRect();
     const init = {
       bubbles: true,
@@ -108,7 +109,7 @@ async function dropRawTabIndexOnPane(page: Page, tabIndex: number): Promise<void
     };
     pane.dispatchEvent(new DragEvent("dragover", init));
     pane.dispatchEvent(new DragEvent("drop", init));
-  }, tabIndex);
+  }, payload);
 }
 
 /** Opens the app on the loopback daemon and asserts the tokenless auto-connect
@@ -381,15 +382,46 @@ test("split panes (feat): an out-of-range dropped tab is ignored — no broken p
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
 
-  // Drop a stale / out-of-range tab index (9) on the pane's edge. The drop handler
-  // validates it against the live tab count and no-ops it — no split is created, so
-  // no pane can bind to a nonexistent tab and break its stream.
-  await dropRawTabIndexOnPane(page, 9);
-  // Give the (rejected) drop a beat, then assert the layout is unchanged.
+  // Drop an out-of-range tab index (99) on the pane's edge. The drop handler validates
+  // it against the live tab count and no-ops it — no split is created, so no pane can
+  // bind to a nonexistent tab and break its stream.
+  await dropSnapshotOnPane(page, { index: 99, tabs: ["0:x"] });
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
   await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
   // The one pane still shows the live agent output — it was never disturbed.
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+});
+
+test("split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro)", async () => {
+  // Attach to A and give it a second tab, so a drop index of 1 is IN RANGE (2 tabs).
+  // This is the T-Rex reproduction: the index is valid, but the tab set changed since
+  // the drag began, so binding by index alone would attach the new pane to the WRONG
+  // live tab.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  // Drop an IN-RANGE index (1) whose drag-time snapshot (2 entries — count matches the
+  // live 2 tabs, so neither the range nor a count check would catch it) does NOT match
+  // the live tab identities. Only the snapshot-vs-live comparison can reject this, and
+  // it must: the layout stays a single pane, no split bound to the wrong tab.
+  await dropSnapshotOnPane(page, { index: 1, tabs: ["0:stale-agent", "1:stale-shell"] });
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+
+  // A well-formed drag with the LIVE snapshot still splits (the happy path is intact) —
+  // proven here to show the cancel above was the stale check, not a broken drop path.
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+
+  // Clean up: collapse back to one pane and restore A to a single tab.
+  await page.locator(".af-term-host .af-pane", { hasText: READY_MARKER }).locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
 test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", async () => {

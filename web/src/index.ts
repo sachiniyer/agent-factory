@@ -47,6 +47,7 @@ import {
   renderLogin,
   sessionTabs,
   supportsTabManagement,
+  tabIdentity,
   type AppState,
 } from "./ui.js";
 import type { SessionData, TaskData, WireEvent } from "./types.js";
@@ -718,10 +719,12 @@ function syncSplit(state: AppState): void {
   // stale index can never bind a pane to a tab that doesn't exist.
   const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
-  const tabCount = selected ? sessionTabs(selected).length : 1;
+  // The ordered tab identities, so the split view can (a) know the live tab count and
+  // (b) reject a drop whose drag-time snapshot no longer matches (a mid-drag reorder).
+  const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
   // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696), so a
   // loopback client still attaches its live panes.
-  splitView.setSession(tok !== null ? selId : null, tok, tabCount, initialTab);
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab);
 }
 
 function disposeSplit(): void {

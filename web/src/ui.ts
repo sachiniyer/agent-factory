@@ -142,6 +142,16 @@ export function sessionTabs(s: SessionData): { name: string; kind: number }[] {
   return [{ name: "agent", kind: 0 }];
 }
 
+/** A stable-ish client-side IDENTITY for a tab (feat: split tabs), used to detect a
+ *  tab set that changed mid-drag. It is NOT a daemon tab id (there is none yet — the
+ *  full stable-id fix is #1738); it is the best identity the client has: the tab's
+ *  kind + name. The ordered list of these is snapshotted at dragstart and re-checked
+ *  at drop, so a concurrent close/create/reorder cancels the drop instead of binding a
+ *  pane to the wrong live tab. */
+export function tabIdentity(tab: { name: string; kind: number }): string {
+  return `${tab.kind}:${tab.name}`;
+}
+
 /** The label a tab reads as, mirroring the TUI's labelForTab (ui/tree/labels.go):
  *  the agent tab is "Agent", a shell tab is "Terminal", a process tab shows its
  *  name. Keeps the web tab bar TUI-faithful. */
@@ -638,9 +648,12 @@ export class AppShell {
     // Which tabs are currently rendered in a pane (feat: split tabs), so the bar can
     // mark an already-open tab distinctly from the focused one.
     const shown = new Set(state.shownTabs);
+    // The ordered tab identities at THIS render, snapshotted into a dragged tab's
+    // payload so the drop can detect a mid-drag tab-set change and cancel.
+    const tabIds = tabs.map(tabIdentity);
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
-      tabButton(tab, i, i === active, shown.has(i), canManage, this.actions),
+      tabButton(tab, i, i === active, shown.has(i), canManage, tabIds, this.actions),
     );
     if (canManage && tabs.length < MAX_TABS) {
       const add = h("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
@@ -685,6 +698,7 @@ function tabButton(
   active: boolean,
   shown: boolean,
   canManage: boolean,
+  tabIds: string[],
   actions: Actions,
 ): HTMLElement {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
@@ -693,12 +707,15 @@ function tabButton(
   btn.setAttribute("aria-selected", active ? "true" : "false");
   btn.append(h("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions.openTab(index));
-  // Drag source: stamp the tab index and flag the body so panes can show drop hints.
+  // Drag source: stamp the dragged index PLUS a snapshot of the instance's ordered
+  // tab identities at drag time, so the drop can cancel if the tab set changed
+  // mid-drag (a concurrent close/create/reorder — see split.ts). Flag the body so
+  // panes can show drop hints.
   btn.addEventListener("dragstart", (e) => {
     if (!e.dataTransfer) {
       return;
     }
-    e.dataTransfer.setData(TAB_DND_MIME, String(index));
+    e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ index, tabs: tabIds }));
     e.dataTransfer.effectAllowed = "move";
     document.body.classList.add("af-dragging-tab");
   });
