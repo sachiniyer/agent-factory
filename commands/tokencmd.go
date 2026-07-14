@@ -24,16 +24,34 @@ import (
 // {data,error} envelope, matching `af config`'s --json.
 var tokenJSONFlag bool
 
-// tokenShowResult is the `af token show` payload: the bearer token clients
+// tokenResult is the `af token show`/`rotate` payload: the bearer token clients
 // present to the HTTP listener.
-type tokenShowResult struct {
+type tokenResult struct {
 	Token string `json:"token"`
 }
 
-// tokenRotateResult is the `af token rotate` payload: the freshly generated
-// token.
-type tokenRotateResult struct {
-	Token string `json:"token"`
+// runTokenCommand performs the shared token command work. Both show and rotate
+// differ only in how they obtain the token; their output and error contracts are
+// intentionally identical.
+func runTokenCommand(cmd *cobra.Command, loadToken func(string) (string, error)) error {
+	log.Initialize(false)
+	defer log.Close()
+
+	tokenPath, err := daemon.TokenPath()
+	if err != nil {
+		return jsonWrapError(cmd, tokenJSONFlag, err)
+	}
+	token, err := loadToken(tokenPath)
+	if err != nil {
+		return jsonWrapError(cmd, tokenJSONFlag, err)
+	}
+
+	result := tokenResult{Token: token}
+	if tokenJSONFlag {
+		return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(result))
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "token: %s\n", result.Token)
+	return nil
 }
 
 var tokenCmd = &cobra.Command{
@@ -61,24 +79,7 @@ before the TCP listener is ever enabled. Present it to a remote daemon with the
 --token flag (or the AF_DAEMON_TOKEN env var).`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
-
-		tokenPath, err := daemon.TokenPath()
-		if err != nil {
-			return jsonWrapError(cmd, tokenJSONFlag, err)
-		}
-		token, err := daemon.EnsureToken(tokenPath)
-		if err != nil {
-			return jsonWrapError(cmd, tokenJSONFlag, err)
-		}
-
-		result := tokenShowResult{Token: token}
-		if tokenJSONFlag {
-			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(result))
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "token: %s\n", result.Token)
-		return nil
+		return runTokenCommand(cmd, daemon.EnsureToken)
 	},
 }
 
@@ -92,24 +93,7 @@ the token file per request — while any in-flight streams keep running until th
 reconnect.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
-
-		tokenPath, err := daemon.TokenPath()
-		if err != nil {
-			return jsonWrapError(cmd, tokenJSONFlag, err)
-		}
-		token, err := daemon.RotateToken(tokenPath)
-		if err != nil {
-			return jsonWrapError(cmd, tokenJSONFlag, err)
-		}
-
-		result := tokenRotateResult{Token: token}
-		if tokenJSONFlag {
-			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(result))
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "token: %s\n", result.Token)
-		return nil
+		return runTokenCommand(cmd, daemon.RotateToken)
 	},
 }
 
